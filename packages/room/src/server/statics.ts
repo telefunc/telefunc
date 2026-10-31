@@ -36,13 +36,8 @@ import type {
   RoomSendReceipt,
   SendGuard,
 } from '../types.js'
-import {
-  evictMember,
-  reapAndCountPresence,
-  reapAndReadMembersById,
-  reapAndReadRoster,
-  reapAndResolveIdentity,
-} from './membership.js'
+import { evictMember } from './members.js'
+import { reapAndCountPresence, reapAndReadMembersById, reapAndReadRoster, reapAndResolveIdentity } from './roster.js'
 import { SEMANTIC_LANE, commitToInbox, commitRoomLaneOrThrow, openConfig, encodeRoomRecord } from './lanes.js'
 import { ServerRoom } from './room.js'
 import { RoomReplica } from './replica.js'

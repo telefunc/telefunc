@@ -30,21 +30,15 @@ import {
   withinRoomHorizon,
 } from './lanes.js'
 import type { RoomIncarnation } from './lifecycle.js'
-import {
-  dropDmReply,
-  evictMember,
-  finishSessionCleanups,
-  holdViews,
-  removeView,
-  renewSession,
-  takeDmReplies,
-} from './membership.js'
+import { dropDmReply, takeDmReplies } from './dmReplies.js'
+import { evictMember } from './members.js'
+import { finishLeaseCleanups, holdViews, removeView, renewLease } from './leases.js'
 import type { StoredRoomMeta } from './meta.js'
 import type { LaneHolder, ReplayHold, TextWantsChange } from './replay.js'
 import type { MetaMirror, ServerRoom } from './room.js'
 import { RosterStream } from './RosterStream.js'
 import { toggle } from './sets.js'
-import { RoomSession } from './session.js'
+import { RoomLease } from './lease.js'
 import { MemberMessageTexts, type RoomStub, unorderedEventText } from './stub.js'
 import { RoomSubscriptions } from './subscriptions.js'
 assertIsNotBrowser()
@@ -60,7 +54,7 @@ function replicasHere(): Map<string, WeakRef<RoomReplica>> {
 }
 
 /** This process's one view of a room incarnation, a Cloudflare session DO's own, whatever the number of its handles:
- *  the model, the lanes planned from the wants of every handle's holders, the demand, the session hosting the members
+ *  the model, the lanes planned from the wants of every handle's holders, the demand, the lease hosting the members
  *  and pages the handles hold, and the heartbeat that renews it and checks the authority again. Each handle keeps its
  *  guards, its tail, the stubs it opened and its listeners. A replica no handle observes, owns a member through or
  *  tails runs no heartbeat and holds no lane; it lives while a handle holds it. */
@@ -104,7 +98,7 @@ class RoomReplica {
   readonly sync: AuthoritySync
   readonly roster: RosterStream
   /** Hosts the members the handles join and the pages' views. */
-  readonly session = new RoomSession()
+  readonly lease = new RoomLease()
   /** In-flight `send(…, { ack: true })`s; a leave of either end, or a close, fails the ones it strands. */
   readonly acks = new PendingDmAcks()
   /** Every handle's attached stubs. */
@@ -114,14 +108,14 @@ class RoomReplica {
   /** Each stub's latest view write, from its attach or a rewrite, to the key it wrote, null if it failed; its removal
    *  comes after it. */
   private readonly _views = new Map<RoomStub, Promise<string | null>>()
-  /** A view write failed, or the session hosting the views was lost: the heartbeat writes them again. */
+  /** A view write failed, or the lease hosting the views was lost: the heartbeat writes them again. */
   private _viewsLost = false
-  /** Members whose eviction failed, by id, with their identity: the session would host them for as long as it lives. */
+  /** Members whose eviction failed: the lease would host them for as long as it lives. */
   private readonly _unevicted = new Set<string>()
   /** Whether this process tells its demand again, and was asked to again meanwhile. */
   private _tellingAgain = false
   private _askedAgain = false
-  /** The cleanups of the session's members pending at the last heartbeat. */
+  /** The cleanups of the lease's members pending at the last heartbeat. */
   private _pendingCleanups: ReadonlySet<string> = new Set()
   private readonly _gossip: GossipOutbox
   /** The handle holding each member it joined. */
@@ -221,7 +215,7 @@ class RoomReplica {
     try {
       const keys = await holdViews(
         this._incarnation,
-        this.session,
+        this.lease,
         stubs.map((stub) => stub._end.id),
       )
       return stubs.map((_, i) => keys[i] ?? null)
@@ -378,16 +372,16 @@ class RoomReplica {
     this._unevicted.add(id)
   }
 
-  /** @internal Renews the session, evicts again whom it failed to, and finishes the leaves its members' evicting
-   *  servers left unfinished; once the session was lost, or a view write failed, writes every stub's view again in one
+  /** @internal Renews the lease, evicts again whom it failed to, and finishes the leaves its members' evicting
+   *  servers left unfinished; once the lease was lost, or a view write failed, writes every stub's view again in one
    *  write, after each one's earlier write. */
-  async _renewSession(): Promise<void> {
-    if (!(await renewSession(this._incarnation, this.session))) this._viewsLost = true
+  async _renewLease(): Promise<void> {
+    if (!(await renewLease(this._incarnation, this.lease))) this._viewsLost = true
     for (const id of this._unevicted) {
       await evictMember(this._incarnation, id, { type: 'disconnected' })
       this._unevicted.delete(id)
     }
-    this._pendingCleanups = await finishSessionCleanups(this._incarnation, this.session, this._pendingCleanups)
+    this._pendingCleanups = await finishLeaseCleanups(this._incarnation, this.lease, this._pendingCleanups)
     if (!this._viewsLost) return
     this._viewsLost = false
     const stubs = [...this._views.keys()]

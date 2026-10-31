@@ -9,12 +9,12 @@ export {
   identityCellPrefix,
   HOLDS_CELL_KEY,
   JOINS_CELL_KEY,
-  SESSION_CELL_PREFIX,
-  sessionCellKey,
-  sessionMemberCellPrefix,
-  sessionMemberCellKey,
-  memberIdOfSessionMemberKey,
-  sessionViewCellPrefix,
+  LEASE_CELL_PREFIX,
+  leaseCellKey,
+  leaseMemberCellPrefix,
+  leaseMemberCellKey,
+  memberIdOfLeaseMemberKey,
+  leaseViewCellPrefix,
   viewCellKey,
   META_CELL_PREFIX,
   META_SEQ_CELL_KEY,
@@ -60,29 +60,29 @@ function identityCellKey(identity: string, memberId: string): string {
 /** Counters: what holds the room, counted in the compare-exchange that adds or removes a hold, and its joins. */
 const HOLDS_CELL_KEY = 'holds'
 const JOINS_CELL_KEY = 'joins'
-/** One per server hosting a member or a page's view in the room: its lease (see `session.ts`). Session
- *  ids hold no `:`. */
-const SESSION_CELL_PREFIX = 'session:'
-function sessionCellKey(session: string): string {
-  return SESSION_CELL_PREFIX + session
+/** One per server hosting a member or a page's view in the room: its lease (see `lease.ts`). Lease ids
+ *  hold no `:`. */
+const LEASE_CELL_PREFIX = 'session:'
+function leaseCellKey(lease: string): string {
+  return LEASE_CELL_PREFIX + lease
 }
-/** A member's mark under its session, written with its record and removed with its cleanup, so the session's cleaner
+/** A member's mark under its lease, written with its record and removed with its cleanup, so the lease's cleaner
  *  finds it. */
-function sessionMemberCellPrefix(session: string): string {
-  return `sm:${session}:`
+function leaseMemberCellPrefix(lease: string): string {
+  return `sm:${lease}:`
 }
-function sessionMemberCellKey(session: string, memberId: string): string {
-  return sessionMemberCellPrefix(session) + memberId
+function leaseMemberCellKey(lease: string, memberId: string): string {
+  return leaseMemberCellPrefix(lease) + memberId
 }
-function memberIdOfSessionMemberKey(key: string): string {
+function memberIdOfLeaseMemberKey(key: string): string {
   return key.slice(key.lastIndexOf(':') + 1)
 }
-/** One per page holding the room: its view, under the session that wrote it. */
-function sessionViewCellPrefix(session: string): string {
-  return `v:${session}:`
+/** One per page holding the room: its view, under the lease that wrote it. */
+function leaseViewCellPrefix(lease: string): string {
+  return `v:${lease}:`
 }
-function viewCellKey(session: string, viewId: string): string {
-  return sessionViewCellPrefix(session) + viewId
+function viewCellKey(lease: string, viewId: string): string {
+  return leaseViewCellPrefix(lease) + viewId
 }
 /** The room's meta once first written (see `meta.ts`): a counter of the writes, the generation the last replace
  *  started, a cell per top-level key in that generation, and a mark per generation a replace left to drop. */

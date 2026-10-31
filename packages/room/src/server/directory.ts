@@ -6,7 +6,7 @@ export { listRoom, repairRoomIndex, sweepLapsedRoomsSoon }
 import { getRoomBackend } from '../backend/plane.js'
 import type { RoomBackend, RoomHead } from '../backend/contract.js'
 import { Slice } from '../Slice.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_SESSION_TTL_MS } from './constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_LEASE_TTL_MS } from './constants.js'
 import type { RoomIncarnation } from './lifecycle.js'
 import { configFromHead, openConfig } from './lanes.js'
 import { reportRoomError } from './errors.js'
@@ -14,14 +14,14 @@ import { getGlobalObject } from '../utils/getGlobalObject.js'
 
 /** Lists the room, to be looked at again once its head lapses, and a heartbeat from now at the earliest. A room
  *  without hold timeouts never lapses; one with them but no lapse yet gets one once held, so it is looked at again a
- *  session's lease from now. */
+ *  lease from now. */
 async function listRoom(
   backend: RoomBackend,
   { id, inc, hold }: RoomIncarnation,
   expiresAt: number | undefined,
 ): Promise<void> {
   if (hold === null) return await backend.directoryPut(id, inc, Infinity, 0)
-  if (expiresAt === undefined) return await backend.directoryPut(id, inc, 0, ROOM_SESSION_TTL_MS)
+  if (expiresAt === undefined) return await backend.directoryPut(id, inc, 0, ROOM_LEASE_TTL_MS)
   await backend.directoryPut(id, inc, expiresAt, ROOM_HEARTBEAT_INTERVAL_MS)
 }
 

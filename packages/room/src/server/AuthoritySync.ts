@@ -10,7 +10,8 @@ import { sweepLapsedRoomsSoon } from './directory.js'
 import { reportRoomError } from './errors.js'
 import { maintainHold, type RoomIncarnation } from './lifecycle.js'
 import { CONTROL_LANE } from './lanes.js'
-import { reapAndReadRoster, reapLapsedSessions } from './membership.js'
+import { reapLapsedLeases } from './leases.js'
+import { reapAndReadRoster } from './roster.js'
 import { dropReplacedMetaGenerations, readRoomMeta, readRoomMetaSeq, type StoredRoomMeta } from './meta.js'
 import type { RosterStream } from './RosterStream.js'
 import type { RoomSubscriptions } from './subscriptions.js'
@@ -22,7 +23,7 @@ type SyncHost = {
   readonly _incarnation: RoomIncarnation
   /** Read-only here: every change goes through the host's methods. */
   readonly model: Pick<RoomModel, 'closed' | 'metaWaiting' | 'metaSeq' | 'rosterKnown' | 'recordingMembership'>
-  _renewSession(): Promise<void>
+  _renewLease(): Promise<void>
   /** Renews what the replica told of its demand. */
   _renewDemand(): Promise<void>
   _readOpenConfig(): Promise<RoomConfigRecord | null>
@@ -38,7 +39,7 @@ type SyncHost = {
 type Repair = 'control' | 'meta' | 'memberMeta'
 
 /** Keeps a replica's view in step with the authority: its roster and meta reads, the repairs a gap asks for, and the
- *  heartbeat, which renews the session and the demand, reaps lapsed sessions, and reads the roster again once the
+ *  heartbeat, which renews the lease and the demand, reaps lapsed leases, and reads the roster again once the
  *  control lane is past what this view covers. */
 class AuthoritySync {
   private _pendingRefresh: Promise<void> | null = null
@@ -76,13 +77,13 @@ class AuthoritySync {
     await this.refreshMembers()
   }
 
-  /** What a heartbeat reads of the authority: the meta, the lapsed sessions, and the roster only once the control lane
+  /** What a heartbeat reads of the authority: the meta, the lapsed leases, and the roster only once the control lane
    *  committed past what this view covers, or doesn't deliver to it. */
   private async _checkAuthority(): Promise<void> {
     const host = this._host
     if (host.model.closed || !(await this._reconcileMeta())) return
     await dropReplacedMetaGenerations(host.id, host._incarnation.inc)
-    await reapLapsedSessions(host._incarnation)
+    await reapLapsedLeases(host._incarnation)
     const before = this._covered
     const mark = await this._controlMark()
     // The authority's seq never goes below what a view covered, unless a failover rewound it.
@@ -174,8 +175,8 @@ class AuthoritySync {
     return this._pendingRefresh
   }
 
-  /** Runs the heartbeat while `on`. Graceful departures use events; the heartbeat renews this server's session and
-   *  reaps the lapsed sessions whose servers crashed. */
+  /** Runs the heartbeat while `on`. Graceful departures use events; the heartbeat renews this server's lease and
+   *  reaps the lapsed leases whose servers crashed. */
   heartbeat(on: boolean): void {
     if (on && !this._heartbeatTimer) {
       this._heartbeatTimer = unrefTimer(
@@ -231,7 +232,7 @@ class AuthoritySync {
     const host = this._host
     try {
       await host._renewDemand()
-      const renewalFailure = await host._renewSession().then(
+      const renewalFailure = await host._renewLease().then(
         () => null,
         (error: unknown) => ({ error }),
       )

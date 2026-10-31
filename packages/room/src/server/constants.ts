@@ -1,7 +1,7 @@
 export {
   ROOM_CLOUDFLARE_EXTENSION,
   ROOM_HEARTBEAT_INTERVAL_MS,
-  ROOM_SESSION_TTL_MS,
+  ROOM_LEASE_TTL_MS,
   ROOM_TAIL_HOLD_MAX,
   ROOM_TAIL_HOLD_CODE_UNITS_MAX,
   ROOM_REPLAY_HOLD_BYTES_MAX,
@@ -24,8 +24,8 @@ export {
 }
 
 const ROOM_HEARTBEAT_INTERVAL_MS = 30_000
-// Four heartbeats: a server's session in a room lapses only after several renewals in a row were missed.
-const ROOM_SESSION_TTL_MS = ROOM_HEARTBEAT_INTERVAL_MS * 4
+// Four heartbeats: a server's lease in a room lapses only after several renewals in a row were missed.
+const ROOM_LEASE_TTL_MS = ROOM_HEARTBEAT_INTERVAL_MS * 4
 // A tail is a bounded recent suffix, not history: enforce both entry count and serialized code units.
 const ROOM_TAIL_HOLD_MAX = 256
 const ROOM_TAIL_HOLD_CODE_UNITS_MAX = 1024 * 1024

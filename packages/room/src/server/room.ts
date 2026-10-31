@@ -46,7 +46,7 @@ import type { RoomReplica } from './replica.js'
 import { RoomWrites, runAfterHook } from './writes.js'
 import { commitControlOrThrow, withinRoomHorizon } from './lanes.js'
 import { reportRoomError } from './errors.js'
-import { createMember, evictMember } from './membership.js'
+import { createMember, evictMember } from './members.js'
 import { memberCellKey } from './cells.js'
 import type { RoomIncarnation } from './lifecycle.js'
 import type {
@@ -198,7 +198,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._replica.plan.memberOwned(id)
     try {
       await this._inboxReady(id)
-      await createMember(this._incarnation, this._replica.session, id, record, meta)
+      await createMember(this._incarnation, this._replica.lease, id, record, meta)
       this._assertAdmitted(id)
       this._admissions.set(id, 'committed')
       // A member removed meanwhile gets no join after its leave, here or anywhere.
