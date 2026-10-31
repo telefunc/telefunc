@@ -1,9 +1,10 @@
-export { Room, ROOM_GUARD_USAGE }
+export { Room }
 
 import type { ParticipantMeta, Room as RoomInstance, RoomMeta } from '../types.js'
 import type { RoomStatic } from './statics.js'
 import { loadRoomServer, loadedRoomServer, type RoomServer } from './load.js'
 import { assertUsage } from '../utils/assert.js'
+import { ROOM_GUARD_USAGE } from './constants.js'
 
 type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = RoomInstance<
   M,
@@ -11,10 +12,26 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   Pub
 >
 
-const ROOM_GUARD_USAGE = 'Room.guard() expects a room obtained from Room.get()/Room.create()'
+/** Room's statics that load its server code on their first call: every one but `guard`, which only a room it made
+ *  can reach. */
+const ROOM_STATICS = [
+  'create',
+  'get',
+  'getOrCreate',
+  'join',
+  'list',
+  'setMeta',
+  'setAttributes',
+  'close',
+  'removeParticipant',
+  'announce',
+  'send',
+  'getParticipants',
+] as const satisfies readonly Exclude<keyof RoomStatic, 'guard'>[]
+type LoadingStatic = (typeof ROOM_STATICS)[number]
 
 /** `name` of Room's statics, loading Room's server code on the first call. */
-function onLoad<K extends Exclude<keyof RoomStatic, 'guard'>>(name: K): RoomStatic[K] {
+function onLoad<K extends LoadingStatic>(name: K): RoomStatic[K] {
   const call = (server: RoomServer, args: unknown[]) => (server.Room[name] as (...args: unknown[]) => unknown)(...args)
   return ((...args: unknown[]) => {
     const server = loadedRoomServer()
@@ -22,23 +39,16 @@ function onLoad<K extends Exclude<keyof RoomStatic, 'guard'>>(name: K): RoomStat
   }) as RoomStatic[K]
 }
 
+const loading = Object.fromEntries(ROOM_STATICS.map((name) => [name, onLoad(name)])) as {
+  [K in LoadingStatic]: RoomStatic[K]
+}
+
 const Room: RoomStatic = {
-  create: onLoad('create'),
-  get: onLoad('get'),
-  getOrCreate: onLoad('getOrCreate'),
+  ...loading,
   guard(room, guards) {
     const server = loadedRoomServer()
     // Only Room's server code makes a room.
     assertUsage(server !== undefined, ROOM_GUARD_USAGE)
     server.Room.guard(room, guards)
   },
-  join: onLoad('join'),
-  list: onLoad('list'),
-  setMeta: onLoad('setMeta'),
-  setAttributes: onLoad('setAttributes'),
-  close: onLoad('close'),
-  removeParticipant: onLoad('removeParticipant'),
-  announce: onLoad('announce'),
-  send: onLoad('send'),
-  getParticipants: onLoad('getParticipants'),
 }

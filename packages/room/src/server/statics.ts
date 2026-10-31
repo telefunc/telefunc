@@ -46,7 +46,7 @@ import { metaObjectOf } from '../metaState.js'
 import { closeIncarnation } from './close.js'
 import { cancelClose, type RoomIncarnation } from './lifecycle.js'
 import { repairRoomIndex } from './directory.js'
-import { ROOM_GUARD_USAGE } from './lazyRoom.js'
+import { ROOM_GUARD_USAGE } from './constants.js'
 
 type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = RoomInstance<
   M,

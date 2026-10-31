@@ -21,6 +21,7 @@ export {
   ROOM_TOMBSTONE_TTL_MS,
   ROOM_CLOSE_LEASE_MS,
   ROOM_LAPSE_AFTER_CLOSE_MS,
+  ROOM_GUARD_USAGE,
 }
 
 const ROOM_HEARTBEAT_INTERVAL_MS = 30_000
@@ -63,3 +64,5 @@ const ROOM_CLOSE_LEASE_MS = 15_000
 const ROOM_LAPSE_AFTER_CLOSE_MS = 5_000
 /** The name Room's Cloudflare extension registers its `durableObject` and session calls under. */
 const ROOM_CLOUDFLARE_EXTENSION = 'room'
+/** What `Room.guard()` says of a room Room's server code didn't make. */
+const ROOM_GUARD_USAGE = 'Room.guard() expects a room obtained from Room.get()/Room.create()'
