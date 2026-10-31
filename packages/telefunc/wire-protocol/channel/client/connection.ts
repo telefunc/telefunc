@@ -1,16 +1,5 @@
 export { ClientConnection }
-export type {
-  BarrierEmission,
-  ClientChannelTransport,
-  MuxChannel,
-  MuxConnection,
-  OutboundFrame,
-  OutboundFrameKind,
-  ProbeWire,
-  TransportOwner,
-  UpgradeSource,
-  UpgradeTarget,
-}
+export type { ClientChannelTransport, MuxChannel, MuxConnection, OutboundFrame, OutboundFrameKind, TransportOwner }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
@@ -27,10 +16,6 @@ import {
   CHANNEL_TRANSPORT,
   RECONCILE_TIMEOUT_MS,
   MAX_CHANNELS_PER_CONNECTION,
-  UPGRADE_HANDOFF_BUFFER_BYTES,
-  UPGRADE_HANDOFF_BUFFER_FRAMES,
-  UPGRADE_HANDOFF_JOIN_TIMEOUT_MS,
-  UPGRADE_ATTEMPT_TIMEOUT_MS,
   type ChannelTransport,
   type ChannelTransports,
   TIMER_DELAY_MAX_MS,
@@ -49,49 +34,18 @@ import type {
   PongEntry,
   SequencedEncoder,
 } from '../../wire/frame.js'
-import type {
-  ReadyPayload,
-  ReattachState,
-  ReconcileOpenEntry,
-  ReconcilePayload,
-  ReconciledPayload,
-} from '../../wire/payloads.js'
-import { randomUuid } from '../../../utils/randomUuid.js'
+import type { ReattachState, ReconcileOpenEntry, ReconcilePayload, ReconciledPayload } from '../../wire/payloads.js'
 import { settledOrAborted } from '../../../utils/settledOrAborted.js'
-import { Heartbeat } from './Heartbeat.js'
+import type { Heartbeat } from './Heartbeat.js'
 import { ChannelTable, type ChannelRecord } from './ChannelTable.js'
 import { SendGate, type SendGateOwner } from './SendGate.js'
 import { Liveness, type LivenessOwner } from './Liveness.js'
+import { Upgrade, type ProbeSession, type UpgradeOwner, type UpgradeTarget } from './Upgrade.js'
 import { pingDeadline } from '../../wire/pingDeadline.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
 import { WsTransport } from './ws.js'
 import { SseTransport } from './sse.js'
-
-/** Probe wire returned by `WsTransport.probe`. Liveness is the consumer's responsibility
- *  until the swap commits — typically driven via a transient Heartbeat. */
-type ProbeWire = {
-  ping: () => void
-  onPong: (cb: () => void) => void
-  onClose: (cb: () => void) => void
-  /** `send`/`onFrame` exchange PREPARE/READY without the probe becoming the transport — adopting it
-   *  early would put a sessionless wire in `this.transport`. PONG stays on `onPong`. */
-  send: (frame: Uint8Array<ArrayBuffer>) => void
-  onFrame: (cb: (frame: DecodedFrame, byteLength: number) => void) => void
-  close: () => void
-  /** The uplink of the wire it opens. */
-  uplink: Uplink
-}
-
-type ProbeSession = {
-  upgradeId: string
-  sessionId: string
-  probeHeartbeat: Heartbeat
-  uplink: Uplink
-}
-
-/** Kept apart, as recovery differs: `emitted` may have reached the server, `not-emitted` leaves the wire usable. */
-type BarrierEmission = 'emitted' | 'not-emitted'
 
 type OutboundFrameKind = 'reconcile' | 'released' | 'control' | WindowKind | 'ack' | 'data' | 'heartbeat'
 
@@ -244,21 +198,9 @@ type TransportOwner = Pick<
   | 'stageReconcileBatch'
 >
 
-/** The wire an upgrade moves FROM: it has to carry the barrier as its last frame. */
-type UpgradeSource = ClientChannelTransport & {
-  emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission>
-}
-
-/** The wire an upgrade moves TO: it has to be openable without becoming the transport, and
- *  adoptable once the barrier commits. */
-type UpgradeTarget = ClientChannelTransport & {
-  probe(): Promise<ProbeWire | null>
-  adoptProbe(): void
-}
-
 type ConnectionState =
   | { tag: 'fresh' }
-  | { tag: 'open'; upgrade: UpgradeState }
+  | { tag: 'open' }
   | {
       tag: 'reconnecting'
       attempt: number
@@ -267,49 +209,7 @@ type ConnectionState =
     }
   | { tag: 'closed' }
 
-type UpgradeState =
-  | { tag: 'none' }
-  | {
-      tag: 'staging'
-      attempt: AbortController
-      deadline: ReturnType<typeof setTimeout> | null
-      /** READY arrived: the barrier comes next, and a registration waits for the handoff. */
-      ready: boolean
-    }
-  | {
-      tag: 'committing'
-      attempt: AbortController
-      deadline: ReturnType<typeof setTimeout> | null
-      from: UpgradeSource
-      to: UpgradeTarget
-      probeHeartbeat: Heartbeat
-      upgradeId: string
-      /** The join's two limbs, one per wire. Both must land before dispatching resumes. */
-      finReceived: boolean
-      committed: boolean
-      /** Frames the probe delivered before the flip. The swap has not happened, so not even a
-       *  control frame may be acted on yet; the flip is what releases them. */
-      heldBeforeFlip: BufferedWireFrame[]
-      buffer: UpgradeBuffer
-      bufferedBytes: number
-      bufferedFrames: number
-      deferredOmitted: number[]
-      joinTimer: ReturnType<typeof setTimeout> | null
-    }
-
-type CommittingUpgrade = Extract<UpgradeState, { tag: 'committing' }>
-
-type BufferedWireFrame = { frame: DecodedFrame; byteLength: number }
-
-/** Per source wire, `old` draining first: the server wrote all of it before anything the new wire carries. */
-type UpgradeBuffer = { old: BufferedWireFrame[]; new: BufferedWireFrame[] }
-
-/** FIN (old wire) and RECONCILED (new wire) are the join's two limbs; everything else is payload. */
-function isJoinLimb(frame: DecodedFrame): boolean {
-  return frame.tag === TAG.FIN || frame.tag === TAG.RECONCILED
-}
-
-class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
+class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner, UpgradeOwner {
   private static cache = new Map<string, ClientConnection>()
 
   static getOrCreate(telefuncUrl: string, channel: MuxChannel, options: ClientConnectionOptions): ClientConnection {
@@ -333,17 +233,11 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
   transport: ClientChannelTransport
 
   private state: ConnectionState = { tag: 'fresh' }
-  /** Sticky after a permanent upgrade abort — survives every state transition until dispose. */
-  private upgradeDisabled = false
-  /** Server-allowed transports from the last settled RECONCILED. Kept so `maybeStartUpgrade`
-   *  can run from both `handleReconciled` and `onTransportOpen` — transport-open and the
-   *  first RECONCILED can arrive in either order on the SSE path. */
-  private serverTransports: ReconciledPayload['transports'] | null = null
   /** RECONCILE sent, awaiting RECONCILED. SSE sets it true during connecting since the
    *  initial reconcile is baked into the openStream POST body. Bounded by `reconcileTimer`:
    *  written only via `enterReconciling`/`exitReconciling` so the deadline can never outlive
    *  the state it guards. */
-  private reconciling = false
+  reconciling = false
   private reconcileTimer: ReturnType<typeof setTimeout> | null = null
   /** Resolved once no RECONCILE is in flight. */
   private reconcileSettledWaiters: (() => void)[] = []
@@ -351,24 +245,8 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
   private get closed(): boolean {
     return this.state.tag === 'closed'
   }
-  private get connected(): boolean {
+  get connected(): boolean {
     return this.state.tag === 'open'
-  }
-  private get committing(): CommittingUpgrade | null {
-    if (this.state.tag !== 'open' || this.state.upgrade.tag !== 'committing') return null
-    return this.state.upgrade
-  }
-
-  /** The flip is an EVENT inside `committing`, not a transition out of it: `flipped ≡ transport === to`. */
-  private get flipped(): boolean {
-    const u = this.committing
-    return u !== null && this.transport === u.to
-  }
-
-  /** Sends are gated from the barrier's emission until its COMMITTED lands. */
-  private get upgradeGatesSends(): boolean {
-    const u = this.committing
-    return u !== null && !u.committed
   }
 
   sessionId: string | null = null
@@ -381,6 +259,7 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
   private readonly channels = new ChannelTable()
   private readonly gate = new SendGate({ owner: this, channels: this.channels })
   private readonly liveness = new Liveness({ owner: this, channels: this.channels, gate: this.gate })
+  private readonly upgrade: Upgrade
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
   private idleTimeoutMs: number
   private clientReplayBufferBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BYTES
@@ -394,6 +273,12 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
     this.telefuncUrl = telefuncUrl
     this.connectionOptions = options
     this.usesWebSocket = options.transports.includes(CHANNEL_TRANSPORT.WS)
+    this.upgrade = new Upgrade({
+      owner: this,
+      channels: this.channels,
+      liveness: this.liveness,
+      allowsWebSocket: this.usesWebSocket,
+    })
     this.idleTimeoutMs = options.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS
     this.transport = TRANSPORT_REGISTRY[options.transports[0]!](telefuncUrl, options, this)
   }
@@ -402,7 +287,7 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
 
   private enterOpen(): void {
     if (this.state.tag === 'open') return
-    this.state = { tag: 'open', upgrade: { tag: 'none' } }
+    this.state = { tag: 'open' }
   }
 
   /** Owns the reconnect timer's lifecycle so callers can't forget to cancel a prior one. */
@@ -410,87 +295,16 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
     if (this.state.tag === 'reconnecting') clearTimeout(this.state.timer)
     const timer = setTimeout(() => this.transport.start(), delay)
     this.state = { tag: 'reconnecting', attempt, startedAt, timer }
+    this.upgrade.forget()
   }
 
   private enterClosed(): void {
     this.state = { tag: 'closed' }
-  }
-
-  private enterUpgradeStaging(attempt: AbortController): void {
-    assert(this.state.tag === 'open' && this.state.upgrade.tag === 'none')
-    this.state = { tag: 'open', upgrade: { tag: 'staging', attempt, deadline: null, ready: false } }
-  }
-
-  private enterUpgradeReady(attempt: AbortController): void {
-    assert(this.state.tag === 'open')
-    const u = this.state.upgrade
-    assert(u.tag === 'staging' && u.attempt === attempt)
-    u.ready = true
-  }
-
-  /** READY came, so the barrier goes next: a RECONCILE too, and no other goes out till the handoff. */
-  private get upgradeReady(): boolean {
-    return this.state.tag === 'open' && this.state.upgrade.tag === 'staging' && this.state.upgrade.ready
-  }
-
-  private armAttemptDeadline(attempt: AbortController): void {
-    assert(this.state.tag === 'open')
-    const u = this.state.upgrade
-    assert(u.tag === 'staging' && u.attempt === attempt && u.deadline === null)
-    u.deadline = setTimeout(() => attempt.abort(), UPGRADE_ATTEMPT_TIMEOUT_MS)
-  }
-
-  private enterUpgradeCommitting(
-    from: UpgradeSource,
-    to: UpgradeTarget,
-    session: ProbeSession,
-    attempt: AbortController,
-  ): void {
-    assert(this.state.tag === 'open')
-    const u = this.state.upgrade
-    assert(u.tag === 'staging' && u.attempt === attempt)
-    this.state = {
-      tag: 'open',
-      upgrade: {
-        tag: 'committing',
-        attempt,
-        deadline: u.deadline,
-        from,
-        to,
-        probeHeartbeat: session.probeHeartbeat,
-        upgradeId: session.upgradeId,
-        finReceived: false,
-        committed: false,
-        heldBeforeFlip: [],
-        buffer: { old: [], new: [] },
-        bufferedBytes: 0,
-        bufferedFrames: 0,
-        deferredOmitted: [],
-        joinTimer: null,
-      },
-    }
-  }
-
-  private exitUpgradeAttempt(attempt: AbortController): void {
-    if (this.state.tag !== 'open') return
-    const u = this.state.upgrade
-    if (u.tag === 'none' || u.attempt !== attempt) return
-    if (u.tag === 'committing' && this.transport === u.to) return
-    if (u.deadline) clearTimeout(u.deadline)
-    this.state = { tag: 'open', upgrade: { tag: 'none' } }
-  }
-
-  private exitUpgradeCommitting(): CommittingUpgrade {
-    assert(this.state.tag === 'open' && this.state.upgrade.tag === 'committing')
-    const u = this.state.upgrade
-    if (u.deadline) clearTimeout(u.deadline)
-    if (u.joinTimer) clearTimeout(u.joinTimer)
-    this.state = { tag: 'open', upgrade: { tag: 'none' } }
-    return u
+    this.upgrade.forget()
   }
 
   get sendsOpen(): boolean {
-    return this.connected && !this.reconciling && !this.upgradeGatesSends && !this.reconcileOwed
+    return this.connected && !this.reconciling && !this.upgrade.gatesSends && !this.reconcileOwed
   }
 
   private register(channel: MuxChannel): void {
@@ -543,7 +357,7 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
   }
 
   /** A channel registered since the last RECONCILE, which owes the server one naming it. */
-  private reconcileOwed = false
+  reconcileOwed = false
   private registerReconcileTimer: ReturnType<typeof setTimeout> | null = null
   /** Coalesces sync-burst registrations into one RECONCILE round-trip. */
   private scheduleRegisterReconcile(): void {
@@ -561,9 +375,9 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
    *  `sendsOpen` false so data frames buffer behind the RECONCILE), and the
    *  transitions that make the wire sendable re-invoke this: `onTransportOpen`, a settled
    *  RECONCILED, upgrade-attempt exit, and handoff completion. */
-  private flushPendingRegisterReconcile(): void {
+  flushPendingRegisterReconcile(): void {
     if (!this.reconcileOwed) return
-    if (this.state.tag !== 'open' || this.state.upgrade.tag === 'committing' || this.upgradeReady) return
+    if (!this.connected || this.upgrade.committing !== null || this.upgrade.ready) return
     if (this.reconciling) return
     this.sendReconcileBatch(this.stageReconcileBatch(false))
   }
@@ -714,7 +528,7 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
       this.flushPendingRegisterReconcile()
       this.drainBufferedFramesToWire()
     }
-    this.maybeStartUpgrade()
+    this.upgrade.maybeStart()
   }
 
   /** The wire's upload fell back to batch POSTs, which a channel may have opened before (see `onTransportOpen`). */
@@ -727,15 +541,15 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
   onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void {
     // A wire the page gave up still delivers, but its RECONCILED answers a RECONCILE the next wire's replaces.
     if (abandoned && frame.tag === TAG.RECONCILED) return
-    const u = this.committing
+    const u = this.upgrade.committing
     if (u !== null && this.transport === u.to) {
-      this.ingestDuringHandoff(frame, source === u.from ? 'old' : 'new', byteLength)
+      this.upgrade.ingestDuringHandoff(frame, source === u.from ? 'old' : 'new', byteLength)
     } else {
       this.dispatchFrame(frame)
     }
   }
 
-  private dispatchFrame(frame: DecodedFrame): void {
+  dispatchFrame(frame: DecodedFrame): void {
     // Track seq for ALL sequenced frames, ACK_RES and the closing ones too; otherwise reconciles under-report lastSeq.
     if (isSequencedFrame(frame)) {
       const seq = this.trackSeq(frame.index, frame.seq)
@@ -749,7 +563,7 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
     // ATTACH_RESULT and the connection-level and closing ctrls need connection bookkeeping; the rest is per-channel.
     switch (frame.tag) {
       case TAG.FIN:
-        this.handleUpgradeFin()
+        this.upgrade.handleFin()
         return
       case TAG.RECONCILED:
         this.handleReconciled(frame.payload)
@@ -776,51 +590,6 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
     const record = this.channels.get(channelFrame.index)
     // A closed channel stays listed only for what it still has to tell the server.
     if (record && record.state.tag !== 'closed') record.channel._dispatchFrame(channelFrame)
-  }
-
-  /** Every frame arriving mid-handoff lands here — the one charge site. Before the flip the probe
-   *  is nobody's wire, so even a join limb waits: acting on one would settle a swap that has not
-   *  happened. After it, limbs apply and the rest waits, partitioned by the wire it came from. */
-  private ingestDuringHandoff(frame: DecodedFrame, source: 'old' | 'new', byteLength: number): void {
-    const u = this.committing
-    if (u === null) return
-    const flipped = this.transport === u.to
-    if (flipped && this.applyJoinLimb(frame)) return
-    ;(flipped ? u.buffer[source] : u.heldBeforeFlip).push({ frame, byteLength })
-    u.bufferedFrames += 1
-    u.bufferedBytes += byteLength
-    // Checked after the push, so the frame that trips the budget is still in the prefix the
-    // fallback delivers. Pre-flip nothing is committed yet, so the attempt can simply be dropped.
-    if (u.bufferedFrames <= UPGRADE_HANDOFF_BUFFER_FRAMES && u.bufferedBytes <= UPGRADE_HANDOFF_BUFFER_BYTES) return
-    if (flipped) this.fallbackToSse(new NetworkError('Upgrade handoff buffer limit exceeded', true))
-    else u.attempt.abort()
-  }
-
-  /** True if the frame was one of the join's limbs, and has been applied. */
-  private applyJoinLimb(frame: DecodedFrame): boolean {
-    if (frame.tag === TAG.FIN) {
-      this.handleUpgradeFin()
-      return true
-    }
-    if (frame.tag === TAG.RECONCILED) {
-      this.handleReconciled(frame.payload)
-      return true
-    }
-    return false
-  }
-
-  private onJoinTimeout(): void {
-    const u = this.committing
-    if (u === null) return
-    u.joinTimer = null
-    // The FIN comes behind what the old wire still delivers: given up on once that wire went quiet for the timeout.
-    const quiet = u.finReceived ? Infinity : (u.from.heartbeat?.quietFor() ?? Infinity)
-    if (quiet < UPGRADE_HANDOFF_JOIN_TIMEOUT_MS) {
-      u.joinTimer = setTimeout(() => this.onJoinTimeout(), UPGRADE_HANDOFF_JOIN_TIMEOUT_MS - quiet)
-      return
-    }
-    const waitingFor = u.finReceived ? 'RECONCILED' : 'FIN'
-    this.fallbackToSse(new NetworkError(`Upgrade handoff timed out waiting for ${waitingFor}`, true))
   }
 
   /** An SSE wire's RECONCILE went out with the request that opens it, before the wire opens (see `beatFromReconcile`). */
@@ -872,7 +641,7 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
     for (const resolve of this.reconcileSettledWaiters.splice(0)) resolve()
   }
 
-  private reconcileSettled(signal: AbortSignal): Promise<void> {
+  reconcileSettled(signal: AbortSignal): Promise<void> {
     if (!this.reconciling) return Promise.resolve()
     return settledOrAborted(new Promise<void>((resolve) => this.reconcileSettledWaiters.push(resolve)), signal)
   }
@@ -887,74 +656,25 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
     this.dropWire(this.transport)
   }
 
-  private handleUpgradeFin(): void {
-    const u = this.committing
-    if (u === null) return
-    u.finReceived = true
-    this.tryCompleteUpgrade()
-  }
-
-  private tryCompleteUpgrade(): void {
-    const u = this.committing
-    if (u === null || this.transport !== u.to) return
-    if (!u.finReceived || !u.committed) return
-    const { from, buffer, deferredOmitted } = this.exitUpgradeCommitting()
-    this.retireOldWire(from)
-    for (const entry of buffer.old) this.dispatchFrame(entry.frame)
-    this.closeUnacknowledged(deferredOmitted)
-    for (const entry of buffer.new) this.dispatchFrame(entry.frame)
-    for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._onUpgradeJoined()
-    this.flushPendingRegisterReconcile()
-    this.startTtlIfIdle()
-  }
-
-  /** Tears down whichever upgrade phase is in flight. Returns the join's record when the flip had
-   *  already happened — its buffered frames are then the caller's to drain — and null otherwise. */
-  private teardownUpgrade(): CommittingUpgrade | null {
-    if (this.state.tag !== 'open' || this.state.upgrade.tag === 'none') return null
-    const u = this.state.upgrade
-    if (u.tag === 'committing' && this.transport === u.to) {
-      const record = this.exitUpgradeCommitting()
-      this.retireOldWire(record.from)
-      return record
-    }
-    u.attempt.abort()
-    this.exitUpgradeAttempt(u.attempt)
-    return null
-  }
-
-  private retireOldWire(transport: ClientChannelTransport): void {
-    transport.detachHeartbeat()
-    transport.abandonActiveTransport()
-    transport.dispose()
-  }
-
   onTransportClosed(transport: ClientChannelTransport, { rejectedByServer = false } = {}): void {
     if (this.closed) return
     transport.detachHeartbeat()
     if (transport !== this.transport) {
-      if (this.flipped && transport === this.committing!.from) {
+      if (this.upgrade.flipped && transport === this.upgrade.committing!.from) {
         this.fallbackToSse(new NetworkError('Connection dropped', true))
       }
       return
     }
-    if (this.state.tag === 'open' && this.state.upgrade.tag !== 'none' && !this.flipped) {
-      this.state.upgrade.attempt.abort()
-    }
+    this.upgrade.abortAttempt()
     const err = new NetworkError(rejectedByServer ? 'Server rejected SSE connection' : 'Connection dropped', true)
     this.handleTransportLoss(err, rejectedByServer)
   }
 
-  private handleReconciled(ctrl: ReconciledPayload): void {
-    const committing = this.committing
-    if (committing !== null && !committing.committed) {
-      // A RECONCILED that does not echo this attempt's id belongs to someone else's upgrade.
-      if (ctrl.upgradeId !== committing.upgradeId) return
-      committing.committed = true
-    }
+  handleReconciled(ctrl: ReconciledPayload): void {
+    if (!this.upgrade.onReconciled(ctrl)) return
     this.transport.applyReconciledSettings(ctrl)
     this.reconciledWire = this.wire
-    const deferredOmitted = committing?.deferredOmitted ?? null
+    const deferredOmitted = this.upgrade.committing?.deferredOmitted ?? null
     const outcome = this.applyReconciled(ctrl, deferredOmitted)
     this.liveness.install(this.transport, ctrl.pingInterval, false)
     this.transport.closeAbandonedTransport()
@@ -962,176 +682,43 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
     for (const channel of outcome.channelsToOpen) {
       channel._onTransportOpen(this.transport.batched, this.transport.uplink, this.transport.downlink)
     }
-    this.tryCompleteUpgrade()
+    this.upgrade.tryComplete()
     if (outcome.reconcileComplete) {
-      this.serverTransports = ctrl.transports
+      this.upgrade.serverTransports = ctrl.transports
       this.startTtlIfIdle()
       this.flushPendingRegisterReconcile()
-      this.maybeStartUpgrade()
+      this.upgrade.maybeStart()
     }
   }
 
   // ── SSE→WS upgrade ──
 
-  private maybeStartUpgrade(): void {
-    if (this.upgradeDisabled) return
-    if (this.state.tag !== 'open' || this.state.upgrade.tag !== 'none') return
-    // Settled-reconcile gate; a flush above may have just re-armed `reconciling` — the next
-    // RECONCILED retries via `handleReconciled`.
-    if (this.reconciling) return
-    // Only SSE can carry a barrier as its last frame, and only SSE has anywhere to upgrade to.
-    if (this.transport.type !== CHANNEL_TRANSPORT.SSE) return
-    if (!this.connectionOptions.transports.includes(CHANNEL_TRANSPORT.WS)) return
-    if (!this.serverTransports?.includes(CHANNEL_TRANSPORT.WS)) return
-    void this.probeAndUpgrade(this.transport as UpgradeSource)
+  createWebSocket(): UpgradeTarget {
+    return new WsTransport({ telefuncUrl: this.telefuncUrl, owner: this })
   }
 
-  private fallbackToSse(err: Error): void {
+  adoptTransport(transport: UpgradeTarget): void {
+    this.transport = transport
+    this.wire++
+  }
+
+  fallbackToSse(err: Error): void {
     if (this.closed) return
-    const abandoned = this.teardownUpgrade()
-    if (abandoned) {
-      for (const entry of abandoned.buffer.old) this.dispatchFrame(entry.frame)
-      this.closeUnacknowledged(abandoned.deferredOmitted)
-    }
-    this.upgradeDisabled = true
+    this.upgrade.abandon()
     this.transport.abandonActiveTransport()
     this.transport.dispose()
     this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.SSE](this.telefuncUrl, this.connectionOptions, this)
     this.handleTransportLoss(err, false)
   }
 
-  private async probeAndUpgrade(from: UpgradeSource): Promise<void> {
-    this.flushPendingRegisterReconcile()
-    const sessionId = this.sessionId
-    if (sessionId === null) return
-    const attempt = new AbortController()
-    this.enterUpgradeStaging(attempt)
-    try {
-      const to = new WsTransport({ telefuncUrl: this.telefuncUrl, owner: this })
-      const session = await this.stageProbe(to, sessionId, attempt)
-      if (!session) return
-      await this.commitBarrier(from, to, session, attempt)
-    } finally {
-      this.exitUpgradeAttempt(attempt)
-      this.flushPendingRegisterReconcile()
-    }
-  }
-
-  private async stageProbe(
-    to: UpgradeTarget,
-    sessionId: string,
-    attempt: AbortController,
-  ): Promise<ProbeSession | null> {
-    const probe = await to.probe()
-    if (attempt.signal.aborted || !probe) {
-      probe?.close()
-      return null
-    }
-    const probeHeartbeat = this.keepProbeAlive(probe, attempt)
-
-    const upgradeId = randomUuid()
-    let onReady: ((payload: ReadyPayload) => void) | null = null
-    probe.onFrame((frame, byteLength) => {
-      if (frame.tag === TAG.READY) {
-        onReady?.(frame.payload)
-        return
-      }
-      this.ingestDuringHandoff(frame, 'new', byteLength)
-    })
-
-    const readyP = new Promise<ReadyPayload | null>((resolve) => {
-      onReady = resolve
-      attempt.signal.addEventListener('abort', () => resolve(null), { once: true })
-    })
-    this.armAttemptDeadline(attempt)
-    probe.send(encode.prepare({ upgradeId, sessionId }))
-    const ready = await readyP
-    if (!ready || ready.upgradeId !== upgradeId || attempt.signal.aborted) {
-      attempt.abort()
-      if (!this.reconcileOwed) this.drainBufferedFramesToWire()
-      return null
-    }
-    this.enterUpgradeReady(attempt)
-    return { upgradeId, sessionId, probeHeartbeat, uplink: probe.uplink }
-  }
-
-  /** The probe is nobody's transport yet, so it has no heartbeat of its own: this one keeps it
-   *  alive until the flip adopts it, and any death — its own or the attempt's — closes both. */
-  private keepProbeAlive(probe: ProbeWire, attempt: AbortController): Heartbeat {
-    const heartbeat = new Heartbeat({
-      intervalMs: this.liveness.pingInterval,
-      pongTimeoutMs: pingDeadline(this.liveness.pingInterval),
-      send: () => probe.ping(),
-      onDead: () => attempt.abort(),
-    })
-    probe.onPong(() => heartbeat.resetPong())
-    probe.onClose(() => attempt.abort())
-    heartbeat.start(true)
-    attempt.signal.addEventListener(
-      'abort',
-      () => {
-        heartbeat.stop()
-        probe.close()
-      },
-      { once: true },
-    )
-    return heartbeat
-  }
-
-  private async commitBarrier(
-    from: UpgradeSource,
-    to: UpgradeTarget,
-    session: ProbeSession,
-    attempt: AbortController,
-  ): Promise<void> {
-    // After the RECONCILED of the one in flight, which may name a channel the barrier lists.
-    await this.reconcileSettled(attempt.signal)
-    if (attempt.signal.aborted) return
-    this.enterUpgradeCommitting(from, to, session, attempt)
-    const emission = await from.emitBarrier(() => this.buildBarrierFrame(session), attempt.signal)
-
-    if (emission === 'not-emitted') {
-      attempt.abort()
-      if (!this.reconcileOwed) this.drainBufferedFramesToWire()
-      // An attempt that ended without its barrier goes again once the outbox drained.
-      void from.drained().then(() => this.maybeStartUpgrade())
-      return
-    }
-    if (attempt.signal.aborted) {
-      this.fallbackToSse(new NetworkError('Upgrade barrier attempt timed out', true))
-      return
-    }
-    this.flip()
-  }
-
-  private flip(): void {
-    const u = this.committing
-    assert(u !== null)
-    if (u.deadline) {
-      clearTimeout(u.deadline)
-      u.deadline = null
-    }
-    u.probeHeartbeat.stop()
-    this.transport = u.to
-    this.wire++
-    u.to.adoptProbe()
-    u.joinTimer = setTimeout(() => this.onJoinTimeout(), UPGRADE_HANDOFF_JOIN_TIMEOUT_MS)
-    // What the probe delivered before the swap can be acted on now. The buffer is made whole
-    // first, so the COMMITTED that may be among them cannot complete a join over a partial one.
-    const held = u.heldBeforeFlip.splice(0)
-    for (const { frame, byteLength } of held) if (!isJoinLimb(frame)) u.buffer.new.push({ frame, byteLength })
-    for (const { frame } of held) if (isJoinLimb(frame)) this.applyJoinLimb(frame)
-    this.tryCompleteUpgrade()
-  }
-
-  private drainBufferedFramesToWire(): void {
+  drainBufferedFramesToWire(): void {
     for (const frame of this.gate.drainSendable()) this.transport.sendFrame(frame)
     this.startTtlIfIdle()
   }
 
   private handleTransportLoss(err: Error, rejected: boolean): void {
     if (this.closed) return
-    if (this.flipped) {
+    if (this.upgrade.flipped) {
       this.fallbackToSse(err)
       return
     }
@@ -1171,7 +758,7 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
   }
 
   /** On a live wire with no channel open and nothing queued: what the transport holds leaves before the wire does. */
-  private startTtlIfIdle(): void {
+  startTtlIfIdle(): void {
     if (!this.connected || this.ttl || !this.gate.idle || !this.channels.idle) {
       return
     }
@@ -1199,7 +786,7 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
     this.cancelRegisterReconcile()
     // Tear down any in-flight phase before transitioning to `closed`.
     if (this.state.tag === 'reconnecting') clearTimeout(this.state.timer)
-    this.teardownUpgrade()
+    this.upgrade.teardown()
     this.enterClosed()
     this.transport.detachHeartbeat()
     this.transport.dispose()
@@ -1229,7 +816,7 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
   }
 
   /** The old wire's last frame; a channel no RECONCILE named yet is left out, to reconcile after the handoff. */
-  private buildBarrierFrame({ sessionId, upgradeId, uplink }: ProbeSession): OutboundFrame {
+  buildBarrierFrame({ sessionId, upgradeId, uplink }: ProbeSession): OutboundFrame {
     // Its entries attach on the WebSocket, `uplink`'s wire, the one after this one.
     const open = this.declareOpenEntries(this.channels.values(), { skipUnnamed: true, uplink })
     // A new wire's RECONCILE releases what it leaves out.
@@ -1347,7 +934,7 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
     }
     for (const frame of this.gate.drain(attached)) releaseFrames.push(frame)
 
-    if (hasNewChannels && !this.upgradeReady) {
+    if (hasNewChannels && !this.upgrade.ready) {
       const reconcileBatch = this.stageReconcileBatch(false)
       this.appendReconcileBatch(releaseFrames, reconcileBatch)
     } else {
@@ -1408,7 +995,7 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
     return this.replayTo(record, lastSeq, throughSeq)
   }
 
-  private closeUnacknowledged(ixes: number[]): void {
+  closeUnacknowledged(ixes: number[]): void {
     for (const ix of ixes) {
       const record = this.channels.get(ix)
       if (!record) continue
@@ -1441,7 +1028,7 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
       }
     }
     this.startTtlIfIdle()
-    this.maybeStartUpgrade()
+    this.upgrade.maybeStart()
   }
 
   /** What the server lacks through `throughSeq`: the replay, or an ERROR ending the channel if the replay lost some. */

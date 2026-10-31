@@ -10,7 +10,8 @@ import { Downlink } from '../../flowControl/client/Downlink.js'
 import { decode, encode, isOneFrame, messageFrames, withTook, type DecodedFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
-import type { OutboundFrame, ProbeWire, TransportOwner, UpgradeTarget } from './connection.js'
+import type { OutboundFrame, TransportOwner } from './connection.js'
+import type { ProbeWire, UpgradeTarget } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 
 /** What a WebSocket's frames go through, each way. */

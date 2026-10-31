@@ -28,7 +28,8 @@ import { SSEEvents } from './SSEEvents.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { randomUuid } from '../../../utils/randomUuid.js'
 import { settledOrAborted } from '../../../utils/settledOrAborted.js'
-import type { BarrierEmission, OutboundFrame, OutboundFrameKind, TransportOwner, UpgradeSource } from './connection.js'
+import type { OutboundFrame, OutboundFrameKind, TransportOwner } from './connection.js'
+import type { BarrierEmission, UpgradeSource } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 
 type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number; queuedAt: number }
