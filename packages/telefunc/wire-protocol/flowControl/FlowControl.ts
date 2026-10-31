@@ -43,7 +43,7 @@ type AttachedDownlink = {
   creditArrived(bytes: number): void
 }
 
-/** The largest window a sender whose replay lanes hold `text` and `binary` bytes gets: what it holds in flight fits. */
+/** The largest window a sender whose replay queues hold `text` and `binary` bytes gets: what it holds in flight fits. */
 function replayWindow(text: number, binary: number): number {
   return Math.max(1, Math.floor(Math.min(text, binary) / 2) - MESSAGE_FRAME_OVERHEAD_MAX_BYTES)
 }

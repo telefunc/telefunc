@@ -34,26 +34,26 @@ type FlushHandlers = {
  * Delivery callbacks on evicted entries are rejected immediately so channel
  * memory stays hard-capped.
  *
- * Binary messages (binary sends, binary ack requests, binary publishes) are stored in a separate lane with its own
- * byte budget. An oversized binary only clears the binary lane — text messages
+ * Binary messages (binary sends, binary ack requests, binary publishes) are stored in a separate queue with its own
+ * byte budget. An oversized binary only clears the binary queue — text messages
  * are never affected.
  *
- * A single message larger than its lane's maxBytes causes that lane to be
+ * A single message larger than its queue's maxBytes causes that queue to be
  * cleared and the message dropped — sequential delivery is paramount;
- * a gap in the middle is never acceptable, so the lane resets to a
+ * a gap in the middle is never acceptable, so the queue resets to a
  * clean slate instead.
  *
  * Sequential delivery is guaranteed: flush() sends all buffered messages
- * in insertion order by merge-iterating both lanes. There are no gaps or null markers.
+ * in insertion order by merge-iterating both queues. There are no gaps or null markers.
  */
 class ServerChannelBuffer<TAck = never> {
-  private readonly text: BufferLane
-  private readonly binary: BufferLane
+  private readonly text: BufferQueue
+  private readonly binary: BufferQueue
   private insertionSeq = 0
 
   constructor(maxBytes: number, binaryMaxBytes: number) {
-    this.text = new BufferLane(maxBytes)
-    this.binary = new BufferLane(binaryMaxBytes)
+    this.text = new BufferQueue(maxBytes)
+    this.binary = new BufferQueue(binaryMaxBytes)
   }
 
   get byteLength(): number {
@@ -96,8 +96,8 @@ class ServerChannelBuffer<TAck = never> {
 
   /**
    * Flush all buffered messages to the client connection in insertion order, then clear.
-   * Merge-iterates text and binary lanes by insertion order so the caller
-   * sees the same sequence as if both lanes were a single interleaved buffer.
+   * Merge-iterates text and binary queues by insertion order so the caller
+   * sees the same sequence as if both queues were a single interleaved buffer.
    */
   flush(handlers: FlushHandlers): void {
     let ti = this.text.head
@@ -120,10 +120,10 @@ class ServerChannelBuffer<TAck = never> {
     this.insertionSeq = 0
   }
 
-  private flushEntry(lane: BufferLane, i: number, h: FlushHandlers): void {
-    const tag = lane.tagAt(i)
-    const data = lane.dataAt(i)
-    const cb = lane.callbackAt(i)
+  private flushEntry(queue: BufferQueue, i: number, h: FlushHandlers): void {
+    const tag = queue.tagAt(i)
+    const data = queue.dataAt(i)
+    const cb = queue.callbackAt(i)
     switch (tag) {
       case TAG.TEXT:
         assert(typeof data === 'string' && cb)
@@ -168,12 +168,12 @@ class ServerChannelBuffer<TAck = never> {
 }
 
 /**
- * Bounded FIFO lane with parallel arrays and amortised O(1) compaction.
+ * Bounded FIFO queue with parallel arrays and amortised O(1) compaction.
  * ServerChannelBuffer uses two instances — one for text, one for binary —
  * each with its own byte budget so binary can never evict text.
  */
 
-class BufferLane {
+class BufferQueue {
   // Parallel arrays for cache-friendly access
   private tags: number[] = []
   private data: (string | Uint8Array)[] = []
@@ -222,7 +222,7 @@ class BufferLane {
     if (held !== null) this.append(tag, data, held, callback, order)
   }
 
-  /** Holds a copy of `data`, made only once the lane admits it. */
+  /** Holds a copy of `data`, made only once the queue admits it. */
   pushCopy(tag: number, data: Uint8Array, callback: EntryCallback, order: number): void {
     const held = this.admit(data.byteLength, callback)
     if (held !== null) this.append(tag, new Uint8Array(data), held, callback, order)
@@ -254,7 +254,7 @@ class BufferLane {
 
   // ── Private ──
 
-  /** The bytes holding the entry takes, or `null` once the lane is cleared for an entry larger than it. */
+  /** The bytes holding the entry takes, or `null` once the queue is cleared for an entry larger than it. */
   private admit(bytes: number, callback: EntryCallback | null): number | null {
     const held = bytes + (callback === null ? HELD_PUBLISH_OVERHEAD_BYTES : HELD_SEND_OVERHEAD_BYTES)
     if (held <= this.maxBytes) return held

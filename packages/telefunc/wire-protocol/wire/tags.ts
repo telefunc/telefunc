@@ -1,5 +1,5 @@
-export { TAG, isConnCtrlTag, isChannelCtrlTag, isSequencedTag, passesData, replayLaneOf, countsCredit }
-export type { ReplayLaneKind }
+export { TAG, isConnCtrlTag, isChannelCtrlTag, isSequencedTag, passesData, replayKindOf, countsCredit }
+export type { ReplayKind }
 
 import { assert } from '../../utils/assert.js'
 
@@ -103,10 +103,10 @@ function isClosingTag(tag: number): boolean {
   return tag === TAG.CLOSE || tag === TAG.CLOSE_ACK || tag === TAG.ABORT || tag === TAG.ERROR
 }
 
-/** The replay lane of a sequenced frame; `closing` holds the frame that ends a channel, which no byte budget drops. */
-type ReplayLaneKind = 'text' | 'binary' | 'closing'
+/** The replay queue of a sequenced frame; `closing` holds the frame that ends a channel, which no byte budget drops. */
+type ReplayKind = 'text' | 'binary' | 'closing'
 
-function replayLaneOf(tag: number): ReplayLaneKind {
+function replayKindOf(tag: number): ReplayKind {
   if (isClosingTag(tag)) return 'closing'
   assert(tag >= DATA_TAG_MIN && tag < CHANNEL_CTRL_TAG_MIN)
   return tag === TAG.BINARY ||
