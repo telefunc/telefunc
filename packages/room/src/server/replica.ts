@@ -40,7 +40,7 @@ import { RosterStream } from './RosterStream.js'
 import { toggle } from './sets.js'
 import { RoomLease } from './lease.js'
 import { MemberMessageTexts, type RoomStub, unorderedEventText } from './stub.js'
-import { RoomSubscriptions, type LanePlanOwner } from './subscriptions.js'
+import { LanePlan, type LanePlanOwner } from './LanePlan.js'
 import { RoomHeartbeat, type RoomHeartbeatOwner } from './heartbeat.js'
 assertIsNotBrowser()
 
@@ -92,11 +92,11 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
   readonly id: string
   readonly _incarnation: RoomIncarnation
   readonly model: RoomModel
-  readonly demand: RoomDemand
+  readonly incomingDemand: RoomDemand
   /** What every holder here receives, told to the other processes and to `demand`. */
-  readonly report = new DemandReport((entry, on) => this._tellDemand(entry, on))
-  readonly plan: RoomSubscriptions
-  readonly sync: AuthoritySync
+  readonly outgoingDemand = new DemandReport((entry, on) => this._tellDemand(entry, on))
+  readonly lanePlan: LanePlan
+  readonly authority: AuthoritySync
   readonly heartbeat: RoomHeartbeat
   readonly roster: RosterStream
   /** Hosts the members the handles join and the pages' views. */
@@ -147,26 +147,26 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
       meta: stored.entries,
       seed,
       metaSeq: stored.seq,
-      onMetaWaiting: () => this.sync.metaWaiting(),
-      onMemberMetaGap: () => this.sync.memberMetaGap(),
+      onMetaWaiting: () => this.authority.metaWaiting(),
+      onMemberMetaGap: () => this.authority.memberMetaGap(),
       // A local participant takes each update its member's meta takes here.
       onMemberMeta: (id, update) => this._owners.get(id)?._acceptMeta(id, update),
       onLeave: (id, cause, hidden) => this._onLeave(id, cause, hidden),
     })
-    this._gossip = new GossipOutbox(incarnation, this.report.instance)
-    this.demand = new RoomDemand({
+    this._gossip = new GossipOutbox(incarnation, this.outgoingDemand.instance)
+    this.incomingDemand = new RoomDemand({
       ownsMember: (id) => this._owners.has(id),
       ownedMembers: () => this._owners.keys(),
       deliver: (member, track, wanted) => this._owners.get(member)?._deliverDemand(member, track, wanted),
       ask: (instance) => this._askDemand(instance),
     })
-    this.plan = new RoomSubscriptions({ owner: this, demand: this.report })
-    this.sync = new AuthoritySync(this, this.plan)
+    this.lanePlan = new LanePlan({ owner: this, outgoingDemand: this.outgoingDemand })
+    this.authority = new AuthoritySync(this, this.lanePlan)
     this.heartbeat = new RoomHeartbeat({ owner: this })
     this.roster = new RosterStream({
       model: this.model,
       stubs: this.stubs,
-      ensureRoster: () => this.sync.ensureRoster(),
+      ensureRoster: () => this.authority.ensureRoster(),
     })
   }
 
@@ -182,7 +182,7 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
     this._owners.set(member, handle)
     // A member's id is fresh at each join, so its inbox starts before seq 1.
     this._inboxSeqs.set(member, 0)
-    this.demand.owned(member)
+    this.incomingDemand.owned(member)
   }
 
   /** The member's demand goes with it. */
@@ -190,7 +190,7 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
     if (this._owners.get(member) !== handle) return
     this._owners.delete(member)
     this._inboxSeqs.delete(member)
-    this.demand.forgetMember(member)
+    this.incomingDemand.forgetMember(member)
   }
 
   attachStub(stub: RoomStub): void {
@@ -237,7 +237,7 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
     switch (event.__r) {
       case 'join':
         if (!this.model.applyJoin(joinedMember(event))) return
-        this.plan.memberChanged(event.id)
+        this.lanePlan.memberChanged(event.id)
         relay()
         return
       case 'leave':
@@ -283,9 +283,9 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
   }
 
   private async _readRetainedText(holder: LaneHolder, before: TextWantsChange, hold: ReplayHold): Promise<void> {
-    await this.sync.ensureRoster()
+    await this.authority.ensureRoster()
     // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
-    await withinRoomHorizon(this.plan.semanticReady)
+    await withinRoomHorizon(this.lanePlan.semanticReady)
     const stored = await getRoomBackend().readRetained(this.id, this._incarnation.inc, SEMANTIC_LANE)
     if (stored === null) return
     const serialized = decodeRoomText(stored.payload)
@@ -314,8 +314,8 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
   }
 
   private async _readRetainedBinary(holder: LaneHolder, { member, track }: BinaryWantChange, hold: ReplayHold) {
-    await this.sync.ensureRoster()
-    await (member === ALL ? this.plan.binaryReady() : this.plan.pairsReady(member, track))
+    await this.authority.ensureRoster()
+    await (member === ALL ? this.lanePlan.binaryReady() : this.lanePlan.pairsReady(member, track))
     const backend = getRoomBackend()
     const lanes: LaneId[] =
       member !== ALL && track !== ALL
@@ -403,15 +403,15 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
   /** This process's demand entry, to the other processes and to its own owners. */
   private _tellDemand(entry: DemandEntry, on: boolean): void {
     this._gossip.push({ on, ...entry })
-    this.demand.take(this.report.instance, entry, on)
+    this.incomingDemand.take(this.outgoingDemand.instance, entry, on)
   }
 
   /** @internal Renews this process's demand elsewhere with one page, and drops the reporters that lapsed,
    *  a slice at a time. */
   async _renewDemand(): Promise<void> {
-    if (this.report.reporting) this._gossip.renew()
+    if (this.outgoingDemand.reporting) this._gossip.renew()
     const slice = new Slice()
-    for (const _ of this.demand.expire()) if (slice.over) await slice.next()
+    for (const _ of this.incomingDemand.expire()) if (slice.over) await slice.next()
   }
 
   /** Tells every entry of this process's demand again as all it receives, a slice at a time; once more after it when
@@ -425,10 +425,10 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
     try {
       do {
         this._askedAgain = false
-        if (!this.report.reporting) continue
+        if (!this.outgoingDemand.reporting) continue
         this._gossip.push({ again: true })
         const slice = new Slice()
-        for (const _ of this.report.all()) if (slice.over) await slice.next()
+        for (const _ of this.outgoingDemand.all()) if (slice.over) await slice.next()
         this._gossip.push({ again: false })
       } while (this._askedAgain)
     } finally {
@@ -439,12 +439,15 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
   /** @internal */
   _onDemand(serialized: string): void {
     const page = decodeDemandPage(serialized)
-    if (page.instance !== this.report.instance) this.demand.applyPage(page)
+    if (page.instance !== this.outgoingDemand.instance) this.incomingDemand.applyPage(page)
   }
 
   /** @internal Asks `of`, or every other process, to tell its demand again. */
   _askDemand(of?: string): void {
-    const ask: Extract<RoomCtrlEnvelope, { __r: 'demand-ask' }> = { __r: 'demand-ask', instance: this.report.instance }
+    const ask: Extract<RoomCtrlEnvelope, { __r: 'demand-ask' }> = {
+      __r: 'demand-ask',
+      instance: this.outgoingDemand.instance,
+    }
     if (of) ask.of = of
     // A stale commit is a closed room's, which has no demand.
     void commitControl(this.id, this._incarnation.inc, ask).catch(reportRoomError)
@@ -452,7 +455,7 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
 
   /** @internal */
   _forgetDemand(): void {
-    this.demand.forgetLeased()
+    this.incomingDemand.forgetLeased()
   }
 
   /** @internal */
@@ -479,10 +482,10 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
 
   /** @internal */
   _onControl(serialized: string, info: OrderingInfo): void {
-    this.sync.controlDelivered(info.seq)
+    this.authority.controlDelivered(info.seq)
     const ctrl = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
     if (ctrl.__r === 'demand-ask') {
-      const self = this.report.instance
+      const self = this.outgoingDemand.instance
       if (ctrl.instance !== self && (ctrl.of ?? self) === self) void this._tellDemandAgain().catch(reportRoomError)
       return
     }
@@ -570,22 +573,22 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
     }
     for (const stub of this.stubs) {
       stub._forgetMember(id)
-      if (stub._forgetWantsOf(id)) this.plan.holderChanged(stub, [id])
+      if (stub._forgetWantsOf(id)) this.lanePlan.holderChanged(stub, [id])
     }
-    this.plan.memberReleased(id)
+    this.lanePlan.memberReleased(id)
   }
 
   /** The room closed. Runs once, after the `closed` event has been applied and relayed. */
   private _teardown(): void {
     this.acks.settleAll(DM_FAILURE.roomClosed) // no recipient will reply now
     this.roster.clear()
-    this.demand.close()
+    this.incomingDemand.close()
     for (const [id, owner] of this._owners) this.disown(id, owner)
     const handles = new Set(this._observers)
     for (const tail of this._tails) handles.add(tail)
     for (const handle of handles) handle._teardown()
     this._gossip.close()
-    void this.plan.replan()
+    void this.lanePlan.replan()
   }
 }
 

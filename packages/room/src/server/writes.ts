@@ -137,9 +137,9 @@ class RoomWrites {
     const lane = { kind: 'binary', member: from, track: frame.track } as const
     const { sender, commit } = await this._inCallOrder(encodeLaneKey(lane), async (sent) => {
       const { sender } = await this._admitPublish(from, frame.payload)
-      const planned = host._replica.plan.lanePlanned(from, lane.track)
+      const planned = host._replica.lanePlan.lanePlanned(from, lane.track)
       if (planned !== null) await planned
-      const demand = host._replica.demand
+      const demand = host._replica.incomingDemand
       if (!demand.admitsTrack(from, lane.track)) {
         throw new RoomError(`A participant publishes on at most ${ROOM_MEMBER_TRACKS_MAX} named tracks`)
       }

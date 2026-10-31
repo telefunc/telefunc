@@ -12,7 +12,7 @@ import { CONTROL_LANE } from './lanes.js'
 import { reapAndReadRoster } from './roster.js'
 import { dropReplacedMetaGenerations, readRoomMeta, readRoomMetaSeq, type StoredRoomMeta } from './meta.js'
 import type { RosterStream } from './RosterStream.js'
-import type { RoomSubscriptions } from './subscriptions.js'
+import type { LanePlan } from './LanePlan.js'
 assertIsNotBrowser()
 
 /** The replica whose view the sync keeps: what it renews, and where what the sync reads applies. */
@@ -47,7 +47,7 @@ class AuthoritySync {
 
   constructor(
     private readonly _host: SyncHost,
-    private readonly _lanes: Pick<RoomSubscriptions, 'replan' | 'resumeDropped' | 'observing' | 'controlEstablished'>,
+    private readonly _lanes: Pick<LanePlan, 'replan' | 'resumeDropped' | 'observing' | 'controlEstablished'>,
   ) {}
 
   ensureRoster(): Promise<void> {

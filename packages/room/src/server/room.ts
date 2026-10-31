@@ -153,18 +153,18 @@ class ServerRoom extends RoomStateView implements Room {
 
   async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
     assertKnownOptions(options, ['hidden'], 'getParticipants()')
-    await this._replica.sync.ensureRoster()
+    await this._replica.authority.ensureRoster()
     return options?.hidden ? this._state.listHidden() : this._state.listVisible()
   }
 
   async getParticipant(id: string): Promise<RemoteParticipant | null> {
-    await this._replica.sync.ensureRoster()
+    await this._replica.authority.ensureRoster()
     return this._state.getRemote(id)
   }
 
   snapshot(): RoomSnapshotView {
     // Loads the members for the next snapshot; their arrival fires onChange.
-    if (!this._model.rosterKnown) void this._replica.sync.ensureRoster().catch(reportRoomError)
+    if (!this._model.rosterKnown) void this._replica.authority.ensureRoster().catch(reportRoomError)
     return this._model.snapshot()
   }
 
@@ -192,7 +192,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._admissions.set(id, admission)
     // A holder that detached during the guard took nothing, and a room that closed meanwhile takes no one.
     if (this._holderOf(id) === undefined || this._model.closed) admission.abandon()
-    this._replica.plan.memberOwned(id)
+    this._replica.lanePlan.memberOwned(id)
     try {
       await this._inboxReady(admission)
       await createMember(this._incarnation, this._replica.lease, id, record, meta)
@@ -221,7 +221,7 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** The member's inbox delivers (within the horizon) before its join is visible, and the admission still holds. */
   private async _inboxReady(admission: Admission): Promise<void> {
-    const inbox = this._replica.plan.inboxOf(admission.id)
+    const inbox = this._replica.lanePlan.inboxOf(admission.id)
     if (inbox !== undefined) await withinRoomHorizon(inbox.ready)
     admission.assertLive(this._model)
   }
@@ -320,8 +320,8 @@ class ServerRoom extends RoomStateView implements Room {
   async _startTail(): Promise<void> {
     this._tail = new TailHold(() => this._teardownTail())
     this._replica.track(this)
-    this._replica.plan.syncLanes() // bring up text ingestion before any stub exists
-    await withinRoomHorizon(this._replica.plan.semanticReady)
+    this._replica.lanePlan.syncLanes() // bring up text ingestion before any stub exists
+    await withinRoomHorizon(this._replica.lanePlan.semanticReady)
   }
 
   private _teardownTail(): void {
@@ -329,7 +329,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._tail.end()
     this._tail = null
     this._replica.track(this)
-    this._replica.plan.syncLanes() // drop the text ingestion nothing is consuming
+    this._replica.lanePlan.syncLanes() // drop the text ingestion nothing is consuming
   }
 
   /** @internal A client's view of this room. It attaches before the snapshot, so every later event relays and every
@@ -352,18 +352,18 @@ class ServerRoom extends RoomStateView implements Room {
     this._replica.attachStub(stub)
     if (this._tail !== null) {
       // Its expiry ends only the stub's want of all text.
-      stub._beginTail(this._tail.take(), () => this._replica.plan.textChanged(stub, []))
+      stub._beginTail(this._tail.take(), () => this._replica.lanePlan.textChanged(stub, []))
       this._tail = null
     }
     this._replica.track(this)
-    this._replica.plan.holderChanged(stub)
+    this._replica.lanePlan.holderChanged(stub)
   }
 
   _onStubAttached(stub: RoomStub): void {
     this._replica.roster.sendTo(stub)
     stub._relayEvent({ __r: 'update', seq: this._model.metaSeq, meta: this._model.metaEntries() })
     for (const member of stub._heldMembers()) {
-      stub._relayEvent({ __r: 'demand-state', member, tracks: this._replica.demand.wanted(member) })
+      stub._relayEvent({ __r: 'demand-state', member, tracks: this._replica.incomingDemand.wanted(member) })
     }
   }
 
@@ -384,11 +384,11 @@ class ServerRoom extends RoomStateView implements Room {
     stub._endTail()
     stub._endReplayHolds()
     this._replica.track(this)
-    this._replica.plan.holderGone(stub)
+    this._replica.lanePlan.holderGone(stub)
     for (const id of stub._heldMembers()) {
       this._stubOf.delete(id)
       this._replica.disown(id, this)
-      this._replica.plan.memberReleased(id)
+      this._replica.lanePlan.memberReleased(id)
       const admission = this._admissions.get(id)
       const owned = admission?.owned === true
       admission?.abandon()
@@ -399,7 +399,7 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** @internal A response serialized a participant whose own frames the stub's client doesn't get back. */
   _onStubSuppressed(stub: RoomStub, member: string): void {
-    if (this._stubs.has(stub)) this._replica.plan.memberChanged(member)
+    if (this._stubs.has(stub)) this._replica.lanePlan.memberChanged(member)
   }
 
   async _joinStubMember(
@@ -420,13 +420,13 @@ class ServerRoom extends RoomStateView implements Room {
   /** @internal A holder's text wants changed (`before` is `null` when none did): replan, then replay the retained
    *  frame it now wants. */
   _onHolderTextChanged(holder: LaneHolder, before: TextWantsChange | null): void {
-    if (this._holdsLanes(holder)) this._replica.plan.textChanged(holder, before?.members.keys() ?? [])
+    if (this._holdsLanes(holder)) this._replica.lanePlan.textChanged(holder, before?.members.keys() ?? [])
     if (before) void this._replica.replayText(holder, before).catch(reportRoomError)
   }
 
   /** @internal One of a holder's binary wants changed: replan the pairs it covers, then replay what it now wants. */
   _onHolderBinaryChanged(holder: LaneHolder, change: BinaryWantChange): void {
-    if (this._holdsLanes(holder)) this._replica.plan.binaryChanged(holder, change)
+    if (this._holdsLanes(holder)) this._replica.lanePlan.binaryChanged(holder, change)
     if (change.on) void this._replica.replayBinary(holder, change).catch(reportRoomError)
   }
 
@@ -476,7 +476,7 @@ class ServerLocalParticipant extends ParticipantBase {
 
   /** @internal Read from the room's demand, which holds it once. */
   get _demandedTracks(): TrackKey[] {
-    return this._left ? [] : this._room._replica.demand.wanted(this.id)
+    return this._left ? [] : this._room._replica.incomingDemand.wanted(this.id)
   }
 
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {

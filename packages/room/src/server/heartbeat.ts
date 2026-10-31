@@ -12,16 +12,16 @@ import { reapLapsedLeases } from './leases.js'
 import { maintainHold, type RoomIncarnation } from './lifecycle.js'
 import { dropReplacedMetaGenerations } from './meta.js'
 import type { AuthoritySync } from './AuthoritySync.js'
-import type { RoomSubscriptions } from './subscriptions.js'
+import type { LanePlan } from './LanePlan.js'
 assertIsNotBrowser()
 
 /** The replica the heartbeat keeps at the authority. */
 interface RoomHeartbeatOwner {
   readonly _incarnation: RoomIncarnation
   readonly model: Pick<RoomModel, 'closed'>
-  readonly plan: Pick<RoomSubscriptions, 'observing' | 'ownsInbox' | 'resumeDropped'>
-  readonly report: Pick<DemandReport, 'reporting'>
-  readonly sync: Pick<AuthoritySync, 'reconcileMeta' | 'checkCoverage'>
+  readonly lanePlan: Pick<LanePlan, 'observing' | 'ownsInbox' | 'resumeDropped'>
+  readonly outgoingDemand: Pick<DemandReport, 'reporting'>
+  readonly authority: Pick<AuthoritySync, 'reconcileMeta' | 'checkCoverage'>
   /** Renews what the replica told of its demand. */
   _renewDemand(): Promise<void>
   _renewLease(): Promise<void>
@@ -44,8 +44,8 @@ class RoomHeartbeat {
 
   /** Starts or stops the heartbeat by what this process is to the room now. */
   update(): void {
-    const { model, plan, report } = this.owner
-    const on = !model.closed && (plan.observing || plan.ownsInbox || report.reporting)
+    const { model, lanePlan, outgoingDemand } = this.owner
+    const on = !model.closed && (lanePlan.observing || lanePlan.ownsInbox || outgoingDemand.reporting)
     if (on && !this.timer) {
       this.timer = unrefTimer(setInterval(() => void this.tick().catch(reportRoomError), ROOM_HEARTBEAT_INTERVAL_MS))
     } else if (!on && this.timer) {
@@ -64,12 +64,12 @@ class RoomHeartbeat {
         () => null,
         (error: unknown) => ({ error }),
       )
-      owner.plan.resumeDropped()
-      if (!owner.model.closed && (await owner.sync.reconcileMeta())) {
+      owner.lanePlan.resumeDropped()
+      if (!owner.model.closed && (await owner.authority.reconcileMeta())) {
         const incarnation = owner._incarnation
         await dropReplacedMetaGenerations(incarnation.id, incarnation.inc)
         await reapLapsedLeases(incarnation)
-        await owner.sync.checkCoverage()
+        await owner.authority.checkCoverage()
       }
       if (!owner.model.closed) await maintainHold(owner._incarnation)
       sweepLapsedRoomsSoon()
