@@ -111,15 +111,19 @@ function retainedOfTrackKey(prefix: string, roomId: string, inc: string, track: 
   return `${genPrefix(prefix, roomId, inc)}:rtt:${encodeURIComponent(track)}`
 }
 function channelKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
-  return `${roomTag(prefix, roomId)}:ch:${inc}:${laneKey}`
+  return channelsPrefix(prefix, roomId, inc) + laneKey
 }
 function commitChannels(prefix: string, roomId: string, inc: string, lane: LaneId, laneKey: string): CommitChannels {
-  const channels = `${roomTag(prefix, roomId)}:ch:${inc}:`
+  const channels = channelsPrefix(prefix, roomId, inc)
   return {
     lane: channels + laneKey,
     everyTrack: lane.kind === 'binary' ? channels + roomKit().everyTrackLaneKey(lane.member) : null,
     everyMember: lane.kind === 'binary' ? channels + roomKit().everyMemberLaneKey(lane.track) : null,
   }
+}
+/** What every lane channel of an incarnation starts with. */
+function channelsPrefix(prefix: string, roomId: string, inc: string): string {
+  return `${roomTag(prefix, roomId)}:ch:${inc}:`
 }
 function generationInvalidationChannel(prefix: string, roomId: string, inc: string): string {
   return `${roomTag(prefix, roomId)}:invalidate:${inc}`
