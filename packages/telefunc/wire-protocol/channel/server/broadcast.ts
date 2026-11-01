@@ -61,12 +61,14 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     this._end = new ServerBroadcastEnd()
     this._end._setOwner(this)
     this.routes = {
-      text: new RouteSubscription({ key: this.key, kind: 'text' }, (payload, rawInfo) =>
-        this.deliverBroadcastMessage(payload, rawInfo),
-      ),
-      binary: new RouteSubscription({ key: this.key, kind: 'binary' }, (payload, rawInfo) =>
-        this.deliverBroadcastBinaryMessage(payload, rawInfo),
-      ),
+      text: new RouteSubscription({
+        route: { key: this.key, kind: 'text' },
+        receiver: (payload, rawInfo) => this.deliverBroadcastMessage(payload, rawInfo),
+      }),
+      binary: new RouteSubscription({
+        route: { key: this.key, kind: 'binary' },
+        receiver: (payload, rawInfo) => this.deliverBroadcastBinaryMessage(payload, rawInfo),
+      }),
     }
     this._end.onClose(() => {
       for (const route of Object.values(this.routes)) route.close()
@@ -285,8 +287,11 @@ function subscribeRoute<Kind extends BroadcastKind, Data>(
   callback: (data: Data, info: ChannelPublishInfo) => unknown,
 ): BroadcastUnsubscribe {
   assertBroadcastKey(route.key)
-  const subscription = new RouteSubscription(route, (payload, info) => {
-    callStaticListener(callback, decode(payload), makePublishInfo(route.key, info.seq, info.timestamp))
+  const subscription = new RouteSubscription({
+    route,
+    receiver: (payload, info) => {
+      callStaticListener(callback, decode(payload), makePublishInfo(route.key, info.seq, info.timestamp))
+    },
   })
   subscription.open()
   return () => subscription.close()
@@ -310,15 +315,22 @@ function reportStaticListenerError(err: unknown): void {
   if (!isAbort(err)) reportBug(err)
 }
 
+type RouteSubscriptionOptions<Kind extends BroadcastKind> = {
+  route: BroadcastRoute<Kind>
+  receiver: BackendReceiver<BroadcastPayload<Kind>>
+}
+
 /** A route's subscription while wanted; one that ends on its own is reported and replaced once, and a transport that
  *  replaces the plane gets it. */
 class RouteSubscription<Kind extends BroadcastKind> {
+  private readonly route: BroadcastRoute<Kind>
+  private readonly receiver: BackendReceiver<BroadcastPayload<Kind>>
   private current: BackendSubscription | null = null
 
-  constructor(
-    private readonly route: BroadcastRoute<Kind>,
-    private readonly receiver: BackendReceiver<BroadcastPayload<Kind>>,
-  ) {}
+  constructor({ route, receiver }: RouteSubscriptionOptions<Kind>) {
+    this.route = route
+    this.receiver = receiver
+  }
 
   /** Subscribes unless a subscription is live; throws where the backend can't bind the route. */
   open(): void {
