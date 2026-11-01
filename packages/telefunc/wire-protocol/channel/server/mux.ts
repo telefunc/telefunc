@@ -144,6 +144,8 @@ function hostLocal<T>(key: symbol, init: (host: { id: string | null }) => T): T 
   return getOrCreate(mux.hostLocals, key, () => init({ id: mux.hostId })) as T
 }
 
+type ChannelMuxOptions = { hostId?: string }
+
 class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStagesOwner {
   /** Its session Durable Object's id on Cloudflare, else null. */
   readonly hostId: string | null
@@ -170,8 +172,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
    *  runs before `serverConfig` is initialized). */
   private resolvedOptions: MuxServerOptions | null = null
 
-  constructor(opts?: { hostId?: string }) {
-    this.hostId = opts?.hostId ?? null
+  constructor({ hostId }: ChannelMuxOptions = {}) {
+    this.hostId = hostId ?? null
   }
 
   private get options(): MuxServerOptions {
