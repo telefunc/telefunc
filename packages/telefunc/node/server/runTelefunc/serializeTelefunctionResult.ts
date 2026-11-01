@@ -7,7 +7,7 @@ import { hasProp } from '../../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
 import { createStreamingReplacer } from '../../../wire-protocol/values/server/response/registry.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/channel.js'
-import { ServerBroadcastEnd } from '../../../wire-protocol/channel/server/ServerBroadcastEnd.js'
+import { ServerBroadcastEnd } from '../../../wire-protocol/channel/server/broadcastEnd.js'
 import { getChannelMux } from '../../../wire-protocol/channel/server/mux.js'
 import {
   buildShieldValidators,

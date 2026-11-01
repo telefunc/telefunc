@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
-import { ReplayBuffer } from '../channel/ReplayBuffer.js'
-import { ACK_STATUS, decode } from '../wire/frame.js'
-import { TAG } from '../wire/tags.js'
-import { IndexedPeer } from '../channel/server/IndexedPeer.js'
-import { configureBroadcastTransport, disposeBackend } from '../backend/install.js'
-import type { BroadcastTransport } from '../backend/broadcast/transport.js'
+import { Broadcast, ServerBroadcast } from './broadcast.js'
+import { ReplayBuffer } from '../ReplayBuffer.js'
+import { ACK_STATUS, decode } from '../../wire/frame.js'
+import { TAG } from '../../wire/tags.js'
+import { IndexedPeer } from './IndexedPeer.js'
+import { configureBroadcastTransport, disposeBackend } from '../../backend/install.js'
+import type { BroadcastTransport } from '../../backend/broadcast/transport.js'
 
 afterEach(() => disposeBackend())
 

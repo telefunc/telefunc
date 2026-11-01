@@ -41,9 +41,10 @@ export type {
 }
 
 import type { ServerChannel } from '../channel/server/channel.js'
-import type { ServerBroadcast } from '../broadcast/ServerBroadcast.js'
-import type { ServerBroadcastEnd } from '../channel/server/ServerBroadcastEnd.js'
-import type { ClientChannel, ClientBroadcast } from '../channel/client/channel.js'
+import type { ServerBroadcast } from '../channel/server/broadcast.js'
+import type { ServerBroadcastEnd } from '../channel/server/broadcastEnd.js'
+import type { ClientChannel } from '../channel/client/channel.js'
+import type { ClientBroadcast } from '../channel/client/broadcast.js'
 import type { AbortError } from '../../shared/Abort.js'
 import type { ShieldValidators } from '../../node/server/shield.js'
 import type { FileDownload, BlobDownload } from './client/response/DownloadClasses.js'

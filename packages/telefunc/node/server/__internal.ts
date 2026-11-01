@@ -21,7 +21,7 @@ export type {
   SubscriptionBinding,
   SubscriptionDriver,
 } from '../../wire-protocol/backend/subscription.js'
-export type { BroadcastEndOwner } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
+export type { BroadcastEndOwner } from '../../wire-protocol/channel/server/broadcastEnd.js'
 export type { ServerBroadcastEnd, ClientBroadcast }
 export { encodePublish } from '../../wire-protocol/wire/publishInfo.js'
 export type { BroadcastKind } from '../../wire-protocol/wire/payloads.js'
@@ -40,8 +40,8 @@ export type { ChannelPublishAck, ChannelPublishInfo } from '../../wire-protocol/
 export { MemoryPubSub, type Subscriptions } from '../../wire-protocol/backend/memory/deliveries.js'
 export { isChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
 
-import type { ServerBroadcastEnd as ServerBroadcastEndClass } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
-import type { ClientBroadcast as ClientBroadcastClass } from '../../wire-protocol/channel/client/channel.js'
+import type { ServerBroadcastEnd as ServerBroadcastEndClass } from '../../wire-protocol/channel/server/broadcastEnd.js'
+import type { ClientBroadcast as ClientBroadcastClass } from '../../wire-protocol/channel/client/broadcast.js'
 
 /** The members of a page's broadcast end that an add-on drives. */
 type ServerBroadcastEnd = Pick<
