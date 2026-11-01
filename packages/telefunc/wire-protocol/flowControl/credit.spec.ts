@@ -12,10 +12,8 @@ afterEach(() => vi.useRealTimers())
 /** What the wire delivered before an ack: right up to it, as a queue does. */
 const upToAck = () => Infinity
 
-// The async `_waitForGates` re-check loop adds a couple of microtask hops
-// between a waiter-drain and the outer `decrement` Promise resolving. Tests
-// that observe post-drain resolution must flush enough microtasks to settle
-// the chain — `Promise.resolve()` once isn't enough.
+// Lets the credit's pending microtasks settle before the next assertion: a released waiter reaches the
+// `decrement` promise through more than one hop, so one `Promise.resolve()` isn't enough.
 async function flushMicrotasks(): Promise<void> {
   for (let i = 0; i < 6; i++) await Promise.resolve()
 }

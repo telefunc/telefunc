@@ -10,7 +10,7 @@ import {
   CREDIT_WINDOW_MAX_BYTES,
 } from '../constants.js'
 
-// `Date.now()` drives the min-interval throttle; fake time so tests can pin the
+// `performance.now()` drives the min-interval throttle; fake time so tests can pin the
 // "ping is allowed to fire" / "throttled" boundary deterministically.
 beforeEach(() => vi.useFakeTimers({ now: 1_000_000 }))
 afterEach(() => vi.useRealTimers())
