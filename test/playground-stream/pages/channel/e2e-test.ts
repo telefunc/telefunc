@@ -50,6 +50,7 @@ type ChannelState = {
   pendingAckAbortChannelId: string | null
   clientAbortThenSendErr: string | null
   clientPendingAckCloseErr: string | null
+  peerShorterCloseChannelId: string | null
   clientPendingAckCloseReconnectChannelId: string | null
   clientPendingAckCloseReconnectOnOpenFired: boolean | null
   clientPendingAckCloseReconnectErr: string | null
@@ -750,6 +751,20 @@ function testChannel(isDev: boolean, inDocker = false) {
     await autoRetry(async () => {
       const state = await getResult<ChannelState>('#channel-state')
       expect(state.clientPendingAckCloseErr).toBe('ChannelClosedError')
+    })
+  })
+
+  test("channel: a close() the page makes within 1 s cuts short the server's close() waiting up to 60 s on an ack", async () => {
+    await page.click('#channel-test-peer-shorter-close')
+    let channelId: string | null = null
+    await autoRetry(async () => {
+      channelId = (await getResult<ChannelState>('#channel-state')).peerShorterCloseChannelId
+      expect(channelId).not.toBe(null)
+    })
+    await autoRetry(async () => {
+      const ss = await getCleanupState()
+      expect(Number(ss[`peerShorterClose_${channelId}_closeMs`])).lessThan(10_000)
+      expect(ss[`peerShorterClose_${channelId}_onCloseErr`]).toBe('Channel close timed out')
     })
   })
 

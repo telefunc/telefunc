@@ -19,6 +19,7 @@ import {
   onChannelClientAbortThenSend,
   onChannelClientPendingAckCloseReconnect,
   onChannelClientPendingAckClose,
+  onChannelPeerShorterClose,
   onChannelServerPendingAckCloseReconnectOpen,
   onChannelUpstreamReconnect,
   onChannelNoListenerAckServer,
@@ -123,6 +124,7 @@ type ChannelState = {
   pendingAckAbortChannelId: string | null
   clientAbortThenSendErr: string | null
   clientPendingAckCloseErr: string | null
+  peerShorterCloseChannelId: string | null
   clientPendingAckCloseReconnectChannelId: string | null
   clientPendingAckCloseReconnectOnOpenFired: boolean | null
   clientPendingAckCloseReconnectErr: string | null
@@ -210,6 +212,7 @@ const initialState: ChannelState = {
   pendingAckAbortChannelId: null,
   clientAbortThenSendErr: null,
   clientPendingAckCloseErr: null,
+  peerShorterCloseChannelId: null,
   clientPendingAckCloseReconnectChannelId: null,
   clientPendingAckCloseReconnectOnOpenFired: null,
   clientPendingAckCloseReconnectErr: null,
@@ -705,6 +708,17 @@ function ChannelDemo() {
       }
     })
   }, [addLog])
+
+  const testPeerShorterClose = useCallback(async () => {
+    const { channel, channelId } = await openChannel(onChannelPeerShorterClose)
+    channel.listen(() => {
+      void channel.close({ timeout: 1_000 })
+    })
+    channel.onOpen(() => {
+      channel.send('hold', { ack: true }).catch(() => {})
+    })
+    setChannelState((s) => ({ ...s, peerShorterCloseChannelId: channelId }))
+  }, [])
 
   const openClientPendingAckCloseReconnectChannel = useCallback(async () => {
     addLog('system', 'Starting client pending-ack-close reconnect test...')
@@ -1319,6 +1333,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-600 text-white hover:bg-sky-700"
           >
             Test Client Pending Ack Close
+          </button>
+          <button
+            id="channel-test-peer-shorter-close"
+            type="button"
+            onClick={testPeerShorterClose}
+            className="px-3 py-1.5 text-sm rounded bg-sky-600 text-white hover:bg-sky-700"
+          >
+            Test Peer Shorter Close
           </button>
           <button
             id="channel-test-client-pending-ack-close-reconnect-open"

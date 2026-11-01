@@ -15,6 +15,7 @@ export {
   onChannelClientAbortThenSend,
   onChannelClientPendingAckCloseReconnect,
   onChannelClientPendingAckClose,
+  onChannelPeerShorterClose,
   onChannelServerPendingAckCloseReconnectOpen,
   onChannelUpstreamReconnect,
   onChannelNoListenerAckServer,
@@ -353,6 +354,30 @@ async function onChannelClientPendingAckClose() {
   const ch = new Channel<(msg: string) => void, never>()
   ch.listen(() => new Promise(() => {}))
   return { channel: ch.client }
+}
+
+/**
+ * A close the page cuts short. The page sends a message with an ack the server never answers; the server tells the
+ * page it closes and closes within 60 s, waiting on that ack; the page answers with a close within 1 s.
+ * cleanupState keys:
+ *   peerShorterClose_<id>_closeMs    = how long the server's close() took
+ *   peerShorterClose_<id>_onCloseErr = 'none' | error message
+ */
+async function onChannelPeerShorterClose() {
+  const ch = new Channel<(msg: string) => void, (msg: string) => void>()
+  const id = ch.id
+  ch.listen(() => {
+    void ch.send('closing')
+    const start = performance.now()
+    void ch.close({ timeout: 60_000 }).then(() => {
+      cleanupState[`peerShorterClose_${id}_closeMs`] = String(Math.round(performance.now() - start))
+    })
+    return new Promise(() => {})
+  })
+  ch.onClose((err) => {
+    cleanupState[`peerShorterClose_${id}_onCloseErr`] = formatCloseError(err as CloseError)
+  })
+  return { channel: ch.client, channelId: id }
 }
 
 /**
