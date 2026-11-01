@@ -401,17 +401,6 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     return binary !== undefined && binary.size > 0
   }
 
-  private deliverLocal({ key, doName, serialized, binaryData, info }: BroadcastDeliverRequest): void {
-    if (serialized !== undefined) {
-      const subs = this.textSubs.get(key)
-      if (subs) for (const [cb, owner] of subs) if (owner === doName) cb(serialized, info)
-    }
-    if (binaryData !== undefined) {
-      const subs = this.binarySubs.get(key)
-      if (subs) for (const [cb, owner] of subs) if (owner === doName) cb(binaryData, info)
-    }
-  }
-
   /** The Durable Object that may write to a subscriber's page; the server's own subscribers go with the isolate's first. */
   private ownerOf(wireRequest: Request | undefined): string {
     if (!wireRequest) return this.requireRepresentativeDOName()
@@ -553,8 +542,15 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   /**
    * Delivers a publish to the subscribers here of the Durable Object `request.doName`, which the RPC went to.
    */
-  deliverToLocal(request: BroadcastDeliverRequest): void {
-    this.deliverLocal(request)
+  deliverToLocal({ key, doName, serialized, binaryData, info }: BroadcastDeliverRequest): void {
+    if (serialized !== undefined) {
+      const subs = this.textSubs.get(key)
+      if (subs) for (const [cb, owner] of subs) if (owner === doName) cb(serialized, info)
+    }
+    if (binaryData !== undefined) {
+      const subs = this.binarySubs.get(key)
+      if (subs) for (const [cb, owner] of subs) if (owner === doName) cb(binaryData, info)
+    }
   }
 
   // --- Private ---
