@@ -103,7 +103,7 @@ interface MuxConnection {
   /** Bytes the wire holds that haven't gone out. */
   bufferedAmount(): number
   /** Bytes the wire delivered in the `ms` before its latest delivery: the frame being handled, on arrival. */
-  deliveredBeforeLast(ms: number): number
+  deliveredBefore(ms: number): number
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
   sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void
   unregister(channel: MuxChannel): void
@@ -446,7 +446,7 @@ class ClientConnection
     return this.transport.bufferedAmount() + this.gate.waitingBytes
   }
 
-  deliveredBeforeLast(ms: number): number {
+  deliveredBefore(ms: number): number {
     return this.transport.heartbeat?.deliveredBefore(ms) ?? 0
   }
 

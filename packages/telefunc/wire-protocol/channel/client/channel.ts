@@ -245,6 +245,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.connection.bufferedAmount()
   }
 
+  /** @internal */
+  _deliveredBefore(ms: number): number {
+    return this.connection.deliveredBefore(ms)
+  }
+
   // ── Called by transport connection ──
 
   /** @internal Probes a path it hasn't measured. */
@@ -409,7 +414,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         })
         return
       case TAG.BDP_PING_ACK:
-        this.receiveCredit.onPingAck(frame, (ms) => this.connection.deliveredBeforeLast(ms))
+        this.receiveCredit.onPingAck(frame)
         return
       // BROADCAST_SUB/UNSUB are server-side only; ABORT/ERROR handled by connection.
     }

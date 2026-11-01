@@ -16,7 +16,7 @@ interface PeerSender {
   /** The wait the wire reports for the frames that go at once (see `SocketWait`). */
   sendWait(): SendWait
   /** The bytes the wire delivered in the `ms` before the frame it's handling arrived. */
-  deliveredBeforeFrame(ms: number): number
+  deliveredBefore(ms: number): number
 }
 
 type IndexedPeerOptions = {

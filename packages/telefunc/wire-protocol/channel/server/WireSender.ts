@@ -106,7 +106,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
     return this.wait
   }
 
-  deliveredBeforeFrame(ms: number): number {
+  deliveredBefore(ms: number): number {
     return this.closed ? 0 : this.deliveries.beforeHandled(ms)
   }
 

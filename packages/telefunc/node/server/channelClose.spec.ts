@@ -15,7 +15,7 @@ function createPeer(frames: Uint8Array[]) {
       },
       carry() {},
       bufferedAmount: () => 0,
-      deliveredBeforeFrame: () => 0,
+      deliveredBefore: () => 0,
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
     },
     index: 7,

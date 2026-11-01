@@ -47,6 +47,7 @@ function makeEmit(): Emit {
       e.probe = probe
     },
     _backlogBytes: () => 0,
+    _deliveredBefore: upToAck,
   }
   return e
 }
@@ -128,7 +129,7 @@ describe('ReceiveCredit — consumption (byte axis)', () => {
     const { flow, emit } = makeFlow()
     flow.receive.onReceived(1)
     flow.receive.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
-    flow.receive.onPingAck({ probe: emit.probe, backlog: 0, pathRtt: Infinity }, upToAck)
+    flow.receive.onPingAck({ probe: emit.probe, backlog: 0, pathRtt: Infinity })
     expect(flow.receive.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES * 2)
     // BDP growth itself emits a WINDOW with the new value; reset the spy so the
     // consumption assertions below are clean.
@@ -149,7 +150,7 @@ describe('ReceiveCredit — BDP integration', () => {
   const cycle = ({ flow, emit }: { flow: Flow; emit: Emit }, sampleBytes: number) => {
     flow.receive.onReceived(1)
     flow.receive.onReceived(sampleBytes)
-    flow.receive.onPingAck({ probe: emit.probe, backlog: 0, pathRtt: Infinity }, upToAck)
+    flow.receive.onPingAck({ probe: emit.probe, backlog: 0, pathRtt: Infinity })
   }
 
   it('emits BDP_PING on the first onReceived', () => {

@@ -465,7 +465,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this.peer?.sendBdpPingAck(frame.probe, this.sendCredit.onPing(), Infinity)
         return
       case TAG.BDP_PING_ACK:
-        this.receiveCredit.onPingAck(frame, (ms) => this.peer?.sender.deliveredBeforeFrame(ms) ?? 0)
+        this.receiveCredit.onPingAck(frame)
         return
       case TAG.BROADCAST_SUB:
       case TAG.BROADCAST_UNSUB:
@@ -493,6 +493,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal */
   _backlogBytes(): number | undefined {
     return this.peer?.sender.bufferedAmount()
+  }
+
+  /** @internal */
+  _deliveredBefore(ms: number): number {
+    return this.peer?.sender.deliveredBefore(ms) ?? 0
   }
 
   /** `ServerBroadcast` overrides it; a plain channel ignores subscriptions. */
