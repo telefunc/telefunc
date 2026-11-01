@@ -40,7 +40,7 @@ import {
   metaKeyOfCellKey,
   roomMetaGenPrefix,
 } from './cells.js'
-import { EXCHANGE_CONFLICT, retryCompareExchange } from './cx.js'
+import { EXCHANGE_CONFLICT, retryCompareExchange } from './retryCompareExchange.js'
 import { deleteCells, dropCells, readOpenCells } from './cellStore.js'
 import { acceptedOrThrow, commitLane, controlLane, decodeRoomRecord, encodeRoomRecord } from './lanes.js'
 import type { RoomIncarnation } from './lifecycle.js'

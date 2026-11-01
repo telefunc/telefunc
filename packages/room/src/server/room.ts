@@ -48,7 +48,7 @@ import { TailHold } from './tail.js'
 import type { RoomReplica } from './replica.js'
 import { RoomWrites, runAfterHook, type RoomWritesOwner } from './writes.js'
 import { acceptedOrThrow, commitLane, controlLane, encodeRoomRecord, withinRoomHorizon } from './lanes.js'
-import { reportRoomError } from './errors.js'
+import { reportRoomError } from './reportRoomError.js'
 import { Admission } from './Admission.js'
 import { createMember, evictMember } from './members.js'
 import { memberCellKey } from './cells.js'
@@ -64,7 +64,7 @@ import type {
   RoomSnapshotView,
   Sender,
 } from '../types.js'
-import type { Room, RoomGuardHooks } from './statics.js'
+import type { Room, RoomGuardHooks } from './roomStatics.js'
 assertIsNotBrowser()
 
 const SERVER_ROOM_BRAND: unique symbol = Symbol.for('telefunc.ServerRoom')

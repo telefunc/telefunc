@@ -6,7 +6,7 @@ import type { CellCount, CellCounter, CellMutation, CellsRead } from '../backend
 import { Slice } from '../Slice.js'
 import { roomClosedError } from '../errors.js'
 import { ROOM_MEMBER_WRITES_IN_FLIGHT_MAX } from './constants.js'
-import { EXCHANGE_CONFLICT, retryCompareExchange } from './cx.js'
+import { EXCHANGE_CONFLICT, retryCompareExchange } from './retryCompareExchange.js'
 
 // A room's cells, read and written by the incarnation's server code: a read that throws once the incarnation closed, a
 // compare-exchange retried until it commits, and paged drops.

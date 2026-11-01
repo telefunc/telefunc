@@ -1,7 +1,7 @@
 export { Room }
 
 import type { ParticipantMeta, Room as RoomInstance, RoomMeta } from '../types.js'
-import type { RoomStatic } from './statics.js'
+import type { RoomStatic } from './roomStatics.js'
 import { loadRoomServer, loadedRoomServer, type RoomServer } from './load.js'
 import { assertUsage } from '../utils/assert.js'
 import { ROOM_GUARD_USAGE } from './constants.js'

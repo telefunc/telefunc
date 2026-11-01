@@ -34,14 +34,14 @@ import type { RoomModel } from '../model.js'
 import type { RoomState } from '../state.js'
 import type { ParticipantMeta, RoomAckReceipt, RoomSendReceipt, Sender } from '../types.js'
 import { memberCellKey } from './cells.js'
-import { reportRoomError } from './errors.js'
+import { reportRoomError } from './reportRoomError.js'
 import { SEMANTIC_LANE, acceptedOrThrow, commitLane, controlLane, encodeRoomRecord, inboxOf } from './lanes.js'
 import type { RoomIncarnation } from './lifecycle.js'
 import { reapAndReadMembersById } from './roster.js'
 import { storeDmReply, takeDmReply } from './dmReplies.js'
 import { dropMemberMetaGeneration, writeMemberConnection, writeMemberMeta, type MemberMetaWrite } from './meta.js'
 import type { RoomReplica } from './replica.js'
-import type { RoomGuardHooks } from './statics.js'
+import type { RoomGuardHooks } from './roomStatics.js'
 assertIsNotBrowser()
 
 /** The handle the writes go out through: its guards and its local participants pass and stamp them. */

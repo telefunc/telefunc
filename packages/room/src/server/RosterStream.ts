@@ -6,7 +6,7 @@ import { ROOM_ROSTER_PART_MEMBERS } from './constants.js'
 import type { MemberSnapshot, RoomRosterEvent } from '../protocol.js'
 import { Slice } from '../Slice.js'
 import type { MembershipEvent, RoomModel } from '../model.js'
-import { reportRoomError } from './errors.js'
+import { reportRoomError } from './reportRoomError.js'
 import { type RoomStub, unorderedEventText } from './stub.js'
 import type { AuthoritySync } from './AuthoritySync.js'
 assertIsNotBrowser()

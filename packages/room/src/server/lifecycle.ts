@@ -17,8 +17,8 @@ import type { HoldConfig } from './protocol.js'
 import { roomClosedError } from '../errors.js'
 import { HOLDS_CELL_KEY, JOINS_CELL_KEY } from './cells.js'
 import { closeIncarnation } from './close.js'
-import { EXCHANGE_CONFLICT, retryCompareExchange } from './cx.js'
-import { reportRoomError } from './errors.js'
+import { EXCHANGE_CONFLICT, retryCompareExchange } from './retryCompareExchange.js'
+import { reportRoomError } from './reportRoomError.js'
 assertIsNotBrowser()
 
 /** What holds a room (its non-hidden members and pages' views), and how many joins it had. */

@@ -27,7 +27,7 @@ import type { RoomConfigRecord, RoomDemandPage } from './protocol.js'
 import { RoomError, participantGoneError, roomClosedError } from '../errors.js'
 import { assert } from '../utils/assert.js'
 import { ROOM_HORIZON_MS } from './constants.js'
-import { reportRoomError } from './errors.js'
+import { reportRoomError } from './reportRoomError.js'
 import { memberIdOfCellKey } from './cells.js'
 
 const roomTextEncoder = new TextEncoder()

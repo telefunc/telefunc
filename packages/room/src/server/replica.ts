@@ -26,7 +26,7 @@ import { RoomModel, type ServerModelOwner } from '../model.js'
 import type { LeaveCause } from '../types.js'
 import { AuthoritySync, type AuthoritySyncOwner } from './AuthoritySync.js'
 import { PendingDmAcks } from './dmAcks.js'
-import { reportRoomError } from './errors.js'
+import { reportRoomError } from './reportRoomError.js'
 import { GossipOutbox } from './gossip.js'
 import {
   SEMANTIC_LANE,

@@ -12,7 +12,7 @@ import { EVERY_TRACK, type BinaryWantChange, type EveryTrack, type TrackKey } fr
 import type { DemandReport } from './demand.js'
 import type { RoomConfigRecord } from './protocol.js'
 import type { RoomModel } from '../model.js'
-import { reportRoomError } from './errors.js'
+import { reportRoomError } from './reportRoomError.js'
 import { LaneSubscription, type LaneAddress, type LaneSubscriptionOwner } from './LaneSubscription.js'
 import { Slice } from '../Slice.js'
 import type { LaneHolder } from './replay.js'

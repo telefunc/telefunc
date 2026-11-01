@@ -20,7 +20,7 @@ import {
 } from 'telefunc/__internal'
 import { ShieldValidationError, type ShieldValidator } from 'telefunc'
 import type { ServerLocalParticipant, ServerRoom } from './room.js'
-import { reportRoomError } from './errors.js'
+import { reportRoomError } from './reportRoomError.js'
 import {
   decodeParticipantDeclaration,
   decodeParticipantFrame,
