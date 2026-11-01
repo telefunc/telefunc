@@ -123,7 +123,7 @@ type PiecesAck = { bytes: number; heldMs: number; spanUs: number }
 /** `backlog` in bytes, `Infinity` where credit didn't run out; `pathRtt` in ms, `Infinity` where none was measured. */
 type BdpPingAck = { probe: number; backlog: number; pathRtt: number }
 
-type ConnCtrlFrame =
+type WireCtrlFrame =
   | { tag: typeof TAG.PING; ended: PingEntry[]; took: number }
   | { tag: typeof TAG.PONG; ended: PongEntry[]; took: number }
   | { tag: typeof TAG.FIN }
@@ -137,7 +137,7 @@ type ConnCtrlFrame =
   | ({ tag: typeof TAG.PIECES_ACK } & PiecesAck)
   | { tag: typeof TAG.ANNOUNCE; bytes: number; floor: number }
 
-type DecodedFrame = ChannelFrame | ConnCtrlFrame
+type DecodedFrame = ChannelFrame | WireCtrlFrame
 
 /** What a replay holds: data, and the closing frames. */
 function isSequencedFrame(frame: DecodedFrame): frame is SequencedFrame {
@@ -212,7 +212,7 @@ const encode = {
     return frame
   },
 
-  // ── Connection-level ctrls ──
+  // ── Wire-level ctrls ──
   /** Wire: [header]([u16 ix][u32 lastSeq])* */
   ping(ended: PingEntry[] = []): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + PING_ENTRY_BYTES * ended.length)

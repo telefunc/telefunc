@@ -65,7 +65,7 @@ interface MuxChannel {
   /** The upgrade joined: the channel is on the WebSocket and has already received the frames the join held. */
   _onUpgradeJoined(): void
   /** Entry point for every per-channel wire frame (data + per-channel ctrl). The
-   *  channel splits ctrl vs data internally. Connection-level frames (PING/PONG/
+   *  channel splits ctrl vs data internally. Wire-level frames (PING/PONG/
    *  FIN/RECONCILED), channel-termination ctrls (ABORT/ERROR) and ATTACH_RESULT stay with the
    *  connection — they involve connection-side cleanup. */
   _dispatchFrame(frame: ChannelFrame): void
@@ -137,7 +137,7 @@ type ClientChannelTransport = {
   start(): void
   hasWire(): boolean
   isConnecting(): boolean
-  /** Send a connection-level ping on this wire. Heartbeat's send callback calls this. */
+  /** Send a wire-level ping on this wire. Heartbeat's send callback calls this. */
   sendPing(frame: Uint8Array<ArrayBuffer>): void
   sendFrame(frame: OutboundFrame): void
   /** How many bytes of data frames it accepts now, `Infinity` if nothing bounds them. Other frames go at once. */
@@ -508,7 +508,7 @@ class ClientConnection
       this.channels.serverHasThrough(frame.index, this.channels.sentThrough(frame.index, frame.lastSeq))
     }
     if (frame.tag === TAG.ACK_RES) this.channels.serverHasThrough(frame.index, frame.ackedSeq)
-    // ATTACH_RESULT and the connection-level and closing ctrls need connection bookkeeping; the rest is per-channel.
+    // ATTACH_RESULT and the wire-level and closing ctrls need connection bookkeeping; the rest is per-channel.
     switch (frame.tag) {
       case TAG.FIN:
         this.upgrade.handleFin()

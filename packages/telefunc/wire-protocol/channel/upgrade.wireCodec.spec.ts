@@ -8,7 +8,7 @@ import {
   CHANNEL_TRANSPORT,
   MAX_CHANNELS_PER_CONNECTION,
   UPGRADE_MAX_ID_BYTES,
-  WIRE_MAX_CONN_CTRL_FRAME_BYTES,
+  WIRE_MAX_CTRL_FRAME_BYTES,
 } from '../constants.js'
 
 const clientFrame = (raw: Uint8Array<ArrayBuffer>) => decodeClientFrame(raw, 64 * 1024)
@@ -52,8 +52,8 @@ describe('upgrade wire vocabulary', () => {
     // The byte cap is derived from the entry caps precisely so this frame is admissible: a cap
     // that refuses the largest legal barrier would fail every client that hit the entry cap.
     expect(encoded.byteLength).toBeGreaterThan(MAX_CHANNELS_PER_CONNECTION * UPGRADE_MAX_ID_BYTES)
-    expect(encoded.byteLength).toBeLessThanOrEqual(WIRE_MAX_CONN_CTRL_FRAME_BYTES)
-    expect(decodeClientFrame(encoded, WIRE_MAX_CONN_CTRL_FRAME_BYTES)).toEqual({ tag: TAG.BARRIER, payload: max })
+    expect(encoded.byteLength).toBeLessThanOrEqual(WIRE_MAX_CTRL_FRAME_BYTES)
+    expect(decodeClientFrame(encoded, WIRE_MAX_CTRL_FRAME_BYTES)).toEqual({ tag: TAG.BARRIER, payload: max })
   })
 
   test('a RECONCILED round-trips the commit upgradeId', () => {
@@ -114,12 +114,12 @@ describe('decodeClientFrame — hostile schemas', () => {
   test('a BARRIER over the byte cap is refused BEFORE it is parsed', () => {
     // Payload is zero bytes — not JSON. If the cap were checked after `decode`, the failure would
     // be the parser's ('payload is not JSON'); naming the cap proves nothing parsed it.
-    const oversize = new Uint8Array(WIRE_MAX_CONN_CTRL_FRAME_BYTES + 1) as Uint8Array<ArrayBuffer>
+    const oversize = new Uint8Array(WIRE_MAX_CTRL_FRAME_BYTES + 1) as Uint8Array<ArrayBuffer>
     oversize[0] = TAG.BARRIER
-    expect(() => decodeClientFrame(oversize, WIRE_MAX_CONN_CTRL_FRAME_BYTES)).toThrow('upgrade frame over byte cap')
+    expect(() => decodeClientFrame(oversize, WIRE_MAX_CTRL_FRAME_BYTES)).toThrow('upgrade frame over byte cap')
 
     const legal = encode.barrier({ sessionId: 's', upgradeId: 'u', open: goodOpen })
-    expect(decodeClientFrame(legal, WIRE_MAX_CONN_CTRL_FRAME_BYTES).tag).toBe(TAG.BARRIER)
+    expect(decodeClientFrame(legal, WIRE_MAX_CTRL_FRAME_BYTES).tag).toBe(TAG.BARRIER)
   })
 
   const nonObjects: [string, unknown][] = [

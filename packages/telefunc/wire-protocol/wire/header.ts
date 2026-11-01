@@ -5,8 +5,8 @@ export { HEADER, SEQ_OFFSET, SEQ_SPAN, writeHeader, writeU16, writeU32, writeU64
 // Every frame has a uniform 7-byte header:
 //   [u8 tag][u16 LE index][u32 LE seq][payload...]
 //
-// `tag` discriminates the frame variant (data, connection ctrl, per-channel ctrl).
-// `index` is the channel ix for per-channel frames; 0 for connection-level frames.
+// `tag` discriminates the frame variant (data, wire ctrl, per-channel ctrl).
+// `index` is the channel ix for per-channel frames; 0 for wire-level frames.
 // `seq` is the replay sequence number of a sequenced frame: a data frame, or a CLOSE, CLOSE_ACK, ABORT or ERROR. Other
 // ctrl frames carry 0, but a WebSocket's PING, PONG and ANNOUNCE, which say a count there. Seqs count on
 // past 32 bits, and a u32 seq on the wire is their low 32 bits, which `decode` returns as they are: the frame's owner

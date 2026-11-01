@@ -1,10 +1,10 @@
-export { TAG, isConnCtrlTag, isChannelCtrlTag, isSequencedTag, passesData, replayKindOf, countsCredit }
+export { TAG, isWireCtrlTag, isChannelCtrlTag, isSequencedTag, passesData, replayKindOf, countsCredit }
 export type { ReplayKind }
 
 import { assert } from '../../utils/assert.js'
 
 // Tag layout — sparse ranges so range checks classify:
-//   0x01–0x0f  connection-level control (no ix; seq 0 except on a WebSocket's PING, PONG and ANNOUNCE)
+//   0x01–0x0f  wire-level control (no ix; seq 0 except on a WebSocket's PING, PONG and ANNOUNCE)
 //   0x10–0x29  data plane (carries seq, payload varies)
 //   0x30–      per-channel control (carries ix; seq 0 except on the four closing frames)
 
@@ -13,7 +13,7 @@ const DATA_TAG_MIN = 0x10
 const CHANNEL_CTRL_TAG_MIN = 0x30
 
 const TAG = {
-  // ─── Connection-level control (no ix) ───
+  // ─── Wire-level control (no ix) ───
   /** Client → server heartbeat: a `PingEntry` per closed attached channel; on a WebSocket, its seq is what it took. */
   PING: 0x01 as const,
   /** Server → client heartbeat: a `PongEntry` per channel the PING names; on a WebSocket, its seq is what it took. */
@@ -82,7 +82,7 @@ const TAG = {
   ATTACH_RESULT: 0x3b as const,
 }
 
-function isConnCtrlTag(tag: number): boolean {
+function isWireCtrlTag(tag: number): boolean {
   return tag < DATA_TAG_MIN
 }
 

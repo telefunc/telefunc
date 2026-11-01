@@ -379,7 +379,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  /** @internal — Per-channel ctrl-message switch. Connection-level ctrls (PING/PONG/
+  /** @internal — Per-channel ctrl-message switch. Wire-level ctrls (PING/PONG/
    *  FIN/RECONCILED) and channel-termination ctrls (ABORT/ERROR — which involve
    *  connection-side cleanup) are handled by the connection and never reach here. */
   protected dispatchCtrl(frame: ChannelCtrlFrame): void {

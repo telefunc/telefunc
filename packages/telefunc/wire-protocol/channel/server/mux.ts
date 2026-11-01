@@ -13,14 +13,14 @@ import {
   MAX_CHANNELS_PER_CONNECTION,
   TIMER_DELAY_MAX_MS,
   UPGRADE_MAX_ID_BYTES,
-  WIRE_MAX_CONN_CTRL_FRAME_BYTES,
+  WIRE_MAX_CTRL_FRAME_BYTES,
   WIRE_MAX_RAW_FRAME_BYTES,
   WIRE_RECV_BACKLOG_BASE_BYTES,
   WIRE_RECV_BACKLOG_BASE_FRAMES,
   type ChannelTransports,
 } from '../../constants.js'
 import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, withTook } from '../../wire/frame.js'
-import { TAG, isConnCtrlTag } from '../../wire/tags.js'
+import { TAG, isWireCtrlTag } from '../../wire/tags.js'
 import { seqThrough } from '../../wire/seq.js'
 import { textEncoder } from '../../wire/envelope.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
@@ -378,7 +378,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     state.lastReceivedAt = now
     state.deliveries.note(now, rawFrame.byteLength)
     this.answerArrival(entry)
-    const piece = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
+    const piece = decodeClientFrame(rawFrame, WIRE_MAX_CTRL_FRAME_BYTES)
     assert(piece.tag === TAG.PIECE)
     assertProtocol(entry.sender.pieces, 'PIECE on a wire that takes no pieces')
     // Pieces let a frame exceed the runtime's limit on one message, so its total is checked against that limit here.
@@ -398,7 +398,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     const now = performance.now()
     entry.state.lastReceivedAt = now
     entry.state.deliveries.note(now, rawFrame.byteLength)
-    const announce = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
+    const announce = decodeClientFrame(rawFrame, WIRE_MAX_CTRL_FRAME_BYTES)
     assert(announce.tag === TAG.ANNOUNCE)
     assertProtocol(entry.sender.pieces, 'ANNOUNCE on a wire that takes no pieces')
     entry.sender.pieces.receiver.announce(announce.bytes, now, announce.floor)
@@ -422,8 +422,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
   private isOverBudget(entry: WireEntry, rawFrame: Uint8Array<ArrayBuffer>): boolean {
     const tag = peekTag(rawFrame)
     const maxFrameBytes =
-      tag !== undefined && isConnCtrlTag(tag) && tag !== TAG.PIECE
-        ? WIRE_MAX_CONN_CTRL_FRAME_BYTES
+      tag !== undefined && isWireCtrlTag(tag) && tag !== TAG.PIECE
+        ? WIRE_MAX_CTRL_FRAME_BYTES
         : WIRE_MAX_RAW_FRAME_BYTES
     const byteLength = rawFrame.byteLength
     if (byteLength > maxFrameBytes) return true
@@ -474,7 +474,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     entry: WireEntry,
     rawFrame: Uint8Array<ArrayBuffer>,
   ): null | ReconcileOutcome | Promise<ReconcileOutcome | null> {
-    const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
+    const frame = decodeClientFrame(rawFrame, WIRE_MAX_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.PING) {
       const pieces = entry.sender.pieces
       if (pieces)
@@ -653,7 +653,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
       const session = this.sessions.removeSession(newSessionId)
       if (session) for (const handle of session.values()) this.detachHandle(handle, reason)
       state.awaited.stop()
-      throw new ProtocolViolationError('connection closed mid-reconcile')
+      throw new ProtocolViolationError('wire closed mid-reconcile')
     }
 
     this.sessionWires.set(newSessionId, wire)

@@ -438,7 +438,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  /** @internal — Per-channel ctrl-message switch. Connection-level ctrls (ping,
+  /** @internal — Per-channel ctrl-message switch. Wire-level ctrls (ping,
    *  reconcile, fin) never reach here — the mux's `handleFrame` handles them. */
   private dispatchCtrl(frame: ChannelCtrlFrame): void {
     switch (frame.tag) {

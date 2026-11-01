@@ -121,13 +121,13 @@ export const WIRE_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
  *  65 536 — a u16 index — but that is exhaustion, not a working limit.) */
 export const MAX_CHANNELS_PER_CONNECTION = 4_096
 
-/** Largest control frame the server will decode, checked on the raw bytes. Derived, never picked:
+/** Largest wire control frame the server will decode, checked on the raw bytes. Derived, never picked:
  *  the biggest legitimate one lists every channel at the id cap, and a cap that refuses a legal
  *  frame is worse than no cap. */
-export const WIRE_MAX_CONN_CTRL_FRAME_BYTES =
+export const WIRE_MAX_CTRL_FRAME_BYTES =
   MAX_CHANNELS_PER_CONNECTION * (UPGRADE_MAX_ID_BYTES + RECONCILE_ENTRY_ENVELOPE_BYTES) + 1_024
 
-/** A peer past its connection's allowance of unprocessed frames is terminated: this base, plus a window per channel. */
+/** A peer past its wire's allowance of unprocessed frames is terminated: this base, plus a window per channel. */
 export const WIRE_RECV_BACKLOG_BASE_BYTES = 64 * 1024 * 1024
 export const WIRE_RECV_BACKLOG_BASE_FRAMES = 50_000
 
