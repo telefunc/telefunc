@@ -21,6 +21,13 @@ interface BufferedSender {
   _sendBuffered(peer: IndexedPeer, tag: number, data: string | Uint8Array, callback: EntryCallback | null): void
 }
 
+type ServerChannelBufferOptions = {
+  /** The text queue's byte budget. */
+  maxBytes: number
+  /** The binary queue's byte budget. */
+  binaryMaxBytes: number
+}
+
 /**
  * Holds what a channel sends while no peer is attached (text, binary, publishes, ack requests) within two budgets;
  * binary has its own queue, so it never evicts text. Past a budget the oldest entries go and their callbacks reject;
@@ -32,7 +39,7 @@ class ServerChannelBuffer<TAck = never> {
   private readonly binary: BufferQueue
   private insertionSeq = 0
 
-  constructor(maxBytes: number, binaryMaxBytes: number) {
+  constructor({ maxBytes, binaryMaxBytes }: ServerChannelBufferOptions) {
     this.text = new BufferQueue(maxBytes)
     this.binary = new BufferQueue(binaryMaxBytes)
   }

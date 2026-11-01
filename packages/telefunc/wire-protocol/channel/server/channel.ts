@@ -157,7 +157,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.sendCredit.fitReplay(replayWindow(c.serverReplayBuffer, c.serverReplayBufferBinary))
     this.bufferLimit = bufferLimit ?? c.bufferLimit
     this.bufferLimitBinary = c.bufferLimitBinary
-    this.offlineBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(this.bufferLimit, this.bufferLimitBinary)
+    this.offlineBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>({
+      maxBytes: this.bufferLimit,
+      binaryMaxBytes: this.bufferLimitBinary,
+    })
   }
 
   get isClosed(): boolean {
