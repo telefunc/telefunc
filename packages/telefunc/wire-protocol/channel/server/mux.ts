@@ -51,12 +51,12 @@ type ServerTransport<TWire> = {
    *  traffic across requests (WebSocket: every frame already lands on the same socket). */
   getConnId(wire: TWire): string | null
   sendNow(wire: TWire, frame: Uint8Array<ArrayBuffer>): void
-  /** Its peer gets no part of a message until all of it arrived, as on a WebSocket (see `pieces.ts`). */
+  /** True if the peer gets a message only once all of it has arrived, as on a WebSocket (see `pieces.ts`). */
   wholeMessages: boolean
   /** Bytes of sent frames still in the wire, never undercounted; `undefined` if the runtime can't tell. */
   bufferedAmount(wire: TWire): number | undefined
-  /** Of the bytes `bufferedAmount` counts, those a frame sent now waits behind, where it can pass some of them (SSE).
-   *  Without it, the frame waits behind all of them. */
+  /** The part of `bufferedAmount` a frame sent now waits behind, where it can pass the rest (SSE). Without this
+   *  method, a frame waits behind all of `bufferedAmount`. */
   queuedAhead?(wire: TWire): number | undefined
   terminateWire(wire: TWire): void
 }
@@ -66,7 +66,7 @@ type ReconcileOutcome = {
   sessionId: string
   /** Each `lastSeq` is read as the RECONCILED goes out, so it counts what was dispatched before then. */
   attached: ChannelHandle[]
-  /** The wire a barrier retired, which gets its FIN once this RECONCILED went out; null but on an SSE→WS upgrade. */
+  /** The wire a barrier retired, which gets its FIN once this RECONCILED went out; null except on an SSE→WS upgrade. */
   retiredWire: Wire | null
   /** The wire this RECONCILED belongs on — a barrier reconciles the staged WS, not the sender. */
   deliverTo: Wire
@@ -147,7 +147,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
   private readonly wiresByConnId = new Map<string, Wire>()
   /** The SSE→WS upgrades staged on probe WebSockets. */
   private readonly stages = new UpgradeStages({ owner: this })
-  /** Ended channels their page may still need, each with the timer releasing it, null while the page is attached. */
+  /** Ended channels whose page may still need them, each with its release timer (null while the page is attached). */
   private readonly endedChannels = new Map<ServerChannel, ReturnType<typeof setTimeout> | null>()
 
   /** Resolved lazily so the mux can be constructed at module-load (the globalObject factory
@@ -167,17 +167,17 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
 
   /** Callers must not invoke `channel._registerChannel()` directly. */
   registerChannel(channel: ServerChannel<any, any>): void {
-    // Before a waiter attaches it: its `onOpen` may end it, which it tells this mux.
+    // Registered before any waiter attaches it: its `onOpen` may end it, and it tells this mux when it does.
     channel._registerChannel(this)
     this.channels.set(channel.id, channel)
-    // It ended before a response carried it: it waits for its page as an ended channel does.
+    // A channel that ended before a response carried it waits for its page, as any ended channel does.
     if (channel._phase === 'ended') this.keepEnded(channel, false)
     for (const awaited of this.registrationWaits.take(channel.id)) {
       if (this.registrationWaits.stop(awaited)) this.attachAwaited(awaited, channel)
     }
   }
 
-  /** `RegistrationWaitsOwner`: its channel didn't register within `connectTtl`. */
+  /** `RegistrationWaitsOwner`: the awaited channel didn't register within `connectTtl`. */
   onRegistrationTimeout(awaited: AwaitedChannel): void {
     this.expireAwaited(awaited)
   }
@@ -196,7 +196,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     else this.unregisterChannel(channel.id)
   }
 
-  /** Keeps an ended channel attachable until its page needs nothing of it, leaves it, or is away `reconnectTimeout`. */
+  /** Keeps an ended channel attachable until its page needs nothing more from it, leaves, or stays away for
+   *  `reconnectTimeout`. */
   private keepEnded(channel: ServerChannel, pageAttached: boolean): void {
     const timer = this.endedChannels.get(channel)
     if (timer) clearTimeout(timer)
@@ -318,7 +319,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     if (this.sessionWires.get(sessionId) === wire) this.sessionWires.delete(sessionId)
   }
 
-  /** Ends the channels of a session whose wire closed transiently as a permanent close would have: its page left. */
+  /** The page of a session whose wire closed transiently left: ends its channels as a permanent close would. */
   endSession(sessionId: string): void {
     this.detachSession(sessionId, 'permanent')
   }
@@ -399,7 +400,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     const piece = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
     assert(piece.tag === TAG.PIECE)
     assertProtocol(entry.sender.pieces, 'PIECE on a wire that takes no pieces')
-    // In pieces, a frame gets past the runtime's limit on one message, so its total is held to that limit here.
+    // Pieces let a frame exceed the runtime's limit on one message, so its total is checked against that limit here.
     const cap = getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES
     assertProtocol(piece.total <= cap, 'PIECE of a frame over the cap')
     const { receiver } = entry.sender.pieces
@@ -423,7 +424,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     return Promise.resolve(null)
   }
 
-  /** Bytes reached `wire`: a frame slower than the ping deadline to arrive shows the wire alive meanwhile. */
+  /** Bytes reached `wire`: while a frame takes longer than the ping deadline to arrive, they show the wire is alive. */
   onWireBytes(wire: Wire): void {
     const entry = this.wires.get(wire)
     if (!entry) return
@@ -528,7 +529,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     return null
   }
 
-  /** Answers each closed channel the page lists on its session's wire: how far the server has it, or null once gone. */
+  /** Answers each closed channel the page lists on its session's wire: the last seq the server has from it, or null
+   *  once the channel is gone. */
   private answerPing(entry: WireEntry, ended: PingEntry[]): PongEntry[] {
     assertProtocol(ended.length <= MAX_CHANNELS_PER_CONNECTION, 'PING over entry cap')
     const sessionId = entry.transport.getSessionId(entry.wire)
@@ -548,7 +550,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     return answers
   }
 
-  /** At each page heartbeat, its session's channels acknowledge what arrived, so the page's replay lets it go. */
+  /** On each page heartbeat, the session's channels acknowledge what arrived, so the page's replay lets it go. */
   private acknowledgeArrivals(entry: WireEntry): void {
     const sessionId = entry.transport.getSessionId(entry.wire)
     if (sessionId === undefined || this.sessionWires.get(sessionId) !== entry.wire) return
@@ -566,8 +568,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     this.sessions.get(sessionId, frame.index)?.channel._dispatchFrame(frame)
   }
 
-  /** A RECONCILE that doesn't name its own wire's session abandons the probes staged for the session it names and for
-   *  its wire's session; a claim on a committing stage is refused. */
+  /** A RECONCILE that doesn't name its own wire's session abandons the probes staged for both sessions: the one it
+   *  names and its wire's. A claim on a stage that is committing is refused. */
   private claimSessionForReconcile(ctrl: ReconcilePayload, entry: WireEntry): void {
     const own = entry.transport.getSessionId(entry.wire)
     if (ctrl.sessionId !== undefined && ctrl.sessionId === own) return
@@ -679,7 +681,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     return { sessionId: newSessionId, attached, retiredWire, deliverTo: wire }
   }
 
-  /** Attaches the channels a RECONCILE of the whole session names; one of the session before it doesn't name ends. */
+  /** Attaches the channels a full-session RECONCILE names; the previous session's channels it leaves out end. */
   private attachSession(
     prevSessionId: string | undefined,
     newSessionId: string,
@@ -712,7 +714,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     const session = this.sessions.peekSession(sessionId)
     const { awaited } = entry.state
     const heldId = (ix: number): string | undefined => session?.get(ix)?.channel.id ?? awaited.get(ix)?.open.id
-    // At least the channels the wire holds once this frame applies, counted before any is allocated.
+    // A lower bound on the channels the wire holds once this frame applies, counted before any is allocated.
     let held = (session?.size ?? 0) + awaited.unattached
     for (const ix of new Set(released)) if (heldId(ix) !== undefined) held--
     for (const { id, ix } of open) {
@@ -737,7 +739,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     return handles
   }
 
-  /** Null leaves it out of the RECONCILED; an initial channel not yet registered is awaited until its ATTACH_RESULT. */
+  /** Returns null to leave the channel out of the RECONCILED; an initial channel not registered yet is awaited until
+   *  its ATTACH_RESULT. */
   private attach(open: ReconcileOpenEntry, entry: WireEntry, replay: boolean): ChannelHandle | null {
     // The probe is answered ahead of the channel's frames, and of its registration where the channel is awaited, so its
     // round trip measures the path alone.
@@ -769,7 +772,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     entry.state.awaited.add(awaited)
   }
 
-  /** Runs in `registerChannel`, between two reconciles: waiters attach in the order they began; the latest keeps it. */
+  /** Runs in `registerChannel`, between two reconciles. Waiters attach in the order they began; the latest one keeps
+   *  the channel. */
   private attachAwaited(awaited: AwaitedChannel, channel: ServerChannel): void {
     const { entry } = awaited
     const sessionId = entry.transport.getSessionId(entry.wire)
@@ -792,7 +796,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     void this.chainRecv(entry, settle).catch(handleTelefunctionBug)
   }
 
-  /** Returns false if what it held broke the protocol, which ends its wire. */
+  /** Dispatches the frames held for `awaited`; returns false if they broke the protocol, which ends its wire. */
   private dispatchHeld(awaited: AwaitedChannel): boolean {
     const { entry } = awaited
     const held = entry.state.awaited.take(awaited)
@@ -808,13 +812,13 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     }
   }
 
-  /** Not registered within `connectTtl`, or shut down as it registered. */
+  /** The awaited channel didn't register within `connectTtl`, or shut down as it registered: ATTACH_RESULT null. */
   private expireAwaited(awaited: AwaitedChannel): void {
     awaited.entry.state.awaited.expire(awaited)
     awaited.entry.sender.send(encode.attachResult(awaited.open.ix, null))
   }
 
-  /** Awaited channels the barrier lists move to the WebSocket; an attached one first gets what the old wire held. */
+  /** Moves the barrier's awaited channels to the WebSocket; an attached one first gets what the old wire held. */
   private moveAwaited(oldEntry: WireEntry, wsEntry: WireEntry, open: ReconcileOpenEntry[]): void {
     for (const { ix } of open) {
       const awaited = oldEntry.state.awaited.get(ix)
@@ -829,7 +833,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     }
   }
 
-  /** With `replay`, sends what the page missed, or ends the channel if the replay lost it; null if it kept nothing. */
+  /** Attaches `channel` to the wire. With `replay`, first sends what the page missed, or ends the channel if the
+   *  replay lost it. Null once the channel keeps nothing for a page (its replay was released). */
   private attachChannel(
     channel: ServerChannel,
     open: ReconcileOpenEntry,
@@ -961,7 +966,8 @@ class SessionRegistry {
     return this.bySession.get(sessionId)
   }
 
-  /** Stores no empty session: a transient close leaves it, and no channel's removal deletes it. */
+  /** Replaces the session's channels. An empty session isn't stored: a transient close keeps sessions, and no
+   *  channel's removal would delete an empty one. */
   setSession(sessionId: string, handles: Iterable<ChannelHandle>): void {
     this.removeSession(sessionId)
     for (const h of handles) this.add(sessionId, h)
@@ -982,7 +988,7 @@ class SessionRegistry {
     bindings.set(sessionId, h.ix)
   }
 
-  /** Takes the channel at `ix` out of the session and returns it; a session left empty goes, as in `removeChannel`. */
+  /** Takes the channel at `ix` out of the session and returns it; an emptied session goes, as in `removeChannel`. */
   remove(sessionId: string, ix: number): ChannelHandle | undefined {
     const session = this.bySession.get(sessionId)
     const handle = session?.get(ix)
