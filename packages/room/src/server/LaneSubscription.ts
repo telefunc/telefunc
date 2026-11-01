@@ -1,14 +1,18 @@
 export { LaneSubscription }
-export type { LaneSubscriptionOptions, LaneSubscriptionOwner }
+export type { LaneAddress, LaneSubscriptionOptions, LaneSubscriptionOwner }
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { createDeferred, type Deferred } from '../utils/createDeferred.js'
-import type { BackendSubscription } from 'telefunc/__internal'
+import type { BackendReceiver, BackendSubscription, OrderingInfo } from 'telefunc/__internal'
 import type { RoomSubscriptionSource } from '../backend/contract.js'
 assertIsNotBrowser()
 
-/** The plan that holds a lane subscription, told as its lane ends, recovers, and goes pending or ready. */
+/** The plan that holds a lane subscription: it subscribes the lane, takes what the lane delivers, and is told as the
+ *  lane ends, recovers, and goes pending or ready. */
 interface LaneSubscriptionOwner {
+  /** One attempt at `address`, delivering to `receiver`. */
+  subscribeLane(address: LaneAddress, receiver: BackendReceiver): BackendSubscription
+  onLaneDelivery(lane: LaneSubscription, payload: Uint8Array, info: OrderingInfo): void
   /** The lane ended for good: the owner's recovery policy replaces it. */
   onLaneTerminal(lane: LaneSubscription): void
   /** The lane is ready again after a loss. */
@@ -16,25 +20,30 @@ interface LaneSubscriptionOwner {
   onLanePending(lane: LaneSubscription, pending: boolean): void
 }
 
-type LaneSubscriptionOptions = { owner: LaneSubscriptionOwner; address: RoomSubscriptionSource['lane'] }
+type LaneAddress = RoomSubscriptionSource['lane']
+
+type LaneSubscriptionOptions = { owner: LaneSubscriptionOwner; address: LaneAddress }
 
 /** A lane subscription the room wants: holder-facing readiness survives failed attempts, and Room's recovery policy
  *  replaces them. */
 class LaneSubscription {
   private subscription: BackendSubscription | null = null
-  private subscribe: (() => BackendSubscription) | null = null
+  private isWanted = false
   private unobserve: (() => void) | null = null
   private readyPromise = Promise.resolve()
   private pendingReady: Deferred<void> | null = null
   private _delivering = false
 
   /** The lane it subscribes, which tells its owner what its readiness replans. */
-  readonly address: RoomSubscriptionSource['lane']
+  readonly address: LaneAddress
   private readonly owner: LaneSubscriptionOwner
+  /** Each attempt's receiver, built once per lane. */
+  private readonly receive: BackendReceiver
 
   constructor({ owner, address }: LaneSubscriptionOptions) {
     this.owner = owner
     this.address = address
+    this.receive = (payload, info) => owner.onLaneDelivery(this, payload, info)
   }
 
   get established(): boolean {
@@ -42,7 +51,7 @@ class LaneSubscription {
   }
 
   get wanted(): boolean {
-    return this.subscribe !== null
+    return this.isWanted
   }
 
   /** Whether an attempt was ready since the lane started; a loss or a dropped attempt keeps it. */
@@ -59,10 +68,10 @@ class LaneSubscription {
     return this.subscription?.ready ?? Promise.resolve()
   }
 
-  /** Starts a wanted lane; a closed subscription is replaced by the recovery policy, not by re-planning. */
-  sync(want: boolean, subscribe: () => BackendSubscription): void {
-    if (!want) return this.stop()
-    this.subscribe = subscribe
+  /** The lane is wanted: it subscribes unless an attempt is open. A closed attempt is replaced by the recovery policy,
+   *  not by starting again. */
+  start(): void {
+    this.isWanted = true
     this.resume()
   }
 
@@ -72,11 +81,11 @@ class LaneSubscription {
   }
 
   retry(): void {
-    if (this.subscribe === null) return
+    if (!this.isWanted) return
     this.ensurePendingReady()
     const previous = this.subscription
     this.unobserve?.()
-    const subscription = this.subscribe()
+    const subscription = this.owner.subscribeLane(this.address, this.receive)
     this.subscription = subscription
     let wasReady = subscription.state() === 'ready'
     if (wasReady) this.settleReady()
@@ -120,7 +129,7 @@ class LaneSubscription {
   }
 
   stop(): void {
-    this.subscribe = null
+    this.isWanted = false
     this._delivering = false
     this.dropAttempt()
     this.settleReady()
@@ -144,7 +153,7 @@ class LaneSubscription {
   }
 
   private settleReady(): void {
-    if (this.subscribe !== null) this._delivering = true
+    if (this.isWanted) this._delivering = true
     if (this.pendingReady === null) return
     this.pendingReady.resolve()
     this.pendingReady = null

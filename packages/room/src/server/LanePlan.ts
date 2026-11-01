@@ -5,7 +5,6 @@ import { assert } from '../utils/assert.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getOrCreate } from '../utils/getOrCreate.js'
 import { getRoomBackend } from '../backend/plane.js'
-import type { RoomSubscriptionSource } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
 import type { BackendReceiver, BackendSubscription, OrderingInfo } from 'telefunc/__internal'
 import { ROOM_MEMBER_NAMED_LANES_MAX } from './constants.js'
@@ -14,7 +13,7 @@ import type { DemandReport } from './demand.js'
 import type { RoomConfigRecord } from './protocol.js'
 import type { RoomModel } from '../state.js'
 import { reportRoomError } from './errors.js'
-import { LaneSubscription, type LaneSubscriptionOwner } from './LaneSubscription.js'
+import { LaneSubscription, type LaneAddress, type LaneSubscriptionOwner } from './LaneSubscription.js'
 import { Slice } from '../Slice.js'
 import type { LaneHolder } from './replay.js'
 import type { RoomIncarnation } from './lifecycle.js'
@@ -80,7 +79,7 @@ type LanePlanOptions = { owner: LanePlanOwner }
 type Establishing = { lanes: Set<LaneSubscription>; waiting: Set<string>; replans: 'members' | 'tracks' }
 
 /** A lane of binary frames: a track of a member, every track of a member, or a track of every member. */
-type BinaryLane = Extract<RoomSubscriptionSource['lane'], { kind: 'binary' | 'binary-all' | 'binary-track' }>
+type BinaryLane = Extract<LaneAddress, { kind: 'binary' | 'binary-all' | 'binary-track' }>
 
 /** What a planning pass replans: each member's binary lanes, or every member's and every track's when `all`, the
  *  lanes of each of `tracks` named of every member, and some members' named pairs. */
@@ -310,15 +309,11 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     const open = !model.closed
     const observing = open && owner.observed()
     const becomesObserved = observing && !this._observing
-    this.control.sync(
-      observing,
-      this.subscriber(CONTROL_LANE, (payload, info) => owner.onControl(decodeRoomText(payload), info)),
-    )
+    if (observing) this.control.start()
+    else this.control.stop()
     this._observing = observing
-    this.semantic.sync(
-      open && (owner.holdsTail() || this.wants.wantsText),
-      this.subscriber(SEMANTIC_LANE, (payload, info) => owner.onTextData(decodeRoomText(payload), info)),
-    )
+    if (open && (owner.holdsTail() || this.wants.wantsText)) this.semantic.start()
+    else this.semantic.stop()
     const needsRoster = owner.listened() || (open && this.wants.wantsBinary)
     if ((becomesObserved && model.rosterKnown) || (open && !model.rosterKnown && needsRoster)) {
       void owner.authority.refreshMembers().catch(reportRoomError)
@@ -673,11 +668,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
 
   /** Subscribes a binary lane the plan already holds, which its readiness replans by. */
   private subscribeBinary(lane: LaneSubscription): LaneSubscription {
-    const owner = this.owner
-    lane.sync(
-      true,
-      this.subscriber(lane.address, (framed, info) => owner.onBinary(framed, info)),
-    )
+    lane.start()
     return lane
   }
 
@@ -714,12 +705,8 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   private openInbox(member: string): void {
     const owner = this.owner
     if (owner.model.closed || !owner.ownsMember(member)) return
-    const inbox = { kind: 'inbox', member } as const
-    const lane = getOrCreate(this.inbox, member, () => new LaneSubscription({ owner: this, address: inbox }))
-    lane.sync(
-      true,
-      this.subscriber(inbox, (payload, info) => owner.onDm(decodeRoomText(payload), info)),
-    )
+    const address = { kind: 'inbox', member } as const
+    getOrCreate(this.inbox, member, () => new LaneSubscription({ owner: this, address })).start()
   }
 
   private closeInbox(member: string): void {
@@ -731,20 +718,36 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     const owner = this.owner
     const lane = this.demandLane
     if (!owner.model.closed && owner.ownsAnyMember()) {
-      return lane.sync(
-        true,
-        this.subscriber(DEMAND_LANE, (payload) => owner.onDemand(decodeRoomText(payload))),
-      )
+      lane.start()
+      return
     }
     if (!lane.wanted) return
     lane.stop()
     owner.forgetDemand()
   }
 
-  /** What a lane's `sync` subscribes: `lane` of this incarnation, delivering to `receiver`. */
-  private subscriber(lane: RoomSubscriptionSource['lane'], receiver: BackendReceiver): () => BackendSubscription {
+  /** `LaneSubscriptionOwner`: a lane of this incarnation. */
+  subscribeLane(address: LaneAddress, receiver: BackendReceiver): BackendSubscription {
+    return getRoomBackend().subscribeLane(this.owner.id, this.owner.incarnation.inc, address, receiver)
+  }
+
+  /** `LaneSubscriptionOwner`: what a lane carries goes to the replica's handler for its kind. */
+  onLaneDelivery(lane: LaneSubscription, payload: Uint8Array, info: OrderingInfo): void {
     const owner = this.owner
-    return () => getRoomBackend().subscribeLane(owner.id, owner.incarnation.inc, lane, receiver)
+    switch (lane.address.kind) {
+      case 'control':
+        return owner.onControl(decodeRoomText(payload), info)
+      case 'semantic':
+        return owner.onTextData(decodeRoomText(payload), info)
+      case 'inbox':
+        return owner.onDm(decodeRoomText(payload), info)
+      case 'demand':
+        return owner.onDemand(decodeRoomText(payload))
+      case 'binary':
+      case 'binary-all':
+      case 'binary-track':
+        return owner.onBinary(payload, info)
+    }
   }
 
   onEveryMemberCoverChanged(track: string): void {
