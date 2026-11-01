@@ -368,7 +368,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  an open one applies the RECONCILE's broadcast subscriptions before `onOpen` fires. */
   _attachPeer(peer: IndexedPeer, state?: AttachState): void {
     if (this._phase === 'ended') {
-      this.flushOfflineBuffer(peer)
+      this.offlineBuffer.flush(this, peer)
       this.sendPendingAckRes(peer)
       this.sendPendingEnd(peer)
       return
@@ -379,7 +379,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.reconnectTimer = null
     this.peer = peer
     this.receiveCredit.attach(peer.sender.sendWait())
-    this.flushOfflineBuffer(peer)
+    this.offlineBuffer.flush(this, peer)
     this.sendPendingAckRes(peer)
     if (state?.broadcast) {
       this._onPeerSubscription({ binary: false, subscribed: state.broadcast.text })
@@ -690,10 +690,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   private ensurePendingEnd(): PendingEnd {
     return (this.pendingEnd ??= { closeAck: false, closeRequest: false, abort: null, error: null })
-  }
-
-  private flushOfflineBuffer(peer: IndexedPeer): void {
-    this.offlineBuffer.flush(this, peer)
   }
 
   /** @internal `BufferedSender`: sends `peer` a frame buffered while no page was attached, as it would have gone then.
