@@ -90,20 +90,9 @@ class RedisRoomDriver implements RoomDriver, RedisPlane {
   }
 
   commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
-    const { hold, prefix } = this.connection
     // A close commits under its lease, which would lapse before the hold ends.
-    if (!hold.active || opts?.closingLease !== undefined) return this.commit(target, payload, opts)
-    const { roomId, inc, lane } = target
-    const channels = commitChannels(prefix, roomId, inc, lane, this.kit.encodeLaneKey(lane), this.kit)
-    // A binary commit also reaches its member's every-track and its track's every-member channels, and its held bytes
-    // count against its member's.
-    const held = {
-      queue: channels.lane,
-      channels: [channels.lane, channels.everyTrack, channels.everyMember].filter((channel) => channel !== null),
-      budget: channels.everyTrack ?? channels.lane,
-      binary: lane.kind === 'binary',
-    }
-    return hold.whenReady(held, payload, (owned) => this.commit(target, owned, opts))
+    if (!this.connection.hold.active || opts?.closingLease !== undefined) return this.commit(target, payload, opts)
+    return this.commitOnceReady(target, payload, opts)
   }
 
   subscribe(source: RoomSubscriptionSource, subscriber: Subscriber): Unsubscribe {
@@ -124,6 +113,18 @@ class RedisRoomDriver implements RoomDriver, RedisPlane {
     if (lane.kind === 'binary-all') return await this.memberLaneStarts(roomId, inc, lane.member)
     if (lane.kind === 'binary-track') return await this.trackLaneStarts(roomId, inc, lane.track)
     return await this.connection.run(REDIS_COMMANDS.laneStart, { ...source, laneKey: this.kit.encodeLaneKey(lane) })
+  }
+
+  private async commitOnceReady(
+    target: CommitTarget,
+    payload: Uint8Array,
+    opts?: CommitOptions,
+  ): Promise<CommitResult> {
+    const { roomId, inc, lane } = target
+    const channels = commitChannels(this.connection.prefix, roomId, inc, lane, this.kit.encodeLaneKey(lane), this.kit)
+    const held = this.connection.hold.holdCommit(channels, payload)
+    if (held !== null) payload = await held
+    return this.commit(target, payload, opts)
   }
 
   private commit(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {

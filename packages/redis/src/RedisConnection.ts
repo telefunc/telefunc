@@ -36,7 +36,7 @@ class RedisConnection {
     this.prefix = isCluster(this.commands) ? prefix : `${prefix}${this.commands.options.db ?? 0}:`
     this.reportsReceivers = !isCluster(this.commands)
     this.subscriber = new RedisSubscriber({ connection: this })
-    this.hold = new PublishHold({ subscriber: this.subscriber })
+    this.hold = new PublishHold({ subscriber: this.subscriber, prefix: this.prefix })
   }
 
   /** A fresh, unconnected subscriber socket on the current command client, which never retries on its own. */

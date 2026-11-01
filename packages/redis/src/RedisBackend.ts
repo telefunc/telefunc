@@ -28,19 +28,12 @@ class RedisBackend implements Backend, RedisPlane {
     this.connection = connection
   }
 
-  publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {
-    const { hold, prefix } = this.connection
-    if (!hold.active) return this.send(route, payload)
-    const { key } = route
-    const text = broadcastChannel(prefix, { key, kind: 'text' })
-    const held = {
-      // A key's two kinds share its order, so a publish of either waits behind the key's held ones.
-      queue: text,
-      channels: [text, broadcastChannel(prefix, { key, kind: 'binary' })],
-      budget: broadcastChannel(prefix, route),
-      binary: route.kind === 'binary',
-    }
-    return hold.whenReady(held, payload, (owned) => this.send(route, owned))
+  async publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {
+    const { hold } = this.connection
+    const held = hold.active ? hold.holdBroadcast(route, payload) : null
+    if (held !== null) payload = await held
+    const { seq, timestamp, receivers } = await this.connection.run(REDIS_COMMANDS.publish, { route, payload })
+    return { seq, timestamp, receivers: this.connection.reportsReceivers ? receivers : undefined }
   }
 
   subscribe(route: BroadcastRoute, subscriber: Subscriber): Unsubscribe {
@@ -57,10 +50,5 @@ class RedisBackend implements Backend, RedisPlane {
   /** The route's last publish, read once its SUBSCRIBE is acknowledged. */
   readLaneStarts(route: BroadcastRoute): Promise<Map<string, OrderingInfo>> {
     return this.connection.run(REDIS_COMMANDS.broadcastStart, route)
-  }
-
-  private async send(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {
-    const { seq, timestamp, receivers } = await this.connection.run(REDIS_COMMANDS.publish, { route, payload })
-    return { seq, timestamp, receivers: this.connection.reportsReceivers ? receivers : undefined }
   }
 }
