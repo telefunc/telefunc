@@ -4,7 +4,7 @@ import { backendPlane } from 'telefunc/__internal'
 import type { RoomBackend, RoomDriver, RoomPlaneKit } from './contract.js'
 import { CELL_PAGE_SIZE, DIRECTORY_PAGE_SIZE } from './contract.js'
 import { decodeLaneKey, encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from './laneKey.js'
-import { MemoryRoomDriver } from './memory.js'
+import { MemoryRoomDriver } from './MemoryRoomDriver.js'
 import { superviseRoomDriver } from './supervise.js'
 
 const ROOM_PLANE = Symbol.for('telefunc.room.plane')

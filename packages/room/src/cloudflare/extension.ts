@@ -8,7 +8,7 @@ import { registerCloudflareExtension } from 'telefunc/__internal'
 import { ROOM_CLOUDFLARE_EXTENSION } from '../server/constants.js'
 import { ROOM_PLANE } from '../backend/plane.js'
 import { RoomAuthority } from './do.js'
-import { CloudflareRoomDriver } from './driver.js'
+import { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
 import { getRoomSessionManager, type RoomSessionDeliveryRequest } from './subscription.js'
 
 registerCloudflareExtension({

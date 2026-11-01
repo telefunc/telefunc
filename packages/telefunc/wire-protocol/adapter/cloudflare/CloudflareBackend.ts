@@ -2,7 +2,7 @@
 export { CloudflareBackend }
 
 import type {
-  BroadcastDriver,
+  Backend,
   BroadcastPayload,
   BroadcastRoute,
   PublishResult,
@@ -14,7 +14,7 @@ import { getCloudflareExtensionPlanes, type TelefuncExtensionNamespace } from '.
 import { requireCloudflareSession } from './session.js'
 
 /** A subscription requires its session DO's context. */
-class CloudflareBackend implements BroadcastDriver {
+class CloudflareBackend implements Backend {
   readonly broadcast: CloudflareBroadcast
   private readonly namespace: () => TelefuncExtensionNamespace
 

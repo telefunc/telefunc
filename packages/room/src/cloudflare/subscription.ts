@@ -7,7 +7,7 @@ import { encodeLaneKey } from '../backend/laneKey.js'
 import { assertUsage } from '../utils/assert.js'
 import { ROUTE_RENEW_EVERY_MS, type RouteInstallation } from './routes.js'
 import type { CloudflareRoomAuthorityStub, RegisterWire, RenewWire } from './do.js'
-import type { CloudflareRoomDriver } from './driver.js'
+import type { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
 
 type RoomSessionDeliveryRequest = {
   route: RouteInstallation

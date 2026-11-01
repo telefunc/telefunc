@@ -2,19 +2,12 @@ export { MemoryBackend }
 
 // The in-process backend.
 
-import type {
-  BroadcastDriver,
-  BroadcastPayload,
-  BroadcastRoute,
-  PublishResult,
-  Subscriber,
-  Unsubscribe,
-} from '../driver.js'
+import type { Backend, BroadcastPayload, BroadcastRoute, PublishResult, Subscriber, Unsubscribe } from '../driver.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import type { BroadcastKind } from '../../wire/payloads.js'
 import { MemoryPubSub, type Subscribers } from './deliveries.js'
 
-class MemoryBackend implements BroadcastDriver {
+class MemoryBackend implements Backend {
   /** The order of each key subscribed here; an unsubscribed key's next publish starts above `broadcastHighest`. */
   private readonly broadcastOrder = new Map<string, OrderingInfo>()
   /** The highest `seq` and `timestamp` a Broadcast publish was given. */

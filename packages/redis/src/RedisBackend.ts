@@ -1,8 +1,7 @@
-export { RedisBroadcastDriver }
+export { RedisBackend }
 
 import type {
-  BackendDriver,
-  BroadcastDriver,
+  Backend,
   BroadcastPayload,
   BroadcastRoute,
   OrderingInfo,
@@ -18,12 +17,12 @@ import { RedisRoomDriver } from './RedisRoomDriver.js'
 import type { RedisPlane } from './subscriber.js'
 
 /** The installed backend: Broadcast on `connection`, and Room's plane, built on the same connection. */
-class RedisBroadcastDriver implements BroadcastDriver, RedisPlane {
+class RedisBackend implements Backend, RedisPlane {
   readonly connection: RedisConnection
   readonly planes = {
     [Symbol.for('telefunc.room.plane')]: (kit: RoomPlaneKit): RoomDriver =>
       new RedisRoomDriver({ connection: this.connection, kit }),
-  } satisfies BackendDriver['planes']
+  } satisfies Backend['planes']
 
   constructor({ connection }: { connection: RedisConnection }) {
     this.connection = connection

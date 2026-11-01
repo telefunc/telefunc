@@ -1,5 +1,6 @@
 export type { TELEFUNC_SHIELDS } from '../shared/transformer/generateShield/shieldKey.js'
 export type {
+  Backend,
   BackendPayload,
   BroadcastDriver,
   BroadcastPayload,
@@ -9,9 +10,8 @@ export type {
   Unsubscribe,
 } from '../../wire-protocol/backend/driver.js'
 export { installBackend, backendPlane } from '../../wire-protocol/backend/install.js'
-export type { BackendDriver } from '../../wire-protocol/backend/install.js'
 export { assertDriverOrdering } from '../../wire-protocol/backend/driverOrdering.js'
-export { MemoryBackend } from '../../wire-protocol/backend/memory/backend.js'
+export { MemoryBackend } from '../../wire-protocol/backend/memory/MemoryBackend.js'
 export { decodeOrderingFrame } from '../../wire-protocol/wire/orderingFrame.js'
 export type { OrderingInfo } from '../../wire-protocol/wire/orderingFrame.js'
 export type { BackendReceiver, BackendSubscription, Subscriptions } from '../../wire-protocol/backend/Subscriptions.js'

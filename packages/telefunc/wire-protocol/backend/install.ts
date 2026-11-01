@@ -7,27 +7,18 @@ export {
   backendPlane,
   disposeBackend,
 }
-export type { BackendDriver }
-
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import type { BroadcastBackend } from './broadcast/contract.js'
-import type { BroadcastDriver, Subscriber, Unsubscribe } from './driver.js'
+import type { Backend, Subscriber, Unsubscribe } from './driver.js'
 import { superviseBroadcastDriver } from './broadcast/supervise.js'
 import { createBroadcastTransportDriver, type BroadcastTransport } from './broadcast/transport.js'
-import { MemoryBackend } from './memory/backend.js'
+import { MemoryBackend } from './memory/MemoryBackend.js'
 import { Subscriptions } from './Subscriptions.js'
 import { assertUsage } from '../../utils/assert.js'
 import { getOrCreate } from '../../utils/getOrCreate.js'
 
-/** A backend: Broadcast's driver, and the driver of each other plane it serves. */
-type BackendDriver = BroadcastDriver & {
-  /** The planes this backend serves, by extension key; each is built on its first `backendPlane()` call, given the
-   *  `kit` the extension passes it. */
-  readonly planes?: { readonly [key: symbol]: (kit: never) => unknown }
-}
-
 type Installed = {
-  readonly driver: BackendDriver
+  readonly backend: Backend
   readonly key: readonly unknown[]
   /** The memory backend a process falls back to when it installed none. */
   readonly fallback: boolean
@@ -52,12 +43,12 @@ const state = getGlobalObject<{
 
 const FALLBACK_KEY = [Symbol.for('telefunc.memoryBackend')]
 
-/** Installs the process's one backend and returns its driver. Re-evaluating an entry with the same `key` returns the
- *  installed driver; the key names the factory's configuration, so that driver is the one the factory would build. */
-function installBackend<Driver extends BackendDriver>(factory: () => Driver, key: readonly unknown[]): Driver {
+/** Installs the process's one backend and returns it. Re-evaluating an entry with the same `key` returns the installed
+ *  one; the key names the factory's configuration, so that backend is the one the factory would build. */
+function installBackend<B extends Backend>(factory: () => B, key: readonly unknown[]): B {
   const installed = state.installed
-  if (installed === null) return install(factory, key, false).driver as Driver
-  if (sameKey(installed.key, key)) return installed.driver as Driver
+  if (installed === null) return install(factory, key, false).backend as B
+  if (sameKey(installed.key, key)) return installed.backend as B
   assertUsage(
     !installed.fallback,
     'Install the backend (for example with installRedis()) before its first use: an earlier use already started the in-memory backend',
@@ -87,7 +78,7 @@ function unfollowBroadcastPlane(follower: BroadcastPlaneFollower): void {
 
 function getBroadcastBackend(): BroadcastBackend {
   return (state.broadcast ??= superviseBroadcastDriver(
-    state.transport ? createBroadcastTransportDriver(state.transport) : currentBackend().driver,
+    state.transport ? createBroadcastTransportDriver(state.transport) : currentBackend().backend,
   ))
 }
 
@@ -119,7 +110,7 @@ function backendPlane<
     let driver: Driver
     if (installed.fallback) driver = fallback()
     else {
-      const build = installed.driver.planes?.[key]
+      const build = installed.backend.planes?.[key]
       assertUsage(build, `The installed backend doesn't serve ${String(key)}, which this call needs`)
       driver = build(kit as never) as Driver
     }
@@ -139,10 +130,9 @@ async function disposeBackend(): Promise<void> {
   await Promise.all([broadcast?.dispose(), ...planes.map((plane) => plane.dispose())])
 }
 
-function install(factory: () => BackendDriver, key: readonly unknown[], fallback: boolean): Installed {
-  const driver = factory()
+function install(factory: () => Backend, key: readonly unknown[], fallback: boolean): Installed {
   const installed: Installed = {
-    driver,
+    backend: factory(),
     key,
     fallback,
     planes: new Map(),

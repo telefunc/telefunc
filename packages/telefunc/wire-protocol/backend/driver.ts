@@ -1,4 +1,5 @@
 export type {
+  Backend,
   BackendPayload,
   BroadcastDriver,
   BroadcastPayload,
@@ -16,6 +17,13 @@ type BroadcastRoute<Kind extends BroadcastKind = BroadcastKind> = { key: string;
 
 /** What a route carries: a text route the serialized message, a binary route its bytes. */
 type BroadcastPayload<Kind extends BroadcastKind = BroadcastKind> = { text: string; binary: Uint8Array }[Kind]
+
+/** What `installBackend()` installs: Broadcast's driver, and the driver of each other plane it serves. */
+type Backend = BroadcastDriver & {
+  /** The planes this backend serves, by extension key; each is built on its first `backendPlane()` call, given the
+   *  `kit` the extension passes it. */
+  readonly planes?: { readonly [key: symbol]: (kit: never) => unknown }
+}
 
 /** What a subscription delivers: a string on a text route, bytes on a binary route or a Room lane. */
 type BackendPayload = string | Uint8Array

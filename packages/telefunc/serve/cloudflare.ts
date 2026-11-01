@@ -37,7 +37,7 @@ import { assert, assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale } from '../wire-protocol/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
-import { CloudflareBackend } from '../wire-protocol/adapter/cloudflare/backend.js'
+import { CloudflareBackend } from '../wire-protocol/adapter/cloudflare/CloudflareBackend.js'
 import {
   getCloudflareExtension,
   type CloudflareExtensionDurableObject,
