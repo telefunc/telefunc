@@ -1,5 +1,5 @@
 import { runPlayground } from './.testRun'
-import { testRoomSmallBuffer } from './pages/room/e2e-test'
+import { testRoomPublishHold } from './pages/room/e2e-test'
 import { testPublishSmallBuffer } from './pages/publish/e2e-test'
 
 process.env.PUBLIC_ENV__STREAM_TRANSPORT = 'channel'
@@ -11,4 +11,4 @@ process.env.CHANNEL_CONFIG = JSON.stringify({ bufferLimit: 4096 })
 // within bufferLimit.
 runPlayground('pnpm preview:redis')
 testPublishSmallBuffer()
-testRoomSmallBuffer()
+testRoomPublishHold()

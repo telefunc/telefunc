@@ -263,6 +263,22 @@ describe('prepare()', () => {
                   "job": "Playground Stream",
                 },
               },
+              "testFilePath": "test/playground-stream/.test-preview.channel-small-buffer.sse.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
+              "testFilePath": "test/playground-stream/.test-preview.channel-small-buffer.ws.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
               "testFilePath": "test/playground-stream/.test-preview.channel-small-replay.sse.test.ts",
             },
             {
