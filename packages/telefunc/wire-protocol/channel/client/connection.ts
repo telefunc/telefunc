@@ -148,7 +148,7 @@ type ClientChannelTransport = {
   /** Its wire's, which tracks what the wire delivers. */
   readonly heartbeat: Heartbeat | null
   /** Liveness constructs the Heartbeat and hands it over; the transport's receive path tells it of each PONG. */
-  attachHeartbeat(hb: Heartbeat): void
+  attachHeartbeat(heartbeat: Heartbeat): void
   detachHeartbeat(): void
   /** Settles once the frames it was handed have left it, or its wire is gone. */
   drained(): Promise<void>

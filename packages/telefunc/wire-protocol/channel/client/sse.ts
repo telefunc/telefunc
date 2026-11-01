@@ -616,9 +616,9 @@ class SseTransport implements UpgradeSource {
   }
 
   /** Its PINGs wait for a POST half the heartbeat's interval at most. */
-  attachHeartbeat(hb: Heartbeat): void {
-    this.heartbeat = hb
-    this.heartbeatFlushDelayMs = Math.floor(hb.intervalMs / 2)
+  attachHeartbeat(heartbeat: Heartbeat): void {
+    this.heartbeat = heartbeat
+    this.heartbeatFlushDelayMs = Math.floor(heartbeat.intervalMs / 2)
   }
 
   detachHeartbeat(): void {

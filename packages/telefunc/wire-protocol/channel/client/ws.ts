@@ -175,11 +175,11 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     this.owner.onTransportOpen(this)
   }
 
-  attachHeartbeat(hb: Heartbeat): void {
-    this.heartbeat = hb
+  attachHeartbeat(heartbeat: Heartbeat): void {
+    this.heartbeat = heartbeat
     // What the server announced comes at the rate it arrives at; a PONG, behind what the page announced.
-    hb.expectFrom(() =>
-      Math.max(this.pieces?.receiver.expectedBy(hb.pongTimeoutMs) ?? 0, this.pieces?.sender.acknowledgedBy ?? 0),
+    heartbeat.expectFrom(() =>
+      Math.max(this.pieces?.receiver.expectedBy(heartbeat.pongTimeoutMs) ?? 0, this.pieces?.sender.acknowledgedBy ?? 0),
     )
   }
 
