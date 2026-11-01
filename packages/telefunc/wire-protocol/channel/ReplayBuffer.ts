@@ -10,7 +10,7 @@ type ReplayBufferOptions = {
 
 /** Sent sequenced frames till their peer acks them, in queues by tag; a data queue evicts its oldest past its budget. */
 class ReplayBuffer {
-  /** Each queue, from its first frame on. */
+  /** Each kind's queue, made at its first frame. */
   private readonly queues: Partial<Record<ReplayKind, ReplayQueue>> = {}
   private readonly budgets: Record<ReplayKind, number>
   private issuedSeq = 0
@@ -30,7 +30,7 @@ class ReplayBuffer {
     this.budgets = queueBudgets(maxBytes, binaryMaxBytes)
   }
 
-  /** A budget lower than a queue's applies once the peer has every seq issued before: they flew under the higher one. */
+  /** A lower budget waits till the peer acks every seq issued so far, so no frame a reconnect needs is trimmed. */
   setLimits(maxBytes: number, binaryMaxBytes: number): void {
     const budgets = queueBudgets(maxBytes, binaryMaxBytes)
     const unacknowledged = this.acknowledgedSeq < this.issuedSeq

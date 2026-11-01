@@ -13,14 +13,14 @@ type BufferedFrame = {
 }
 type HeldFrame = BufferedFrame & { seq: number }
 
-/** Its channel and tag, for a WINDOW or MSG_WINDOW; null for any other frame. */
+/** A WINDOW or MSG_WINDOW frame's key, made of its channel and its tag; null for any other frame. */
 function limitKey({ frame, channelIx }: BufferedFrame): number | null {
   return frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW ? channelIx * 256 + frame[0] : null
 }
 
 /** The connection, whose transport takes what the gate lets go. */
 interface SendGateOwner {
-  /** No RECONCILE or upgrade holds sends back. */
+  /** False while a RECONCILE or an upgrade holds sends back. */
   readonly sendsOpen: boolean
   readonly transport: ClientChannelTransport
 }
@@ -34,12 +34,12 @@ type SendGateOptions = {
 class SendGate {
   private readonly owner: SendGateOwner
   private readonly channels: ChannelTable
-  /** Frames held while sends are, or for their channel's ATTACH_RESULT. */
+  /** Frames held in order while sends are held back, or till the server attaches their channel (ATTACH_RESULT). */
   private sendBuffer: BufferedFrame[] = []
   /** Sequenced frames waiting only for the transport's headroom, in order: a channel's next send waits behind them. */
   private waitingForHeadroom = new Fifo<HeldFrame>()
   private waitingForHeadroomBytes = 0
-  /** Channels whose queued frames go, all in one pass when they're next read (see `settleQueue`). */
+  /** Channels whose held and waiting frames are dropped, all in one pass at the next read (see `dropQueues`). */
   private droppedQueues = new Set<number>()
 
   constructor({ owner, channels }: SendGateOptions) {
@@ -57,7 +57,7 @@ class SendGate {
     return this.settleQueue().length === 0 && this.waitingForHeadroom.length === 0
   }
 
-  /** Sends, or queues while sends are held or the transport lacks headroom; one sent at once passes the settle queue. */
+  /** Sends after the frames waiting for headroom; holds it while sends are held back or its channel isn't attached. */
   send(record: ChannelRecord, seq: number, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
     if (!this.canSendImmediately(record)) {
       this.settleQueue().push({ frame, channelIx: record.ix, seq })
@@ -74,7 +74,7 @@ class SendGate {
     this.waitForHeadroom({ frame, channelIx: record.ix, seq })
   }
 
-  /** Sends a frame without a seq, or queues it while its channel waits: a limit is cumulative, so stays right. */
+  /** Sends a frame without a seq, or holds it as `send` does: a late WINDOW is still right, its limit cumulative. */
   sendUnsequenced(record: ChannelRecord, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
     if (!this.canSendImmediately(record)) {
       this.settleQueue().push({ frame, channelIx: record.ix, seq: undefined })
@@ -98,7 +98,7 @@ class SendGate {
     }
   }
 
-  /** Takes out what the channels not awaited queued. */
+  /** Takes out the held frames of every channel the server doesn't await. */
   drainSendable(): OutboundFrame[] {
     return this.drain(this.isSendable)
   }
@@ -113,7 +113,7 @@ class SendGate {
     return this.drain(this.isSendable)
   }
 
-  /** Takes out what `releasable` channels queued; past the headroom, their sequenced frames go behind those waiting. */
+  /** Takes out what `releasable` channels held; past the headroom, their sequenced frames join those waiting for it. */
   drain(releasable: (ix: number) => boolean): OutboundFrame[] {
     const frames: OutboundFrame[] = []
     const sendBuffer = this.settleQueue()
@@ -148,7 +148,7 @@ class SendGate {
     return frames
   }
 
-  /** The `subscribing` channels' queued SUB/UNSUB frames go: the subscriptions a RECONCILE declares supersede them. */
+  /** Drops the `subscribing` channels' held SUB/UNSUB frames: the subscriptions a RECONCILE declares supersede them. */
   dropSubscriptionFrames(subscribing: Set<number>): void {
     this.sendBuffer = this.settleQueue().filter(
       ({ channelIx, frame }) =>
@@ -164,7 +164,7 @@ class SendGate {
     return ixes
   }
 
-  /** What channel `ix` queued goes, at the next read. */
+  /** Drops the frames channel `ix` holds or has waiting, at the next read. */
   dropQueue(ix: number): void {
     if (this.sendBuffer.length === 0 && this.waitingForHeadroom.length === 0) return
     this.droppedQueues.add(ix)
@@ -188,7 +188,7 @@ class SendGate {
     this.waitingForHeadroomBytes += entry.frame.byteLength
   }
 
-  /** sendBuffer, with what waited for headroom in front of it once sends are held: a reconcile takes them all in order. */
+  /** `sendBuffer`; while sends are held back, the frames waiting for headroom move to its front, keeping seq order. */
   private settleQueue(): BufferedFrame[] {
     this.dropQueues()
     if (!this.owner.sendsOpen && this.waitingForHeadroom.length > 0) {
