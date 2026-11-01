@@ -113,7 +113,8 @@ class SharedSubscription implements Subscriber {
   private readiness: Deferred<void> = createReadiness()
   private unsubscribeDriver: Unsubscribe | null = null
   /** What the driver delivered before its first `ready()`; null from then on, as a message after a loss goes out as it
-   *  arrives. */
+   *  arrives. Not null once finished either, so a message checks this one field to take the path a delivering
+   *  subscription takes. */
   private early: EarlyMessage[] | null = []
   /** It stopped or ended: what the driver says from here on is ignored. */
   private finished = false
@@ -170,30 +171,36 @@ class SharedSubscription implements Subscriber {
   // What the driver tells.
 
   message(payload: BackendPayload, ordering: OrderingInfo): void {
-    if (this.finished) return
-    // Checked once for all consumers; one that fails is reported and dropped.
-    try {
-      assertDriverOrdering(ordering)
-      assert((this.delivers === 'text') === (typeof payload === 'string'))
-    } catch (error) {
-      console.error(error)
-      return
+    if (this.early !== null) return this.hold(payload, ordering)
+    if (!this.checked(payload, ordering)) return
+    // The receiver is called here, not through a method of the consumer: one call less on every message.
+    for (const consumer of this.targets()) {
+      // Consumers are isolated from each other: one that throws is reported.
+      try {
+        consumer.receiver(payload, ordering)
+      } catch (error) {
+        console.error(error)
+      }
     }
-    // A consumer sees `ready` before any message, so a driver needn't order its acknowledgment before what it delivers.
-    if (this.early !== null) this.early.push({ payload, ordering, targets: this.targets() })
-    else for (const consumer of this.targets()) consumer.receive(payload, ordering)
   }
 
   ready(): void {
     if (this.finished || this.current === 'ready') return
     this.readiness.resolve()
     this.enter('ready')
-    const early = this.early ?? []
+    const early = this.early
+    if (early === null) return
     this.early = null
     for (const { payload, ordering, targets } of early) {
-      // A consumer may leave, or stop the subscription, on one of them.
-      for (const consumer of targets)
-        if (!this.finished && this.attached.has(consumer)) consumer.receive(payload, ordering)
+      for (const consumer of targets) {
+        // A consumer may leave, or stop the subscription, on one of them.
+        if (this.finished || !this.attached.has(consumer)) continue
+        try {
+          consumer.receiver(payload, ordering)
+        } catch (error) {
+          console.error(error)
+        }
+      }
     }
   }
 
@@ -215,6 +222,26 @@ class SharedSubscription implements Subscriber {
     void this.readiness.promise.catch(reportBug)
   }
 
+  /** A consumer sees `ready` before any message, so a driver needn't order its acknowledgment before what it delivers:
+   *  until then a message waits, with the consumers it would have reached. Once finished, it is dropped. */
+  private hold(payload: BackendPayload, ordering: OrderingInfo): void {
+    if (!this.finished && this.checked(payload, ordering)) {
+      this.early!.push({ payload, ordering, targets: this.targets() })
+    }
+  }
+
+  /** Checked once for all consumers; one that fails is reported and dropped. */
+  private checked(payload: BackendPayload, ordering: OrderingInfo): boolean {
+    try {
+      assertDriverOrdering(ordering)
+      assert((this.delivers === 'text') === (typeof payload === 'string'))
+      return true
+    } catch (error) {
+      console.error(error)
+      return false
+    }
+  }
+
   /** Its consumers' `ready` rejects with `failure`. */
   private close(failure: Error): void {
     this.finish()
@@ -226,7 +253,7 @@ class SharedSubscription implements Subscriber {
 
   private finish(): void {
     this.finished = true
-    this.early = null
+    this.early = []
     this.unsubscribeDriver = null
     this.subscriptions.forget(this)
   }
@@ -248,7 +275,7 @@ class Consumer implements BackendSubscription {
 
   constructor(
     private readonly shared: SharedSubscription,
-    private readonly receiver: BackendReceiver<BackendPayload>,
+    readonly receiver: BackendReceiver<BackendPayload>,
   ) {}
 
   get ready(): Promise<void> {
@@ -271,15 +298,6 @@ class Consumer implements BackendSubscription {
     if (this.shared.state !== 'closed') this.notify('closed')
     this.listeners.clear()
     await this.shared.remove(this)
-  }
-
-  /** Consumers are isolated from each other: one that throws is reported. */
-  receive(payload: BackendPayload, ordering: OrderingInfo): void {
-    try {
-      this.receiver(payload, ordering)
-    } catch (error) {
-      console.error(error)
-    }
   }
 
   notify(state: SubscriptionState): void {
