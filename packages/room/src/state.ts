@@ -197,7 +197,6 @@ class RoomState {
     this.trackWantsMax = opts.trackWantsMax ?? Number.POSITIVE_INFINITY
   }
 
-  // ── Reads ──
   get roomId(): string {
     return this.model.roomId
   }
@@ -236,7 +235,7 @@ class RoomState {
     return this.remote(this.model.entryFromSnapshot(snap))
   }
 
-  // ── Listener registration (all return an unlisten function) ──
+  // Each registration returns its unlisten function.
   subscribe(cb: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
     return this.register(this.roomDataListeners, cb)
   }
@@ -289,7 +288,7 @@ class RoomState {
     return this.register(this.announceListeners, cb)
   }
 
-  // ── The model's changes, told while this view has a listener ──
+  // Each of these tells one change of the model, while this view has a listener.
   changed(): void {
     this.fireAll(this.changeListeners)
   }
@@ -347,7 +346,6 @@ class RoomState {
     this.releaseAllListeners()
   }
 
-  // ── Delivery ──
   applyAnnounce(data: unknown, info: ChannelPublishInfo): void {
     this.fireAll(this.announceListeners, data, info)
   }
@@ -393,7 +391,6 @@ class RoomState {
     }
   }
 
-  // ── Private ──
   private listenersOf(entry: MemberEntry): MemberListeners {
     const existing = this.memberListeners.get(entry)
     if (existing !== undefined) return existing

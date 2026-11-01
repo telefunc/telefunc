@@ -15,9 +15,9 @@ type Leases = Map<string, number>
  *  receives it only of the members it fetches by member. */
 type TrackLease = { instance: string; telling: number; except: Set<string>; byMember: boolean }
 type TrackLeases = Map<string, TrackLease>
-/** Another process telling demand: its lease on all it told, renewed by each of its pages, so a crashed one lapses; the
- *  count of its last page, which skips one this process missed; how many times it told everything again; and whether
- *  this process asked it to since. */
+/** Another process that tells demand. `expiresAt`: its lease on all it told, which each of its pages renews, so a
+ *  crashed process lapses. `page`: the number of its last page, so a page this process missed shows as a gap.
+ *  `telling`: how many times it told everything again. `asked`: whether this process asked it to since. */
 type Reporter = { expiresAt: number; page: number; telling: number; asked: boolean }
 
 /** The replica whose owned members the demand is for. */
@@ -192,12 +192,12 @@ class DemandReport {
     }
   }
 
-  /** Ons go before offs, so no pair reads as unreceived while one state hands over to another: a track of every member
-   *  is told before the pairs it replaces stop, and after the pairs replacing it start; a member it is fetched by is
-   *  told before it, and stops after it. A track whose fetching changed is told again whole; a member a told track
-   *  stops being told without is told with the ons, one it starts being told without with the offs. Only a planning
-   *  round sets what this reads, and none runs until the telling ends, so it is read as it goes. Each change it reads
-   *  is a step. */
+  /** Tells the untold changes, ons before offs, so no pair reads as unreceived while one state hands over to another. A
+   *  track of every member is told before the pairs it replaces stop, and after the pairs that replace it start; a
+   *  member whose every-track lane fetches the track is told before the track, and stops after it. A track whose
+   *  fetching changed is told again whole. A member that a told track stops leaving out is told with the ons; a member
+   *  that a told track starts leaving out is told with the offs. Only a planning round sets what this reads, and no
+   *  round runs until the telling ends, so this reads it as it goes. Each change it reads is one step. */
   private *tellChanges(): Generator<void, void, void> {
     const { pairs, members, tracks, fetched, except } = this.untold
     this.untold = new Receives()

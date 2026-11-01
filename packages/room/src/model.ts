@@ -219,7 +219,6 @@ class RoomModel {
     }
   }
 
-  // ── Reads ──
   /** Before the roster is known: the seed count (which excludes hidden members) adjusted by the events since. */
   get count(): number {
     if (!this._rosterKnown) return this.seedCount
@@ -384,7 +383,6 @@ class RoomModel {
     this.recording?.push(event)
   }
 
-  // ── Event application ──
   applyJoin(member: MemberSnapshot): boolean {
     this.record({ join: member })
     if (this.closed) return false

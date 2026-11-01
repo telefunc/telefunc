@@ -74,19 +74,22 @@ type LanePlanOptions = {
   outgoingDemand: DemandReport
 }
 
-/** Fan-in lanes of one kind not delivering yet, and the lanes of the other kind, by member or track, that wait for
- *  none to be; the last one's first delivery or stop replans those, as the plan's `replans`. */
+/** Fan-in lanes of one kind (every-track or every-member) that don't deliver yet. `waiting` lists, by member or by
+ *  track, the lanes of the other kind that wait until none of them is left; the last one to deliver or stop replans
+ *  those, as `replans` says. */
 type Establishing = { lanes: Set<LaneSubscription>; waiting: Set<string>; replans: 'members' | 'tracks' }
 
 /** A lane of binary frames: a track of a member, every track of a member, or a track of every member. */
 type BinaryLane = Extract<LaneAddress, { kind: 'binary' | 'binary-all' | 'binary-track' }>
 
-/** What a planning pass replans: each member's binary lanes, or every member's and every track's when `all`, the
- *  lanes of each of `tracks` named of every member, and some members' named pairs. */
+/** What a planning pass replans. `all`: the binary lanes of every member and every track. `members`: the binary lanes
+ *  of each listed member. `tracks`: the lanes of each listed track that holders name of every member. `pairs`: the
+ *  named pairs of some members. */
 type BinaryPlan = { all: boolean; members: Set<string>; tracks: Set<string>; pairs: Map<string, Set<string>> }
 
-/** What this process subscribes of a room: a function of its holders' wants, ownership and membership, kept current
- *  per change, recovered within Room's horizon, and subscribed again by the heartbeat once a recovery gave up. */
+/** Decides which lanes of a room this process subscribes. The plan follows the holders' wants, the members this process
+ *  owns and the room's membership, and changes with each of them. A lane that ends is recovered within Room's horizon;
+ *  once a recovery gives up, the heartbeat subscribes the lane again. */
 class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   private readonly wants = new WantsIndex({ owner: this })
   /** Whether some handle observes the room, which the control lane serves. */
@@ -100,31 +103,32 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   private readonly binary = new Map<string, LaneSubscription>()
   private readonly binaryTracks = new Map<string, Set<string>>()
   private readonly trackMembers = new Map<string, Set<string>>()
-  /** Each member's every-track lane, while some holder here receives all of its tracks, more than
-   *  `ROOM_MEMBER_NAMED_LANES_MAX` named of it alone, or the tracks named of every member fetched by member. */
+  /** Each member's every-track lane. A member has one while a holder here receives all of its tracks, while holders
+   *  here name more than `ROOM_MEMBER_NAMED_LANES_MAX` of its tracks for it alone, or while the tracks named of every
+   *  member are fetched by member. */
   private readonly everyTrack = new Map<string, LaneSubscription>()
-  /** Each track's every-member lane, while some holder here names it of every member and the tracks are
-   *  not fetched by member. */
+  /** Each track's every-member lane. A track has one while a holder here names it of every member, unless the tracks
+   *  are fetched by member. */
   private readonly everyMember = new Map<string, LaneSubscription>()
-  /** Whether the tracks named of every member are fetched on each member's every-track lane, as they outnumber
-   *  `ROOM_MEMBER_NAMED_LANES_MAX` and the members, so a lane per track would cost more: from more tracks than members
-   *  until twice as many members as tracks. */
+  /** Whether the tracks named of every member are fetched on each member's every-track lane, where a lane per track
+   *  would cost more. It turns on once those tracks outnumber both `ROOM_MEMBER_NAMED_LANES_MAX` and the members, and
+   *  off once the members are twice as many as the tracks. */
   private byMember = false
   /** The tracks named of every member that are told as demand while every-track lanes deliver them. */
   private readonly byMemberTracks = new Set<string>()
 
-  /** The every-track lanes not delivering yet, and the tracks whose every-member lanes wait for none to be. */
+  /** Every-track lanes that don't deliver yet, and the tracks whose every-member lanes wait until none is left. */
   private readonly establishingEveryTrack: Establishing = { lanes: new Set(), waiting: new Set(), replans: 'tracks' }
 
-  /** The every-member lanes not delivering yet, and the members whose every-track lanes wait for none to be. */
+  /** Every-member lanes that don't deliver yet, and the members whose every-track lanes wait until none is left. */
   private readonly establishingEveryMember: Establishing = { lanes: new Set(), waiting: new Set(), replans: 'members' }
 
-  /** The members some track named of every member is told without. */
+  /** Members left out of the demand told for some track named of every member. */
   private readonly excepted = new Set<string>()
-  /** Per present member, how many tracks named of it alone some holder here receives. */
+  /** For each present member, the number of its tracks that a holder here receives and names of it alone. */
   private readonly counts = new Map<string, number>()
-  /** The member a planning pass counts a slice at a time, and whether a change of its wants since
-   *  made the count stale. */
+  /** The member a planning pass is counting, a slice at a time; `stale` once a change of its wants made the count out
+   *  of date. */
   private counting: { member: string; stale: boolean } | null = null
   /** The members whose named tracks exceeded `ROOM_MEMBER_NAMED_LANES_MAX` when last planned. */
   private readonly overflowing = new Set<string>()
@@ -136,8 +140,8 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   private readonly recovering = new Set<LaneSubscription>()
   /** The lanes whose recovery gave up, which the heartbeat subscribes again while they are wanted. */
   private readonly dropped = new Set<LaneSubscription>()
-  /** What the next planning pass replans: binary want changes and lane readiness wait for it, so a burst of them is
-   *  planned from the whole want set before any lane opens. */
+  /** What the next planning pass replans. Binary want changes and lane readiness queue here and wait for that pass, so
+   *  it plans a burst of them from the whole want set before it opens any lane. */
   private queued = newBinaryPlan()
   /** The holders gone whose wants the next planning pass drops. */
   private readonly gone = new Set<LaneHolder>()
@@ -268,8 +272,8 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     this.syncLanes()
   }
 
-  /** The planning pass under way while a holder here receives the member's `track` and no lane here carries it yet:
-   *  once it ends, the lane establishes, and holds a commit on it until it delivers. */
+  /** The planning pass under way, while a holder here receives the member's `track` and no lane here carries it yet;
+   *  else null. Once the pass ends, the lane is establishing, and it holds a commit made on it until it delivers. */
   lanePlanned(member: string, track: string): Promise<void> | null {
     if (this.planning === null || !this.wants.wantsBinary || this.everyTrack.has(member)) return null
     if (this.everyMember.has(track)) return null
@@ -359,9 +363,9 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     this.planning ??= this.runPlan().catch(reportRoomError)
   }
 
-  /** Plans what is queued once the current turn's changes are in, then tells the demand it changed, each round sharing
-   *  one `ROOM_PLAN_SLICE_MS` slice at a time so timers and I/O run between slices; what is queued meanwhile gets the
-   *  next round. No other demand is told until it ends, so no owner sees the demand between two of its slices. */
+  /** Plans what is queued once the current turn's changes are in, then tells the changed demand. Each round runs in
+   *  `ROOM_PLAN_SLICE_MS` slices, so timers and I/O run between slices; what is queued meanwhile waits for the next
+   *  round. No other demand is told until the pass ends, so no owner sees the demand between two slices. */
   private async runPlan(): Promise<void> {
     try {
       await Promise.resolve()
@@ -465,11 +469,11 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     return true
   }
 
-  /** A member's binary lanes: its every-track lane while some holder here receives all of its tracks, more than
-   *  `ROOM_MEMBER_NAMED_LANES_MAX` named of it alone, or the tracks named of every member fetched by member, else a
-   *  lane per track named of it alone. A switch between them keeps the lanes it leaves until the lanes it takes
-   *  deliver. It yields between tracks, so a member's plan is resumed a slice at a time: it plans from the counts and
-   *  lanes it read first, and every change meanwhile queues the member again. */
+  /** Plans a member's binary lanes. The member gets its every-track lane while a holder here receives all of its
+   *  tracks, while holders here name more than `ROOM_MEMBER_NAMED_LANES_MAX` of its tracks for it alone, or while the
+   *  tracks named of every member are fetched by member; otherwise it gets a lane per track named of it alone. A switch
+   *  keeps the lanes it leaves until the lanes it takes deliver. The plan yields between tracks and resumes a slice at
+   *  a time: it plans from the counts and lanes it read first, and any change meanwhile queues the member again. */
   private *syncMemberBinary(member: string): Generator<void> {
     const present = this.present(member)
     if (!present) this.counts.delete(member)
@@ -532,9 +536,10 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     }
   }
 
-  /** A named lane while some holder names the track of the member alone and neither the member's every-track lane nor
-   *  the track's every-member lane serves it; beside either, a lane stays until it delivers. The pair is demand while
-   *  some lane here delivers it to a holder that wants it, told as a pair unless the every-member lane delivers it. */
+  /** Plans the named lane of one (member, track) pair. The pair has a named lane while a holder names the track of the
+   *  member alone and neither the member's every-track lane nor the track's every-member lane serves it; once either
+   *  one does, the named lane stays until that lane delivers. The pair is demand while a lane here delivers it to a
+   *  holder that wants it, and is told as a pair unless the every-member lane delivers it. */
   private syncLane(member: string, track: string, servedByAll: boolean): void {
     const present = this.present(member)
     const named = present && this.wants.wantsNamedPair(member, track)
@@ -562,8 +567,9 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     this.outgoingDemand.setPair(member, track, (named || lane !== undefined) && delivers && !trackDelivers)
   }
 
-  /** The every-member lane of `track` while some holder here names it of every member and the tracks are not fetched
-   *  by member. Its demand is one entry, told once it delivers, or while the every-track lanes it replaces still do. */
+  /** Plans the every-member lane of `track`: the track has one while a holder here names it of every member, unless the
+   *  tracks are fetched by member. Its demand is one entry, told once the lane delivers, or while the every-track lanes
+   *  it replaces still deliver. */
   private keepEveryMember(track: string): void {
     if (this.byMember || !this.namesEveryMember(track)) return
     this.establishingEveryTrack.waiting.delete(track)
@@ -574,9 +580,10 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     this.outgoingDemand.setTrack(track, lane.delivering || byMember, { byMember })
   }
 
-  /** An every-member lane that serves no holder here stops once the lanes replacing it deliver: the named lanes and
-   *  every-track lanes once no holder names the track, each member's every-track lane while the tracks are fetched by
-   *  member, which then tells the track's demand. Until then, each one's readiness replans the track. */
+  /** Stops an every-member lane that serves no holder here, once the lanes replacing it deliver. When no holder names
+   *  the track any more, the named lanes and every-track lanes replace it; while the tracks are fetched by member, each
+   *  member's every-track lane replaces it and tells the track's demand. Until then, each replacing lane that becomes
+   *  ready replans the track. */
   private releaseEveryMember(track: string): void {
     const named = this.namesEveryMember(track)
     if (named && !this.byMember) return
@@ -599,9 +606,9 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     return !this.model.closed && this.wants.namesEveryMember(track)
   }
 
-  /** Whether the member is one no holder here receives a track named of every member from: only a holder's own member
-   *  can be, as one suppresses it, so only an owned member is read while a track has its every-member lane or is told
-   *  by member, or one told so before. */
+  /** Leaves `member` out of the demand of each track named of every member that no holder here receives from it. Only a
+   *  holder's own member can be left out, since a holder suppresses its own member; so this reads only an owned member
+   *  while some track has its every-member lane or is told by member, or a member left out before. */
   private syncExcept(member: string): void {
     const served = this.everyMember.size > 0 || this.byMemberTracks.size > 0
     if (!this.excepted.has(member) && (!served || !this.owner.ownsMember(member))) return
@@ -761,8 +768,8 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     void this.owner.recoverFromGap().catch(reportRoomError)
   }
 
-  /** The demand lane delivering asks for demand. What a binary lane carries is demand once it delivers, so its
-   *  readiness replans what it serves. */
+  /** When the demand lane delivers, the plan asks for demand. What a binary lane carries counts as demand once it
+   *  delivers, so its readiness replans what it serves. */
   onLanePending(lane: LaneSubscription, pending: boolean): void {
     const address = lane.address
     if (address.kind === 'demand') {

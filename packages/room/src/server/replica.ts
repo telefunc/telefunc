@@ -64,11 +64,11 @@ function replicasHere(): Map<string, WeakRef<RoomReplica>> {
   return hostLocal(REPLICAS, () => new Map<string, WeakRef<RoomReplica>>())
 }
 
-/** This process's one view of a room incarnation, a Cloudflare session DO's own, whatever the number of its handles:
- *  the model, the lanes planned from the wants of every handle's holders, the demand, the lease hosting the members
- *  and pages the handles hold, and the heartbeat that renews it and checks the authority again. Each handle keeps its
- *  guards, its tail, the stubs it opened and its listeners. A replica no handle observes, owns a member through or
- *  tails runs no heartbeat and holds no lane; it lives while a handle holds it. */
+/** This process's one view of a room incarnation, however many handles share it; on Cloudflare, a session DO holds its
+ *  own. The replica holds the model, the lanes planned from the wants of the handles' holders, the demand, the lease
+ *  that hosts the members and pages the handles hold, and the heartbeat that renews the lease and checks the authority
+ *  again. Each handle keeps its guards, its tail, the stubs it opened and its listeners. A replica that no handle
+ *  observes, owns a member through or tails runs no heartbeat and holds no lane; it lives while a handle holds it. */
 class RoomReplica
   implements ServerModelOwner, DemandReportOwner, RoomDemandOwner, LanePlanOwner, AuthoritySyncOwner, RoomHeartbeatOwner
 {
