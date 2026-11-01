@@ -146,7 +146,7 @@ class SharedSubscription implements Subscriber {
   }
 
   add(receiver: BackendReceiver<BackendPayload>): BackendSubscription {
-    const consumer = new Consumer(this, receiver)
+    const consumer = new Consumer({ shared: this, receiver })
     this.attached.add(consumer)
     this.snapshot = null
     return consumer
@@ -268,15 +268,22 @@ class SharedSubscription implements Subscriber {
   }
 }
 
+type ConsumerOptions = {
+  shared: SharedSubscription
+  receiver: BackendReceiver<BackendPayload>
+}
+
 /** One consumer's subscription on a shared one. */
 class Consumer implements BackendSubscription {
+  readonly receiver: BackendReceiver<BackendPayload>
+  private readonly shared: SharedSubscription
   private attached = true
   private readonly listeners = new Set<(state: SubscriptionState) => void>()
 
-  constructor(
-    private readonly shared: SharedSubscription,
-    readonly receiver: BackendReceiver<BackendPayload>,
-  ) {}
+  constructor({ shared, receiver }: ConsumerOptions) {
+    this.shared = shared
+    this.receiver = receiver
+  }
 
   get ready(): Promise<void> {
     return this.attached ? this.shared.established : Promise.resolve()
