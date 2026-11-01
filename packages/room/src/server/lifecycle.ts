@@ -17,7 +17,7 @@ import type { HoldConfig } from './protocol.js'
 import { roomClosedError } from '../errors.js'
 import { HOLDS_CELL_KEY, JOINS_CELL_KEY } from './cells.js'
 import { closeIncarnation } from './close.js'
-import { CX_CONFLICT, retryCompareExchange } from './cx.js'
+import { EXCHANGE_CONFLICT, retryCompareExchange } from './cx.js'
 import { reportRoomError } from './errors.js'
 assertIsNotBrowser()
 
@@ -142,7 +142,7 @@ async function lapseNewRoom(room: RoomIncarnation): Promise<RoomHead | null> {
         ttlMs: record.closesIn + ROOM_LAPSE_AFTER_CLOSE_MS,
       },
     )
-    return 'conflict' in result ? CX_CONFLICT : result.head
+    return 'conflict' in result ? EXCHANGE_CONFLICT : result.head
   })
 }
 
@@ -170,7 +170,7 @@ async function extendLapse(
       { form: 'rev', rev: head.rev },
       { head: { currentInc: inc, state: 'open', config: head.config }, ttlMs },
     )
-    return 'conflict' in result ? CX_CONFLICT : undefined
+    return 'conflict' in result ? EXCHANGE_CONFLICT : undefined
   })
 }
 

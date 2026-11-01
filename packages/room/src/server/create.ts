@@ -11,7 +11,7 @@ import { encodeRoomRecord } from './lanes.js'
 import { ServerRoom } from './room.js'
 import { RoomReplica } from './replica.js'
 import { metaEntriesAt } from '../metaState.js'
-import { CX_CONFLICT, retryCompareExchange } from './cx.js'
+import { EXCHANGE_CONFLICT, retryCompareExchange } from './cx.js'
 import { cleanupFinalizedIncarnation, takeOverClose } from './close.js'
 import { createHold, lapseNewRoom, newHoldConfig, type RoomIncarnation } from './lifecycle.js'
 import { listRoom, sweepLapsedRoomsSoon } from './directory.js'
@@ -69,8 +69,8 @@ function openHead(created: RoomConfigRecord): HeadNext['head'] {
 }
 
 /** A head that went away (a lapsed tombstone) or closed meanwhile still allows the create: try again. */
-function refusalOf(conflicting: RoomHead | null): Refusal | typeof CX_CONFLICT {
-  if (conflicting === null || conflicting.state === 'closed') return CX_CONFLICT
+function refusalOf(conflicting: RoomHead | null): Refusal | typeof EXCHANGE_CONFLICT {
+  if (conflicting === null || conflicting.state === 'closed') return EXCHANGE_CONFLICT
   return conflicting.state === 'closing' ? { kind: 'closing' } : { kind: 'exists' }
 }
 

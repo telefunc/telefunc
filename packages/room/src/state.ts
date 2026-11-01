@@ -33,18 +33,18 @@ type CountedTrack = { counts: TrackCounts; track: TrackFilter }
  *  members never get one. */
 type MemberListeners = {
   remote: RemoteParticipant | null
-  dataCbs: Listeners<(data: unknown, info: ChannelPublishInfo) => unknown> | null
+  dataListeners: Listeners<(data: unknown, info: ChannelPublishInfo) => unknown> | null
   binary: {
-    cbs: Listeners<{
+    listeners: Listeners<{
       cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown
       track: TrackFilter
     }>
     tracks: TrackCounts
   } | null
-  updateCbs: Listeners<(meta: ParticipantMeta, prev: ParticipantMeta) => void> | null
-  disconnectCbs: Listeners<() => void> | null
-  reconnectCbs: Listeners<() => void> | null
-  leaveCbs: Listeners<(cause: LeaveCause) => void> | null
+  updateListeners: Listeners<(meta: ParticipantMeta, prev: ParticipantMeta) => void> | null
+  disconnectListeners: Listeners<() => void> | null
+  reconnectListeners: Listeners<() => void> | null
+  leaveListeners: Listeners<(cause: LeaveCause) => void> | null
 }
 
 type RoomStateOptions = {
@@ -156,15 +156,15 @@ class RoomState {
   private readonly listenerCleanups = new Map<object, Set<() => void>>()
   /** By the model's entry, so a remote still held keeps its own, and a member's leave forgets it. */
   private readonly memberListeners = new WeakMap<MemberEntry, MemberListeners>()
-  private readonly changeCbs: Listeners<() => void> = new Listeners()
+  private readonly changeListeners: Listeners<() => void> = new Listeners()
   private readonly owner: RoomStateOwner
   /** The owner's `reportCallbackError`, bound once for every listener call. */
   private readonly reportError: (error: unknown) => void
 
-  private readonly roomDataCbs: Listeners<(data: unknown, info: ChannelPublishInfo, from: Sender) => unknown> =
+  private readonly roomDataListeners: Listeners<(data: unknown, info: ChannelPublishInfo, from: Sender) => unknown> =
     new Listeners()
 
-  private readonly roomBinaryCbs: Listeners<{
+  private readonly roomBinaryListeners: Listeners<{
     cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown
     track: TrackFilter
   }> = new Listeners()
@@ -172,17 +172,17 @@ class RoomState {
   private readonly roomBinaryTracks: TrackCounts = newTrackCounts()
   /** The members with a `subscribe()` listener. */
   private readonly textWanted = new Set<string>()
-  private readonly joinCbs: Listeners<(member: RemoteParticipant) => void> = new Listeners()
-  private readonly leaveCbs: Listeners<(member: RemoteParticipant, cause: LeaveCause) => void> = new Listeners()
+  private readonly joinListeners: Listeners<(member: RemoteParticipant) => void> = new Listeners()
+  private readonly leaveListeners: Listeners<(member: RemoteParticipant, cause: LeaveCause) => void> = new Listeners()
 
-  private readonly participantUpdateCbs: Listeners<
+  private readonly participantUpdateListeners: Listeners<
     (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void
   > = new Listeners()
 
-  private readonly updateCbs: Listeners<(meta: RoomMeta, prev: RoomMeta) => void> = new Listeners()
-  private readonly emptyCbs: Listeners<() => void> = new Listeners()
-  private readonly closeCbs: Listeners<() => void> = new Listeners()
-  private readonly announceCbs: Listeners<(data: unknown, info: ChannelPublishInfo) => void> = new Listeners()
+  private readonly updateListeners: Listeners<(meta: RoomMeta, prev: RoomMeta) => void> = new Listeners()
+  private readonly emptyListeners: Listeners<() => void> = new Listeners()
+  private readonly closeListeners: Listeners<() => void> = new Listeners()
+  private readonly announceListeners: Listeners<(data: unknown, info: ChannelPublishInfo) => void> = new Listeners()
   private _listenerCount = 0
   /** The tracks its binary listeners name, each `(member or room, track)` pair once. */
   private trackWants = 0
@@ -214,12 +214,12 @@ class RoomState {
 
   /** Whether this holder consumes room-authored messages on the semantic lane. */
   get wantsAnnounce(): boolean {
-    return this.announceCbs.size > 0
+    return this.announceListeners.size > 0
   }
 
   /** `all` while room-level `subscribe()`rs exist, and the members with participant-scoped listeners either way. */
   textWants(): MemberWants {
-    return { all: this.roomDataCbs.size > 0, members: this.textWanted }
+    return { all: this.roomDataListeners.size > 0, members: this.textWanted }
   }
 
   getRemote(id: string): RemoteParticipant | null {
@@ -238,7 +238,7 @@ class RoomState {
 
   // ── Listener registration (all return an unlisten function) ──
   subscribe(cb: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
-    return this.register(this.roomDataCbs, cb)
+    return this.register(this.roomDataListeners, cb)
   }
 
   subscribeBinary(
@@ -246,116 +246,120 @@ class RoomState {
     opts?: { track?: string | null },
   ): () => void {
     const listener = binaryListener(cb, opts)
-    return this.register(this.roomBinaryCbs, listener, null, {
+    return this.register(this.roomBinaryListeners, listener, null, {
       counts: this.roomBinaryTracks,
       track: listener.track,
     })
   }
 
   onJoin(cb: (member: RemoteParticipant) => void): () => void {
-    return this.register(this.joinCbs, cb)
+    return this.register(this.joinListeners, cb)
   }
 
   onLeave(cb: (member: RemoteParticipant, cause: LeaveCause) => void): () => void {
-    return this.register(this.leaveCbs, cb)
+    return this.register(this.leaveListeners, cb)
   }
 
   onParticipantUpdate(
     cb: (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void,
   ): () => void {
-    return this.register(this.participantUpdateCbs, cb)
+    return this.register(this.participantUpdateListeners, cb)
   }
 
   onUpdate(cb: (meta: RoomMeta, prev: RoomMeta) => void): () => void {
-    return this.register(this.updateCbs, cb)
+    return this.register(this.updateListeners, cb)
   }
 
   onEmpty(cb: () => void): () => void {
-    return this.register(this.emptyCbs, cb)
+    return this.register(this.emptyListeners, cb)
   }
 
   onClose(cb: () => void): () => void {
-    if (!this.model.closed) return this.register(this.closeCbs, cb)
+    if (!this.model.closed) return this.register(this.closeListeners, cb)
     // Terminal, like a departed member's onLeave: a late listener hears it at once.
     invokeChannelListener(cb, [], this.reportError)
     return makeDisposer()
   }
 
   onChange(cb: () => void): () => void {
-    return this.register(this.changeCbs, cb)
+    return this.register(this.changeListeners, cb)
   }
 
   onAnnounce(cb: (data: unknown, info: ChannelPublishInfo) => void): () => void {
-    return this.register(this.announceCbs, cb)
+    return this.register(this.announceListeners, cb)
   }
 
   // ── The model's changes, told while this view has a listener ──
   changed(): void {
-    this.fireAll(this.changeCbs)
+    this.fireAll(this.changeListeners)
   }
 
   /** A visible member joined. */
   joined(entry: MemberEntry): void {
-    if (this.joinCbs.size > 0) this.fireAll(this.joinCbs, this.remote(entry))
+    if (this.joinListeners.size > 0) this.fireAll(this.joinListeners, this.remote(entry))
   }
 
   left(entry: MemberEntry, cause: LeaveCause): void {
-    const leaveCbs = this.memberListeners.get(entry)?.leaveCbs
-    if (leaveCbs) this.fireAll(leaveCbs, cause)
-    if (!entry.hidden && this.leaveCbs.size > 0) this.fireAll(this.leaveCbs, this.remote(entry), cause)
+    const leaveListeners = this.memberListeners.get(entry)?.leaveListeners
+    if (leaveListeners) this.fireAll(leaveListeners, cause)
+    if (!entry.hidden && this.leaveListeners.size > 0) this.fireAll(this.leaveListeners, this.remote(entry), cause)
     this.releaseEntryListeners(entry)
     if (entry.hidden) return
-    if (this.model.count === 0) this.fireAll(this.emptyCbs)
+    if (this.model.count === 0) this.fireAll(this.emptyListeners)
   }
 
   connectionChanged(entry: MemberEntry): void {
     const listeners = this.memberListeners.get(entry)
-    const cbs = this.model.isConnected(entry) ? listeners?.reconnectCbs : listeners?.disconnectCbs
-    if (cbs) this.fireAll(cbs)
+    const connectionListeners = this.model.isConnected(entry)
+      ? listeners?.reconnectListeners
+      : listeners?.disconnectListeners
+    if (connectionListeners) this.fireAll(connectionListeners)
   }
 
   /** Whether a member meta change needs its previous meta built for this view. */
   listensToMeta(entry: MemberEntry): boolean {
-    return (this.memberListeners.get(entry)?.updateCbs ?? null) !== null || this.participantUpdateCbs.size > 0
+    return (
+      (this.memberListeners.get(entry)?.updateListeners ?? null) !== null || this.participantUpdateListeners.size > 0
+    )
   }
 
   metaChanged(entry: MemberEntry, next: ParticipantMeta, prev: ParticipantMeta): void {
-    const updateCbs = this.memberListeners.get(entry)?.updateCbs
-    if (updateCbs) this.fireAll(updateCbs, next, prev)
-    this.fireAll(this.participantUpdateCbs, this.remote(entry), next, prev)
+    const updateListeners = this.memberListeners.get(entry)?.updateListeners
+    if (updateListeners) this.fireAll(updateListeners, next, prev)
+    this.fireAll(this.participantUpdateListeners, this.remote(entry), next, prev)
   }
 
   listensToRoomMeta(): boolean {
-    return this.updateCbs.size > 0
+    return this.updateListeners.size > 0
   }
 
   roomMetaChanged(next: RoomMeta, prev: RoomMeta): void {
-    this.fireAll(this.updateCbs, next, prev)
+    this.fireAll(this.updateListeners, next, prev)
   }
 
   closed(departed: MemberEntry[], cause: LeaveCause): void {
     for (const entry of departed) {
-      const leaveCbs = this.memberListeners.get(entry)?.leaveCbs
-      if (leaveCbs) this.fireAll(leaveCbs, cause)
+      const leaveListeners = this.memberListeners.get(entry)?.leaveListeners
+      if (leaveListeners) this.fireAll(leaveListeners, cause)
       this.releaseEntryListeners(entry)
     }
-    this.fireAll(this.closeCbs)
+    this.fireAll(this.closeListeners)
     this.releaseAllListeners()
   }
 
   // ── Delivery ──
   applyAnnounce(data: unknown, info: ChannelPublishInfo): void {
-    this.fireAll(this.announceCbs, data, info)
+    this.fireAll(this.announceListeners, data, info)
   }
 
   /** Never waits on the roster: an unknown sender (its join may be behind on the control lane) is the snapshot its
    *  instance stamped. */
   applyData(event: RoomDataEvent, info: ChannelPublishInfo): void {
     const sender = this.resolveSender(event)
-    this.fireAll(this.roomDataCbs, event.data, info, sender)
+    this.fireAll(this.roomDataListeners, event.data, info, sender)
     const entry = this.model.entry(event.from)
-    const dataCbs = entry && this.memberListeners.get(entry)?.dataCbs
-    if (dataCbs) this.fireAll(dataCbs, event.data, info)
+    const dataListeners = entry && this.memberListeners.get(entry)?.dataListeners
+    if (dataListeners) this.fireAll(dataListeners, event.data, info)
   }
 
   /** A message's sender as of its send (see `RoomModel.resolveSender`). */
@@ -376,14 +380,14 @@ class RoomState {
     const entry = this.model.entry(from)
     const sender = entry ? this.remote(entry) : senderOf(from, {}, null)
     // Each listener gets bytes of its own: one may write into them or transfer their buffer.
-    for (const { cb, track: want } of this.roomBinaryCbs.list()) {
+    for (const { cb, track: want } of this.roomBinaryListeners.list()) {
       if (want === EVERY_TRACK || want === track) {
         invokeChannelListener(cb, [new Uint8Array(payload), frameInfo, sender], this.reportError)
       }
     }
     const binary = entry && this.memberListeners.get(entry)?.binary
     if (!binary) return
-    for (const { cb, track: want } of binary.cbs.list()) {
+    for (const { cb, track: want } of binary.listeners.list()) {
       if (want === EVERY_TRACK || want === track)
         invokeChannelListener(cb, [new Uint8Array(payload), frameInfo], this.reportError)
     }
@@ -395,12 +399,12 @@ class RoomState {
     if (existing !== undefined) return existing
     const listeners: MemberListeners = {
       remote: null,
-      dataCbs: null,
+      dataListeners: null,
       binary: null,
-      updateCbs: null,
-      disconnectCbs: null,
-      reconnectCbs: null,
-      leaveCbs: null,
+      updateListeners: null,
+      disconnectListeners: null,
+      reconnectListeners: null,
+      leaveListeners: null,
     }
     this.memberListeners.set(entry, listeners)
     return listeners
@@ -424,17 +428,17 @@ class RoomState {
       get isConnected() {
         return model.isConnected(entry)
       },
-      subscribe: (cb) => this.registerLive(entry, (listeners.dataCbs ??= new Listeners()), cb),
+      subscribe: (cb) => this.registerLive(entry, (listeners.dataListeners ??= new Listeners()), cb),
       subscribeBinary: (cb, opts) => {
         const listener = binaryListener(cb, opts)
-        const binary = (listeners.binary ??= { cbs: new Listeners(), tracks: newTrackCounts() })
-        return this.registerLive(entry, binary.cbs, listener, { counts: binary.tracks, track: listener.track })
+        const binary = (listeners.binary ??= { listeners: new Listeners(), tracks: newTrackCounts() })
+        return this.registerLive(entry, binary.listeners, listener, { counts: binary.tracks, track: listener.track })
       },
-      onUpdate: (cb) => this.registerLive(entry, (listeners.updateCbs ??= new Listeners()), cb),
-      onDisconnect: (cb) => this.registerLive(entry, (listeners.disconnectCbs ??= new Listeners()), cb),
-      onReconnect: (cb) => this.registerLive(entry, (listeners.reconnectCbs ??= new Listeners()), cb),
+      onUpdate: (cb) => this.registerLive(entry, (listeners.updateListeners ??= new Listeners()), cb),
+      onDisconnect: (cb) => this.registerLive(entry, (listeners.disconnectListeners ??= new Listeners()), cb),
+      onReconnect: (cb) => this.registerLive(entry, (listeners.reconnectListeners ??= new Listeners()), cb),
       onLeave: (cb: (cause: LeaveCause) => void) => {
-        if (!entry.left) return this.register((listeners.leaveCbs ??= new Listeners()), cb, entry)
+        if (!entry.left) return this.register((listeners.leaveListeners ??= new Listeners()), cb, entry)
         assert(entry.leaveCause)
         invokeChannelListener(cb, [entry.leaveCause], this.reportError)
         return makeDisposer()
@@ -483,12 +487,12 @@ class RoomState {
     const listeners = this.memberListeners.get(entry)
     if (!listeners) return
     const lists = [
-      listeners.dataCbs,
-      listeners.binary?.cbs,
-      listeners.updateCbs,
-      listeners.disconnectCbs,
-      listeners.reconnectCbs,
-      listeners.leaveCbs,
+      listeners.dataListeners,
+      listeners.binary?.listeners,
+      listeners.updateListeners,
+      listeners.disconnectListeners,
+      listeners.reconnectListeners,
+      listeners.leaveListeners,
     ]
     for (const list of lists) {
       if (!list) continue
@@ -506,14 +510,14 @@ class RoomState {
     if (this._listenerCount === (delta > 0 ? 1 : 0)) this.model.listen(this, delta > 0)
     if (binary !== null && binary.track !== EVERY_TRACK) this.trackWants += binary.on ? 1 : -1
     if (entry !== null) {
-      if ((this.memberListeners.get(entry)?.dataCbs?.size ?? 0) > 0) this.textWanted.add(entry.id)
+      if ((this.memberListeners.get(entry)?.dataListeners?.size ?? 0) > 0) this.textWanted.add(entry.id)
       else this.textWanted.delete(entry.id)
     }
     this.owner.onListenersChanged(entry?.id ?? null, binary)
   }
 
-  private fireAll<Args extends unknown[]>(cbs: Listeners<(...args: Args) => unknown>, ...args: Args): void {
-    for (const cb of cbs.list()) invokeChannelListener(cb, args, this.reportError)
+  private fireAll<Args extends unknown[]>(listeners: Listeners<(...args: Args) => unknown>, ...args: Args): void {
+    for (const cb of listeners.list()) invokeChannelListener(cb, args, this.reportError)
   }
 }
 

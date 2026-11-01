@@ -40,7 +40,7 @@ import {
   metaKeyOfCellKey,
   roomMetaGenPrefix,
 } from './cells.js'
-import { CX_CONFLICT, retryCompareExchange } from './cx.js'
+import { EXCHANGE_CONFLICT, retryCompareExchange } from './cx.js'
 import { deleteCells, dropCells, readOpenCells } from './cellStore.js'
 import { acceptedOrThrow, commitLane, controlLane, decodeRoomRecord, encodeRoomRecord } from './lanes.js'
 import type { RoomIncarnation } from './lifecycle.js'
@@ -186,7 +186,7 @@ async function readRoomMetaSeq(roomId: string, inc: string): Promise<number | nu
 async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: RoomMetaWrite): Promise<void> {
   const { inc } = config
   const backend = getRoomBackend()
-  const update = await retryCompareExchange(async (): Promise<RoomMetaUpdate | null | typeof CX_CONFLICT> => {
+  const update = await retryCompareExchange(async (): Promise<RoomMetaUpdate | null | typeof EXCHANGE_CONFLICT> => {
     const read = await readOpenCells(roomId, inc, [META_SEQ_CELL_KEY, META_GEN_CELL_KEY])
     const seq = read.cells.get(META_SEQ_CELL_KEY)
     if (seq === undefined) {
@@ -229,9 +229,9 @@ function committed(
   roomId: string,
   result: CxResult,
   update: (seq: number) => RoomMetaUpdate,
-): RoomMetaUpdate | typeof CX_CONFLICT {
+): RoomMetaUpdate | typeof EXCHANGE_CONFLICT {
   if (result === 'stale-inc') throw roomClosedError(roomId)
-  if (result === 'conflict') return CX_CONFLICT
+  if (result === 'conflict') return EXCHANGE_CONFLICT
   return update(result.committed.get(META_SEQ_CELL_KEY)!.value)
 }
 
@@ -299,7 +299,7 @@ async function writeMemberMeta(
     const expect = [{ key: memberKey, version: read.versions.get(memberKey)! }]
     const result = await backend.compareExchangeCells(room.id, room.inc, { expect, mutations })
     if (result === 'stale-inc') throw roomClosedError(room.id)
-    if (result === 'conflict') return CX_CONFLICT
+    if (result === 'conflict') return EXCHANGE_CONFLICT
     let update: MemberMetaUpdate
     if ('replace' in write) {
       update = { seq, meta: write.replace }
@@ -332,7 +332,7 @@ async function writeMemberConnection(
       mutations: [{ key: memberKey, bytes: encodeRoomRecord(next) }],
     })
     if (result === 'stale-inc') throw roomClosedError(room.id)
-    if (result === 'conflict') return CX_CONFLICT
+    if (result === 'conflict') return EXCHANGE_CONFLICT
     return { update: { seq, connected }, hidden: record.hidden === true }
   })
 }

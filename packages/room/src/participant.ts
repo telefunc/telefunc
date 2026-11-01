@@ -38,11 +38,11 @@ abstract class ParticipantBase implements LocalParticipant {
   private readonly memberMeta: MemberMeta
   private leftCause: LeaveCause | null = null
   // Each list is made when its first listener is added.
-  private leaveCbs: Listeners<(cause: LeaveCause) => unknown> | null = null
-  private messageCbs: Listeners<(data: unknown, from: Sender | null) => unknown> | null = null
-  private demandCbs: Listeners<(track: string | null, wanted: boolean) => unknown> | null = null
-  private disconnectCbs: Listeners<() => unknown> | null = null
-  private reconnectCbs: Listeners<() => unknown> | null = null
+  private leaveListeners: Listeners<(cause: LeaveCause) => unknown> | null = null
+  private messageListeners: Listeners<(data: unknown, from: Sender | null) => unknown> | null = null
+  private demandListeners: Listeners<(track: string | null, wanted: boolean) => unknown> | null = null
+  private disconnectListeners: Listeners<() => unknown> | null = null
+  private reconnectListeners: Listeners<() => unknown> | null = null
   private listenerCleanups: Set<() => void> | null = null
   private inboxAttached = false
   /** DMs held until the first `listen()` (`null` once flushed); an ack DM carries the resolver of its reply. */
@@ -110,14 +110,14 @@ abstract class ParticipantBase implements LocalParticipant {
   protected abstract _inboxBufferLimit(): number
 
   listen(callback: (data: unknown, from: Sender | null) => unknown): () => void {
-    const unlisten = this.register((this.messageCbs ??= new Listeners()), callback)
+    const unlisten = this.register((this.messageListeners ??= new Listeners()), callback)
     this._flushHeld({ deliver: (msg) => this.fireInbox(msg), deliverAck: (msg) => this.fireInboxAck(msg) })
     return unlisten
   }
 
   /** @internal A DM for this member: to its listeners, held until the first `listen()`. */
   _deliverMessage(msg: InboxMessage): void {
-    if (!this.messageCbs?.size) {
+    if (!this.messageListeners?.size) {
       if (this._left || this.inboxAttached) return
       this.hold(msg)
       return
@@ -128,7 +128,7 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal An `{ ack: true }` DM, resolved with the recipient's reply (or an error if it leaves first); never
    *  rejects. */
   _deliverMessageAck(msg: InboxMessage): Promise<RoomResult> {
-    if (this.messageCbs?.size) return this.fireInboxAck(msg)
+    if (this.messageListeners?.size) return this.fireInboxAck(msg)
     if (this._left) return Promise.resolve(DM_FAILURE.left)
     if (this.inboxAttached) return Promise.resolve(DM_FAILURE.noListener)
     return new Promise<RoomResult>((resolve) => this.hold(msg, resolve))
@@ -168,7 +168,7 @@ abstract class ParticipantBase implements LocalParticipant {
 
   private fireInbox(msg: InboxMessage): void {
     const sender = this.inboxSender(msg)
-    for (const cb of this.messageCbs?.list() ?? []) this.invoke(cb, msg.data, sender)
+    for (const cb of this.messageListeners?.list() ?? []) this.invoke(cb, msg.data, sender)
   }
 
   /** The last listener's return is the reply; a throw is the failure reply (see `toRoomFailure`: a bug is reported
@@ -176,7 +176,7 @@ abstract class ParticipantBase implements LocalParticipant {
   private async fireInboxAck(msg: InboxMessage): Promise<RoomResult> {
     const sender = this.inboxSender(msg)
     let result: unknown
-    for (const cb of this.messageCbs?.list() ?? []) {
+    for (const cb of this.messageListeners?.list() ?? []) {
       try {
         result = await cb(msg.data, sender)
       } catch (err) {
@@ -192,7 +192,7 @@ abstract class ParticipantBase implements LocalParticipant {
   }
 
   onDemand(callback: (track: string | null, wanted: boolean) => void): () => void {
-    const unlisten = this.register((this.demandCbs ??= new Listeners()), callback)
+    const unlisten = this.register((this.demandListeners ??= new Listeners()), callback)
     for (const track of this._demandedTracks) this.invoke(callback, publicTrack(track), true)
     return unlisten
   }
@@ -202,25 +202,25 @@ abstract class ParticipantBase implements LocalParticipant {
 
   /** @internal Room-wide demand for one of this member's tracks changed. */
   _onDemand(track: TrackKey, wanted: boolean): void {
-    for (const cb of this.demandCbs?.list() ?? []) this.invoke(cb, publicTrack(track), wanted)
+    for (const cb of this.demandListeners?.list() ?? []) this.invoke(cb, publicTrack(track), wanted)
   }
 
   onDisconnect(callback: () => void): () => void {
-    return this.register((this.disconnectCbs ??= new Listeners()), callback)
+    return this.register((this.disconnectListeners ??= new Listeners()), callback)
   }
 
   onReconnect(callback: () => void): () => void {
-    return this.register((this.reconnectCbs ??= new Listeners()), callback)
+    return this.register((this.reconnectListeners ??= new Listeners()), callback)
   }
 
   /** @internal */
   _onDisconnected(): void {
-    for (const cb of this.disconnectCbs?.list() ?? []) this.invoke(cb)
+    for (const cb of this.disconnectListeners?.list() ?? []) this.invoke(cb)
   }
 
   /** @internal */
   _onReconnected(): void {
-    for (const cb of this.reconnectCbs?.list() ?? []) this.invoke(cb)
+    for (const cb of this.reconnectListeners?.list() ?? []) this.invoke(cb)
   }
 
   onLeave(callback: (cause: LeaveCause) => void): () => void {
@@ -228,7 +228,7 @@ abstract class ParticipantBase implements LocalParticipant {
       this.invoke(callback, this.leftCause)
       return makeDisposer()
     }
-    return this.register((this.leaveCbs ??= new Listeners()), callback)
+    return this.register((this.leaveListeners ??= new Listeners()), callback)
   }
 
   /** @internal The member is gone; `cause` says how. */
@@ -241,9 +241,9 @@ abstract class ParticipantBase implements LocalParticipant {
     this.pendingInbox = null
     this.pendingInboxBytes = 0
     if (held) for (const entry of held) entry.ackResolve?.(DM_FAILURE.left)
-    const cbs = this.leaveCbs?.list() ?? []
+    const leaveListeners = this.leaveListeners?.list() ?? []
     for (const unlisten of this.listenerCleanups ?? []) unlisten()
-    for (const cb of cbs) this.invoke(cb, ownedCause)
+    for (const cb of leaveListeners) this.invoke(cb, ownedCause)
   }
 
   protected _assertActive(): void {

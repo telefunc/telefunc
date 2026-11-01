@@ -6,7 +6,7 @@ import type { CellCount, CellCounter, CellMutation, CellsRead } from '../backend
 import { Slice } from '../Slice.js'
 import { roomClosedError } from '../errors.js'
 import { ROOM_MEMBER_WRITES_IN_FLIGHT_MAX } from './constants.js'
-import { CX_CONFLICT, retryCompareExchange } from './cx.js'
+import { EXCHANGE_CONFLICT, retryCompareExchange } from './cx.js'
 
 // A room's cells, read and written by the incarnation's server code: a read that throws once the incarnation closed, a
 // compare-exchange retried until it commits, and paged drops.
@@ -51,7 +51,7 @@ async function mutateCells<T>(
     const expect = keys.map((key) => ({ key, version: read.versions.get(key) ?? null }))
     const result = await backend.compareExchangeCells(roomId, inc, { expect, mutations, counts })
     if (result === 'stale-inc') throw roomClosedError(roomId)
-    return result === 'conflict' ? CX_CONFLICT : { value, counters: result.committed }
+    return result === 'conflict' ? EXCHANGE_CONFLICT : { value, counters: result.committed }
   })
 }
 
