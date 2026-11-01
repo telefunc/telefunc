@@ -220,7 +220,7 @@ class RoomReplica
     this.stubs.add(stub)
     this.views.set(
       stub,
-      this.holdViews([stub]).then(([key]) => key ?? null),
+      this.hostViews([stub]).then(([key]) => key ?? null),
     )
   }
 
@@ -237,7 +237,7 @@ class RoomReplica
   }
 
   /** The stubs' views' keys, in order; each null and the views lost if the write failed. */
-  private async holdViews(stubs: RoomStub[]): Promise<(string | null)[]> {
+  private async hostViews(stubs: RoomStub[]): Promise<(string | null)[]> {
     try {
       const keys = await holdViews(
         this.incarnation,
@@ -414,7 +414,7 @@ class RoomReplica
     const stubs = [...this.views.keys()]
     if (stubs.length === 0) return
     const previous = Promise.all(this.views.values())
-    const keys = previous.then(() => this.holdViews(stubs))
+    const keys = previous.then(() => this.hostViews(stubs))
     stubs.forEach((stub, i) =>
       this.views.set(
         stub,
