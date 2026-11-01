@@ -11,7 +11,7 @@ import {
   type EveryMember,
   type EveryTrack,
   type TrackKey,
-} from '../binary.js'
+} from '../shared/binary.js'
 import type { BinaryWants, TrackWants } from './binaryWants.js'
 import type { LaneHolder } from './replay.js'
 import { hasEntry, toggle, toggleEntry } from './sets.js'

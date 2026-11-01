@@ -5,7 +5,7 @@ export { listRoom, repairRoomIndex, sweepLapsedRoomsSoon }
 
 import { getRoomBackend } from '../backend/plane.js'
 import type { RoomBackend, RoomHead } from '../backend/contract.js'
-import { Slice } from '../Slice.js'
+import { Slice } from '../shared/Slice.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_LEASE_TTL_MS } from './constants.js'
 import type { RoomIncarnation } from './lifecycle.js'
 import { configFromHead, openConfig } from './lanes.js'

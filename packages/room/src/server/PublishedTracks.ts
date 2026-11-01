@@ -1,7 +1,7 @@
 export { PublishedTracks }
 
-import { DEFAULT_TRACK } from '../binary.js'
-import { ROOM_MEMBER_TRACKS_MAX } from '../constants.js'
+import { DEFAULT_TRACK } from '../shared/binary.js'
+import { ROOM_MEMBER_TRACKS_MAX } from '../shared/constants.js'
 import { hasEntry, toggleEntry } from './sets.js'
 
 /** The named tracks each member this process owns published on, at most `ROOM_MEMBER_TRACKS_MAX` a member. */

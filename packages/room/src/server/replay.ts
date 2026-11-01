@@ -3,13 +3,13 @@ export type { LaneHolder, TextWantsChange }
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getOrCreate } from '../utils/getOrCreate.js'
-import { makePublishInfo } from '../channel.js'
+import { makePublishInfo } from '../shared/channel.js'
 import type { ChannelPublishInfo, OrderingInfo } from 'telefunc/__internal'
-import { EVERY_MEMBER, EVERY_TRACK, type BinaryFrame, type BinaryWantChange } from '../binary.js'
+import { EVERY_MEMBER, EVERY_TRACK, type BinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binaryWants.js'
-import type { MemberWants } from '../protocol.js'
+import type { MemberWants } from '../shared/protocol.js'
 import type { RoomDataEnvelope } from './protocol.js'
-import type { RoomState } from '../state.js'
+import type { RoomState } from '../shared/state.js'
 import { toggle } from './sets.js'
 import { ROOM_REPLAY_HOLD_BYTES_MAX, ROOM_REPLAY_HOLD_ENTRY_BYTES } from './constants.js'
 assertIsNotBrowser()

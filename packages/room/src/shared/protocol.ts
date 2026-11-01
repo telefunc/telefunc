@@ -31,7 +31,7 @@ export type {
 
 import { isRecord, ownLeaveCause, removedCause } from './model.js'
 import type { TrackKey } from './binary.js'
-import type { LeaveCause, ParticipantMeta } from './types.js'
+import type { LeaveCause, ParticipantMeta } from '../types.js'
 
 type MemberSnapshot = {
   id: string

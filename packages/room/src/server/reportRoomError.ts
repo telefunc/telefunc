@@ -1,7 +1,7 @@
 export { reportRoomError }
 
 import { isChannelOverflowError, reportBug } from 'telefunc/__internal'
-import { isRoomError } from '../errors.js'
+import { isRoomError } from '../shared/errors.js'
 
 /** Room's own background work: a RoomError there is an expected outcome (closed room, departed member). A write a
  *  held-send bound refused is no bug either, as Broadcast's refused publish isn't, but nothing else hears of it. */

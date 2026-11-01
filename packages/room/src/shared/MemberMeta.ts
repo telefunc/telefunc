@@ -2,7 +2,7 @@ export { MemberMeta, assignAttributes }
 export type { MetaRewinds }
 
 import type { MemberMetaUpdate } from './protocol.js'
-import type { ParticipantMeta } from './types.js'
+import type { ParticipantMeta } from '../types.js'
 
 /** Merges held past this many keys, or past the meta's own size, are folded into the object, so held merges stay
  *  within a constant factor of the meta. */

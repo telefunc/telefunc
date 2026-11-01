@@ -1,13 +1,13 @@
 export { RoomState, RoomStateView, remoteBacking }
 export type { RoomStateOwner }
 
-import { assert, assertUsage } from './utils/assert.js'
-import { getGlobalObject } from './utils/getGlobalObject.js'
+import { assert, assertUsage } from '../utils/assert.js'
+import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { invokeChannelListener } from './channel.js'
 import type { ChannelPublishInfo } from 'telefunc/__internal'
 import { makeDisposer } from './disposer.js'
-import { Listeners } from './utils/Listeners.js'
-import { getOrCreate } from './utils/getOrCreate.js'
+import { Listeners } from '../utils/Listeners.js'
+import { getOrCreate } from '../utils/getOrCreate.js'
 import {
   EVERY_MEMBER,
   EVERY_TRACK,
@@ -21,7 +21,7 @@ import {
 } from './binary.js'
 import { assertKnownOptions, senderOf, type MemberEntry, type RoomModel } from './model.js'
 import type { MemberSnapshot, MemberWants, RoomDataEvent, SenderStamp } from './protocol.js'
-import type { BinaryFrameInfo, LeaveCause, ParticipantMeta, RemoteParticipant, RoomMeta, Sender } from './types.js'
+import type { BinaryFrameInfo, LeaveCause, ParticipantMeta, RemoteParticipant, RoomMeta, Sender } from '../types.js'
 
 /** A binary listener's track filter: one track, or `EVERY_TRACK`. */
 type TrackFilter = TrackKey | EveryTrack

@@ -1,7 +1,7 @@
 export { Admission }
 export type { AdmissionOptions }
 
-import { participantLeftError, roomClosedError } from '../errors.js'
+import { participantLeftError, roomClosedError } from '../shared/errors.js'
 import type { ParticipantMeta } from '../types.js'
 
 type AdmissionOptions = { meta: ParticipantMeta; identity: string | null; hidden: boolean }

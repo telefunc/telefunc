@@ -1,7 +1,7 @@
 export { reapAndReadRoster, reapAndReadMembersById, reapAndCountPresence, reapAndResolveIdentity }
 
 import { assert } from '../utils/assert.js'
-import type { MemberSnapshot } from '../protocol.js'
+import type { MemberSnapshot } from '../shared/protocol.js'
 import type { RoomMemberRecord } from './protocol.js'
 import type { ParticipantMeta } from '../types.js'
 import { memberMetaOf, readMembersMetaCells, type MemberMetaCells } from './meta.js'

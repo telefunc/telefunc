@@ -17,9 +17,9 @@ import {
   type BinaryFrame,
   type BinaryWantChange,
   type TrackKey,
-} from '../binary.js'
-import { roomClosedError, ROOM_BUG_MESSAGE } from '../errors.js'
-import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetadata, recipientId } from '../model.js'
+} from '../shared/binary.js'
+import { roomClosedError, ROOM_BUG_MESSAGE } from '../shared/errors.js'
+import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetadata, recipientId } from '../shared/model.js'
 import {
   inboxMessageFromWire,
   type SenderStamp,
@@ -30,11 +30,11 @@ import {
   type RoomSnapshotMetadata,
   type InboxMessage,
   type RoomResult,
-} from '../protocol.js'
+} from '../shared/protocol.js'
 import type { RoomDataEnvelope, RoomMemberRecord } from './protocol.js'
-import type { RoomModel } from '../model.js'
-import { RoomState, RoomStateView, type RoomStateOwner } from '../state.js'
-import { ParticipantBase } from '../participant.js'
+import type { RoomModel } from '../shared/model.js'
+import { RoomState, RoomStateView, type RoomStateOwner } from '../shared/state.js'
+import { ParticipantBase } from '../shared/participant.js'
 import {
   MemberMessageTexts,
   RoomParticipantStub,

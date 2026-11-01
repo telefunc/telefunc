@@ -1,7 +1,7 @@
 export { config, getRoomConfig }
 export type { RoomConfig }
 
-import { assertRoomTimeout } from '../model.js'
+import { assertRoomTimeout } from '../shared/model.js'
 import { ROOM_DEPARTURE_TIMEOUT_MS, ROOM_EMPTY_TIMEOUT_MS } from './constants.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { assertUsage } from '../utils/assert.js'

@@ -1,7 +1,7 @@
 export { emptyBinaryWants, wantsTrack, binaryWantsCovers, applyBinaryWantChange }
 export type { TrackWants, BinaryWants }
 
-import { EVERY_MEMBER, EVERY_TRACK, type BinaryWantChange, type TrackKey } from '../binary.js'
+import { EVERY_MEMBER, EVERY_TRACK, type BinaryWantChange, type TrackKey } from '../shared/binary.js'
 import { toggle } from './sets.js'
 
 /** Which of a publisher's tracks a holder wants: every track while `all`, and each of `tracks` either way

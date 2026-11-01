@@ -7,8 +7,8 @@ import { unrefTimer } from '../utils/unrefTimer.js'
 import type { CommitAccepted } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
 import { type ChannelPublishAck, reportBug } from 'telefunc/__internal'
-import type { BinaryFrame } from '../binary.js'
-import { ROOM_MEMBER_TRACKS_MAX } from '../constants.js'
+import type { BinaryFrame } from '../shared/binary.js'
+import { ROOM_MEMBER_TRACKS_MAX } from '../shared/constants.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import {
   DM_FAILURE,
@@ -19,8 +19,8 @@ import {
   RoomError,
   toRoomFailure,
   ROOM_BUG_MESSAGE,
-} from '../errors.js'
-import { ownMetaArgument, senderOf } from '../model.js'
+} from '../shared/errors.js'
+import { ownMetaArgument, senderOf } from '../shared/model.js'
 import type {
   MemberMetaUpdate,
   WholeMemberUpdate,
@@ -28,10 +28,10 @@ import type {
   RoomCtrlEnvelope,
   RoomDmEnvelope,
   SenderStamp,
-} from '../protocol.js'
+} from '../shared/protocol.js'
 import type { RoomDataEnvelope, RoomDmAckEnvelope } from './protocol.js'
-import type { RoomModel } from '../model.js'
-import type { RoomState } from '../state.js'
+import type { RoomModel } from '../shared/model.js'
+import type { RoomState } from '../shared/state.js'
 import type { ParticipantMeta, RoomAckReceipt, RoomSendReceipt, Sender } from '../types.js'
 import { memberCellKey } from './cells.js'
 import { reportRoomError } from './reportRoomError.js'

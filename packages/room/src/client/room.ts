@@ -6,7 +6,7 @@ import { markHandled } from '../utils/markHandled.js'
 import { getOrCreate } from '../utils/getOrCreate.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import type { TELEFUNC_SHIELDS, ChannelPublishAck, ChannelPublishInfo, ClientBroadcast } from 'telefunc/__internal'
-import { makePublishInfo } from '../channel.js'
+import { makePublishInfo } from '../shared/channel.js'
 import {
   EVERY_MEMBER,
   EVERY_TRACK,
@@ -14,8 +14,8 @@ import {
   encodeBinaryFrame,
   type BinaryWantChange,
   type TrackKey,
-} from '../binary.js'
-import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetaArgument, recipientId } from '../model.js'
+} from '../shared/binary.js'
+import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetaArgument, recipientId } from '../shared/model.js'
 import {
   hasRoomTag,
   inboxMessageFromWire,
@@ -38,13 +38,13 @@ import {
   type RoomRosterEvent,
   type RoomSnapshotMetadata,
   type RoomStubRequest,
-} from '../protocol.js'
-import { RoomModel, type MembershipEvent, type RoomModelOwner } from '../model.js'
-import { RoomState, RoomStateView, type RoomStateOwner } from '../state.js'
-import { ROOM_TRACK_WANTS_MAX } from '../constants.js'
-import { CLIENT_ROOM_BUG_MESSAGE, roomResultValue } from '../errors.js'
-import { ParticipantBase } from '../participant.js'
-import type { MetaRewinds } from '../MemberMeta.js'
+} from '../shared/protocol.js'
+import { RoomModel, type MembershipEvent, type RoomModelOwner } from '../shared/model.js'
+import { RoomState, RoomStateView, type RoomStateOwner } from '../shared/state.js'
+import { ROOM_TRACK_WANTS_MAX } from '../shared/constants.js'
+import { CLIENT_ROOM_BUG_MESSAGE, roomResultValue } from '../shared/errors.js'
+import { ParticipantBase } from '../shared/participant.js'
+import type { MetaRewinds } from '../shared/MemberMeta.js'
 import type {
   BinaryPublishOptions,
   JoinOptions,

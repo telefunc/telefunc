@@ -1,7 +1,7 @@
 export { RoomMetaState, compareMetaEntries, metaEntriesAt, metaObjectOf }
 
 import type { RoomMetaEntry, RoomMetaUpdate } from './protocol.js'
-import type { RoomMeta } from './types.js'
+import type { RoomMeta } from '../types.js'
 
 /** Keys go by place, then by key: the order every read of the stored meta lists them in. */
 function compareMetaEntries(a: RoomMetaEntry, b: RoomMetaEntry): number {

@@ -18,12 +18,12 @@ export type { MemberEntry, MembershipEvent, RoomModelOwner, ServerModelOwner }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
-import { assert, assertUsage } from './utils/assert.js'
-import { isObject } from './utils/isObject.js'
+import { assert, assertUsage } from '../utils/assert.js'
+import { isObject } from '../utils/isObject.js'
 import { TIMER_DELAY_MAX_MS } from './constants.js'
 import { untether } from 'telefunc/__internal'
 import { Slice } from './Slice.js'
-import { getOrCreate } from './utils/getOrCreate.js'
+import { getOrCreate } from '../utils/getOrCreate.js'
 import { RoomMetaState } from './metaState.js'
 import { MemberMeta, assignAttributes, type MetaRewinds } from './MemberMeta.js'
 import type {
@@ -34,7 +34,7 @@ import type {
   SenderStamp,
   WholeMemberUpdate,
 } from './protocol.js'
-import type { JoinOptions, LeaveCause, ParticipantMeta, RoomMeta, RoomSnapshotView, Sender } from './types.js'
+import type { JoinOptions, LeaveCause, ParticipantMeta, RoomMeta, RoomSnapshotView, Sender } from '../types.js'
 import type { RoomState } from './state.js'
 
 function isRecord(value: unknown): value is Record<string, unknown> {

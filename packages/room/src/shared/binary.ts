@@ -13,10 +13,10 @@ export type { TrackKey, EveryMember, EveryTrack, BinaryWantChange, BinaryFrame }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
-import { assert, assertUsage } from './utils/assert.js'
-import { utf8ByteLength } from './utils/utf8ByteLength.js'
+import { assert, assertUsage } from '../utils/assert.js'
+import { utf8ByteLength } from '../utils/utf8ByteLength.js'
 import { assertKnownOptions, isRecord } from './model.js'
-import type { BinaryPublishOptions } from './types.js'
+import type { BinaryPublishOptions } from '../types.js'
 
 // Member IDs: UUIDs, framed as a fixed 16-byte prefix on binary messages
 const MEMBER_ID_BYTE_LENGTH = 16

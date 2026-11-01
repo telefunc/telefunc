@@ -1,7 +1,7 @@
 export { makePublishInfo, invokeChannelListener }
 
 import type { ChannelPublishInfo } from 'telefunc/__internal'
-import { isPromise } from './utils/isPromise.js'
+import { isPromise } from '../utils/isPromise.js'
 
 function makePublishInfo(key: string, seq: number, timestamp: number): ChannelPublishInfo {
   return { key, seq, timestamp }

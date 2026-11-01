@@ -4,7 +4,7 @@ export type { PendingMemberCleanup }
 import { getRoomBackend } from '../backend/plane.js'
 import type { CellMutation } from '../backend/contract.js'
 import { isOpenIncarnation } from '../backend/semantics.js'
-import { leaveCauseToWire, type RoomCtrlEnvelope, type WireLeaveCause } from '../protocol.js'
+import { leaveCauseToWire, type RoomCtrlEnvelope, type WireLeaveCause } from '../shared/protocol.js'
 import type { RoomDataEnvelope, RoomMemberRecord } from './protocol.js'
 import type { LeaveCause, ParticipantMeta } from '../types.js'
 import { dropMemberMeta, memberMetaMutations } from './meta.js'

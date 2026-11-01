@@ -3,8 +3,8 @@ export type { CellPlan, CellCommit, CellsAt }
 
 import { getRoomBackend } from '../backend/plane.js'
 import type { CellCount, CellCounter, CellMutation, CellsRead } from '../backend/contract.js'
-import { Slice } from '../Slice.js'
-import { roomClosedError } from '../errors.js'
+import { Slice } from '../shared/Slice.js'
+import { roomClosedError } from '../shared/errors.js'
 import { ROOM_MEMBER_WRITES_IN_FLIGHT_MAX } from './constants.js'
 import { EXCHANGE_CONFLICT, retryCompareExchange } from './retryCompareExchange.js'
 

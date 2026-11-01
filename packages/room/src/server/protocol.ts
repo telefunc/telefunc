@@ -9,7 +9,7 @@ export type {
   RoomDmAckEnvelope,
 }
 
-import type { RoomResult, SenderStamp } from '../protocol.js'
+import type { RoomResult, SenderStamp } from '../shared/protocol.js'
 import type { RoomMeta } from '../types.js'
 
 /** The head's config. `meta` is the one the room was created with, until its first meta write (see `meta.ts`). `inc`

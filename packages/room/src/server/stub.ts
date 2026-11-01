@@ -3,7 +3,7 @@ export type { RoomStubOptions, RoomParticipantStubOptions }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
-import { ROOM_TRACK_WANTS_MAX, ROOM_VIEW_MEMBERS_MAX } from '../constants.js'
+import { ROOM_TRACK_WANTS_MAX, ROOM_VIEW_MEMBERS_MAX } from '../shared/constants.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import {
   assertProtocol,
@@ -35,9 +35,9 @@ import {
 } from './requests.js'
 import { ANNOUNCE_KEY, ReplayGate, heldTextWeight, heldWeight, type LaneHolder, type ReplayHold } from './replay.js'
 import { TailHold, type TailEntry } from './tail.js'
-import { EVERY_MEMBER, EVERY_TRACK, DEFAULT_TRACK, type BinaryFrame, type BinaryWantChange } from '../binary.js'
+import { EVERY_MEMBER, EVERY_TRACK, DEFAULT_TRACK, type BinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binaryWants.js'
-import { DM_FAILURE, RoomError, ROOM_BUG_MESSAGE, toRoomFailure } from '../errors.js'
+import { DM_FAILURE, RoomError, ROOM_BUG_MESSAGE, toRoomFailure } from '../shared/errors.js'
 import {
   leaveCauseToWire,
   dmNotice,
@@ -54,7 +54,7 @@ import {
   type RoomJoinedEvent,
   type RoomResult,
   type RoomRosterEvent,
-} from '../protocol.js'
+} from '../shared/protocol.js'
 import type { RoomDataEnvelope } from './protocol.js'
 import { toggle } from './sets.js'
 assertIsNotBrowser()

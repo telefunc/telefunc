@@ -20,15 +20,15 @@ import {
   isRoomTrack,
   type BinaryFrame,
   type BinaryWantChange,
-} from '../binary.js'
-import { isRecord } from '../model.js'
+} from '../shared/binary.js'
+import { isRecord } from '../shared/model.js'
 import type {
   RoomResult,
   MemberMutationRequest,
   ParticipantStubRequest,
   RoomDataPublish,
   RoomStubRequest,
-} from '../protocol.js'
+} from '../shared/protocol.js'
 assertIsNotBrowser()
 
 type RoomRequest = Extract<

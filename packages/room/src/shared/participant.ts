@@ -4,9 +4,9 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { invokeChannelListener } from './channel.js'
 import type { ChannelPublishAck, TELEFUNC_SHIELDS } from 'telefunc/__internal'
 import { makeDisposer } from './disposer.js'
-import { Listeners } from './utils/Listeners.js'
-import { Fifo } from './utils/Fifo.js'
-import { utf8ByteLength } from './utils/utf8ByteLength.js'
+import { Listeners } from '../utils/Listeners.js'
+import { Fifo } from '../utils/Fifo.js'
+import { utf8ByteLength } from '../utils/utf8ByteLength.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderOf } from './model.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
@@ -19,7 +19,7 @@ import type {
   ParticipantMeta,
   PublishOptions,
   Sender,
-} from './types.js'
+} from '../types.js'
 
 /** What holding a DM before the first `listen()` retains beyond its serialized bytes (about 55 measured), so many small
  *  ones are bounded by memory too. The inbox is the one lane no want gates, so the only one to bridge. */

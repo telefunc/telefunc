@@ -3,14 +3,14 @@ export { roomRemoteReviver, roomTypes }
 import type { ClientReviverContext, ReviverType, TypeContract } from 'telefunc/client'
 import { ClientRoom, ClientStandaloneParticipant } from './room.js'
 import type { LocalParticipant, RemoteParticipant } from '../types.js'
-import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from '../protocol.js'
+import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from '../shared/protocol.js'
 import { assert } from '../utils/assert.js'
 import { untether, type ClientBroadcast } from 'telefunc/__internal'
 import {
   SERIALIZER_PREFIX_ROOM,
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   SERIALIZER_PREFIX_ROOM_REMOTE,
-} from '../constants.js'
+} from '../shared/constants.js'
 
 type RoomReviverContract = TypeContract<never, ClientRoom, RoomSnapshotMetadata>
 type RoomParticipantReviverContract = TypeContract<never, LocalParticipant, ParticipantStubMetadata>

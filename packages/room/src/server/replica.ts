@@ -7,11 +7,11 @@ import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getRoomBackend } from '../backend/plane.js'
 import type { LaneId } from '../backend/contract.js'
 import { encodePublish, hostLocal, type OrderingInfo } from 'telefunc/__internal'
-import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../binary.js'
+import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { DemandReport, RoomDemand, type DemandReportOwner, type RoomDemandOwner } from './demand.js'
 import { PublishedTracks } from './PublishedTracks.js'
-import { DM_FAILURE } from '../errors.js'
-import { joinedMember, leaveCauseFromWire, leaveCauseToWire } from '../protocol.js'
+import { DM_FAILURE } from '../shared/errors.js'
+import { joinedMember, leaveCauseFromWire, leaveCauseToWire } from '../shared/protocol.js'
 import type {
   MemberMetaUpdate,
   MemberSnapshot,
@@ -19,10 +19,10 @@ import type {
   RoomDmEnvelope,
   RoomEnvelope,
   SenderStamp,
-} from '../protocol.js'
+} from '../shared/protocol.js'
 import type { DemandEntry, RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope } from './protocol.js'
-import { Slice } from '../Slice.js'
-import { RoomModel, type MembershipEvent, type ServerModelOwner } from '../model.js'
+import { Slice } from '../shared/Slice.js'
+import { RoomModel, type MembershipEvent, type ServerModelOwner } from '../shared/model.js'
 import type { LeaveCause } from '../types.js'
 import { AuthoritySync, type AuthoritySyncOwner } from './AuthoritySync.js'
 import { PendingDmAcks } from './dmAcks.js'

@@ -5,7 +5,7 @@ import { assertUsage } from '../utils/assert.js'
 import { isObject } from '../utils/isObject.js'
 import { getRoomBackend } from '../backend/plane.js'
 import type { RoomBackend } from '../backend/contract.js'
-import { RoomError, isRoomError, participantGoneError, roomClosedError } from '../errors.js'
+import { RoomError, isRoomError, participantGoneError, roomClosedError } from '../shared/errors.js'
 import {
   assertKnownOptions,
   assertParticipantIdentity,
@@ -13,8 +13,8 @@ import {
   ownMessage,
   ownMetadata,
   removedCause,
-} from '../model.js'
-import type { MemberSnapshot, RoomEnvelope } from '../protocol.js'
+} from '../shared/model.js'
+import type { MemberSnapshot, RoomEnvelope } from '../shared/protocol.js'
 import type { RoomConfigRecord } from './protocol.js'
 import type {
   AfterJoinHook,
@@ -43,7 +43,7 @@ import { SEMANTIC_LANE, acceptedOrThrow, commitLane, inboxOf, openConfig, encode
 import { ServerRoom } from './room.js'
 import { RoomReplica } from './replica.js'
 import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './meta.js'
-import { metaObjectOf } from '../metaState.js'
+import { metaObjectOf } from '../shared/metaState.js'
 import { closeIncarnation } from './close.js'
 import { cancelClose, type RoomIncarnation } from './lifecycle.js'
 import { repairRoomIndex } from './directory.js'
