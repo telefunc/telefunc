@@ -10,7 +10,7 @@ import {
   CREDIT_WINDOW_MAX_BYTES,
 } from '../constants.js'
 import type { RoundTrips } from './RoundTrips.js'
-import type { SendWait } from './SendWait.js'
+import type { SendWait } from './SendWaits.js'
 import type { BdpPingAck } from '../wire/frame.js'
 import type { CreditOwner } from './credit.js'
 

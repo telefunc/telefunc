@@ -5,7 +5,7 @@ import { BdpEstimator } from './BdpEstimator.js'
 import type { CreditOwner, Urgency } from './credit.js'
 import type { RoundTrips } from './RoundTrips.js'
 import type { SelfTime } from './SelfTime.js'
-import type { SendWait } from './SendWait.js'
+import type { SendWait } from './SendWaits.js'
 import { CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_INITIAL_BYTES_BATCH, FC_SELF_UTIL_THRESHOLD } from '../constants.js'
 import type { BdpPingAck } from '../wire/frame.js'
 

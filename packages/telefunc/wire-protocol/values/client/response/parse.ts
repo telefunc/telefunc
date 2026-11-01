@@ -14,7 +14,7 @@ import { makeAbortError, throwAbortError, throwBugError } from '../../../../clie
 import { BaseStreamReader } from './BaseStreamReader.js'
 import { PendingValue, resolvePendingValues } from './PendingValue.js'
 import { StreamReader } from './StreamReader.js'
-import { SSEStreamReader } from './SSEStreamReader.js'
+import { SseStreamReader } from './SseStreamReader.js'
 import { ClientChannel, type ConnectionOptions } from '../../../channel/client/channel.js'
 import { ClientBroadcast } from '../../../channel/client/broadcast.js'
 import { wrapProxy } from '../../../../utils/wrapProxy.js'
@@ -66,7 +66,7 @@ async function parseResponse(
     const isSSE = contentType.includes('text/event-stream')
     const streamReader = isSSE
       ? //
-        new SSEStreamReader(reader, callContext)
+        new SseStreamReader(reader, callContext)
       : new StreamReader(reader, callContext)
     const metaLen = await streamReader.readU32()
     const metaBytes = await streamReader.readExact(metaLen)

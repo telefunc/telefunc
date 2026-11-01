@@ -1,4 +1,4 @@
-export { SSEStreamReader }
+export { SseStreamReader }
 
 import { BaseStreamReader } from './BaseStreamReader.js'
 import { SseEvents } from '../../../channel/client/SseEvents.js'
@@ -15,7 +15,7 @@ const EMPTY = new Uint8Array(0)
  *  persisted across calls. `reader.read()` is called inline — only when more
  *  bytes are needed — preserving the full pull chain through
  *  `FrameDemuxer.ensureReading` to the server generator. No separate pump. */
-class SSEStreamReader extends BaseStreamReader {
+class SseStreamReader extends BaseStreamReader {
   private reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
   private binary: Uint8Array<ArrayBuffer> = EMPTY
   private sse = new SseEvents()

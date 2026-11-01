@@ -4,7 +4,7 @@ export type { PeerSender }
 import { ACK_STATUS, encode } from '../../wire/frame.js'
 import type { AckResultStatus, ErrorReason, SequencedEncoder } from '../../wire/frame.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
-import type { SendWait } from '../../flowControl/SendWait.js'
+import type { SendWait } from '../../flowControl/SendWaits.js'
 import type { Urgency } from '../../flowControl/credit.js'
 
 interface PeerSender {

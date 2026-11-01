@@ -1,6 +1,6 @@
 export { RoundTrips }
 
-import { SendWaits } from './SendWait.js'
+import { SendWaits } from './SendWaits.js'
 
 /** One wire's round trips, as this side measures them: every channel on it reads the same. */
 class RoundTrips {
