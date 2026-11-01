@@ -41,7 +41,7 @@ import {
   type LaneHolder,
   type ReplayHold,
 } from './lifecycle/replay.js'
-import { TailHold, type TailEntry } from './lifecycle/tail.js'
+import { TailHold, type TailEntry, type TailHoldOwner } from './lifecycle/tail.js'
 import { EVERY_MEMBER, EVERY_TRACK, DEFAULT_TRACK, type BinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './lanes/binaryWants.js'
 import { DM_FAILURE, RoomError, ROOM_BUG_MESSAGE, toRoomFailure } from '../shared/errors.js'
@@ -175,7 +175,7 @@ type RoomStubOptions = {
 }
 
 /** One client's view of a server room: it relays what the client wants and acts for the members the client joined. */
-class RoomStub implements LaneHolder, BroadcastEndOwner {
+class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   /** Its channel to its client. */
   readonly end: ServerBroadcastEnd
   private readonly room: ServerRoom
@@ -492,11 +492,14 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
 
   /** Seeded from the room's pre-attach hold, with a fresh lease; expiry drops the hold and lets
    *  the room release ingestion. */
-  beginTail(seed: TailEntry[], onExpire: () => void): void {
-    this.tail = new TailHold(() => {
-      this.tail = null
-      onExpire()
-    }, seed)
+  beginTail(seed: TailEntry[]): void {
+    this.tail = new TailHold({ owner: this, seed })
+  }
+
+  /** Its expiry ends only this stub's want of all text. */
+  _tailExpired(): void {
+    this.tail = null
+    this.room._replica.lanePlan.textChanged(this, [])
   }
 
   /** The first real text want flushes the tail in order through the replay gate. */

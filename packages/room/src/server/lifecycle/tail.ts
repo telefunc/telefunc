@@ -1,5 +1,5 @@
 export { TailHold }
-export type { TailEntry }
+export type { TailEntry, TailHoldOwner }
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
@@ -9,16 +9,27 @@ assertIsNotBrowser()
 
 type TailEntry = { serialized: string; ord: OrderingInfo; from: string }
 
+/** The room or stub whose tail it holds. */
+interface TailHoldOwner {
+  /** The lease expired before the holder subscribed. */
+  _tailExpired(): void
+}
+
+type TailHoldOptions = {
+  owner: TailHoldOwner
+  seed?: TailEntry[]
+}
+
 /** Recent text held drop-oldest under both caps until its holder subscribes, or until its lease expires. */
 class TailHold {
   private readonly entries: TailEntry[]
   private codeUnits = 0
   private readonly lease: ReturnType<typeof setTimeout>
 
-  constructor(onExpire: () => void, seed: TailEntry[] = []) {
+  constructor({ owner, seed = [] }: TailHoldOptions) {
     this.entries = seed
     for (const entry of seed) this.codeUnits += entry.serialized.length
-    this.lease = unrefTimer(setTimeout(onExpire, ROOM_TAIL_ATTACH_TIMEOUT_MS))
+    this.lease = unrefTimer(setTimeout(() => owner._tailExpired(), ROOM_TAIL_ATTACH_TIMEOUT_MS))
   }
 
   /** An entry larger than the whole budget is dropped, never held: the tail is best-effort. */

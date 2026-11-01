@@ -44,7 +44,7 @@ import {
 } from './stub.js'
 import type { RoomRequest } from './requests.js'
 import { LocalHolder, type LaneHolder, type TextWantsChange } from './lifecycle/replay.js'
-import { TailHold } from './lifecycle/tail.js'
+import { TailHold, type TailHoldOwner } from './lifecycle/tail.js'
 import type { RoomReplica } from './replica.js'
 import { RoomWrites, runAfterHook, type RoomWritesOwner } from './writes.js'
 import { acceptedOrThrow, commitLane, controlLane, encodeRoomRecord, withinRoomHorizon } from './lanes/lanes.js'
@@ -74,7 +74,7 @@ type MetaMirror = { accepted(update: MemberMetaUpdate): void; rewound(): void }
 
 /** One `Room.get()`'s handle on a room: its guards, its tail, the stubs it opened, its participants and its listeners,
  *  over this process's one view of the room, which every handle to it shares. Each serialization opens a fresh stub. */
-class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
+class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHoldOwner {
   readonly [SERVER_ROOM_BRAND] = true
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
@@ -317,10 +317,15 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
 
   /** Resolves once the tail receives, so it holds everything committed after it returns. */
   async _startTail(): Promise<void> {
-    this.tail = new TailHold(() => this.teardownTail())
+    this.tail = new TailHold({ owner: this })
     this._replica.track(this)
     this._replica.lanePlan.syncLanes() // bring up text ingestion before any stub exists
     await withinRoomHorizon(this._replica.lanePlan.semanticReady)
+  }
+
+  /** @internal */
+  _tailExpired(): void {
+    this.teardownTail()
   }
 
   private teardownTail(): void {
@@ -350,8 +355,7 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
     this.stubs.add(stub)
     this._replica.attachStub(stub)
     if (this.tail !== null) {
-      // Its expiry ends only the stub's want of all text.
-      stub.beginTail(this.tail.take(), () => this._replica.lanePlan.textChanged(stub, []))
+      stub.beginTail(this.tail.take())
       this.tail = null
     }
     this._replica.track(this)
