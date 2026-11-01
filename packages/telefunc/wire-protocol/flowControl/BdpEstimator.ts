@@ -76,7 +76,7 @@ class BdpEstimator {
     return this.byteWindowCap
   }
 
-  /** Currently advertised message-count window. */
+  /** The message window the estimator sets, which `ReceiveCredit` advertises. */
   get msgWindow(): number {
     return this.currentMsgWindow
   }
@@ -194,7 +194,8 @@ class BdpEstimator {
     return msgSample * 3 < msgWindow * 2 ? 'sample-too-small' : 'grow'
   }
 
-  /** Cadence: snap to MIN on grow (more headroom may exist), exponential backoff on a verdict against growing. */
+  /** Sets the probe interval: back to the minimum after a grow, since more headroom may exist; doubled, up to the
+   *  maximum, after a verdict against growing. */
   private pace(bytes: AxisDecision, msgs: AxisDecision): void {
     if (bytes === 'grow' || msgs === 'grow') {
       this.probeIntervalMs = BDP_PING_MIN_INTERVAL_MS
@@ -203,7 +204,7 @@ class BdpEstimator {
     }
   }
 
-  /** Commit a byte-window growth: a doubling, or less as the last settled probe says. Idempotent at the cap. */
+  /** Grows the byte window: doubles it, or less where the last settled probe says so; no change at the cap. */
   growBytes(): void {
     this.currentByteWindow = Math.min(this.byteWindowCap, this.grownWindow || this.currentByteWindow * 2)
     this.grownWindow = 0
@@ -233,7 +234,7 @@ class BdpEstimator {
     this.currentByteWindow = Math.min(this.currentByteWindow, this.byteWindowCap)
   }
 
-  /** Commit a message-window doubling. Idempotent at the cap. */
+  /** Doubles the message window; no change at the cap. */
   growMsgs(): void {
     this.msgWindowBeforeGrowth = this.currentMsgWindow
     this.currentMsgWindow = Math.min(CREDIT_MSG_WINDOW_MAX, this.currentMsgWindow * 2)
@@ -251,8 +252,7 @@ class BdpEstimator {
 
   private pingDue(now: number): boolean {
     if (this.pingInFlight) return false
-    // Skip probe only when *both* axes have already hit their cap — otherwise one of them
-    // might still want to grow.
+    // A probe is skipped only when both windows are at their cap: otherwise one may still grow.
     if (this.currentByteWindow >= this.byteWindowCap && this.currentMsgWindow >= CREDIT_MSG_WINDOW_MAX) return false
     return now - this.lastPingAt >= this.probeIntervalMs
   }
