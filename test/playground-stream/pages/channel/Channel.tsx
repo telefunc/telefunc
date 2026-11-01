@@ -126,7 +126,7 @@ type ChannelState = {
   clientAbortThenSendErr: string | null
   clientPendingAckCloseErr: string | null
   peerShorterCloseChannelId: string | null
-  longerCloseAfterPeer: { ms: number; result: number } | null
+  longerCloseAfterPeerMs: number | null
   clientPendingAckCloseReconnectChannelId: string | null
   clientPendingAckCloseReconnectOnOpenFired: boolean | null
   clientPendingAckCloseReconnectErr: string | null
@@ -215,7 +215,7 @@ const initialState: ChannelState = {
   clientAbortThenSendErr: null,
   clientPendingAckCloseErr: null,
   peerShorterCloseChannelId: null,
-  longerCloseAfterPeer: null,
+  longerCloseAfterPeerMs: null,
   clientPendingAckCloseReconnectChannelId: null,
   clientPendingAckCloseReconnectOnOpenFired: null,
   clientPendingAckCloseReconnectErr: null,
@@ -730,8 +730,8 @@ function ChannelDemo() {
       void channel.send('close')
       while (!channel.isClosed) await new Promise((resolve) => setTimeout(resolve, 10))
       const start = performance.now()
-      const result = await channel.close({ timeout: 60_000 })
-      setChannelState((s) => ({ ...s, longerCloseAfterPeer: { ms: Math.round(performance.now() - start), result } }))
+      await channel.close({ timeout: 60_000 })
+      setChannelState((s) => ({ ...s, longerCloseAfterPeerMs: Math.round(performance.now() - start) }))
     })
   }, [])
 

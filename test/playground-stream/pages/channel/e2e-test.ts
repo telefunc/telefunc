@@ -51,7 +51,7 @@ type ChannelState = {
   clientAbortThenSendErr: string | null
   clientPendingAckCloseErr: string | null
   peerShorterCloseChannelId: string | null
-  longerCloseAfterPeer: { ms: number; result: number } | null
+  longerCloseAfterPeerMs: number | null
   clientPendingAckCloseReconnectChannelId: string | null
   clientPendingAckCloseReconnectOnOpenFired: boolean | null
   clientPendingAckCloseReconnectErr: string | null
@@ -772,8 +772,8 @@ function testChannel(isDev: boolean, inDocker = false) {
   test("channel: a close() the page makes within 60 s after the server's close() within 1 s ends by the server's deadline", async () => {
     await page.click('#channel-test-longer-close-after-peer')
     await autoRetry(async () => {
-      const { longerCloseAfterPeer } = await getResult<ChannelState>('#channel-state')
-      expect(longerCloseAfterPeer?.ms).lessThan(10_000)
+      const { longerCloseAfterPeerMs } = await getResult<ChannelState>('#channel-state')
+      expect(longerCloseAfterPeerMs).lessThan(10_000)
     })
   })
 
