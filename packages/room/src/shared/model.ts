@@ -197,7 +197,7 @@ class RoomModel {
 
   constructor(opts: RoomModelOptions) {
     this.roomId = opts.roomId
-    this.metaState = new RoomMetaState(opts.meta, opts.metaSeq)
+    this.metaState = new RoomMetaState({ entries: opts.meta, seq: opts.metaSeq })
     this.closed = opts.closed === true
     this.owner = opts.owner
     if ('members' in opts.seed) {

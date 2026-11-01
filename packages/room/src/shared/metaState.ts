@@ -17,6 +17,8 @@ function metaObjectOf(entries: Iterable<RoomMetaEntry>): RoomMeta {
   return Object.freeze(Object.fromEntries(Array.from(entries, ([key, value]) => [key, value])))
 }
 
+type RoomMetaStateOptions = { entries: readonly RoomMetaEntry[]; seq: number }
+
 /** A room meta as a view keeps it: its updates apply in `seq` order, each in what it changed, and the plain object is
  *  built when read. */
 class RoomMetaState {
@@ -31,7 +33,7 @@ class RoomMetaState {
   /** Changes past the next seq, until the ones before them arrive or a whole meta covers them. */
   private readonly pendingUpdates = new Map<number, RoomMetaUpdate>()
 
-  constructor(entries: readonly RoomMetaEntry[], seq: number) {
+  constructor({ entries, seq }: RoomMetaStateOptions) {
     this._entries = new Map(entries.map((entry) => [entry[0], entry]))
     this.last = entries.at(-1)
     this._seq = seq
