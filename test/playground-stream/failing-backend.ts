@@ -4,7 +4,6 @@ export {
   pendingBackendFaults,
   endBackendSubscriptions,
   holdCellPages,
-  holdSubscriptions,
   holdRetainedReads,
 }
 export type { BackendFault }
@@ -38,14 +37,13 @@ type Call = { roomId?: string; keys: string[] }
 type CellPagesHold = { roomId: string; key: string; pages: number; wait: () => Promise<void> }
 type RetainedReadsHold = { roomId: string; waiting: number; released: Promise<void> }
 
-const { faults, subscriptions, holds, holding, subscriptionHolds, retainedHolds, holdingRetained } = ((
+const { faults, subscriptions, holds, holding, retainedHolds, holdingRetained } = ((
   globalThis as Record<symbol, unknown>
 )[Symbol.for('playground-stream:failingBackend')] ??= {
   faults: [],
   subscriptions: new Set(),
   holds: [],
   holding: new WeakSet(),
-  subscriptionHolds: new Map(),
   retainedHolds: [],
   holdingRetained: new WeakSet(),
 }) as {
@@ -53,32 +51,29 @@ const { faults, subscriptions, holds, holding, subscriptionHolds, retainedHolds,
   subscriptions: Set<FailingSubscription>
   holds: CellPagesHold[]
   holding: WeakSet<RoomPlane>
-  subscriptionHolds: Map<string, Promise<void>>
   retainedHolds: RetainedReadsHold[]
   holdingRetained: WeakSet<RoomPlane>
 }
 
-/** What a subscription of the in-memory backend tells core, passed on unless a test drops it or holds it. */
+/** What a subscription of the in-memory backend tells core, passed on unless a test drops it. */
 class FailingSubscription implements Subscriber {
   unsubscribeInner: Unsubscribe | null = null
 
   constructor(
     readonly source: Source,
     private readonly outer: Subscriber,
-    private readonly held: Promise<void> | undefined,
   ) {}
 
   get consumers(): number {
     return this.outer.consumers
   }
 
-  message(payload: BackendPayload, position: OrderingInfo): void {
-    if (!takeFault('deliver', callOf(this.source))) this.outer.message(payload, position)
+  message(payload: BackendPayload, ordering: OrderingInfo): void {
+    if (!takeFault('deliver', callOf(this.source))) this.outer.message(payload, ordering)
   }
 
   ready(): void {
-    if (this.held === undefined) this.outer.ready()
-    else void this.held.then(() => this.outer.ready())
+    this.outer.ready()
   }
 
   lost(): void {
@@ -127,8 +122,7 @@ function failing<Driver extends { subscribe(source: Source, subscriber: Subscrib
       outer.failed(new Error('failing-backend: subscribe refused'))
       return async () => {}
     }
-    const held = 'roomId' in source ? subscriptionHolds.get(source.roomId) : undefined
-    const subscription = new FailingSubscription(source, outer, held)
+    const subscription = new FailingSubscription(source, outer)
     subscriptions.add(subscription)
     subscription.unsubscribeInner = memory.subscribe(source, subscription)
     return () => subscription.unsubscribe()
@@ -149,16 +143,6 @@ function failing<Driver extends { subscribe(source: Source, subscriber: Subscrib
       }
     },
   })
-}
-
-/** Holds the subscriptions opened on `roomId` until `release()` short of ready, as a store slow to confirm them would. */
-function holdSubscriptions(roomId: string): () => void {
-  const released = createDeferred()
-  subscriptionHolds.set(roomId, released.promise)
-  return () => {
-    subscriptionHolds.delete(roomId)
-    released.resolve()
-  }
 }
 
 function addBackendFault(fault: BackendFault) {

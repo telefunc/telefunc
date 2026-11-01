@@ -91,7 +91,6 @@ import {
   addBackendFault,
   endBackendSubscriptions,
   holdCellPages,
-  holdSubscriptions,
   holdRetainedReads,
   type BackendFault,
 } from '../../failing-backend'
@@ -918,15 +917,15 @@ async function onStopChurn(roomId: string) {
   return await churning.get(roomId)!()
 }
 
-/** While the store holds a view's new subscription short of ready, a member publishes three 1,500-byte messages at once,
- *  past the 4,096-byte bufferLimit of the lane that runs it. */
+/** A view subscribes and a member publishes three 1,500-byte messages in the same turn, past the 4,096-byte
+ *  bufferLimit of the lane that runs it: Redis's SUBSCRIBE round trip keeps the view's new subscription short of ready,
+ *  so the Redis driver holds the three commits until it is. */
 async function onPublishWhileEstablishing(roomId: string) {
   const me = await Room.join(roomId, { meta: { name: 'Me' } })
   const room = await Room.get(roomId)
   const seen: string[] = []
   watched.set(roomId, seen)
   watchedRooms.set(roomId, room)
-  const release = holdSubscriptions(roomId)
   room.subscribe((data, _info, from) => {
     if (from.id === me.id) seen.push((data as string)[0]!)
   })
@@ -936,8 +935,5 @@ async function onPublishWhileEstablishing(roomId: string) {
       (err: Error) => err.name,
     ),
   )
-  // The one past bufferLimit settles while the others are held.
-  await publishes[2]
-  release()
   return await Promise.all(publishes)
 }

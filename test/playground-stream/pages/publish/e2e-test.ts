@@ -443,7 +443,7 @@ function testPublishFailingBackend() {
   })
 }
 
-/** Runs in a lane whose config.channel.bufferLimit is 4,096 bytes. */
+/** Runs on Redis, in a lane whose config.channel.bufferLimit is 4,096 bytes. */
 function testPublishSmallBuffer() {
   test('broadcast: publishes held while a subscription establishes fit bufferLimit by their bytes, and the one past it rejects with ChannelOverflowError', async () => {
     await navigate(`${getServerUrl()}/publish`)
