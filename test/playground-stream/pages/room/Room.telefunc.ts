@@ -27,6 +27,7 @@ export {
   onGetHiddenAfterPlayers,
   onCloseRoomWithMember,
   onBackgroundErrors,
+  onCloseWhileSubscribing,
   onRoomWhileAway,
   onRoomMetaWhileAway,
   onRoomLeaveWhileJoining,
@@ -343,6 +344,27 @@ async function onBackgroundErrors(roomId: string) {
   const reported = bugs.sort()
   bugs = null
   return { reported, unhandled: unhandled.length, awaited }
+}
+
+/** Rooms closed while a view of each subscribes, and the bugs reported meanwhile. */
+async function onCloseWhileSubscribing() {
+  bugs = []
+  const prefix = `e2e-close-while-subscribing:${crypto.randomUUID()}:`
+  const closed = await Promise.all(
+    Array.from({ length: 10 }, async (_, i) => {
+      await Room.create(prefix + i)
+      const room = await Room.get(prefix + i)
+      const { promise, resolve } = Promise.withResolvers<void>()
+      room.onClose(resolve)
+      room.subscribe(() => {})
+      room.subscribeBinary(() => {}, { track: 'cam' })
+      await Room.close(prefix + i)
+      await promise
+    }),
+  )
+  const reported = bugs
+  bugs = null
+  return { closed: closed.length, reported }
 }
 
 const awayMembers = new Map<string, LocalParticipant[]>()

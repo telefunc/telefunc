@@ -297,6 +297,8 @@ class RedisSubscriber {
     }
     if (!this.isCurrent(id)) return
     if (starts !== null) return subscription.markReady(starts)
+    // Closed on purpose since the caller read it open; gone after a loss, it may have gone with Redis's data.
+    if (subscription.subscribing) return subscription.end()
     subscription.fail(new Error(`subscribeLane: the incarnation of '${subscription.laneChannel}' is not open`))
   }
 
@@ -444,7 +446,7 @@ class RedisSubscription {
   }
 
   /** Its incarnation was dropped. */
-  private end(): void {
+  end(): void {
     if (this.state === 'closed') return
     this.close(new Error(`Redis incarnation of '${this.laneChannel}' was dropped`))
     this.subscriber.ended()

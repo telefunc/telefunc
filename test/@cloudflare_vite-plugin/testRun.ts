@@ -450,6 +450,15 @@ function testRoomStorage() {
     expect(await clickRoomCard(page, 'close-when-left')).deep.equal({ listed: 0 })
   })
 
+  test('Room: a view that subscribes after another session closed its room closes, and no bug is reported', async () => {
+    const id = crypto.randomUUID()
+    const [holder, closer] = await openSessions(id, ['holder', 'closer'])
+    await clickRoomCard(holder!, 'hold-view')
+    await clickRoomCard(closer!, 'close-held')
+    expect(await clickRoomCard(holder!, 'subscribe-held')).deep.equal([])
+    for (const page of [holder!, closer!]) await page.context().close()
+  })
+
   test('Room: its meta keeps the key order its writes gave it', async () => {
     await openRoomPage()
     expect(await clickRoomCard(page, 'meta-key-order')).deep.equal({

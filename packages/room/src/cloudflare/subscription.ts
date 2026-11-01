@@ -117,15 +117,15 @@ class CloudflareRoomSubscription {
   }
 
   async register(): Promise<void> {
-    let registered: RegisterWire
+    let registration: RegisterWire
     try {
-      registered = await this.callAuthority((authority) => authority.registerRoute(this.route))
+      registration = await this.callAuthority((authority) => authority.registerRoute(this.route))
     } catch (error) {
       return this.fail(error)
     }
-    if (!('ok' in registered)) return this.fail(new Error(registered.reason))
     // Unsubscribed while it registered: its release already went out.
     if (this.ended) return
+    if (registration === 'dropped') return this.end()
     this.subscriber.ready()
     this.scheduleRenewal()
   }
@@ -148,10 +148,15 @@ class CloudflareRoomSubscription {
     }
     if (this.ended) return
     if (renewal === 'renewed') return this.scheduleRenewal()
-    this.stop()
     // A route that went with its dropped incarnation ends on purpose; a lapsed one is a failure.
-    if (renewal === 'dropped') this.subscriber.ended()
-    else this.subscriber.failed(new Error(`Cloudflare route '${this.route.laneKey}' lapsed`))
+    if (renewal === 'dropped') this.end()
+    else this.fail(new Error(`Cloudflare route '${this.route.laneKey}' lapsed`))
+  }
+
+  /** Its incarnation is no longer open. */
+  private end(): void {
+    this.stop()
+    this.subscriber.ended()
   }
 
   private fail(error: unknown): void {

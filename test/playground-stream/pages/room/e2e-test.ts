@@ -459,6 +459,13 @@ function testRoom() {
       expect(r.emptied).toBe(false)
     },
   )
+  testRoomScenario<{ closed: number; reported: string[] }>(
+    'close-while-subscribing',
+    'room: a room closed while a view of it subscribes closes the view, and no bug is reported',
+    (r) => {
+      expect(r).deep.equal({ closed: 10, reported: [] })
+    },
+  )
   testRoomScenario<MemberResult>(
     'member',
     'room: a returned RemoteParticipant is the same object as the room view',

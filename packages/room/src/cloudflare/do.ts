@@ -60,7 +60,8 @@ import {
 type AcceptedCommitWire = { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken?: string }
 type CommitWire = AcceptedCommitWire | StaleCommit
 
-type RegisterWire = { ok: true } | { rejected: true; reason: string }
+/** A route registered, or refused because its incarnation is dropped or closing. */
+type RegisterWire = 'registered' | 'dropped'
 /** A route renewed, lapsed on its own, or deleted with its dropped incarnation. */
 type RenewWire = 'renewed' | 'lapsed' | 'dropped'
 
@@ -163,15 +164,13 @@ class RoomAuthority {
 
   async registerRoute(route: RouteInstallation): Promise<RegisterWire> {
     const now = Date.now()
-    const result = this.transaction((sql): RegisterWire => {
-      if (!isOpenIncarnation(readLiveHead(sql, now), route.inc)) {
-        return { rejected: true, reason: `room has no open incarnation '${route.inc}'` }
-      }
+    const registration = this.transaction((sql): RegisterWire => {
+      if (!isOpenIncarnation(readLiveHead(sql, now), route.inc)) return 'dropped'
       upsertRoute(sql, route, now)
-      return { ok: true }
+      return 'registered'
     })
-    if ('ok' in result) await this.scheduleMaintenanceIfNeeded()
-    return result
+    if (registration === 'registered') await this.scheduleMaintenanceIfNeeded()
+    return registration
   }
 
   /** Renews the route, or says it lapsed or went with its dropped incarnation; the session then ends its

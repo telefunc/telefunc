@@ -32,6 +32,7 @@ import {
   onGetHiddenAfterPlayers,
   onCloseRoomWithMember,
   onBackgroundErrors,
+  onCloseWhileSubscribing,
   onRoomWhileAway,
   onRoomMetaWhileAway,
   onRoomLeaveWhileJoining,
@@ -1738,6 +1739,10 @@ function Room() {
         )
         const server = await onBackgroundErrors(`e2e-errors-server:${crypto.randomUUID()}`)
         setResult(JSON.stringify({ awaited, server }))
+      })}
+
+      {scenario('close-while-subscribing', null, 'Rooms closed while a server view subscribes', async () => {
+        setResult(JSON.stringify(await onCloseWhileSubscribing()))
       })}
 
       {scenario('tracks', 'Named tracks and demand', 'Tracks reach who asked', async () => {
