@@ -1,4 +1,4 @@
-export { Waits }
+export { SendWaits }
 export type { SendWait }
 
 /** How long a wait stays in the history a download's window reads (see `SendWait`). */
@@ -12,8 +12,8 @@ type SendWait = {
   longestWaitSince(at: number): number
 }
 
-/** Waits by when they were seen, for `WAITS_KEPT_MS`; each drops the earlier ones no longer than it. */
-class Waits {
+/** The waits a sender saw, kept by when for `WAITS_KEPT_MS`; each drops the earlier ones no longer than it. */
+class SendWaits {
   private entries: { at: number; wait: number }[] = []
   private head = 0
 

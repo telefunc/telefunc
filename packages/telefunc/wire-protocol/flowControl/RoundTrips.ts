@@ -1,12 +1,12 @@
 export { RoundTrips }
 
-import { Waits } from './SendWait.js'
+import { SendWaits } from './SendWait.js'
 
 /** One wire's round trips, as this side measures them: every channel on it reads the same. */
 class RoundTrips {
   private leastRtt = Number.POSITIVE_INFINITY
   /** Where this side's frames go by batch POST: how long each POST's oldest frame waited for its answer. */
-  private readonly postWaits = new Waits()
+  private readonly postWaits = new SendWaits()
 
   /** The least round trip an attach's probe or a later ping took on this wire, `Infinity` before a probe's answer. */
   get pathRtt(): number {

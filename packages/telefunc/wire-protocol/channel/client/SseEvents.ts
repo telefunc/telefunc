@@ -1,10 +1,10 @@
-export { SSEEvents }
+export { SseEvents }
 
 import { base64urlToUint8Array } from '../../wire/base64url.js'
 
 /** Splits an SSE body into its events' base64url data, searching each read once: a line that spans reads is kept in
  *  parts and joined once. */
-class SSEEvents {
+class SseEvents {
   private decoder = new TextDecoder()
   private partial: string[] = []
   private data = ''

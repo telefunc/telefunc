@@ -13,7 +13,7 @@ import { createPushReadableStream, type PushReadableStream } from '../../../util
 import { createPushReadable, type PushReadable } from '../../../utils/pushReadable.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { parseSseRequestMetadata, textEncoder, type SseRequestMetadata } from '../../wire/envelope.js'
-import { OversizeFrameError, StreamReader, StreamTruncatedError } from '../../wire/StreamReader.js'
+import { OversizeFrameError, BodyReader, StreamTruncatedError } from '../../wire/BodyReader.js'
 import { getChannelMux } from './mux.js'
 import type { ReconcileOutcome, ServerTransport } from './mux.js'
 import { encode } from '../../wire/frame.js'
@@ -138,7 +138,7 @@ class SseServerTransport {
     const useNodeStream = readable !== undefined
     let connId: string | null = null
     try {
-      const reader = new StreamReader(source)
+      const reader = new BodyReader(source)
       const metadata = parseMetadata(await reader.readMetadata(SSE_METADATA_MAX_BYTES))
       connId = metadata.connId
       switch (metadata.kind) {
@@ -168,7 +168,7 @@ class SseServerTransport {
    *  (`runStreamResponse`). Returns immediately so the response headers can flush. */
   private async handleStreamResponsePost(
     connId: string,
-    reader: StreamReader,
+    reader: BodyReader,
     useNodeStream: boolean,
     request: Request,
   ): Promise<SseChannelHttpResponse> {
@@ -211,7 +211,7 @@ class SseServerTransport {
 
   /** Long-lived client→server upload POST. The body streams for the wire's lifetime, so every
    *  frame is dispatched fire-and-forget — awaiting one would stall the read loop behind it. */
-  private async handleStreamRequestPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
+  private async handleStreamRequestPost(connId: string, reader: BodyReader): Promise<SseChannelHttpResponse> {
     const wire = await this.resolveWire(connId)
     if (!wire) return badRequest()
     reader.onChunk = () => this.mux.onWireBytes(wire)
@@ -251,7 +251,7 @@ class SseServerTransport {
   /** Short-lived outbox batch POST. A RECONCILE's RECONCILED goes as it is answered, ahead of what the frames behind it
    *  send: those are what the page carries with it, which it doesn't replay. Tracked in `pendingDispatches` so
    *  `runStreamResponse` won't send its own reconciled mid-batch. */
-  private async handleBatchPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
+  private async handleBatchPost(connId: string, reader: BodyReader): Promise<SseChannelHttpResponse> {
     const wire = await this.resolveWire(connId)
     if (!wire) return badRequest()
     reader.onChunk = () => this.mux.onWireBytes(wire)
@@ -271,7 +271,7 @@ class SseServerTransport {
   /** Stream-response POST lifecycle: consume the initial reconcile batch; once its RECONCILE is answered, drain the
    *  batch POSTs in flight so their `_lastClientSeq` mutations land first and emit `reconciled`, ahead of what the
    *  frames carried behind it send; then release the `ready` gate the other POSTs are parked on. */
-  private async runStreamResponse(wire: SseWire, reader: StreamReader): Promise<void> {
+  private async runStreamResponse(wire: SseWire, reader: BodyReader): Promise<void> {
     try {
       await this.drain(wire, reader, async (outcome) => {
         if (!shouldSendReconciled(outcome, wire)) return
@@ -311,7 +311,7 @@ class SseServerTransport {
    *  `onReconciled` before the next frame is read. */
   private async drain(
     wire: SseWire,
-    reader: StreamReader,
+    reader: BodyReader,
     onReconciled: (outcome: ReconcileOutcome) => void | Promise<void>,
   ): Promise<void> {
     while (true) {

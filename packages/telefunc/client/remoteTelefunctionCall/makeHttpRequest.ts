@@ -11,7 +11,7 @@ import { getConnectionOptions } from './getConnectionOptions.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import type { CloseHandler } from '../close.js'
 import { ConnectionError } from '../ConnectionError.js'
-import { getSessionUrl } from '../../wire-protocol/channel/client/sessionRegistry.js'
+import { getSessionUrl } from '../../wire-protocol/channel/client/getSessionUrl.js'
 import type { ChannelTransports } from '../../wire-protocol/constants.js'
 import {
   STATUS_CODE_SUCCESS,

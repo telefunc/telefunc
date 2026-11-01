@@ -1,4 +1,4 @@
-export { StreamReader, OversizeFrameError, StreamTruncatedError }
+export { BodyReader, OversizeFrameError, StreamTruncatedError }
 
 import type { Readable } from 'node:stream'
 import { assert, assertUsage, assertWarning } from '../../utils/assert.js'
@@ -15,7 +15,7 @@ class OversizeFrameError extends Error {}
 class StreamTruncatedError extends Error {}
 
 /**
- * Pull-based byte-counting stream reader for the binary frame protocol.
+ * Pull-based byte-counting reader of a request body in the binary frame protocol.
  *
  * Wire format: [u32 metadata length][metadata bytes][file0 bytes][file1 bytes]...
  * File sizes are known from the metadata — no boundary scanning needed,
@@ -32,7 +32,7 @@ class StreamTruncatedError extends Error {}
  * `buffer`/`source` per chunk, and `#fields` compile to per-access `WeakMap.get/set`
  * which dominates CPU on hot streaming paths. Plain property access is cheap.
  */
-class StreamReader {
+class BodyReader {
   private source: AsyncIterator<Uint8Array<ArrayBuffer>>
   private buffer: Uint8Array<ArrayBuffer> = EMPTY
   private fileSizes: Map<number, number> = new Map()

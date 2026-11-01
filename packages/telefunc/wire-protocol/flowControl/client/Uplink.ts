@@ -3,7 +3,7 @@ export { Uplink }
 import { DrainRate } from '../DrainRate.js'
 import { PieceRate } from '../PieceRate.js'
 import { RoundTrips } from '../RoundTrips.js'
-import { Waits, type SendWait } from '../SendWait.js'
+import { SendWaits, type SendWait } from '../SendWait.js'
 
 /** A page's uplink: the rate the server takes data at, and what the uplink holds. */
 class Uplink implements SendWait {
@@ -15,7 +15,7 @@ class Uplink implements SendWait {
   private queued = 0
   private queuedAt = 0
   /** How long the frames that go at once waited behind the uplink, and data did as the peer acknowledged it. */
-  private readonly waits = new Waits()
+  private readonly waits = new SendWaits()
   readonly roundTrips = new RoundTrips()
   readonly pieceRate = new PieceRate()
 

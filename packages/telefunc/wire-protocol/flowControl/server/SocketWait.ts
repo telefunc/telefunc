@@ -2,7 +2,7 @@ export { SocketWait }
 export type { SocketWaitOwner }
 
 import { DRAIN_SPAN_MS, DrainRate } from '../DrainRate.js'
-import { Waits, type SendWait } from '../SendWait.js'
+import { SendWaits, type SendWait } from '../SendWait.js'
 
 interface SocketWaitOwner {
   /** All the wire holds, which drains as the frames it is handed arrive. */
@@ -23,7 +23,7 @@ class SocketWait implements SendWait {
   private spanFrom = 0
   private spanHeld = 0
   private spanHanded = 0
-  private readonly waits = new Waits()
+  private readonly waits = new SendWaits()
 
   constructor({ owner }: SocketWaitOptions) {
     this.owner = owner
