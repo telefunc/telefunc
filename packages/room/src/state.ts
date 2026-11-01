@@ -410,20 +410,6 @@ class RoomModel {
     for (const view of [...this.views]) view.connectionChanged(entry)
   }
 
-  /** Runs `read`, then `settle` with what it read, recording the membership events this model gets until `settle` ends;
-   *  `settle` sees the events grow. */
-  async recordingMembership<T, R>(
-    read: () => Promise<T>,
-    settle: (value: T, events: readonly MembershipEvent[]) => R | Promise<R>,
-  ): Promise<R> {
-    const events = this.recordMembership()
-    try {
-      return await settle(await read(), events)
-    } finally {
-      this.stopRecordingMembership()
-    }
-  }
-
   /** Records the membership events this model gets into the returned list, until `stopRecordingMembership()`. */
   recordMembership(): readonly MembershipEvent[] {
     assert(this.recording === null)

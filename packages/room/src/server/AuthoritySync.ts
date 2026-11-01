@@ -21,7 +21,10 @@ interface AuthoritySyncOwner {
   readonly id: string
   readonly incarnation: RoomIncarnation
   /** Read-only here: every change goes through the owner's methods. */
-  readonly model: Pick<RoomModel, 'closed' | 'metaWaiting' | 'metaSeq' | 'rosterKnown' | 'recordingMembership'>
+  readonly model: Pick<
+    RoomModel,
+    'closed' | 'metaWaiting' | 'metaSeq' | 'rosterKnown' | 'recordMembership' | 'stopRecordingMembership'
+  >
   readOpenConfig(): Promise<RoomConfigRecord | null>
   applyAuthorityMeta(stored: StoredRoomMeta): void
   /** A failover rewound the control lane: the view forgets its meta seqs. */
@@ -197,11 +200,14 @@ class AuthoritySync {
     const owner = this.owner
     if (owner.model.closed) return
     const mark = await this.controlMark()
-    const read = await owner.model.recordingMembership(
-      () => reapAndReadRoster(owner.incarnation),
-      async (roster, events) => !owner.model.closed && (await owner.roster.reconcile(roster, events)),
-    )
-    if (!read) return
+    // The events grow while the roster is read and reconciled.
+    const events = owner.model.recordMembership()
+    try {
+      const roster = await reapAndReadRoster(owner.incarnation)
+      if (owner.model.closed || !(await owner.roster.reconcile(roster, events))) return
+    } finally {
+      owner.model.stopRecordingMembership()
+    }
     this.cover(mark)
     await this.owner.lanePlan.replan()
   }
