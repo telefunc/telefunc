@@ -19,12 +19,12 @@ type ChannelMetadata = { channelId: string; roomId: string; maxFrameBytes?: numb
 
 const roomReviver = channelReviver<RoomReviverContract>(
   SERIALIZER_PREFIX_ROOM,
-  (end, metadata) => new ClientRoom(end, metadata),
+  (end, metadata) => new ClientRoom({ end, snapshot: metadata }),
 )
 
 const roomParticipantReviver = channelReviver<RoomParticipantReviverContract>(
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
-  (end, metadata) => new ClientStandaloneParticipant(end, metadata),
+  (end, metadata) => new ClientStandaloneParticipant({ end, metadata }),
 )
 
 /** Bound to the live `ClientRoom` the parser revived first, so `room.getParticipant(m.id) === m`, and sharing its

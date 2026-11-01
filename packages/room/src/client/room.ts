@@ -127,6 +127,8 @@ function heldConnectionChanged(id: string, wasConnected: boolean | null): void {
   }
 }
 
+type ClientRoomOptions = { end: ClientBroadcast; snapshot: RoomSnapshotMetadata }
+
 /** A server room through one Broadcast channel: its frames carry events and data, its acked messages requests. */
 class ClientRoom extends RoomStateView implements Room {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
@@ -150,11 +152,11 @@ class ClientRoom extends RoomStateView implements Room {
   /** @internal */
   readonly _bufferLimit: number
 
-  constructor(end: ClientBroadcast, snapshot: RoomSnapshotMetadata) {
+  constructor({ end, snapshot }: ClientRoomOptions) {
     super()
     this.end = end
     this._bufferLimit = snapshot.bufferLimit
-    const owner = new ClientRoomOwner(this)
+    const owner = new ClientRoomOwner({ room: this })
     this.model = new RoomModel({
       roomId: snapshot.roomId,
       meta: snapshot.meta,
@@ -655,11 +657,13 @@ abstract class ClientParticipantBase extends ParticipantBase {
   }
 }
 
+type ClientRoomOwnerOptions = { room: ClientRoom }
+
 /** What a `ClientRoom`'s model and state ask of it, kept off the room itself, which is the user's `Room`. */
 class ClientRoomOwner implements RoomModelOwner, RoomStateOwner {
   private readonly room: ClientRoom
 
-  constructor(room: ClientRoom) {
+  constructor({ room }: ClientRoomOwnerOptions) {
     this.room = room
   }
 
@@ -763,12 +767,14 @@ class ClientRoomParticipant extends ClientParticipantBase {
   }
 }
 
+type ClientStandaloneParticipantOptions = { end: ClientBroadcast; metadata: ParticipantStubMetadata }
+
 /** `LocalParticipant` revived from a serialized `ServerLocalParticipant`. Owns its channel. */
 class ClientStandaloneParticipant extends ClientParticipantBase {
   private readonly end: ClientBroadcast
   private readonly request: (req: ParticipantStubRequest) => Promise<unknown>
 
-  constructor(end: ClientBroadcast, metadata: ParticipantStubMetadata) {
+  constructor({ end, metadata }: ClientStandaloneParticipantOptions) {
     const request = async (req: ParticipantStubRequest) => roomResultValue(end.send(req, { ack: true }))
     // Its own: the `rewound` notice forgets its seq.
     super({ participant: metadata, rewinds: { count: 0 }, request })
