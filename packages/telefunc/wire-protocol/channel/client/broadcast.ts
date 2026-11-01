@@ -11,13 +11,9 @@ import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ChannelClosedError } from '../channelErrors.js'
 import { isPromise } from '../../../utils/isPromise.js'
-import { hasProp } from '../../../utils/hasProp.js'
 import { ClientChannel, reportChannelError, type ClientChannelOptions } from './channel.js'
 
-const CLIENT_BROADCAST_BRAND = Symbol.for('telefunc.ClientBroadcast')
-
 class ClientBroadcast<T = unknown> extends ClientChannel {
-  readonly [CLIENT_BROADCAST_BRAND] = true
   private readonly broadcastListeners = new Listeners<BroadcastListener<T>>()
   private readonly broadcastBinaryListeners = new Listeners<BroadcastBinaryListener>()
   /** The subscriptions this page asks the server for. */
@@ -27,10 +23,6 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     super(options)
     // Nothing waits on a publish's credit: the window only bounds how far behind the server lets the page fall.
     this.receiveCredit.widenByteWindow()
-  }
-
-  static isClientBroadcast(value: unknown): value is ClientBroadcast {
-    return hasProp(value, CLIENT_BROADCAST_BRAND)
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
