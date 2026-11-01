@@ -136,7 +136,8 @@ function mergeBySeq(a: Run, b: Run): Run {
   return { seqs, frames }
 }
 
-/** Bounded FIFO queue with parallel arrays and amortised O(1) compaction. */
+/** One kind's frames, oldest first, within a byte budget; `ReplayBuffer` keeps one per replay kind, made at its first
+ *  frame. */
 class ReplayQueue {
   // Seqs and frames in parallel arrays, so a scan by seq reads only numbers.
   private seqs: number[] = []
