@@ -376,20 +376,16 @@ class RoomState {
     const entry = this.model.entry(from)
     const sender = entry ? this.remote(entry) : senderOf(from, {}, null)
     // Each listener gets bytes of its own: one may write into them or transfer their buffer.
-    this.fireTrackFiltered(this.roomBinaryCbs, track, (cb) => cb(new Uint8Array(payload), frameInfo, sender))
+    for (const { cb, track: want } of this.roomBinaryCbs.list()) {
+      if (want === EVERY_TRACK || want === track) {
+        invokeChannelListener(cb, [new Uint8Array(payload), frameInfo, sender], this.reportError)
+      }
+    }
     const binary = entry && this.memberListeners.get(entry)?.binary
-    if (binary) this.fireTrackFiltered(binary.cbs, track, (cb) => cb(new Uint8Array(payload), frameInfo))
-  }
-
-  /** Fire the listeners whose track filter admits `track`. */
-  private fireTrackFiltered<CB>(
-    cbs: Listeners<{ cb: CB; track: TrackFilter }>,
-    track: TrackKey,
-    invoke: (cb: CB) => unknown,
-  ): void {
-    for (const { cb, track: want } of cbs.list()) {
-      if (want !== EVERY_TRACK && want !== track) continue
-      invokeChannelListener(invoke, [cb], this.reportError)
+    if (!binary) return
+    for (const { cb, track: want } of binary.cbs.list()) {
+      if (want === EVERY_TRACK || want === track)
+        invokeChannelListener(cb, [new Uint8Array(payload), frameInfo], this.reportError)
     }
   }
 
