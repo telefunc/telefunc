@@ -25,7 +25,7 @@ function subscribe(subscriptions: Subscriptions<string>, events: string[], name:
   return subscription
 }
 
-describe('a message the driver delivers before ready()', () => {
+describe('a message the driver delivers before its first ready()', () => {
   it('reaches the consumers right after ready, in the order delivered', () => {
     const driver = createDriver()
     const events: string[] = []
@@ -49,6 +49,17 @@ describe('a message the driver delivers before ready()', () => {
     void b.unsubscribe()
     driver.subscriber!.ready()
     expect(events).toEqual(['b closed', 'a ready', 'c ready', 'a message 1'])
+  })
+
+  it('after a loss, a message is delivered as it arrives', () => {
+    const driver = createDriver()
+    const events: string[] = []
+    subscribe(new Subscriptions({ driver }), events, 'a')
+    driver.subscriber!.ready()
+    driver.subscriber!.lost()
+    driver.subscriber!.message('1', at(1))
+    driver.subscriber!.ready()
+    expect(events).toEqual(['a ready', 'a lost', 'a message 1', 'a ready'])
   })
 
   it('is dropped when the subscription ends instead', async () => {

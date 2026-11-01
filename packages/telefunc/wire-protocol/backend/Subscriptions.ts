@@ -112,7 +112,9 @@ class SharedSubscription implements Subscriber {
   private current: SubscriptionState = 'establishing'
   private readiness: Deferred<void> = createReadiness()
   private unsubscribeDriver: Unsubscribe | null = null
-  private early: EarlyMessage[] = []
+  /** What the driver delivered before its first `ready()`; null from then on, as a message after a loss goes out as it
+   *  arrives. */
+  private early: EarlyMessage[] | null = []
   /** It stopped or ended: what the driver says from here on is ignored. */
   private finished = false
 
@@ -178,7 +180,7 @@ class SharedSubscription implements Subscriber {
       return
     }
     // A consumer sees `ready` before any message, so a driver needn't order its acknowledgment before what it delivers.
-    if (this.current !== 'ready') this.early.push({ payload, ordering, targets: this.targets() })
+    if (this.early !== null) this.early.push({ payload, ordering, targets: this.targets() })
     else for (const consumer of this.targets()) consumer.receive(payload, ordering)
   }
 
@@ -186,8 +188,8 @@ class SharedSubscription implements Subscriber {
     if (this.finished || this.current === 'ready') return
     this.readiness.resolve()
     this.enter('ready')
-    const early = this.early
-    this.early = []
+    const early = this.early ?? []
+    this.early = null
     for (const { payload, ordering, targets } of early) {
       // A consumer may leave, or stop the subscription, on one of them.
       for (const consumer of targets)
@@ -224,7 +226,7 @@ class SharedSubscription implements Subscriber {
 
   private finish(): void {
     this.finished = true
-    this.early = []
+    this.early = null
     this.unsubscribeDriver = null
     this.subscriptions.forget(this)
   }
