@@ -55,7 +55,8 @@ type ServerTransport<TWire> = {
   wholeMessages: boolean
   /** Bytes of sent frames still in the wire, never undercounted; `undefined` if the runtime can't tell. */
   bufferedAmount(wire: TWire): number | undefined
-  /** The bytes of those a frame that goes at once waits behind, where it passes some: else `bufferedAmount`'s. */
+  /** Of the bytes `bufferedAmount` counts, those a frame sent now waits behind, where it can pass some of them (SSE).
+   *  Without it, the frame waits behind all of them. */
   queuedAhead?(wire: TWire): number | undefined
   terminateWire(wire: TWire): void
 }
@@ -157,7 +158,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     return (this.resolvedOptions ??= resolveMuxServerOptions())
   }
 
-  /** Exposed for transport-level race timers (SSE's `waitForConnection`). */
+  /** Exposed for transport-level race timers (SSE's `waitForWire`). */
   get connectTtl(): number {
     return this.options.connectTtl
   }
@@ -379,7 +380,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     }
     state.recvBacklog.bytes += byteLength
     state.recvBacklog.frames++
-    // Taken as it arrives: it's handled once those before it were, after later ones arrived.
+    // Read now, as the frame arrives: it is handled only after the frames before it, when later ones may have arrived.
     const delivery = state.deliveries.last
     state.lastReceivedAt = now
     const exec = (): Promise<ReconcileOutcome | null> => this.runInboundTurn(entry, rawFrame, byteLength, delivery)
@@ -398,13 +399,13 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     const piece = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
     assert(piece.tag === TAG.PIECE)
     assertProtocol(entry.sender.pieces, 'PIECE on a wire that takes no pieces')
-    // As large as the runtime takes in one message: its pieces get past what it would refuse whole.
+    // In pieces, a frame gets past the runtime's limit on one message, so its total is held to that limit here.
     const cap = getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES
     assertProtocol(piece.total <= cap, 'PIECE of a frame over the cap')
     const { receiver } = entry.sender.pieces
     const heldBefore = receiver.held
     const frame = receiver.add(piece.total, piece.piece, now)
-    // What it holds of a frame counts in the recv backlog as the frame does once whole.
+    // The part of a frame the receiver holds counts in the recv backlog, as the whole frame will.
     state.recvBacklog.bytes += receiver.held - heldBefore
     state.recvBacklog.frames += Number(receiver.held > 0) - Number(heldBefore > 0)
     if (frame === null) return Promise.resolve(null)
@@ -517,7 +518,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     const sessionId = entry.transport.getSessionId(entry.wire)
     assertProtocol(sessionId, 'frame before reconcile')
     const channelFrame = frame as ChannelFrame
-    // One for a channel the wire awaits is held for after its attach, and stays in the recv backlog until then.
+    // A frame for a channel the wire awaits is held until the channel attaches, counted in the recv backlog meanwhile.
     const awaited = entry.state.awaited.get(channelFrame.index)
     if (awaited && awaited.phase !== 'expired') {
       entry.state.awaited.hold(awaited, channelFrame, rawFrame.byteLength)
@@ -565,7 +566,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     this.sessions.get(sessionId, frame.index)?.channel._dispatchFrame(frame)
   }
 
-  /** Abandons the probes staged on the session it names and its wire's, refused mid-commit, unless it names its own. */
+  /** A RECONCILE that doesn't name its own wire's session abandons the probes staged for the session it names and for
+   *  its wire's session; a claim on a committing stage is refused. */
   private claimSessionForReconcile(ctrl: ReconcilePayload, entry: WireEntry): void {
     const own = entry.transport.getSessionId(entry.wire)
     if (ctrl.sessionId !== undefined && ctrl.sessionId === own) return
@@ -642,12 +644,14 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     const { wire, state, transport } = entry
     const retiredWire = isBarrier && ctrl.sessionId ? (this.sessionWires.get(ctrl.sessionId) ?? null) : null
     this.resetPingTimer(entry)
-    // One on the wire that holds the session it names keeps it, and so what is bound to it: a staged upgrade.
+    // A RECONCILE on the wire that holds the session it names keeps that session, and what is bound to it, such as a
+    // staged upgrade.
     const newSessionId =
       ctrl.sessionId !== undefined && ctrl.sessionId === transport.getSessionId(wire)
         ? ctrl.sessionId
         : crypto.randomUUID()
-    // Replayed only on a reconnect, as the session's own wire and a barrier's old one (read to its FIN) still deliver.
+    // Missed frames are replayed only on a reconnect: the session's own wire, and a barrier's old wire read up to its
+    // FIN, still deliver them.
     const replay = !isBarrier && newSessionId !== ctrl.sessionId
     const { released } = ctrl
     // The page names what changed only on the wire that has its session: elsewhere it can't know what the server holds.
@@ -735,7 +739,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
 
   /** Null leaves it out of the RECONCILED; an initial channel not yet registered is awaited until its ATTACH_RESULT. */
   private attach(open: ReconcileOpenEntry, entry: WireEntry, replay: boolean): ChannelHandle | null {
-    // Answered ahead of the channel's frames, and of its registration where awaited: its round trip is the path's.
+    // The probe is answered ahead of the channel's frames, and of its registration where the channel is awaited, so its
+    // round trip measures the path alone.
     if (open.probe !== undefined) entry.sender.addProbe(open.ix, open.probe)
     const awaited = entry.state.awaited.get(open.ix)
     if (awaited) {
@@ -778,7 +783,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     }
     this.sessions.add(sessionId, handle)
     entry.state.awaited.attach(awaited)
-    // Once the registering code added its listeners; the ATTACH_RESULT follows, so its lastSeq counts what was held.
+    // Runs once the registering code has added its listeners. The ATTACH_RESULT goes after the held frames, so its
+    // lastSeq counts them.
     const settle = async (): Promise<void> => {
       if (entry.state.awaited.get(awaited.open.ix) !== awaited) return
       if (this.dispatchHeld(awaited)) entry.sender.send(encode.attachResult(awaited.open.ix, channel._lastClientSeq))
@@ -922,7 +928,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     state.pingTimer = unrefTimer(
       setTimeout(() => {
         state.pingTimer = null
-        // A PING waits behind what the page queued: dead past the deadline after its last bytes and its announced data.
+        // A PING waits behind what the page queued, so the wire is dead only a deadline after its last bytes and after
+        // the data it announced.
         const deadAt = Math.max(
           state.lastReceivedAt + this.options.pingDeadline,
           entry.sender.pieces?.receiver.expectedBy(this.options.pingDeadline) ?? 0,

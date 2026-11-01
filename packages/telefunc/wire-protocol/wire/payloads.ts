@@ -38,8 +38,8 @@ type ReconcilePayload = {
   released?: number[]
 }
 
-/** A barrier names the session it retires and the upgrade it commits — both mandatory, where a
- *  reconcile has neither. A malformed one can no longer fall through to ordinary reconciliation. */
+/** A barrier names the session it retires and the upgrade it commits; a reconcile has neither. Both are required:
+ *  `parseBarrierPayload` refuses a barrier without them. */
 type BarrierPayload = {
   sessionId: string
   upgradeId: string

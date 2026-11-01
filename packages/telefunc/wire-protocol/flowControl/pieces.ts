@@ -77,23 +77,25 @@ class PieceSender {
   private headroom = 0
   /** The frames and pieces sent and not yet acknowledged that measure the rate. */
   private readonly unacknowledged = new Fifo<{ crossing: number; at: number; end: number; probe: boolean }>()
-  /** The bytes the receiver has acknowledged; the first frame's, and when it was sent. */
+  /** The bytes the receiver has acknowledged. */
   acknowledgedBytes = 0
+  /** The first frame's bytes, and when it was sent. */
   private firstBytes = 0
   private firstAt = 0
   /** The bytes its receiver said it took at its newest heartbeat. */
   heartbeatBytes = 0
   /** The bytes of the messages for the socket, headers and announcements included, as its receiver counts them. */
   transmittedBytes = 0
-  /** A probe out: the bytes handed to the socket through it, and where its second piece starts, for a pair. */
+  /** The probe in flight: `end` counts the bytes handed to the socket up to its end, and `second` is where its
+   *  second piece starts, when it went as a pair. */
   private probe: { end: number; second: number | null } | null = null
   /** The rest of a data frame, waiting for headroom. */
   private rest: { frame: Uint8Array<ArrayBuffer>; offset: number } | null = null
-  /** The frames sent after the rest, but those that pass it. */
+  /** The frames sent while the rest of a data frame waits, in order; a frame that passes the rest isn't here. */
   private readonly waiting = new Fifo<Uint8Array<ArrayBuffer>>()
   /** The bytes waiting for headroom. */
   waitingBytes = 0
-  /** The announcement its task's frames go behind, open until the task ends. */
+  /** The open announcement that the current task's frames go behind; it closes when the task ends. */
   private open: { start: number; at: number; bytes: number } | null = null
   /** The bytes of the newest message it announced. */
   private lastAnnounced = 0
@@ -123,7 +125,7 @@ class PieceSender {
     this.setWholeUpTo()
   }
 
-  /** The bytes of the messages for the socket, and of the frames sent, those it holds. */
+  /** The bytes of the messages handed to the socket, and of the frames still waiting here. */
   get sentBytes(): number {
     return this.transmittedBytes + this.waitingBytes
   }
@@ -133,12 +135,12 @@ class PieceSender {
     return this.waitingBytes + this.messages.bytes
   }
 
-  /** Whether it has data its socket doesn't have yet: what waits goes behind the rest of a data frame. */
+  /** Whether the rest of a data frame waits for headroom; every frame sent meanwhile waits behind it. */
   get dataWaits(): boolean {
     return this.rest !== null
   }
 
-  /** The next message it hands the socket carries ahead of it the frame `frame` returns then, if any. */
+  /** Puts the frame that `frame` returns then, if any, ahead of the next message it hands the socket. */
   carry(frame: () => Uint8Array<ArrayBuffer> | null): void {
     this.carried.push(frame)
   }
@@ -158,7 +160,7 @@ class PieceSender {
     }
     this.takeCarried()
     const tag = frame[0]!
-    // It passes what waits: the probe its peer waits on may be its own.
+    // A PIECES_ACK goes ahead of what waits: the peer's probe may be waiting for it.
     if (tag === TAG.PIECES_ACK && this.open === null) return this.pass(frame)
     if (this.rest === null) {
       if (this.open === null && !this.announces(frame)) return this.pass(frame)
@@ -181,7 +183,7 @@ class PieceSender {
     )
   }
 
-  /** No rate yet: a data frame carrying at most what any sender hands ahead goes whole, as pieces cost a round trip. */
+  /** With no rate measured, a data frame no larger than any sender hands ahead goes whole: pieces cost a round trip. */
   private goesWhole(frame: Uint8Array<ArrayBuffer>): boolean {
     return (
       this.pieceRate.fastest === 0 &&
@@ -554,7 +556,7 @@ abstract class PieceReceiver implements AckScheduleOwner {
   took = 0
   protected acknowledgedTook = 0
   protected newestAt = 0
-  /** When the newest data frame arrived, and when the newest the last acknowledgement covered did. */
+  /** When the newest data frame arrived, and when the newest one the last acknowledgement covered arrived. */
   private newestDataAt: number | null = null
   private acknowledgedDataAt: number | null = null
   protected ackedAt = Number.NEGATIVE_INFINITY
