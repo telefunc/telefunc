@@ -21,9 +21,6 @@ type HeldPublish = {
   binary: boolean
 }
 
-/** What the publishes held on one queue wait for. */
-type Wait = { readonly ready: Promise<void>; ended: boolean }
-
 /**
  * Our PUBLISH goes out on the command connection, so it can reach Redis before the SUBSCRIBE our subscriber
  * connection sent just before it, and our own new subscription would miss it. So a publish waits, at most HOLD_MS,
@@ -34,7 +31,8 @@ type Wait = { readonly ready: Promise<void>; ended: boolean }
 class PublishHold {
   private readonly subscriptions: RedisSubscriptions
   private readonly prefix: string
-  private readonly waits = new Map<string, Wait>()
+  /** What the publishes held on each queue wait for. */
+  private readonly waits = new Map<string, Promise<void>>()
   private readonly heldBytes = new Map<string, number>()
 
   constructor({ subscriptions, prefix }: { subscriptions: RedisSubscriptions; prefix: string }) {
@@ -84,15 +82,10 @@ class PublishHold {
 
   private hold<Payload extends string | Uint8Array>(held: HeldPublish, payload: Payload): Promise<Payload> | null {
     let wait = this.waits.get(held.queue)
-    if (wait === undefined || wait.ended) {
+    if (wait === undefined) {
       const ready = this.subscriptions.firstReady(held.channels)
-      if (ready === null) {
-        if (wait === undefined) return null
-        // The publishes the ended wait held send in the microtasks that follow; this one goes after them.
-        const owned = ownCopy(payload)
-        return wait.ready.then(() => owned)
-      }
-      wait = { ready: withTimeout(ready, HOLD_MS), ended: false }
+      if (ready === null) return null
+      wait = withTimeout(ready, HOLD_MS)
     }
     const bytes = HELD_OVERHEAD_BYTES + (typeof payload === 'string' ? Buffer.byteLength(payload) : payload.byteLength)
     const total = (this.heldBytes.get(held.budget) ?? 0) + bytes
@@ -104,7 +97,7 @@ class PublishHold {
     this.heldBytes.set(held.budget, total)
     if (this.waits.get(held.queue) !== wait) this.startWait(held.queue, wait)
     const owned = ownCopy(payload)
-    return wait.ready.then(() => {
+    return wait.then(() => {
       const left = this.heldBytes.get(held.budget)! - bytes
       if (left === 0) this.heldBytes.delete(held.budget)
       else this.heldBytes.set(held.budget, left)
@@ -112,16 +105,9 @@ class PublishHold {
     })
   }
 
-  private startWait(queue: string, wait: Wait): void {
+  private startWait(queue: string, wait: Promise<void>): void {
     this.waits.set(queue, wait)
-    void wait.ready.then(() => {
-      wait.ended = true
-      // The publishes it held send in the microtasks that follow, so it is dropped on the event loop's next turn: a
-      // publish before then still goes after them.
-      setImmediate(() => {
-        if (this.waits.get(queue) === wait) this.waits.delete(queue)
-      })
-    })
+    void wait.then(() => this.waits.delete(queue))
   }
 }
 
