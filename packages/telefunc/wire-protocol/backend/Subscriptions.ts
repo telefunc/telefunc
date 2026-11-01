@@ -89,6 +89,9 @@ class Subscriptions<Source> {
   }
 }
 
+/** A message the driver delivered before `ready()`, and the consumers it would have reached then. */
+type EarlyMessage = { payload: BackendPayload; ordering: OrderingInfo; targets: readonly Consumer[] }
+
 type SharedSubscriptionOptions = {
   subscriptions: Subscriptions<unknown>
   host: Host
@@ -109,6 +112,7 @@ class SharedSubscription implements Subscriber {
   private current: SubscriptionState = 'establishing'
   private readiness: Deferred<void> = createReadiness()
   private unsubscribeDriver: Unsubscribe | null = null
+  private early: EarlyMessage[] = []
   /** It stopped or ended: what the driver says from here on is ignored. */
   private finished = false
 
@@ -173,13 +177,22 @@ class SharedSubscription implements Subscriber {
       console.error(error)
       return
     }
-    for (const consumer of this.targets()) consumer.receive(payload, ordering)
+    // A consumer sees `ready` before any message, so a driver needn't order its acknowledgment before what it delivers.
+    if (this.current !== 'ready') this.early.push({ payload, ordering, targets: this.targets() })
+    else for (const consumer of this.targets()) consumer.receive(payload, ordering)
   }
 
   ready(): void {
     if (this.finished || this.current === 'ready') return
     this.readiness.resolve()
     this.enter('ready')
+    const early = this.early
+    this.early = []
+    for (const { payload, ordering, targets } of early) {
+      // A consumer may leave, or stop the subscription, on one of them.
+      for (const consumer of targets)
+        if (!this.finished && this.attached.has(consumer)) consumer.receive(payload, ordering)
+    }
   }
 
   lost(): void {
@@ -211,6 +224,7 @@ class SharedSubscription implements Subscriber {
 
   private finish(): void {
     this.finished = true
+    this.early = []
     this.unsubscribeDriver = null
     this.subscriptions.forget(this)
   }

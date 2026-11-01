@@ -35,11 +35,11 @@ type PublishResult = OrderingInfo & { receivers?: number }
 /**
  * What a backend implements for Broadcast.
  *
- * An ordering's `seq` is a positive safe integer that grows with every publish on a key, of either kind; its
+ * A host is the process, or a session Durable Object on Cloudflare. An ordering's `seq` is a positive safe integer that grows with every publish on a key, of either kind; its
  * `timestamp` is a non-negative safe integer (ms) that never goes back on a key.
  */
 type BroadcastDriver = {
-  /** Publishes `payload` on `route` and returns its ordering. A publish this process makes after `subscribe()`
+  /** Publishes `payload` on `route` and returns its ordering. A publish this host makes after `subscribe()`
    *  returned reaches that subscription: if your publishes and subscribes travel by different connections, hold a
    *  publish until your own new subscriptions on its route are ready, as the Redis driver does. The caller may reuse
    *  `payload`'s bytes once this returns: copy what you keep. */
@@ -47,9 +47,10 @@ type BroadcastDriver = {
     route: BroadcastRoute<Kind>,
     payload: BroadcastPayload<Kind>,
   ): PublishResult | Promise<PublishResult>
-  /** Subscribes this host to `route` and tells `subscriber` how it goes. Core calls it once per route and host (the
-   *  process; a session Durable Object on Cloudflare), however many consumers share it. Throw only for the caller's
-   *  mistake, which reaches the caller; report a refusal with `subscriber.failed(error)`. */
+  /** Subscribes this host to `route` and tells `subscriber` how it goes. Core keeps at most one live subscription
+   *  per route and host, however many consumers share it, and subscribes again once that one failed, ended or was
+   *  unsubscribed. Throw only for the caller's mistake, which reaches the caller; report a refusal with
+   *  `subscriber.failed(error)`. */
   subscribe(route: BroadcastRoute, subscriber: Subscriber): Unsubscribe
   /** Only for a driver that fixes a publish's recipients as it publishes (memory): the `seq` of `key`'s last
    *  publish, so a consumer joining a live subscription skips what was published before it. */
@@ -59,8 +60,9 @@ type BroadcastDriver = {
 /**
  * Core's end of one driver subscription. Call `ready()` once every publish made from now on reaches it, `lost()` when
  * it may miss messages (its connection dropped), `ready()` again once it can't, and `ended()` or `failed()` when it is
- * over for good. Deliver each key's messages in `seq` order with `message()`. Core ignores a call that repeats the
- * state, and every call after `ended()`, `failed()` or its unsubscribe.
+ * over for good. Deliver each key's messages in `seq` order with `message()`, as they arrive: one that comes before
+ * `ready()` is held by core and reaches the consumers right after it. Core ignores a call that repeats the state, and
+ * every call after `ended()`, `failed()` or its unsubscribe.
  */
 interface Subscriber {
   message(payload: BackendPayload, ordering: OrderingInfo): void

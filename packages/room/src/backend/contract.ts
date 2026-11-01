@@ -164,7 +164,7 @@ type RoomDriver = {
    *  page is the last. */
   readCellPages(roomId: string, inc: string, prefix: string): AsyncIterable<CellsRead>
   compareExchangeCells(roomId: string, inc: string, cx: CellsCx): Promise<CxResult>
-  /** A commit this process makes after `subscribe()` returned reaches that subscription: if your commits and
+  /** A commit this host makes after `subscribe()` returned reaches that subscription: if your commits and
    *  subscribes travel by different connections, hold a commit until your own new subscriptions on its lanes are
    *  ready, as the Redis driver does. The caller may reuse `payload`'s bytes once this returns: copy what you keep. */
   commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult>
@@ -188,7 +188,7 @@ type RoomDriver = {
   /** Up to a page of the entries due at the authority's now, earliest first; an entry stays due until it is put again
    *  or deleted. */
   directoryDue(): Promise<DirectoryPage['entries']>
-  /** Subscribes this host to `source` and tells `subscriber` how it goes, as a Broadcast driver's `subscribe` does. A
+  /** Subscribes this host to `source` and tells `subscriber` how it goes, as a Broadcast driver's `subscribe` does. An
    *  incarnation that isn't open is a refusal: `subscriber.failed(error)`. */
   subscribe(source: RoomSubscriptionSource, subscriber: Subscriber): Unsubscribe
 }
