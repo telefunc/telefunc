@@ -1,5 +1,5 @@
 export { ChannelMux, getChannelMux }
-export type { WireEntry, ReconcileOutcome, ServerTransport, Wire, WirePieces }
+export type { WireEntry, ReconcileOutcome, ServerTransport, Wire }
 
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
@@ -26,12 +26,9 @@ import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type { BarrierPayload, PreparePayload, ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
 import { IndexedPeer } from './IndexedPeer.js'
-import { ServerHeadroom } from '../../flowControl/server/headroom.js'
-import type { ServerPieceReceiver } from '../../flowControl/server/pieceReceiver.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
 import { WireSender, type WireSenderOwner } from './WireSender.js'
 import { UpgradeStages, type UpgradeStagesOwner } from './UpgradeStages.js'
-import { TransportSocket } from './TransportSocket.js'
 import { AwaitedChannels, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
 import { RegistrationWaits, type RegistrationWaitsOwner } from './RegistrationWaits.js'
 import type { ServerChannel } from './channel.js'
@@ -98,8 +95,6 @@ type MuxServerOptions = {
 type DetachReason = 'transient' | 'permanent' | 'recoveryFailed'
 
 type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer }
-
-type WirePieces = { headroom: ServerHeadroom; receiver: ServerPieceReceiver }
 
 type WireState = {
   pingTimer: ReturnType<typeof setTimeout> | null
@@ -219,12 +214,6 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
 
   onWireOpen<TWire>(wire: TWire, transport: ServerTransport<TWire>, request?: Request): void {
     const recvBacklog = { bytes: 0, frames: 0 }
-    const headroom = transport.wholeMessages
-      ? new ServerHeadroom({
-          socket: new TransportSocket({ transport: transport as ServerTransport<unknown>, wire }),
-          pingInterval: this.options.pingInterval,
-        })
-      : null
     const deliveries = new Deliveries()
     const entry: WireEntry = {
       wire,
@@ -246,7 +235,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
         owner: this,
         wire,
         transport: transport as ServerTransport<unknown>,
-        pieceHeadroom: headroom,
+        pingInterval: this.options.pingInterval,
         deliveries,
       }),
       request,
@@ -291,7 +280,6 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     const entry = this.wires.get(wire)
     if (!entry) return
     entry.state.closed = { isPermanent: permanent }
-    entry.sender.pieces?.headroom.close()
     this.clearPingTimer(entry.state)
     entry.state.awaited.stop()
     entry.sender.close()
