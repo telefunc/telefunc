@@ -12,7 +12,7 @@ interface DemandReportOwner {
 type DemandReportOptions = { owner: DemandReportOwner }
 
 /** What some holder of a replica receives. */
-class Receives {
+class DemandSets {
   readonly pairs = new Map<string, Set<string>>()
   /** The members whose every track is received. */
   readonly members = new Set<string>()
@@ -30,10 +30,10 @@ class DemandReport {
   /** The reports of this process carry it, so its own echo is told apart. */
   readonly instance = crypto.randomUUID()
   /** Its `except` is set whether or not the track is planned. */
-  private readonly planned = new Receives()
+  private readonly planned = new DemandSets()
   /** The planned tracks of every member that are fetched by member. */
   private readonly byMember = new Set<string>()
-  private untold = new Receives()
+  private untold = new DemandSets()
   /** A telling a deadline stopped, resumed by the next one. */
   private telling: Iterator<void> | null = null
 
@@ -167,7 +167,7 @@ class DemandReport {
    *  round runs until the telling ends, so this reads it as it goes. Each change it reads is one step. */
   private *tellChanges(): Generator<void, void, void> {
     const { pairs, members, tracks, fetched, except } = this.untold
-    this.untold = new Receives()
+    this.untold = new DemandSets()
     const planned = this.planned
     const told = this.told
     for (const [member, byTrack] of pairs) {
