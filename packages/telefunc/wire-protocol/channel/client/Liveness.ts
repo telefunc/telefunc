@@ -11,7 +11,6 @@ import { Heartbeat } from './Heartbeat.js'
 
 /** The connection, which drops a wire whose PONG came late and lets go of a channel the server needs nothing more of. */
 interface LivenessOwner {
-  readonly sessionId: string | null
   onPongTimeout(transport: ClientChannelTransport): void
   releaseChannel(record: ChannelRecord): void
 }
@@ -43,9 +42,10 @@ class Liveness {
     return this.pingIntervalMs
   }
 
-  /** From the RECONCILE on: a RECONCILED comes behind what the server sends as it attaches, however long that takes. */
-  beatFromReconcile(transport: ClientChannelTransport): void {
-    if (this.owner.sessionId !== null) this.install(transport, this.pingIntervalMs)
+  /** From the RECONCILE on: a RECONCILED comes behind what the server sends as it attaches, however long that takes.
+   *  `sessionId` is the server's from the last RECONCILED, null before the first. */
+  beatFromReconcile(transport: ClientChannelTransport, sessionId: string | null): void {
+    if (sessionId !== null) this.install(transport, this.pingIntervalMs)
     else this.installProvisional(transport)
   }
 

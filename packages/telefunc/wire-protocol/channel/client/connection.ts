@@ -277,10 +277,6 @@ class ClientConnection
     return this.connected && !this.exchange.reconciling && !this.upgrade.gatesSends && !this.exchange.reconcileOwed
   }
 
-  get sessionId(): string | null {
-    return this.exchange.sessionId
-  }
-
   get reconcileHeld(): boolean {
     return !this.connected || this.upgrade.committing !== null || this.upgrade.ready
   }
@@ -468,7 +464,7 @@ class ClientConnection
     this.enterOpen()
     if (!this.transport.carriesReconcileInOpen) {
       this.exchange.sendReconcileBatch(this.exchange.stageReconcileBatch())
-      this.liveness.beatFromReconcile(transport)
+      this.liveness.beatFromReconcile(transport, this.exchange.sessionId)
       return
     }
     if (!this.exchange.reconciling) {
@@ -543,7 +539,7 @@ class ClientConnection
 
   onTransportReconcileSent(transport: ClientChannelTransport): void {
     if (this.closed || transport !== this.transport) return
-    this.liveness.beatFromReconcile(transport)
+    this.liveness.beatFromReconcile(transport, this.exchange.sessionId)
   }
 
   onTransportPong(ended: PongEntry[]): void {
