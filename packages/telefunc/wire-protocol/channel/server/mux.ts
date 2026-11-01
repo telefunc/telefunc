@@ -22,6 +22,7 @@ import {
 import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, withTook } from '../../wire/frame.js'
 import { TAG, isConnCtrlTag } from '../../wire/tags.js'
 import { seqThrough } from '../../wire/seq.js'
+import { textEncoder } from '../../wire/envelope.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type { BarrierPayload, PreparePayload, ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
@@ -74,8 +75,6 @@ function retargetToProbe(err: unknown, probe: Wire): unknown {
   if (!isProtocolViolationError(err) || err.target !== undefined) return err
   return new ProtocolViolationError(err.message, probe)
 }
-
-const textEncoder = new TextEncoder()
 
 type MuxServerOptions = {
   reconnectTimeout: number

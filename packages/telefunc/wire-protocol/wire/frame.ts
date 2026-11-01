@@ -40,6 +40,7 @@ import {
 } from './payloads.js'
 import { decodePublishBinary, decodePublishText, type WirePublishInfo } from './publishInfo.js'
 import { ProtocolViolationError, assertProtocol } from './protocolViolation.js'
+import { textDecoder, textEncoder } from './envelope.js'
 
 const PING_ENTRY_BYTES = 6
 const PONG_ENTRY_BYTES = 7
@@ -47,9 +48,6 @@ const PONG_ENTRY_BYTES = 7
 const ACK_RES_PREFIX = 9
 /** The most a frame adds to a channel message or its ack answer: an ACK_RES's header and prefix. */
 const MESSAGE_FRAME_OVERHEAD_MAX_BYTES = HEADER + ACK_RES_PREFIX
-
-const textEncoder = new TextEncoder()
-const textDecoder = new TextDecoder()
 
 /** A closed channel of the page's: the last seq the page has of what the server sent on it. */
 type PingEntry = { ix: number; lastSeq: number }
