@@ -74,7 +74,8 @@ type ClientChannelOptions = {
 class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements ClientChannelType<ClientToServer, ServerToClient>, MuxChannel, CreditOwner, ChannelLifecycleOwner
 {
-  /** @see ChannelShield in ../channel.ts — `data` validates C2S; `ack` validates ack of own C2S send. */
+  /** @see ChannelShield in ../channel.ts — the server checks with it: `data` what this page sends, `ack` its answers
+   *  to the server's ack requests. */
   declare readonly [TELEFUNC_SHIELDS]: {
     data: ChannelData<ClientToServer>
     ack: ChannelAck<ServerToClient>
@@ -88,15 +89,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
   protected closed = false
   protected readonly lifecycle = new ChannelLifecycle({ owner: this })
-  /** Outstanding ack-bearing sends, keyed by the seq the server will echo on `ACK_RES`.
-   *  Lives on the channel (mirrors server-side `pendingAcks`) so per-channel state
-   *  stays encapsulated; connection just routes ACK_RES frames in. `resolve` is typed
-   *  `any` because the channel hosts ack-bearing sends with several distinct resolution
-   *  types (`ChannelAck<C2S>`, `unknown` for binary, `ChannelPublishAck` for broadcast
-   *  publishes); the stored resolver is always invoked with `parse(text)` at the boundary. */
+  /** The ack requests sent and not yet answered, by seq. `resolve` takes `any`: text, binary and publish sends
+   *  resolve with different types, each with `parse(text)` of the answer. */
   protected pendingAcks = new Map<number, { resolve: (v: any) => void; reject: (err: Error) => void }>()
-  /** Credit governs fire-and-forget TEXT/BINARY, and PUBLISH in bytes — see `constants.ts`. */
   protected selfTime = new SelfTime()
+  /** Paces fire-and-forget TEXT, BINARY and PUBLISH sends to what the server grants; see `constants.ts`. */
   protected sendCredit: SendCredit
   protected receiveCredit: ReceiveCredit
 
@@ -362,7 +359,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal — Tag-keyed data-frame switch. `ClientBroadcast` overrides to add the
    *  PUBLISH variants and falls back to `super` for the common cases. Receive-time
-   *  BDP accounting happens inside each credit-counted `_onTransport*` handler. */
+   *  BDP accounting happens inside `_onPeerMessage` and `_onPeerBinaryMessage`. */
   protected dispatchDataFrame(frame: ChannelDataFrame): void {
     switch (frame.tag) {
       case TAG.TEXT:
