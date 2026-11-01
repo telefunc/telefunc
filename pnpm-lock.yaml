@@ -387,7 +387,7 @@ importers:
         version: 1.0.28
       '@brillout/vite-plugin-server-entry':
         specifier: ^0.7.20
-        version: 0.7.23
+        version: 0.7.20
       crossws:
         specifier: ^0.4.4
         version: 0.4.6(srvx@0.12.8)
@@ -1454,6 +1454,9 @@ packages:
     hasBin: true
     peerDependencies:
       typescript: ^4.0.0
+
+  '@brillout/vite-plugin-server-entry@0.7.20':
+    resolution: {integrity: sha512-cLXispf4rBz0zk2p9LYuSQts264dhZFsIXEq9wCmCWH+tLNsqRxx2AwXcciIJ+1VdPtjB0STHnfkwcl9J8t7sg==}
 
   '@brillout/vite-plugin-server-entry@0.7.23':
     resolution: {integrity: sha512-tHI6zRUM+1yQxiC4CTwpPhYhU9Cdo4LkPy0JRxDiFBZSVSauzWTzZv/r7/+dKVk4/ihQmCtI1/XoegKVLMR7CQ==}
@@ -7913,6 +7916,11 @@ snapshots:
       fast-glob: 3.3.3
       source-map-support: 0.5.21
       typescript: 7.0.2
+
+  '@brillout/vite-plugin-server-entry@0.7.20':
+    dependencies:
+      '@brillout/import': 0.2.6
+      '@brillout/picocolors': 1.0.30
 
   '@brillout/vite-plugin-server-entry@0.7.23':
     dependencies:
