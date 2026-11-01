@@ -13,6 +13,8 @@ const MEMBER_META_MERGES_HELD_MIN = 64
 type MetaRewinds = { count: number }
 const NEVER_REWOUND: MetaRewinds = Object.freeze({ count: 0 })
 
+type MemberMetaOptions = { meta: ParticipantMeta; seq: number; rewinds?: MetaRewinds; connected?: boolean }
+
 /** A member's meta and connection as a view keeps them: its updates apply in `seq` order, a merge in what it changed,
  *  and the object is built when read. What it is given is owned already, as an API argument copied or a frame or record
  *  decoded. */
@@ -27,12 +29,7 @@ class MemberMeta {
   private rewindsSeen: number
   private _connected: boolean
 
-  constructor({
-    meta,
-    seq,
-    rewinds = NEVER_REWOUND,
-    connected = true,
-  }: { meta: ParticipantMeta; seq: number; rewinds?: MetaRewinds; connected?: boolean }) {
+  constructor({ meta, seq, rewinds = NEVER_REWOUND, connected = true }: MemberMetaOptions) {
     this._connected = connected
     this._object = Object.freeze(meta)
     this.keys = Object.keys(this._object).length

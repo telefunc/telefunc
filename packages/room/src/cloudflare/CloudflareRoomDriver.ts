@@ -36,12 +36,14 @@ import { ROOM_CLOUDFLARE_EXTENSION } from '../server/constants.js'
 const ROOM_AUTHORITY_PREFIX = '__telefunc_room__:'
 const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
 
+type CloudflareRoomDriverOptions = { getNamespace: () => TelefuncExtensionNamespace }
+
 /** A subscription requires its session DO's context; a lane commit made in one goes through that session's ordered
  *  stub. */
 class CloudflareRoomDriver implements RoomDriver {
   private readonly getNamespace: () => TelefuncExtensionNamespace
 
-  constructor({ getNamespace }: { getNamespace: () => TelefuncExtensionNamespace }) {
+  constructor({ getNamespace }: CloudflareRoomDriverOptions) {
     this.getNamespace = getNamespace
   }
 

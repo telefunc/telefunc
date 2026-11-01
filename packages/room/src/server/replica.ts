@@ -65,6 +65,12 @@ function replicasHere(): Map<string, WeakRef<RoomReplica>> {
   return hostLocal(REPLICAS, () => new Map<string, WeakRef<RoomReplica>>())
 }
 
+type RoomReplicaOptions = {
+  incarnation: RoomIncarnation
+  stored: StoredRoomMeta
+  seed: { members: MemberSnapshot[] } | { count: number }
+}
+
 /** This process's one view of a room incarnation, however many handles share it; on Cloudflare, a session DO holds its
  *  own. The replica holds the model, the lanes planned from the wants of the handles' holders, the demand, the lease
  *  that hosts the members and pages the handles hold, and the heartbeat that renews the lease and checks the authority
@@ -145,15 +151,7 @@ class RoomReplica
   private readonly tails = new Set<ServerRoom>()
   private readonly receivers = new Set<ServerRoom>()
 
-  private constructor({
-    incarnation,
-    stored,
-    seed,
-  }: {
-    incarnation: RoomIncarnation
-    stored: StoredRoomMeta
-    seed: { members: MemberSnapshot[] } | { count: number }
-  }) {
+  private constructor({ incarnation, stored, seed }: RoomReplicaOptions) {
     this.id = incarnation.id
     this.incarnation = incarnation
     this.model = new RoomModel({

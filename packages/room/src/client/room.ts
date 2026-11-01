@@ -505,6 +505,11 @@ class ClientRoom extends RoomStateView implements Room {
   }
 }
 
+type ClientParticipantBaseOptions = {
+  participant: Pick<ParticipantStubMetadata, 'id' | 'meta' | 'selfDelivery' | 'identity' | 'bufferLimit'>
+  rewinds: MetaRewinds
+}
+
 abstract class ClientParticipantBase extends ParticipantBase {
   /** `publish(data, { coalesce })`'s conflation, by key. */
   private readonly coalescers = new Map<string, CoalesceSlot>()
@@ -533,13 +538,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
     if (heldMembers.get(this.id) === this) heldMembers.delete(this.id)
   }
 
-  constructor({
-    participant,
-    rewinds,
-  }: {
-    participant: Pick<ParticipantStubMetadata, 'id' | 'meta' | 'selfDelivery' | 'identity' | 'bufferLimit'>
-    rewinds: MetaRewinds
-  }) {
+  constructor({ participant, rewinds }: ClientParticipantBaseOptions) {
     super({ participant, rewinds })
     this.bufferLimit = participant.bufferLimit
   }
@@ -685,25 +684,21 @@ class ClientRoomOwner implements RoomModelOwner, RoomStateOwner {
   }
 }
 
+type ClientRoomParticipantOptions = {
+  clientRoom: ClientRoom
+  id: string
+  meta: ParticipantMeta
+  selfDelivery: boolean
+  rewinds: MetaRewinds
+}
+
 /** `LocalParticipant` returned by `ClientRoom.join()`. Operates through the room's channel. */
 class ClientRoomParticipant extends ClientParticipantBase {
   private readonly room: ClientRoom
   /** Weak: the room reaches this member, so a strong one would hold the room open for good. */
   private handle: WeakRef<LocalParticipant> | null = null
 
-  constructor({
-    clientRoom,
-    id,
-    meta,
-    selfDelivery,
-    rewinds,
-  }: {
-    clientRoom: ClientRoom
-    id: string
-    meta: ParticipantMeta
-    selfDelivery: boolean
-    rewinds: MetaRewinds
-  }) {
+  constructor({ clientRoom, id, meta, selfDelivery, rewinds }: ClientRoomParticipantOptions) {
     super({
       // Client-side joins carry no identity: it's server-assigned (see JoinOptions.identity).
       participant: { id, meta, selfDelivery, identity: null, bufferLimit: clientRoom._bufferLimit },

@@ -50,6 +50,8 @@ function entryKey(route: Pick<RouteInstallation, 'roomId' | 'inc' | 'laneKey'>):
   return JSON.stringify([route.roomId, route.inc, route.laneKey])
 }
 
+type RoomSessionSubscriptionsOptions = { sessionId: string; driver: CloudflareRoomDriver }
+
 /** A session DO's Room subscriptions, and its calls to room authorities. */
 class RoomSessionSubscriptions {
   private readonly authorityCalls = new OrderedStubs<CloudflareRoomAuthorityStub>()
@@ -57,7 +59,7 @@ class RoomSessionSubscriptions {
   private readonly driver: CloudflareRoomDriver
   private readonly entries = new Map<string, CloudflareRoomSubscription>()
 
-  constructor({ sessionId, driver }: { sessionId: string; driver: CloudflareRoomDriver }) {
+  constructor({ sessionId, driver }: RoomSessionSubscriptionsOptions) {
     this.id = sessionId
     this.driver = driver
   }
