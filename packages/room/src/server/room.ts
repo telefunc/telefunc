@@ -34,7 +34,7 @@ import {
 import type { RoomDataEnvelope, RoomMemberRecord } from './protocol.js'
 import type { RoomModel } from '../shared/model.js'
 import { RoomState, RoomStateView, type RoomStateOwner } from '../shared/state.js'
-import { ParticipantBase } from '../shared/participant.js'
+import { ParticipantBase, type ParticipantBaseOptions } from '../shared/participant.js'
 import {
   MemberMessageTexts,
   RoomParticipantStub,
@@ -466,8 +466,8 @@ class ServerLocalParticipant extends ParticipantBase {
   private holder: RoomParticipantStub | null = null
   protected readonly _bugMessage = ROOM_BUG_MESSAGE
 
-  constructor(serverRoom: ServerRoom, participant: ConstructorParameters<typeof ParticipantBase>[0]) {
-    super(participant, serverRoom._model.metaRewinds)
+  constructor(serverRoom: ServerRoom, participant: ParticipantBaseOptions['participant']) {
+    super({ participant, rewinds: serverRoom._model.metaRewinds })
     this._room = serverRoom
   }
 

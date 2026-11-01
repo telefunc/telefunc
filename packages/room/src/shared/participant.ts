@@ -1,4 +1,5 @@
 export { ParticipantBase }
+export type { ParticipantBaseOptions }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { invokeChannelListener } from './channel.js'
@@ -28,6 +29,12 @@ type HeldDm = { msg: InboxMessage; bytes: number; ackResolve?: (reply: RoomResul
 /** Where the inbox delivers once it attaches: the local listeners, or the client holding the participant. */
 type InboxTarget = { deliver(msg: InboxMessage): void; deliverAck(msg: InboxMessage): Promise<RoomResult> }
 
+type ParticipantBaseOptions = {
+  participant: { id: string; meta: ParticipantMeta; selfDelivery: boolean; identity: string | null }
+  /** Its room view's, or its own for a participant a client holds alone. */
+  rewinds: MetaRewinds
+}
+
 /** The private-message inbox and the leave lifecycle, identical on server and client; flavors supply the transport. */
 abstract class ParticipantBase implements LocalParticipant {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
@@ -49,11 +56,7 @@ abstract class ParticipantBase implements LocalParticipant {
   private pendingInbox: Fifo<HeldDm> | null = null
   private pendingInboxBytes = 0
 
-  /** `rewinds` is its room view's, or its own for a participant a client holds alone. */
-  constructor(
-    participant: { id: string; meta: ParticipantMeta; selfDelivery: boolean; identity: string | null },
-    rewinds: MetaRewinds,
-  ) {
+  constructor({ participant, rewinds }: ParticipantBaseOptions) {
     this.id = participant.id
     this.memberMeta = new MemberMeta({ meta: participant.meta, seq: 0, rewinds })
     this.selfDelivery = participant.selfDelivery
