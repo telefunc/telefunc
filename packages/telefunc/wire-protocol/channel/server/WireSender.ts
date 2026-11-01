@@ -68,7 +68,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
       this.headroom = this.measureHeadroom()
       if (this.headroom < 0) {
         this.pastBacklog = true
-        queueMicrotask(() => this.transport.terminateConnection(this.wire))
+        queueMicrotask(() => this.transport.terminateWire(this.wire))
         return
       }
     }

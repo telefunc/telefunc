@@ -3,7 +3,7 @@ export type { AwaitedChannel, RecvBacklog }
 
 import type { ChannelFrame } from '../../wire/frame.js'
 import type { ReconcileOpenEntry } from '../../wire/payloads.js'
-import type { ConnectionEntry } from './mux.js'
+import type { WireEntry } from './mux.js'
 import type { RegistrationWaits } from './RegistrationWaits.js'
 
 /** What a wire received and hasn't handled yet. */
@@ -16,7 +16,7 @@ type AwaitedChannel = {
   /** The latest RECONCILE entry naming it. */
   open: ReconcileOpenEntry
   /** The wire awaiting it: the one whose RECONCILE named it, until a barrier moves it to the WebSocket. */
-  entry: ConnectionEntry
+  entry: WireEntry
   /** What the page sent it meanwhile, dispatched after its attach. */
   held: { frame: ChannelFrame; bytes: number }[]
   /** `attached` until what it holds is dispatched; `expired` stays while a RECONCILE names it, never awaited again. */

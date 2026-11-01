@@ -1,5 +1,5 @@
 export { ChannelMux, getChannelMux }
-export type { ConnectionEntry, ReconcileOutcome, ServerTransport, Wire, WirePieces }
+export type { WireEntry, ReconcileOutcome, ServerTransport, Wire, WirePieces }
 
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
@@ -38,28 +38,28 @@ import { AwaitedChannels, type AwaitedChannel, type RecvBacklog } from './Awaite
 import { RegistrationWaits, type RegistrationWaitsOwner } from './RegistrationWaits.js'
 import type { ServerChannel } from './channel.js'
 
-/** A transport-owned connection handle. The mux never looks inside one — it only compares them by
+/** A transport-owned wire handle. The mux never looks inside one — it only compares them by
  *  identity and hands them back to the transport that created it. */
 type Wire = unknown
 
-// Single-instance kernel: owns channels, sessions, per-connection runtime. Transports talk
-// to this class via `onConnectionOpen` and from then on identify connections by object
+// Single-instance kernel: owns channels, sessions, per-wire runtime. Transports talk
+// to this class via `onWireOpen` and from then on identify wires by object
 // identity. Multi-instance deployments rely on sticky sessions at the load balancer.
 
-type ServerTransport<TConnection> = {
-  getSessionId(connection: TConnection): string | undefined
-  setSessionId(connection: TConnection, sessionId: string): void
-  /** Stable per-connection id, or `null` for transports that don't multiplex client→server
+type ServerTransport<TWire> = {
+  getSessionId(wire: TWire): string | undefined
+  setSessionId(wire: TWire, sessionId: string): void
+  /** Stable per-wire id, or `null` for transports that don't multiplex client→server
    *  traffic across requests (WebSocket: every frame already lands on the same socket). */
-  getConnId(connection: TConnection): string | null
-  sendNow(connection: TConnection, frame: Uint8Array<ArrayBuffer>): void
+  getConnId(wire: TWire): string | null
+  sendNow(wire: TWire, frame: Uint8Array<ArrayBuffer>): void
   /** Its peer gets no part of a message until all of it arrived, as on a WebSocket (see `pieces.ts`). */
   wholeMessages: boolean
-  /** Bytes of sent frames still in the connection, never undercounted; `undefined` if the runtime can't tell. */
-  bufferedAmount(connection: TConnection): number | undefined
+  /** Bytes of sent frames still in the wire, never undercounted; `undefined` if the runtime can't tell. */
+  bufferedAmount(wire: TWire): number | undefined
   /** The bytes of those a frame that goes at once waits behind, where it passes some: else `bufferedAmount`'s. */
-  queuedAhead?(connection: TConnection): number | undefined
-  terminateConnection(connection: TConnection): void
+  queuedAhead?(wire: TWire): number | undefined
+  terminateWire(wire: TWire): void
 }
 
 /** What a RECONCILE or a barrier settled, which `sendReconciled` answers with the RECONCILED. */
@@ -110,7 +110,7 @@ type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer }
 
 type WirePieces = { headroom: ServerHeadroom; receiver: ServerPieceReceiver }
 
-type ConnectionState = {
+type WireState = {
   pingTimer: ReturnType<typeof setTimeout> | null
   /** When the wire last delivered a frame, or the ping deadline was last set. */
   lastReceivedAt: number
@@ -120,7 +120,7 @@ type ConnectionState = {
   pongedAt: number
   terminatePermanently: boolean
   recvChain: Promise<unknown> | null
-  /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
+  /** Set by `onWireClosed` so an in-flight `reconcile` can see the close and its kind. */
   closed: { isPermanent: boolean } | null
   retiredByBarrier: boolean
   recvBacklog: RecvBacklog
@@ -129,9 +129,9 @@ type ConnectionState = {
   attaching: Set<ServerChannel>
 }
 
-type ConnectionEntry = {
+type WireEntry = {
   wire: Wire
-  state: ConnectionState
+  state: WireState
   transport: ServerTransport<unknown>
   /** One per wire: the peers of every reconcile on this wire share it. */
   sender: WireSender
@@ -150,10 +150,10 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
   private readonly sessions = new SessionRegistry()
   /** The wire each session is on: the last to reconcile it, until another reconciles it or the wire closes. */
   private readonly sessionWires = new Map<string, Wire>()
-  private readonly connectionEntries = new Map<unknown, ConnectionEntry>()
+  private readonly wires = new Map<unknown, WireEntry>()
   /** Reverse index for transports with a stable connId (SSE). Lets data POSTs locate the
-   *  live stream connection, and catches a duplicate-connId reconnect racing teardown. */
-  private readonly connectionsByConnId = new Map<string, Wire>()
+   *  live stream wire, and catches a duplicate-connId reconnect racing teardown. */
+  private readonly wiresByConnId = new Map<string, Wire>()
   private readonly stagedUpgrades = new Map<Wire, StagedUpgrade>()
   private readonly stagedByPrevSession = new Map<string, Wire>()
   private stagedBytes = 0
@@ -224,23 +224,19 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     channel._release()
   }
 
-  // ── Connection lifecycle (transport-facing) ─────────────────────────
+  // ── Wire lifecycle (transport-facing) ───────────────────────────────
 
-  onConnectionOpen<TConnection>(
-    connection: TConnection,
-    transport: ServerTransport<TConnection>,
-    request?: Request,
-  ): void {
+  onWireOpen<TWire>(wire: TWire, transport: ServerTransport<TWire>, request?: Request): void {
     const recvBacklog = { bytes: 0, frames: 0 }
     const headroom = transport.wholeMessages
       ? new ServerHeadroom({
-          socket: new TransportSocket({ transport: transport as ServerTransport<unknown>, wire: connection }),
+          socket: new TransportSocket({ transport: transport as ServerTransport<unknown>, wire }),
           pingInterval: this.options.pingInterval,
         })
       : null
     const deliveries = new Deliveries()
-    const entry: ConnectionEntry = {
-      wire: connection,
+    const entry: WireEntry = {
+      wire,
       state: {
         pingTimer: null,
         lastReceivedAt: 0,
@@ -257,33 +253,33 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
       transport: transport as ServerTransport<unknown>,
       sender: new WireSender({
         owner: this,
-        wire: connection,
+        wire,
         transport: transport as ServerTransport<unknown>,
         pieceHeadroom: headroom,
         deliveries,
       }),
       request,
     }
-    this.connectionEntries.set(connection, entry)
-    const connId = transport.getConnId(connection)
-    if (connId !== null) this.connectionsByConnId.set(connId, connection)
+    this.wires.set(wire, entry)
+    const connId = transport.getConnId(wire)
+    if (connId !== null) this.wiresByConnId.set(connId, wire)
     this.resetPingTimer(entry)
   }
 
-  async onConnectionRawMessage(connection: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<void> {
-    const outcome = await this.dispatchInbound(connection, rawFrame)
+  async onWireMessage(wire: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<void> {
+    const outcome = await this.dispatchInbound(wire, rawFrame)
     if (outcome) this.sendReconciled(outcome)
   }
 
   onConnectionRawMessageDeferredReconciled(
-    connection: Wire,
+    wire: Wire,
     rawFrame: Uint8Array<ArrayBuffer>,
   ): Promise<ReconcileOutcome | null> {
-    return this.dispatchInbound(connection, rawFrame)
+    return this.dispatchInbound(wire, rawFrame)
   }
 
   sendReconciled(outcome: ReconcileOutcome): void {
-    this.connectionEntries.get(outcome.deliverTo)?.sender.dropProbes()
+    this.wires.get(outcome.deliverTo)?.sender.dropProbes()
     this.send(
       outcome.deliverTo,
       encode.reconciled({
@@ -307,30 +303,30 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     if (outcome.retiredWire !== null) this.send(outcome.retiredWire, encode.fin())
   }
 
-  onConnectionClosed(connection: Wire, { permanent }: { permanent: boolean }): void {
-    const entry = this.connectionEntries.get(connection)
+  onWireClosed(wire: Wire, { permanent }: { permanent: boolean }): void {
+    const entry = this.wires.get(wire)
     if (!entry) return
     entry.state.closed = { isPermanent: permanent }
     entry.sender.pieces?.headroom.close()
     this.clearPingTimer(entry.state)
     entry.state.awaited.stop()
     entry.sender.close()
-    this.connectionEntries.delete(connection)
-    const connId = entry.transport.getConnId(connection)
-    // Identity-equality guards against deleting a *replacement* connection's entry when
+    this.wires.delete(wire)
+    const connId = entry.transport.getConnId(wire)
+    // Identity-equality guards against deleting a *replacement* wire's entry when
     // a duplicate-connId reconnect raced the old wire's teardown.
-    if (connId !== null && this.connectionsByConnId.get(connId) === connection) {
-      this.connectionsByConnId.delete(connId)
+    if (connId !== null && this.wiresByConnId.get(connId) === wire) {
+      this.wiresByConnId.delete(connId)
     }
-    this.clearStage(connection)
-    const sessionId = entry.transport.getSessionId(connection)
+    this.clearStage(wire)
+    const sessionId = entry.transport.getSessionId(wire)
     if (!sessionId) return // Closed before reconciling — nothing to clean up.
     const stagedWs = this.stagedByPrevSession.get(sessionId)
     if (stagedWs !== undefined) this.abandonStage(stagedWs)
     // Channels survive a transient close (`_onPeerDisconnect`'s reconnectTimeout grace);
     // permanent tears them down.
     this.detachSession(sessionId, permanent ? 'permanent' : 'transient')
-    if (this.sessionWires.get(sessionId) === connection) this.sessionWires.delete(sessionId)
+    if (this.sessionWires.get(sessionId) === wire) this.sessionWires.delete(sessionId)
   }
 
   /** Ends the channels of a session whose wire closed transiently as a permanent close would have: its page left. */
@@ -338,20 +334,20 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     this.detachSession(sessionId, 'permanent')
   }
 
-  readPermanentTermination(connection: Wire): boolean {
-    return this.connectionEntries.get(connection)?.state.terminatePermanently ?? false
+  readPermanentTermination(wire: Wire): boolean {
+    return this.wires.get(wire)?.state.terminatePermanently ?? false
   }
 
-  /** SSE data POST: resolve the stream connection by its stable connId. Undefined when the
-   *  connection hasn't reconciled yet or has already torn down. */
-  getConnectionByConnId<TConnection>(connId: string): TConnection | undefined {
-    return this.connectionsByConnId.get(connId) as TConnection | undefined
+  /** SSE data POST: resolve the stream wire by its stable connId. Undefined when the
+   *  wire hasn't reconciled yet or has already torn down. */
+  getWireByConnId<TWire>(connId: string): TWire | undefined {
+    return this.wiresByConnId.get(connId) as TWire | undefined
   }
 
   // ── Inbound dispatch ────────────────────────────────────────────────
 
-  private dispatchInbound(connection: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
-    const entry = this.connectionEntries.get(connection)
+  private dispatchInbound(wire: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
+    const entry = this.wires.get(wire)
     if (!entry) return Promise.resolve(null)
     let outcome: Promise<ReconcileOutcome | null> = Promise.resolve(null)
     try {
@@ -368,14 +364,14 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
       }
     } catch (err) {
       if (!isProtocolViolationError(err)) throw err
-      this.terminateWire(connection)
+      this.terminateWire(wire)
     }
     return outcome
   }
 
   /** PING and PIECES_ACK skip the recv chain, which would tie liveness to its slowest handler. */
   private dispatchFrame(
-    entry: ConnectionEntry,
+    entry: WireEntry,
     rawFrame: Uint8Array<ArrayBuffer>,
     arrival: 'alone' | 'riding' | 'pieced',
   ): Promise<ReconcileOutcome | null> {
@@ -405,7 +401,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
   }
 
   /** The frame a piece completes is dispatched as one that came whole. */
-  private receivePiece(entry: ConnectionEntry, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
+  private receivePiece(entry: WireEntry, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
     const { state } = entry
     const now = performance.now()
     state.lastReceivedAt = now
@@ -427,7 +423,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     return this.dispatchFrame(entry, frame, 'pieced')
   }
 
-  private receiveAnnounce(entry: ConnectionEntry, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
+  private receiveAnnounce(entry: WireEntry, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
     const now = performance.now()
     entry.state.lastReceivedAt = now
     entry.state.deliveries.note(now, rawFrame.byteLength)
@@ -438,21 +434,21 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     return Promise.resolve(null)
   }
 
-  /** Bytes reached `connection`: a frame slower than the ping deadline to arrive shows the wire alive meanwhile. */
-  onConnectionBytes(connection: Wire): void {
-    const entry = this.connectionEntries.get(connection)
+  /** Bytes reached `wire`: a frame slower than the ping deadline to arrive shows the wire alive meanwhile. */
+  onWireBytes(wire: Wire): void {
+    const entry = this.wires.get(wire)
     if (!entry) return
     entry.state.lastReceivedAt = performance.now()
     this.answerArrival(entry)
   }
 
   /** A wire whose bytes keep arriving gets a PONG each ping interval, as its PING may wait behind an upload. */
-  private answerArrival(entry: ConnectionEntry): void {
+  private answerArrival(entry: WireEntry): void {
     if (performance.now() - entry.state.pongedAt >= this.options.pingInterval) this.pong(entry, [])
   }
 
   /** Only data frames and pieces get the raw frame cap; the backlog adds a full window per channel of the session. */
-  private isOverBudget(entry: ConnectionEntry, rawFrame: Uint8Array<ArrayBuffer>): boolean {
+  private isOverBudget(entry: WireEntry, rawFrame: Uint8Array<ArrayBuffer>): boolean {
     const tag = peekTag(rawFrame)
     const maxFrameBytes =
       tag !== undefined && isConnCtrlTag(tag) && tag !== TAG.PIECE
@@ -473,7 +469,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
   }
 
   private async runInboundTurn(
-    entry: ConnectionEntry,
+    entry: WireEntry,
     rawFrame: Uint8Array<ArrayBuffer>,
     byteLength: number,
     delivery: number,
@@ -491,20 +487,20 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     }
   }
 
-  /** `connection` may be a wire other than the one that sent the offending frame — a barrier's
+  /** `wire` may be a wire other than the one that sent the offending frame — a barrier's
    *  violation is the staged probe's. */
-  private terminateWire(connection: Wire): void {
-    const entry = this.connectionEntries.get(connection)
+  private terminateWire(wire: Wire): void {
+    const entry = this.wires.get(wire)
     if (!entry) return
-    if (this.stagedUpgrades.get(connection)?.phase === 'staged') this.clearStage(connection)
+    if (this.stagedUpgrades.get(wire)?.phase === 'staged') this.clearStage(wire)
     entry.state.terminatePermanently = true
-    entry.transport.terminateConnection(connection)
+    entry.transport.terminateWire(wire)
   }
 
   /** Returns a `ReconcileOutcome` only on reconcile (so the caller decides when to send
    *  `reconciled`). Anything but reconcile/ping before reconciliation is a violation. */
   private handleFrame(
-    entry: ConnectionEntry,
+    entry: WireEntry,
     rawFrame: Uint8Array<ArrayBuffer>,
   ): null | ReconcileOutcome | Promise<ReconcileOutcome | null> {
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
@@ -544,7 +540,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
   }
 
   /** Answers each closed channel the page lists on its session's wire: how far the server has it, or null once gone. */
-  private answerPing(entry: ConnectionEntry, ended: PingEntry[]): PongEntry[] {
+  private answerPing(entry: WireEntry, ended: PingEntry[]): PongEntry[] {
     assertProtocol(ended.length <= MAX_CHANNELS_PER_CONNECTION, 'PING over entry cap')
     const sessionId = entry.transport.getSessionId(entry.wire)
     if (sessionId === undefined || this.sessionWires.get(sessionId) !== entry.wire) return []
@@ -564,13 +560,13 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
   }
 
   /** At each page heartbeat, its session's channels acknowledge what arrived, so the page's replay lets it go. */
-  private acknowledgeArrivals(entry: ConnectionEntry): void {
+  private acknowledgeArrivals(entry: WireEntry): void {
     const sessionId = entry.transport.getSessionId(entry.wire)
     if (sessionId === undefined || this.sessionWires.get(sessionId) !== entry.wire) return
     for (const { channel } of this.sessions.peekSession(sessionId)?.values() ?? []) channel._acknowledge()
   }
 
-  private pong(entry: ConnectionEntry, ended: PongEntry[]): void {
+  private pong(entry: WireEntry, ended: PongEntry[]): void {
     entry.state.pongedAt = performance.now()
     entry.sender.send(withTook(encode.pong(ended), entry.sender.pieces?.receiver.took ?? 0))
   }
@@ -582,7 +578,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
   }
 
   /** Abandons the probes staged on the session it names and its wire's, refused mid-commit, unless it names its own. */
-  private claimSessionForReconcile(ctrl: ReconcilePayload, entry: ConnectionEntry): void {
+  private claimSessionForReconcile(ctrl: ReconcilePayload, entry: WireEntry): void {
     const own = entry.transport.getSessionId(entry.wire)
     if (ctrl.sessionId !== undefined && ctrl.sessionId === own) return
     for (const claimed of [ctrl.sessionId, own]) {
@@ -596,7 +592,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     }
   }
 
-  private handlePrepare(entry: ConnectionEntry, payload: PreparePayload, rawByteLength: number): null {
+  private handlePrepare(entry: WireEntry, payload: PreparePayload, rawByteLength: number): null {
     const { wire } = entry
     assertProtocol(!entry.transport.getSessionId(wire), 'PREPARE on a reconciled wire')
     assertProtocol(this.sessions.peekSession(payload.sessionId), 'PREPARE for an unknown session')
@@ -623,46 +619,46 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     return null
   }
 
-  private handleBarrier(entry: ConnectionEntry, ctrl: BarrierPayload): Promise<ReconcileOutcome> | null {
-    const wsConnection = this.stagedByPrevSession.get(ctrl.sessionId)
-    const stage = wsConnection === undefined ? undefined : this.stagedUpgrades.get(wsConnection)
+  private handleBarrier(entry: WireEntry, ctrl: BarrierPayload): Promise<ReconcileOutcome> | null {
+    const probe = this.stagedByPrevSession.get(ctrl.sessionId)
+    const stage = probe === undefined ? undefined : this.stagedUpgrades.get(probe)
     // A barrier for an unknown or already-committing stage is refused SILENTLY (the client's attempt
     // deadline is the only watchdog) — erroring would tear down a wire this frame has no claim on.
-    if (wsConnection === undefined || stage?.phase !== 'staged') return null
+    if (probe === undefined || stage?.phase !== 'staged') return null
 
     try {
       // Admission policy — `decodeClientFrame` has already established the frame's shape.
       for (const channel of ctrl.open) {
         assertProtocol(textEncoder.encode(channel.id).byteLength <= UPGRADE_MAX_ID_BYTES, 'channel id over byte cap')
       }
-      assertProtocol(ctrl.upgradeId === stage.upgradeId, 'barrier upgradeId mismatch', wsConnection)
+      assertProtocol(ctrl.upgradeId === stage.upgradeId, 'barrier upgradeId mismatch', probe)
       assertProtocol(
         entry.transport.getSessionId(entry.wire) === stage.prevSessionId,
         'barrier session mismatch',
-        wsConnection,
+        probe,
       )
 
-      const wsEntry = this.connectionEntries.get(wsConnection)
-      assert(wsEntry, 'staged probe has no connection entry')
+      const wsEntry = this.wires.get(probe)
+      assert(wsEntry, 'staged probe has no wire entry')
 
       stage.phase = 'committing'
       entry.state.retiredByBarrier = true
       this.moveAwaited(entry, wsEntry, ctrl.open)
       return this.attachBarrier(entry, wsEntry, ctrl, stage.upgradeId)
     } catch (err) {
-      this.clearStage(wsConnection)
-      throw retargetToProbe(err, wsConnection)
+      this.clearStage(probe)
+      throw retargetToProbe(err, probe)
     }
   }
 
   /** Attaches the channels a barrier names to the WebSocket it commits. */
   private async attachBarrier(
-    oldEntry: ConnectionEntry,
-    wsEntry: ConnectionEntry,
+    oldEntry: WireEntry,
+    wsEntry: WireEntry,
     ctrl: BarrierPayload,
     upgradeId: string,
   ): Promise<ReconcileOutcome> {
-    const wsConnection = wsEntry.wire
+    const probe = wsEntry.wire
     try {
       // `reconcile` ran against the staged WS, so the outcome already carries it as `deliverTo`. Awaited: the stage
       // stays committing for a microtask, so a claim of the old session that runs in it is refused.
@@ -670,29 +666,29 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
       return { ...outcome, upgradeId }
     } catch (err) {
       oldEntry.state.retiredByBarrier = false
-      throw retargetToProbe(err, wsConnection)
+      throw retargetToProbe(err, probe)
     } finally {
-      this.clearStage(wsConnection)
+      this.clearStage(probe)
     }
   }
 
   /** Forgets the stage AND kills the probe holding it. No-op once the stage is committing. */
-  private abandonStage(wsConnection: Wire): void {
-    if (this.stagedUpgrades.get(wsConnection)?.phase !== 'staged') return
-    this.clearStage(wsConnection)
-    const entry = this.connectionEntries.get(wsConnection)
+  private abandonStage(probe: Wire): void {
+    if (this.stagedUpgrades.get(probe)?.phase !== 'staged') return
+    this.clearStage(probe)
+    const entry = this.wires.get(probe)
     if (!entry) return
     entry.state.terminatePermanently = true
-    entry.transport.terminateConnection(wsConnection)
+    entry.transport.terminateWire(probe)
   }
 
   /** Bookkeeping only — the probe wire is left alone. */
-  private clearStage(wsConnection: Wire): void {
-    const stage = this.stagedUpgrades.get(wsConnection)
+  private clearStage(probe: Wire): void {
+    const stage = this.stagedUpgrades.get(probe)
     if (!stage) return
     clearTimeout(stage.timer)
-    this.stagedUpgrades.delete(wsConnection)
-    if (this.stagedByPrevSession.get(stage.prevSessionId) === wsConnection) {
+    this.stagedUpgrades.delete(probe)
+    if (this.stagedByPrevSession.get(stage.prevSessionId) === probe) {
       this.stagedByPrevSession.delete(stage.prevSessionId)
     }
     this.stagedBytes -= stage.bytes
@@ -702,7 +698,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
 
   /** `isBarrier`: this commit retires the old wire's session, so the outcome names that wire, which gets a FIN once
    *  the new wire's RECONCILED has gone out. */
-  private reconcile(entry: ConnectionEntry, ctrl: ReconcilePayload, isBarrier = false): ReconcileOutcome {
+  private reconcile(entry: WireEntry, ctrl: ReconcilePayload, isBarrier = false): ReconcileOutcome {
     const { wire, state, transport } = entry
     const retiredWire = isBarrier && ctrl.sessionId ? (this.sessionWires.get(ctrl.sessionId) ?? null) : null
     this.resetPingTimer(entry)
@@ -744,7 +740,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     prevSessionId: string | undefined,
     newSessionId: string,
     open: ReconcilePayload['open'],
-    entry: ConnectionEntry,
+    entry: WireEntry,
     replay: boolean,
   ): ChannelHandle[] {
     const handles = open.map((each) => this.attach(each, entry, replay)).filter((h): h is ChannelHandle => h !== null)
@@ -767,12 +763,12 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     sessionId: string,
     open: ReconcileOpenEntry[],
     released: number[],
-    entry: ConnectionEntry,
+    entry: WireEntry,
   ): ChannelHandle[] {
     const session = this.sessions.peekSession(sessionId)
     const { awaited } = entry.state
     const heldId = (ix: number): string | undefined => session?.get(ix)?.channel.id ?? awaited.get(ix)?.open.id
-    // At least the channels the connection holds once this frame applies, counted before any is allocated.
+    // At least the channels the wire holds once this frame applies, counted before any is allocated.
     let held = (session?.size ?? 0) + awaited.unattached
     for (const ix of new Set(released)) if (heldId(ix) !== undefined) held--
     for (const { id, ix } of open) {
@@ -781,7 +777,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
       assertProtocol(heldAs === undefined || heldAs === id, 'RECONCILE names a held index under another id')
       if (heldAs === undefined) held++
     }
-    assertProtocol(held <= MAX_CHANNELS_PER_CONNECTION, 'RECONCILE over the connection channel cap')
+    assertProtocol(held <= MAX_CHANNELS_PER_CONNECTION, 'RECONCILE over the wire channel cap')
     const handles: ChannelHandle[] = []
     for (const each of open) {
       const handle = this.attach(each, entry, false)
@@ -798,7 +794,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
   }
 
   /** Null leaves it out of the RECONCILED; an initial channel not yet registered is awaited until its ATTACH_RESULT. */
-  private attach(open: ReconcileOpenEntry, entry: ConnectionEntry, replay: boolean): ChannelHandle | null {
+  private attach(open: ReconcileOpenEntry, entry: WireEntry, replay: boolean): ChannelHandle | null {
     // Answered ahead of the channel's frames, and of its registration where awaited: its round trip is the path's.
     if (open.probe !== undefined) entry.sender.addProbe(open.ix, open.probe)
     const awaited = entry.state.awaited.get(open.ix)
@@ -815,7 +811,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     return null
   }
 
-  private awaitChannel(open: ReconcileOpenEntry, entry: ConnectionEntry): void {
+  private awaitChannel(open: ReconcileOpenEntry, entry: WireEntry): void {
     const awaited: AwaitedChannel = {
       channelId: open.id,
       open,
@@ -873,7 +869,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
   }
 
   /** Awaited channels the barrier lists move to the WebSocket; an attached one first gets what the old wire held. */
-  private moveAwaited(oldEntry: ConnectionEntry, wsEntry: ConnectionEntry, open: ReconcileOpenEntry[]): void {
+  private moveAwaited(oldEntry: WireEntry, wsEntry: WireEntry, open: ReconcileOpenEntry[]): void {
     for (const { ix } of open) {
       const awaited = oldEntry.state.awaited.get(ix)
       if (!awaited) continue
@@ -891,7 +887,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
   private attachChannel(
     channel: ServerChannel,
     open: ReconcileOpenEntry,
-    { sender, request }: ConnectionEntry,
+    { sender, request }: WireEntry,
     replay: boolean,
   ): ChannelHandle | null {
     const buffer = channel._replayBuffer
@@ -940,25 +936,25 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     }
   }
 
-  // ── Per-connection plumbing (send, recv chain, ping) ────────────────
+  // ── Per-wire plumbing (send, recv chain, ping) ────────────────
 
   /** Sole send path, sync so wire order is call order; a wire closed or past its backlog drops the frame. */
-  private send(connection: Wire, frame: Uint8Array<ArrayBuffer>): void {
-    this.connectionEntries.get(connection)?.sender.send(frame)
+  private send(wire: Wire, frame: Uint8Array<ArrayBuffer>): void {
+    this.wires.get(wire)?.sender.send(frame)
   }
 
   /** The channels the wire's send headroom counts: its session's, and those attaching in this turn. */
-  channelsOn(connection: Wire): Set<ServerChannel> {
-    const entry = this.connectionEntries.get(connection)
+  channelsOn(wire: Wire): Set<ServerChannel> {
+    const entry = this.wires.get(wire)
     if (entry === undefined) return new Set()
-    const sessionId = entry.transport.getSessionId(connection)
+    const sessionId = entry.transport.getSessionId(wire)
     const session = sessionId === undefined ? undefined : this.sessions.peekSession(sessionId)
     const channels = new Set(entry.state.attaching)
     for (const { channel } of session?.values() ?? []) channels.add(channel)
     return channels
   }
 
-  private chainRecv<T>(entry: ConnectionEntry, fn: () => Promise<T>): Promise<T> {
+  private chainRecv<T>(entry: WireEntry, fn: () => Promise<T>): Promise<T> {
     const prev = entry.state.recvChain ?? Promise.resolve()
     const next = prev.then(fn, fn).finally(() => {
       if (entry.state.recvChain === next) entry.state.recvChain = null
@@ -967,20 +963,20 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     return next
   }
 
-  private clearPingTimer(state: ConnectionState): void {
+  private clearPingTimer(state: WireState): void {
     if (!state.pingTimer) return
     clearTimeout(state.pingTimer)
     state.pingTimer = null
   }
 
   /** A wire that closed keeps no timer. */
-  private resetPingTimer(entry: ConnectionEntry): void {
+  private resetPingTimer(entry: WireEntry): void {
     if (entry.state.closed !== null) return
     entry.state.lastReceivedAt = performance.now()
     this.armPingDeadline(entry, this.options.pingDeadline)
   }
 
-  private armPingDeadline(entry: ConnectionEntry, ms: number): void {
+  private armPingDeadline(entry: WireEntry, ms: number): void {
     const { wire, state, transport } = entry
     this.clearPingTimer(state)
     state.pingTimer = unrefTimer(
@@ -994,8 +990,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
         const now = performance.now()
         if (now < deadAt) return this.armPingDeadline(entry, Math.min(deadAt - now, TIMER_DELAY_MAX_MS))
         // Transient close so each channel gets its `reconnectTimeout` grace via
-        // `_onPeerDisconnect`. Connection-level state is rebuilt by the next reconcile.
-        transport.terminateConnection(wire)
+        // `_onPeerDisconnect`. Wire-level state is rebuilt by the next reconcile.
+        transport.terminateWire(wire)
       }, ms),
     )
   }
