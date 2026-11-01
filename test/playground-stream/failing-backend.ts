@@ -55,14 +55,22 @@ const { faults, subscriptions, holds, holding, retainedHolds, holdingRetained } 
   holdingRetained: WeakSet<RoomPlane>
 }
 
+type FailingSubscriptionOptions = {
+  source: Source
+  /** Core's end, which this one passes the memory driver's calls on to. */
+  outer: Subscriber
+}
+
 /** What a subscription of the in-memory backend tells core, passed on unless a test drops it. */
 class FailingSubscription implements Subscriber {
+  readonly source: Source
+  private readonly outer: Subscriber
   unsubscribeInner: Unsubscribe | null = null
 
-  constructor(
-    readonly source: Source,
-    private readonly outer: Subscriber,
-  ) {}
+  constructor({ source, outer }: FailingSubscriptionOptions) {
+    this.source = source
+    this.outer = outer
+  }
 
   get consumers(): number {
     return this.outer.consumers
@@ -122,7 +130,7 @@ function failing<Driver extends { subscribe(source: Source, subscriber: Subscrib
       outer.failed(new Error('failing-backend: subscribe refused'))
       return async () => {}
     }
-    const subscription = new FailingSubscription(source, outer)
+    const subscription = new FailingSubscription({ source, outer })
     subscriptions.add(subscription)
     subscription.unsubscribeInner = memory.subscribe(source, subscription)
     return () => subscription.unsubscribe()
