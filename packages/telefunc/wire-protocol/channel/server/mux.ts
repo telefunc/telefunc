@@ -258,14 +258,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
   }
 
   async onWireMessage(wire: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<void> {
-    const outcome = await this.dispatchInbound(wire, rawFrame)
+    const outcome = await this.dispatchWireMessage(wire, rawFrame)
     if (outcome) this.sendReconciled(outcome)
-  }
-
-  /** As `onWireMessage`, but a RECONCILE's outcome is returned for the caller to send: SSE sends the RECONCILED once
-   *  the stream it answers is open. */
-  dispatchWireMessage(wire: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
-    return this.dispatchInbound(wire, rawFrame)
   }
 
   sendReconciled(outcome: ReconcileOutcome): void {
@@ -336,7 +330,9 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
 
   // ── Inbound dispatch ────────────────────────────────────────────────
 
-  private dispatchInbound(wire: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
+  /** As `onWireMessage`, but a RECONCILE's outcome is returned for the caller to send: SSE sends the RECONCILED once
+   *  the stream it answers is open. */
+  dispatchWireMessage(wire: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
     const entry = this.wires.get(wire)
     if (!entry) return Promise.resolve(null)
     let outcome: Promise<ReconcileOutcome | null> = Promise.resolve(null)
