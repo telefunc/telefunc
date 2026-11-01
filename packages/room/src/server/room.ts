@@ -72,6 +72,8 @@ const SERVER_PARTICIPANT_BRAND: unique symbol = Symbol.for('telefunc.ServerRoomP
 
 type MetaMirror = { accepted(update: MemberMetaUpdate): void; rewound(): void }
 
+type ServerRoomOptions = { replica: RoomReplica }
+
 /** One `Room.get()`'s handle on a room: its guards, its tail, the stubs it opened, its participants and its listeners,
  *  over this process's one view of the room, which every handle to it shares. Each serialization opens a fresh stub. */
 class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHoldOwner {
@@ -104,11 +106,11 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
   /** @internal */
   readonly _writes: RoomWrites
 
-  constructor(replica: RoomReplica) {
+  constructor({ replica }: ServerRoomOptions) {
     super()
     this._replica = replica
     this._incarnation = replica.incarnation
-    this._state = new RoomState({ view: this, model: replica.model, owner: new ServerRoomStateOwner(this) })
+    this._state = new RoomState({ view: this, model: replica.model, owner: new ServerRoomStateOwner({ room: this }) })
     this._local = new LocalHolder({ state: this._state, suppressed: this.localSuppressed })
     this._writes = new RoomWrites({
       owner: this,
@@ -141,7 +143,10 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
   async join(options?: JoinOptions): Promise<LocalParticipant> {
     const { meta, selfDelivery, identity, hidden } = normalizeJoinOptions(options)
     const admission = new Admission({ meta, identity, hidden })
-    const participant = new ServerLocalParticipant(this, { id: admission.id, meta, selfDelivery, identity })
+    const participant = new ServerLocalParticipant({
+      room: this,
+      participant: { id: admission.id, meta, selfDelivery, identity },
+    })
     await this.admit(admission, () => {
       this._localParticipants.set(admission.id, participant)
       this._replica.own(admission.id, this)
@@ -460,6 +465,11 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
   }
 }
 
+type ServerLocalParticipantOptions = {
+  room: ServerRoom
+  participant: ParticipantBaseOptions['participant']
+}
+
 /** Server-side `LocalParticipant`, returned by `ServerRoom.join()`. */
 class ServerLocalParticipant extends ParticipantBase {
   readonly [SERVER_PARTICIPANT_BRAND] = true
@@ -470,9 +480,9 @@ class ServerLocalParticipant extends ParticipantBase {
   private holder: RoomParticipantStub | null = null
   protected readonly _bugMessage = ROOM_BUG_MESSAGE
 
-  constructor(serverRoom: ServerRoom, participant: ParticipantBaseOptions['participant']) {
-    super({ participant, rewinds: serverRoom._model.metaRewinds })
-    this._room = serverRoom
+  constructor({ room, participant }: ServerLocalParticipantOptions) {
+    super({ participant, rewinds: room._model.metaRewinds })
+    this._room = room
   }
 
   static isServerLocalParticipant(value: unknown): value is ServerLocalParticipant {
@@ -636,11 +646,13 @@ class ServerLocalParticipant extends ParticipantBase {
   }
 }
 
+type ServerRoomStateOwnerOptions = { room: ServerRoom }
+
 /** What a `ServerRoom`'s state asks of it, kept off the room itself, which is the user's `Room`. */
 class ServerRoomStateOwner implements RoomStateOwner {
   private readonly room: ServerRoom
 
-  constructor(room: ServerRoom) {
+  constructor({ room }: ServerRoomStateOwnerOptions) {
     this.room = room
   }
 

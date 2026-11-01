@@ -77,7 +77,7 @@ function refusalOf(conflicting: RoomHead | null): Refusal | typeof EXCHANGE_CONF
 /** This process's view of the new incarnation: its meta at seq 0, no members. */
 function seededRoom(id: string, created: RoomConfigRecord): ServerRoom {
   const meta = { entries: metaEntriesAt(created.meta, 0), seq: 0 }
-  return new ServerRoom(RoomReplica.seeded(id, created, meta, { members: [] }))
+  return new ServerRoom({ replica: RoomReplica.seeded(id, created, meta, { members: [] }) })
 }
 
 function normalizeRoomOptions(options: RoomOptions | undefined): {
