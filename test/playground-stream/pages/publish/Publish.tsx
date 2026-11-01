@@ -15,6 +15,7 @@ import {
   onSubscribeThrows,
   onDeliveredBeforeReady,
   onJoinedBeforeReady,
+  onDeliveredWhileLost,
   onChatLeaveOnClose,
   onGetChatWatched,
   onServerBroadcastChecks,
@@ -285,6 +286,16 @@ function Publish() {
         }}
       >
         Listener joining between messages delivered before the store acknowledges the subscription
+      </button>
+
+      <button
+        id="test-delivered-while-lost"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify({ seen: await onDeliveredWhileLost() }))
+        }}
+      >
+        Messages delivered while the store restores a lost subscription
       </button>
 
       <h2>Leave message from onClose</h2>

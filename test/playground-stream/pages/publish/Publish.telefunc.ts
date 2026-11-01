@@ -11,6 +11,7 @@ export {
   onSubscribeThrows,
   onDeliveredBeforeReady,
   onJoinedBeforeReady,
+  onDeliveredWhileLost,
   onChatLeaveOnClose,
   onGetChatWatched,
   onServerBroadcastChecks,
@@ -263,6 +264,22 @@ async function onJoinedBeforeReady() {
   await first.publish({ n: 2 })
   await within10s(delivered)
   await Promise.all([first.close(), second.close()])
+  return seen
+}
+
+/** The store loses the subscription on this key and goes on delivering (a test asks it to, see `failBackend()`). */
+async function onDeliveredWhileLost() {
+  const channel = new BroadcastChannel<{ n: number }>({ key: `room:delivered-while-lost:${crypto.randomUUID()}` })
+  const seen: number[] = []
+  const { promise: delivered, resolve } = Promise.withResolvers<void>()
+  channel.subscribe((msg) => {
+    seen.push(msg.n)
+    if (msg.n === 2) resolve()
+  })
+  await channel.publish({ n: 1 })
+  await channel.publish({ n: 2 })
+  await within10s(delivered)
+  await channel.close()
   return seen
 }
 

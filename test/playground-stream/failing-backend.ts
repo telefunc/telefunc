@@ -28,10 +28,12 @@ import { createDeferred } from './createDeferred'
 
 /** `op` is a driver method (its next matching call rejects), 'bind' (the next matching subscribe throws), 'subscribe'
  *  (the next matching subscription is refused), 'deliver' (the next message a matching subscription gets is dropped),
- *  'early' (the next matching subscription is ready only after its first message, as a store whose acknowledgment
- *  comes after what it delivered; each further time, one message later) or 'lastSeq' (the next matching call answers 0,
- *  as a store that doesn't fix a publish's recipients, like Redis). `roomId`, or `key` (a Broadcast key, the start of a
- *  Room cell key the call reads or writes, or a commit's lane kind or required cell), narrows what matches. */
+ *  'lost' (a matching subscription is lost right before its next message, as a store that keeps delivering while it
+ *  restores its link), 'early' (the next matching subscription is ready only after its first message, as a store whose
+ *  acknowledgment comes after what it delivered; each further time, one message later) or 'lastSeq' (the next matching
+ *  call answers 0, as a store that doesn't fix a publish's recipients, like Redis). `roomId`, or `key` (a Broadcast
+ *  key, the start of a Room cell key the call reads or writes, or a commit's lane kind or required cell), narrows what
+ *  matches. */
 type BackendFault = { op: string; roomId?: string; key?: string; times?: number }
 
 type Source = BroadcastRoute | RoomSubscriptionSource
@@ -81,7 +83,9 @@ class FailingSubscription implements Subscriber {
   }
 
   message(payload: BackendPayload, ordering: OrderingInfo): void {
-    if (takeFault('deliver', callOf(this.source))) return
+    const call = callOf(this.source)
+    if (takeFault('deliver', call)) return
+    if (takeFault('lost', call)) this.outer.lost()
     this.outer.message(payload, ordering)
     if (!this.readyAfterMessage) return
     this.readyAfterMessage = false

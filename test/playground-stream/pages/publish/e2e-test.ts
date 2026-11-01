@@ -443,6 +443,16 @@ function testPublishFailingBackend() {
     })
   })
 
+  test('broadcast: a message the store delivers while the subscription is lost reaches the listener as it arrives', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await failBackend({ op: 'lost', key: 'room:delivered-while-lost:' })
+    await page.click('#test-delivered-while-lost')
+
+    await autoRetry(async () => {
+      expect(await getResult('#publish-result')).deep.equal({ seen: [1, 2] })
+    })
+  })
+
   test('broadcast: a subscriber that throws or rejects is reported as a bug and the others get every message, and an un-awaited publish the store fails leaves no unhandled rejection', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-errors')
