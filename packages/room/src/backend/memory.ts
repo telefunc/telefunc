@@ -31,7 +31,7 @@ import {
   headCxMatches,
   isOpenIncarnation,
   materializeHead,
-  nextOrderMark,
+  nextOrdering,
   publicHead,
   type StoredHead,
 } from './semantics.js'
@@ -187,7 +187,7 @@ function setCell(gen: Generation, key: string, bytes: Uint8Array | null, version
 }
 
 function advanceOrder(order: Map<string, OrderingInfo>, domain: string, now: number): OrderingInfo {
-  const mark = nextOrderMark(order.get(domain), now)
+  const mark = nextOrdering(order.get(domain), now)
   order.set(domain, mark)
   return mark
 }

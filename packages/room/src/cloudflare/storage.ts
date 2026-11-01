@@ -44,7 +44,7 @@ import {
   headCxMatches,
   isOpenIncarnation,
   materializeHead,
-  nextOrderMark,
+  nextOrdering,
   type StoredHead,
 } from '../backend/semantics.js'
 import type { OrderingInfo } from 'telefunc/__internal'
@@ -108,11 +108,10 @@ function directoryGet(sql: SqlStorage, roomId: string): string | undefined {
 function directoryList(sql: SqlStorage, prefix: string, cursor?: string): DirectoryPage {
   const range = keyRange('room_id', prefix, cursor)
   const matching = sql
-    .exec<{ room_id: string; inc_tag: string }>(
-      `SELECT room_id, inc_tag FROM directory WHERE ${range.where} ORDER BY room_id LIMIT ?`,
-      ...range.args,
-      DIRECTORY_PAGE_SIZE + 1,
-    )
+    .exec<{
+      room_id: string
+      inc_tag: string
+    }>(`SELECT room_id, inc_tag FROM directory WHERE ${range.where} ORDER BY room_id LIMIT ?`, ...range.args, DIRECTORY_PAGE_SIZE + 1)
     .toArray()
   const page = matching.slice(0, DIRECTORY_PAGE_SIZE)
   const entries = page.map((row) => ({ roomId: row.room_id, incTag: row.inc_tag }))
@@ -195,9 +194,9 @@ function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
   if (listOrphanGenerations(sql, readLiveHead(sql, now)?.currentInc ?? null).length > 0) return now
   // Each table takes its own MIN, so the route table's seeks its expires_at index.
   return sql
-    .exec<{ deadline: number | null }>(
-      'SELECT MIN(deadline) AS deadline FROM (SELECT MIN(expires_at) AS deadline FROM head UNION ALL SELECT MIN(expires_at) FROM route)',
-    )
+    .exec<{
+      deadline: number | null
+    }>('SELECT MIN(deadline) AS deadline FROM (SELECT MIN(expires_at) AS deadline FROM head UNION ALL SELECT MIN(expires_at) FROM route)')
     .toArray()[0]!.deadline
 }
 
@@ -321,7 +320,7 @@ function readOrder(sql: SqlStorage, inc: string, domain: string): OrderingInfo |
 
 /** `seq` strictly increases for the lifetime of a domain instance. */
 function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: number): OrderingInfo {
-  const mark = nextOrderMark(readOrder(sql, inc, domain) ?? undefined, now)
+  const mark = nextOrdering(readOrder(sql, inc, domain) ?? undefined, now)
   sql.exec(
     'INSERT OR REPLACE INTO ord (inc, domain, seq, ts) VALUES (?, ?, ?, ?)',
     inc,

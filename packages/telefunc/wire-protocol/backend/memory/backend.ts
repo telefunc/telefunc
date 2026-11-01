@@ -24,7 +24,7 @@ class MemoryBackend implements BroadcastDriver {
 
   publish(route: BroadcastRoute, payload: BroadcastPayload): PublishResult | Promise<PublishResult> {
     const order = this.broadcastOrder.get(route.key)
-    const mark = nextOrderMark(order ?? this.broadcastHighest, Date.now())
+    const mark = nextOrdering(order ?? this.broadcastHighest, Date.now())
     // Only a subscribed key has an order.
     if (order !== undefined || this.broadcastSubscribed(route.key)) this.broadcastOrder.set(route.key, mark)
     const highest = this.broadcastHighest
@@ -52,6 +52,6 @@ class MemoryBackend implements BroadcastDriver {
 }
 
 /** `seq` strictly increases per key; `timestamp` is this process's time, clamped so it never goes back. */
-function nextOrderMark(previous: OrderingInfo | undefined, now: number): OrderingInfo {
+function nextOrdering(previous: OrderingInfo | undefined, now: number): OrderingInfo {
   return { seq: (previous?.seq ?? 0) + 1, timestamp: Math.max(now, previous?.timestamp ?? 0) }
 }

@@ -11,7 +11,7 @@ import type { OrderingInfo } from '../wire/orderingFrame.js'
 
 type SubscriptionState = 'establishing' | 'ready' | 'lost' | 'closed'
 
-type BackendReceiver<Payload = Uint8Array> = (payload: Payload, position: OrderingInfo) => void
+type BackendReceiver<Payload = Uint8Array> = (payload: Payload, ordering: OrderingInfo) => void
 
 /** A consumer's subscription. */
 type BackendSubscription = {
@@ -163,17 +163,17 @@ class SharedSubscription implements Subscriber {
 
   // What the driver tells.
 
-  message(payload: BackendPayload, position: OrderingInfo): void {
+  message(payload: BackendPayload, ordering: OrderingInfo): void {
     if (this.finished) return
     // Checked once for all consumers; one that fails is reported and dropped.
     try {
-      assertDriverOrdering(position)
+      assertDriverOrdering(ordering)
       assert((this.delivers === 'text') === (typeof payload === 'string'))
     } catch (error) {
       console.error(error)
       return
     }
-    for (const consumer of this.targets()) consumer.receive(payload, position)
+    for (const consumer of this.targets()) consumer.receive(payload, ordering)
   }
 
   ready(): void {
@@ -258,9 +258,9 @@ class Consumer implements BackendSubscription {
   }
 
   /** Consumers are isolated from each other: one that throws is reported. */
-  receive(payload: BackendPayload, position: OrderingInfo): void {
+  receive(payload: BackendPayload, ordering: OrderingInfo): void {
     try {
-      this.receiver(payload, position)
+      this.receiver(payload, ordering)
     } catch (error) {
       console.error(error)
     }

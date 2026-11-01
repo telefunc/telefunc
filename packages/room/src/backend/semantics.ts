@@ -4,7 +4,7 @@ export {
   isOpenIncarnation,
   materializeHead,
   publicHead,
-  nextOrderMark,
+  nextOrdering,
   countCell,
   encodeCellCounter,
   decodeCellCounter,
@@ -76,7 +76,7 @@ function commitPreconditionHolds(
 }
 
 /** `seq` strictly increases per domain; `timestamp` is authority time, clamped so it never goes back. */
-function nextOrderMark(previous: OrderingInfo | undefined, now: number): OrderingInfo {
+function nextOrdering(previous: OrderingInfo | undefined, now: number): OrderingInfo {
   return { seq: (previous?.seq ?? 0) + 1, timestamp: Math.max(now, previous?.timestamp ?? 0) }
 }
 

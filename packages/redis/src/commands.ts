@@ -1,4 +1,4 @@
-export { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH, LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrderMark }
+export { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH, LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrdering }
 export type { RedisCommand }
 
 // Every Lua script and the one command table that registers and invokes them.
@@ -669,7 +669,7 @@ const REDIS_COMMANDS = {
     },
     parse: (reply): Map<string, OrderingInfo> | null => {
       if (reply === null) return null
-      return reply === '' ? new Map() : new Map([['', parseOrderMark(reply as string)]])
+      return reply === '' ? new Map() : new Map([['', parseOrdering(reply as string)]])
     },
   }),
   memberLaneStarts: command({
@@ -684,7 +684,7 @@ const REDIS_COMMANDS = {
       if (reply === null) return null
       const [cursor, fields] = reply as [string, string[]]
       const starts: Array<[string, OrderingInfo]> = []
-      for (let i = 0; i < fields.length; i += 2) starts.push([fields[i]!, parseOrderMark(fields[i + 1]!)])
+      for (let i = 0; i < fields.length; i += 2) starts.push([fields[i]!, parseOrdering(fields[i + 1]!)])
       return { cursor, starts }
     },
   }),
@@ -710,14 +710,14 @@ const REDIS_COMMANDS = {
       keys: lanes.map((laneKey) => memberOrderKey(prefix, roomId, inc, binaryLaneOf(kit, laneKey).member)),
       argv: lanes,
     }),
-    parse: (reply) => (reply as string[]).map((mark) => (mark === '' ? null : parseOrderMark(mark))),
+    parse: (reply) => (reply as string[]).map((mark) => (mark === '' ? null : parseOrdering(mark))),
   }),
   broadcastStart: command({
     name: 'tfBroadcastStart',
     lua: BROADCAST_START_LUA,
     numberOfKeys: 1,
     invoke: (prefix, route: BroadcastRoute) => ({ keys: [broadcastSequenceKey(prefix, route.key)], argv: [] }),
-    parse: (reply) => new Map([['', parseOrderMark(reply as string)]]),
+    parse: (reply) => new Map([['', parseOrdering(reply as string)]]),
   }),
   dropGeneration: command({
     name: 'tfRoomDropGeneration',
@@ -948,8 +948,8 @@ function toBuffer(bytes: Uint8Array): Buffer {
   return Buffer.from(bytes)
 }
 
-function parseOrderMark(mark: string): OrderingInfo {
-  const [seq, timestamp] = mark.split(':').map(Number) as [number, number]
+function parseOrdering(reply: string): OrderingInfo {
+  const [seq, timestamp] = reply.split(':').map(Number) as [number, number]
   return { seq, timestamp }
 }
 

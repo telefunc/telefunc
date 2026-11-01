@@ -20,18 +20,18 @@ type BroadcastPayload<Kind extends BroadcastKind = BroadcastKind> = { text: stri
 /** What a subscription delivers: a string on a text route, bytes on a binary route or a Room lane. */
 type BackendPayload = string | Uint8Array
 
-/** A publish's position, and how many subscribers the backend handed it to, counted its own way (absent where it
+/** A publish's ordering, and how many subscribers the backend handed it to, counted its own way (absent where it
  *  can't tell). */
 type PublishResult = OrderingInfo & { receivers?: number }
 
 /**
  * What a backend implements for Broadcast.
  *
- * A position's `seq` is a positive safe integer that grows with every publish on a key, of either kind; its
+ * An ordering's `seq` is a positive safe integer that grows with every publish on a key, of either kind; its
  * `timestamp` is a non-negative safe integer (ms) that never goes back on a key.
  */
 type BroadcastDriver = {
-  /** Publishes `payload` on `route` and returns its position. A publish this process makes after `subscribe()`
+  /** Publishes `payload` on `route` and returns its ordering. A publish this process makes after `subscribe()`
    *  returned reaches that subscription: if your publishes and subscribes travel by different connections, hold a
    *  publish until your own new subscriptions on its route are ready, as the Redis driver does. The caller may reuse
    *  `payload`'s bytes once this returns: copy what you keep. */
@@ -55,7 +55,7 @@ type BroadcastDriver = {
  * state, and every call after `ended()`, `failed()` or its unsubscribe.
  */
 interface Subscriber {
-  message(payload: BackendPayload, position: OrderingInfo): void
+  message(payload: BackendPayload, ordering: OrderingInfo): void
   ready(): void
   lost(): void
   /** The backend ended it on purpose (a Room generation was dropped), which its consumers expect. */

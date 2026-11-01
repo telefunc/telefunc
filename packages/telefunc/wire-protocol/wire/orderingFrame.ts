@@ -1,4 +1,4 @@
-export { encodeOrderingFrame, decodeOrderingFrame, isOrderingPosition }
+export { encodeOrderingFrame, decodeOrderingFrame, isOrdering }
 export type { OrderingInfo }
 
 import { assert } from '../../utils/assert.js'
@@ -10,12 +10,12 @@ const ORDERING_FRAME_HEADER_BYTES = 16
 const WORD_RANGE = 0x1_0000_0000
 
 /** A positive safe-integer `seq` and a non-negative safe-integer `timestamp`. */
-function isOrderingPosition({ seq, timestamp }: OrderingInfo): boolean {
+function isOrdering({ seq, timestamp }: OrderingInfo): boolean {
   return Number.isSafeInteger(seq) && seq > 0 && Number.isSafeInteger(timestamp) && timestamp >= 0
 }
 
 function encodeOrderingFrame(payload: Uint8Array, info: OrderingInfo): Uint8Array {
-  assert(isOrderingPosition(info))
+  assert(isOrdering(info))
   const frame = new Uint8Array(ORDERING_FRAME_HEADER_BYTES + payload.byteLength)
   const view = new DataView(frame.buffer)
   view.setUint32(0, Math.floor(info.seq / WORD_RANGE))
@@ -33,6 +33,6 @@ function decodeOrderingFrame(frame: Uint8Array): { payload: Uint8Array; info: Or
     seq: view.getUint32(0) * WORD_RANGE + view.getUint32(4),
     timestamp: view.getUint32(8) * WORD_RANGE + view.getUint32(12),
   }
-  assert(isOrderingPosition(info), 'Ordering frame carries an invalid position')
+  assert(isOrdering(info), 'Ordering frame carries an invalid ordering')
   return { payload: frame.subarray(ORDERING_FRAME_HEADER_BYTES), info }
 }

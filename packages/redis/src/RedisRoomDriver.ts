@@ -39,7 +39,7 @@ import {
   commitChannels,
   type FenceTokens,
 } from './keys.js'
-import { LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrderMark } from './commands.js'
+import { LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrdering } from './commands.js'
 import type { RedisConnection } from './RedisConnection.js'
 import type { RedisPlane } from './subscriber.js'
 
@@ -193,7 +193,7 @@ class RedisRoomDriver implements RoomDriver, RedisPlane {
       lane.kind === 'inbox' || lane.kind === 'binary'
         ? await this.connection.client.hget(memberOrderKey(this.connection.prefix, roomId, inc, lane.member), laneKey)
         : await this.connection.client.get(orderKey(this.connection.prefix, roomId, inc, laneKey))
-    return mark === null ? null : parseOrderMark(mark)
+    return mark === null ? null : parseOrdering(mark)
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {

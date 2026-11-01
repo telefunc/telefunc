@@ -29,8 +29,8 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
       const lastSeq = driver.lastSeq?.(route.key) ?? 0
       if (lastSeq === 0) return subscriptions.subscribe(route, source, receive)
       // A consumer gets only what is published after it subscribed, as the driver fixed each publish's recipients.
-      return subscriptions.subscribe(route, source, (payload, position) => {
-        if (position.seq > lastSeq) receive(payload, position)
+      return subscriptions.subscribe(route, source, (payload, ordering) => {
+        if (ordering.seq > lastSeq) receive(payload, ordering)
       })
     },
     dispose: () => subscriptions.dispose(),

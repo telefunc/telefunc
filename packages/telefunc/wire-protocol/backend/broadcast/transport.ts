@@ -1,7 +1,7 @@
 export { createBroadcastTransportDriver }
 export type { BroadcastTransport }
 
-import { isOrderingPosition } from '../../wire/orderingFrame.js'
+import { isOrdering } from '../../wire/orderingFrame.js'
 import type {
   BroadcastDriver,
   BroadcastPayload,
@@ -41,23 +41,23 @@ function publish(
 ): PublishResult | Promise<PublishResult> {
   const result =
     typeof payload === 'string' ? transport.send(route.key, payload) : transport.sendBinary(route.key, payload)
-  return isPromise(result) ? result.then(checkMark) : checkMark(result)
+  return isPromise(result) ? result.then(checkOrdering) : checkOrdering(result)
 }
 
-function checkMark<Mark extends { seq: number; timestamp: number }>(mark: Mark): Mark {
+function checkOrdering<Ordering extends { seq: number; timestamp: number }>(ordering: Ordering): Ordering {
   assertUsage(
-    isOrderingPosition(mark),
-    `config.broadcast.transport returned { seq: ${mark.seq}, timestamp: ${mark.timestamp} }: seq must be a positive safe integer and timestamp a non-negative safe integer.`,
+    isOrdering(ordering),
+    `config.broadcast.transport returned { seq: ${ordering.seq}, timestamp: ${ordering.timestamp} }: seq must be a positive safe integer and timestamp a non-negative safe integer.`,
   )
-  return mark
+  return ordering
 }
 
 /** Ready at once: a user transport's listen() has no establishment to wait for. */
 function subscribe(transport: BroadcastTransport, route: BroadcastRoute, subscriber: Subscriber): Unsubscribe {
   const stop =
     route.kind === 'text'
-      ? transport.listen(route.key, (payload, info) => subscriber.message(payload, checkMark(info)))
-      : transport.listenBinary(route.key, (payload, info) => subscriber.message(payload, checkMark(info)))
+      ? transport.listen(route.key, (payload, info) => subscriber.message(payload, checkOrdering(info)))
+      : transport.listenBinary(route.key, (payload, info) => subscriber.message(payload, checkOrdering(info)))
   subscriber.ready()
   return async () => stop()
 }

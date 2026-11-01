@@ -9,7 +9,7 @@ import { nextTurn } from '../../flowControl/macrotaskYield.js'
 /** Subscribers by key; a change replaces a key's array, so an array read at a publish or commit is its targets. */
 type Subscribers = Map<string, readonly Subscriber[]>
 
-/** A publish's position and the local consumers it reached. */
+/** A publish's ordering and the local consumers it reached. */
 type Receipt = OrderingInfo & { receivers: number }
 
 /** Deliveries one event-loop turn runs; the rest wait for the next, so a listener answering itself
