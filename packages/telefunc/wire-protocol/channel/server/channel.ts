@@ -66,14 +66,15 @@ function parsePeerText(text: string): unknown {
   }
 }
 
-/** The closing frames made while no peer was attached, sent to the next. */
+/** Closing frames the channel produced while no page was attached; the next attach sends them. */
 type PendingEnd = { closeAck: boolean; closeRequest: boolean; abort: string | null; error: ErrorReason | null }
 
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements Channel<ClientToServer, ServerToClient>, CreditOwner, ChannelLifecycleOwner, BufferedSender
 {
   readonly [SERVER_CHANNEL_BRAND] = true
-  /** @see ChannelShield in ../channel.ts — `data` validates incoming C2S, `ack` validates ack of own S2C sends. */
+  /** @see ChannelShield in ../channel.ts — `data` checks what the page sends, `ack` the page's answers to this
+   *  channel's ack requests. */
   declare readonly [TELEFUNC_SHIELDS]: {
     data: ChannelData<ClientToServer>
     ack: ChannelAck<ServerToClient>
@@ -89,7 +90,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return hasProp(value, SERVER_CHANNEL_BRAND)
   }
 
-  /** @internal `closing` once `close`, `abort` or the page's CLOSE started its end; `ended` once `shutdown` ran. */
+  /** @internal `closing` once `close`, `abort` or the page's CLOSE starts the close; `ended` once `shutdown` ran. */
   _phase: 'open' | 'closing' | 'ended' = 'open'
   private didRegister = false
   protected peer: IndexedPeer | null = null
@@ -108,29 +109,29 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected readonly bufferLimitBinary: number
   protected readonly lifecycle = new ChannelLifecycle({ owner: this })
   private ttlTimer: ReturnType<typeof setTimeout> | null = null
-  /** Credit governs fire-and-forget TEXT/BINARY, and PUBLISH in bytes — see `constants.ts`. */
   protected selfTime = new SelfTime()
+  /** Paces fire-and-forget TEXT, BINARY and PUBLISH sends to what the page grants; see `constants.ts`. */
   protected sendCredit: SendCredit
   protected receiveCredit: ReceiveCredit
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private responseAbort: ((abortValue?: unknown) => void) | null = null
   private pendingAckRes: Array<{ ackedSeq: number; result: string; status: AckResultStatus }> = []
-  /** The mux it is registered with, which keeps or forgets it once it ends. */
+  /** The mux that registered this channel; when the channel ends, the mux keeps it or forgets it. */
   private mux: ChannelMux | null = null
   private pendingEnd: PendingEnd | null = null
   private closeRequestSeq = 0
-  /** How far the page is known to have what this channel sent it. */
+  /** The highest seq the page is known to have received from this channel. */
   private pageLastSeq = 0
-  /** Its page closed its end, and takes nothing more of it. */
+  /** The page closed its end, so it takes nothing more from this channel. */
   private pageClosed = false
 
-  // ── Wire state — channel-owned, persistent across attach-mode transitions ────
+  // ── Wire state — channel-owned, kept across the page's attaches ────
   /** Buffer of outgoing wire frames, used to replay missed frames on reconnect.
    *  Allocated in `_registerChannel`; disposed in `_release`. Null only between
    *  construction and registration (no peer can attach before registration). */
   /** @internal */ _replayBuffer: ReplayBuffer | null = null
   /** Highest client→server seq the channel has received and dispatched. Used for
-   *  frame deduplication and reported back to the client in `CtrlReconciled.open[].lastSeq`. */
+   *  frame deduplication and reported back to the client in `ReconciledPayload.open[].lastSeq`. */
   /** @internal */ _lastClientSeq = 0
 
   /** Shield validators keyed by name (see `ChannelShield` in ../channel.ts).
@@ -263,17 +264,19 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.sendCredit.decrement(this.peer.sendSequenced(encode.binary, data))
   }
 
-  /** @internal The most that may wait on its wire for a reading page: credit, the allowance past it, offline buffers. */
+  /** @internal The most bytes that may wait for a reading page: the credit window, the allowance past it, and both
+   *  offline buffers. */
   _sendAllowance(): number {
     return CREDIT_WINDOW_MAX_BYTES + this.pastCreditAllowance() + this.bufferLimit + this.bufferLimitBinary
   }
 
-  /** How far past its credit the peer may be sent while it reads: the largest window a page grants. */
+  /** How many bytes past credit a page that is still reading may be sent: the largest window a page grants. */
   protected pastCreditAllowance(): number {
     return CREDIT_WINDOW_MAX_BYTES
   }
 
-  /** Whether its sends past credit and unanswered ack requests, as far as its wire holds them, reach the allowance. */
+  /** Whether the page fell behind: the bytes sent past credit plus the unanswered ack requests, capped at what the
+   *  wire still buffers, reach the allowance. */
   protected isPeerBehind(): boolean {
     const allowance = this.pastCreditAllowance()
     const behind = this.sendCredit.bytesSentPastCredit + this.pendingAckBytes
@@ -326,7 +329,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this.lifecycle.closing) return this.lifecycle.closing
     if (this._phase === 'ended') return Promise.resolve(this.lifecycle.result)
     const timeout = normalizeCloseTimeout(opts?.timeout)
-    // A channel no response carried yet has no page to acknowledge its close.
+    // Until a response carries the channel, no page exists to acknowledge its close.
     this.lifecycle.startClose(timeout, this.didRegister)
     this._phase = 'closing'
     if (this.peer) this.closeRequestSeq = this.peer.sendCloseRequest(timeout)
@@ -361,7 +364,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     )
   }
 
-  /** RECONCILE declarations apply before `onOpen`; an ended channel sends only what it made with no peer attached. */
+  /** @internal Attaches the page's wire. An ended channel only sends what it produced while no page was attached;
+   *  an open one applies the RECONCILE's broadcast subscriptions before `onOpen` fires. */
   _attachPeer(peer: IndexedPeer, state?: AttachState): void {
     if (this._phase === 'ended') {
       this.flushOfflineBuffer(peer)
@@ -395,7 +399,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       if (frame.seq !== 0 && frame.seq <= this._lastClientSeq) return
       if (frame.seq > this._lastClientSeq) this._lastClientSeq = frame.seq
     }
-    // An ended channel keeps only how far the page's frames reached it.
+    // An ended channel only tracks the page's last seq; it acts on no frame.
     if (this._phase === 'ended') return
     if (isChannelCtrlTag(frame.tag)) {
       this.dispatchCtrl(frame as ChannelCtrlFrame)
@@ -457,7 +461,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this.sendCredit.onPeerMessageWindow(frame.count)
         return
       case TAG.BDP_PING:
-        // It has no attach of its own to probe the path with.
+        // A channel measures no path RTT of its own, so `pathRtt` is `Infinity`.
         this.peer?.sendBdpPingAck(frame.probe, this.sendCredit.onPing(), Infinity)
         return
       case TAG.BDP_PING_ACK:
@@ -491,7 +495,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.peer?.sender.bufferedAmount()
   }
 
-  /** A broadcast takes subscriptions; a plain channel drops them. */
+  /** `ServerBroadcast` overrides it; a plain channel ignores subscriptions. */
   _onPeerSubscription(_subscription: { binary: boolean; subscribed: boolean }): void {}
 
   _onPeerMessage(text: string, bytes: number): void {
@@ -614,12 +618,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   _onPeerCloseAck(): void {
     if (this._phase === 'ended') return
-    // The page acknowledges the close request as it gets it, so it has all sent before it.
+    // The page sends CLOSE_ACK when the close request arrives, so it has received everything sent before it.
     this._onPageHas(this.closeRequestSeq)
     this.lifecycle.onCloseAck()
   }
 
-  /** @internal `peer`'s wire went away. A channel a later reconcile moved to another wire keeps that one. */
+  /** @internal The wire of `peer` went away. A channel a later RECONCILE already moved to another wire stays there. */
   _onPeerDisconnect(peer: IndexedPeer, reconnectTimeout: number): void {
     if (this._phase === 'ended' || this.peer?.sender !== peer.sender) return
     this.peer = null
@@ -646,7 +650,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.shutdown(undefined, { pageGone: true })
   }
 
-  /** @internal Its replay lost what its page lacks: drops what it made offline and ends, `peer` telling the page. */
+  /** @internal The replay buffer no longer holds what the page lacks: drops what was buffered offline, sends the page
+   *  a LOST error on `peer`, and ends. */
   _onReplayLost(peer: IndexedPeer): void {
     const err = replayLossError('server')
     this.dropPending(err)
@@ -654,24 +659,24 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.shutdown(err)
   }
 
-  /** @internal At each of its page's heartbeats: see `ReceiveCredit.acknowledge`. */
+  /** @internal Called on each of the page's heartbeats; see `ReceiveCredit.acknowledge`. */
   _acknowledge(): void {
     this.receiveCredit.acknowledge()
   }
 
-  /** @internal The page has what this channel sent it through `lastSeq`, which its replay lets go. */
+  /** @internal The page received this channel's frames through `lastSeq`, so the replay buffer lets them go. */
   _onPageHas(lastSeq: number): void {
     if (lastSeq > this.pageLastSeq) this.pageLastSeq = lastSeq
     this._replayBuffer?.acknowledge(lastSeq)
   }
 
-  /** @internal Its page closed its end, having what this channel sent it through `lastSeq`. */
+  /** @internal The page closed its end after receiving this channel's frames through `lastSeq`. */
   _onPageClosed(lastSeq: number): void {
     this.pageClosed = true
     this._onPageHas(lastSeq)
   }
 
-  /** @internal Its page takes nothing more of it: it closed its end, or has all this channel sent and nothing waits. */
+  /** True once the page needs nothing more: it closed its end, or it received every frame and nothing is pending. */
   private pageNeedsNothing(): boolean {
     if (this._replayBuffer === null) return false
     if (this.pageClosed) return true
@@ -691,8 +696,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.offlineBuffer.flush(this, peer)
   }
 
-  /** @internal `BufferedSender`: what was sent while no peer was attached goes to `peer`, as it would have then; an ack
-   *  request rejected at the end takes no answer. */
+  /** @internal `BufferedSender`: sends `peer` a frame buffered while no page was attached, as it would have gone then.
+   *  An ack request already rejected at shutdown has no callback left to answer. */
   _sendBuffered(peer: IndexedPeer, tag: number, data: string | Uint8Array, callback: EntryCallback | null): void {
     switch (tag) {
       case TAG.TEXT:
@@ -743,7 +748,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.pendingEnd = null
   }
 
-  /** Ends the channel on both ends with an ERROR of `reason`, which a page not attached gets at its next attach. */
+  /** Ends the channel on both sides with an ERROR of `reason`; a page not attached receives it on its next attach. */
   protected endWithError(reason: ErrorReason, err: Error): void {
     if (this._phase === 'ended') return
     this.offlineBuffer.clear(err)
@@ -797,7 +802,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.shutdown(err)
   }
 
-  /** @internal An `Abort` a callback threw ends its response where it has one. */
+  /** @internal A callback threw `Abort`: aborts the response carrying the channel if there is one, else the channel. */
   _abortFromCallback(err: AbortError): void {
     if (this.responseAbort) {
       this.responseAbort(err.abortValue)
@@ -811,7 +816,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     reportServerChannelError(err)
   }
 
-  /** `pageGone`: its page left it, or never came, so nothing it lacks of the channel can reach it. */
+  /** `pageGone`: the page left or never attached, so nothing the channel holds for it can reach it. */
   protected shutdown(err?: Error, { pageGone = false } = {}): void {
     if (this._phase === 'ended') return
     this._phase = 'ended'
@@ -823,24 +828,24 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.ttlTimer = null
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = null
-    // Before any response carried it, it keeps its end for the page a later one hands it to.
+    // Kept for a page that may still attach and lacks something, or for a response that has yet to carry it.
     const keep = !pageGone && !this.pageNeedsNothing()
     if (!keep) this._release()
     this.mux?.onChannelEnded(this, { keep, pageAttached })
     this.lifecycle.fireClose(err)
     this.sendCredit.shutdown()
-    // Building an error captures its stack: one is built only where an answer is awaited.
+    // Building an error captures a stack trace, so one is built only when an ack is still awaited.
     if (this.pendingAcks.size > 0 || this.offlineBuffer.size > 0) {
       const ackErr = err ?? new ChannelClosedError()
       for (const { reject } of this.pendingAcks.values()) reject(ackErr)
-      // What it keeps for its page takes no answer.
+      // The buffered ack requests stay for the page, but their callbacks reject now.
       this.offlineBuffer.rejectAcks(ackErr)
     }
     this.pendingAcks.clear()
     this.pendingAckBytes = 0
   }
 
-  /** @internal Drops what the channel keeps for its page: its replay, and what it made while no peer was attached. */
+  /** @internal Drops what the channel holds for its page: the replay buffer and all it buffered while detached. */
   _release(): void {
     this._replayBuffer?.dispose()
     this._replayBuffer = null
@@ -849,7 +854,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     )
   }
 
-  /** What was sent while no peer was attached rejects with `err`. */
+  /** Drops all buffered while no page was attached; buffered sends reject with `err` when it is given. */
   private dropPending(err?: Error): void {
     this.offlineBuffer.clear(err)
     this.pendingAckRes.length = 0
