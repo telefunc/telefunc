@@ -441,7 +441,7 @@ if ${COMMIT_ARG.retain} == '1' then
   end
   redis.call('SET', retained_key, frame)
 end
--- A channel's local attempts awaiting the commit find their fence token ahead of its frame, after a byte no frame
+-- A channel's local subscriptions awaiting the commit find their fence token ahead of its frame, after a byte no frame
 -- starts with.
 local fence = string.char(${REDIS_DELIVERY_FENCE_BYTE})
 local lane_message = frame
