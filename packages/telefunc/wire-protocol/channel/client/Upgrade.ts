@@ -23,8 +23,8 @@ import { assert } from '../../../utils/assert.js'
 import { randomUuid } from '../../../utils/randomUuid.js'
 import { Heartbeat } from './Heartbeat.js'
 
-/** Probe wire returned by `WsTransport.probe`. Liveness is the consumer's responsibility
- *  until the swap commits — typically driven via a transient Heartbeat. */
+/** The probe wire `WsTransport.probe` returns. Until the swap commits, its caller keeps it alive: `Upgrade` does so
+ *  with a Heartbeat of its own. */
 type ProbeWire = {
   ping: () => void
   /** Exchanges PREPARE/READY without the probe becoming the transport — adopting it early would put a sessionless
@@ -145,7 +145,7 @@ class Upgrade implements ProbeOwner {
   private readonly allowsWebSocket: boolean
   /** Only while the connection is open: it goes with the open state it was in (see `forget`). */
   private state: UpgradeState = { tag: 'none' }
-  /** Sticky after a permanent upgrade abort — survives every state transition until dispose. */
+  /** Set by a permanent upgrade abort, and kept through every state change until dispose. */
   private disabled = false
   /** Server-allowed transports from the last settled RECONCILED. Kept so `maybeStart`
    *  can run from both `handleReconciled` and `onTransportOpen` — transport-open and the
@@ -164,7 +164,8 @@ class Upgrade implements ProbeOwner {
     return this.state.tag === 'committing' ? this.state : null
   }
 
-  /** The flip is an EVENT inside `committing`, not a transition out of it: `flipped ≡ transport === to`. */
+  /** Whether the connection's transport is already the new wire. The flip happens inside `committing`; it is not a
+   *  state of its own. */
   get flipped(): boolean {
     const u = this.committing
     return u !== null && this.owner.transport === u.to
@@ -239,9 +240,9 @@ class Upgrade implements ProbeOwner {
     this.disabled = true
   }
 
-  /** Every frame arriving mid-handoff lands here — the one charge site. Before the flip the probe
-   *  is nobody's wire, so even a join limb waits: acting on one would settle a swap that has not
-   *  happened. After it, limbs apply and the rest waits, partitioned by the wire it came from. */
+  /** Takes every frame that arrives during the handoff, and is the one place that counts it against the handoff's
+   *  budget. Before the flip the probe is nobody's wire, so even a join limb waits: acting on one would settle a swap
+   *  that hasn't happened. After it, limbs apply and the rest waits, split by the wire it came from. */
   ingestDuringHandoff(frame: DecodedFrame, source: 'old' | 'new', byteLength: number): void {
     const u = this.committing
     if (u === null) return
