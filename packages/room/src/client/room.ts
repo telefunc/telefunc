@@ -664,21 +664,18 @@ abstract class ClientParticipantBase extends ParticipantBase {
 /** What a `ClientRoom`'s model and state ask of it, kept off the room itself, which is the user's `Room`. */
 class ClientRoomOwner implements RoomModelOwner, RoomStateOwner {
   private readonly room: ClientRoom
-  readonly onCallbackError = reportClientCallbackError
 
   constructor(room: ClientRoom) {
     this.room = room
   }
 
+  reportCallbackError(error: unknown): void {
+    reportClientCallbackError(error)
+  }
+
   onMemberLeft(id: string, cause: LeaveCause): void {
     this.room._onLeave(id, cause)
   }
-
-  // A client's local participants take their meta where it arrives (`_acceptParticipantMeta`), and it repairs no
-  // meta: the server does.
-  onMemberMeta(): void {}
-  onMetaWaiting(): void {}
-  onMemberMetaGap(): void {}
 
   pendingMember(id: string): MemberSnapshot | undefined {
     return this.room._rosterStream?.pending.get(id)

@@ -22,7 +22,7 @@ import type {
 } from '../protocol.js'
 import type { DemandEntry, RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope } from './protocol.js'
 import { Slice } from '../Slice.js'
-import { RoomModel, type RoomModelOwner } from '../state.js'
+import { RoomModel, type ServerModelOwner } from '../state.js'
 import type { LeaveCause } from '../types.js'
 import { AuthoritySync, type AuthoritySyncOwner } from './AuthoritySync.js'
 import { PendingDmAcks } from './dmAcks.js'
@@ -71,7 +71,7 @@ function replicasHere(): Map<string, WeakRef<RoomReplica>> {
  *  tails runs no heartbeat and holds no lane; it lives while a handle holds it. */
 class RoomReplica
   implements
-    RoomModelOwner,
+    ServerModelOwner,
     DemandReportOwner,
     RoomDemandOwner,
     LanePlanOwner,

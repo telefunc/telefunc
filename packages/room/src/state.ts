@@ -1,5 +1,5 @@
 export { RoomModel, RoomState, RoomStateView, remoteBacking }
-export type { MembershipEvent, RoomModelOwner, RoomStateOwner }
+export type { MembershipEvent, RoomModelOwner, ServerModelOwner, RoomStateOwner }
 
 import { assert, assertUsage } from './utils/assert.js'
 import { getGlobalObject } from './utils/getGlobalObject.js'
@@ -95,11 +95,25 @@ type RoomModelOptions = {
   owner: RoomModelOwner
 }
 
-/** What a model tells the side that holds it, as each happens. */
-interface RoomModelEvents {
+/** What a model tells and asks the side that holds it. */
+interface RoomModelOwner {
   /** Every leave, from an event or a reconciled roster, after every view's callbacks; `hidden` is null for a member
    *  this model didn't know. */
   onMemberLeft(id: string, cause: LeaveCause, hidden: boolean | null): void
+  /** A member of a roster still streaming in or applying, which an unstamped message may name. */
+  pendingMember(id: string): MemberSnapshot | undefined
+  /** This side's own connection to a member it holds, shown in place of the room's record of it; `null` for one it
+   *  doesn't hold. */
+  heldConnection(id: string): boolean | null
+  // Only a server acts on these (see `ServerModelOwner`): a client's local participants take their meta where it
+  // arrives, and the server repairs the meta.
+  onMemberMeta?(id: string, update: MemberMetaUpdate): void
+  onMetaWaiting?(): void
+  onMemberMetaGap?(): void
+}
+
+/** What a server's model also tells its replica. */
+interface ServerModelOwner extends RoomModelOwner {
   /** A known member's meta update applied, from an event, a stamp or a roster read. */
   onMemberMeta(id: string, update: MemberMetaUpdate): void
   /** A room meta change arrived ahead of one before it, and waits for it. */
@@ -107,17 +121,6 @@ interface RoomModelEvents {
   /** A member's meta change arrived ahead of one before it, which never arrived: the next roster read repairs it. */
   onMemberMetaGap(): void
 }
-
-/** What a model asks the side that holds it. */
-interface RoomModelQueries {
-  /** A member of a roster still streaming in or applying, which an unstamped message may name. */
-  pendingMember(id: string): MemberSnapshot | undefined
-  /** This side's own connection to a member it holds, shown in place of the room's record of it; `null` for one it
-   *  doesn't hold. */
-  heldConnection(id: string): boolean | null
-}
-
-interface RoomModelOwner extends RoomModelEvents, RoomModelQueries {}
 
 type RoomStateOptions = {
   view: RoomStateView
@@ -133,9 +136,8 @@ interface RoomStateOwner {
    *  one), and the binary want it turned on or off, if any: the side (de)activates its event source (adapter
    *  subscription, wire subscription). */
   onListenersChanged(member: string | null, binary: BinaryWantChange | null): void
-  /** A user callback threw: the side reports it. Called on its own, as a function, so the state hands it to each
-   *  listener's call as it is. */
-  readonly onCallbackError: (error: unknown) => void
+  /** A user callback threw: the side reports it. */
+  reportCallbackError(error: unknown): void
 }
 
 /** Exact-keyed backing lets the serializer recover (room, member) without exposing a public brand. */
@@ -483,9 +485,9 @@ class RoomModel {
     const prev = listening.length > 0 ? entry.meta.object : null
     const wasConnected = this.isConnected(entry)
     const applied = entry.meta.apply(update)
-    if (applied === 'gap') this.owner.onMemberMetaGap()
+    if (applied === 'gap') this.owner.onMemberMetaGap?.()
     if (applied !== 'applied') return false
-    this.owner.onMemberMeta(id, update)
+    this.owner.onMemberMeta?.(id, update)
     this.bumpState()
     if (this.isConnected(entry) !== wasConnected) this.connectionChanged(entry)
     if (prev === null) return true
@@ -500,7 +502,7 @@ class RoomModel {
     const listening = [...this.views].filter((view) => view.listensToRoomMeta())
     const prev = listening.length > 0 ? this.metaState.object : null
     const applied = this.metaState.apply(update)
-    if (this.metaState.waiting) this.owner.onMetaWaiting()
+    if (this.metaState.waiting) this.owner.onMetaWaiting?.()
     if (applied.length === 0) return applied
     this.bumpState()
     if (prev !== null) for (const view of listening) view.roomMetaChanged(this.metaState.object, prev)
@@ -656,7 +658,7 @@ class RoomModel {
       this.applyParticipantMeta(member.id, update)
       return true
     }
-    if (entry.meta.apply(update) === 'applied') this.owner.onMemberMeta(member.id, update)
+    if (entry.meta.apply(update) === 'applied') this.owner.onMemberMeta?.(member.id, update)
     return false
   }
 
@@ -679,6 +681,8 @@ class RoomState {
   private readonly memberListeners = new WeakMap<MemberEntry, MemberListeners>()
   private readonly changeCbs: Listeners<() => void> = new Listeners()
   private readonly owner: RoomStateOwner
+  /** The owner's `reportCallbackError`, bound once for every listener call. */
+  private readonly reportError: (error: unknown) => void
 
   private readonly roomDataCbs: Listeners<(data: unknown, info: ChannelPublishInfo, from: Sender) => unknown> =
     new Listeners()
@@ -710,7 +714,9 @@ class RoomState {
   constructor(opts: RoomStateOptions) {
     this.view = opts.view
     this.model = opts.model
-    this.owner = opts.owner
+    const owner = opts.owner
+    this.owner = owner
+    this.reportError = (error) => owner.reportCallbackError(error)
     this.trackWantsMax = opts.trackWantsMax ?? Number.POSITIVE_INFINITY
   }
 
@@ -794,7 +800,7 @@ class RoomState {
   onClose(cb: () => void): () => void {
     if (!this.model.closed) return this.register(this.closeCbs, cb)
     // Terminal, like a departed member's onLeave: a late listener hears it at once.
-    invokeChannelListener(cb, [], this.owner.onCallbackError)
+    invokeChannelListener(cb, [], this.reportError)
     return makeDisposer()
   }
 
@@ -906,7 +912,7 @@ class RoomState {
   ): void {
     for (const { cb, track: want } of cbs.list()) {
       if (want !== EVERY_TRACK && want !== track) continue
-      invokeChannelListener(invoke, [cb], this.owner.onCallbackError)
+      invokeChannelListener(invoke, [cb], this.reportError)
     }
   }
 
@@ -957,7 +963,7 @@ class RoomState {
       onLeave: (cb: (cause: LeaveCause) => void) => {
         if (!entry.left) return this.register((listeners.leaveCbs ??= new Listeners()), cb, entry)
         assert(entry.leaveCause)
-        invokeChannelListener(cb, [entry.leaveCause], this.owner.onCallbackError)
+        invokeChannelListener(cb, [entry.leaveCause], this.reportError)
         return makeDisposer()
       },
     }
@@ -1034,7 +1040,7 @@ class RoomState {
   }
 
   private fireAll<Args extends unknown[]>(cbs: Listeners<(...args: Args) => unknown>, ...args: Args): void {
-    for (const cb of cbs.list()) invokeChannelListener(cb, args, this.owner.onCallbackError)
+    for (const cb of cbs.list()) invokeChannelListener(cb, args, this.reportError)
   }
 }
 

@@ -627,10 +627,13 @@ class ServerLocalParticipant extends ParticipantBase {
 /** What a `ServerRoom`'s state asks of it, kept off the room itself, which is the user's `Room`. */
 class ServerRoomStateOwner implements RoomStateOwner {
   private readonly room: ServerRoom
-  readonly onCallbackError = reportBug
 
   constructor(room: ServerRoom) {
     this.room = room
+  }
+
+  reportCallbackError(error: unknown): void {
+    reportBug(error)
   }
 
   onListenersChanged(member: string | null, binary: BinaryWantChange | null): void {
