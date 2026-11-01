@@ -113,8 +113,8 @@ class SharedSubscription implements Subscriber {
   private readiness: Deferred<void> = createReadiness()
   private unsubscribeDriver: Unsubscribe | null = null
   /** What the driver delivered before its first `ready()`; null from then on, as a message after a loss goes out as it
-   *  arrives. Not null once finished either, so a message checks this one field to take the path a delivering
-   *  subscription takes. */
+   *  arrives. Empty, not null, once finished: a message then goes to `keepEarly()`, which drops it, so `message()`
+   *  checks this one field. */
   private early: EarlyMessage[] | null = []
   /** It stopped or ended: what the driver says from here on is ignored. */
   private finished = false
