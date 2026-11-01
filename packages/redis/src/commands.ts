@@ -28,8 +28,8 @@ import {
   directoryChecksKey,
   directoryIndexKey,
   directoryTagsKey,
-  generationInvalidationChannel,
-  generationKeysKey,
+  incarnationInvalidationChannel,
+  incarnationKeysKey,
   headKey,
   memberOrderKey,
   orderKey,
@@ -46,7 +46,7 @@ import {
 const REDIS_DELIVERY_FENCE_BYTE = 0xff
 /** A fence token is a UUID. */
 const REDIS_DELIVERY_FENCE_TOKEN_LENGTH = 36
-/** What a start read's, a leave's or a generation drop's page holds, as a SCAN count. */
+/** What a start read's, a leave's or an incarnation drop's page holds, as a SCAN count. */
 const LANE_PAGE_SIZE = 1024
 
 // Authority time in ms from Redis TIME's [sec, µs] pair, never from the caller.
@@ -267,19 +267,19 @@ return mark
 // Drops the manifest once its keys are; incarnation ids are never reused, so a repeated drop deletes nothing.
 //   KEYS: [1]=invalidation-channel [2]=manifest
 //   ARGV: [1]=inc
-const DROP_GENERATION_LUA = `
+const DROP_INCARNATION_LUA = `
 redis.call('UNLINK', KEYS[2])
 redis.call('PUBLISH', KEYS[1], ARGV[1])
 `
 
 // CELLS CX: all mutations and counts or none, while each expected cell is at its version; success implies the head
-// precondition (open + inc) held at apply time. A commit's writes take the generation's next revision as version.
-//   KEYS: [1]=head [2]=rev [3]=generation-keys [4]=cell-index [5]=values [6]=versions
+// precondition (open + inc) held at apply time. A commit's writes take the incarnation's next revision as version.
+//   KEYS: [1]=head [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions
 //   ARGV: [1]=inc [2..4]=how many mutated, expected and counted cells, then per mutated cell its key, op('set'|'del')
 //         and value, per expected cell its key and version ('' while absent), and per counted cell its key, delta and
 //         create ('1' or '')
 const CELLS_CX_LUA = `${HEAD_PRELUDE}
-local head_key, rev_key, generation_keys_key, cell_index_key, values_key, versions_key =
+local head_key, rev_key, incarnation_keys_key, cell_index_key, values_key, versions_key =
   KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6]
 local now = tf_now()
 local head = tf_live_head(head_key, now)
@@ -322,7 +322,7 @@ for at = first_counted, first_counted + 3 * counted - 1, 3 do
     reply[#reply + 1] = string.format('%d', counter.changedAt)
   end
 end
-redis.call('SADD', generation_keys_key, rev_key, cell_index_key, values_key, versions_key)
+redis.call('SADD', incarnation_keys_key, rev_key, cell_index_key, values_key, versions_key)
 return reply
 `
 
@@ -340,7 +340,7 @@ const COMMIT_KEYS = {
   order: 1,
   retained: 2,
   channel: 3,
-  generationKeys: 4,
+  incarnationKeys: 4,
   cellValues: 5,
   everyTrackChannel: 6,
   /** A retained binary lane's member's retained lanes. */
@@ -350,7 +350,7 @@ const COMMIT_KEYS = {
   everyMemberChannel: 9,
   /** A binary lane's track's lane set, which its first commit enters. */
   trackLanes: 10,
-  /** The generation's retained lanes. */
+  /** The incarnation's retained lanes. */
   retainedLanes: 11,
 } as const
 
@@ -383,8 +383,8 @@ const COMMIT_ARG = luaRefs('ARGV', COMMIT_ARGS)
 
 const COMMIT_LUA = `${HEAD_PRELUDE}
 ${REDIS_ORDERING_FRAME_LUA}
-local head_key, order_key, retained_key, channel_key, generation_keys_key =
-  ${COMMIT_KEY.head}, ${COMMIT_KEY.order}, ${COMMIT_KEY.retained}, ${COMMIT_KEY.channel}, ${COMMIT_KEY.generationKeys}
+local head_key, order_key, retained_key, channel_key, incarnation_keys_key =
+  ${COMMIT_KEY.head}, ${COMMIT_KEY.order}, ${COMMIT_KEY.retained}, ${COMMIT_KEY.channel}, ${COMMIT_KEY.incarnationKeys}
 local now = tf_now()
 local head = tf_live_head(head_key, now)
 local ok = false
@@ -422,21 +422,21 @@ if member_lane then
 else
   redis.call('SET', order_key, seq_text .. ':' .. ts_text)
 end
-redis.call('SADD', generation_keys_key, order_key)
+redis.call('SADD', incarnation_keys_key, order_key)
 if not prev and ${COMMIT_ARG.laneKind} == 'binary' then
   redis.call('SADD', ${COMMIT_KEY.trackLanes}, ${COMMIT_ARG.laneKey})
-  redis.call('SADD', generation_keys_key, ${COMMIT_KEY.trackLanes})
+  redis.call('SADD', incarnation_keys_key, ${COMMIT_KEY.trackLanes})
 end
 local frame = tf_ordering_frame(seq, ts, ${COMMIT_ARG.payload})
 if ${COMMIT_ARG.retain} == '1' then
   -- A lane holding a retained frame is already indexed: its frame and index entries leave together.
   if redis.call('EXISTS', retained_key) == 0 then
-    redis.call('SADD', generation_keys_key, retained_key, ${COMMIT_KEY.retainedLanes})
+    redis.call('SADD', incarnation_keys_key, retained_key, ${COMMIT_KEY.retainedLanes})
     redis.call('SADD', ${COMMIT_KEY.retainedLanes}, ${COMMIT_ARG.laneKey})
     if ${COMMIT_ARG.laneKind} == 'binary' then
       redis.call('SADD', ${COMMIT_KEY.memberRetained}, ${COMMIT_ARG.laneKey})
       redis.call('SADD', ${COMMIT_KEY.trackRetained}, ${COMMIT_ARG.laneKey})
-      redis.call('SADD', generation_keys_key, ${COMMIT_KEY.memberRetained}, ${COMMIT_KEY.trackRetained})
+      redis.call('SADD', incarnation_keys_key, ${COMMIT_KEY.memberRetained}, ${COMMIT_KEY.trackRetained})
     end
   end
   redis.call('SET', retained_key, frame)
@@ -458,8 +458,8 @@ return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',
 `
 
 // Deletes one lane's retained frame, optionally only while it still holds seq ARGV[1].
-//   KEYS: [1]=generation-keys [2]=retained [3]=a binary lane's member's retained lanes [4]=its track's retained lanes
-//         (another lane repeats [2] for both) [5]=the generation's retained lanes
+//   KEYS: [1]=incarnation-keys [2]=retained [3]=a binary lane's member's retained lanes [4]=its track's retained lanes
+//         (another lane repeats [2] for both) [5]=the incarnation's retained lanes
 //   ARGV: [1]=ifSeq or '' [2]=lane kind [3]=lane key
 const RETAINED_DELETE_LUA = `
 if ARGV[1] ~= '' then
@@ -480,7 +480,7 @@ return redis.call('DEL', KEYS[2])
 `
 
 // Takes a page of a leaving member's binary lanes out of their tracks' lane sets.
-//   KEYS: [1]=generation-keys [2..]=each lane's track's lane set
+//   KEYS: [1]=incarnation-keys [2..]=each lane's track's lane set
 //   ARGV: [1..]=the lane keys, in KEYS[2..]'s order
 const FORGET_TRACK_LANES_LUA = `
 for i = 2, #KEYS do
@@ -490,7 +490,7 @@ end
 `
 
 // Forgets one member's lane order.
-//   KEYS: [1]=generation-keys [2]=the member's order hash
+//   KEYS: [1]=incarnation-keys [2]=the member's order hash
 const DROP_LANE_ORDERS_LUA = `
 redis.call('SREM', KEYS[1], KEYS[2])
 redis.call('UNLINK', KEYS[2])
@@ -719,12 +719,12 @@ const REDIS_COMMANDS = {
     invoke: (prefix, route: BroadcastRoute) => ({ keys: [broadcastSequenceKey(prefix, route.key)], argv: [] }),
     parse: (reply) => new Map([['', parseOrdering(reply as string)]]),
   }),
-  dropGeneration: command({
-    name: 'tfRoomDropGeneration',
-    lua: DROP_GENERATION_LUA,
+  dropIncarnation: command({
+    name: 'tfRoomDropIncarnation',
+    lua: DROP_INCARNATION_LUA,
     numberOfKeys: 2,
     invoke: (prefix, { roomId, inc }: RoomInc) => ({
-      keys: [generationInvalidationChannel(prefix, roomId, inc), generationKeysKey(prefix, roomId, inc)],
+      keys: [incarnationInvalidationChannel(prefix, roomId, inc), incarnationKeysKey(prefix, roomId, inc)],
       argv: [inc],
     }),
     parse: () => {},
@@ -739,7 +739,7 @@ const REDIS_COMMANDS = {
         keys: [
           headKey(prefix, roomId),
           revKey(prefix, roomId, inc),
-          generationKeysKey(prefix, roomId, inc),
+          incarnationKeysKey(prefix, roomId, inc),
           cellIndexKey(prefix, roomId, inc),
           cellValuesKey(prefix, roomId, inc),
           cellVersionsKey(prefix, roomId, inc),
@@ -784,7 +784,7 @@ const REDIS_COMMANDS = {
       keys[COMMIT_KEYS.order] = order
       keys[COMMIT_KEYS.retained] = retained
       keys[COMMIT_KEYS.channel] = channels.lane
-      keys[COMMIT_KEYS.generationKeys] = generationKeysKey(prefix, roomId, inc)
+      keys[COMMIT_KEYS.incarnationKeys] = incarnationKeysKey(prefix, roomId, inc)
       keys[COMMIT_KEYS.cellValues] = cellValuesKey(prefix, roomId, inc)
       keys[COMMIT_KEYS.everyTrackChannel] = channels.everyTrack ?? channels.lane
       keys[COMMIT_KEYS.memberRetained] = indexed ? retainedOfKey(prefix, roomId, inc, lane.member) : retained
@@ -825,7 +825,7 @@ const REDIS_COMMANDS = {
       const binary = lane.kind === 'binary'
       return {
         keys: [
-          generationKeysKey(prefix, roomId, inc),
+          incarnationKeysKey(prefix, roomId, inc),
           retained,
           binary ? retainedOfKey(prefix, roomId, inc, lane.member) : retained,
           binary ? retainedOfTrackKey(prefix, roomId, inc, lane.track) : retained,
@@ -842,7 +842,7 @@ const REDIS_COMMANDS = {
     numberOfKeys: null,
     invoke: (prefix, { roomId, inc, lanes, kit }: RoomInc & { lanes: readonly string[]; kit: RoomPlaneKit }) => ({
       keys: [
-        generationKeysKey(prefix, roomId, inc),
+        incarnationKeysKey(prefix, roomId, inc),
         ...lanes.map((laneKey) => trackLanesKey(prefix, roomId, inc, binaryLaneOf(kit, laneKey).track)),
       ],
       argv: lanes,
@@ -854,7 +854,7 @@ const REDIS_COMMANDS = {
     lua: DROP_LANE_ORDERS_LUA,
     numberOfKeys: 2,
     invoke: (prefix, { roomId, inc, member }: RoomInc & { member: string }) => ({
-      keys: [generationKeysKey(prefix, roomId, inc), memberOrderKey(prefix, roomId, inc, member)],
+      keys: [incarnationKeysKey(prefix, roomId, inc), memberOrderKey(prefix, roomId, inc, member)],
       argv: [],
     }),
     parse: () => {},

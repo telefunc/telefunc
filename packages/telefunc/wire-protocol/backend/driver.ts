@@ -58,7 +58,7 @@ interface Subscriber {
   message(payload: BackendPayload, ordering: OrderingInfo): void
   ready(): void
   lost(): void
-  /** The backend ended it on purpose (a Room generation was dropped), which its consumers expect. */
+  /** The backend ended it on purpose (a Room incarnation was dropped), which its consumers expect. */
   ended(): void
   /** It failed for good; core reports `error` once, however many consumers share it. */
   failed(error: unknown): void

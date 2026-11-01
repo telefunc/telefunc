@@ -28,8 +28,8 @@ import {
   channelKey,
   directoryIndexKey,
   directoryTagsKey,
-  generationInvalidationChannel,
-  generationKeysKey,
+  incarnationInvalidationChannel,
+  incarnationKeysKey,
   memberOrderKey,
   orderKey,
   retainedKey,
@@ -111,7 +111,7 @@ class RedisRoomDriver implements RoomDriver, RedisPlane {
     return this.connection.subscriber.subscribe({
       source,
       laneChannel: channelKey(prefix, source.roomId, source.inc, this.kit.encodeLaneKey(source.lane)),
-      invalidationChannel: generationInvalidationChannel(prefix, source.roomId, source.inc),
+      invalidationChannel: incarnationInvalidationChannel(prefix, source.roomId, source.inc),
       plane: this,
       subscriber,
     })
@@ -239,16 +239,16 @@ class RedisRoomDriver implements RoomDriver, RedisPlane {
     await this.connection.run(REDIS_COMMANDS.dropLaneOrders, { roomId, inc, member })
   }
 
-  async dropGeneration(roomId: string, inc: string): Promise<void> {
+  async dropIncarnation(roomId: string, inc: string): Promise<void> {
     // No head names the incarnation any more, so no commit adds to its manifest while it is paged.
-    const manifest = generationKeysKey(this.connection.prefix, roomId, inc)
+    const manifest = incarnationKeysKey(this.connection.prefix, roomId, inc)
     let cursor = '0'
     do {
       const [next, keys] = await this.connection.client.sscan(manifest, cursor, 'COUNT', LANE_PAGE_SIZE)
       cursor = next
       if (keys.length > 0) await this.connection.client.unlink(...keys)
     } while (cursor !== '0')
-    await this.connection.run(REDIS_COMMANDS.dropGeneration, { roomId, inc })
+    await this.connection.run(REDIS_COMMANDS.dropIncarnation, { roomId, inc })
   }
 
   directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {

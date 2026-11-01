@@ -44,7 +44,7 @@ function superviseRoomDriver(driver: RoomDriver, subscriptions: Subscriptions<Ro
       const key = { key: roomSubscriptionSourceKey(source), delivers: 'binary' } as const
       return subscriptions.subscribe(source, key, receiver as BackendReceiver<BackendPayload>)
     },
-    dropGeneration: (roomId, inc) => driver.dropGeneration(roomId, inc),
+    dropIncarnation: (roomId, inc) => driver.dropIncarnation(roomId, inc),
     directoryPut: (roomId, incTag, checkAt, minDelayMs) => driver.directoryPut(roomId, incTag, checkAt, minDelayMs),
     directoryDelete: (roomId, incTag) => driver.directoryDelete(roomId, incTag),
     directoryGet: (roomId) => driver.directoryGet(roomId),

@@ -43,12 +43,12 @@ import {
   directoryGet,
   directoryList,
   directoryPut,
-  dropGenerationRows,
+  dropIncarnationRows,
   dropLaneOrderRows,
   initSchema,
   deleteLapsedHead,
-  listOrphanGenerations,
-  hasGeneration,
+  listOrphanIncarnations,
+  hasIncarnation,
   nextMaintenanceDeadline,
   readCells,
   readCellPage,
@@ -61,7 +61,7 @@ type AcceptedCommitWire = { accepted: true; seq: number; timestamp: number; rece
 type CommitWire = AcceptedCommitWire | StaleCommit
 
 type RegisterWire = { ok: true } | { rejected: true; reason: string }
-/** A route renewed, lapsed on its own, or deleted with its dropped generation. */
+/** A route renewed, lapsed on its own, or deleted with its dropped incarnation. */
 type RenewWire = 'renewed' | 'lapsed' | 'dropped'
 
 /** The room authority's methods, which its Durable Object serves over RPC. */
@@ -174,13 +174,13 @@ class RoomAuthority {
     return result
   }
 
-  /** Renews the route, or says it lapsed or went with its dropped generation; the session then ends its
+  /** Renews the route, or says it lapsed or went with its dropped incarnation; the session then ends its
    *  subscription. */
   async renewRoute(route: RouteInstallation): Promise<RenewWire> {
     const now = Date.now()
     const renewal = this.transaction((sql): RenewWire => {
       if (renewRoute(sql, route, now)) return 'renewed'
-      return hasGeneration(sql, route.inc) ? 'lapsed' : 'dropped'
+      return hasIncarnation(sql, route.inc) ? 'lapsed' : 'dropped'
     })
     await this.scheduleMaintenanceIfNeeded()
     return renewal
@@ -195,8 +195,8 @@ class RoomAuthority {
     this.transaction((sql) => dropLaneOrderRows(sql, inc, member))
   }
 
-  async dropGeneration(inc: string): Promise<void> {
-    this.transaction((sql) => dropGenerationRows(sql, inc))
+  async dropIncarnation(inc: string): Promise<void> {
+    this.transaction((sql) => dropIncarnationRows(sql, inc))
     await this.scheduleMaintenanceIfNeeded()
   }
 
@@ -230,13 +230,13 @@ class RoomAuthority {
     }
   }
 
-  /** Storage only: a session whose route lapsed or whose generation went learns it at its next renewal. */
+  /** Storage only: a session whose route lapsed or whose incarnation went learns it at its next renewal. */
   private runSweep(now: number): void {
     this.transaction((sql) => {
       const currentInc = readLiveHead(sql, now)?.currentInc ?? null
       deleteLapsedHead(sql, now)
       deleteExpiredRoutes(sql, now)
-      for (const inc of listOrphanGenerations(sql, currentInc)) dropGenerationRows(sql, inc)
+      for (const inc of listOrphanIncarnations(sql, currentInc)) dropIncarnationRows(sql, inc)
     })
   }
 

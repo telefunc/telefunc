@@ -177,7 +177,7 @@ type RoomDriver = {
   deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void>
   /** Forgets the order of `member`'s inbox and binary lanes; called once no commit to them can land. */
   dropLaneOrders(roomId: string, inc: string, member: string): Promise<void>
-  dropGeneration(roomId: string, inc: string): Promise<void>
+  dropIncarnation(roomId: string, inc: string): Promise<void>
   /** Lists `roomId` under `incTag`, due at `checkAt` (authority ms) and no sooner than `minDelayMs` from the
    *  authority's now; an entry due at Infinity is never due. */
   directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void>
@@ -189,7 +189,7 @@ type RoomDriver = {
    *  or deleted. */
   directoryDue(): Promise<DirectoryPage['entries']>
   /** Subscribes this host to `source` and tells `subscriber` how it goes, as a Broadcast driver's `subscribe` does. A
-   *  generation that isn't open is a refusal: `subscriber.failed(error)`. */
+   *  incarnation that isn't open is a refusal: `subscriber.failed(error)`. */
   subscribe(source: RoomSubscriptionSource, subscriber: Subscriber): Unsubscribe
 }
 

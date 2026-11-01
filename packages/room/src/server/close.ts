@@ -73,6 +73,6 @@ async function cleanupFinalizedIncarnation(backend: RoomBackend, roomId: string,
   // A closed tombstone's incarnation, which a random `inc` never makes current again.
   assert(closed.state === 'closed' && closed.currentInc === null, 'Dropping the current incarnation')
   const inc = configFromHead(closed).inc
-  await backend.dropGeneration(roomId, inc)
+  await backend.dropIncarnation(roomId, inc)
   await backend.directoryDelete(roomId, inc)
 }

@@ -52,7 +52,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     // The new incarnation: the head lapses only once the counters that keep it ahead are written.
     await createHold(incarnation)
     const lapsing = await lapseNewRoom(incarnation)
-    if (lapsedInc !== undefined) await backend.dropGeneration(id, lapsedInc)
+    if (lapsedInc !== undefined) await backend.dropIncarnation(id, lapsedInc)
     await listRoom(backend, incarnation, lapsing?.expiresAt)
     sweepLapsedRoomsSoon()
     return { kind: 'created', room: seededRoom(id, created) }

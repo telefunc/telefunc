@@ -115,8 +115,8 @@ class CloudflareRoomDriver implements RoomDriver {
     return this.stub(roomId).dropLaneOrders(inc, member)
   }
 
-  async dropGeneration(roomId: string, inc: string): Promise<void> {
-    return this.stub(roomId).dropGeneration(inc)
+  async dropIncarnation(roomId: string, inc: string): Promise<void> {
+    return this.stub(roomId).dropIncarnation(inc)
   }
 
   async directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {

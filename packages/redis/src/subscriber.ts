@@ -26,7 +26,7 @@ interface RedisPlane {
 type RedisSubscriptionOptions = {
   source: RedisSubscriptionSource
   laneChannel: string
-  /** A Room lane's generation channel: a message on it means the generation was dropped. */
+  /** A Room lane's incarnation channel: a message on it means the incarnation was dropped. */
   invalidationChannel: string | null
   plane: RedisPlane
   subscriber: Subscriber
@@ -297,7 +297,7 @@ class RedisSubscriber {
     }
     if (!this.isCurrent(id)) return
     if (starts !== null) return subscription.markReady(starts)
-    subscription.fail(new Error(`subscribeLane: the generation of '${subscription.laneChannel}' is not open`))
+    subscription.fail(new Error(`subscribeLane: the incarnation of '${subscription.laneChannel}' is not open`))
   }
 
   private subscriptions(): Set<RedisSubscription> {
@@ -443,10 +443,10 @@ class RedisSubscription {
     if (this.awaitsConfirmation()) this.early.push(message)
   }
 
-  /** Its generation was dropped. */
+  /** Its incarnation was dropped. */
   private end(): void {
     if (this.state === 'closed') return
-    this.close(new Error(`Redis generation of '${this.laneChannel}' was dropped`))
+    this.close(new Error(`Redis incarnation of '${this.laneChannel}' was dropped`))
     this.subscriber.ended()
   }
 

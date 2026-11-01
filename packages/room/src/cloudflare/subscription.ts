@@ -143,7 +143,7 @@ class CloudflareRoomSubscription {
     if (this.ended) return
     if (renewal === 'renewed') return this.scheduleRenewal()
     this.stop()
-    // A route that went with its dropped generation ends on purpose; a lapsed one is a failure.
+    // A route that went with its dropped incarnation ends on purpose; a lapsed one is a failure.
     if (renewal === 'dropped') this.subscriber.ended()
     else this.subscriber.failed(new Error(`Cloudflare route '${this.route.laneKey}' lapsed`))
   }

@@ -34,7 +34,7 @@ async function repairRoomIndex(
   head: RoomHead | null,
 ): Promise<void> {
   if (head?.currentInc === listedInc) return
-  await backend.dropGeneration(id, listedInc)
+  await backend.dropIncarnation(id, listedInc)
   const live = openConfig(head)
   if (live) await listRoom(backend, { id, inc: live.inc, hold: live.hold }, head!.expiresAt)
   else await backend.directoryDelete(id, listedInc)

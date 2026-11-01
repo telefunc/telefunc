@@ -8,8 +8,8 @@ export {
   directoryDue,
   readLiveHead,
   deleteLapsedHead,
-  listOrphanGenerations,
-  hasGeneration,
+  listOrphanIncarnations,
+  hasIncarnation,
   nextMaintenanceDeadline,
   compareExchangeHead,
   readCells,
@@ -18,7 +18,7 @@ export {
   compareExchangeCells,
   advanceOrder,
   dropLaneOrderRows,
-  dropGenerationRows,
+  dropIncarnationRows,
   keyRange,
 }
 
@@ -111,7 +111,11 @@ function directoryList(sql: SqlStorage, prefix: string, cursor?: string): Direct
     .exec<{
       room_id: string
       inc_tag: string
-    }>(`SELECT room_id, inc_tag FROM directory WHERE ${range.where} ORDER BY room_id LIMIT ?`, ...range.args, DIRECTORY_PAGE_SIZE + 1)
+    }>(
+      `SELECT room_id, inc_tag FROM directory WHERE ${range.where} ORDER BY room_id LIMIT ?`,
+      ...range.args,
+      DIRECTORY_PAGE_SIZE + 1,
+    )
     .toArray()
   const page = matching.slice(0, DIRECTORY_PAGE_SIZE)
   const entries = page.map((row) => ({ roomId: row.room_id, incTag: row.inc_tag }))
@@ -176,27 +180,29 @@ function deleteLapsedHead(sql: SqlStorage, now: number): void {
 }
 
 /** Installed incarnations other than `currentInc`. */
-function listOrphanGenerations(sql: SqlStorage, currentInc: string | null): string[] {
+function listOrphanIncarnations(sql: SqlStorage, currentInc: string | null): string[] {
   return sql
     .exec<{ inc: string }>('SELECT inc FROM gen WHERE inc IS NOT ?', currentInc)
     .toArray()
     .map((row) => row.inc)
 }
 
-/** Whether `inc`'s generation is stored: `dropGenerationRows` deletes it with its routes. */
-function hasGeneration(sql: SqlStorage, inc: string): boolean {
+/** Whether `inc`'s incarnation is stored: `dropIncarnationRows` deletes it with its routes. */
+function hasIncarnation(sql: SqlStorage, inc: string): boolean {
   return sql.exec('SELECT 1 FROM gen WHERE inc = ?', inc).toArray().length > 0
 }
 
-/** When the alarm's sweep next has work: `now` while an orphaned generation waits, else the first lapse of a head or a
+/** When the alarm's sweep next has work: `now` while an orphaned incarnation waits, else the first lapse of a head or a
  *  route, or null for none. */
 function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
-  if (listOrphanGenerations(sql, readLiveHead(sql, now)?.currentInc ?? null).length > 0) return now
+  if (listOrphanIncarnations(sql, readLiveHead(sql, now)?.currentInc ?? null).length > 0) return now
   // Each table takes its own MIN, so the route table's seeks its expires_at index.
   return sql
     .exec<{
       deadline: number | null
-    }>('SELECT MIN(deadline) AS deadline FROM (SELECT MIN(expires_at) AS deadline FROM head UNION ALL SELECT MIN(expires_at) FROM route)')
+    }>(
+      'SELECT MIN(deadline) AS deadline FROM (SELECT MIN(expires_at) AS deadline FROM head UNION ALL SELECT MIN(expires_at) FROM route)',
+    )
     .toArray()[0]!.deadline
 }
 
@@ -219,7 +225,7 @@ function storeHead(sql: SqlStorage, next: HeadNext, now: number): StoredHead {
     head.closeLease?.until ?? null,
     head.expiresAt,
   )
-  // A new incarnation's generation is registered inside the CX that names it.
+  // A new incarnation is registered inside the CX that names it.
   if (head.currentInc !== null) {
     sql.exec('INSERT OR IGNORE INTO gen (inc, revision) VALUES (?, 0)', head.currentInc)
   }
@@ -342,7 +348,7 @@ function dropLaneOrderRows(sql: SqlStorage, inc: string, member: string): void {
   )
 }
 
-function dropGenerationRows(sql: SqlStorage, inc: string): void {
+function dropIncarnationRows(sql: SqlStorage, inc: string): void {
   for (const table of ['cell', 'ord', 'rt_manifest', 'rt_chunk', 'route', 'gen']) {
     sql.exec(`DELETE FROM ${table} WHERE inc = ?`, inc)
   }
