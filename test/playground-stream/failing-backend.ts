@@ -27,10 +27,11 @@ import {
 import { createDeferred } from './createDeferred'
 
 /** `op` is a driver method (its next matching call rejects), 'bind' (the next matching subscribe throws), 'subscribe'
- *  (the next matching subscription is refused), 'deliver' (the next message a matching subscription gets is dropped)
- *  or 'early' (the next matching subscription is ready only after its first message, as a store whose acknowledgment
- *  comes after what it delivered). `roomId`, or `key` (a Broadcast key, the start of a Room cell key the call reads or
- *  writes, or a commit's lane kind or required cell), narrows what matches. */
+ *  (the next matching subscription is refused), 'deliver' (the next message a matching subscription gets is dropped),
+ *  'early' (the next matching subscription is ready only after its first message, as a store whose acknowledgment
+ *  comes after what it delivered; each further time, one message later) or 'lastSeq' (the next matching call answers 0,
+ *  as a store that doesn't fix a publish's recipients, like Redis). `roomId`, or `key` (a Broadcast key, the start of a
+ *  Room cell key the call reads or writes, or a commit's lane kind or required cell), narrows what matches. */
 type BackendFault = { op: string; roomId?: string; key?: string; times?: number }
 
 type Source = BroadcastRoute | RoomSubscriptionSource
@@ -67,7 +68,7 @@ class FailingSubscription implements Subscriber {
   readonly source: Source
   private readonly outer: Subscriber
   unsubscribeInner: Unsubscribe | null = null
-  /** Its `ready()` waits for its first message (the 'early' fault). */
+  /** Its `ready()` waits for its next message (the 'early' fault). */
   private readyAfterMessage = false
 
   constructor({ source, outer }: FailingSubscriptionOptions) {
@@ -84,7 +85,7 @@ class FailingSubscription implements Subscriber {
     this.outer.message(payload, ordering)
     if (!this.readyAfterMessage) return
     this.readyAfterMessage = false
-    this.outer.ready()
+    this.ready()
   }
 
   ready(): void {
@@ -148,6 +149,8 @@ function failing<Driver extends { subscribe(source: Source, subscriber: Subscrib
       if (op === 'subscribe') return subscribe
       const value = Reflect.get(target, op)
       if (typeof value !== 'function' || typeof op !== 'string') return value
+      if (op === 'lastSeq')
+        return (key: string) => (takeFault(op, { keys: [key] }) ? 0 : Reflect.apply(value, target, [key]))
       return (...args: unknown[]) => {
         if (!takeFault(op, callOfArgs(op, args))) return Reflect.apply(value, target, args)
         const error = new Error(`failing-backend: ${op} failed`)

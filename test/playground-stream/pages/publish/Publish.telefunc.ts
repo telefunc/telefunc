@@ -10,6 +10,7 @@ export {
   onBroadcastWhileEstablishing,
   onSubscribeThrows,
   onDeliveredBeforeReady,
+  onJoinedBeforeReady,
   onChatLeaveOnClose,
   onGetChatWatched,
   onServerBroadcastChecks,
@@ -240,6 +241,28 @@ async function onDeliveredBeforeReady() {
   await channel.publish({ n: 2 })
   await within10s(delivered)
   await channel.close()
+  return seen
+}
+
+/** The store delivers two messages on this key before it acknowledges the subscription, and a second listener joins
+ *  between them; like Redis, the store leaves it to core to keep the first message from that listener. */
+async function onJoinedBeforeReady() {
+  const key = `room:joined-before-ready:${crypto.randomUUID()}`
+  addBackendFault({ op: 'early', key, times: 2 })
+  const first = new BroadcastChannel<{ n: number }>({ key })
+  const second = new BroadcastChannel<{ n: number }>({ key })
+  const seen = { first: [] as number[], second: [] as number[] }
+  const { promise: delivered, resolve } = Promise.withResolvers<void>()
+  first.subscribe((msg) => seen.first.push(msg.n))
+  await first.publish({ n: 1 })
+  addBackendFault({ op: 'lastSeq', key })
+  second.subscribe((msg) => {
+    seen.second.push(msg.n)
+    if (msg.n === 2) resolve()
+  })
+  await first.publish({ n: 2 })
+  await within10s(delivered)
+  await Promise.all([first.close(), second.close()])
   return seen
 }
 

@@ -14,6 +14,7 @@ import {
   onBroadcastWhileEstablishing,
   onSubscribeThrows,
   onDeliveredBeforeReady,
+  onJoinedBeforeReady,
   onChatLeaveOnClose,
   onGetChatWatched,
   onServerBroadcastChecks,
@@ -274,6 +275,16 @@ function Publish() {
         }}
       >
         Message delivered before the store acknowledges the subscription
+      </button>
+
+      <button
+        id="test-joined-before-ready"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onJoinedBeforeReady()))
+        }}
+      >
+        Listener joining between messages delivered before the store acknowledges the subscription
       </button>
 
       <h2>Leave message from onClose</h2>
