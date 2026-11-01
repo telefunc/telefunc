@@ -94,8 +94,8 @@ interface MuxConnection {
   sendAbort(channel: MuxChannel, abortValue: string): void
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
   sendCloseAck(channel: MuxChannel): void
-  sendByteWindowUpdate(channel: MuxChannel, limit: number, urgency: Urgency): void
-  sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgency: Urgency): void
+  sendByteLimit(channel: MuxChannel, limit: number, urgency: Urgency): void
+  sendMessageLimit(channel: MuxChannel, limit: number, urgency: Urgency): void
   sendBdpPing(channel: MuxChannel, probe: number): void
   sendBdpPingAck(channel: MuxChannel, ack: BdpPingAck): void
   /** Bytes the wire holds that haven't gone out. */
@@ -411,13 +411,13 @@ class ClientConnection
     this.gate.send(record, seq, encode.closeAck(record.ix, seq), 'control')
   }
 
-  sendByteWindowUpdate(channel: MuxChannel, limit: number, urgency: Urgency): void {
+  sendByteLimit(channel: MuxChannel, limit: number, urgency: Urgency): void {
     const record = this.channels.of(channel)
     if (record === undefined) return
     this.gate.sendUnsequenced(record, encode.window(record.ix, limit, record.lastSeq), urgency)
   }
 
-  sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgency: Urgency): void {
+  sendMessageLimit(channel: MuxChannel, limit: number, urgency: Urgency): void {
     const record = this.channels.of(channel)
     if (record === undefined) return
     this.gate.sendUnsequenced(record, encode.msgWindow(record.ix, limit), urgency)

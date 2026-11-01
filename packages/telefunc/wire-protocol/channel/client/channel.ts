@@ -227,12 +227,12 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal A closed channel's server ends its sends with the close, so the channel grants it no more credit. */
   _sendByteLimit(limit: number, urgency: Urgency): void {
-    if (!this.closed) this.connection.sendByteWindowUpdate(this, limit, urgency)
+    if (!this.closed) this.connection.sendByteLimit(this, limit, urgency)
   }
 
   /** @internal */
   _sendMessageLimit(limit: number, urgency: Urgency): void {
-    if (!this.closed) this.connection.sendMsgWindowUpdate(this, limit, urgency)
+    if (!this.closed) this.connection.sendMessageLimit(this, limit, urgency)
   }
 
   /** @internal */

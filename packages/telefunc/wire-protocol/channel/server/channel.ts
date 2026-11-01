@@ -473,12 +473,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal */
   _sendByteLimit(limit: number, urgency: Urgency): void {
-    this.peer?.sendByteWindowUpdate(limit, this._lastClientSeq, urgency)
+    this.peer?.sendByteLimit(limit, this._lastClientSeq, urgency)
   }
 
   /** @internal */
   _sendMessageLimit(limit: number, urgency: Urgency): void {
-    this.peer?.sendMsgWindowUpdate(limit, urgency)
+    this.peer?.sendMessageLimit(limit, urgency)
   }
 
   /** @internal */
