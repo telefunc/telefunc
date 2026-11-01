@@ -63,8 +63,8 @@ class BdpEstimator {
   private grewSincePing = false
   /** The ping in flight went out after the byte window grew: its answer covers credit the smaller window granted. */
   private pingFollowsGrowth = false
-  /** Adaptive probe interval: snaps to `MIN` on grow, doubles up to `MAX` on
-   *  non-grow. Slows but never freezes — a real rate change rediscovers. */
+  /** The probe interval, which `pace` sets: the minimum after a grow, kept after `'window-grew'`, doubled up to the
+   *  maximum otherwise. It slows but never stops, so a real rate change is found again. */
   private probeIntervalMs = BDP_PING_MIN_INTERVAL_MS
 
   /** The byte window the estimator sets, which `ReceiveCredit` grants unless it grants more. */
@@ -196,8 +196,9 @@ class BdpEstimator {
     return msgSample * 3 < msgWindow * 2 ? 'sample-too-small' : 'grow'
   }
 
-  /** Sets the probe interval: back to the minimum after a grow, since more headroom may exist; doubled, up to the
-   *  maximum, after a verdict against growing. */
+  /** Sets the probe interval: back to the minimum after a grow, since more headroom may exist; kept after a
+   *  `'window-grew'` byte decision, whose ping followed the window's growth; doubled, up to the maximum, after any
+   *  other verdict against growing. */
   private pace(bytes: AxisDecision, msgs: AxisDecision): void {
     if (bytes === 'grow' || msgs === 'grow') {
       this.probeIntervalMs = BDP_PING_MIN_INTERVAL_MS
