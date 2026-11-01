@@ -174,7 +174,8 @@ class RoomAuthority {
     return result
   }
 
-  /** Renews the route, or says it lapsed or went with its dropped generation; the session then ends the attempt. */
+  /** Renews the route, or says it lapsed or went with its dropped generation; the session then ends its
+   *  subscription. */
   async renewRoute(route: RouteInstallation): Promise<RenewWire> {
     const now = Date.now()
     const renewal = this.transaction((sql): RenewWire => {

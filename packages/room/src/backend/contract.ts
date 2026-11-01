@@ -29,7 +29,7 @@ export type {
   RoomSubscriptionSource,
 }
 
-import type { BackendReceiver, BackendSubscription, SubscriptionDriver, OrderingInfo } from 'telefunc/__internal'
+import type { BackendReceiver, BackendSubscription, OrderingInfo, Subscriber, Unsubscribe } from 'telefunc/__internal'
 
 /** The cells a prefix read's page holds. */
 const CELL_PAGE_SIZE = 1024
@@ -164,6 +164,9 @@ type RoomDriver = {
    *  page is the last. */
   readCellPages(roomId: string, inc: string, prefix: string): AsyncIterable<CellsRead>
   compareExchangeCells(roomId: string, inc: string, cx: CellsCx): Promise<CxResult>
+  /** A commit this process makes after `subscribe()` returned reaches that subscription: if your commits and
+   *  subscribes travel by different connections, hold a commit until your own new subscriptions on its lanes are
+   *  ready, as the Redis driver does. The caller may reuse `payload`'s bytes once this returns: copy what you keep. */
   commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult>
   /** The lane's last commit's seq and timestamp; null before its first, or once its incarnation or member is gone. */
   readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null>
@@ -185,11 +188,13 @@ type RoomDriver = {
   /** Up to a page of the entries due at the authority's now, earliest first; an entry stays due until it is put again
    *  or deleted. */
   directoryDue(): Promise<DirectoryPage['entries']>
-  readonly subscriptions: SubscriptionDriver<RoomSubscriptionSource>
+  /** Subscribes this host to `source` and tells `subscriber` how it goes, as a Broadcast driver's `subscribe` does. A
+   *  generation that isn't open is a refusal: `subscriber.failed(error)`. */
+  subscribe(source: RoomSubscriptionSource, subscriber: Subscriber): Unsubscribe
 }
 
 /** Internal supervised Room consumer contract. */
-type RoomBackend = Omit<RoomDriver, 'subscriptions'> & {
+type RoomBackend = Omit<RoomDriver, 'subscribe'> & {
   subscribeLane(
     roomId: string,
     inc: string,

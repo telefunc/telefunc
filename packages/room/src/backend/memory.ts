@@ -36,13 +36,11 @@ import {
   type StoredHead,
 } from './semantics.js'
 import {
-  type BackendPayload,
-  type BackendReceiver,
   type OrderingInfo,
-  type SubscriptionAttempt,
-  type SubscriptionDriver,
+  type Subscriber,
+  type Unsubscribe,
   MemoryPubSub,
-  type Subscriptions,
+  type Subscribers,
 } from 'telefunc/__internal'
 import { createDeferred } from '../utils/createDeferred.js'
 import { getOrCreate } from '../utils/getOrCreate.js'
@@ -67,11 +65,11 @@ type Generation = {
   retainedOf: Map<string, Set<string>>
   /** The keys of each track's retained binary lanes. */
   retainedOfTrack: Map<string, Set<string>>
-  subs: Subscriptions
+  subs: Subscribers
   /** Every-track subscriptions by member id, so a binary commit finds its member's without building a key. */
-  everyTrackSubs: Subscriptions
+  everyTrackSubs: Subscribers
   /** Every-member subscriptions by track, likewise. */
-  everyMemberSubs: Subscriptions
+  everyMemberSubs: Subscribers
 }
 
 type RoomRecord = { head: StoredHead | null; gens: Map<string, Generation> }
@@ -195,8 +193,6 @@ function advanceOrder(order: Map<string, OrderingInfo>, domain: string, now: num
 }
 
 class MemoryRoomDriver implements RoomDriver {
-  readonly subscriptions: SubscriptionDriver<RoomSubscriptionSource>
-
   private readonly rooms = new Map<string, RoomRecord>()
   private readonly directory = new Map<string, DirectoryEntry>()
   /** The directory's room ids in code point order: a put of a new id or a delete drops it, and the next list sorts
@@ -206,16 +202,6 @@ class MemoryRoomDriver implements RoomDriver {
   private readonly directoryChecks: DirectoryCheck[] = []
   private revSeq = 0
   private readonly pubSub = new MemoryPubSub()
-
-  constructor() {
-    this.subscriptions = {
-      bind: (source) => ({
-        partition: '',
-        open: (receiver, localReceiverCount) => this.openSubscription(source, receiver, localReceiverCount),
-      }),
-      partitionHere: () => '',
-    }
-  }
 
   async readHead(roomId: string): Promise<RoomHead | null> {
     const head = this.liveHead(this.rooms.get(roomId))
@@ -327,12 +313,12 @@ class MemoryRoomDriver implements RoomDriver {
     const nextTurn = this.pubSub.deliverSoon(() => {
       // A subscriber may write into the bytes it is given, which a retained frame must not share.
       const shared = opts?.retain ? copyBytes(frame) : frame
-      for (const target of targets) target.deliver(shared, mark)
-      for (const target of everyTrack) target.deliver(shared, mark)
-      for (const target of everyMember) target.deliver(shared, mark)
+      for (const target of targets) target.message(shared, mark)
+      for (const target of everyTrack) target.message(shared, mark)
+      for (const target of everyMember) target.message(shared, mark)
       delivered?.resolve()
     })
-    const receivers = this.pubSub.receivers(targets, everyTrack, everyMember)
+    const receivers = this.pubSub.consumers(targets, everyTrack, everyMember)
     if (nextTurn !== null) await nextTurn
     if (delivered === null) return { accepted: true, seq: mark.seq, timestamp: mark.timestamp, receivers }
     return { accepted: true, seq: mark.seq, timestamp: mark.timestamp, receivers, delivery: delivered.promise }
@@ -373,32 +359,30 @@ class MemoryRoomDriver implements RoomDriver {
     this.rooms.get(roomId)?.gens.get(inc)?.memberOrders.delete(member)
   }
 
-  private openSubscription(
-    { roomId, inc, lane }: RoomSubscriptionSource,
-    receiver: BackendReceiver<BackendPayload>,
-    localReceiverCount: () => number,
-  ): SubscriptionAttempt {
+  subscribe({ roomId, inc, lane }: RoomSubscriptionSource, subscriber: Subscriber): Unsubscribe {
     const room = this.rooms.get(roomId)
-    const head = this.liveHead(room)
-    if (room === undefined || !isOpenIncarnation(head, inc)) {
-      throw new Error(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)
+    if (room === undefined || !isOpenIncarnation(this.liveHead(room), inc)) {
+      subscriber.failed(new Error(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`))
+      // Core never unsubscribes a failed subscription.
+      return async () => {}
     }
     // Registration is durable before `ready` resolves: a commit accepted after this point must see it.
     const gen = this.generation(room, inc)
-    let subs: Subscriptions
+    let subscribers: Subscribers
     let key: string
     if (lane.kind === 'binary-all') {
-      subs = gen.everyTrackSubs
+      subscribers = gen.everyTrackSubs
       key = lane.member
     } else if (lane.kind === 'binary-track') {
-      subs = gen.everyMemberSubs
+      subscribers = gen.everyMemberSubs
       key = lane.track
     } else {
-      subs = gen.subs
+      subscribers = gen.subs
       key = encodeLaneKey(lane)
     }
     // Ready once what was committed before it is delivered: a lane it replaces delivers those first.
-    return this.pubSub.subscribe({ subs, key, receiver, localReceiverCount })
+    this.pubSub.subscribe(subscribers, key, subscriber)
+    return async () => this.pubSub.unsubscribe(subscribers, key, subscriber)
   }
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {

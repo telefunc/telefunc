@@ -4,38 +4,14 @@ import {
   assertDriverOrdering,
   type BackendPayload,
   type BackendReceiver,
-  type PlaneSubscriptions,
-  type SendHold,
+  type Subscriptions,
 } from 'telefunc/__internal'
-import type { CommitTarget, HeadNext, RoomBackend, RoomDriver, RoomSubscriptionSource } from './contract.js'
+import type { HeadNext, RoomBackend, RoomDriver, RoomSubscriptionSource } from './contract.js'
 import { roomSubscriptionSourceKey } from './laneKey.js'
 import { assert } from '../utils/assert.js'
 
-/** What a commit holds while this instance's subscriptions on its lanes establish. A binary commit also reaches its
- *  member's every-track lane and its track's every-member lane, and its held bytes count against its member's. */
-function describeCommitHold(target: CommitTarget, payload: Uint8Array): SendHold<RoomSubscriptionSource> {
-  const { roomId, inc, lane } = target
-  const key = roomSubscriptionSourceKey(target)
-  const bytes = () => payload.byteLength
-  if (lane.kind !== 'binary') return { key, sources: [target], kind: 'text', budget: key, bytes, label: 'Room' }
-  const everyTrack = { roomId, inc, lane: { kind: 'binary-all', member: lane.member } } as const
-  const everyMember = { roomId, inc, lane: { kind: 'binary-track', track: lane.track } } as const
-  return {
-    key,
-    sources: [target, everyTrack, everyMember],
-    kind: 'binary',
-    budget: roomSubscriptionSourceKey(everyTrack),
-    bytes,
-    label: 'Room',
-  }
-}
-
-/** Holds a lane's commits while this instance's subscription on it establishes, and checks what the driver is given
- *  and returns. */
-function superviseRoomDriver(
-  driver: RoomDriver,
-  subscriptions: PlaneSubscriptions<RoomSubscriptionSource>,
-): RoomBackend {
+/** Checks what the driver is given and returns; its lane subscriptions are shared by source and host. */
+function superviseRoomDriver(driver: RoomDriver, subscriptions: Subscriptions<RoomSubscriptionSource>): RoomBackend {
   return {
     readHead: (roomId) => driver.readHead(roomId),
     compareExchangeHead: async (roomId, cx, next) => {
@@ -46,12 +22,7 @@ function superviseRoomDriver(
     readCellPages: (roomId, inc, prefix) => driver.readCellPages(roomId, inc, prefix),
     compareExchangeCells: (roomId, inc, cx) => driver.compareExchangeCells(roomId, inc, cx),
     commitLane: async (target, payload, opts) => {
-      const commit = () => driver.commitLane(target, payload, opts)
-      // A close commits under its lease, which would lapse before the hold ends.
-      const result =
-        opts?.closingLease === undefined
-          ? await subscriptions.afterEstablished(commit, () => describeCommitHold(target, payload))
-          : await commit()
+      const result = await driver.commitLane(target, payload, opts)
       if ('accepted' in result) assertDriverOrdering(result)
       return result
     },
@@ -68,9 +39,11 @@ function superviseRoomDriver(
     listRetained: (roomId, inc, of) => driver.listRetained(roomId, inc, of),
     deleteRetained: (roomId, inc, lane, opts) => driver.deleteRetained(roomId, inc, lane, opts),
     dropLaneOrders: (roomId, inc, member) => driver.dropLaneOrders(roomId, inc, member),
-    // The plane hands a lane's consumers only the deliveries it checked.
-    subscribeLane: (roomId, inc, lane, receiver) =>
-      subscriptions.subscribe({ roomId, inc, lane }, receiver as BackendReceiver<BackendPayload>),
+    subscribeLane: (roomId, inc, lane, receiver) => {
+      const source = { roomId, inc, lane }
+      const key = { key: roomSubscriptionSourceKey(source), delivers: 'binary' } as const
+      return subscriptions.subscribe(source, key, receiver as BackendReceiver<BackendPayload>)
+    },
     dropGeneration: (roomId, inc) => driver.dropGeneration(roomId, inc),
     directoryPut: (roomId, incTag, checkAt, minDelayMs) => driver.directoryPut(roomId, incTag, checkAt, minDelayMs),
     directoryDelete: (roomId, incTag) => driver.directoryDelete(roomId, incTag),

@@ -1,33 +1,19 @@
-export {
-  CloudflareRoomSessionManager,
-  CloudflareRoomSubscriptionAttempt,
-  currentRoomSessionManager,
-  getRoomSessionManager,
-}
+export { CloudflareRoomSessionManager, currentRoomSessionManager, getRoomSessionManager }
 export type { RoomSessionDeliveryRequest }
 
-import {
-  type BackendReceiver,
-  type OrderingInfo,
-  DriverAttempt,
-  OrderedStubs,
-  SourceDroppedError,
-  hostLocal,
-} from 'telefunc/__internal'
+import { type OrderingInfo, type Subscriber, type Unsubscribe, OrderedStubs, hostLocal } from 'telefunc/__internal'
 import type { RoomSubscriptionSource } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
 import { assertUsage } from '../utils/assert.js'
 import { ROUTE_RENEW_EVERY_MS, type RouteInstallation } from './routes.js'
 import type { CloudflareRoomAuthorityStub, RegisterWire, RenewWire } from './do.js'
+import type { CloudflareRoomDriver } from './driver.js'
 
 type RoomSessionDeliveryRequest = {
   route: RouteInstallation
   payload: Uint8Array
   info: OrderingInfo
 }
-
-/** A call to the room's authority through the session's ordered stub for it. */
-type AuthorityCall = <T>(invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>) => Promise<T>
 
 const ROOM_SESSION_MANAGER = Symbol.for('telefunc.room.cloudflareSessionManager')
 
@@ -52,113 +38,95 @@ function entryKey(route: Pick<RouteInstallation, 'roomId' | 'inc' | 'laneKey'>):
 }
 
 class CloudflareRoomSessionManager {
-  /** Subscriptions share an attempt only within one session DO. */
-  readonly partition = crypto.randomUUID()
   private readonly authorityCalls = new OrderedStubs<CloudflareRoomAuthorityStub>()
   private readonly id: string
-  private readonly entries = new Map<string, CloudflareRoomSubscriptionAttempt>()
+  private readonly entries = new Map<string, CloudflareRoomSubscription>()
 
   constructor(sessionId: string) {
     this.id = sessionId
   }
 
-  openSubscription(
+  subscribe(
     { roomId, inc, lane }: RoomSubscriptionSource,
-    openAuthority: () => CloudflareRoomAuthorityStub,
-    receiver: BackendReceiver,
-  ): CloudflareRoomSubscriptionAttempt {
+    subscriber: Subscriber,
+    driver: CloudflareRoomDriver,
+  ): Unsubscribe {
     const route = { roomId, inc, laneKey: encodeLaneKey(lane), sessionDoId: this.id, leaseId: crypto.randomUUID() }
-    const callAuthority: AuthorityCall = (invoke) => this.callAuthority(roomId, openAuthority, invoke)
-    const key = entryKey(route)
-    const attempt = new CloudflareRoomSubscriptionAttempt({
-      route,
-      callAuthority,
-      receiver,
-      onClosed: () => this.entries.delete(key),
-    })
-    this.entries.set(key, attempt)
-    attempt.start()
-    return attempt
+    const subscription = new CloudflareRoomSubscription({ session: this, route, driver, subscriber })
+    this.entries.set(entryKey(route), subscription)
+    void subscription.register()
+    return () => subscription.unsubscribe()
   }
 
   /** A call to a room's authority through this session's ordered stub for it, so a room's commits and route calls
-   *  reach its authority in the order they were made. */
+   *  reach its authority in the order they were made. A line opens a fresh stub: a stub that rejected may be broken. */
   callAuthority<T>(
+    driver: CloudflareRoomDriver,
     roomId: string,
-    open: () => CloudflareRoomAuthorityStub,
     invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>,
   ): Promise<T> {
-    return this.authorityCalls.call(roomId, open, invoke)
+    return this.authorityCalls.call(roomId, () => driver.stub(roomId), invoke)
+  }
+
+  forget(subscription: CloudflareRoomSubscription): void {
+    const key = entryKey(subscription.route)
+    if (this.entries.get(key) === subscription) this.entries.delete(key)
   }
 
   /** A delivery to a lease this session no longer holds, as after a restart, is dropped: delivery is at-most-once, and
    *  the authority's route lapses with the lease. */
   deliver(request: RoomSessionDeliveryRequest): void {
     const entry = this.entries.get(entryKey(request.route))
-    if (entry?.leaseId !== request.route.leaseId) return
+    if (entry?.route.leaseId !== request.route.leaseId) return
     entry.deliver(request.payload, request.info)
   }
 }
 
-/** Ready once the authority has durably registered this attempt's exact route; Room owns retry and replacement. */
-class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
-  private readonly callAuthority: AuthorityCall
-  private readonly route: RouteInstallation
-  private readonly receiver: BackendReceiver
-  private readonly onClosed: () => void
+type CloudflareRoomSubscriptionOptions = {
+  session: CloudflareRoomSessionManager
+  route: RouteInstallation
+  driver: CloudflareRoomDriver
+  subscriber: Subscriber
+}
+
+/** Ready once the authority has durably registered this subscription's exact route; Room owns retry and
+ *  replacement. */
+class CloudflareRoomSubscription {
+  readonly route: RouteInstallation
+  private readonly session: CloudflareRoomSessionManager
+  private readonly driver: CloudflareRoomDriver
+  private readonly subscriber: Subscriber
+  private ended = false
   private renewalTimer: ReturnType<typeof setTimeout> | undefined
 
-  constructor({
-    route,
-    callAuthority,
-    receiver,
-    onClosed,
-  }: {
-    route: RouteInstallation
-    callAuthority: AuthorityCall
-    receiver: BackendReceiver
-    onClosed: () => void
-  }) {
-    super()
-    this.callAuthority = callAuthority
+  constructor({ session, route, driver, subscriber }: CloudflareRoomSubscriptionOptions) {
+    this.session = session
     this.route = route
-    this.receiver = receiver
-    this.onClosed = onClosed
-  }
-
-  start(): void {
-    void this.establish()
-  }
-
-  get leaseId(): string {
-    return this.route.leaseId
+    this.driver = driver
+    this.subscriber = subscriber
   }
 
   deliver(payload: Uint8Array, info: OrderingInfo): void {
-    this.receiver(payload, info)
+    this.subscriber.message(payload, info)
   }
 
-  async unsubscribe(): Promise<void> {
-    this.finish()
-    await this.callAuthority((authority) => authority.unsubscribeRoute(this.route))
-  }
-
-  private async establish(): Promise<void> {
+  async register(): Promise<void> {
     let registered: RegisterWire
     try {
       registered = await this.callAuthority((authority) => authority.registerRoute(this.route))
     } catch (error) {
-      this.finish(error)
-      return
+      return this.fail(error)
     }
-    if (!('ok' in registered)) {
-      this.finish(new Error(registered.reason))
-      return
-    }
+    if (!('ok' in registered)) return this.fail(new Error(registered.reason))
     // Unsubscribed while it registered: its release already went out.
     if (this.ended) return
-    this.transition('ready')
+    this.subscriber.ready()
     this.scheduleRenewal()
+  }
+
+  async unsubscribe(): Promise<void> {
+    this.stop()
+    await this.callAuthority((authority) => authority.unsubscribeRoute(this.route))
   }
 
   private scheduleRenewal(): void {
@@ -170,19 +138,29 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
     try {
       renewal = await this.callAuthority((authority) => authority.renewRoute(this.route))
     } catch (error) {
-      this.finish(error)
-      return
+      return this.fail(error)
     }
-    if (this.state() !== 'ready') return
-    if (renewal === 'renewed') this.scheduleRenewal()
-    else if (renewal === 'dropped') this.finish(new SourceDroppedError('Cloudflare route went with its generation'))
-    else this.finish()
+    if (this.ended) return
+    if (renewal === 'renewed') return this.scheduleRenewal()
+    this.stop()
+    // A route that went with its dropped generation ends on purpose; a lapsed one is a failure.
+    if (renewal === 'dropped') this.subscriber.ended()
+    else this.subscriber.failed(new Error(`Cloudflare route '${this.route.laneKey}' lapsed`))
   }
 
-  private finish(error?: unknown): void {
+  private fail(error: unknown): void {
     if (this.ended) return
+    this.stop()
+    this.subscriber.failed(error)
+  }
+
+  private stop(): void {
+    this.ended = true
     clearTimeout(this.renewalTimer)
-    this.transition('closed', error)
-    this.onClosed()
+    this.session.forget(this)
+  }
+
+  private callAuthority<T>(invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>): Promise<T> {
+    return this.session.callAuthority(this.driver, this.route.roomId, invoke)
   }
 }
