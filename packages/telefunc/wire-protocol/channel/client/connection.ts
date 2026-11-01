@@ -473,7 +473,7 @@ class ClientConnection
     }
     if (!this.exchange.reconciling) {
       // A register-reconcile queued during the connecting window sends its RECONCILE here and
-      // carries the buffered frames after it, emptying the buffer; with none queued, flush
+      // carries the buffered frames after it, emptying the buffer; with none queued, the buffered frames go out alone.
       this.exchange.flushPendingRegisterReconcile()
       this.drainBufferedFramesToWire()
     }
