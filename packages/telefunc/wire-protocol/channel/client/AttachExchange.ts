@@ -67,10 +67,9 @@ class AttachExchange {
   private readonly owner: AttachExchangeOwner
   private readonly channels: ChannelTable
   private readonly gate: SendGate
-  /** RECONCILE sent, awaiting RECONCILED. SSE sets it true during connecting since the
-   *  initial reconcile is baked into the openStream POST body. Bounded by `reconcileTimer`:
-   *  written only via `enterReconciling`/`exitReconciling` so the deadline can never outlive
-   *  the state it guards. */
+  /** A RECONCILE is out and its RECONCILED hasn't come. On SSE it is set while connecting too: the open POST's body
+   *  carries the first RECONCILE. Only `enterReconciling` and `exitReconciling` write it, so its deadline
+   *  (`reconcileTimer`) never outlives it. */
   private isReconciling = false
   private reconcileTimer: ReturnType<typeof setTimeout> | null = null
   /** Resolved once no RECONCILE is in flight. */
@@ -117,12 +116,10 @@ class AttachExchange {
     }, 0)
   }
 
-  /** Send the queued RECONCILE on the live wire. No-op when nothing's queued. While the wire
-   *  can't take it (connecting, awaiting RECONCILED, from an upgrade's READY until its handoff)
-   *  the obligation is KEPT, not consumed — `reconcileOwed` stays set (which also keeps
-   *  `sendsOpen` false so data frames buffer behind the RECONCILE), and the
-   *  transitions that make the wire sendable re-invoke this: `onTransportOpen` and an upgrade
-   *  attempt's exit. A RECONCILED, the handoff's too, names what registered meanwhile in its follow-up. */
+  /** Sends the owed RECONCILE on the live wire; no-op when none is owed. While the wire can't take it (connecting,
+   *  awaiting a RECONCILED, from an upgrade's READY until its handoff) it stays owed: `reconcileOwed` keeps `sendsOpen`
+   *  false, so data frames buffer behind it, and `onTransportOpen` and an upgrade attempt's exit call this again. A
+   *  RECONCILED, the handoff's too, names what registered meanwhile in its follow-up. */
   flushPendingRegisterReconcile(): void {
     if (!this.isReconcileOwed) return
     if (this.owner.reconcileHeld) return
@@ -271,8 +268,8 @@ class AttachExchange {
 
   // ── The await-RECONCILED window ──
 
-  /** Enter the await-RECONCILED window of a new RECONCILE in flight and arm its liveness bound. A follow-up RECONCILE
-   *  for late registrations re-enters and restarts the deadline from scratch. */
+  /** Opens the wait for a new RECONCILE's RECONCILED and arms its deadline. A follow-up RECONCILE for late
+   *  registrations opens it again, restarting the deadline. */
   private enterReconciling(): void {
     this.isReconciling = true
     this.inFlight = reconcileInFlight()
@@ -284,7 +281,7 @@ class AttachExchange {
     this.reconcileTimer = setTimeout(() => this.onReconcileTimeout(), ms)
   }
 
-  /** Leave the await-RECONCILED window: RECONCILED settled, the wire was lost, or disposed. */
+  /** Closes the wait: the RECONCILED settled, the wire was lost, or the connection was disposed. */
   private exitReconciling(): void {
     this.isReconciling = false
     if (this.reconcileTimer) {
@@ -294,8 +291,8 @@ class AttachExchange {
     for (const resolve of this.reconcileSettledWaiters.splice(0)) resolve()
   }
 
-  /** RECONCILED never arrived on a silently-stalled wire — same outcome as a missed pong:
-   *  drop the wire and let `handleTransportLoss` reconnect. */
+  /** The RECONCILED didn't come by the deadline. Unless the wire delivered something meanwhile, it is dropped as on a
+   *  missed pong, and `handleTransportLoss` reconnects. */
   private onReconcileTimeout(): void {
     if (this.owner.closed || !this.isReconciling) return
     const { transport } = this.owner
