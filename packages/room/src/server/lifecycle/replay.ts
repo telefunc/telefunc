@@ -30,10 +30,18 @@ function heldTextWeight(serialized: string): number {
   return serialized.length * 2 + ROOM_REPLAY_HOLD_ENTRY_BYTES
 }
 
+type ReplayHoldOptions = {
+  /** The binary want whose retained frames are read, null for a text want. */
+  change: BinaryWantChange | null
+  gate: ReplayGate
+}
+
 /** A want whose retained frames, or retained message (`change` null: a text want), are being read: it holds the live
  *  frames or messages the want covers on lanes its holder has had none from, until `end()` once the read settled, or
  *  `flush()` earlier. */
 class ReplayHold {
+  readonly change: BinaryWantChange | null
+  private readonly gate: ReplayGate
   held: HeldFrame[] = []
   bytes = 0
   holding = true
@@ -41,10 +49,10 @@ class ReplayHold {
    *  only if the holder never got it. */
   readonly firstLive = new Map<string, Map<string, OrderingInfo>>()
 
-  constructor(
-    readonly change: BinaryWantChange | null,
-    private readonly gate: ReplayGate,
-  ) {}
+  constructor({ change, gate }: ReplayHoldOptions) {
+    this.change = change
+    this.gate = gate
+  }
 
   /** Whether it holds `member`'s frames on `track`, or with `track` null its messages. */
   covers(member: string, track: string | null): boolean {
@@ -141,7 +149,7 @@ class ReplayGate {
   /** Holds the live frames `change` covers on lanes the holder has had none from, or with `change` null the live
    *  messages of senders it has had none from: what is retained, read meanwhile, goes out first. */
   hold(change: BinaryWantChange | null): ReplayHold {
-    const hold = new ReplayHold(change, this)
+    const hold = new ReplayHold({ change, gate: this })
     this.replays.add(hold)
     this._holding++
     return hold
@@ -244,18 +252,26 @@ interface LaneHolder {
   emitRetainedBinary(frame: BinaryFrame, info: OrderingInfo, framed: Uint8Array, hold: ReplayHold): void
 }
 
+type LocalHolderOptions = {
+  state: RoomState
+  /** The local members joined with `selfDelivery: false`, whose messages these listeners don't get. */
+  suppressed: ReadonlySet<string>
+}
+
 /** This instance's own listeners as one holder: gated like a client's stub, with wants that change only when they
  *  differ, as a client declares them. */
 class LocalHolder implements LaneHolder {
+  private readonly state: RoomState
+  private readonly suppressed: ReadonlySet<string>
   private readonly replay = new ReplayGate()
   private textAll = false
   private readonly textMembers = new Set<string>()
   readonly binaryWants: BinaryWants = emptyBinaryWants()
 
-  constructor(
-    private readonly state: RoomState,
-    private readonly suppressed: ReadonlySet<string>,
-  ) {}
+  constructor({ state, suppressed }: LocalHolderOptions) {
+    this.state = state
+    this.suppressed = suppressed
+  }
 
   /** Re-derives the listeners' room-wide text want, and the own want of `member` when its listeners changed; `null`
    *  when neither changed. */
