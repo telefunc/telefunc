@@ -10,13 +10,13 @@ assertIsNotBrowser()
 /** The plan that holds a lane subscription, told as its lane ends, recovers, and goes pending or ready. */
 interface LaneSubscriptionOwner {
   /** The lane ended for good: the owner's recovery policy replaces it. */
-  onLaneTerminal(slot: LaneSubscription): void
+  onLaneTerminal(lane: LaneSubscription): void
   /** The lane is ready again after a loss. */
   onLaneRecovered(): void
-  onLanePending(slot: LaneSubscription, pending: boolean): void
+  onLanePending(lane: LaneSubscription, pending: boolean): void
 }
 
-type LaneSubscriptionOptions = { owner: LaneSubscriptionOwner; lane: RoomSubscriptionSource['lane'] }
+type LaneSubscriptionOptions = { owner: LaneSubscriptionOwner; address: RoomSubscriptionSource['lane'] }
 
 /** A lane subscription the room wants: holder-facing readiness survives failed attempts, and Room's recovery policy
  *  replaces them. */
@@ -29,12 +29,12 @@ class LaneSubscription {
   private _delivering = false
 
   /** The lane it subscribes, which tells its owner what its readiness replans. */
-  readonly lane: RoomSubscriptionSource['lane']
+  readonly address: RoomSubscriptionSource['lane']
   private readonly owner: LaneSubscriptionOwner
 
-  constructor({ owner, lane }: LaneSubscriptionOptions) {
+  constructor({ owner, address }: LaneSubscriptionOptions) {
     this.owner = owner
-    this.lane = lane
+    this.address = address
   }
 
   get established(): boolean {
@@ -45,7 +45,7 @@ class LaneSubscription {
     return this.subscribe !== null
   }
 
-  /** Whether an attempt was ready since the slot started; a loss or a dropped attempt keeps it. */
+  /** Whether an attempt was ready since the lane started; a loss or a dropped attempt keeps it. */
   get delivering(): boolean {
     return this._delivering
   }
@@ -59,14 +59,14 @@ class LaneSubscription {
     return this.subscription?.ready ?? Promise.resolve()
   }
 
-  /** Starts a wanted slot; a closed subscription is replaced by the recovery policy, not by re-planning. */
+  /** Starts a wanted lane; a closed subscription is replaced by the recovery policy, not by re-planning. */
   sync(want: boolean, subscribe: () => BackendSubscription): void {
     if (!want) return this.stop()
     this.subscribe = subscribe
     this.resume()
   }
 
-  /** Opens an attempt of a wanted slot that has none, once its recovery gave up. */
+  /** Opens an attempt of a wanted lane that has none, once its recovery gave up. */
   resume(): void {
     if (this.subscription === null) this.retry()
   }
@@ -127,7 +127,7 @@ class LaneSubscription {
     this.readyPromise = Promise.resolve()
   }
 
-  /** Exhausted policy keeps demand and holder readiness pending, but drops the dead attempt until the slot resumes. */
+  /** Exhausted policy keeps demand and holder readiness pending, but drops the dead attempt until the lane resumes. */
   dropAttempt(): void {
     const subscription = this.subscription
     this.subscription = null

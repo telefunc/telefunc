@@ -92,10 +92,10 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   private readonly wants = new WantsIndex({ owner: this })
   /** Whether some handle observes the room, which the control lane serves. */
   private _observing = false
-  private readonly control = new LaneSubscription({ owner: this, lane: CONTROL_LANE })
-  private readonly semantic = new LaneSubscription({ owner: this, lane: SEMANTIC_LANE })
+  private readonly control = new LaneSubscription({ owner: this, address: CONTROL_LANE })
+  private readonly semantic = new LaneSubscription({ owner: this, address: SEMANTIC_LANE })
   /** While this process owns a member: only an owner reads demand. */
-  private readonly demandLane = new LaneSubscription({ owner: this, lane: DEMAND_LANE })
+  private readonly demandLane = new LaneSubscription({ owner: this, address: DEMAND_LANE })
 
   /** Named lanes, keyed by (member, track); `binaryTracks` lists each member's, `trackMembers` each track's. */
   private readonly binary = new Map<string, LaneSubscription>()
@@ -183,7 +183,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
 
   /** Subscribes again each lane whose recovery gave up and that is still wanted, as a planning pass would. */
   resumeDropped(): void {
-    for (const slot of drain(this.dropped)) slot.resume()
+    for (const lane of drain(this.dropped)) lane.resume()
   }
 
   /** A holder attached, or its wants changed wholesale: its room-wide ones, and those of `members` when given. The next
@@ -649,14 +649,14 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   }
 
   private openEveryTrack(member: string): LaneSubscription {
-    const lane = new LaneSubscription({ owner: this, lane: { kind: 'binary-all', member } })
+    const lane = new LaneSubscription({ owner: this, address: { kind: 'binary-all', member } })
     this.establishingEveryTrack.lanes.add(lane)
     this.everyTrack.set(member, lane)
     return this.subscribeBinary(lane)
   }
 
   private openEveryMember(track: string): LaneSubscription {
-    const lane = new LaneSubscription({ owner: this, lane: { kind: 'binary-track', track } })
+    const lane = new LaneSubscription({ owner: this, address: { kind: 'binary-track', track } })
     this.establishingEveryMember.lanes.add(lane)
     this.everyMember.set(track, lane)
     return this.subscribeBinary(lane)
@@ -664,7 +664,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
 
   private openNamedLane(member: string, track: string): LaneSubscription {
     const binary = { kind: 'binary', member, track } as const
-    const lane = new LaneSubscription({ owner: this, lane: binary })
+    const lane = new LaneSubscription({ owner: this, address: binary })
     this.binary.set(encodeLaneKey(binary), lane)
     toggleEntry(this.binaryTracks, member, track, true)
     toggleEntry(this.trackMembers, track, member, true)
@@ -676,7 +676,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     const owner = this.owner
     lane.sync(
       true,
-      this.subscriber(lane.lane, (framed, info) => owner.onBinary(framed, info)),
+      this.subscriber(lane.address, (framed, info) => owner.onBinary(framed, info)),
     )
     return lane
   }
@@ -715,8 +715,8 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     const owner = this.owner
     if (owner.model.closed || !owner.ownsMember(member)) return
     const inbox = { kind: 'inbox', member } as const
-    const slot = getOrCreate(this.inbox, member, () => new LaneSubscription({ owner: this, lane: inbox }))
-    slot.sync(
+    const lane = getOrCreate(this.inbox, member, () => new LaneSubscription({ owner: this, address: inbox }))
+    lane.sync(
       true,
       this.subscriber(inbox, (payload, info) => owner.onDm(decodeRoomText(payload), info)),
     )
@@ -757,74 +757,74 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
 
   /** The demand lane delivering asks for demand. What a binary lane carries is demand once it delivers, so its
    *  readiness replans what it serves. */
-  onLanePending(slot: LaneSubscription, pending: boolean): void {
-    const lane = slot.lane
-    if (lane.kind === 'demand') {
-      if (!pending && slot.wanted) this.owner.askDemand()
+  onLanePending(lane: LaneSubscription, pending: boolean): void {
+    const address = lane.address
+    if (address.kind === 'demand') {
+      if (!pending && lane.wanted) this.owner.askDemand()
       return
     }
-    if (lane.kind !== 'binary' && lane.kind !== 'binary-all' && lane.kind !== 'binary-track') return
-    this.onBinaryPending(slot, pending)
-    if (pending || !slot.wanted) return
-    this.replanDelivering(slot, lane)
+    if (address.kind !== 'binary' && address.kind !== 'binary-all' && address.kind !== 'binary-track') return
+    this.onBinaryPending(lane, pending)
+    if (pending || !lane.wanted) return
+    this.replanDelivering(lane, address)
     this.schedulePlan()
   }
 
-  private replanDelivering(slot: LaneSubscription, lane: BinaryLane): void {
-    switch (lane.kind) {
+  private replanDelivering(lane: LaneSubscription, address: BinaryLane): void {
+    switch (address.kind) {
       case 'binary-all':
-        this.queued.members.add(lane.member)
-        return this.established(slot, this.establishingEveryTrack)
+        this.queued.members.add(address.member)
+        return this.established(lane, this.establishingEveryTrack)
       case 'binary-track':
         // The named lanes and every-track lanes it serves stop once it delivers.
-        this.queued.tracks.add(lane.track)
-        for (const member of this.trackMembers.get(lane.track) ?? []) this.queuePair(member, lane.track)
-        return this.established(slot, this.establishingEveryMember)
+        this.queued.tracks.add(address.track)
+        for (const member of this.trackMembers.get(address.track) ?? []) this.queuePair(member, address.track)
+        return this.established(lane, this.establishingEveryMember)
       case 'binary':
         // An every-track lane beside it may wait for it to deliver, so it replans the whole member; an every-member
         // lane that holders no longer name waits for it too.
-        if (this.everyTrack.has(lane.member)) this.queued.members.add(lane.member)
-        else this.queuePair(lane.member, lane.track)
-        if (this.everyMember.has(lane.track)) this.queued.tracks.add(lane.track)
+        if (this.everyTrack.has(address.member)) this.queued.members.add(address.member)
+        else this.queuePair(address.member, address.track)
+        if (this.everyMember.has(address.track)) this.queued.tracks.add(address.track)
     }
   }
 
-  private onBinaryPending(slot: LaneSubscription, pending: boolean): void {
+  private onBinaryPending(lane: LaneSubscription, pending: boolean): void {
     if (!pending) {
-      this.binaryPending.delete(slot)
+      this.binaryPending.delete(lane)
       return
     }
-    this.binaryPending.add(slot)
+    this.binaryPending.add(lane)
     this._binaryReady = null
   }
 
-  onLaneTerminal(slot: LaneSubscription): void {
+  onLaneTerminal(lane: LaneSubscription): void {
     // A replacement that ends is its recovery's failure.
-    if (this.recovering.has(slot)) return
-    this.recovering.add(slot)
-    void this.recover(slot).catch(reportRoomError)
+    if (this.recovering.has(lane)) return
+    this.recovering.add(lane)
+    void this.recover(lane).catch(reportRoomError)
   }
 
   /** A still-wanted terminal lane gets one replacement after a head read; if that fails too, the heartbeat subscribes
    *  it again. */
-  private async recover(slot: LaneSubscription): Promise<void> {
+  private async recover(lane: LaneSubscription): Promise<void> {
     let replaced = false
     try {
       const config = await withinRoomHorizon(this.owner.readOpenConfig())
       if (config === null) return this.owner.closeFromAuthority()
-      slot.retry()
+      lane.retry()
       replaced = true
-      await withinRoomHorizon(slot.attemptReady)
+      await withinRoomHorizon(lane.attemptReady)
     } catch (error) {
-      if (slot.wanted) {
-        slot.dropAttempt()
-        this.dropped.add(slot)
+      if (lane.wanted) {
+        lane.dropAttempt()
+        this.dropped.add(lane)
       }
       // The backend reported the replacement's end; the horizon's RoomError goes unreported.
       if (replaced) return
       throw error
     } finally {
-      this.recovering.delete(slot)
+      this.recovering.delete(lane)
     }
     // Catch up on what the outage dropped; a later end of the lane gets its own recovery.
     await this.owner.authority.reconcileAuthority()
