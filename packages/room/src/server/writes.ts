@@ -30,7 +30,8 @@ import type {
   SenderStamp,
 } from '../protocol.js'
 import type { RoomDataEnvelope, RoomDmAckEnvelope } from './protocol.js'
-import type { RoomModel, RoomState } from '../state.js'
+import type { RoomModel } from '../model.js'
+import type { RoomState } from '../state.js'
 import type { ParticipantMeta, RoomAckReceipt, RoomSendReceipt, Sender } from '../types.js'
 import { memberCellKey } from './cells.js'
 import { reportRoomError } from './errors.js'

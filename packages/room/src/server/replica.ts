@@ -22,7 +22,7 @@ import type {
 } from '../protocol.js'
 import type { DemandEntry, RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope } from './protocol.js'
 import { Slice } from '../Slice.js'
-import { RoomModel, type ServerModelOwner } from '../state.js'
+import { RoomModel, type ServerModelOwner } from '../model.js'
 import type { LeaveCause } from '../types.js'
 import { AuthoritySync, type AuthoritySyncOwner } from './AuthoritySync.js'
 import { PendingDmAcks } from './dmAcks.js'

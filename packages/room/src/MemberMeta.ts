@@ -1,7 +1,6 @@
-export { MemberMeta }
+export { MemberMeta, assignAttributes }
 export type { MetaRewinds }
 
-import { assignAttributes } from './model.js'
 import type { MemberMetaUpdate } from './protocol.js'
 import type { ParticipantMeta } from './types.js'
 
@@ -109,4 +108,21 @@ class MemberMeta {
     this._seq = seq
     this.rewindsSeen = this.rewinds.count
   }
+}
+
+/** Assign `attrs` onto `target` per key, returning the change in its key count. A value of `undefined` deletes its
+ *  key (the serializer preserves `undefined` on the wire). */
+function assignAttributes(target: ParticipantMeta, attrs: ParticipantMeta): number {
+  let keys = 0
+  for (const [key, value] of Object.entries(attrs)) {
+    const had = Object.hasOwn(target, key)
+    if (value === undefined) {
+      if (had) keys--
+      delete target[key]
+      continue
+    }
+    if (!had) keys++
+    Object.defineProperty(target, key, { value, enumerable: true, configurable: true, writable: true })
+  }
+  return keys
 }

@@ -3,7 +3,7 @@ export type { RoomHeartbeatOptions, RoomHeartbeatOwner }
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../utils/unrefTimer.js'
-import type { RoomModel } from '../state.js'
+import type { RoomModel } from '../model.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS } from './constants.js'
 import type { DemandReport } from './demand.js'
 import { sweepLapsedRoomsSoon } from './directory.js'

@@ -32,7 +32,8 @@ import {
   type RoomResult,
 } from '../protocol.js'
 import type { RoomDataEnvelope, RoomMemberRecord } from './protocol.js'
-import { type RoomModel, RoomState, RoomStateView, type RoomStateOwner } from '../state.js'
+import type { RoomModel } from '../model.js'
+import { RoomState, RoomStateView, type RoomStateOwner } from '../state.js'
 import { ParticipantBase } from '../participant.js'
 import {
   MemberMessageTexts,

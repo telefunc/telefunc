@@ -39,14 +39,8 @@ import {
   type RoomSnapshotMetadata,
   type RoomStubRequest,
 } from '../protocol.js'
-import {
-  RoomModel,
-  RoomState,
-  RoomStateView,
-  type MembershipEvent,
-  type RoomModelOwner,
-  type RoomStateOwner,
-} from '../state.js'
+import { RoomModel, type MembershipEvent, type RoomModelOwner } from '../model.js'
+import { RoomState, RoomStateView, type RoomStateOwner } from '../state.js'
 import { ROOM_TRACK_WANTS_MAX } from '../constants.js'
 import { CLIENT_ROOM_BUG_MESSAGE, roomResultValue } from '../errors.js'
 import { ParticipantBase } from '../participant.js'
