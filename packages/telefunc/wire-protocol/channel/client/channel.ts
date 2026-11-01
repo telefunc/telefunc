@@ -373,7 +373,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       case TAG.PUBLISH_ACK_REQ:
       case TAG.PUBLISH_BINARY:
       case TAG.PUBLISH_BINARY_ACK_REQ:
-        // PUBLISH variants land here only on `ClientBroadcast`; non-broadcast channels drop them.
+        // A plain channel drops a publish: `ClientBroadcast` takes PUBLISH and PUBLISH_BINARY before this switch, and
+        // the server sends no publish ack request.
         return
     }
   }
