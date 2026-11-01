@@ -79,9 +79,8 @@ describe('SendCredit', () => {
     expect(flow.send.decrement(1024)).toBeUndefined()
   })
 
-  // When the decrement zeroes-or-crosses-below credit, decrement returns a
-  // Promise → caller's next `await` blocks until the peer's WINDOW arrives.
-  // The gate is `_peerWindow > 0`, so exactly draining to 0 also blocks.
+  // Once a send uses up the credit, `decrement` returns a Promise, so the caller's next `await` waits for the peer's
+  // WINDOW. The gate is `isOutOfCredit`: using up exactly the last byte blocks too.
   it('decrement returns a Promise once credit is depleted', () => {
     const { flow } = makeFlow()
     expect(flow.send.decrement(CREDIT_WINDOW_INITIAL_BYTES - 1)).toBeUndefined()
