@@ -58,7 +58,7 @@ interface MuxChannel {
   readonly isClosed: boolean
   /** The largest frame the server accepts from this channel on a WebSocket. */
   readonly _maxFrameBytes: number
-  /** The channel is open on `uplink`'s wire. The last attach's `uplink` means the same wire, which lost nothing. */
+  /** The channel is open on `uplink`'s wire; called again with the same `uplink`, that wire lost nothing. */
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void
   /** The wire's streaming upload failed after the channel opened, so its frames now go in batch POSTs. */
   _onTransportBatched(): void
@@ -353,7 +353,7 @@ class ClientConnection
     const { replay } = record
     const frame = encodeFrame(record.ix, data, replay.seq + 1)
     const maxFrameBytes = this.maxFrameBytesOf(channel)
-    // The server ends any wire a larger frame arrives on, the next one its replay goes out on too.
+    // The server ends any wire a larger frame arrives on, and the replay would send it again on the next one.
     assertUsage(
       frame.byteLength <= maxFrameBytes,
       `Channel message too large: ${frame.byteLength} bytes encoded, the server accepts ${maxFrameBytes} at most`,

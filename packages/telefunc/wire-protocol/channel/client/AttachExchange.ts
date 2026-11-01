@@ -23,11 +23,11 @@ type ReconcileOutcome = {
 type ReconcileInFlight = {
   /** The channels it lists, and whether as `initial`. */
   ixes: Map<number, boolean>
-  /** The probes it carries, by channel: its RECONCILED answers each a BDP_PING_ACK didn't. */
+  /** The BDP probes it carries, by channel; its RECONCILED answers each one no BDP_PING_ACK answered. */
   probes: Map<number, number>
   /** Per channel, the first seq its wire carries behind it: the RECONCILED replays only the frames before it. */
   carriedFrom: Map<number, number>
-  /** Applied with its RECONCILED, which the server may build before them (an SSE POST's, once its body is read). */
+  /** Its channels' ATTACH_RESULT frames from before its RECONCILED, applied with it: the server may build it first. */
   attachResults: Map<number, number | null>
 }
 
@@ -193,7 +193,7 @@ class AttachExchange {
     }
     const releaseFrames: OutboundFrame[] = []
     const channelsToOpen: MuxChannel[] = []
-    // Registered after the RECONCILE we just got back was built — wait for next round.
+    // Channels registered after this RECONCILE was built wait for the next one.
     const hasNewChannels = this.channels.hasUnnamed
 
     for (const ix of ixes.keys()) {

@@ -37,7 +37,7 @@ class Liveness {
     this.gate = gate
   }
 
-  /** As the last RECONCILED says it. */
+  /** The PING interval the last RECONCILED set. */
   get pingInterval(): number {
     return this.pingIntervalMs
   }
