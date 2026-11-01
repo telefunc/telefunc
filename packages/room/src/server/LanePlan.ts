@@ -4,7 +4,7 @@ export type { LanePlanOwner, LanePlanOptions }
 import { assert } from '../utils/assert.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getOrCreate } from '../utils/getOrCreate.js'
-import { getRoomBackend } from '../backend/plane.js'
+import { getRoomPlane } from '../backend/plane.js'
 import type { RoomSubscriptionSource } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
 import type { BackendReceiver, BackendSubscription, OrderingInfo } from 'telefunc/__internal'
@@ -744,7 +744,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   /** What a lane's `sync` subscribes: `lane` of this incarnation, delivering to `receiver`. */
   private subscriber(lane: RoomSubscriptionSource['lane'], receiver: BackendReceiver): () => BackendSubscription {
     const owner = this.owner
-    return () => getRoomBackend().subscribeLane(owner.id, owner.incarnation.inc, lane, receiver)
+    return () => getRoomPlane().subscribeLane(owner.id, owner.incarnation.inc, lane, receiver)
   }
 
   onEveryMemberCoverChanged(track: string): void {

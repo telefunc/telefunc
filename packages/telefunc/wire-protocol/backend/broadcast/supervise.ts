@@ -1,7 +1,7 @@
 export { superviseBroadcastDriver }
 
 import { Subscriptions, type BackendReceiver } from '../Subscriptions.js'
-import type { BroadcastBackend } from './contract.js'
+import type { BroadcastPlane } from './contract.js'
 import type { BackendPayload, BroadcastDriver, BroadcastRoute, PublishResult } from '../driver.js'
 import type { ChannelPublishAck } from '../../channel/channel.js'
 import { broadcastRouteKey } from './routeKey.js'
@@ -16,7 +16,7 @@ function toAck(key: string, result: PublishResult): ChannelPublishAck {
 }
 
 /** Broadcast on a driver: its publishes checked, its subscriptions shared by route and host. */
-function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
+function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastPlane {
   const subscriptions = new Subscriptions<BroadcastRoute>({ driver })
   return {
     publish: (route, payload) => {

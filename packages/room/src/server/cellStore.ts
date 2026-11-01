@@ -1,7 +1,7 @@
 export { readPrefix, readPrefixAt, readOpenCells, mutateCells, eachInFlight, dropCells, deleteCells }
 export type { CellPlan, CellCommit, CellsAt }
 
-import { getRoomBackend } from '../backend/plane.js'
+import { getRoomPlane } from '../backend/plane.js'
 import type { CellCount, CellCounter, CellMutation, CellsRead } from '../backend/contract.js'
 import { Slice } from '../Slice.js'
 import { roomClosedError } from '../errors.js'
@@ -26,7 +26,7 @@ async function readPrefixAt(roomId: string, inc: string, prefix: string): Promis
   const cells = new Map<string, Uint8Array>()
   let now = 0
   const slice = new Slice()
-  for await (const page of getRoomBackend().readCellPages(roomId, inc, prefix)) {
+  for await (const page of getRoomPlane().readCellPages(roomId, inc, prefix)) {
     if ('staleInc' in page) throw roomClosedError(roomId)
     for (const [key, raw] of page.cells) cells.set(key, raw)
     now = page.now
@@ -42,14 +42,14 @@ async function mutateCells<T>(
   keys: string[],
   plan: (cells: ReadonlyMap<string, Uint8Array>, now: number) => CellPlan<T>,
 ): Promise<CellCommit<T>> {
-  const backend = getRoomBackend()
+  const plane = getRoomPlane()
   return await retryCompareExchange(async () => {
-    const read = await backend.readCells(roomId, inc, { keys })
+    const read = await plane.readCells(roomId, inc, { keys })
     if ('staleInc' in read) throw roomClosedError(roomId)
     const { value, mutations, counts = [] } = plan(read.cells, read.now)
     if (mutations.length === 0 && counts.length === 0) return { value, counters: new Map() }
     const expect = keys.map((key) => ({ key, version: read.versions.get(key) ?? null }))
-    const result = await backend.compareExchangeCells(roomId, inc, { expect, mutations, counts })
+    const result = await plane.compareExchangeCells(roomId, inc, { expect, mutations, counts })
     if (result === 'stale-inc') throw roomClosedError(roomId)
     return result === 'conflict' ? CX_CONFLICT : { value, counters: result.committed }
   })
@@ -60,7 +60,7 @@ async function readOpenCells(
   inc: string,
   keys: string[],
 ): Promise<Exclude<CellsRead, { staleInc: true }>> {
-  const read = await getRoomBackend().readCells(roomId, inc, { keys })
+  const read = await getRoomPlane().readCells(roomId, inc, { keys })
   if ('staleInc' in read) throw roomClosedError(roomId)
   return read
 }
@@ -95,7 +95,7 @@ async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<un
 async function dropCells(roomId: string, inc: string, prefix: string, mark?: string): Promise<boolean> {
   let held: string[] = []
   const slice = new Slice()
-  for await (const page of getRoomBackend().readCellPages(roomId, inc, prefix)) {
+  for await (const page of getRoomPlane().readCellPages(roomId, inc, prefix)) {
     if ('staleInc' in page) return false
     // Without a mark, each page goes as it is read; with one, a page waits for the next, so the last goes with it.
     if (mark === undefined) {
@@ -114,5 +114,5 @@ async function dropCells(roomId: string, inc: string, prefix: string, mark?: str
 /** Deletes `keys` in one exchange; false once the incarnation is stale. */
 async function deleteCells(roomId: string, inc: string, keys: Iterable<string>): Promise<boolean> {
   const mutations = Array.from(keys, (key) => ({ key, bytes: null }))
-  return (await getRoomBackend().compareExchangeCells(roomId, inc, { expect: [], mutations })) !== 'stale-inc'
+  return (await getRoomPlane().compareExchangeCells(roomId, inc, { expect: [], mutations })) !== 'stale-inc'
 }

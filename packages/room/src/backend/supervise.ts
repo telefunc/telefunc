@@ -6,12 +6,12 @@ import {
   type BackendReceiver,
   type Subscriptions,
 } from 'telefunc/__internal'
-import type { HeadNext, RoomBackend, RoomDriver, RoomSubscriptionSource } from './contract.js'
+import type { HeadNext, RoomPlane, RoomDriver, RoomSubscriptionSource } from './contract.js'
 import { roomSubscriptionSourceKey } from './laneKey.js'
 import { assert } from '../utils/assert.js'
 
 /** Checks what the driver is given and returns; its lane subscriptions are shared by source and host. */
-function superviseRoomDriver(driver: RoomDriver, subscriptions: Subscriptions<RoomSubscriptionSource>): RoomBackend {
+function superviseRoomDriver(driver: RoomDriver, subscriptions: Subscriptions<RoomSubscriptionSource>): RoomPlane {
   return {
     readHead: (roomId) => driver.readHead(roomId),
     compareExchangeHead: async (roomId, cx, next) => {

@@ -8,7 +8,7 @@ import { assert } from '../utils/assert.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../utils/unrefTimer.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
-import { getRoomBackend } from '../backend/plane.js'
+import { getRoomPlane } from '../backend/plane.js'
 import type { CellCount, CellCounter, RoomHead } from '../backend/contract.js'
 import { decodeCellCounter, isOpenIncarnation } from '../backend/semantics.js'
 import { TIMER_DELAY_MAX_MS } from '../constants.js'
@@ -77,7 +77,7 @@ function holdRecord(config: HoldConfig, counters: ReadonlyMap<string, CellCounte
  *  failed and nothing has held it since. */
 async function readHoldRecord({ id, inc, hold }: RoomIncarnation): Promise<HoldRecord | null> {
   if (hold === null) return null
-  const read = await getRoomBackend().readCells(id, inc, { keys: [HOLDS_CELL_KEY, JOINS_CELL_KEY] })
+  const read = await getRoomPlane().readCells(id, inc, { keys: [HOLDS_CELL_KEY, JOINS_CELL_KEY] })
   if ('staleInc' in read || read.cells.size === 0) return null
   const counters = new Map<string, CellCounter>()
   for (const [key, raw] of read.cells) counters.set(key, decodeCellCounter(raw))
@@ -102,7 +102,7 @@ function afterHoldChange(room: RoomIncarnation, change: HoldChange | null): void
 async function createHold(room: RoomIncarnation): Promise<void> {
   const { hold } = room
   if (hold === null) return
-  const result = await getRoomBackend().compareExchangeCells(room.id, room.inc, {
+  const result = await getRoomPlane().compareExchangeCells(room.id, room.inc, {
     expect: [],
     mutations: [],
     counts: holdDelta(hold, 0).counts,
@@ -128,13 +128,13 @@ async function maintainHold(room: RoomIncarnation): Promise<void> {
 async function lapseNewRoom(room: RoomIncarnation): Promise<RoomHead | null> {
   if (room.hold === null) return null
   const { id, inc } = room
-  const backend = getRoomBackend()
+  const plane = getRoomPlane()
   return await retryCompareExchange(async () => {
-    const head = await backend.readHead(id)
+    const head = await plane.readHead(id)
     if (!isOpenIncarnation(head, inc)) return null
     const record = await readHoldRecord(room)
     if (record?.closesIn === undefined) return head
-    const result = await backend.compareExchangeHead(
+    const result = await plane.compareExchangeHead(
       id,
       { form: 'rev', rev: head.rev },
       {
@@ -157,15 +157,15 @@ async function extendLapse(
   const firstHold = opts?.firstHold === true
   const timeout = unheldTimeout(record)
   const ttlMs = timeout === Infinity ? undefined : ROOM_LEASE_TTL_MS + timeout + 2 * ROOM_HEARTBEAT_INTERVAL_MS
-  const backend = getRoomBackend()
+  const plane = getRoomPlane()
   await retryCompareExchange(async () => {
-    const head = await backend.readHead(id)
+    const head = await plane.readHead(id)
     if (!isOpenIncarnation(head, inc)) return
     const { expiresAt } = head
     if (!firstHold && ttlMs === undefined && expiresAt === undefined) return
     const bothLapse = ttlMs !== undefined && expiresAt !== undefined
     if (!firstHold && bothLapse && expiresAt >= record.readAt + ttlMs - ROOM_HEARTBEAT_INTERVAL_MS) return
-    const result = await backend.compareExchangeHead(
+    const result = await plane.compareExchangeHead(
       id,
       { form: 'rev', rev: head.rev },
       { head: { currentInc: inc, state: 'open', config: head.config }, ttlMs },

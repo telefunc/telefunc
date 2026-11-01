@@ -2,7 +2,7 @@ export { tryCreateRoom }
 
 import { assert, assertUsage } from '../utils/assert.js'
 import { isObject } from '../utils/isObject.js'
-import { getRoomBackend } from '../backend/plane.js'
+import { getRoomPlane } from '../backend/plane.js'
 import type { HeadCx, HeadNext, RoomHead } from '../backend/contract.js'
 import { assertKnownOptions, assertRoomTimeout, isRecord, ownMetadata } from '../model.js'
 import type { RoomConfigRecord } from './protocol.js'
@@ -25,15 +25,15 @@ type Refusal = { kind: 'exists' } | { kind: 'closing' }
 
 async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<TryCreateRoomResult> {
   const { meta, emptyTimeout, departureTimeout } = normalizeRoomOptions(options)
-  const backend = getRoomBackend()
+  const plane = getRoomPlane()
   return await retryCompareExchange(async () => {
     // The head a create may replace: a closing one taken over, a closed one cleaned up.
-    let current = await backend.readHead(id)
+    let current = await plane.readHead(id)
     if (current?.state === 'closing') {
-      if (!(await takeOverClose(backend, id, current))) return { kind: 'closing' }
-      current = await backend.readHead(id)
+      if (!(await takeOverClose(plane, id, current))) return { kind: 'closing' }
+      current = await plane.readHead(id)
     }
-    if (current?.state === 'closed') await cleanupFinalizedIncarnation(backend, id, current)
+    if (current?.state === 'closed') await cleanupFinalizedIncarnation(plane, id, current)
     if (current !== null && current.state !== 'closed') return { kind: 'exists' }
     const incarnation: RoomIncarnation = {
       id,
@@ -42,18 +42,18 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     }
     const created: RoomConfigRecord = { meta, inc: incarnation.inc, hold: incarnation.hold }
     // An incarnation that lapsed is still listed, and its data still stored: dropped as `Room.list()` would.
-    const lapsedInc = current === null ? await backend.directoryGet(id) : undefined
+    const lapsedInc = current === null ? await plane.directoryGet(id) : undefined
     // A creator that stops past its head leaves a listing the sweep finds: the lapsed incarnation's, or this one.
-    if (lapsedInc === undefined) await listRoom(backend, incarnation, undefined)
+    if (lapsedInc === undefined) await listRoom(plane, incarnation, undefined)
     // The new head, in the one exchange.
-    const result = await backend.compareExchangeHead(id, replacing(current), { head: openHead(created) })
+    const result = await plane.compareExchangeHead(id, replacing(current), { head: openHead(created) })
     if ('conflict' in result) return refusalOf(result.current)
     assert('head' in result)
     // The new incarnation: the head lapses only once the counters that keep it ahead are written.
     await createHold(incarnation)
     const lapsing = await lapseNewRoom(incarnation)
-    if (lapsedInc !== undefined) await backend.dropIncarnation(id, lapsedInc)
-    await listRoom(backend, incarnation, lapsing?.expiresAt)
+    if (lapsedInc !== undefined) await plane.dropIncarnation(id, lapsedInc)
+    await listRoom(plane, incarnation, lapsing?.expiresAt)
     sweepLapsedRoomsSoon()
     return { kind: 'created', room: seededRoom(id, created) }
   })

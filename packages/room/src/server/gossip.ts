@@ -2,7 +2,7 @@ export { GossipOutbox }
 
 import { Fifo } from '../utils/Fifo.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
-import { getRoomBackend } from '../backend/plane.js'
+import { getRoomPlane } from '../backend/plane.js'
 import { ROOM_DEMAND_PAGE_ENTRIES, ROOM_GOSSIP_IN_FLIGHT_MAX } from './constants.js'
 import type { RoomDemandPage } from './protocol.js'
 import { reportRoomError } from './errors.js'
@@ -79,7 +79,7 @@ class GossipOutbox {
       const page: RoomDemandPage = { __r: 'demand', instance: this.instance, page: ++this.pages, wants }
       this.inFlight++
       // A stale commit is a closed room's: its gossip has no reader.
-      void getRoomBackend()
+      void getRoomPlane()
         .commitLane({ roomId: this.room.id, inc: this.room.inc, lane: DEMAND_LANE }, encodeDemandPage(page))
         .catch(reportRoomError)
         .finally(() => {

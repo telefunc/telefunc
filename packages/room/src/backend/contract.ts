@@ -22,7 +22,7 @@ export type {
   HeadCxResult,
   HeadNext,
   LaneId,
-  RoomBackend,
+  RoomPlane,
   RoomDriver,
   RoomHead,
   RoomPlaneKit,
@@ -194,7 +194,7 @@ type RoomDriver = {
 }
 
 /** Internal supervised Room consumer contract. */
-type RoomBackend = Omit<RoomDriver, 'subscribe'> & {
+type RoomPlane = Omit<RoomDriver, 'subscribe'> & {
   subscribeLane(
     roomId: string,
     inc: string,

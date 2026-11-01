@@ -1,14 +1,14 @@
 export {
   installBackend,
   configureBroadcastTransport,
-  getBroadcastBackend,
+  getBroadcastPlane,
   followBroadcastPlane,
   unfollowBroadcastPlane,
   backendPlane,
   disposeBackend,
 }
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
-import type { BroadcastBackend } from './broadcast/contract.js'
+import type { BroadcastPlane } from './broadcast/contract.js'
 import type { Backend, Subscriber, Unsubscribe } from './driver.js'
 import { superviseBroadcastDriver } from './broadcast/supervise.js'
 import { createBroadcastTransportDriver, type BroadcastTransport } from './broadcast/transport.js'
@@ -37,7 +37,7 @@ const state = getGlobalObject<{
   /** The public broadcast-only override: Broadcast goes through it instead of the installed backend. */
   transport?: BroadcastTransport
   /** Built on first Broadcast use, from the transport or else the installed backend; `null` again once either changes. */
-  broadcast: BroadcastBackend | null
+  broadcast: BroadcastPlane | null
   planeFollowers: Set<BroadcastPlaneFollower>
 }>('wire-protocol/backend/install.ts', () => ({ installed: null, broadcast: null, planeFollowers: new Set() }))
 
@@ -76,7 +76,7 @@ function unfollowBroadcastPlane(follower: BroadcastPlaneFollower): void {
   state.planeFollowers.delete(follower)
 }
 
-function getBroadcastBackend(): BroadcastBackend {
+function getBroadcastPlane(): BroadcastPlane {
   return (state.broadcast ??= superviseBroadcastDriver(
     state.transport ? createBroadcastTransportDriver(state.transport) : currentBackend().backend,
   ))

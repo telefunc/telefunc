@@ -19,10 +19,10 @@ import {
   type Unsubscribe,
 } from 'telefunc/__internal'
 import {
-  getRoomBackend,
+  getRoomPlane,
   MemoryRoomDriver,
   type CellsRead,
-  type RoomBackend,
+  type RoomPlane,
   type RoomSubscriptionSource,
 } from '@telefunc/room/backend'
 import { createDeferred } from './createDeferred'
@@ -52,10 +52,10 @@ const { faults, subscriptions, holds, holding, subscriptionHolds, retainedHolds,
   faults: (BackendFault & { times: number })[]
   subscriptions: Set<FailingSubscription>
   holds: CellPagesHold[]
-  holding: WeakSet<RoomBackend>
+  holding: WeakSet<RoomPlane>
   subscriptionHolds: Map<string, Promise<void>>
   retainedHolds: RetainedReadsHold[]
-  holdingRetained: WeakSet<RoomBackend>
+  holdingRetained: WeakSet<RoomPlane>
 }
 
 /** What a subscription of the in-memory backend tells core, passed on unless a test drops it or holds it. */
@@ -187,7 +187,7 @@ function holdCellPages(roomId: string, key: string, pages: number): { reached: P
     return released.promise
   }
   holds.push({ roomId, key, pages, wait })
-  const backend = getRoomBackend()
+  const backend = getRoomPlane()
   if (!holding.has(backend)) {
     holding.add(backend)
     const read = backend.readCellPages
@@ -202,7 +202,7 @@ function holdRetainedReads(roomId: string): { held: () => number; release: () =>
   const released = createDeferred()
   const hold: RetainedReadsHold = { roomId, waiting: 0, released: released.promise }
   retainedHolds.push(hold)
-  const backend = getRoomBackend()
+  const backend = getRoomPlane()
   if (!holdingRetained.has(backend)) {
     holdingRetained.add(backend)
     const read = backend.readRetained

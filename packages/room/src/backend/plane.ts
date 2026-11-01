@@ -1,7 +1,7 @@
-export { getRoomBackend, ROOM_PLANE }
+export { getRoomPlane, ROOM_PLANE }
 
 import { backendPlane } from 'telefunc/__internal'
-import type { RoomBackend, RoomDriver, RoomPlaneKit } from './contract.js'
+import type { RoomPlane, RoomDriver, RoomPlaneKit } from './contract.js'
 import { CELL_PAGE_SIZE, DIRECTORY_PAGE_SIZE } from './contract.js'
 import { decodeLaneKey, encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from './laneKey.js'
 import { MemoryRoomDriver } from './MemoryRoomDriver.js'
@@ -20,7 +20,7 @@ const kit: RoomPlaneKit = {
 }
 
 /** The Room plane of the installed backend, the in-memory one when the process installed none. */
-function getRoomBackend(): RoomBackend {
+function getRoomPlane(): RoomPlane {
   return backendPlane(ROOM_PLANE, {
     fallback: (): RoomDriver => new MemoryRoomDriver(),
     supervise: superviseRoomDriver,

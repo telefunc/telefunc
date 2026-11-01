@@ -3,8 +3,8 @@ export { listRoom, repairRoomIndex, sweepLapsedRoomsSoon }
 // Each listed room is due once its head may have lapsed: a sweep then drops what a lapsed incarnation left, as
 // `Room.list()` does, so no lapsed room's data waits for a list call.
 
-import { getRoomBackend } from '../backend/plane.js'
-import type { RoomBackend, RoomHead } from '../backend/contract.js'
+import { getRoomPlane } from '../backend/plane.js'
+import type { RoomPlane, RoomHead } from '../backend/contract.js'
 import { Slice } from '../Slice.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_LEASE_TTL_MS } from './constants.js'
 import type { RoomIncarnation } from './lifecycle.js'
@@ -16,28 +16,23 @@ import { getGlobalObject } from '../utils/getGlobalObject.js'
  *  without hold timeouts never lapses; one with them but no lapse yet gets one once held, so it is looked at again a
  *  lease from now. */
 async function listRoom(
-  backend: RoomBackend,
+  plane: RoomPlane,
   { id, inc, hold }: RoomIncarnation,
   expiresAt: number | undefined,
 ): Promise<void> {
-  if (hold === null) return await backend.directoryPut(id, inc, Infinity, 0)
-  if (expiresAt === undefined) return await backend.directoryPut(id, inc, 0, ROOM_LEASE_TTL_MS)
-  await backend.directoryPut(id, inc, expiresAt, ROOM_HEARTBEAT_INTERVAL_MS)
+  if (hold === null) return await plane.directoryPut(id, inc, Infinity, 0)
+  if (expiresAt === undefined) return await plane.directoryPut(id, inc, 0, ROOM_LEASE_TTL_MS)
+  await plane.directoryPut(id, inc, expiresAt, ROOM_HEARTBEAT_INTERVAL_MS)
 }
 
 /** A listed incarnation no head names as current has no owner left (its close finished, or was interrupted and its
  *  tombstone lapsed), so it is dropped with its listing. */
-async function repairRoomIndex(
-  backend: RoomBackend,
-  id: string,
-  listedInc: string,
-  head: RoomHead | null,
-): Promise<void> {
+async function repairRoomIndex(plane: RoomPlane, id: string, listedInc: string, head: RoomHead | null): Promise<void> {
   if (head?.currentInc === listedInc) return
-  await backend.dropIncarnation(id, listedInc)
+  await plane.dropIncarnation(id, listedInc)
   const live = openConfig(head)
-  if (live) await listRoom(backend, { id, inc: live.inc, hold: live.hold }, head!.expiresAt)
-  else await backend.directoryDelete(id, listedInc)
+  if (live) await listRoom(plane, { id, inc: live.inc, hold: live.hold }, head!.expiresAt)
+  else await plane.directoryDelete(id, listedInc)
 }
 
 const globalObject = getGlobalObject('server/directory.ts', {
@@ -49,18 +44,18 @@ function sweepLapsedRoomsSoon(): void {
   const now = performance.now()
   if (now < globalObject.nextSweepAt) return
   globalObject.nextSweepAt = now + ROOM_HEARTBEAT_INTERVAL_MS
-  void sweepLapsedRooms(getRoomBackend()).catch(reportRoomError)
+  void sweepLapsedRooms(getRoomPlane()).catch(reportRoomError)
 }
 
 /** Each due room leaves the due ones: due again under the head that still names it, or repaired. A page and a
  *  `ROOM_PLAN_SLICE_MS` slice at a time. */
-async function sweepLapsedRooms(backend: RoomBackend): Promise<void> {
+async function sweepLapsedRooms(plane: RoomPlane): Promise<void> {
   const slice = new Slice()
-  for (let due = await backend.directoryDue(); due.length > 0; due = await backend.directoryDue()) {
+  for (let due = await plane.directoryDue(); due.length > 0; due = await plane.directoryDue()) {
     for (const { roomId, incTag } of due) {
-      const head = await backend.readHead(roomId)
-      if (head?.currentInc !== incTag) await repairRoomIndex(backend, roomId, incTag, head)
-      else await listRoom(backend, { id: roomId, inc: incTag, hold: configFromHead(head).hold }, head.expiresAt)
+      const head = await plane.readHead(roomId)
+      if (head?.currentInc !== incTag) await repairRoomIndex(plane, roomId, incTag, head)
+      else await listRoom(plane, { id: roomId, inc: incTag, hold: configFromHead(head).hold }, head.expiresAt)
     }
     if (slice.over) await slice.next()
   }

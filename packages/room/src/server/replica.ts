@@ -4,7 +4,7 @@ export type { PresenceEvent }
 import { parse } from '@brillout/json-serializer/parse'
 import { assert } from '../utils/assert.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
-import { getRoomBackend } from '../backend/plane.js'
+import { getRoomPlane } from '../backend/plane.js'
 import type { LaneId } from '../backend/contract.js'
 import { encodePublish, hostLocal, type OrderingInfo } from 'telefunc/__internal'
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../binary.js'
@@ -294,7 +294,7 @@ class RoomReplica
     await this.authority.ensureRoster()
     // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
     await withinRoomHorizon(this.lanePlan.semanticReady)
-    const stored = await getRoomBackend().readRetained(this.id, this.incarnation.inc, SEMANTIC_LANE)
+    const stored = await getRoomPlane().readRetained(this.id, this.incarnation.inc, SEMANTIC_LANE)
     if (stored === null) return
     const serialized = decodeRoomText(stored.payload)
     const event = parse(serialized) as RoomDataEnvelope
@@ -324,18 +324,18 @@ class RoomReplica
   private async readRetainedBinary(holder: LaneHolder, { member, track }: BinaryWantChange, hold: ReplayHold) {
     await this.authority.ensureRoster()
     await (member === EVERY_MEMBER ? this.lanePlan.binaryReady() : this.lanePlan.pairsReady(member, track))
-    const backend = getRoomBackend()
+    const plane = getRoomPlane()
     const lanes: LaneId[] =
       member !== EVERY_MEMBER && track !== EVERY_TRACK
         ? [{ kind: 'binary', member, track }]
-        : await backend.listRetained(
+        : await plane.listRetained(
             this.id,
             this.incarnation.inc,
             member !== EVERY_MEMBER ? { member } : track !== EVERY_TRACK ? { track } : undefined,
           )
     for (const lane of lanes) {
       if (lane.kind !== 'binary' || !holder.wantsBinary(lane.member, lane.track)) continue
-      const stored = await backend.readRetained(this.id, this.incarnation.inc, lane)
+      const stored = await plane.readRetained(this.id, this.incarnation.inc, lane)
       // An unsubscribe during the read leaves nothing to deliver to, and no receipt to keep.
       if (stored === null || !holder.wantsBinary(lane.member, lane.track)) continue
       if (!this.model.hasMember(lane.member)) continue
@@ -466,7 +466,7 @@ class RoomReplica
   }
 
   async readOpenConfig(): Promise<RoomConfigRecord | null> {
-    return openConfig(await getRoomBackend().readHead(this.id), this.incarnation.inc)
+    return openConfig(await getRoomPlane().readHead(this.id), this.incarnation.inc)
   }
 
   /** A newer meta reaching this view through the authority never reached its clients as an event. */

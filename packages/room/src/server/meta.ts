@@ -14,7 +14,7 @@ export {
 export type { StoredRoomMeta, RoomMetaWrite, MemberMetaWrite, MemberMetaCells }
 
 import { getOrCreate } from '../utils/getOrCreate.js'
-import { getRoomBackend } from '../backend/plane.js'
+import { getRoomPlane } from '../backend/plane.js'
 import { CELL_PAGE_SIZE, type CellMutation, type CxResult } from '../backend/contract.js'
 import { decodeCellCounter } from '../backend/semantics.js'
 import { Slice } from '../Slice.js'
@@ -131,27 +131,27 @@ async function mergePair(a: RoomMetaEntry[], b: RoomMetaEntry[], slice: Slice): 
  *  pages its generation's keys between two reads of `meta:seq`, which every write counts, and keeps the pages only
  *  when no write landed between. */
 async function readRoomMeta(roomId: string, { inc, meta }: RoomConfigRecord): Promise<StoredRoomMeta | null> {
-  const backend = getRoomBackend()
+  const plane = getRoomPlane()
   for (let attempt = 0; attempt < META_PAGED_READS; attempt++) {
-    const before = await backend.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY, META_GEN_CELL_KEY] })
+    const before = await plane.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY, META_GEN_CELL_KEY] })
     if ('staleInc' in before) return null
     const seq = before.cells.get(META_SEQ_CELL_KEY)
     if (seq === undefined) return { entries: metaEntriesAt(meta, 0), seq: 0 }
     const prefix = roomMetaGenPrefix(decodeRoomRecord<number>(before.cells.get(META_GEN_CELL_KEY)!))
     const runs: RoomMetaEntry[][] = []
     const slice = new Slice()
-    for await (const page of backend.readCellPages(roomId, inc, prefix)) {
+    for await (const page of plane.readCellPages(roomId, inc, prefix)) {
       if ('staleInc' in page) return null
       runs.push(metaRun(page.cells, prefix))
       if (slice.over) await slice.next()
     }
-    const after = await backend.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY] })
+    const after = await plane.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY] })
     if ('staleInc' in after) return null
     if (after.versions.get(META_SEQ_CELL_KEY) === before.versions.get(META_SEQ_CELL_KEY)) {
       return { entries: await mergeRuns(runs), seq: decodeCellCounter(seq).value }
     }
   }
-  const read = await backend.readCells(roomId, inc, { prefix: META_CELL_PREFIX })
+  const read = await plane.readCells(roomId, inc, { prefix: META_CELL_PREFIX })
   if ('staleInc' in read) return null
   const prefix = roomMetaGenPrefix(decodeRoomRecord<number>(read.cells.get(META_GEN_CELL_KEY)!))
   const runs: RoomMetaEntry[][] = []
@@ -170,7 +170,7 @@ async function readRoomMeta(roomId: string, { inc, meta }: RoomConfigRecord): Pr
 
 /** How many writes the stored meta reflects; null once the incarnation is gone. */
 async function readRoomMetaSeq(roomId: string, inc: string): Promise<number | null> {
-  const read = await getRoomBackend().readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY] })
+  const read = await getRoomPlane().readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY] })
   if ('staleInc' in read) return null
   const seq = read.cells.get(META_SEQ_CELL_KEY)
   return seq === undefined ? 0 : decodeCellCounter(seq).value
@@ -185,14 +185,14 @@ async function readRoomMetaSeq(roomId: string, inc: string): Promise<number | nu
  *  keys are placed at the `meta:seq` the write read. */
 async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: RoomMetaWrite): Promise<void> {
   const { inc } = config
-  const backend = getRoomBackend()
+  const plane = getRoomPlane()
   const update = await retryCompareExchange(async (): Promise<RoomMetaUpdate | null | typeof CX_CONFLICT> => {
     const read = await readOpenCells(roomId, inc, [META_SEQ_CELL_KEY, META_GEN_CELL_KEY])
     const seq = read.cells.get(META_SEQ_CELL_KEY)
     if (seq === undefined) {
       const meta = metaEntriesAt('replace' in write ? write.replace : mergeAttributes(config.meta, write.merge), 0)
       const prefix = roomMetaGenPrefix(0)
-      const result = await backend.compareExchangeCells(roomId, inc, {
+      const result = await plane.compareExchangeCells(roomId, inc, {
         expect: [{ key: META_SEQ_CELL_KEY, version: null }],
         mutations: [genMutation(0), ...meta.map((entry) => metaKeyMutation(prefix, entry))],
         counts: [{ key: META_SEQ_CELL_KEY, delta: 1, create: true }],
@@ -208,7 +208,7 @@ async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: Ro
       const prefix = roomMetaGenPrefix(count)
       const drop = { key: metaDropCellKey(gen), bytes: encodeRoomRecord(gen) }
       const mutations = [genMutation(count), drop, ...meta.map((entry) => metaKeyMutation(prefix, entry))]
-      const result = await backend.compareExchangeCells(roomId, inc, { expect, mutations, counts })
+      const result = await plane.compareExchangeCells(roomId, inc, { expect, mutations, counts })
       return result === 'conflict' ? null : committed(roomId, result, (seq) => ({ __r: 'update', seq, meta }))
     }
     const prefix = roomMetaGenPrefix(gen)
@@ -216,7 +216,7 @@ async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: Ro
     const merging = keys.length === 0 ? new Map() : (await readOpenCells(roomId, inc, keys)).cells
     const changes = metaChanges(write.merge, prefix, count, merging)
     const mutations = changes.map((change) => changeMutation(prefix, change))
-    const result = await backend.compareExchangeCells(roomId, inc, { expect, mutations, counts })
+    const result = await plane.compareExchangeCells(roomId, inc, { expect, mutations, counts })
     return committed(roomId, result, (seq) => ({ __r: 'update', seq, changes }))
   })
   if (update === null) return
@@ -239,14 +239,14 @@ function committed(
  *  its last page. A marked generation stopped being `meta:gen` in the exchange that marked it, so whoever finishes a
  *  mark, a later replace or the heartbeat, drops no live key. */
 async function dropReplacedMetaGenerations(roomId: string, inc: string): Promise<void> {
-  const backend = getRoomBackend()
-  const marks = await backend.readCells(roomId, inc, { prefix: META_DROP_CELL_PREFIX })
+  const plane = getRoomPlane()
+  const marks = await plane.readCells(roomId, inc, { prefix: META_DROP_CELL_PREFIX })
   if ('staleInc' in marks) return
   const slice = new Slice()
   // The loop is `dropCells`' marked one, inline so that a replace's drop runs in this one async frame.
   for (const [mark, raw] of marks.cells) {
     let held: string[] = []
-    for await (const page of backend.readCellPages(roomId, inc, roomMetaGenPrefix(decodeRoomRecord<number>(raw)))) {
+    for await (const page of plane.readCellPages(roomId, inc, roomMetaGenPrefix(decodeRoomRecord<number>(raw)))) {
       if ('staleInc' in page || (held.length > 0 && !(await deleteCells(roomId, inc, held)))) return
       held = [...page.cells.keys()]
       if (slice.over) await slice.next()
@@ -275,7 +275,7 @@ async function writeMemberMeta(
   id: string,
   write: MemberMetaWrite,
 ): Promise<{ update: MemberMetaUpdate; hidden: boolean; replaced: number | null }> {
-  const backend = getRoomBackend()
+  const plane = getRoomPlane()
   const memberKey = memberCellKey(id)
   return await retryCompareExchange(async () => {
     const read = await readOpenCells(room.id, room.inc, [memberKey])
@@ -297,7 +297,7 @@ async function writeMemberMeta(
     const next: RoomMemberRecord = { ...record, metaSeq: seq, metaGen: gen }
     mutations.push({ key: memberKey, bytes: encodeRoomRecord(next) })
     const expect = [{ key: memberKey, version: read.versions.get(memberKey)! }]
-    const result = await backend.compareExchangeCells(room.id, room.inc, { expect, mutations })
+    const result = await plane.compareExchangeCells(room.id, room.inc, { expect, mutations })
     if (result === 'stale-inc') throw roomClosedError(room.id)
     if (result === 'conflict') return CX_CONFLICT
     let update: MemberMetaUpdate
@@ -327,7 +327,7 @@ async function writeMemberConnection(
     const seq = record.metaSeq + 1
     const next: RoomMemberRecord = { ...record, metaSeq: seq }
     if (!connected) next.disconnected = true
-    const result = await getRoomBackend().compareExchangeCells(room.id, room.inc, {
+    const result = await getRoomPlane().compareExchangeCells(room.id, room.inc, {
       expect: [{ key: memberKey, version: read.versions.get(memberKey)! }],
       mutations: [{ key: memberKey, bytes: encodeRoomRecord(next) }],
     })
@@ -378,7 +378,7 @@ async function readMetaCellPages(
   const cut = new Set<string>()
   let last: string | undefined
   const slice = new Slice()
-  for await (const page of getRoomBackend().readCellPages(room.id, room.inc, prefix)) {
+  for await (const page of getRoomPlane().readCellPages(room.id, room.inc, prefix)) {
     if ('staleInc' in page) throw roomClosedError(room.id)
     if (last !== undefined) cut.add(last)
     for (const cell of page.cells) {
@@ -408,7 +408,7 @@ async function settleMemberMetaCells(
     cells = read.byMember.get(id) ?? []
     if (read.cut.size === 0) return cells
   }
-  const read = await getRoomBackend().readCells(room.id, room.inc, { prefix: memberMetaCellPrefix(id) })
+  const read = await getRoomPlane().readCells(room.id, room.inc, { prefix: memberMetaCellPrefix(id) })
   if ('staleInc' in read) throw roomClosedError(room.id)
   return Array.from(read.cells)
 }
