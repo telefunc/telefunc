@@ -1,26 +1,20 @@
 export type { TELEFUNC_SHIELDS } from '../shared/transformer/generateShield/shieldKey.js'
 export type {
+  BackendPayload,
   BroadcastDriver,
   BroadcastPayload,
   BroadcastRoute,
   PublishResult,
-} from '../../wire-protocol/backend/broadcast/contract.js'
+  Subscriber,
+  Unsubscribe,
+} from '../../wire-protocol/backend/driver.js'
 export { installBackend, backendPlane } from '../../wire-protocol/backend/install.js'
 export type { BackendDriver } from '../../wire-protocol/backend/install.js'
-export { DriverAttempt, SourceDroppedError } from '../../wire-protocol/backend/attempt.js'
 export { assertDriverOrdering } from '../../wire-protocol/backend/driverOrdering.js'
 export { MemoryBackend } from '../../wire-protocol/backend/memory/backend.js'
-export type { PlaneSubscriptions, SendHold } from '../../wire-protocol/backend/SubscriptionManager.js'
 export { decodeOrderingFrame } from '../../wire-protocol/wire/orderingFrame.js'
 export type { OrderingInfo } from '../../wire-protocol/wire/orderingFrame.js'
-export type {
-  BackendPayload,
-  BackendReceiver,
-  BackendSubscription,
-  SubscriptionAttempt,
-  SubscriptionBinding,
-  SubscriptionDriver,
-} from '../../wire-protocol/backend/subscription.js'
+export type { BackendReceiver, BackendSubscription, Subscriptions } from '../../wire-protocol/backend/Subscriptions.js'
 export type { BroadcastEndOwner } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 export type { ServerBroadcastEnd, ClientBroadcast }
 export { encodePublish } from '../../wire-protocol/wire/publishInfo.js'
@@ -37,8 +31,8 @@ export type {
   TelefuncExtensionStub,
 } from '../../wire-protocol/adapter/cloudflare/extensions.js'
 export type { ChannelPublishAck, ChannelPublishInfo } from '../../wire-protocol/channel/channel.js'
-export { MemoryPubSub, type Subscriptions } from '../../wire-protocol/backend/memory/deliveries.js'
-export { isChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
+export { MemoryPubSub, type Subscribers } from '../../wire-protocol/backend/memory/deliveries.js'
+export { ChannelOverflowError, isChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
 
 import type { ServerBroadcastEnd as ServerBroadcastEndClass } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 import type { ClientBroadcast as ClientBroadcastClass } from '../../wire-protocol/channel/client/channel.js'

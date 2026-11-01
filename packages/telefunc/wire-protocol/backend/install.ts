@@ -10,12 +10,12 @@ export {
 export type { BackendDriver }
 
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
-import type { BroadcastBackend, BroadcastDriver } from './broadcast/contract.js'
+import type { BroadcastBackend } from './broadcast/contract.js'
+import type { BroadcastDriver, Subscriber, Unsubscribe } from './driver.js'
 import { superviseBroadcastDriver } from './broadcast/supervise.js'
 import { createBroadcastTransportDriver, type BroadcastTransport } from './broadcast/transport.js'
 import { MemoryBackend } from './memory/backend.js'
-import { SubscriptionManager, type PlaneSubscriptions } from './SubscriptionManager.js'
-import type { SubscriptionDriver } from './subscription.js'
+import { Subscriptions } from './Subscriptions.js'
 import { assertUsage } from '../../utils/assert.js'
 import { getOrCreate } from '../../utils/getOrCreate.js'
 
@@ -93,10 +93,10 @@ function getBroadcastBackend(): BroadcastBackend {
 
 /** The plane `key` of the installed backend, built once per installed backend: `supervise` wraps the driver the
  *  backend serves, built with the extension's `kit`, or the in-memory one `fallback` builds when the process installed
- *  none, given the driver's subscriptions keyed by `sourceKey`, whose deliveries carry `payloadKind`. */
+ *  none, given the driver's subscriptions, shared by source and host. */
 function backendPlane<
   Source,
-  Driver extends { readonly subscriptions: SubscriptionDriver<Source> },
+  Driver extends { subscribe(source: Source, subscriber: Subscriber): Unsubscribe },
   Plane extends BackendPlane,
 >(
   key: symbol,
@@ -104,14 +104,10 @@ function backendPlane<
     fallback,
     supervise,
     kit,
-    sourceKey,
-    payloadKind,
   }: {
     fallback: () => Driver
-    supervise: (driver: Driver, subscriptions: PlaneSubscriptions<Source>) => Plane
+    supervise: (driver: Driver, subscriptions: Subscriptions<Source>) => Plane
     kit?: unknown
-    sourceKey: (source: Source) => string
-    payloadKind: (source: Source) => 'text' | 'binary'
   },
 ): Plane {
   assertUsage(
@@ -127,7 +123,7 @@ function backendPlane<
       assertUsage(build, `The installed backend doesn't serve ${String(key)}, which this call needs`)
       driver = build(kit as never) as Driver
     }
-    return supervise(driver, new SubscriptionManager({ driver: driver.subscriptions, sourceKey, payloadKind }))
+    return supervise(driver, new Subscriptions({ driver }))
   }) as Plane
 }
 
