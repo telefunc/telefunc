@@ -39,10 +39,6 @@ import type { ServerChannel } from './channel.js'
  *  identity and hands them back to the transport that created it. */
 type Wire = unknown
 
-// Single-instance kernel: owns channels, sessions, per-wire runtime. Transports talk
-// to this class via `onWireOpen` and from then on identify wires by object
-// identity. Multi-instance deployments rely on sticky sessions at the load balancer.
-
 type ServerTransport<TWire> = {
   getSessionId(wire: TWire): string | undefined
   setSessionId(wire: TWire, sessionId: string): void
@@ -127,6 +123,9 @@ function getChannelMux(): ChannelMux {
   return getGlobals().mux
 }
 
+/** The server's channel kernel: it owns the channels, the sessions and each wire's state. Transports report a wire
+ *  through `onWireOpen` and name it by identity from then on; a deployment with several instances relies on sticky
+ *  sessions at its load balancer. */
 class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStagesOwner {
   private readonly channels = new Map<string, ServerChannel>()
   /** The channels a reconcile named before they registered, which `registerChannel` attaches. */
