@@ -4,11 +4,11 @@ export type { ChannelHandle }
 import type { ServerChannel } from './channel.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 
+/** A channel as one session holds it: its index there and the peer it sends through. */
 type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer }
 
-/** Forward (`bySession`: sessionId → ix → handle) for per-frame routing; reverse
- *  (`byChannel`: channelId → sessionId → ix) for O(bindings) channel eviction.
- *  Mutations stay atomic across both maps. */
+/** Each session's channels by index, and the sessions each channel is in: a frame finds its channel by session and
+ *  index, and an ending channel leaves every session in O(its sessions). Every change writes both maps. */
 class SessionRegistry {
   private readonly bySession = new Map<string, Map<number, ChannelHandle>>()
   private readonly byChannel = new Map<string, Map<string, number>>()
@@ -17,8 +17,7 @@ class SessionRegistry {
     return this.bySession.get(sessionId)?.get(ix)
   }
 
-  /** Read without mutating. Used by transient-close handling so the next reconcile's
-   *  prev-comparison can still detect channels the client dropped. */
+  /** The session's channels, left in place. */
   peekSession(sessionId: string): Map<number, ChannelHandle> | undefined {
     return this.bySession.get(sessionId)
   }
@@ -58,7 +57,7 @@ class SessionRegistry {
     return handle
   }
 
-  /** Returns the removed session so callers can drive per-handle lifecycle side effects. */
+  /** Takes the session out and returns its channels, for the caller to detach. */
   removeSession(sessionId: string): Map<number, ChannelHandle> | undefined {
     const session = this.bySession.get(sessionId)
     if (!session) return undefined
