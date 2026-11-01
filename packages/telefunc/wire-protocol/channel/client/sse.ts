@@ -62,6 +62,7 @@ type SseTransportOptions = {
   owner: TransportOwner
 }
 
+/** The SSE transport: an event stream down, batch POSTs or one streaming POST up. */
 class SseTransport implements UpgradeSource {
   private readonly telefuncUrl: string
   private readonly fetchImpl: typeof fetch
@@ -81,7 +82,7 @@ class SseTransport implements UpgradeSource {
   /** The wire's open POST is unanswered: the server holds a POST on the wire until it has the open. */
   private openPending = false
   private startTimer: ReturnType<typeof setTimeout> | null = null
-  /** Abort handle for the active transport's fetches. `null` means no active transport. */
+  /** Aborts the active transport's fetches; null when no transport is active. */
   private transportAbort: AbortController | null = null
   private abandonedStream: AbortController | null = null
   private readonly abandonedControllers = new WeakSet<AbortController>()
@@ -107,7 +108,7 @@ class SseTransport implements UpgradeSource {
   private postIdleFlushDelayMs = SSE_POST_IDLE_FLUSH_DELAY_MS
   private heartbeatFlushDelayMs = Math.floor(CHANNEL_PING_INTERVAL_MS / 2)
   private drainCallbacks: Array<() => void> = []
-  /** Client→server upstream POST. `failed` is sticky → fall back to outbox+batch POSTs forever. */
+  /** The streaming upload POST. Once `failed`, it stays so, and frames go in batch POSTs from the outbox. */
   private streamRequest:
     | { tag: 'idle' }
     | {
