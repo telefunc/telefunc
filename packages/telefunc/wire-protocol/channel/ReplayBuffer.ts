@@ -21,7 +21,7 @@ class ReplayBuffer {
   /** Lower budgets than the queues', which apply once the peer acknowledged every seq through `throughSeq`. */
   private lowered: { budgets: Record<ReplayKind, number>; throughSeq: number } | null = null
 
-  /** Current sequence number. */
+  /** The last seq handed out (see `nextSeq`). */
   get seq(): number {
     return this.issuedSeq
   }
@@ -42,7 +42,7 @@ class ReplayBuffer {
     this.lowered = lowered ? { budgets, throughSeq: this.lowered?.throughSeq ?? this.issuedSeq } : null
   }
 
-  /** Increment and return the next sequence number. */
+  /** Hands out the next seq. */
   nextSeq(): number {
     return ++this.issuedSeq
   }
@@ -138,7 +138,7 @@ function mergeBySeq(a: Run, b: Run): Run {
 
 /** Bounded FIFO queue with parallel arrays and amortised O(1) compaction. */
 class ReplayQueue {
-  // Parallel arrays — seqs separate for cache-friendly access
+  // Seqs and frames in parallel arrays, so a scan by seq reads only numbers.
   private seqs: number[] = []
   private frames: Uint8Array<ArrayBuffer>[] = []
   private head = 0
@@ -208,7 +208,8 @@ class ReplayQueue {
     this.head++
   }
 
-  /** Compact when dead zone ≥ live zone (amortised O(1)). */
+  /** Drops the dead slots ahead of `head` once they are as many as the live ones, which keeps each drop amortised
+   *  O(1). */
   private compact(): void {
     if (this.head >= this.frames.length) {
       this.seqs.length = 0
