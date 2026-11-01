@@ -163,7 +163,7 @@ class RoomReplica
       metaSeq: stored.seq,
       owner: this,
     })
-    this.gossip = new GossipOutbox(incarnation, this.outgoingDemand.instance)
+    this.gossip = new GossipOutbox({ room: incarnation, instance: this.outgoingDemand.instance })
     this.incomingDemand = new RoomDemand({ owner: this, publishedTracks: this.publishedTracks })
     const { model, outgoingDemand } = this
     this.lanePlan = new LanePlan({ owner: this, incarnation, model, outgoingDemand })

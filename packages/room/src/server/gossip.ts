@@ -13,10 +13,18 @@ assertIsNotBrowser()
 
 type Want = RoomDemandPage['wants'][number]
 
+type GossipOutboxOptions = {
+  room: RoomIncarnation
+  /** This process's instance id, which its demand pages carry. */
+  instance: string
+}
+
 /** Commits a room's demand on its demand lane in order, the entries told in one turn sharing pages, and
  *  `ROOM_GOSSIP_IN_FLIGHT_MAX` pages at a time and a slice per turn, so a burst waits as entries rather than as
  *  commits, and its deliveries leave the event loop turning. Its pages are counted, so a reader sees one it missed. */
 class GossipOutbox {
+  private readonly room: RoomIncarnation
+  private readonly instance: string
   private waiting = new Fifo<Want>()
   private pages = 0
   /** A page is due even with no entry waiting: each page renews this process's demand elsewhere. */
@@ -28,10 +36,10 @@ class GossipOutbox {
   private slice: Slice | null = null
   private yielding = false
 
-  constructor(
-    private readonly room: RoomIncarnation,
-    private readonly instance: string,
-  ) {}
+  constructor({ room, instance }: GossipOutboxOptions) {
+    this.room = room
+    this.instance = instance
+  }
 
   push(want: Want): void {
     if (this.closed) return
