@@ -14,7 +14,7 @@ import { REDIS_COMMANDS } from './commands.js'
 import { broadcastChannel } from './keys.js'
 import type { RedisConnection } from './RedisConnection.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
-import type { RedisPlane } from './subscriber.js'
+import type { RedisPlane } from './RedisSubscriptions.js'
 
 /** The installed backend: Broadcast on `connection`, and Room's plane, built on the same connection. */
 class RedisBackend implements Backend, RedisPlane {
@@ -38,7 +38,7 @@ class RedisBackend implements Backend, RedisPlane {
 
   subscribe(route: BroadcastRoute, subscriber: Subscriber): Unsubscribe {
     const laneChannel = broadcastChannel(this.connection.prefix, route)
-    return this.connection.subscriber.subscribe({
+    return this.connection.subscriptions.subscribe({
       source: route,
       laneChannel,
       invalidationChannel: null,

@@ -1,4 +1,4 @@
-export { RedisSubscriber }
+export { RedisSubscriptions }
 export type { RedisPlane, RedisSubscriptionSource }
 
 import { randomUUID } from 'node:crypto'
@@ -13,7 +13,7 @@ import type { RedisConnection } from './RedisConnection.js'
 
 type RedisSubscriptionSource = BroadcastRoute | RoomSubscriptionSource
 
-type RedisSubscriberOptions = { connection: RedisConnection }
+type RedisSubscriptionsOptions = { connection: RedisConnection }
 
 /** The driver a subscription's source belongs to. */
 interface RedisPlane {
@@ -66,7 +66,7 @@ const REORDER_WAIT_MS = 1_000
  * subscription is lost; a fresh connection subscribes them again and tells them ready (a Room lane only while its
  * incarnation is still the open head).
  */
-class RedisSubscriber {
+class RedisSubscriptions {
   private readonly connection: RedisConnection
   /** Every channel some subscription needs, with the subscriptions that listen on it. */
   private readonly byChannel = new Map<string, Set<RedisSubscription>>()
@@ -84,7 +84,7 @@ class RedisSubscriber {
   /** An establishing subscription reports no failure, so the first one of an outage is reported here. */
   private outageReported = false
 
-  constructor({ connection }: RedisSubscriberOptions) {
+  constructor({ connection }: RedisSubscriptionsOptions) {
     this.connection = connection
   }
 
@@ -139,7 +139,7 @@ class RedisSubscriber {
     const everyMember = arm(channels.everyMember)
     const all = [lane, everyTrack, everyMember]
     const delivery = Promise.all(all.flatMap((channel) => channel.armed)).then(() => {})
-    // A subscriber can drop before the commit awaiting this delivery returns.
+    // The subscriber connection can drop before the commit awaiting this delivery returns.
     void delivery.catch(() => {})
     const tokenOf = (channel: { armed: unknown[] }) => (channel.armed.length === 0 ? '' : token)
     return {
@@ -330,7 +330,7 @@ class RedisSubscription {
   readonly invalidationChannel: string | null
   readonly plane: RedisPlane
   readonly channels: readonly string[]
-  private readonly owner: RedisSubscriber
+  private readonly owner: RedisSubscriptions
   private readonly subscriber: Subscriber
   private state: 'establishing' | 'ready' | 'lost' | 'closed' = 'establishing'
   private readonly firstReadiness = createDeferred()
@@ -354,7 +354,7 @@ class RedisSubscription {
     invalidationChannel,
     plane,
     subscriber,
-  }: RedisSubscriptionOptions & { owner: RedisSubscriber }) {
+  }: RedisSubscriptionOptions & { owner: RedisSubscriptions }) {
     this.owner = owner
     this.source = source
     this.laneChannel = laneChannel

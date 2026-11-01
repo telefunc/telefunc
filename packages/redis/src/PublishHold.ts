@@ -3,7 +3,7 @@ export { PublishHold }
 import type { BroadcastPayload, BroadcastRoute } from 'telefunc/__internal'
 import { ChannelOverflowError, getChannelLimits } from 'telefunc/__internal'
 import { broadcastChannel, type CommitChannels } from './keys.js'
-import type { RedisSubscriber } from './subscriber.js'
+import type { RedisSubscriptions } from './RedisSubscriptions.js'
 
 /** How long a publish waits for our own subscriptions on its channels. */
 const HOLD_MS = 60_000
@@ -32,20 +32,20 @@ type Wait = { readonly ready: Promise<void>; ended: boolean }
  * holds nothing: a subscription that was ready once reads where it stands again when it reconnects.
  */
 class PublishHold {
-  private readonly subscriber: RedisSubscriber
+  private readonly subscriptions: RedisSubscriptions
   private readonly prefix: string
   private readonly waits = new Map<string, Wait>()
   private readonly heldBytes = new Map<string, number>()
 
-  constructor({ subscriber, prefix }: { subscriber: RedisSubscriber; prefix: string }) {
-    this.subscriber = subscriber
+  constructor({ subscriptions, prefix }: { subscriptions: RedisSubscriptions; prefix: string }) {
+    this.subscriptions = subscriptions
     this.prefix = prefix
   }
 
   /** False on the fast path, checked before a publish builds anything: nothing of ours is subscribing and nothing
    *  is held. */
   get active(): boolean {
-    return this.subscriber.subscribing || this.waits.size > 0
+    return this.subscriptions.subscribing || this.waits.size > 0
   }
 
   /** Holds a Broadcast publish while one of our subscriptions on its key subscribes: resolves with the publish's own
@@ -85,7 +85,7 @@ class PublishHold {
   private hold<Payload extends string | Uint8Array>(held: HeldPublish, payload: Payload): Promise<Payload> | null {
     let wait = this.waits.get(held.queue)
     if (wait === undefined || wait.ended) {
-      const ready = this.subscriber.firstReady(held.channels)
+      const ready = this.subscriptions.firstReady(held.channels)
       if (ready === null) {
         if (wait === undefined) return null
         // The publishes the ended wait held send in the microtasks that follow; this one goes after them.

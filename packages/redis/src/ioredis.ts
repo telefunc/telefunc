@@ -9,7 +9,7 @@ import { assert } from './assert.js'
 
 type RedisClient = Redis | Cluster
 
-/** What `RedisSubscriber` needs of its connection. */
+/** What `RedisSubscriptions` needs of its connection. */
 type SubscriberSocket = {
   connect(): Promise<void>
   subscribe(...channels: string[]): Promise<unknown>

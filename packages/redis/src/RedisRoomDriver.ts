@@ -41,7 +41,7 @@ import {
 } from './keys.js'
 import { LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrdering } from './commands.js'
 import type { RedisConnection } from './RedisConnection.js'
-import type { RedisPlane } from './subscriber.js'
+import type { RedisPlane } from './RedisSubscriptions.js'
 
 const NO_FENCE_TOKENS: FenceTokens = { lane: '', everyTrack: '', everyMember: '' }
 
@@ -97,7 +97,7 @@ class RedisRoomDriver implements RoomDriver, RedisPlane {
 
   subscribe(source: RoomSubscriptionSource, subscriber: Subscriber): Unsubscribe {
     const { prefix } = this.connection
-    return this.connection.subscriber.subscribe({
+    return this.connection.subscriptions.subscribe({
       source,
       laneChannel: channelKey(prefix, source.roomId, source.inc, this.kit.encodeLaneKey(source.lane)),
       invalidationChannel: incarnationInvalidationChannel(prefix, source.roomId, source.inc),
@@ -154,7 +154,7 @@ class RedisRoomDriver implements RoomDriver, RedisPlane {
     const laneKey = this.kit.encodeLaneKey(lane)
     const channels = commitChannels(this.connection.prefix, roomId, inc, lane, laneKey, this.kit)
     const fence =
-      lane.kind === 'inbox' || lane.kind === 'control' ? this.connection.subscriber.prepareFence(channels) : null
+      lane.kind === 'inbox' || lane.kind === 'control' ? this.connection.subscriptions.prepareFence(channels) : null
     let reply
     try {
       reply = await this.connection.run(REDIS_COMMANDS.commit, {

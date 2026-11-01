@@ -2,24 +2,24 @@ import { describe, expect, it } from 'vitest'
 import { PublishHold } from './PublishHold.js'
 import { RedisBackend } from './RedisBackend.js'
 import type { RedisConnection } from './RedisConnection.js'
-import type { RedisSubscriber } from './subscriber.js'
+import type { RedisSubscriptions } from './RedisSubscriptions.js'
 
 const PREFIX = 'tf:0:'
 
-/** A backend whose commands record the order they are sent in, and whose subscriber reports what `subscribe()`
+/** A backend whose commands record the order they are sent in, and whose subscriptions report what `subscribe()`
  *  starts on key `held`. */
 function setup() {
-  const subscriber = {
+  const subscriptions = {
     subscribing: false,
     establishing: null as Promise<void> | null,
     firstReady: (channels: readonly string[]) =>
-      channels.includes(`${PREFIX}t:{held}`) ? subscriber.establishing : null,
+      channels.includes(`${PREFIX}t:{held}`) ? subscriptions.establishing : null,
   }
   const sent: string[] = []
   const connection = {
     prefix: PREFIX,
     reportsReceivers: true,
-    hold: new PublishHold({ subscriber: subscriber as unknown as RedisSubscriber, prefix: PREFIX }),
+    hold: new PublishHold({ subscriptions: subscriptions as unknown as RedisSubscriptions, prefix: PREFIX }),
     run: (_command: unknown, { payload }: { payload: string | Uint8Array }) => {
       sent.push(typeof payload === 'string' ? payload : new TextDecoder().decode(payload))
       return Promise.resolve({ seq: sent.length, timestamp: 0, receivers: 0 })
@@ -29,11 +29,11 @@ function setup() {
   /** Starts a subscription on key `held`; the returned function makes it ready. */
   const subscribe = () => {
     let ready!: () => void
-    subscriber.establishing = new Promise<void>((resolve) => (ready = resolve))
-    subscriber.subscribing = true
+    subscriptions.establishing = new Promise<void>((resolve) => (ready = resolve))
+    subscriptions.subscribing = true
     return () => {
-      subscriber.establishing = null
-      subscriber.subscribing = false
+      subscriptions.establishing = null
+      subscriptions.subscribing = false
       ready()
     }
   }
