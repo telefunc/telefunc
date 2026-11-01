@@ -197,8 +197,8 @@ function advanceOrder(order: Map<string, OrderingInfo>, domain: string, now: num
 class MemoryRoomDriver implements RoomDriver {
   private readonly rooms = new Map<string, RoomRecord>()
   private readonly directory = new Map<string, DirectoryEntry>()
-  /** The directory's room ids in code point order, so a page reads only its own ids. The first list sorts them, and puts
-   *  and deletes keep them in order from then on: a server that never lists pays nothing per put. */
+  /** The directory's room ids in code point order, so a page reads only its own ids. The first list sorts them, and each
+   *  list merges in the puts and deletes since the one before: a server that never lists pays nothing per put. */
   private sortedIds: SortedIds | null = null
   /** A min-heap by `at` of the checks each put scheduled; a check its entry no longer has is dropped when reached. */
   private readonly directoryChecks: DirectoryCheck[] = []

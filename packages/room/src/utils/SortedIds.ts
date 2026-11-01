@@ -1,60 +1,47 @@
 export { SortedIds, compareCodePoints }
 
-// A chunk this long is split in two, so an add or a delete moves at most this many ids.
-const CHUNK_IDS_MAX = 1024
-const CHUNK_IDS_HALF = CHUNK_IDS_MAX / 2
-
-/** Ids in code point order, held in chunks: an add or a delete costs a binary search and one chunk's move, at any size. */
+/** Ids in code point order. An add or a delete is recorded, and the next read merges the recorded ids in at once. */
 class SortedIds {
-  private readonly chunks: string[][] = []
+  private ids: string[]
+  private readonly added = new Set<string>()
+  private readonly deleted = new Set<string>()
 
   constructor(ids: Iterable<string>) {
-    const sorted = [...ids].sort(compareCodePoints)
-    for (let at = 0; at < sorted.length; at += CHUNK_IDS_HALF) this.chunks.push(sorted.slice(at, at + CHUNK_IDS_HALF))
+    this.ids = [...ids].sort(compareCodePoints)
   }
 
+  /** `id` isn't held. */
   add(id: string): void {
-    if (this.chunks.length === 0) {
-      this.chunks.push([id])
-      return
-    }
-    const c = Math.min(this.chunkOf(id), this.chunks.length - 1)
-    const chunk = this.chunks[c]!
-    const at = positionOf(chunk, id)
-    if (chunk[at] === id) return
-    chunk.splice(at, 0, id)
-    if (chunk.length > CHUNK_IDS_MAX) this.chunks.splice(c + 1, 0, chunk.splice(CHUNK_IDS_HALF))
+    if (!this.deleted.delete(id)) this.added.add(id)
   }
 
+  /** `id` is held. */
   delete(id: string): void {
-    const c = this.chunkOf(id)
-    const chunk = this.chunks[c]
-    if (chunk === undefined) return
-    const at = positionOf(chunk, id)
-    if (chunk[at] !== id) return
-    chunk.splice(at, 1)
-    if (chunk.length === 0) this.chunks.splice(c, 1)
+    if (!this.added.delete(id)) this.deleted.add(id)
   }
 
   /** The ids from `start` on, in order. */
   *from(start: string): Generator<string> {
-    const first = this.chunkOf(start)
-    for (let c = first; c < this.chunks.length; c++) {
-      const chunk = this.chunks[c]!
-      for (let at = c === first ? positionOf(chunk, start) : 0; at < chunk.length; at++) yield chunk[at]!
-    }
+    const ids = this.merged()
+    for (let at = positionOf(ids, start); at < ids.length; at++) yield ids[at]!
   }
 
-  /** The first chunk whose last id is at or past `id`, or the chunk count if none is. */
-  private chunkOf(id: string): number {
-    let low = 0
-    let high = this.chunks.length
-    while (low < high) {
-      const mid = (low + high) >> 1
-      if (compareCodePoints(this.chunks[mid]!.at(-1)!, id) < 0) low = mid + 1
-      else high = mid
+  private merged(): string[] {
+    if (this.added.size === 0 && this.deleted.size === 0) return this.ids
+    const ids: string[] = []
+    let at = 0
+    for (const id of [...this.added, ...this.deleted].sort(compareCodePoints)) {
+      const to = positionOf(this.ids, id, at)
+      while (at < to) ids.push(this.ids[at++]!)
+      // A deleted id is held at `to`.
+      if (this.added.has(id)) ids.push(id)
+      else at++
     }
-    return low
+    while (at < this.ids.length) ids.push(this.ids[at++]!)
+    this.added.clear()
+    this.deleted.clear()
+    this.ids = ids
+    return ids
   }
 }
 
@@ -68,9 +55,8 @@ function compareCodePoints(left: string, right: string): number {
   return left.length - right.length
 }
 
-/** Where `id` is in `ids`, which are in code point order, or where it would go. */
-function positionOf(ids: readonly string[], id: string): number {
-  let low = 0
+/** Where `id` is in `ids`, which are in code point order, or where it would go, searching from `low` on. */
+function positionOf(ids: readonly string[], id: string, low = 0): number {
   let high = ids.length
   while (low < high) {
     const mid = (low + high) >> 1
