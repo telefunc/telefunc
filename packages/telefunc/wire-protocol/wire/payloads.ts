@@ -1,7 +1,7 @@
 export { parseJsonPayload, parsePreparePayload, parseReconcilePayload, parseBarrierPayload }
 export type {
   ReconcileOpenEntry,
-  ReattachState,
+  AttachState,
   ReconcilePayload,
   BarrierPayload,
   PreparePayload,
@@ -28,7 +28,7 @@ type ReconcileOpenEntry = {
 }
 
 /** What a channel adds to its own RECONCILE entry. */
-type ReattachState = Pick<ReconcileOpenEntry, 'broadcast' | 'probe'>
+type AttachState = Pick<ReconcileOpenEntry, 'broadcast' | 'probe'>
 
 /** On a new wire it names every channel the page holds; on the wire of the session it names, with `released`, it names
  *  only the channels no RECONCILE named there yet, and `released` the ones the page let go since its last. */

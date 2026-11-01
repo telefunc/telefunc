@@ -55,7 +55,7 @@ import type {
   ChannelFrame,
   ErrorReason,
 } from '../../wire/frame.js'
-import type { ReattachState } from '../../wire/payloads.js'
+import type { AttachState } from '../../wire/payloads.js'
 
 /** Peer-authored JSON: a parse failure is the peer's, so it surfaces as a protocol violation. */
 function parsePeerText(text: string): unknown {
@@ -362,7 +362,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** RECONCILE declarations apply before `onOpen`; an ended channel sends only what it made with no peer attached. */
-  _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
+  _attachPeer(peer: IndexedPeer, state?: AttachState): void {
     if (this._phase === 'ended') {
       this.flushOfflineBuffer(peer)
       this.sendPendingAckRes(peer)

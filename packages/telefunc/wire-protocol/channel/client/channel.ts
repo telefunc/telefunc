@@ -30,7 +30,7 @@ import {
   type SequencedEncoder,
 } from '../../wire/frame.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
-import type { ReattachState } from '../../wire/payloads.js'
+import type { AttachState } from '../../wire/payloads.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { assert } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
@@ -248,7 +248,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   // ── Called by transport connection ──
 
   /** @internal Probes a path it hasn't measured. */
-  _reattachState(uplink: Uplink): ReattachState {
+  _attachState(uplink: Uplink): AttachState {
     const probe = this.receiveCredit.probeAttach(uplink.roundTrips)
     return probe === undefined ? {} : { probe }
   }
@@ -564,7 +564,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   /** @internal Declares the subscriptions on every (re)attach: a SUB or UNSUB written to a dead wire isn't replayed. */
-  override _reattachState(): ReattachState {
+  override _attachState(): AttachState {
     return { broadcast: this.subscribed }
   }
 

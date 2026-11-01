@@ -659,7 +659,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     // Its wire no longer has the session it names, which is gone with the handles it had.
     if (ctrl.sessionId) this.sessionWires.delete(ctrl.sessionId)
 
-    // Closed since this frame arrived: the session goes, but a transient close keeps its channels' reattach grace.
+    // Closed since this frame arrived: the session goes, but a transient close keeps its channels' reconnect grace.
     if (state.closed) {
       state.attaching.clear()
       const reason = state.closed.isPermanent ? 'permanent' : 'transient'

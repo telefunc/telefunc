@@ -33,7 +33,7 @@ import type {
   PongEntry,
   SequencedEncoder,
 } from '../../wire/frame.js'
-import type { ReattachState, ReconciledPayload } from '../../wire/payloads.js'
+import type { AttachState, ReconciledPayload } from '../../wire/payloads.js'
 import type { Heartbeat } from './Heartbeat.js'
 import { ChannelTable, type ChannelRecord } from './ChannelTable.js'
 import { SendGate, type SendGateOwner } from './SendGate.js'
@@ -71,7 +71,7 @@ interface MuxChannel {
   _dispatchFrame(frame: ChannelFrame): void
   _onEnded(err?: Error): void
   /** Its RECONCILE entry on each (re)attach to `uplink`'s wire. */
-  _reattachState(uplink: Uplink): ReattachState
+  _attachState(uplink: Uplink): AttachState
   /** Its RECONCILE entry's `probe` was answered by the RECONCILED. */
   _onProbeAnswered(probe: number): void
   /** The largest windows the replay buffers allow: the one the page grants, and the one the server grants it. */

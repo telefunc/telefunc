@@ -38,7 +38,7 @@ function createChannel(dispatched: DecodedFrame[]) {
     _onEnded() {},
     _onTransportBatched() {},
     _onUpgradeJoined() {},
-    _reattachState: () => ({}),
+    _attachState: () => ({}),
     _onProbeAnswered() {},
     _fitReplays() {},
     _acknowledge() {},
