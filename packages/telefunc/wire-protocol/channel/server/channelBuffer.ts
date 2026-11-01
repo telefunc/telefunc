@@ -22,25 +22,10 @@ interface BufferedSender {
 }
 
 /**
- * Hard-capped FIFO buffer for channel messages sent before the client connects.
- *
- * Buffers text, publish, binary, and ack-request messages sent before the client connects.
- * After every push, oldest entries are evicted (FIFO) until the byte
- * total, each entry counted with what holding it retains, is within the cap.
- * Delivery callbacks on evicted entries are rejected immediately so channel
- * memory stays hard-capped.
- *
- * Binary messages (binary sends, binary ack requests, binary publishes) are stored in a separate queue with its own
- * byte budget. An oversized binary only clears the binary queue — text messages
- * are never affected.
- *
- * A single message larger than its queue's maxBytes causes that queue to be
- * cleared and the message dropped — sequential delivery is paramount;
- * a gap in the middle is never acceptable, so the queue resets to a
- * clean slate instead.
- *
- * Sequential delivery is guaranteed: flush() sends all buffered messages
- * in insertion order by merge-iterating both queues. There are no gaps or null markers.
+ * Holds what a channel sends while no peer is attached (text, binary, publishes, ack requests) within two budgets;
+ * binary has its own queue, so it never evicts text. Past a budget the oldest entries go and their callbacks reject;
+ * an entry larger than its budget clears its queue and is dropped, so what stays has no gap. `flush` sends the rest
+ * in insertion order.
  */
 class ServerChannelBuffer<TAck = never> {
   private readonly text: BufferQueue
@@ -91,7 +76,7 @@ class ServerChannelBuffer<TAck = never> {
   }
 
   /**
-   * Flush all buffered messages to the client connection in insertion order, then clear.
+   * Flush all buffered messages to the peer in insertion order, then clear.
    * Merge-iterates text and binary queues by insertion order so the caller
    * sees the same sequence as if both queues were a single interleaved buffer.
    */
