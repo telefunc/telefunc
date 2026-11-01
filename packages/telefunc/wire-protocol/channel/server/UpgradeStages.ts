@@ -40,7 +40,7 @@ class UpgradeStages {
     this.owner = owner
   }
 
-  get(probe: Wire): StagedUpgrade | undefined {
+  get(probe: Wire): Readonly<StagedUpgrade> | undefined {
     return this.byProbe.get(probe)
   }
 
@@ -70,6 +70,11 @@ class UpgradeStages {
     })
     this.byPrevSession.set(payload.sessionId, probe)
     this.stagedBytes += bytes
+  }
+
+  /** Marks the probe's stage committing: from now on a claim of its session is refused and `abandon` is a no-op. */
+  commit(probe: Wire): void {
+    this.byProbe.get(probe)!.phase = 'committing'
   }
 
   /** A RECONCILE claims `sessionId`: the probe staged for it is abandoned. A committing barrier already owns the

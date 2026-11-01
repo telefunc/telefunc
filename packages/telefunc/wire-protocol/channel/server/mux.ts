@@ -591,7 +591,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
       const wsEntry = this.wires.get(probe)
       assert(wsEntry, 'staged probe has no wire entry')
 
-      stage.phase = 'committing'
+      this.stages.commit(probe)
       entry.state.retiredByBarrier = true
       this.moveAwaited(entry, wsEntry, ctrl.open)
       return this.attachBarrier(entry, wsEntry, ctrl, stage.upgradeId)
