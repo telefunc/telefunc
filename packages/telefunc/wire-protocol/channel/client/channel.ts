@@ -1,4 +1,4 @@
-export { ClientChannel, ClientBroadcast }
+export { ClientChannel, reportChannelError }
 export type { ClientChannelOptions, ConnectionOptions }
 
 import type {
@@ -10,12 +10,8 @@ import type {
   ChannelData,
   ChannelListener,
   ChannelBinaryListener,
-  ChannelPublishAck,
-  BroadcastBinaryListener,
-  BroadcastListener,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
-import { makePublishInfo } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { resolveClientConfig } from '../../../client/clientConfig.js'
@@ -31,7 +27,6 @@ import {
 } from '../../wire/frame.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
 import type { AttachState } from '../../wire/payloads.js'
-import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { assert } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
@@ -50,9 +45,6 @@ import type { Downlink } from '../../flowControl/client/Downlink.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
 import { ChannelClosedError } from '../channelErrors.js'
 import { isPromise } from '../../../utils/isPromise.js'
-import { hasProp } from '../../../utils/hasProp.js'
-
-const CLIENT_BROADCAST_BRAND = Symbol.for('telefunc.ClientBroadcast')
 
 /** The connection a channel rides (see `ClientConnection.getOrCreate`). */
 type ConnectionOptions = {
@@ -505,112 +497,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal */
   _reportCallbackError(err: unknown): void {
     reportChannelError(err)
-  }
-}
-
-class ClientBroadcast<T = unknown> extends ClientChannel {
-  readonly [CLIENT_BROADCAST_BRAND] = true
-  private readonly broadcastListeners = new Listeners<BroadcastListener<T>>()
-  private readonly broadcastBinaryListeners = new Listeners<BroadcastBinaryListener>()
-  /** The subscriptions this page asks the server for. */
-  private readonly subscribed = { text: false, binary: false }
-
-  constructor(options: ClientChannelOptions) {
-    super(options)
-    // Nothing waits on a publish's credit: the window only bounds how far behind the server lets the page fall.
-    this.receiveCredit.widenByteWindow()
-  }
-
-  static isClientBroadcast(value: unknown): value is ClientBroadcast {
-    return hasProp(value, CLIENT_BROADCAST_BRAND)
-  }
-
-  publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
-    if (this.closed) throw new ChannelClosedError()
-    const serialized = stringify(data)
-    const ret = this.sendAckReq<ChannelPublishAck, string>(encode.publishAckReq, serialized)
-    ret.catch(reportChannelError)
-    return ret
-  }
-
-  subscribe(callback: BroadcastListener<T>): () => void {
-    if (this.broadcastListeners.size === 0) this.setSubscribed('text', true)
-    const remove = this.broadcastListeners.add(callback)
-    return () => {
-      remove()
-      if (this.broadcastListeners.size === 0) this.setSubscribed('text', false)
-    }
-  }
-
-  publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
-    if (this.closed) throw new ChannelClosedError()
-    const ret = this.sendAckReq<ChannelPublishAck, Uint8Array>(encode.publishBinaryAckReq, data)
-    ret.catch(reportChannelError)
-    return ret
-  }
-
-  subscribeBinary(callback: BroadcastBinaryListener): () => void {
-    if (this.broadcastBinaryListeners.size === 0) this.setSubscribed('binary', true)
-    const remove = this.broadcastBinaryListeners.add(callback)
-    return () => {
-      remove()
-      if (this.broadcastBinaryListeners.size === 0) this.setSubscribed('binary', false)
-    }
-  }
-
-  private setSubscribed(kind: 'text' | 'binary', on: boolean): void {
-    if (on === this.subscribed[kind] || this.closed) return
-    this.subscribed[kind] = on
-    if (on) this.connection.sendBroadcastSubscribe(this, kind === 'binary')
-    else this.connection.sendBroadcastUnsubscribe(this, kind === 'binary')
-  }
-
-  /** @internal Declares the subscriptions on every (re)attach: a SUB or UNSUB written to a dead wire isn't replayed. */
-  override _attachState(): AttachState {
-    return { broadcast: this.subscribed }
-  }
-
-  protected override dispatchDataFrame(frame: ChannelDataFrame): void {
-    if (frame.tag === TAG.PUBLISH) {
-      this._onPeerPublish(frame.text, frame.info, frame.bytes)
-      return
-    }
-    if (frame.tag === TAG.PUBLISH_BINARY) {
-      this._onPeerPublishBinary(frame.data as Uint8Array<ArrayBuffer>, frame.info, frame.bytes)
-      return
-    }
-    super.dispatchDataFrame(frame)
-  }
-
-  /** A publish counts in bytes, consumed once the listeners ran, so the server sees how far behind the page is. */
-  _onPeerPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
-    this.receiveCredit.onPublishArrived()
-    const parsed = parse(data) as ChannelData<T>
-    const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of this.broadcastListeners.list()) {
-      try {
-        const result = cb(parsed, info)
-        if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
-      } catch (err) {
-        if (this.lifecycle.handleCallbackError(err)) return
-      }
-    }
-    this.receiveCredit.onPublishConsumed(bytes)
-  }
-
-  _onPeerPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
-    this.receiveCredit.onPublishArrived()
-    const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of this.broadcastBinaryListeners.list()) {
-      try {
-        // Bytes of its own: a listener may write into them or transfer their buffer.
-        const result = cb(new Uint8Array(data), info)
-        if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
-      } catch (err) {
-        if (this.lifecycle.handleCallbackError(err)) return
-      }
-    }
-    this.receiveCredit.onPublishConsumed(bytes)
   }
 }
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
+import { Broadcast, ServerBroadcast } from '../channel/server/broadcast.js'
 import { ReplayBuffer } from '../channel/ReplayBuffer.js'
 import { ACK_STATUS, decode } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'

@@ -2,7 +2,7 @@ export { broadcastReplacer }
 
 import type { BroadcastContract, ReplacerType, ServerReplacerContext } from '../../types.js'
 import { SERIALIZER_PREFIX_BROADCAST } from '../../../constants.js'
-import { ServerBroadcast } from '../../../broadcast/ServerBroadcast.js'
+import { ServerBroadcast } from '../../../channel/server/broadcast.js'
 import { getAdapterMaxFrameBytes } from '../../../../node/server/serverConfig.js'
 import { assertIsNotBrowser } from '../../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
