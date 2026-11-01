@@ -19,14 +19,14 @@ function createHarness() {
       wholeMessages: false,
       sendNow: (_conn, frame) => sent.push(decode(frame)),
       bufferedAmount: () => 0,
-      terminateConnection: () => (terminated = true),
+      terminateWire: () => (terminated = true),
     }
-    mux.onConnectionOpen(conn, transport)
+    mux.onWireOpen(conn, transport)
     return {
       sent,
       sessionId: () => sessionId,
       terminated: () => terminated,
-      deliver: (frame: Uint8Array<ArrayBuffer>) => mux.onConnectionRawMessage(conn, frame),
+      deliver: (frame: Uint8Array<ArrayBuffer>) => mux.onWireMessage(conn, frame),
     }
   }
   const channel = new ServerChannel<number, never>({ id: 'A' })

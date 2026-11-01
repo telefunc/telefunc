@@ -7,7 +7,7 @@ import type { IndexedPeer } from './IndexedPeer.js'
 import { ChannelOverflowError, isChannelOverflowError } from '../channelErrors.js'
 import { isShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { ACK_STATUS, ERROR_REASON, encode } from '../../wire/frame.js'
-import type { BroadcastKind, ReattachState } from '../../wire/payloads.js'
+import type { BroadcastKind, AttachState } from '../../wire/payloads.js'
 
 /** What a page's publishes, subscriptions and attaches go to. */
 type BroadcastEndOwner = {
@@ -99,7 +99,7 @@ class ServerBroadcastEnd extends ServerChannel {
     return this.sendCredit.peerByteWindowMax / 4
   }
 
-  override _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
+  override _attachPeer(peer: IndexedPeer, state?: AttachState): void {
     super._attachPeer(peer, state)
     if (this.peer !== peer || this.isClosed) return
     assert(this.owner)

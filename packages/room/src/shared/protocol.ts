@@ -119,8 +119,8 @@ type RoomRosterEvent =
 /** To the client whose `req-join` (`reqId`) admitted the member, before any event naming it. */
 type RoomJoinedEvent = { __r: 'joined'; reqId: number; id: string }
 
-/** Global demand for one of a member's own published tracks, pushed on aggregate state changes; a reattached client
- *  gets the member's whole wanted set, since its offline buffer may have dropped changes. */
+/** Global demand for one of a member's own published tracks, pushed on aggregate state changes; a client that attaches
+ *  again gets the member's whole wanted set, since its offline buffer may have dropped changes. */
 type RoomDemandEvent =
   | { __r: 'demand'; member: string; track: TrackKey; wanted: boolean }
   | { __r: 'demand-state'; member: string; tracks: TrackKey[] }
@@ -162,7 +162,7 @@ type MemberMutationRequest =
   | { __r: 'req-dm'; to: string; data: unknown; ack?: boolean }
 
 /** Client→server requests on a room stub; `id` is the acting member. The room-wide text want rides the Broadcast
- *  subscription, which reattaches before `onOpen`. */
+ *  subscription, which attaches again before `onOpen`. */
 type RoomStubRequest =
   | { __r: 'req-join'; reqId: number; meta: ParticipantMeta; selfDelivery: boolean }
   | { __r: 'req-leave'; id: string }

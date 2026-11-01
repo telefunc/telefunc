@@ -26,12 +26,12 @@ import {
   type SequencedEncoder,
 } from '../../wire/frame.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
-import type { ReattachState } from '../../wire/payloads.js'
+import type { AttachState } from '../../wire/payloads.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'
-import { getSessionUrl } from './sessionRegistry.js'
+import { getSessionUrl } from './getSessionUrl.js'
 import { FC_PAGE_YIELD_BYTES, WIRE_MAX_RAW_FRAME_BYTES, type ChannelTransports } from '../../constants.js'
 import type { CreditOwner, Urgency } from '../../flowControl/credit.js'
 import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
@@ -230,12 +230,12 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal A closed channel's server ends its sends with the close, so the channel grants it no more credit. */
   _sendByteLimit(limit: number, urgency: Urgency): void {
-    if (!this.closed) this.connection.sendByteWindowUpdate(this, limit, urgency)
+    if (!this.closed) this.connection.sendByteLimit(this, limit, urgency)
   }
 
   /** @internal */
   _sendMessageLimit(limit: number, urgency: Urgency): void {
-    if (!this.closed) this.connection.sendMsgWindowUpdate(this, limit, urgency)
+    if (!this.closed) this.connection.sendMessageLimit(this, limit, urgency)
   }
 
   /** @internal */
@@ -251,7 +251,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   // ── Called by transport connection ──
 
   /** @internal Probes a path it hasn't measured. */
-  _reattachState(uplink: Uplink): ReattachState {
+  _attachState(uplink: Uplink): AttachState {
     const probe = this.receiveCredit.probeAttach(uplink.roundTrips)
     return probe === undefined ? {} : { probe }
   }

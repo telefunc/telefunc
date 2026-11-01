@@ -3,7 +3,7 @@ export type { AwaitedChannel, RecvBacklog }
 
 import type { ChannelFrame } from '../../wire/frame.js'
 import type { ReconcileOpenEntry } from '../../wire/payloads.js'
-import type { ConnectionEntry } from './mux.js'
+import type { WireEntry } from './mux.js'
 import type { RegistrationWaits } from './RegistrationWaits.js'
 
 /** What a wire received and hasn't handled yet. */
@@ -16,13 +16,20 @@ type AwaitedChannel = {
   /** The latest RECONCILE entry naming it. */
   open: ReconcileOpenEntry
   /** The wire awaiting it: the one whose RECONCILE named it, until a barrier moves it to the WebSocket. */
-  entry: ConnectionEntry
+  entry: WireEntry
   /** What the page sent it meanwhile, dispatched after its attach. */
   held: { frame: ChannelFrame; bytes: number }[]
   /** `attached` until what it holds is dispatched; `expired` stays while a RECONCILE names it, never awaited again. */
   phase: 'waiting' | 'attached' | 'expired'
   /** The deadline of its wait for its channel's registration (see `RegistrationWaits`); null once it waits no more. */
   ttl: ReturnType<typeof setTimeout> | null
+}
+
+type AwaitedChannelsOptions = {
+  /** The wire's recv backlog, which counts what it holds. */
+  backlog: RecvBacklog
+  /** The mux's, which every wire's awaited channels wait in. */
+  waits: RegistrationWaits
 }
 
 /** The channels a wire awaits, by index; what it holds for them counts in its recv backlog. */
@@ -32,8 +39,7 @@ class AwaitedChannels {
   private readonly waits: RegistrationWaits
   private attachedCount = 0
 
-  /** `waits`: the mux's, which every wire's awaited channels wait in. */
-  constructor(backlog: RecvBacklog, waits: RegistrationWaits) {
+  constructor({ backlog, waits }: AwaitedChannelsOptions) {
     this.backlog = backlog
     this.waits = waits
   }

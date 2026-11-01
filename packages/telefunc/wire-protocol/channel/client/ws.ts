@@ -14,13 +14,13 @@ import type { OutboundFrame, TransportOwner } from './connection.js'
 import type { ProbeOwner, ProbeWire, UpgradeTarget } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 
-/** What a WebSocket's frames go through, each way. */
-type WsEnds = {
+/** What a WebSocket's frames go through, each way; the server's `WirePieces` holds its headroom and receiver. */
+type WirePieces = {
   uplink: Uplink
   downlink: Downlink
   headroom: ClientHeadroom
   sender: PieceSender
-  pieces: ClientPieceReceiver
+  receiver: ClientPieceReceiver
 }
 
 type WsTransportOptions = {
@@ -33,14 +33,14 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   readonly carriesReconcileInOpen = false
   readonly batched = false
   heartbeat: Heartbeat | null = null
-  /** The probe's socket and ends, kept as the transport adopts it: the server counts every frame the socket carries. */
-  private probed: { ws: WebSocket; ends: WsEnds } | null = null
+  /** The probe's socket and pieces, kept as the transport adopts it: the server counts every frame the socket carries. */
+  private probed: { ws: WebSocket; pieces: WirePieces } | null = null
   private ws: WebSocket | null = null
   /** The wire the page left, still read until the next takes over; its headroom's timers may still send. */
   private abandoned: { ws: WebSocket; headroom: ClientHeadroom } | null = null
   private connecting = false
   /** The live wire's, set with it by `setupHandlers`: none before the first. */
-  private ends: WsEnds | null = null
+  private pieces: WirePieces | null = null
   private drainCallbacks: Array<() => void> = []
   /** The server's, once a RECONCILED said it. */
   private pingInterval = CHANNEL_PING_INTERVAL_MIN_MS
@@ -64,8 +64,8 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
       return null
     }
     ws.binaryType = 'arraybuffer'
-    const ends = this.wsEnds(ws)
-    const { headroom, sender, pieces } = ends
+    const pieces = this.wirePieces(ws)
+    const { headroom, sender, receiver } = pieces
 
     // Till its first PONG proves the wire, `proved` settles the wait below; from then on it tells `owner`, till closed.
     let proved: ((alive: boolean) => void) | null = null
@@ -80,7 +80,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
       return true
     }
     ws.onmessage = ({ data }: MessageEvent) => {
-      if (!receiveMessage(pieces, new Uint8Array(data as ArrayBuffer), performance.now(), take)) ws.close()
+      if (!receiveMessage(receiver, new Uint8Array(data as ArrayBuffer), performance.now(), take)) ws.close()
     }
     ws.onclose = () => {
       headroom.close()
@@ -106,14 +106,14 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
       return null
     }
 
-    this.probed = { ws, ends }
+    this.probed = { ws, pieces }
     // A RECONCILED may have come while it waited for the PONG.
     sender.setPingInterval(this.pingInterval)
     reporting = true
     return {
       ping: () => {
         try {
-          sender.send(withTook(encode.ping(), pieces.took), 0)
+          sender.send(withTook(encode.ping(), receiver.took), 0)
         } catch {}
       },
       send: (frame) => {
@@ -131,7 +131,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
           ws.close()
         } catch {}
       },
-      uplink: ends.uplink,
+      uplink: pieces.uplink,
     }
   }
 
@@ -141,7 +141,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     this.probed = null
     this.ws = probed.ws
     this.connecting = false
-    this.setupHandlers(probed.ws, probed.ends)
+    this.setupHandlers(probed.ws, probed.pieces)
   }
 
   start(): void {
@@ -166,7 +166,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
       this.handleOpen(ws)
     }
 
-    this.setupHandlers(ws, this.wsEnds(ws))
+    this.setupHandlers(ws, this.wirePieces(ws))
   }
 
   private handleOpen(ws: WebSocket): void {
@@ -175,11 +175,11 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     this.owner.onTransportOpen(this)
   }
 
-  attachHeartbeat(hb: Heartbeat): void {
-    this.heartbeat = hb
+  attachHeartbeat(heartbeat: Heartbeat): void {
+    this.heartbeat = heartbeat
     // What the server announced comes at the rate it arrives at; a PONG, behind what the page announced.
-    hb.expectFrom(() =>
-      Math.max(this.ends?.pieces.expectedBy(hb.pongTimeoutMs) ?? 0, this.ends?.sender.acknowledgedBy ?? 0),
+    heartbeat.expectFrom(() =>
+      Math.max(this.pieces?.receiver.expectedBy(heartbeat.pongTimeoutMs) ?? 0, this.pieces?.sender.acknowledgedBy ?? 0),
     )
   }
 
@@ -190,7 +190,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
 
   drained(): Promise<void> {
     // A socket sends what it buffered before its close, but not what waits in its piece sender for headroom.
-    if (!this.ws || !this.ends?.sender.waitingBytes) return Promise.resolve()
+    if (!this.ws || !this.pieces?.sender.waitingBytes) return Promise.resolve()
     return new Promise((resolve) => this.drainCallbacks.push(resolve))
   }
 
@@ -199,7 +199,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   }
 
   /** Every frame `ws` carries goes through its headroom's sender, which counts the bytes its receiver acknowledges. */
-  private wsEnds(ws: WebSocket): WsEnds {
+  private wirePieces(ws: WebSocket): WirePieces {
     const uplink = new Uplink()
     const downlink = new Downlink(uplink)
     const headroom = new ClientHeadroom({
@@ -209,22 +209,18 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
       downlink,
       owner: this,
     })
-    const { sender } = headroom
     return {
       uplink,
       downlink,
       headroom,
-      sender,
-      pieces: new ClientPieceReceiver({
-        send: (frame) => sender.send(frame, 0),
-        carry: (ack) => sender.carry(ack),
-      }),
+      sender: headroom.sender,
+      receiver: new ClientPieceReceiver({ owner: headroom }),
     }
   }
 
-  private setupHandlers(ws: WebSocket, ends: WsEnds): void {
-    const { downlink, headroom, sender, pieces } = ends
-    this.ends = ends
+  private setupHandlers(ws: WebSocket, pieces: WirePieces): void {
+    const { downlink, headroom, sender, receiver } = pieces
+    this.pieces = pieces
     const take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
       if (frame.tag === TAG.PIECES_ACK) {
         if (!headroom.acknowledged(frame)) return false
@@ -242,7 +238,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
       this.heartbeat?.noteReceived(raw.byteLength, now)
       downlink.delivered(raw.byteLength, now)
       headroom.received()
-      if (!receiveMessage(pieces, raw, now, take)) ws.close()
+      if (!receiveMessage(receiver, raw, now, take)) ws.close()
     }
     ws.onclose = () => {
       headroom.close()
@@ -256,7 +252,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
 
   /** `ClientHeadroomOwner`: the live wire's sender sends what waited. */
   onHeadroom(headroom: ClientHeadroom): void {
-    if (this.ws === null || this.ends?.headroom !== headroom) return
+    if (this.ws === null || this.pieces?.headroom !== headroom) return
     headroom.sendWaiting()
     this.headroomChanged(headroom.sender)
   }
@@ -276,29 +272,29 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   }
 
   sendFrame(frame: OutboundFrame): void {
-    assert(this.ws && this.ends)
-    if (frame.kind === 'acknowledgement') this.ends.sender.carry(() => frame.frame)
-    else this.ends.headroom.send(frame.frame)
+    assert(this.ws && this.pieces)
+    if (frame.kind === 'acknowledgement') this.pieces.sender.carry(() => frame.frame)
+    else this.pieces.headroom.send(frame.frame)
   }
 
   headroom(): number {
-    assert(this.ends)
-    return this.ends.headroom.headroomPastSent()
+    assert(this.pieces)
+    return this.pieces.headroom.headroomPastSent()
   }
 
   get uplink(): Uplink {
-    assert(this.ends)
-    return this.ends.uplink
+    assert(this.pieces)
+    return this.pieces.uplink
   }
 
   get downlink(): Downlink {
-    assert(this.ends)
-    return this.ends.downlink
+    assert(this.pieces)
+    return this.pieces.downlink
   }
 
   /** What its socket holds unsent, and what its piece sender hasn't handed it. */
   bufferedAmount(): number {
-    return (this.ws?.bufferedAmount ?? 0) + (this.ends?.sender.unhandedBytes ?? 0)
+    return (this.ws?.bufferedAmount ?? 0) + (this.pieces?.sender.unhandedBytes ?? 0)
   }
 
   abandonActiveTransport(): void {
@@ -306,8 +302,8 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     if (!ws) return
     this.ws = null
     this.closeAbandonedTransport()
-    assert(this.ends)
-    const { headroom } = this.ends
+    assert(this.pieces)
+    const { headroom } = this.pieces
     this.abandoned = { ws, headroom }
     ws.onopen = ws.onerror = null
     ws.onclose = () => headroom.close()
@@ -326,27 +322,27 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   }
 
   applyReconciledSettings(ctrl: ReconciledPayload): void {
-    assert(this.ends) // a RECONCILED came on its wire
+    assert(this.pieces) // a RECONCILED came on its wire
     this.pingInterval = ctrl.pingInterval
-    this.ends.sender.setPingInterval(this.pingInterval)
-    this.probed?.ends.sender.setPingInterval(this.pingInterval)
+    this.pieces.sender.setPingInterval(this.pingInterval)
+    this.probed?.pieces.sender.setPingInterval(this.pingInterval)
     // The server sends nothing on a wire before the page's first frame arrived: that frame crossed by now.
-    this.ends.sender.answered(performance.now())
+    this.pieces.sender.answered(performance.now())
   }
 
   sendPing(frame: Uint8Array<ArrayBuffer>): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
-    assert(this.ends)
-    this.ends.sender.send(withTook(frame, this.ends.pieces.took), 0)
+    assert(this.pieces)
+    this.pieces.sender.send(withTook(frame, this.pieces.receiver.took), 0)
   }
 
   dispose(): void {
     this.connecting = false
     // A socket sends what it was handed before its close.
-    this.probed?.ends.sender.flush()
-    this.probed?.ends.headroom.close()
-    if (this.ws) this.ends?.sender.flush()
-    if (this.ws) this.ends?.headroom.close()
+    this.probed?.pieces.sender.flush()
+    this.probed?.pieces.headroom.close()
+    if (this.ws) this.pieces?.sender.flush()
+    if (this.ws) this.pieces?.headroom.close()
     const wsProbed = this.probed?.ws
     this.probed = null
     if (wsProbed) {
@@ -370,7 +366,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
 
 /** Hands `take` the frames of a WebSocket message that arrived at `at`; false where its wire closes. */
 function receiveMessage(
-  pieces: ClientPieceReceiver,
+  receiver: ClientPieceReceiver,
   raw: Uint8Array<ArrayBuffer>,
   at: number,
   take: (frame: DecodedFrame, byteLength: number, at: number) => boolean,
@@ -384,19 +380,19 @@ function receiveMessage(
     const own = frames.pop()!
     for (const each of frames) {
       const frame = decode(each)
-      pieces.arrived(frame.tag, each.byteLength, at, 'riding')
+      receiver.arrived(frame.tag, each.byteLength, at, 'riding')
       riding.push({ frame, bytes: each.byteLength })
     }
     const frame = decode(own)
-    if (frame.tag === TAG.ANNOUNCE) pieces.announce(frame.bytes, at, frame.floor)
+    if (frame.tag === TAG.ANNOUNCE) receiver.announce(frame.bytes, at, frame.floor)
     else if (frame.tag === TAG.PIECE) {
-      const whole = pieces.add(frame.total, frame.piece, at)
+      const whole = receiver.add(frame.total, frame.piece, at)
       if (whole !== null) {
         last = decode(whole)
         lastBytes = whole.byteLength
       }
     } else {
-      pieces.arrived(frame.tag, own.byteLength, at, 'alone')
+      receiver.arrived(frame.tag, own.byteLength, at, 'alone')
       last = frame
       lastBytes = own.byteLength
     }

@@ -1,7 +1,7 @@
 export { SSEStreamReader }
 
 import { BaseStreamReader } from './BaseStreamReader.js'
-import { SSEEvents } from '../../../channel/client/SSEEvents.js'
+import { SseEvents } from '../../../channel/client/SseEvents.js'
 import { splitOwned } from '../../../wire/envelope.js'
 import { throwAbortError } from '../../../../client/remoteTelefunctionCall/errors.js'
 
@@ -18,7 +18,7 @@ const EMPTY = new Uint8Array(0)
 class SSEStreamReader extends BaseStreamReader {
   private reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
   private binary: Uint8Array<ArrayBuffer> = EMPTY
-  private sse = new SSEEvents()
+  private sse = new SseEvents()
 
   constructor(
     reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,

@@ -77,11 +77,11 @@ class IndexedPeer {
   }
 
   /** `lastSeq`: the last seq the server has of what the page sent on the channel. */
-  sendByteWindowUpdate(limit: number, lastSeq: number, urgency: Urgency): void {
+  sendByteLimit(limit: number, lastSeq: number, urgency: Urgency): void {
     this.sendLimit(encode.window(this.index, limit, lastSeq), urgency)
   }
 
-  sendMsgWindowUpdate(limit: number, urgency: Urgency): void {
+  sendMessageLimit(limit: number, urgency: Urgency): void {
     this.sendLimit(encode.msgWindow(this.index, limit), urgency)
   }
 

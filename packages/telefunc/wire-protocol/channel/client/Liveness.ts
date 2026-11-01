@@ -72,14 +72,14 @@ class Liveness {
   /** Hands the wire a heartbeat at `intervalMs` in place of the one it had, not started. */
   private replaceHeartbeat(transport: ClientChannelTransport, intervalMs: number): Heartbeat {
     transport.detachHeartbeat()
-    const hb = new Heartbeat({
+    const heartbeat = new Heartbeat({
       intervalMs,
       pongTimeoutMs: pingDeadline(intervalMs),
       send: () => this.beat(transport),
       onDead: () => this.owner.onPongTimeout(transport),
     })
-    transport.attachHeartbeat(hb)
-    return hb
+    transport.attachHeartbeat(heartbeat)
+    return heartbeat
   }
 
   /** How far the server has what the page sent on each channel named, or that it no longer holds it. */

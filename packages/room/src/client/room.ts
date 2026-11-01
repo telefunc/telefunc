@@ -463,9 +463,9 @@ class ClientRoom extends RoomStateView implements Room {
     this.localParticipants.clear()
   }
 
-  /** Room-wide text wants ride the Broadcast subscription, which reattaches before the channel's `onOpen`. Declarations
-   *  are replayed channel messages, so the server keeps them across reconnects: each one carries only what changed,
-   *  the room-wide text wants and those of `member`, whose listeners changed, or the one binary want that did. */
+  /** Room-wide text wants ride the Broadcast subscription, which attaches again before the channel's `onOpen`.
+   *  Declarations are replayed channel messages, so the server keeps them across reconnects: each carries only what
+   *  changed, the room-wide text wants and those of `member`, whose listeners changed, or the binary want that did. */
   /** @internal */
   _syncWants(member: string | null, binary: BinaryWantChange | null): void {
     if (this.model.closed) {
@@ -551,7 +551,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
     return this._left ? [] : [...this.wantedTracks]
   }
 
-  /** @internal The whole wanted set, as a reattached holder hears it: only the tracks that changed fire. */
+  /** @internal The whole wanted set, as a holder hears it when it attaches again: only the tracks that changed fire. */
   _applyDemandState(tracks: TrackKey[]): void {
     const next = new Set(tracks)
     for (const track of this.wantedTracks) if (!next.has(track)) this._onDemand(track, false)

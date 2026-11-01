@@ -13,7 +13,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { encode, type ChannelDataFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
-import type { BroadcastKind, BroadcastSubscriptions, ReattachState } from '../../wire/payloads.js'
+import type { BroadcastKind, BroadcastSubscriptions, AttachState } from '../../wire/payloads.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ChannelClosedError, isExpectedChannelFailure } from '../channelErrors.js'
@@ -69,7 +69,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   /** @internal Declares the subscriptions on every (re)attach: a SUB or UNSUB written to a dead wire isn't replayed. */
-  override _reattachState(): ReattachState {
+  override _attachState(): AttachState {
     return { broadcast: this.subscribed }
   }
 

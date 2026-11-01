@@ -7,7 +7,7 @@ import {
   WIRE_QUEUE_DELAY_MS,
   WIRE_SEND_AHEAD_MIN_BYTES,
 } from '../../constants.js'
-import { PieceSender, type PieceSenderOptions, type PieceSenderOwner } from '../pieces.js'
+import { PieceSender, type PieceReceiverOwner, type PieceSenderOptions, type PieceSenderOwner } from '../pieces.js'
 import type { Uplink } from './Uplink.js'
 import type { Downlink } from './Downlink.js'
 import type { PiecesAck } from '../../wire/frame.js'
@@ -26,16 +26,18 @@ type ClientHeadroomOptions = Pick<PieceSenderOptions, 'socket' | 'pingInterval'>
   owner: ClientHeadroomOwner
 }
 
-/** The bytes of data a page lets its WebSocket's queues hold, so its window refreshes don't wait long behind them. */
-class ClientHeadroom implements PieceSenderOwner {
-  /** Every frame the WebSocket carries goes through it. */
+/** Caps the data a page lets its WebSocket's queues hold, so the page's window refreshes don't wait long behind it. */
+class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
+  /** Sends every frame the WebSocket carries. */
   readonly sender: PieceSender
   private readonly uplink: Uplink
   private readonly downlink: Downlink
   private readonly owner: ClientHeadroomOwner
-  /** In ms, the server's clock from the first data an acknowledgement covered. */
+  /** When the newest acknowledged data arrived, in ms on the server's clock, counted from the first data an
+   *  acknowledgement covered. */
   private arrivedAt = 0
-  /** The least time an acknowledgement took back, up to the same offset: behind no queue of the uplink's. */
+  /** The shortest time an acknowledgement took to come back, up to that clock's offset: one that waited behind no
+   *  uplink queue. */
   private leastBack = Number.POSITIVE_INFINITY
   private lateMs = 0
   private lateAt = 0
@@ -61,10 +63,19 @@ class ClientHeadroom implements PieceSenderOwner {
       this.sender.send(frame, this.sender.dataWaits ? 0 : this.headroom())
       return this.pace()
     }
-    // What it waits behind: the uplink holds it too once handed.
+    // What the frame waits behind, read before it is handed: once handed, the uplink holds it too.
     const wait = this.uplink.waitNow()
     this.sender.send(frame, 0)
     this.uplink.noteWait(wait)
+  }
+
+  /** `PieceReceiverOwner`: the wire's receiver sends its acknowledgements through this sender, past the headroom. */
+  sendAck(frame: Uint8Array<ArrayBuffer>): void {
+    this.sender.send(frame, 0)
+  }
+
+  carryAck(take: () => Uint8Array<ArrayBuffer> | null): void {
+    this.sender.carry(take)
   }
 
   /** Sends what waits in the sender, as far as the headroom goes now. */
@@ -72,7 +83,7 @@ class ClientHeadroom implements PieceSenderOwner {
     if (this.sender.dataWaits) this.sender.sendWaiting(this.headroom())
   }
 
-  /** What the server takes in `WIRE_QUEUE_DELAY_MS`, `WIRE_SEND_AHEAD_MIN_BYTES` at least. */
+  /** The bytes the uplink drains in `WIRE_QUEUE_DELAY_MS`: at least `WIRE_SEND_AHEAD_MIN_BYTES`, at most a window. */
   private get allowance(): number {
     return Math.min(
       CREDIT_WINDOW_MAX_BYTES,
@@ -85,26 +96,26 @@ class ClientHeadroom implements PieceSenderOwner {
     return this.headroomPast(this.sender.transmittedBytes)
   }
 
-  /** The headroom past all the sender was sent, what waits in it included: none once used or data waits for it. */
+  /** The headroom past everything given to the sender, waiting frames included: none once used up or data waits. */
   headroomPastSent(): number {
     return this.headroomPast(this.sender.sentBytes)
   }
 
-  /** Its socket closed: it hands it nothing more. */
+  /** The socket closed: pacing stops, and nothing more is handed to it. */
   close(): void {
     if (this.paceTimer !== null) clearTimeout(this.paceTimer)
     this.paceTimer = null
     this.sender.close()
   }
 
-  /** A message arrived: where the timer is late to look again, looks now. A hidden tab throttles timers, not messages. */
+  /** A message arrived. If the pacing timer is overdue, it looks now: a hidden tab throttles timers, not messages. */
   received(): void {
     if (this.paceTimer === null || performance.now() < this.paceDue) return
     clearTimeout(this.paceTimer)
     this.lookAgain()
   }
 
-  /** Takes a PIECES_ACK (see `PieceSender.acknowledged`), and sends what it made headroom for. */
+  /** Takes a PIECES_ACK (see `PieceSender.acknowledged`), then sends what the freed headroom allows. */
   acknowledged(ack: PiecesAck): boolean {
     const before = this.sender.acknowledgedBytes
     if (!this.sender.acknowledged(ack)) return false
@@ -124,18 +135,19 @@ class ClientHeadroom implements PieceSenderOwner {
     return true
   }
 
-  /** The headroom less what the sender handed past `sent` bytes. */
+  /** The allowance less what is still in flight, counting `sent` bytes as sent. */
   private headroomPast(sent: number): number {
     const unacknowledged = sent - this.sender.acknowledgedBytes
     const waiting = Math.min(unacknowledged, this.uplink.inUplink() + sent - this.sender.transmittedBytes)
-    // Unarrived: what no ack or newest heartbeat says the server took, less what crosses while late.
+    // Unarrived: what neither an ack nor the newest heartbeat says the server took, less what crosses while late.
     const late = Math.max(this.lateMs, this.downlink.peerQueueWait())
     const untaken = sent - Math.max(this.sender.acknowledgedBytes, this.sender.heartbeatBytes)
     const unarrived = untaken - this.uplink.uplinkRate() * late
     return this.allowance - Math.max(waiting, unarrived)
   }
 
-  /** With no headroom and data in the uplink, looks again once it carried what the server acks at once, or all it holds. */
+  /** With no headroom and data in the uplink, looks again once the uplink should have carried what the server
+   *  acknowledges at once (`WIRE_PIECES_ACK_BYTES`), or all it holds. */
   private pace(): void {
     const drainRate = this.uplink.drain.rate
     if (drainRate === 0 || this.headroomPastSent() > 0 || this.paceTimer !== null) return

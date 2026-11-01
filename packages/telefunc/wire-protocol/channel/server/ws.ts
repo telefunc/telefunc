@@ -39,26 +39,26 @@ function getTelefuncChannelHooks({
     wholeMessages: true,
     bufferedAmount,
     // Closed at once: a Durable Object peer's terminate() is a close handshake a vanished client never answers.
-    terminateConnection: (peer) => {
+    terminateWire: (peer) => {
       const mux = getChannelMux()
       const permanent = mux.readPermanentTermination(peer)
       terminate(peer)
-      mux.onConnectionClosed(peer, { permanent })
+      mux.onWireClosed(peer, { permanent })
     },
   }
 
   return defineHooks({
     upgrade,
-    open: (peer) => getChannelMux().onConnectionOpen(peer, transport),
+    open: (peer) => getChannelMux().onWireOpen(peer, transport),
     message: (peer, message) => {
       onMessage(peer)
-      return getChannelMux().onConnectionRawMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>)
+      return getChannelMux().onWireMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>)
     },
     close: (peer, details) => {
       const mux = getChannelMux()
       const isPermanent = mux.readPermanentTermination(peer) || details?.code === 1000 || details?.code === 1001
-      mux.onConnectionClosed(peer, { permanent: isPermanent })
+      mux.onWireClosed(peer, { permanent: isPermanent })
     },
-    error: (peer) => getChannelMux().onConnectionClosed(peer, { permanent: false }),
+    error: (peer) => getChannelMux().onWireClosed(peer, { permanent: false }),
   })
 }

@@ -3,7 +3,7 @@ export type {
   ReconcileOpenEntry,
   BroadcastKind,
   BroadcastSubscriptions,
-  ReattachState,
+  AttachState,
   ReconcilePayload,
   BarrierPayload,
   PreparePayload,
@@ -33,7 +33,7 @@ type BroadcastKind = 'text' | 'binary'
 type BroadcastSubscriptions = Record<BroadcastKind, boolean>
 
 /** What a channel adds to its own RECONCILE entry. */
-type ReattachState = Pick<ReconcileOpenEntry, 'broadcast' | 'probe'>
+type AttachState = Pick<ReconcileOpenEntry, 'broadcast' | 'probe'>
 
 /** On a new wire it names every channel the page holds; on the wire of the session it names, with `released`, it names
  *  only the channels no RECONCILE named there yet, and `released` the ones the page let go since its last. */
@@ -43,8 +43,8 @@ type ReconcilePayload = {
   released?: number[]
 }
 
-/** A barrier names the session it retires and the upgrade it commits — both mandatory, where a
- *  reconcile has neither. A malformed one can no longer fall through to ordinary reconciliation. */
+/** A barrier names the session it retires and the upgrade it commits; a reconcile has neither. Both are required:
+ *  `parseBarrierPayload` refuses a barrier without them. */
 type BarrierPayload = {
   sessionId: string
   upgradeId: string

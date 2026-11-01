@@ -201,7 +201,12 @@ class AttachExchange {
     for (const ix of ixes.keys()) {
       const record = this.channels.get(ix)
       if (record === undefined || record.awaited) continue
-      const replay = this.reattach(record, serverMap.get(ix), (carriedFrom.get(ix) ?? Infinity) - 1, deferredOmitted)
+      const replay = this.attachRecord(
+        record,
+        serverMap.get(ix),
+        (carriedFrom.get(ix) ?? Infinity) - 1,
+        deferredOmitted,
+      )
       if (replay === null) continue
       for (const frame of replay) releaseFrames.push(frame)
       if (record.state.tag !== 'closed') channelsToOpen.push(record.channel)
@@ -348,7 +353,7 @@ class AttachExchange {
         lastSeq: record.lastSeq,
       }
       if (isInitial) payloadEntry.initial = true
-      const state = record.channel._reattachState(uplink)
+      const state = record.channel._attachState(uplink)
       if (state.probe !== undefined) this.inFlight.probes.set(ix, state.probe)
       Object.assign(payloadEntry, state)
       if (state.broadcast) subscribing.add(ix)
@@ -380,7 +385,7 @@ class AttachExchange {
   // ── The RECONCILED ──
 
   /** What a channel the RECONCILE named replays to the server, its state brought to the server's; null if let go. */
-  private reattach(
+  private attachRecord(
     record: ChannelRecord,
     lastSeq: number | undefined,
     throughSeq: number,

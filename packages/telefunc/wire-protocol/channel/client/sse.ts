@@ -24,7 +24,7 @@ import { decode } from '../../wire/frame.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import { DeadlineScheduler } from './DeadlineScheduler.js'
-import { SSEEvents } from './SSEEvents.js'
+import { SseEvents } from './SseEvents.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { randomUuid } from '../../../utils/randomUuid.js'
 import { settledOrAborted } from '../../../utils/settledOrAborted.js'
@@ -616,9 +616,9 @@ class SseTransport implements UpgradeSource {
   }
 
   /** Its PINGs wait for a POST half the heartbeat's interval at most. */
-  attachHeartbeat(hb: Heartbeat): void {
-    this.heartbeat = hb
-    this.heartbeatFlushDelayMs = Math.floor(hb.intervalMs / 2)
+  attachHeartbeat(heartbeat: Heartbeat): void {
+    this.heartbeat = heartbeat
+    this.heartbeatFlushDelayMs = Math.floor(heartbeat.intervalMs / 2)
   }
 
   detachHeartbeat(): void {
@@ -687,7 +687,7 @@ function createSseEventStreamReader(
   cancel: () => void
   readNextEntry: () => Promise<Uint8Array<ArrayBuffer> | null>
 } {
-  const sse = new SSEEvents()
+  const sse = new SseEvents()
   const ready = new Fifo<Uint8Array<ArrayBuffer>>()
   let cancelled = false
 
