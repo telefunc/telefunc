@@ -45,9 +45,9 @@ class MemoryDeliveries {
     return this.queue.length === 0 && this.deliveredThisTurn < DELIVERIES_PER_TURN
   }
 
-  /** Runs a delivery while nothing is queued, holding the queue's head as `_drain()` does. */
+  /** Runs a delivery while nothing is queued, holding the queue's head as `drain()` does. */
   deliverNow(delivery: () => void): void {
-    if (this.deliveredThisTurn++ === 0) nextTurn(() => this.nextTurn())
+    if (this.deliveredThisTurn++ === 0) nextTurn(() => this.startTurn())
     this.queue.push(DELIVERING_NOW)
     delivery()
     this.queue.shift()
@@ -64,13 +64,13 @@ class MemoryDeliveries {
   private drain(): void {
     for (let delivery = this.queue.peek(); delivery !== undefined; delivery = this.queue.peek()) {
       if (this.deliveredThisTurn === DELIVERIES_PER_TURN) return
-      if (this.deliveredThisTurn++ === 0) nextTurn(() => this.nextTurn())
+      if (this.deliveredThisTurn++ === 0) nextTurn(() => this.startTurn())
       delivery()
       this.queue.shift()
     }
   }
 
-  private nextTurn(): void {
+  private startTurn(): void {
     this.deliveredThisTurn = 0
     this.drain()
   }
