@@ -271,10 +271,9 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     if (outcome) this.sendReconciled(outcome)
   }
 
-  onConnectionRawMessageDeferredReconciled(
-    wire: Wire,
-    rawFrame: Uint8Array<ArrayBuffer>,
-  ): Promise<ReconcileOutcome | null> {
+  /** As `onWireMessage`, but a RECONCILE's outcome is returned for the caller to send: SSE sends the RECONCILED once
+   *  the stream it answers is open. */
+  dispatchWireMessage(wire: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
     return this.dispatchInbound(wire, rawFrame)
   }
 

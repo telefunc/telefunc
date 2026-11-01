@@ -307,7 +307,7 @@ class SseServerTransport {
     return Promise.allSettled([...wire.pendingDispatches])
   }
 
-  /** Reads `reader`'s frames and dispatches each through the deferred-reconcile path; a RECONCILE's outcome goes to
+  /** Reads `reader`'s frames and dispatches each with `dispatchWireMessage`; a RECONCILE's outcome goes to
    *  `onReconciled` before the next frame is read. */
   private async drain(
     wire: SseWire,
@@ -317,7 +317,7 @@ class SseServerTransport {
     while (true) {
       const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
       if (!raw || wire.closed) break
-      const outcome = await this.mux.onConnectionRawMessageDeferredReconciled(wire, raw)
+      const outcome = await this.mux.dispatchWireMessage(wire, raw)
       if (outcome !== null) await onReconciled(outcome)
     }
   }
