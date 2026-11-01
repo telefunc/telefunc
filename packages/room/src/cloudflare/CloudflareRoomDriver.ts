@@ -29,7 +29,7 @@ import type {
   Unsubscribe,
 } from 'telefunc/__internal'
 import type { CloudflareRoomAuthorityStub } from './do.js'
-import { currentRoomSessionManager, getRoomSessionManager } from './subscription.js'
+import { currentRoomSessionSubscriptions, getRoomSessionSubscriptions } from './subscription.js'
 import { ROOM_CLOUDFLARE_EXTENSION } from '../server/constants.js'
 
 // Room authorities share the Telefunc namespace with sessions and Broadcast, so a room id is always prefixed.
@@ -46,7 +46,7 @@ class CloudflareRoomDriver implements RoomDriver {
   }
 
   subscribe(source: RoomSubscriptionSource, subscriber: Subscriber): Unsubscribe {
-    return getRoomSessionManager().subscribe(source, subscriber, this)
+    return getRoomSessionSubscriptions(this).subscribe(source, subscriber)
   }
 
   async readHead(roomId: string): Promise<RoomHead | null> {
@@ -82,8 +82,8 @@ class CloudflareRoomDriver implements RoomDriver {
   ): Promise<CommitResult> {
     const commit = (stub: CloudflareRoomAuthorityStub) => stub.commitLane(inc, lane, payload, opts)
     // From a session DO, through its ordered stub, so its commits to a room keep the order Room sent them in.
-    const session = currentRoomSessionManager()
-    const wire = await (session ? session.callAuthority(this, roomId, commit) : commit(this.stub(roomId)))
+    const session = currentRoomSessionSubscriptions(this)
+    const wire = await (session ? session.callAuthority(roomId, commit) : commit(this.stub(roomId)))
     if ('stale' in wire) return wire
     const receipt: CommitAccepted = {
       accepted: true,

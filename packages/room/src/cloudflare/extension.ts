@@ -9,11 +9,11 @@ import { ROOM_CLOUDFLARE_EXTENSION } from '../server/constants.js'
 import { ROOM_PLANE } from '../backend/plane.js'
 import { RoomAuthority } from './do.js'
 import { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
-import { getRoomSessionManager, type RoomSessionDeliveryRequest } from './subscription.js'
+import { deliverToRoomSession } from './subscription.js'
 
 registerCloudflareExtension({
   name: ROOM_CLOUDFLARE_EXTENSION,
   durableObject: (ctx: DurableObjectState, _env, getNamespace) => new RoomAuthority(ctx, getNamespace()),
-  session: { deliver: (request: RoomSessionDeliveryRequest) => getRoomSessionManager().deliver(request) },
+  session: { deliver: deliverToRoomSession },
   planes: { [ROOM_PLANE]: (getNamespace) => new CloudflareRoomDriver({ getNamespace }) },
 })

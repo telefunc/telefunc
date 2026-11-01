@@ -1,4 +1,4 @@
-export { CloudflareRoomSessionManager, currentRoomSessionManager, getRoomSessionManager }
+export { RoomSessionSubscriptions, currentRoomSessionSubscriptions, getRoomSessionSubscriptions, deliverToRoomSession }
 export type { RoomSessionDeliveryRequest }
 
 import { type OrderingInfo, type Subscriber, type Unsubscribe, OrderedStubs, hostLocal } from 'telefunc/__internal'
@@ -15,44 +15,56 @@ type RoomSessionDeliveryRequest = {
   info: OrderingInfo
 }
 
-const ROOM_SESSION_MANAGER = Symbol.for('telefunc.room.cloudflareSessionManager')
+const ROOM_SESSION = Symbol.for('telefunc.room.cloudflareSession')
 
-/** The Room manager of the session DO whose call this is, null outside a session DO's call. */
-function currentRoomSessionManager(): CloudflareRoomSessionManager | null {
-  return hostLocal(ROOM_SESSION_MANAGER, (host) =>
-    host.id === null ? null : new CloudflareRoomSessionManager(host.id),
-  )
+/** A session DO's Room part: its subscriptions, made by the first subscribe or lane commit made in it. */
+type RoomSession = { readonly id: string; subscriptions: RoomSessionSubscriptions | null }
+
+/** The session DO whose call this is, null outside a session DO's call. */
+function currentRoomSession(): RoomSession | null {
+  return hostLocal(ROOM_SESSION, (host) => (host.id === null ? null : { id: host.id, subscriptions: null }))
 }
 
-function getRoomSessionManager(): CloudflareRoomSessionManager {
-  const manager = currentRoomSessionManager()
+/** The Room subscriptions of the session DO whose call this is, null outside a session DO's call. */
+function currentRoomSessionSubscriptions(driver: CloudflareRoomDriver): RoomSessionSubscriptions | null {
+  const session = currentRoomSession()
+  if (session === null) return null
+  return (session.subscriptions ??= new RoomSessionSubscriptions({ sessionId: session.id, driver }))
+}
+
+function getRoomSessionSubscriptions(driver: CloudflareRoomDriver): RoomSessionSubscriptions {
+  const subscriptions = currentRoomSessionSubscriptions(driver)
   assertUsage(
-    manager !== null,
+    subscriptions !== null,
     'A Cloudflare subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.',
   )
-  return manager
+  return subscriptions
+}
+
+/** A room authority's delivery to this session DO, which has no subscription to take it before its first one. */
+function deliverToRoomSession(request: RoomSessionDeliveryRequest): void {
+  currentRoomSession()?.subscriptions?.deliver(request)
 }
 
 function entryKey(route: Pick<RouteInstallation, 'roomId' | 'inc' | 'laneKey'>): string {
   return JSON.stringify([route.roomId, route.inc, route.laneKey])
 }
 
-class CloudflareRoomSessionManager {
+/** A session DO's Room subscriptions, and its calls to room authorities. */
+class RoomSessionSubscriptions {
   private readonly authorityCalls = new OrderedStubs<CloudflareRoomAuthorityStub>()
   private readonly id: string
+  private readonly driver: CloudflareRoomDriver
   private readonly entries = new Map<string, CloudflareRoomSubscription>()
 
-  constructor(sessionId: string) {
+  constructor({ sessionId, driver }: { sessionId: string; driver: CloudflareRoomDriver }) {
     this.id = sessionId
+    this.driver = driver
   }
 
-  subscribe(
-    { roomId, inc, lane }: RoomSubscriptionSource,
-    subscriber: Subscriber,
-    driver: CloudflareRoomDriver,
-  ): Unsubscribe {
+  subscribe({ roomId, inc, lane }: RoomSubscriptionSource, subscriber: Subscriber): Unsubscribe {
     const route = { roomId, inc, laneKey: encodeLaneKey(lane), sessionDoId: this.id, leaseId: crypto.randomUUID() }
-    const subscription = new CloudflareRoomSubscription({ session: this, route, driver, subscriber })
+    const subscription = new CloudflareRoomSubscription({ owner: this, route, subscriber })
     this.entries.set(entryKey(route), subscription)
     void subscription.register()
     return () => subscription.unsubscribe()
@@ -60,17 +72,14 @@ class CloudflareRoomSessionManager {
 
   /** A call to a room's authority through this session's ordered stub for it, so a room's commits and route calls
    *  reach its authority in the order they were made. A line opens a fresh stub: a stub that rejected may be broken. */
-  callAuthority<T>(
-    driver: CloudflareRoomDriver,
-    roomId: string,
-    invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>,
-  ): Promise<T> {
-    return this.authorityCalls.call(roomId, () => driver.stub(roomId), invoke)
+  callAuthority<T>(roomId: string, invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>): Promise<T> {
+    return this.authorityCalls.call(roomId, () => this.driver.stub(roomId), invoke)
   }
 
-  forget(subscription: CloudflareRoomSubscription): void {
-    const key = entryKey(subscription.route)
-    if (this.entries.get(key) === subscription) this.entries.delete(key)
+  /** `route`'s subscription ended: a delivery to it is dropped from now on. */
+  routeClosed(route: RouteInstallation): void {
+    const key = entryKey(route)
+    if (this.entries.get(key)?.route === route) this.entries.delete(key)
   }
 
   /** A delivery to a lease this session no longer holds, as after a restart, is dropped: delivery is at-most-once, and
@@ -83,9 +92,8 @@ class CloudflareRoomSessionManager {
 }
 
 type CloudflareRoomSubscriptionOptions = {
-  session: CloudflareRoomSessionManager
+  owner: RoomSessionSubscriptions
   route: RouteInstallation
-  driver: CloudflareRoomDriver
   subscriber: Subscriber
 }
 
@@ -93,16 +101,14 @@ type CloudflareRoomSubscriptionOptions = {
  *  replacement. */
 class CloudflareRoomSubscription {
   readonly route: RouteInstallation
-  private readonly session: CloudflareRoomSessionManager
-  private readonly driver: CloudflareRoomDriver
+  private readonly owner: RoomSessionSubscriptions
   private readonly subscriber: Subscriber
   private ended = false
   private renewalTimer: ReturnType<typeof setTimeout> | undefined
 
-  constructor({ session, route, driver, subscriber }: CloudflareRoomSubscriptionOptions) {
-    this.session = session
+  constructor({ owner, route, subscriber }: CloudflareRoomSubscriptionOptions) {
+    this.owner = owner
     this.route = route
-    this.driver = driver
     this.subscriber = subscriber
   }
 
@@ -157,10 +163,10 @@ class CloudflareRoomSubscription {
   private stop(): void {
     this.ended = true
     clearTimeout(this.renewalTimer)
-    this.session.forget(this)
+    this.owner.routeClosed(this.route)
   }
 
   private callAuthority<T>(invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>): Promise<T> {
-    return this.session.callAuthority(this.driver, this.route.roomId, invoke)
+    return this.owner.callAuthority(this.route.roomId, invoke)
   }
 }
