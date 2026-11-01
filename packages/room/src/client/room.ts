@@ -512,8 +512,6 @@ abstract class ClientParticipantBase extends ParticipantBase {
   private readonly bufferLimit: number
   protected readonly _bugMessage = CLIENT_ROOM_BUG_MESSAGE
 
-  private readonly requestParticipant: (request: MemberMutationRequest) => Promise<unknown>
-
   /** @internal The page holds this member from now on, until it leaves. */
   _holdOnPage(): void {
     heldMembers.set(this.id, this)
@@ -538,15 +536,12 @@ abstract class ClientParticipantBase extends ParticipantBase {
   constructor({
     participant,
     rewinds,
-    request,
   }: {
     participant: Pick<ParticipantStubMetadata, 'id' | 'meta' | 'selfDelivery' | 'identity' | 'bufferLimit'>
     rewinds: MetaRewinds
-    request: (request: MemberMutationRequest) => Promise<unknown>
   }) {
     super({ participant, rewinds })
     this.bufferLimit = participant.bufferLimit
-    this.requestParticipant = request
   }
 
   get _demandedTracks(): TrackKey[] {
@@ -569,6 +564,8 @@ abstract class ClientParticipantBase extends ParticipantBase {
   /** Each flavor's wire publish; `publish()` adds conflation. */
   protected abstract _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck>
   protected abstract _sendPublishBinary(framed: Uint8Array): Promise<ChannelPublishAck>
+  /** Each flavor's wire request, for a DM or a metadata write. */
+  protected abstract _request(request: MemberMutationRequest): Promise<unknown>
 
   // Messaging is often fire-and-forget: a usage error throws, and a failure is a rejection left handled.
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
@@ -612,19 +609,19 @@ abstract class ClientParticipantBase extends ParticipantBase {
     this._assertActive()
     const request: MemberMutationRequest = { __r: 'req-dm', to, data }
     if (ack) request.ack = true
-    return await this.requestParticipant(request)
+    return await this._request(request)
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
     this._assertActive()
     const owned = ownMetaArgument(meta, 'setMeta() meta')
-    this._onOwnMetaWritten((await this.requestParticipant({ __r: 'req-set-meta', meta: owned })) as MemberMetaUpdate)
+    this._onOwnMetaWritten((await this._request({ __r: 'req-set-meta', meta: owned })) as MemberMetaUpdate)
   }
 
   async setAttributes(attrs: ParticipantMeta): Promise<void> {
     this._assertActive()
     const owned = ownMetaArgument(attrs, 'setAttributes() attributes')
-    this._onOwnMetaWritten((await this.requestParticipant({ __r: 'req-set-attrs', attrs: owned })) as MemberMetaUpdate)
+    this._onOwnMetaWritten((await this._request({ __r: 'req-set-attrs', attrs: owned })) as MemberMetaUpdate)
   }
 
   /** Concurrent writes can commit out of request order: adopt the sequence-accepted value, as observers do. */
@@ -711,7 +708,6 @@ class ClientRoomParticipant extends ClientParticipantBase {
       // Client-side joins carry no identity: it's server-assigned (see JoinOptions.identity).
       participant: { id, meta, selfDelivery, identity: null, bufferLimit: clientRoom._bufferLimit },
       rewinds,
-      request: (request) => clientRoom._request({ ...request, id }),
     })
     this.room = clientRoom
   }
@@ -736,6 +732,10 @@ class ClientRoomParticipant extends ClientParticipantBase {
   protected async _sendPublishBinary(framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
     return await this.room._publishBinaryFramed(framed)
+  }
+
+  protected _request(request: MemberMutationRequest): Promise<unknown> {
+    return this.room._request({ ...request, id: this.id })
   }
 
   /** @internal The page's handle: it holds the room open until this member leaves, and nothing in the room reaches it. */
@@ -772,14 +772,11 @@ type ClientStandaloneParticipantOptions = { end: ClientBroadcast; metadata: Part
 /** `LocalParticipant` revived from a serialized `ServerLocalParticipant`. Owns its channel. */
 class ClientStandaloneParticipant extends ClientParticipantBase {
   private readonly end: ClientBroadcast
-  private readonly request: (req: ParticipantStubRequest) => Promise<unknown>
 
   constructor({ end, metadata }: ClientStandaloneParticipantOptions) {
-    const request = async (req: ParticipantStubRequest) => roomResultValue(end.send(req, { ack: true }))
     // Its own: the `rewound` notice forgets its seq.
-    super({ participant: metadata, rewinds: { count: 0 }, request })
+    super({ participant: metadata, rewinds: { count: 0 } })
     this.end = end
-    this.request = request
 
     end._subscribeLocal('text', (notice) => this.onNotice(notice))
     end.onClose(() => this._onLeft({ type: 'disconnected' }))
@@ -822,7 +819,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     this._assertActive()
     const request: ParticipantStubRequest = { __r: 'req-publish', data }
     if (retain) request.retain = true
-    return (await this.request(request)) as ChannelPublishAck
+    return (await this._request(request)) as ChannelPublishAck
   }
 
   protected async _sendPublishBinary(framed: Uint8Array): Promise<ChannelPublishAck> {
@@ -830,9 +827,13 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     return roomResultValue<ChannelPublishAck>(this.end._publishBinaryUnreported(framed))
   }
 
+  protected async _request(request: ParticipantStubRequest): Promise<unknown> {
+    return roomResultValue(this.end.send(request, { ack: true }))
+  }
+
   async leave(): Promise<void> {
     if (this._left) return
-    await this.request({ __r: 'req-leave' })
+    await this._request({ __r: 'req-leave' })
     this._onLeft({ type: 'left' })
     void this.end.close().catch(() => {})
   }
