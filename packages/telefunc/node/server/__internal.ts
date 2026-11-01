@@ -39,6 +39,12 @@ export type {
 export type { ChannelPublishAck, ChannelPublishInfo } from '../../wire-protocol/channel/channel.js'
 export { MemoryPubSub, type Subscriptions } from '../../wire-protocol/backend/memory/deliveries.js'
 export { isChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
+export {
+  ProtocolViolationError,
+  assertProtocol,
+  isProtocolViolationError,
+  parsePeerText,
+} from '../../wire-protocol/wire/protocolViolation.js'
 
 import type { ServerBroadcastEnd as ServerBroadcastEndClass } from '../../wire-protocol/channel/server/broadcastEnd.js'
 import type { ClientBroadcast as ClientBroadcastClass } from '../../wire-protocol/channel/client/broadcast.js'

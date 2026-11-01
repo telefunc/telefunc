@@ -5,8 +5,11 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { ROOM_TRACK_WANTS_MAX, ROOM_VIEW_MEMBERS_MAX } from '../constants.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
-import { assertProtocol, isProtocolViolationError, parsePeerText, ProtocolViolationError } from './protocolViolation.js'
 import {
+  assertProtocol,
+  isProtocolViolationError,
+  parsePeerText,
+  ProtocolViolationError,
   encodePublish,
   getChannelLimits,
   type BroadcastEndOwner,

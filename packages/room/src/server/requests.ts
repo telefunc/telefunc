@@ -11,7 +11,7 @@ export {
 export type { RoomRequest, RoomDeclaration }
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
-import { ProtocolViolationError } from './protocolViolation.js'
+import { ProtocolViolationError } from 'telefunc/__internal'
 import {
   EVERY_MEMBER,
   EVERY_TRACK,

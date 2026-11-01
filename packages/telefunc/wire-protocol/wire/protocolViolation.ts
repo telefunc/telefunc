@@ -1,4 +1,6 @@
-export { ProtocolViolationError, isProtocolViolationError, assertProtocol }
+export { ProtocolViolationError, isProtocolViolationError, assertProtocol, parsePeerText }
+
+import { parse } from '@brillout/json-serializer/parse'
 
 const protocolViolationErrorBrand = Symbol.for('telefunc.ProtocolViolationError')
 
@@ -26,4 +28,13 @@ function isProtocolViolationError(thing: unknown): thing is ProtocolViolationErr
  *  isn't the sender. */
 function assertProtocol(condition: unknown, debugInfo: string, target?: unknown): asserts condition {
   if (!condition) throw new ProtocolViolationError(debugInfo, target)
+}
+
+/** Peer-authored JSON: a parse failure is the peer's, so it surfaces as a protocol violation. */
+function parsePeerText(text: string): unknown {
+  try {
+    return parse(text)
+  } catch {
+    throw new ProtocolViolationError('peer payload is not parsable')
+  }
 }

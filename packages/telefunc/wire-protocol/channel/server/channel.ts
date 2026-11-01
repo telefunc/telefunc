@@ -21,7 +21,6 @@ import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generate
 import type { IndexedPeer } from './IndexedPeer.js'
 import type { ChannelMux } from './mux.js'
 import { stringify } from '@brillout/json-serializer/stringify'
-import { parse } from '@brillout/json-serializer/parse'
 import { hasProp } from '../../../utils/hasProp.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { ShieldValidator, ShieldValidators } from '../../../node/server/shield.js'
@@ -47,7 +46,7 @@ import { Listeners } from '../../../utils/Listeners.js'
 import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/frame.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
 import { seqNear, seqThrough } from '../../wire/seq.js'
-import { ProtocolViolationError, assertProtocol } from '../../wire/protocolViolation.js'
+import { ProtocolViolationError, assertProtocol, parsePeerText } from '../../wire/protocolViolation.js'
 import type {
   AckResultStatus,
   ChannelCtrlFrame,
@@ -56,15 +55,6 @@ import type {
   ErrorReason,
 } from '../../wire/frame.js'
 import type { BroadcastKind, ReattachState } from '../../wire/payloads.js'
-
-/** Peer-authored JSON: a parse failure is the peer's, so it surfaces as a protocol violation. */
-function parsePeerText(text: string): unknown {
-  try {
-    return parse(text)
-  } catch {
-    throw new ProtocolViolationError('peer payload is not parsable')
-  }
-}
 
 /** The closing frames made while no peer was attached, sent to the next. */
 type PendingEnd = { closeAck: boolean; closeRequest: boolean; abort: string | null; error: ErrorReason | null }
