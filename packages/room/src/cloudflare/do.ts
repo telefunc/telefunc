@@ -79,7 +79,7 @@ class RoomAuthority {
 
   constructor(ctx: DurableObjectState, sessions: TelefuncExtensionNamespace) {
     this.ctx = ctx
-    this.fanout = new Fanout(sessions)
+    this.fanout = new Fanout({ sessions })
   }
 
   async readHead(): Promise<RoomHead | null> {

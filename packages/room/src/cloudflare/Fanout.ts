@@ -11,6 +11,8 @@ import { ROOM_CLOUDFLARE_EXTENSION, ROOM_HORIZON_MS } from '../server/constants.
 import type { RouteInstallation } from './routes.js'
 import type { RoomSessionDeliveryRequest } from './subscription.js'
 
+type FanoutOptions = { sessions: TelefuncExtensionNamespace }
+
 /** A room authority's deliveries. Each session DO's frames go through one ordered stub, so they arrive in commit order
  *  without waiting on each other. A lane has one route per subscribed session DO, at most the deployment's session
  *  shards, so the authority calls each itself, well within an invocation's subrequest limit. */
@@ -23,7 +25,7 @@ class Fanout {
   private rotated = new Map<string, Promise<void>>()
   private rotatedAt = Date.now()
 
-  constructor(sessions: TelefuncExtensionNamespace) {
+  constructor({ sessions }: FanoutOptions) {
     this.sessions = sessions
   }
 
