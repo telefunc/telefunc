@@ -61,7 +61,7 @@ type BroadcastDriver = {
  * Core's end of one driver subscription. Call `ready()` once every publish made from now on reaches it, `lost()` when
  * it may miss messages (its connection dropped), `ready()` again once it can't, and `ended()` or `failed()` when it is
  * over for good. Deliver each key's messages in `seq` order with `message()`, as they arrive: one that comes before
- * the first `ready()` is held by core and reaches the consumers right after it, and one after a loss goes out as it
+ * the first `ready()` is kept by core and reaches the consumers right after it, and one after a loss goes out as it
  * arrives. Core ignores a call that repeats the state, and every call after `ended()`, `failed()` or its unsubscribe.
  */
 interface Subscriber {

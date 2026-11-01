@@ -171,7 +171,7 @@ class SharedSubscription implements Subscriber {
   // What the driver tells.
 
   message(payload: BackendPayload, ordering: OrderingInfo): void {
-    if (this.early !== null) return this.hold(payload, ordering)
+    if (this.early !== null) return this.keepEarly(payload, ordering)
     if (!this.checked(payload, ordering)) return
     // The receiver is called here, not through a method of the consumer: one call less on every message.
     for (const consumer of this.targets()) {
@@ -224,7 +224,7 @@ class SharedSubscription implements Subscriber {
 
   /** A consumer sees `ready` before any message, so a driver needn't order its acknowledgment before what it delivers:
    *  until then a message waits, with the consumers it would have reached. Once finished, it is dropped. */
-  private hold(payload: BackendPayload, ordering: OrderingInfo): void {
+  private keepEarly(payload: BackendPayload, ordering: OrderingInfo): void {
     if (!this.finished && this.checked(payload, ordering)) {
       this.early!.push({ payload, ordering, targets: this.targets() })
     }

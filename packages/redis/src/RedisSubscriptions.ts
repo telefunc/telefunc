@@ -41,16 +41,16 @@ type Connection =
 
 type Connected = Extract<Connection, { phase: 'connected' }>
 
-/** A lane's last frame delivered, and the frames that arrived past a missing one, by their predecessor's seq,
+/** A lane's last frame delivered, and the frames parked past a missing one, by their predecessor's seq,
  *  until it arrives or the wait ends. */
 type LaneOrder = {
   last: number
   lastTimestamp: number
-  held: Map<number, HeldFrame> | null
+  parked: Map<number, ParkedFrame> | null
   release: ReturnType<typeof setTimeout> | null
 }
 
-type HeldFrame = { payload: Uint8Array; info: OrderingInfo; token: string | null }
+type ParkedFrame = { payload: Uint8Array; info: OrderingInfo; token: string | null }
 
 const textDecoder = new TextDecoder()
 
@@ -382,7 +382,7 @@ class RedisSubscription {
     if (this.state === 'closed') return
     this.state = 'closed'
     this.firstReadiness.resolve()
-    this.dropHeld()
+    this.dropParked()
     for (const token of this.fences.keys()) this.settleFence(token)
     this.owner.detach(this)
   }
@@ -409,7 +409,7 @@ class RedisSubscription {
     if (!this.awaitsConfirmation()) return
     this.orders = new Map()
     for (const [lane, start] of starts) {
-      this.orders.set(lane, { last: start.seq, lastTimestamp: start.timestamp, held: null, release: null })
+      this.orders.set(lane, { last: start.seq, lastTimestamp: start.timestamp, parked: null, release: null })
     }
     const early = this.early
     this.early = []
@@ -433,7 +433,7 @@ class RedisSubscription {
     this.early = []
     if (this.state !== 'ready') return
     // What arrived goes out: what it waits for can no longer arrive on this connection.
-    for (const order of this.orders.values()) if (order.held !== null) this.release(order)
+    for (const order of this.orders.values()) if (order.parked !== null) this.release(order)
     this.rejectFences(error)
     this.state = 'lost'
     this.subscriber.lost()
@@ -456,7 +456,7 @@ class RedisSubscription {
   private close(reason: unknown): void {
     this.state = 'closed'
     this.firstReadiness.resolve()
-    this.dropHeld()
+    this.dropParked()
     this.rejectFences(reason)
     this.owner.detach(this)
   }
@@ -483,18 +483,18 @@ class RedisSubscription {
     let order = this.orders.get(lane)
     if (order === undefined) {
       // A lane with no commit when the subscription went live: every one of its commits is after.
-      order = { last: 0, lastTimestamp: 0, held: null, release: null }
+      order = { last: 0, lastTimestamp: 0, parked: null, release: null }
       this.orders.set(lane, order)
     }
     if (predecessor <= order.last && info.seq > order.last) {
       this.advance(order, payload, info, token)
-      if (order.held !== null) this.drain(order)
+      if (order.parked !== null) this.drain(order)
       return
     }
-    if (predecessor > order.last) return this.hold(order, predecessor, payload, info, token)
+    if (predecessor > order.last) return this.park(order, predecessor, payload, info, token)
     // A commit never sets its lane's time back, so a later time on a seq at or below the last is a failover's rewind.
     if (info.timestamp <= order.lastTimestamp) return this.settle(token)
-    if (order.held !== null) this.release(order)
+    if (order.parked !== null) this.release(order)
     this.advance(order, payload, info, token)
   }
 
@@ -504,49 +504,49 @@ class RedisSubscription {
     this.deliver(payload, info, token)
   }
 
-  private hold(
+  private park(
     order: LaneOrder,
     predecessor: number,
     payload: Uint8Array,
     info: OrderingInfo,
     token: string | null,
   ): void {
-    if (order.held?.has(predecessor)) return this.settle(token)
-    order.held ??= new Map()
-    order.held.set(predecessor, { payload, info, token })
+    if (order.parked?.has(predecessor)) return this.settle(token)
+    order.parked ??= new Map()
+    order.parked.set(predecessor, { payload, info, token })
     if (order.release !== null) return
     order.release = setTimeout(() => this.release(order), REORDER_WAIT_MS)
     order.release.unref()
   }
 
-  /** The held frames that now follow in order. */
+  /** The parked frames that now follow in order. */
   private drain(order: LaneOrder): void {
-    const held = order.held!
-    for (let next = held.get(order.last); next !== undefined; next = held.get(order.last)) {
+    const parked = order.parked!
+    for (let next = parked.get(order.last); next !== undefined; next = parked.get(order.last)) {
       // A consumer may close the lane.
       if (this.state !== 'ready') return
-      held.delete(order.last)
+      parked.delete(order.last)
       this.advance(order, next.payload, next.info, next.token)
     }
-    if (held.size > 0) return
+    if (parked.size > 0) return
     clearTimeout(order.release!)
-    order.held = null
+    order.parked = null
     order.release = null
   }
 
-  /** The wait ended: every held frame goes out in seq order, past what never arrived. */
+  /** The wait ended: every parked frame goes out in seq order, past what never arrived. */
   private release(order: LaneOrder): void {
     clearTimeout(order.release!)
-    const held = [...order.held!.values()].sort((a, b) => a.info.seq - b.info.seq)
-    order.held = null
+    const parked = [...order.parked!.values()].sort((a, b) => a.info.seq - b.info.seq)
+    order.parked = null
     order.release = null
-    for (const frame of held) {
+    for (const frame of parked) {
       if (this.state !== 'ready') return
       this.advance(order, frame.payload, frame.info, frame.token)
     }
   }
 
-  private dropHeld(): void {
+  private dropParked(): void {
     for (const order of this.orders.values()) if (order.release !== null) clearTimeout(order.release)
     this.orders.clear()
     this.early = []
