@@ -1,4 +1,4 @@
-export { emptyBinaryWants, wantsTrack, binaryWantsCovers, applyBinaryWantChange }
+export { emptyBinaryWants, binaryWantsCovers, applyBinaryWantChange }
 export type { TrackWants, BinaryWants }
 
 import { EVERY_MEMBER, EVERY_TRACK, type BinaryWantChange, type TrackKey } from '../../shared/binary.js'
