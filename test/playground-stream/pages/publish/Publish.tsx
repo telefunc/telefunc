@@ -13,6 +13,7 @@ import {
   onBroadcastAnsweringLoop,
   onBroadcastWhileEstablishing,
   onSubscribeThrows,
+  onDeliveredBeforeReady,
   onChatLeaveOnClose,
   onGetChatWatched,
   onServerBroadcastChecks,
@@ -263,6 +264,16 @@ function Publish() {
         }}
       >
         Subscribe refused by the store
+      </button>
+
+      <button
+        id="test-delivered-before-ready"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify({ seen: await onDeliveredBeforeReady() }))
+        }}
+      >
+        Message delivered before the store acknowledges the subscription
       </button>
 
       <h2>Leave message from onClose</h2>

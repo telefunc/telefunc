@@ -9,6 +9,7 @@ export {
   onBroadcastAnsweringLoop,
   onBroadcastWhileEstablishing,
   onSubscribeThrows,
+  onDeliveredBeforeReady,
   onChatLeaveOnClose,
   onGetChatWatched,
   onServerBroadcastChecks,
@@ -218,6 +219,23 @@ async function onSubscribeThrows() {
   await channel.publish({ n: 1 })
   await delivered
   return { thrown, seen }
+}
+
+/** The store delivers the first message on this key before it acknowledges the subscription (a test asks it to, see
+ *  `failBackend()`). */
+async function onDeliveredBeforeReady() {
+  const channel = new BroadcastChannel<{ n: number }>({ key: `room:delivered-before-ready:${crypto.randomUUID()}` })
+  const seen: number[] = []
+  const { promise: delivered, resolve } = Promise.withResolvers<void>()
+  channel.subscribe((msg) => {
+    seen.push(msg.n)
+    if (msg.n === 2) resolve()
+  })
+  await channel.publish({ n: 1 })
+  await channel.publish({ n: 2 })
+  await within10s(delivered)
+  await channel.close()
+  return seen
 }
 
 const chatWatched = new Map<string, { received: string[]; unsubscribe(): void }>()

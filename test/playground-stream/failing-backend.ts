@@ -27,9 +27,10 @@ import {
 import { createDeferred } from './createDeferred'
 
 /** `op` is a driver method (its next matching call rejects), 'bind' (the next matching subscribe throws), 'subscribe'
- *  (the next matching subscription is refused) or 'deliver' (the next message a matching subscription gets is
- *  dropped). `roomId`, or `key` (a Broadcast key, the start of a Room cell key the call reads or writes, or a commit's
- *  lane kind or required cell), narrows what matches. */
+ *  (the next matching subscription is refused), 'deliver' (the next message a matching subscription gets is dropped)
+ *  or 'early' (the next matching subscription is ready only after its first message, as a store whose acknowledgment
+ *  comes after what it delivered). `roomId`, or `key` (a Broadcast key, the start of a Room cell key the call reads or
+ *  writes, or a commit's lane kind or required cell), narrows what matches. */
 type BackendFault = { op: string; roomId?: string; key?: string; times?: number }
 
 type Source = BroadcastRoute | RoomSubscriptionSource
@@ -66,6 +67,8 @@ class FailingSubscription implements Subscriber {
   readonly source: Source
   private readonly outer: Subscriber
   unsubscribeInner: Unsubscribe | null = null
+  /** Its `ready()` waits for its first message (the 'early' fault). */
+  private readyAfterMessage = false
 
   constructor({ source, outer }: FailingSubscriptionOptions) {
     this.source = source
@@ -77,11 +80,16 @@ class FailingSubscription implements Subscriber {
   }
 
   message(payload: BackendPayload, ordering: OrderingInfo): void {
-    if (!takeFault('deliver', callOf(this.source))) this.outer.message(payload, ordering)
+    if (takeFault('deliver', callOf(this.source))) return
+    this.outer.message(payload, ordering)
+    if (!this.readyAfterMessage) return
+    this.readyAfterMessage = false
+    this.outer.ready()
   }
 
   ready(): void {
-    this.outer.ready()
+    if (takeFault('early', callOf(this.source))) this.readyAfterMessage = true
+    else this.outer.ready()
   }
 
   lost(): void {
