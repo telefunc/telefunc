@@ -6,16 +6,16 @@ import type {
   BroadcastPayload,
   BroadcastRoute,
   PublishResult,
-} from '../../backend/broadcast/contract.js'
-import type { SubscriptionDriver } from '../../backend/subscription.js'
+  Subscriber,
+  Unsubscribe,
+} from '../../backend/driver.js'
 import type { CloudflareBroadcast } from './broadcast.js'
 import { getCloudflareExtensionPlanes, type TelefuncExtensionNamespace } from './extensions.js'
-import { currentCloudflareSession, requireCloudflareSession } from './session.js'
+import { requireCloudflareSession } from './session.js'
 
 /** A subscription requires its session DO's context. */
 class CloudflareBackend implements BroadcastDriver {
   readonly broadcast: CloudflareBroadcast
-  readonly subscriptions: SubscriptionDriver<BroadcastRoute>
   private readonly namespace: () => TelefuncExtensionNamespace
 
   constructor({
@@ -27,16 +27,6 @@ class CloudflareBackend implements BroadcastDriver {
   }) {
     this.broadcast = broadcast
     this.namespace = namespace
-    this.subscriptions = {
-      bind: (source) => {
-        const session = requireCloudflareSession()
-        return {
-          partition: session.broadcast.partition,
-          open: (receiver) => session.broadcast.openSubscription(source, receiver),
-        }
-      },
-      partitionHere: () => currentCloudflareSession()?.broadcast.partition ?? null,
-    }
   }
 
   /** The planes of the Cloudflare extensions registered so far. */
@@ -46,5 +36,9 @@ class CloudflareBackend implements BroadcastDriver {
 
   publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {
     return this.broadcast.publish(route, payload)
+  }
+
+  subscribe(route: BroadcastRoute, subscriber: Subscriber): Unsubscribe {
+    return requireCloudflareSession().broadcast.subscribe(route, subscriber)
   }
 }
