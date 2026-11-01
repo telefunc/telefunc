@@ -4,7 +4,7 @@ export {
   broadcastSequenceKey,
   broadcastChannel,
   headKey,
-  generationKeysKey,
+  incarnationKeysKey,
   revKey,
   cellIndexKey,
   cellValuesKey,
@@ -18,7 +18,7 @@ export {
   retainedOfTrackKey,
   channelKey,
   commitChannels,
-  generationInvalidationChannel,
+  incarnationInvalidationChannel,
   directoryIndexKey,
   directoryTagsKey,
   directoryChecksKey,
@@ -62,52 +62,52 @@ function roomTag(prefix: string, roomId: string): string {
 function headKey(prefix: string, roomId: string): string {
   return `${roomTag(prefix, roomId)}:head`
 }
-function genPrefix(prefix: string, roomId: string, inc: string): string {
+function incarnationPrefix(prefix: string, roomId: string, inc: string): string {
   return `${roomTag(prefix, roomId)}:g:${inc}`
 }
-function generationKeysKey(prefix: string, roomId: string, inc: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:keys`
+function incarnationKeysKey(prefix: string, roomId: string, inc: string): string {
+  return `${incarnationPrefix(prefix, roomId, inc)}:keys`
 }
 function revKey(prefix: string, roomId: string, inc: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:rev`
+  return `${incarnationPrefix(prefix, roomId, inc)}:rev`
 }
-/** The generation's cell keys, all at score 0, so a prefix read is a lexicographic range. */
+/** The incarnation's cell keys, all at score 0, so a prefix read is a lexicographic range. */
 function cellIndexKey(prefix: string, roomId: string, inc: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:cells`
+  return `${incarnationPrefix(prefix, roomId, inc)}:cells`
 }
 /** Each cell's bytes, by its key. */
 function cellValuesKey(prefix: string, roomId: string, inc: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:values`
+  return `${incarnationPrefix(prefix, roomId, inc)}:values`
 }
 /** Each cell's version, by its key. */
 function cellVersionsKey(prefix: string, roomId: string, inc: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:versions`
+  return `${incarnationPrefix(prefix, roomId, inc)}:versions`
 }
 function orderKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:o:${laneKey}`
+  return `${incarnationPrefix(prefix, roomId, inc)}:o:${laneKey}`
 }
 /** The order of one member's inbox and binary lanes, by lane key. */
 function memberOrderKey(prefix: string, roomId: string, inc: string, member: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:om:${encodeURIComponent(member)}`
+  return `${incarnationPrefix(prefix, roomId, inc)}:om:${encodeURIComponent(member)}`
 }
 /** The keys of one track's binary lanes that have a commit. */
 function trackLanesKey(prefix: string, roomId: string, inc: string, track: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:lt:${encodeURIComponent(track)}`
+  return `${incarnationPrefix(prefix, roomId, inc)}:lt:${encodeURIComponent(track)}`
 }
 function retainedKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:rt:${laneKey}`
+  return `${incarnationPrefix(prefix, roomId, inc)}:rt:${laneKey}`
 }
-/** The lane keys of the generation's retained frames. */
+/** The lane keys of the incarnation's retained frames. */
 function retainedLanesKey(prefix: string, roomId: string, inc: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:rtl`
+  return `${incarnationPrefix(prefix, roomId, inc)}:rtl`
 }
 /** The lane keys of one member's retained binary frames. */
 function retainedOfKey(prefix: string, roomId: string, inc: string, member: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:rtm:${encodeURIComponent(member)}`
+  return `${incarnationPrefix(prefix, roomId, inc)}:rtm:${encodeURIComponent(member)}`
 }
 /** The lane keys of one track's retained binary frames. */
 function retainedOfTrackKey(prefix: string, roomId: string, inc: string, track: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:rtt:${encodeURIComponent(track)}`
+  return `${incarnationPrefix(prefix, roomId, inc)}:rtt:${encodeURIComponent(track)}`
 }
 function channelKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
   return channelsPrefix(prefix, roomId, inc) + laneKey
@@ -131,7 +131,7 @@ function commitChannels(
 function channelsPrefix(prefix: string, roomId: string, inc: string): string {
   return `${roomTag(prefix, roomId)}:ch:${inc}:`
 }
-function generationInvalidationChannel(prefix: string, roomId: string, inc: string): string {
+function incarnationInvalidationChannel(prefix: string, roomId: string, inc: string): string {
   return `${roomTag(prefix, roomId)}:invalidate:${inc}`
 }
 /** The directory's two keys share their own tag so the tag-guarded delete stays one slot under Cluster. */

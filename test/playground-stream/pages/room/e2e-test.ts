@@ -5,6 +5,7 @@ export {
   testRoomLimits,
   testRoomAckTimeout,
   testRoomSmallBuffer,
+  testRoomPublishHold,
   testRoomLongWaits,
 }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
@@ -1329,6 +1330,10 @@ function testRoomSmallBuffer() {
       expect(r.got).deep.equal(['2', '3'])
     },
   )
+}
+
+/** Runs on Redis, in a lane whose config.channel.bufferLimit is 4,096 bytes. */
+function testRoomPublishHold() {
   testRoomScenario<{ serverOutcomes: string[]; seen: string[] }>(
     'hold-overflow',
     'room: publishes held while a subscription establishes fit bufferLimit by their bytes, and the one past it rejects with ChannelOverflowError',

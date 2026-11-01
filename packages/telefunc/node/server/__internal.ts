@@ -22,28 +22,23 @@ export {
 } from '../../wire-protocol/wire/protocolViolation.js'
 
 // A backend: one `installBackend` installs (`@telefunc/redis`, a test's), and the drivers of a plane (Room's).
-export { installBackend, backendPlane } from '../../wire-protocol/backend/install.js'
-export type { BackendDriver } from '../../wire-protocol/backend/install.js'
 export type {
+  Backend,
+  BackendPayload,
   BroadcastDriver,
   BroadcastPayload,
   BroadcastRoute,
   PublishResult,
-} from '../../wire-protocol/backend/broadcast/contract.js'
-export type {
-  BackendPayload,
-  BackendReceiver,
-  BackendSubscription,
-  SubscriptionAttempt,
-  SubscriptionBinding,
-  SubscriptionDriver,
-} from '../../wire-protocol/backend/subscription.js'
-export type { PlaneSubscriptions, SendHold } from '../../wire-protocol/backend/SubscriptionManager.js'
-export { DriverAttempt, SourceDroppedError } from '../../wire-protocol/backend/attempt.js'
+  Subscriber,
+  Unsubscribe,
+} from '../../wire-protocol/backend/driver.js'
+export { installBackend, backendPlane, type PlaneDefinition } from '../../wire-protocol/backend/install.js'
+export type { BackendReceiver, BackendSubscription, Subscriptions } from '../../wire-protocol/backend/Subscriptions.js'
 export { assertDriverOrdering } from '../../wire-protocol/backend/driverOrdering.js'
 export { decodeOrderingFrame } from '../../wire-protocol/wire/orderingFrame.js'
-export { MemoryBackend } from '../../wire-protocol/backend/memory/backend.js'
-export { MemoryPubSub, type Subscriptions } from '../../wire-protocol/backend/memory/deliveries.js'
+export { MemoryBackend } from '../../wire-protocol/backend/memory/MemoryBackend.js'
+export { MemoryPubSub, type Subscribers } from '../../wire-protocol/backend/memory/deliveries.js'
+export { ChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
 
 // A Cloudflare extension: Room's session and authority Durable Objects.
 export { registerCloudflareExtension } from '../../wire-protocol/adapter/cloudflare/extensions.js'

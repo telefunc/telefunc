@@ -18,9 +18,9 @@ import { reportBug } from './channel.js'
 import { ServerBroadcastEnd, type BroadcastEndOwner } from './broadcastEnd.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
-import type { BroadcastPayload, BroadcastRoute } from '../../backend/broadcast/contract.js'
-import { followBroadcastPlane, getBroadcastBackend, unfollowBroadcastPlane } from '../../backend/install.js'
-import type { BackendReceiver, BackendSubscription } from '../../backend/subscription.js'
+import type { BroadcastPayload, BroadcastRoute } from '../../backend/driver.js'
+import { followBroadcastPlane, getBroadcastPlane, unfollowBroadcastPlane } from '../../backend/install.js'
+import type { BackendReceiver, BackendSubscription } from '../../backend/Subscriptions.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage } from '../../../utils/assert.js'
@@ -209,7 +209,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     kind: Kind,
     payload: BroadcastPayload<Kind>,
   ): ChannelPublishAck | Promise<ChannelPublishAck> {
-    return getBroadcastBackend().publish({ key: this.key, kind }, payload)
+    return getBroadcastPlane().publish({ key: this.key, kind }, payload)
   }
 
   /** @internal Without a shield, the page's payload is never parsed here. */
@@ -264,14 +264,14 @@ const BroadcastChannel = ServerBroadcast as {
 const Broadcast = {
   publish<U = unknown>(key: string, data: ChannelData<U>): ChannelPublishAck | Promise<ChannelPublishAck> {
     assertBroadcastKey(key)
-    return markHandled(getBroadcastBackend().publish({ key, kind: 'text' }, stringify(data)))
+    return markHandled(getBroadcastPlane().publish({ key, kind: 'text' }, stringify(data)))
   },
   subscribe<U = unknown>(key: string, callback: BroadcastListener<U>): BroadcastUnsubscribe {
     return subscribeRoute({ key, kind: 'text' }, (payload) => parse(payload) as ChannelData<U>, callback)
   },
   publishBinary(key: string, data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     assertBroadcastKey(key)
-    return markHandled(getBroadcastBackend().publish({ key, kind: 'binary' }, data))
+    return markHandled(getBroadcastPlane().publish({ key, kind: 'binary' }, data))
   },
   subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
     // Bytes of its own: every subscriber on the key gets the same delivery.
@@ -341,7 +341,7 @@ class RouteSubscription<Kind extends BroadcastKind> {
 
   private subscribe(replacing: boolean): void {
     // The plane in effect now; the subscription keeps its own handle.
-    const subscription = getBroadcastBackend().subscribe(this.route, this.receiver)
+    const subscription = getBroadcastPlane().subscribe(this.route, this.receiver)
     this.current = subscription
     let wasReady = subscription.state() === 'ready'
     // Only a terminal end rejects `ready`, after the manager retired and reported the subscription; an unsubscribe

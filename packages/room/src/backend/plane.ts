@@ -1,16 +1,10 @@
-export { getRoomBackend, ROOM_PLANE }
+export { getRoomPlane, ROOM_PLANE }
 
-import { backendPlane } from 'telefunc/__internal'
-import type { RoomBackend, RoomDriver, RoomPlaneKit } from './contract.js'
+import { backendPlane, type PlaneDefinition } from 'telefunc/__internal'
+import type { RoomPlane, RoomDriver, RoomPlaneKit } from './contract.js'
 import { CELL_PAGE_SIZE, DIRECTORY_PAGE_SIZE } from './contract.js'
-import {
-  decodeLaneKey,
-  encodeLaneKey,
-  everyMemberLaneKey,
-  everyTrackLaneKey,
-  roomSubscriptionSourceKey,
-} from './laneKey.js'
-import { MemoryRoomDriver } from './memory.js'
+import { decodeLaneKey, encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from './laneKey.js'
+import { MemoryRoomDriver } from './MemoryRoomDriver.js'
 import { superviseRoomDriver } from './supervise.js'
 
 const ROOM_PLANE = Symbol.for('telefunc.room.plane')
@@ -25,14 +19,14 @@ const kit: RoomPlaneKit = {
   DIRECTORY_PAGE_SIZE,
 }
 
+const roomPlane: PlaneDefinition<RoomDriver, RoomPlane> = {
+  key: ROOM_PLANE,
+  kit,
+  memoryDriver: () => new MemoryRoomDriver(),
+  supervise: superviseRoomDriver,
+}
+
 /** The Room plane of the installed backend, the in-memory one when the process installed none. */
-function getRoomBackend(): RoomBackend {
-  return backendPlane(ROOM_PLANE, {
-    fallback: (): RoomDriver => new MemoryRoomDriver(),
-    supervise: superviseRoomDriver,
-    kit,
-    sourceKey: roomSubscriptionSourceKey,
-    // A lane carries bytes.
-    payloadKind: () => 'binary',
-  })
+function getRoomPlane(): RoomPlane {
+  return backendPlane(roomPlane)
 }

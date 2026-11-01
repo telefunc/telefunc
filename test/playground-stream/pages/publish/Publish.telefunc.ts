@@ -180,12 +180,10 @@ async function onBroadcastAnsweringLoop() {
   return { timerFired: true, deliveredAtLastReceipt, delivered }
 }
 
-/** While another key's publishes are delivered, an instance subscribes and publishes three 1,500-byte messages at once,
- *  past the 4,096-byte bufferLimit of the lane that runs it. */
+/** An instance subscribes and publishes three 1,500-byte messages in the same turn, past the 4,096-byte bufferLimit of
+ *  the lane that runs it: Redis's SUBSCRIBE round trip keeps the new subscription short of ready, so the Redis driver
+ *  holds the three publishes until it is. */
 async function onBroadcastWhileEstablishing() {
-  const busy = new BroadcastChannel<number>({ key: `room:busy-test:${crypto.randomUUID()}` })
-  busy.subscribe(() => {})
-  for (let i = 0; i < 2000; i++) void busy.publish(i)
   const room = new BroadcastChannel<string>({ key: `room:held-test:${crypto.randomUUID()}` })
   const seen: string[] = []
   room.subscribe((data) => seen.push(data[0]!))
@@ -198,7 +196,7 @@ async function onBroadcastWhileEstablishing() {
     ),
   )
   await new Promise((resolve) => setTimeout(resolve, 0))
-  await Promise.all([busy.close(), room.close()])
+  await room.close()
   return { outcomes, seen }
 }
 

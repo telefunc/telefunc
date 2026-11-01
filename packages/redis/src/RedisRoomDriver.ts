@@ -1,6 +1,6 @@
 export { RedisRoomDriver }
 
-import type { OrderingInfo, SubscriptionDriver } from 'telefunc/__internal'
+import type { OrderingInfo, Subscriber, Unsubscribe } from 'telefunc/__internal'
 import type {
   CellsCx,
   CommitAccepted,
@@ -28,8 +28,8 @@ import {
   channelKey,
   directoryIndexKey,
   directoryTagsKey,
-  generationInvalidationChannel,
-  generationKeysKey,
+  incarnationInvalidationChannel,
+  incarnationKeysKey,
   memberOrderKey,
   orderKey,
   retainedKey,
@@ -39,22 +39,14 @@ import {
   commitChannels,
   type FenceTokens,
 } from './keys.js'
-import { LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrderMark } from './commands.js'
+import { LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrdering } from './commands.js'
 import type { RedisConnection } from './RedisConnection.js'
+import type { RedisPlane } from './subscriber.js'
 
 const NO_FENCE_TOKENS: FenceTokens = { lane: '', everyTrack: '', everyMember: '' }
 
 /** Room's plane on a Redis backend: its store and lanes on `connection`, keyed and paged by Room's `kit`. */
-class RedisRoomDriver implements RoomDriver {
-  readonly subscriptions: SubscriptionDriver<RoomSubscriptionSource> = {
-    bind: (source) =>
-      this.connection.subscriber.bind(source, {
-        laneChannel: channelKey(this.connection.prefix, source.roomId, source.inc, this.kit.encodeLaneKey(source.lane)),
-        invalidationChannel: generationInvalidationChannel(this.connection.prefix, source.roomId, source.inc),
-        readLaneStarts: this.readLaneStarts,
-      }),
-    partitionHere: () => '',
-  }
+class RedisRoomDriver implements RoomDriver, RedisPlane {
   private readonly connection: RedisConnection
   private readonly kit: RoomPlaneKit
   /** A Cluster's last commit per lane. */
@@ -98,6 +90,44 @@ class RedisRoomDriver implements RoomDriver {
   }
 
   commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
+    // A close commits under its lease, which would lapse before the hold ends.
+    if (!this.connection.hold.active || opts?.closingLease !== undefined) return this.commit(target, payload, opts)
+    return this.commitOnceReady(target, payload, opts)
+  }
+
+  subscribe(source: RoomSubscriptionSource, subscriber: Subscriber): Unsubscribe {
+    const { prefix } = this.connection
+    return this.connection.subscriber.subscribe({
+      source,
+      laneChannel: channelKey(prefix, source.roomId, source.inc, this.kit.encodeLaneKey(source.lane)),
+      invalidationChannel: incarnationInvalidationChannel(prefix, source.roomId, source.inc),
+      plane: this,
+      subscriber,
+    })
+  }
+
+  /** Each of the source's lanes' last commit, read once its SUBSCRIBE is acknowledged, by the lane key its frames carry
+   *  on a fan-in channel and `''` on another; null once the source's incarnation is not the open head. */
+  async readLaneStarts(source: RoomSubscriptionSource): Promise<Map<string, OrderingInfo> | null> {
+    const { roomId, inc, lane } = source
+    if (lane.kind === 'binary-all') return await this.memberLaneStarts(roomId, inc, lane.member)
+    if (lane.kind === 'binary-track') return await this.trackLaneStarts(roomId, inc, lane.track)
+    return await this.connection.run(REDIS_COMMANDS.laneStart, { ...source, laneKey: this.kit.encodeLaneKey(lane) })
+  }
+
+  private async commitOnceReady(
+    target: CommitTarget,
+    payload: Uint8Array,
+    opts?: CommitOptions,
+  ): Promise<CommitResult> {
+    const { roomId, inc, lane } = target
+    const channels = commitChannels(this.connection.prefix, roomId, inc, lane, this.kit.encodeLaneKey(lane), this.kit)
+    const held = this.connection.hold.holdCommit(channels, payload)
+    if (held !== null) payload = await held
+    return this.commit(target, payload, opts)
+  }
+
+  private commit(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
     const commit = () => this.sendCommit(target, payload, opts)
     if (!isCluster(this.connection.client)) return commit()
     // A Cluster re-sends a command Redis refused with TRYAGAIN (its slot migrating) or CLUSTERDOWN (a failover) after a
@@ -164,7 +194,7 @@ class RedisRoomDriver implements RoomDriver {
       lane.kind === 'inbox' || lane.kind === 'binary'
         ? await this.connection.client.hget(memberOrderKey(this.connection.prefix, roomId, inc, lane.member), laneKey)
         : await this.connection.client.get(orderKey(this.connection.prefix, roomId, inc, laneKey))
-    return mark === null ? null : parseOrderMark(mark)
+    return mark === null ? null : parseOrdering(mark)
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
@@ -210,16 +240,16 @@ class RedisRoomDriver implements RoomDriver {
     await this.connection.run(REDIS_COMMANDS.dropLaneOrders, { roomId, inc, member })
   }
 
-  async dropGeneration(roomId: string, inc: string): Promise<void> {
+  async dropIncarnation(roomId: string, inc: string): Promise<void> {
     // No head names the incarnation any more, so no commit adds to its manifest while it is paged.
-    const manifest = generationKeysKey(this.connection.prefix, roomId, inc)
+    const manifest = incarnationKeysKey(this.connection.prefix, roomId, inc)
     let cursor = '0'
     do {
       const [next, keys] = await this.connection.client.sscan(manifest, cursor, 'COUNT', LANE_PAGE_SIZE)
       cursor = next
       if (keys.length > 0) await this.connection.client.unlink(...keys)
     } while (cursor !== '0')
-    await this.connection.run(REDIS_COMMANDS.dropGeneration, { roomId, inc })
+    await this.connection.run(REDIS_COMMANDS.dropIncarnation, { roomId, inc })
   }
 
   directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
@@ -256,17 +286,6 @@ class RedisRoomDriver implements RoomDriver {
 
   directoryDue(): Promise<DirectoryPage['entries']> {
     return this.connection.run(REDIS_COMMANDS.directoryDue, { limit: this.kit.DIRECTORY_PAGE_SIZE })
-  }
-
-  /** Each of the source's lanes' last commit, read once its SUBSCRIBE is acknowledged, by the lane key its frames carry
-   *  on a fan-in channel and `''` on another; null once the source's incarnation is not the open head. */
-  private readonly readLaneStarts = async (
-    source: RoomSubscriptionSource,
-  ): Promise<Map<string, OrderingInfo> | null> => {
-    const { roomId, inc, lane } = source
-    if (lane.kind === 'binary-all') return await this.memberLaneStarts(roomId, inc, lane.member)
-    if (lane.kind === 'binary-track') return await this.trackLaneStarts(roomId, inc, lane.track)
-    return await this.connection.run(REDIS_COMMANDS.laneStart, { ...source, laneKey: this.kit.encodeLaneKey(lane) })
   }
 
   private async memberLaneStarts(

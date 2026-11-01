@@ -3,7 +3,7 @@ export type { AuthoritySyncOptions, AuthoritySyncOwner }
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
-import { getRoomBackend } from '../../backend/plane.js'
+import { getRoomPlane } from '../../backend/plane.js'
 import { ROOM_META_REPAIR_MS } from '../constants.js'
 import type { RoomConfigRecord } from '../protocol.js'
 import type { MembershipEvent, RoomModel } from '../../shared/model.js'
@@ -151,7 +151,7 @@ class AuthoritySync {
   }
 
   private async controlMark(): Promise<number> {
-    return (await getRoomBackend().readLaneOrder(this.incarnation.id, this.incarnation.inc, CONTROL_LANE))?.seq ?? 0
+    return (await getRoomPlane().readLaneOrder(this.incarnation.id, this.incarnation.inc, CONTROL_LANE))?.seq ?? 0
   }
 
   /** A meta change waits on one before it. Unless that one arrives, a whole read repairs the gap

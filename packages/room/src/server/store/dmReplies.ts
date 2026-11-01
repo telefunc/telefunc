@@ -1,6 +1,6 @@
 export { storeDmReply, takeDmReply, takeDmReplies, dropDmReply }
 
-import { getRoomBackend } from '../../backend/plane.js'
+import { getRoomPlane } from '../../backend/plane.js'
 import { Slice } from '../../shared/Slice.js'
 import { roomClosedError } from '../../shared/errors.js'
 import type { RoomResult } from '../../shared/protocol.js'
@@ -36,10 +36,10 @@ async function takeDmReply(roomId: string, inc: string, sender: string, ackId: s
 
 /** Every reply stored for `sender`, by `ackId`, deleted a page at a time as it is read. */
 async function takeDmReplies(roomId: string, inc: string, sender: string): Promise<Map<string, RoomResult>> {
-  const backend = getRoomBackend()
+  const plane = getRoomPlane()
   const replies = new Map<string, RoomResult>()
   const slice = new Slice()
-  for await (const page of backend.readCellPages(roomId, inc, dmReplyCellPrefix(sender))) {
+  for await (const page of plane.readCellPages(roomId, inc, dmReplyCellPrefix(sender))) {
     if ('staleInc' in page) throw roomClosedError(roomId)
     for (const [key, raw] of page.cells) replies.set(ackIdOfDmReplyCellKey(key), decodeRoomRecord<RoomResult>(raw))
     if (!(await deleteCells(roomId, inc, page.cells.keys()))) throw roomClosedError(roomId)

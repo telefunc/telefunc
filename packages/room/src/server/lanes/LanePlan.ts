@@ -4,7 +4,7 @@ export type { LanePlanOwner, LanePlanOptions }
 import { assert } from '../../utils/assert.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { getOrCreate } from '../../utils/getOrCreate.js'
-import { getRoomBackend } from '../../backend/plane.js'
+import { getRoomPlane } from '../../backend/plane.js'
 import { encodeLaneKey } from '../../backend/laneKey.js'
 import type { BackendReceiver, BackendSubscription, OrderingInfo } from 'telefunc/__internal'
 import { ROOM_MEMBER_NAMED_LANES_MAX } from '../constants.js'
@@ -738,7 +738,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
 
   /** `LaneSubscriptionOwner`: a lane of this incarnation. */
   subscribeLane(address: LaneAddress, receiver: BackendReceiver): BackendSubscription {
-    return getRoomBackend().subscribeLane(this.incarnation.id, this.incarnation.inc, address, receiver)
+    return getRoomPlane().subscribeLane(this.incarnation.id, this.incarnation.inc, address, receiver)
   }
 
   /** `LaneSubscriptionOwner`: what a lane carries goes to the replica's handler for its kind. */

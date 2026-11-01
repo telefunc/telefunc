@@ -1,16 +1,15 @@
 export { MemoryPubSub }
-export type { Subscriptions }
+export type { Subscribers }
 
 import { Fifo } from '../../../utils/Fifo.js'
-import type { BackendPayload, BackendReceiver } from '../subscription.js'
+import type { BackendPayload, Subscriber } from '../driver.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
-import { DriverAttempt } from '../attempt.js'
 import { nextTurn } from '../../flowControl/macrotaskYield.js'
 
-/** Subscriptions by key; a change replaces a key's array, so an array read at a publish or commit is its targets. */
-type Subscriptions = Map<string, readonly MemorySubscriptionAttempt[]>
+/** Subscribers by key; a change replaces a key's array, so an array read at a publish or commit is its targets. */
+type Subscribers = Map<string, readonly Subscriber[]>
 
-/** A publish's position and the local consumers it reached. */
+/** A publish's ordering and the local consumers it reached. */
 type Receipt = OrderingInfo & { receivers: number }
 
 /** Deliveries one event-loop turn runs; the rest wait for the next, so a listener answering itself
@@ -24,54 +23,8 @@ function copyBytes(bytes: Uint8Array): Uint8Array {
   return new Uint8Array(bytes)
 }
 
-function sumReceiverCounts(targets: readonly MemorySubscriptionAttempt[]): number {
-  return targets.reduce((total, target) => total + target.receiverCount(), 0)
-}
-
-function removeSubscription(subs: Subscriptions, key: string, sub: MemorySubscriptionAttempt): void {
-  const current = subs.get(key)
-  if (current === undefined || !current.includes(sub)) return
-  const rest = current.filter((other) => other !== sub)
-  if (rest.length === 0) subs.delete(key)
-  else subs.set(key, rest)
-}
-
-class MemorySubscriptionAttempt extends DriverAttempt {
-  private readonly receiver: BackendReceiver<BackendPayload>
-  private readonly localReceiverCount: () => number
-  private readonly detach: () => void
-
-  constructor({
-    receiver,
-    localReceiverCount,
-    detach,
-  }: {
-    receiver: BackendReceiver<BackendPayload>
-    localReceiverCount: () => number
-    detach: () => void
-  }) {
-    super()
-    this.receiver = receiver
-    this.localReceiverCount = localReceiverCount
-    this.detach = detach
-  }
-
-  establish(): void {
-    this.transition('ready')
-  }
-
-  async unsubscribe(): Promise<void> {
-    this.detach()
-    this.transition('closed')
-  }
-
-  deliver(payload: BackendPayload, info: { seq: number; timestamp: number }): void {
-    this.receiver(payload, info)
-  }
-
-  receiverCount(): number {
-    return this.localReceiverCount()
-  }
+function countConsumers(targets: readonly Subscriber[]): number {
+  return targets.reduce((total, target) => total + target.consumers, 0)
 }
 
 /** Deliveries in seq order: the running one stays queued, so a publish made inside it is delivered after. */
@@ -123,58 +76,41 @@ class MemoryDeliveries {
   }
 }
 
-/** An in-process driver's pub/sub: subscriptions by key, delivered in order, a turn's worth at a time. */
+/** An in-process driver's pub/sub: subscribers by key, delivered in order, a turn's worth at a time. */
 class MemoryPubSub {
   private readonly deliveries = new MemoryDeliveries()
   /** Deliveries a microtask is yet to queue. */
   private queuing = 0
 
-  /** Subscribes `receiver` to `key` of `subs`; `onDetach` runs once it is removed. */
-  subscribe({
-    subs,
-    key,
-    receiver,
-    localReceiverCount,
-    onDetach,
-  }: {
-    subs: Subscriptions
-    key: string
-    receiver: BackendReceiver<BackendPayload>
-    localReceiverCount: () => number
-    onDetach?: () => void
-  }): MemorySubscriptionAttempt {
-    const sub: MemorySubscriptionAttempt = new MemorySubscriptionAttempt({
-      receiver,
-      localReceiverCount,
-      detach: () => {
-        removeSubscription(subs, key, sub)
-        onDetach?.()
-      },
-    })
-    subs.set(key, [...(subs.get(key) ?? []), sub])
+  subscribe(subscribers: Subscribers, key: string, subscriber: Subscriber): void {
+    subscribers.set(key, [...(subscribers.get(key) ?? []), subscriber])
     // Ready once what was published before it is delivered, as a network subscriber hears its confirmation after the
-    // messages sent before it.
-    if (this.queuing === 0 && this.deliveries.length === 0) sub.establish()
-    else queueMicrotask(() => this.deliveries.deliver(() => sub.establish()))
-    return sub
+    // messages sent before it, and before what is published after it.
+    if (this.queuing > 0) queueMicrotask(() => this.deliveries.deliver(() => subscriber.ready()))
+    else if (this.deliveries.length > 0) this.deliveries.deliver(() => subscriber.ready())
+    else subscriber.ready()
+  }
+
+  unsubscribe(subscribers: Subscribers, key: string, subscriber: Subscriber): void {
+    const current = subscribers.get(key)
+    if (current === undefined || !current.includes(subscriber)) return
+    const rest = current.filter((other) => other !== subscriber)
+    if (rest.length === 0) subscribers.delete(key)
+    else subscribers.set(key, rest)
   }
 
   /** How many local consumers `targets` reach. */
-  receivers(...targets: (readonly MemorySubscriptionAttempt[])[]): number {
-    return targets.reduce((total, of) => total + sumReceiverCounts(of), 0)
+  consumers(...targets: (readonly Subscriber[])[]): number {
+    return targets.reduce((total, of) => total + countConsumers(of), 0)
   }
 
   /** Delivers `payload` to `targets` at once while nothing is queued; else queues it. */
-  publish(
-    targets: readonly MemorySubscriptionAttempt[],
-    payload: BackendPayload,
-    mark: OrderingInfo,
-  ): Receipt | Promise<Receipt> {
+  publish(targets: readonly Subscriber[], payload: BackendPayload, mark: OrderingInfo): Receipt | Promise<Receipt> {
     // Counted before delivery, which may unsubscribe or subscribe.
-    const receipt = { seq: mark.seq, timestamp: mark.timestamp, receivers: sumReceiverCounts(targets) }
+    const receipt = { seq: mark.seq, timestamp: mark.timestamp, receivers: countConsumers(targets) }
     if (this.deliveries.deliversNow()) {
       this.deliveries.deliverNow(() => {
-        for (const target of targets) target.deliver(payload, mark)
+        for (const target of targets) target.message(payload, mark)
       })
       return receipt
     }
@@ -182,7 +118,7 @@ class MemoryPubSub {
     // A queued publish resolves as it is delivered, so a publisher awaiting each can't outrun its subscribers.
     return new Promise((resolve) => {
       this.deliveries.deliver(() => {
-        for (const target of targets) target.deliver(held, mark)
+        for (const target of targets) target.message(held, mark)
         resolve(receipt)
       })
     })

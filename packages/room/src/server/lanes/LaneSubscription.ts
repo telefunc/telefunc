@@ -119,7 +119,7 @@ class LaneSubscription {
   }
 
   /** A terminal end rejects `ready` right after announcing `closed`, and the backend reports it unless it dropped the
-   *  lane's generation; a stop resolves it. */
+   *  lane's incarnation; a stop resolves it. */
   private ended(subscription: BackendSubscription): void {
     this.ensurePendingReady()
     const end = () => {

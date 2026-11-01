@@ -20,7 +20,7 @@ export {
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { raceTimeout } from '../../utils/raceTimeout.js'
-import { getRoomBackend } from '../../backend/plane.js'
+import { getRoomPlane } from '../../backend/plane.js'
 import type { CommitAccepted, CommitOptions, CommitTarget, LaneId, RoomHead } from '../../backend/contract.js'
 import { hasRoomTag } from '../../shared/protocol.js'
 import type { RoomConfigRecord, RoomDemandPage } from '../protocol.js'
@@ -85,7 +85,7 @@ type LaneCommit = CommitAccepted | { gone: string } | { stale: 'incarnation' }
  *  server applies its own joins and leaves as it commits them, so a join's frame must not reach it after the member's
  *  leave. */
 async function commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<LaneCommit> {
-  const result = await getRoomBackend().commitLane(target, payload, opts)
+  const result = await getRoomPlane().commitLane(target, payload, opts)
   // Required cells are member records, so a missing one names the member that left.
   if ('stale' in result) return result.stale === 'cell' ? { gone: memberIdOfCellKey(result.key) } : result
   if (result.delivery !== undefined) await handedOff(target.roomId, result)

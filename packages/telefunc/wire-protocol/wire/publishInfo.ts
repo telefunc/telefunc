@@ -12,7 +12,7 @@ type WirePublishInfo = { seq: number; timestamp: number }
 // Format: seq,timestamp\n{serialized text}
 // JSON.stringify never produces bare \n, so the first \n reliably splits info from payload.
 
-/** A publish frame at `info`; a text one with no position (null) carries seq 0 and the current time. */
+/** A publish frame at `info`; a text one with no ordering (null) carries seq 0 and the current time. */
 function encodePublish(text: string, info: WirePublishInfo | null): string
 function encodePublish(data: Uint8Array, info: WirePublishInfo): Uint8Array
 function encodePublish(payload: string | Uint8Array, info: WirePublishInfo | null): string | Uint8Array {

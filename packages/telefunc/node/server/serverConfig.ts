@@ -376,10 +376,11 @@ function reconnectWindow(c = getServerConfig().channel): number {
 }
 
 /** What a channel to a page may hold, and how long it waits for its page to come back. */
-function getChannelLimits(): { bufferLimit: number; reconnectWindow: number } {
+function getChannelLimits(): { bufferLimit: number; bufferLimitBinary: number; reconnectWindow: number } {
   const { channel } = getServerConfig()
   return {
     bufferLimit: channel.bufferLimit,
+    bufferLimitBinary: channel.bufferLimitBinary,
     reconnectWindow: reconnectWindow(channel),
   }
 }

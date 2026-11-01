@@ -23,12 +23,13 @@ import type {
 } from '../backend/contract.js'
 import type {
   OrderingInfo,
-  SubscriptionDriver,
+  Subscriber,
   TelefuncExtensionNamespace,
   TelefuncExtensionStub,
+  Unsubscribe,
 } from 'telefunc/__internal'
 import type { CloudflareRoomAuthorityStub } from './do.js'
-import { currentRoomSessionManager, getRoomSessionManager } from './subscription.js'
+import { currentRoomSessionSubscriptions, getRoomSessionSubscriptions } from './subscription.js'
 import { ROOM_CLOUDFLARE_EXTENSION } from '../server/constants.js'
 
 // Room authorities share the Telefunc namespace with sessions and Broadcast, so a room id is always prefixed.
@@ -38,22 +39,14 @@ const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
 /** A subscription requires its session DO's context; a lane commit made in one goes through that session's ordered
  *  stub. */
 class CloudflareRoomDriver implements RoomDriver {
-  readonly subscriptions: SubscriptionDriver<RoomSubscriptionSource>
-  private readonly namespace: () => TelefuncExtensionNamespace
+  private readonly getNamespace: () => TelefuncExtensionNamespace
 
-  constructor({ namespace }: { namespace: () => TelefuncExtensionNamespace }) {
-    this.namespace = namespace
-    this.subscriptions = {
-      bind: (source) => {
-        const room = getRoomSessionManager()
-        return {
-          partition: room.partition,
-          // A route call line opens a fresh stub, like a commit's: a stub that rejected may be broken.
-          open: (receiver) => room.openSubscription(source, () => this.stub(source.roomId), receiver),
-        }
-      },
-      partitionHere: () => currentRoomSessionManager()?.partition ?? null,
-    }
+  constructor({ getNamespace }: { getNamespace: () => TelefuncExtensionNamespace }) {
+    this.getNamespace = getNamespace
+  }
+
+  subscribe(source: RoomSubscriptionSource, subscriber: Subscriber): Unsubscribe {
+    return getRoomSessionSubscriptions(this).subscribe(source, subscriber)
   }
 
   async readHead(roomId: string): Promise<RoomHead | null> {
@@ -89,10 +82,8 @@ class CloudflareRoomDriver implements RoomDriver {
   ): Promise<CommitResult> {
     const commit = (stub: CloudflareRoomAuthorityStub) => stub.commitLane(inc, lane, payload, opts)
     // From a session DO, through its ordered stub, so its commits to a room keep the order Room sent them in.
-    const session = currentRoomSessionManager()
-    const wire = await (session
-      ? session.callAuthority(roomId, () => this.stub(roomId), commit)
-      : commit(this.stub(roomId)))
+    const session = currentRoomSessionSubscriptions(this)
+    const wire = await (session ? session.callAuthority(roomId, commit) : commit(this.stub(roomId)))
     if ('stale' in wire) return wire
     const receipt: CommitAccepted = {
       accepted: true,
@@ -124,8 +115,8 @@ class CloudflareRoomDriver implements RoomDriver {
     return this.stub(roomId).dropLaneOrders(inc, member)
   }
 
-  async dropGeneration(roomId: string, inc: string): Promise<void> {
-    return this.stub(roomId).dropGeneration(inc)
+  async dropIncarnation(roomId: string, inc: string): Promise<void> {
+    return this.stub(roomId).dropIncarnation(inc)
   }
 
   async directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
@@ -148,7 +139,7 @@ class CloudflareRoomDriver implements RoomDriver {
     return this.directory().directoryDue()
   }
 
-  private stub(roomId: string): CloudflareRoomAuthorityStub {
+  stub(roomId: string): CloudflareRoomAuthorityStub {
     return this.object(ROOM_AUTHORITY_PREFIX + roomId)
   }
 
@@ -157,7 +148,7 @@ class CloudflareRoomDriver implements RoomDriver {
   }
 
   private object(name: string): CloudflareRoomAuthorityStub {
-    const namespace = this.namespace()
+    const namespace = this.getNamespace()
     return roomAuthorityStub(namespace.get(namespace.idFromName(name)))
   }
 }

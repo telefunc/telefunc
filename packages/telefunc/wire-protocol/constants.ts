@@ -213,8 +213,6 @@ export const WIRE_QUEUE_DELAY_MS = 300
 export const CHANNEL_BUFFER_LIMIT_BYTES = 512 * 1024
 /** Maximum bytes buffered per channel for binary messages sent before a peer connects. */
 export const CHANNEL_BUFFER_LIMIT_BINARY_BYTES = 2 * 1024 * 1024
-/** How long a publish waits for this instance's new subscriptions on its key or lane. */
-export const ESTABLISH_HOLD_MS = 60_000
 
 /** How long a channel waits for its peer to connect: it outlasts a page's noticing its wire died, and a reconnect. */
 export const CHANNEL_CONNECT_TTL_MS = 15_000

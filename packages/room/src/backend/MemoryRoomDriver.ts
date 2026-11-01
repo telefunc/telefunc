@@ -31,18 +31,16 @@ import {
   headCxMatches,
   isOpenIncarnation,
   materializeHead,
-  nextOrderMark,
+  nextOrdering,
   publicHead,
   type StoredHead,
 } from './semantics.js'
 import {
-  type BackendPayload,
-  type BackendReceiver,
   type OrderingInfo,
-  type SubscriptionAttempt,
-  type SubscriptionDriver,
+  type Subscriber,
+  type Unsubscribe,
   MemoryPubSub,
-  type Subscriptions,
+  type Subscribers,
 } from 'telefunc/__internal'
 import { createDeferred } from '../utils/createDeferred.js'
 import { getOrCreate } from '../utils/getOrCreate.js'
@@ -53,8 +51,8 @@ type Expiring = { expiresAt: number | null }
 type StoredCell = { bytes: Uint8Array; version: string }
 type RetainedEntry = { lane: LaneId; payload: Uint8Array; seq: number; timestamp: number }
 
-type Generation = {
-  /** The last cell version this generation issued. */
+type Incarnation = {
+  /** The last cell version this incarnation issued. */
   version: number
   cells: Map<string, StoredCell>
   /** Cell keys by each of their prefixes ending in ':', the separator of cell keys, so a prefix read lists its own. */
@@ -68,14 +66,14 @@ type Generation = {
   retainedOf: Map<string, Set<string>>
   /** The keys of each track's retained binary lanes. */
   retainedOfTrack: Map<string, Set<string>>
-  subs: Subscriptions
+  subs: Subscribers
   /** Every-track subscriptions by member id, so a binary commit finds its member's without building a key. */
-  everyTrackSubs: Subscriptions
+  everyTrackSubs: Subscribers
   /** Every-member subscriptions by track, likewise. */
-  everyMemberSubs: Subscriptions
+  everyMemberSubs: Subscribers
 }
 
-type RoomRecord = { head: StoredHead | null; gens: Map<string, Generation> }
+type RoomRecord = { head: StoredHead | null; incarnations: Map<string, Incarnation> }
 
 type DirectoryEntry = { incTag: string; checkAt: number }
 /** A directory entry's check, current while its entry is still due at `at`. */
@@ -95,7 +93,7 @@ function isExpired(entry: Expiring, now: number): boolean {
   return entry.expiresAt !== null && entry.expiresAt <= now
 }
 
-function newGeneration(): Generation {
+function newIncarnation(): Incarnation {
   return {
     version: 0,
     cells: new Map(),
@@ -116,21 +114,21 @@ function* separatorPrefixes(key: string): Generator<string> {
 }
 
 /** The collection `prefix`'s keys are among: its longest separator prefix's index entry, or every cell. */
-function cellKeyIndex(gen: Generation, prefix: string): Map<string, StoredCell> | Set<string> | undefined {
+function cellKeyIndex(incarnation: Incarnation, prefix: string): Map<string, StoredCell> | Set<string> | undefined {
   const indexed = prefix.slice(0, prefix.lastIndexOf(':') + 1)
-  return indexed === '' ? gen.cells : gen.cellsByPrefix.get(indexed)
+  return indexed === '' ? incarnation.cells : incarnation.cellsByPrefix.get(indexed)
 }
 
-function cellKeysWithPrefix(gen: Generation, prefix: string): Iterable<string> {
-  const keys = cellKeyIndex(gen, prefix)?.keys() ?? []
+function cellKeysWithPrefix(incarnation: Incarnation, prefix: string): Iterable<string> {
+  const keys = cellKeyIndex(incarnation, prefix)?.keys() ?? []
   return prefix.endsWith(':') ? keys : [...keys].filter((key) => key.startsWith(prefix))
 }
 
 /** The keys under `prefix`, live, so a key added during the iteration comes, those sharing the prefix's next
  *  separator-ended segment as one run, as key order keeps them on Redis and Cloudflare. */
-function* liveKeysWithPrefix(gen: Generation, prefix: string): Generator<string> {
+function* liveKeysWithPrefix(incarnation: Incarnation, prefix: string): Generator<string> {
   const runs = new Set<string>()
-  for (const key of liveEntryKeys(() => cellKeyIndex(gen, prefix))) {
+  for (const key of liveEntryKeys(() => cellKeyIndex(incarnation, prefix))) {
     if (!key.startsWith(prefix)) continue
     const end = key.indexOf(':', prefix.length)
     if (end === -1) {
@@ -140,7 +138,7 @@ function* liveKeysWithPrefix(gen: Generation, prefix: string): Generator<string>
     const run = key.slice(0, end + 1)
     if (runs.has(run)) continue
     runs.add(run)
-    yield* liveEntryKeys(() => gen.cellsByPrefix.get(run))
+    yield* liveEntryKeys(() => incarnation.cellsByPrefix.get(run))
   }
 }
 
@@ -165,11 +163,11 @@ function takePage(keys: Iterator<string>, seen: Set<string>): string[] {
   return page
 }
 
-function readCellsOf(gen: Generation, keys: Iterable<string>, now: number): CellsRead {
+function readCellsOf(incarnation: Incarnation, keys: Iterable<string>, now: number): CellsRead {
   const cells = new Map<string, Uint8Array>()
   const versions = new Map<string, string>()
   for (const key of keys) {
-    const cell = gen.cells.get(key)
+    const cell = incarnation.cells.get(key)
     if (cell === undefined) continue
     cells.set(key, copyBytes(cell.bytes))
     versions.set(key, cell.version)
@@ -177,27 +175,26 @@ function readCellsOf(gen: Generation, keys: Iterable<string>, now: number): Cell
   return { cells, versions, now }
 }
 
-function setCell(gen: Generation, key: string, bytes: Uint8Array | null, version: string): void {
+function setCell(incarnation: Incarnation, key: string, bytes: Uint8Array | null, version: string): void {
   if (bytes === null) {
-    if (!gen.cells.delete(key)) return
-    for (const prefix of separatorPrefixes(key)) unindex(gen.cellsByPrefix, prefix, key)
+    if (!incarnation.cells.delete(key)) return
+    for (const prefix of separatorPrefixes(key)) unindex(incarnation.cellsByPrefix, prefix, key)
     return
   }
-  if (!gen.cells.has(key)) {
-    for (const prefix of separatorPrefixes(key)) getOrCreate(gen.cellsByPrefix, prefix, () => new Set()).add(key)
+  if (!incarnation.cells.has(key)) {
+    for (const prefix of separatorPrefixes(key))
+      getOrCreate(incarnation.cellsByPrefix, prefix, () => new Set()).add(key)
   }
-  gen.cells.set(key, { bytes: copyBytes(bytes), version })
+  incarnation.cells.set(key, { bytes: copyBytes(bytes), version })
 }
 
 function advanceOrder(order: Map<string, OrderingInfo>, domain: string, now: number): OrderingInfo {
-  const mark = nextOrderMark(order.get(domain), now)
+  const mark = nextOrdering(order.get(domain), now)
   order.set(domain, mark)
   return mark
 }
 
 class MemoryRoomDriver implements RoomDriver {
-  readonly subscriptions: SubscriptionDriver<RoomSubscriptionSource>
-
   private readonly rooms = new Map<string, RoomRecord>()
   private readonly directory = new Map<string, DirectoryEntry>()
   /** The directory's room ids in code point order, so a page reads only its own ids. The first list sorts them, and puts
@@ -207,16 +204,6 @@ class MemoryRoomDriver implements RoomDriver {
   private readonly directoryChecks: DirectoryCheck[] = []
   private revSeq = 0
   private readonly pubSub = new MemoryPubSub()
-
-  constructor() {
-    this.subscriptions = {
-      bind: (source) => ({
-        partition: '',
-        open: (receiver, localReceiverCount) => this.openSubscription(source, receiver, localReceiverCount),
-      }),
-      partitionHere: () => '',
-    }
-  }
 
   async readHead(roomId: string): Promise<RoomHead | null> {
     const head = this.liveHead(this.rooms.get(roomId))
@@ -237,14 +224,14 @@ class MemoryRoomDriver implements RoomDriver {
     const materialized = materializeHead(next, Date.now(), `rev-${++this.revSeq}`)
     const stored = { ...materialized, config: copyBytes(materialized.config) }
     room.head = stored
-    if (stored.currentInc !== null) this.generation(room, stored.currentInc)
+    if (stored.currentInc !== null) this.incarnation(room, stored.currentInc)
     return stored
   }
 
   async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
-    const gen = this.readableGeneration(roomId, inc)
-    if (gen === null) return { staleInc: true }
-    return readCellsOf(gen, 'keys' in sel ? sel.keys : cellKeysWithPrefix(gen, sel.prefix), Date.now())
+    const incarnation = this.readableIncarnation(roomId, inc)
+    if (incarnation === null) return { staleInc: true }
+    return readCellsOf(incarnation, 'keys' in sel ? sel.keys : cellKeysWithPrefix(incarnation, sel.prefix), Date.now())
   }
 
   /** Skips a key it returned that was removed and added again (see `liveKeysWithPrefix`). */
@@ -253,38 +240,39 @@ class MemoryRoomDriver implements RoomDriver {
     const seen = new Set<string>()
     let page: string[]
     do {
-      const gen = this.readableGeneration(roomId, inc)
-      if (gen === null) {
+      const incarnation = this.readableIncarnation(roomId, inc)
+      if (incarnation === null) {
         yield { staleInc: true }
         return
       }
-      keys ??= liveKeysWithPrefix(gen, prefix)
+      keys ??= liveKeysWithPrefix(incarnation, prefix)
       page = takePage(keys, seen)
-      yield readCellsOf(gen, page, Date.now())
+      yield readCellsOf(incarnation, page, Date.now())
     } while (page.length === CELL_PAGE_SIZE)
   }
 
   /** Closing tails may read; only writes require an open head. */
-  private readableGeneration(roomId: string, inc: string): Generation | null {
+  private readableIncarnation(roomId: string, inc: string): Incarnation | null {
     const room = this.rooms.get(roomId)
     const head = this.liveHead(room)
     if (room === undefined || head === null || head.currentInc !== inc) return null
-    return this.generation(room, inc)
+    return this.incarnation(room, inc)
   }
 
   async compareExchangeCells(roomId: string, inc: string, cx: CellsCx): Promise<CxResult> {
     const room = this.rooms.get(roomId)
     const head = this.liveHead(room)
     if (room === undefined || !isOpenIncarnation(head, inc)) return 'stale-inc'
-    const gen = this.generation(room, inc)
-    if (cx.expect.some(({ key, version }) => (gen.cells.get(key)?.version ?? null) !== version)) return 'conflict'
-    const version = String(++gen.version)
-    for (const mutation of cx.mutations) setCell(gen, mutation.key, mutation.bytes, version)
+    const incarnation = this.incarnation(room, inc)
+    if (cx.expect.some(({ key, version }) => (incarnation.cells.get(key)?.version ?? null) !== version))
+      return 'conflict'
+    const version = String(++incarnation.version)
+    for (const mutation of cx.mutations) setCell(incarnation, mutation.key, mutation.bytes, version)
     const counters = new Map<string, CellCounter>()
     for (const count of cx.counts ?? []) {
-      const counted = countCell(gen.cells.get(count.key)?.bytes, count, Date.now())
+      const counted = countCell(incarnation.cells.get(count.key)?.bytes, count, Date.now())
       if (counted === null) continue
-      if (counted.written) setCell(gen, count.key, encodeCellCounter(counted.counter), version)
+      if (counted.written) setCell(incarnation, count.key, encodeCellCounter(counted.counter), version)
       counters.set(count.key, counted.counter)
     }
     return { committed: counters }
@@ -300,114 +288,114 @@ class MemoryRoomDriver implements RoomDriver {
     if (room === undefined || !commitPreconditionHolds(head, inc, lane.kind, opts?.closingLease, Date.now())) {
       return { stale: 'incarnation' }
     }
-    const gen = this.generation(room, inc)
-    const missing = opts?.requiredCellKeys?.find((key) => !gen.cells.has(key))
+    const incarnation = this.incarnation(room, inc)
+    const missing = opts?.requiredCellKeys?.find((key) => !incarnation.cells.has(key))
     if (missing !== undefined) return { stale: 'cell', key: missing }
     const key = encodeLaneKey(lane)
     const frame = copyBytes(payload)
     const order =
       lane.kind === 'inbox' || lane.kind === 'binary'
-        ? getOrCreate(gen.memberOrders, lane.member, () => new Map())
-        : gen.order
+        ? getOrCreate(incarnation.memberOrders, lane.member, () => new Map())
+        : incarnation.order
     const mark = advanceOrder(order, key, Date.now())
     if (opts?.retain) {
       // A lane holding a retained frame is already indexed: its frame and index entries leave together.
-      if (lane.kind === 'binary' && !gen.retained.has(key)) {
-        getOrCreate(gen.retainedOf, lane.member, () => new Set()).add(key)
-        getOrCreate(gen.retainedOfTrack, lane.track, () => new Set()).add(key)
+      if (lane.kind === 'binary' && !incarnation.retained.has(key)) {
+        getOrCreate(incarnation.retainedOf, lane.member, () => new Set()).add(key)
+        getOrCreate(incarnation.retainedOfTrack, lane.track, () => new Set()).add(key)
       }
-      gen.retained.set(key, { lane: copyLane(lane), payload: frame, seq: mark.seq, timestamp: mark.timestamp })
+      incarnation.retained.set(key, { lane: copyLane(lane), payload: frame, seq: mark.seq, timestamp: mark.timestamp })
     }
-    const targets = gen.subs.get(key) ?? NO_TARGETS
+    const targets = incarnation.subs.get(key) ?? NO_TARGETS
     // A binary commit also reaches its member's every-track lane and its track's every-member lane.
     const binary = lane.kind === 'binary'
-    const everyTrack = binary ? (gen.everyTrackSubs.get(lane.member) ?? NO_TARGETS) : NO_TARGETS
-    const everyMember = binary ? (gen.everyMemberSubs.get(lane.track) ?? NO_TARGETS) : NO_TARGETS
+    const everyTrack = binary ? (incarnation.everyTrackSubs.get(lane.member) ?? NO_TARGETS) : NO_TARGETS
+    const everyMember = binary ? (incarnation.everyMemberSubs.get(lane.track) ?? NO_TARGETS) : NO_TARGETS
     const delivered = lane.kind === 'inbox' || lane.kind === 'control' ? createDeferred() : null
     // Commits assign their seq and queue their delivery in one synchronous step, so deliveries run in seq order.
     const nextTurn = this.pubSub.deliverSoon(() => {
       // A subscriber may write into the bytes it is given, which a retained frame must not share.
       const shared = opts?.retain ? copyBytes(frame) : frame
-      for (const target of targets) target.deliver(shared, mark)
-      for (const target of everyTrack) target.deliver(shared, mark)
-      for (const target of everyMember) target.deliver(shared, mark)
+      for (const target of targets) target.message(shared, mark)
+      for (const target of everyTrack) target.message(shared, mark)
+      for (const target of everyMember) target.message(shared, mark)
       delivered?.resolve()
     })
-    const receivers = this.pubSub.receivers(targets, everyTrack, everyMember)
+    const receivers = this.pubSub.consumers(targets, everyTrack, everyMember)
     if (nextTurn !== null) await nextTurn
     if (delivered === null) return { accepted: true, seq: mark.seq, timestamp: mark.timestamp, receivers }
     return { accepted: true, seq: mark.seq, timestamp: mark.timestamp, receivers, delivery: delivered.promise }
   }
 
   async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {
-    const gen = this.rooms.get(roomId)?.gens.get(inc)
-    const order = lane.kind === 'inbox' || lane.kind === 'binary' ? gen?.memberOrders.get(lane.member) : gen?.order
+    const incarnation = this.rooms.get(roomId)?.incarnations.get(inc)
+    const order =
+      lane.kind === 'inbox' || lane.kind === 'binary' ? incarnation?.memberOrders.get(lane.member) : incarnation?.order
     const mark = order?.get(encodeLaneKey(lane))
     return mark === undefined ? null : { ...mark }
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
-    const entry = this.rooms.get(roomId)?.gens.get(inc)?.retained.get(encodeLaneKey(lane))
+    const entry = this.rooms.get(roomId)?.incarnations.get(inc)?.retained.get(encodeLaneKey(lane))
     if (entry === undefined) return null
     return { payload: copyBytes(entry.payload), seq: entry.seq, timestamp: entry.timestamp }
   }
 
   async listRetained(roomId: string, inc: string, of?: RetainedOf): Promise<LaneId[]> {
-    const gen = this.rooms.get(roomId)?.gens.get(inc)
-    if (gen === undefined) return []
-    if (of === undefined) return Array.from(gen.retained.values(), (entry) => copyLane(entry.lane))
-    const keys = 'member' in of ? gen.retainedOf.get(of.member) : gen.retainedOfTrack.get(of.track)
-    return Array.from(keys ?? [], (key) => copyLane(gen.retained.get(key)!.lane))
+    const incarnation = this.rooms.get(roomId)?.incarnations.get(inc)
+    if (incarnation === undefined) return []
+    if (of === undefined) return Array.from(incarnation.retained.values(), (entry) => copyLane(entry.lane))
+    const keys = 'member' in of ? incarnation.retainedOf.get(of.member) : incarnation.retainedOfTrack.get(of.track)
+    return Array.from(keys ?? [], (key) => copyLane(incarnation.retained.get(key)!.lane))
   }
 
   async deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
-    const gen = this.rooms.get(roomId)?.gens.get(inc)
+    const incarnation = this.rooms.get(roomId)?.incarnations.get(inc)
     const key = encodeLaneKey(lane)
-    if (gen === undefined || (opts?.ifSeq !== undefined && gen.retained.get(key)?.seq !== opts.ifSeq)) return
-    gen.retained.delete(key)
+    if (incarnation === undefined || (opts?.ifSeq !== undefined && incarnation.retained.get(key)?.seq !== opts.ifSeq))
+      return
+    incarnation.retained.delete(key)
     if (lane.kind !== 'binary') return
-    unindex(gen.retainedOf, lane.member, key)
-    unindex(gen.retainedOfTrack, lane.track, key)
+    unindex(incarnation.retainedOf, lane.member, key)
+    unindex(incarnation.retainedOfTrack, lane.track, key)
   }
 
   async dropLaneOrders(roomId: string, inc: string, member: string): Promise<void> {
-    this.rooms.get(roomId)?.gens.get(inc)?.memberOrders.delete(member)
+    this.rooms.get(roomId)?.incarnations.get(inc)?.memberOrders.delete(member)
   }
 
-  private openSubscription(
-    { roomId, inc, lane }: RoomSubscriptionSource,
-    receiver: BackendReceiver<BackendPayload>,
-    localReceiverCount: () => number,
-  ): SubscriptionAttempt {
+  subscribe({ roomId, inc, lane }: RoomSubscriptionSource, subscriber: Subscriber): Unsubscribe {
     const room = this.rooms.get(roomId)
-    const head = this.liveHead(room)
-    if (room === undefined || !isOpenIncarnation(head, inc)) {
-      throw new Error(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)
+    if (room === undefined || !isOpenIncarnation(this.liveHead(room), inc)) {
+      subscriber.failed(new Error(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`))
+      // Core never unsubscribes a failed subscription.
+      return async () => {}
     }
     // Registration is durable before `ready` resolves: a commit accepted after this point must see it.
-    const gen = this.generation(room, inc)
-    let subs: Subscriptions
+    const incarnation = this.incarnation(room, inc)
+    let subscribers: Subscribers
     let key: string
     if (lane.kind === 'binary-all') {
-      subs = gen.everyTrackSubs
+      subscribers = incarnation.everyTrackSubs
       key = lane.member
     } else if (lane.kind === 'binary-track') {
-      subs = gen.everyMemberSubs
+      subscribers = incarnation.everyMemberSubs
       key = lane.track
     } else {
-      subs = gen.subs
+      subscribers = incarnation.subs
       key = encodeLaneKey(lane)
     }
     // Ready once what was committed before it is delivered: a lane it replaces delivers those first.
-    return this.pubSub.subscribe({ subs, key, receiver, localReceiverCount })
+    this.pubSub.subscribe(subscribers, key, subscriber)
+    return async () => this.pubSub.unsubscribe(subscribers, key, subscriber)
   }
 
-  async dropGeneration(roomId: string, inc: string): Promise<void> {
+  async dropIncarnation(roomId: string, inc: string): Promise<void> {
     const room = this.rooms.get(roomId)
     if (room === undefined) return
-    const gen = room.gens.get(inc)
-    if (gen === undefined) return // already dropped (the janitor is resumable)
-    room.gens.delete(inc)
+    const incarnation = room.incarnations.get(inc)
+    if (incarnation === undefined) return // already dropped (the janitor is resumable)
+    room.incarnations.delete(inc)
     this.releaseWhenLapsed(roomId, room)
   }
 
@@ -458,12 +446,12 @@ class MemoryRoomDriver implements RoomDriver {
   // ── internals ──
 
   private roomFor(roomId: string): RoomRecord {
-    return getOrCreate(this.rooms, roomId, () => ({ head: null, gens: new Map() }))
+    return getOrCreate(this.rooms, roomId, () => ({ head: null, incarnations: new Map() }))
   }
 
   /** A room with no incarnation left is forgotten once its tombstone lapses (this backend's revs are never reused). */
   private releaseWhenLapsed(roomId: string, room: RoomRecord): void {
-    if (this.rooms.get(roomId) !== room || room.gens.size > 0) return
+    if (this.rooms.get(roomId) !== room || room.incarnations.size > 0) return
     const head = this.liveHead(room)
     if (head === null) {
       this.rooms.delete(roomId)
@@ -473,8 +461,8 @@ class MemoryRoomDriver implements RoomDriver {
     unrefTimer(setTimeout(() => this.releaseWhenLapsed(roomId, room), head.expiresAt - Date.now()))
   }
 
-  private generation(room: RoomRecord, inc: string): Generation {
-    return getOrCreate(room.gens, inc, newGeneration)
+  private incarnation(room: RoomRecord, inc: string): Incarnation {
+    return getOrCreate(room.incarnations, inc, newIncarnation)
   }
 
   /** Lazy TTL: a lapsed tombstone reads as absent, which is what reopens an absence epoch. */
