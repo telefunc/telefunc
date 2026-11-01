@@ -29,8 +29,6 @@ class WireSender implements PeerSender, SocketWaitOwner {
   private readonly wait = new SocketWait({ owner: this })
   private readonly deliveries: Deliveries
   private readonly channels: () => Iterable<ServerChannel>
-  /** The number of the delivery that completed the frame the wire is handling. */
-  frameDelivery = 0
   /** The wire closed: it sends nothing more, holds nothing and delivered nothing. */
   private closed = false
   /** What may be written before the backlog is read again against what its channels' flow control allows. */
@@ -80,7 +78,7 @@ class WireSender implements PeerSender, SocketWaitOwner {
   }
 
   deliveredBeforeFrame(ms: number): number {
-    return this.closed ? 0 : this.deliveries.before(this.frameDelivery, ms)
+    return this.closed ? 0 : this.deliveries.beforeHandled(ms)
   }
 
   close(): void {

@@ -490,7 +490,7 @@ class ChannelMux implements RegistrationWaitsOwner {
     delivery: number,
   ): Promise<ReconcileOutcome | null> {
     try {
-      entry.sender.frameDelivery = delivery
+      entry.state.deliveries.handle(delivery)
       return (await this.handleFrame(entry, rawFrame)) ?? null
     } catch (err) {
       if (!isProtocolViolationError(err)) throw err
