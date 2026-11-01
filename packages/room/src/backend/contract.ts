@@ -193,7 +193,8 @@ type RoomDriver = {
   subscribe(source: RoomSubscriptionSource, subscriber: Subscriber): Unsubscribe
 }
 
-/** Internal supervised Room consumer contract. */
+/** What Room's server code calls: the driver checked, with its lane subscriptions shared by source and host
+ *  (`superviseRoomDriver`). */
 type RoomPlane = Omit<RoomDriver, 'subscribe'> & {
   subscribeLane(
     roomId: string,
