@@ -125,11 +125,11 @@ class BdpEstimator {
     this.roundTrips = roundTrips
   }
 
-  /** Settles the ping in flight; `wire._deliveredBefore(ms)` is what the wire delivered from any channel in the `ms`
-   *  before. */
+  /** Settles the ping in flight. `channel._deliveredBefore(ms)` is what the channel's wire delivered, from any
+   *  channel, in the `ms` before. */
   onPingAck(
     { probe, backlog: senderBacklog, pathRtt: senderPathRtt }: BdpPingAck,
-    wire: Pick<CreditOwner, '_deliveredBefore'>,
+    channel: Pick<CreditOwner, '_deliveredBefore'>,
     sendWait: SendWait | null = null,
   ): GrowDecision {
     if (this.settleAttachProbe(probe)) return NOT_SETTLED
@@ -142,7 +142,7 @@ class BdpEstimator {
     const roundWait = sendWait?.longestWaitSince(this.lastPingAt) ?? 0
     const received = this.bytesReceived - this.bytesAtPingSent
     const starved = senderBacklog * 8 < this.currentByteWindow
-    this.boundRoundTrip(rtt, received, starved, wire)
+    this.boundRoundTrip(rtt, received, starved, channel)
     const pathRtt = this.pathRtt(senderPathRtt)
     // A round of credit on a batch-POST wire also waits for its POST.
     const loopRtt = pathRtt + roundWait + (roundTrips?.longestPostWaitSince(this.lastPingAt) ?? 0)
@@ -163,12 +163,12 @@ class BdpEstimator {
     rtt: number,
     received: number,
     starved: boolean,
-    wire: Pick<CreditOwner, '_deliveredBefore'>,
+    channel: Pick<CreditOwner, '_deliveredBefore'>,
   ): void {
     const roundRtt = Math.max(1, rtt - this.pingWait)
     if (this.boundRtt < Infinity && roundRtt < this.boundRtt) this.boundRtt = roundRtt
     // Starved, the wire near idle before the ack: no queue held it, so the round trip less its wait is the path's.
-    if (starved && received * 3 >= this.currentByteWindow * 2 && wire._deliveredBefore(rtt / 8) * 16 < received) {
+    if (starved && received * 3 >= this.currentByteWindow * 2 && channel._deliveredBefore(rtt / 8) * 16 < received) {
       this.boundRtt = roundRtt
     }
   }
