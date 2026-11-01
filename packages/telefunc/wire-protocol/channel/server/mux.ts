@@ -32,7 +32,7 @@ import { IndexedPeer } from './IndexedPeer.js'
 import { ServerHeadroom } from '../../flowControl/server/headroom.js'
 import { ServerPieceReceiver } from '../../flowControl/server/pieceReceiver.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
-import { WireSender } from './WireSender.js'
+import { WireSender, type WireSenderOwner } from './WireSender.js'
 import { TransportSocket } from './TransportSocket.js'
 import { AwaitedChannels, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
 import { RegistrationWaits, type RegistrationWaitsOwner } from './RegistrationWaits.js'
@@ -145,7 +145,7 @@ function getChannelMux(): ChannelMux {
   return getGlobals().mux
 }
 
-class ChannelMux implements RegistrationWaitsOwner {
+class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
   private readonly channels = new Map<string, ServerChannel>()
   /** The channels a reconcile named before they registered, which `registerChannel` attaches. */
   private readonly registrationWaits = new RegistrationWaits({ owner: this })
@@ -247,7 +247,6 @@ class ChannelMux implements RegistrationWaitsOwner {
         carry: (ack) => headroom.sender.carry(ack),
       }),
     }
-    const attaching = new Set<ServerChannel>()
     const deliveries = new Deliveries()
     const entry: ConnectionEntry = {
       wire: connection,
@@ -263,15 +262,15 @@ class ChannelMux implements RegistrationWaitsOwner {
         retiredByBarrier: false,
         recvBacklog,
         awaited: new AwaitedChannels({ backlog: recvBacklog, waits: this.registrationWaits }),
-        attaching,
+        attaching: new Set(),
       },
       transport: transport as ServerTransport<unknown>,
       sender: new WireSender({
+        owner: this,
         wire: connection,
         transport: transport as ServerTransport<unknown>,
         pieces,
         deliveries,
-        channels: () => this.wireChannels(transport, connection, attaching),
       }),
       request,
     }
@@ -960,14 +959,12 @@ class ChannelMux implements RegistrationWaitsOwner {
   }
 
   /** The channels the wire's send headroom counts: its session's, and those attaching in this turn. */
-  private wireChannels<TConnection>(
-    transport: ServerTransport<TConnection>,
-    connection: TConnection,
-    attaching: Set<ServerChannel>,
-  ): Set<ServerChannel> {
-    const sessionId = transport.getSessionId(connection)
+  channelsOn(connection: Wire): Set<ServerChannel> {
+    const entry = this.connectionEntries.get(connection)
+    if (entry === undefined) return new Set()
+    const sessionId = entry.transport.getSessionId(connection)
     const session = sessionId === undefined ? undefined : this.sessions.peekSession(sessionId)
-    const channels = new Set(attaching)
+    const channels = new Set(entry.state.attaching)
     for (const { channel } of session?.values() ?? []) channels.add(channel)
     return channels
   }

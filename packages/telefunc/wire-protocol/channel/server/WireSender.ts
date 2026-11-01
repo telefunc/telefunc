@@ -1,4 +1,5 @@
 export { WireSender }
+export type { WireSenderOwner }
 
 import { WIRE_SEND_BACKLOG_BASE_BYTES } from '../../constants.js'
 import { encode } from '../../wire/frame.js'
@@ -9,26 +10,31 @@ import type { ServerTransport, Wire, WirePieces } from './mux.js'
 import type { Deliveries } from '../../flowControl/Deliveries.js'
 import { SocketWait, type SocketWaitOwner } from '../../flowControl/server/SocketWait.js'
 
+/** The mux, which knows the channels on a wire. */
+interface WireSenderOwner {
+  /** The channels whose flow control the wire's headroom counts. */
+  channelsOn(wire: Wire): Iterable<ServerChannel>
+}
+
 type WireSenderOptions = {
+  owner: WireSenderOwner
   wire: Wire
   transport: ServerTransport<unknown>
   pieces: WirePieces | null
   /** What the wire delivered. */
   deliveries: Deliveries
-  /** The channels whose flow control the headroom counts. */
-  channels: () => Iterable<ServerChannel>
 }
 
 /** Sends a wire's frames in call order, and terminates the wire once its backlog passes what its channels allow; the
  *  peers of its channels send through it, and once the wire closed it drops what they send. */
 class WireSender implements PeerSender, SocketWaitOwner {
+  private readonly owner: WireSenderOwner
   private readonly wire: Wire
   private readonly transport: ServerTransport<unknown>
   private readonly pieces: WirePieces | null
   /** How long the frames that go at once wait behind what the socket holds. */
   private readonly wait = new SocketWait({ owner: this })
   private readonly deliveries: Deliveries
-  private readonly channels: () => Iterable<ServerChannel>
   /** The wire closed: it sends nothing more, holds nothing and delivered nothing. */
   private closed = false
   /** What may be written before the backlog is read again against what its channels' flow control allows. */
@@ -40,12 +46,12 @@ class WireSender implements PeerSender, SocketWaitOwner {
   /** The RECONCILE's probes its RECONCILED hasn't answered: a frame ahead of it goes behind their BDP_PING_ACKs. */
   private probed: { ix: number; probe: number }[] = []
 
-  constructor({ wire, transport, pieces, deliveries, channels }: WireSenderOptions) {
+  constructor({ owner, wire, transport, pieces, deliveries }: WireSenderOptions) {
+    this.owner = owner
     this.wire = wire
     this.transport = transport
     this.pieces = pieces
     this.deliveries = deliveries
-    this.channels = channels
   }
 
   send(frame: Uint8Array<ArrayBuffer>): void {
@@ -120,7 +126,7 @@ class WireSender implements PeerSender, SocketWaitOwner {
     const backlog = this.bufferedAmount()
     if (backlog === undefined) return Infinity
     let allowed = WIRE_SEND_BACKLOG_BASE_BYTES
-    for (const channel of this.channels()) allowed += channel._sendAllowance() + this.largestSent
+    for (const channel of this.owner.channelsOn(this.wire)) allowed += channel._sendAllowance() + this.largestSent
     return allowed - backlog
   }
 }
