@@ -13,9 +13,6 @@ import {
   MAX_CHANNELS_PER_CONNECTION,
   TIMER_DELAY_MAX_MS,
   UPGRADE_MAX_ID_BYTES,
-  UPGRADE_MAX_STAGED_BYTES,
-  UPGRADE_MAX_STAGED_RECORDS,
-  UPGRADE_STAGE_TTL_MS,
   WIRE_MAX_CONN_CTRL_FRAME_BYTES,
   WIRE_MAX_RAW_FRAME_BYTES,
   WIRE_RECV_BACKLOG_BASE_BYTES,
@@ -33,6 +30,7 @@ import { ServerHeadroom } from '../../flowControl/server/headroom.js'
 import type { ServerPieceReceiver } from '../../flowControl/server/pieceReceiver.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
 import { WireSender, type WireSenderOwner } from './WireSender.js'
+import { UpgradeStages, type UpgradeStagesOwner } from './UpgradeStages.js'
 import { TransportSocket } from './TransportSocket.js'
 import { AwaitedChannels, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
 import { RegistrationWaits, type RegistrationWaitsOwner } from './RegistrationWaits.js'
@@ -72,14 +70,6 @@ type ReconcileOutcome = {
   /** The wire this RECONCILED belongs on — a barrier reconciles the staged WS, not the sender. */
   deliverTo: Wire
   upgradeId?: string
-}
-
-type StagedUpgrade = {
-  upgradeId: string
-  prevSessionId: string
-  bytes: number
-  timer: ReturnType<typeof setTimeout>
-  phase: 'staged' | 'committing'
 }
 
 function retargetToProbe(err: unknown, probe: Wire): unknown {
@@ -143,7 +133,7 @@ function getChannelMux(): ChannelMux {
   return getGlobals().mux
 }
 
-class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
+class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStagesOwner {
   private readonly channels = new Map<string, ServerChannel>()
   /** The channels a reconcile named before they registered, which `registerChannel` attaches. */
   private readonly registrationWaits = new RegistrationWaits({ owner: this })
@@ -154,9 +144,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
   /** Reverse index for transports with a stable connId (SSE). Lets data POSTs locate the
    *  live stream wire, and catches a duplicate-connId reconnect racing teardown. */
   private readonly wiresByConnId = new Map<string, Wire>()
-  private readonly stagedUpgrades = new Map<Wire, StagedUpgrade>()
-  private readonly stagedByPrevSession = new Map<string, Wire>()
-  private stagedBytes = 0
+  /** The SSE→WS upgrades staged on probe WebSockets. */
+  private readonly stages = new UpgradeStages({ owner: this })
   /** Ended channels their page may still need, each with the timer releasing it, null while the page is attached. */
   private readonly endedChannels = new Map<ServerChannel, ReturnType<typeof setTimeout> | null>()
 
@@ -317,11 +306,11 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     if (connId !== null && this.wiresByConnId.get(connId) === wire) {
       this.wiresByConnId.delete(connId)
     }
-    this.clearStage(wire)
+    this.stages.clear(wire)
     const sessionId = entry.transport.getSessionId(wire)
     if (!sessionId) return // Closed before reconciling — nothing to clean up.
-    const stagedWs = this.stagedByPrevSession.get(sessionId)
-    if (stagedWs !== undefined) this.abandonStage(stagedWs)
+    const stagedProbe = this.stages.probeFor(sessionId)
+    if (stagedProbe !== undefined) this.stages.abandon(stagedProbe)
     // Channels survive a transient close (`_onPeerDisconnect`'s reconnectTimeout grace);
     // permanent tears them down.
     this.detachSession(sessionId, permanent ? 'permanent' : 'transient')
@@ -488,10 +477,10 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
 
   /** `wire` may be a wire other than the one that sent the offending frame — a barrier's
    *  violation is the staged probe's. */
-  private terminateWire(wire: Wire): void {
+  terminateWire(wire: Wire): void {
     const entry = this.wires.get(wire)
     if (!entry) return
-    if (this.stagedUpgrades.get(wire)?.phase === 'staged') this.clearStage(wire)
+    if (this.stages.get(wire)?.phase === 'staged') this.stages.clear(wire)
     entry.state.terminatePermanently = true
     entry.transport.terminateWire(wire)
   }
@@ -518,7 +507,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
       return null
     }
     assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')
-    assertProtocol(!this.stagedUpgrades.has(entry.wire), 'frame on a staged probe')
+    assertProtocol(this.stages.get(entry.wire) === undefined, 'frame on a staged probe')
     if (frame.tag === TAG.PREPARE) return this.handlePrepare(entry, frame.payload, rawFrame.byteLength)
     if (frame.tag === TAG.BARRIER) return this.handleBarrier(entry, frame.payload)
     if (frame.tag === TAG.RECONCILE) {
@@ -580,47 +569,21 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
   private claimSessionForReconcile(ctrl: ReconcilePayload, entry: WireEntry): void {
     const own = entry.transport.getSessionId(entry.wire)
     if (ctrl.sessionId !== undefined && ctrl.sessionId === own) return
-    for (const claimed of [ctrl.sessionId, own]) {
-      if (claimed === undefined) continue
-      const staleProbe = this.stagedByPrevSession.get(claimed)
-      if (staleProbe === undefined) continue
-      // A committing barrier already owns this session; a concurrent claim on it is refused rather
-      // than allowed to abandon the stage out from under the in-flight commit.
-      assertProtocol(this.stagedUpgrades.get(staleProbe)?.phase !== 'committing', 'session claimed mid-commit')
-      this.abandonStage(staleProbe)
-    }
+    for (const claimed of [ctrl.sessionId, own]) if (claimed !== undefined) this.stages.claim(claimed)
   }
 
   private handlePrepare(entry: WireEntry, payload: PreparePayload, rawByteLength: number): null {
     const { wire } = entry
     assertProtocol(!entry.transport.getSessionId(wire), 'PREPARE on a reconciled wire')
     assertProtocol(this.sessions.peekSession(payload.sessionId), 'PREPARE for an unknown session')
-    // A page stages one attempt at a time, so a newer PREPARE replaces what an earlier attempt left staged.
-    const staged = this.stagedByPrevSession.get(payload.sessionId)
-    if (staged !== undefined) {
-      assertProtocol(this.stagedUpgrades.get(staged)?.phase === 'staged', 'session already committing')
-      this.abandonStage(staged)
-    }
-    assertProtocol(this.stagedUpgrades.size < UPGRADE_MAX_STAGED_RECORDS, 'staged record budget')
-    assertProtocol(this.stagedBytes + rawByteLength <= UPGRADE_MAX_STAGED_BYTES, 'staged byte budget')
-
-    const timer = unrefTimer(setTimeout(() => this.abandonStage(wire), UPGRADE_STAGE_TTL_MS))
-    this.stagedUpgrades.set(wire, {
-      upgradeId: payload.upgradeId,
-      prevSessionId: payload.sessionId,
-      bytes: rawByteLength,
-      timer,
-      phase: 'staged',
-    })
-    this.stagedByPrevSession.set(payload.sessionId, wire)
-    this.stagedBytes += rawByteLength
+    this.stages.stage(wire, payload, rawByteLength)
     entry.sender.send(encode.ready({ upgradeId: payload.upgradeId }))
     return null
   }
 
   private handleBarrier(entry: WireEntry, ctrl: BarrierPayload): Promise<ReconcileOutcome> | null {
-    const probe = this.stagedByPrevSession.get(ctrl.sessionId)
-    const stage = probe === undefined ? undefined : this.stagedUpgrades.get(probe)
+    const probe = this.stages.probeFor(ctrl.sessionId)
+    const stage = probe === undefined ? undefined : this.stages.get(probe)
     // A barrier for an unknown or already-committing stage is refused SILENTLY (the client's attempt
     // deadline is the only watchdog) — erroring would tear down a wire this frame has no claim on.
     if (probe === undefined || stage?.phase !== 'staged') return null
@@ -645,7 +608,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
       this.moveAwaited(entry, wsEntry, ctrl.open)
       return this.attachBarrier(entry, wsEntry, ctrl, stage.upgradeId)
     } catch (err) {
-      this.clearStage(probe)
+      this.stages.clear(probe)
       throw retargetToProbe(err, probe)
     }
   }
@@ -667,30 +630,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
       oldEntry.state.retiredByBarrier = false
       throw retargetToProbe(err, probe)
     } finally {
-      this.clearStage(probe)
+      this.stages.clear(probe)
     }
-  }
-
-  /** Forgets the stage AND kills the probe holding it. No-op once the stage is committing. */
-  private abandonStage(probe: Wire): void {
-    if (this.stagedUpgrades.get(probe)?.phase !== 'staged') return
-    this.clearStage(probe)
-    const entry = this.wires.get(probe)
-    if (!entry) return
-    entry.state.terminatePermanently = true
-    entry.transport.terminateWire(probe)
-  }
-
-  /** Bookkeeping only — the probe wire is left alone. */
-  private clearStage(probe: Wire): void {
-    const stage = this.stagedUpgrades.get(probe)
-    if (!stage) return
-    clearTimeout(stage.timer)
-    this.stagedUpgrades.delete(probe)
-    if (this.stagedByPrevSession.get(stage.prevSessionId) === probe) {
-      this.stagedByPrevSession.delete(stage.prevSessionId)
-    }
-    this.stagedBytes -= stage.bytes
   }
 
   // ── Reconcile + attach ──────────────────────────────────────────────
