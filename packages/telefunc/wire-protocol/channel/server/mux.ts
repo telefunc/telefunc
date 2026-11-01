@@ -62,14 +62,13 @@ type ServerTransport<TConnection> = {
   terminateConnection(connection: TConnection): void
 }
 
-/** Emitted only when `handleFrame` consumed a reconcile. Caller threads the payload through
- *  to `sendReconciled` and fires `finalizeUpgrade` once the new wire's reconciled has emitted.
- *  `finalizeUpgrade` is null when this isn't an SSE→WS upgrade. */
+/** What a RECONCILE or a barrier settled, which `sendReconciled` answers with the RECONCILED. */
 type ReconcileOutcome = {
   sessionId: string
   /** Each `lastSeq` is read as the RECONCILED goes out, so it counts what was dispatched before then. */
   attached: ChannelHandle[]
-  finalizeUpgrade: (() => void) | null
+  /** The wire a barrier retired, which gets its FIN once this RECONCILED went out; null but on an SSE→WS upgrade. */
+  retiredWire: Wire | null
   /** The wire this RECONCILED belongs on — a barrier reconciles the staged WS, not the sender. */
   deliverTo: Wire
   upgradeId?: string
@@ -313,8 +312,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
         transports: this.options.transports,
       }),
     )
-    // Sends are sync; firing the upgrade finalizer here can't reorder anything on the new wire.
-    outcome.finalizeUpgrade?.()
+    // Sends are sync, so the FIN can't pass anything on the new wire.
+    if (outcome.retiredWire !== null) this.send(outcome.retiredWire, encode.fin())
   }
 
   onConnectionClosed(connection: Wire, { permanent }: { permanent: boolean }): void {
@@ -710,12 +709,11 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
 
   // ── Reconcile + attach ──────────────────────────────────────────────
 
-  /** `isBarrier`: the old wire's session is retired by this commit, so it gets a finalizer that
-   *  FINs it once the new wire's RECONCILED has gone out. */
+  /** `isBarrier`: this commit retires the old wire's session, so the outcome names that wire, which gets a FIN once
+   *  the new wire's RECONCILED has gone out. */
   private reconcile(entry: ConnectionEntry, ctrl: ReconcilePayload, isBarrier = false): ReconcileOutcome {
     const { wire, state, transport } = entry
-    const oldWire = isBarrier && ctrl.sessionId ? this.sessionWires.get(ctrl.sessionId) : undefined
-    const finalizeUpgrade = oldWire === undefined ? null : () => this.send(oldWire, encode.fin())
+    const retiredWire = isBarrier && ctrl.sessionId ? (this.sessionWires.get(ctrl.sessionId) ?? null) : null
     this.resetPingTimer(entry)
     // One on the wire that holds the session it names keeps it, and so what is bound to it: a staged upgrade.
     const newSessionId =
@@ -747,7 +745,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     this.sessionWires.set(newSessionId, wire)
     transport.setSessionId(wire, newSessionId)
     state.attaching.clear()
-    return { sessionId: newSessionId, attached, finalizeUpgrade, deliverTo: wire }
+    return { sessionId: newSessionId, attached, retiredWire, deliverTo: wire }
   }
 
   /** Attaches the channels a RECONCILE of the whole session names; one of the session before it doesn't name ends. */
