@@ -126,13 +126,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private pageClosed = false
 
   // ── Wire state — channel-owned, kept across the page's attaches ────
-  /** Buffer of outgoing wire frames, used to replay missed frames on reconnect.
-   *  Allocated in `_registerChannel`; disposed in `_release`. Null only between
-   *  construction and registration (no peer can attach before registration). */
-  /** @internal */ _replayBuffer: ReplayBuffer | null = null
-  /** Highest client→server seq the channel has received and dispatched. Used for
-   *  frame deduplication and reported back to the client in `ReconciledPayload.open[].lastSeq`. */
-  /** @internal */ _lastClientSeq = 0
+  /** @internal Buffer of outgoing wire frames, used to replay missed frames on reconnect. Allocated in
+   *  `_registerChannel` and disposed in `_release`: null before registration, when no peer can attach, and after. */
+  _replayBuffer: ReplayBuffer | null = null
+  /** @internal Highest client→server seq the channel has received and dispatched. Used for frame deduplication and
+   *  reported back to the client in `ReconciledPayload.open[].lastSeq`. */
+  _lastClientSeq = 0
 
   /** Shield validators keyed by name (see `ChannelShield` in ../channel.ts).
    *  - `data`: validates incoming client data (_onPeerMessage / answerAckReq)
@@ -835,7 +834,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.mux?.onChannelEnded(this, { keep, pageAttached })
     this.lifecycle.fireClose(err)
     this.sendCredit.shutdown()
-    // Building an error captures a stack trace, so one is built only when an ack is still awaited.
+    // Building an error captures a stack trace, so one is built only while an ack is awaited or a frame is buffered.
     if (this.pendingAcks.size > 0 || this.offlineBuffer.size > 0) {
       const ackErr = err ?? new ChannelClosedError()
       for (const { reject } of this.pendingAcks.values()) reject(ackErr)
