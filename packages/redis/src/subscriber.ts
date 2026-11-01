@@ -9,13 +9,11 @@ import { createDeferred, type Deferred } from './createDeferred.js'
 import type { CommitChannels, FenceTokens } from './keys.js'
 import { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH } from './commands.js'
 import type { SubscriberSocket } from './ioredis.js'
+import type { RedisConnection } from './RedisConnection.js'
 
 type RedisSubscriptionSource = BroadcastRoute | RoomSubscriptionSource
 
-type RedisSubscriberOptions = {
-  /** A fresh, unconnected subscriber socket that never retries on its own. */
-  createSubscriber: () => Promise<SubscriberSocket>
-}
+type RedisSubscriberOptions = { connection: RedisConnection }
 
 /** The driver a subscription's source belongs to. */
 interface RedisPlane {
@@ -69,7 +67,7 @@ const REORDER_WAIT_MS = 1_000
  * incarnation is still the open head).
  */
 class RedisSubscriber {
-  private readonly createSubscriber: () => Promise<SubscriberSocket>
+  private readonly connection: RedisConnection
   /** Every channel some subscription needs, with the subscriptions that listen on it. */
   private readonly byChannel = new Map<string, Set<RedisSubscription>>()
   /** The channels some subscription started or stopped needing since the last sync read them. */
@@ -78,7 +76,7 @@ class RedisSubscriber {
   private readonly unconfirmed = new Set<RedisSubscription>()
   /** Subscriptions not ready yet for the first time: at 0, no publish waits. */
   private subscribingCount = 0
-  private connection: Connection = { phase: 'idle' }
+  private socket: Connection = { phase: 'idle' }
   private nextId = 0
   private syncing: Promise<void> = Promise.resolve()
   private syncQueued = false
@@ -86,8 +84,8 @@ class RedisSubscriber {
   /** An establishing subscription reports no failure, so the first one of an outage is reported here. */
   private outageReported = false
 
-  constructor(options: RedisSubscriberOptions) {
-    this.createSubscriber = options.createSubscriber
+  constructor({ connection }: RedisSubscriberOptions) {
+    this.connection = connection
   }
 
   subscribe(options: RedisSubscriptionOptions): Unsubscribe {
@@ -104,8 +102,8 @@ class RedisSubscriber {
       }
     }
     this.unconfirmed.add(subscription)
-    if (this.connection.phase === 'connected') this.syncChannels()
-    else if (this.connection.phase === 'idle') void this.connect()
+    if (this.socket.phase === 'connected') this.syncChannels()
+    else if (this.socket.phase === 'idle') void this.connect()
     return () => subscription.unsubscribe()
   }
 
@@ -173,10 +171,10 @@ class RedisSubscriber {
   private async connect(): Promise<void> {
     const id = ++this.nextId
     const connecting: Extract<Connection, { phase: 'connecting' }> = { phase: 'connecting', id, socket: null }
-    this.connection = connecting
+    this.socket = connecting
     let socket: SubscriberSocket
     try {
-      socket = await this.createSubscriber()
+      socket = await this.connection.openSubscriberSocket()
     } catch (error) {
       return this.lost(id, error)
     }
@@ -196,7 +194,7 @@ class RedisSubscriber {
       return this.lost(id, error)
     }
     if (!this.isCurrent(id)) return
-    this.connection = { phase: 'connected', id, socket, subscribed: new Set() }
+    this.socket = { phase: 'connected', id, socket, subscribed: new Set() }
     this.changedChannels = new Set(this.byChannel.keys())
     this.syncChannels()
   }
@@ -209,26 +207,26 @@ class RedisSubscriber {
       this.unconfirmed.add(subscription)
     }
     // A listener may have released the last subscription, or opened one that is already connecting.
-    if (this.byChannel.size === 0 || this.connection.phase !== 'idle') return
+    if (this.byChannel.size === 0 || this.socket.phase !== 'idle') return
     if (!this.outageReported) {
       this.outageReported = true
       console.error(error)
     }
     const timer = setTimeout(() => void this.connect(), this.reconnectDelay)
     timer.unref()
-    this.connection = { phase: 'waiting', timer }
+    this.socket = { phase: 'waiting', timer }
     this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_DELAY_MAX_MS)
   }
 
   private disconnect(): void {
-    const connection = this.connection
-    this.connection = { phase: 'idle' }
+    const connection = this.socket
+    this.socket = { phase: 'idle' }
     if (connection.phase === 'waiting') clearTimeout(connection.timer)
     else if (connection.phase !== 'idle') connection.socket?.disconnect()
   }
 
   private isCurrent(id: number): boolean {
-    const connection = this.connection
+    const connection = this.socket
     return (connection.phase === 'connecting' || connection.phase === 'connected') && connection.id === id
   }
 
@@ -239,7 +237,7 @@ class RedisSubscriber {
     this.syncQueued = true
     this.syncing = this.syncing.then(async () => {
       this.syncQueued = false
-      const connection = this.connection
+      const connection = this.socket
       if (connection.phase !== 'connected') return
       try {
         await this.syncChannelsOnce(connection)

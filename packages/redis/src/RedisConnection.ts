@@ -7,6 +7,7 @@ import {
   createSubscriberSocket,
   isCluster,
   type RedisClient,
+  type SubscriberSocket,
 } from './ioredis.js'
 import { assertKeyPrefix } from './keys.js'
 import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
@@ -34,8 +35,13 @@ class RedisConnection {
     // Pub/Sub channels span every database, so a standalone client's names carry its database.
     this.prefix = isCluster(this.commands) ? prefix : `${prefix}${this.commands.options.db ?? 0}:`
     this.reportsReceivers = !isCluster(this.commands)
-    this.subscriber = new RedisSubscriber({ createSubscriber: () => createSubscriberSocket(this.commands) })
+    this.subscriber = new RedisSubscriber({ connection: this })
     this.hold = new PublishHold({ subscriber: this.subscriber })
+  }
+
+  /** A fresh, unconnected subscriber socket on the current command client, which never retries on its own. */
+  openSubscriberSocket(): Promise<SubscriberSocket> {
+    return createSubscriberSocket(this.commands)
   }
 
   /** The command client, for the commands that need no script. */
