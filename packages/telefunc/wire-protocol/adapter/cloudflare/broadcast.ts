@@ -62,6 +62,8 @@ type BroadcastNamespace = {
   get(id: unknown, options?: { locationHint: LocationBucket }): TelefuncBroadcastStub
 }
 
+type MemberRouteOptions = { route: BroadcastRoute; subscriber: Subscriber }
+
 /** One route's presence at its key's authority, for one member DO, and the subscriber it serves. */
 class MemberRoute {
   state: 'establishing' | 'ready' | 'lost' = 'establishing'
@@ -70,7 +72,7 @@ class MemberRoute {
   readonly route: BroadcastRoute
   private refreshTimer: ReturnType<typeof setInterval> | undefined
 
-  constructor({ route, subscriber }: { route: BroadcastRoute; subscriber: Subscriber }) {
+  constructor({ route, subscriber }: MemberRouteOptions) {
     this.route = route
     this.subscriber = subscriber
   }
@@ -170,6 +172,8 @@ class CloudflareBroadcastAuthorityState {
   }
 }
 
+type CloudflareBroadcastMemberOptions = { broadcast: CloudflareBroadcast; id: string; calls: BroadcastCalls }
+
 /** A session DO's Broadcast membership: its routes' presence at their key authorities, its subscriptions, and the
  *  deliveries to them. It is addressed by the DO's id and sends through the DO's own ordered stubs. */
 class CloudflareBroadcastMember {
@@ -179,7 +183,7 @@ class CloudflareBroadcastMember {
   private locatedBucket: LocationBucket | null = null
   private readonly routes = new Map<string, MemberRoute>()
 
-  constructor({ broadcast, id, calls }: { broadcast: CloudflareBroadcast; id: string; calls: BroadcastCalls }) {
+  constructor({ broadcast, id, calls }: CloudflareBroadcastMemberOptions) {
     this.broadcast = broadcast
     this.id = id
     this.calls = calls
@@ -255,6 +259,13 @@ class CloudflareBroadcastMember {
   }
 }
 
+type CloudflareBroadcastOptions = {
+  baseInstanceName: string
+  scale?: CloudflareScale
+  locationFallback: LocationBucket
+  getNamespace: () => BroadcastNamespace
+}
+
 /** The isolate's Cloudflare Broadcast driver: where each key's authority and each bucket's coordinators live, and
  *  their RPC handlers. Each session DO subscribes through its own `CloudflareBroadcastMember`. */
 class CloudflareBroadcast {
@@ -263,17 +274,7 @@ class CloudflareBroadcast {
   private readonly locationFallback: LocationBucket
   private readonly getNamespace: () => BroadcastNamespace
 
-  constructor({
-    baseInstanceName,
-    scale,
-    locationFallback,
-    getNamespace,
-  }: {
-    baseInstanceName: string
-    scale?: CloudflareScale
-    locationFallback: LocationBucket
-    getNamespace: () => BroadcastNamespace
-  }) {
+  constructor({ baseInstanceName, scale, locationFallback, getNamespace }: CloudflareBroadcastOptions) {
     this.baseInstanceName = baseInstanceName
     this.scale = scale
     this.locationFallback = locationFallback

@@ -32,6 +32,8 @@ type SourceKey = { key: string; delivers: 'text' | 'binary' }
 /** One host's shared subscriptions, by source key. */
 type Host = { readonly subscriptions: Map<string, SharedSubscription> }
 
+type SubscriptionsOptions<Source> = { driver: SubscribingDriver<Source> }
+
 /** A plane's subscriptions (Broadcast's, Room's): consumers of one source on one host share one driver subscription. */
 class Subscriptions<Source> {
   private readonly driver: SubscribingDriver<Source>
@@ -41,7 +43,7 @@ class Subscriptions<Source> {
   private readonly hosts = new Set<Host>()
   private readonly cleanups = new Set<Promise<void>>()
 
-  constructor({ driver }: { driver: SubscribingDriver<Source> }) {
+  constructor({ driver }: SubscriptionsOptions<Source>) {
     this.driver = driver
     this.hostKey = Symbol('telefunc.subscriptions')
   }

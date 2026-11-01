@@ -13,18 +13,17 @@ import type { CloudflareBroadcast } from './broadcast.js'
 import { getCloudflareExtensionPlanes, type TelefuncExtensionNamespace } from './extensions.js'
 import { requireCloudflareSession } from './session.js'
 
+type CloudflareBackendOptions = {
+  getNamespace: () => TelefuncExtensionNamespace
+  broadcast: CloudflareBroadcast
+}
+
 /** A subscription requires its session DO's context. */
 class CloudflareBackend implements Backend {
   readonly broadcast: CloudflareBroadcast
   private readonly getNamespace: () => TelefuncExtensionNamespace
 
-  constructor({
-    getNamespace,
-    broadcast,
-  }: {
-    getNamespace: () => TelefuncExtensionNamespace
-    broadcast: CloudflareBroadcast
-  }) {
+  constructor({ getNamespace, broadcast }: CloudflareBackendOptions) {
     this.broadcast = broadcast
     this.getNamespace = getNamespace
   }
