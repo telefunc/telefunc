@@ -109,10 +109,11 @@ class ChannelLifecycle {
     this.closeCallbacks.push(callback)
   }
 
-  /** This end closes, within `timeoutMs`; `awaitingCloseAck` where its peer acknowledges the CLOSE. */
+  /** This end closes, within `timeoutMs` or by its peer's earlier deadline; `awaitingCloseAck` where its peer
+   *  acknowledges the CLOSE. */
   startClose(timeoutMs: number, awaitingCloseAck: boolean): void {
-    this.deadline = performance.now() + timeoutMs
     this.awaitingCloseAck = awaitingCloseAck
+    this.shortenDeadline(timeoutMs)
   }
 
   /** Runs the close `startClose` began until the channel ended, for `close()` to return. */
@@ -127,7 +128,7 @@ class ChannelLifecycle {
     return this.run
   }
 
-  /** The peer closes within `timeoutMs`, which only shortens the deadline. */
+  /** This end or its peer closes within `timeoutMs`, which only shortens the deadline. */
   shortenDeadline(timeoutMs: number): void {
     const deadline = performance.now() + timeoutMs
     if (this.deadline && deadline >= this.deadline) return

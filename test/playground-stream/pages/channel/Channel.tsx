@@ -20,6 +20,7 @@ import {
   onChannelClientPendingAckCloseReconnect,
   onChannelClientPendingAckClose,
   onChannelPeerShorterClose,
+  onChannelLongerCloseAfterPeer,
   onChannelServerPendingAckCloseReconnectOpen,
   onChannelUpstreamReconnect,
   onChannelNoListenerAckServer,
@@ -125,6 +126,7 @@ type ChannelState = {
   clientAbortThenSendErr: string | null
   clientPendingAckCloseErr: string | null
   peerShorterCloseChannelId: string | null
+  longerCloseAfterPeer: { ms: number; result: number } | null
   clientPendingAckCloseReconnectChannelId: string | null
   clientPendingAckCloseReconnectOnOpenFired: boolean | null
   clientPendingAckCloseReconnectErr: string | null
@@ -213,6 +215,7 @@ const initialState: ChannelState = {
   clientAbortThenSendErr: null,
   clientPendingAckCloseErr: null,
   peerShorterCloseChannelId: null,
+  longerCloseAfterPeer: null,
   clientPendingAckCloseReconnectChannelId: null,
   clientPendingAckCloseReconnectOnOpenFired: null,
   clientPendingAckCloseReconnectErr: null,
@@ -718,6 +721,18 @@ function ChannelDemo() {
       channel.send('hold', { ack: true }).catch(() => {})
     })
     setChannelState((s) => ({ ...s, peerShorterCloseChannelId: channelId }))
+  }, [])
+
+  const testLongerCloseAfterPeer = useCallback(async () => {
+    const { channel } = await openChannel(onChannelLongerCloseAfterPeer)
+    channel.onClose(() => new Promise(() => {}))
+    channel.onOpen(async () => {
+      void channel.send('close')
+      while (!channel.isClosed) await new Promise((resolve) => setTimeout(resolve, 10))
+      const start = performance.now()
+      const result = await channel.close({ timeout: 60_000 })
+      setChannelState((s) => ({ ...s, longerCloseAfterPeer: { ms: Math.round(performance.now() - start), result } }))
+    })
   }, [])
 
   const openClientPendingAckCloseReconnectChannel = useCallback(async () => {
@@ -1341,6 +1356,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-600 text-white hover:bg-sky-700"
           >
             Test Peer Shorter Close
+          </button>
+          <button
+            id="channel-test-longer-close-after-peer"
+            type="button"
+            onClick={testLongerCloseAfterPeer}
+            className="px-3 py-1.5 text-sm rounded bg-sky-600 text-white hover:bg-sky-700"
+          >
+            Test Longer Close After Peer
           </button>
           <button
             id="channel-test-client-pending-ack-close-reconnect-open"

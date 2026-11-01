@@ -16,6 +16,7 @@ export {
   onChannelClientPendingAckCloseReconnect,
   onChannelClientPendingAckClose,
   onChannelPeerShorterClose,
+  onChannelLongerCloseAfterPeer,
   onChannelServerPendingAckCloseReconnectOpen,
   onChannelUpstreamReconnect,
   onChannelNoListenerAckServer,
@@ -400,6 +401,18 @@ async function onChannelClientPendingAckCloseReconnect() {
     cleanupState[`clientClose_${id}_serverOnCloseErr`] = formatCloseError(err as CloseError)
   })
   return { channel: ch.client, channelId: id }
+}
+
+/**
+ * A close() the page makes after the server's. The page asks the server to close within 1 s; the page's onClose never
+ * settles, so its close lasts until its deadline, which its own close() within 60 s must not push back.
+ */
+async function onChannelLongerCloseAfterPeer() {
+  const ch = new Channel<(msg: string) => void, never>()
+  ch.listen(() => {
+    void ch.close({ timeout: 1_000 })
+  })
+  return { channel: ch.client }
 }
 
 // Global store keyed by channel id — survives across telefunc invocations.
