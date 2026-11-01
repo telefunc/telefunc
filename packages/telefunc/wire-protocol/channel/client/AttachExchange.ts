@@ -40,7 +40,7 @@ type ReconcileBatch = {
   movedBufferedFrames: OutboundFrame[]
 }
 
-/** The connection, whose wire carries the RECONCILEs and whose server sets the settings a RECONCILED says. */
+/** The connection, whose wire carries the RECONCILEs. */
 interface AttachExchangeOwner {
   readonly transport: ClientChannelTransport
   readonly closed: boolean
@@ -48,9 +48,6 @@ interface AttachExchangeOwner {
   readonly wire: number
   /** The wire can't take a RECONCILE now: it isn't open, or an upgrade is between its READY and its handoff. */
   readonly reconcileHeld: boolean
-  /** An upgrade's READY came, so its barrier, a RECONCILE too, goes next. */
-  readonly upgradeReady: boolean
-  takeServerSettings(ctrl: ReconciledPayload): void
   releaseChannel(record: ChannelRecord): void
   dropWire(transport: ClientChannelTransport): void
 }
@@ -175,10 +172,14 @@ class AttachExchange {
     return { kind: 'reconcile', frame: encode.barrier({ sessionId, upgradeId, open }) }
   }
 
-  applyReconciled(ctrl: ReconciledPayload, deferredOmitted: number[] | null): ReconcileOutcome {
+  /** `deferredOmitted` collects, during an upgrade's handoff, the channels it leaves out; `upgradeReady`: an upgrade's
+   *  READY came, so its barrier, a RECONCILE too, goes next. */
+  applyReconciled(
+    ctrl: ReconciledPayload,
+    { deferredOmitted, upgradeReady }: { deferredOmitted: number[] | null; upgradeReady: boolean },
+  ): ReconcileOutcome {
     this.reconciledWire = this.owner.wire
     this.session = ctrl.sessionId
-    this.owner.takeServerSettings(ctrl)
     const serverMap = new Map<number, number>()
     for (const channel of ctrl.open) serverMap.set(channel.ix, channel.lastSeq)
     const { ixes, probes, attachResults, carriedFrom } = this.inFlight
@@ -217,7 +218,7 @@ class AttachExchange {
     }
     for (const frame of this.gate.drain(attached)) releaseFrames.push(frame)
 
-    if (hasNewChannels && !this.owner.upgradeReady) {
+    if (hasNewChannels && !upgradeReady) {
       const reconcileBatch = this.stageReconcileBatch()
       appendReconcileBatch(releaseFrames, reconcileBatch)
     } else {

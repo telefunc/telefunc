@@ -281,10 +281,6 @@ class ClientConnection
     return !this.connected || this.upgrade.committing !== null || this.upgrade.ready
   }
 
-  get upgradeReady(): boolean {
-    return this.upgrade.ready
-  }
-
   private register(channel: MuxChannel): void {
     // A new wire's RECONCILE lists closed channels too, so at the limit the oldest closed one the server has in full
     // makes way.
@@ -579,8 +575,11 @@ class ClientConnection
   handleReconciled(ctrl: ReconciledPayload): void {
     if (!this.upgrade.onReconciled(ctrl)) return
     this.transport.applyReconciledSettings(ctrl)
-    const deferredOmitted = this.upgrade.committing?.deferredOmitted ?? null
-    const outcome = this.exchange.applyReconciled(ctrl, deferredOmitted)
+    this.takeServerSettings(ctrl)
+    const outcome = this.exchange.applyReconciled(ctrl, {
+      deferredOmitted: this.upgrade.committing?.deferredOmitted ?? null,
+      upgradeReady: this.upgrade.ready,
+    })
     this.liveness.install(this.transport, ctrl.pingInterval)
     this.transport.closeAbandonedTransport()
     for (const frame of outcome.frames) this.transport.sendFrame(frame)
@@ -701,7 +700,7 @@ class ClientConnection
   }
 
   /** Takes the timeouts, replay sizes and frame limit the server sets, and fits each replay buffer to them. */
-  takeServerSettings(ctrl: ReconciledPayload): void {
+  private takeServerSettings(ctrl: ReconciledPayload): void {
     this.reconnectTimeoutMs = ctrl.reconnectTimeout
     this.maxFrameBytes = ctrl.maxFrameBytes
     // A per-call `idleTimeout` (withContext) is kept over the server's.
