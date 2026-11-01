@@ -15,10 +15,14 @@ type Leases = Map<string, number>
  *  receives it only of the members it fetches by member. */
 type TrackLease = { instance: string; telling: number; except: Set<string>; byMember: boolean }
 type TrackLeases = Map<string, TrackLease>
+/** `undefined` where `instance` holds no lease. */
+type TrackLeaseChange = { instance: string; was: TrackLease | undefined; now: TrackLease | undefined }
 /** Another process that tells demand. `expiresAt`: its lease on all it told, which each of its pages renews, so a
  *  crashed process lapses. `page`: the number of its last page, so a page this process missed shows as a gap.
  *  `telling`: how many times it told everything again. `asked`: whether this process asked it to since. */
 type Reporter = { expiresAt: number; page: number; telling: number; asked: boolean }
+/** A reporter's entry as it told it: started or stopped (`on`), in its `telling`. */
+type Report = { instance: string; on: boolean; telling: number }
 
 /** The replica whose owned members the demand is for. */
 interface RoomDemandOwner {
@@ -107,22 +111,22 @@ class RoomDemand {
   /** A reporter's entry starts or stops; another process's lasts while it renews its lease. Only a member's owner
    *  keeps its pairs; ownership is fixed from before the member exists anywhere. */
   take(instance: string, entry: DemandEntry, on: boolean): void {
-    const telling = this.reporters.get(instance)?.telling ?? 0
+    const report: Report = { instance, on, telling: this.reporters.get(instance)?.telling ?? 0 }
     if ('except' in entry) {
-      this.takeTrack(instance, entry, on, telling)
+      this.takeTrack(entry, report)
     } else if (!this.owner.ownsMember(entry.member)) {
       return
     } else if ('byMember' in entry) {
       const { member } = entry
       const held = this.fetched.get(member)?.has(instance) === true
-      lease(this.fetched, member, instance, on, telling)
+      lease(this.fetched, member, report)
       if (held !== on) this.queueFetched(instance, member)
     } else if ('track' in entry) {
       const { member, track } = entry
       const byTrack = getOrCreate(this.pairs, member, () => new Map())
-      if (lease(byTrack, track, instance, on, telling)) this.queue(track, member)
+      if (lease(byTrack, track, report)) this.queue(track, member)
       if (byTrack.size === 0) this.pairs.delete(member)
-    } else if (lease(this.members, entry.member, instance, on, telling)) {
+    } else if (lease(this.members, entry.member, report)) {
       for (const track of this.everyTrackOf(entry.member)) this.queue(track, entry.member)
     }
     this.settle()
@@ -185,7 +189,7 @@ class RoomDemand {
       for (const [instance, held] of leases) {
         if (dropped(instance, held.telling)) {
           leases.delete(instance)
-          this.queueLease(track, instance, held, undefined)
+          this.queueLease(track, { instance, was: held, now: undefined })
         }
       }
       if (leases.size === 0) this.tracks.delete(track)
@@ -220,12 +224,7 @@ class RoomDemand {
     this.due.clear()
   }
 
-  private takeTrack(
-    instance: string,
-    entry: Extract<DemandEntry, { except: unknown }>,
-    on: boolean,
-    telling: number,
-  ): void {
+  private takeTrack(entry: Extract<DemandEntry, { except: unknown }>, { instance, on, telling }: Report): void {
     const leases = this.tracks.get(entry.track)
     const held = leases?.get(instance)
     // A member's change follows its track's entry; a lease this process lost comes whole with the telling it asks.
@@ -240,7 +239,7 @@ class RoomDemand {
       if (held === undefined) return
       leases!.delete(instance)
       if (leases!.size === 0) this.tracks.delete(track)
-      return this.queueLease(track, instance, held, undefined)
+      return this.queueLease(track, { instance, was: held, now: undefined })
     }
     if (held !== undefined && held.byMember === byMember && sameMembers(held.except, except)) {
       held.telling = telling
@@ -248,13 +247,13 @@ class RoomDemand {
     }
     const now = { instance, telling, except: new Set(except), byMember }
     getOrCreate(this.tracks, track, () => new Map()).set(instance, now)
-    this.queueLease(track, instance, held, now)
+    this.queueLease(track, { instance, was: held, now })
   }
 
   /** Queues the members whose `track` a change of `instance`'s lease of it from `was` to `now` may have turned: those
    *  another reporter's lease of it of every member leaves out, else those one lease excepts and the other not when
    *  both are fetched alike, else every member. */
-  private queueLease(track: string, instance: string, was: TrackLease | undefined, now: TrackLease | undefined): void {
+  private queueLease(track: string, { instance, was, now }: TrackLeaseChange): void {
     for (const [other, lease] of this.tracks.get(track) ?? []) {
       if (other !== instance && !lease.byMember) return this.queueEach(track, lease.except)
     }
@@ -340,7 +339,7 @@ class RoomDemand {
 }
 
 /** Takes, renews or drops `instance`'s lease on `key`, and whether `key` went from held to not or back. */
-function lease<K>(leases: Map<K, Leases>, key: K, instance: string, on: boolean, telling: number): boolean {
+function lease<K>(leases: Map<K, Leases>, key: K, { instance, on, telling }: Report): boolean {
   const held = leases.get(key)
   if (on) {
     if (held) held.set(instance, telling)
