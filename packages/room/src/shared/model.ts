@@ -7,7 +7,6 @@ export {
   mergeAttributes,
   normalizeJoinOptions,
   assertParticipantIdentity,
-  assertRoomTimeout,
   removedCause,
   senderOf,
   ownMetaArgument,
@@ -20,7 +19,6 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../utils/assert.js'
 import { isObject } from '../utils/isObject.js'
-import { TIMER_DELAY_MAX_MS } from './constants.js'
 import { untether } from 'telefunc/__internal'
 import { Slice } from './Slice.js'
 import { getOrCreate } from '../utils/getOrCreate.js'
@@ -81,14 +79,6 @@ function assertParticipantIdentity(identity: unknown, where: string): asserts id
   assertUsage(
     typeof identity === 'string' && identity.length > 0 && identity.isWellFormed(),
     `${where} should be a non-empty well-formed string`,
-  )
-}
-/** Milliseconds a timer can wait, or `Infinity` for never. */
-function assertRoomTimeout(value: unknown, what: string): asserts value is number {
-  assertUsage(
-    value === Infinity ||
-      (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= TIMER_DELAY_MAX_MS),
-    `\`${what}\` should be a non-negative safe integer of milliseconds, at most ${TIMER_DELAY_MAX_MS}, the longest a timer waits, or Infinity`,
   )
 }
 /** An option the call doesn't have, a misspelled one included, would otherwise be ignored silently. */

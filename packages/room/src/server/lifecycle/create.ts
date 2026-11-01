@@ -4,7 +4,7 @@ import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import { getRoomBackend } from '../../backend/plane.js'
 import type { HeadCx, HeadNext, RoomHead } from '../../backend/contract.js'
-import { assertKnownOptions, assertRoomTimeout, isRecord, ownMetadata } from '../../shared/model.js'
+import { assertKnownOptions, isRecord, ownMetadata } from '../../shared/model.js'
 import type { RoomConfigRecord } from '../protocol.js'
 import type { RoomMeta, RoomOptions } from '../../types.js'
 import { encodeRoomRecord } from '../lanes/lanes.js'
@@ -15,7 +15,7 @@ import { EXCHANGE_CONFLICT, retryCompareExchange } from '../store/retryCompareEx
 import { cleanupFinalizedIncarnation, takeOverClose } from './close.js'
 import { createHold, lapseNewRoom, newHoldConfig, type RoomIncarnation } from './lifecycle.js'
 import { listRoom, sweepLapsedRoomsSoon } from '../store/directory.js'
-import { getRoomConfig } from '../config.js'
+import { assertRoomTimeout, getRoomConfig } from '../config.js'
 
 // A create reads the head until it may replace it, replaces it in one compare-exchange, and only then sets up the new
 // incarnation; a head that changed under the exchange sends it back to the read. The three run in one async attempt.

@@ -1,8 +1,8 @@
-export { config, getRoomConfig }
+export { assertRoomTimeout, config, getRoomConfig }
 export type { RoomConfig }
 
-import { assertRoomTimeout } from '../shared/model.js'
 import { ROOM_DEPARTURE_TIMEOUT_MS, ROOM_EMPTY_TIMEOUT_MS } from './constants.js'
+import { TIMER_DELAY_MAX_MS } from '../shared/constants.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { assertUsage } from '../utils/assert.js'
 
@@ -44,4 +44,13 @@ function getRoomConfig(): Required<RoomConfig> {
     emptyTimeout: globalObject.config.emptyTimeout ?? ROOM_EMPTY_TIMEOUT_MS,
     departureTimeout: globalObject.config.departureTimeout ?? ROOM_DEPARTURE_TIMEOUT_MS,
   }
+}
+
+/** Milliseconds a timer can wait, or `Infinity` for never. */
+function assertRoomTimeout(value: unknown, what: string): asserts value is number {
+  assertUsage(
+    value === Infinity ||
+      (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= TIMER_DELAY_MAX_MS),
+    `\`${what}\` should be a non-negative safe integer of milliseconds, at most ${TIMER_DELAY_MAX_MS}, the longest a timer waits, or Infinity`,
+  )
 }
