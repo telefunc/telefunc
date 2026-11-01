@@ -471,8 +471,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     entry.transport.terminateWire(wire)
   }
 
-  /** Returns a `ReconcileOutcome` only on reconcile (so the caller decides when to send
-   *  `reconciled`). Anything but reconcile/ping before reconciliation is a violation. */
+  /** Returns a RECONCILE's or barrier's `ReconcileOutcome` for the caller to send. Before a RECONCILE, a channel frame
+   *  is a violation; PING, PIECES_ACK, PREPARE and BARRIER go through their own checks. */
   private handleFrame(
     entry: WireEntry,
     rawFrame: Uint8Array<ArrayBuffer>,
