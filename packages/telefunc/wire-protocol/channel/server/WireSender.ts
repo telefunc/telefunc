@@ -1,5 +1,5 @@
 export { WireSender }
-export type { WireSenderOwner, WirePieces }
+export type { WireSenderOwner }
 
 import { WIRE_SEND_BACKLOG_BASE_BYTES } from '../../constants.js'
 import { encode } from '../../wire/frame.js'
