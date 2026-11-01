@@ -80,7 +80,7 @@ class ReceiveCredit {
     this.bdp.capByteWindow(window)
   }
 
-  /** Account one received frame off the wire, emitting a `BDP_PING` iff the estimator opens a probe. */
+  /** Counts a frame that arrived, and sends a `BDP_PING` when the estimator opens a probe. */
   onReceived(bytes: number): void {
     this.arrived = true
     this.receivedBytes += bytes
@@ -98,7 +98,7 @@ class ReceiveCredit {
     this.bdp.settleAttachProbe(probe)
   }
 
-  /** Account post-callback consumption of one frame. */
+  /** Counts a frame of `bytes` as consumed: its listeners are done with it, or it was dropped. */
   onConsumed(bytes: number): void {
     this.consume(bytes, 1)
   }
@@ -192,7 +192,7 @@ class ReceiveCredit {
     this.consume(bytes, 0)
   }
 
-  /** Bump to the batch-POST initial window and advertise it. Grow-only / idempotent. */
+  /** Raises the window to the batch-POST initial window and advertises it; never lowers it. */
   useBatchTransportInitial(): void {
     const prev = this.byteWindow
     this.bdp.raiseByteWindow(CREDIT_WINDOW_INITIAL_BYTES_BATCH)
