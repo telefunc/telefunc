@@ -1,5 +1,13 @@
 export { PieceSender, PieceReceiver, acknowledges }
-export type { FrameArrival, PieceArrival, PieceReceiverOptions, PieceSenderOptions, PieceSenderOwner, PieceSocket }
+export type {
+  FrameArrival,
+  PieceArrival,
+  PieceReceiverOptions,
+  PieceReceiverOwner,
+  PieceSenderOptions,
+  PieceSenderOwner,
+  PieceSocket,
+}
 
 import {
   WIRE_ANNOUNCED_MIN_BYTES,
@@ -511,16 +519,21 @@ type FrameArrival = { bytes: number; data: boolean; announced: boolean; at: numb
 /** A piece that arrived and made its frame `whole`, a data frame if `data`, as an announced message if `announced`. */
 type PieceArrival = { whole: boolean; data: boolean; announced: boolean }
 
+/** What sends its side's frames on the wire, which sends the receiver's acknowledgements. */
+interface PieceReceiverOwner {
+  /** Sends the acknowledgement now, alone. */
+  sendAck(frame: Uint8Array<ArrayBuffer>): void
+  /** Sends what `take` returns in the next message its side sends, as `PieceSender.carry` does. */
+  carryAck(take: () => Uint8Array<ArrayBuffer> | null): void
+}
+
 type PieceReceiverOptions = {
-  send: (frame: Uint8Array<ArrayBuffer>) => void
-  /** Its side's `PieceSender.carry`. */
-  carry: (frame: () => Uint8Array<ArrayBuffer> | null) => void
+  owner: PieceReceiverOwner
 }
 
 /** One WebSocket's receiver: puts a frame sent in pieces back together, and acknowledges the bytes it took. */
 abstract class PieceReceiver implements AckScheduleOwner {
-  private readonly send: (frame: Uint8Array<ArrayBuffer>) => void
-  private readonly carry: (frame: () => Uint8Array<ArrayBuffer> | null) => void
+  private readonly owner: PieceReceiverOwner
   /** The frame not yet whole: one buffer, grown as its pieces arrive, so what it holds is what arrived. */
   private frame = new Uint8Array(0)
   private received = 0
@@ -547,9 +560,8 @@ abstract class PieceReceiver implements AckScheduleOwner {
   protected ackedAt = Number.NEGATIVE_INFINITY
   private readonly ack = new AckSchedule({ owner: this })
 
-  constructor({ send, carry }: PieceReceiverOptions) {
-    this.send = send
-    this.carry = carry
+  constructor({ owner }: PieceReceiverOptions) {
+    this.owner = owner
   }
 
   protected abstract tookFrame(frame: FrameArrival): void
@@ -669,13 +681,13 @@ abstract class PieceReceiver implements AckScheduleOwner {
 
   /** Acknowledges now, alone. */
   acknowledge(): void {
-    this.send(this.takeAcknowledgement())
+    this.owner.sendAck(this.takeAcknowledgement())
   }
 
   /** Acknowledges in the message its side sends next. */
   acknowledgeWithNext(): void {
     if (!this.ack.carry()) return
-    this.carry(() => (this.ack.carried ? this.takeAcknowledgement() : null))
+    this.owner.carryAck(() => (this.ack.carried ? this.takeAcknowledgement() : null))
   }
 
   private takeAcknowledgement(): Uint8Array<ArrayBuffer> {

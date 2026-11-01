@@ -9,6 +9,9 @@ import type { PeerSender } from './IndexedPeer.js'
 import type { ServerTransport, Wire, WirePieces } from './mux.js'
 import type { Deliveries } from '../../flowControl/Deliveries.js'
 import { SocketWait, type SocketWaitOwner } from '../../flowControl/server/SocketWait.js'
+import type { ServerHeadroom } from '../../flowControl/server/headroom.js'
+import { ServerPieceReceiver } from '../../flowControl/server/pieceReceiver.js'
+import type { PieceReceiverOwner } from '../../flowControl/pieces.js'
 
 /** The mux, which knows the channels on a wire. */
 interface WireSenderOwner {
@@ -20,18 +23,20 @@ type WireSenderOptions = {
   owner: WireSenderOwner
   wire: Wire
   transport: ServerTransport<unknown>
-  pieces: WirePieces | null
+  /** The headroom of a wire that takes pieces (a WebSocket), else null. */
+  pieceHeadroom: ServerHeadroom | null
   /** What the wire delivered. */
   deliveries: Deliveries
 }
 
 /** Sends a wire's frames in call order, and terminates the wire once its backlog passes what its channels allow; the
  *  peers of its channels send through it, and once the wire closed it drops what they send. */
-class WireSender implements PeerSender, SocketWaitOwner {
+class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   private readonly owner: WireSenderOwner
   private readonly wire: Wire
   private readonly transport: ServerTransport<unknown>
-  private readonly pieces: WirePieces | null
+  /** Its headroom and the receiver that acknowledges what the wire took, on a wire that takes pieces. */
+  readonly pieces: WirePieces | null
   /** How long the frames that go at once wait behind what the socket holds. */
   private readonly wait = new SocketWait({ owner: this })
   private readonly deliveries: Deliveries
@@ -46,11 +51,11 @@ class WireSender implements PeerSender, SocketWaitOwner {
   /** The RECONCILE's probes its RECONCILED hasn't answered: a frame ahead of it goes behind their BDP_PING_ACKs. */
   private probed: { ix: number; probe: number }[] = []
 
-  constructor({ owner, wire, transport, pieces, deliveries }: WireSenderOptions) {
+  constructor({ owner, wire, transport, pieceHeadroom, deliveries }: WireSenderOptions) {
     this.owner = owner
     this.wire = wire
     this.transport = transport
-    this.pieces = pieces
+    this.pieces = pieceHeadroom && { headroom: pieceHeadroom, receiver: new ServerPieceReceiver({ owner: this }) }
     this.deliveries = deliveries
   }
 
@@ -77,6 +82,15 @@ class WireSender implements PeerSender, SocketWaitOwner {
   carry(frame: Uint8Array<ArrayBuffer>): void {
     if (this.pieces) this.pieces.headroom.sender.carry(() => frame)
     else this.send(frame)
+  }
+
+  /** `PieceReceiverOwner`: its receiver's acknowledgement goes as any frame of the wire does. */
+  sendAck(frame: Uint8Array<ArrayBuffer>): void {
+    this.send(frame)
+  }
+
+  carryAck(take: () => Uint8Array<ArrayBuffer> | null): void {
+    this.pieces?.headroom.sender.carry(take)
   }
 
   sendWait(): SocketWait {

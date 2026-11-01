@@ -7,7 +7,7 @@ import {
   WIRE_QUEUE_DELAY_MS,
   WIRE_SEND_AHEAD_MIN_BYTES,
 } from '../../constants.js'
-import { PieceSender, type PieceSenderOptions, type PieceSenderOwner } from '../pieces.js'
+import { PieceSender, type PieceReceiverOwner, type PieceSenderOptions, type PieceSenderOwner } from '../pieces.js'
 import type { Uplink } from './Uplink.js'
 import type { Downlink } from './Downlink.js'
 import type { PiecesAck } from '../../wire/frame.js'
@@ -27,7 +27,7 @@ type ClientHeadroomOptions = Pick<PieceSenderOptions, 'socket' | 'pingInterval'>
 }
 
 /** The bytes of data a page lets its WebSocket's queues hold, so its window refreshes don't wait long behind them. */
-class ClientHeadroom implements PieceSenderOwner {
+class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
   /** Every frame the WebSocket carries goes through it. */
   readonly sender: PieceSender
   private readonly uplink: Uplink
@@ -65,6 +65,15 @@ class ClientHeadroom implements PieceSenderOwner {
     const wait = this.uplink.waitNow()
     this.sender.send(frame, 0)
     this.uplink.noteWait(wait)
+  }
+
+  /** `PieceReceiverOwner`: the wire's receiver acknowledges through its sender, past the headroom. */
+  sendAck(frame: Uint8Array<ArrayBuffer>): void {
+    this.sender.send(frame, 0)
+  }
+
+  carryAck(take: () => Uint8Array<ArrayBuffer> | null): void {
+    this.sender.carry(take)
   }
 
   /** Sends what waits in the sender, as far as the headroom goes now. */

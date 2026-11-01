@@ -30,7 +30,7 @@ import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type { BarrierPayload, PreparePayload, ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { ServerHeadroom } from '../../flowControl/server/headroom.js'
-import { ServerPieceReceiver } from '../../flowControl/server/pieceReceiver.js'
+import type { ServerPieceReceiver } from '../../flowControl/server/pieceReceiver.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
 import { WireSender, type WireSenderOwner } from './WireSender.js'
 import { TransportSocket } from './TransportSocket.js'
@@ -118,7 +118,6 @@ type ConnectionState = {
   deliveries: Deliveries
   /** When the last PONG went out. */
   pongedAt: number
-  pieces: WirePieces | null
   terminatePermanently: boolean
   recvChain: Promise<unknown> | null
   /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
@@ -239,13 +238,6 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
           pingInterval: this.options.pingInterval,
         })
       : null
-    const pieces = headroom && {
-      headroom,
-      receiver: new ServerPieceReceiver({
-        send: (frame) => this.send(connection, frame),
-        carry: (ack) => headroom.sender.carry(ack),
-      }),
-    }
     const deliveries = new Deliveries()
     const entry: ConnectionEntry = {
       wire: connection,
@@ -254,7 +246,6 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
         lastReceivedAt: 0,
         deliveries,
         pongedAt: performance.now(),
-        pieces,
         terminatePermanently: false,
         recvChain: null,
         closed: null,
@@ -268,7 +259,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
         owner: this,
         wire: connection,
         transport: transport as ServerTransport<unknown>,
-        pieces,
+        pieceHeadroom: headroom,
         deliveries,
       }),
       request,
@@ -320,7 +311,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
     entry.state.closed = { isPermanent: permanent }
-    entry.state.pieces?.headroom.close()
+    entry.sender.pieces?.headroom.close()
     this.clearPingTimer(entry.state)
     entry.state.awaited.stop()
     entry.sender.close()
@@ -366,7 +357,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     try {
       if (isOneFrame(rawFrame)) return this.dispatchFrame(entry, rawFrame, 'alone')
       // Every frame but the last arrives riding.
-      assertProtocol(entry.state.pieces, 'frames in one message on a wire that takes no pieces')
+      assertProtocol(entry.sender.pieces, 'frames in one message on a wire that takes no pieces')
       const frames = messageFrames(rawFrame)
       let next = frames.next()
       while (!next.done && entry.state.closed === null) {
@@ -399,7 +390,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     if (tag === TAG.ANNOUNCE) return this.receiveAnnounce(entry, rawFrame)
     const now = performance.now()
     if (arrival !== 'pieced') {
-      state.pieces?.receiver.arrived(tag as number, byteLength, now, arrival)
+      entry.sender.pieces?.receiver.arrived(tag as number, byteLength, now, arrival)
       state.deliveries.note(now, byteLength)
     }
     state.recvBacklog.bytes += byteLength
@@ -422,11 +413,11 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     this.answerArrival(entry)
     const piece = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
     assert(piece.tag === TAG.PIECE)
-    assertProtocol(state.pieces, 'PIECE on a wire that takes no pieces')
+    assertProtocol(entry.sender.pieces, 'PIECE on a wire that takes no pieces')
     // As large as the runtime takes in one message: its pieces get past what it would refuse whole.
     const cap = getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES
     assertProtocol(piece.total <= cap, 'PIECE of a frame over the cap')
-    const { receiver } = state.pieces
+    const { receiver } = entry.sender.pieces
     const heldBefore = receiver.held
     const frame = receiver.add(piece.total, piece.piece, now)
     // What it holds of a frame counts in the recv backlog as the frame does once whole.
@@ -442,8 +433,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
     entry.state.deliveries.note(now, rawFrame.byteLength)
     const announce = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
     assert(announce.tag === TAG.ANNOUNCE)
-    assertProtocol(entry.state.pieces, 'ANNOUNCE on a wire that takes no pieces')
-    entry.state.pieces.receiver.announce(announce.bytes, now, announce.floor)
+    assertProtocol(entry.sender.pieces, 'ANNOUNCE on a wire that takes no pieces')
+    entry.sender.pieces.receiver.announce(announce.bytes, now, announce.floor)
     return Promise.resolve(null)
   }
 
@@ -518,7 +509,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
   ): null | ReconcileOutcome | Promise<ReconcileOutcome | null> {
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.PING) {
-      const pieces = entry.state.pieces
+      const pieces = entry.sender.pieces
       if (pieces)
         assertProtocol(pieces.headroom.sender.heartbeat(frame.took, performance.now()), 'PING took more than sent')
       this.resetPingTimer(entry)
@@ -527,7 +518,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
       return null
     }
     if (frame.tag === TAG.PIECES_ACK) {
-      const known = entry.state.pieces?.headroom.acknowledged(frame)
+      const known = entry.sender.pieces?.headroom.acknowledged(frame)
       assertProtocol(known, 'PIECES_ACK for nothing sent')
       return null
     }
@@ -581,7 +572,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
 
   private pong(entry: ConnectionEntry, ended: PongEntry[]): void {
     entry.state.pongedAt = performance.now()
-    entry.sender.send(withTook(encode.pong(ended), entry.state.pieces?.receiver.took ?? 0))
+    entry.sender.send(withTook(encode.pong(ended), entry.sender.pieces?.receiver.took ?? 0))
   }
 
   private dispatchChannelFrame(sessionId: string, frame: ChannelFrame): void {
@@ -998,7 +989,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner {
         // A PING waits behind what the page queued: dead past the deadline after its last bytes and its announced data.
         const deadAt = Math.max(
           state.lastReceivedAt + this.options.pingDeadline,
-          state.pieces?.receiver.expectedBy(this.options.pingDeadline) ?? 0,
+          entry.sender.pieces?.receiver.expectedBy(this.options.pingDeadline) ?? 0,
         )
         const now = performance.now()
         if (now < deadAt) return this.armPingDeadline(entry, Math.min(deadAt - now, TIMER_DELAY_MAX_MS))
