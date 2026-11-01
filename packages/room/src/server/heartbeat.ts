@@ -17,35 +17,48 @@ assertIsNotBrowser()
 
 /** The replica the heartbeat keeps at the authority. */
 interface RoomHeartbeatOwner {
-  readonly incarnation: RoomIncarnation
-  readonly model: Pick<RoomModel, 'closed'>
-  readonly lanePlan: Pick<LanePlan, 'observing' | 'ownsInbox' | 'resumeDropped'>
-  readonly outgoingDemand: Pick<DemandReport, 'reporting'>
-  readonly authority: Pick<AuthoritySync, 'reconcileMeta' | 'checkCoverage'>
   /** Renews what the replica told of its demand. */
   renewDemand(): Promise<void>
   maintainLease(): Promise<void>
 }
 
-type RoomHeartbeatOptions = { owner: RoomHeartbeatOwner }
+type RoomHeartbeatOptions = {
+  owner: RoomHeartbeatOwner
+  incarnation: RoomIncarnation
+  model: Pick<RoomModel, 'closed'>
+  lanePlan: Pick<LanePlan, 'observing' | 'ownsInbox' | 'resumeDropped'>
+  outgoingDemand: Pick<DemandReport, 'reporting'>
+  authority: Pick<AuthoritySync, 'reconcileMeta' | 'checkCoverage'>
+}
 
 /** Graceful departures use events; the heartbeat renews this server's lease and its demand, reaps the lapsed leases
  *  whose servers crashed, and reads the roster again once the control lane is past what the view covers. It runs while
  *  the room is open and this process observes it, owns an inbox, or reports demand. */
 class RoomHeartbeat {
-  private readonly owner: RoomHeartbeatOwner
   private timer: ReturnType<typeof setInterval> | null = null
   /** A slow backend must not pile up overlapping ticks. */
   private ticking = false
 
-  constructor({ owner }: RoomHeartbeatOptions) {
+  private readonly owner: RoomHeartbeatOwner
+  private readonly incarnation: RoomIncarnation
+  private readonly model: RoomHeartbeatOptions['model']
+  private readonly lanePlan: RoomHeartbeatOptions['lanePlan']
+  private readonly outgoingDemand: RoomHeartbeatOptions['outgoingDemand']
+  private readonly authority: RoomHeartbeatOptions['authority']
+
+  constructor({ owner, incarnation, model, lanePlan, outgoingDemand, authority }: RoomHeartbeatOptions) {
     this.owner = owner
+    this.incarnation = incarnation
+    this.model = model
+    this.lanePlan = lanePlan
+    this.outgoingDemand = outgoingDemand
+    this.authority = authority
   }
 
   /** Starts or stops the heartbeat by what this process is to the room now. */
   update(): void {
-    const { model, lanePlan, outgoingDemand } = this.owner
-    const on = !model.closed && (lanePlan.observing || lanePlan.ownsInbox || outgoingDemand.reporting)
+    const on =
+      !this.model.closed && (this.lanePlan.observing || this.lanePlan.ownsInbox || this.outgoingDemand.reporting)
     if (on && !this.timer) {
       this.timer = unrefTimer(setInterval(() => void this.tick().catch(reportRoomError), ROOM_HEARTBEAT_INTERVAL_MS))
     } else if (!on && this.timer) {
@@ -64,14 +77,14 @@ class RoomHeartbeat {
         () => null,
         (error: unknown) => ({ error }),
       )
-      owner.lanePlan.resumeDropped()
-      if (!owner.model.closed && (await owner.authority.reconcileMeta())) {
-        const incarnation = owner.incarnation
+      this.lanePlan.resumeDropped()
+      if (!this.model.closed && (await this.authority.reconcileMeta())) {
+        const incarnation = this.incarnation
         await dropReplacedMetaGenerations(incarnation.id, incarnation.inc)
         await reapLapsedLeases(incarnation)
-        await owner.authority.checkCoverage()
+        await this.authority.checkCoverage()
       }
-      if (!owner.model.closed) await maintainHold(owner.incarnation)
+      if (!this.model.closed) await maintainHold(this.incarnation)
       sweepLapsedRoomsSoon()
       if (renewalFailure) throw renewalFailure.error
     } finally {

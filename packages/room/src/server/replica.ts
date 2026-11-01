@@ -22,7 +22,7 @@ import type {
 } from '../protocol.js'
 import type { DemandEntry, RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope } from './protocol.js'
 import { Slice } from '../Slice.js'
-import { RoomModel, type ServerModelOwner } from '../model.js'
+import { RoomModel, type MembershipEvent, type ServerModelOwner } from '../model.js'
 import type { LeaveCause } from '../types.js'
 import { AuthoritySync, type AuthoritySyncOwner } from './AuthoritySync.js'
 import { PendingDmAcks } from './dmAcks.js'
@@ -46,7 +46,7 @@ import { finishLeaseCleanups, holdViews, removeView, renewLease } from './leases
 import type { StoredRoomMeta } from './meta.js'
 import type { LaneHolder, ReplayHold, TextWantsChange } from './replay.js'
 import type { MetaMirror, ServerRoom } from './room.js'
-import { RosterStream, type RosterStreamOwner } from './RosterStream.js'
+import { RosterStream } from './RosterStream.js'
 import { toggle } from './sets.js'
 import { RoomLease } from './lease.js'
 import { MemberMessageTexts, type RoomStub, unorderedEventText } from './stub.js'
@@ -70,14 +70,7 @@ function replicasHere(): Map<string, WeakRef<RoomReplica>> {
  *  guards, its tail, the stubs it opened and its listeners. A replica no handle observes, owns a member through or
  *  tails runs no heartbeat and holds no lane; it lives while a handle holds it. */
 class RoomReplica
-  implements
-    ServerModelOwner,
-    DemandReportOwner,
-    RoomDemandOwner,
-    LanePlanOwner,
-    AuthoritySyncOwner,
-    RoomHeartbeatOwner,
-    RosterStreamOwner
+  implements ServerModelOwner, DemandReportOwner, RoomDemandOwner, LanePlanOwner, AuthoritySyncOwner, RoomHeartbeatOwner
 {
   private static readonly collected = new FinalizationRegistry<{
     replicas: Map<string, WeakRef<RoomReplica>>
@@ -170,11 +163,33 @@ class RoomReplica
       owner: this,
     })
     this.gossip = new GossipOutbox(incarnation, this.outgoingDemand.instance)
-    this.incomingDemand = new RoomDemand({ owner: this })
-    this.lanePlan = new LanePlan({ owner: this })
-    this.authority = new AuthoritySync({ owner: this })
-    this.heartbeat = new RoomHeartbeat({ owner: this })
-    this.roster = new RosterStream({ owner: this })
+    this.incomingDemand = new RoomDemand({ owner: this, publishedTracks: this.publishedTracks })
+    const { model, outgoingDemand } = this
+    this.lanePlan = new LanePlan({ owner: this, incarnation, model, outgoingDemand })
+    const lanePlan = this.lanePlan
+    this.authority = new AuthoritySync({ owner: this, incarnation, model, lanePlan })
+    const authority = this.authority
+    this.heartbeat = new RoomHeartbeat({ owner: this, incarnation, model, lanePlan, outgoingDemand, authority })
+    this.roster = new RosterStream({ model, stubs: this.stubs, authority })
+  }
+
+  onLanesChanged(): void {
+    this.heartbeat.update()
+  }
+
+  refreshMembers(): Promise<void> {
+    return this.authority.refreshMembers()
+  }
+
+  recoverFromGap(): Promise<void> {
+    return this.authority.reconcileAuthority()
+  }
+
+  applyRoster(
+    roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
+    events: readonly MembershipEvent[],
+  ): Promise<boolean> {
+    return this.roster.reconcile(roster, events)
   }
 
   /** Whether the handle's holders and holds are served: its stubs, participants and listeners, and its tail. */

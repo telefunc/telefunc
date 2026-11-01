@@ -6,36 +6,40 @@ import { unrefTimer } from '../utils/unrefTimer.js'
 import { getRoomBackend } from '../backend/plane.js'
 import { ROOM_META_REPAIR_MS } from './constants.js'
 import type { RoomConfigRecord } from './protocol.js'
-import type { RoomModel } from '../model.js'
+import type { MembershipEvent, RoomModel } from '../model.js'
+import type { MemberSnapshot } from '../protocol.js'
 import { reportRoomError } from './reportRoomError.js'
 import type { RoomIncarnation } from './lifecycle.js'
 import { CONTROL_LANE } from './lanes.js'
 import { reapAndReadRoster } from './roster.js'
 import { dropReplacedMetaGenerations, readRoomMeta, readRoomMetaSeq, type StoredRoomMeta } from './meta.js'
-import type { RosterStream } from './RosterStream.js'
 import type { LanePlan } from './LanePlan.js'
 assertIsNotBrowser()
 
 /** The replica whose view the sync keeps: what it renews, and where what the sync reads applies. */
 interface AuthoritySyncOwner {
-  readonly id: string
-  readonly incarnation: RoomIncarnation
-  /** Read-only here: every change goes through the owner's methods. */
-  readonly model: Pick<
-    RoomModel,
-    'closed' | 'metaWaiting' | 'metaSeq' | 'rosterKnown' | 'recordMembership' | 'stopRecordingMembership'
-  >
   readOpenConfig(): Promise<RoomConfigRecord | null>
   applyAuthorityMeta(stored: StoredRoomMeta): void
   /** A failover rewound the control lane: the view forgets its meta seqs. */
   rewound(): void
-  /** Applies a complete roster read, and sends it to the clients it concerns. */
-  readonly roster: Pick<RosterStream, 'reconcile'>
-  readonly lanePlan: Pick<LanePlan, 'replan' | 'resumeDropped' | 'observing' | 'controlEstablished'>
+  /** Applies a complete roster read, and sends it to the clients it concerns; false if the view moved past it. */
+  applyRoster(
+    roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
+    events: readonly MembershipEvent[],
+  ): Promise<boolean>
   closeFromAuthority(): void
 }
 
-type AuthoritySyncOptions = { owner: AuthoritySyncOwner }
+type AuthoritySyncOptions = {
+  owner: AuthoritySyncOwner
+  incarnation: RoomIncarnation
+  /** Read-only here: every change goes through the owner's methods. */
+  model: Pick<
+    RoomModel,
+    'closed' | 'metaWaiting' | 'metaSeq' | 'rosterKnown' | 'recordMembership' | 'stopRecordingMembership'
+  >
+  lanePlan: Pick<LanePlan, 'replan' | 'resumeDropped' | 'observing' | 'controlEstablished'>
+}
 
 /** The repairs a gap asks for, each due `ROOM_META_REPAIR_MS` after it. */
 type Repair = 'control' | 'meta' | 'memberMeta'
@@ -53,27 +57,32 @@ class AuthoritySync {
   private runStart = 0
 
   private readonly owner: AuthoritySyncOwner
+  private readonly incarnation: RoomIncarnation
+  private readonly model: AuthoritySyncOptions['model']
+  private readonly lanePlan: AuthoritySyncOptions['lanePlan']
 
-  constructor({ owner }: AuthoritySyncOptions) {
+  constructor({ owner, incarnation, model, lanePlan }: AuthoritySyncOptions) {
     this.owner = owner
+    this.incarnation = incarnation
+    this.model = model
+    this.lanePlan = lanePlan
   }
 
   ensureRoster(): Promise<void> {
     if (this.pendingRefresh !== null) return this.pendingRefresh
-    if (this.owner.model.closed || this.current()) return Promise.resolve()
+    if (this.model.closed || this.current()) return Promise.resolve()
     return this.refreshMembers()
   }
 
   /** What a new handle reads of a view it shares: nothing while the view is current, else the meta and the roster. */
   async catchUp(): Promise<void> {
-    if (this.owner.model.closed || this.current()) return
+    if (this.model.closed || this.current()) return
     if (await this.reconcileMeta()) await this.refreshMembers()
   }
 
   async reconcileAuthority(): Promise<void> {
-    const owner = this.owner
-    if (owner.model.closed || !(await this.reconcileMeta())) return
-    await dropReplacedMetaGenerations(owner.id, owner.incarnation.inc)
+    if (this.model.closed || !(await this.reconcileMeta())) return
+    await dropReplacedMetaGenerations(this.incarnation.id, this.incarnation.inc)
     await this.refreshMembers()
   }
 
@@ -105,7 +114,7 @@ class AuthoritySync {
     this.joinRun()
     if (this.covered < this.received) {
       this.repairSoon('control', () => {
-        if (this.covered < this.received && !this.owner.model.closed) {
+        if (this.covered < this.received && !this.model.closed) {
           void this.reconcileAuthority().catch(reportRoomError)
         }
       })
@@ -142,15 +151,14 @@ class AuthoritySync {
   }
 
   private async controlMark(): Promise<number> {
-    const owner = this.owner
-    return (await getRoomBackend().readLaneOrder(owner.id, owner.incarnation.inc, CONTROL_LANE))?.seq ?? 0
+    return (await getRoomBackend().readLaneOrder(this.incarnation.id, this.incarnation.inc, CONTROL_LANE))?.seq ?? 0
   }
 
   /** A meta change waits on one before it. Unless that one arrives, a whole read repairs the gap
    *  `ROOM_META_REPAIR_MS` after the first wait rather than at the next heartbeat. */
   metaWaiting(): void {
     this.repairSoon('meta', () => {
-      const model = this.owner.model
+      const model = this.model
       if (model.metaWaiting && !model.closed) void this.reconcileMeta().catch(reportRoomError)
     })
   }
@@ -159,7 +167,7 @@ class AuthoritySync {
    *  the member rather than the next heartbeat's. */
   memberMetaGap(): void {
     this.repairSoon('memberMeta', () => {
-      if (!this.owner.model.closed) void this.refreshMembers().catch(reportRoomError)
+      if (!this.model.closed) void this.refreshMembers().catch(reportRoomError)
     })
   }
 
@@ -173,7 +181,7 @@ class AuthoritySync {
 
   /** The roster is known, and the control lane delivers every change since. */
   private current(): boolean {
-    return this.owner.model.rosterKnown && this.owner.lanePlan.observing && this.owner.lanePlan.controlEstablished
+    return this.model.rosterKnown && this.lanePlan.observing && this.lanePlan.controlEstablished
   }
 
   /** The stored meta, applied if newer, and read whole only when it holds a write the view lacks or one waits; false
@@ -181,11 +189,11 @@ class AuthoritySync {
   async reconcileMeta(): Promise<boolean> {
     const owner = this.owner
     const config = await owner.readOpenConfig()
-    if (config !== null && !owner.model.metaWaiting) {
-      const seq = await readRoomMetaSeq(owner.id, config.inc)
-      if (seq !== null && seq <= owner.model.metaSeq) return true
+    if (config !== null && !this.model.metaWaiting) {
+      const seq = await readRoomMetaSeq(this.incarnation.id, config.inc)
+      if (seq !== null && seq <= this.model.metaSeq) return true
     }
-    const stored = config === null ? null : await readRoomMeta(owner.id, config)
+    const stored = config === null ? null : await readRoomMeta(this.incarnation.id, config)
     if (stored === null) {
       owner.closeFromAuthority()
       return false
@@ -198,17 +206,17 @@ class AuthoritySync {
    *  the control lane up to the order read before it, as a frame commits after the cells it changed. */
   private async runMemberRefresh(): Promise<void> {
     const owner = this.owner
-    if (owner.model.closed) return
+    if (this.model.closed) return
     const mark = await this.controlMark()
     // The events grow while the roster is read and reconciled.
-    const events = owner.model.recordMembership()
+    const events = this.model.recordMembership()
     try {
-      const roster = await reapAndReadRoster(owner.incarnation)
-      if (owner.model.closed || !(await owner.roster.reconcile(roster, events))) return
+      const roster = await reapAndReadRoster(this.incarnation)
+      if (this.model.closed || !(await owner.applyRoster(roster, events))) return
     } finally {
-      owner.model.stopRecordingMembership()
+      this.model.stopRecordingMembership()
     }
     this.cover(mark)
-    await this.owner.lanePlan.replan()
+    await this.lanePlan.replan()
   }
 }

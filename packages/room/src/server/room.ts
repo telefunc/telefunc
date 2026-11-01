@@ -110,7 +110,14 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
     this._incarnation = replica.incarnation
     this._state = new RoomState({ view: this, model: replica.model, owner: new ServerRoomStateOwner(this) })
     this._local = new LocalHolder(this._state, this.localSuppressed)
-    this._writes = new RoomWrites({ owner: this })
+    this._writes = new RoomWrites({
+      owner: this,
+      incarnation: replica.incarnation,
+      model: replica.model,
+      state: this._state,
+      replica,
+      localParticipants: this._localParticipants,
+    })
   }
 
   /** @internal */

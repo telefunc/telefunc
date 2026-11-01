@@ -17,8 +17,6 @@ import { LaneSubscription, type LaneAddress, type LaneSubscriptionOwner } from '
 import { Slice } from '../Slice.js'
 import type { LaneHolder } from './replay.js'
 import type { RoomIncarnation } from './lifecycle.js'
-import type { AuthoritySync } from './AuthoritySync.js'
-import type { RoomHeartbeat } from './heartbeat.js'
 import { WantsIndex, type WantsIndexOwner } from './WantsIndex.js'
 import { runAll, toggle, toggleEntry } from './sets.js'
 import { CONTROL_LANE, DEMAND_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
@@ -39,8 +37,6 @@ interface LaneReceiver {
 
 /** What this process's handles are to the room, which decides the lanes it subscribes. */
 interface LaneRoles {
-  /** Read-only here: every change goes through the owner's methods. */
-  readonly model: Pick<RoomModel, 'closed' | 'rosterKnown' | 'memberIds' | 'memberCount' | 'hasMember'>
   /** Whether a handle observes the room: a client stub, a participant, or a listener. */
   observed(): boolean
   /** Whether a handle has a listener. */
@@ -53,26 +49,30 @@ interface LaneRoles {
   ownedMembers(): Iterable<string>
 }
 
-/** What this process tells of its demand, which the plan sets as it plans. */
-interface LaneDemand {
-  readonly outgoingDemand: DemandReport
-}
-
-/** The incarnation the lanes are subscribed at, and what keeps the view in step with it. */
+/** What keeps the view in step with the authority, which the lanes ask for. */
 interface LaneAuthority {
-  readonly id: string
-  readonly incarnation: RoomIncarnation
-  /** Recovers from a gap, and refreshes the members; the heartbeat runs while the plan keeps the room. */
-  readonly authority: Pick<AuthoritySync, 'reconcileAuthority' | 'refreshMembers'>
-  readonly heartbeat: Pick<RoomHeartbeat, 'update'>
   readOpenConfig(): Promise<RoomConfigRecord | null>
   closeFromAuthority(): void
+  /** A lane dropped deliveries: the view catches up with the authority. */
+  recoverFromGap(): Promise<void>
+  /** The lanes need the roster, which the view reads again. */
+  refreshMembers(): Promise<void>
+  /** The lanes changed, which decides whether the heartbeat runs. */
+  onLanesChanged(): void
 }
 
 /** The replica the subscriptions serve: it aggregates every handle's holders and applies what the lanes carry. */
-type LanePlanOwner = LaneReceiver & LaneRoles & LaneAuthority & LaneDemand
+type LanePlanOwner = LaneReceiver & LaneRoles & LaneAuthority
 
-type LanePlanOptions = { owner: LanePlanOwner }
+type LanePlanOptions = {
+  owner: LanePlanOwner
+  /** The incarnation the lanes are subscribed at. */
+  incarnation: RoomIncarnation
+  /** Read-only here: every change goes through the owner's methods. */
+  model: Pick<RoomModel, 'closed' | 'rosterKnown' | 'memberIds' | 'memberCount' | 'hasMember'>
+  /** What this process tells of its demand, which the plan sets as it plans. */
+  outgoingDemand: DemandReport
+}
 
 /** Fan-in lanes of one kind not delivering yet, and the lanes of the other kind, by member or track, that wait for
  *  none to be; the last one's first delivery or stop replans those, as the plan's `replans`. */
@@ -144,9 +144,15 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   private planning: Promise<void> | null = null
 
   private readonly owner: LanePlanOwner
+  private readonly incarnation: RoomIncarnation
+  private readonly model: LanePlanOptions['model']
+  private readonly outgoingDemand: DemandReport
 
-  constructor({ owner }: LanePlanOptions) {
+  constructor({ owner, incarnation, model, outgoingDemand }: LanePlanOptions) {
     this.owner = owner
+    this.incarnation = incarnation
+    this.model = model
+    this.outgoingDemand = outgoingDemand
   }
 
   /** Whether some handle observes the room through the control lane. */
@@ -305,7 +311,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
    *  the demand lane and the heartbeat after them. */
   syncLanes(): void {
     const owner = this.owner
-    const model = owner.model
+    const model = this.model
     const open = !model.closed
     const observing = open && owner.observed()
     const becomesObserved = observing && !this._observing
@@ -316,11 +322,11 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     else this.semantic.stop()
     const needsRoster = owner.listened() || (open && this.wants.wantsBinary)
     if ((becomesObserved && model.rosterKnown) || (open && !model.rosterKnown && needsRoster)) {
-      void owner.authority.refreshMembers().catch(reportRoomError)
+      void owner.refreshMembers().catch(reportRoomError)
     }
     this.syncDemandLane()
-    if (this.planning === null) this.owner.outgoingDemand.flush()
-    this.owner.heartbeat.update()
+    if (this.planning === null) this.outgoingDemand.flush()
+    this.owner.onLanesChanged()
   }
 
   /** Indexes the holder's wants a step at a time, each step queueing the members it affected. */
@@ -367,15 +373,15 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
           await this.replanEach(slice, drain(this.gone), (holder) => this.indexHolder(holder, { gone: true }))
         } else if (!isEmpty(plan)) {
           await this.planRound(slice, plan)
-        } else if (this.owner.outgoingDemand.changed) {
-          while (!this.owner.outgoingDemand.tellUntil(slice.end)) await slice.next()
+        } else if (this.outgoingDemand.changed) {
+          while (!this.outgoingDemand.tellUntil(slice.end)) await slice.next()
         } else {
           return
         }
       }
     } finally {
       this.planning = null
-      this.owner.heartbeat.update()
+      this.owner.onLanesChanged()
     }
   }
 
@@ -388,7 +394,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     const members = chain(
       plan.members,
       plan.pairs.keys(),
-      plan.all ? owner.model.memberIds() : [],
+      plan.all ? this.model.memberIds() : [],
       // Lanes of members no longer present close too.
       plan.all ? this.binaryTracks.keys() : [],
       plan.all ? this.everyTrack.keys() : [],
@@ -421,7 +427,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
         slice,
         chain(this.inbox.keys(), owner.ownedMembers()),
         once((member) => {
-          if (!owner.model.closed && owner.ownsMember(member)) this.openInbox(member)
+          if (!this.model.closed && owner.ownsMember(member)) this.openInbox(member)
           else this.closeInbox(member)
         }),
       )
@@ -447,7 +453,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
 
   /** Whether `byMember` changed. */
   private syncByMember(): boolean {
-    const model = this.owner.model
+    const model = this.model
     const tracks = this.wants.everyMemberTrackCount
     const members = model.memberCount
     const byMember =
@@ -479,12 +485,9 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     }
     const all = this.everyTrack.get(member)
     const allDelivers = all?.delivering === true
-    this.owner.outgoingDemand.setMember(member, wantsAll && allDelivers)
-    this.owner.outgoingDemand.setFetched(
-      member,
-      present && allDelivers && (this.byMember || this.byMemberTracks.size > 0),
-    )
-    for (const track of chain(this.binaryTracks.get(member) ?? [], this.owner.outgoingDemand.localTracks(member))) {
+    this.outgoingDemand.setMember(member, wantsAll && allDelivers)
+    this.outgoingDemand.setFetched(member, present && allDelivers && (this.byMember || this.byMemberTracks.size > 0))
+    for (const track of chain(this.binaryTracks.get(member) ?? [], this.outgoingDemand.localTracks(member))) {
       this.syncLane(member, track, servedByAll)
       yield
     }
@@ -509,7 +512,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
       !this.binaryTracks.has(member) &&
       !this.everyTrack.has(member) &&
       !this.overflowing.has(member) &&
-      !this.owner.outgoingDemand.receivesFrom(member)
+      !this.outgoingDemand.receivesFrom(member)
     )
   }
 
@@ -556,7 +559,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     }
     if (everyMember) this.setExcept(track, member, present && !named)
     const delivers = allDelivers || trackDelivers || lane?.delivering === true
-    this.owner.outgoingDemand.setPair(member, track, (named || lane !== undefined) && delivers && !trackDelivers)
+    this.outgoingDemand.setPair(member, track, (named || lane !== undefined) && delivers && !trackDelivers)
   }
 
   /** The every-member lane of `track` while some holder here names it of every member and the tracks are not fetched
@@ -568,7 +571,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     lane.resume()
     if (lane.delivering) this.byMemberTracks.delete(track)
     const byMember = this.byMemberTracks.has(track)
-    this.owner.outgoingDemand.setTrack(track, lane.delivering || byMember, { byMember })
+    this.outgoingDemand.setTrack(track, lane.delivering || byMember, { byMember })
   }
 
   /** An every-member lane that serves no holder here stops once the lanes replacing it deliver: the named lanes and
@@ -588,12 +591,12 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
       this.stopFanIn(lane, this.establishingEveryMember)
     }
     toggle(this.byMemberTracks, track, named)
-    if (named) this.owner.outgoingDemand.setTrack(track, true, { byMember: true })
-    else this.owner.outgoingDemand.forgetTrack(track)
+    if (named) this.outgoingDemand.setTrack(track, true, { byMember: true })
+    else this.outgoingDemand.forgetTrack(track)
   }
 
   private namesEveryMember(track: string): boolean {
-    return !this.owner.model.closed && this.wants.namesEveryMember(track)
+    return !this.model.closed && this.wants.namesEveryMember(track)
   }
 
   /** Whether the member is one no holder here receives a track named of every member from: only a holder's own member
@@ -613,12 +616,12 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   }
 
   private setExcept(track: string, member: string, on: boolean): void {
-    this.owner.outgoingDemand.setExcept(track, member, on)
+    this.outgoingDemand.setExcept(track, member, on)
     if (on) this.excepted.add(member)
   }
 
   private present(member: string): boolean {
-    const model = this.owner.model
+    const model = this.model
     return !model.closed && model.hasMember(member)
   }
 
@@ -681,12 +684,12 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     if (this.waitsFor(this.establishingEveryMember, member)) return
     this.everyTrack.delete(member)
     this.stopFanIn(all, this.establishingEveryTrack)
-    this.owner.outgoingDemand.setFetched(member, false)
+    this.outgoingDemand.setFetched(member, false)
   }
 
   /** Whether `item`'s lane stays while a lane of the other kind is not delivering yet: a closed room waits for none. */
   private waitsFor(other: Establishing, item: string): boolean {
-    const waits = !this.owner.model.closed && other.lanes.size > 0
+    const waits = !this.model.closed && other.lanes.size > 0
     toggle(other.waiting, item, waits)
     return waits
   }
@@ -704,7 +707,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
 
   private openInbox(member: string): void {
     const owner = this.owner
-    if (owner.model.closed || !owner.ownsMember(member)) return
+    if (this.model.closed || !owner.ownsMember(member)) return
     const address = { kind: 'inbox', member } as const
     getOrCreate(this.inbox, member, () => new LaneSubscription({ owner: this, address })).start()
   }
@@ -717,7 +720,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   private syncDemandLane(): void {
     const owner = this.owner
     const lane = this.demandLane
-    if (!owner.model.closed && owner.ownsAnyMember()) {
+    if (!this.model.closed && owner.ownsAnyMember()) {
       lane.start()
       return
     }
@@ -728,7 +731,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
 
   /** `LaneSubscriptionOwner`: a lane of this incarnation. */
   subscribeLane(address: LaneAddress, receiver: BackendReceiver): BackendSubscription {
-    return getRoomBackend().subscribeLane(this.owner.id, this.owner.incarnation.inc, address, receiver)
+    return getRoomBackend().subscribeLane(this.incarnation.id, this.incarnation.inc, address, receiver)
   }
 
   /** `LaneSubscriptionOwner`: what a lane carries goes to the replica's handler for its kind. */
@@ -755,7 +758,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   }
 
   onLaneRecovered(): void {
-    void this.owner.authority.reconcileAuthority().catch(reportRoomError)
+    void this.owner.recoverFromGap().catch(reportRoomError)
   }
 
   /** The demand lane delivering asks for demand. What a binary lane carries is demand once it delivers, so its
@@ -830,7 +833,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
       this.recovering.delete(lane)
     }
     // Catch up on what the outage dropped; a later end of the lane gets its own recovery.
-    await this.owner.authority.reconcileAuthority()
+    await this.owner.recoverFromGap()
   }
 }
 

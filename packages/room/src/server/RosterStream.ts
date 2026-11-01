@@ -1,5 +1,5 @@
 export { RosterStream }
-export type { RosterStreamOptions, RosterStreamOwner }
+export type { RosterStreamOptions }
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { ROOM_ROSTER_PART_MEMBERS } from './constants.js'
@@ -11,15 +11,13 @@ import { type RoomStub, unorderedEventText } from './stub.js'
 import type { AuthoritySync } from './AuthoritySync.js'
 assertIsNotBrowser()
 
-/** The replica whose view's roster streams. */
-interface RosterStreamOwner {
-  readonly model: RoomModel
+type RosterStreamOptions = {
+  /** The view whose roster streams. */
+  model: RoomModel
   /** The view's attached stubs; one that leaves it drops out of a stream. */
-  readonly stubs: ReadonlySet<RoomStub>
-  readonly authority: Pick<AuthoritySync, 'ensureRoster'>
+  stubs: ReadonlySet<RoomStub>
+  authority: Pick<AuthoritySync, 'ensureRoster'>
 }
-
-type RosterStreamOptions = { owner: RosterStreamOwner }
 
 /** A view's roster to its clients: on attach, and again to every client once a roster read corrected a drift. */
 class RosterStream {
@@ -33,10 +31,14 @@ class RosterStream {
   /** The roster stream each stub is being sent; a newer one replaces it. */
   private readonly streamOf = new WeakMap<RoomStub, object>()
 
-  private readonly owner: RosterStreamOwner
+  private readonly model: RoomModel
+  private readonly stubs: ReadonlySet<RoomStub>
+  private readonly authority: RosterStreamOptions['authority']
 
-  constructor({ owner }: RosterStreamOptions) {
-    this.owner = owner
+  constructor({ model, stubs, authority }: RosterStreamOptions) {
+    this.model = model
+    this.stubs = stubs
+    this.authority = authority
   }
 
   /** Whether a client of the view was sent every member it holds, as it holds them:
@@ -52,11 +54,11 @@ class RosterStream {
     roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
     events: readonly MembershipEvent[],
   ): Promise<boolean> {
-    this.reconciling = this.owner.model.rosterKnown
+    this.reconciling = this.model.rosterKnown
     try {
-      const drifted = await this.owner.model.reconcileRoster(roster, events)
+      const drifted = await this.model.reconcileRoster(roster, events)
       if (drifted === null) return false
-      const recipients = drifted ? [...this.owner.stubs] : [...this.owed]
+      const recipients = drifted ? [...this.stubs] : [...this.owed]
       this.owed.clear()
       if (recipients.length > 0) void this.stream(recipients).catch(reportRoomError)
       return true
@@ -67,14 +69,14 @@ class RosterStream {
 
   /** An attached stub's first roster, once the view knows it; a failed read owes it the next one. */
   sendTo(stub: RoomStub): void {
-    void this.owner.authority
+    void this.authority
       .ensureRoster()
       .then(() => {
-        if (this.owner.stubs.has(stub) && !this.owner.model.closed) return this.stream([stub])
+        if (this.stubs.has(stub) && !this.model.closed) return this.stream([stub])
       })
       .catch((error) => {
         reportRoomError(error)
-        if (!this.owner.stubs.has(stub) || this.owner.model.closed) return
+        if (!this.stubs.has(stub) || this.model.closed) return
         stub.relayEvent({ __r: 'roster-error' })
         this.owed.add(stub)
       })
@@ -98,7 +100,7 @@ class RosterStream {
       this.streamOf.set(stub, stream)
       stub.rosterSent = false
     }
-    const model = this.owner.model
+    const model = this.model
     const version = model.version
     if (this.texts?.version !== version) this.texts = { version, parts: [] }
     const texts = this.texts.parts
@@ -115,7 +117,7 @@ class RosterStream {
         }
         chunk.push(next.value)
       }
-      const receiving = stubs.filter((stub) => this.streamOf.get(stub) === stream && this.owner.stubs.has(stub))
+      const receiving = stubs.filter((stub) => this.streamOf.get(stub) === stream && this.stubs.has(stub))
       if (receiving.length === 0 || model.closed) return
       // The first roster read adds its members without a change.
       const unchanged = model.rosterKnown && model.version === version

@@ -29,11 +29,13 @@ interface RoomDemandOwner {
   deliverDemand(member: string, track: string, wanted: boolean): void
   /** Asks the reporter to tell everything again. */
   askDemand(instance: string): void
-  /** A report of a member's every track covers the tracks it published on. */
-  readonly publishedTracks: Pick<PublishedTracks, 'has' | 'namedOf'>
 }
 
-type RoomDemandOptions = { owner: RoomDemandOwner }
+type RoomDemandOptions = {
+  owner: RoomDemandOwner
+  /** A report of a member's every track covers the tracks it published on. */
+  publishedTracks: Pick<PublishedTracks, 'has' | 'namedOf'>
+}
 
 /** The replica that tells the room each change of its planner's demand. */
 interface DemandReportOwner {
@@ -307,9 +309,11 @@ class RoomDemand {
   private settling = false
 
   private readonly owner: RoomDemandOwner
+  private readonly publishedTracks: RoomDemandOptions['publishedTracks']
 
-  constructor({ owner }: RoomDemandOptions) {
+  constructor({ owner, publishedTracks }: RoomDemandOptions) {
     this.owner = owner
+    this.publishedTracks = publishedTracks
   }
 
   /** Another process's page, which renews its lease. A page count that skips one makes this process ask it to tell
@@ -575,7 +579,7 @@ class RoomDemand {
   /** Whether some reporter receives the owned member's track. */
   private isWanted(member: string, track: string): boolean {
     if (this.pairs.get(member)?.has(track)) return true
-    if (this.owner.publishedTracks.has(member, track) && this.members.has(member)) return true
+    if (this.publishedTracks.has(member, track) && this.members.has(member)) return true
     for (const { instance, except, byMember } of this.tracks.get(track)?.values() ?? []) {
       if (!except.has(member) && (!byMember || this.fetched.get(member)?.has(instance) === true)) return true
     }
@@ -583,7 +587,7 @@ class RoomDemand {
   }
 
   private everyTrackOf(member: string): string[] {
-    return [DEFAULT_TRACK, ...this.owner.publishedTracks.namedOf(member)]
+    return [DEFAULT_TRACK, ...this.publishedTracks.namedOf(member)]
   }
 }
 
