@@ -46,6 +46,7 @@ import {
 } from 'telefunc/__internal'
 import { createDeferred } from '../utils/createDeferred.js'
 import { getOrCreate } from '../utils/getOrCreate.js'
+import { SortedIds, compareCodePoints } from '../utils/SortedIds.js'
 import { unrefTimer } from '../utils/unrefTimer.js'
 
 type Expiring = { expiresAt: number | null }
@@ -199,9 +200,9 @@ class MemoryRoomDriver implements RoomDriver {
 
   private readonly rooms = new Map<string, RoomRecord>()
   private readonly directory = new Map<string, DirectoryEntry>()
-  /** The directory's room ids in code point order: a put of a new id or a delete drops it, and the next list sorts
-   *  them again, so a full list sorts once and each page reads only its own ids. */
-  private sortedIds: string[] | null = null
+  /** The directory's room ids in code point order, so a page reads only its own ids. The first list sorts them, and puts
+   *  and deletes keep them in order from then on: a server that never lists pays nothing per put. */
+  private sortedIds: SortedIds | null = null
   /** A min-heap by `at` of the checks each put scheduled; a check its entry no longer has is dropped when reached. */
   private readonly directoryChecks: DirectoryCheck[] = []
   private revSeq = 0
@@ -412,7 +413,7 @@ class MemoryRoomDriver implements RoomDriver {
 
   async directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
     const at = Math.max(checkAt, Date.now() + minDelayMs)
-    if (!this.directory.has(roomId)) this.sortedIds = null
+    if (!this.directory.has(roomId)) this.sortedIds?.add(roomId)
     this.directory.set(roomId, { incTag, checkAt: at })
     if (at !== Infinity) pushCheck(this.directoryChecks, { at, roomId })
   }
@@ -420,7 +421,7 @@ class MemoryRoomDriver implements RoomDriver {
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
     if (this.directory.get(roomId)?.incTag !== incTag) return
     this.directory.delete(roomId)
-    this.sortedIds = null
+    this.sortedIds?.delete(roomId)
   }
 
   async directoryGet(roomId: string): Promise<string | undefined> {
@@ -428,15 +429,14 @@ class MemoryRoomDriver implements RoomDriver {
   }
 
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
-    const ids = (this.sortedIds ??= [...this.directory.keys()].sort(compareCodePoints))
     // The ids under `prefix` sit together in code point order; a page starts past the cursor.
     const from = cursor !== undefined && compareCodePoints(cursor, prefix) > 0 ? cursor : prefix
-    let at = positionOf(ids, from)
-    if (ids[at] === cursor) at++
     const entries: DirectoryPage['entries'] = []
-    for (; at < ids.length && ids[at]!.startsWith(prefix); at++) {
+    this.sortedIds ??= new SortedIds(this.directory.keys())
+    for (const roomId of this.sortedIds.from(from)) {
+      if (!roomId.startsWith(prefix)) break
+      if (roomId === cursor) continue
       if (entries.length === DIRECTORY_PAGE_SIZE) return { entries, cursor: entries.at(-1)!.roomId }
-      const roomId = ids[at]!
       entries.push({ roomId, incTag: this.directory.get(roomId)!.incTag })
     }
     return { entries }
@@ -482,28 +482,6 @@ class MemoryRoomDriver implements RoomDriver {
     const head = room?.head ?? null
     return head === null || isExpired(head, Date.now()) ? null : head
   }
-}
-
-function compareCodePoints(left: string, right: string): number {
-  for (let i = 0; i < left.length && i < right.length; ) {
-    const a = left.codePointAt(i)!
-    const b = right.codePointAt(i)!
-    if (a !== b) return a - b
-    i += a > 0xffff ? 2 : 1
-  }
-  return left.length - right.length
-}
-
-/** Where `id` is in `ids`, which are in code point order, or where it would go. */
-function positionOf(ids: readonly string[], id: string): number {
-  let low = 0
-  let high = ids.length
-  while (low < high) {
-    const mid = (low + high) >> 1
-    if (compareCodePoints(ids[mid]!, id) < 0) low = mid + 1
-    else high = mid
-  }
-  return low
 }
 
 function pushCheck(checks: DirectoryCheck[], check: DirectoryCheck): void {
