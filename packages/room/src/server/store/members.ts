@@ -1,16 +1,23 @@
 export { createMember, evictMember, completeCleanup }
 export type { PendingMemberCleanup }
 
-import { getRoomBackend } from '../backend/plane.js'
-import type { CellMutation } from '../backend/contract.js'
-import { isOpenIncarnation } from '../backend/semantics.js'
-import { leaveCauseToWire, type RoomCtrlEnvelope, type WireLeaveCause } from '../shared/protocol.js'
-import type { RoomDataEnvelope, RoomMemberRecord } from './protocol.js'
-import type { LeaveCause, ParticipantMeta } from '../types.js'
+import { getRoomBackend } from '../../backend/plane.js'
+import type { CellMutation } from '../../backend/contract.js'
+import { isOpenIncarnation } from '../../backend/semantics.js'
+import { leaveCauseToWire, type RoomCtrlEnvelope, type WireLeaveCause } from '../../shared/protocol.js'
+import type { RoomDataEnvelope, RoomMemberRecord } from '../protocol.js'
+import type { LeaveCause, ParticipantMeta } from '../../types.js'
 import { dropMemberMeta, memberMetaMutations } from './meta.js'
 import { dropCells, mutateCells, readOpenCells } from './cellStore.js'
-import { SEMANTIC_LANE, acceptedOrThrow, commitLane, controlLane, decodeRoomRecord, encodeRoomRecord } from './lanes.js'
-import { afterHoldChange, holdDelta, type HoldDelta, type RoomIncarnation } from './lifecycle.js'
+import {
+  SEMANTIC_LANE,
+  acceptedOrThrow,
+  commitLane,
+  controlLane,
+  decodeRoomRecord,
+  encodeRoomRecord,
+} from '../lanes/lanes.js'
+import { afterHoldChange, holdDelta, type HoldDelta, type RoomIncarnation } from '../lifecycle/lifecycle.js'
 import { cleanupCellKey, dmReplyCellPrefix, identityCellKey, leaseMemberCellKey, memberCellKey } from './cells.js'
 import type { RoomLease } from './lease.js'
 import { mutateHosted } from './leases.js'

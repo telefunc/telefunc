@@ -4,11 +4,11 @@ export type { LeaseRecord }
 // A server's lease in one room incarnation, on the store's clock: the members it joined and the pages' views it holds
 // name it, and once it lapses one other server claims it and removes them (see `leases.ts`).
 
-import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
-import type { CellMutation } from '../backend/contract.js'
-import { ROOM_LEASE_TTL_MS } from './constants.js'
+import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
+import type { CellMutation } from '../../backend/contract.js'
+import { ROOM_LEASE_TTL_MS } from '../constants.js'
 import { leaseCellKey } from './cells.js'
-import { decodeRoomText } from './lanes.js'
+import { decodeRoomText } from '../lanes/lanes.js'
 assertIsNotBrowser()
 
 const leaseTextEncoder = new TextEncoder()

@@ -6,8 +6,8 @@ import { getRoomBackend } from '../backend/plane.js'
 import { ROOM_DEMAND_PAGE_ENTRIES, ROOM_GOSSIP_IN_FLIGHT_MAX } from './constants.js'
 import type { RoomDemandPage } from './protocol.js'
 import { reportRoomError } from './reportRoomError.js'
-import { DEMAND_LANE, encodeDemandPage } from './lanes.js'
-import type { RoomIncarnation } from './lifecycle.js'
+import { DEMAND_LANE, encodeDemandPage } from './lanes/lanes.js'
+import type { RoomIncarnation } from './lifecycle/lifecycle.js'
 import { Slice } from '../shared/Slice.js'
 assertIsNotBrowser()
 

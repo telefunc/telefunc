@@ -3,14 +3,14 @@ export { listRoom, repairRoomIndex, sweepLapsedRoomsSoon }
 // Each listed room is due once its head may have lapsed: a sweep then drops what a lapsed incarnation left, as
 // `Room.list()` does, so no lapsed room's data waits for a list call.
 
-import { getRoomBackend } from '../backend/plane.js'
-import type { RoomBackend, RoomHead } from '../backend/contract.js'
-import { Slice } from '../shared/Slice.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_LEASE_TTL_MS } from './constants.js'
-import type { RoomIncarnation } from './lifecycle.js'
-import { configFromHead, openConfig } from './lanes.js'
-import { reportRoomError } from './reportRoomError.js'
-import { getGlobalObject } from '../utils/getGlobalObject.js'
+import { getRoomBackend } from '../../backend/plane.js'
+import type { RoomBackend, RoomHead } from '../../backend/contract.js'
+import { Slice } from '../../shared/Slice.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_LEASE_TTL_MS } from '../constants.js'
+import type { RoomIncarnation } from '../lifecycle/lifecycle.js'
+import { configFromHead, openConfig } from '../lanes/lanes.js'
+import { reportRoomError } from '../reportRoomError.js'
+import { getGlobalObject } from '../../utils/getGlobalObject.js'
 
 /** Lists the room, to be looked at again once its head lapses, and a heartbeat from now at the earliest. A room
  *  without hold timeouts never lapses; one with them but no lapse yet gets one once held, so it is looked at again a

@@ -1,6 +1,6 @@
 export { EXCHANGE_CONFLICT, retryCompareExchange }
 
-import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
+import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
 // Room owns conflict recovery: retried after 1→64 ms of jitter until it commits. A conflict means another write

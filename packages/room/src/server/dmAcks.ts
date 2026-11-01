@@ -2,7 +2,7 @@ export { PendingDmAcks }
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import type { RoomResult } from '../shared/protocol.js'
-import { toggleEntry } from './sets.js'
+import { toggleEntry } from '../utils/sets.js'
 assertIsNotBrowser()
 
 type PendingDmAck = { from: string; to: string; settle: (reply: RoomResult) => void }

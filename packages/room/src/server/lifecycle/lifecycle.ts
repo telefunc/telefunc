@@ -4,21 +4,21 @@ export type { HoldDelta, RoomIncarnation }
 // An unheld room closes on its own: the server whose write leaves it unheld closes it on a timer, and the head's lapse,
 // which every heartbeat on the room keeps ahead, removes it if no server is left to.
 
-import { assert } from '../utils/assert.js'
-import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
-import { unrefTimer } from '../utils/unrefTimer.js'
-import { getGlobalObject } from '../utils/getGlobalObject.js'
-import { getRoomBackend } from '../backend/plane.js'
-import type { CellCount, CellCounter, RoomHead } from '../backend/contract.js'
-import { decodeCellCounter, isOpenIncarnation } from '../backend/semantics.js'
-import { TIMER_DELAY_MAX_MS } from '../shared/constants.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_LAPSE_AFTER_CLOSE_MS, ROOM_LEASE_TTL_MS } from './constants.js'
-import type { HoldConfig } from './protocol.js'
-import { roomClosedError } from '../shared/errors.js'
-import { HOLDS_CELL_KEY, JOINS_CELL_KEY } from './cells.js'
+import { assert } from '../../utils/assert.js'
+import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
+import { unrefTimer } from '../../utils/unrefTimer.js'
+import { getGlobalObject } from '../../utils/getGlobalObject.js'
+import { getRoomBackend } from '../../backend/plane.js'
+import type { CellCount, CellCounter, RoomHead } from '../../backend/contract.js'
+import { decodeCellCounter, isOpenIncarnation } from '../../backend/semantics.js'
+import { TIMER_DELAY_MAX_MS } from '../../shared/constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_LAPSE_AFTER_CLOSE_MS, ROOM_LEASE_TTL_MS } from '../constants.js'
+import type { HoldConfig } from '../protocol.js'
+import { roomClosedError } from '../../shared/errors.js'
+import { HOLDS_CELL_KEY, JOINS_CELL_KEY } from '../store/cells.js'
 import { closeIncarnation } from './close.js'
-import { EXCHANGE_CONFLICT, retryCompareExchange } from './retryCompareExchange.js'
-import { reportRoomError } from './reportRoomError.js'
+import { EXCHANGE_CONFLICT, retryCompareExchange } from '../store/retryCompareExchange.js'
+import { reportRoomError } from '../reportRoomError.js'
 assertIsNotBrowser()
 
 /** What holds a room (its non-hidden members and pages' views), and how many joins it had. */

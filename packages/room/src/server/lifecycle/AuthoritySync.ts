@@ -1,19 +1,19 @@
 export { AuthoritySync }
 export type { AuthoritySyncOptions, AuthoritySyncOwner }
 
-import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
-import { unrefTimer } from '../utils/unrefTimer.js'
-import { getRoomBackend } from '../backend/plane.js'
-import { ROOM_META_REPAIR_MS } from './constants.js'
-import type { RoomConfigRecord } from './protocol.js'
-import type { MembershipEvent, RoomModel } from '../shared/model.js'
-import type { MemberSnapshot } from '../shared/protocol.js'
-import { reportRoomError } from './reportRoomError.js'
+import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
+import { unrefTimer } from '../../utils/unrefTimer.js'
+import { getRoomBackend } from '../../backend/plane.js'
+import { ROOM_META_REPAIR_MS } from '../constants.js'
+import type { RoomConfigRecord } from '../protocol.js'
+import type { MembershipEvent, RoomModel } from '../../shared/model.js'
+import type { MemberSnapshot } from '../../shared/protocol.js'
+import { reportRoomError } from '../reportRoomError.js'
 import type { RoomIncarnation } from './lifecycle.js'
-import { CONTROL_LANE } from './lanes.js'
-import { reapAndReadRoster } from './roster.js'
-import { dropReplacedMetaGenerations, readRoomMeta, readRoomMetaSeq, type StoredRoomMeta } from './meta.js'
-import type { LanePlan } from './LanePlan.js'
+import { CONTROL_LANE } from '../lanes/lanes.js'
+import { reapAndReadRoster } from '../store/roster.js'
+import { dropReplacedMetaGenerations, readRoomMeta, readRoomMetaSeq, type StoredRoomMeta } from '../store/meta.js'
+import type { LanePlan } from '../lanes/LanePlan.js'
 assertIsNotBrowser()
 
 /** The replica whose view the sync keeps: what it renews, and where what the sync reads applies. */

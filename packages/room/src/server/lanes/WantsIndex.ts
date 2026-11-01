@@ -1,8 +1,8 @@
 export { WantsIndex }
 export type { Affected, WantsIndexOptions, WantsIndexOwner }
 
-import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
-import { getOrCreate } from '../utils/getOrCreate.js'
+import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
+import { getOrCreate } from '../../utils/getOrCreate.js'
 import {
   EVERY_MEMBER,
   EVERY_TRACK,
@@ -11,10 +11,10 @@ import {
   type EveryMember,
   type EveryTrack,
   type TrackKey,
-} from '../shared/binary.js'
+} from '../../shared/binary.js'
 import type { BinaryWants, TrackWants } from './binaryWants.js'
-import type { LaneHolder } from './replay.js'
-import { hasEntry, toggle, toggleEntry } from './sets.js'
+import type { LaneHolder } from '../lifecycle/replay.js'
+import { hasEntry, toggle, toggleEntry } from '../../utils/sets.js'
 assertIsNotBrowser()
 
 /** A holder's text wants as last indexed, and the binary cover keys it is in per scope (`EVERY_MEMBER`: every member). */

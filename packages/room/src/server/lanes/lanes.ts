@@ -19,16 +19,16 @@ export {
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
-import { raceTimeout } from '../utils/raceTimeout.js'
-import { getRoomBackend } from '../backend/plane.js'
-import type { CommitAccepted, CommitOptions, CommitTarget, LaneId, RoomHead } from '../backend/contract.js'
-import { hasRoomTag } from '../shared/protocol.js'
-import type { RoomConfigRecord, RoomDemandPage } from './protocol.js'
-import { RoomError, participantGoneError, roomClosedError } from '../shared/errors.js'
-import { assert } from '../utils/assert.js'
-import { ROOM_HORIZON_MS } from './constants.js'
-import { reportRoomError } from './reportRoomError.js'
-import { memberIdOfCellKey } from './cells.js'
+import { raceTimeout } from '../../utils/raceTimeout.js'
+import { getRoomBackend } from '../../backend/plane.js'
+import type { CommitAccepted, CommitOptions, CommitTarget, LaneId, RoomHead } from '../../backend/contract.js'
+import { hasRoomTag } from '../../shared/protocol.js'
+import type { RoomConfigRecord, RoomDemandPage } from '../protocol.js'
+import { RoomError, participantGoneError, roomClosedError } from '../../shared/errors.js'
+import { assert } from '../../utils/assert.js'
+import { ROOM_HORIZON_MS } from '../constants.js'
+import { reportRoomError } from '../reportRoomError.js'
+import { memberIdOfCellKey } from '../store/cells.js'
 
 const roomTextEncoder = new TextEncoder()
 const roomTextDecoder = new TextDecoder()

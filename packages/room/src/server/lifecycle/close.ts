@@ -1,10 +1,10 @@
 export { closeIncarnation, takeOverClose, cleanupFinalizedIncarnation }
 
-import { assert } from '../utils/assert.js'
-import { getRoomBackend } from '../backend/plane.js'
-import type { RoomBackend, RoomHead } from '../backend/contract.js'
-import { ROOM_CLOSE_LEASE_MS, ROOM_TOMBSTONE_TTL_MS } from './constants.js'
-import { commitLane, configFromHead, controlLane, encodeRoomRecord } from './lanes.js'
+import { assert } from '../../utils/assert.js'
+import { getRoomBackend } from '../../backend/plane.js'
+import type { RoomBackend, RoomHead } from '../../backend/contract.js'
+import { ROOM_CLOSE_LEASE_MS, ROOM_TOMBSTONE_TTL_MS } from '../constants.js'
+import { commitLane, configFromHead, controlLane, encodeRoomRecord } from '../lanes/lanes.js'
 
 /** Closes the room, or only its incarnation `inc` when given; returns the incarnation that ended closed, if any. */
 async function closeIncarnation(id: string, inc?: string): Promise<string | null> {

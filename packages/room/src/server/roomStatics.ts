@@ -35,18 +35,23 @@ import type {
   RoomSendReceipt,
   SendGuard,
 } from '../types.js'
-import { memberCellKey } from './cells.js'
-import { tryCreateRoom } from './create.js'
-import { evictMember } from './members.js'
-import { reapAndCountPresence, reapAndReadMembersById, reapAndReadRoster, reapAndResolveIdentity } from './roster.js'
-import { SEMANTIC_LANE, acceptedOrThrow, commitLane, inboxOf, openConfig, encodeRoomRecord } from './lanes.js'
+import { memberCellKey } from './store/cells.js'
+import { tryCreateRoom } from './lifecycle/create.js'
+import { evictMember } from './store/members.js'
+import {
+  reapAndCountPresence,
+  reapAndReadMembersById,
+  reapAndReadRoster,
+  reapAndResolveIdentity,
+} from './store/roster.js'
+import { SEMANTIC_LANE, acceptedOrThrow, commitLane, inboxOf, openConfig, encodeRoomRecord } from './lanes/lanes.js'
 import { ServerRoom } from './room.js'
 import { RoomReplica } from './replica.js'
-import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './meta.js'
+import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './store/meta.js'
 import { metaObjectOf } from '../shared/metaState.js'
-import { closeIncarnation } from './close.js'
-import { cancelClose, type RoomIncarnation } from './lifecycle.js'
-import { repairRoomIndex } from './directory.js'
+import { closeIncarnation } from './lifecycle/close.js'
+import { cancelClose, type RoomIncarnation } from './lifecycle/lifecycle.js'
+import { repairRoomIndex } from './store/directory.js'
 import { ROOM_GUARD_USAGE } from './constants.js'
 
 type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = RoomInstance<

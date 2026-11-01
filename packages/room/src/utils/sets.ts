@@ -1,6 +1,6 @@
 export { toggle, hasEntry, toggleEntry, runAll }
 
-import { getOrCreate } from '../utils/getOrCreate.js'
+import { getOrCreate } from './getOrCreate.js'
 
 function toggle<T>(set: Set<T>, value: T, on: boolean): void {
   if (on) set.add(value)

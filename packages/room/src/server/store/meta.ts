@@ -13,17 +13,17 @@ export {
 }
 export type { StoredRoomMeta, RoomMetaWrite, MemberMetaWrite, MemberMetaCells }
 
-import { getOrCreate } from '../utils/getOrCreate.js'
-import { getRoomBackend } from '../backend/plane.js'
-import { CELL_PAGE_SIZE, type CellMutation, type CxResult } from '../backend/contract.js'
-import { decodeCellCounter } from '../backend/semantics.js'
-import { Slice } from '../shared/Slice.js'
-import { participantGoneError, roomClosedError } from '../shared/errors.js'
-import { compareMetaEntries, metaEntriesAt } from '../shared/metaState.js'
-import { mergeAttributes } from '../shared/model.js'
-import type { MemberMetaUpdate, RoomMetaEntry, RoomMetaUpdate } from '../shared/protocol.js'
-import type { RoomConfigRecord, RoomMemberRecord } from './protocol.js'
-import type { ParticipantMeta, RoomMeta } from '../types.js'
+import { getOrCreate } from '../../utils/getOrCreate.js'
+import { getRoomBackend } from '../../backend/plane.js'
+import { CELL_PAGE_SIZE, type CellMutation, type CxResult } from '../../backend/contract.js'
+import { decodeCellCounter } from '../../backend/semantics.js'
+import { Slice } from '../../shared/Slice.js'
+import { participantGoneError, roomClosedError } from '../../shared/errors.js'
+import { compareMetaEntries, metaEntriesAt } from '../../shared/metaState.js'
+import { mergeAttributes } from '../../shared/model.js'
+import type { MemberMetaUpdate, RoomMetaEntry, RoomMetaUpdate } from '../../shared/protocol.js'
+import type { RoomConfigRecord, RoomMemberRecord } from '../protocol.js'
+import type { ParticipantMeta, RoomMeta } from '../../types.js'
 import {
   MEMBER_META_CELL_PREFIX,
   META_CELL_PREFIX,
@@ -42,8 +42,8 @@ import {
 } from './cells.js'
 import { EXCHANGE_CONFLICT, retryCompareExchange } from './retryCompareExchange.js'
 import { deleteCells, dropCells, readOpenCells } from './cellStore.js'
-import { acceptedOrThrow, commitLane, controlLane, decodeRoomRecord, encodeRoomRecord } from './lanes.js'
-import type { RoomIncarnation } from './lifecycle.js'
+import { acceptedOrThrow, commitLane, controlLane, decodeRoomRecord, encodeRoomRecord } from '../lanes/lanes.js'
+import type { RoomIncarnation } from '../lifecycle/lifecycle.js'
 
 // A meta, the room's or a member's, is a cell per top-level key under its generation's prefix, each holding the
 // key's value and place. A replace writes a new generation; a merge writes its keys into the current one.

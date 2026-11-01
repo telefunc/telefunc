@@ -1,10 +1,10 @@
 export { LaneSubscription }
 export type { LaneAddress, LaneSubscriptionOptions, LaneSubscriptionOwner }
 
-import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
-import { createDeferred, type Deferred } from '../utils/createDeferred.js'
+import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
+import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 import type { BackendReceiver, BackendSubscription, OrderingInfo } from 'telefunc/__internal'
-import type { RoomSubscriptionSource } from '../backend/contract.js'
+import type { RoomSubscriptionSource } from '../../backend/contract.js'
 assertIsNotBrowser()
 
 /** The plan that holds a lane subscription: it subscribes the lane, takes what the lane delivers, and is told as the

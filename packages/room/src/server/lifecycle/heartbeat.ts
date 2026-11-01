@@ -1,18 +1,18 @@
 export { RoomHeartbeat }
 export type { RoomHeartbeatOptions, RoomHeartbeatOwner }
 
-import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
-import { unrefTimer } from '../utils/unrefTimer.js'
-import type { RoomModel } from '../shared/model.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS } from './constants.js'
-import type { DemandReport } from './demand.js'
-import { sweepLapsedRoomsSoon } from './directory.js'
-import { reportRoomError } from './reportRoomError.js'
-import { reapLapsedLeases } from './leases.js'
+import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
+import { unrefTimer } from '../../utils/unrefTimer.js'
+import type { RoomModel } from '../../shared/model.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS } from '../constants.js'
+import type { DemandReport } from '../lanes/demand.js'
+import { sweepLapsedRoomsSoon } from '../store/directory.js'
+import { reportRoomError } from '../reportRoomError.js'
+import { reapLapsedLeases } from '../store/leases.js'
 import { maintainHold, type RoomIncarnation } from './lifecycle.js'
-import { dropReplacedMetaGenerations } from './meta.js'
+import { dropReplacedMetaGenerations } from '../store/meta.js'
 import type { AuthoritySync } from './AuthoritySync.js'
-import type { LanePlan } from './LanePlan.js'
+import type { LanePlan } from '../lanes/LanePlan.js'
 assertIsNotBrowser()
 
 /** The replica the heartbeat keeps at the authority. */

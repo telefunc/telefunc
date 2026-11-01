@@ -1,11 +1,11 @@
 export { storeDmReply, takeDmReply, takeDmReplies, dropDmReply }
 
-import { getRoomBackend } from '../backend/plane.js'
-import { Slice } from '../shared/Slice.js'
-import { roomClosedError } from '../shared/errors.js'
-import type { RoomResult } from '../shared/protocol.js'
+import { getRoomBackend } from '../../backend/plane.js'
+import { Slice } from '../../shared/Slice.js'
+import { roomClosedError } from '../../shared/errors.js'
+import type { RoomResult } from '../../shared/protocol.js'
 import { deleteCells, mutateCells, readOpenCells } from './cellStore.js'
-import { decodeRoomRecord, encodeRoomRecord } from './lanes.js'
+import { decodeRoomRecord, encodeRoomRecord } from '../lanes/lanes.js'
 import { ackIdOfDmReplyCellKey, dmReplyCellKey, dmReplyCellPrefix, memberCellKey } from './cells.js'
 
 // A DM's reply, stored for its sender to take until the sender leaves.

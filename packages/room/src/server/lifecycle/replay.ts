@@ -1,17 +1,17 @@
 export { ReplayGate, ReplayHold, LocalHolder, ANNOUNCE_KEY, heldWeight, heldTextWeight }
 export type { LaneHolder, TextWantsChange }
 
-import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
-import { getOrCreate } from '../utils/getOrCreate.js'
-import { makePublishInfo } from '../shared/channel.js'
+import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
+import { getOrCreate } from '../../utils/getOrCreate.js'
+import { makePublishInfo } from '../../shared/channel.js'
 import type { ChannelPublishInfo, OrderingInfo } from 'telefunc/__internal'
-import { EVERY_MEMBER, EVERY_TRACK, type BinaryFrame, type BinaryWantChange } from '../shared/binary.js'
-import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binaryWants.js'
-import type { MemberWants } from '../shared/protocol.js'
-import type { RoomDataEnvelope } from './protocol.js'
-import type { RoomState } from '../shared/state.js'
-import { toggle } from './sets.js'
-import { ROOM_REPLAY_HOLD_BYTES_MAX, ROOM_REPLAY_HOLD_ENTRY_BYTES } from './constants.js'
+import { EVERY_MEMBER, EVERY_TRACK, type BinaryFrame, type BinaryWantChange } from '../../shared/binary.js'
+import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from '../lanes/binaryWants.js'
+import type { MemberWants } from '../../shared/protocol.js'
+import type { RoomDataEnvelope } from '../protocol.js'
+import type { RoomState } from '../../shared/state.js'
+import { toggle } from '../../utils/sets.js'
+import { ROOM_REPLAY_HOLD_BYTES_MAX, ROOM_REPLAY_HOLD_ENTRY_BYTES } from '../constants.js'
 assertIsNotBrowser()
 
 // Text gate keys: a member's id, and for announcements a key no id takes.

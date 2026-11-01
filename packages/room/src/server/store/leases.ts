@@ -1,7 +1,7 @@
 export { mutateHosted, holdViews, removeView, renewLease, finishLeaseCleanups, reapLapsedLeases, reapLeases }
 
-import { decodeRoomRecord } from './lanes.js'
-import { afterHoldChange, holdDelta, type RoomIncarnation } from './lifecycle.js'
+import { decodeRoomRecord } from '../lanes/lanes.js'
+import { afterHoldChange, holdDelta, type RoomIncarnation } from '../lifecycle/lifecycle.js'
 import {
   CLEANUP_CELL_PREFIX,
   LEASE_CELL_PREFIX,

@@ -43,16 +43,16 @@ import {
   type RoomStubOptions,
 } from './stub.js'
 import type { RoomRequest } from './requests.js'
-import { LocalHolder, type LaneHolder, type TextWantsChange } from './replay.js'
-import { TailHold } from './tail.js'
+import { LocalHolder, type LaneHolder, type TextWantsChange } from './lifecycle/replay.js'
+import { TailHold } from './lifecycle/tail.js'
 import type { RoomReplica } from './replica.js'
 import { RoomWrites, runAfterHook, type RoomWritesOwner } from './writes.js'
-import { acceptedOrThrow, commitLane, controlLane, encodeRoomRecord, withinRoomHorizon } from './lanes.js'
+import { acceptedOrThrow, commitLane, controlLane, encodeRoomRecord, withinRoomHorizon } from './lanes/lanes.js'
 import { reportRoomError } from './reportRoomError.js'
 import { Admission } from './Admission.js'
-import { createMember, evictMember } from './members.js'
-import { memberCellKey } from './cells.js'
-import type { RoomIncarnation } from './lifecycle.js'
+import { createMember, evictMember } from './store/members.js'
+import { memberCellKey } from './store/cells.js'
+import type { RoomIncarnation } from './lifecycle/lifecycle.js'
 import type {
   BinaryPublishOptions,
   JoinOptions,

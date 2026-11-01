@@ -1,11 +1,11 @@
 export { readPrefix, readPrefixAt, readOpenCells, mutateCells, eachInFlight, dropCells, deleteCells }
 export type { CellPlan, CellCommit, CellsAt }
 
-import { getRoomBackend } from '../backend/plane.js'
-import type { CellCount, CellCounter, CellMutation, CellsRead } from '../backend/contract.js'
-import { Slice } from '../shared/Slice.js'
-import { roomClosedError } from '../shared/errors.js'
-import { ROOM_MEMBER_WRITES_IN_FLIGHT_MAX } from './constants.js'
+import { getRoomBackend } from '../../backend/plane.js'
+import type { CellCount, CellCounter, CellMutation, CellsRead } from '../../backend/contract.js'
+import { Slice } from '../../shared/Slice.js'
+import { roomClosedError } from '../../shared/errors.js'
+import { ROOM_MEMBER_WRITES_IN_FLIGHT_MAX } from '../constants.js'
 import { EXCHANGE_CONFLICT, retryCompareExchange } from './retryCompareExchange.js'
 
 // A room's cells, read and written by the incarnation's server code: a read that throws once the incarnation closed, a

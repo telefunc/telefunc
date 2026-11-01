@@ -1,8 +1,8 @@
 export { emptyBinaryWants, wantsTrack, binaryWantsCovers, applyBinaryWantChange }
 export type { TrackWants, BinaryWants }
 
-import { EVERY_MEMBER, EVERY_TRACK, type BinaryWantChange, type TrackKey } from '../shared/binary.js'
-import { toggle } from './sets.js'
+import { EVERY_MEMBER, EVERY_TRACK, type BinaryWantChange, type TrackKey } from '../../shared/binary.js'
+import { toggle } from '../../utils/sets.js'
 
 /** Which of a publisher's tracks a holder wants: every track while `all`, and each of `tracks` either way
  *  (`DEFAULT_TRACK` selects the unnamed lane). */

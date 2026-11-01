@@ -33,10 +33,17 @@ import {
   isRoomRequest,
   type RoomDeclaration,
 } from './requests.js'
-import { ANNOUNCE_KEY, ReplayGate, heldTextWeight, heldWeight, type LaneHolder, type ReplayHold } from './replay.js'
-import { TailHold, type TailEntry } from './tail.js'
+import {
+  ANNOUNCE_KEY,
+  ReplayGate,
+  heldTextWeight,
+  heldWeight,
+  type LaneHolder,
+  type ReplayHold,
+} from './lifecycle/replay.js'
+import { TailHold, type TailEntry } from './lifecycle/tail.js'
 import { EVERY_MEMBER, EVERY_TRACK, DEFAULT_TRACK, type BinaryFrame, type BinaryWantChange } from '../shared/binary.js'
-import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binaryWants.js'
+import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './lanes/binaryWants.js'
 import { DM_FAILURE, RoomError, ROOM_BUG_MESSAGE, toRoomFailure } from '../shared/errors.js'
 import {
   leaveCauseToWire,
@@ -56,7 +63,7 @@ import {
   type RoomRosterEvent,
 } from '../shared/protocol.js'
 import type { RoomDataEnvelope } from './protocol.js'
-import { toggle } from './sets.js'
+import { toggle } from '../utils/sets.js'
 assertIsNotBrowser()
 
 /** What one response's Room values grant the client on a room: echo drops for its own members, and hidden members it
