@@ -21,6 +21,8 @@ type HeldPublish = {
   binary: boolean
 }
 
+type PublishHoldOptions = { subscriptions: RedisSubscriptions; prefix: string }
+
 /**
  * Our PUBLISH goes out on the command connection, so it can reach Redis before the SUBSCRIBE our subscriber
  * connection sent just before it, and our own new subscription would miss it. So a publish waits, at most HOLD_MS,
@@ -35,7 +37,7 @@ class PublishHold {
   private readonly waits = new Map<string, Promise<void>>()
   private readonly heldBytes = new Map<string, number>()
 
-  constructor({ subscriptions, prefix }: { subscriptions: RedisSubscriptions; prefix: string }) {
+  constructor({ subscriptions, prefix }: PublishHoldOptions) {
     this.subscriptions = subscriptions
     this.prefix = prefix
   }

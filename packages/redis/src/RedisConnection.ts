@@ -14,6 +14,8 @@ import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
 import { RedisSubscriptions } from './RedisSubscriptions.js'
 import { PublishHold } from './PublishHold.js'
 
+type RedisConnectionOptions = { redis: RedisClient; prefix: string }
+
 /** One Redis deployment as Broadcast's and Room's drivers reach it: the backend's command client, the key prefix, and
  *  the one subscriber connection their subscriptions share. */
 class RedisConnection {
@@ -29,7 +31,7 @@ class RedisConnection {
   /** The last holder ended, so `commands` was disconnected; its socket may still be closing. */
   private commandsEnded = false
 
-  constructor({ redis, prefix }: { redis: RedisClient; prefix: string }) {
+  constructor({ redis, prefix }: RedisConnectionOptions) {
     assertKeyPrefix(prefix)
     this.commands = commandClientOf(redis)
     // Pub/Sub channels span every database, so a standalone client's names carry its database.

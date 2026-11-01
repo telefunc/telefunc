@@ -16,6 +16,8 @@ import type { RedisConnection } from './RedisConnection.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
 import type { RedisPlane } from './RedisSubscriptions.js'
 
+type RedisBackendOptions = { connection: RedisConnection }
+
 /** The installed backend: Broadcast on `connection`, and Room's plane, built on the same connection. */
 class RedisBackend implements Backend, RedisPlane {
   readonly connection: RedisConnection
@@ -24,7 +26,7 @@ class RedisBackend implements Backend, RedisPlane {
       new RedisRoomDriver({ connection: this.connection, kit }),
   } satisfies Backend['planes']
 
-  constructor({ connection }: { connection: RedisConnection }) {
+  constructor({ connection }: RedisBackendOptions) {
     this.connection = connection
   }
 

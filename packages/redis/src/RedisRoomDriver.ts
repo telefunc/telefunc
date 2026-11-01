@@ -45,6 +45,8 @@ import type { RedisPlane } from './RedisSubscriptions.js'
 
 const NO_FENCE_TOKENS: FenceTokens = { lane: '', everyTrack: '', everyMember: '' }
 
+type RedisRoomDriverOptions = { connection: RedisConnection; kit: RoomPlaneKit }
+
 /** Room's plane on a Redis backend: its store and lanes on `connection`, keyed and paged by Room's `kit`. */
 class RedisRoomDriver implements RoomDriver, RedisPlane {
   private readonly connection: RedisConnection
@@ -52,7 +54,7 @@ class RedisRoomDriver implements RoomDriver, RedisPlane {
   /** A Cluster's last commit per lane. */
   private readonly laneTurns = new Map<string, Promise<void>>()
 
-  constructor({ connection, kit }: { connection: RedisConnection; kit: RoomPlaneKit }) {
+  constructor({ connection, kit }: RedisRoomDriverOptions) {
     this.connection = connection
     this.kit = kit
   }
