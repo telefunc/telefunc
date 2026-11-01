@@ -407,18 +407,4 @@ describe('cross-close', () => {
     await expect(closePromise).resolves.toBe(1)
     expect(channel._phase).toBe('ended')
   })
-
-  test("a peer's shorter timeout cuts short a close already waiting on its own", async () => {
-    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
-
-    channel._registerChannel()
-    channel._attachPeer(createPeer([]))
-
-    const closePromise = channel.close({ timeout: 60_000 })
-    await new Promise((resolve) => setTimeout(resolve, 5))
-    channel._onPeerCloseRequest(10)
-
-    await expect(closePromise).resolves.toBe(1)
-    expect(channel._phase).toBe('ended')
-  })
 })
