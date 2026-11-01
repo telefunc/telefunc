@@ -9,7 +9,7 @@ export type {
   Subscriber,
   Unsubscribe,
 } from '../../wire-protocol/backend/driver.js'
-export { installBackend, backendPlane } from '../../wire-protocol/backend/install.js'
+export { installBackend, backendPlane, type PlaneDefinition } from '../../wire-protocol/backend/install.js'
 export { assertDriverOrdering } from '../../wire-protocol/backend/driverOrdering.js'
 export { MemoryBackend } from '../../wire-protocol/backend/memory/MemoryBackend.js'
 export { decodeOrderingFrame } from '../../wire-protocol/wire/orderingFrame.js'

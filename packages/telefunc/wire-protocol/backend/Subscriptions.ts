@@ -1,5 +1,5 @@
 export { Subscriptions }
-export type { BackendReceiver, BackendSubscription, SourceKey, SubscriptionState }
+export type { BackendReceiver, BackendSubscription, SourceKey, SubscribingDriver, SubscriptionState }
 
 import { assert } from '../../utils/assert.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'

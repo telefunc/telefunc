@@ -7,13 +7,14 @@ export {
   backendPlane,
   disposeBackend,
 }
+export type { PlaneDefinition }
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import type { BroadcastPlane } from './broadcast/contract.js'
-import type { Backend, Subscriber, Unsubscribe } from './driver.js'
+import type { Backend } from './driver.js'
 import { superviseBroadcastDriver } from './broadcast/supervise.js'
 import { createBroadcastTransportDriver, type BroadcastTransport } from './broadcast/transport.js'
 import { MemoryBackend } from './memory/MemoryBackend.js'
-import { Subscriptions } from './Subscriptions.js'
+import { Subscriptions, type SubscribingDriver } from './Subscriptions.js'
 import { assertUsage } from '../../utils/assert.js'
 import { getOrCreate } from '../../utils/getOrCreate.js'
 
@@ -28,6 +29,21 @@ type Installed = {
 
 /** An extension's supervised plane; `disposeBackend()` stops it. */
 type BackendPlane = { dispose(): Promise<void> }
+
+type PlaneDriver = SubscribingDriver<never>
+type SourceOf<Driver extends PlaneDriver> = Parameters<Driver['subscribe']>[0]
+
+/** An extension's plane, which `backendPlane()` builds once per installed backend. */
+type PlaneDefinition<Driver extends PlaneDriver, Plane extends BackendPlane> = {
+  /** The key a backend serves it under in `planes`. */
+  readonly key: symbol
+  /** What the extension gives a backend's `planes` entry to build its driver with. */
+  readonly kit?: unknown
+  /** The driver of a process that installed no backend. */
+  memoryDriver(): Driver
+  /** The plane over `driver`, given its subscriptions, shared by source and host. */
+  supervise(driver: Driver, subscriptions: Subscriptions<SourceOf<Driver>>): Plane
+}
 
 /** A consumer of the Broadcast plane that moves to the plane a transport replaces it with. */
 type BroadcastPlaneFollower = { planeReplaced(): void }
@@ -82,39 +98,24 @@ function getBroadcastPlane(): BroadcastPlane {
   ))
 }
 
-/** The plane `key` of the installed backend, built once per installed backend: `supervise` wraps the driver the
- *  backend serves, built with the extension's `kit`, or the in-memory one `fallback` builds when the process installed
- *  none, given the driver's subscriptions, shared by source and host. */
-function backendPlane<
-  Source,
-  Driver extends { subscribe(source: Source, subscriber: Subscriber): Unsubscribe },
-  Plane extends BackendPlane,
->(
-  key: symbol,
-  {
-    fallback,
-    supervise,
-    kit,
-  }: {
-    fallback: () => Driver
-    supervise: (driver: Driver, subscriptions: Subscriptions<Source>) => Plane
-    kit?: unknown
-  },
+/** The installed backend's `plane`, built on first use. */
+function backendPlane<Driver extends PlaneDriver, Plane extends BackendPlane>(
+  plane: PlaneDefinition<Driver, Plane>,
 ): Plane {
   assertUsage(
     !(state.transport && (state.installed?.fallback ?? true)),
     'config.broadcast.transport configures Broadcast only, and this call needs a full backend: install the Redis backend or use the Cloudflare adapter.',
   )
   const installed = currentBackend()
-  return getOrCreate(installed.planes, key, () => {
+  return getOrCreate(installed.planes, plane.key, () => {
     let driver: Driver
-    if (installed.fallback) driver = fallback()
+    if (installed.fallback) driver = plane.memoryDriver()
     else {
-      const build = installed.backend.planes?.[key]
-      assertUsage(build, `The installed backend doesn't serve ${String(key)}, which this call needs`)
-      driver = build(kit as never) as Driver
+      const build = installed.backend.planes?.[plane.key]
+      assertUsage(build, `The installed backend doesn't serve ${String(plane.key)}, which this call needs`)
+      driver = build(plane.kit as never) as Driver
     }
-    return supervise(driver, new Subscriptions({ driver }))
+    return plane.supervise(driver, new Subscriptions<SourceOf<Driver>>({ driver }))
   }) as Plane
 }
 
