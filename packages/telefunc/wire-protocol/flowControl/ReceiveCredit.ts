@@ -23,8 +23,6 @@ type AttachedDownlink = {
 /** What a channel lets its peer send: the byte and message windows it grants as cumulative limits, sized by BDP probes. */
 class ReceiveCredit {
   private readonly owner: CreditOwner
-  /** `owner._deliveredBefore`, built once for the estimator. */
-  private readonly deliveredBefore: (ms: number) => number
   private readonly selfTime: SelfTime
   private bdp = new BdpEstimator()
   /** What the frames that go at once wait behind on the wire of the last `attach`, which identifies that wire. */
@@ -56,7 +54,6 @@ class ReceiveCredit {
 
   constructor({ owner, selfTime }: ReceiveCreditOptions) {
     this.owner = owner
-    this.deliveredBefore = (ms) => owner._deliveredBefore(ms)
     this.selfTime = selfTime
   }
 
@@ -123,7 +120,7 @@ class ReceiveCredit {
 
   /** Settles a `BDP_PING_ACK`, reading what the wire delivered before it through `owner._deliveredBefore`. */
   onPingAck(ack: BdpPingAck): void {
-    const suggest = this.bdp.onPingAck(ack, this.deliveredBefore, this.sendWait)
+    const suggest = this.bdp.onPingAck(ack, this.owner, this.sendWait)
     const wantBytes = suggest.bytes === 'grow'
     const wantMsgs = suggest.msgs === 'grow'
     if (!wantBytes && !wantMsgs) return

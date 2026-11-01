@@ -17,7 +17,7 @@ afterEach(() => vi.useRealTimers())
 
 /** A sender's wire that held nothing as its credit ran out, and delivered right up to the ack. */
 const EMPTY = 0
-const upToAck = () => Infinity
+const upToAck = { _deliveredBefore: () => Infinity }
 
 // Sample shape: `bytesAtPingSent` is snapshotted *after* the first `onReceive`
 // increments the byte counter, so the sample is the bytes that arrive
