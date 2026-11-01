@@ -154,11 +154,10 @@ class CloudflareBroadcastAuthorityState {
   /** The route's unexpired member DOs, each with its bucket. */
   livePresence(routeKey: string, now: number): Array<{ member: string; bucket: LocationBucket }> {
     return this.sql()
-      .exec<{ member: string; bucket: LocationBucket }>(
-        'SELECT member, bucket FROM broadcast_presence WHERE route_key = ? AND expires_at > ?',
-        routeKey,
-        now,
-      )
+      .exec<{
+        member: string
+        bucket: LocationBucket
+      }>('SELECT member, bucket FROM broadcast_presence WHERE route_key = ? AND expires_at > ?', routeKey, now)
       .toArray()
   }
 
@@ -262,23 +261,23 @@ class CloudflareBroadcast {
   private readonly baseInstanceName: string
   private readonly scale: CloudflareScale | undefined
   private readonly locationFallback: LocationBucket
-  private readonly namespace: () => BroadcastNamespace
+  private readonly getNamespace: () => BroadcastNamespace
 
   constructor({
     baseInstanceName,
     scale,
     locationFallback,
-    namespace,
+    getNamespace,
   }: {
     baseInstanceName: string
     scale?: CloudflareScale
     locationFallback: LocationBucket
-    namespace: () => BroadcastNamespace
+    getNamespace: () => BroadcastNamespace
   }) {
     this.baseInstanceName = baseInstanceName
     this.scale = scale
     this.locationFallback = locationFallback
-    this.namespace = namespace
+    this.getNamespace = getNamespace
   }
 
   member(id: string, calls: BroadcastCalls): CloudflareBroadcastMember {
@@ -370,12 +369,12 @@ class CloudflareBroadcast {
   }
 
   private stubByName(name: string, locationHint: LocationBucket | null): TelefuncBroadcastStub {
-    const namespace = this.namespace()
+    const namespace = this.getNamespace()
     return namespace.get(namespace.idFromName(name), locationHint === null ? undefined : { locationHint })
   }
 
   private stubById(id: string): TelefuncBroadcastStub {
-    const namespace = this.namespace()
+    const namespace = this.getNamespace()
     return namespace.get(namespace.idFromString(id))
   }
 }

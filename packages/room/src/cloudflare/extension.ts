@@ -13,7 +13,7 @@ import { getRoomSessionManager, type RoomSessionDeliveryRequest } from './subscr
 
 registerCloudflareExtension({
   name: ROOM_CLOUDFLARE_EXTENSION,
-  durableObject: (ctx: DurableObjectState, _env, namespace) => new RoomAuthority(ctx, namespace()),
+  durableObject: (ctx: DurableObjectState, _env, getNamespace) => new RoomAuthority(ctx, getNamespace()),
   session: { deliver: (request: RoomSessionDeliveryRequest) => getRoomSessionManager().deliver(request) },
-  planes: { [ROOM_PLANE]: (namespace) => new CloudflareRoomDriver({ namespace }) },
+  planes: { [ROOM_PLANE]: (getNamespace) => new CloudflareRoomDriver({ getNamespace }) },
 })

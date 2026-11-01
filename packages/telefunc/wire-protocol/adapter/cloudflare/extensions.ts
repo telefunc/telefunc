@@ -27,16 +27,17 @@ type CloudflareExtension = {
   name: string
   /** Builds the extension's part of a Durable Object, once, on its first `telefuncDurableObjectCall()`; `ctx` and
    *  `env` are the Durable Object's `DurableObjectState` and `Cloudflare.Env`. Its `alarm()` gets the Durable Object's
-   *  alarms. */
+   *  alarms. `getNamespace` reads the Telefunc Durable Object namespace of the Worker's current env. */
   durableObject?: (
     ctx: never,
     env: never,
-    namespace: () => TelefuncExtensionNamespace,
+    getNamespace: () => TelefuncExtensionNamespace,
   ) => CloudflareExtensionDurableObject
   /** The calls a session Durable Object takes from other Durable Objects through `telefuncSessionCall()`. */
   session?: Record<string, (...args: never[]) => unknown>
-  /** The backend planes the Cloudflare backend serves for the extension, by `backendPlane()` key. */
-  planes?: Record<symbol, (namespace: () => TelefuncExtensionNamespace) => unknown>
+  /** The backend planes the Cloudflare backend serves for the extension, by `backendPlane()` key. Each takes
+   *  `getNamespace`, which reads the Telefunc Durable Object namespace of the Worker's current env. */
+  planes?: Record<symbol, (getNamespace: () => TelefuncExtensionNamespace) => unknown>
 }
 
 const globalObject = getGlobalObject<{ extensions: Map<string, CloudflareExtension> }>('extensions.ts', () => ({
@@ -52,10 +53,10 @@ function getCloudflareExtension(name: string): CloudflareExtension | undefined {
   return globalObject.extensions.get(name)
 }
 
-function getCloudflareExtensionPlanes(namespace: () => TelefuncExtensionNamespace): Record<symbol, () => unknown> {
+function getCloudflareExtensionPlanes(getNamespace: () => TelefuncExtensionNamespace): Record<symbol, () => unknown> {
   const planes: Record<symbol, () => unknown> = {}
   for (const { planes: own = {} } of globalObject.extensions.values()) {
-    for (const key of Object.getOwnPropertySymbols(own)) planes[key] = () => own[key]!(namespace)
+    for (const key of Object.getOwnPropertySymbols(own)) planes[key] = () => own[key]!(getNamespace)
   }
   return planes
 }

@@ -16,22 +16,22 @@ import { requireCloudflareSession } from './session.js'
 /** A subscription requires its session DO's context. */
 class CloudflareBackend implements Backend {
   readonly broadcast: CloudflareBroadcast
-  private readonly namespace: () => TelefuncExtensionNamespace
+  private readonly getNamespace: () => TelefuncExtensionNamespace
 
   constructor({
-    namespace,
+    getNamespace,
     broadcast,
   }: {
-    namespace: () => TelefuncExtensionNamespace
+    getNamespace: () => TelefuncExtensionNamespace
     broadcast: CloudflareBroadcast
   }) {
     this.broadcast = broadcast
-    this.namespace = namespace
+    this.getNamespace = getNamespace
   }
 
   /** The planes of the Cloudflare extensions registered so far. */
   get planes(): { readonly [key: symbol]: (kit: never) => unknown } {
-    return getCloudflareExtensionPlanes(this.namespace)
+    return getCloudflareExtensionPlanes(this.getNamespace)
   }
 
   publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {

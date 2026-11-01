@@ -39,10 +39,10 @@ const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
 /** A subscription requires its session DO's context; a lane commit made in one goes through that session's ordered
  *  stub. */
 class CloudflareRoomDriver implements RoomDriver {
-  private readonly namespace: () => TelefuncExtensionNamespace
+  private readonly getNamespace: () => TelefuncExtensionNamespace
 
-  constructor({ namespace }: { namespace: () => TelefuncExtensionNamespace }) {
-    this.namespace = namespace
+  constructor({ getNamespace }: { getNamespace: () => TelefuncExtensionNamespace }) {
+    this.getNamespace = getNamespace
   }
 
   subscribe(source: RoomSubscriptionSource, subscriber: Subscriber): Unsubscribe {
@@ -148,7 +148,7 @@ class CloudflareRoomDriver implements RoomDriver {
   }
 
   private object(name: string): CloudflareRoomAuthorityStub {
-    const namespace = this.namespace()
+    const namespace = this.getNamespace()
     return roomAuthorityStub(namespace.get(namespace.idFromName(name)))
   }
 }

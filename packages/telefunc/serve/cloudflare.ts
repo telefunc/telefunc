@@ -113,12 +113,12 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const cloudflareBackend = installBackend(
     () =>
       new CloudflareBackend({
-        namespace: () => telefuncNamespace(workerEnv),
+        getNamespace: () => telefuncNamespace(workerEnv),
         broadcast: new CloudflareBroadcast({
           baseInstanceName,
           scale,
           locationFallback,
-          namespace: () => telefuncNamespace(workerEnv),
+          getNamespace: () => telefuncNamespace(workerEnv),
         }),
       }),
     [
