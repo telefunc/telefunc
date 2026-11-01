@@ -163,7 +163,7 @@ class PieceSender {
     }
     this.takeCarried()
     const tag = frame[0]!
-    // A PIECES_ACK goes ahead of what waits: the peer's probe may be waiting for it.
+    // While no announcement is open, a PIECES_ACK goes ahead of what waits: the peer's probe may be waiting for it.
     if (tag === TAG.PIECES_ACK && this.open === null) return this.pass(frame)
     if (this.rest === null) {
       if (this.open === null && !this.announces(frame)) return this.pass(frame)
