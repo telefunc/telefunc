@@ -93,9 +93,9 @@ function unfollowBroadcastPlane(follower: BroadcastPlaneFollower): void {
 }
 
 function getBroadcastPlane(): BroadcastPlane {
-  return (state.broadcast ??= superviseBroadcastDriver(
-    state.transport ? createBroadcastTransportDriver(state.transport) : currentBackend().backend,
-  ))
+  if (state.broadcast) return state.broadcast
+  const driver = state.transport ? createBroadcastTransportDriver(state.transport) : currentBackend().backend
+  return (state.broadcast = superviseBroadcastDriver(driver, new Subscriptions({ driver })))
 }
 
 /** The installed backend's `plane`, built on first use. */
