@@ -41,14 +41,14 @@ import {
 } from './keys.js'
 import { LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrdering } from './commands.js'
 import type { RedisConnection } from './RedisConnection.js'
-import type { RedisPlane } from './RedisSubscriptions.js'
+import type { RedisDriver } from './RedisSubscriptions.js'
 
 const NO_FENCE_TOKENS: FenceTokens = { lane: '', everyTrack: '', everyMember: '' }
 
 type RedisRoomDriverOptions = { connection: RedisConnection; kit: RoomPlaneKit }
 
-/** Room's plane on a Redis backend: its store and lanes on `connection`, keyed and paged by Room's `kit`. */
-class RedisRoomDriver implements RoomDriver, RedisPlane {
+/** Room's driver on a Redis backend: its store and lanes on `connection`, keyed and paged by Room's `kit`. */
+class RedisRoomDriver implements RoomDriver, RedisDriver {
   readonly publishOvertakesSubscribe = true
   private readonly connection: RedisConnection
   private readonly kit: RoomPlaneKit
@@ -106,7 +106,7 @@ class RedisRoomDriver implements RoomDriver, RedisPlane {
       source,
       laneChannel: channelKey(prefix, source.roomId, source.inc, this.kit.encodeLaneKey(source.lane)),
       invalidationChannel: incarnationInvalidationChannel(prefix, source.roomId, source.inc),
-      plane: this,
+      driver: this,
       receiver,
     })
   }

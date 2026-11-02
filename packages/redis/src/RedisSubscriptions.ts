@@ -1,5 +1,5 @@
 export { RedisSubscriptions }
-export type { RedisPlane, RedisSubscriptionSource }
+export type { RedisDriver, RedisSubscriptionSource }
 
 import { randomUUID } from 'node:crypto'
 import type { BackendReceiver, BroadcastRoute, OrderingInfo } from 'telefunc/__internal'
@@ -16,7 +16,7 @@ type RedisSubscriptionSource = BroadcastRoute | RoomSubscriptionSource
 type RedisSubscriptionsOptions = { connection: RedisConnection }
 
 /** The driver a subscription's source belongs to. */
-interface RedisPlane {
+interface RedisDriver {
   /** Each of the source's lanes' last commit, by the lane key its frames carry on a fan-in channel and `''` on
    *  another; null once a Room source's incarnation is not the open head. */
   readLaneStarts(source: RedisSubscriptionSource): Promise<Map<string, OrderingInfo> | null>
@@ -28,7 +28,7 @@ type RedisAttemptOptions = {
   laneChannel: string
   /** A Room lane's incarnation channel: a message on it means the incarnation was dropped. */
   invalidationChannel: string | null
-  plane: RedisPlane
+  driver: RedisDriver
   receiver: BackendReceiver
 }
 
@@ -270,7 +270,7 @@ class RedisSubscriptions {
   private async confirm(subscription: RedisAttempt, id: number): Promise<void> {
     let starts: Map<string, OrderingInfo> | null
     try {
-      starts = await subscription.plane.readLaneStarts(subscription.source)
+      starts = await subscription.driver.readLaneStarts(subscription.source)
     } catch (error) {
       // A failed read (a command-connection error) fails this subscription, not the shared subscriber connection.
       if (this.isCurrent(id)) subscription.fail(error)
@@ -299,7 +299,7 @@ class RedisAttempt extends DriverAttempt {
   readonly source: RedisSubscriptionSource
   readonly laneChannel: string
   readonly invalidationChannel: string | null
-  readonly plane: RedisPlane
+  readonly driver: RedisDriver
   readonly channels: readonly string[]
   private readonly owner: RedisSubscriptions
   private readonly receiver: BackendReceiver
@@ -319,7 +319,7 @@ class RedisAttempt extends DriverAttempt {
     source,
     laneChannel,
     invalidationChannel,
-    plane,
+    driver,
     receiver,
   }: RedisAttemptOptions & { owner: RedisSubscriptions }) {
     super()
@@ -327,7 +327,7 @@ class RedisAttempt extends DriverAttempt {
     this.source = source
     this.laneChannel = laneChannel
     this.invalidationChannel = invalidationChannel
-    this.plane = plane
+    this.driver = driver
     this.receiver = receiver
     this.channels = invalidationChannel === null ? [laneChannel] : [laneChannel, invalidationChannel]
     if ('roomId' in source) {

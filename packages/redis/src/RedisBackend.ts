@@ -14,12 +14,12 @@ import { REDIS_COMMANDS } from './commands.js'
 import { broadcastChannel } from './keys.js'
 import type { RedisConnection } from './RedisConnection.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
-import type { RedisPlane } from './RedisSubscriptions.js'
+import type { RedisDriver } from './RedisSubscriptions.js'
 
 type RedisBackendOptions = { connection: RedisConnection }
 
-/** The installed backend: Broadcast on `connection`, and Room's plane, built on the same connection. */
-class RedisBackend implements BroadcastDriver, RedisPlane {
+/** The installed backend: Broadcast on `connection`, and Room's driver, built on the same connection. */
+class RedisBackend implements BroadcastDriver, RedisDriver {
   readonly connection: RedisConnection
   readonly publishOvertakesSubscribe = true
   readonly planes = {
@@ -42,7 +42,7 @@ class RedisBackend implements BroadcastDriver, RedisPlane {
       source: route,
       laneChannel,
       invalidationChannel: null,
-      plane: this,
+      driver: this,
       receiver,
     })
   }

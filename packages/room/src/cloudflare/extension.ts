@@ -1,8 +1,8 @@
 /// <reference types="@cloudflare/workers-types" />
 
 // Room on Cloudflare: a room authority, and each region's room directory, are Room's part of the Telefunc Durable
-// Object, its frames reach session Durable Objects through Broadcast's regions, and Room's storage driver is the
-// Cloudflare backend's Room plane.
+// Object, its frames reach session Durable Objects through Broadcast's regions, and Room's storage driver is
+// `CloudflareRoomDriver`.
 
 import { registerCloudflareExtension } from 'telefunc/__internal'
 import { ROOM_CLOUDFLARE_EXTENSION } from '../server/constants.js'
