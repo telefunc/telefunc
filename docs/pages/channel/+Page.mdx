@@ -299,6 +299,8 @@ When `publish()` rejects depends on where Broadcast runs:
 
 A rejected publish may still have reached some subscribers (on Cloudflare, every subscriber the failed server doesn't hold), so publishing it again can deliver it twice to them.
 
+A failed `publish()` you neither `await` nor `.catch()` fails silently: your code gets no error, and Node.js reports no unhandled rejection. To see failures, `await` it or add `.catch()`.
+
 `publish()` can't be awaited per subscriber, so the <Link href="#backpressure">64 MiB warning</Link> doesn't apply to a `BroadcastChannel`. Instead, a client that falls far behind a broadcast has its connection cut and reconnects. The client's other channels on that connection reconnect too, and lose nothing they can replay. The `BroadcastChannel` then gets what it missed, unless it missed more than the server's buffers hold: then it closes (see <Link href="#errors">errors</Link>).
 
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
