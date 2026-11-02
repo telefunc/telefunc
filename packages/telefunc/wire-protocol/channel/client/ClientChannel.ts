@@ -39,7 +39,7 @@ import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import { ChannelAttach } from './ChannelAttach.js'
-import { ClientCreditSender } from './ClientCreditSender.js'
+import type { CreditOwner } from '../../flowControl/credit.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
 import type { MuxChannel, MuxConnection } from './ClientConnection.js'
 import { ChannelClosedError } from '../channelErrors.js'
@@ -102,7 +102,18 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.key = key
     this._maxFrameBytes = maxFrameBytes
     // Built before the connection: registering the channel fits its credits to the replay buffers.
-    const owner = new ClientCreditSender({ channel: this })
+    const owner: CreditOwner = {
+      // A closed channel's server ends its sends with the close, so the channel grants it no more credit.
+      sendByteLimit: (limit, urgency) => {
+        if (!this.isClosed) this.connection.sendByteLimit(this, limit, urgency)
+      },
+      sendMessageLimit: (limit, urgency) => {
+        if (!this.isClosed) this.connection.sendMessageLimit(this, limit, urgency)
+      },
+      sendBdpPing: (probe) => this.connection.sendBdpPing(this, probe),
+      backlogBytes: () => this.connection.bufferedAmount(),
+      deliveredBefore: (ms) => this.connection.deliveredBefore(ms),
+    }
     this.sendCredit = new SendCredit({ owner, selfTime: this.selfTime, yieldBytes: FC_PAGE_YIELD_BYTES })
     this.receiveCredit = new ReceiveCredit({ owner, selfTime: this.selfTime })
     this._attach = new ChannelAttach({ channel: this, sendCredit: this.sendCredit, receiveCredit: this.receiveCredit })
