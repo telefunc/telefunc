@@ -20,7 +20,7 @@ import type {
 } from './driver.js'
 import type { OrderingInfo } from '../wire/orderingFrame.js'
 
-/** How long a send waits for its host's establishing attempts. */
+/** How long a send waits for the establishing attempts it waits for. */
 const ESTABLISH_WAIT_MS = 60_000
 /** What a waiting send keeps beyond its payload (130–160 bytes measured), so small ones are bounded too. */
 const WAITING_SEND_OVERHEAD_BYTES = 256
@@ -44,8 +44,8 @@ type SourceRules<Source> = {
   sendWaitsFor(source: Source): WaitRule<Source>
 }
 
-/** A send waits while one of its host's attempts on `subscriptions` is establishing, behind the waiting sends ordered
- *  with it (`orderedWith`: what one seq counts). Its bytes count against `countsAgainst`'s `bufferLimit`. */
+/** A send waits while one of the attempts on `subscriptions` is establishing, behind the waiting sends ordered with it
+ *  (`orderedWith`: what one seq counts). Its bytes count against `countsAgainst`'s `bufferLimit`. */
 type WaitRule<Source> = {
   orderedWith: string
   subscriptions: readonly Source[]
@@ -53,7 +53,7 @@ type WaitRule<Source> = {
   bufferLimit: 'bufferLimit' | 'bufferLimitBinary'
 }
 
-/** The sends on one host's domain, waiting for its establishing attempts. */
+/** The sends on one domain, waiting for its establishing attempts. */
 type Wait = { readonly established: Promise<void>; sends: number }
 
 type SharedSubscriptionsOptions<Source> = {
@@ -71,14 +71,16 @@ class SharedSubscriptions<Source> {
   private readonly slots = new Map<string, SubscriptionSlot<Source>>()
   private readonly cleanups = new Set<Promise<void>>()
   private readonly sendName: string
-  /** By host and domain. */
+  /** By domain. */
   private readonly waits = new Map<string, Wait>()
-  /** Bytes waiting, by host and budget. */
+  /** Bytes waiting, by budget. */
   private readonly waitingBytes = new Map<string, number>()
-  /** Slots never ready yet, counted down a microtask after: at 0, no send has anything to wait for. */
-  private establishingSlots = 0
+  /** By source key, the slots never ready yet, unmapped a microtask after: empty, no send has anything to wait for. */
+  private readonly establishingSlots = new Map<string, SubscriptionSlot<Source>>()
 
   constructor({ driver, sources, sendName }: SharedSubscriptionsOptions<Source>) {
+    // A process runs one host of an overtaking driver, so a wait has no host to tell apart.
+    assert(!(driver.publishOvertakesSubscribe && driver.hostKey))
     this.driver = driver
     this.sources = sources
     this.sendName = sendName
@@ -86,42 +88,39 @@ class SharedSubscriptions<Source> {
 
   /** False on the fast path, read before a send builds anything: no attempt establishes and no send waits. */
   get establishing(): boolean {
-    return this.establishingSlots > 0 || this.waits.size > 0
+    return this.establishingSlots.size > 0 || this.waits.size > 0
   }
 
-  /** A send's turn once this host's attempts on its source are established, at most `ESTABLISH_WAIT_MS` later; a driver
+  /** A send's turn once the attempts on its source are established, at most `ESTABLISH_WAIT_MS` later; a driver
    *  may get a publish before its own subscribe otherwise (Redis's go by two connections). Null when it has nothing to
    *  wait for. The turn gives the send its own copy: the caller reuses its bytes. Throws `ChannelOverflowError` when its
    *  bytes would pass its buffer limit; the config is read only then, as resolving it is costly. */
   waitTurn<Payload extends BackendPayload>(source: Source, payload: Payload): WaitingSend<Payload> | null {
-    const hostKey = this.driver.hostKey ? this.driver.hostKey() : ''
-    if (hostKey === null) return null
     const { orderedWith, subscriptions, countsAgainst, bufferLimit } = this.sources.sendWaitsFor(source)
-    const waitKey = JSON.stringify([hostKey, orderedWith])
-    let wait = this.waits.get(waitKey)
-    if (wait === undefined && this.establishingIn(hostKey, subscriptions).length === 0) return null
-    const budget = JSON.stringify([hostKey, countsAgainst])
+    let wait = this.waits.get(orderedWith)
+    if (wait === undefined && this.establishingIn(subscriptions).length === 0) return null
     const bytes =
       WAITING_SEND_OVERHEAD_BYTES + (typeof payload === 'string' ? utf8ByteLength(payload) : payload.byteLength)
-    const total = (this.waitingBytes.get(budget) ?? 0) + bytes
+    const total = (this.waitingBytes.get(countsAgainst) ?? 0) + bytes
     if (total > getChannelLimits()[bufferLimit]) {
       throw new ChannelOverflowError(`${this.sendName} waiting for a new subscription, past ${bufferLimit}`)
     }
-    wait ??= this.openWait(hostKey, subscriptions)
-    this.waits.set(waitKey, wait)
+    wait ??= this.openWait(subscriptions)
+    this.waits.set(orderedWith, wait)
     wait.sends++
-    this.waitingBytes.set(budget, total)
+    this.waitingBytes.set(countsAgainst, total)
     const owned = (typeof payload === 'string' ? payload : new Uint8Array(payload)) as Payload
-    return new WaitingSend({ owner: this, waitKey, wait, budget, bytes, turn: wait.established.then(() => owned) })
+    const turn = wait.established.then(() => owned)
+    return new WaitingSend({ owner: this, orderedWith, wait, countsAgainst, bytes, turn })
   }
 
   /** A waiting send went to the driver: the last of its wait's sends unmaps it, so a send made before then still
    *  queues behind the rest. */
-  endWait({ waitKey, wait, budget, bytes }: WaitingSend<unknown>): void {
-    if (--wait.sends === 0) this.waits.delete(waitKey)
-    const left = this.waitingBytes.get(budget)! - bytes
-    if (left === 0) this.waitingBytes.delete(budget)
-    else this.waitingBytes.set(budget, left)
+  endWait({ orderedWith, wait, countsAgainst, bytes }: WaitingSend<unknown>): void {
+    if (--wait.sends === 0) this.waits.delete(orderedWith)
+    const left = this.waitingBytes.get(countsAgainst)! - bytes
+    if (left === 0) this.waitingBytes.delete(countsAgainst)
+    else this.waitingBytes.set(countsAgainst, left)
   }
 
   subscribe(source: Source, listener: BackendListener): BackendSubscription {
@@ -157,37 +156,34 @@ class SharedSubscriptions<Source> {
     const slot = new SubscriptionSlot(options)
     // A driver whose publishes can't overtake its subscribes never makes a send wait.
     if (!this.driver.publishOvertakesSubscribe) return slot
-    this.establishingSlots++
-    void slot.firstReady.then(() => this.establishingSlots--)
+    const { key } = options
+    this.establishingSlots.set(key, slot)
+    void slot.firstReady.then(() => {
+      if (this.establishingSlots.get(key) === slot) this.establishingSlots.delete(key)
+    })
     return slot
   }
 
-  /** A wait for this host's attempts on `subscriptions`, including ones made meanwhile. */
-  private openWait(hostKey: string, subscriptions: readonly Source[]): Wait {
+  /** A wait for the attempts on `subscriptions`, including ones made meanwhile. */
+  private openWait(subscriptions: readonly Source[]): Wait {
     let timer!: ReturnType<typeof setTimeout>
     const timeout = new Promise<void>((resolve) => {
       timer = unrefTimer(setTimeout(resolve, ESTABLISH_WAIT_MS))
     })
-    const established = Promise.race([this.establishedIn(hostKey, subscriptions), timeout]).finally(() =>
-      clearTimeout(timer),
-    )
+    const established = Promise.race([this.establishedIn(subscriptions), timeout]).finally(() => clearTimeout(timer))
     return { established, sends: 0 }
   }
 
-  private async establishedIn(hostKey: string, waitsFor: readonly Source[]): Promise<void> {
-    for (
-      let left = this.establishingIn(hostKey, waitsFor);
-      left.length > 0;
-      left = this.establishingIn(hostKey, waitsFor)
-    ) {
+  private async establishedIn(subscriptions: readonly Source[]): Promise<void> {
+    for (let left = this.establishingIn(subscriptions); left.length > 0; left = this.establishingIn(subscriptions)) {
       await Promise.all(left)
     }
   }
 
-  private establishingIn(hostKey: string, waitsFor: readonly Source[]): Promise<void>[] {
+  private establishingIn(subscriptions: readonly Source[]): Promise<void>[] {
     const left: Promise<void>[] = []
-    for (const source of waitsFor) {
-      const slot = this.slots.get(JSON.stringify([hostKey, this.sources.key(source)]))
+    for (const source of subscriptions) {
+      const slot = this.establishingSlots.get(this.sources.key(source))
       if (slot?.establishing) left.push(slot.firstReady)
     }
     return left
@@ -205,9 +201,9 @@ class SharedSubscriptions<Source> {
 
 type WaitingSendOptions<Payload> = {
   owner: SharedSubscriptions<unknown>
-  waitKey: string
+  orderedWith: string
   wait: Wait
-  budget: string
+  countsAgainst: string
   bytes: number
   turn: Promise<Payload>
 }
@@ -215,17 +211,17 @@ type WaitingSendOptions<Payload> = {
 /** A send's place in its domain's wait: `await turn` for its own copy of the payload, send that, then `sent()`. */
 class WaitingSend<Payload> {
   readonly turn: Promise<Payload>
-  readonly waitKey: string
+  readonly orderedWith: string
   readonly wait: Wait
-  readonly budget: string
+  readonly countsAgainst: string
   readonly bytes: number
   private readonly owner: SharedSubscriptions<unknown>
 
-  constructor({ owner, waitKey, wait, budget, bytes, turn }: WaitingSendOptions<Payload>) {
+  constructor({ owner, orderedWith, wait, countsAgainst, bytes, turn }: WaitingSendOptions<Payload>) {
     this.owner = owner
-    this.waitKey = waitKey
+    this.orderedWith = orderedWith
     this.wait = wait
-    this.budget = budget
+    this.countsAgainst = countsAgainst
     this.bytes = bytes
     this.turn = turn
   }
