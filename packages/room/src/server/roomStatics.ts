@@ -222,7 +222,7 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
   do {
     const page = await plane.driver.directoryList(options?.prefix ?? '', cursor)
     cursor = page.cursor
-    // `DIRECTORY_PAGE_SIZE` at once, each at its own authority: a page holds that many rooms per region.
+    // `DIRECTORY_PAGE_SIZE` reads at once, each at its room's authority: a Cloudflare page holds a page per region.
     for (let at = 0; at < page.entries.length; at += DIRECTORY_PAGE_SIZE) {
       const chunk = page.entries.slice(at, at + DIRECTORY_PAGE_SIZE)
       const listed = await Promise.all(chunk.map(({ roomId, incTag }) => listedRoom(plane, roomId, incTag)))

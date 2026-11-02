@@ -4,7 +4,7 @@ export type { DemandReportOptions, DemandReportOwner }
 import type { DemandEntry } from '../protocol.js'
 import { hasEntry, toggle, toggleEntry } from '../../utils/sets.js'
 
-/** The replica that tells the room each change of its planner's demand. */
+/** The room's demand exchange, which tells the other processes and this one each change of the planner's demand. */
 interface DemandReportOwner {
   tellDemand(entry: DemandEntry, on: boolean): void
 }
