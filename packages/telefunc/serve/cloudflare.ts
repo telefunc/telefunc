@@ -4,8 +4,7 @@ export { Telefunc }
 export type { CloudflareOptions }
 
 import { DurableObject, env as workerEnv } from 'cloudflare:workers'
-// A subscription finds its session through AsyncLocalStorage, which the setup's compatibility flag enables.
-import '../node/server/async_hooks.js'
+import { installAsyncContext } from '../node/server/context/async.js'
 import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
 import { ChannelMux } from '../wire-protocol/channel/server/ChannelMux.js'
@@ -48,6 +47,15 @@ import { isTelefuncRequest, toResponse } from './shared.js'
 import { REQUEST_KIND, getRequestKind } from '../wire-protocol/wire/requestKind.js'
 import { STATUS_BODY_MALFORMED_REQUEST, STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
 import { importBundledEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
+
+// A subscription finds its session through AsyncLocalStorage, which a compatibility flag enables. A Worker without it
+// still serves telefunctions and channels; Broadcast and Room ask for the flag (session.ts). The specifier is a
+// variable so that the bundler leaves the import to the runtime, and doesn't warn a Worker without the flag about it.
+const asyncHooksModule = 'node:async_hooks'
+const asyncHooks: typeof import('node:async_hooks') | null = await import(/* @vite-ignore */ asyncHooksModule).catch(
+  () => null,
+)
+if (asyncHooks) installAsyncContext(asyncHooks.AsyncLocalStorage)
 
 // At Worker start, so that the extensions' server entries run before a Durable Object's first call
 await importBundledEntry()

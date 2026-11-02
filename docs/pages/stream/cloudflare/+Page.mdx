@@ -35,7 +35,8 @@ export default {
 // wrangler.jsonc
 {
   "compatibility_date": "2025-08-15", // or later
-  // Required: nodejs_als (nodejs_compat works too). With enable_request_signal, a Worker's request.signal aborts when its client disconnects.
+  // nodejs_als (or nodejs_compat): Broadcast and Room need it.
+  // enable_request_signal: a Worker's request.signal aborts when its client disconnects.
   "compatibility_flags": ["nodejs_als", "enable_request_signal"],
   "durable_objects": {
     "bindings": [
