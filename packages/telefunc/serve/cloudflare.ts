@@ -47,8 +47,6 @@ type CloudflareOptions = {
 type ServeInput = {
   request: Request
   env: Cloudflare.Env
-  /** Not read: serve() leaves no work running past its response. */
-  ctx?: ExecutionContext
 }
 
 interface TelefuncServe {

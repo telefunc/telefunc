@@ -56,7 +56,7 @@ export default {
       if (request.method === 'POST') await env.TelefuncKV.put(`${run}:stalled`, 'true')
       return new Response(await env.TelefuncKV.get(run))
     }
-    const resp = await tf.serve({ request, env, ctx })
+    const resp = await tf.serve({ request, env })
     return resp ?? vikeAsCloudflareHandler.fetch!(request, env, ctx)
   },
 } satisfies ExportedHandler<Env>
