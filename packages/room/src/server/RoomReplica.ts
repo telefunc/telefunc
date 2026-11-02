@@ -4,6 +4,7 @@ export type { PresenceEvent }
 import { parse } from '@brillout/json-serializer/parse'
 import { assert } from '../utils/assert.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
+import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { getRoomPlane } from '../backend/plane.js'
 import type { LaneId } from '../backend/contract.js'
 import { encodePublish, hostLocal, type OrderingInfo } from 'telefunc/__internal'
@@ -52,6 +53,15 @@ function replicasHere(): Map<string, WeakRef<RoomReplica>> {
   return hostLocal(REPLICAS, () => new Map<string, WeakRef<RoomReplica>>())
 }
 
+const { collected } = getGlobalObject('server/RoomReplica.ts', () => ({
+  /** Forgets a collected replica, unless a later one of its incarnation took its place. */
+  collected: new FinalizationRegistry<{ replicas: Map<string, WeakRef<RoomReplica>>; inc: string }>(
+    ({ replicas, inc }) => {
+      if (replicas.get(inc)?.deref() === undefined) replicas.delete(inc)
+    },
+  ),
+}))
+
 type RoomReplicaOptions = {
   incarnation: RoomIncarnation
   stored: StoredRoomMeta
@@ -64,13 +74,6 @@ type RoomReplicaOptions = {
  *  again. Each handle keeps its guards, its tail, the stubs it opened and its listeners. A replica that no handle
  *  observes, owns a member through or tails runs no heartbeat and holds no lane; it lives while a handle holds it. */
 class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, AuthoritySyncOwner, RoomHeartbeatOwner {
-  private static readonly collected = new FinalizationRegistry<{
-    replicas: Map<string, WeakRef<RoomReplica>>
-    inc: string
-  }>(({ replicas, inc }) => {
-    if (replicas.get(inc)?.deref() === undefined) replicas.delete(inc)
-  })
-
   /** The incarnation's replica on this channel host, while a handle or its own work holds it. */
   static of(inc: string): RoomReplica | undefined {
     return replicasHere().get(inc)?.deref()
@@ -89,7 +92,7 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
     const replica = new RoomReplica({ incarnation, stored, seed })
     const replicas = replicasHere()
     replicas.set(config.inc, new WeakRef(replica))
-    RoomReplica.collected.register(replica, { replicas, inc: config.inc })
+    collected.register(replica, { replicas, inc: config.inc })
     return replica
   }
 

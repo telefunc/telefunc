@@ -6,6 +6,7 @@ export type { RedisClient, SubscriberSocket }
 import { randomUUID } from 'node:crypto'
 import { Cluster, type Redis } from 'ioredis'
 import { assert } from './assert.js'
+import { getGlobalObject } from './getGlobalObject.js'
 
 type RedisClient = Redis | Cluster
 
@@ -83,11 +84,12 @@ async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSoc
   })
 }
 
-// The node each Cluster's subscriber was last duplicated from.
-const subscriberNodes = new WeakMap<Cluster, Redis>()
-
-// One wait per connecting Cluster, however often subscribers reopen during it.
-const clusterWaits = new WeakMap<Cluster, Promise<void>>()
+const { subscriberNodes, clusterWaits } = getGlobalObject('ioredis.ts', () => ({
+  /** The node each Cluster's subscriber was last duplicated from. */
+  subscriberNodes: new WeakMap<Cluster, Redis>(),
+  /** One wait per connecting Cluster, however often subscribers reopen during it. */
+  clusterWaits: new WeakMap<Cluster, Promise<void>>(),
+}))
 
 function clusterReady(cluster: Cluster): Promise<void> {
   let wait = clusterWaits.get(cluster)
