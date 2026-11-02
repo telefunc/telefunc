@@ -4,7 +4,10 @@ export type { PushReadable }
 import type { Readable } from 'node:stream'
 import { getStreamNodeModule } from './loadStreamNodeModule.js'
 
-type PushReadable = Readable & {
+/** A Node `Readable` fed by `push`: `readable` is the body handed on, the rest stays with the producer. */
+type PushReadable = {
+  readonly readable: Readable
+  push(chunk: Uint8Array): boolean
   close(): void
   /** Bytes pushed that the consumer hasn't read yet. */
   readonly bufferedAmount: number
@@ -25,12 +28,17 @@ function createPushReadable(onCancel?: () => void, onDrain?: () => void): PushRe
       }
       callback(err)
     },
-  }) as PushReadable
-  readable.close = () => {
-    if (ended || cancelled) return
-    ended = true
-    readable.push(null)
+  })
+  return {
+    readable,
+    push: (chunk) => readable.push(chunk),
+    close: () => {
+      if (ended || cancelled) return
+      ended = true
+      readable.push(null)
+    },
+    get bufferedAmount() {
+      return readable.readableLength
+    },
   }
-  Object.defineProperty(readable, 'bufferedAmount', { get: () => readable.readableLength })
-  return readable
 }

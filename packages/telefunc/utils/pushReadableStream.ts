@@ -4,10 +4,9 @@ export type { PushReadableStream }
 /**
  * Push-fed Web `ReadableStream` for streaming bodies on the Web side
  * (client SSE upstream, any cross-runtime use that hands a body to fetch /
- * Response). Mirrors `createPushReadable`: the returned object IS-A
- * `ReadableStream`, with `push` / `close` / `isClosed` bolted on as the
- * producer surface — so callers don't have to choose between a wrapper
- * object and the underlying body.
+ * Response). Mirrors `createPushReadable`: `readable` is a plain
+ * `ReadableStream`, the body handed on; `push` / `close` / `isClosed` stay
+ * with the producer.
  *
  * Producer calls `push(chunk)` / `close()` synchronously; each chunk lands
  * directly in the stream's internal queue via `controller.enqueue`.
@@ -26,7 +25,8 @@ export type { PushReadableStream }
  * is a normal end and does *not* fire `onCancel`.
  */
 
-type PushReadableStream<T extends Uint8Array = Uint8Array<ArrayBuffer>> = ReadableStream<T> & {
+type PushReadableStream<T extends Uint8Array = Uint8Array<ArrayBuffer>> = {
+  readonly readable: ReadableStream<T>
   push(chunk: T): boolean
   close(): void
   readonly isClosed: boolean
@@ -44,7 +44,7 @@ function createPushReadableStream<T extends Uint8Array = Uint8Array<ArrayBuffer>
 ): PushReadableStream<T> {
   let controller!: ReadableStreamDefaultController<T>
   let closed = false
-  const stream = new ReadableStream<T>(
+  const readable = new ReadableStream<T>(
     {
       start: (c) => {
         controller = c
@@ -58,20 +58,24 @@ function createPushReadableStream<T extends Uint8Array = Uint8Array<ArrayBuffer>
       },
     },
     { highWaterMark: HIGH_WATER_MARK, size: (chunk) => chunk.byteLength },
-  ) as PushReadableStream<T>
-  stream.push = (chunk) => {
-    if (closed) return false
-    controller.enqueue(chunk)
-    return (controller.desiredSize ?? 1) > 0
+  )
+  return {
+    readable,
+    push: (chunk) => {
+      if (closed) return false
+      controller.enqueue(chunk)
+      return (controller.desiredSize ?? 1) > 0
+    },
+    close: () => {
+      if (closed) return
+      closed = true
+      controller.close()
+    },
+    get isClosed() {
+      return closed
+    },
+    get bufferedAmount() {
+      return closed ? 0 : HIGH_WATER_MARK - controller.desiredSize!
+    },
   }
-  stream.close = () => {
-    if (closed) return
-    closed = true
-    controller.close()
-  }
-  Object.defineProperty(stream, 'isClosed', { get: () => closed })
-  Object.defineProperty(stream, 'bufferedAmount', {
-    get: () => (closed ? 0 : HIGH_WATER_MARK - controller.desiredSize!),
-  })
-  return stream
 }

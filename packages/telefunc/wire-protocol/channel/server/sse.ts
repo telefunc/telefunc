@@ -212,7 +212,7 @@ class SseServerTransport {
         ['Cache-Control', 'no-cache, no-transform'],
         ['X-Accel-Buffering', 'no'],
       ],
-      body: events.stream,
+      body: events.stream.readable,
     }
   }
 

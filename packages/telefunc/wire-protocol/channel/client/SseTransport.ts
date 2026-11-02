@@ -336,7 +336,7 @@ class SseTransport implements UpgradeSource {
     // Metadata header first — the server classifies the POST by it; `streamRequest: true`
     // makes it emit `reconciled` inline (the body never ends, can't defer to body-end).
     body.push(encodeSseRequestMetadata({ connId: this.connId, streamRequest: true }))
-    const fetch = this.postAndRead(body, abort.signal, { duplex: 'half' })
+    const fetch = this.postAndRead(body.readable, abort.signal, { duplex: 'half' })
     this.streamRequest = { tag: 'active', body, unconfirmed: [] }
     // The POST ends with its body or when cut on the way; `ended` handles its rejection if openStream exits.
     const ended = fetch.then(
