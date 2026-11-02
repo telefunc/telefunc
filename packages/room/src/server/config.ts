@@ -1,4 +1,4 @@
-export { assertRoomTimeout, config, getRoomConfig }
+export { assertRoomTimeout, roomConfig, getRoomConfig }
 export type { RoomConfig }
 
 import { ROOM_DEPARTURE_TIMEOUT_MS, ROOM_EMPTY_TIMEOUT_MS } from './constants.js'
@@ -26,12 +26,12 @@ type RoomConfig = {
 const globalObject = getGlobalObject<{ config: RoomConfig }>('server/config.ts', () => ({ config: {} }))
 
 /** `Room` defaults. */
-const config: RoomConfig = new Proxy({} as RoomConfig, {
+const roomConfig: RoomConfig = new Proxy({} as RoomConfig, {
   get(_target, prop) {
     return globalObject.config[prop as keyof RoomConfig]
   },
   set(_target, prop, value) {
-    const configPath = `config.${String(prop)}`
+    const configPath = `roomConfig.${String(prop)}`
     assertUsage(prop === 'emptyTimeout' || prop === 'departureTimeout', `Unknown ${configPath}`)
     assertRoomTimeout(value, configPath)
     globalObject.config[prop] = value

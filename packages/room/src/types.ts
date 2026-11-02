@@ -107,10 +107,10 @@ type RoomOptions<M extends RoomMeta = RoomMeta> = {
   /** Room metadata, visible to all observers. Default: `{}`. */
   meta?: M
   /** Milliseconds an unheld room nobody joined stays before it closes; `Infinity` never. Default:
-   *  `config.emptyTimeout` from `@telefunc/room`. */
+   *  `roomConfig.emptyTimeout` from `@telefunc/room`. */
   emptyTimeout?: number
   /** Milliseconds an unheld room a member had joined stays before it closes; `Infinity` never. Default:
-   *  `config.departureTimeout` from `@telefunc/room`. */
+   *  `roomConfig.departureTimeout` from `@telefunc/room`. */
   departureTimeout?: number
 }
 
