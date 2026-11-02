@@ -15,7 +15,7 @@ import { RedisSubscriptions } from './RedisSubscriptions.js'
 
 type RedisConnectionOptions = { redis: RedisClient; prefix: string }
 
-/** One Redis deployment as Broadcast's and Room's drivers reach it: the backend's command client, the key prefix, and
+/** One Redis deployment as the Broadcast and Room drivers reach it: the backend's command client, the key prefix, and
  *  the one subscriber connection their subscriptions share. */
 class RedisConnection {
   readonly prefix: string

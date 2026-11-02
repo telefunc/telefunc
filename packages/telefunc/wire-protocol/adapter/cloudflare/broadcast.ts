@@ -142,7 +142,7 @@ const AUTHORITY_SCHEMA = `
     (route_key TEXT NOT NULL, member TEXT NOT NULL, bucket TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (route_key, member));
 `
 
-/** A key authority DO's Broadcast state, in its SQLite storage: each key's `seq` and each route's member presence.
+/** The Broadcast state of a key authority DO, in its SQLite storage: each key's `seq` and each route's member presence.
  *  The tables are created on first use, so a DO in another role never has them. */
 class CloudflareBroadcastAuthorityState {
   private readonly storage: DurableObjectStorage
@@ -315,7 +315,7 @@ type CloudflareBroadcastOptions = {
   getNamespace: () => BroadcastNamespace
 }
 
-/** The isolate's Cloudflare Broadcast driver: where each key's authority and each bucket's coordinators live, and
+/** The Cloudflare Broadcast driver of the isolate: where each key's authority and each bucket's coordinators live, and
  *  their RPC handlers. Each session DO subscribes through its own `CloudflareBroadcastMember`. */
 class CloudflareBroadcast {
   private readonly baseInstanceName: string

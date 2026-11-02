@@ -213,7 +213,7 @@ return tf_cells_reply({'more', time, keys[#keys]}, keys, 1)
 
 // Read once SUBSCRIBE is acknowledged: a lane subscription is live only while its incarnation is the open head, so one
 // closed or dropped during establishment is never reported ready, and its frames start after its lane's last commit.
-//   KEYS: [1]=head [2]=order: an inbox or binary lane's member's order hash, or another lane's own key
+//   KEYS: [1]=head [2]=order: the order hash of an inbox or binary lane's member, or another lane's own key
 //   ARGV: [1]=inc [2]=an inbox or binary lane's key, or ''
 //   Reply: nil once the incarnation is not the open head, else the lane's 'seq:ts', '' before its first commit
 const LANE_START_LUA = `${HEAD_PRELUDE}
@@ -329,16 +329,18 @@ return reply
 `
 
 // COMMIT: while the room is closing, only the close's control commit under its lease lands. A binary commit is also
-// published on its member's every-track channel and its track's every-member channel, after its lane key's two-byte
-// length and the key, so a receiver orders it by its own lane; no lane key is long enough for that length's first byte
-// to read as the fence byte.
+// published on the every-track channel of its member and the every-member channel of its track, after its lane key's
+// two-byte length and the key, so a receiver orders it by its own lane; no lane key is long enough for that length's
+// first byte to read as the fence byte.
 
-/** COMMIT's KEYS, by index: the script reads each by its name, and `commit.invoke` writes each there. A lane without a
- *  key of its own repeats another: a binary lane's member's every-track channel and track's every-member channel are
- *  another lane's `channel`, its track's lane set `order`; an unindexed retain's member and track lanes `retained`. */
+/** COMMIT's KEYS, by index: the script reads each by its name, and `commit.invoke` writes each there. A key the lane
+ *  has none of repeats another: outside a binary lane, `everyTrackChannel` and `everyMemberChannel` repeat
+ *  `channel` and `trackLanes` repeats `order`; for an unindexed retain, `memberRetained` and `trackRetained` repeat
+ *  `retained`. */
 const COMMIT_KEYS = {
   head: 0,
-  /** An inbox or binary lane's member's order hash, which holds it under its lane key, or another lane's own key. */
+  /** The order hash of an inbox or binary lane's member, which holds the lane under its lane key; for any other lane,
+   *  the lane's own key. */
   order: 1,
   retained: 2,
   channel: 3,
@@ -460,7 +462,7 @@ return '{"kind":"accepted","seq":' .. seq_text .. ',"timestamp":' .. ts_text .. 
 `
 
 // Deletes one lane's retained frame, optionally only while it still holds seq ARGV[1].
-//   KEYS: [1]=incarnation-keys [2]=retained [3]=a binary lane's member's retained lanes [4]=its track's retained lanes
+//   KEYS: [1]=incarnation-keys [2]=retained [3]=the retained lanes of a binary lane's member [4]=those of its track
 //         (another lane repeats [2] for both) [5]=the incarnation's retained lanes
 //   ARGV: [1]=ifSeq or '' [2]=lane kind [3]=lane key
 const RETAINED_DELETE_LUA = `

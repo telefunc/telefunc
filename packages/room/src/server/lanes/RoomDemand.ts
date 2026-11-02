@@ -108,8 +108,8 @@ class RoomDemand {
     this.reporters.clear()
   }
 
-  /** A reporter's entry starts or stops; another process's lasts while it renews its lease. Only a member's owner
-   *  keeps its pairs; ownership is fixed from before the member exists anywhere. */
+  /** A reporter's entry starts or stops; one from another process lasts while it renews its lease. Only a member's
+   *  owner keeps its pairs; ownership is fixed from before the member exists anywhere. */
   take(instance: string, entry: DemandEntry, on: boolean): void {
     const report: Report = { instance, on, telling: this.reporters.get(instance)?.telling ?? 0 }
     if ('except' in entry) {

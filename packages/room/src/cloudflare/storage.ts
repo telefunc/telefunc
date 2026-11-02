@@ -69,7 +69,7 @@ type HeadRow = {
 
 function initSchema(sql: SqlStorage): void {
   // The DO is the room: `head` is one row or absent; `gen` is each installed incarnation's last cell version. Its
-  // `directory` is its room's listing, one row or none; a region's directory DO lists the region's rooms in it instead.
+  // `directory` is the room's listing, one row or none; a regional directory DO lists the region's rooms in it instead.
   sql.exec(`
     CREATE TABLE IF NOT EXISTS head
       (id INTEGER PRIMARY KEY CHECK (id = 1), rev TEXT NOT NULL, inc TEXT, state TEXT NOT NULL, config BLOB NOT NULL, lease_id TEXT, lease_until INTEGER, expires_at INTEGER);

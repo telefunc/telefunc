@@ -58,7 +58,7 @@ class RoomSessionSubscriptions {
     this.driver = driver
   }
 
-  /** Its lane's frames reach `receiver` from Broadcast's coordinator in this session's bucket, which the route it
+  /** The lane's frames reach `receiver` from the Broadcast coordinator in this session's bucket, which the route it
    *  registers names. A later subscription to the lane takes them over, those committed under this one's lease too. */
   subscribe({ roomId, inc, lane }: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {
     const { bucket } = this.member
@@ -71,7 +71,7 @@ class RoomSessionSubscriptions {
     return subscription
   }
 
-  /** A call to a room's authority through this session's ordered stub for it, so a room's commits and route calls
+  /** Calls the room's authority through the ordered stub this session keeps for it, so a room's commits and route calls
    *  reach its authority in the order they were made. A line opens a fresh stub: a stub that rejected may be broken. */
   callAuthority<T>(roomId: string, invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>): Promise<T> {
     return this.authorityCalls.call(roomId, () => this.driver.stub(roomId), invoke)

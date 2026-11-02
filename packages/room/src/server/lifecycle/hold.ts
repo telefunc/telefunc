@@ -123,8 +123,8 @@ async function maintainHold(room: RoomIncarnation): Promise<void> {
 }
 
 /** Once its creation is counted, a new room nothing holds yet lapses just past its close. The record is read under
- *  the head's revision, which a first hold's lapse write moves, so that hold's lapse wins. Returns the head it leaves,
- *  while that is the room's open head. */
+ *  the head's revision, which the lapse write of a first hold moves, so that hold's lapse wins. Returns the head it
+ *  leaves, while that is the room's open head. */
 async function lapseNewRoom(room: RoomIncarnation): Promise<RoomHead | null> {
   if (room.hold === null) return null
   const { id, inc } = room

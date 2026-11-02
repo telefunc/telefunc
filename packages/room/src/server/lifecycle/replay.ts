@@ -233,7 +233,7 @@ function admitInto(high: Map<string, OrderingInfo>, key: string, info: OrderingI
  *  member whose own want changed. */
 type TextWantsChange = { all: boolean; members: Map<string, boolean> }
 
-/** A consumer of a room's lanes that retained frames replay into: a client's stub, or this instance's own listeners. */
+/** A consumer of a room's lanes that retained frames replay into: a client stub, or this instance's own listeners. */
 interface LaneHolder {
   readonly binaryWants: BinaryWants
   readonly wantsAnnounce: boolean

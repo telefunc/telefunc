@@ -568,7 +568,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
   /** Each flavor's wire publish; `publish()` adds conflation. */
   protected abstract _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck>
   protected abstract _sendPublishBinary(framed: Uint8Array): Promise<ChannelPublishAck>
-  /** Each flavor's wire request: the base's DMs and metadata writes, and the standalone flavor's publish and leave. */
+  /** The wire request of a flavor: the base's DMs and metadata writes, and the standalone's publish and leave. */
   protected abstract _request(request: MemberMutationRequest): Promise<unknown>
 
   // Messaging is often fire-and-forget: a usage error throws, and a failure is a rejection left handled.
