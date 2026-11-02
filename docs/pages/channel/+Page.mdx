@@ -235,7 +235,7 @@ Fire-and-forget is also fine — a send goes out as soon as the connection has r
 channel.send({ type: 'ping' }) // no await needed
 ```
 
-If a client's connection can't keep up, a server channel holds what you send, and once it holds 64 MiB or more, a send can reject with `ChannelOverflowError`; `await` your sends to avoid it.
+What the connection hasn't taken yet waits in the server's memory: `await` your sends to apply backpressure. Once sends you didn't await one by one are 64 MiB ahead of the client, Telefunc logs a warning (once per channel).
 
 
 ## `Broadcast`
@@ -417,7 +417,7 @@ Channels and broadcasts signal failure through four errors:
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
 | `NetworkError` (`isChannel: true`) | Offline longer than `reconnectTimeout`, or missed more messages than the replay buffer holds | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
-| `ChannelOverflowError` | The client fell too far behind, or `bufferLimit` filled while it was offline | **Open** (a `BroadcastChannel`: closed) | Only the dropped `send()` rejects; `await` your sends to apply backpressure (a `BroadcastChannel`: call its telefunction again to rejoin) |
+| `ChannelOverflowError` | `bufferLimit` filled while the client was offline | **Open** (a `BroadcastChannel`: closed) | Only the dropped `send()` rejects (a `BroadcastChannel`: call its telefunction again to rejoin) |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 
