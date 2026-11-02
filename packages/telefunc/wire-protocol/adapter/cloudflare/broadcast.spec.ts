@@ -66,7 +66,6 @@ function createBroadcast(binding = createBasicBinding()): CloudflareBroadcast {
   return new CloudflareBroadcast({
     baseInstanceName: 'telefunc',
     scale: 1,
-    locationFallback: 'weur',
     getNamespace: () => binding,
   })
 }

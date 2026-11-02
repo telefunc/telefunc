@@ -117,18 +117,10 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         broadcast: new CloudflareBroadcast({
           baseInstanceName,
           scale,
-          locationFallback,
           getNamespace: () => telefuncNamespace(workerEnv),
         }),
       }),
-    [
-      'cloudflare',
-      bindingName,
-      baseInstanceName,
-      JSON.stringify(scale ?? null),
-      locationFallback,
-      jurisdiction ?? null,
-    ],
+    ['cloudflare', bindingName, baseInstanceName, JSON.stringify(scale ?? null), jurisdiction ?? null],
   )
   const broadcast = cloudflareBackend.broadcast
 

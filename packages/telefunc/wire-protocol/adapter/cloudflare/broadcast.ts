@@ -9,12 +9,7 @@ export type {
   TelefuncBroadcastStub,
 }
 
-import {
-  KNOWN_BROADCAST_BUCKETS,
-  getBucketCoordinatorScale,
-  getDeterministicKeyBucketIndex,
-  getScaleCountForBucket,
-} from './routing.js'
+import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorScale, getDeterministicKeyBucketIndex } from './routing.js'
 import { reportLostDeliveries, type OrderedStubs } from './OrderedStubs.js'
 import { assert } from '../../../utils/assert.js'
 import type { BroadcastPayload, BroadcastRoute, PublishResult, Subscriber, Unsubscribe } from '../../backend/driver.js'
@@ -262,7 +257,6 @@ class CloudflareBroadcastMember {
 type CloudflareBroadcastOptions = {
   baseInstanceName: string
   scale?: CloudflareScale
-  locationFallback: LocationBucket
   getNamespace: () => BroadcastNamespace
 }
 
@@ -271,13 +265,11 @@ type CloudflareBroadcastOptions = {
 class CloudflareBroadcast {
   private readonly baseInstanceName: string
   private readonly scale: CloudflareScale | undefined
-  private readonly locationFallback: LocationBucket
   private readonly getNamespace: () => BroadcastNamespace
 
-  constructor({ baseInstanceName, scale, locationFallback, getNamespace }: CloudflareBroadcastOptions) {
+  constructor({ baseInstanceName, scale, getNamespace }: CloudflareBroadcastOptions) {
     this.baseInstanceName = baseInstanceName
     this.scale = scale
-    this.locationFallback = locationFallback
     this.getNamespace = getNamespace
   }
 
@@ -317,14 +309,10 @@ class CloudflareBroadcast {
     const { key, kind, payload } = request
     const info = { seq: authorityState.nextSequence(key), timestamp: Date.now() }
     const presence = authorityState.livePresence(broadcastRouteKey({ key, kind }), info.timestamp)
-    // Presence written before a redeploy dropped its region forwards through the fallback region's coordinators.
-    const membersByCoordinatorBucket = new Map<LocationBucket, string[]>()
-    for (const { member, bucket } of presence) {
-      const via = getScaleCountForBucket(this.scale, bucket) > 0 ? bucket : this.locationFallback
-      getOrCreate(membersByCoordinatorBucket, via, () => []).push(member)
-    }
+    const membersByBucket = new Map<LocationBucket, string[]>()
+    for (const { member, bucket } of presence) getOrCreate(membersByBucket, bucket, () => []).push(member)
     const forwards = await Promise.allSettled(
-      Array.from(membersByCoordinatorBucket, ([bucket, members]) =>
+      Array.from(membersByBucket, ([bucket, members]) =>
         this.callByName(calls, this.coordinatorName(key, bucket), bucket, (coordinator) =>
           coordinator.telefuncBroadcastForward({ key, kind, payload, info, members }),
         ),
