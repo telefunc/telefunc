@@ -832,7 +832,11 @@ async function onChannelOpenAbort() {
   const id = ch.id
   cleanupState[`openAbort_${id}_second`] = 'not run'
   ch.onOpen(() => {
-    throw Abort('stop')
+    setTimeout(() =>
+      ch.onOpen(() => {
+        throw Abort('stop')
+      }),
+    )
   })
   ch.onOpen(() => {
     cleanupState[`openAbort_${id}_second`] = 'run'

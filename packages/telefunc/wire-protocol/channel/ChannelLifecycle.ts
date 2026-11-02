@@ -73,8 +73,7 @@ class ChannelLifecycle {
 
   onOpen(callback: () => void): void {
     if (this.didFireOpen) {
-      const result = callback()
-      if (isPromise(result)) result.catch((err: unknown) => this.handleCallbackError(err))
+      this.invokeOpenCallback(callback)
       return
     }
     this.openListeners.push(callback)
@@ -84,14 +83,19 @@ class ChannelLifecycle {
     if (this.didFireOpen) return
     this.didFireOpen = true
     for (const cb of this.openListeners) {
-      try {
-        const result = cb()
-        if (isPromise(result)) result.catch((err: unknown) => this.handleCallbackError(err))
-      } catch (err) {
-        if (this.handleCallbackError(err)) return
-      }
+      if (this.invokeOpenCallback(cb)) break
     }
     this.openListeners.length = 0
+  }
+
+  private invokeOpenCallback(callback: () => void): boolean {
+    try {
+      const result = callback()
+      if (isPromise(result)) result.catch((err: unknown) => this.handleCallbackError(err))
+    } catch (err) {
+      return this.handleCallbackError(err)
+    }
+    return false
   }
 
   /** A callback's `Abort` aborts the channel: true where `err` is one. */

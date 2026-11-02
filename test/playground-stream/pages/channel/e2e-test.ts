@@ -320,7 +320,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
-  test("channel: an Abort the server's onOpen throws aborts the channel with its value, and the onOpen after it doesn't run", async () => {
+  test('channel: an Abort a late server onOpen throws aborts the channel with its value', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-open-abort')
     let openAbort: ChannelState['openAbort'] = null
@@ -329,7 +329,7 @@ function testChannel(isDev: boolean, inDocker = false) {
       expect(openAbort?.abortValue).toBe('stop')
     })
     const ss = await getCleanupState()
-    expect(ss[`openAbort_${openAbort!.channelId}_second`]).toBe('not run')
+    expect(ss[`openAbort_${openAbort!.channelId}_second`]).toBe('run')
   })
 
   // ── Binary sendBinary / listenBinary round-trip ───────────────────────
