@@ -1,5 +1,7 @@
 export { channelMessages }
 
+import { Fifo } from '../../utils/Fifo.js'
+
 interface MessageSource<T> {
   listen(callback: (data: T) => any, options: { signal: AbortSignal }): () => void
   listenBinary(callback: (data: Uint8Array) => any, options: { signal: AbortSignal }): () => void
@@ -13,7 +15,7 @@ async function* channelMessages<T>(
   { signal }: { signal?: AbortSignal } = {},
 ): AsyncIterableIterator<Message<T>> {
   const registrations = new AbortController()
-  const queue: Array<{ message: Message<T>; consumed: () => void }> = []
+  const queue = new Fifo<{ message: Message<T>; consumed: () => void }>()
   let wake: (() => void) | undefined
   let ended = false
   let error: unknown
@@ -32,7 +34,7 @@ async function* channelMessages<T>(
   signal?.addEventListener('abort', abort, { once: true })
   if (signal?.aborted) abort()
   channel.listen((data) => receive({ type: 'text', data }), { signal: registrations.signal })
-  channel.listenBinary((data) => receive({ type: 'binary', data: new Uint8Array(data) }), {
+  channel.listenBinary((data) => receive({ type: 'binary', data }), {
     signal: registrations.signal,
   })
   // The close promise outlives the registrations and doesn't retain the iterator after it exits.

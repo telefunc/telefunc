@@ -891,7 +891,9 @@ async function onChannelCreditFailure() {
     const sends = Array.from({ length: 300 }, () => ch.send('x'))
     ch.abort('capacity-failure')
     void Promise.allSettled(sends).then((results) => {
-      cleanupState[`credit_${ch.id}`] = String(results.some((r) => r.status === 'rejected'))
+      cleanupState[`credit_${ch.id}`] = String(
+        results.some((r) => r.status === 'rejected' && r.reason.abortValue === 'capacity-failure'),
+      )
     })
   })
   return { channel: ch.client }

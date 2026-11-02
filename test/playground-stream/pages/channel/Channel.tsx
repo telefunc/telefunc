@@ -1125,7 +1125,7 @@ function ChannelDemo() {
     const results = await Promise.allSettled(sends)
     document.querySelector('#channel-credit-result')!.textContent = JSON.stringify({
       id: channel.id,
-      rejected: results.some((r) => r.status === 'rejected'),
+      rejected: results.some((r) => r.status === 'rejected' && r.reason.abortValue === 'capacity-failure'),
     })
   }, [])
 

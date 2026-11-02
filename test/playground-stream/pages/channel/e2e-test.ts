@@ -1,4 +1,4 @@
-export { testChannel }
+export { testChannel, testChannelApi }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Request, Response, WebSocket, WebSocketRoute } from 'playwright-chromium'
@@ -123,61 +123,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     throw new Error(`Unsupported channel transport in e2e: ${channelTransport}`)
   }
 
-  test('channel: promises, text and binary iteration, and cancelled registrations', async () => {
-    await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-api')
-    await autoRetry(async () => {
-      expect(JSON.parse((await page.textContent('#channel-api-result'))!)).deep.equal({
-        text: { type: 'text', data: 'hello' },
-        binary: [1, 2, 3],
-        aborted: true,
-      })
-    })
-  })
-
-  test('channel: one listener answers even with a later observer, and conflicting answers reject', async () => {
-    await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-ack-ownership')
-    await autoRetry(async () => {
-      expect(JSON.parse((await page.textContent('#channel-ack-ownership-result'))!)).deep.equal({
-        answer: 'answer',
-        conflict: true,
-      })
-    })
-  })
-
-  test('channel: failed capacity waits reject on both ends', async () => {
-    await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-credit')
-    let id = ''
-    await autoRetry(async () => {
-      const result = JSON.parse((await page.textContent('#channel-credit-result'))!)
-      expect(result.rejected).toBe(true)
-      id = result.id
-    })
-    await autoRetry(async () => {
-      expect((await getCleanupState())[`credit_${id}`]).toBe('true')
-    })
-  })
-
-  test('channel: unawaited sends close at finite byte and acknowledgement budgets', async () => {
-    await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-budgets')
-    await autoRetry(async () => {
-      const ids = JSON.parse((await page.textContent('#channel-budgets-result'))!)
-      const state = await getCleanupState()
-      expect(state[`budget_${ids.bytes}`]).toContain('maxPendingBytes')
-      expect(state[`budget_${ids.acks}`]).toContain('maxPendingAcks')
-    })
-  })
-
-  test('channel: late onOpen Abort terminates the channel', async () => {
-    await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-late-open-abort')
-    await autoRetry(async () => {
-      expect(await page.textContent('#channel-late-abort-result')).toBe('late-stop')
-    })
-  })
+  testChannelApi()
 
   // ── Basic connection ─────────────────────────────────────────────────
 
@@ -1314,4 +1260,62 @@ function parseChannelTransports(value: string | undefined): Array<'sse' | 'ws'> 
     throw new Error(`Invalid PUBLIC_ENV__CHANNEL_TRANSPORTS: ${value ?? '(unset)'}`)
   }
   return parsed
+}
+
+function testChannelApi() {
+  test('channel: promises, text and binary iteration, and cancelled registrations', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-api')
+    await autoRetry(async () => {
+      expect(JSON.parse((await page.textContent('#channel-api-result'))!)).deep.equal({
+        text: { type: 'text', data: 'hello' },
+        binary: [1, 2, 3],
+        aborted: true,
+      })
+    })
+  })
+
+  test('channel: one listener answers even with a later observer, and conflicting answers reject', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-ack-ownership')
+    await autoRetry(async () => {
+      expect(JSON.parse((await page.textContent('#channel-ack-ownership-result'))!)).deep.equal({
+        answer: 'answer',
+        conflict: true,
+      })
+    })
+  })
+
+  test('channel: failed capacity waits reject on both ends', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-credit')
+    let id = ''
+    await autoRetry(async () => {
+      const result = JSON.parse((await page.textContent('#channel-credit-result'))!)
+      expect(result.rejected).toBe(true)
+      id = result.id
+    })
+    await autoRetry(async () => {
+      expect((await getCleanupState())[`credit_${id}`]).toBe('true')
+    })
+  })
+
+  test('channel: unawaited sends close at finite byte and acknowledgement budgets', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-budgets')
+    await autoRetry(async () => {
+      const ids = JSON.parse((await page.textContent('#channel-budgets-result'))!)
+      const state = await getCleanupState()
+      expect(state[`budget_${ids.bytes}`]).toContain('maxPendingBytes')
+      expect(state[`budget_${ids.acks}`]).toContain('maxPendingAcks')
+    })
+  })
+
+  test('channel: late onOpen Abort terminates the channel', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-late-open-abort')
+    await autoRetry(async () => {
+      expect(await page.textContent('#channel-late-abort-result')).toBe('late-stop')
+    })
+  })
 }
