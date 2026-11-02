@@ -11,6 +11,7 @@ import {
 } from 'telefunc/__internal'
 import { assert, assertUsage } from '../utils/assert.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
+import { getGlobalObject } from '../utils/getGlobalObject.js'
 import {
   encodeBinaryFrame,
   decodeBinaryFrame,
@@ -523,7 +524,10 @@ class ServerRoom extends RoomStateView implements Room {
   }
 }
 
-const roomHandles = new WeakMap<ServerRoom, RoomHandle>()
+// One map for every module graph of the server, as a Room from one graph is a Room in another.
+const { roomHandles } = getGlobalObject('server/room.ts', () => ({
+  roomHandles: new WeakMap<ServerRoom, RoomHandle>(),
+}))
 
 /** The handle a user's `Room` is over, for Room's own code. */
 function handleOf(room: ServerRoom): RoomHandle {
