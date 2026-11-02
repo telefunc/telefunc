@@ -4,6 +4,7 @@ export type { RoomGuardHooks, RoomStatic }
 import { assertUsage } from '../utils/assert.js'
 import { isObject } from '../utils/isObject.js'
 import { getRoomPlane } from '../backend/plane.js'
+import { DIRECTORY_PAGE_SIZE } from '../backend/contract.js'
 import type { RoomPlane } from '../backend/RoomPlane.js'
 import { RoomError, isRoomError, participantGoneError, roomClosedError } from '../shared/errors.js'
 import {
@@ -221,9 +222,12 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
   do {
     const page = await plane.driver.directoryList(options?.prefix ?? '', cursor)
     cursor = page.cursor
-    // At once: a page holds at most `DIRECTORY_PAGE_SIZE` rooms, each read at its own authority.
-    const listed = await Promise.all(page.entries.map(({ roomId, incTag }) => listedRoom(plane, roomId, incTag)))
-    for (const info of listed) if (info !== null) rooms.push(info)
+    // `DIRECTORY_PAGE_SIZE` at once, each at its own authority: a page holds that many rooms per region.
+    for (let at = 0; at < page.entries.length; at += DIRECTORY_PAGE_SIZE) {
+      const chunk = page.entries.slice(at, at + DIRECTORY_PAGE_SIZE)
+      const listed = await Promise.all(chunk.map(({ roomId, incTag }) => listedRoom(plane, roomId, incTag)))
+      for (const info of listed) if (info !== null) rooms.push(info)
+    }
   } while (cursor !== undefined)
   return rooms
 }

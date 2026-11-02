@@ -33,7 +33,7 @@ import type { BackendReceiver, DriverAttempt, OrderingInfo, SubscriptionDriver }
 
 /** The cells a prefix read's page holds. */
 const CELL_PAGE_SIZE = 1024
-/** The entries a directory list's or due read's page holds. */
+/** The entries a due read's page holds, and a directory list's per region: a Cloudflare page merges each region's. */
 const DIRECTORY_PAGE_SIZE = 100
 
 /** Room's lane keys and page sizes, which `backendPlane()` hands a backend's Room driver. */
