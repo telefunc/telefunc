@@ -48,7 +48,6 @@ interface AttachExchangeOwner {
   readonly wire: number
   /** The wire can't take a RECONCILE now: it isn't open, or an upgrade is between its READY and its handoff. */
   readonly reconcileHeld: boolean
-  releaseChannel(record: ChannelRecord): void
   dropWire(transport: ClientChannelTransport): void
 }
 
@@ -262,7 +261,7 @@ class AttachExchange {
       const record = this.channels.get(ix)
       if (!record) continue
       const err = new NetworkError('Channel not acknowledged by server after reconnect', true)
-      this.owner.releaseChannel(record)
+      this.gate.release(record)
       record.channel._onEnded(err)
     }
   }
@@ -338,7 +337,7 @@ class AttachExchange {
       const { ix } = record
       // The server has all a delivered one sent it, or ended it: leaving it out lets it go there too.
       if (record.state.tag === 'closed' && record.state.delivered) {
-        this.owner.releaseChannel(record)
+        this.gate.release(record)
         continue
       }
       const isInitial = record.state.tag !== 'open' && record.state.initial
@@ -392,7 +391,7 @@ class AttachExchange {
     if (record.state.tag === 'closed') {
       // One the server no longer has needs nothing more from the page.
       if (lastSeq === undefined) {
-        this.owner.releaseChannel(record)
+        this.gate.release(record)
         return null
       }
       this.channels.serverHas(record, record.state, lastSeq)

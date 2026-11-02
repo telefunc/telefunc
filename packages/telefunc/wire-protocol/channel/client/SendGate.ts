@@ -164,6 +164,13 @@ class SendGate {
     return ixes
   }
 
+  /** Drops all the channel holds, its ATTACH_RESULT wait included. On the server, the RECONCILE that releases it, or a
+   *  new wire's RECONCILE that leaves it out, ends it too. */
+  release(record: ChannelRecord): void {
+    this.channels.release(record)
+    this.dropQueue(record.ix)
+  }
+
   /** Drops the frames channel `ix` holds or has waiting, at the next read. */
   dropQueue(ix: number): void {
     if (this.sendBuffer.length === 0 && this.waitingForHeadroom.length === 0) return

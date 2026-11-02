@@ -28,7 +28,8 @@ import { SseEvents } from './SseEvents.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { randomUuid } from '../../../utils/randomUuid.js'
 import { settledOrAborted } from '../../../utils/settledOrAborted.js'
-import type { OutboundFrame, OutboundFrameKind, TransportOwner } from './ClientConnection.js'
+import type { OutboundFrame, OutboundFrameKind } from './ClientConnection.js'
+import type { TransportOwner } from './WireLifecycle.js'
 import type { BarrierEmission, UpgradeSource } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 
@@ -481,7 +482,7 @@ class SseTransport implements UpgradeSource {
   /** The wire is lost with the POST out for `ms`, as one that missed its pong: a reconnect resends what it carried. */
   private watchPost(wire: AbortController, ms: number): void {
     this.postWatch = setTimeout(() => {
-      this.owner.onTransportPostLate(this)
+      this.owner.onWireLate(this)
       if (this.transportAbort === wire) this.watchPost(wire, SSE_POST_FLOOR_MS)
     }, ms)
   }

@@ -1,51 +1,31 @@
 export { ClientConnection }
-export type { ClientChannelTransport, MuxChannel, MuxConnection, OutboundFrame, OutboundFrameKind, TransportOwner }
+export type {
+  ClientChannelTransport,
+  ClientConnectionOptions,
+  MuxChannel,
+  MuxConnection,
+  OutboundFrame,
+  OutboundFrameKind,
+}
 
-import { parse } from '@brillout/json-serializer/parse'
-import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
-import { assert, assertUsage } from '../../../utils/assert.js'
-import { ChannelOverflowError, replayLossError } from '../channelErrors.js'
-import { NetworkError } from '../../../shared/NetworkError.js'
+import { assertUsage } from '../../../utils/assert.js'
 import {
-  CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
-  CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
-  CHANNEL_IDLE_TIMEOUT_MS,
-  CHANNEL_RECONNECT_INITIAL_DELAY_MS,
-  CHANNEL_RECONNECT_MAX_DELAY_MS,
-  CHANNEL_RECONNECT_TIMEOUT_MS,
   CHANNEL_TRANSPORT,
-  MAX_CHANNELS_PER_CONNECTION,
   type ChannelTransport,
   type ChannelTransports,
-  TIMER_DELAY_MAX_MS,
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../../constants.js'
-import { replayWindow, type Urgency } from '../../flowControl/credit.js'
-import { ReplayBuffer } from '../ReplayBuffer.js'
-import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/frame.js'
-import { TAG } from '../../wire/tags.js'
-import { seqNear } from '../../wire/seq.js'
-import type {
-  AckResultStatus,
-  BdpPingAck,
-  ChannelFrame,
-  DecodedFrame,
-  PongEntry,
-  SequencedEncoder,
-} from '../../wire/frame.js'
+import type { Urgency } from '../../flowControl/credit.js'
+import { ACK_STATUS, encode } from '../../wire/frame.js'
+import type { AckResultStatus, BdpPingAck, ChannelFrame, SequencedEncoder } from '../../wire/frame.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import type { Heartbeat } from './Heartbeat.js'
-import { ChannelTable, type ChannelRecord } from './ChannelTable.js'
-import { SendGate, type SendGateOwner } from './SendGate.js'
-import { Liveness, type LivenessOwner } from './Liveness.js'
-import { Upgrade, type UpgradeOwner, type UpgradeTarget } from './Upgrade.js'
-import { AttachExchange, type AttachExchangeOwner, type ReconcileBatch } from './AttachExchange.js'
+import type { ChannelTable } from './ChannelTable.js'
+import type { SendGate } from './SendGate.js'
 import type { ChannelAttach } from './ChannelAttach.js'
-import { pingDeadline } from '../../wire/pingDeadline.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
-import { WsTransport } from './WsTransport.js'
-import { SseTransport } from './SseTransport.js'
+import { WireLifecycle, type WireLifecycleOwner } from './WireLifecycle.js'
 
 type OutboundFrameKind = 'reconcile' | 'released' | 'control' | Urgency | 'ack' | 'data' | 'heartbeat'
 
@@ -144,186 +124,51 @@ type ClientChannelTransport = {
   dispose(): void
 }
 
-/** What a transport tells its connection, and the reconcile batch it asks for when its wire opens. */
-interface TransportOwner {
-  onTransportOpen(transport: ClientChannelTransport): void
-  onTransportClosed(transport: ClientChannelTransport, options?: { rejectedByServer?: boolean }): void
-  onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void
-  onTransportPong(ended: PongEntry[]): void
-  /** The transport may have headroom again, so the frames waiting for it are sent. */
-  onTransportHeadroom(transport: ClientChannelTransport): void
-  /** The wire's upload fell back to batch POSTs; a channel may have opened before that (see `onTransportOpen`). */
-  onTransportBatched(transport: ClientChannelTransport): void
-  /** An SSE wire's RECONCILE went out with the request that opens it, before the wire opens (see `beatFromReconcile`). */
-  onTransportReconcileSent(transport: ClientChannelTransport): void
-  /** A batch POST has been out longer than its upload takes at the slowest rate a wire is held to. */
-  onTransportPostLate(transport: ClientChannelTransport): void
-  /** What a transport's wire carries as it opens: the RECONCILE, and the frames buffered behind it. */
-  stageInitialReconcileBatch(): ReconcileBatch
-}
-
-type ConnectionState =
-  | { tag: 'fresh' }
-  | { tag: 'open' }
-  | {
-      tag: 'reconnecting'
-      attempt: number
-      startedAt: number
-      timer: ReturnType<typeof setTimeout>
-    }
-  | { tag: 'closed' }
-
-class ClientConnection
-  implements MuxConnection, TransportOwner, SendGateOwner, LivenessOwner, UpgradeOwner, AttachExchangeOwner
-{
+/** What a page's channels send through, one connection per server and set of transports: it encodes each channel's
+ *  frames and hands them to its send gate; the wire lifecycle carries them. */
+class ClientConnection implements MuxConnection, WireLifecycleOwner {
   private static cache = new Map<string, ClientConnection>()
 
   static getOrCreate(telefuncUrl: string, channel: MuxChannel, options: ClientConnectionOptions): ClientConnection {
     // `connectionKey` opts callers out of the shared connection without the server seeing it.
     const key = `${options.transports.join(',')}:${telefuncUrl}|${options.connectionKey ?? ''}`
     let connection = ClientConnection.cache.get(key)
-    // Wire indexes are u16 and never reused, so a new channel starts a fresh connection once they run out.
-    if (!connection || connection.closed || connection.nextIndex > 0xffff) {
+    if (!connection || !connection.lifecycle.takesChannels) {
       connection = new ClientConnection(telefuncUrl, options, key)
       ClientConnection.cache.set(key, connection)
     }
-    connection.register(channel)
+    connection.lifecycle.register(channel)
     return connection
   }
 
   private readonly cacheKey: string
-  private readonly telefuncUrl: string
-  private readonly connectionOptions: ClientConnectionOptions
   /** True if its transports include a WebSocket, whose runtime may accept smaller frames than the wire's limit. */
   private readonly usesWebSocket: boolean
-  transport: ClientChannelTransport
+  private readonly lifecycle: WireLifecycle
+  private readonly channels: ChannelTable
+  private readonly gate: SendGate
 
-  private state: ConnectionState = { tag: 'fresh' }
-  private ttl: ReturnType<typeof setTimeout> | null = null
-  get closed(): boolean {
-    return this.state.tag === 'closed'
-  }
-  get connected(): boolean {
-    return this.state.tag === 'open'
-  }
-
-  /** Increments each time the connection moves to another wire: what went out on the previous one may not have
-   *  arrived. */
-  wire = 0
-  private nextIndex = 0
-  private readonly channels = new ChannelTable()
-  private readonly gate = new SendGate({ owner: this, channels: this.channels })
-  private readonly liveness = new Liveness({ owner: this, channels: this.channels, gate: this.gate })
-  private readonly exchange = new AttachExchange({ owner: this, channels: this.channels, gate: this.gate })
-  private readonly upgrade: Upgrade
-  private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
-  private idleTimeoutMs: number
-  private clientReplayBufferBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BYTES
-  private clientReplayBufferBinaryBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES
-  /** The credit windows the replay buffers allow, the page's and the server's, from the last RECONCILED. */
-  private replayWindows: { window: number; peerWindow: number } | null = null
-  /** The largest frame the server accepts on a WebSocket, from the last RECONCILED. */
-  private maxFrameBytes = WIRE_MAX_RAW_FRAME_BYTES
   private constructor(telefuncUrl: string, options: ClientConnectionOptions, cacheKey: string) {
     this.cacheKey = cacheKey
-    this.telefuncUrl = telefuncUrl
-    this.connectionOptions = options
     this.usesWebSocket = options.transports.includes(CHANNEL_TRANSPORT.WS)
-    this.upgrade = new Upgrade({
-      owner: this,
-      channels: this.channels,
-      liveness: this.liveness,
-      exchange: this.exchange,
-      allowsWebSocket: this.usesWebSocket,
-    })
-    this.idleTimeoutMs = options.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS
-    this.transport = TRANSPORT_REGISTRY[options.transports[0]!](telefuncUrl, options, this)
+    this.lifecycle = new WireLifecycle({ owner: this, telefuncUrl, options })
+    this.channels = this.lifecycle.channels
+    this.gate = this.lifecycle.gate
   }
 
-  // ── State transitions: every `this.state =` write goes through these. ──
-
-  private enterOpen(): void {
-    if (this.state.tag === 'open') return
-    this.state = { tag: 'open' }
-  }
-
-  /** Owns the reconnect timer's lifecycle so callers can't forget to cancel a prior one. */
-  private enterReconnecting(attempt: number, startedAt: number, delay: number): void {
-    if (this.state.tag === 'reconnecting') clearTimeout(this.state.timer)
-    const timer = setTimeout(() => this.transport.start(), delay)
-    this.state = { tag: 'reconnecting', attempt, startedAt, timer }
-    this.upgrade.forget()
-  }
-
-  private enterClosed(): void {
-    this.state = { tag: 'closed' }
-    this.upgrade.forget()
-  }
-
-  get sendsOpen(): boolean {
-    return this.connected && !this.exchange.reconciling && !this.upgrade.gatesSends && !this.exchange.reconcileOwed
-  }
-
-  get reconcileHeld(): boolean {
-    return !this.connected || this.upgrade.committing !== null || this.upgrade.ready
-  }
-
-  private register(channel: MuxChannel): void {
-    // A new wire's RECONCILE lists closed channels too, so at the limit the oldest closed one the server has in full
-    // makes way.
-    if (this.channels.size === MAX_CHANNELS_PER_CONNECTION) {
-      for (const record of this.channels.values()) {
-        if (record.state.tag !== 'closed' || !record.state.delivered) continue
-        this.releaseChannel(record)
-        break
-      }
-    }
-    assertUsage(
-      this.channels.size < MAX_CHANNELS_PER_CONNECTION,
-      `Too many channels on one connection (${MAX_CHANNELS_PER_CONNECTION} max) — open another with \`connectionKey\``,
-    )
-    if (this.ttl) {
-      clearTimeout(this.ttl)
-      this.ttl = null
-    }
-    const replay = new ReplayBuffer({
-      maxBytes: this.clientReplayBufferBytes,
-      binaryMaxBytes: this.clientReplayBufferBinaryBytes,
-    })
-    this.channels.add(this.nextIndex++, channel, replay)
-    this.fitReplays(channel)
-
-    if (!this.transport.hasWire() && !this.transport.isConnecting()) {
-      this.transport.start()
-      return
-    }
-    this.exchange.scheduleRegisterReconcile()
-  }
-
-  /** Fits the channel's credit windows to the replay buffers once a RECONCILED gave their sizes. Until then the
-   *  default initial window fits any replay buffer. */
-  private fitReplays(channel: MuxChannel): void {
-    if (this.replayWindows === null) return
-    channel._attach.fitReplays(this.replayWindows.window, this.replayWindows.peerWindow)
-  }
-
-  onTransportHeadroom(transport: ClientChannelTransport): void {
-    if (transport !== this.transport || !this.sendsOpen) return
-    this.gate.sendWaiting()
-    this.startTtlIfIdle()
+  /** The next `getOrCreate` opens a fresh connection; one that already replaced this one stays cached. */
+  onDisposed(): void {
+    if (ClientConnection.cache.get(this.cacheKey) === this) ClientConnection.cache.delete(this.cacheKey)
   }
 
   /** How long the page waits for a server that went away: until the pong deadline, then `reconnectTimeout` more. */
   reconnectWindow(): number {
-    return Math.min(TIMER_DELAY_MAX_MS, pingDeadline(this.liveness.pingInterval) + this.reconnectTimeoutMs)
+    return this.lifecycle.reconnectWindow()
   }
 
   /** Called once the channel sends nothing more. */
   unregister(channel: MuxChannel): void {
-    const record = this.channels.of(channel)
-    if (record === undefined) return
-    this.channels.close(record)
-    this.startTtlIfIdle()
+    this.lifecycle.unregister(channel)
   }
 
   /** Encodes `data` with `encodeFrame` at the next seq and only then takes the seq, so a refused frame uses none.
@@ -370,7 +215,7 @@ class ClientConnection
   /** The largest frame the server accepts from `channel`; on a WebSocket, a runtime's lower limit wins. */
   private maxFrameBytesOf(channel: MuxChannel): number {
     if (!this.usesWebSocket) return WIRE_MAX_RAW_FRAME_BYTES
-    return Math.min(channel._maxFrameBytes, this.maxFrameBytes)
+    return Math.min(channel._maxFrameBytes, this.lifecycle.maxFrameBytes)
   }
 
   /** Sequenced like data, as CLOSE and CLOSE_ACK are, so a closing frame lost with a dead wire is replayed. */
@@ -417,16 +262,16 @@ class ClientConnection
     const record = this.channels.of(channel)
     if (record === undefined) return
     // On batch POSTs the page's measured round trip leaves out the wait for its POST, so it reports no path RTT.
-    const frame = encode.bdpPingAck(record.ix, probe, backlog, this.transport.batched ? Infinity : pathRtt)
+    const frame = encode.bdpPingAck(record.ix, probe, backlog, this.lifecycle.transport.batched ? Infinity : pathRtt)
     this.gate.sendUnsequenced(record, frame, 'flow-control')
   }
 
   bufferedAmount(): number {
-    return this.transport.bufferedAmount() + this.gate.waitingBytes
+    return this.lifecycle.transport.bufferedAmount() + this.gate.waitingBytes
   }
 
   deliveredBefore(ms: number): number {
-    return this.transport.heartbeat?.deliveredBefore(ms) ?? 0
+    return this.lifecycle.transport.heartbeat?.deliveredBefore(ms) ?? 0
   }
 
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void {
@@ -439,336 +284,5 @@ class ClientConnection
     const record = this.channels.of(channel)
     if (record === undefined) return
     this.gate.sendUnsequenced(record, encode.broadcastUnsub(record.ix, binary), 'control')
-  }
-
-  onTransportOpen(transport: ClientChannelTransport): void {
-    if (this.closed) return
-    if (transport !== this.transport) return
-    this.enterOpen()
-    if (!this.transport.carriesReconcileInOpen) {
-      this.exchange.sendReconcileBatch(this.exchange.stageReconcileBatch())
-      this.liveness.beatFromReconcile(transport, this.exchange.sessionId)
-      return
-    }
-    if (!this.exchange.reconciling) {
-      // A register-reconcile queued during the connecting window sends its RECONCILE here and
-      // carries the buffered frames after it, emptying the buffer; with none queued, the buffered frames go out alone.
-      this.exchange.flushPendingRegisterReconcile()
-      this.drainBufferedFramesToWire()
-    }
-    this.upgrade.maybeStart()
-  }
-
-  onTransportBatched(transport: ClientChannelTransport): void {
-    if (transport !== this.transport) return
-    // Open channels only, as the join's undo does: one still opening gets the batched window as it opens on this wire.
-    for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._attach.onBatched()
-  }
-
-  onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void {
-    // An abandoned wire still delivers, but its RECONCILED answers a RECONCILE the next wire's has replaced.
-    if (abandoned && frame.tag === TAG.RECONCILED) return
-    const u = this.upgrade.committing
-    if (u !== null && this.transport === u.to) {
-      this.upgrade.ingestDuringHandoff(frame, source === u.from ? 'old' : 'new', byteLength)
-    } else {
-      this.dispatchFrame(frame)
-    }
-  }
-
-  dispatchFrame(frame: DecodedFrame): void {
-    // Track seq for ALL sequenced frames, ACK_RES and the closing ones too; otherwise reconciles under-report lastSeq.
-    if (isSequencedFrame(frame)) {
-      const seq = this.trackSeq(frame.index, frame.seq)
-      if (seq === null) return
-      frame.seq = seq
-    }
-    if (frame.tag === TAG.WINDOW) {
-      this.channels.serverHasThrough(frame.index, this.channels.sentThrough(frame.index, frame.lastSeq))
-    }
-    if (frame.tag === TAG.ACK_RES) this.channels.serverHasThrough(frame.index, frame.ackedSeq)
-    // ATTACH_RESULT and the wire-level and closing ctrls need connection bookkeeping; the rest is per-channel.
-    switch (frame.tag) {
-      case TAG.FIN:
-        this.upgrade.handleFin()
-        return
-      case TAG.RECONCILED:
-        this.handleReconciled(frame.payload)
-        return
-      case TAG.ATTACH_RESULT: {
-        const lastSeq = frame.lastSeq === null ? null : this.channels.sentThrough(frame.index, frame.lastSeq)
-        if (!this.exchange.handleAttachResult(frame.index, lastSeq)) return
-        this.startTtlIfIdle()
-        this.upgrade.maybeStart()
-        return
-      }
-      case TAG.ABORT:
-        this.closeRemoteChannel(frame.index, makeAbortError(parse(frame.abortValue)))
-        this.startTtlIfIdle()
-        return
-      case TAG.ERROR:
-        this.closeRemoteChannel(frame.index, channelErrorFor(frame.reason))
-        this.startTtlIfIdle()
-        return
-    }
-    // PING/PONG/PIECE/PIECES_ACK/ANNOUNCE/RECONCILE/STREAM_REQUEST_OPEN_ACK never reach `dispatchFrame` —
-    // transports peel them off in their own receive paths. Everything that lands
-    // here is per-channel and carries `index`.
-    const channelFrame = frame as ChannelFrame
-    const record = this.channels.get(channelFrame.index)
-    // A closed channel stays listed only for what it still has to tell the server.
-    if (record && record.state.tag !== 'closed') record.channel._dispatchFrame(channelFrame)
-  }
-
-  onTransportReconcileSent(transport: ClientChannelTransport): void {
-    if (this.closed || transport !== this.transport) return
-    this.liveness.beatFromReconcile(transport, this.exchange.sessionId)
-  }
-
-  onTransportPong(ended: PongEntry[]): void {
-    this.liveness.onPong(ended)
-  }
-
-  dropWire(transport: ClientChannelTransport): void {
-    transport.detachHeartbeat()
-    transport.abandonActiveTransport()
-    this.onTransportClosed(transport)
-  }
-
-  onTransportPostLate(transport: ClientChannelTransport): void {
-    this.onPongTimeout(transport)
-  }
-
-  /** Until a wire's first RECONCILED, the RECONCILE deadline bounds it: the wait may outlast the pong deadline. */
-  onPongTimeout(transport: ClientChannelTransport): void {
-    if (this.exchange.boundsWire) return
-    this.dropWire(transport)
-  }
-
-  onTransportClosed(transport: ClientChannelTransport, { rejectedByServer = false } = {}): void {
-    if (this.closed) return
-    transport.detachHeartbeat()
-    if (transport !== this.transport) {
-      if (this.upgrade.flipped && transport === this.upgrade.committing!.from) {
-        this.fallbackToSse(new NetworkError('Connection dropped', true))
-      }
-      return
-    }
-    this.upgrade.abortAttempt()
-    const err = new NetworkError(rejectedByServer ? 'Server rejected SSE connection' : 'Connection dropped', true)
-    this.handleTransportLoss(err, rejectedByServer)
-  }
-
-  handleReconciled(ctrl: ReconciledPayload): void {
-    if (!this.upgrade.onReconciled(ctrl)) return
-    this.transport.applyReconciledSettings(ctrl)
-    this.takeServerSettings(ctrl)
-    const outcome = this.exchange.applyReconciled(ctrl, {
-      deferredOmitted: this.upgrade.committing?.deferredOmitted ?? null,
-      upgradeReady: this.upgrade.ready,
-    })
-    this.liveness.install(this.transport, ctrl.pingInterval)
-    this.transport.closeAbandonedTransport()
-    for (const frame of outcome.frames) this.transport.sendFrame(frame)
-    for (const channel of outcome.channelsToOpen) {
-      channel._onTransportOpen(this.transport.batched, this.transport.uplink, this.transport.downlink)
-    }
-    this.upgrade.tryComplete()
-    if (outcome.reconcileComplete) {
-      this.upgrade.serverTransports = ctrl.transports
-      this.startTtlIfIdle()
-      this.upgrade.maybeStart()
-    }
-  }
-
-  // ── SSE→WS upgrade ──
-
-  createWebSocket(): UpgradeTarget {
-    return new WsTransport({ telefuncUrl: this.telefuncUrl, owner: this })
-  }
-
-  adoptTransport(transport: UpgradeTarget): void {
-    this.transport = transport
-    this.wire++
-  }
-
-  fallbackToSse(err: Error): void {
-    if (this.closed) return
-    this.upgrade.abandon()
-    this.transport.abandonActiveTransport()
-    this.transport.dispose()
-    this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.SSE](this.telefuncUrl, this.connectionOptions, this)
-    this.handleTransportLoss(err, false)
-  }
-
-  drainBufferedFramesToWire(): void {
-    for (const frame of this.gate.drainSendable()) this.transport.sendFrame(frame)
-    this.startTtlIfIdle()
-  }
-
-  private handleTransportLoss(err: Error, rejected: boolean): void {
-    if (this.closed) return
-    if (this.upgrade.flipped) {
-      this.fallbackToSse(err)
-      return
-    }
-    this.wire++
-    // The wire is dying: the queued RECONCILE is not sent, since the reconnect's RECONCILE lists every channel.
-    this.exchange.cancelRegisterReconcile()
-    this.exchange.forgetWire()
-    if (this.ttl) {
-      clearTimeout(this.ttl)
-      this.ttl = null
-    }
-
-    const { attempt: prevAttempt, startedAt: prevStartedAt } =
-      this.state.tag === 'reconnecting' ? this.state : { attempt: 0, startedAt: 0 }
-
-    if (rejected && prevAttempt === 0) {
-      this.closeAll(err)
-      this.dispose()
-      return
-    }
-    // A closed channel whose frames the server all has needs nothing from another wire.
-    for (const record of this.channels.values()) {
-      if (record.state.tag === 'closed' && record.state.delivered) this.releaseChannel(record)
-    }
-    if (this.channels.size === 0) {
-      this.dispose()
-      return
-    }
-    const startedAt = prevStartedAt || performance.now()
-    if (performance.now() - startedAt > this.reconnectTimeoutMs) {
-      this.closeAll(err)
-      this.dispose()
-      return
-    }
-    const delay = Math.min(CHANNEL_RECONNECT_INITIAL_DELAY_MS * 2 ** prevAttempt, CHANNEL_RECONNECT_MAX_DELAY_MS)
-    this.enterReconnecting(prevAttempt + 1, startedAt, delay)
-  }
-
-  /** Starts the idle timer on a live wire with no channel open and nothing queued; the transport drains first. */
-  startTtlIfIdle(): void {
-    if (!this.connected || this.ttl || !this.gate.idle || !this.channels.idle) {
-      return
-    }
-    const ttl = setTimeout(() => {
-      void this.transport.drained().then(() => {
-        if (this.ttl === ttl && this.channels.idle) this.dispose()
-      })
-    }, this.idleTimeoutMs)
-    this.ttl = ttl
-  }
-
-  private dispose(): void {
-    if (this.closed) return
-    if (this.ttl) {
-      clearTimeout(this.ttl)
-      this.ttl = null
-    }
-    this.exchange.cancelRegisterReconcile()
-    // Tear down any in-flight phase before transitioning to `closed`.
-    if (this.state.tag === 'reconnecting') clearTimeout(this.state.timer)
-    this.upgrade.teardown()
-    this.enterClosed()
-    this.transport.detachHeartbeat()
-    this.transport.dispose()
-    this.channels.clear()
-    this.gate.clear()
-    this.exchange.forgetWire()
-    // The next `getOrCreate` opens a fresh connection; one that already replaced this one stays cached.
-    if (ClientConnection.cache.get(this.cacheKey) === this) ClientConnection.cache.delete(this.cacheKey)
-  }
-
-  // ── Protocol internals ──
-
-  stageInitialReconcileBatch(): ReconcileBatch {
-    return this.exchange.stageInitialReconcileBatch()
-  }
-
-  /** Takes the timeouts, replay sizes and frame limit the server sets, and fits each replay buffer to them. */
-  private takeServerSettings(ctrl: ReconciledPayload): void {
-    this.reconnectTimeoutMs = ctrl.reconnectTimeout
-    this.maxFrameBytes = ctrl.maxFrameBytes
-    // A per-call `idleTimeout` (withContext) is kept over the server's.
-    if (this.connectionOptions.idleTimeout === undefined) this.idleTimeoutMs = ctrl.idleTimeout
-    const window = replayWindow(ctrl.serverReplayBuffer, ctrl.serverReplayBufferBinary)
-    // Unchanged sizes: every replay already fits them, since `register` sizes and fits each new channel with them.
-    if (
-      this.replayWindows?.window === window &&
-      this.clientReplayBufferBytes === ctrl.clientReplayBuffer &&
-      this.clientReplayBufferBinaryBytes === ctrl.clientReplayBufferBinary
-    ) {
-      return
-    }
-    this.clientReplayBufferBytes = ctrl.clientReplayBuffer
-    this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
-    this.replayWindows = { window, peerWindow: replayWindow(ctrl.clientReplayBuffer, ctrl.clientReplayBufferBinary) }
-    // Resized before this reconcile stores anything: channels registered before the first RECONCILED used the defaults.
-    for (const { replay } of this.channels.values()) {
-      replay.setLimits(this.clientReplayBufferBytes, this.clientReplayBufferBinaryBytes)
-    }
-    for (const { channel } of this.channels.values()) this.fitReplays(channel)
-  }
-
-  /** The server ended channel `ix`, so it needs nothing more of what the page sent on it. */
-  private closeRemoteChannel(ix: number, err?: Error): void {
-    const record = this.channels.get(ix)
-    if (!record) return
-    this.unregister(record.channel)
-    assert(record.state.tag === 'closed')
-    this.channels.serverEnded(record.state)
-    record.channel._onEnded(err)
-  }
-
-  private closeAll(err: Error): void {
-    for (const { channel } of this.channels.values()) {
-      channel._onEnded(err)
-    }
-    this.dispose()
-  }
-
-  /** Widens a frame's seq on channel `ix` from its low bits `bits`; null drops a duplicate or a released channel's. */
-  private trackSeq(ix: number, bits: number): number | null {
-    const record = this.channels.get(ix)
-    if (record === undefined) return null
-    const prev = record.lastSeq
-    const seq = seqNear(bits, prev + 1)
-    if (seq <= prev) return null
-    record.lastSeq = seq
-    return seq
-  }
-
-  /** Drops all the channel holds, its ATTACH_RESULT wait included. On the server, the RECONCILE that releases it, or a
-   *  new wire's RECONCILE that leaves it out, ends it too. */
-  releaseChannel(record: ChannelRecord): void {
-    this.channels.release(record)
-    this.gate.dropQueue(record.ix)
-  }
-}
-
-// ── Transport registry ──
-
-/** Maps each ChannelTransport to a factory that creates the corresponding ClientChannelTransport. */
-const TRANSPORT_REGISTRY: Record<
-  ChannelTransport,
-  (telefuncUrl: string, options: ClientConnectionOptions, owner: ClientConnection) => ClientChannelTransport
-> = {
-  [CHANNEL_TRANSPORT.WS]: (telefuncUrl, _options, owner) => new WsTransport({ telefuncUrl, owner }),
-  [CHANNEL_TRANSPORT.SSE]: (telefuncUrl, options, owner) =>
-    new SseTransport({ telefuncUrl, fetchImpl: options.fetchImpl, userHeaders: options.headers, owner }),
-}
-
-/** What a channel the server ended with an ERROR of `reason` closes with. */
-function channelErrorFor(reason: number): Error {
-  switch (reason) {
-    case ERROR_REASON.OVERFLOW:
-      return new ChannelOverflowError(
-        'Broadcast closed: more was published while this client was offline than the server holds for a client',
-      )
-    case ERROR_REASON.LOST:
-      return replayLossError('server')
-    default:
-      return makeBugError()
   }
 }
