@@ -28,15 +28,14 @@ type LeaseDropped = (instance: string, telling: number) => boolean
 
 /** The replica whose owned members the demand is for. */
 interface RoomDemandOwner {
-  ownsMember(id: string): boolean
-  /** Live. */
-  ownedMembers(): Iterable<string>
   /** Tells an owned member whether a track of it is wanted. */
   deliverDemand(member: string, track: string, wanted: boolean): void
 }
 
 type RoomDemandOptions = {
   owner: RoomDemandOwner
+  /** The members this process owns, kept current by the replica. */
+  ownedMembers: ReadonlyMap<string, unknown>
   /** A report of a member's every track covers the tracks it published on. */
   publishedTracks: Pick<PublishedTracks, 'has' | 'namedOf'>
 }
@@ -61,10 +60,12 @@ class RoomDemand {
   private settling = false
 
   private readonly owner: RoomDemandOwner
+  private readonly ownedMembers: ReadonlyMap<string, unknown>
   private readonly publishedTracks: RoomDemandOptions['publishedTracks']
 
-  constructor({ owner, publishedTracks }: RoomDemandOptions) {
+  constructor({ owner, ownedMembers, publishedTracks }: RoomDemandOptions) {
     this.owner = owner
+    this.ownedMembers = ownedMembers
     this.publishedTracks = publishedTracks
   }
 
@@ -114,7 +115,7 @@ class RoomDemand {
     const report: Report = { instance, on, telling: this.reporters.get(instance)?.telling ?? 0 }
     if ('except' in entry) {
       this.takeTrack(entry, report)
-    } else if (!this.owner.ownsMember(entry.member)) {
+    } else if (!this.ownedMembers.has(entry.member)) {
       return
     } else if ('byMember' in entry) {
       const { member } = entry
@@ -324,7 +325,7 @@ class RoomDemand {
   private *evaluations(): Generator<void> {
     for (const [track, members] of this.due) {
       this.due.delete(track)
-      for (const member of members === EVERY_MEMBER ? this.owner.ownedMembers() : members) {
+      for (const member of members === EVERY_MEMBER ? this.ownedMembers.keys() : members) {
         this.evaluate(member, track)
         yield
       }
@@ -332,7 +333,7 @@ class RoomDemand {
   }
 
   private evaluate(member: string, track: string): void {
-    if (!this.owner.ownsMember(member)) return
+    if (!this.ownedMembers.has(member)) return
     const wanted = this.isWanted(member, track)
     if (wanted === hasEntry(this.told, track, member)) return
     toggleEntry(this.told, track, member, wanted)

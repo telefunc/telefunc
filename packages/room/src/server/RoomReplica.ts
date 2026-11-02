@@ -126,12 +126,11 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
   private readonly owners = new Map<string, ServerRoom>()
   /** The seq of the last frame each owned member's inbox delivered, 0 before its first. */
   private readonly inboxSeqs = new Map<string, number>()
-  /** The handles with a client stub, a participant or a listener; those with a listener; those with a tail; those with
-   *  either, which take what a lane carries. */
-  private readonly observers = new Set<ServerRoom>()
-  private readonly listening = new Set<ServerRoom>()
-  private readonly tails = new Set<ServerRoom>()
-  private readonly receivers = new Set<ServerRoom>()
+  /** The handles that observe the room (a client stub, a participant or a listener) or hold a tail. The replica keeps
+   *  it in its own methods that a handle's change goes through, and holds them while they are served. */
+  private readonly served = new Set<ServerRoom>()
+  /** What the served handles are to the room, which the lane plan reads. */
+  private readonly roles = { observed: false, listened: false, tailHeld: false, owned: this.owners }
 
   private constructor({ incarnation, stored, seed }: RoomReplicaOptions) {
     this.id = incarnation.id
@@ -143,11 +142,15 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
       metaSeq: stored.seq,
       owner: this,
     })
-    this.incomingDemand = new RoomDemand({ owner: this, publishedTracks: this.publishedTracks })
+    this.incomingDemand = new RoomDemand({
+      owner: this,
+      ownedMembers: this.owners,
+      publishedTracks: this.publishedTracks,
+    })
     this.demandExchange = new DemandExchange({ incarnation, incomingDemand: this.incomingDemand })
     const { model, demandExchange } = this
     const { outgoingDemand } = demandExchange
-    this.lanePlan = new LanePlan({ owner: this, incarnation, model, outgoingDemand, demandExchange })
+    this.lanePlan = new LanePlan({ owner: this, roles: this.roles, incarnation, model, outgoingDemand, demandExchange })
     const lanePlan = this.lanePlan
     this.authority = new AuthoritySync({ owner: this, incarnation, model, lanePlan })
     const authority = this.authority
@@ -199,15 +202,30 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
     return this.roster.reconcile(roster, events)
   }
 
-  /** Whether the handle's holders and holds are served: its stubs, participants and listeners, and its tail. */
-  track(handle: ServerRoom): void {
-    toggle(this.observers, handle, handle._isObserved())
-    toggle(this.listening, handle, handle._state.listenerCount > 0)
-    toggle(this.tails, handle, handle._holdsTail())
-    toggle(this.receivers, handle, this.listening.has(handle) || this.tails.has(handle))
+  /** A handle's listeners changed. */
+  listenersChanged(handle: ServerRoom): void {
+    this.reconsider(handle)
+  }
+
+  /** Keeps `served` and the roles the lane plan reads current with the handle. */
+  private reconsider(handle: ServerRoom): void {
+    toggle(this.served, handle, handle._isObserved() || handle._holdsTail())
+    const roles = this.roles
+    roles.observed = roles.listened = roles.tailHeld = false
+    for (const served of this.served) {
+      roles.observed ||= served._isObserved()
+      roles.listened ||= served._state.listenerCount > 0
+      roles.tailHeld ||= served._holdsTail()
+    }
+  }
+
+  /** The served handles that take what a lane carries: those with a listener or a tail. */
+  private *receivers(): Generator<ServerRoom> {
+    for (const handle of this.served) if (handle._state.listenerCount > 0 || handle._holdsTail()) yield handle
   }
 
   own(member: string, handle: ServerRoom): void {
+    this.reconsider(handle)
     this.owners.set(member, handle)
     // A member's id is fresh at each join, so its inbox starts before seq 1.
     this.inboxSeqs.set(member, 0)
@@ -216,11 +234,12 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
 
   /** The handle let the member go: it owns it here no more, and the member's lanes follow. */
   release(member: string, handle: ServerRoom): void {
+    this.reconsider(handle)
     this.disown(member, handle)
     this.lanePlan.memberReleased(member)
   }
 
-  /** The member's demand goes with it. */
+  /** Forgets the member here: its owner, its inbox seq, its demand and its published tracks. */
   private disown(member: string, handle: ServerRoom): void {
     if (this.owners.get(member) !== handle) return
     this.owners.delete(member)
@@ -229,8 +248,9 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
     this.publishedTracks.forget(member)
   }
 
-  /** After the stub's handle tracked it: its view is written and its wants planned. */
-  attachStub(stub: RoomStub): void {
+  /** The handle's stub attached: its view is written and its wants planned. */
+  attachStub(handle: ServerRoom, stub: RoomStub): void {
+    this.reconsider(handle)
     this.stubs.add(stub)
     this.views.set(
       stub,
@@ -248,8 +268,9 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
     }
   }
 
-  /** After the stub's handle tracked it: its view is removed and its wants dropped. */
-  detachStub(stub: RoomStub): void {
+  /** The handle's stub detached: its view is removed and its wants dropped. */
+  detachStub(handle: ServerRoom, stub: RoomStub): void {
+    this.reconsider(handle)
     this.stubs.delete(stub)
     const view = this.views.get(stub)
     this.views.delete(stub)
@@ -264,7 +285,7 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
 
   /** A handle's tail started or ended: text ingestion follows it, ready once the returned promise resolves. */
   tailChanged(handle: ServerRoom): Promise<void> {
-    this.track(handle)
+    this.reconsider(handle)
     this.lanePlan.syncLanes()
     return this.lanePlan.semanticReady
   }
@@ -419,33 +440,6 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
 
   // What the replica's parts ask of it
 
-  /** Whether a handle here observes the room: a client stub, a participant, or a listener. */
-  isObserved(): boolean {
-    return this.observers.size > 0
-  }
-
-  isListened(): boolean {
-    return this.listening.size > 0
-  }
-
-  /** A pre-attach tail ingests all text. */
-  holdsTail(): boolean {
-    return this.tails.size > 0
-  }
-
-  ownsMember(id: string): boolean {
-    return this.owners.has(id)
-  }
-
-  ownsAnyMember(): boolean {
-    return this.owners.size > 0
-  }
-
-  /** Live. A pending admission owns its inbox. */
-  ownedMembers(): Iterable<string> {
-    return this.owners.keys()
-  }
-
   deliverDemand(member: string, track: string, wanted: boolean): void {
     this.owners.get(member)?._deliverDemand(member, track, wanted)
   }
@@ -509,13 +503,13 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
   onTextData(serialized: string, info: OrderingInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope | Extract<RoomEnvelope, { __r: 'announce' }>
     if (envelope.__r === 'announce') {
-      for (const handle of this.receivers) handle._local.relayAnnouncement(envelope.data, info)
+      for (const handle of this.receivers()) handle._local.relayAnnouncement(envelope.data, info)
       const wireText = encodePublish(serialized, info)
       for (const stub of this.stubs) stub.relayAnnouncement(wireText, info)
       return
     }
     this.applyStamp(envelope.from, envelope)
-    for (const handle of this.receivers) handle._relayData(serialized, envelope, info)
+    for (const handle of this.receivers()) handle._relayData(serialized, envelope, info)
     if (this.stubs.size === 0) return
     const texts = new MemberMessageTexts(serialized, info, envelope)
     for (const stub of this.stubs) stub.relayText(serialized, texts, envelope.from, info)
@@ -524,7 +518,7 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
   onBinary(framed: Uint8Array, info: OrderingInfo): void {
     const unframed = decodeBinaryFrame(framed)
     assert(unframed)
-    for (const handle of this.receivers) handle._local.relayBinary(unframed, info)
+    for (const handle of this.receivers()) handle._local.relayBinary(unframed, info)
     if (this.stubs.size === 0) return
     const wireData = encodePublish(framed, info)
     for (const stub of this.stubs) stub.relayBinary(wireData, unframed.from, unframed.track, info)
@@ -589,11 +583,12 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
   /** Every leave the model applies, event or reconcile, runs the member's cleanup. */
   onMemberLeft(id: string, cause: LeaveCause, hidden: boolean | null): void {
     this.acks.settleMember(id, DM_FAILURE.left) // strand no waiter on a gone sender or recipient
-    for (const handle of this.receivers) handle._local.forgetMember(id)
+    for (const handle of this.receivers()) handle._local.forgetMember(id)
     const owner = this.owners.get(id)
     if (owner !== undefined) {
       this.disown(id, owner)
       owner._memberLeft(id, cause)
+      this.reconsider(owner)
     }
     // Every leave of a known member reaches the clients here, once, whatever applied it.
     if (hidden !== null) {
@@ -615,9 +610,10 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
     this.incomingDemand.close()
     this.publishedTracks.clear()
     for (const [id, owner] of this.owners) this.disown(id, owner)
-    const handles = new Set(this.observers)
-    for (const tail of this.tails) handles.add(tail)
-    for (const handle of handles) handle._teardown()
+    for (const handle of [...this.served]) {
+      handle._teardown()
+      this.reconsider(handle)
+    }
     this.demandExchange.close()
     void this.lanePlan.replan()
   }

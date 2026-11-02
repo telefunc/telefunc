@@ -194,7 +194,6 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
       this._localParticipants.set(admission.id, participant)
       this._replica.own(admission.id, this)
       if (!selfDelivery) this.localSuppressed.add(admission.id)
-      this._replica.track(this)
     })
     return participant
   }
@@ -313,7 +312,6 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
     }
     this.stubOf.delete(id)
     this.admissions.get(id)?.abandon()
-    this._replica.track(this)
   }
 
   /** @internal The room closed: the replica already applied and relayed `closed`. */
@@ -326,7 +324,6 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
     // A client back while its channel still holds it gets `closed`.
     const timeout = getChannelLimits().reconnectWindow
     for (const stub of this.stubs) void stub.end.close({ timeout }).catch(() => {})
-    this._replica.track(this)
   }
 
   /** @internal A DM for a member this handle owns, routed to its holder: a server participant or its client stub. */
@@ -392,13 +389,12 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
       stub.beginTail(this.tail.take())
       this.tail = null
     }
-    this._replica.track(this)
-    this._replica.attachStub(stub)
+    this._replica.attachStub(this, stub)
   }
 
   /** @internal */
   _setHeldConnected(stub: RoomStub, connected: boolean): void {
-    // An admission under way takes the wire's state once its join applies.
+    // A member whose join is under way is skipped: its record takes the wire's state when the join applies.
     for (const id of stub.heldMembers()) if (!this.admissions.has(id)) this.setMemberConnected(id, connected)
   }
 
@@ -411,8 +407,7 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
     this.stubs.delete(stub)
     stub.endTail()
     stub.endReplayHolds()
-    this._replica.track(this)
-    this._replica.detachStub(stub)
+    this._replica.detachStub(this, stub)
     for (const id of stub.heldMembers()) {
       this.stubOf.delete(id)
       this._replica.release(id, this)
@@ -693,7 +688,7 @@ class ServerRoomStateOwner implements RoomStateOwner {
 
   onListenersChanged(member: string | null, binary: BinaryWantChange | null): void {
     const room = this.room
-    room._replica.track(room)
+    room._replica.listenersChanged(room)
     room._onHolderTextChanged(room._local, room._local.refreshText(member))
     if (binary !== null && room._local.applyBinary(binary)) room._onHolderBinaryChanged(room._local, binary)
   }
