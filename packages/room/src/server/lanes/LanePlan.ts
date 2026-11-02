@@ -222,33 +222,38 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
    *  planning pass. */
   binaryChanged(holder: LaneHolder, change: BinaryWantChange): void {
     const { track } = change
-    const wasEveryMember = track !== EVERY_TRACK && this.wants.namesEveryMember(track)
-    const affected = this.wants.applyBinary(holder, change)
-    const queued = this.queued
-    if (track === EVERY_TRACK) {
-      if (affected === 'all') queued.all = true
-      else for (const member of affected) queued.members.add(member)
+    if (track !== EVERY_TRACK) {
+      this.namedTrackChanged(holder, { member: change.member, track, on: change.on })
     } else {
-      // Only a want of every track of every member concerns every member.
-      assert(affected !== 'all')
-      const everyMember = this.wants.namesEveryMember(track)
-      const pair: BinaryWantChange & { track: TrackKey } = { member: change.member, track, on: change.on }
-      // A track counts for a member while it is named of the member alone; one named of every member counts for none.
-      for (const member of affected) {
-        const count = this.counts.get(member)
-        if (count === undefined) {
-          if (this.counting?.member === member) this.counting.stale = true
-          continue
-        }
-        const [before, after] = this.wants.namedPairChange(holder, pair, member)
-        this.counts.set(member, count + Number(!everyMember && after) - Number(!wasEveryMember && before))
-      }
-      for (const member of affected) this.queuePair(member, track)
-      // Whom the track's every-member lane serves here may have changed.
-      if (everyMember || wasEveryMember) queued.tracks.add(track)
+      const affected = this.wants.applyBinary(holder, change)
+      if (affected === 'all') this.queued.all = true
+      else for (const member of affected) this.queued.members.add(member)
     }
     this.schedulePlan()
     this.syncLanes()
+  }
+
+  /** A want of one named track: each member it affects is recounted and its pairs of the track replanned. */
+  private namedTrackChanged(holder: LaneHolder, pair: BinaryWantChange & { track: TrackKey }): void {
+    const { track } = pair
+    const wasEveryMember = this.wants.namesEveryMember(track)
+    const affected = this.wants.applyBinary(holder, pair)
+    // Only a want of every track of every member concerns every member.
+    assert(affected !== 'all')
+    const everyMember = this.wants.namesEveryMember(track)
+    // A track counts for a member while it is named of the member alone; one named of every member counts for none.
+    for (const member of affected) {
+      const count = this.counts.get(member)
+      if (count === undefined) {
+        if (this.counting?.member === member) this.counting.stale = true
+        continue
+      }
+      const [before, after] = this.wants.namedPairChange(holder, pair, member)
+      this.counts.set(member, count + Number(!everyMember && after) - Number(!wasEveryMember && before))
+    }
+    for (const member of affected) this.queuePair(member, track)
+    // Whom the track's every-member lane serves here may have changed.
+    if (everyMember || wasEveryMember) this.queued.tracks.add(track)
   }
 
   /** A member joined, or which holders suppress it changed: the next planning pass recounts it. */

@@ -130,28 +130,41 @@ async function mergePair(a: RoomMetaEntry[], b: RoomMetaEntry[], slice: Slice): 
 /** Null once the incarnation is gone. Until its first write, the meta is the one the room was created with. A read
  *  pages its generation's keys between two reads of `meta:seq`, which every write counts, and keeps the pages only
  *  when no write landed between. */
-async function readRoomMeta(roomId: string, { inc, meta }: RoomConfigRecord): Promise<StoredRoomMeta | null> {
-  const plane = getRoomPlane()
+async function readRoomMeta(roomId: string, config: RoomConfigRecord): Promise<StoredRoomMeta | null> {
   for (let attempt = 0; attempt < META_PAGED_READS; attempt++) {
-    const before = await plane.driver.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY, META_GEN_CELL_KEY] })
-    if (before.kind === 'stale-incarnation') return null
-    const seq = before.cells.get(META_SEQ_CELL_KEY)
-    if (seq === undefined) return { entries: metaEntriesAt(meta, 0), seq: 0 }
-    const prefix = roomMetaGenPrefix(decodeRoomRecord<number>(before.cells.get(META_GEN_CELL_KEY)!))
-    const runs: RoomMetaEntry[][] = []
-    const slice = new Slice()
-    for await (const page of plane.driver.readCellPages(roomId, inc, prefix)) {
-      if (page.kind === 'stale-incarnation') return null
-      runs.push(metaRun(page.cells, prefix))
-      if (slice.over) await slice.next()
-    }
-    const after = await plane.driver.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY] })
-    if (after.kind === 'stale-incarnation') return null
-    if (after.versions.get(META_SEQ_CELL_KEY) === before.versions.get(META_SEQ_CELL_KEY)) {
-      return { entries: await mergeRuns(runs), seq: decodeCellCounter(seq).value }
-    }
+    const read = await readMetaPaged(roomId, config)
+    if (read !== 'raced') return read
   }
-  const read = await plane.driver.readCells(roomId, inc, { prefix: META_CELL_PREFIX })
+  return await readMetaWhole(roomId, config.inc)
+}
+
+/** The meta paged between two reads of `meta:seq`; `'raced'` when a write landed between. */
+async function readMetaPaged(
+  roomId: string,
+  { inc, meta }: RoomConfigRecord,
+): Promise<StoredRoomMeta | null | 'raced'> {
+  const plane = getRoomPlane()
+  const before = await plane.driver.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY, META_GEN_CELL_KEY] })
+  if (before.kind === 'stale-incarnation') return null
+  const seq = before.cells.get(META_SEQ_CELL_KEY)
+  if (seq === undefined) return { entries: metaEntriesAt(meta, 0), seq: 0 }
+  const prefix = roomMetaGenPrefix(decodeRoomRecord<number>(before.cells.get(META_GEN_CELL_KEY)!))
+  const runs: RoomMetaEntry[][] = []
+  const slice = new Slice()
+  for await (const page of plane.driver.readCellPages(roomId, inc, prefix)) {
+    if (page.kind === 'stale-incarnation') return null
+    runs.push(metaRun(page.cells, prefix))
+    if (slice.over) await slice.next()
+  }
+  const after = await plane.driver.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY] })
+  if (after.kind === 'stale-incarnation') return null
+  if (after.versions.get(META_SEQ_CELL_KEY) !== before.versions.get(META_SEQ_CELL_KEY)) return 'raced'
+  return { entries: await mergeRuns(runs), seq: decodeCellCounter(seq).value }
+}
+
+/** The whole meta in one read, cut into runs of `CELL_PAGE_SIZE` as pages would be. */
+async function readMetaWhole(roomId: string, inc: string): Promise<StoredRoomMeta | null> {
+  const read = await getRoomPlane().driver.readCells(roomId, inc, { prefix: META_CELL_PREFIX })
   if (read.kind === 'stale-incarnation') return null
   const prefix = roomMetaGenPrefix(decodeRoomRecord<number>(read.cells.get(META_GEN_CELL_KEY)!))
   const runs: RoomMetaEntry[][] = []
