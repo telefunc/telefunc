@@ -69,7 +69,16 @@ type PieceSenderOptions = {
 }
 
 /** Sends one WebSocket's frames. The small frames one task sends go in one message, with at most one data frame on a
- *  page; a frame that could take longer than a ping interval to cross goes in pieces. */
+ *  page; a frame that could take longer than a ping interval to cross goes in pieces.
+ *
+ *  Its counters agree between calls:
+ *  - `transmittedBytes` counts each byte once, as it joins a message (`countHanded`): handed, gathered or carried,
+ *    headers, LENGTH frames and announcements included. It includes `messages.bytes`, and not `waitingBytes`.
+ *  - `waitingBytes` is what `rest` has left from its offset, plus every frame in `waiting`.
+ *  - `acknowledgedBytes` and `heartbeatBytes` never pass `transmittedBytes`.
+ *  - `unacknowledged`, `announcedEnds` and `announcements` are in order of `end`, and each `end` is past
+ *    `acknowledgedBytes`: an ack drops every entry it reaches (`acknowledged`), and `probe` once it reaches its
+ *    `end`. */
 class PieceSender {
   private readonly socket: PieceSocket
   private pingInterval: number
