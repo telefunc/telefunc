@@ -168,10 +168,10 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
 
   /** The lanes in `member`'s order hash and its retained binary lanes, which its drop removes. */
   private async memberLanes(roomId: string, inc: string, member: string): Promise<DroppedMember> {
-    const { prefix, client } = this.connection
+    const { prefix } = this.connection
     const [lanes, retained] = await Promise.all([
-      client.hkeys(memberOrderKey(prefix, roomId, inc, member)),
-      client.smembers(retainedOfKey(prefix, roomId, inc, member)),
+      this.connection.send((client) => client.hkeys(memberOrderKey(prefix, roomId, inc, member))),
+      this.connection.send((client) => client.smembers(retainedOfKey(prefix, roomId, inc, member))),
     ])
     return { member, lanes, retained }
   }
