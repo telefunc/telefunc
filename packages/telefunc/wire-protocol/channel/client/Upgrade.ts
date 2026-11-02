@@ -160,7 +160,7 @@ class Upgrade implements ProbeOwner {
     this.allowsWebSocket = allowsWebSocket
   }
 
-  get committing(): CommittingUpgrade | null {
+  private get committing(): CommittingUpgrade | null {
     return this.state.tag === 'committing' ? this.state : null
   }
 
@@ -180,6 +180,28 @@ class Upgrade implements ProbeOwner {
   /** READY came, so the barrier goes next: a RECONCILE too, and no other goes out till the handoff. */
   get ready(): boolean {
     return this.state.tag === 'staging' && this.state.ready
+  }
+
+  /** From READY to the handoff's end, no RECONCILE but the upgrade's goes out. */
+  get holdsReconcile(): boolean {
+    return this.state.tag === 'committing' || this.ready
+  }
+
+  /** In a handoff, the channels its RECONCILED left out, which close unacknowledged once it ends; null outside one. */
+  get deferredOmitted(): number[] | null {
+    return this.committing?.deferredOmitted ?? null
+  }
+
+  /** Whether `transport` is the wire a flipped handoff left. */
+  isLeftWire(transport: ClientChannelTransport): boolean {
+    return this.flipped && transport === this.committing!.from
+  }
+
+  /** Takes a frame a wire delivered once the connection flipped to the new wire mid-handoff; false outside that. */
+  takeHandoffFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number): boolean {
+    if (!this.flipped) return false
+    this.ingestDuringHandoff(frame, source === this.committing!.from ? 'old' : 'new', byteLength)
+    return true
   }
 
   /** The connection left its open state, and the upgrade in it. */
@@ -243,7 +265,7 @@ class Upgrade implements ProbeOwner {
   /** Takes every frame that arrives during the handoff, and is the one place that counts it against the handoff's
    *  budget. Before the flip the probe is nobody's wire, so even a completion frame waits: acting on one would settle a
    *  swap that hasn't happened. After it, completion frames apply and the rest waits, split by the wire it came from. */
-  ingestDuringHandoff(frame: DecodedFrame, source: 'old' | 'new', byteLength: number): void {
+  private ingestDuringHandoff(frame: DecodedFrame, source: 'old' | 'new', byteLength: number): void {
     const u = this.committing
     if (u === null) return
     const flipped = this.owner.transport === u.to

@@ -156,7 +156,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 
   get reconcileHeld(): boolean {
-    return !this.connected || this.upgrade.committing !== null || this.upgrade.ready
+    return !this.connected || this.upgrade.holdsReconcile
   }
 
   /** Wire indexes are u16 and never reused, so once they run out a new channel needs a fresh connection. */
@@ -249,12 +249,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void {
     // An abandoned wire still delivers, but its RECONCILED answers a RECONCILE the next wire's has replaced.
     if (abandoned && frame.tag === TAG.RECONCILED) return
-    const u = this.upgrade.committing
-    if (u !== null && this.transport === u.to) {
-      this.upgrade.ingestDuringHandoff(frame, source === u.from ? 'old' : 'new', byteLength)
-    } else {
-      this.dispatchFrame(frame)
-    }
+    if (!this.upgrade.takeHandoffFrame(frame, source, byteLength)) this.dispatchFrame(frame)
   }
 
   dispatchFrame(frame: DecodedFrame): void {
@@ -335,7 +330,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       return
     }
     if (transport !== this.transport) {
-      if (this.upgrade.flipped && transport === this.upgrade.committing!.from) {
+      if (this.upgrade.isLeftWire(transport)) {
         this.fallbackToSse(new NetworkError('Connection dropped', true))
       }
       return
@@ -350,7 +345,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.transport.applyReconciledSettings(ctrl)
     this.takeServerSettings(ctrl)
     const outcome = this.exchange.applyReconciled(ctrl, {
-      deferredOmitted: this.upgrade.committing?.deferredOmitted ?? null,
+      deferredOmitted: this.upgrade.deferredOmitted,
       upgradeReady: this.upgrade.ready,
     })
     this.liveness.install(this.transport, ctrl.pingInterval)
