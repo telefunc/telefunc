@@ -9,6 +9,7 @@ export type {
 }
 
 import { assertUsage } from '../../../utils/assert.js'
+import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import {
   CHANNEL_TRANSPORT,
   type ChannelTransport,
@@ -124,18 +125,22 @@ type ClientChannelTransport = {
   dispose(): void
 }
 
+// One per page, however many copies of Telefunc it loaded: each would otherwise open its own connections.
+const globalObject = getGlobalObject<{ connections: Map<string, ClientConnection> }>(
+  'channel/client/ClientConnection.ts',
+  { connections: new Map() },
+)
+
 /** What a page's channels send through, one connection per server and set of transports: it encodes each channel's
  *  frames and hands them to its send gate; the wire lifecycle carries them. */
 class ClientConnection implements MuxConnection, WireLifecycleOwner {
-  private static cache = new Map<string, ClientConnection>()
-
   static getOrCreate(telefuncUrl: string, channel: MuxChannel, options: ClientConnectionOptions): ClientConnection {
     // `connectionKey` opts callers out of the shared connection without the server seeing it.
     const key = `${options.transports.join(',')}:${telefuncUrl}|${options.connectionKey ?? ''}`
-    let connection = ClientConnection.cache.get(key)
+    let connection = globalObject.connections.get(key)
     if (!connection || !connection.lifecycle.takesChannels) {
-      connection = new ClientConnection(telefuncUrl, options, key)
-      ClientConnection.cache.set(key, connection)
+      connection = new ClientConnection({ telefuncUrl, options, cacheKey: key })
+      globalObject.connections.set(key, connection)
     }
     connection.lifecycle.register(channel)
     return connection
@@ -152,7 +157,11 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     return this.lifecycle.transport
   }
 
-  private constructor(telefuncUrl: string, options: ClientConnectionOptions, cacheKey: string) {
+  private constructor({
+    telefuncUrl,
+    options,
+    cacheKey,
+  }: { telefuncUrl: string; options: ClientConnectionOptions; cacheKey: string }) {
     this.cacheKey = cacheKey
     this.usesWebSocket = options.transports.includes(CHANNEL_TRANSPORT.WS)
     this.lifecycle = new WireLifecycle({ owner: this, telefuncUrl, options })
@@ -162,7 +171,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
 
   /** The next `getOrCreate` opens a fresh connection; one that already replaced this one stays cached. */
   onDisposed(): void {
-    if (ClientConnection.cache.get(this.cacheKey) === this) ClientConnection.cache.delete(this.cacheKey)
+    if (globalObject.connections.get(this.cacheKey) === this) globalObject.connections.delete(this.cacheKey)
   }
 
   /** How long the page waits for a server that went away: until the pong deadline, then `reconnectTimeout` more. */
