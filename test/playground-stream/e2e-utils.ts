@@ -81,18 +81,29 @@ async function getCleanupState(): Promise<Record<string, string>> {
   return resp.json()
 }
 
-/** Forces a full GC on the server (via `/api/gc`) so GC-driven cleanup is deterministic in tests. */
+/** Forces a full GC on the server (via `/api/gc`) so GC-driven cleanup is deterministic in tests. The page sends it, so
+ *  behind the docker lanes' load balancer its sticky cookie picks the page's server. */
 async function forceServerGc() {
-  const resp = await fetch(`${getServerUrl()}/api/gc`, { method: 'POST' })
+  const resp = await fetchFromPage(`${getServerUrl()}/api/gc`, 'POST')
   // Fail loudly on `gc not exposed` (server missing `--expose-gc`): silently ignoring it
   // degrades GC tests into waiting for natural GC, which times out with a misleading assertion.
-  if (!resp.ok) throw new Error(`forceServerGc() failed: ${await resp.text()}`)
+  if (!resp.ok) throw new Error(`forceServerGc() failed: ${resp.text}`)
 }
 
-/** The server's `heapUsed`, in bytes. */
+/** The page's server's `heapUsed`, in bytes. */
 async function serverHeapUsed(): Promise<number> {
-  const resp = await fetch(`${getServerUrl()}/api/heap-used`)
-  return ((await resp.json()) as { heapUsed: number }).heapUsed
+  const resp = await fetchFromPage(`${getServerUrl()}/api/heap-used`, 'GET')
+  return (JSON.parse(resp.text) as { heapUsed: number }).heapUsed
+}
+
+function fetchFromPage(url: string, method: 'GET' | 'POST'): Promise<{ ok: boolean; text: string }> {
+  return page.evaluate(
+    async ({ url, method }) => {
+      const resp = await fetch(url, { method })
+      return { ok: resp.ok, text: await resp.text() }
+    },
+    { url, method },
+  )
 }
 
 /** Runs what a telefunction left under `key` with `onServerAction()` (server-actions.ts), also while the page is offline. */

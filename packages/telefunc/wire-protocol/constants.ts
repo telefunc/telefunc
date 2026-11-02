@@ -79,6 +79,10 @@ export const DEFAULT_SERVER_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRA
 /** How long to wait for a WebSocket probe ping/pong before giving up on the upgrade. */
 export const WS_PROBE_TIMEOUT_MS = 3_000
 
+/** The close code of a WebSocket its page closes for good. Not 1000 or 1001: a proxy that restarts closes its sockets
+ *  with 1001, as a browser does for a page that unloads, and the page will come back. */
+export const WS_CLOSE_PAGE_LEFT = 4000
+
 /** How long to wait for the stream-request POST handshake ack on the SSE downstream
  *  before declaring the upstream wire dead and falling back to outbox+batch POSTs. */
 export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
