@@ -178,7 +178,7 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
 
   /** Whether the handle's holders and holds are served: its stubs, participants and listeners, and its tail. */
   track(handle: ServerRoom): void {
-    toggle(this.observers, handle, handle._observed())
+    toggle(this.observers, handle, handle._isObserved())
     toggle(this.listening, handle, handle._state.listenerCount > 0)
     toggle(this.tails, handle, handle._holdsTail())
     toggle(this.receivers, handle, this.listening.has(handle) || this.tails.has(handle))
@@ -451,11 +451,11 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
   // What the replica's parts ask of it
 
   /** Whether a handle here observes the room: a client stub, a participant, or a listener. */
-  observed(): boolean {
+  isObserved(): boolean {
     return this.observers.size > 0
   }
 
-  listened(): boolean {
+  isListened(): boolean {
     return this.listening.size > 0
   }
 
@@ -537,7 +537,7 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
   }
 
   /** A failover rewound the room's control lane, and its meta cells with it, which share its slot. */
-  rewound(): void {
+  onControlLaneRewound(): void {
     this.model.forgetMetaSeqs()
     for (const mirror of this.metaMirrors) mirror.rewound()
     for (const stub of this.stubs) stub.relayEvent({ __r: 'rewound' })

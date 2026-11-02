@@ -39,9 +39,9 @@ interface LaneReceiver {
 /** What this process's handles are to the room, which decides the lanes it subscribes. */
 interface LaneRoles {
   /** Whether a handle observes the room: a client stub, a participant, or a listener. */
-  observed(): boolean
+  isObserved(): boolean
   /** Whether a handle has a listener. */
-  listened(): boolean
+  isListened(): boolean
   /** A pre-attach tail ingests all text. */
   holdsTail(): boolean
   ownsMember(id: string): boolean
@@ -323,14 +323,14 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     const owner = this.owner
     const model = this.model
     const open = !model.closed
-    const observing = open && owner.observed()
+    const observing = open && owner.isObserved()
     const becomesObserved = observing && !this._observing
     if (observing) this.control.start()
     else this.control.stop()
     this._observing = observing
     if (open && (owner.holdsTail() || this.wants.wantsText)) this.semantic.start()
     else this.semantic.stop()
-    const needsRoster = owner.listened() || (open && this.wants.wantsBinary)
+    const needsRoster = owner.isListened() || (open && this.wants.wantsBinary)
     if ((becomesObserved && model.rosterKnown) || (open && !model.rosterKnown && needsRoster)) {
       void owner.refreshMembers().catch(reportRoomError)
     }

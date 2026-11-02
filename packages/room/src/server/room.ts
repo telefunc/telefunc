@@ -426,7 +426,7 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
   }
 
   /** @internal Whether this handle observes the room: a client stub, a participant, or a listener. */
-  _observed(): boolean {
+  _isObserved(): boolean {
     return this.stubs.size > 0 || this._localParticipants.size > 0 || this._state.listenerCount > 0
   }
 
