@@ -19,9 +19,6 @@ type MemorySubscription = {
   owner?: MemoryAttemptOwner
 }
 
-/** A publish's ordering and the local consumers it reached. */
-type Receipt = OrderingInfo & { receivers: number }
-
 /** Deliveries one event-loop turn runs; the rest wait for the next, so a listener answering itself
  *  can't starve the loop. */
 const DELIVERIES_PER_TURN = 1024
@@ -31,10 +28,6 @@ const DELIVERING_NOW = (): void => {}
 
 function copyBytes(bytes: Uint8Array): Uint8Array {
   return new Uint8Array(bytes)
-}
-
-function countConsumers(targets: readonly BackendReceiver[]): number {
-  return targets.reduce((total, target) => total + target.consumers, 0)
 }
 
 /** Deliveries in seq order: the running one stays queued, so a publish made inside it is delivered after. */
@@ -113,19 +106,13 @@ class MemoryPubSub {
     owner?.released(key)
   }
 
-  /** How many local consumers `targets` reach. */
-  consumers(...targets: (readonly BackendReceiver[])[]): number {
-    return targets.reduce((total, of) => total + countConsumers(of), 0)
-  }
-
   /** Delivers `payload` to `targets` at once while nothing is queued; else queues it. */
   publish(
     targets: readonly BackendReceiver[],
     payload: BackendPayload,
     mark: OrderingInfo,
-  ): Receipt | Promise<Receipt> {
-    // Counted before delivery, which may unsubscribe or subscribe.
-    const receipt = { seq: mark.seq, timestamp: mark.timestamp, receivers: countConsumers(targets) }
+  ): OrderingInfo | Promise<OrderingInfo> {
+    const receipt = { seq: mark.seq, timestamp: mark.timestamp }
     if (this.deliveries.deliversNow()) {
       this.deliveries.deliverNow(() => {
         for (const target of targets) target.deliver(payload, mark)

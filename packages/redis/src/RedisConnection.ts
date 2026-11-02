@@ -19,8 +19,6 @@ type RedisConnectionOptions = { redis: RedisClient; prefix: string }
  *  the one subscriber connection their subscriptions share. */
 class RedisConnection {
   readonly prefix: string
-  /** A Cluster node's PUBLISH count is node-local, so it cannot prove global absence. */
-  readonly reportsReceivers: boolean
   readonly subscriptions: RedisSubscriptions
   private commands: RedisClient
   /** The app clients installed with this backend: its command client ends once the last one does. */
@@ -33,7 +31,6 @@ class RedisConnection {
     this.commands = commandClientOf(redis)
     // Pub/Sub channels span every database, so a standalone client's names carry its database.
     this.prefix = isCluster(this.commands) ? prefix : `${prefix}${this.commands.options.db ?? 0}:`
-    this.reportsReceivers = !isCluster(this.commands)
     this.subscriptions = new RedisSubscriptions({ connection: this })
   }
 

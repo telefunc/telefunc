@@ -322,10 +322,9 @@ class MemoryRoomDriver implements RoomDriver {
       for (const target of everyMember) target.deliver(shared, mark)
       delivered?.resolve()
     })
-    const receivers = this.pubSub.consumers(targets, everyTrack, everyMember)
     if (nextTurn !== null) await nextTurn
-    if (delivered === null) return { kind: 'accepted', seq: mark.seq, timestamp: mark.timestamp, receivers }
-    return { kind: 'accepted', seq: mark.seq, timestamp: mark.timestamp, receivers, delivery: delivered.promise }
+    if (delivered === null) return { kind: 'accepted', seq: mark.seq, timestamp: mark.timestamp }
+    return { kind: 'accepted', seq: mark.seq, timestamp: mark.timestamp, delivery: delivered.promise }
   }
 
   async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {

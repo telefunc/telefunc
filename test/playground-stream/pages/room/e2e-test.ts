@@ -48,7 +48,6 @@ type BinaryResult = {
   }>
   cameraOnly: number[]
   defaultOnly: number[]
-  camReceivers: number
 }
 
 type GuardResult = {
@@ -232,7 +231,6 @@ function testRoom() {
     expect(result.frames.map((f) => f.meta)).deep.equal([null, null, null, { key: true }])
     expect(result.cameraOnly).deep.equal([9])
     expect(result.defaultOnly).deep.equal([1, 2, 3])
-    expect(result.camReceivers).greaterThanOrEqual(1)
   })
   testRoomScenario<{ seen: number[][]; serverSeen: number[][]; lateSeen: number[][] }>(
     'own-bytes',

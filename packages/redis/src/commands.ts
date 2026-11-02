@@ -112,8 +112,8 @@ else
 end
 redis.call('SET', KEYS[1], seq_text .. ':' .. string.format('%.0f', ts) .. ':' .. last_text .. ':' .. last_binary)
 local frame = tf_u64(predecessor) .. tf_ordering_frame(seq, ts, ARGV[1])
-local receivers = redis.call('PUBLISH', KEYS[2], frame)
-return {seq, ts, receivers}
+redis.call('PUBLISH', KEYS[2], frame)
+return {seq, ts}
 `
 
 // HEAD EXCHANGE: compares by form, then stores the next head.
@@ -450,15 +450,16 @@ end
 local fence = string.char(${REDIS_DELIVERY_FENCE_BYTE})
 local lane_message = frame
 if ${COMMIT_ARG.channelFence} ~= '' then lane_message = fence .. ${COMMIT_ARG.channelFence} .. frame end
-local receivers = redis.call('PUBLISH', channel_key, lane_message)
+redis.call('PUBLISH', channel_key, lane_message)
 if ${COMMIT_ARG.laneKind} == 'binary' then
   local fan_in = struct.pack('>I2', #${COMMIT_ARG.laneKey}) .. ${COMMIT_ARG.laneKey} .. frame
   local every_track, every_member = fan_in, fan_in
   if ${COMMIT_ARG.everyTrackFence} ~= '' then every_track = fence .. ${COMMIT_ARG.everyTrackFence} .. fan_in end
   if ${COMMIT_ARG.everyMemberFence} ~= '' then every_member = fence .. ${COMMIT_ARG.everyMemberFence} .. fan_in end
-  receivers = receivers + redis.call('PUBLISH', ${COMMIT_KEY.everyTrackChannel}, every_track) + redis.call('PUBLISH', ${COMMIT_KEY.everyMemberChannel}, every_member)
+  redis.call('PUBLISH', ${COMMIT_KEY.everyTrackChannel}, every_track)
+  redis.call('PUBLISH', ${COMMIT_KEY.everyMemberChannel}, every_member)
 end
-return '{"kind":"accepted","seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',"receivers":' .. receivers .. '}'
+return '{"kind":"accepted","seq":' .. seq_text .. ',"timestamp":' .. ts_text .. '}'
 `
 
 // Deletes one lane's retained frame, optionally only while it still holds seq ARGV[1].
@@ -569,7 +570,7 @@ type CommitInput = RoomInc & {
 type CommitReply =
   | StaleIncarnation
   | { kind: 'stale-cell'; index: number }
-  | { kind: 'accepted'; seq: number; timestamp: number; receivers: number }
+  | { kind: 'accepted'; seq: number; timestamp: number }
 
 /** A commit as the driver hands it on: a missing required cell by its key. */
 type CommitOutcome = StaleCommit | Extract<CommitReply, { kind: 'accepted' }>
@@ -587,9 +588,9 @@ const REDIS_COMMANDS = {
     parse: (reply) => {
       // A shared client with ioredis's `stringNumbers` returns integer replies as decimal strings.
       const values = Array.isArray(reply) ? reply.map(Number) : []
-      assert(values.length === 3 && values.every(Number.isSafeInteger), 'Publish script returned an unexpected reply')
-      const [seq, timestamp, receivers] = values as [number, number, number]
-      return { seq, timestamp, receivers }
+      assert(values.length === 2 && values.every(Number.isSafeInteger), 'Publish script returned an unexpected reply')
+      const [seq, timestamp] = values as [number, number]
+      return { seq, timestamp }
     },
   }),
   headExchange: command({

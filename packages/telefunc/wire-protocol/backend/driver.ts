@@ -29,9 +29,8 @@ type BackendListener<Payload extends BackendPayload = BackendPayload> = (
   ordering: OrderingInfo,
 ) => void
 
-/** A publish's ordering, and how many subscribers the backend handed it to, counted its own way (absent where it
- *  can't tell). */
-type PublishResult = OrderingInfo & { receivers?: number }
+/** A publish's ordering. */
+type PublishResult = OrderingInfo
 
 /**
  * What a backend implements to subscribe to a plane's sources (a Broadcast route, a Room lane). Core keeps at most one
@@ -76,8 +75,6 @@ type BroadcastDriver = SubscriptionDriver<BroadcastRoute> & {
  */
 type BackendReceiver = {
   deliver(payload: BackendPayload, ordering: OrderingInfo): void
-  /** How many subscriptions share the attempt now. */
-  readonly consumers: number
 }
 
 type AttemptState = 'establishing' | 'ready' | 'lost' | 'closed'

@@ -379,7 +379,7 @@ class CloudflareBroadcast {
     const info = { seq: authorityState.nextSequence(key), timestamp: Date.now() }
     const presence = authorityState.livePresence(broadcastRouteKey({ key, kind }), info.timestamp)
     await this.forward(calls, key, { routes: [{ key, kind }], payload, info }, presence)
-    return { seq: info.seq, timestamp: info.timestamp, receivers: presence.length }
+    return info
   }
 
   /** Sends `delivery` across to each bucket once, to the coordinator `key` picks there, which hands it to the bucket's

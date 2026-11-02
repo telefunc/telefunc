@@ -32,8 +32,7 @@ class RedisBackend implements BroadcastDriver, RedisDriver {
   }
 
   async publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {
-    const { seq, timestamp, receivers } = await this.connection.run(REDIS_COMMANDS.publish, { route, payload })
-    return { seq, timestamp, receivers: this.connection.reportsReceivers ? receivers : undefined }
+    return await this.connection.run(REDIS_COMMANDS.publish, { route, payload })
   }
 
   subscribe(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {

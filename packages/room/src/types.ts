@@ -76,7 +76,7 @@ type RoomAckReceipt = RoomSendReceipt & { response: unknown }
 type AfterPublishHook<P extends ParticipantMeta = ParticipantMeta> = (
   from: Sender<P>,
   data: unknown,
-  info: RoomSendReceipt & { receivers?: number },
+  info: RoomSendReceipt,
 ) => void | Promise<void>
 
 /** Runs after a private message is delivered; throwing cannot undo delivery. */

@@ -35,11 +35,7 @@ type ChannelPublishInfo = {
   /** Server timestamp, Unix epoch milliseconds. */
   timestamp: number
 }
-type ChannelPublishAck = ChannelPublishInfo & {
-  /** Who the message was handed to, when the backend can count it: subscribers in memory, server instances on
-   *  standalone Redis, session Durable Objects on Cloudflare; absent on Redis Cluster. Not a viewer count. */
-  receivers?: number
-}
+type ChannelPublishAck = ChannelPublishInfo
 
 /** Invoke a fire-and-forget listener while routing both thrown and rejected failures. Returns what `handleError`
  *  returned for a synchronous throw only, which a caller can use to stop iterating; a rejection can't stop it. */

@@ -70,7 +70,6 @@ type AcceptedCommitWire = {
   kind: 'accepted'
   seq: number
   timestamp: number
-  receivers: number
   deliveryToken?: string
 }
 /** A commit the transaction accepted: its order, the lanes it reaches, and the routes subscribed to them then. */
@@ -159,7 +158,6 @@ class RoomAuthority {
       kind: 'accepted',
       seq: mark.seq,
       timestamp: mark.timestamp,
-      receivers: routes.length,
     }
     if (lane.kind === 'inbox' || lane.kind === 'control') receipt.deliveryToken = this.fanout.tokenOf(delivery)
     return receipt

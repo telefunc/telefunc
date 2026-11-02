@@ -265,10 +265,6 @@ class SubscriptionSlot<Source> implements BackendReceiver {
     this.delivers = delivers
   }
 
-  get consumers(): number {
-    return this.attached.size
-  }
-
   /** It was never ready, and is still open. */
   get establishing(): boolean {
     return !this.wasReady && !this.finished

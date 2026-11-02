@@ -86,12 +86,7 @@ class CloudflareRoomDriver implements RoomDriver {
     const session = currentRoomSessionSubscriptions(this)
     const wire = await (session ? session.callAuthority(roomId, commit) : commit(this.stub(roomId)))
     if (wire.kind !== 'accepted') return wire
-    const receipt: CommitAccepted = {
-      kind: 'accepted',
-      seq: wire.seq,
-      timestamp: wire.timestamp,
-      receivers: wire.receivers,
-    }
+    const receipt: CommitAccepted = { kind: 'accepted', seq: wire.seq, timestamp: wire.timestamp }
     if (wire.deliveryToken !== undefined) receipt.delivery = this.stub(roomId).awaitDelivery(wire.deliveryToken)
     return receipt
   }

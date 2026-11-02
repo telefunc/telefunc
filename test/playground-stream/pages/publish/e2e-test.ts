@@ -170,14 +170,13 @@ function testPublish(isDev: boolean, inDocker = false) {
     })
   })
 
-  test('broadcast: a subscribe after abort opens nothing, receivers counts the subscribers a publish reached, and an unsubscribe stops deliveries', async () => {
+  test('broadcast: a subscribe after abort opens nothing, and an unsubscribe stops deliveries', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-server-broadcast-checks')
     await autoRetry(async () => {
       expect(await getResult('#publish-result')).deep.equal({
-        afterAbort: [0, 0],
+        afterAbort: [],
         received: ['leaving', 'joining'],
-        duringDelivery: [1, 1],
         statically: ['first'],
       })
     })

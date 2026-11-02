@@ -166,7 +166,6 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
       kind: 'accepted',
       seq: reply.seq,
       timestamp: reply.timestamp,
-      receivers: this.connection.reportsReceivers ? reply.receivers : undefined,
     }
     // The frame carries the fence token, so observing the fence proves local dispatch.
     if (fence !== null) accepted.delivery = fence.delivery

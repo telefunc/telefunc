@@ -327,7 +327,7 @@ function Publish() {
           setResult(JSON.stringify(await onServerBroadcastChecks()))
         }}
       >
-        Abort, receivers, unsubscribe
+        Abort, unsubscribe
       </button>
 
       <h2>Failing subscribers and publishes</h2>

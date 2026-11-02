@@ -75,6 +75,5 @@ class BroadcastPlane {
 /** The driver's receipt as the public ack, carrying its key like a subscriber's `info`. */
 function toAck(key: string, result: PublishResult): ChannelPublishAck {
   assertDriverOrdering(result)
-  const { seq, timestamp, receivers } = result
-  return receivers === undefined ? { key, seq, timestamp } : { key, seq, timestamp, receivers }
+  return { key, seq: result.seq, timestamp: result.timestamp }
 }

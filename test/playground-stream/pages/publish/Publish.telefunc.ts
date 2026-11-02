@@ -303,12 +303,14 @@ async function onServerBroadcastChecks() {
 
   const aborted = new BroadcastChannel({ key })
   aborted.abort()
-  aborted.subscribe(() => {})
-  aborted.subscribeBinary(() => {})
-  const afterAbort = [
-    (await Broadcast.publish(key, 'after-abort')).receivers,
-    (await Broadcast.publishBinary(key, new Uint8Array([1]))).receivers,
-  ]
+  const afterAbort: unknown[] = []
+  aborted.subscribe((msg) => afterAbort.push(msg))
+  aborted.subscribeBinary((bytes) => afterAbort.push(bytes))
+  // A live subscriber of the key sees both publishes, so the aborted channel had its chance to.
+  const liveSeen = Promise.withResolvers<void>()
+  const unsubscribeLive = Broadcast.subscribe<string>(key, () => liveSeen.resolve())
+  await Broadcast.publishBinary(key, new Uint8Array([1]))
+  await Broadcast.publish(key, 'after-abort')
 
   // publish() resolves once the message is accepted: a store like Redis delivers it to local subscribers after that.
   const leavingSeen = Promise.withResolvers<void>()
@@ -327,10 +329,8 @@ async function onServerBroadcastChecks() {
     Broadcast.subscribe(`${key}:joining`, () => {})
     joiningSeen.resolve()
   })
-  const duringDelivery = [
-    (await Broadcast.publish(`${key}:leaving`, 'leaving')).receivers,
-    (await Broadcast.publish(`${key}:joining`, 'joining')).receivers,
-  ]
+  await Broadcast.publish(`${key}:leaving`, 'leaving')
+  await Broadcast.publish(`${key}:joining`, 'joining')
 
   const statically: string[] = []
   const unsubscribe = Broadcast.subscribe<string>(`${key}:static`, (msg) => {
@@ -338,11 +338,12 @@ async function onServerBroadcastChecks() {
     firstSeen.resolve()
   })
   await Broadcast.publish(`${key}:static`, 'first')
-  await within10s(Promise.all([leavingSeen.promise, joiningSeen.promise, firstSeen.promise]))
+  await within10s(Promise.all([liveSeen.promise, leavingSeen.promise, joiningSeen.promise, firstSeen.promise]))
+  unsubscribeLive()
   unsubscribe()
   await Broadcast.publish(`${key}:static`, 'second')
 
-  return { afterAbort, received, duringDelivery, statically }
+  return { afterAbort, received, statically }
 }
 
 let bugs: string[] | null = null

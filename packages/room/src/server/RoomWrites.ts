@@ -188,7 +188,6 @@ class RoomWrites {
 
   private async finishPublish(sender: Sender, payload: unknown, commit: CommitAccepted): Promise<ChannelPublishAck> {
     const receipt: Omit<ChannelPublishAck, 'key'> = { seq: commit.seq, timestamp: commit.timestamp }
-    if (commit.receivers !== undefined) receipt.receivers = commit.receivers
     const onAfterPublish = this.owner._guards?.onAfterPublish
     if (onAfterPublish) await runAfterHook(() => onAfterPublish(sender, payload, receipt))
     return { key: this.incarnation.id, ...receipt }

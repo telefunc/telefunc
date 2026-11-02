@@ -142,7 +142,6 @@ type CommitAccepted = {
   kind: 'accepted'
   seq: number
   timestamp: number
-  receivers?: number
   /** An inbox or control commit's one at-most-once handoff that never retries; a rejection means the handoff was
    *  lost. Other commits have none. */
   delivery?: Promise<void>

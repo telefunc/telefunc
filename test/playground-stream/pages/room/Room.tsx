@@ -349,19 +349,13 @@ function Room() {
         for (let i = 0; i < 3; i++) {
           await me.publishBinary(new Uint8Array(64).fill(i + 1))
         }
-        // Named track + per-frame meta: mic/camera/screen multiplex over one member lane;
-        // the ack's `receivers` counts the track's live subscriptions (the pause-at-0 signal).
-        const camAck = await me.publishBinary(new Uint8Array(32).fill(9), { track: 'camera', meta: { key: true } })
+        // Named track + per-frame meta: mic/camera/screen multiplex over one member lane.
+        await me.publishBinary(new Uint8Array(32).fill(9), { track: 'camera', meta: { key: true } })
 
         await pollUntil(() => {
           return {
-            result: { frames, cameraOnly, defaultOnly, camReceivers: camAck.receivers },
-            done:
-              frames.length >= 4 &&
-              cameraOnly.length >= 1 &&
-              defaultOnly.length >= 3 &&
-              typeof camAck.receivers === 'number' &&
-              camAck.receivers >= 1,
+            result: { frames, cameraOnly, defaultOnly },
+            done: frames.length >= 4 && cameraOnly.length >= 1 && defaultOnly.length >= 3,
           }
         })
       })}
