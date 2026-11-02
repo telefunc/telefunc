@@ -1,8 +1,16 @@
 export { Upgrade }
-export type { BarrierEmission, ProbeOwner, ProbeSession, ProbeWire, UpgradeOwner, UpgradeSource, UpgradeTarget }
+export type {
+  BarrierEmission,
+  HandoffFrame,
+  JoinRelease,
+  ProbeOwner,
+  ProbeSession,
+  ProbeWire,
+  UpgradeOwner,
+  UpgradeSource,
+  UpgradeTarget,
+}
 
-import type { AttachExchange } from './AttachExchange.js'
-import type { ChannelTable } from './ChannelTable.js'
 import type { ClientChannelTransport, OutboundFrame } from './ClientConnection.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { DecodedFrame } from '../../wire/frame.js'
@@ -82,6 +90,8 @@ type UpgradeState =
       deadline: ReturnType<typeof setTimeout> | null
       from: UpgradeSource
       to: UpgradeTarget
+      /** The connection adopted `to` (`flip`): from here the join runs, and frames from either wire wait for it. */
+      flipped: boolean
       probeHeartbeat: Heartbeat
       upgradeId: string
       /** The join's two completion frames, one per wire. Both must land before dispatching resumes. */
@@ -109,19 +119,23 @@ function isUpgradeCompletionFrame(frame: DecodedFrame): boolean {
   return frame.tag === TAG.FIN || frame.tag === TAG.RECONCILED
 }
 
+/** What a frame a wire delivers is to the connection: `'dispatch'` it outside a flipped handoff; inside one, `'held'`
+ *  for the join, `'complete'` to apply as one of the join's completion frames, or `'fallback'` once the handoff's buffer
+ *  went past its budget. */
+type HandoffFrame = 'dispatch' | 'held' | 'complete' | 'fallback'
+
+/** What a join releases, in the order the server wrote it: the old wire's frames, then the new wire's. The channels its
+ *  RECONCILED left out close unacknowledged between them. */
+type JoinRelease = { old: DecodedFrame[]; deferredOmitted: number[]; new: DecodedFrame[] }
+
 /** The connection an upgrade moves from its SSE wire to a WebSocket. */
 interface UpgradeOwner {
-  readonly transport: ClientChannelTransport
-  dispatchFrame(frame: DecodedFrame): void
-  handleReconciled(ctrl: ReconciledPayload): void
-  fallbackToSse(err: Error): void
-  startTtlIfIdle(): void
+  /** The join didn't complete in time: the connection goes back to SSE. */
+  onHandoffFailed(err: Error): void
 }
 
 type UpgradeOptions = {
   owner: UpgradeOwner
-  channels: ChannelTable
-  exchange: AttachExchange
 }
 
 /** The SSE→WS upgrade: a WebSocket probe staged beside the SSE wire, the barrier that ends the old wire, and the join
@@ -129,17 +143,13 @@ type UpgradeOptions = {
  *  `start`, `stage`, `commit`, `flip`, then `endAttempt` however it ended. */
 class Upgrade implements ProbeOwner {
   private readonly owner: UpgradeOwner
-  private readonly channels: ChannelTable
-  private readonly exchange: AttachExchange
   /** Only while the connection is open: it goes with the open state it was in (see `forget`). */
   private state: UpgradeState = { tag: 'none' }
   /** Set by a permanent upgrade abort, and kept through every state change until dispose. */
   private disabled = false
 
-  constructor({ owner, channels, exchange }: UpgradeOptions) {
+  constructor({ owner }: UpgradeOptions) {
     this.owner = owner
-    this.channels = channels
-    this.exchange = exchange
   }
 
   private get committing(): CommittingUpgrade | null {
@@ -149,8 +159,7 @@ class Upgrade implements ProbeOwner {
   /** Whether the connection's transport is already the new wire. The flip happens inside `committing`; it is not a
    *  state of its own. */
   get flipped(): boolean {
-    const u = this.committing
-    return u !== null && this.owner.transport === u.to
+    return this.committing?.flipped === true
   }
 
   /** Sends are gated from the barrier's emission until its COMMITTED lands. */
@@ -179,11 +188,10 @@ class Upgrade implements ProbeOwner {
     return this.flipped && transport === this.committing!.from
   }
 
-  /** Takes a frame a wire delivered once the connection flipped to the new wire mid-handoff; false outside that. */
-  takeHandoffFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number): boolean {
-    if (!this.flipped) return false
-    this.ingestDuringHandoff(frame, source === this.committing!.from ? 'old' : 'new', byteLength)
-    return true
+  /** Takes a frame a wire delivered: what the connection does with it (see `HandoffFrame`). */
+  takeHandoffFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number): HandoffFrame {
+    if (!this.flipped) return 'dispatch'
+    return this.ingestDuringHandoff(frame, source === this.committing!.from ? 'old' : 'new', byteLength)
   }
 
   /** The connection left its open state, and the upgrade in it. */
@@ -215,7 +223,7 @@ class Upgrade implements ProbeOwner {
   teardown(): CommittingUpgrade | null {
     const u = this.state
     if (u.tag === 'none') return null
-    if (u.tag === 'committing' && this.owner.transport === u.to) {
+    if (u.tag === 'committing' && u.flipped) {
       const record = this.exitCommitting()
       retireOldWire(record.from)
       return record
@@ -225,32 +233,33 @@ class Upgrade implements ProbeOwner {
     return null
   }
 
-  /** The upgrade is given up for good: what the join held of the old wire is handed on, and none starts again. */
-  abandon(): void {
+  /** The upgrade is given up for good, and none starts again. Returns what a flipped join held of the old wire, for
+   *  the connection to deliver, and the channels its RECONCILED left out; null before a flip. */
+  abandon(): Omit<JoinRelease, 'new'> | null {
     const abandoned = this.teardown()
-    if (abandoned) {
-      for (const entry of abandoned.buffer.old) this.owner.dispatchFrame(entry.frame)
-      this.exchange.closeUnacknowledged(abandoned.deferredOmitted)
-    }
     this.disabled = true
+    if (abandoned === null) return null
+    return { old: abandoned.buffer.old.map(({ frame }) => frame), deferredOmitted: abandoned.deferredOmitted }
   }
 
   /** Takes every frame that arrives during the handoff, and is the one place that counts it against the handoff's
    *  budget. Before the flip the probe is nobody's wire, so even a completion frame waits: acting on one would settle a
    *  swap that hasn't happened. After it, completion frames apply and the rest waits, split by the wire it came from. */
-  private ingestDuringHandoff(frame: DecodedFrame, source: 'old' | 'new', byteLength: number): void {
+  private ingestDuringHandoff(frame: DecodedFrame, source: 'old' | 'new', byteLength: number): HandoffFrame {
     const u = this.committing
-    if (u === null) return
-    const flipped = this.owner.transport === u.to
-    if (flipped && this.applyCompletionFrame(frame)) return
+    if (u === null) return 'held'
+    const { flipped } = u
+    if (flipped && isUpgradeCompletionFrame(frame)) return 'complete'
     ;(flipped ? u.buffer[source] : u.heldBeforeFlip).push({ frame, byteLength })
     u.bufferedFrames += 1
     u.bufferedBytes += byteLength
     // Checked after the push, so the frame that trips the budget is still in the prefix the
     // fallback delivers. Pre-flip nothing is committed yet, so the attempt can simply be dropped.
-    if (u.bufferedFrames <= UPGRADE_HANDOFF_BUFFER_FRAMES && u.bufferedBytes <= UPGRADE_HANDOFF_BUFFER_BYTES) return
-    if (flipped) this.owner.fallbackToSse(new NetworkError('Upgrade handoff buffer limit exceeded', true))
-    else u.attempt.abort()
+    if (u.bufferedFrames <= UPGRADE_HANDOFF_BUFFER_FRAMES && u.bufferedBytes <= UPGRADE_HANDOFF_BUFFER_BYTES)
+      return 'held'
+    if (flipped) return 'fallback'
+    u.attempt.abort()
+    return 'held'
   }
 
   onProbePong(): void {
@@ -258,8 +267,12 @@ class Upgrade implements ProbeOwner {
     if (u.tag !== 'none') u.probeHeartbeat?.resetPong()
   }
 
+  /** The probe delivers only before the flip, which hands its socket to the transport: what it delivers waits for it. */
   onProbeFrame(frame: DecodedFrame, byteLength: number): void {
-    if (frame.tag !== TAG.READY) return this.ingestDuringHandoff(frame, 'new', byteLength)
+    if (frame.tag !== TAG.READY) {
+      this.ingestDuringHandoff(frame, 'new', byteLength)
+      return
+    }
     if (this.state.tag === 'staging') this.state.settleReady?.(frame.payload)
   }
 
@@ -267,24 +280,26 @@ class Upgrade implements ProbeOwner {
     if (this.state.tag !== 'none') this.state.attempt.abort()
   }
 
-  handleFin(): void {
+  /** The old wire's FIN came: what the join releases, if that completed it. */
+  handleFin(): JoinRelease | null {
     const u = this.committing
-    if (u === null) return
+    if (u === null) return null
     u.finReceived = true
-    this.tryComplete()
+    return this.tryComplete()
   }
 
-  tryComplete(): void {
+  /** What the join releases once both its completion frames landed after the flip; null till then. */
+  tryComplete(): JoinRelease | null {
     const u = this.committing
-    if (u === null || this.owner.transport !== u.to) return
-    if (!u.finReceived || !u.committed) return
+    if (u === null || !u.flipped) return null
+    if (!u.finReceived || !u.committed) return null
     const { from, buffer, deferredOmitted } = this.exitCommitting()
     retireOldWire(from)
-    for (const entry of buffer.old) this.owner.dispatchFrame(entry.frame)
-    this.exchange.closeUnacknowledged(deferredOmitted)
-    for (const entry of buffer.new) this.owner.dispatchFrame(entry.frame)
-    for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._attach.onUpgradeJoined()
-    this.owner.startTtlIfIdle()
+    return {
+      old: buffer.old.map(({ frame }) => frame),
+      deferredOmitted,
+      new: buffer.new.map(({ frame }) => frame),
+    }
   }
 
   // ── State transitions: every `this.state =` write goes through these. ──
@@ -320,6 +335,7 @@ class Upgrade implements ProbeOwner {
       deadline: u.deadline,
       from,
       to,
+      flipped: false,
       probeHeartbeat: session.probeHeartbeat,
       upgradeId: session.upgradeId,
       finReceived: false,
@@ -337,7 +353,7 @@ class Upgrade implements ProbeOwner {
   endAttempt(attempt: AbortController): void {
     const u = this.state
     if (u.tag === 'none' || u.attempt !== attempt) return
-    if (u.tag === 'committing' && this.owner.transport === u.to) return
+    if (u.tag === 'committing' && u.flipped) return
     if (u.deadline) clearTimeout(u.deadline)
     this.state = { tag: 'none' }
   }
@@ -423,8 +439,10 @@ class Upgrade implements ProbeOwner {
 
   // ── The join ──
 
-  /** The barrier went and the connection adopted the new wire: the probe becomes it, and the join begins. */
-  flip(): void {
+  /** The barrier went and the connection adopted the new wire: the probe becomes it, and the join begins. Returns the
+   *  completion frames the probe delivered before, in order, for the connection to apply; then it calls `tryComplete`.
+   *  The buffer is made whole first, so a COMMITTED among them cannot complete a join over a partial one. */
+  flip(): DecodedFrame[] {
     const u = this.committing
     assert(u !== null)
     if (u.deadline) {
@@ -432,28 +450,13 @@ class Upgrade implements ProbeOwner {
       u.deadline = null
     }
     u.probeHeartbeat.stop()
+    u.flipped = true
     u.to.adoptProbe()
     u.joinTimer = setTimeout(() => this.onJoinTimeout(), UPGRADE_HANDOFF_JOIN_TIMEOUT_MS)
-    // What the probe delivered before the swap can be acted on now. The buffer is made whole
-    // first, so the COMMITTED that may be among them cannot complete a join over a partial one.
     const held = u.heldBeforeFlip.splice(0)
     for (const { frame, byteLength } of held)
       if (!isUpgradeCompletionFrame(frame)) u.buffer.new.push({ frame, byteLength })
-    for (const { frame } of held) if (isUpgradeCompletionFrame(frame)) this.applyCompletionFrame(frame)
-    this.tryComplete()
-  }
-
-  /** True if the frame was one of the join's completion frames, and has been applied. */
-  private applyCompletionFrame(frame: DecodedFrame): boolean {
-    if (frame.tag === TAG.FIN) {
-      this.handleFin()
-      return true
-    }
-    if (frame.tag === TAG.RECONCILED) {
-      this.owner.handleReconciled(frame.payload)
-      return true
-    }
-    return false
+    return held.map(({ frame }) => frame).filter(isUpgradeCompletionFrame)
   }
 
   private onJoinTimeout(): void {
@@ -467,7 +470,7 @@ class Upgrade implements ProbeOwner {
       return
     }
     const waitingFor = u.finReceived ? 'RECONCILED' : 'FIN'
-    this.owner.fallbackToSse(new NetworkError(`Upgrade handoff timed out waiting for ${waitingFor}`, true))
+    this.owner.onHandoffFailed(new NetworkError(`Upgrade handoff timed out waiting for ${waitingFor}`, true))
   }
 }
 

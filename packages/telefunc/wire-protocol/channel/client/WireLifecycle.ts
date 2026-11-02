@@ -30,7 +30,7 @@ import type { ReconciledPayload } from '../../wire/payloads.js'
 import { ChannelTable } from './ChannelTable.js'
 import { SendGate, type SendGateOwner } from './SendGate.js'
 import { Liveness, type LivenessOwner } from './Liveness.js'
-import { Upgrade, type UpgradeOwner, type UpgradeSource, type UpgradeTarget } from './Upgrade.js'
+import { Upgrade, type JoinRelease, type UpgradeOwner, type UpgradeSource, type UpgradeTarget } from './Upgrade.js'
 import { AttachExchange, type AttachExchangeOwner, type ReconcileBatch } from './AttachExchange.js'
 
 import { pingDeadline } from '../../wire/pingDeadline.js'
@@ -127,7 +127,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.owner = owner
     this.telefuncUrl = telefuncUrl
     this.connectionOptions = options
-    this.upgrade = new Upgrade({ owner: this, channels: this.channels, exchange: this.exchange })
+    this.upgrade = new Upgrade({ owner: this })
     this.allowsWebSocket = options.transports.includes(CHANNEL_TRANSPORT.WS)
     this.idleTimeoutMs = options.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS
     this.transport = TRANSPORT_REGISTRY[options.transports[0]!](telefuncUrl, options, this)
@@ -249,10 +249,20 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void {
     // An abandoned wire still delivers, but its RECONCILED answers a RECONCILE the next wire's has replaced.
     if (abandoned && frame.tag === TAG.RECONCILED) return
-    if (!this.upgrade.takeHandoffFrame(frame, source, byteLength)) this.dispatchFrame(frame)
+    switch (this.upgrade.takeHandoffFrame(frame, source, byteLength)) {
+      case 'dispatch':
+        this.dispatchFrame(frame)
+        return
+      case 'complete':
+        this.applyCompletionFrame(frame)
+        return
+      case 'fallback':
+        this.fallbackToSse(new NetworkError('Upgrade handoff buffer limit exceeded', true))
+        return
+    }
   }
 
-  dispatchFrame(frame: DecodedFrame): void {
+  private dispatchFrame(frame: DecodedFrame): void {
     // Track seq for ALL sequenced frames, ACK_RES and the closing ones too; otherwise reconciles under-report lastSeq.
     if (isSequencedFrame(frame)) {
       const seq = this.trackSeq(frame.index, frame.seq)
@@ -266,7 +276,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     // ATTACH_RESULT and the wire-level and closing ctrls need connection bookkeeping; the rest is per-channel.
     switch (frame.tag) {
       case TAG.FIN:
-        this.upgrade.handleFin()
+        this.releaseJoin(this.upgrade.handleFin())
         return
       case TAG.RECONCILED:
         this.handleReconciled(frame.payload)
@@ -340,7 +350,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.handleTransportLoss(err, rejectedByServer)
   }
 
-  handleReconciled(ctrl: ReconciledPayload): void {
+  private handleReconciled(ctrl: ReconciledPayload): void {
     if (!this.upgrade.onReconciled(ctrl)) return
     this.transport.applyReconciledSettings(ctrl)
     this.takeServerSettings(ctrl)
@@ -354,7 +364,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     for (const channel of outcome.channelsToOpen) {
       channel._onTransportOpen(this.transport.batched, this.transport.uplink, this.transport.downlink)
     }
-    this.upgrade.tryComplete()
+    this.releaseJoin(this.upgrade.tryComplete())
     if (outcome.reconcileComplete) {
       this.serverTransports = ctrl.transports
       this.startTtlIfIdle()
@@ -411,16 +421,43 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
         return
       }
       this.adoptTransport(to)
-      this.upgrade.flip()
+      for (const frame of this.upgrade.flip()) this.applyCompletionFrame(frame)
+      this.releaseJoin(this.upgrade.tryComplete())
     } finally {
       this.upgrade.endAttempt(attempt)
       this.exchange.flushPendingRegisterReconcile()
     }
   }
 
-  fallbackToSse(err: Error): void {
+  /** A completion frame of the join, applied once the connection flipped: FIN from the old wire, RECONCILED from the
+   *  new. */
+  private applyCompletionFrame(frame: DecodedFrame): void {
+    if (frame.tag === TAG.FIN) this.releaseJoin(this.upgrade.handleFin())
+    else if (frame.tag === TAG.RECONCILED) this.handleReconciled(frame.payload)
+  }
+
+  /** The join completed: the old wire's frames, then the channels its RECONCILED left out closed, then the new wire's,
+   *  as the server wrote them; then the channels learn they are on the WebSocket. */
+  private releaseJoin(release: JoinRelease | null): void {
+    if (release === null) return
+    for (const frame of release.old) this.dispatchFrame(frame)
+    this.exchange.closeUnacknowledged(release.deferredOmitted)
+    for (const frame of release.new) this.dispatchFrame(frame)
+    for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._attach.onUpgradeJoined()
+    this.startTtlIfIdle()
+  }
+
+  onHandoffFailed(err: Error): void {
+    this.fallbackToSse(err)
+  }
+
+  private fallbackToSse(err: Error): void {
     if (this.closed) return
-    this.upgrade.abandon()
+    const abandoned = this.upgrade.abandon()
+    if (abandoned) {
+      for (const frame of abandoned.old) this.dispatchFrame(frame)
+      this.exchange.closeUnacknowledged(abandoned.deferredOmitted)
+    }
     this.transport.abandonActiveTransport()
     this.transport.dispose()
     this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.SSE](this.telefuncUrl, this.connectionOptions, this)
@@ -474,7 +511,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 
   /** Starts the idle timer on a live wire with no channel open and nothing queued; the transport drains first. */
-  startTtlIfIdle(): void {
+  private startTtlIfIdle(): void {
     if (!this.connected || this.ttl || !this.gate.idle || !this.channels.idle) {
       return
     }
