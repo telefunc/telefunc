@@ -5,7 +5,7 @@ import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { ROOM_ROSTER_PART_MEMBERS } from '../constants.js'
 import type { MemberSnapshot, RoomRosterEvent } from '../../shared/protocol.js'
 import { Slice } from '../../shared/Slice.js'
-import type { MembershipEvent, RoomModel } from '../../shared/RoomModel.js'
+import type { MembershipEvent, RoomModel, RosterRead } from '../../shared/RoomModel.js'
 import { reportRoomError } from '../reportRoomError.js'
 import { type RoomStub, unorderedEventText } from '../RoomStub.js'
 import type { AuthoritySync } from './AuthoritySync.js'
@@ -55,10 +55,7 @@ class RosterStream {
   /** Reconciles with a roster read in `ROOM_PLAN_SLICE_MS` slices, replaying `events`, which grow until it ends; false
    *  if the room closed first. Every client gets a roster that corrected a drift; otherwise only the clients still owed
    *  their first. */
-  async reconcile(
-    roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
-    events: readonly MembershipEvent[],
-  ): Promise<boolean> {
+  async reconcile(roster: RosterRead, events: readonly MembershipEvent[]): Promise<boolean> {
     this.reconciling = this.model.rosterKnown
     try {
       const drifted = await this.model.reconcileRoster(roster, events)

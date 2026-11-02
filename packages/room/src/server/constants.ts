@@ -20,6 +20,7 @@ export {
   ROOM_DEMAND_PAGE_ENTRIES,
   ROOM_META_REPAIR_MS,
   ROOM_TOMBSTONE_TTL_MS,
+  ROOM_DEPARTING_RECORD_MS,
   ROOM_CLOSE_LEASE_MS,
   ROOM_LAPSE_AFTER_CLOSE_MS,
   ROOM_GUARD_USAGE,
@@ -60,6 +61,9 @@ const ROOM_DEMAND_PAGE_ENTRIES = 1024
 // exchange and its publish, or the lane lost it, so a whole read repairs it.
 const ROOM_META_REPAIR_MS = 1_000
 const ROOM_TOMBSTONE_TTL_MS = 60_000
+// How long a member's departing record outlives its leave: several heartbeats, each of which reads the roster of a view
+// behind the control lane, so a view that missed the leave event reads the record before the next sweep removes it.
+const ROOM_DEPARTING_RECORD_MS = ROOM_HEARTBEAT_INTERVAL_MS * 4
 const ROOM_CLOSE_LEASE_MS = 15_000
 /** How long past an unheld room's close its head lapses: the close that server's timer starts lands well before. */
 const ROOM_LAPSE_AFTER_CLOSE_MS = 5_000

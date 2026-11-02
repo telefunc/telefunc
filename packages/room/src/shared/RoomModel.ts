@@ -1,5 +1,5 @@
 export { RoomModel }
-export type { MemberEntry, MembershipEvent, RoomModelOwner, ServerModelOwner }
+export type { MemberEntry, MembershipEvent, RosterRead, RoomModelOwner, ServerModelOwner }
 
 import { assert, assertUsage } from '../utils/assert.js'
 import { untether, getOrCreate } from 'telefunc/__internal'
@@ -20,6 +20,11 @@ import type { RoomState } from './state.js'
 
 /** A membership event as this model got it, whether it applied it or not. */
 type MembershipEvent = { join: MemberSnapshot } | { leave: string } | { meta: { id: string; update: MemberMetaUpdate } }
+
+/** A roster as read: its members; why each member that left recently left (a server reads its departing records);
+ *  and `behind` while this side's delivery hadn't reached what the read covers: a leave event may still be on its
+ *  way. */
+type RosterRead = { members: MemberSnapshot[]; departing?: ReadonlyMap<string, LeaveCause>; behind?: boolean }
 
 type MemberEntry = {
   id: string
@@ -430,13 +435,9 @@ class RoomModel {
     return { sender: senderSnapshot(from, meta.object, pending.identity ?? null) }
   }
 
-  /** The first roster loads silently; later ones narrate the drift they correct as events. A departing member stays
-   *  until its leave event, which carries the cause. Runs `reconcilingRoster` a `ROOM_PLAN_SLICE_MS` slice per turn;
-   *  null if the room closed between slices. */
-  async reconcileRoster(
-    roster: { members: MemberSnapshot[]; departing?: ReadonlySet<string> },
-    events: readonly MembershipEvent[],
-  ): Promise<boolean | null> {
+  /** The first roster loads silently; later ones narrate the drift they correct as events. Runs `reconcilingRoster` a
+   *  `ROOM_PLAN_SLICE_MS` slice per turn; null if the room closed between slices. */
+  async reconcileRoster(roster: RosterRead, events: readonly MembershipEvent[]): Promise<boolean | null> {
     const steps = this.reconcilingRoster(roster, events)
     const slice = new Slice()
     let step = steps.next()
@@ -450,16 +451,13 @@ class RoomModel {
 
   /** Reconciles with a roster read a member per step, the membership `events` since the read began, which may grow
    *  between steps, replayed onto it first, so no step undoes one. Returns whether a drift was narrated. */
-  *reconcilingRoster(
-    roster: { members: MemberSnapshot[]; departing?: ReadonlySet<string> },
-    events: readonly MembershipEvent[],
-  ): Generator<void, boolean> {
+  *reconcilingRoster(roster: RosterRead, events: readonly MembershipEvent[]): Generator<void, boolean> {
     const listed = new Map<string, MemberSnapshot>()
     for (const member of roster.members) {
       listed.set(member.id, member)
       yield
     }
-    const departing = new Set(roster.departing)
+    const departing = new Map(roster.departing)
     let replayed = 0
     const replay = () => {
       for (; replayed < events.length; replayed++) replayMembershipEvent(listed, departing, events[replayed]!)
@@ -480,10 +478,15 @@ class RoomModel {
       this.bumpState()
     }
     for (const id of [...this.members.keys()]) {
-      if (this.members.has(id) && !listed.has(id) && !departing.has(id)) {
-        // No leave event reached this model, so its cause is unknown: it is reported as removed.
-        this.applyLeave(id, removedCause(undefined))
-        narratedDrift = true
+      if (this.members.has(id) && !listed.has(id)) {
+        // No leave event reached this model: its departing record says why it left. Without one, a model behind the
+        // read keeps the member for its event. One that isn't lost the event, and the record too: a leave older than
+        // the record, which this model didn't follow. Its cause is unknown then, and it's reported as removed.
+        const cause = departing.get(id) ?? (roster.behind === true ? undefined : removedCause(undefined))
+        if (cause !== undefined) {
+          this.applyLeave(id, cause)
+          narratedDrift = true
+        }
       }
       yield
       replay()
@@ -536,7 +539,7 @@ function newEntry(
 
 function replayMembershipEvent(
   members: Map<string, MemberSnapshot>,
-  departing: Set<string>,
+  departing: Map<string, LeaveCause>,
   event: MembershipEvent,
 ): void {
   if ('join' in event) {

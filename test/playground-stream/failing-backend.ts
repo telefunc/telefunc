@@ -30,15 +30,15 @@ import {
 } from '@telefunc/room/backend'
 import { createDeferred } from './createDeferred'
 
-/** `op` is a driver method (its next matching call rejects), 'subscribe' (the next matching subscribe throws, a refusal),
- *  'deliver' (the next message a matching subscription gets is dropped), 'lost' (a matching subscription is lost right
- *  before its next message, as a store that keeps delivering while it restores its link), 'early' (the next matching
- *  subscription is ready only after its first message, as a store whose acknowledgment comes after what it delivered;
- *  each further time, one message later) or 'published' (the next matching call answers 0, as a store that doesn't fix
- *  a publish's recipients, like Redis). `roomId`, or `key` (a Broadcast
- *  key, the start of a Room cell key the call reads or writes, a commit's lane kind or required cell, or an operation's
- *  name), narrows what matches. */
-type BackendFault = { op: string; roomId?: string; key?: string; times?: number }
+/** `op` is a driver method (its next matching call rejects; with `after`, once it ran, as a store whose reply is lost),
+ *  'subscribe' (the next matching subscribe throws, a refusal), 'deliver' (the next message a matching subscription
+ *  gets is dropped), 'lost' (a matching subscription is lost right before its next message, as a store that keeps
+ *  delivering while it restores its link), 'early' (the next matching subscription is ready only after its first
+ *  message, as a store whose acknowledgment comes after what it delivered; each further time, one message later) or
+ *  'published' (the next matching call answers 0, as a store that doesn't fix a publish's recipients, like Redis).
+ *  `roomId`, or `key` (a Broadcast key, the start of a Room cell key the call reads or writes, a commit's or a
+ *  subscription's lane kind or a required cell, or an operation's name), narrows what matches. */
+type BackendFault = { op: string; roomId?: string; key?: string; times?: number; after?: boolean }
 
 type Source = BroadcastRoute | RoomSubscriptionSource
 type Call = { roomId?: string; keys: string[] }
@@ -158,8 +158,12 @@ function failing<Driver extends SubscriptionDriver<Source>>(memory: Driver): Dri
       if (op === 'published')
         return (key: string) => (takeFault(op, { keys: [key] }) ? 0 : Reflect.apply(value, target, [key]))
       return (...args: unknown[]) => {
-        if (!takeFault(op, callOfArgs(op, args))) return Reflect.apply(value, target, args)
+        const fault = takeFault(op, callOfArgs(op, args))
+        if (!fault) return Reflect.apply(value, target, args)
         const error = new Error(`failing-backend: ${op} failed`)
+        if (fault.after) {
+          return (Reflect.apply(value, target, args) as Promise<unknown>).then(() => Promise.reject(error))
+        }
         return value.constructor.name === 'AsyncGeneratorFunction'
           ? (async function* () {
               throw error
@@ -247,11 +251,12 @@ async function* heldCellPages(pages: AsyncIterable<CellsRead>, hold: CellPagesHo
   }
 }
 
-function takeFault(op: string, call: Call): boolean {
+function takeFault(op: string, call: Call): BackendFault | null {
   const index = faults.findIndex((fault) => fault.op === op && matches(fault, call))
-  if (index === -1) return false
-  if (--faults[index]!.times === 0) faults.splice(index, 1)
-  return true
+  if (index === -1) return null
+  const fault = faults[index]!
+  if (--fault.times === 0) faults.splice(index, 1)
+  return fault
 }
 
 function matches(fault: { roomId?: string; key?: string }, call: Call): boolean {
@@ -260,7 +265,7 @@ function matches(fault: { roomId?: string; key?: string }, call: Call): boolean 
 }
 
 function callOf(source: Source): Call {
-  return 'roomId' in source ? { roomId: source.roomId, keys: [] } : { keys: [source.key] }
+  return 'roomId' in source ? { roomId: source.roomId, keys: [source.lane.kind] } : { keys: [source.key] }
 }
 
 function callOfArgs(op: string, args: unknown[]): Call {

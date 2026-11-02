@@ -9,6 +9,7 @@ import type { DemandExchange } from '../lanes/DemandExchange.js'
 import { sweepLapsedRoomsSoon } from '../store/directory.js'
 import { reportRoomError } from '../reportRoomError.js'
 import { reapLapsedLeases } from '../store/lease.js'
+import { sweepDepartingRecords } from '../store/members.js'
 import { maintainHold } from './hold.js'
 import type { RoomIncarnation } from '../protocol.js'
 import { dropReplacedMetaGenerations } from '../store/meta.js'
@@ -30,8 +31,9 @@ type RoomHeartbeatOptions = {
 }
 
 /** Graceful departures use events; the heartbeat renews this server's lease and its demand, reaps the lapsed leases
- *  whose servers crashed, and reads the roster again once the control lane is past what the view covers. It runs while
- *  the room is open and this process observes it, owns an inbox, or reports demand. */
+ *  whose servers crashed, sweeps the departing records past their time, and reads the roster again once the control
+ *  lane is past what the view covers. It runs while the room is open and this process observes it, owns an inbox, or
+ *  reports demand. */
 class RoomHeartbeat {
   private timer: ReturnType<typeof setInterval> | null = null
   /** A slow backend must not pile up overlapping ticks. */
@@ -89,6 +91,7 @@ class RoomHeartbeat {
         const incarnation = this.incarnation
         await dropReplacedMetaGenerations(incarnation.id, incarnation.inc)
         await reapLapsedLeases(incarnation)
+        await sweepDepartingRecords(incarnation)
         await this.authority.checkCoverage()
       }
       if (!this.model.closed) await maintainHold(this.incarnation)

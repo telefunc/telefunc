@@ -2005,6 +2005,18 @@ function Room() {
         await pollUntil(() => ({ done: joinView.count === 1 }))
         const listed = await onListParticipantNames(joinRoomId)
 
+        const [lostRoomId, lostView] = await createRoom('hiccup-lost-leave')
+        const lostLeaves: string[] = []
+        lostView.onLeave((member, cause) => lostLeaves.push(`${member.meta.name}:${cause.type}`))
+        const leaver = await lostView.join({ meta: { name: 'Leaver' } })
+        // The leave commits, but its event never reaches this server, and its reply is lost.
+        await onFailBackend({ op: 'deliver', roomId: lostRoomId, key: 'control' })
+        await onFailBackend({ op: 'runOperation', roomId: lostRoomId, key: 'leave', after: true })
+        const lostLeave = await settle(leaver.leave())
+        // The next control frame shows the server the one it missed, which a roster read repairs.
+        await lostView.join({ meta: { name: 'Next' } })
+        await pollUntil(() => ({ done: lostLeaves.length > 0 }))
+
         const [laneRoomId, laneView] = await createRoom('hiccup-lane')
         const got: string[] = []
         laneView.subscribe((data) => got.push(data as string))
@@ -2019,6 +2031,7 @@ function Room() {
           JSON.stringify({
             leave: { firstLeave, publishAfter, secondLeave, leaves, count: leaveView.count },
             join: { firstJoin, count: joinView.count, listed },
+            lost: { leave: lostLeave, leaves: lostLeaves },
             lane: { ended: ended > 0, got },
           }),
         )

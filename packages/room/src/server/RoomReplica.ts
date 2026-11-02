@@ -24,7 +24,7 @@ import type {
   SenderStamp,
 } from '../shared/protocol.js'
 import type { RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope, RoomIncarnation } from './protocol.js'
-import { RoomModel, type MembershipEvent, type ServerModelOwner } from '../shared/RoomModel.js'
+import { RoomModel, type MembershipEvent, type RosterRead, type ServerModelOwner } from '../shared/RoomModel.js'
 import type { LeaveCause } from '../types.js'
 import { AuthoritySync, type AuthoritySyncOwner } from './lifecycle/AuthoritySync.js'
 import { PendingDmAcks } from './PendingDmAcks.js'
@@ -194,10 +194,7 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
     return this.authority.reconcileAuthority()
   }
 
-  applyRoster(
-    roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
-    events: readonly MembershipEvent[],
-  ): Promise<boolean> {
+  applyRoster(roster: RosterRead, events: readonly MembershipEvent[]): Promise<boolean> {
     return this.roster.reconcile(roster, events)
   }
 

@@ -1322,7 +1322,7 @@ function testRoom() {
 
 /** Tests that need the failing backend (failing-backend.ts), which a server without Redis installs. */
 function testRoomFailingBackend() {
-  test('room: a store write that fails once heals: a failed leave can be retried, a failed join leaves no member, and a lane the store ends is replaced', async () => {
+  test("room: a store write that fails once heals: a failed leave can be retried, a failed join leaves no member, a leave whose event and reply are lost ends once with 'left', and a lane the store ends is replaced", async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-hiccups')
     await autoRetry(async () => {
@@ -1335,6 +1335,7 @@ function testRoomFailingBackend() {
           count: 0,
         },
         join: { firstJoin: 'Internal Server Error — see server logs', count: 1, listed: ['Second'] },
+        lost: { leave: 'Internal Server Error — see server logs', leaves: ['Leaver:left'] },
         lane: { ended: true, got: ['before', 'after'] },
       })
     })

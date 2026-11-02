@@ -2,12 +2,13 @@ export { AuthoritySync }
 export type { AuthoritySyncOptions, AuthoritySyncOwner }
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
+import { raceTimeout } from '../../utils/raceTimeout.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
+import { createDeferred } from 'telefunc/__internal'
 import { getRoomPlane } from '../../backend/plane.js'
-import { ROOM_META_REPAIR_MS } from '../constants.js'
+import { ROOM_HORIZON_MS, ROOM_META_REPAIR_MS } from '../constants.js'
 import type { RoomIncarnation } from '../protocol.js'
-import type { MembershipEvent, RoomModel } from '../../shared/RoomModel.js'
-import type { MemberSnapshot } from '../../shared/protocol.js'
+import type { MembershipEvent, RoomModel, RosterRead } from '../../shared/RoomModel.js'
 import { reportRoomError } from '../reportRoomError.js'
 import { CONTROL_LANE, readOpenConfig } from '../lanes/lanes.js'
 import { reapAndReadRoster } from '../store/roster.js'
@@ -21,10 +22,7 @@ interface AuthoritySyncOwner {
   /** A failover rewound the control lane: the view forgets its meta seqs. */
   onControlLaneRewound(): void
   /** Applies a complete roster read, and sends it to the clients it concerns; false if the view moved past it. */
-  applyRoster(
-    roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
-    events: readonly MembershipEvent[],
-  ): Promise<boolean>
+  applyRoster(roster: RosterRead, events: readonly MembershipEvent[]): Promise<boolean>
   closeFromAuthority(): void
 }
 
@@ -53,6 +51,8 @@ class AuthoritySync {
   /** The highest control seq delivered, and the first of the delivered run that ends at it. */
   private received = 0
   private runStart = 0
+  /** Settled at each control delivery, then replaced: what a wait for delivery to reach a seq awaits. */
+  private delivery = createDeferred()
 
   private readonly owner: AuthoritySyncOwner
   private readonly incarnation: RoomIncarnation
@@ -108,6 +108,8 @@ class AuthoritySync {
     if (seq <= this.received) this.onControlLaneRewound()
     if (seq !== this.received + 1) this.runStart = seq
     this.received = seq
+    this.delivery.resolve()
+    this.delivery = createDeferred()
     if (seq <= this.covered + 1) this.covered = Math.max(this.covered, seq)
     this.joinRun()
     if (this.covered < this.received) {
@@ -177,6 +179,25 @@ class AuthoritySync {
     return this.pendingRefresh
   }
 
+  /** Whether the control lane's delivery here is still behind what a roster read just covered, past Room's horizon.
+   *  A leave the read no longer lists may then be on its way, and only its event or its departing record ends that
+   *  member. Until delivery reaches the lane's order after the read, the read waits for it, and for the leave events
+   *  it brings. A view the lane doesn't deliver to, or a first roster, which narrates nothing, waits for nothing. */
+  private async deliveryBehind(): Promise<boolean> {
+    if (!this.model.rosterKnown || !this.lanePlan.observing || !this.lanePlan.controlEstablished) return false
+    const mark = await this.controlMark()
+    let waiting = true
+    const reached = (async () => {
+      while (waiting && this.received < mark && !this.model.closed) await this.delivery.promise
+      return this.received >= mark
+    })()
+    try {
+      return !(await raceTimeout(reached, ROOM_HORIZON_MS, () => false))
+    } finally {
+      waiting = false
+    }
+  }
+
   /** The roster is known, and the control lane delivers every change since. */
   private current(): boolean {
     return this.model.rosterKnown && this.lanePlan.observing && this.lanePlan.controlEstablished
@@ -210,7 +231,8 @@ class AuthoritySync {
     const events = this.model.recordMembership()
     try {
       const roster = await reapAndReadRoster(this.incarnation)
-      if (this.model.closed || !(await owner.applyRoster(roster, events))) return
+      const behind = await this.deliveryBehind()
+      if (this.model.closed || !(await owner.applyRoster({ ...roster, behind }, events))) return
     } finally {
       this.model.stopRecordingMembership()
     }

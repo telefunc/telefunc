@@ -42,8 +42,8 @@ function memberCellKey(memberId: string): string {
 function memberIdOfCellKey(key: string): string {
   return key.slice(MEMBER_CELL_PREFIX.length)
 }
-/** A member that left, from its leave until the leave is handed off: a roster read meanwhile keeps it departing, so
- *  its leave event, which carries the cause, ends it. */
+/** A member that left, with its cause, written by its leave and swept `ROOM_DEPARTING_RECORD_MS` after it: a view
+ *  that missed the leave event ends the member with it (`DepartingRecord`). */
 const DEPARTING_CELL_PREFIX = 'departing:'
 function departingCellKey(memberId: string): string {
   return DEPARTING_CELL_PREFIX + memberId

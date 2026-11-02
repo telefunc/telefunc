@@ -3,10 +3,12 @@ export { reapAndReadRoster, reapAndReadMembersById, reapAndCountPresence, reapAn
 import { assert } from '../../utils/assert.js'
 import type { MemberSnapshot } from '../../shared/protocol.js'
 import type { RoomMemberRecord, RoomIncarnation } from '../protocol.js'
-import type { ParticipantMeta } from '../../types.js'
+import type { LeaveCause, ParticipantMeta } from '../../types.js'
 import { memberMetaOf, readMembersMetaCells, type MemberMetaCells } from './meta.js'
 import { eachInFlight, readOpenCells, readPrefix, readPrefixAt } from './cellStore.js'
+import { leaveCauseFromWire } from '../../shared/protocol.js'
 import { decodeRoomRecord } from '../lanes/lanes.js'
+import type { DepartingRecord } from './members.js'
 import {
   DEPARTING_CELL_PREFIX,
   LEASE_CELL_PREFIX,
@@ -20,9 +22,9 @@ import { reapLeases } from './lease.js'
 
 // The room's members as read from its cells, each read after reaping the lapsed leases it found.
 
-type Roster = { members: MemberSnapshot[]; departing: Set<string> }
+type Roster = { members: MemberSnapshot[]; departing: Map<string, LeaveCause> }
 
-/** Live members, and the departing ones, whose leave is not handed off yet; read again after a lapsed lease's were
+/** Live members, and why each recent leaver left (its departing record); read again after a lapsed lease's were
  *  removed. */
 async function reapAndReadRoster(room: RoomIncarnation): Promise<Roster> {
   const [leases, roster] = await Promise.all([readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX), readRoster(room)])
@@ -37,7 +39,10 @@ async function readRoster(room: RoomIncarnation): Promise<Roster> {
     readPrefix(room.id, room.inc, DEPARTING_CELL_PREFIX),
     readMembersMetaCells(room, cells),
   ])
-  const departing = new Set(Array.from(departingCells.keys(), memberIdOfDepartingKey))
+  const departing = new Map<string, LeaveCause>()
+  for (const [key, raw] of departingCells) {
+    departing.set(memberIdOfDepartingKey(key), leaveCauseFromWire(decodeRoomRecord<DepartingRecord>(raw)))
+  }
   const members = await liveMembers(memberRecords(cells), metaCells)
   return { members, departing }
 }
