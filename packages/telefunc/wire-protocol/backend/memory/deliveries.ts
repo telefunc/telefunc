@@ -1,13 +1,23 @@
 export { MemoryPubSub }
-export type { Subscribers }
+export type { MemoryAttemptOwner, Subscribers }
 
 import { Fifo } from '../../../utils/Fifo.js'
-import type { BackendPayload, Subscriber } from '../driver.js'
+import { DriverAttempt, type BackendPayload, type BackendReceiver } from '../driver.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import { nextTurn } from '../../flowControl/macrotaskYield.js'
 
-/** Subscribers by key; a change replaces a key's array, so an array read at a publish or commit is its targets. */
-type Subscribers = Map<string, readonly Subscriber[]>
+/** Receivers by key; a change replaces a key's array, so an array read at a publish or commit is its targets. */
+type Subscribers = Map<string, readonly BackendReceiver[]>
+
+/** Told each time an attempt on `key` lets go. */
+type MemoryAttemptOwner = { released(key: string): void }
+
+type MemorySubscription = {
+  subscribers: Subscribers
+  key: string
+  receiver: BackendReceiver
+  owner?: MemoryAttemptOwner
+}
 
 /** A publish's ordering and the local consumers it reached. */
 type Receipt = OrderingInfo & { receivers: number }
@@ -23,7 +33,7 @@ function copyBytes(bytes: Uint8Array): Uint8Array {
   return new Uint8Array(bytes)
 }
 
-function countConsumers(targets: readonly Subscriber[]): number {
+function countConsumers(targets: readonly BackendReceiver[]): number {
   return targets.reduce((total, target) => total + target.consumers, 0)
 }
 
@@ -82,35 +92,43 @@ class MemoryPubSub {
   /** Deliveries a microtask is yet to queue. */
   private queuing = 0
 
-  subscribe(subscribers: Subscribers, key: string, subscriber: Subscriber): void {
-    subscribers.set(key, [...(subscribers.get(key) ?? []), subscriber])
+  subscribe(subscription: MemorySubscription): DriverAttempt {
+    const { subscribers, key, receiver } = subscription
+    subscribers.set(key, [...(subscribers.get(key) ?? []), receiver])
+    const attempt = new MemoryAttempt({ pubSub: this, subscription })
     // Ready once what was published before it is delivered, as a network subscriber hears its confirmation after the
     // messages sent before it, and before what is published after it.
-    if (this.queuing > 0) queueMicrotask(() => this.deliveries.deliver(() => subscriber.ready()))
-    else if (this.deliveries.length > 0) this.deliveries.deliver(() => subscriber.ready())
-    else subscriber.ready()
+    if (this.queuing > 0) queueMicrotask(() => this.deliveries.deliver(() => attempt.delivered()))
+    else if (this.deliveries.length > 0) this.deliveries.deliver(() => attempt.delivered())
+    else attempt.delivered()
+    return attempt
   }
 
-  unsubscribe(subscribers: Subscribers, key: string, subscriber: Subscriber): void {
+  unsubscribe({ subscribers, key, receiver, owner }: MemorySubscription): void {
     const current = subscribers.get(key)
-    if (current === undefined || !current.includes(subscriber)) return
-    const rest = current.filter((other) => other !== subscriber)
+    if (current === undefined || !current.includes(receiver)) return
+    const rest = current.filter((other) => other !== receiver)
     if (rest.length === 0) subscribers.delete(key)
     else subscribers.set(key, rest)
+    owner?.released(key)
   }
 
   /** How many local consumers `targets` reach. */
-  consumers(...targets: (readonly Subscriber[])[]): number {
+  consumers(...targets: (readonly BackendReceiver[])[]): number {
     return targets.reduce((total, of) => total + countConsumers(of), 0)
   }
 
   /** Delivers `payload` to `targets` at once while nothing is queued; else queues it. */
-  publish(targets: readonly Subscriber[], payload: BackendPayload, mark: OrderingInfo): Receipt | Promise<Receipt> {
+  publish(
+    targets: readonly BackendReceiver[],
+    payload: BackendPayload,
+    mark: OrderingInfo,
+  ): Receipt | Promise<Receipt> {
     // Counted before delivery, which may unsubscribe or subscribe.
     const receipt = { seq: mark.seq, timestamp: mark.timestamp, receivers: countConsumers(targets) }
     if (this.deliveries.deliversNow()) {
       this.deliveries.deliverNow(() => {
-        for (const target of targets) target.message(payload, mark)
+        for (const target of targets) target.deliver(payload, mark)
       })
       return receipt
     }
@@ -118,7 +136,7 @@ class MemoryPubSub {
     // A queued publish resolves as it is delivered, so a publisher awaiting each can't outrun its subscribers.
     return new Promise((resolve) => {
       this.deliveries.deliver(() => {
-        for (const target of targets) target.message(held, mark)
+        for (const target of targets) target.deliver(held, mark)
         resolve(receipt)
       })
     })
@@ -133,5 +151,29 @@ class MemoryPubSub {
       this.deliveries.deliver(delivery)
     })
     return this.deliveries.isFull ? new Promise<void>(nextTurn) : null
+  }
+}
+
+type MemoryAttemptOptions = { pubSub: MemoryPubSub; subscription: MemorySubscription }
+
+/** An in-process subscription: its receiver is in its key's targets until it unsubscribes. */
+class MemoryAttempt extends DriverAttempt {
+  private readonly pubSub: MemoryPubSub
+  private readonly subscription: MemorySubscription
+
+  constructor({ pubSub, subscription }: MemoryAttemptOptions) {
+    super()
+    this.pubSub = pubSub
+    this.subscription = subscription
+  }
+
+  /** What was published before it is delivered. */
+  delivered(): void {
+    this.transition('ready')
+  }
+
+  async unsubscribe(): Promise<void> {
+    this.transition('closed')
+    this.pubSub.unsubscribe(this.subscription)
   }
 }

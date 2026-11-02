@@ -36,9 +36,9 @@ import {
   type StoredHead,
 } from './semantics.js'
 import {
+  type BackendReceiver,
+  type DriverAttempt,
   type OrderingInfo,
-  type Subscriber,
-  type Unsubscribe,
   MemoryPubSub,
   type Subscribers,
 } from 'telefunc/__internal'
@@ -317,9 +317,9 @@ class MemoryRoomDriver implements RoomDriver {
     const nextTurn = this.pubSub.deliverSoon(() => {
       // A subscriber may write into the bytes it is given, which a retained frame must not share.
       const shared = opts?.retain ? copyBytes(frame) : frame
-      for (const target of targets) target.message(shared, mark)
-      for (const target of everyTrack) target.message(shared, mark)
-      for (const target of everyMember) target.message(shared, mark)
+      for (const target of targets) target.deliver(shared, mark)
+      for (const target of everyTrack) target.deliver(shared, mark)
+      for (const target of everyMember) target.deliver(shared, mark)
       delivered?.resolve()
     })
     const receivers = this.pubSub.consumers(targets, everyTrack, everyMember)
@@ -365,12 +365,10 @@ class MemoryRoomDriver implements RoomDriver {
     this.rooms.get(roomId)?.incarnations.get(inc)?.memberOrders.delete(member)
   }
 
-  subscribe({ roomId, inc, lane }: RoomSubscriptionSource, subscriber: Subscriber): Unsubscribe {
+  subscribe({ roomId, inc, lane }: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {
     const room = this.rooms.get(roomId)
     if (room === undefined || !isOpenIncarnation(this.liveHead(room), inc)) {
-      subscriber.failed(new Error(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`))
-      // Core never unsubscribes a failed subscription.
-      return async () => {}
+      throw new Error(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)
     }
     // Registration is durable before `ready` resolves: a commit accepted after this point must see it.
     const incarnation = this.incarnation(room, inc)
@@ -387,8 +385,7 @@ class MemoryRoomDriver implements RoomDriver {
       key = encodeLaneKey(lane)
     }
     // Ready once what was committed before it is delivered: a lane it replaces delivers those first.
-    this.pubSub.subscribe(subscribers, key, subscriber)
-    return async () => this.pubSub.unsubscribe(subscribers, key, subscriber)
+    return this.pubSub.subscribe({ subscribers, key, receiver })
   }
 
   async dropIncarnation(roomId: string, inc: string): Promise<void> {

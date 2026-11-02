@@ -21,7 +21,7 @@ import type {
   RoomHead,
   RoomSubscriptionSource,
 } from '../backend/contract.js'
-import type { OrderingInfo, Subscriber, TelefuncExtensionNamespace, Unsubscribe } from 'telefunc/__internal'
+import type { BackendReceiver, DriverAttempt, OrderingInfo, TelefuncExtensionNamespace } from 'telefunc/__internal'
 import { CLOUDFLARE_BUCKETS, currentCloudflareMember } from 'telefunc/__internal'
 import type { CloudflareRoomAuthorityStub } from './do.js'
 import { currentRoomSessionSubscriptions, getRoomSessionSubscriptions } from './subscription.js'
@@ -39,8 +39,12 @@ class CloudflareRoomDriver implements RoomDriver {
     this.getNamespace = getNamespace
   }
 
-  subscribe(source: RoomSubscriptionSource, subscriber: Subscriber): Unsubscribe {
-    return getRoomSessionSubscriptions(this).subscribe(source, subscriber)
+  scope(): string | null {
+    return currentCloudflareMember()?.scope ?? null
+  }
+
+  subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {
+    return getRoomSessionSubscriptions(this).subscribe(source, receiver)
   }
 
   async readHead(roomId: string): Promise<RoomHead | null> {

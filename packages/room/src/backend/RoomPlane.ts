@@ -1,12 +1,13 @@
 export { RoomPlane }
+export type { LaneConsumer }
 
 import {
   assertDriverOrdering,
-  Subscriptions,
+  SubscriptionManager,
   type BackendPayload,
-  type BackendReceiver,
   type BackendSubscription,
   type OrderingInfo,
+  type SourceRules,
 } from 'telefunc/__internal'
 import type {
   CommitOptions,
@@ -25,17 +26,26 @@ import type {
 import { roomSubscriptionSourceKey } from './laneKey.js'
 import { assert } from '../utils/assert.js'
 
+/** A lane's consumer. */
+type LaneConsumer = (payload: Uint8Array, ordering: OrderingInfo) => void
+
 type RoomPlaneOptions = { driver: RoomDriver }
+
+const laneSources: SourceRules<RoomSubscriptionSource> = {
+  key: roomSubscriptionSourceKey,
+  // A lane carries bytes.
+  deliveryKind: () => 'binary',
+}
 
 /** What Room's server code calls: the driver's writes and orderings checked, its lane subscriptions shared by source
  *  and host. Room reads the rest from `driver` itself. */
 class RoomPlane {
   readonly driver: RoomDriver
-  private readonly subscriptions: Subscriptions<RoomSubscriptionSource>
+  private readonly subscriptions: SubscriptionManager<RoomSubscriptionSource>
 
   constructor({ driver }: RoomPlaneOptions) {
     this.driver = driver
-    this.subscriptions = new Subscriptions({ driver })
+    this.subscriptions = new SubscriptionManager({ driver, sources: laneSources })
   }
 
   async compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult> {
@@ -65,11 +75,13 @@ class RoomPlane {
     roomId: string,
     inc: string,
     lane: LaneId | EveryTrackLane | EveryMemberLane,
-    receiver: BackendReceiver,
+    receive: LaneConsumer,
   ): BackendSubscription {
-    const source = { roomId, inc, lane }
-    const key = { key: roomSubscriptionSourceKey(source), delivers: 'binary' } as const
-    return this.subscriptions.subscribe(source, key, receiver as BackendReceiver<BackendPayload>)
+    // The manager checked that a lane delivers bytes.
+    return this.subscriptions.subscribe(
+      { roomId, inc, lane },
+      receive as (payload: BackendPayload, ordering: OrderingInfo) => void,
+    )
   }
 
   dispose(): Promise<void> {

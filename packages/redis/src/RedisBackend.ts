@@ -1,13 +1,13 @@
 export { RedisBackend }
 
 import type {
-  Backend,
+  BackendReceiver,
+  BroadcastDriver,
   BroadcastPayload,
   BroadcastRoute,
+  DriverAttempt,
   OrderingInfo,
   PublishResult,
-  Subscriber,
-  Unsubscribe,
 } from 'telefunc/__internal'
 import type { RoomDriver, RoomPlaneKit } from '@telefunc/room/backend'
 import { REDIS_COMMANDS } from './commands.js'
@@ -19,12 +19,12 @@ import type { RedisPlane } from './RedisSubscriptions.js'
 type RedisBackendOptions = { connection: RedisConnection }
 
 /** The installed backend: Broadcast on `connection`, and Room's plane, built on the same connection. */
-class RedisBackend implements Backend, RedisPlane {
+class RedisBackend implements BroadcastDriver, RedisPlane {
   readonly connection: RedisConnection
   readonly planes = {
     [Symbol.for('telefunc.room.plane')]: (kit: RoomPlaneKit): RoomDriver =>
       new RedisRoomDriver({ connection: this.connection, kit }),
-  } satisfies Backend['planes']
+  } satisfies BroadcastDriver['planes']
 
   constructor({ connection }: RedisBackendOptions) {
     this.connection = connection
@@ -38,14 +38,14 @@ class RedisBackend implements Backend, RedisPlane {
     return { seq, timestamp, receivers: this.connection.reportsReceivers ? receivers : undefined }
   }
 
-  subscribe(route: BroadcastRoute, subscriber: Subscriber): Unsubscribe {
+  subscribe(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
     const laneChannel = broadcastChannel(this.connection.prefix, route)
     return this.connection.subscriptions.subscribe({
       source: route,
       laneChannel,
       invalidationChannel: null,
       plane: this,
-      subscriber,
+      receiver,
     })
   }
 

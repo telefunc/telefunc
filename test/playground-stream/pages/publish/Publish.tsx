@@ -12,7 +12,7 @@ import {
   onBroadcastAnswers,
   onBroadcastAnsweringLoop,
   onBroadcastWhileEstablishing,
-  onSubscribeThrows,
+  onSubscribeRefused,
   onDeliveredBeforeReady,
   onJoinedBeforeReady,
   onDeliveredWhileLost,
@@ -256,13 +256,13 @@ function Publish() {
         Broadcast Shield
       </button>
 
-      <h2>Subscribe that throws</h2>
+      <h2>Subscribe the store refuses</h2>
 
       <button
-        id="test-subscribe-throws"
+        id="test-subscribe-refused"
         onClick={async () => {
           setResult('')
-          setResult(JSON.stringify(await onSubscribeThrows()))
+          setResult(JSON.stringify(await onSubscribeRefused()))
         }}
       >
         Subscribe refused by the store

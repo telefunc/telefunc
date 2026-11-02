@@ -3,7 +3,8 @@ export type { LaneAddress, LaneSubscriptionOptions, LaneSubscriptionOwner }
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
-import type { BackendReceiver, BackendSubscription, OrderingInfo } from 'telefunc/__internal'
+import type { BackendSubscription, OrderingInfo } from 'telefunc/__internal'
+import type { LaneConsumer } from '../../backend/RoomPlane.js'
 import type { RoomSubscriptionSource } from '../../backend/contract.js'
 assertIsNotBrowser()
 
@@ -11,7 +12,7 @@ assertIsNotBrowser()
  *  lane ends, recovers, and goes pending or ready. */
 interface LaneSubscriptionOwner {
   /** One attempt at `address`, delivering to `receiver`. */
-  subscribeLane(address: LaneAddress, receiver: BackendReceiver): BackendSubscription
+  subscribeLane(address: LaneAddress, receiver: LaneConsumer): BackendSubscription
   onLaneDelivery(lane: LaneSubscription, payload: Uint8Array, info: OrderingInfo): void
   /** The lane ended for good: the owner's recovery policy replaces it. */
   onLaneTerminal(lane: LaneSubscription): void
@@ -38,7 +39,7 @@ class LaneSubscription {
   readonly address: LaneAddress
   private readonly owner: LaneSubscriptionOwner
   /** Each attempt's receiver, built once per lane. */
-  private readonly receive: BackendReceiver
+  private readonly receive: LaneConsumer
 
   constructor({ owner, address }: LaneSubscriptionOptions) {
     this.owner = owner

@@ -12,7 +12,13 @@ export type {
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorScale, getDeterministicKeyBucketIndex } from './routing.js'
 import { reportLostDeliveries, type OrderedStubs } from './OrderedStubs.js'
 import { assert } from '../../../utils/assert.js'
-import type { BroadcastPayload, BroadcastRoute, PublishResult, Subscriber, Unsubscribe } from '../../backend/driver.js'
+import {
+  DriverAttempt,
+  type BackendReceiver,
+  type BroadcastPayload,
+  type BroadcastRoute,
+  type PublishResult,
+} from '../../backend/driver.js'
 import { broadcastRouteKey } from '../../backend/broadcast/routeKey.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
@@ -59,32 +65,31 @@ type BroadcastNamespace = {
   get(id: unknown, options?: { locationHint: LocationBucket }): TelefuncBroadcastStub
 }
 
-type MemberRouteOptions = { route: BroadcastRoute; subscriber: Subscriber }
+type MemberRouteOptions = { route: BroadcastRoute }
 
-/** One route's presence at its key's authority, for one member DO, and the subscriber it serves. */
+/** One route's presence at its key's authority, for one member DO, and the attempt it serves. */
 class MemberRoute {
   state: 'establishing' | 'ready' | 'lost' = 'establishing'
   /** Null once it unsubscribed: an establishing route is released once its presence is recorded. */
-  subscriber: Subscriber | null
+  attempt: MemberAttempt | null = null
   readonly route: BroadcastRoute
   private refreshTimer: ReturnType<typeof setInterval> | undefined
 
-  constructor({ route, subscriber }: MemberRouteOptions) {
+  constructor({ route }: MemberRouteOptions) {
     this.route = route
-    this.subscriber = subscriber
   }
 
   presenceRecorded(): void {
     if (this.state === 'ready') return
     this.state = 'ready'
-    this.subscriber?.ready()
+    this.attempt?.presence('ready')
   }
 
   presenceLost(error: unknown): void {
     if (this.state !== 'ready') return
     this.state = 'lost'
     console.error(new Error(`Cloudflare Broadcast presence for '${this.route.key}' lost`, { cause: error }))
-    this.subscriber?.lost()
+    this.attempt?.presence('lost')
   }
 
   startRefresh(refresh: () => Promise<void>): void {
@@ -98,6 +103,36 @@ class MemberRoute {
 
   stopRefresh(): void {
     clearInterval(this.refreshTimer)
+  }
+}
+
+type MemberAttemptOptions = {
+  member: CloudflareBroadcastMember
+  memberRoute: MemberRoute
+  receiver: BackendReceiver
+}
+
+/** A subscription on a member DO's route: ready while the route's presence is recorded. */
+class MemberAttempt extends DriverAttempt {
+  readonly receiver: BackendReceiver
+  private readonly member: CloudflareBroadcastMember
+  private readonly memberRoute: MemberRoute
+
+  constructor({ member, memberRoute, receiver }: MemberAttemptOptions) {
+    super()
+    this.member = member
+    this.memberRoute = memberRoute
+    this.receiver = receiver
+  }
+
+  /** Its route's presence was recorded, lost, or failed to record with `error`. */
+  presence(state: 'ready' | 'lost' | 'closed', error?: unknown): void {
+    this.transition(state, error)
+  }
+
+  unsubscribe(): Promise<void> {
+    this.transition('closed')
+    return this.member.unsubscribe(this.memberRoute)
   }
 }
 
@@ -178,9 +213,11 @@ class CloudflareBroadcastMember {
   private readonly broadcast: CloudflareBroadcast
   private readonly id: string
   private locatedBucket: LocationBucket | null = null
+  /** This incarnation of the DO: a slot an evicted one left is never shared with the next. */
+  readonly scope = crypto.randomUUID()
   private readonly routes = new Map<string, MemberRoute>()
-  /** The subscribers of routes whose sender keeps its own list of receivers, by route key. */
-  private readonly localSubscribers = new Map<string, Subscriber>()
+  /** The receivers of routes whose sender keeps its own list of receivers, by route key. */
+  private readonly localReceivers = new Map<string, BackendReceiver>()
 
   constructor({ broadcast, id, calls }: CloudflareBroadcastMemberOptions) {
     this.broadcast = broadcast
@@ -198,29 +235,28 @@ class CloudflareBroadcastMember {
     this.locatedBucket = bucket
   }
 
-  subscribe(route: BroadcastRoute, subscriber: Subscriber): Unsubscribe {
+  openSubscription(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
     const routeKey = broadcastRouteKey(route)
     let memberRoute = this.routes.get(routeKey)
     if (memberRoute === undefined) {
-      memberRoute = new MemberRoute({ route, subscriber })
+      memberRoute = new MemberRoute({ route })
       this.routes.set(routeKey, memberRoute)
       // Nobody awaits a deferred teardown; a failed withdrawal lapses with the presence TTL.
       void this.recordFirstPresence(routeKey, memberRoute).catch(() => {})
-    } else {
-      // Unsubscribed while establishing, and subscribed again before its presence was recorded.
-      memberRoute.subscriber = subscriber
     }
-    const subscribed = memberRoute
-    return () => this.unsubscribe(routeKey, subscribed)
+    // Else it was unsubscribed while establishing, and is subscribed again before its presence was recorded.
+    const attempt = new MemberAttempt({ member: this, memberRoute, receiver })
+    memberRoute.attempt = attempt
+    return attempt
   }
 
-  /** Takes `route`'s deliveries for `subscriber` with no presence at the key's authority: for a sender that keeps its
+  /** Takes `route`'s deliveries for `receiver` with no presence at the key's authority: for a sender that keeps its
    *  own list of receivers, as a room authority does. A later `subscribeLocal()` to the route replaces it. */
-  subscribeLocal(route: BroadcastRoute, subscriber: Subscriber): Unsubscribe {
+  subscribeLocal(route: BroadcastRoute, receiver: BackendReceiver): () => void {
     const routeKey = broadcastRouteKey(route)
-    this.localSubscribers.set(routeKey, subscriber)
-    return async () => {
-      if (this.localSubscribers.get(routeKey) === subscriber) this.localSubscribers.delete(routeKey)
+    this.localReceivers.set(routeKey, receiver)
+    return () => {
+      if (this.localReceivers.get(routeKey) === receiver) this.localReceivers.delete(routeKey)
     }
   }
 
@@ -229,15 +265,15 @@ class CloudflareBroadcastMember {
   deliver({ routes, payload, info }: BroadcastDelivery): void {
     for (const route of routes) {
       const routeKey = broadcastRouteKey(route)
-      const subscriber = this.routes.get(routeKey)?.subscriber ?? this.localSubscribers.get(routeKey)
-      subscriber?.message(payload, info)
+      const receiver = this.routes.get(routeKey)?.attempt?.receiver ?? this.localReceivers.get(routeKey)
+      receiver?.deliver(payload, info)
     }
   }
 
-  private async unsubscribe(routeKey: string, memberRoute: MemberRoute): Promise<void> {
-    memberRoute.subscriber = null
+  async unsubscribe(memberRoute: MemberRoute): Promise<void> {
+    memberRoute.attempt = null
     // An establishing route is released once its presence is recorded.
-    if (memberRoute.state !== 'establishing') await this.release(routeKey, memberRoute)
+    if (memberRoute.state !== 'establishing') await this.release(broadcastRouteKey(memberRoute.route), memberRoute)
   }
 
   private async recordFirstPresence(routeKey: string, memberRoute: MemberRoute): Promise<void> {
@@ -245,11 +281,11 @@ class CloudflareBroadcastMember {
       await this.recordPresence(memberRoute.route)
     } catch (error) {
       this.routes.delete(routeKey)
-      memberRoute.subscriber?.failed(error)
+      memberRoute.attempt?.presence('closed', error)
       return
     }
     memberRoute.presenceRecorded()
-    if (memberRoute.subscriber === null) return this.release(routeKey, memberRoute)
+    if (memberRoute.attempt === null) return this.release(routeKey, memberRoute)
     memberRoute.startRefresh(() => this.recordPresence(memberRoute.route))
   }
 

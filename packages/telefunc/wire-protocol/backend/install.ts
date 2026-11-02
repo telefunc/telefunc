@@ -9,16 +9,15 @@ export {
 }
 export type { PlaneDefinition }
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
-import type { Backend } from './driver.js'
+import type { BroadcastDriver, SubscriptionDriver } from './driver.js'
 import { BroadcastPlane } from './broadcast/BroadcastPlane.js'
 import { TransportBroadcastDriver, type BroadcastTransport } from './broadcast/transport.js'
 import { MemoryBackend } from './memory/MemoryBackend.js'
-import type { SubscribingDriver } from './Subscriptions.js'
 import { assertUsage } from '../../utils/assert.js'
 import { getOrCreate } from '../../utils/getOrCreate.js'
 
 type Installed = {
-  readonly backend: Backend
+  readonly backend: BroadcastDriver
   readonly key: readonly unknown[]
   /** The memory backend a process falls back to when it installed none. */
   readonly fallback: boolean
@@ -29,7 +28,7 @@ type Installed = {
 /** An extension's supervised plane; `disposeBackend()` stops it. */
 type BackendPlane = { dispose(): Promise<void> }
 
-type PlaneDriver = SubscribingDriver<never>
+type PlaneDriver = SubscriptionDriver<never>
 
 /** An extension's plane, which `backendPlane()` builds once per installed backend. */
 type PlaneDefinition<Driver extends PlaneDriver, Plane extends BackendPlane> = {
@@ -59,7 +58,7 @@ const FALLBACK_KEY = [Symbol.for('telefunc.memoryBackend')]
 
 /** Installs the process's one backend and returns it. Re-evaluating an entry with the same `key` returns the installed
  *  one; the key names the factory's configuration, so that backend is the one the factory would build. */
-function installBackend<B extends Backend>(factory: () => B, key: readonly unknown[]): B {
+function installBackend<B extends BroadcastDriver>(factory: () => B, key: readonly unknown[]): B {
   const installed = state.installed
   if (installed === null) return install(factory, key, false).backend as B
   if (sameKey(installed.key, key)) return installed.backend as B
@@ -130,7 +129,7 @@ async function disposeBackend(): Promise<void> {
   await Promise.all([broadcast?.dispose(), ...planes.map((plane) => plane.dispose())])
 }
 
-function install(factory: () => Backend, key: readonly unknown[], fallback: boolean): Installed {
+function install(factory: () => BroadcastDriver, key: readonly unknown[], fallback: boolean): Installed {
   const installed: Installed = {
     backend: factory(),
     key,

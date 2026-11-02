@@ -6,7 +6,8 @@ import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { getOrCreate } from '../../utils/getOrCreate.js'
 import { getRoomPlane } from '../../backend/plane.js'
 import { encodeLaneKey } from '../../backend/laneKey.js'
-import type { BackendReceiver, BackendSubscription, OrderingInfo } from 'telefunc/__internal'
+import type { BackendSubscription, OrderingInfo } from 'telefunc/__internal'
+import type { LaneConsumer } from '../../backend/RoomPlane.js'
 import { ROOM_MEMBER_NAMED_LANES_MAX } from '../constants.js'
 import { EVERY_TRACK, type BinaryWantChange, type EveryTrack, type TrackKey } from '../../shared/binary.js'
 import type { DemandReport } from './DemandReport.js'
@@ -737,7 +738,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   }
 
   /** `LaneSubscriptionOwner`: a lane of this incarnation. */
-  subscribeLane(address: LaneAddress, receiver: BackendReceiver): BackendSubscription {
+  subscribeLane(address: LaneAddress, receiver: LaneConsumer): BackendSubscription {
     return getRoomPlane().subscribeLane(this.incarnation.id, this.incarnation.inc, address, receiver)
   }
 

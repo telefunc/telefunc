@@ -9,13 +9,14 @@ export {
 export type { BackendFault }
 
 import {
+  DriverAttempt,
   installBackend,
   MemoryBackend,
   type BackendPayload,
+  type BackendReceiver,
   type BroadcastRoute,
   type OrderingInfo,
-  type Subscriber,
-  type Unsubscribe,
+  type SubscriptionDriver,
 } from 'telefunc/__internal'
 import {
   getRoomPlane,
@@ -27,12 +28,12 @@ import {
 } from '@telefunc/room/backend'
 import { createDeferred } from './createDeferred'
 
-/** `op` is a driver method (its next matching call rejects), 'bind' (the next matching subscribe throws), 'subscribe'
- *  (the next matching subscription is refused), 'deliver' (the next message a matching subscription gets is dropped),
- *  'lost' (a matching subscription is lost right before its next message, as a store that keeps delivering while it
- *  restores its link), 'early' (the next matching subscription is ready only after its first message, as a store whose
- *  acknowledgment comes after what it delivered; each further time, one message later) or 'lastSeq' (the next matching
- *  call answers 0, as a store that doesn't fix a publish's recipients, like Redis). `roomId`, or `key` (a Broadcast
+/** `op` is a driver method (its next matching call rejects), 'subscribe' (the next matching subscribe throws, a refusal),
+ *  'deliver' (the next message a matching subscription gets is dropped), 'lost' (a matching subscription is lost right
+ *  before its next message, as a store that keeps delivering while it restores its link), 'early' (the next matching
+ *  subscription is ready only after its first message, as a store whose acknowledgment comes after what it delivered;
+ *  each further time, one message later) or 'published' (the next matching call answers 0, as a store that doesn't fix
+ *  a publish's recipients, like Redis). `roomId`, or `key` (a Broadcast
  *  key, the start of a Room cell key the call reads or writes, or a commit's lane kind or required cell), narrows what
  *  matches. */
 type BackendFault = { op: string; roomId?: string; key?: string; times?: number }
@@ -53,28 +54,31 @@ const { faults, subscriptions, holds, holding, retainedHolds, holdingRetained } 
   holdingRetained: new WeakSet(),
 }) as {
   faults: (BackendFault & { times: number })[]
-  subscriptions: Set<FailingSubscription>
+  subscriptions: Set<FailingAttempt>
   holds: CellPagesHold[]
   holding: WeakSet<RoomDriver>
   retainedHolds: RetainedReadsHold[]
   holdingRetained: WeakSet<RoomPlane>
 }
 
-type FailingSubscriptionOptions = {
+type FailingAttemptOptions = {
   source: Source
-  /** Core's end, which this one passes the memory driver's calls on to. */
-  outer: Subscriber
+  /** Core's end, which this one passes the memory attempt's deliveries on to. */
+  outer: BackendReceiver
 }
 
-/** What a subscription of the in-memory backend tells core, passed on unless a test drops it. */
-class FailingSubscription implements Subscriber {
+/** An attempt of the in-memory backend as core sees it: what the memory attempt says, passed on unless a test drops
+ *  it. */
+class FailingAttempt extends DriverAttempt implements BackendReceiver {
   readonly source: Source
-  private readonly outer: Subscriber
-  unsubscribeInner: Unsubscribe | null = null
-  /** Its `ready()` waits for its next message (the 'early' fault). */
+  private readonly outer: BackendReceiver
+  private inner: DriverAttempt | null = null
+  private unobserve: (() => void) | null = null
+  /** It is ready only after its next message (the 'early' fault). */
   private readyAfterMessage = false
 
-  constructor({ source, outer }: FailingSubscriptionOptions) {
+  constructor({ source, outer }: FailingAttemptOptions) {
+    super()
     this.source = source
     this.outer = outer
   }
@@ -83,44 +87,52 @@ class FailingSubscription implements Subscriber {
     return this.outer.consumers
   }
 
-  message(payload: BackendPayload, ordering: OrderingInfo): void {
+  /** Follows the memory attempt, which this one is the receiver of. */
+  follow(inner: DriverAttempt): void {
+    this.inner = inner
+    this.unobserve = inner.onStateChange((state, reason) => this.innerChanged(state, reason))
+    const state = inner.state()
+    if (state !== 'establishing') this.innerChanged(state, undefined)
+  }
+
+  deliver(payload: BackendPayload, ordering: OrderingInfo): void {
     const call = callOf(this.source)
     if (takeFault('deliver', call)) return
-    if (takeFault('lost', call)) this.outer.lost()
-    this.outer.message(payload, ordering)
+    if (takeFault('lost', call)) this.transition('lost')
+    this.outer.deliver(payload, ordering)
     if (!this.readyAfterMessage) return
     this.readyAfterMessage = false
     this.ready()
   }
 
-  ready(): void {
-    if (takeFault('early', callOf(this.source))) this.readyAfterMessage = true
-    else this.outer.ready()
-  }
-
-  lost(): void {
-    this.outer.lost()
-  }
-
-  ended(): void {
-    subscriptions.delete(this)
-    this.outer.ended()
-  }
-
-  failed(error: unknown): void {
-    subscriptions.delete(this)
-    this.outer.failed(error)
-  }
-
   async unsubscribe(): Promise<void> {
-    subscriptions.delete(this)
-    await this.unsubscribeInner?.()
+    this.stop()
+    this.transition('closed')
+    await this.inner?.unsubscribe()
   }
 
   end(): void {
+    this.stop()
+    this.transition('closed', new Error('failing-backend: subscription ended'))
+    void this.inner?.unsubscribe()
+  }
+
+  private innerChanged(state: 'ready' | 'lost' | 'closed', reason: Error | undefined): void {
+    if (state === 'ready') return this.ready()
+    if (state === 'lost') return this.transition('lost')
+    this.stop()
+    this.transition('closed', reason)
+  }
+
+  private ready(): void {
+    if (takeFault('early', callOf(this.source))) this.readyAfterMessage = true
+    else this.transition('ready')
+  }
+
+  private stop(): void {
     subscriptions.delete(this)
-    this.outer.failed(new Error('failing-backend: subscription ended'))
-    void this.unsubscribeInner?.()
+    this.unobserve?.()
+    this.unobserve = null
   }
 }
 
@@ -134,27 +146,20 @@ function installFailingBackend() {
 }
 
 /** `memory`, failing what a test asks it to fail. */
-function failing<Driver extends { subscribe(source: Source, subscriber: Subscriber): Unsubscribe }>(
-  memory: Driver,
-): Driver {
-  const subscribe = (source: Source, outer: Subscriber): Unsubscribe => {
-    const call = callOf(source)
-    if (takeFault('bind', call)) throw new Error('failing-backend: bind refused')
-    if (takeFault('subscribe', call)) {
-      outer.failed(new Error('failing-backend: subscribe refused'))
-      return async () => {}
-    }
-    const subscription = new FailingSubscription({ source, outer })
-    subscriptions.add(subscription)
-    subscription.unsubscribeInner = memory.subscribe(source, subscription)
-    return () => subscription.unsubscribe()
+function failing<Driver extends SubscriptionDriver<Source>>(memory: Driver): Driver {
+  const subscribe = (source: Source, outer: BackendReceiver): DriverAttempt => {
+    if (takeFault('subscribe', callOf(source))) throw new Error('failing-backend: subscribe refused')
+    const attempt = new FailingAttempt({ source, outer })
+    subscriptions.add(attempt)
+    attempt.follow(memory.subscribe(source, attempt))
+    return attempt
   }
   return new Proxy(memory, {
     get(target, op) {
       if (op === 'subscribe') return subscribe
       const value = Reflect.get(target, op)
       if (typeof value !== 'function' || typeof op !== 'string') return value
-      if (op === 'lastSeq')
+      if (op === 'published')
         return (key: string) => (takeFault(op, { keys: [key] }) ? 0 : Reflect.apply(value, target, [key]))
       return (...args: unknown[]) => {
         if (!takeFault(op, callOfArgs(op, args))) return Reflect.apply(value, target, args)

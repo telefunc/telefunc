@@ -19,8 +19,9 @@ import { ServerBroadcastEnd, type BroadcastEndOwner } from './broadcastEnd.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import type { BroadcastPayload, BroadcastRoute } from '../../backend/driver.js'
+import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import { followBroadcastPlane, getBroadcastPlane, unfollowBroadcastPlane } from '../../backend/install.js'
-import type { BackendReceiver, BackendSubscription } from '../../backend/Subscriptions.js'
+import type { BackendSubscription } from '../../backend/SubscriptionManager.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage } from '../../../utils/assert.js'
@@ -315,16 +316,18 @@ function reportStaticListenerError(err: unknown): void {
   if (!isAbort(err)) reportBug(err)
 }
 
+type RouteReceiver<Kind extends BroadcastKind> = (payload: BroadcastPayload<Kind>, ordering: OrderingInfo) => void
+
 type RouteSubscriptionOptions<Kind extends BroadcastKind> = {
   route: BroadcastRoute<Kind>
-  receiver: BackendReceiver<BroadcastPayload<Kind>>
+  receiver: RouteReceiver<Kind>
 }
 
 /** A route's subscription while wanted; one that ends on its own is reported and replaced once, and a transport that
  *  replaces the plane gets it. */
 class RouteSubscription<Kind extends BroadcastKind> {
   private readonly route: BroadcastRoute<Kind>
-  private readonly receiver: BackendReceiver<BroadcastPayload<Kind>>
+  private readonly receiver: RouteReceiver<Kind>
   private current: BackendSubscription | null = null
 
   constructor({ route, receiver }: RouteSubscriptionOptions<Kind>) {
@@ -332,7 +335,7 @@ class RouteSubscription<Kind extends BroadcastKind> {
     this.receiver = receiver
   }
 
-  /** Subscribes unless a subscription is live; throws where the backend can't bind the route. */
+  /** Subscribes unless a subscription is live; throws outside a Cloudflare session. */
   open(): void {
     if (this.current === null) this.subscribe(false)
     followBroadcastPlane(this)

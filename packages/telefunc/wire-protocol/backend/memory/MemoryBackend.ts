@@ -2,12 +2,19 @@ export { MemoryBackend }
 
 // The in-process backend.
 
-import type { Backend, BroadcastPayload, BroadcastRoute, PublishResult, Subscriber, Unsubscribe } from '../driver.js'
+import type {
+  BackendReceiver,
+  BroadcastDriver,
+  BroadcastPayload,
+  BroadcastRoute,
+  DriverAttempt,
+  PublishResult,
+} from '../driver.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import type { BroadcastKind } from '../../wire/payloads.js'
-import { MemoryPubSub, type Subscribers } from './deliveries.js'
+import { MemoryPubSub, type MemoryAttemptOwner, type Subscribers } from './deliveries.js'
 
-class MemoryBackend implements Backend {
+class MemoryBackend implements BroadcastDriver, MemoryAttemptOwner {
   /** The order of each key subscribed here; an unsubscribed key's next publish starts above `broadcastHighest`. */
   private readonly broadcastOrder = new Map<string, OrderingInfo>()
   /** The highest `seq` and `timestamp` a Broadcast publish was given. */
@@ -26,17 +33,17 @@ class MemoryBackend implements Backend {
     return this.pubSub.publish(this.broadcastSubs[route.kind].get(route.key) ?? [], payload, mark)
   }
 
-  subscribe({ kind, key }: BroadcastRoute, subscriber: Subscriber): Unsubscribe {
-    const subscribers = this.broadcastSubs[kind]
-    this.pubSub.subscribe(subscribers, key, subscriber)
-    return async () => {
-      this.pubSub.unsubscribe(subscribers, key, subscriber)
-      if (!this.broadcastSubscribed(key)) this.broadcastOrder.delete(key)
-    }
+  subscribe({ kind, key }: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
+    return this.pubSub.subscribe({ subscribers: this.broadcastSubs[kind], key, receiver, owner: this })
   }
 
-  lastSeq(key: string): number {
+  published(key: string): number {
     return this.broadcastOrder.get(key)?.seq ?? 0
+  }
+
+  /** A key no route of either kind subscribes to forgets its order. */
+  released(key: string): void {
+    if (!this.broadcastSubscribed(key)) this.broadcastOrder.delete(key)
   }
 
   private broadcastSubscribed(key: string): boolean {

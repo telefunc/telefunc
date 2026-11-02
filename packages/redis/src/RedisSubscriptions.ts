@@ -2,9 +2,9 @@ export { RedisSubscriptions }
 export type { RedisPlane, RedisSubscriptionSource }
 
 import { randomUUID } from 'node:crypto'
-import type { BroadcastRoute, OrderingInfo, Subscriber, Unsubscribe } from 'telefunc/__internal'
+import type { BackendReceiver, BroadcastRoute, OrderingInfo } from 'telefunc/__internal'
 import type { RoomSubscriptionSource } from '@telefunc/room/backend'
-import { decodeOrderingFrame } from 'telefunc/__internal'
+import { DriverAttempt, decodeOrderingFrame } from 'telefunc/__internal'
 import { createDeferred, type Deferred } from './createDeferred.js'
 import type { CommitChannels, FenceTokens } from './keys.js'
 import { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH } from './commands.js'
@@ -22,14 +22,14 @@ interface RedisPlane {
   readLaneStarts(source: RedisSubscriptionSource): Promise<Map<string, OrderingInfo> | null>
 }
 
-/** Where a subscription's frames arrive, which driver it belongs to, and whom it reports to. */
+/** Where a subscription's frames arrive, which driver it belongs to, and whom it delivers to. */
 type RedisSubscriptionOptions = {
   source: RedisSubscriptionSource
   laneChannel: string
   /** A Room lane's incarnation channel: a message on it means the incarnation was dropped. */
   invalidationChannel: string | null
   plane: RedisPlane
-  subscriber: Subscriber
+  receiver: BackendReceiver
 }
 
 /** The subscriber connection; `id` tells work that awaited across a drop that it is stale. */
@@ -88,7 +88,7 @@ class RedisSubscriptions {
     this.connection = connection
   }
 
-  subscribe(options: RedisSubscriptionOptions): Unsubscribe {
+  subscribe(options: RedisSubscriptionOptions): DriverAttempt {
     const subscription = new RedisSubscription({ ...options, owner: this })
     this.subscribingCount++
     void subscription.firstReady.then(() => this.subscribingCount--)
@@ -104,7 +104,7 @@ class RedisSubscriptions {
     this.unconfirmed.add(subscription)
     if (this.socket.phase === 'connected') this.syncChannels()
     else if (this.socket.phase === 'idle') void this.connect()
-    return () => subscription.unsubscribe()
+    return subscription
   }
 
   /** Whether one of ours is subscribing for the first time. */
@@ -323,16 +323,15 @@ class RedisSubscriptions {
   }
 }
 
-/** One source on the shared connection: delivers its lanes in seq order to core's `subscriber`. */
-class RedisSubscription {
+/** One source on the shared connection: delivers its lanes in seq order to core's `receiver`. */
+class RedisSubscription extends DriverAttempt {
   readonly source: RedisSubscriptionSource
   readonly laneChannel: string
   readonly invalidationChannel: string | null
   readonly plane: RedisPlane
   readonly channels: readonly string[]
   private readonly owner: RedisSubscriptions
-  private readonly subscriber: Subscriber
-  private state: 'establishing' | 'ready' | 'lost' | 'closed' = 'establishing'
+  private readonly receiver: BackendReceiver
   private readonly firstReadiness = createDeferred()
   /** Settles on its first ready, its unsubscribe or its end; never rejects. */
   readonly firstReady: Promise<void> = this.firstReadiness.promise
@@ -353,14 +352,15 @@ class RedisSubscription {
     laneChannel,
     invalidationChannel,
     plane,
-    subscriber,
+    receiver,
   }: RedisSubscriptionOptions & { owner: RedisSubscriptions }) {
+    super()
     this.owner = owner
     this.source = source
     this.laneChannel = laneChannel
     this.invalidationChannel = invalidationChannel
     this.plane = plane
-    this.subscriber = subscriber
+    this.receiver = receiver
     this.channels = invalidationChannel === null ? [laneChannel] : [laneChannel, invalidationChannel]
     if ('roomId' in source) {
       this.fanIn = source.lane.kind === 'binary-all' || source.lane.kind === 'binary-track'
@@ -375,12 +375,12 @@ class RedisSubscription {
 
   /** It has never been ready, and hasn't ended. */
   get subscribing(): boolean {
-    return this.state === 'establishing'
+    return this.state() === 'establishing'
   }
 
   async unsubscribe(): Promise<void> {
-    if (this.state === 'closed') return
-    this.state = 'closed'
+    if (this.state() === 'closed') return
+    this.transition('closed')
     this.firstReadiness.resolve()
     this.dropParked()
     for (const token of this.fences.keys()) this.settleFence(token)
@@ -388,7 +388,7 @@ class RedisSubscription {
   }
 
   prepareFence(token: string): Promise<void> | null {
-    if (this.state !== 'ready') return null
+    if (this.state() !== 'ready') return null
     const fence = createDeferred()
     this.fences.set(token, fence)
     return fence.promise
@@ -401,7 +401,8 @@ class RedisSubscription {
   }
 
   awaitsConfirmation(): boolean {
-    return this.state === 'establishing' || this.state === 'lost'
+    const state = this.state()
+    return state === 'establishing' || state === 'lost'
   }
 
   /** A lane missing from `starts` has no commit yet. */
@@ -413,48 +414,45 @@ class RedisSubscription {
     }
     const early = this.early
     this.early = []
-    this.state = 'ready'
     this.firstReadiness.resolve()
-    this.subscriber.ready()
+    this.transition('ready')
     for (const message of early) {
       // A consumer may close the lane.
-      if (this.state !== 'ready') return
+      if (this.state() !== 'ready') return
       this.receiveFrame(message)
     }
   }
 
   fail(error: unknown): void {
-    if (this.state === 'closed') return
+    if (this.state() === 'closed') return
     this.close(error)
-    this.subscriber.failed(error)
+    this.transition('closed', error)
   }
 
   lose(error: unknown): void {
     this.early = []
-    if (this.state !== 'ready') return
+    if (this.state() !== 'ready') return
     // What arrived goes out: what it waits for can no longer arrive on this connection.
     for (const order of this.orders.values()) if (order.parked !== null) this.release(order)
     this.rejectFences(error)
-    this.state = 'lost'
-    this.subscriber.lost()
+    this.transition('lost')
   }
 
   receive(channel: string, message: Buffer): void {
     if (channel === this.invalidationChannel) return this.end()
-    if (this.state === 'ready') return this.receiveFrame(message)
+    if (this.state() === 'ready') return this.receiveFrame(message)
     if (this.awaitsConfirmation()) this.early.push(message)
   }
 
-  /** Its incarnation was dropped. */
+  /** Its incarnation was dropped: closed on purpose, with no reason. */
   end(): void {
-    if (this.state === 'closed') return
+    if (this.state() === 'closed') return
     this.close(new Error(`Redis incarnation of '${this.laneChannel}' was dropped`))
-    this.subscriber.ended()
+    this.transition('closed')
   }
 
-  /** Over for good: the commits awaiting its fences see `reason`. */
+  /** Over for good: the commits awaiting its fences see `reason`. Its consumers are told after, by `closed`. */
   private close(reason: unknown): void {
-    this.state = 'closed'
     this.firstReadiness.resolve()
     this.dropParked()
     this.rejectFences(reason)
@@ -524,7 +522,7 @@ class RedisSubscription {
     const parked = order.parked!
     for (let next = parked.get(order.last); next !== undefined; next = parked.get(order.last)) {
       // A consumer may close the lane.
-      if (this.state !== 'ready') return
+      if (this.state() !== 'ready') return
       parked.delete(order.last)
       this.advance(order, next.payload, next.info, next.token)
     }
@@ -541,7 +539,7 @@ class RedisSubscription {
     order.parked = null
     order.release = null
     for (const frame of parked) {
-      if (this.state !== 'ready') return
+      if (this.state() !== 'ready') return
       this.advance(order, frame.payload, frame.info, frame.token)
     }
   }
@@ -554,7 +552,7 @@ class RedisSubscription {
 
   private deliver(payload: Uint8Array, info: OrderingInfo, token: string | null): void {
     try {
-      this.subscriber.message(this.text ? textDecoder.decode(payload) : Uint8Array.from(payload), info)
+      this.receiver.deliver(this.text ? textDecoder.decode(payload) : Uint8Array.from(payload), info)
     } finally {
       this.settle(token)
     }

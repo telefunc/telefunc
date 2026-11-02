@@ -29,7 +29,7 @@ export type {
   RoomSubscriptionSource,
 }
 
-import type { OrderingInfo, Subscriber, Unsubscribe } from 'telefunc/__internal'
+import type { BackendReceiver, DriverAttempt, OrderingInfo, SubscriptionDriver } from 'telefunc/__internal'
 
 /** The cells a prefix read's page holds. */
 const CELL_PAGE_SIZE = 1024
@@ -163,7 +163,7 @@ type RoomSubscriptionSource = {
 }
 
 /** What a backend implements for Room: durable heads, cells, lanes and retained frames, and lane subscriptions. */
-type RoomDriver = {
+type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
   readHead(roomId: string): Promise<RoomHead | null>
   compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult>
   readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead>
@@ -198,7 +198,6 @@ type RoomDriver = {
   /** Up to a page of the entries due at the authority's now, earliest first; an entry stays due until it is put again
    *  or deleted. */
   directoryDue(): Promise<DirectoryPage['entries']>
-  /** Subscribes this host to `source` and tells `subscriber` how it goes, as a Broadcast driver's `subscribe` does. An
-   *  incarnation that isn't open is a refusal: `subscriber.failed(error)`. */
-  subscribe(source: RoomSubscriptionSource, subscriber: Subscriber): Unsubscribe
+  /** As a Broadcast driver's `subscribe`; an incarnation that isn't open is a refusal. */
+  subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt
 }

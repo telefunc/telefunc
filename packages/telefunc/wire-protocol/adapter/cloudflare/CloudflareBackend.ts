@@ -2,16 +2,16 @@
 export { CloudflareBackend }
 
 import type {
-  Backend,
+  BackendReceiver,
+  BroadcastDriver,
   BroadcastPayload,
   BroadcastRoute,
+  DriverAttempt,
   PublishResult,
-  Subscriber,
-  Unsubscribe,
 } from '../../backend/driver.js'
 import type { CloudflareBroadcast } from './broadcast.js'
 import { getCloudflareExtensionPlanes, type TelefuncExtensionNamespace } from './extensions.js'
-import { requireCloudflareSession } from './session.js'
+import { currentCloudflareSession, requireCloudflareSession } from './session.js'
 
 type CloudflareBackendOptions = {
   getNamespace: () => TelefuncExtensionNamespace
@@ -19,7 +19,7 @@ type CloudflareBackendOptions = {
 }
 
 /** A subscription requires its session DO's context. */
-class CloudflareBackend implements Backend {
+class CloudflareBackend implements BroadcastDriver {
   readonly broadcast: CloudflareBroadcast
   private readonly getNamespace: () => TelefuncExtensionNamespace
 
@@ -37,7 +37,11 @@ class CloudflareBackend implements Backend {
     return this.broadcast.publish(route, payload)
   }
 
-  subscribe(route: BroadcastRoute, subscriber: Subscriber): Unsubscribe {
-    return requireCloudflareSession().broadcast.subscribe(route, subscriber)
+  scope(): string | null {
+    return currentCloudflareSession()?.broadcast.scope ?? null
+  }
+
+  subscribe(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
+    return requireCloudflareSession().broadcast.openSubscription(route, receiver)
   }
 }

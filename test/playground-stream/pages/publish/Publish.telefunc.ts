@@ -8,7 +8,7 @@ export {
   onBroadcastAnswers,
   onBroadcastAnsweringLoop,
   onBroadcastWhileEstablishing,
-  onSubscribeThrows,
+  onSubscribeRefused,
   onDeliveredBeforeReady,
   onJoinedBeforeReady,
   onDeliveredWhileLost,
@@ -209,23 +209,20 @@ async function onBroadcastWhileEstablishing() {
 }
 
 /** The store refuses the first subscribe on this key (a test asks it to, see `failBackend()`). */
-async function onSubscribeThrows() {
-  const channel = new BroadcastChannel<{ n: number }>({ key: `room:subscribe-throws:${crypto.randomUUID()}` })
+/** The store refuses this key's first subscribe (a test asks it to, see `failBackend()`). */
+async function onSubscribeRefused() {
+  const channel = new BroadcastChannel<{ n: number }>({ key: `room:subscribe-refused:${crypto.randomUUID()}` })
   const seen: string[] = []
-  let thrown: string | null = null
-  try {
-    channel.subscribe((msg) => seen.push(`first:${msg.n}`))
-  } catch (err) {
-    thrown = (err as Error).message
-  }
   const { promise: delivered, resolve } = Promise.withResolvers<void>()
   channel.subscribe((msg) => {
-    seen.push(`second:${msg.n}`)
+    seen.push(`first:${msg.n}`)
     resolve()
   })
+  // The refused subscription is replaced a few microtasks later.
+  await new Promise((resolve) => setTimeout(resolve, 0))
   await channel.publish({ n: 1 })
   await delivered
-  return { thrown, seen }
+  return { seen }
 }
 
 /** The store delivers the first message on this key before it acknowledges the subscription (a test asks it to, see
@@ -256,7 +253,7 @@ async function onJoinedBeforeReady() {
   const { promise: delivered, resolve } = Promise.withResolvers<void>()
   first.subscribe((msg) => seen.first.push(msg.n))
   await first.publish({ n: 1 })
-  addBackendFault({ op: 'lastSeq', key })
+  addBackendFault({ op: 'published', key })
   second.subscribe((msg) => {
     seen.second.push(msg.n)
     if (msg.n === 2) resolve()

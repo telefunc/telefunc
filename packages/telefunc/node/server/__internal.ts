@@ -23,18 +23,18 @@ export {
 
 // A backend: one `installBackend` installs (`@telefunc/redis`, a test's), and the drivers of a plane (Room's).
 export type {
-  Backend,
   BackendPayload,
+  BackendReceiver,
   BroadcastDriver,
   BroadcastPayload,
   BroadcastRoute,
   PublishResult,
-  Subscriber,
-  Unsubscribe,
+  SubscriptionDriver,
 } from '../../wire-protocol/backend/driver.js'
+export { DriverAttempt } from '../../wire-protocol/backend/driver.js'
 export { installBackend, backendPlane, type PlaneDefinition } from '../../wire-protocol/backend/install.js'
-export type { BackendReceiver, BackendSubscription } from '../../wire-protocol/backend/Subscriptions.js'
-export { Subscriptions } from '../../wire-protocol/backend/Subscriptions.js'
+export type { BackendSubscription, SourceRules } from '../../wire-protocol/backend/SubscriptionManager.js'
+export { SubscriptionManager } from '../../wire-protocol/backend/SubscriptionManager.js'
 export { assertDriverOrdering } from '../../wire-protocol/backend/driverOrdering.js'
 export { decodeOrderingFrame } from '../../wire-protocol/wire/orderingFrame.js'
 export { MemoryBackend } from '../../wire-protocol/backend/memory/MemoryBackend.js'

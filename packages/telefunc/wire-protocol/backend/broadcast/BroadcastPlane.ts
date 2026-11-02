@@ -1,7 +1,8 @@
 export { BroadcastPlane }
 
-import { Subscriptions, type BackendReceiver, type BackendSubscription } from '../Subscriptions.js'
-import type { BackendPayload, BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult } from '../driver.js'
+import { SubscriptionManager, type BackendSubscription, type SourceRules } from '../SubscriptionManager.js'
+import type { BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult } from '../driver.js'
+import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import type { BroadcastKind } from '../../wire/payloads.js'
 import type { ChannelPublishAck } from '../../channel/channel.js'
 import { broadcastRouteKey } from './routeKey.js'
@@ -10,14 +11,19 @@ import { isPromise } from '../../../utils/isPromise.js'
 
 type BroadcastPlaneOptions = { driver: BroadcastDriver }
 
+const broadcastSources: SourceRules<BroadcastRoute> = {
+  key: broadcastRouteKey,
+  deliveryKind: (route) => route.kind,
+}
+
 /** What core consumes: Broadcast on a driver, its publishes checked, its subscriptions shared by route and host. */
 class BroadcastPlane {
   private readonly driver: BroadcastDriver
-  private readonly subscriptions: Subscriptions<BroadcastRoute>
+  private readonly subscriptions: SubscriptionManager<BroadcastRoute>
 
   constructor({ driver }: BroadcastPlaneOptions) {
     this.driver = driver
-    this.subscriptions = new Subscriptions({ driver })
+    this.subscriptions = new SubscriptionManager({ driver, sources: broadcastSources })
   }
 
   /** Publishes `payload` as it is at the call. */
@@ -31,15 +37,15 @@ class BroadcastPlane {
 
   subscribe<Kind extends BroadcastKind>(
     route: BroadcastRoute<Kind>,
-    receiver: BackendReceiver<BroadcastPayload<Kind>>,
+    receive: (payload: BroadcastPayload<Kind>, ordering: OrderingInfo) => void,
   ): BackendSubscription {
-    const source = { key: broadcastRouteKey(route), delivers: route.kind }
-    const receive = receiver as BackendReceiver<BackendPayload>
-    const lastSeq = this.driver.lastSeq?.(route.key) ?? 0
-    if (lastSeq === 0) return this.subscriptions.subscribe(route, source, receive)
+    // The manager checked that a route delivers its kind.
+    const deliver = receive as (payload: BroadcastPayload, ordering: OrderingInfo) => void
+    const published = this.driver.published?.(route.key) ?? 0
+    if (published === 0) return this.subscriptions.subscribe(route, deliver)
     // A consumer gets only what is published after it subscribed, as the driver fixed each publish's recipients.
-    return this.subscriptions.subscribe(route, source, (payload, ordering) => {
-      if (ordering.seq > lastSeq) receive(payload, ordering)
+    return this.subscriptions.subscribe(route, (payload, ordering) => {
+      if (ordering.seq > published) deliver(payload, ordering)
     })
   }
 

@@ -17,7 +17,7 @@ export type {
 }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import type { BroadcastPayload, BroadcastRoute, Subscriber, Unsubscribe } from '../../backend/driver.js'
+import type { BackendReceiver, BroadcastPayload, BroadcastRoute } from '../../backend/driver.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import { currentCloudflareSession } from './session.js'
 import { DEFAULT_BROADCAST_BUCKETS } from './routing.js'
@@ -69,9 +69,11 @@ type CloudflareExtensionKit = {
 type CloudflareMember = {
   /** The bucket the session was placed in, from the request that reached it; null before one did. */
   readonly bucket: string | null
-  /** Takes `route`'s deliveries for `subscriber` with no presence at a key authority, for a sender that keeps its own
-   *  list of receivers. */
-  subscribeLocal(route: BroadcastRoute, subscriber: Subscriber): Unsubscribe
+  /** This incarnation of the session DO, as a driver's `scope()`. */
+  readonly scope: string
+  /** Takes `route`'s deliveries for `receiver` with no presence at a key authority, for a sender that keeps its own
+   *  list of receivers; returns what stops them. */
+  subscribeLocal(route: BroadcastRoute, receiver: BackendReceiver): () => void
 }
 
 /** The object an extension's Durable Object calls go to, by method name. */

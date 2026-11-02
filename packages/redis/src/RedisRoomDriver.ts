@@ -1,6 +1,6 @@
 export { RedisRoomDriver }
 
-import type { OrderingInfo, Subscriber, Unsubscribe } from 'telefunc/__internal'
+import type { BackendReceiver, DriverAttempt, OrderingInfo } from 'telefunc/__internal'
 import type {
   CellsExchange,
   CellsExchangeResult,
@@ -97,14 +97,14 @@ class RedisRoomDriver implements RoomDriver, RedisPlane {
     return this.commitOnceReady(target, payload, opts)
   }
 
-  subscribe(source: RoomSubscriptionSource, subscriber: Subscriber): Unsubscribe {
+  subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {
     const { prefix } = this.connection
     return this.connection.subscriptions.subscribe({
       source,
       laneChannel: channelKey(prefix, source.roomId, source.inc, this.kit.encodeLaneKey(source.lane)),
       invalidationChannel: incarnationInvalidationChannel(prefix, source.roomId, source.inc),
       plane: this,
-      subscriber,
+      receiver,
     })
   }
 

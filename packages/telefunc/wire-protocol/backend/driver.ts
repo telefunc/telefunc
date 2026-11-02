@@ -1,12 +1,13 @@
+export { DriverAttempt }
 export type {
-  Backend,
+  AttemptState,
   BackendPayload,
+  BackendReceiver,
   BroadcastDriver,
   BroadcastPayload,
   BroadcastRoute,
   PublishResult,
-  Subscriber,
-  Unsubscribe,
+  SubscriptionDriver,
 }
 
 import type { BroadcastKind } from '../wire/payloads.js'
@@ -18,14 +19,7 @@ type BroadcastRoute<Kind extends BroadcastKind = BroadcastKind> = { key: string;
 /** What a route carries: a text route the serialized message, a binary route its bytes. */
 type BroadcastPayload<Kind extends BroadcastKind = BroadcastKind> = { text: string; binary: Uint8Array }[Kind]
 
-/** What `installBackend()` installs: Broadcast's driver, and the driver of each other plane it serves. */
-type Backend = BroadcastDriver & {
-  /** The planes this backend serves, by extension key; each is built on its first `backendPlane()` call, given the
-   *  `kit` the extension passes it. */
-  readonly planes?: { readonly [key: symbol]: (kit: never) => unknown }
-}
-
-/** What a subscription delivers: a string on a text route, bytes on a binary route or a Room lane. */
+/** What an attempt delivers: a string on a text route, bytes on a binary route or a Room lane. */
 type BackendPayload = string | Uint8Array
 
 /** A publish's ordering, and how many subscribers the backend handed it to, counted its own way (absent where it
@@ -33,49 +27,79 @@ type BackendPayload = string | Uint8Array
 type PublishResult = OrderingInfo & { receivers?: number }
 
 /**
- * What a backend implements for Broadcast.
- *
- * A host is the process, or a session Durable Object on Cloudflare. An ordering's `seq` is a positive safe integer that grows with every publish on a key, of either kind; its
- * `timestamp` is a non-negative safe integer (ms) that never goes back on a key.
+ * What a backend implements to subscribe to a plane's sources (a Broadcast route, a Room lane). Core keeps at most one
+ * live attempt per source and scope, however many consumers share it, and subscribes again once that one closed or
+ * was unsubscribed.
  */
-type BroadcastDriver = {
-  /** Publishes `payload` on `route` and returns its ordering. A publish this host makes after `subscribe()`
-   *  returned reaches that subscription: if your publishes and subscribes travel by different connections, hold a
-   *  publish until your own new subscriptions on its route are ready, as the Redis driver does. The caller may reuse
-   *  `payload`'s bytes once this returns: copy what you keep. */
+type SubscriptionDriver<Source> = {
+  /** Returns the attempt at once, establishing or ready; throws a refusal it knows now. */
+  subscribe(source: Source, receiver: BackendReceiver): DriverAttempt
+  /** Absent: per process. Cloudflare: the session DO, null outside one (subscribe throws, publish doesn't wait). */
+  scope?(): string | null
+}
+
+/**
+ * What `installBackend()` installs: Broadcast's driver, and the driver of each other plane it serves. An ordering's
+ * `seq` is a positive safe integer that grows with every publish on a key, of either kind; its `timestamp` is a
+ * non-negative safe integer (ms) that never goes back on a key.
+ */
+type BroadcastDriver = SubscriptionDriver<BroadcastRoute> & {
+  /** Keeps `payload` past the call only as a copy: the caller reuses its bytes. */
   publish<Kind extends BroadcastKind>(
     route: BroadcastRoute<Kind>,
     payload: BroadcastPayload<Kind>,
   ): PublishResult | Promise<PublishResult>
-  /** Subscribes this host to `route` and tells `subscriber` how it goes. Core keeps at most one live subscription
-   *  per route and host, however many consumers share it, and subscribes again once that one failed, ended or was
-   *  unsubscribed. Throw only for the caller's mistake, which reaches the caller; report a refusal with
-   *  `subscriber.failed(error)`. */
-  subscribe(route: BroadcastRoute, subscriber: Subscriber): Unsubscribe
-  /** Only for a driver that fixes a publish's recipients as it publishes (memory): the `seq` of `key`'s last
-   *  publish, so a consumer joining a live subscription skips what was published before it. */
-  lastSeq?(key: string): number
+  /** Memory only, as it fixes a publish's recipients as it publishes: the `seq` of `key`'s last publish, so a consumer
+   *  joining a live attempt skips what was published before it. */
+  published?(key: string): number
+  /** The planes this backend serves, by extension key; each is built on its first `backendPlane()` call, given the
+   *  `kit` the extension passes it. */
+  readonly planes?: { readonly [key: symbol]: (kit: never) => unknown }
 }
 
 /**
- * Core's end of one driver subscription. Call `ready()` once every publish made from now on reaches it, `lost()` when
- * it may miss messages (its connection dropped), `ready()` again once it can't, and `ended()` or `failed()` when it is
- * over for good. Deliver each key's messages in `seq` order with `message()`, as they arrive: one that comes before
- * the first `ready()` is kept by core and reaches the consumers right after it, and one after a loss goes out as it
- * arrives. Core ignores a call that repeats the state, and every call after `ended()`, `failed()` or its unsubscribe.
+ * Core's end of one attempt. Deliver each source's messages in `seq` order, as they arrive: one that comes before the
+ * attempt's first `ready` is kept by core and reaches the consumers right after it, and one after a loss goes out as
+ * it arrives.
  */
-interface Subscriber {
-  message(payload: BackendPayload, ordering: OrderingInfo): void
-  ready(): void
-  lost(): void
-  /** The backend ended it on purpose (a Room incarnation was dropped), which its consumers expect. */
-  ended(): void
-  /** It failed for good; core reports `error` once, however many consumers share it. */
-  failed(error: unknown): void
-  /** How many consumers share this subscription now. */
+type BackendReceiver = {
+  deliver(payload: BackendPayload, ordering: OrderingInfo): void
+  /** How many subscriptions share the attempt now. */
   readonly consumers: number
 }
 
-/** Ends a subscription and settles once the driver's own cleanup did. Core calls it at most once, and never after
- *  `ended()` or `failed()`; the driver doesn't call either from it. */
-type Unsubscribe = () => Promise<void>
+type AttemptState = 'establishing' | 'ready' | 'lost' | 'closed'
+
+type StateListener = (state: Exclude<AttemptState, 'establishing'>, reason?: Error) => void
+
+/**
+ * One driver subscription to a source. It starts `establishing`; the driver makes it `ready` once every publish made
+ * from now on reaches it, `lost` when it may miss messages (its connection dropped), `ready` again once it can't, and
+ * `closed` when it is over for good: without a reason when the backend ended it on purpose (a Room incarnation was
+ * dropped), which its consumers expect; with the reason when it failed, which core reports once. `closed` is final.
+ */
+abstract class DriverAttempt {
+  private current: AttemptState = 'establishing'
+  private readonly listeners = new Set<StateListener>()
+
+  state(): AttemptState {
+    return this.current
+  }
+
+  onStateChange(listener: StateListener): () => void {
+    this.listeners.add(listener)
+    return () => this.listeners.delete(listener)
+  }
+
+  /** Settles after the driver's own cleanup. Core calls it at most once, never on a closed attempt, and stops
+   *  listening first. */
+  abstract unsubscribe(): Promise<void>
+
+  /** `lost` on a drop, `ready` again after it, `closed` with the reason. */
+  protected transition(state: Exclude<AttemptState, 'establishing'>, reason?: unknown): void {
+    if (this.current === state || this.current === 'closed') return
+    this.current = state
+    const error = reason === undefined || reason instanceof Error ? reason : new Error(String(reason))
+    for (const listener of this.listeners) listener(state, error)
+  }
+}

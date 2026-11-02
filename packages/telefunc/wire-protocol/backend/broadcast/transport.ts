@@ -2,13 +2,13 @@ export { TransportBroadcastDriver }
 export type { BroadcastTransport }
 
 import { isOrdering } from '../../wire/orderingFrame.js'
-import type {
-  BroadcastDriver,
-  BroadcastPayload,
-  BroadcastRoute,
-  PublishResult,
-  Subscriber,
-  Unsubscribe,
+import {
+  DriverAttempt,
+  type BackendReceiver,
+  type BroadcastDriver,
+  type BroadcastPayload,
+  type BroadcastRoute,
+  type PublishResult,
 } from '../driver.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { isPromise } from '../../../utils/isPromise.js'
@@ -45,14 +45,30 @@ class TransportBroadcastDriver implements BroadcastDriver {
     return isPromise(result) ? result.then(checkOrdering) : checkOrdering(result)
   }
 
-  /** Ready at once: a user transport's listen() has no establishment to wait for. */
-  subscribe(route: BroadcastRoute, subscriber: Subscriber): Unsubscribe {
+  subscribe(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
     const stop =
       route.kind === 'text'
-        ? this.transport.listen(route.key, (payload, info) => subscriber.message(payload, checkOrdering(info)))
-        : this.transport.listenBinary(route.key, (payload, info) => subscriber.message(payload, checkOrdering(info)))
-    subscriber.ready()
-    return async () => stop()
+        ? this.transport.listen(route.key, (payload, info) => receiver.deliver(payload, checkOrdering(info)))
+        : this.transport.listenBinary(route.key, (payload, info) => receiver.deliver(payload, checkOrdering(info)))
+    return new ListenAttempt({ stop })
+  }
+}
+
+type ListenAttemptOptions = { stop: () => void }
+
+/** Ready at once: a user transport's listen() has no establishment to wait for. */
+class ListenAttempt extends DriverAttempt {
+  private readonly stop: () => void
+
+  constructor({ stop }: ListenAttemptOptions) {
+    super()
+    this.stop = stop
+    this.transition('ready')
+  }
+
+  async unsubscribe(): Promise<void> {
+    this.transition('closed')
+    this.stop()
   }
 }
 
