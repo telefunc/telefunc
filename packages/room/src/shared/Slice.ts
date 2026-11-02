@@ -24,7 +24,7 @@ class Slice {
   async next(): Promise<void> {
     await new Promise<void>((resolve) => {
       waiting.slices.push(resolve)
-      tick()
+      void tick()
     })
     this._end = performance.now() + ROOM_PLAN_SLICE_MS
   }
@@ -32,13 +32,12 @@ class Slice {
 
 /** Resumes the first waiting slice in a later turn, unless another tick did since; each wait schedules its own, so a
  *  tick a runtime drops stalls nothing past the next wait. */
-function tick(): void {
+async function tick(): Promise<void> {
   const resumed = waiting.resumed
-  nextTurn(() => {
-    if (waiting.resumed !== resumed) return
-    waiting.resumed++
-    const resume = waiting.slices.shift()
-    if (waiting.slices.length > 0) tick()
-    resume?.()
-  })
+  await nextTurn()
+  if (waiting.resumed !== resumed) return
+  waiting.resumed++
+  const resume = waiting.slices.shift()
+  if (waiting.slices.length > 0) void tick()
+  resume?.()
 }

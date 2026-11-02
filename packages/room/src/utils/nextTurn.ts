@@ -53,8 +53,8 @@ const macrotaskYield = getGlobalObject<{ instance: MacrotaskYield }>('utils/next
   instance: new MacrotaskYield(),
 })).instance
 
-/** A later macrotask; setImmediate keeps the process alive for it, where the runtime has one. */
-function nextTurn(callback: () => void): void {
-  if (typeof setImmediate === 'function') setImmediate(callback)
-  else void macrotaskYield.yield().then(callback)
+/** Resolves in a later macrotask; setImmediate keeps the process alive for it, where the runtime has one. */
+function nextTurn(): Promise<void> {
+  if (typeof setImmediate === 'function') return new Promise((resolve) => setImmediate(resolve))
+  return macrotaskYield.yield()
 }
