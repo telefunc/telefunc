@@ -27,7 +27,9 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
       (log.logText.includes('disconnected: ::write(') &&
         (log.logText.includes('Broken pipe') || log.logText.includes('Connection reset by peer'))) ||
       // testRefusedPresence()'s authority refuses a presence, and the subscription it ended is reported.
-      log.logText.includes('Backend subscription closed: text:refused-presence'),
+      log.logText.includes('Backend subscription closed: text:refused-presence') ||
+      // testRefusedDelivery()'s session refuses a delivery, which its coordinator reports.
+      log.logText.includes('Test: the session refused the delivery'),
   })
   testTodolist()
   testChannel()
@@ -38,6 +40,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testUnsubscribeTwice()
   testResubscribe()
   testRefusedPresence()
+  testRefusedDelivery()
   testRoom()
   // Under `vite dev`, @cloudflare/vite-plugin awaits each Durable Object call apart, so one stub's calls can run out of order.
   if (!isDev) testRoomOrderAcrossSessions()
@@ -381,6 +384,59 @@ function testRefusedPresence() {
       await page.click('#publish')
       expect(JSON.parse((await page.textContent('#refused-presence-state'))!).received).toContain('again')
     })
+  })
+}
+
+function testRefusedDelivery() {
+  test('Broadcast: a publish a session Durable Object refuses to take rejects, the other session still gets it, and the next publish reaches both', async () => {
+    const key = `refused-delivery:${Math.random()}`
+    const browser = page.context().browser()!
+    // Two regions, so each session takes its deliveries in a Durable Object of its own (LAX is wnam, FRA is weur).
+    const pages = await Promise.all(
+      Object.entries({ p1: 'LAX', p2: 'FRA' }).map(async ([name, colo]) => {
+        const context = await browser.newContext()
+        await context.addCookies([{ name: 'test-colo', value: colo, url: getServerUrl() }])
+        const session = await context.newPage()
+        await session.goto(`${getServerUrl()}/refused-delivery?key=${key}&page=${name}`)
+        await autoRetry(async () => {
+          expect(await session.locator('#hydrated').count()).toBe(1)
+        })
+        await session.click('#subscribe')
+        await autoRetry(async () => {
+          expect(JSON.parse((await session.textContent('#refused-delivery-state'))!).subscribed).toBe(true)
+        })
+        return session
+      }),
+    )
+    const publish = async (message: string) => {
+      const query = new URLSearchParams({ key, message })
+      const response = await fetch(`${getServerUrl()}/__refused-delivery-publish?${query}`)
+      return ((await response.json()) as { rejected: string | null }).rejected
+    }
+    const received = async () =>
+      await Promise.all(
+        pages.map(async (session) => {
+          await session.click('#read')
+          return JSON.parse((await session.textContent('#refused-delivery-state'))!).received as string[]
+        }),
+      )
+    // Each try publishes again until both presences are recorded.
+    await autoRetry(
+      async () => {
+        await publish('ready')
+        for (const got of await received()) expect(got).toContain('ready')
+      },
+      { timeout: 10_000 },
+    )
+    expect(await publish('refused')).toContain('lost to 1/2 Durable Objects')
+    await autoRetry(async () => {
+      expect((await received()).map((got) => got.includes('refused')).sort()).deep.equal([false, true])
+    })
+    expect(await publish('after')).toBe(null)
+    await autoRetry(async () => {
+      for (const got of await received()) expect(got).toContain('after')
+    })
+    for (const session of pages) await session.context().close()
   })
 }
 

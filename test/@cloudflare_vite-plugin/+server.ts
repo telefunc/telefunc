@@ -37,6 +37,12 @@ export class TelefuncDurableObject extends (tf.TelefuncDurableObject as Telefunc
   }
   override async telefuncBroadcastDeliver(request: DeliveryRequest) {
     if (isTraced(request)) regionTrace.deliveries.push({ member: this.ctx.id.toString(), region: this.region })
+    // Test-only: the first session DO a `refused-delivery:` key's message 'refused' reaches refuses it.
+    const refused = request.routes.find(({ key }) => key.startsWith('refused-delivery:'))?.key
+    if (refused !== undefined && payloadText(request).includes('refused') && !refusedDeliveries.has(refused)) {
+      refusedDeliveries.add(refused)
+      throw new Error('Test: the session refused the delivery')
+    }
     return super.telefuncBroadcastDeliver(request)
   }
 
@@ -63,6 +69,7 @@ type TelefuncDurableObjectWithPresence = new (
   telefuncDurableObjectCall(name: string, method: string, args: unknown[]): Promise<unknown>
 }
 const refusedPresences = new Set<string>()
+const refusedDeliveries = new Set<string>()
 let roomCalls: { object: string | null; method: string; room: unknown }[] | null = null
 
 // Test-only: the Room deliveries of the message `/__region-trace` names, as the regions test counts them.
@@ -73,7 +80,10 @@ const regionTrace = {
 }
 function isTraced({ routes, payload }: DeliveryRequest): boolean {
   if (tracedMessage === null || !routes.some(({ key }) => key.startsWith('__telefunc_room__:'))) return false
-  return (typeof payload === 'string' ? payload : new TextDecoder().decode(payload)).includes(tracedMessage)
+  return payloadText({ routes, payload }).includes(tracedMessage)
+}
+function payloadText({ payload }: DeliveryRequest): string {
+  return typeof payload === 'string' ? payload : new TextDecoder().decode(payload)
 }
 // Test-only: a page's `test-colo` cookie names the Cloudflare colo its requests come from.
 function withTestColo(request: Request): Request {
@@ -88,6 +98,14 @@ vike(app)
 app.all('/__broadcast-publish-from-worker', async (c) => {
   await Broadcast.publish('worker-publish', { from: 'worker' })
   return c.body(null, 204)
+})
+// Test-only: publishes `?message=` to `?key=` from the Worker, and says whether publish() rejected, with what.
+app.all('/__refused-delivery-publish', async (c) => {
+  const rejected = await Promise.resolve(Broadcast.publish(c.req.query('key')!, c.req.query('message')!)).then(
+    () => null,
+    (error: unknown) => String(error),
+  )
+  return c.json({ rejected })
 })
 app.all('/__broadcast-subscribe-from-worker', (c) => {
   try {
