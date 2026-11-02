@@ -1226,6 +1226,26 @@ function testChannel(isDev: boolean, inDocker = false) {
       }
     })
   }
+
+  // Bun hands the server `request.body === null` for it, Node and Deno an empty stream.
+  test('channel: an SSE request without a body is answered 400, and reports no bug', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    const bugs = async () => Object.keys(await getCleanupState()).filter((key) => key.startsWith('bug:'))
+    const bugsBefore = await bugs()
+    const answer = await page.evaluate(async () => {
+      const resp = await fetch('/_telefunc?_telefunc=sse&wire=1', {
+        method: 'POST',
+        headers: { 'x-telefunc-request': 'sse' },
+      })
+      return { status: resp.status, text: await resp.text() }
+    })
+    expect(answer).deep.equal({
+      status: 400,
+      text: 'The request has no body: an SSE channel request starts with its metadata.',
+    })
+    expect(await bugs()).deep.equal(bugsBefore)
+    expectLog('the server responded with a status of 400', { filter: (log) => log.logSource === 'Browser Error' })
+  })
 }
 
 function parseChannelTransports(value: string | undefined): Array<'sse' | 'ws'> {
