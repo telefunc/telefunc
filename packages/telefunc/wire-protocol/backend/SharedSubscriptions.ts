@@ -1,5 +1,5 @@
 export { SharedSubscriptions }
-export type { BackendSubscription, SourceRules, SourceWait }
+export type { BackendSubscription, SourceRules, WaitRule }
 
 import { assert, assertUsage } from '../../utils/assert.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
@@ -41,25 +41,26 @@ type SourceRules<Source> = {
   /** A string for 'text', bytes for 'binary'. */
   deliveryKind(source: Source): 'text' | 'binary'
   /** What a send to `source` waits for; read only while some attempt establishes or some send waits. */
-  waitOf(source: Source): SourceWait<Source>
+  sendWaitsFor(source: Source): WaitRule<Source>
 }
 
-/** A send waits while one of its host's attempts on `waitsFor` is establishing, behind the sends that wait on its
- *  `domain` (what one seq counts). Its bytes count against `budget`'s `bufferLimit`, or `bufferLimitBinary` when `limit`
- *  is 'binary'. */
-type SourceWait<Source> = { domain: string; waitsFor: readonly Source[]; budget: string; limit: 'text' | 'binary' }
+/** A send waits while one of its host's attempts on `subscriptions` is establishing, behind the waiting sends ordered
+ *  with it (`orderedWith`: what one seq counts). Its bytes count against `countsAgainst`'s `bufferLimit`. */
+type WaitRule<Source> = {
+  orderedWith: string
+  subscriptions: readonly Source[]
+  countsAgainst: string
+  bufferLimit: 'bufferLimit' | 'bufferLimitBinary'
+}
 
 /** The sends on one host's domain, waiting for its establishing attempts. */
 type Wait = { readonly established: Promise<void>; sends: number }
-
-/** A waiting send's own copy of its payload, and what it counts against. */
-type WaitingSend<Payload> = { waitKey: string; wait: Wait; budget: string; bytes: number; payload: Payload }
 
 type SharedSubscriptionsOptions<Source> = {
   driver: SubscriptionDriver<Source>
   sources: SourceRules<Source>
   /** What a send is, for its overflow error: 'Broadcast publish', 'Room commit'. */
-  sends: string
+  sendName: string
 }
 
 /** A plane's subscriptions (Broadcast's, Room's): consumers of one source on one host share one driver attempt. */
@@ -69,7 +70,7 @@ class SharedSubscriptions<Source> {
   /** By host and source key. */
   private readonly slots = new Map<string, SubscriptionSlot<Source>>()
   private readonly cleanups = new Set<Promise<void>>()
-  private readonly sends: string
+  private readonly sendName: string
   /** By host and domain. */
   private readonly waits = new Map<string, Wait>()
   /** Bytes waiting, by host and budget. */
@@ -77,10 +78,10 @@ class SharedSubscriptions<Source> {
   /** Slots never ready yet, counted down a microtask after: at 0, no send has anything to wait for. */
   private establishingSlots = 0
 
-  constructor({ driver, sources, sends }: SharedSubscriptionsOptions<Source>) {
+  constructor({ driver, sources, sendName }: SharedSubscriptionsOptions<Source>) {
     this.driver = driver
     this.sources = sources
-    this.sends = sends
+    this.sendName = sendName
   }
 
   /** False on the fast path, read before a send builds anything: no attempt establishes and no send waits. */
@@ -88,25 +89,39 @@ class SharedSubscriptions<Source> {
     return this.establishingSlots > 0 || this.waits.size > 0
   }
 
-  /** Sends `payload` once this host's attempts on its source are established, at most `ESTABLISH_WAIT_MS` later; a
-   *  driver may get a publish before its own subscribe otherwise (Redis's go by two connections). `send` gets the
-   *  send's own copy: the caller reuses its bytes. */
-  afterEstablished<Payload extends BackendPayload, R>(
-    source: Source,
-    payload: Payload,
-    send: (owned: Payload) => R,
-  ): R | Promise<Awaited<R>> {
+  /** A send's turn once this host's attempts on its source are established, at most `ESTABLISH_WAIT_MS` later; a driver
+   *  may get a publish before its own subscribe otherwise (Redis's go by two connections). Null when it has nothing to
+   *  wait for. The turn gives the send its own copy: the caller reuses its bytes. Throws `ChannelOverflowError` when its
+   *  bytes would pass its buffer limit; the config is read only then, as resolving it is costly. */
+  waitTurn<Payload extends BackendPayload>(source: Source, payload: Payload): WaitingSend<Payload> | null {
     const hostKey = this.driver.hostKey ? this.driver.hostKey() : ''
-    if (hostKey === null) return send(payload)
-    const { domain, waitsFor, budget, limit } = this.sources.waitOf(source)
-    const waitKey = JSON.stringify([hostKey, domain])
-    const wait = this.waits.get(waitKey) ?? this.openWait(hostKey, waitsFor)
-    if (wait === null) return send(payload)
-    const waiting = this.countWaiting(waitKey, wait, JSON.stringify([hostKey, budget]), limit, payload)
-    if (waiting === null) return Promise.reject(new ChannelOverflowError(`${this.sends} readiness buffer overflow`))
-    // Sent inside the reaction, so a send that finds the wait gone can't reach the driver first. `then` adopts what
-    // `send` returns, which TypeScript can't tell from `R`.
-    return wait.established.then(() => send(this.endWait(waiting))) as Promise<Awaited<R>>
+    if (hostKey === null) return null
+    const { orderedWith, subscriptions, countsAgainst, bufferLimit } = this.sources.sendWaitsFor(source)
+    const waitKey = JSON.stringify([hostKey, orderedWith])
+    let wait = this.waits.get(waitKey)
+    if (wait === undefined && this.establishingIn(hostKey, subscriptions).length === 0) return null
+    const budget = JSON.stringify([hostKey, countsAgainst])
+    const bytes =
+      WAITING_SEND_OVERHEAD_BYTES + (typeof payload === 'string' ? utf8ByteLength(payload) : payload.byteLength)
+    const total = (this.waitingBytes.get(budget) ?? 0) + bytes
+    if (total > getChannelLimits()[bufferLimit]) {
+      throw new ChannelOverflowError(`${this.sendName} waiting for a new subscription, past ${bufferLimit}`)
+    }
+    wait ??= this.openWait(hostKey, subscriptions)
+    this.waits.set(waitKey, wait)
+    wait.sends++
+    this.waitingBytes.set(budget, total)
+    const owned = (typeof payload === 'string' ? payload : new Uint8Array(payload)) as Payload
+    return new WaitingSend({ owner: this, waitKey, wait, budget, bytes, turn: wait.established.then(() => owned) })
+  }
+
+  /** A waiting send went to the driver: the last of its wait's sends unmaps it, so a send made before then still
+   *  queues behind the rest. */
+  endWait({ waitKey, wait, budget, bytes }: WaitingSend<unknown>): void {
+    if (--wait.sends === 0) this.waits.delete(waitKey)
+    const left = this.waitingBytes.get(budget)! - bytes
+    if (left === 0) this.waitingBytes.delete(budget)
+    else this.waitingBytes.set(budget, left)
   }
 
   subscribe(source: Source, listener: BackendListener): BackendSubscription {
@@ -147,14 +162,13 @@ class SharedSubscriptions<Source> {
     return slot
   }
 
-  /** A wait for this host's attempts on `waitsFor`, including ones made meanwhile; null when none is establishing. */
-  private openWait(hostKey: string, waitsFor: readonly Source[]): Wait | null {
-    if (this.establishingIn(hostKey, waitsFor).length === 0) return null
+  /** A wait for this host's attempts on `subscriptions`, including ones made meanwhile. */
+  private openWait(hostKey: string, subscriptions: readonly Source[]): Wait {
     let timer!: ReturnType<typeof setTimeout>
     const timeout = new Promise<void>((resolve) => {
       timer = unrefTimer(setTimeout(resolve, ESTABLISH_WAIT_MS))
     })
-    const established = Promise.race([this.establishedIn(hostKey, waitsFor), timeout]).finally(() =>
+    const established = Promise.race([this.establishedIn(hostKey, subscriptions), timeout]).finally(() =>
       clearTimeout(timer),
     )
     return { established, sends: 0 }
@@ -179,36 +193,6 @@ class SharedSubscriptions<Source> {
     return left
   }
 
-  /** Counts a waiting send against its budget: null past the budget's limit, read only now, as resolving the config is
-   *  costly. */
-  private countWaiting<Payload extends BackendPayload>(
-    waitKey: string,
-    wait: Wait,
-    budget: string,
-    limit: 'text' | 'binary',
-    payload: Payload,
-  ): WaitingSend<Payload> | null {
-    const bytes =
-      WAITING_SEND_OVERHEAD_BYTES + (typeof payload === 'string' ? utf8ByteLength(payload) : payload.byteLength)
-    const total = (this.waitingBytes.get(budget) ?? 0) + bytes
-    const limits = getChannelLimits()
-    if (total > (limit === 'binary' ? limits.bufferLimitBinary : limits.bufferLimit)) return null
-    this.waitingBytes.set(budget, total)
-    this.waits.set(waitKey, wait)
-    wait.sends++
-    const owned = (typeof payload === 'string' ? payload : new Uint8Array(payload)) as Payload
-    return { waitKey, wait, budget, bytes, payload: owned }
-  }
-
-  /** The wait ended: the last of its sends unmaps it, so a send its predecessor makes still queues behind the rest. */
-  private endWait<Payload>({ waitKey, wait, budget, bytes, payload }: WaitingSend<Payload>): Payload {
-    if (--wait.sends === 0) this.waits.delete(waitKey)
-    const left = this.waitingBytes.get(budget)! - bytes
-    if (left === 0) this.waitingBytes.delete(budget)
-    else this.waitingBytes.set(budget, left)
-    return payload
-  }
-
   private hostKeyHere(): string {
     const hostKey = this.driver.hostKey ? this.driver.hostKey() : ''
     assertUsage(
@@ -216,6 +200,38 @@ class SharedSubscriptions<Source> {
       'A Cloudflare subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.',
     )
     return hostKey
+  }
+}
+
+type WaitingSendOptions<Payload> = {
+  owner: SharedSubscriptions<unknown>
+  waitKey: string
+  wait: Wait
+  budget: string
+  bytes: number
+  turn: Promise<Payload>
+}
+
+/** A send's place in its domain's wait: `await turn` for its own copy of the payload, send that, then `sent()`. */
+class WaitingSend<Payload> {
+  readonly turn: Promise<Payload>
+  readonly waitKey: string
+  readonly wait: Wait
+  readonly budget: string
+  readonly bytes: number
+  private readonly owner: SharedSubscriptions<unknown>
+
+  constructor({ owner, waitKey, wait, budget, bytes, turn }: WaitingSendOptions<Payload>) {
+    this.owner = owner
+    this.waitKey = waitKey
+    this.wait = wait
+    this.budget = budget
+    this.bytes = bytes
+    this.turn = turn
+  }
+
+  sent(): void {
+    this.owner.endWait(this)
   }
 }
 

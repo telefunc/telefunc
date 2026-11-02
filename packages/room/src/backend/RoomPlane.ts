@@ -31,16 +31,19 @@ const laneSources: SourceRules<RoomSubscriptionSource> = {
   key: roomSubscriptionSourceKey,
   // A lane carries bytes.
   deliveryKind: () => 'binary',
-  waitOf: (target) => {
-    const domain = roomSubscriptionSourceKey(target)
-    if (target.lane.kind !== 'binary') return { domain, waitsFor: [target], budget: domain, limit: 'text' }
+  sendWaitsFor: (target) => {
+    const orderedWith = roomSubscriptionSourceKey(target)
+    if (target.lane.kind !== 'binary') {
+      return { orderedWith, subscriptions: [target], countsAgainst: orderedWith, bufferLimit: 'bufferLimit' }
+    }
     // A binary commit also reaches its member's every-track lane and its track's every-member lane, and its waiting
     // bytes count against its member's.
     const { roomId, inc, lane } = target
     const everyTrack = { roomId, inc, lane: { kind: 'binary-all', member: lane.member } } as const
     const everyMember = { roomId, inc, lane: { kind: 'binary-track', track: lane.track } } as const
-    const budget = roomSubscriptionSourceKey(everyTrack)
-    return { domain, waitsFor: [target, everyTrack, everyMember], budget, limit: 'binary' }
+    const countsAgainst = roomSubscriptionSourceKey(everyTrack)
+    const subscriptions = [target, everyTrack, everyMember]
+    return { orderedWith, subscriptions, countsAgainst, bufferLimit: 'bufferLimitBinary' }
   },
 }
 
@@ -52,7 +55,7 @@ class RoomPlane {
 
   constructor({ driver }: RoomPlaneOptions) {
     this.driver = driver
-    this.subscriptions = new SharedSubscriptions({ driver, sources: laneSources, sends: 'Room commit' })
+    this.subscriptions = new SharedSubscriptions({ driver, sources: laneSources, sendName: 'Room commit' })
   }
 
   async compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult> {
@@ -64,7 +67,7 @@ class RoomPlane {
     // A close commits under its lease, which would lapse before the wait ends.
     if (!this.subscriptions.establishing || opts?.closingLease !== undefined)
       return this.commitNow(target, payload, opts)
-    return this.subscriptions.afterEstablished(target, payload, (owned) => this.commitNow(target, owned, opts))
+    return this.commitInTurn(target, payload, opts)
   }
 
   async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {
@@ -91,6 +94,18 @@ class RoomPlane {
 
   dispose(): Promise<void> {
     return this.subscriptions.dispose()
+  }
+
+  /** While a lane subscription on this host establishes: commits in its turn, then lets later commits past. */
+  private async commitInTurn(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
+    const waiting = this.subscriptions.waitTurn(target, payload)
+    if (waiting === null) return this.commitNow(target, payload, opts)
+    const owned = await waiting.turn
+    try {
+      return this.commitNow(target, owned, opts)
+    } finally {
+      waiting.sent()
+    }
   }
 
   private async commitNow(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {

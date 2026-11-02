@@ -14,14 +14,14 @@ const broadcastSources: SourceRules<BroadcastRoute> = {
   key: broadcastRouteKey,
   deliveryKind: (route) => route.kind,
   // A key's two kinds share its order, so a publish of either waits behind the key's waiting ones.
-  waitOf: (route) => ({
-    domain: route.key,
-    waitsFor: [
+  sendWaitsFor: (route) => ({
+    orderedWith: route.key,
+    subscriptions: [
       { key: route.key, kind: 'text' },
       { key: route.key, kind: 'binary' },
     ],
-    budget: broadcastRouteKey(route),
-    limit: route.kind,
+    countsAgainst: broadcastRouteKey(route),
+    bufferLimit: route.kind === 'binary' ? 'bufferLimitBinary' : 'bufferLimit',
   }),
 }
 
@@ -32,7 +32,7 @@ class BroadcastPlane {
 
   constructor({ driver }: BroadcastPlaneOptions) {
     this.driver = driver
-    this.subscriptions = new SharedSubscriptions({ driver, sources: broadcastSources, sends: 'Broadcast publish' })
+    this.subscriptions = new SharedSubscriptions({ driver, sources: broadcastSources, sendName: 'Broadcast publish' })
   }
 
   /** Publishes `payload` as it is at the call. */
@@ -40,9 +40,7 @@ class BroadcastPlane {
     route: BroadcastRoute<Kind>,
     payload: BroadcastPayload<Kind>,
   ): ChannelPublishAck | Promise<ChannelPublishAck> {
-    return this.subscriptions.establishing
-      ? this.subscriptions.afterEstablished(route, payload, (owned) => this.publishNow(route, owned))
-      : this.publishNow(route, payload)
+    return this.subscriptions.establishing ? this.publishInTurn(route, payload) : this.publishNow(route, payload)
   }
 
   subscribe<Kind extends BroadcastKind>(
@@ -61,6 +59,21 @@ class BroadcastPlane {
 
   dispose(): Promise<void> {
     return this.subscriptions.dispose()
+  }
+
+  /** While a subscription on this host establishes: publishes in its turn, then lets later publishes past. */
+  private async publishInTurn<Kind extends BroadcastKind>(
+    route: BroadcastRoute<Kind>,
+    payload: BroadcastPayload<Kind>,
+  ): Promise<ChannelPublishAck> {
+    const waiting = this.subscriptions.waitTurn(route, payload)
+    if (waiting === null) return this.publishNow(route, payload)
+    const owned = await waiting.turn
+    try {
+      return this.publishNow(route, owned)
+    } finally {
+      waiting.sent()
+    }
   }
 
   private publishNow<Kind extends BroadcastKind>(
