@@ -1,8 +1,8 @@
 export { RoomDemand }
 export type { RoomDemandOptions, RoomDemandOwner }
 
-import { getOrCreate } from '../../utils/getOrCreate.js'
 import { EVERY_MEMBER, DEFAULT_TRACK, type EveryMember } from '../../shared/binary.js'
+import { getOrCreate } from 'telefunc/__internal'
 import { ROOM_DEMAND_TTL_MS } from '../constants.js'
 import type { DemandEntry, RoomDemandPage } from '../protocol.js'
 import { hasEntry, runAll, toggle, toggleEntry } from '../../utils/sets.js'

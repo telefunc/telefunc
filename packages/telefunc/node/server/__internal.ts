@@ -8,6 +8,13 @@ export { hostLocal } from '../../wire-protocol/channel/server/ChannelMux.js'
 export { getChannelLimits } from './serverConfig.js'
 export { MAX_CHANNELS_PER_CONNECTION } from '../../wire-protocol/constants.js'
 
+// Utilities the add-ons share with core.
+export { createDeferred, type Deferred } from '../../utils/createDeferred.js'
+export { getOrCreate } from '../../utils/getOrCreate.js'
+export { isObject } from '../../utils/isObject.js'
+export { Listeners } from '../../utils/Listeners.js'
+export { markHandled } from '../../utils/markHandled.js'
+
 // An add-on that drives a page's channel ends: Room's stubs and its client.
 export type { ServerBroadcastEnd, ClientBroadcast }
 export type { BroadcastEndOwner } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'

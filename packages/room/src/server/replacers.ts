@@ -1,6 +1,7 @@
 export { roomReplacer, roomParticipantReplacer, roomRemoteReplacer }
 
 import type { ReplacerType, ServerReplacerContext, TypeContract } from 'telefunc'
+import { getOrCreate } from 'telefunc/__internal'
 import {
   SERIALIZER_PREFIX_ROOM,
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
@@ -12,7 +13,6 @@ import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMe
 import { ResponseRoomGrants } from './RoomStub.js'
 import { remoteBacking } from '../shared/state.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
-import { getOrCreate } from '../utils/getOrCreate.js'
 assertIsNotBrowser()
 
 type RoomReplacerContract = TypeContract<ServerRoom, never, RoomSnapshotMetadata>

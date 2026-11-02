@@ -7,9 +7,9 @@ import {
   getChannelLimits,
   reportBug,
   type OrderingInfo,
+  markHandled,
 } from 'telefunc/__internal'
 import { assert, assertUsage } from '../utils/assert.js'
-import { markHandled } from '../utils/markHandled.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import {
   encodeBinaryFrame,
@@ -19,7 +19,7 @@ import {
   type TrackKey,
 } from '../shared/binary.js'
 import { roomClosedError, ROOM_BUG_MESSAGE } from '../shared/errors.js'
-import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetadata, recipientId } from '../shared/RoomModel.js'
+import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetadata, recipientId } from '../shared/arguments.js'
 import {
   inboxMessageFromWire,
   type SenderStamp,

@@ -24,13 +24,12 @@ import type {
   RoomSubscriptionSource,
 } from '../backend/contract.js'
 import type { BackendReceiver, CloudflarePlaneKit, DriverAttempt, OrderingInfo } from 'telefunc/__internal'
-import { CLOUDFLARE_BUCKETS, currentCloudflareHostKey, currentCloudflareMember } from 'telefunc/__internal'
+import { CLOUDFLARE_BUCKETS, currentCloudflareHostKey, currentCloudflareMember, markHandled } from 'telefunc/__internal'
 import type { AcceptedCommitWire, CloudflareRoomAuthorityStub } from './RoomAuthority.js'
 import { currentRoomSessionSubscriptions } from './RoomSessionSubscriptions.js'
 import { openRegionDirectory, openRoomAuthority } from './objects.js'
 import { compareCodePoints } from '../utils/SortedIds.js'
 import { assert } from '../utils/assert.js'
-import { markHandled } from '../utils/markHandled.js'
 import { OPERATION_COMMIT_LANE } from '../backend/operation.js'
 
 /** A subscription requires its session DO's context; a lane commit made in one goes through that session's ordered

@@ -29,7 +29,7 @@ export type {
   WireLeaveCause,
 }
 
-import { isRecord, ownLeaveCause, removedCause } from './RoomModel.js'
+import { isRecord, ownLeaveCause, removedCause } from './arguments.js'
 import type { TrackKey } from './binary.js'
 import type { LeaveCause, ParticipantMeta } from '../types.js'
 

@@ -12,8 +12,8 @@ export {
 }
 export type { StoredRoomMeta, RoomMetaWrite, MemberMetaWrite, MemberMetaCells }
 
-import { getOrCreate } from '../../utils/getOrCreate.js'
 import { getRoomPlane } from '../../backend/plane.js'
+import { getOrCreate } from 'telefunc/__internal'
 import {
   CELL_PAGE_SIZE,
   type CellMutation,
@@ -24,7 +24,7 @@ import { decodeCellCounter } from '../../backend/semantics.js'
 import { Slice } from '../../shared/Slice.js'
 import { participantGoneError, roomClosedError } from '../../shared/errors.js'
 import { compareMetaEntries, metaEntriesAt } from '../../shared/RoomMetaState.js'
-import { mergeAttributes } from '../../shared/RoomModel.js'
+import { mergeAttributes } from '../../shared/arguments.js'
 import type { MemberMetaUpdate, RoomCtrlEnvelope, RoomMetaEntry, RoomMetaUpdate } from '../../shared/protocol.js'
 import type { RoomConfigRecord, RoomMemberRecord, RoomIncarnation } from '../protocol.js'
 import type { ParticipantMeta, RoomMeta } from '../../types.js'

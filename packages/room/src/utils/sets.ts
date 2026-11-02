@@ -1,6 +1,5 @@
 export { toggle, hasEntry, toggleEntry, runAll }
-
-import { getOrCreate } from './getOrCreate.js'
+import { getOrCreate } from 'telefunc/__internal'
 
 function toggle<T>(set: Set<T>, value: T, on: boolean): void {
   if (on) set.add(value)

@@ -2,11 +2,10 @@ export { RoomWrites, runAfterHook }
 export type { RoomWritesOptions, RoomWritesOwner }
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
-import { createDeferred } from '../utils/createDeferred.js'
 import { unrefTimer } from '../utils/unrefTimer.js'
 import type { CommitAccepted } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
-import { type ChannelPublishAck, reportBug } from 'telefunc/__internal'
+import { type ChannelPublishAck, reportBug, createDeferred } from 'telefunc/__internal'
 import type { BinaryFrame } from '../shared/binary.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import {
@@ -18,7 +17,7 @@ import {
   toRoomFailure,
   ROOM_BUG_MESSAGE,
 } from '../shared/errors.js'
-import { ownMetaArgument, senderOf } from '../shared/RoomModel.js'
+import { ownMetaArgument, senderOf } from '../shared/arguments.js'
 import type {
   MemberMetaUpdate,
   WholeMemberUpdate,

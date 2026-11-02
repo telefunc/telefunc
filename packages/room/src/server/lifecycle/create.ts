@@ -1,10 +1,10 @@
 export { tryCreateRoom }
 
 import { assert, assertUsage } from '../../utils/assert.js'
-import { isObject } from '../../utils/isObject.js'
+import { isObject } from 'telefunc/__internal'
 import { getRoomPlane } from '../../backend/plane.js'
 import type { HeadExpectation, HeadNext, RoomHead } from '../../backend/contract.js'
-import { assertKnownOptions, isRecord, ownMetadata } from '../../shared/RoomModel.js'
+import { assertKnownOptions, isRecord, ownMetadata } from '../../shared/arguments.js'
 import type { RoomConfigRecord, RoomIncarnation } from '../protocol.js'
 import type { RoomMeta, RoomOptions } from '../../types.js'
 import { encodeRoomRecord } from '../lanes/lanes.js'

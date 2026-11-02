@@ -3,10 +3,8 @@ export type { RoomStateOwner }
 
 import { assert, assertUsage } from '../utils/assert.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
-import { invokeChannelListener, type ChannelPublishInfo } from 'telefunc/__internal'
+import { invokeChannelListener, type ChannelPublishInfo, getOrCreate, Listeners } from 'telefunc/__internal'
 import { makeDisposer } from './disposer.js'
-import { Listeners } from '../utils/Listeners.js'
-import { getOrCreate } from '../utils/getOrCreate.js'
 import {
   EVERY_MEMBER,
   EVERY_TRACK,
@@ -18,7 +16,8 @@ import {
   type BinaryWantChange,
   type TrackKey,
 } from './binary.js'
-import { assertKnownOptions, senderOf, type MemberEntry, type RoomModel } from './RoomModel.js'
+import { type MemberEntry, type RoomModel } from './RoomModel.js'
+import { assertKnownOptions, senderOf } from './arguments.js'
 import type { MemberSnapshot, MemberWants, RoomDataEvent, SenderStamp } from './protocol.js'
 import type { BinaryFrameInfo, LeaveCause, ParticipantMeta, RemoteParticipant, RoomMeta, Sender } from '../types.js'
 

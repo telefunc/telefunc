@@ -2,7 +2,7 @@ export { roomStatics }
 export type { RoomGuardHooks, RoomStatic }
 
 import { assertUsage } from '../utils/assert.js'
-import { isObject } from '../utils/isObject.js'
+import { isObject } from 'telefunc/__internal'
 import { getRoomPlane } from '../backend/plane.js'
 import { DIRECTORY_PAGE_SIZE } from '../backend/contract.js'
 import type { RoomPlane } from '../backend/RoomPlane.js'
@@ -14,7 +14,7 @@ import {
   ownMessage,
   ownMetadata,
   removedCause,
-} from '../shared/RoomModel.js'
+} from '../shared/arguments.js'
 import type { MemberSnapshot, RoomEnvelope } from '../shared/protocol.js'
 import type { RoomConfigRecord, RoomIncarnation } from './protocol.js'
 import type {

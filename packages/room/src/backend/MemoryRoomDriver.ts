@@ -47,9 +47,9 @@ import {
   type OrderingInfo,
   MemoryPubSub,
   type Subscribers,
+  createDeferred,
+  getOrCreate,
 } from 'telefunc/__internal'
-import { createDeferred } from '../utils/createDeferred.js'
-import { getOrCreate } from '../utils/getOrCreate.js'
 import { SortedIds, compareCodePoints } from '../utils/SortedIds.js'
 import { unrefTimer } from '../utils/unrefTimer.js'
 

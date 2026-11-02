@@ -21,7 +21,7 @@ import {
   type BinaryFrame,
   type BinaryWantChange,
 } from '../shared/binary.js'
-import { isRecord } from '../shared/RoomModel.js'
+import { isRecord } from '../shared/arguments.js'
 import type {
   RoomResult,
   MemberMutationRequest,

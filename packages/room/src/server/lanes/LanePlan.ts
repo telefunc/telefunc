@@ -2,8 +2,8 @@ export { LanePlan }
 export type { LanePlanOwner, LanePlanOptions }
 
 import { assert } from '../../utils/assert.js'
+import { getOrCreate } from 'telefunc/__internal'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
-import { getOrCreate } from '../../utils/getOrCreate.js'
 import { getRoomPlane } from '../../backend/plane.js'
 import { encodeLaneKey } from '../../backend/laneKey.js'
 import type { BackendListener, BackendSubscription, OrderingInfo } from 'telefunc/__internal'

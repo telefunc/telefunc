@@ -2,7 +2,7 @@ export { WantsIndex }
 export type { Affected, WantsIndexOptions, WantsIndexOwner }
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
-import { getOrCreate } from '../../utils/getOrCreate.js'
+import { getOrCreate } from 'telefunc/__internal'
 import {
   EVERY_MEMBER,
   EVERY_TRACK,

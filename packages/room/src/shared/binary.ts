@@ -15,7 +15,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../utils/assert.js'
 import { utf8ByteLength } from '../utils/utf8ByteLength.js'
-import { assertKnownOptions, isRecord } from './RoomModel.js'
+import { assertKnownOptions, isRecord } from './arguments.js'
 import type { BinaryPublishOptions } from '../types.js'
 
 // Member IDs: UUIDs, framed as a fixed 16-byte prefix on binary messages

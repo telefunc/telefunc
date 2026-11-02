@@ -1,9 +1,7 @@
 export { ClientRoom, ClientStandaloneParticipant }
 
-import { createDeferred } from '../utils/createDeferred.js'
 import { assert, assertUsage } from '../utils/assert.js'
-import { markHandled } from '../utils/markHandled.js'
-import { getOrCreate } from '../utils/getOrCreate.js'
+import { createDeferred, getOrCreate, markHandled } from 'telefunc/__internal'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import type { TELEFUNC_SHIELDS, ChannelPublishAck, ChannelPublishInfo, ClientBroadcast } from 'telefunc/__internal'
 import {
@@ -20,7 +18,7 @@ import {
   ownMessage,
   ownMetaArgument,
   recipientId,
-} from '../shared/RoomModel.js'
+} from '../shared/arguments.js'
 import {
   hasRoomTag,
   inboxMessageFromWire,

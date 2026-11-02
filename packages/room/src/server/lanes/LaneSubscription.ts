@@ -2,7 +2,7 @@ export { LaneSubscription }
 export type { LaneAddress, LaneSubscriptionOptions, LaneSubscriptionOwner }
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
-import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
+import { createDeferred, type Deferred } from 'telefunc/__internal'
 import type { BackendListener, BackendSubscription, OrderingInfo } from 'telefunc/__internal'
 import type { RoomSubscriptionSource } from '../../backend/contract.js'
 assertIsNotBrowser()
