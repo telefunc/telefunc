@@ -77,7 +77,7 @@ function holdRecord(config: HoldConfig, counters: ReadonlyMap<string, CellCounte
  *  failed and nothing has held it since. */
 async function readHoldRecord({ id, inc, hold }: RoomIncarnation): Promise<HoldRecord | null> {
   if (hold === null) return null
-  const read = await getRoomPlane().readCells(id, inc, { keys: [HOLDS_CELL_KEY, JOINS_CELL_KEY] })
+  const read = await getRoomPlane().driver.readCells(id, inc, { keys: [HOLDS_CELL_KEY, JOINS_CELL_KEY] })
   if (read.kind === 'stale-incarnation' || read.cells.size === 0) return null
   const counters = new Map<string, CellCounter>()
   for (const [key, raw] of read.cells) counters.set(key, decodeCellCounter(raw))
@@ -102,7 +102,7 @@ function afterHoldChange(room: RoomIncarnation, change: HoldChange | null): void
 async function createHold(room: RoomIncarnation): Promise<void> {
   const { hold } = room
   if (hold === null) return
-  const result = await getRoomPlane().compareExchangeCells(room.id, room.inc, {
+  const result = await getRoomPlane().driver.compareExchangeCells(room.id, room.inc, {
     expect: [],
     mutations: [],
     counts: holdDelta(hold, 0).counts,
@@ -130,7 +130,7 @@ async function lapseNewRoom(room: RoomIncarnation): Promise<RoomHead | null> {
   const { id, inc } = room
   const plane = getRoomPlane()
   return await retryCompareExchange(async () => {
-    const head = await plane.readHead(id)
+    const head = await plane.driver.readHead(id)
     if (!isOpenIncarnation(head, inc)) return null
     const record = await readHoldRecord(room)
     if (record?.closesIn === undefined) return head
@@ -159,7 +159,7 @@ async function extendLapse(
   const ttlMs = timeout === Infinity ? undefined : ROOM_LEASE_TTL_MS + timeout + 2 * ROOM_HEARTBEAT_INTERVAL_MS
   const plane = getRoomPlane()
   await retryCompareExchange(async () => {
-    const head = await plane.readHead(id)
+    const head = await plane.driver.readHead(id)
     if (!isOpenIncarnation(head, inc)) return
     const { expiresAt } = head
     if (!firstHold && ttlMs === undefined && expiresAt === undefined) return

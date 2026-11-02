@@ -33,7 +33,8 @@ export type {
   Unsubscribe,
 } from '../../wire-protocol/backend/driver.js'
 export { installBackend, backendPlane, type PlaneDefinition } from '../../wire-protocol/backend/install.js'
-export type { BackendReceiver, BackendSubscription, Subscriptions } from '../../wire-protocol/backend/Subscriptions.js'
+export type { BackendReceiver, BackendSubscription } from '../../wire-protocol/backend/Subscriptions.js'
+export { Subscriptions } from '../../wire-protocol/backend/Subscriptions.js'
 export { assertDriverOrdering } from '../../wire-protocol/backend/driverOrdering.js'
 export { decodeOrderingFrame } from '../../wire-protocol/wire/orderingFrame.js'
 export { MemoryBackend } from '../../wire-protocol/backend/memory/MemoryBackend.js'

@@ -1,4 +1,4 @@
-export { createBroadcastTransportDriver }
+export { TransportBroadcastDriver }
 export type { BroadcastTransport }
 
 import { isOrdering } from '../../wire/orderingFrame.js'
@@ -27,21 +27,33 @@ type BroadcastTransport = {
   ): () => void
 }
 
-function createBroadcastTransportDriver(transport: BroadcastTransport): BroadcastDriver {
-  return {
-    publish: (route, payload) => publish(transport, route, payload),
-    subscribe: (route, subscriber) => subscribe(transport, route, subscriber),
-  }
-}
+type TransportBroadcastDriverOptions = { transport: BroadcastTransport }
 
-function publish(
-  transport: BroadcastTransport,
-  route: BroadcastRoute,
-  payload: BroadcastPayload,
-): PublishResult | Promise<PublishResult> {
-  const result =
-    typeof payload === 'string' ? transport.send(route.key, payload) : transport.sendBinary(route.key, payload)
-  return isPromise(result) ? result.then(checkOrdering) : checkOrdering(result)
+/** Broadcast on the app's `config.broadcast.transport`. */
+class TransportBroadcastDriver implements BroadcastDriver {
+  private readonly transport: BroadcastTransport
+
+  constructor({ transport }: TransportBroadcastDriverOptions) {
+    this.transport = transport
+  }
+
+  publish(route: BroadcastRoute, payload: BroadcastPayload): PublishResult | Promise<PublishResult> {
+    const result =
+      typeof payload === 'string'
+        ? this.transport.send(route.key, payload)
+        : this.transport.sendBinary(route.key, payload)
+    return isPromise(result) ? result.then(checkOrdering) : checkOrdering(result)
+  }
+
+  /** Ready at once: a user transport's listen() has no establishment to wait for. */
+  subscribe(route: BroadcastRoute, subscriber: Subscriber): Unsubscribe {
+    const stop =
+      route.kind === 'text'
+        ? this.transport.listen(route.key, (payload, info) => subscriber.message(payload, checkOrdering(info)))
+        : this.transport.listenBinary(route.key, (payload, info) => subscriber.message(payload, checkOrdering(info)))
+    subscriber.ready()
+    return async () => stop()
+  }
 }
 
 function checkOrdering<Ordering extends { seq: number; timestamp: number }>(ordering: Ordering): Ordering {
@@ -50,14 +62,4 @@ function checkOrdering<Ordering extends { seq: number; timestamp: number }>(orde
     `config.broadcast.transport returned { seq: ${ordering.seq}, timestamp: ${ordering.timestamp} }: seq must be a positive safe integer and timestamp a non-negative safe integer.`,
   )
   return ordering
-}
-
-/** Ready at once: a user transport's listen() has no establishment to wait for. */
-function subscribe(transport: BroadcastTransport, route: BroadcastRoute, subscriber: Subscriber): Unsubscribe {
-  const stop =
-    route.kind === 'text'
-      ? transport.listen(route.key, (payload, info) => subscriber.message(payload, checkOrdering(info)))
-      : transport.listenBinary(route.key, (payload, info) => subscriber.message(payload, checkOrdering(info)))
-  subscriber.ready()
-  return async () => stop()
 }

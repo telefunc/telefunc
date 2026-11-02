@@ -23,14 +23,13 @@ export type {
   HeadExchangeResult,
   HeadNext,
   LaneId,
-  RoomPlane,
   RoomDriver,
   RoomHead,
   RoomPlaneKit,
   RoomSubscriptionSource,
 }
 
-import type { BackendReceiver, BackendSubscription, OrderingInfo, Subscriber, Unsubscribe } from 'telefunc/__internal'
+import type { OrderingInfo, Subscriber, Unsubscribe } from 'telefunc/__internal'
 
 /** The cells a prefix read's page holds. */
 const CELL_PAGE_SIZE = 1024
@@ -202,16 +201,4 @@ type RoomDriver = {
   /** Subscribes this host to `source` and tells `subscriber` how it goes, as a Broadcast driver's `subscribe` does. An
    *  incarnation that isn't open is a refusal: `subscriber.failed(error)`. */
   subscribe(source: RoomSubscriptionSource, subscriber: Subscriber): Unsubscribe
-}
-
-/** What Room's server code calls: the driver checked, with its lane subscriptions shared by source and host
- *  (`superviseRoomDriver`). */
-type RoomPlane = Omit<RoomDriver, 'subscribe'> & {
-  subscribeLane(
-    roomId: string,
-    inc: string,
-    lane: LaneId | EveryTrackLane | EveryMemberLane,
-    receiver: BackendReceiver,
-  ): BackendSubscription
-  dispose(): Promise<void>
 }

@@ -26,7 +26,7 @@ async function readPrefixAt(roomId: string, inc: string, prefix: string): Promis
   const cells = new Map<string, Uint8Array>()
   let now = 0
   const slice = new Slice()
-  for await (const page of getRoomPlane().readCellPages(roomId, inc, prefix)) {
+  for await (const page of getRoomPlane().driver.readCellPages(roomId, inc, prefix)) {
     if (page.kind === 'stale-incarnation') throw roomClosedError(roomId)
     for (const [key, raw] of page.cells) cells.set(key, raw)
     now = page.now
@@ -44,12 +44,12 @@ async function mutateCells<T>(
 ): Promise<CellCommit<T>> {
   const plane = getRoomPlane()
   return await retryCompareExchange(async () => {
-    const read = await plane.readCells(roomId, inc, { keys })
+    const read = await plane.driver.readCells(roomId, inc, { keys })
     if (read.kind === 'stale-incarnation') throw roomClosedError(roomId)
     const { value, mutations, counts = [] } = plan(read.cells, read.now)
     if (mutations.length === 0 && counts.length === 0) return { value, counters: new Map() }
     const expect = keys.map((key) => ({ key, version: read.versions.get(key) ?? null }))
-    const result = await plane.compareExchangeCells(roomId, inc, { expect, mutations, counts })
+    const result = await plane.driver.compareExchangeCells(roomId, inc, { expect, mutations, counts })
     if (result.kind === 'stale-incarnation') throw roomClosedError(roomId)
     return result.kind === 'conflict' ? EXCHANGE_CONFLICT : { value, counters: result.counters }
   })
@@ -60,7 +60,7 @@ async function readOpenCells(
   inc: string,
   keys: string[],
 ): Promise<Extract<CellsRead, { kind: 'read' }>> {
-  const read = await getRoomPlane().readCells(roomId, inc, { keys })
+  const read = await getRoomPlane().driver.readCells(roomId, inc, { keys })
   if (read.kind === 'stale-incarnation') throw roomClosedError(roomId)
   return read
 }
@@ -95,7 +95,7 @@ async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<un
 async function dropCells(roomId: string, inc: string, prefix: string, mark?: string): Promise<boolean> {
   let held: string[] = []
   const slice = new Slice()
-  for await (const page of getRoomPlane().readCellPages(roomId, inc, prefix)) {
+  for await (const page of getRoomPlane().driver.readCellPages(roomId, inc, prefix)) {
     if (page.kind === 'stale-incarnation') return false
     // Without a mark, each page goes as it is read; with one, a page waits for the next, so the last goes with it.
     if (mark === undefined) {
@@ -114,6 +114,6 @@ async function dropCells(roomId: string, inc: string, prefix: string, mark?: str
 /** Deletes `keys` in one exchange; false once the incarnation is stale. */
 async function deleteCells(roomId: string, inc: string, keys: Iterable<string>): Promise<boolean> {
   const mutations = Array.from(keys, (key) => ({ key, bytes: null }))
-  const result = await getRoomPlane().compareExchangeCells(roomId, inc, { expect: [], mutations })
+  const result = await getRoomPlane().driver.compareExchangeCells(roomId, inc, { expect: [], mutations })
   return result.kind !== 'stale-incarnation'
 }

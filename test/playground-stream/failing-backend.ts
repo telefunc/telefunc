@@ -21,6 +21,7 @@ import {
   getRoomPlane,
   MemoryRoomDriver,
   type CellsRead,
+  type RoomDriver,
   type RoomPlane,
   type RoomSubscriptionSource,
 } from '@telefunc/room/backend'
@@ -54,7 +55,7 @@ const { faults, subscriptions, holds, holding, retainedHolds, holdingRetained } 
   faults: (BackendFault & { times: number })[]
   subscriptions: Set<FailingSubscription>
   holds: CellPagesHold[]
-  holding: WeakSet<RoomPlane>
+  holding: WeakSet<RoomDriver>
   retainedHolds: RetainedReadsHold[]
   holdingRetained: WeakSet<RoomPlane>
 }
@@ -194,11 +195,11 @@ function holdCellPages(roomId: string, key: string, pages: number): { reached: P
     return released.promise
   }
   holds.push({ roomId, key, pages, wait })
-  const backend = getRoomPlane()
-  if (!holding.has(backend)) {
-    holding.add(backend)
-    const read = backend.readCellPages
-    backend.readCellPages = (roomId, inc, prefix) => heldCellPages(read(roomId, inc, prefix), takeHold(roomId, prefix))
+  const { driver } = getRoomPlane()
+  if (!holding.has(driver)) {
+    holding.add(driver)
+    const read = driver.readCellPages.bind(driver)
+    driver.readCellPages = (roomId, inc, prefix) => heldCellPages(read(roomId, inc, prefix), takeHold(roomId, prefix))
   }
   return { reached: reached.promise, release: released.resolve }
 }
@@ -209,11 +210,11 @@ function holdRetainedReads(roomId: string): { held: () => number; release: () =>
   const released = createDeferred()
   const hold: RetainedReadsHold = { roomId, waiting: 0, released: released.promise }
   retainedHolds.push(hold)
-  const backend = getRoomPlane()
-  if (!holdingRetained.has(backend)) {
-    holdingRetained.add(backend)
-    const read = backend.readRetained
-    backend.readRetained = async (roomId, inc, lane) => {
+  const plane = getRoomPlane()
+  if (!holdingRetained.has(plane)) {
+    holdingRetained.add(plane)
+    const read = plane.readRetained.bind(plane)
+    plane.readRetained = async (roomId, inc, lane) => {
       const hold = lane.kind === 'binary' ? retainedHolds.find((hold) => hold.roomId === roomId) : undefined
       if (hold !== undefined) {
         hold.waiting++

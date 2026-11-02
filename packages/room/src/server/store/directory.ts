@@ -4,7 +4,8 @@ export { listRoom, repairRoomIndex, sweepLapsedRoomsSoon }
 // `Room.list()` does, so no lapsed room's data waits for a list call.
 
 import { getRoomPlane } from '../../backend/plane.js'
-import type { RoomPlane, RoomHead } from '../../backend/contract.js'
+import type { RoomHead } from '../../backend/contract.js'
+import type { RoomPlane } from '../../backend/RoomPlane.js'
 import { Slice } from '../../shared/Slice.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_LEASE_TTL_MS } from '../constants.js'
 import type { RoomIncarnation } from '../lifecycle/lifecycle.js'
@@ -20,19 +21,19 @@ async function listRoom(
   { id, inc, hold }: RoomIncarnation,
   expiresAt: number | undefined,
 ): Promise<void> {
-  if (hold === null) return await plane.directoryPut(id, inc, Infinity, 0)
-  if (expiresAt === undefined) return await plane.directoryPut(id, inc, 0, ROOM_LEASE_TTL_MS)
-  await plane.directoryPut(id, inc, expiresAt, ROOM_HEARTBEAT_INTERVAL_MS)
+  if (hold === null) return await plane.driver.directoryPut(id, inc, Infinity, 0)
+  if (expiresAt === undefined) return await plane.driver.directoryPut(id, inc, 0, ROOM_LEASE_TTL_MS)
+  await plane.driver.directoryPut(id, inc, expiresAt, ROOM_HEARTBEAT_INTERVAL_MS)
 }
 
 /** A listed incarnation no head names as current has no owner left (its close finished, or was interrupted and its
  *  tombstone lapsed), so it is dropped with its listing. */
 async function repairRoomIndex(plane: RoomPlane, id: string, listedInc: string, head: RoomHead | null): Promise<void> {
   if (head?.currentInc === listedInc) return
-  await plane.dropIncarnation(id, listedInc)
+  await plane.driver.dropIncarnation(id, listedInc)
   const live = openConfig(head)
   if (live) await listRoom(plane, { id, inc: live.inc, hold: live.hold }, head!.expiresAt)
-  else await plane.directoryDelete(id, listedInc)
+  else await plane.driver.directoryDelete(id, listedInc)
 }
 
 const globalObject = getGlobalObject('server/directory.ts', {
@@ -51,9 +52,9 @@ function sweepLapsedRoomsSoon(): void {
  *  `ROOM_PLAN_SLICE_MS` slice at a time. */
 async function sweepLapsedRooms(plane: RoomPlane): Promise<void> {
   const slice = new Slice()
-  for (let due = await plane.directoryDue(); due.length > 0; due = await plane.directoryDue()) {
+  for (let due = await plane.driver.directoryDue(); due.length > 0; due = await plane.driver.directoryDue()) {
     for (const { roomId, incTag } of due) {
-      const head = await plane.readHead(roomId)
+      const head = await plane.driver.readHead(roomId)
       if (head?.currentInc !== incTag) await repairRoomIndex(plane, roomId, incTag, head)
       else await listRoom(plane, { id: roomId, inc: incTag, hold: configFromHead(head).hold }, head.expiresAt)
     }

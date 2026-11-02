@@ -2,7 +2,8 @@ export { closeIncarnation, takeOverClose, cleanupFinalizedIncarnation }
 
 import { assert } from '../../utils/assert.js'
 import { getRoomPlane } from '../../backend/plane.js'
-import type { RoomPlane, RoomHead } from '../../backend/contract.js'
+import type { RoomHead } from '../../backend/contract.js'
+import type { RoomPlane } from '../../backend/RoomPlane.js'
 import { ROOM_CLOSE_LEASE_MS, ROOM_TOMBSTONE_TTL_MS } from '../constants.js'
 import { commitLane, configFromHead, controlLane, encodeRoomRecord } from '../lanes/lanes.js'
 
@@ -10,7 +11,7 @@ import { commitLane, configFromHead, controlLane, encodeRoomRecord } from '../la
 async function closeIncarnation(id: string, inc?: string): Promise<string | null> {
   const plane = getRoomPlane()
   for (;;) {
-    const current = await plane.readHead(id)
+    const current = await plane.driver.readHead(id)
     if (current === null) return null
     if (current.state === 'closed') {
       await cleanupFinalizedIncarnation(plane, id, current)
@@ -71,6 +72,6 @@ async function cleanupFinalizedIncarnation(plane: RoomPlane, roomId: string, clo
   // A closed tombstone's incarnation, which a random `inc` never makes current again.
   assert(closed.state === 'closed' && closed.currentInc === null, 'Dropping the current incarnation')
   const inc = configFromHead(closed).inc
-  await plane.dropIncarnation(roomId, inc)
-  await plane.directoryDelete(roomId, inc)
+  await plane.driver.dropIncarnation(roomId, inc)
+  await plane.driver.directoryDelete(roomId, inc)
 }

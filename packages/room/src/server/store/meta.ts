@@ -133,25 +133,25 @@ async function mergePair(a: RoomMetaEntry[], b: RoomMetaEntry[], slice: Slice): 
 async function readRoomMeta(roomId: string, { inc, meta }: RoomConfigRecord): Promise<StoredRoomMeta | null> {
   const plane = getRoomPlane()
   for (let attempt = 0; attempt < META_PAGED_READS; attempt++) {
-    const before = await plane.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY, META_GEN_CELL_KEY] })
+    const before = await plane.driver.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY, META_GEN_CELL_KEY] })
     if (before.kind === 'stale-incarnation') return null
     const seq = before.cells.get(META_SEQ_CELL_KEY)
     if (seq === undefined) return { entries: metaEntriesAt(meta, 0), seq: 0 }
     const prefix = roomMetaGenPrefix(decodeRoomRecord<number>(before.cells.get(META_GEN_CELL_KEY)!))
     const runs: RoomMetaEntry[][] = []
     const slice = new Slice()
-    for await (const page of plane.readCellPages(roomId, inc, prefix)) {
+    for await (const page of plane.driver.readCellPages(roomId, inc, prefix)) {
       if (page.kind === 'stale-incarnation') return null
       runs.push(metaRun(page.cells, prefix))
       if (slice.over) await slice.next()
     }
-    const after = await plane.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY] })
+    const after = await plane.driver.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY] })
     if (after.kind === 'stale-incarnation') return null
     if (after.versions.get(META_SEQ_CELL_KEY) === before.versions.get(META_SEQ_CELL_KEY)) {
       return { entries: await mergeRuns(runs), seq: decodeCellCounter(seq).value }
     }
   }
-  const read = await plane.readCells(roomId, inc, { prefix: META_CELL_PREFIX })
+  const read = await plane.driver.readCells(roomId, inc, { prefix: META_CELL_PREFIX })
   if (read.kind === 'stale-incarnation') return null
   const prefix = roomMetaGenPrefix(decodeRoomRecord<number>(read.cells.get(META_GEN_CELL_KEY)!))
   const runs: RoomMetaEntry[][] = []
@@ -170,7 +170,7 @@ async function readRoomMeta(roomId: string, { inc, meta }: RoomConfigRecord): Pr
 
 /** How many writes the stored meta reflects; null once the incarnation is gone. */
 async function readRoomMetaSeq(roomId: string, inc: string): Promise<number | null> {
-  const read = await getRoomPlane().readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY] })
+  const read = await getRoomPlane().driver.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY] })
   if (read.kind === 'stale-incarnation') return null
   const seq = read.cells.get(META_SEQ_CELL_KEY)
   return seq === undefined ? 0 : decodeCellCounter(seq).value
@@ -192,7 +192,7 @@ async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: Ro
     if (seq === undefined) {
       const meta = metaEntriesAt('replace' in write ? write.replace : mergeAttributes(config.meta, write.merge), 0)
       const prefix = roomMetaGenPrefix(0)
-      const result = await plane.compareExchangeCells(roomId, inc, {
+      const result = await plane.driver.compareExchangeCells(roomId, inc, {
         expect: [{ key: META_SEQ_CELL_KEY, version: null }],
         mutations: [genMutation(0), ...meta.map((entry) => metaKeyMutation(prefix, entry))],
         counts: [{ key: META_SEQ_CELL_KEY, delta: 1, create: true }],
@@ -208,7 +208,7 @@ async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: Ro
       const prefix = roomMetaGenPrefix(count)
       const drop = { key: metaDropCellKey(gen), bytes: encodeRoomRecord(gen) }
       const mutations = [genMutation(count), drop, ...meta.map((entry) => metaKeyMutation(prefix, entry))]
-      const result = await plane.compareExchangeCells(roomId, inc, { expect, mutations, counts })
+      const result = await plane.driver.compareExchangeCells(roomId, inc, { expect, mutations, counts })
       return result.kind === 'conflict' ? null : committed(roomId, result, (seq) => ({ __r: 'update', seq, meta }))
     }
     const prefix = roomMetaGenPrefix(gen)
@@ -216,7 +216,7 @@ async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: Ro
     const merging = keys.length === 0 ? new Map() : (await readOpenCells(roomId, inc, keys)).cells
     const changes = metaChanges(write.merge, prefix, count, merging)
     const mutations = changes.map((change) => changeMutation(prefix, change))
-    const result = await plane.compareExchangeCells(roomId, inc, { expect, mutations, counts })
+    const result = await plane.driver.compareExchangeCells(roomId, inc, { expect, mutations, counts })
     return committed(roomId, result, (seq) => ({ __r: 'update', seq, changes }))
   })
   if (update === null) return
@@ -240,13 +240,17 @@ function committed(
  *  mark, a later replace or the heartbeat, drops no live key. */
 async function dropReplacedMetaGenerations(roomId: string, inc: string): Promise<void> {
   const plane = getRoomPlane()
-  const marks = await plane.readCells(roomId, inc, { prefix: META_DROP_CELL_PREFIX })
+  const marks = await plane.driver.readCells(roomId, inc, { prefix: META_DROP_CELL_PREFIX })
   if (marks.kind === 'stale-incarnation') return
   const slice = new Slice()
   // The loop is `dropCells`' marked one, inline so that a replace's drop runs in this one async frame.
   for (const [mark, raw] of marks.cells) {
     let held: string[] = []
-    for await (const page of plane.readCellPages(roomId, inc, roomMetaGenPrefix(decodeRoomRecord<number>(raw)))) {
+    for await (const page of plane.driver.readCellPages(
+      roomId,
+      inc,
+      roomMetaGenPrefix(decodeRoomRecord<number>(raw)),
+    )) {
       if (page.kind === 'stale-incarnation' || (held.length > 0 && !(await deleteCells(roomId, inc, held)))) return
       held = [...page.cells.keys()]
       if (slice.over) await slice.next()
@@ -297,7 +301,7 @@ async function writeMemberMeta(
     const next: RoomMemberRecord = { ...record, metaSeq: seq, metaGen: gen }
     mutations.push({ key: memberKey, bytes: encodeRoomRecord(next) })
     const expect = [{ key: memberKey, version: read.versions.get(memberKey)! }]
-    const result = await plane.compareExchangeCells(room.id, room.inc, { expect, mutations })
+    const result = await plane.driver.compareExchangeCells(room.id, room.inc, { expect, mutations })
     if (result.kind === 'stale-incarnation') throw roomClosedError(room.id)
     if (result.kind === 'conflict') return EXCHANGE_CONFLICT
     let update: MemberMetaUpdate
@@ -327,7 +331,7 @@ async function writeMemberConnection(
     const seq = record.metaSeq + 1
     const next: RoomMemberRecord = { ...record, metaSeq: seq }
     if (!connected) next.disconnected = true
-    const result = await getRoomPlane().compareExchangeCells(room.id, room.inc, {
+    const result = await getRoomPlane().driver.compareExchangeCells(room.id, room.inc, {
       expect: [{ key: memberKey, version: read.versions.get(memberKey)! }],
       mutations: [{ key: memberKey, bytes: encodeRoomRecord(next) }],
     })
@@ -378,7 +382,7 @@ async function readMetaCellPages(
   const cut = new Set<string>()
   let last: string | undefined
   const slice = new Slice()
-  for await (const page of getRoomPlane().readCellPages(room.id, room.inc, prefix)) {
+  for await (const page of getRoomPlane().driver.readCellPages(room.id, room.inc, prefix)) {
     if (page.kind === 'stale-incarnation') throw roomClosedError(room.id)
     if (last !== undefined) cut.add(last)
     for (const cell of page.cells) {
@@ -408,7 +412,7 @@ async function settleMemberMetaCells(
     cells = read.byMember.get(id) ?? []
     if (read.cut.size === 0) return cells
   }
-  const read = await getRoomPlane().readCells(room.id, room.inc, { prefix: memberMetaCellPrefix(id) })
+  const read = await getRoomPlane().driver.readCells(room.id, room.inc, { prefix: memberMetaCellPrefix(id) })
   if (read.kind === 'stale-incarnation') throw roomClosedError(room.id)
   return Array.from(read.cells)
 }

@@ -60,7 +60,7 @@ async function evictMember(room: RoomIncarnation, id: string, cause: LeaveCause)
     return await removeMemberCells(room, id, cause)
   } catch (error) {
     // A room that closed under the eviction ended the member with everyone else.
-    if (!isOpenIncarnation(await getRoomPlane().readHead(room.id), room.inc)) return true
+    if (!isOpenIncarnation(await getRoomPlane().driver.readHead(room.id), room.inc)) return true
     throw error
   }
 }
@@ -94,12 +94,12 @@ async function removeMemberCells(room: RoomIncarnation, id: string, cause: Leave
 
 async function dropRetainedOwnedBy(roomId: string, inc: string, memberId: string): Promise<void> {
   const plane = getRoomPlane()
-  for (const lane of await plane.listRetained(roomId, inc, { member: memberId })) {
-    await plane.deleteRetained(roomId, inc, lane)
+  for (const lane of await plane.driver.listRetained(roomId, inc, { member: memberId })) {
+    await plane.driver.deleteRetained(roomId, inc, lane)
   }
   const text = await plane.readRetained(roomId, inc, SEMANTIC_LANE)
   if (text !== null && decodeRoomRecord<RoomDataEnvelope>(text.payload).from === memberId) {
-    await plane.deleteRetained(roomId, inc, SEMANTIC_LANE, { ifSeq: text.seq })
+    await plane.driver.deleteRetained(roomId, inc, SEMANTIC_LANE, { ifSeq: text.seq })
   }
 }
 
@@ -114,7 +114,7 @@ async function completeCleanup(roomId: string, inc: string, memberId: string, ra
   const cleanup = decodeRoomRecord<PendingMemberCleanup>(raw)
   await dropRetainedOwnedBy(roomId, inc, memberId)
   // Every commit to the member's lanes requires its cell, which the eviction removed.
-  await getRoomPlane().dropLaneOrders(roomId, inc, memberId)
+  await getRoomPlane().driver.dropLaneOrders(roomId, inc, memberId)
   await dropMemberMeta(roomId, inc, memberId)
   await dropCells(roomId, inc, dmReplyCellPrefix(memberId))
   const leave: Extract<RoomCtrlEnvelope, { __r: 'leave' }> = { __r: 'leave', id: memberId, ...cleanup.cause }

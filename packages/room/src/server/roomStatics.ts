@@ -4,7 +4,7 @@ export type { RoomGuardHooks, RoomStatic }
 import { assertUsage } from '../utils/assert.js'
 import { isObject } from '../utils/isObject.js'
 import { getRoomPlane } from '../backend/plane.js'
-import type { RoomPlane } from '../backend/contract.js'
+import type { RoomPlane } from '../backend/RoomPlane.js'
 import { RoomError, isRoomError, participantGoneError, roomClosedError } from '../shared/errors.js'
 import {
   assertKnownOptions,
@@ -118,7 +118,7 @@ function assertRoomId(id: unknown): asserts id is string {
 /** The room's incarnation and config, or null if the room is missing or closed. */
 async function findRoom(id: string): Promise<(RoomIncarnation & RoomConfigRecord) | null> {
   assertRoomId(id)
-  const config = openConfig(await getRoomPlane().readHead(id))
+  const config = openConfig(await getRoomPlane().driver.readHead(id))
   return config === null ? null : { id, ...config }
 }
 
@@ -228,7 +228,7 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
   const rooms: RoomInfo[] = []
   let cursor: string | undefined
   do {
-    const page = await plane.directoryList(options?.prefix ?? '', cursor)
+    const page = await plane.driver.directoryList(options?.prefix ?? '', cursor)
     cursor = page.cursor
     for (const { roomId, incTag } of page.entries) {
       const info = await listedRoom(plane, roomId, incTag)
@@ -240,13 +240,13 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
 
 /** A directory entry as `Room.list()` lists it, after repairing its listing; null once the room isn't open. */
 async function listedRoom(plane: RoomPlane, roomId: string, incTag: string): Promise<RoomInfo | null> {
-  const head = await plane.readHead(roomId)
+  const head = await plane.driver.readHead(roomId)
   await repairRoomIndex(plane, roomId, incTag, head)
   const config = openConfig(head)
   if (config === null) return null
   // A room that began closing after its head read is no longer listed.
   const count = await reapAndCountPresence({ id: roomId, ...config }).catch(async (error: unknown) => {
-    if (isRoomError(error) && openConfig(await plane.readHead(roomId), config.inc) === null) return null
+    if (isRoomError(error) && openConfig(await plane.driver.readHead(roomId), config.inc) === null) return null
     throw error
   })
   if (count === null) return null

@@ -342,7 +342,7 @@ class RoomReplica
     const lanes: LaneId[] =
       member !== EVERY_MEMBER && track !== EVERY_TRACK
         ? [{ kind: 'binary', member, track }]
-        : await plane.listRetained(
+        : await plane.driver.listRetained(
             this.id,
             this.incarnation.inc,
             member !== EVERY_MEMBER ? { member } : track !== EVERY_TRACK ? { track } : undefined,
@@ -480,7 +480,7 @@ class RoomReplica
   }
 
   async readOpenConfig(): Promise<RoomConfigRecord | null> {
-    return openConfig(await getRoomPlane().readHead(this.id), this.incarnation.inc)
+    return openConfig(await getRoomPlane().driver.readHead(this.id), this.incarnation.inc)
   }
 
   /** A newer meta reaching this view through the authority never reached its clients as an event. */
