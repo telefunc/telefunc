@@ -235,7 +235,9 @@ Fire-and-forget is also fine — a send goes out as soon as the connection has r
 channel.send({ type: 'ping' }) // no await needed
 ```
 
-What the connection hasn't taken yet waits in the server's memory: `await` your sends to apply backpressure. Once sends you didn't await one by one are 64 MiB ahead of the client, Telefunc logs a warning (once per channel).
+While the client is connected, the server delivers every send, awaited or not. While the client is offline, the server buffers your sends, and an awaited `send()` resolves once the client is back and the message went out. While the channel is open, a send without `{ ack: true }` rejects only if that buffer was full and dropped it (`ChannelOverflowError`, see <Link href="#errors" />).
+
+Telefunc logs a warning (once per channel) when a server channel's sends get 64 MiB ahead of its client: what your code sent that the client hasn't made room for yet, plus `{ ack: true }` sends it hasn't answered yet. It's only a warning: the server holds those messages in memory and still delivers them all. (It's unrelated to the 64 MiB limit on a message above.) To fix it, `await` each `send()` before the next.
 
 
 ## `Broadcast`
@@ -417,7 +419,8 @@ Channels and broadcasts signal failure through four errors:
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
 | `NetworkError` (`isChannel: true`) | Offline longer than `reconnectTimeout`, or missed more messages than the replay buffer holds | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
-| `ChannelOverflowError` | `bufferLimit` filled while the client was offline | **Open** (a `BroadcastChannel`: closed) | Only the dropped `send()` rejects (a `BroadcastChannel`: call its telefunction again to rejoin) |
+| `ChannelOverflowError` | A server `send()` while the client was offline overfilled `bufferLimit`/`bufferLimitBinary` | **Open** | Only the dropped `send()`s reject; `await` your sends |
+| `ChannelOverflowError` (`BroadcastChannel`) | More was published to its key while the client was offline than `bufferLimit`/`bufferLimitBinary` holds | Closed | Call its telefunction again to rejoin |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 
