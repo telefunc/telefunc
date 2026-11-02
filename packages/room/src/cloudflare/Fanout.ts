@@ -28,9 +28,6 @@ class Fanout {
   ): Promise<void> {
     const members = new Map(routes.map(({ sessionDoId, bucket }) => [sessionDoId, { member: sessionDoId, bucket }]))
     const delivery = { routes: laneKeys.map((laneKey) => laneRoute(inc, laneKey)), payload, info }
-    const sent = this.regions.forward(ROOM_CLOUDFLARE_PREFIX + inc, delivery, members.values())
-    // Logged here: no committer awaits a binary or data frame's delivery.
-    sent.catch((error: unknown) => console.error(error))
-    return sent
+    return this.regions.forward(ROOM_CLOUDFLARE_PREFIX + inc, delivery, members.values())
   }
 }

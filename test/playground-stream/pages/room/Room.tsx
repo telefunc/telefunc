@@ -2017,6 +2017,18 @@ function Room() {
         await lostView.join({ meta: { name: 'Next' } })
         await pollUntil(() => ({ done: lostLeaves.length > 0 }))
 
+        const [dmRoomId, dmView] = await createRoom('hiccup-lost-dm')
+        const sender = await dmView.join({ meta: { name: 'Sender' } })
+        const recipient = await dmView.join({ meta: { name: 'Recipient' } })
+        const dms: unknown[] = []
+        recipient.listen((data) => void dms.push(data))
+        // The DM commits, but its handoff fails and it never reaches the recipient.
+        await onFailBackend({ op: 'deliver', roomId: dmRoomId, key: 'inbox' })
+        await onFailBackend({ op: 'handoff', roomId: dmRoomId, key: 'inbox' })
+        const lostDm = await settle(sender.send(recipient.id, 'lost'))
+        await sender.send(recipient.id, 'after')
+        await pollUntil(() => ({ done: dms.length > 0 }))
+
         const [laneRoomId, laneView] = await createRoom('hiccup-lane')
         const got: string[] = []
         laneView.subscribe((data) => got.push(data as string))
@@ -2031,7 +2043,7 @@ function Room() {
           JSON.stringify({
             leave: { firstLeave, publishAfter, secondLeave, leaves, count: leaveView.count },
             join: { firstJoin, count: joinView.count, listed },
-            lost: { leave: lostLeave, leaves: lostLeaves },
+            lost: { leave: lostLeave, leaves: lostLeaves, dm: lostDm, dms },
             lane: { ended: ended > 0, got },
           }),
         )

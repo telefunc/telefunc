@@ -6,7 +6,7 @@ import { isObject } from 'telefunc/__internal'
 import { getRoomPlane } from '../backend/plane.js'
 import { DIRECTORY_PAGE_SIZE } from '../backend/contract.js'
 import type { RoomPlane } from '../backend/RoomPlane.js'
-import { RoomError, isRoomError, participantGoneError, roomClosedError } from '../shared/errors.js'
+import { RoomError, isRoomError, messageLostError, participantGoneError, roomClosedError } from '../shared/errors.js'
 import {
   assertKnownOptions,
   assertParticipantIdentity,
@@ -342,6 +342,7 @@ async function sendToParticipant(id: string, target: ParticipantRef, data: unkno
   const incarnation = await requireRoom(id)
   const members = await resolveParticipantRef(incarnation, target)
   const exact = 'id' in target
+  let lost = false
   for (const member of members) {
     const envelope = { __r: 'dm', to: member.id, from: '', fromMeta: null, data: message } as const
     const requiredCellKeys = [memberCellKey(member.id)]
@@ -349,5 +350,7 @@ async function sendToParticipant(id: string, target: ParticipantRef, data: unkno
     const receipt = await commitLane(inbox, encodeRoomRecord(envelope), { requiredCellKeys })
     if (receipt.kind === 'stale-incarnation') throw roomClosedError(id)
     if (receipt.kind === 'gone' && exact) throw participantGoneError(member.id)
+    if (receipt.kind === 'accepted' && receipt.lost !== undefined) lost = true
   }
+  if (lost) throw messageLostError()
 }

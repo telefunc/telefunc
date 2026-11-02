@@ -24,6 +24,7 @@ import {
   MemoryRoomDriver,
   ROOM_PLANE,
   type CellsRead,
+  type CommitResult,
   type RoomDriver,
   type RoomPlane,
   type RoomSubscriptionSource,
@@ -34,7 +35,8 @@ import { createDeferred } from './createDeferred'
  *  'subscribe' (the next matching subscribe throws, a refusal), 'deliver' (the next message a matching subscription
  *  gets is dropped), 'lost' (a matching subscription is lost right before its next message, as a store that keeps
  *  delivering while it restores its link), 'early' (the next matching subscription is ready only after its first
- *  message, as a store whose acknowledgment comes after what it delivered; each further time, one message later) or
+ *  message, as a store whose acknowledgment comes after what it delivered; each further time, one message later),
+ *  'handoff' (the next matching Room commit's handoff rejects once it committed, as a fan-out that failed) or
  *  'published' (the next matching call answers 0, as a store that doesn't fix a publish's recipients, like Redis).
  *  `roomId`, or `key` (a Broadcast key, the start of a Room cell key the call reads or writes, a commit's or a
  *  subscription's lane kind or a required cell, or an operation's name), narrows what matches. */
@@ -158,7 +160,11 @@ function failing<Driver extends SubscriptionDriver<Source>>(memory: Driver): Dri
       if (op === 'published')
         return (key: string) => (takeFault(op, { keys: [key] }) ? 0 : Reflect.apply(value, target, [key]))
       return (...args: unknown[]) => {
-        const fault = takeFault(op, callOfArgs(op, args))
+        const call = callOfArgs(op, args)
+        if (op === 'commitLane' && takeFault('handoff', call)) {
+          return handoffLost(Reflect.apply(value, target, args) as Promise<CommitResult>)
+        }
+        const fault = takeFault(op, call)
         if (!fault) return Reflect.apply(value, target, args)
         const error = new Error(`failing-backend: ${op} failed`)
         if (fault.after) {
@@ -172,6 +178,15 @@ function failing<Driver extends SubscriptionDriver<Source>>(memory: Driver): Dri
       }
     },
   })
+}
+
+/** `commit`, its handoff rejected. */
+async function handoffLost(commit: Promise<CommitResult>): Promise<CommitResult> {
+  const result = await commit
+  if (result.kind !== 'accepted' || result.delivery === undefined) return result
+  const delivery = Promise.reject(new Error('failing-backend: handoff lost'))
+  delivery.catch(() => {})
+  return { ...result, delivery }
 }
 
 function addBackendFault(fault: BackendFault) {

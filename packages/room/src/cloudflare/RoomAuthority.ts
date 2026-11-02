@@ -200,7 +200,11 @@ class RoomAuthority {
   ): Promise<AcceptedCommitWire> {
     const delivery = this.fanout.send(inc, laneKeys, routes, payload, mark)
     const receipt: AcceptedCommitWire = { kind: 'accepted', seq: mark.seq, timestamp: mark.timestamp }
-    if (lane.kind !== 'inbox' && lane.kind !== 'control') return receipt
+    if (lane.kind !== 'inbox' && lane.kind !== 'control') {
+      // No committer awaits a data or binary frame's handoff, so a lost one is logged.
+      delivery.catch((error: unknown) => console.error(error))
+      return receipt
+    }
     const lost = await lostReason(delivery)
     if (lost !== null) receipt.lost = lost
     return receipt

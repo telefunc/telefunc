@@ -10,6 +10,7 @@ import type { BinaryFrame } from '../shared/binary.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import {
   DM_FAILURE,
+  messageLostError,
   participantGoneError,
   participantLeftError,
   roomClosedError,
@@ -257,6 +258,7 @@ class RoomWrites {
       requiredCellKeys,
     })
     const receipt = acceptedOrThrow(this.incarnation.id, await committing)
+    if (receipt.lost !== undefined) throw messageLostError()
     const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
     const onAfterSend = this.owner.guards?.onAfterSend
     if (onAfterSend) await runAfterHook(() => onAfterSend(sender, target, data, info))

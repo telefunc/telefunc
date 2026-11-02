@@ -15,7 +15,7 @@ export {
   decodeRoomText,
   encodeDemandPage,
   encodeRoomRecord,
-  handedOff,
+  handoffLost,
   withinRoomHorizon,
 }
 
@@ -91,23 +91,27 @@ async function readOpenConfig({ id, inc }: RoomIncarnation): Promise<RoomConfigR
   return openConfig(await getRoomPlane().driver.readHead(id), inc)
 }
 
+/** An accepted commit, with why its handoff was lost if it was an inbox's. */
+type LaneAccepted = CommitAccepted & { lost?: string }
+
 /** An accepted commit; a member whose cell the commit required and that left; or the incarnation ended. */
-type LaneCommit = CommitAccepted | { kind: 'gone'; member: string } | StaleIncarnation
+type LaneCommit = LaneAccepted | { kind: 'gone'; member: string } | StaleIncarnation
 
 /** Commits `payload` on `target`'s lane. An accepted inbox or control commit waits for its handoff up to the horizon: a
  *  server applies its own joins and leaves as it commits them, so a join's frame must not reach it after the member's
- *  leave. */
+ *  leave. A lost inbox handoff is the sender's to hear: the message is gone. A control commit's state reaches every
+ *  view by its reads. */
 async function commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<LaneCommit> {
   const result = await getRoomPlane().commitLane(target, payload, opts)
   // Required cells are member records, so a missing one names the member that left.
   if (result.kind === 'stale-cell') return { kind: 'gone', member: memberIdOfCellKey(result.key) }
-  if (result.kind === 'stale-incarnation') return result
-  if (result.delivery !== undefined) await handedOff(target.roomId, result)
-  return result
+  if (result.kind === 'stale-incarnation' || result.delivery === undefined) return result
+  const lost = await handoffLost(target.roomId, result.delivery)
+  return lost !== null && target.lane.kind === 'inbox' ? { ...result, lost } : result
 }
 
 /** The accepted commit; a member that left or an ended incarnation throws. */
-function acceptedOrThrow(roomId: string, commit: LaneCommit): CommitAccepted {
+function acceptedOrThrow(roomId: string, commit: LaneCommit): LaneAccepted {
   if (commit.kind === 'gone') throw participantGoneError(commit.member)
   if (commit.kind === 'stale-incarnation') throw roomClosedError(roomId)
   return commit
@@ -121,12 +125,11 @@ function inboxOf(roomId: string, inc: string, member: string): CommitTarget {
   return { roomId, inc, lane: { kind: 'inbox', member } }
 }
 
-/** Delivery is at-most-once: a handoff that rejects or never settles is lost, not the committer's failure, and no bug
- *  (an authority a deploy evicts rejects it), so it is logged, as a Broadcast delivery that can't reach a DO is. */
-async function handedOff(roomId: string, commit: CommitAccepted): Promise<void> {
-  assert(commit.delivery !== undefined)
+/** Why `delivery` was lost, logged, or null once handed off. Delivery is at-most-once: a handoff that rejects or never
+ *  settles is lost and never retried, and no bug (an authority a deploy evicts rejects it). */
+async function handoffLost(roomId: string, delivery: Promise<void>): Promise<string | null> {
   const lost = await raceTimeout(
-    commit.delivery.then(
+    delivery.then(
       () => null,
       (reason: unknown) => String(reason),
     ),
@@ -134,6 +137,7 @@ async function handedOff(roomId: string, commit: CommitAccepted): Promise<void> 
     () => 'unconfirmed within the horizon',
   )
   if (lost !== null) console.error(`Room delivery handoff of '${roomId}' lost: ${lost}`)
+  return lost
 }
 
 function withinRoomHorizon<T>(promise: Promise<T>): Promise<T> {

@@ -218,6 +218,8 @@ const { response } = await me.send(alice, { move: 'e4' }, { ack: true })
 console.log(response) // 'ok'
 ```
 
+> A private message is delivered at most once: when it can't be handed on to the recipient, `send()` rejects, and the message isn't sent again.
+
 
 ## Send from the server
 

@@ -4,6 +4,7 @@ export {
   roomClosedError,
   participantGoneError,
   participantLeftError,
+  messageLostError,
   toRoomFailure,
   ROOM_BUG_MESSAGE,
   CLIENT_ROOM_BUG_MESSAGE,
@@ -47,6 +48,11 @@ const PARTICIPANT_LEFT = 'Participant left the room'
 
 function participantLeftError(): RoomError {
   return new RoomError(PARTICIPANT_LEFT)
+}
+
+/** A message whose handoff to its recipient failed after it was committed; it isn't sent again. */
+function messageLostError(): RoomError {
+  return new RoomError("Message may not be delivered: its handoff to the recipient failed, and it isn't sent again")
 }
 
 const ROOM_BUG_MESSAGE = 'Internal Server Error — see server logs'
