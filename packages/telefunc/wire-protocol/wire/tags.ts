@@ -40,7 +40,8 @@ const TAG = {
   PIECES_ACK: 0x0b as const,
   /** The bytes of the frames that follow at once (see `pieces.ts`). Payload: u32; its seq: the floor in bytes/s. */
   ANNOUNCE: 0x0c as const,
-  /** Its seq: the bytes of the next frame, not its message's last, whose tag doesn't fix them (see `messageFrames`). */
+  /** Goes ahead of a frame of no fixed size that another follows in its message. Its seq: that frame's bytes (see
+   *  `messageFrames`). */
   LENGTH: 0x0d as const,
 
   // ─── Data plane ───
