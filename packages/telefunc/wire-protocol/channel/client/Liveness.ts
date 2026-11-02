@@ -2,7 +2,7 @@ export { Liveness }
 export type { LivenessOwner }
 
 import type { ChannelRecord, ChannelTable } from './ChannelTable.js'
-import type { ClientChannelTransport } from './connection.js'
+import type { ClientChannelTransport } from './ClientConnection.js'
 import type { SendGate } from './SendGate.js'
 import { CHANNEL_PING_INTERVAL_MIN_MS, CHANNEL_PING_INTERVAL_MS } from '../../constants.js'
 import { encode, type PingEntry, type PongEntry } from '../../wire/frame.js'

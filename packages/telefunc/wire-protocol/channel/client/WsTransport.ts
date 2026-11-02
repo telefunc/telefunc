@@ -8,14 +8,14 @@ import {
   WS_PROBE_TIMEOUT_MS,
 } from '../../constants.js'
 import { PieceSender } from '../../flowControl/pieces.js'
-import { ClientHeadroom, type ClientHeadroomOwner } from '../../flowControl/client/headroom.js'
-import { ClientPieceReceiver } from '../../flowControl/client/pieceReceiver.js'
+import { ClientHeadroom, type ClientHeadroomOwner } from '../../flowControl/client/ClientHeadroom.js'
+import { ClientPieceReceiver } from '../../flowControl/client/ClientPieceReceiver.js'
 import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
 import { decode, encode, isOneFrame, messageFrames, withTook, type DecodedFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
-import type { OutboundFrame, TransportOwner } from './connection.js'
+import type { OutboundFrame, TransportOwner } from './ClientConnection.js'
 import type { ProbeOwner, ProbeWire, UpgradeTarget } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 

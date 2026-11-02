@@ -6,7 +6,7 @@ import {
   RECONCILE_TIMEOUT_MS,
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../../constants.js'
-import { ClientConnection } from './connection.js'
+import { ClientConnection } from './ClientConnection.js'
 
 /** Minimal `MuxChannel` — registering one is enough to make the connection open a wire. */
 function createChannel(id = crypto.randomUUID()) {

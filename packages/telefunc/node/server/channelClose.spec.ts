@@ -5,7 +5,7 @@ import { ACK_STATUS, decode } from '../../wire-protocol/wire/frame.js'
 import { TAG } from '../../wire-protocol/wire/tags.js'
 import { ProtocolViolationError } from '../../wire-protocol/wire/protocolViolation.js'
 import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'
-import { ServerChannel } from '../../wire-protocol/channel/server/channel.js'
+import { ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
 
 function createPeer(frames: Uint8Array[]) {
   return new IndexedPeer({

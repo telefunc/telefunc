@@ -9,7 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 
-import { ClientConnection } from './connection.js'
+import { ClientConnection } from './ClientConnection.js'
 import { decode, encode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { DecodedFrame } from '../../wire/frame.js'

@@ -197,7 +197,7 @@ export const WIRE_ANNOUNCED_WAIT_MARGIN = 2
 export const WIRE_PIECE_RATE_WINDOW_MS = 60_000
 /** A receiver sends at most one PIECES_ACK this often, covering every frame it took since the last. */
 export const WIRE_PIECES_ACK_GAP_MS = 50
-/** The same where its peer holds data back by what it acknowledges (see `flowControl/client/headroom.ts`). */
+/** The same where its peer holds data back by what it acknowledges (see `flowControl/client/ClientHeadroom.ts`). */
 export const WIRE_SEND_ACK_GAP_MS = 10
 /** Where its peer holds data back, a receiver acks data this soon once `WIRE_SEND_ACK_MIN_BYTES` wait, not 16 KiB. */
 export const WIRE_SEND_ACK_MS = 25

@@ -11,7 +11,7 @@ import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ChannelClosedError } from '../channelErrors.js'
 import { isPromise } from '../../../utils/isPromise.js'
-import { ClientChannel, reportChannelError, type ClientChannelOptions } from './channel.js'
+import { ClientChannel, reportChannelError, type ClientChannelOptions } from './ClientChannel.js'
 
 class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly broadcastListeners = new Listeners<BroadcastListener<T>>()

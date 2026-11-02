@@ -33,7 +33,7 @@ import { UpgradeStages, type UpgradeStagesOwner } from './UpgradeStages.js'
 import { SessionRegistry, type ChannelHandle } from './SessionRegistry.js'
 import { AwaitedChannels, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
 import { RegistrationWaits, type RegistrationWaitsOwner } from './RegistrationWaits.js'
-import type { ServerChannel } from './channel.js'
+import type { ServerChannel } from './ServerChannel.js'
 
 /** A transport-owned wire handle. The mux never looks inside one — it only compares them by
  *  identity and hands them back to the transport that created it. */
@@ -956,5 +956,5 @@ function resolveMuxServerOptions(): MuxServerOptions {
 // Lazy because `getGlobalObject` evaluates its factory eagerly — the factory needs
 // `ChannelMux` fully initialized, so defer until first access.
 function getGlobals(): { mux: ChannelMux } {
-  return getGlobalObject('wire-protocol/channel/server/mux.ts', () => ({ mux: new ChannelMux() }))
+  return getGlobalObject('wire-protocol/channel/server/ChannelMux.ts', () => ({ mux: new ChannelMux() }))
 }

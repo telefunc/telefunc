@@ -3,7 +3,7 @@ export type { BarrierEmission, ProbeOwner, ProbeSession, ProbeWire, UpgradeOwner
 
 import type { AttachExchange } from './AttachExchange.js'
 import type { ChannelTable } from './ChannelTable.js'
-import type { ClientChannelTransport, OutboundFrame } from './connection.js'
+import type { ClientChannelTransport, OutboundFrame } from './ClientConnection.js'
 import type { Liveness } from './Liveness.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { DecodedFrame } from '../../wire/frame.js'

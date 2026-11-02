@@ -12,7 +12,7 @@ import type {
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 import { makePublishInfo } from '../channel.js'
-import { ServerChannel, reportServerChannelError } from './channel.js'
+import { ServerChannel, reportServerChannelError } from './ServerChannel.js'
 import { getBroadcastAdapter } from '../../broadcast/broadcastAdapter.js'
 import type {
   BroadcastPublishResult,

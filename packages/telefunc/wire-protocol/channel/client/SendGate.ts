@@ -2,7 +2,7 @@ export { SendGate }
 export type { SendGateOwner }
 
 import type { ChannelRecord, ChannelTable } from './ChannelTable.js'
-import type { ClientChannelTransport, OutboundFrame, OutboundFrameKind } from './connection.js'
+import type { ClientChannelTransport, OutboundFrame, OutboundFrameKind } from './ClientConnection.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { TAG } from '../../wire/tags.js'
 

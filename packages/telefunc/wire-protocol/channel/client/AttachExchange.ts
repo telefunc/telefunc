@@ -2,7 +2,7 @@ export { AttachExchange }
 export type { AttachExchangeOwner, ReconcileBatch }
 
 import type { ChannelRecord, ChannelTable } from './ChannelTable.js'
-import type { ClientChannelTransport, MuxChannel, OutboundFrame } from './connection.js'
+import type { ClientChannelTransport, MuxChannel, OutboundFrame } from './ClientConnection.js'
 import type { SendGate } from './SendGate.js'
 import type { ProbeSession } from './Upgrade.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'

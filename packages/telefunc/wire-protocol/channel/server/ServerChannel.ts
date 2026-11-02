@@ -19,7 +19,7 @@ import type {
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 
 import type { IndexedPeer } from './IndexedPeer.js'
-import type { ChannelMux } from './mux.js'
+import type { ChannelMux } from './ChannelMux.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { hasProp } from '../../../utils/hasProp.js'

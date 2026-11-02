@@ -3,7 +3,7 @@ export type { AwaitedChannel, RecvBacklog }
 
 import type { ChannelFrame } from '../../wire/frame.js'
 import type { ReconcileOpenEntry } from '../../wire/payloads.js'
-import type { WireEntry } from './mux.js'
+import type { WireEntry } from './ChannelMux.js'
 import type { RegistrationWaits } from './RegistrationWaits.js'
 
 /** What a wire received and hasn't handled yet. */

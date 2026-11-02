@@ -28,7 +28,7 @@ import { SseEvents } from './SseEvents.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { randomUuid } from '../../../utils/randomUuid.js'
 import { settledOrAborted } from '../../../utils/settledOrAborted.js'
-import type { OutboundFrame, OutboundFrameKind, TransportOwner } from './connection.js'
+import type { OutboundFrame, OutboundFrameKind, TransportOwner } from './ClientConnection.js'
 import type { BarrierEmission, UpgradeSource } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 

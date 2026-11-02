@@ -43,8 +43,8 @@ import { AttachExchange, type AttachExchangeOwner, type ReconcileBatch } from '.
 import { pingDeadline } from '../../wire/pingDeadline.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
-import { WsTransport } from './ws.js'
-import { SseTransport } from './sse.js'
+import { WsTransport } from './WsTransport.js'
+import { SseTransport } from './SseTransport.js'
 
 type OutboundFrameKind = 'reconcile' | 'released' | 'control' | Urgency | 'ack' | 'data' | 'heartbeat'
 

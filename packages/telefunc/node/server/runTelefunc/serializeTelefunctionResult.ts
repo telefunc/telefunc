@@ -6,8 +6,8 @@ import { assert, assertUsage } from '../../../utils/assert.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
 import { createStreamingReplacer } from '../../../wire-protocol/values/server/response/registry.js'
-import { ServerChannel } from '../../../wire-protocol/channel/server/channel.js'
-import { getChannelMux } from '../../../wire-protocol/channel/server/mux.js'
+import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
+import { getChannelMux } from '../../../wire-protocol/channel/server/ChannelMux.js'
 import {
   buildShieldValidators,
   type ShieldValidators,

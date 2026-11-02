@@ -1,7 +1,7 @@
 export { TransportSocket }
 
 import type { PieceSocket } from '../../flowControl/pieces.js'
-import type { ServerTransport, Wire } from './mux.js'
+import type { ServerTransport, Wire } from './ChannelMux.js'
 
 type TransportSocketOptions = {
   transport: ServerTransport<unknown>

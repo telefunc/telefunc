@@ -22,7 +22,7 @@ import {
   readForwardedTarget,
   resolveSessionRoutingTarget,
 } from '../wire-protocol/adapter/cloudflare/routing.js'
-import { SessionPins, readSessionPin } from '../wire-protocol/adapter/cloudflare/sessionPin.js'
+import { SessionPins, readSessionPin } from '../wire-protocol/adapter/cloudflare/SessionPins.js'
 import { assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale } from '../wire-protocol/adapter/cloudflare/routing.js'
