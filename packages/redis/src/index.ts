@@ -56,9 +56,10 @@ class RedisTransport implements BroadcastTransport {
   private readonly prefix: string
   private readonly textCallbacks = new Map<string, TextOnMessage>()
   private readonly binaryCallbacks = new Map<string, BinaryOnMessage>()
-  /** Settles once every SUBSCRIBE sent so far is acknowledged: Redis delivers a publish only to the subscriptions it has. */
-  private subscribesAcked: Promise<void> = Promise.resolve()
-  /** SUBSCRIBEs unacknowledged, and the publishes waiting for them. */
+  private readonly subscriptions = new Map<string, Promise<unknown>>()
+  /** A failed subscription blocks publishes while its listener remains registered. */
+  private subscribesAcked: Promise<void> | undefined
+  /** Publishes waiting for subscriptions, preserving their order. */
   private waiting = 0
 
   constructor(options: RedisBroadcastOptions) {
@@ -84,7 +85,9 @@ class RedisTransport implements BroadcastTransport {
     this.subscribe(channel)
     return () => {
       this.textCallbacks.delete(channel)
-      void this.subscriber.unsubscribe(channel)
+      this.subscriptions.delete(channel)
+      this.updateReadiness()
+      void this.subscriber.unsubscribe(channel).catch(() => {})
     }
   }
 
@@ -95,21 +98,26 @@ class RedisTransport implements BroadcastTransport {
     this.subscribe(channel)
     return () => {
       this.binaryCallbacks.delete(channel)
-      void this.subscriber.unsubscribe(channel)
+      this.subscriptions.delete(channel)
+      this.updateReadiness()
+      void this.subscriber.unsubscribe(channel).catch(() => {})
     }
   }
 
   private subscribe(channel: string): void {
-    this.waiting++
-    const sent = this.subscriber.subscribe(channel)
-    const acked = new Promise<void>((resolve) => {
-      // `finally` rethrows: a SUBSCRIBE that fails is still an unhandled rejection, and the publishes go on.
-      void sent.finally(() => {
-        this.waiting--
-        resolve()
-      })
-    })
-    this.subscribesAcked = this.subscribesAcked.then(() => acked)
+    this.subscriptions.set(channel, this.subscriber.subscribe(channel))
+    this.updateReadiness()
+  }
+
+  private updateReadiness(): void {
+    const acked = Promise.all(this.subscriptions.values()).then(() => {})
+    this.subscribesAcked = acked
+    void acked.then(
+      () => {
+        if (this.subscribesAcked === acked) this.subscribesAcked = undefined
+      },
+      () => {},
+    )
   }
 
   private readonly onMessage = (channelBytes: Uint8Array, frame: Uint8Array): void => {
@@ -141,10 +149,13 @@ class RedisTransport implements BroadcastTransport {
     // command past the call (connecting, auto-pipelining, a NOSCRIPT retry).
     const buf = Buffer.from(payload)
     // Publishes keep their order: one waits while an earlier one does.
-    if (this.waiting > 0) {
+    if (this.subscribesAcked || this.waiting > 0) {
       this.waiting++
-      await this.subscribesAcked
-      this.waiting--
+      try {
+        await this.subscribesAcked
+      } finally {
+        this.waiting--
+      }
     }
     const reply = await callDefinedCommand(this.publisher, PUBLISH_CMD, [seqKey, channelKey, buf])
     assert(Array.isArray(reply) && reply.length === 2, 'Publish script returned an unexpected shape')

@@ -242,7 +242,7 @@ function testPublish(isDev: boolean, inDocker = false) {
   })
 
   // In-memory only: the Docker lanes publish through Redis, which has no queue, and whose delivery can come after the publish resolves.
-  if (!inDocker) {
+  if (!inDocker && !process.env.REDIS_URL) {
     test('broadcast: a subscriber that comes while publishes queue gets the next seq right after the one before it', async () => {
       await navigate(`${getServerUrl()}/publish`)
       await page.click('#test-broadcast-seq-while-queued')
@@ -262,7 +262,7 @@ function testPublish(isDev: boolean, inDocker = false) {
   }
 
   // Preview on Node only: the margin is measured there. A leak of 100,000 keys' seq counters grows the heap by 7 MB or more.
-  if (!isDev && !inDocker && serverRuntime() === 'node') {
+  if (!isDev && !inDocker && !process.env.REDIS_URL && serverRuntime() === 'node') {
     for (const subscribed of [false, true]) {
       test(`broadcast: publishes to 100,000 distinct keys, ${subscribed ? 'each while a subscriber comes and goes' : 'none subscribed'}, leave the server's heap where it was`, async () => {
         await navigate(`${getServerUrl()}/publish`)
