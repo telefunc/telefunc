@@ -56,10 +56,14 @@ class RedisTransport implements BroadcastTransport {
   private readonly prefix: string
   private readonly textCallbacks = new Map<string, TextOnMessage>()
   private readonly binaryCallbacks = new Map<string, BinaryOnMessage>()
-  private readonly subscriptions = new Map<string, Promise<unknown>>()
-  /** A failed subscription blocks publishes while its listener remains registered. */
-  private subscribesAcked: Promise<void> | undefined
-  /** Publishes waiting for subscriptions, preserving their order. */
+  /** Each listener's SUBSCRIBE until Redis acknowledges it, in the order they were sent. */
+  private readonly subscribing = new Map<string, { ack: Promise<unknown>; order: number }>()
+  private subscribesSent = 0
+  /** A failed SUBSCRIBE fails publishes while its listener remains registered. */
+  private readonly failedSubscribes = new Map<string, unknown>()
+  /** Publishes waiting for the SUBSCRIBEs sent before them, oldest first. */
+  private readonly waiters: { upTo: number; resolve: () => void; reject: (err: unknown) => void }[] = []
+  /** Publishes waiting or about to resume, so a later one keeps its place behind them. */
   private waiting = 0
 
   constructor(options: RedisBroadcastOptions) {
@@ -85,9 +89,7 @@ class RedisTransport implements BroadcastTransport {
     this.subscribe(channel)
     return () => {
       this.textCallbacks.delete(channel)
-      this.subscriptions.delete(channel)
-      this.updateReadiness()
-      void this.subscriber.unsubscribe(channel).catch(() => {})
+      this.unsubscribe(channel)
     }
   }
 
@@ -98,26 +100,45 @@ class RedisTransport implements BroadcastTransport {
     this.subscribe(channel)
     return () => {
       this.binaryCallbacks.delete(channel)
-      this.subscriptions.delete(channel)
-      this.updateReadiness()
-      void this.subscriber.unsubscribe(channel).catch(() => {})
+      this.unsubscribe(channel)
     }
   }
 
   private subscribe(channel: string): void {
-    this.subscriptions.set(channel, this.subscriber.subscribe(channel))
-    this.updateReadiness()
+    const ack = this.subscriber.subscribe(channel)
+    this.subscribing.set(channel, { ack, order: ++this.subscribesSent })
+    ack.then(
+      () => this.onSubscribeSettled(channel, ack, null),
+      (err: unknown) => this.onSubscribeSettled(channel, ack, { err }),
+    )
   }
 
-  private updateReadiness(): void {
-    const acked = Promise.all(this.subscriptions.values()).then(() => {})
-    this.subscribesAcked = acked
-    void acked.then(
-      () => {
-        if (this.subscribesAcked === acked) this.subscribesAcked = undefined
-      },
-      () => {},
-    )
+  private onSubscribeSettled(channel: string, ack: Promise<unknown>, failure: { err: unknown } | null): void {
+    const subscription = this.subscribing.get(channel)
+    // Its listener was removed meanwhile, or removed and added again with a SUBSCRIBE of its own.
+    if (subscription?.ack !== ack) return
+    this.subscribing.delete(channel)
+    if (failure) {
+      this.failedSubscribes.set(channel, failure.err)
+      // The publishes sent after it waited for it: they fail with it.
+      while (this.waiters.length > 0 && this.waiters.at(-1)!.upTo >= subscription.order) {
+        this.waiters.pop()!.reject(failure.err)
+      }
+    }
+    this.releaseWaiters()
+  }
+
+  private unsubscribe(channel: string): void {
+    this.subscribing.delete(channel)
+    this.failedSubscribes.delete(channel)
+    this.releaseWaiters()
+    void this.subscriber.unsubscribe(channel).catch(() => {})
+  }
+
+  /** Lets each publish go, in order, once every SUBSCRIBE sent before it is acknowledged. */
+  private releaseWaiters(): void {
+    const oldest = this.subscribing.values().next().value?.order ?? Number.POSITIVE_INFINITY
+    while (this.waiters.length > 0 && this.waiters[0]!.upTo < oldest) this.waiters.shift()!.resolve()
   }
 
   private readonly onMessage = (channelBytes: Uint8Array, frame: Uint8Array): void => {
@@ -148,11 +169,15 @@ class RedisTransport implements BroadcastTransport {
     // string of byte values, corrupting the bytes. A copy, as ioredis may hold the
     // command past the call (connecting, auto-pipelining, a NOSCRIPT retry).
     const buf = Buffer.from(payload)
+    if (this.failedSubscribes.size > 0) throw this.failedSubscribes.values().next().value
     // Publishes keep their order: one waits while an earlier one does.
-    if (this.subscribesAcked || this.waiting > 0) {
+    if (this.subscribing.size > 0 || this.waiting > 0) {
       this.waiting++
       try {
-        await this.subscribesAcked
+        await new Promise<void>((resolve, reject) => {
+          this.waiters.push({ upTo: this.subscribesSent, resolve, reject })
+          this.releaseWaiters()
+        })
       } finally {
         this.waiting--
       }
