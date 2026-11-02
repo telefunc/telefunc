@@ -22,8 +22,7 @@ class Fanout {
   }
 
   /** Hands a frame committed on `laneKeys` to the session DO of every route, once per session DO however many of the
-   *  lanes it subscribes to; the returned delivery resolves once each took it, and rejects once one failed to take it
-   *  twice. */
+   *  lanes it subscribes to; the returned delivery resolves once each took it, and rejects once one failed to take it. */
   send(
     inc: string,
     laneKeys: readonly string[],

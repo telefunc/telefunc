@@ -51,7 +51,7 @@ type BroadcastPresenceRequest = {
 
 type TelefuncBroadcastStub = {
   telefuncBroadcastPublish(request: BroadcastPublishRequest): Promise<PublishResult>
-  /** Resolves to how many of the member DOs it names failed to take the delivery twice. */
+  /** Resolves to how many of the member DOs it names failed to take the delivery. */
   telefuncBroadcastForward(request: BroadcastForwardRequest): Promise<number>
   telefuncBroadcastDeliver(delivery: BroadcastDelivery): Promise<void>
   telefuncBroadcastPresence(request: BroadcastPresenceRequest): Promise<void>
@@ -74,8 +74,6 @@ class MemberRoute {
   /** Null once it unsubscribed: an establishing route is released once its presence is recorded. */
   attempt: MemberAttempt | null = null
   readonly route: BroadcastRoute
-  /** The last seq it took, by the key that sequenced it: its own. */
-  readonly taken = new Map<string, number>()
   private refreshTimer: ReturnType<typeof setInterval> | undefined
 
   constructor({ route }: MemberRouteOptions) {
@@ -219,9 +217,8 @@ class CloudflareBroadcastMember {
   /** This incarnation of the DO: a slot an evicted one left is never shared with the next. */
   readonly hostKey = crypto.randomUUID()
   private readonly routes = new Map<string, MemberRoute>()
-  /** The receivers of routes whose sender keeps its own list of receivers, by route key, each with the last seq it
-   *  took of each lane that sequenced a delivery to it. */
-  private readonly localReceivers = new Map<string, { receiver: BackendReceiver; taken: Map<string, number> }>()
+  /** The receivers of routes whose sender keeps its own list of receivers, by route key. */
+  private readonly localReceivers = new Map<string, BackendReceiver>()
 
   constructor({ broadcast, id, calls }: CloudflareBroadcastMemberOptions) {
     this.broadcast = broadcast
@@ -258,27 +255,19 @@ class CloudflareBroadcastMember {
    *  own list of receivers, as a room authority does. A later `subscribeLocal()` to the route replaces it. */
   subscribeLocal(route: BroadcastRoute, receiver: BackendReceiver): () => void {
     const routeKey = broadcastRouteKey(route)
-    const local = { receiver, taken: new Map<string, number>() }
-    this.localReceivers.set(routeKey, local)
+    this.localReceivers.set(routeKey, receiver)
     return () => {
-      if (this.localReceivers.get(routeKey) === local) this.localReceivers.delete(routeKey)
+      if (this.localReceivers.get(routeKey) === receiver) this.localReceivers.delete(routeKey)
     }
   }
 
   /** A coordinator's delivery to this DO. The authority forwards only to an unexpired record, so what arrives is
-   *  owed, lost route or not. A delivery whose reply was lost comes again: a receiver drops a seq it already took of
-   *  the delivery's first route, the key or lane that sequenced it. */
+   *  owed, lost route or not. */
   deliver({ routes, payload, info }: BroadcastDelivery): void {
-    const origin = broadcastRouteKey(routes[0]!)
     for (const route of routes) {
       const routeKey = broadcastRouteKey(route)
-      const memberRoute = this.routes.get(routeKey)
-      if (memberRoute?.attempt) {
-        if (takeOnce(memberRoute.taken, origin, info.seq)) memberRoute.attempt.receiver.deliver(payload, info)
-        continue
-      }
-      const local = this.localReceivers.get(routeKey)
-      if (local !== undefined && takeOnce(local.taken, origin, info.seq)) local.receiver.deliver(payload, info)
+      const receiver = this.routes.get(routeKey)?.attempt?.receiver ?? this.localReceivers.get(routeKey)
+      receiver?.deliver(payload, info)
     }
   }
 
@@ -383,7 +372,7 @@ class CloudflareBroadcast {
   }
 
   /** Sends `delivery` across to each bucket once, to the coordinator `key` picks there, which hands it to the bucket's
-   *  `members`; resolves once every member DO took it, and rejects once one failed to take it twice. The forwards leave
+   *  `members`; resolves once every member DO took it, and rejects once one failed to take it. The forwards leave
    *  through `calls` before this returns, so a DO's forwards for one key reach each coordinator in the order it made
    *  them. */
   async forward(
@@ -400,22 +389,17 @@ class CloudflareBroadcast {
     await Promise.all(
       Array.from(membersByBucket, ([bucket, members]) => {
         total += members.length
-        const send = () =>
-          this.callByName(calls, this.coordinatorName(key, bucket), bucket, (coordinator) =>
-            coordinator.telefuncBroadcastForward({ ...delivery, members }),
-          )
-        // A coordinator that failed to take it gets it once more; it gave each member DO a second try itself.
-        return send()
-          .catch(() => send())
-          .then(
-            (lostThere) => {
-              lost += lostThere
-            },
-            (error: unknown) => {
-              lost += members.length
-              reason ??= error
-            },
-          )
+        return this.callByName(calls, this.coordinatorName(key, bucket), bucket, (coordinator) =>
+          coordinator.telefuncBroadcastForward({ ...delivery, members }),
+        ).then(
+          (lostThere) => {
+            lost += lostThere
+          },
+          (error: unknown) => {
+            lost += members.length
+            reason ??= error
+          },
+        )
       }),
     )
     if (lost === 0) return
@@ -424,16 +408,18 @@ class CloudflareBroadcast {
     })
   }
 
-  /** At a bucket coordinator: delivers a forwarded delivery to the named member DOs, in arrival order, and once more to
-   *  each that failed to take it. Returns how many failed again. */
+  /** At a bucket coordinator: delivers a forwarded delivery to the named member DOs, in arrival order. Returns how many
+   *  failed to take it. */
   async forwardToBucket(calls: BroadcastCalls, { members, ...delivery }: BroadcastForwardRequest): Promise<number> {
-    const deliver = (member: string) =>
-      calls.call(
-        member,
-        () => this.stubById(member),
-        (stub) => stub.telefuncBroadcastDeliver(delivery),
-      )
-    const deliveries = await Promise.allSettled(members.map((member) => deliver(member).catch(() => deliver(member))))
+    const deliveries = await Promise.allSettled(
+      members.map((member) =>
+        calls.call(
+          member,
+          () => this.stubById(member),
+          (stub) => stub.telefuncBroadcastDeliver(delivery),
+        ),
+      ),
+    )
     const keys = delivery.routes.map((route) => route.key).join("', '")
     return reportLostDeliveries(`Cloudflare Broadcast delivery of '${keys}'`, deliveries)
   }
@@ -470,18 +456,11 @@ class CloudflareBroadcast {
   }
 }
 
-/** Logs the deliveries that failed twice, with the first one's reason; returns how many. */
+/** Logs the deliveries that failed, with the first one's reason; returns how many. */
 function reportLostDeliveries(delivery: string, outcomes: PromiseSettledResult<unknown>[]): number {
   const failed = outcomes.filter((outcome) => outcome.status === 'rejected')
   if (failed.length > 0) {
     console.error(`${delivery} lost to ${failed.length}/${outcomes.length} Durable Objects: ${failed[0]!.reason}`)
   }
   return failed.length
-}
-
-/** Whether a receiver that took `taken` takes `seq` of `origin`, which it then records. */
-function takeOnce(taken: Map<string, number>, origin: string, seq: number): boolean {
-  if (seq <= (taken.get(origin) ?? 0)) return false
-  taken.set(origin, seq)
-  return true
 }
