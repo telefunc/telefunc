@@ -15,7 +15,7 @@ import type { OrderingInfo } from '../wire/orderingFrame.js'
 
 type Receive = (payload: BackendPayload, ordering: OrderingInfo) => void
 
-/** How long a send waits for its scope's establishing attempts. */
+/** How long a send waits for its host's establishing attempts. */
 const ESTABLISH_WAIT_MS = 60_000
 /** What a held send keeps beyond its payload (130–160 bytes measured), so small ones are bounded too. */
 const HELD_OVERHEAD_BYTES = 256
@@ -31,7 +31,7 @@ type BackendSubscription = {
 
 /** How a plane's sources share attempts and what they deliver. */
 type SourceRules<Source> = {
-  /** Subscriptions of one key in one scope share an attempt. */
+  /** Subscriptions of one key on one host share an attempt. */
   key(source: Source): string
   /** A string for 'text', bytes for 'binary'. */
   deliveryKind(source: Source): 'text' | 'binary'
@@ -39,12 +39,12 @@ type SourceRules<Source> = {
   waitOf(source: Source): SourceWait<Source>
 }
 
-/** A send waits while one of its scope's attempts on `waitsFor` is establishing, behind the sends that wait on its
+/** A send waits while one of its host's attempts on `waitsFor` is establishing, behind the sends that wait on its
  *  `domain` (what one seq counts). Its bytes count against `budget`'s `bufferLimit`, or `bufferLimitBinary` when `limit`
  *  is 'binary'. */
 type SourceWait<Source> = { domain: string; waitsFor: readonly Source[]; budget: string; limit: 'text' | 'binary' }
 
-/** The sends on one scope's domain, waiting for its establishing attempts. */
+/** The sends on one host's domain, waiting for its establishing attempts. */
 type Wait = { readonly established: Promise<void>; sends: number }
 
 /** A waiting send's own copy of its payload, and what it counts against. */
@@ -57,17 +57,17 @@ type SharedSubscriptionsOptions<Source> = {
   sends: string
 }
 
-/** A plane's subscriptions (Broadcast's, Room's): consumers of one source in one scope share one driver attempt. */
+/** A plane's subscriptions (Broadcast's, Room's): consumers of one source on one host share one driver attempt. */
 class SharedSubscriptions<Source> {
   readonly driver: SubscriptionDriver<Source>
   private readonly sources: SourceRules<Source>
-  /** By scope and source key. */
+  /** By host and source key. */
   private readonly slots = new Map<string, SubscriptionSlot<Source>>()
   private readonly cleanups = new Set<Promise<void>>()
   private readonly sends: string
-  /** By scope and domain. */
+  /** By host and domain. */
   private readonly waits = new Map<string, Wait>()
-  /** Bytes held by scope and budget. */
+  /** Bytes held by host and budget. */
   private readonly held = new Map<string, number>()
   /** Slots never ready yet, counted down a microtask after: at 0, no send has anything to wait for. */
   private establishingSlots = 0
@@ -83,7 +83,7 @@ class SharedSubscriptions<Source> {
     return this.establishingSlots > 0 || this.waits.size > 0
   }
 
-  /** Sends `payload` once this scope's attempts on its source are established, at most `ESTABLISH_WAIT_MS` later; a
+  /** Sends `payload` once this host's attempts on its source are established, at most `ESTABLISH_WAIT_MS` later; a
    *  driver may get a publish before its own subscribe otherwise (Redis's go by two connections). `send` gets the
    *  send's own copy: the caller reuses its bytes. */
   afterEstablished<Payload extends BackendPayload, R>(
@@ -91,13 +91,13 @@ class SharedSubscriptions<Source> {
     payload: Payload,
     send: (owned: Payload) => R,
   ): R | Promise<Awaited<R>> {
-    const scope = this.driver.scope ? this.driver.scope() : ''
-    if (scope === null) return send(payload)
+    const hostKey = this.driver.hostKey ? this.driver.hostKey() : ''
+    if (hostKey === null) return send(payload)
     const { domain, waitsFor, budget, limit } = this.sources.waitOf(source)
-    const waitKey = JSON.stringify([scope, domain])
-    const wait = this.waits.get(waitKey) ?? this.openWait(scope, waitsFor)
+    const waitKey = JSON.stringify([hostKey, domain])
+    const wait = this.waits.get(waitKey) ?? this.openWait(hostKey, waitsFor)
     if (wait === null) return send(payload)
-    const held = this.hold(waitKey, wait, JSON.stringify([scope, budget]), limit, payload)
+    const held = this.hold(waitKey, wait, JSON.stringify([hostKey, budget]), limit, payload)
     if (held === null) return Promise.reject(new ChannelOverflowError(`${this.sends} readiness buffer overflow`))
     // Sent inside the reaction, so a send that finds the wait gone can't reach the driver first. `then` adopts what
     // `send` returns, which TypeScript can't tell from `R`.
@@ -106,7 +106,7 @@ class SharedSubscriptions<Source> {
 
   subscribe(source: Source, receive: Receive): BackendSubscription {
     const key = this.sources.key(source)
-    const slotKey = JSON.stringify([this.scopeHere(), key])
+    const slotKey = JSON.stringify([this.hostKeyHere(), key])
     const delivers = this.sources.deliveryKind(source)
     const slot = getOrCreate(this.slots, slotKey, () => this.openSlot({ owner: this, source, key, slotKey, delivers }))
     return slot.attach(receive)
@@ -142,31 +142,33 @@ class SharedSubscriptions<Source> {
     return slot
   }
 
-  /** A wait for this scope's attempts on `waitsFor`, including ones made meanwhile; null when none is establishing. */
-  private openWait(scope: string, waitsFor: readonly Source[]): Wait | null {
-    if (this.establishingIn(scope, waitsFor).length === 0) return null
+  /** A wait for this host's attempts on `waitsFor`, including ones made meanwhile; null when none is establishing. */
+  private openWait(hostKey: string, waitsFor: readonly Source[]): Wait | null {
+    if (this.establishingIn(hostKey, waitsFor).length === 0) return null
     let timer!: ReturnType<typeof setTimeout>
     const timeout = new Promise<void>((resolve) => {
       timer = unrefTimer(setTimeout(resolve, ESTABLISH_WAIT_MS))
     })
-    const established = Promise.race([this.establishedIn(scope, waitsFor), timeout]).finally(() => clearTimeout(timer))
+    const established = Promise.race([this.establishedIn(hostKey, waitsFor), timeout]).finally(() =>
+      clearTimeout(timer),
+    )
     return { established, sends: 0 }
   }
 
-  private async establishedIn(scope: string, waitsFor: readonly Source[]): Promise<void> {
+  private async establishedIn(hostKey: string, waitsFor: readonly Source[]): Promise<void> {
     for (
-      let left = this.establishingIn(scope, waitsFor);
+      let left = this.establishingIn(hostKey, waitsFor);
       left.length > 0;
-      left = this.establishingIn(scope, waitsFor)
+      left = this.establishingIn(hostKey, waitsFor)
     ) {
       await Promise.all(left)
     }
   }
 
-  private establishingIn(scope: string, waitsFor: readonly Source[]): Promise<void>[] {
+  private establishingIn(hostKey: string, waitsFor: readonly Source[]): Promise<void>[] {
     const left: Promise<void>[] = []
     for (const source of waitsFor) {
-      const slot = this.slots.get(JSON.stringify([scope, this.sources.key(source)]))
+      const slot = this.slots.get(JSON.stringify([hostKey, this.sources.key(source)]))
       if (slot?.establishing) left.push(slot.firstReady)
     }
     return left
@@ -201,13 +203,13 @@ class SharedSubscriptions<Source> {
     return payload
   }
 
-  private scopeHere(): string {
-    const scope = this.driver.scope ? this.driver.scope() : ''
+  private hostKeyHere(): string {
+    const hostKey = this.driver.hostKey ? this.driver.hostKey() : ''
     assertUsage(
-      scope !== null,
+      hostKey !== null,
       'A Cloudflare subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.',
     )
-    return scope
+    return hostKey
   }
 }
 
@@ -217,13 +219,13 @@ type EarlyMessage = { payload: BackendPayload; ordering: OrderingInfo; targets: 
 type SubscriptionSlotOptions<Source> = {
   owner: SharedSubscriptions<Source>
   source: Source
-  /** The source's key, and the key of the source in its scope. */
+  /** The source's key, and the key of the source on its host. */
   key: string
   slotKey: string
   delivers: 'text' | 'binary'
 }
 
-/** One driver attempt, shared by the consumers of its source in its scope. */
+/** One driver attempt, shared by the consumers of its source on its host. */
 class SubscriptionSlot<Source> implements BackendReceiver {
   readonly slotKey: string
   private readonly owner: SharedSubscriptions<Source>

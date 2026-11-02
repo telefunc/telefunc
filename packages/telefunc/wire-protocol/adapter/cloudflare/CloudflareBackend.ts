@@ -37,8 +37,8 @@ class CloudflareBackend implements BroadcastDriver {
     return this.broadcast.publish(route, payload)
   }
 
-  scope(): string | null {
-    return currentCloudflareSession()?.broadcast.scope ?? null
+  hostKey(): string | null {
+    return currentCloudflareSession()?.broadcast.hostKey ?? null
   }
 
   subscribe(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {

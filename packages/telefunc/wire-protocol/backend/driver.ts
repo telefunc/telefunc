@@ -28,16 +28,17 @@ type PublishResult = OrderingInfo & { receivers?: number }
 
 /**
  * What a backend implements to subscribe to a plane's sources (a Broadcast route, a Room lane). Core keeps at most one
- * live attempt per source and scope, however many consumers share it, and subscribes again once that one closed or
+ * live attempt per source and host, however many consumers share it, and subscribes again once that one closed or
  * was unsubscribed.
  */
 type SubscriptionDriver<Source> = {
   /** Returns the attempt at once, establishing or ready; throws a refusal it knows now. */
   subscribe(source: Source, receiver: BackendReceiver): DriverAttempt
-  /** Absent: per process. Cloudflare: the session DO, null outside one (subscribe throws, publish doesn't wait). */
-  scope?(): string | null
+  /** This host's key: absent, the process; on Cloudflare this session DO's incarnation, null outside one (subscribe
+   *  throws, publish doesn't wait). */
+  hostKey?(): string | null
   /** True where a publish can reach the store before the subscribe this host made just before it (Redis: PUBLISH and
-   *  SUBSCRIBE go by two connections). Core then holds a publish while one of its scope's attempts on the publish's
+   *  SUBSCRIBE go by two connections). Core then holds a publish while one of its host's attempts on the publish's
    *  source is establishing, at most 60 s. Absent, a publish never waits. */
   readonly publishOvertakesSubscribe?: boolean
 }

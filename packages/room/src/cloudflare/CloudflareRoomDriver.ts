@@ -39,8 +39,8 @@ class CloudflareRoomDriver implements RoomDriver {
     this.locationFallback = locationFallback
   }
 
-  scope(): string | null {
-    return currentCloudflareMember()?.scope ?? null
+  hostKey(): string | null {
+    return currentCloudflareMember()?.hostKey ?? null
   }
 
   subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {

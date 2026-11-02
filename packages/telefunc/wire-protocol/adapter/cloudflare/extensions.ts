@@ -76,8 +76,8 @@ type CloudflarePlaneKit = {
 type CloudflareMember = {
   /** The bucket the session was placed in, from the request that reached it; null before one did. */
   readonly bucket: string | null
-  /** This incarnation of the session DO, as a driver's `scope()`. */
-  readonly scope: string
+  /** This incarnation of the session DO, as a driver's `hostKey()`. */
+  readonly hostKey: string
   /** Takes `route`'s deliveries for `receiver` with no presence at a key authority, for a sender that keeps its own
    *  list of receivers; returns what stops them. */
   subscribeLocal(route: BroadcastRoute, receiver: BackendReceiver): () => void

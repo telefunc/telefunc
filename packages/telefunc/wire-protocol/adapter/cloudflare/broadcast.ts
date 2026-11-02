@@ -214,7 +214,7 @@ class CloudflareBroadcastMember {
   private readonly id: string
   private locatedBucket: LocationBucket | null = null
   /** This incarnation of the DO: a slot an evicted one left is never shared with the next. */
-  readonly scope = crypto.randomUUID()
+  readonly hostKey = crypto.randomUUID()
   private readonly routes = new Map<string, MemberRoute>()
   /** The receivers of routes whose sender keeps its own list of receivers, by route key. */
   private readonly localReceivers = new Map<string, BackendReceiver>()
