@@ -16,17 +16,15 @@ import {
 import type { BroadcastDeliverRequest, BroadcastPublishRequest } from '../wire-protocol/adapter/cloudflare/broadcast.js'
 import {
   TELEFUNC_BROADCAST_BUCKET_HEADER,
-  TELEFUNC_SESSION_HEADER,
   TELEFUNC_SHARD_HEADER,
   assertLocationFallbackIsScaled,
   readForwardedTarget,
   resolveSessionRoutingTarget,
 } from '../wire-protocol/adapter/cloudflare/routing.js'
-import { SessionPins, readSessionPin } from '../wire-protocol/adapter/cloudflare/SessionPins.js'
 import { assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale } from '../wire-protocol/adapter/cloudflare/routing.js'
-import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
+import { CHANNEL_TRANSPORT, SESSION_HOME_HEADER } from '../wire-protocol/constants.js'
 import { isTelefuncRequest } from './shared.js'
 import { REQUEST_KIND, getRequestKind } from '../wire-protocol/wire/requestKind.js'
 import { STATUS_BODY_MALFORMED_REQUEST, STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
@@ -71,10 +69,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   assertLocationFallbackIsScaled(scale, locationFallback)
   const jurisdiction = options?.jurisdiction
 
-  const sessionPins = new SessionPins()
-
-  // A page may use its session over its WebSocket alone, so each message renews its pin when due, as a request does.
-  const hooks = getTelefuncChannelHooks({ onMessage: (peer) => sessionPins.pin(peer.request) })
+  const hooks = getTelefuncChannelHooks()
   const crosswsAdapter = crossws({ bindingName, instanceName: baseInstanceName, hooks })
   // Factory runs only on first install. Bundler quirks can evaluate the user's entry twice in the same isolate;
   // we want every evaluation to share one transport instance.
@@ -104,10 +99,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       assertUsage(binding, `Missing Cloudflare Durable Object binding "${bindingName}" in Durable Object constructor.`)
       broadcast.attachBinding(binding, bindingName)
       const kv = getKVBinding(env)
-      if (kv) {
-        broadcast.attachKV(kv)
-        sessionPins.attachKV(kv)
-      }
+      if (kv) broadcast.attachKV(kv)
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
       crosswsAdapter.handleDurableInit(this, ctx, env)
     }
@@ -116,16 +108,15 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       broadcast.attachRequest(request, this.instanceName)
       const target = readForwardedTarget(request)
       if (target) broadcast.attachIsolateInfo(target.sessionInstanceName, target.locationBucket)
-      sessionPins.pin(request)
       if (request.headers.get('upgrade') === 'websocket') {
         return crosswsAdapter.handleDurableUpgrade(this, request)
       }
       const context = getContext ? await getContext(request, this.env as Cloudflare.Env) : undefined
       const httpResponse = await serveTelefunc(context ? { request, context } : { request })
-      return new Response(httpResponse.getReadableWebStream(), {
-        status: httpResponse.statusCode,
-        headers: httpResponse.headers,
-      })
+      const headers = new Headers(httpResponse.headers)
+      // The page names it from then on, so it reaches this Durable Object from any region.
+      if (target) headers.set(SESSION_HOME_HEADER, target.locationBucket)
+      return new Response(httpResponse.getReadableWebStream(), { status: httpResponse.statusCode, headers })
     }
 
     webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
@@ -176,17 +167,19 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
       const kv = getKVBinding(env)
       assertUsage(kv, `Missing Cloudflare KV namespace binding "${kvBindingName}". Add it to your wrangler.jsonc.`)
-      const presented = new URL(request.url).searchParams.get('session')
-      const token = presented || crypto.randomUUID()
-      const pinned = presented ? await readSessionPin(kv, presented) : null
-      // Without a pin, the token's hash picks its shard in the request's region.
-      const { sessionInstanceName, locationBucket } =
-        pinned ?? resolveSessionRoutingTarget(baseInstanceName, scale, request, locationFallback, token)
+      const { searchParams } = new URL(request.url)
+      const token = searchParams.get('session') || crypto.randomUUID()
+      // No lookup and nothing shared: each request names the home its session's responses gave its page.
+      const { sessionInstanceName, locationBucket } = resolveSessionRoutingTarget(
+        baseInstanceName,
+        scale,
+        request,
+        locationFallback,
+        token,
+        searchParams.get('home'),
+      )
 
       const forwardedHeaders = new Headers(request.headers as Headers)
-      // A token the client didn't name is never presented again: its session Durable Object pins none.
-      if (presented) forwardedHeaders.set(TELEFUNC_SESSION_HEADER, presented)
-      else forwardedHeaders.delete(TELEFUNC_SESSION_HEADER)
       forwardedHeaders.set(TELEFUNC_SHARD_HEADER, sessionInstanceName)
       forwardedHeaders.set(TELEFUNC_BROADCAST_BUCKET_HEADER, locationBucket)
       const forwardedRequest = new Request(request, { headers: forwardedHeaders })

@@ -31,7 +31,6 @@ import { Listeners } from '../../../utils/Listeners.js'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { ClientConnection } from './ClientConnection.js'
-import { getSessionUrl } from './getSessionUrl.js'
 import { FC_PAGE_YIELD_BYTES, WIRE_MAX_RAW_FRAME_BYTES, type ChannelTransports } from '../../constants.js'
 import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import { SelfTime } from '../../flowControl/SelfTime.js'
@@ -108,7 +107,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.receiveCredit = new ReceiveCredit({ owner, selfTime: this.selfTime })
     this._attach = new ChannelAttach({ channel: this, sendCredit: this.sendCredit, receiveCredit: this.receiveCredit })
     const config = resolveClientConfig()
-    this.connection = ClientConnection.getOrCreate(getSessionUrl(connection.telefuncUrl), this, {
+    this.connection = ClientConnection.getOrCreate(connection.telefuncUrl, this, {
       transports: connection.transports,
       fetchImpl: (config.fetch ?? globalThis.fetch).bind(globalThis),
       connectionKey: connection.connectionKey,

@@ -199,13 +199,21 @@ describe('cloudflare broadcast routing', () => {
   it('resolves session targets from request location and scale', () => {
     const exactRequest = createCloudflareRequest({ colo: 'LHR' })
     const unknownRequest = createCloudflareRequest({ continent: 'EU' })
-    const exactTarget = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, exactRequest, 'weur', 'token')
+    const exactTarget = resolveSessionRoutingTarget(
+      'telefunc',
+      { weur: 2, apac: 1 },
+      exactRequest,
+      'weur',
+      'token',
+      null,
+    )
     const fallbackTarget = resolveSessionRoutingTarget(
       'telefunc',
       { weur: 1, apac: 1 },
       unknownRequest,
       'weur',
       'token',
+      null,
     )
 
     expect(exactTarget).toMatchObject({
@@ -221,7 +229,7 @@ describe('cloudflare broadcast routing', () => {
   it('routes a recognized region missing from the scale map to locationFallback instead of throwing', () => {
     // `ABQ` resolves to `wnam`, which is absent from this per-region scale map.
     const wnamRequest = createCloudflareRequest({ colo: 'ABQ' })
-    const target = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, wnamRequest, 'weur', 'token')
+    const target = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, wnamRequest, 'weur', 'token', null)
 
     expect(target).toMatchObject({
       sessionInstanceName: expect.stringMatching(/^telefunc-shard-weur-[01]$/),

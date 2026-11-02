@@ -3,7 +3,6 @@ export {
   DEFAULT_BROADCAST_BUCKETS,
   KNOWN_BROADCAST_BUCKETS,
   TELEFUNC_BROADCAST_BUCKET_HEADER,
-  TELEFUNC_SESSION_HEADER,
   TELEFUNC_SHARD_HEADER,
   assertLocationFallbackIsScaled,
   getBucketCoordinatorScale,
@@ -34,8 +33,6 @@ const DEFAULT_BROADCAST_BUCKETS = [
 const TELEFUNC_BROADCAST_BUCKET_HEADER = 'x-telefunc-broadcast-bucket'
 /** Internal: forwarded to the DO so it knows its own instance name. */
 const TELEFUNC_SHARD_HEADER = 'x-telefunc-shard'
-/** Internal: forwarded to the DO with the session token its client presented. */
-const TELEFUNC_SESSION_HEADER = 'x-telefunc-session'
 const KNOWN_BROADCAST_BUCKETS = new Set<string>(DEFAULT_BROADCAST_BUCKETS as readonly string[])
 
 type LocationBucket = DurableObjectLocationHint
@@ -66,7 +63,8 @@ function getSessionShardName(baseInstanceName: string, locationBucket: LocationB
 }
 
 /**
- * Derives a session shard target from the request's Cloudflare location metadata and the current scale.
+ * Derives a session shard target from the session's home, else the request's Cloudflare location metadata, and the
+ * current scale.
  */
 function resolveSessionRoutingTarget(
   baseInstanceName: string,
@@ -74,14 +72,19 @@ function resolveSessionRoutingTarget(
   request: Request,
   locationFallback: DurableObjectLocationHint,
   token: string,
+  home: string | null,
 ): SessionRoutingTarget {
-  let locationBucket = resolveCloudflareLocationHint(request, locationFallback)
+  // The region its session Durable Object named, from any region the page roams to.
+  let locationBucket =
+    home !== null && KNOWN_BROADCAST_BUCKETS.has(home)
+      ? (home as LocationBucket)
+      : resolveCloudflareLocationHint(request, locationFallback)
   // With a per-region `scale` map, a recognized region the user didn't list has no Durable Objects
   // of its own — route those requests to the `locationFallback` region instead of failing.
   if (getScaleCountForBucket(scale, locationBucket) === 0) {
     locationBucket = locationFallback
   }
-  // By the session's token, so its calls and channels in one region reach one shard without a KV pin.
+  // By the session's token, so its calls and channels reach one shard of its region.
   const shardOrdinal = getDeterministicKeyBucketIndex(token, getBucketScale(scale, locationBucket))
   const sessionInstanceName = getSessionShardName(baseInstanceName, locationBucket, shardOrdinal)
 

@@ -20,6 +20,7 @@ import { createPushReadableStream, type PushReadableStream } from '../../../util
 import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire/requestKind.js'
+import { getSessionUrl } from './getSessionUrl.js'
 import { decode } from '../../wire/frame.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
@@ -548,7 +549,7 @@ class SseTransport implements UpgradeSource {
       [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
     }
     if (extra?.accept) headers.Accept = extra.accept
-    return this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
+    return this.fetchImpl(getMarkedRequestUrl(getSessionUrl(this.telefuncUrl), REQUEST_KIND.SSE), {
       method: 'POST',
       headers,
       body,

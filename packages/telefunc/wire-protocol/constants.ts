@@ -83,6 +83,10 @@ export const WS_PROBE_TIMEOUT_MS = 3_000
  *  with 1001, as a browser does for a page that unloads, and the page will come back. */
 export const WS_CLOSE_PAGE_LEFT = 4000
 
+/** A response header naming where the page's session lives (Cloudflare: its Durable Object's region). The page then
+ *  names it in its session URL, so its requests reach that session from wherever they come. */
+export const SESSION_HOME_HEADER = 'x-telefunc-home'
+
 /** How long to wait for the stream-request POST handshake ack on the SSE downstream
  *  before declaring the upstream wire dead and falling back to outbox+batch POSTs. */
 export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000

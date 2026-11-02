@@ -52,7 +52,7 @@ export default {
 > Fundamentally, channels are stateful: the server holds live state for each open channel. Cloudflare Workers, however, are stateless and ephemeral — any request can be served by any worker, and nothing is remembered between requests. The state therefore needs to live somewhere else — Durable Objects and KV are Cloudflare's primitives for exactly that:
 >
 > - **Durable Objects** provide stateful compute: each channel lives on a Durable Object, which holds the connection and its state.
-> - **KV** provides shared storage: it's how stateless workers find the Durable Object that holds the state, no matter which worker a request lands on.
+> - **KV** provides shared storage: it's how a broadcast finds the Durable Objects, in every region, that have subscribers.
 >
 > Both bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel` or `BroadcastChannel`, there's no state to keep — you can skip both bindings and use <Link href="/serve"><code>serve()</code></Link> instead.
 >
@@ -77,9 +77,7 @@ See: <Link href="/Telefunc" />.
 
 Telefunc uses [Durable Objects](https://developers.cloudflare.com/durable-objects/) for <Link href="/channel">channel</Link> state and <Link href="/channel#broadcast">broadcast</Link> fan-out. Channel state is in-memory JavaScript (closures, callbacks, local variables), so it must live on the same Durable Object that holds the WebSocket connection.
 
-[KV](https://developers.cloudflare.com/kv/) stores two things:
-- **Session tokens** — pin a browser to the same Durable Object across requests.
-- **Broadcast presence** — tracks which Durable Objects have active subscribers for each key.
+[KV](https://developers.cloudflare.com/kv/) stores broadcast presence: which Durable Objects have active subscribers for each key.
 
 ### Regions
 
@@ -102,9 +100,11 @@ Every telefunction call and channel message from a client must reach the **same 
 
 The client sends a session token with every request, as the `session` query parameter. Telefunc routes all requests with the same token to the same Durable Object, in the region nearest to the client.
 
+That Durable Object names its region in its responses' `x-telefunc-home` header, and the client then sends it as the `home` query parameter, so its requests reach the same Durable Object from any region.
+
 <Warning>
 
-**CDN / reverse proxy** — make sure the `session` query parameter isn't stripped from requests. Without it, each request would be routed to a random Durable Object and channel state would be lost.
+**CDN / reverse proxy** — make sure the `session` and `home` query parameters aren't stripped from requests, nor the `x-telefunc-home` header from responses (a cross-origin server exposes it with `Access-Control-Expose-Headers`). Without the token, each request would be routed to a random Durable Object and channel state would be lost.
 
 </Warning>
 

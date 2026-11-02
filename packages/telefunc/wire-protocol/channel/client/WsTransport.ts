@@ -19,6 +19,7 @@ import type { OutboundFrame } from './ClientConnection.js'
 import type { TransportOwner } from './WireLifecycle.js'
 import type { ProbeOwner, ProbeWire, UpgradeTarget } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
+import { getSessionUrl } from './getSessionUrl.js'
 
 /** What a WebSocket's frames go through, each way; the server's `WirePieces` holds its headroom and receiver. */
 type WirePieces = {
@@ -51,17 +52,22 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   /** The server's, once a RECONCILED said it. */
   private pingInterval = CHANNEL_PING_INTERVAL_MIN_MS
 
-  private readonly wsUrl: string
+  private readonly telefuncUrl: string
   private readonly owner: TransportOwner
 
   constructor({ telefuncUrl, owner }: WsTransportOptions) {
     this.owner = owner
-    const base = typeof window === 'undefined' ? undefined : window.location.href
-    const url = new URL(telefuncUrl, base)
-    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-    this.wsUrl = url.href
+    this.telefuncUrl = telefuncUrl
     // React Native has a `window` without `addEventListener`.
     globalThis.addEventListener?.('pagehide', this.onPageHide)
+  }
+
+  /** Read at each connect: the session's URL names its home once the server named it. */
+  private wsUrl(): string {
+    const base = typeof window === 'undefined' ? undefined : window.location.href
+    const url = new URL(getSessionUrl(this.telefuncUrl), base)
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+    return url.href
   }
 
   /** A page that leaves for good says so in its sockets' close code; one kept in the back/forward cache keeps them. */
@@ -77,7 +83,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   async probe(owner: ProbeOwner): Promise<ProbeWire | null> {
     let ws: WebSocket
     try {
-      ws = new WebSocket(this.wsUrl)
+      ws = new WebSocket(this.wsUrl())
     } catch {
       return null
     }
@@ -169,7 +175,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
 
     let ws: WebSocket
     try {
-      ws = new WebSocket(this.wsUrl)
+      ws = new WebSocket(this.wsUrl())
     } catch {
       this.connecting = false
       this.owner.onTransportClosed(this)
