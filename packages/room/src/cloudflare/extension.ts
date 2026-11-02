@@ -8,10 +8,17 @@ import { registerCloudflareExtension } from 'telefunc/__internal'
 import { ROOM_CLOUDFLARE_EXTENSION } from '../server/constants.js'
 import { ROOM_PLANE } from '../backend/plane.js'
 import { RoomAuthority } from './RoomAuthority.js'
+import { ROOM_AUTHORITY_METHODS } from './objects.js'
 import { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
 
 registerCloudflareExtension({
   name: ROOM_CLOUDFLARE_EXTENSION,
-  durableObject: (ctx: DurableObjectState, _env, kit) => new RoomAuthority(ctx, kit),
+  durableObject: (ctx: DurableObjectState, _env, kit) => {
+    const authority = new RoomAuthority(ctx, kit)
+    const methods = Object.fromEntries(
+      ROOM_AUTHORITY_METHODS.map((method) => [method, authority[method].bind(authority)]),
+    )
+    return { methods, alarm: () => authority.alarm() }
+  },
   planes: [{ key: ROOM_PLANE, build: (kit) => new CloudflareRoomDriver(kit) }],
 })

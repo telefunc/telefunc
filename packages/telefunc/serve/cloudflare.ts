@@ -204,19 +204,16 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
     /** The RPC method every extension's `durableObject` is called through. */
     async telefuncDurableObjectCall(name: string, method: string, args: unknown[]): Promise<unknown> {
-      const durableObject = this.#durableObject(name)
-      const call = (durableObject as Record<string, unknown>)[method]
-      assertUsage(
-        typeof call === 'function',
-        `The Cloudflare extension ${name} has no Durable Object method ${method}()`,
-      )
+      const { methods } = this.#durableObject(name)
+      const call = Object.hasOwn(methods, method) ? methods[method] : undefined
+      assertUsage(call, `The Cloudflare extension ${name} serves no Durable Object method ${method}()`)
       if (this.storedExtension !== name) {
         if ((await this.ctx.storage.get(EXTENSION_STORAGE_KEY)) !== name) {
           await this.ctx.storage.put(EXTENSION_STORAGE_KEY, name)
         }
         this.storedExtension = name
       }
-      return call.apply(durableObject, args)
+      return Reflect.apply(call, methods, args)
     }
 
     /** Only an extension's `durableObject` schedules alarms. */

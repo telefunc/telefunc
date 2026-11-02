@@ -85,8 +85,12 @@ type CloudflareMember = {
   subscribeLocal(route: BroadcastRoute, receiver: BackendReceiver): () => void
 }
 
-/** The object an extension's Durable Object calls go to, by method name. */
-type CloudflareExtensionDurableObject = object & { alarm?(): Promise<void> }
+/** An extension's part of a Durable Object: the methods its calls reach, by name, which are all a call can reach of
+ *  it, and its alarm. */
+type CloudflareExtensionDurableObject = {
+  methods: Readonly<Record<string, (...args: never[]) => Promise<unknown>>>
+  alarm?(): Promise<void>
+}
 
 type CloudflareExtension = {
   name: string

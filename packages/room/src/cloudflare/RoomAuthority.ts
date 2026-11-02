@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 export { RoomAuthority }
-export type { AcceptedCommitWire, CloudflareRoomAuthorityStub, CommitWire, OperationWire, RegisterWire, RenewWire }
+export type { AcceptedCommitWire, CommitWire, OperationWire, RegisterWire, RenewWire }
 
 // A room's authority owns its time, state and fanout.
 
@@ -29,8 +29,8 @@ import {
   type TelefuncExtensionNamespace,
 } from 'telefunc/__internal'
 import { assert } from '../utils/assert.js'
-import { OPERATION_COMMIT_LANE, recordOperation } from '../backend/operation.js'
-import { ROOM_OPERATIONS } from '../server/store/roomOperations.js'
+import { OPERATION_COMMIT_LANE } from '../backend/operation.js'
+import { ROOM_OPERATIONS, recordRequest, type RoomOperationRequest } from '../server/store/roomOperations.js'
 import { raceTimeout } from '../utils/raceTimeout.js'
 import { ROOM_HORIZON_MS } from '../server/constants.js'
 import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../backend/laneKey.js'
@@ -91,9 +91,6 @@ type OperationWire =
 type RegisterWire = 'registered' | 'dropped'
 /** A route renewed, lapsed on its own, or deleted with its dropped incarnation. */
 type RenewWire = 'renewed' | 'lapsed' | 'dropped'
-
-/** The room authority's methods, which its Durable Object serves over RPC. */
-type CloudflareRoomAuthorityStub = Omit<RoomAuthority, 'alarm'>
 
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
 const SEMANTIC_LANE: LaneId = { kind: 'semantic' }
@@ -161,18 +158,14 @@ class RoomAuthority {
     return await this.deliver(inc, lane, payload, outcome)
   }
 
-  /** Runs the operation `name` names in one transaction, which a plan that throws rolls back, then fans its commit
+  /** Runs the operation `request` names in one transaction, which a plan that throws rolls back, then fans its commit
    *  out. */
-  async runOperation(inc: string, name: string, args: unknown): Promise<OperationWire> {
-    const operation = ROOM_OPERATIONS.get(name)
-    assert(operation !== undefined)
+  async runOperation(inc: string, request: RoomOperationRequest): Promise<OperationWire> {
+    assert(Object.hasOwn(ROOM_OPERATIONS, request.name))
     const now = Date.now()
     const outcome = this.transaction((sql) => {
       if (!isOpenIncarnation(readLiveHead(sql, now), inc)) return { kind: 'stale-incarnation' } as const
-      const { value, writes } = recordOperation(operation, args as never, {
-        now,
-        cell: (key) => selectCell(sql, inc, key, now),
-      })
+      const { value, writes } = recordRequest(request, { now, cell: (key) => selectCell(sql, inc, key, now) })
       for (const prefix of writes.prefixes) dropCellPrefix(sql, inc, prefix)
       const exchange = { expect: [], mutations: writes.mutations, counts: writes.counts }
       const exchanged = compareExchangeCells(sql, inc, exchange, now)

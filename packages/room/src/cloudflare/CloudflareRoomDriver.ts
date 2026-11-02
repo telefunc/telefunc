@@ -25,9 +25,10 @@ import type {
 } from '../backend/contract.js'
 import type { BackendReceiver, CloudflarePlaneKit, DriverAttempt, OrderingInfo } from 'telefunc/__internal'
 import { CLOUDFLARE_BUCKETS, currentCloudflareHostKey, currentCloudflareMember, markHandled } from 'telefunc/__internal'
-import type { AcceptedCommitWire, CloudflareRoomAuthorityStub } from './RoomAuthority.js'
+import type { AcceptedCommitWire } from './RoomAuthority.js'
 import { currentRoomSessionSubscriptions } from './RoomSessionSubscriptions.js'
-import { openRegionDirectory, openRoomAuthority } from './objects.js'
+import { openRegionDirectory, openRoomAuthority, type CloudflareRoomAuthorityStub } from './objects.js'
+import { operationRequest } from '../server/store/roomOperations.js'
 import { compareCodePoints } from '../utils/SortedIds.js'
 import { assert } from '../utils/assert.js'
 import { OPERATION_COMMIT_LANE } from '../backend/operation.js'
@@ -98,7 +99,8 @@ class CloudflareRoomDriver implements RoomDriver {
     operation: RoomOperation<Args, Value>,
     args: Args,
   ): Promise<OperationResult<Value>> {
-    const run = (stub: CloudflareRoomAuthorityStub) => stub.runOperation(inc, operation.name, args)
+    const request = operationRequest(operation, args)
+    const run = (stub: CloudflareRoomAuthorityStub) => stub.runOperation(inc, request)
     const session = currentRoomSessionSubscriptions(this)
     const wire = await (session ? session.callAuthority(roomId, run) : run(this.stub(roomId)))
     if (wire.kind !== 'done') return wire

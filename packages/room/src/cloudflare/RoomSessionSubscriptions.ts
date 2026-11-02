@@ -12,7 +12,8 @@ import type { RoomSubscriptionSource } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
 import { assert } from '../utils/assert.js'
 import { ROUTE_RENEW_EVERY_MS, laneRoute, type RouteInstallation } from './routes.js'
-import type { CloudflareRoomAuthorityStub, RegisterWire, RenewWire } from './RoomAuthority.js'
+import type { RegisterWire, RenewWire } from './RoomAuthority.js'
+import type { CloudflareRoomAuthorityStub } from './objects.js'
 import type { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
 
 const ROOM_SESSION = Symbol.for('telefunc.room.cloudflareSession')
