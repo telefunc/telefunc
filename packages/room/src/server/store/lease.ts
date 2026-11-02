@@ -7,13 +7,12 @@ export type { LeaseState }
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import type { CellMutation } from '../../backend/contract.js'
 import { ROOM_LEASE_TTL_MS } from '../constants.js'
-import { decodeRoomRecord, decodeRoomText } from '../lanes/lanes.js'
+import { decodeRoomText } from '../lanes/lanes.js'
 import { afterHoldChange, holdDelta } from '../lifecycle/hold.js'
 import type { RoomIncarnation } from '../protocol.js'
 import {
   LEASE_CELL_PREFIX,
   leaseCellKey,
-  leaseMemberCellKey,
   leaseMemberCellPrefix,
   leaseViewCellPrefix,
   memberIdOfLeaseMemberKey,

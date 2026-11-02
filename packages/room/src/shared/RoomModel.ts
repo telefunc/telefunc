@@ -1,7 +1,7 @@
 export { RoomModel }
 export type { MemberEntry, MembershipEvent, RosterRead, RoomModelOwner, ServerModelOwner }
 
-import { assert, assertUsage } from '../utils/assert.js'
+import { assert } from '../utils/assert.js'
 import { untether, getOrCreate } from 'telefunc/__internal'
 import { Slice } from './Slice.js'
 import { RoomMetaState } from './RoomMetaState.js'
@@ -15,7 +15,7 @@ import type {
   SenderStamp,
   WholeMemberUpdate,
 } from './protocol.js'
-import type { JoinOptions, LeaveCause, ParticipantMeta, RoomMeta, RoomSnapshotView, Sender } from '../types.js'
+import type { LeaveCause, ParticipantMeta, RoomMeta, RoomSnapshotView, Sender } from '../types.js'
 import type { RoomState } from './state.js'
 
 /** A membership event as this model got it, whether it applied it or not. */

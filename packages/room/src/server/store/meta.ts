@@ -46,7 +46,7 @@ import {
   roomMetaGenPrefix,
 } from './cells.js'
 import { EXCHANGE_CONFLICT, retryCompareExchange } from './retryCompareExchange.js'
-import { deleteCells, dropCells, readOpenCells } from './cellStore.js'
+import { deleteCells, readOpenCells } from './cellStore.js'
 import { runOperation } from './operations.js'
 import { acceptedOrThrow, commitLane, controlLane, decodeRoomRecord, encodeRoomRecord } from '../lanes/lanes.js'
 

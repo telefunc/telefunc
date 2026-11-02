@@ -1,6 +1,6 @@
 export { tryCreateRoom }
 
-import { assert, assertUsage } from '../../utils/assert.js'
+import { assertUsage } from '../../utils/assert.js'
 import { isObject } from 'telefunc/__internal'
 import { getRoomPlane } from '../../backend/plane.js'
 import type { HeadExpectation, HeadNext, RoomHead } from '../../backend/contract.js'

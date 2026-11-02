@@ -54,18 +54,10 @@ import type { RosterStream } from './lifecycle/RosterStream.js'
 import type { PendingDmAcks } from './PendingDmAcks.js'
 import type { RoomHosting } from './lifecycle/RoomHosting.js'
 import { RoomWrites, runAfterHook, type RoomWritesOwner } from './RoomWrites.js'
-import {
-  acceptedOrThrow,
-  commitLane,
-  controlLane,
-  encodeRoomRecord,
-  readOpenConfig,
-  withinRoomHorizon,
-} from './lanes/lanes.js'
+import { readOpenConfig, withinRoomHorizon } from './lanes/lanes.js'
 import { reportRoomError } from './reportRoomError.js'
 import { Admission } from './Admission.js'
 import { evictMember, joinMember } from './store/members.js'
-import { memberCellKey } from './store/cells.js'
 import type {
   BinaryPublishOptions,
   JoinOptions,

@@ -24,7 +24,6 @@ import type {
 import {
   OrderedStubs,
   type CloudflareExtensionKit,
-  type CloudflareRegions,
   type OrderingInfo,
   type TelefuncExtensionNamespace,
 } from 'telefunc/__internal'
@@ -99,7 +98,6 @@ const SEMANTIC_LANE: LaneId = { kind: 'semantic' }
  *  directory. Its tables are created on first use. */
 class RoomAuthority {
   private readonly ctx: DurableObjectState
-  private readonly regions: CloudflareRegions
   private readonly getNamespace: () => TelefuncExtensionNamespace
   private readonly fanout: Fanout
   /** Its calls to its listing's region directory, which reach it in the order the listing changed. */
@@ -108,7 +106,6 @@ class RoomAuthority {
 
   constructor(ctx: DurableObjectState, { regions, getNamespace }: CloudflareExtensionKit) {
     this.ctx = ctx
-    this.regions = regions
     this.getNamespace = getNamespace
     this.fanout = new Fanout({ regions })
   }
