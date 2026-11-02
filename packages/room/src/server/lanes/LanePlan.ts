@@ -1,5 +1,5 @@
 export { LanePlan }
-export type { LanePlanOwner, LanePlanOptions, LaneRoles }
+export type { LaneDelivery, LaneEvent, LanePlanOwner, LanePlanOptions, LaneRoles }
 
 import { assert } from '../../utils/assert.js'
 import { getOrCreate } from 'telefunc/__internal'
@@ -22,12 +22,18 @@ import { runAll, toggle, toggleEntry } from '../../utils/sets.js'
 import { CONTROL_LANE, DEMAND_LANE, SEMANTIC_LANE, decodeRoomText, readOpenConfig, withinRoomHorizon } from './lanes.js'
 assertIsNotBrowser()
 
-/** Where the lanes but the demand lane deliver. */
-interface LaneReceiver {
-  onControl(serialized: string, info: OrderingInfo): void
-  onTextData(serialized: string, info: OrderingInfo): void
-  onBinary(framed: Uint8Array, info: OrderingInfo): void
-  onDm(serialized: string, info: OrderingInfo): void
+/** What a lane but the demand lane carries: the text of a control, semantic or inbox frame, or a framed binary one. */
+type LaneDelivery = { kind: 'control' | 'semantic' | 'inbox'; text: string } | { kind: 'binary'; framed: Uint8Array }
+
+/** What the lanes ask of the view: its roster read again, a catch-up with the authority once a lane dropped
+ *  deliveries (a closed room's lanes too), or a look at the heartbeat, as the lanes changed. */
+type LaneEvent = 'roster-needed' | 'deliveries-lost' | 'lanes-changed'
+
+/** The replica the subscriptions serve: it aggregates every handle's holders, applies what the lanes carry, and
+ *  answers what they ask. */
+interface LanePlanOwner {
+  laneDelivered(delivery: LaneDelivery, info: OrderingInfo): void
+  laneEvent(event: LaneEvent): void
 }
 
 /** What this process's handles are to the room, which decides the lanes it subscribes: data the replica keeps
@@ -39,20 +45,6 @@ type LaneRoles = {
   readonly tailHeld: boolean
   readonly owned: ReadonlyMap<string, unknown>
 }
-
-/** What keeps the view in step with the authority, which the lanes ask for. */
-interface LaneAuthority {
-  closeFromAuthority(): void
-  /** A lane dropped deliveries: the view catches up with the authority. */
-  recoverFromGap(): Promise<void>
-  /** The lanes need the roster, which the view reads again. */
-  refreshMembers(): Promise<void>
-  /** The lanes changed, which decides whether the heartbeat runs. */
-  onLanesChanged(): void
-}
-
-/** The replica the subscriptions serve: it aggregates every handle's holders and applies what the lanes carry. */
-type LanePlanOwner = LaneReceiver & LaneAuthority
 
 type LanePlanOptions = {
   owner: LanePlanOwner
@@ -311,7 +303,6 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   /** What the room-wide lanes depend on changed (observers, listeners, the tail, the text wants): they follow it, and
    *  the demand lane and the heartbeat after them. */
   syncLanes(): void {
-    const owner = this.owner
     const model = this.model
     const open = !model.closed
     const observing = open && this.roles.observed
@@ -323,11 +314,11 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     else this.semantic.stop()
     const needsRoster = this.roles.listened || (open && this.wants.wantsBinary)
     if ((becomesObserved && model.rosterKnown) || (open && !model.rosterKnown && needsRoster)) {
-      void owner.refreshMembers().catch(reportRoomError)
+      this.owner.laneEvent('roster-needed')
     }
     this.syncDemandLane()
     if (this.planning === null) this.outgoingDemand.flush()
-    this.owner.onLanesChanged()
+    this.owner.laneEvent('lanes-changed')
   }
 
   /** Indexes the holder's wants a step at a time, each step queueing the members it affected. */
@@ -382,7 +373,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
       }
     } finally {
       this.planning = null
-      this.owner.onLanesChanged()
+      this.owner.laneEvent('lanes-changed')
     }
   }
 
@@ -391,7 +382,6 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   private async planRound(slice: Slice, plan: BinaryPlan): Promise<void> {
     this.queued = newBinaryPlan()
     if (this.syncByMember()) plan.all = true
-    const owner = this.owner
     const members = chain(
       plan.members,
       plan.pairs.keys(),
@@ -710,7 +700,6 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   }
 
   private openInbox(member: string): void {
-    const owner = this.owner
     if (this.model.closed || !this.roles.owned.has(member)) return
     const address = { kind: 'inbox', member } as const
     getOrCreate(this.inbox, member, () => new LaneSubscription({ owner: this, address })).start()
@@ -737,22 +726,20 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     return getRoomPlane().subscribeLane(this.incarnation.id, this.incarnation.inc, address, listener)
   }
 
-  /** `LaneSubscriptionOwner`: what a lane carries goes to the replica's handler for its kind. */
+  /** `LaneSubscriptionOwner`: what a lane carries goes to the replica, the demand lane's to the exchange. */
   onLaneDelivery(lane: LaneSubscription, payload: Uint8Array, info: OrderingInfo): void {
-    const owner = this.owner
-    switch (lane.address.kind) {
+    const { kind } = lane.address
+    switch (kind) {
       case 'control':
-        return owner.onControl(decodeRoomText(payload), info)
       case 'semantic':
-        return owner.onTextData(decodeRoomText(payload), info)
       case 'inbox':
-        return owner.onDm(decodeRoomText(payload), info)
+        return this.owner.laneDelivered({ kind, text: decodeRoomText(payload) }, info)
       case 'demand':
         return this.demandExchange.onPage(decodeRoomText(payload))
       case 'binary':
       case 'binary-all':
       case 'binary-track':
-        return owner.onBinary(payload, info)
+        return this.owner.laneDelivered({ kind: 'binary', framed: payload }, info)
     }
   }
 
@@ -761,7 +748,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   }
 
   onLaneRecovered(): void {
-    void this.owner.recoverFromGap().catch(reportRoomError)
+    this.owner.laneEvent('deliveries-lost')
   }
 
   /** When the demand lane delivers, the plan asks for demand. What a binary lane carries counts as demand once it
@@ -815,12 +802,12 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   }
 
   /** A still-wanted terminal lane gets one replacement after a head read; if that fails too, the heartbeat subscribes
-   *  it again. */
+   *  it again. A lane of an incarnation that ended isn't replaced: the view's catch-up finds the close. */
   private async recover(lane: LaneSubscription): Promise<void> {
     let replaced = false
     try {
       const config = await withinRoomHorizon(readOpenConfig(this.incarnation))
-      if (config === null) return this.owner.closeFromAuthority()
+      if (config === null) return this.owner.laneEvent('deliveries-lost')
       lane.retry()
       replaced = true
       await withinRoomHorizon(lane.attemptReady)
@@ -836,7 +823,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
       this.recovering.delete(lane)
     }
     // Catch up on what the outage dropped; a later end of the lane gets its own recovery.
-    await this.owner.recoverFromGap()
+    this.owner.laneEvent('deliveries-lost')
   }
 }
 

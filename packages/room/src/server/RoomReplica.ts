@@ -38,7 +38,7 @@ import { type MetaMirror, type RoomHandle, ServerRoom } from './room.js'
 import { RosterStream } from './lifecycle/RosterStream.js'
 import { toggle } from '../utils/sets.js'
 import { MemberMessageTexts, type RoomStub, unorderedEventText } from './RoomStub.js'
-import { LanePlan, type LanePlanOwner } from './lanes/LanePlan.js'
+import { LanePlan, type LaneDelivery, type LaneEvent, type LanePlanOwner } from './lanes/LanePlan.js'
 import { RoomHeartbeat } from './lifecycle/RoomHeartbeat.js'
 assertIsNotBrowser()
 
@@ -176,18 +176,6 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   async sharedHandle(): Promise<ServerRoom> {
     await this.authority.catchUp()
     return this.handle()
-  }
-
-  onLanesChanged(): void {
-    this.heartbeat.update()
-  }
-
-  refreshMembers(): Promise<void> {
-    return this.authority.refreshMembers()
-  }
-
-  recoverFromGap(): Promise<void> {
-    return this.authority.reconcileAuthority()
   }
 
   /** A handle's listeners changed. */
@@ -407,19 +395,41 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
 
   // What the replica's parts ask of it
 
-  /** The authority says the room closed; the lane that would have carried `closed` failed. */
-  closeFromAuthority(): void {
-    this.applyControl({ __r: 'closed' })
+  /** `LanePlanOwner`: a lane's frame, to the handler for its kind. */
+  laneDelivered(delivery: LaneDelivery, info: OrderingInfo): void {
+    switch (delivery.kind) {
+      case 'control':
+        return this.onControl(delivery.text, info)
+      case 'semantic':
+        return this.onTextData(delivery.text, info)
+      case 'inbox':
+        return this.onDm(delivery.text, info)
+      case 'binary':
+        return this.onBinary(delivery.framed, info)
+    }
   }
 
-  onControl(serialized: string, info: OrderingInfo): void {
+  /** `LanePlanOwner`: the roster read again, a catch-up with the authority, which finds a close the lanes missed, or
+   *  the heartbeat, which runs while the lanes need it. */
+  laneEvent(event: LaneEvent): void {
+    switch (event) {
+      case 'roster-needed':
+        return void this.authority.refreshMembers().catch(reportRoomError)
+      case 'deliveries-lost':
+        return void this.authority.reconcileAuthority().catch(reportRoomError)
+      case 'lanes-changed':
+        return this.heartbeat.update()
+    }
+  }
+
+  private onControl(serialized: string, info: OrderingInfo): void {
     this.authority.controlDelivered(info.seq)
     const ctrl = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
     if (ctrl.__r === 'demand-ask') return this.demandExchange.onAsk(ctrl)
     this.applyControl(ctrl, () => encodePublish(serialized, info))
   }
 
-  onTextData(serialized: string, info: OrderingInfo): void {
+  private onTextData(serialized: string, info: OrderingInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope | Extract<RoomEnvelope, { __r: 'announce' }>
     if (envelope.__r === 'announce') {
       for (const handle of this.receivers) handle.local.relayAnnouncement(envelope.data, info)
@@ -434,7 +444,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     for (const stub of this.stubs) stub.relayText(serialized, texts, envelope.from, info)
   }
 
-  onBinary(framed: Uint8Array, info: OrderingInfo): void {
+  private onBinary(framed: Uint8Array, info: OrderingInfo): void {
     const unframed = decodeBinaryFrame(framed)
     assert(unframed)
     for (const handle of this.receivers) handle.local.relayBinary(unframed, info)
@@ -444,7 +454,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   }
 
   /** A DM for a member a handle here owns, routed to that handle. */
-  onDm(serialized: string, info: OrderingInfo): void {
+  private onDm(serialized: string, info: OrderingInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDmEnvelope | RoomDmAckEnvelope
     this.inboxFrame(envelope.to, info.seq)
     // A reply to one of our own `send(…, { ack: true })`s, riding our inbox back home.
