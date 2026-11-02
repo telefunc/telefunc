@@ -83,10 +83,6 @@ class FailingAttempt extends DriverAttempt implements BackendReceiver {
     this.outer = outer
   }
 
-  get consumers(): number {
-    return this.outer.consumers
-  }
-
   /** Follows the memory attempt, which this one is the receiver of. */
   follow(inner: DriverAttempt): void {
     this.inner = inner
