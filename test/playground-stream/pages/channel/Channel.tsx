@@ -37,6 +37,7 @@ import {
   onChannelUnawaitedBurst,
   onChannelTextBurst,
   onChannelOpenBurst,
+  onChannelSmallPush,
   onChannelManyListeners,
   onChannelLinkShare,
   onChannelSlowUplink,
@@ -172,6 +173,7 @@ type ChannelState = {
   openBurstReceived: number | null
   freshBinaryEchoed: number | null
   helloBesideBurst: boolean
+  smallPushReceived: number[] | null
   manyListenersMs: { page: number; server: number | null } | null
   linkShare: { pingMs: number[]; downloaded: number } | null
   slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
@@ -249,6 +251,7 @@ const initialState: ChannelState = {
   openBurstReceived: null,
   freshBinaryEchoed: null,
   helloBesideBurst: false,
+  smallPushReceived: null,
   manyListenersMs: null,
   linkShare: null,
   slowUplink: null,
@@ -1127,6 +1130,19 @@ function ChannelDemo() {
     })
   }, [])
 
+  const testSmallPush = useCallback(async () => {
+    setChannelState((s) => ({ ...s, smallPushReceived: null }))
+    const { channel } = await openChannel(onChannelSmallPush)
+    const received: number[] = []
+    channel.listen((seq) => {
+      received.push(seq)
+      if (received.length < 60) return
+      setChannelState((s) => ({ ...s, smallPushReceived: received }))
+      channel.close()
+    })
+    await channel.send(60)
+  }, [])
+
   const testManyListeners = useCallback(async () => {
     setChannelState((s) => ({ ...s, manyListenersMs: null }))
     const { channel } = await openChannel(onChannelManyListeners)
@@ -1584,6 +1600,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             onOpen Throws Abort
+          </button>
+          <button
+            id="channel-test-small-push"
+            type="button"
+            onClick={testSmallPush}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Server Pushes 60 Small Messages
           </button>
           <button
             id="channel-test-link-share"

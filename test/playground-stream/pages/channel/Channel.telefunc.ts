@@ -33,6 +33,7 @@ export {
   onChannelUnawaitedBurst,
   onChannelTextBurst,
   onChannelOpenBurst,
+  onChannelSmallPush,
   onChannelManyListeners,
   onChannelLinkShare,
   onChannelSlowUplink,
@@ -731,6 +732,15 @@ async function onChannelOpenBurst() {
   const ch = new Channel<never, number>()
   ch.onOpen(() => {
     for (let seq = 0; seq < 500; seq++) void ch.send(seq).catch(() => {})
+  })
+  return { channel: ch.client }
+}
+
+/** At the page's message, sends that many small messages without awaiting them. */
+async function onChannelSmallPush() {
+  const ch = new Channel<(count: number) => Promise<void>, (seq: number) => void>()
+  ch.listen(async (count) => {
+    for (let seq = 0; seq < count; seq++) void ch.send(seq)
   })
   return { channel: ch.client }
 }
