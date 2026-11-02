@@ -100,7 +100,7 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
   private readonly incomingDemand: RoomDemand
   private readonly publishedTracks = new PublishedTracks()
   /** This process's demand to the other processes, and theirs to `incomingDemand`. */
-  private readonly demand: DemandExchange
+  private readonly demandExchange: DemandExchange
   private readonly lanePlan: LanePlan
   private readonly authority: AuthoritySync
   private readonly heartbeat: RoomHeartbeat
@@ -144,9 +144,8 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
       owner: this,
     })
     this.incomingDemand = new RoomDemand({ owner: this, publishedTracks: this.publishedTracks })
-    this.demand = new DemandExchange({ incarnation, incomingDemand: this.incomingDemand })
-    const { model } = this
-    const demandExchange = this.demand
+    this.demandExchange = new DemandExchange({ incarnation, incomingDemand: this.incomingDemand })
+    const { model, demandExchange } = this
     const { outgoingDemand } = demandExchange
     this.lanePlan = new LanePlan({ owner: this, incarnation, model, outgoingDemand, demandExchange })
     const lanePlan = this.lanePlan
@@ -508,7 +507,7 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
   onControl(serialized: string, info: OrderingInfo): void {
     this.authority.controlDelivered(info.seq)
     const ctrl = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
-    if (ctrl.__r === 'demand-ask') return this.demand.onAsk(ctrl)
+    if (ctrl.__r === 'demand-ask') return this.demandExchange.onAsk(ctrl)
     this.applyControl(ctrl, () => encodePublish(serialized, info))
   }
 
@@ -624,7 +623,7 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
     const handles = new Set(this.observers)
     for (const tail of this.tails) handles.add(tail)
     for (const handle of handles) handle._teardown()
-    this.demand.close()
+    this.demandExchange.close()
     void this.lanePlan.replan()
   }
 }
