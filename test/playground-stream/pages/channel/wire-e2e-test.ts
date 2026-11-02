@@ -128,7 +128,8 @@ function testWire(isDev: boolean) {
     // MAX_CHANNELS_PER_CONNECTION
     const maxChannels = 4_096
     const connect = async () => {
-      const url = new URL('/_telefunc', getServerUrl())
+      // The wire's version, as the page's `getWireUrl` names it.
+      const url = new URL('/_telefunc?wire=1', getServerUrl())
       url.protocol = 'ws:'
       const ws = new globalThis.WebSocket(url)
       ws.binaryType = 'arraybuffer'

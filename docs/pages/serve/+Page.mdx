@@ -90,7 +90,7 @@ const httpResponse = await serve({
 
 | Property | Type | Description |
 |---|---|---|
-| `statusCode` | `200 \| 400 \| 403 \| 422 \| 500` | HTTP status code |
+| `statusCode` | `200 \| 400 \| 403 \| 409 \| 422 \| 500` | HTTP status code |
 | `headers` | `[string, string][]` | Response headers |
 | `getReadableWebStream()` | `ReadableStream` | Web-standard stream (Hono, Cloudflare, Deno, etc.) |
 | `pipe(writable)` | `Promise<void>` | Pipe to Node.js writable (Express, Fastify) |

@@ -5,6 +5,7 @@ import {
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_TRANSPORT,
   WS_CLOSE_PAGE_LEFT,
+  WS_CLOSE_WIRE_VERSION,
   WS_PROBE_TIMEOUT_MS,
 } from '../../constants.js'
 import { PieceSender } from '../../flowControl/pieces.js'
@@ -19,7 +20,7 @@ import type { OutboundFrame } from './ClientConnection.js'
 import type { TransportOwner } from './WireLifecycle.js'
 import type { ProbeOwner, ProbeWire, UpgradeTarget } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
-import { getSessionUrl } from './getSessionUrl.js'
+import { getWireUrl } from './getSessionUrl.js'
 
 /** What a WebSocket's frames go through, each way; the server's `WirePieces` holds its headroom and receiver. */
 type WirePieces = {
@@ -65,7 +66,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   /** Read at each connect: the session's URL names its home once the server named it. */
   private wsUrl(): string {
     const base = typeof window === 'undefined' ? undefined : window.location.href
-    const url = new URL(getSessionUrl(this.telefuncUrl), base)
+    const url = new URL(getWireUrl(this.telefuncUrl), base)
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
     return url.href
   }
@@ -264,12 +265,12 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
       headroom.received()
       if (!receiveMessage(receiver, raw, now, take)) ws.close()
     }
-    ws.onclose = () => {
+    ws.onclose = ({ code }: CloseEvent) => {
       headroom.close()
       if (this.ws === ws) this.ws = null
       this.connecting = false
       this.settleDrained()
-      this.owner.onTransportClosed(this)
+      this.owner.onTransportClosed(this, { otherWireVersion: code === WS_CLOSE_WIRE_VERSION })
     }
     ws.onerror = () => {}
   }

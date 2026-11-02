@@ -2,7 +2,8 @@ export { getTelefuncChannelHooks }
 
 import { defineHooks, type Hooks, type Peer } from 'crossws'
 import { enableChannelTransports } from '../../../node/server/serverConfig.js'
-import { WS_CLOSE_PAGE_LEFT } from '../../constants.js'
+import { WS_CLOSE_PAGE_LEFT, WS_CLOSE_WIRE_VERSION } from '../../constants.js'
+import { namesWireVersion } from '../../wire/requestKind.js'
 import { getChannelMux } from './ChannelMux.js'
 import type { ServerTransport } from './ChannelMux.js'
 
@@ -49,7 +50,12 @@ function getTelefuncChannelHooks({
 
   return defineHooks({
     upgrade,
-    open: (peer) => mux.onWireOpen(peer, transport, wireRequest(peer)),
+    open: (peer) => {
+      const request = wireRequest(peer)
+      // A page on another version reloads: none of its frames could be read.
+      if (!namesWireVersion(request)) return peer.close(WS_CLOSE_WIRE_VERSION, 'reload the page')
+      mux.onWireOpen(peer, transport, request)
+    },
     message: (peer, message) => mux.onWireMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
     close: (peer, details) => {
       const isPermanent = mux.readPermanentTermination(peer) || details?.code === WS_CLOSE_PAGE_LEFT

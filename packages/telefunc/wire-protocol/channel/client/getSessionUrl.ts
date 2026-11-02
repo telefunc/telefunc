@@ -1,7 +1,8 @@
-export { getSessionUrl, setSessionHome }
+export { getSessionUrl, getWireUrl, setSessionHome }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { randomUuid } from '../../../utils/randomUuid.js'
+import { WIRE_VERSION } from '../../constants.js'
 
 type Session = { token: string; home: string | null }
 
@@ -16,6 +17,11 @@ function getSessionUrl(telefuncUrl: string): string {
   const { token, home } = getSession(telefuncUrl)
   const params = home === null ? `session=${token}` : `session=${token}&home=${home}`
   return telefuncUrl.includes('?') ? `${telefuncUrl}&${params}` : `${telefuncUrl}?${params}`
+}
+
+/** The session URL of a channel's wire, which names the wire's version. */
+function getWireUrl(telefuncUrl: string): string {
+  return `${getSessionUrl(telefuncUrl)}&wire=${WIRE_VERSION}`
 }
 
 /** Records the home the server named for the page's session (`SESSION_HOME_HEADER`), if it named one. */

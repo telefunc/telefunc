@@ -83,6 +83,13 @@ export const WS_PROBE_TIMEOUT_MS = 3_000
  *  with 1001, as a browser does for a page that unloads, and the page will come back. */
 export const WS_CLOSE_PAGE_LEFT = 4000
 
+/** The version of the channel wire, which each channel request names in its URL. A server on another version refuses
+ *  the page's channels with `WS_CLOSE_WIRE_VERSION` or `STATUS_CODE_WIRE_VERSION`, which the page reports as a page to
+ *  reload: those two never change. */
+export const WIRE_VERSION = 1
+export const WS_CLOSE_WIRE_VERSION = 4001
+export const STATUS_CODE_WIRE_VERSION = 409
+
 /** A response header naming where the page's session lives (Cloudflare: its Durable Object's region). The page then
  *  names it in its session URL, so its requests reach that session from wherever they come. */
 export const SESSION_HOME_HEADER = 'x-telefunc-home'

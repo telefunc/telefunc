@@ -24,9 +24,9 @@ import {
 import { assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale } from '../wire-protocol/adapter/cloudflare/routing.js'
-import { CHANNEL_TRANSPORT, SESSION_HOME_HEADER } from '../wire-protocol/constants.js'
+import { CHANNEL_TRANSPORT, SESSION_HOME_HEADER, STATUS_CODE_WIRE_VERSION } from '../wire-protocol/constants.js'
 import { isTelefuncRequest } from './shared.js'
-import { REQUEST_KIND, getRequestKind } from '../wire-protocol/wire/requestKind.js'
+import { REQUEST_KIND, getRequestKind, namesWireVersion } from '../wire-protocol/wire/requestKind.js'
 import { STATUS_BODY_MALFORMED_REQUEST, STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
 
 /** A Durable Object takes a WebSocket message of 32 MiB at most. */
@@ -158,11 +158,15 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         return new Response(null, { status: 400 })
       }
       // Reject before forwarding: a Durable Object that answers without reading the forwarded body fails the request.
-      if (!isWebSocketRequest && getRequestKind(request, config.telefuncUrl) === REQUEST_KIND.INVALID) {
+      const requestKind = isWebSocketRequest ? null : getRequestKind(request, config.telefuncUrl)
+      if (requestKind === REQUEST_KIND.INVALID) {
         return new Response(STATUS_BODY_MALFORMED_REQUEST, {
           status: STATUS_CODE_MALFORMED_REQUEST,
           headers: { 'Content-Type': 'text/plain' },
         })
+      }
+      if (requestKind === REQUEST_KIND.SSE && !namesWireVersion(request)) {
+        return new Response('reload the page', { status: STATUS_CODE_WIRE_VERSION })
       }
 
       const kv = getKVBinding(env)

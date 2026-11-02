@@ -43,7 +43,11 @@ import type { ClientChannelTransport, ClientConnectionOptions, MuxChannel } from
 /** What a transport tells its connection, and the reconcile batch it asks for when its wire opens. */
 interface TransportOwner {
   onTransportOpen(transport: ClientChannelTransport): void
-  onTransportClosed(transport: ClientChannelTransport, options?: { rejectedByServer?: boolean }): void
+  /** `rejectedByServer`: it refused the wire's opening; `otherWireVersion`: it runs another `WIRE_VERSION`. */
+  onTransportClosed(
+    transport: ClientChannelTransport,
+    options?: { rejectedByServer?: boolean; otherWireVersion?: boolean },
+  ): void
   onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void
   onTransportPong(ended: PongEntry[]): void
   /** The transport may have headroom again, so the frames waiting for it are sent. */
@@ -319,9 +323,17 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.dropWire(transport)
   }
 
-  onTransportClosed(transport: ClientChannelTransport, { rejectedByServer = false } = {}): void {
+  onTransportClosed(
+    transport: ClientChannelTransport,
+    { rejectedByServer = false, otherWireVersion = false } = {},
+  ): void {
     if (this.closed) return
     transport.detachHeartbeat()
+    // No reconnect reaches a server that speaks this page's wire.
+    if (otherWireVersion) {
+      this.closeAll(new NetworkError('The server was updated since this page loaded: reload the page.', true))
+      return
+    }
     if (transport !== this.transport) {
       if (this.upgrade.flipped && transport === this.upgrade.committing!.from) {
         this.fallbackToSse(new NetworkError('Connection dropped', true))

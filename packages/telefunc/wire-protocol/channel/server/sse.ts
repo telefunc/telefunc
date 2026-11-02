@@ -8,7 +8,13 @@ import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
-import { CHANNEL_TRANSPORT, SSE_METADATA_MAX_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
+import {
+  CHANNEL_TRANSPORT,
+  SSE_METADATA_MAX_BYTES,
+  STATUS_CODE_WIRE_VERSION,
+  WIRE_MAX_RAW_FRAME_BYTES,
+} from '../../constants.js'
+import { namesWireVersion } from '../../wire/requestKind.js'
 import { createPushReadableStream, type PushReadableStream } from '../../../utils/pushReadableStream.js'
 import { createPushReadable, type PushReadable } from '../../../utils/pushReadable.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
@@ -21,7 +27,7 @@ import { passesData } from '../../wire/tags.js'
 import { isProtocolViolationError, ProtocolViolationError } from '../../wire/protocolViolation.js'
 
 type SseChannelHttpResponse = {
-  statusCode: 200 | 400
+  statusCode: 200 | 400 | 409
   contentType: 'text/plain' | 'text/event-stream'
   headers: [string, string][]
   body: string | Readable | ReadableStream<Uint8Array<ArrayBuffer>>
@@ -130,6 +136,7 @@ class SseServerTransport {
   async handleRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse> {
     if (!getServerConfig().channel.transports.includes(CHANNEL_TRANSPORT.SSE)) return badRequest()
     if (request.method !== 'POST') return badRequest()
+    if (!namesWireVersion(request)) return wireVersionRefused()
     const source = readable ?? request.body
     assert(source)
     // Adapter mode: a Node `IncomingMessage` means we're on the Node-native serve path
@@ -431,6 +438,11 @@ function shouldSendReconciled(outcome: ReconcileOutcome, wire: SseWire): boolean
 
 function badRequest(): SseChannelHttpResponse {
   return { statusCode: 400, contentType: 'text/plain', headers: [], body: '' }
+}
+
+/** A page on another version reloads: none of its frames could be read. */
+function wireVersionRefused(): SseChannelHttpResponse {
+  return { statusCode: STATUS_CODE_WIRE_VERSION, contentType: 'text/plain', headers: [], body: 'reload the page' }
 }
 
 function okResponse(): SseChannelHttpResponse {
