@@ -29,7 +29,7 @@ import {
   type CellPlan,
   type CellsAt,
 } from './cellStore.js'
-import { completeCleanup, evictMember, type PendingMemberCleanup } from './members.js'
+import { evictMember, finishCleanup, type PendingMemberCleanup } from './members.js'
 assertIsNotBrowser()
 
 const leaseTextEncoder = new TextEncoder()
@@ -199,7 +199,7 @@ async function finishLeaseCleanups(
   const cleanups = await readPrefix(room.id, room.inc, CLEANUP_CELL_PREFIX)
   await eachInFlight(cleanups, async ([key, raw]) => {
     if (decodeRoomRecord<PendingMemberCleanup>(raw).session !== lease.id) return
-    if (pendingBefore.has(key)) await completeCleanup(room.id, room.inc, memberIdOfCleanupKey(key), raw)
+    if (pendingBefore.has(key)) await finishCleanup(room, memberIdOfCleanupKey(key))
     else pending.add(key)
   })
   return pending

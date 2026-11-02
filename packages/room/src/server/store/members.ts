@@ -1,4 +1,4 @@
-export { createMember, evictMember, completeCleanup }
+export { createMember, evictMember, finishCleanup }
 export type { PendingMemberCleanup }
 
 import { getRoomPlane } from '../../backend/plane.js'
@@ -21,11 +21,14 @@ import {
 import { afterHoldChange, holdDelta, type HoldDelta } from '../lifecycle/hold.js'
 import { cleanupCellKey, dmReplyCellPrefix, identityCellKey, leaseMemberCellKey, memberCellKey } from './cells.js'
 import { mutateHosted, type RoomLease } from './lease.js'
+import { ROOM_LEASE_TTL_MS } from '../constants.js'
 
 // A member's cells: written by its join under a lease, removed by its eviction with a cleanup that finishes its leave.
 
-/** `session`, the lease, hosted the member: its mark goes with the cleanup. */
-type PendingMemberCleanup = { cause: WireLeaveCause; session: string; hidden?: true }
+/** `session`, the lease, hosted the member: its mark goes with the cleanup. One finisher at a time claims it, until
+ *  `finishingUntil` (authority time): only the claimant commits the leave, and the next one takes over a claim that
+ *  lapsed, as its claimant stopped. */
+type PendingMemberCleanup = { cause: WireLeaveCause; session: string; hidden?: true; finishingUntil?: number }
 const identityTextEncoder = new TextEncoder()
 
 /** Persist a join's member record under the lease, its mark, its meta's keys and identity marker; a non-hidden
@@ -68,30 +71,53 @@ async function evictMember(room: RoomIncarnation, id: string, cause: LeaveCause)
 async function removeMemberCells(room: RoomIncarnation, id: string, cause: LeaveCause): Promise<boolean> {
   const memberKey = memberCellKey(id)
   const cleanupKey = cleanupCellKey(id)
-  // The cleanup is the one pending, else the one this exchange writes: either way the cell holds it once it commits.
-  const { value: outcome, counters } = await mutateCells<{ cleanup: Uint8Array | undefined; hold: HoldDelta | null }>(
+  // The cleanup is the one pending, else the one this exchange writes, claimed by this eviction unless another
+  // finisher's claim holds.
+  type Outcome = { found: boolean; claimed: Uint8Array | null; hold: HoldDelta | null }
+  const { value: outcome, counters } = await mutateCells<Outcome>(
     room.id,
     room.inc,
     [memberKey, cleanupKey],
-    (cells) => {
+    (cells, now) => {
       const pending = cells.get(cleanupKey)
       const raw = cells.get(memberKey)
       const record = raw === undefined ? null : decodeRoomRecord<RoomMemberRecord>(raw)
-      if (record === null) return { value: { cleanup: pending, hold: null }, mutations: [] }
+      if (record === null) {
+        const claimed = pending === undefined ? null : claimCleanup(decodeRoomRecord(pending), now)
+        const mutations = claimed === null ? [] : [{ key: cleanupKey, bytes: claimed }]
+        return { value: { found: pending !== undefined, claimed, hold: null }, mutations }
+      }
       const cleanup: PendingMemberCleanup = { cause: leaveCauseToWire(cause), session: record.session }
       if (record.hidden) cleanup.hidden = true
       const hold = holdDelta(record.hidden ? null : room.hold, -1)
       // The marker is written with the record, so the record's version covers it.
       const mutations: CellMutation[] = [{ key: memberKey, bytes: null }]
       if (record.identity !== undefined) mutations.push({ key: identityCellKey(record.identity, id), bytes: null })
-      const written = pending ?? encodeRoomRecord(cleanup)
-      if (pending === undefined) mutations.push({ key: cleanupKey, bytes: written })
-      return { value: { cleanup: written, hold }, mutations, counts: hold.counts }
+      const claimed = claimCleanup(pending === undefined ? cleanup : decodeRoomRecord(pending), now)
+      if (claimed !== null) mutations.push({ key: cleanupKey, bytes: claimed })
+      return { value: { found: true, claimed, hold }, mutations, counts: hold.counts }
     },
   )
   if (outcome.hold !== null) afterHoldChange(room, outcome.hold.after(counters))
-  if (outcome.cleanup !== undefined) await completeCleanup(room.id, room.inc, id, outcome.cleanup)
-  return outcome.cleanup !== undefined
+  if (outcome.claimed !== null) await completeCleanup(room.id, room.inc, id, outcome.claimed)
+  return outcome.found
+}
+
+/** Finishes a cleanup its evicting server left, unless another finisher's claim on it holds. */
+async function finishCleanup(room: RoomIncarnation, id: string): Promise<void> {
+  const key = cleanupCellKey(id)
+  const { value: claimed } = await mutateCells(room.id, room.inc, [key], (cells, now) => {
+    const pending = cells.get(key)
+    const claimed = pending === undefined ? null : claimCleanup(decodeRoomRecord(pending), now)
+    return { value: claimed, mutations: claimed === null ? [] : [{ key, bytes: claimed }] }
+  })
+  if (claimed !== null) await completeCleanup(room.id, room.inc, id, claimed)
+}
+
+/** `cleanup` claimed for a new finisher, or null while another's claim holds. */
+function claimCleanup(cleanup: PendingMemberCleanup, now: number): Uint8Array | null {
+  if (cleanup.finishingUntil !== undefined && cleanup.finishingUntil >= now) return null
+  return encodeRoomRecord({ ...cleanup, finishingUntil: now + ROOM_LEASE_TTL_MS })
 }
 
 async function dropRetainedOwnedBy(roomId: string, inc: string, memberId: string): Promise<void> {
