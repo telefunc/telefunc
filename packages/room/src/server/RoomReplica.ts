@@ -11,7 +11,7 @@ import { encodePublish, hostLocal, type OrderingInfo } from 'telefunc/__internal
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { ROOM_MEMBER_TRACKS_MAX } from '../shared/constants.js'
 import { DemandExchange } from './lanes/DemandExchange.js'
-import { RoomDemand, type RoomDemandOwner } from './lanes/RoomDemand.js'
+import { RoomDemand } from './lanes/RoomDemand.js'
 import { PublishedTracks } from './lanes/PublishedTracks.js'
 import { DM_FAILURE, RoomError } from '../shared/errors.js'
 import { joinedMember, leaveCauseFromWire, leaveCauseToWire } from '../shared/protocol.js'
@@ -72,7 +72,7 @@ type RoomReplicaOptions = {
  *  that hosts the members and pages the handles hold, and the heartbeat that renews the lease and checks the authority
  *  again. Each handle keeps its guards, its tail, the stubs it opened and its listeners. A replica that no handle
  *  observes, owns a member through or tails runs no heartbeat and holds no lane; it lives while a handle holds it. */
-class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, AuthoritySyncOwner {
+class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner {
   /** The incarnation's replica on this channel host, while a handle or its own work holds it. */
   static of(inc: string): RoomReplica | undefined {
     return replicasHere().get(inc)?.deref()
@@ -138,11 +138,7 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
       metaSeq: stored.seq,
       owner: this,
     })
-    this.incomingDemand = new RoomDemand({
-      owner: this,
-      ownedMembers: this.owners,
-      publishedTracks: this.publishedTracks,
-    })
+    this.incomingDemand = new RoomDemand({ ownedMembers: this.owners, publishedTracks: this.publishedTracks })
     this.demandExchange = new DemandExchange({ incarnation, incomingDemand: this.incomingDemand })
     const { model, demandExchange } = this
     const { outgoingDemand } = demandExchange
@@ -407,10 +403,6 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
   }
 
   // What the replica's parts ask of it
-
-  deliverDemand(member: string, track: string, wanted: boolean): void {
-    this.owners.get(member)?.deliverDemand(member, track, wanted)
-  }
 
   /** A newer meta reaching this view through the authority never reached its clients as an event. */
   applyAuthorityMeta({ entries, seq }: StoredRoomMeta): void {

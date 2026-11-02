@@ -1,5 +1,5 @@
 export { RoomDemand }
-export type { RoomDemandOptions, RoomDemandOwner }
+export type { RoomDemandOptions }
 
 import { EVERY_MEMBER, DEFAULT_TRACK, type EveryMember } from '../../shared/binary.js'
 import { getOrCreate } from 'telefunc/__internal'
@@ -26,16 +26,12 @@ type Report = { instance: string; on: boolean; telling: number }
 /** Whether a reporter's lease, last told in `telling`, is dropped. */
 type LeaseDropped = (instance: string, telling: number) => boolean
 
-/** The replica whose owned members the demand is for. */
-interface RoomDemandOwner {
-  /** Tells an owned member whether a track of it is wanted. */
-  deliverDemand(member: string, track: string, wanted: boolean): void
-}
+/** The handle that owns a member, which hears whether a track of it is wanted. */
+type MemberOwner = { deliverDemand(member: string, track: string, wanted: boolean): void }
 
 type RoomDemandOptions = {
-  owner: RoomDemandOwner
-  /** The members this process owns, kept current by the replica. */
-  ownedMembers: ReadonlyMap<string, unknown>
+  /** The members this process owns, by their owning handle, kept current by the replica. */
+  ownedMembers: ReadonlyMap<string, MemberOwner>
   /** A report of a member's every track covers the tracks it published on. */
   publishedTracks: Pick<PublishedTracks, 'has' | 'namedTracks'>
 }
@@ -59,12 +55,10 @@ class RoomDemand {
   private readonly due = new Map<string, Set<string> | EveryMember>()
   private settling = false
 
-  private readonly owner: RoomDemandOwner
-  private readonly ownedMembers: ReadonlyMap<string, unknown>
+  private readonly ownedMembers: ReadonlyMap<string, MemberOwner>
   private readonly publishedTracks: RoomDemandOptions['publishedTracks']
 
-  constructor({ owner, ownedMembers, publishedTracks }: RoomDemandOptions) {
-    this.owner = owner
+  constructor({ ownedMembers, publishedTracks }: RoomDemandOptions) {
     this.ownedMembers = ownedMembers
     this.publishedTracks = publishedTracks
   }
@@ -333,11 +327,12 @@ class RoomDemand {
   }
 
   private evaluate(member: string, track: string): void {
-    if (!this.ownedMembers.has(member)) return
+    const owner = this.ownedMembers.get(member)
+    if (owner === undefined) return
     const wanted = this.isWanted(member, track)
     if (wanted === hasEntry(this.told, track, member)) return
     toggleEntry(this.told, track, member, wanted)
-    this.owner.deliverDemand(member, track, wanted)
+    owner.deliverDemand(member, track, wanted)
   }
 
   /** Whether some reporter receives the owned member's track. */
