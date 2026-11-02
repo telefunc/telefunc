@@ -5,7 +5,7 @@ import { getRoomPlane } from '../../backend/plane.js'
 import type { CellMutation } from '../../backend/contract.js'
 import { isOpenIncarnation } from '../../backend/semantics.js'
 import { leaveCauseToWire, type RoomCtrlEnvelope, type WireLeaveCause } from '../../shared/protocol.js'
-import type { RoomDataEnvelope, RoomMemberRecord } from '../protocol.js'
+import type { RoomDataEnvelope, RoomMemberRecord, RoomIncarnation } from '../protocol.js'
 import type { LeaveCause, ParticipantMeta } from '../../types.js'
 import { dropMemberMeta, memberMetaMutations } from './meta.js'
 import { dropCells, mutateCells, readOpenCells } from './cellStore.js'
@@ -17,7 +17,7 @@ import {
   decodeRoomRecord,
   encodeRoomRecord,
 } from '../lanes/lanes.js'
-import { afterHoldChange, holdDelta, type HoldDelta, type RoomIncarnation } from '../lifecycle/hold.js'
+import { afterHoldChange, holdDelta, type HoldDelta } from '../lifecycle/hold.js'
 import { cleanupCellKey, dmReplyCellPrefix, identityCellKey, leaseMemberCellKey, memberCellKey } from './cells.js'
 import { mutateHosted, type RoomLease } from './lease.js'
 

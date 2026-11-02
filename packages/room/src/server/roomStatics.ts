@@ -16,7 +16,7 @@ import {
   removedCause,
 } from '../shared/RoomModel.js'
 import type { MemberSnapshot, RoomEnvelope } from '../shared/protocol.js'
-import type { RoomConfigRecord } from './protocol.js'
+import type { RoomConfigRecord, RoomIncarnation } from './protocol.js'
 import type {
   AfterJoinHook,
   AfterPublishHook,
@@ -51,7 +51,7 @@ import { RoomReplica } from './RoomReplica.js'
 import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './store/meta.js'
 import { metaObjectOf } from '../shared/RoomMetaState.js'
 import { closeIncarnation } from './lifecycle/close.js'
-import { cancelClose, type RoomIncarnation } from './lifecycle/hold.js'
+import { cancelClose } from './lifecycle/hold.js'
 import { repairRoomIndex } from './store/directory.js'
 import { ROOM_GUARD_USAGE } from './constants.js'
 

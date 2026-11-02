@@ -2,6 +2,7 @@
 export type {
   RoomConfigRecord,
   HoldConfig,
+  RoomIncarnation,
   RoomMemberRecord,
   DemandEntry,
   RoomDemandPage,
@@ -22,6 +23,9 @@ type RoomConfigRecord = {
 }
 
 type HoldConfig = { emptyTimeout: number; departureTimeout: number }
+
+/** A room incarnation as the server's writes and lanes carry it: its id, its `inc` and its hold timeouts. */
+type RoomIncarnation = { id: string; inc: string; hold: HoldConfig | null }
 
 /** A member cell. It lives while the lease that joined it does (see `lease.ts`). Its meta is a cell per key in
  *  generation `metaGen` (see `memberMetaGenPrefix`). */

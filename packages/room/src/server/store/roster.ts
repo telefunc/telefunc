@@ -2,12 +2,11 @@ export { reapAndReadRoster, reapAndReadMembersById, reapAndCountPresence, reapAn
 
 import { assert } from '../../utils/assert.js'
 import type { MemberSnapshot } from '../../shared/protocol.js'
-import type { RoomMemberRecord } from '../protocol.js'
+import type { RoomMemberRecord, RoomIncarnation } from '../protocol.js'
 import type { ParticipantMeta } from '../../types.js'
 import { memberMetaOf, readMembersMetaCells, type MemberMetaCells } from './meta.js'
 import { eachInFlight, readOpenCells, readPrefix, readPrefixAt } from './cellStore.js'
 import { decodeRoomRecord } from '../lanes/lanes.js'
-import type { RoomIncarnation } from '../lifecycle/hold.js'
 import {
   CLEANUP_CELL_PREFIX,
   LEASE_CELL_PREFIX,

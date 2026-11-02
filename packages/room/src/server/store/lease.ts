@@ -7,7 +7,8 @@ import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import type { CellMutation } from '../../backend/contract.js'
 import { ROOM_LEASE_TTL_MS } from '../constants.js'
 import { decodeRoomRecord, decodeRoomText } from '../lanes/lanes.js'
-import { afterHoldChange, holdDelta, type RoomIncarnation } from '../lifecycle/hold.js'
+import { afterHoldChange, holdDelta } from '../lifecycle/hold.js'
+import type { RoomIncarnation } from '../protocol.js'
 import {
   CLEANUP_CELL_PREFIX,
   LEASE_CELL_PREFIX,

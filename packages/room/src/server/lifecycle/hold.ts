@@ -1,5 +1,5 @@
 export { newHoldConfig, holdDelta, afterHoldChange, createHold, maintainHold, lapseNewRoom, cancelClose }
-export type { HoldDelta, RoomIncarnation }
+export type { HoldDelta }
 
 // An unheld room closes on its own: the server whose write leaves it unheld closes it on a timer, and the head's lapse,
 // which every heartbeat on the room keeps ahead, removes it if no server is left to.
@@ -13,7 +13,7 @@ import type { CellCount, CellCounter, RoomHead } from '../../backend/contract.js
 import { decodeCellCounter, isOpenIncarnation } from '../../backend/semantics.js'
 import { TIMER_DELAY_MAX_MS } from '../../shared/constants.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_LAPSE_AFTER_CLOSE_MS, ROOM_LEASE_TTL_MS } from '../constants.js'
-import type { HoldConfig } from '../protocol.js'
+import type { HoldConfig, RoomIncarnation } from '../protocol.js'
 import { roomClosedError } from '../../shared/errors.js'
 import { HOLDS_CELL_KEY, JOINS_CELL_KEY } from '../store/cells.js'
 import { closeIncarnation } from './close.js'
@@ -33,9 +33,6 @@ type HoldChange = { before: HoldCounts; after: HoldRecord }
 
 /** A write's change to the hold counts: the counts it commits, and the change they made once committed. */
 type HoldDelta = { counts: CellCount[]; after(counters: ReadonlyMap<string, CellCounter>): HoldChange | null }
-
-/** What a room's member and hold writes carry: its incarnation and that incarnation's hold timeouts. */
-type RoomIncarnation = { id: string; inc: string; hold: HoldConfig | null }
 
 function newHoldConfig(emptyTimeout: number, departureTimeout: number): HoldConfig | null {
   if (emptyTimeout === Infinity && departureTimeout === Infinity) return null

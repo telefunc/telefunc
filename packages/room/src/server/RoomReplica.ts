@@ -22,14 +22,13 @@ import type {
   RoomEnvelope,
   SenderStamp,
 } from '../shared/protocol.js'
-import type { RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope } from './protocol.js'
+import type { RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope, RoomIncarnation } from './protocol.js'
 import { RoomModel, type MembershipEvent, type ServerModelOwner } from '../shared/RoomModel.js'
 import type { LeaveCause } from '../types.js'
 import { AuthoritySync, type AuthoritySyncOwner } from './lifecycle/AuthoritySync.js'
 import { PendingDmAcks } from './PendingDmAcks.js'
 import { reportRoomError } from './reportRoomError.js'
 import { SEMANTIC_LANE, decodeLaneEnvelope, decodeRoomText, openConfig, withinRoomHorizon } from './lanes/lanes.js'
-import type { RoomIncarnation } from './lifecycle/hold.js'
 import { dropDmReply, takeDmReplies } from './store/dmReplies.js'
 import { evictMember } from './store/members.js'
 import { finishLeaseCleanups, holdViews, removeView, renewLease, RoomLease } from './store/lease.js'

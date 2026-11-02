@@ -31,7 +31,7 @@ import {
   type InboxMessage,
   type RoomResult,
 } from '../shared/protocol.js'
-import type { RoomDataEnvelope, RoomMemberRecord } from './protocol.js'
+import type { RoomDataEnvelope, RoomMemberRecord, RoomIncarnation } from './protocol.js'
 import type { RoomModel } from '../shared/RoomModel.js'
 import { RoomState, RoomStateView, type RoomStateOwner } from '../shared/state.js'
 import { ParticipantBase, type ParticipantBaseOptions } from '../shared/ParticipantBase.js'
@@ -58,7 +58,6 @@ import { reportRoomError } from './reportRoomError.js'
 import { Admission } from './Admission.js'
 import { createMember, evictMember } from './store/members.js'
 import { memberCellKey } from './store/cells.js'
-import type { RoomIncarnation } from './lifecycle/hold.js'
 import type {
   BinaryPublishOptions,
   JoinOptions,
