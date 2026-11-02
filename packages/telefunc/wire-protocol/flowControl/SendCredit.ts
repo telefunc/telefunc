@@ -53,6 +53,10 @@ class SendCredit {
     macrotaskYield.assertSupported()
   }
 
+  get waitingCount(): number {
+    return this.waiters?.length ?? 0
+  }
+
   /** The largest window the peer grants. */
   get peerByteWindowMax(): number {
     return this.peerByteWindowCap

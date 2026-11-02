@@ -39,13 +39,15 @@ export {
   onChannelSlowUplink,
   onChannelOpenAnswer,
   onChannelOpenHello,
+  onChannelBudgets,
+  onChannelCreditFailure,
   onChannelAckOwnership,
   onChannelApiProbe,
   onChannelLateCallbacks,
   onChannelOpenAbort,
 }
 
-import { Channel, Abort, BroadcastChannel } from 'telefunc'
+import { Channel, Abort, BroadcastChannel, config } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 
 type ServerMessage = { type: 'tick'; count: number } | { type: 'echo'; text: string } | { type: 'welcome' }
@@ -862,5 +864,38 @@ async function onChannelAckOwnership() {
   const ch = new Channel<string, string>()
   ch.listen(() => 'answer')
   ch.listen((data) => (data === 'conflict' ? 'other' : undefined))
+  return { channel: ch.client }
+}
+
+async function onChannelBudgets() {
+  const original = config.channel
+  config.channel = { ...original, maxPendingBytes: 8192, maxPendingAcks: 2 }
+  const bytes = new Channel<never, string>()
+  const acks = new Channel<never, string>()
+  config.channel = original
+  const exercise = (ch: typeof bytes, ack: boolean) => {
+    ch.onOpen(() => {
+      try {
+        for (let i = 0; i < 1000; i++) void ch.send('x'.repeat(1024), { ack: ack as false })
+      } catch (err) {
+        cleanupState[`budget_${ch.id}`] = (err as Error).message
+      }
+    })
+  }
+  exercise(bytes, false)
+  exercise(acks, true)
+  return { bytes: bytes.client, acks: acks.client }
+}
+
+async function onChannelCreditFailure() {
+  const ch = new Channel<string, string>()
+  ch.listen(() => new Promise<void>(() => {}))
+  ch.onOpen(() => {
+    const sends = Array.from({ length: 300 }, () => ch.send('x'))
+    ch.abort('capacity-failure')
+    void Promise.allSettled(sends).then((results) => {
+      cleanupState[`credit_${ch.id}`] = String(results.some((r) => r.status === 'rejected'))
+    })
+  })
   return { channel: ch.client }
 }

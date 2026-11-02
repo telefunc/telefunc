@@ -22,13 +22,14 @@ import type { IndexedPeer } from './IndexedPeer.js'
 import type { ChannelMux } from './ChannelMux.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
+import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { ShieldValidator, ShieldValidators } from '../../../node/server/shield.js'
 import { createAbortError, type AbortError } from '../../../shared/Abort.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
-import { ChannelClosedError, replayLossError } from '../channelErrors.js'
+import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channelErrors.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { channelMessages } from '../channelMessages.js'
 import { isPromise } from '../../../utils/isPromise.js'
@@ -105,6 +106,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected pendingAcks = new Map<number, PendingAck<ServerToClient>>()
   /** Payload bytes of the ack requests in `pendingAcks`. */
   private pendingAckBytes = 0
+  private readonly maxPendingBytes: number
+  private readonly maxPendingAcks: number
   protected readonly bufferLimit: number
   protected readonly bufferLimitBinary: number
   protected readonly lifecycle = new ChannelLifecycle({ owner: this, reportError: handleCallbackBug })
@@ -166,6 +169,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const c = getServerConfig().channel
     this.receiveCredit.fitReplay(replayWindow(c.clientReplayBuffer, c.clientReplayBufferBinary))
     this.sendCredit.fitReplay(replayWindow(c.serverReplayBuffer, c.serverReplayBufferBinary))
+    this.maxPendingBytes = c.maxPendingBytes
+    this.maxPendingAcks = c.maxPendingAcks
     this.bufferLimit = bufferLimit ?? c.bufferLimit
     this.bufferLimitBinary = c.bufferLimitBinary
     this.offlineBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>({
@@ -226,6 +231,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this.offlineBuffer.pushText(serialized, resolve, reject)
       })
     }
+    this.checkPending(utf8ByteLength(serialized) + 7, needsAck)
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
     // Promise already serializes the next send, so credit would add nothing.
     if (needsAck) {
@@ -271,6 +277,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this.offlineBuffer.pushBinary(data, resolve, reject)
       })
     }
+    this.checkPending(data.byteLength + 7, needsAck)
     // Ack-bearing path bypasses credit; see `sendData` for rationale.
     if (needsAck) {
       return this.lifecycle.trackAck(
@@ -285,6 +292,21 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.countSend(this.peer.sendSequenced(encode.binary, data))
   }
 
+  private checkPending(bytes: number, ack: boolean): void {
+    const setting =
+      ack && this.pendingAcks.size >= this.maxPendingAcks
+        ? 'maxPendingAcks'
+        : this.bytesAhead() + bytes + 512 > this.maxPendingBytes
+          ? 'maxPendingBytes'
+          : null
+    if (!setting) return
+    const err = new ChannelOverflowError(
+      `Channel closed: config.channel.${setting} exceeded; await each send or raise the setting`,
+    )
+    this.endWithError(ERROR_REASON.OVERFLOW, err)
+    throw err
+  }
+
   private countSend(bytes: number): void | Promise<void> {
     const sent = this.sendCredit.decrement(bytes)
     this.warnIfAhead()
@@ -293,7 +315,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** What its sends put ahead of the page: past the page's credit, and the ack requests it hasn't answered. */
   private bytesAhead(): number {
-    return this.sendCredit.bytesSentPastCredit + this.pendingAckBytes
+    return (
+      this.sendCredit.bytesSentPastCredit +
+      this.sendCredit.waitingCount * 512 +
+      this.pendingAckBytes +
+      this.pendingAcks.size * 512
+    )
   }
 
   private warnIfAhead(): void {
@@ -315,7 +342,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** What the wire cap lets a page hold past its credit: the largest window a page grants, and all that this channel's
    *  sends put ahead of the page, which only the server code's `await` holds back. */
   protected pastCreditAllowance(): number {
-    return CREDIT_WINDOW_MAX_BYTES + this.bytesAhead()
+    return CREDIT_WINDOW_MAX_BYTES + Math.min(this.maxPendingBytes, this.bytesAhead())
   }
 
   private addPendingAck(

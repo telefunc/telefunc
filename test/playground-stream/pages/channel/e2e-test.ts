@@ -146,6 +146,31 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
+  test('channel: failed capacity waits reject on both ends', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-credit')
+    let id = ''
+    await autoRetry(async () => {
+      const result = JSON.parse((await page.textContent('#channel-credit-result'))!)
+      expect(result.rejected).toBe(true)
+      id = result.id
+    })
+    await autoRetry(async () => {
+      expect((await getCleanupState())[`credit_${id}`]).toBe('true')
+    })
+  })
+
+  test('channel: unawaited sends close at finite byte and acknowledgement budgets', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-budgets')
+    await autoRetry(async () => {
+      const ids = JSON.parse((await page.textContent('#channel-budgets-result'))!)
+      const state = await getCleanupState()
+      expect(state[`budget_${ids.bytes}`]).toContain('maxPendingBytes')
+      expect(state[`budget_${ids.acks}`]).toContain('maxPendingAcks')
+    })
+  })
+
   // ── Basic connection ─────────────────────────────────────────────────
 
   test('channel: connect — client onOpen fires, server responds with welcome via ping', async () => {

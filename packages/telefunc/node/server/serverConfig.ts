@@ -116,6 +116,10 @@ type ChannelConfigUser = {
    * Maximum number of bytes buffered per channel for text messages
    * while no client peer is currently attached.
    */
+  /** Maximum bytes queued beyond credit or awaiting acknowledgements. @default 268435456 */
+  maxPendingBytes?: number
+  /** Maximum simultaneous acknowledgement requests. @default 4096 */
+  maxPendingAcks?: number
   bufferLimit?: number
   /** Maximum number of bytes buffered per channel for binary messages while no client peer is attached. */
   bufferLimitBinary?: number
@@ -147,6 +151,8 @@ type ChannelConfigResolved = {
   clientReplayBuffer: number
   clientReplayBufferBinary: number
   connectTtl: number
+  maxPendingBytes: number
+  maxPendingAcks: number
   bufferLimit: number
   bufferLimitBinary: number
   sseFlushThrottle: number
@@ -358,6 +364,8 @@ function getServerConfig(): ConfigResolved {
       clientReplayBufferBinary:
         configState.channel.clientReplayBufferBinary ?? CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
       connectTtl: configState.channel.connectTtl ?? CHANNEL_CONNECT_TTL_MS,
+      maxPendingBytes: configState.channel.maxPendingBytes ?? 256 * 1024 * 1024,
+      maxPendingAcks: configState.channel.maxPendingAcks ?? 4096,
       bufferLimit: configState.channel.bufferLimit ?? CHANNEL_BUFFER_LIMIT_BYTES,
       bufferLimitBinary: configState.channel.bufferLimitBinary ?? CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
       sseFlushThrottle: configState.channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
@@ -529,6 +537,8 @@ function applyChannelConfig(val: unknown): void {
       case 'serverReplayBufferBinary':
       case 'clientReplayBuffer':
       case 'clientReplayBufferBinary':
+      case 'maxPendingBytes':
+      case 'maxPendingAcks':
       case 'bufferLimit':
       case 'bufferLimitBinary':
         assertUsage(

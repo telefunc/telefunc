@@ -43,6 +43,8 @@ import {
   onChannelSlowUplink,
   onChannelOpenAnswer,
   onChannelOpenHello,
+  onChannelBudgets,
+  onChannelCreditFailure,
   onChannelAckOwnership,
   onChannelApiProbe,
   onChannelLateCallbacks,
@@ -1102,6 +1104,24 @@ function ChannelDemo() {
   }, [])
 
   // Once the channel opened, an onOpen runs at once; once it closed, an onClose runs at once with the Abort it ended with.
+  const testBudgets = useCallback(async () => {
+    const { bytes, acks } = await openChannel(onChannelBudgets)
+    acks.listen(() => new Promise<void>(() => {}))
+    await Promise.allSettled([bytes.closed, acks.closed])
+    document.querySelector('#channel-budgets-result')!.textContent = JSON.stringify({ bytes: bytes.id, acks: acks.id })
+  }, [])
+
+  const testCreditFailure = useCallback(async () => {
+    const { channel } = await openChannel(onChannelCreditFailure)
+    const sends = Array.from({ length: 300 }, () => channel.send('x'))
+    channel.abort('capacity-failure')
+    const results = await Promise.allSettled(sends)
+    document.querySelector('#channel-credit-result')!.textContent = JSON.stringify({
+      id: channel.id,
+      rejected: results.some((r) => r.status === 'rejected'),
+    })
+  }, [])
+
   const testAckOwnership = useCallback(async () => {
     const { channel } = await openChannel(onChannelAckOwnership)
     const answer = await channel.send('one', { ack: true })
@@ -1642,6 +1662,14 @@ function ChannelDemo() {
             Test acknowledgement ownership
           </button>
           <output id="channel-ack-ownership-result" />
+          <button id="channel-test-budgets" onClick={testBudgets}>
+            Test send budgets
+          </button>
+          <output id="channel-budgets-result" />
+          <button id="channel-test-credit" onClick={testCreditFailure}>
+            Test failed credit waits
+          </button>
+          <output id="channel-credit-result" />
           <button id="channel-test-api" onClick={testApi}>
             Test channel API
           </button>
