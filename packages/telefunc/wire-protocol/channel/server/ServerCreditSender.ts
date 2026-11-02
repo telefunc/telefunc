@@ -3,40 +3,42 @@ export { ServerCreditSender }
 import type { CreditOwner, Urgency } from '../../flowControl/credit.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 
-/** The channel whose credits these are: the page's end it is attached to, if any, read when a credit frame goes. */
-type CreditChannel = { readonly _peer: IndexedPeer | null; readonly _lastClientSeq: number }
-
 type ServerCreditSenderOptions = {
-  channel: CreditChannel
+  /** The page's end the channel is attached to, if any, read when a credit frame goes. */
+  peer: () => IndexedPeer | null
+  /** The last seq the channel has from its page. */
+  lastClientSeq: () => number
 }
 
 /** The `CreditOwner` of a server channel's credits, kept off the channel's public surface: what they send to its page,
  *  and what they read of its wire; nothing while no page is attached. */
 class ServerCreditSender implements CreditOwner {
-  private readonly channel: CreditChannel
+  private readonly peer: () => IndexedPeer | null
+  private readonly lastClientSeq: () => number
 
-  constructor({ channel }: ServerCreditSenderOptions) {
-    this.channel = channel
+  constructor({ peer, lastClientSeq }: ServerCreditSenderOptions) {
+    this.peer = peer
+    this.lastClientSeq = lastClientSeq
   }
 
   /** The limit carries the last seq the channel has, which acknowledges what arrived. */
   sendByteLimit(limit: number, urgency: Urgency): void {
-    this.channel._peer?.sendByteLimit(limit, this.channel._lastClientSeq, urgency)
+    this.peer()?.sendByteLimit(limit, this.lastClientSeq(), urgency)
   }
 
   sendMessageLimit(limit: number, urgency: Urgency): void {
-    this.channel._peer?.sendMessageLimit(limit, urgency)
+    this.peer()?.sendMessageLimit(limit, urgency)
   }
 
   sendBdpPing(probe: number): void {
-    this.channel._peer?.sendBdpPing(probe)
+    this.peer()?.sendBdpPing(probe)
   }
 
   backlogBytes(): number | undefined {
-    return this.channel._peer?.sender.bufferedAmount()
+    return this.peer()?.sender.bufferedAmount()
   }
 
   deliveredBefore(ms: number): number {
-    return this.channel._peer?.sender.deliveredBefore(ms) ?? 0
+    return this.peer()?.sender.deliveredBefore(ms) ?? 0
   }
 }

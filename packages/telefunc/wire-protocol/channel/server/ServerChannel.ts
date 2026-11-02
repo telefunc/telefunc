@@ -152,7 +152,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   } = {}) {
     this.ack = ack
     this.id = id ?? crypto.randomUUID()
-    const owner = new ServerCreditSender({ channel: this })
+    const owner = new ServerCreditSender({ peer: () => this.peer, lastClientSeq: () => this._lastClientSeq })
     this.sendCredit = new SendCredit({ owner, selfTime: this.selfTime })
     this.receiveCredit = new ReceiveCredit({ owner, selfTime: this.selfTime })
     const c = getServerConfig().channel
@@ -168,11 +168,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   get isClosed(): boolean {
     return this._phase !== 'open'
-  }
-
-  /** @internal The page's end it is attached to, if any. */
-  get _peer(): IndexedPeer | null {
-    return this.peer
   }
 
   send(data: ChannelData<ServerToClient>): Promise<void>
