@@ -1,5 +1,4 @@
 export { RoomHeartbeat }
-export type { RoomHeartbeatOptions, RoomHeartbeatOwner }
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
@@ -14,16 +13,13 @@ import { maintainHold } from './hold.js'
 import type { RoomIncarnation } from '../protocol.js'
 import { dropReplacedMetaGenerations } from '../store/meta.js'
 import type { AuthoritySync } from './AuthoritySync.js'
+import type { RoomHosting } from './RoomHosting.js'
 import type { LanePlan } from '../lanes/LanePlan.js'
 assertIsNotBrowser()
 
-/** The replica the heartbeat keeps at the authority. */
-interface RoomHeartbeatOwner {
-  maintainLease(): Promise<void>
-}
-
 type RoomHeartbeatOptions = {
-  owner: RoomHeartbeatOwner
+  /** What it renews at the authority, and redoes where it failed. */
+  hosting: Pick<RoomHosting, 'maintain'>
   incarnation: RoomIncarnation
   model: Pick<RoomModel, 'closed'>
   lanePlan: Pick<LanePlan, 'observing' | 'ownsInbox' | 'resumeDropped'>
@@ -41,7 +37,7 @@ class RoomHeartbeat {
   /** A slow backend must not pile up overlapping ticks. */
   private ticking = false
 
-  private readonly owner: RoomHeartbeatOwner
+  private readonly hosting: RoomHeartbeatOptions['hosting']
   private readonly incarnation: RoomIncarnation
   private readonly model: RoomHeartbeatOptions['model']
   private readonly lanePlan: RoomHeartbeatOptions['lanePlan']
@@ -50,7 +46,7 @@ class RoomHeartbeat {
   private readonly authority: RoomHeartbeatOptions['authority']
 
   constructor({
-    owner,
+    hosting,
     incarnation,
     model,
     lanePlan,
@@ -58,7 +54,7 @@ class RoomHeartbeat {
     demandExchange,
     authority,
   }: RoomHeartbeatOptions) {
-    this.owner = owner
+    this.hosting = hosting
     this.incarnation = incarnation
     this.model = model
     this.lanePlan = lanePlan
@@ -82,10 +78,9 @@ class RoomHeartbeat {
   private async tick(): Promise<void> {
     if (this.ticking) return
     this.ticking = true
-    const owner = this.owner
     try {
       await this.demandExchange.renew()
-      const renewalFailure = await owner.maintainLease().then(
+      const renewalFailure = await this.hosting.maintain().then(
         () => null,
         (error: unknown) => ({ error }),
       )

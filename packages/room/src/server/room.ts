@@ -52,7 +52,7 @@ import type { RoomDemand } from './lanes/RoomDemand.js'
 import type { AuthoritySync } from './lifecycle/AuthoritySync.js'
 import type { RosterStream } from './lifecycle/RosterStream.js'
 import type { PendingDmAcks } from './PendingDmAcks.js'
-import type { RoomLease } from './store/lease.js'
+import type { RoomHosting } from './lifecycle/RoomHosting.js'
 import { RoomWrites, runAfterHook, type RoomWritesOwner } from './RoomWrites.js'
 import {
   acceptedOrThrow,
@@ -99,8 +99,8 @@ type RoomHandleOptions = {
   incomingDemand: Pick<RoomDemand, 'wanted'>
   /** For the handle's writes. */
   acks: PendingDmAcks
-  /** Hosts the members the handle admits. */
-  lease: RoomLease
+  /** Hosts the members the handle admits, and evicts again one whose eviction failed. */
+  hosting: Pick<RoomHosting, 'lease' | 'evictLater'>
   /** The meta of each participant a client holds, which the client mirrors. */
   metaMirrors: Set<MetaMirror>
 }
@@ -133,7 +133,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
   private readonly authority: RoomHandleOptions['authority']
   private readonly roster: RoomHandleOptions['roster']
   private readonly incomingDemand: RoomHandleOptions['incomingDemand']
-  private readonly lease: RoomLease
+  private readonly hosting: RoomHandleOptions['hosting']
   private readonly metaMirrors: Set<MetaMirror>
 
   constructor({
@@ -144,7 +144,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     roster,
     incomingDemand,
     acks,
-    lease,
+    hosting,
     metaMirrors,
   }: RoomHandleOptions) {
     this.replica = replica
@@ -152,7 +152,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     this.authority = authority
     this.roster = roster
     this.incomingDemand = incomingDemand
-    this.lease = lease
+    this.hosting = hosting
     this.metaMirrors = metaMirrors
     this.incarnation = replica.incarnation
     this.state = new RoomState({ view, model: replica.model, owner: new RoomHandleStateOwner({ room: this }) })
@@ -253,7 +253,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
       await this.replica.openInbox(id)
       admission.assertLive(this.model)
       // The member's record and its join event are one write, so its leave always follows its join.
-      await joinMember(this.incarnation, this.lease, { id, record, meta, join })
+      await joinMember(this.incarnation, this.hosting.lease, { id, record, meta, join })
       admission.assertLive(this.model)
       admission.commit()
       this.admissions.delete(id)
@@ -267,7 +267,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
       const cause: LeaveCause = { type: lost ? 'disconnected' : 'left' }
       await evictMember(this.incarnation, id, cause).catch((error: unknown) => {
         reportRoomError(error)
-        this.replica.evictLater(id)
+        this.hosting.evictLater(id)
       })
       this.abandonAdmission(id, cause)
       throw error
@@ -291,7 +291,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     try {
       await this.removeMember(id, cause)
     } catch {
-      this.replica.evictLater(id)
+      this.hosting.evictLater(id)
       this.model.applyLeave(id, cause)
     }
   }

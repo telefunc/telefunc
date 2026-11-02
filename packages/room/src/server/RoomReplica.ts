@@ -31,8 +31,7 @@ import { PendingDmAcks } from './PendingDmAcks.js'
 import { reportRoomError } from './reportRoomError.js'
 import { SEMANTIC_LANE, decodeLaneEnvelope, decodeRoomText, withinRoomHorizon } from './lanes/lanes.js'
 import { dropDmReply, takeDmReplies } from './store/dmReplies.js'
-import { evictMember } from './store/members.js'
-import { holdViews, removeView, renewLease, RoomLease } from './store/lease.js'
+import { RoomHosting } from './lifecycle/RoomHosting.js'
 import type { StoredRoomMeta } from './store/meta.js'
 import type { LaneHolder, ReplayHold, TextWantsChange } from './lifecycle/replay.js'
 import { type MetaMirror, type RoomHandle, ServerRoom } from './room.js'
@@ -40,7 +39,7 @@ import { RosterStream } from './lifecycle/RosterStream.js'
 import { toggle } from '../utils/sets.js'
 import { MemberMessageTexts, type RoomStub, unorderedEventText } from './RoomStub.js'
 import { LanePlan, type LanePlanOwner } from './lanes/LanePlan.js'
-import { RoomHeartbeat, type RoomHeartbeatOwner } from './lifecycle/RoomHeartbeat.js'
+import { RoomHeartbeat } from './lifecycle/RoomHeartbeat.js'
 assertIsNotBrowser()
 
 /** What the control lane carries for the model: everything but another process's ask, which the report answers. */
@@ -73,7 +72,7 @@ type RoomReplicaOptions = {
  *  that hosts the members and pages the handles hold, and the heartbeat that renews the lease and checks the authority
  *  again. Each handle keeps its guards, its tail, the stubs it opened and its listeners. A replica that no handle
  *  observes, owns a member through or tails runs no heartbeat and holds no lane; it lives while a handle holds it. */
-class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, AuthoritySyncOwner, RoomHeartbeatOwner {
+class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, AuthoritySyncOwner {
   /** The incarnation's replica on this channel host, while a handle or its own work holds it. */
   static of(inc: string): RoomReplica | undefined {
     return replicasHere().get(inc)?.deref()
@@ -108,20 +107,13 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
   private readonly heartbeat: RoomHeartbeat
   private readonly roster: RosterStream
   /** Hosts the members the handles join and the pages' views. */
-  private readonly lease = new RoomLease()
+  private readonly hosting: RoomHosting
   /** In-flight `send(…, { ack: true })`s; a leave of either end, or a close, fails the ones it strands. */
   private readonly acks = new PendingDmAcks()
   /** Every handle's attached stubs. */
   private readonly stubs = new Set<RoomStub>()
   /** The meta of each participant a client holds, which the client mirrors. */
   private readonly metaMirrors = new Set<MetaMirror>()
-  /** Each stub's latest view write, from its attach or a rewrite, to the key it wrote, null if it failed; its removal
-   *  comes after it. */
-  private readonly views = new Map<RoomStub, Promise<string | null>>()
-  /** A view write failed, or the lease hosting the views was lost: the heartbeat writes them again. */
-  private viewsLost = false
-  /** Members whose eviction failed: the lease would host them for as long as it lives. */
-  private readonly unevicted = new Set<string>()
   /** The handle holding each member it joined. */
   private readonly owners = new Map<string, RoomHandle>()
   /** The seq of the last frame each owned member's inbox delivered, 0 before its first. */
@@ -138,6 +130,7 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
   private constructor({ incarnation, stored, seed }: RoomReplicaOptions) {
     this.id = incarnation.id
     this.incarnation = incarnation
+    this.hosting = new RoomHosting({ incarnation })
     this.model = new RoomModel({
       roomId: incarnation.id,
       meta: stored.entries,
@@ -158,7 +151,7 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
     this.authority = new AuthoritySync({ owner: this, incarnation, model, lanePlan })
     const authority = this.authority
     this.heartbeat = new RoomHeartbeat({
-      owner: this,
+      hosting: this.hosting,
       incarnation,
       model,
       lanePlan,
@@ -178,7 +171,7 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
       roster: this.roster,
       incomingDemand: this.incomingDemand,
       acks: this.acks,
-      lease: this.lease,
+      hosting: this.hosting,
       metaMirrors: this.metaMirrors,
     })
   }
@@ -255,10 +248,7 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
   attachStub(handle: RoomHandle, stub: RoomStub): void {
     this.reconsider(handle)
     this.stubs.add(stub)
-    this.views.set(
-      stub,
-      this.hostViews([stub]).then(([key]) => key ?? null),
-    )
+    this.hosting.hostView(stub)
     this.lanePlan.holderChanged(stub)
   }
 
@@ -275,13 +265,7 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
   detachStub(handle: RoomHandle, stub: RoomStub): void {
     this.reconsider(handle)
     this.stubs.delete(stub)
-    const view = this.views.get(stub)
-    this.views.delete(stub)
-    void view
-      ?.then(async (key) => {
-        if (key !== null) await removeView(this.incarnation, key)
-      })
-      .catch(reportRoomError)
+    this.hosting.dropView(stub)
     this.roster.forget(stub)
     this.lanePlan.holderGone(stub)
   }
@@ -314,22 +298,6 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
       throw new RoomError(`A participant publishes on at most ${ROOM_MEMBER_TRACKS_MAX} named tracks`)
     }
     if (this.publishedTracks.add(member, track)) this.incomingDemand.published(member, track)
-  }
-
-  /** The stubs' views' keys, in order; each null and the views lost if the write failed. */
-  private async hostViews(stubs: RoomStub[]): Promise<(string | null)[]> {
-    try {
-      const keys = await holdViews(
-        this.incarnation,
-        this.lease,
-        stubs.map((stub) => stub.end.id),
-      )
-      return stubs.map((_, i) => keys[i] ?? null)
-    } catch (error) {
-      this.viewsLost = true
-      reportRoomError(error)
-      return stubs.map(() => null)
-    }
   }
 
   /** Applies a presence event to the model and relays what it changed to the clients: as the lane carried it when
@@ -445,34 +413,6 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
 
   deliverDemand(member: string, track: string, wanted: boolean): void {
     this.owners.get(member)?.deliverDemand(member, track, wanted)
-  }
-
-  /** The heartbeat evicts the member again, as `disconnected`. */
-  evictLater(id: string): void {
-    this.unevicted.add(id)
-  }
-
-  /** Renews the lease and evicts again whom it failed to; once the lease was lost, or a view write failed, writes every
-   *  stub's view again in one write, after each one's earlier write. */
-  async maintainLease(): Promise<void> {
-    if (!(await renewLease(this.incarnation, this.lease))) this.viewsLost = true
-    for (const id of this.unevicted) {
-      await evictMember(this.incarnation, id, { type: 'disconnected' })
-      this.unevicted.delete(id)
-    }
-    if (!this.viewsLost) return
-    this.viewsLost = false
-    const stubs = [...this.views.keys()]
-    if (stubs.length === 0) return
-    const previous = Promise.all(this.views.values())
-    const keys = previous.then(() => this.hostViews(stubs))
-    stubs.forEach((stub, i) =>
-      this.views.set(
-        stub,
-        keys.then((written) => written[i] ?? null),
-      ),
-    )
-    await keys
   }
 
   /** A newer meta reaching this view through the authority never reached its clients as an event. */
