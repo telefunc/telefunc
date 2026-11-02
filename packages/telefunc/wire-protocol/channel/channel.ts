@@ -1,4 +1,4 @@
-export { invokeChannelListener, makePublishInfo }
+export { invokeChannelListener }
 export type {
   ChannelBase,
   ChannelShield,
@@ -39,10 +39,6 @@ type ChannelPublishAck = ChannelPublishInfo & {
   /** Who the message was handed to, when the backend can count it: subscribers in memory, server instances on
    *  standalone Redis, session Durable Objects on Cloudflare; absent on Redis Cluster. Not a viewer count. */
   receivers?: number
-}
-
-function makePublishInfo(key: string, seq: number, timestamp: number): ChannelPublishInfo {
-  return { key, seq, timestamp }
 }
 
 /** Invoke a fire-and-forget listener while routing both thrown and rejected failures. Returns what `handleError`

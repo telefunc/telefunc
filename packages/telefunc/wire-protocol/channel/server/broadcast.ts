@@ -13,7 +13,6 @@ import type {
   ChannelPublishInfo,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
-import { makePublishInfo } from '../channel.js'
 import { reportBug } from './channel.js'
 import { ServerBroadcastEnd, type BroadcastEndOwner } from './broadcastEnd.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
@@ -151,7 +150,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
   /** Calls each listener directly, as a channel's receive does, since this runs per subscriber per message; a
    *  listener's error that ends the channel stops the delivery. */
   private deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
-    const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
+    const info = { key: this.key, seq: rawInfo.seq, timestamp: rawInfo.timestamp }
     const data = parse(serialized) as ChannelData<T>
     for (const cb of this.subscribers.text.list()) {
       try {
@@ -166,7 +165,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
   }
 
   private deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
-    const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
+    const info = { key: this.key, seq: rawInfo.seq, timestamp: rawInfo.timestamp }
     for (const cb of this.subscribers.binary.list()) {
       try {
         // Each listener gets bytes of its own: one may write into them or transfer their buffer.
@@ -291,7 +290,7 @@ function subscribeRoute<Kind extends BroadcastKind, Data>(
   const subscription = new RouteSubscription({
     route,
     receiver: (payload, info) => {
-      callStaticListener(callback, decode(payload), makePublishInfo(route.key, info.seq, info.timestamp))
+      callStaticListener(callback, decode(payload), { key: route.key, seq: info.seq, timestamp: info.timestamp })
     },
   })
   subscription.open()

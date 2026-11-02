@@ -2,6 +2,7 @@
 export type { TELEFUNC_SHIELDS } from '../shared/transformer/generateShield/shieldKey.js'
 export type { OrderingInfo } from '../../wire-protocol/wire/orderingFrame.js'
 export { untether } from '../../utils/wrapProxy.js'
+export { invokeChannelListener } from '../../wire-protocol/channel/channel.js'
 export { reportBug } from '../../wire-protocol/channel/server/channel.js'
 export { hostLocal } from '../../wire-protocol/channel/server/mux.js'
 export { getChannelLimits } from './serverConfig.js'

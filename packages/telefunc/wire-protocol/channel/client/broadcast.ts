@@ -8,7 +8,6 @@ import type {
   ChannelData,
   ChannelPublishAck,
 } from '../channel.js'
-import { makePublishInfo } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { encode, type ChannelDataFrame } from '../../wire/frame.js'
@@ -123,7 +122,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   _onPeerPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
     const parsed = parse(data) as ChannelData<T>
-    const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
+    const info = { key: this.key!, seq: wireInfo.seq, timestamp: wireInfo.timestamp }
     for (const cb of this.subscribers.text.list()) {
       try {
         const result = cb(parsed, info)
@@ -137,7 +136,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   _onPeerPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
-    const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
+    const info = { key: this.key!, seq: wireInfo.seq, timestamp: wireInfo.timestamp }
     for (const cb of this.subscribers.binary.list()) {
       try {
         // Bytes of its own: a listener may write into them or transfer their buffer.

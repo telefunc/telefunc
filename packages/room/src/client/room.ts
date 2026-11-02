@@ -6,7 +6,6 @@ import { markHandled } from '../utils/markHandled.js'
 import { getOrCreate } from '../utils/getOrCreate.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import type { TELEFUNC_SHIELDS, ChannelPublishAck, ChannelPublishInfo, ClientBroadcast } from 'telefunc/__internal'
-import { makePublishInfo } from '../shared/channel.js'
 import {
   EVERY_MEMBER,
   EVERY_TRACK,
@@ -327,7 +326,7 @@ class ClientRoom extends RoomStateView implements Room {
         this.model.forgetMetaSeqs()
         return
       case 'data':
-        this._state.applyData(event, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
+        this._state.applyData(event, { key: this.id, seq: rawInfo.seq, timestamp: rawInfo.timestamp })
         return
       case 'join':
         this.model.applyJoin(joinedMember(event))
@@ -345,7 +344,7 @@ class ClientRoom extends RoomStateView implements Room {
         this.applyClosed('closed')
         return
       case 'announce':
-        this._state.applyAnnounce(event.data, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
+        this._state.applyAnnounce(event.data, { key: this.id, seq: rawInfo.seq, timestamp: rawInfo.timestamp })
         return
       case 'demand':
         // Whether anyone wants one of our own members' tracks flipped (onDemand).
@@ -383,7 +382,7 @@ class ClientRoom extends RoomStateView implements Room {
   private onBinaryFrame(framed: Uint8Array, rawInfo: ChannelPublishInfo): void {
     const frame = decodeBinaryFrame(framed)
     assert(frame)
-    this._state.applyBinary(frame, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
+    this._state.applyBinary(frame, { key: this.id, seq: rawInfo.seq, timestamp: rawInfo.timestamp })
   }
 
   private onRosterPart({ members, part, more }: Extract<RoomRosterEvent, { __r: 'roster' }>): void {

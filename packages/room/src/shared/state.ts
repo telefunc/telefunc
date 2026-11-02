@@ -3,8 +3,7 @@ export type { RoomStateOwner }
 
 import { assert, assertUsage } from '../utils/assert.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
-import { invokeChannelListener } from './channel.js'
-import type { ChannelPublishInfo } from 'telefunc/__internal'
+import { invokeChannelListener, type ChannelPublishInfo } from 'telefunc/__internal'
 import { makeDisposer } from './disposer.js'
 import { Listeners } from '../utils/Listeners.js'
 import { getOrCreate } from '../utils/getOrCreate.js'

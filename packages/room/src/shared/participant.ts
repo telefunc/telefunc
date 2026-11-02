@@ -2,8 +2,7 @@ export { ParticipantBase }
 export type { ParticipantBaseOptions }
 
 import { stringify } from '@brillout/json-serializer/stringify'
-import { invokeChannelListener } from './channel.js'
-import type { ChannelPublishAck, TELEFUNC_SHIELDS } from 'telefunc/__internal'
+import { invokeChannelListener, type ChannelPublishAck, type TELEFUNC_SHIELDS } from 'telefunc/__internal'
 import { makeDisposer } from './disposer.js'
 import { Listeners } from '../utils/Listeners.js'
 import { Fifo } from '../utils/Fifo.js'

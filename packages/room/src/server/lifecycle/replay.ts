@@ -3,7 +3,6 @@ export type { LaneHolder, TextWantsChange }
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { getOrCreate } from '../../utils/getOrCreate.js'
-import { makePublishInfo } from '../../shared/channel.js'
 import type { ChannelPublishInfo, OrderingInfo } from 'telefunc/__internal'
 import { EVERY_MEMBER, EVERY_TRACK, type BinaryFrame, type BinaryWantChange } from '../../shared/binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from '../lanes/binaryWants.js'
@@ -370,6 +369,6 @@ class LocalHolder implements LaneHolder {
   }
 
   private publishInfo(info: OrderingInfo): ChannelPublishInfo {
-    return makePublishInfo(this.state.roomId, info.seq, info.timestamp)
+    return { key: this.state.roomId, seq: info.seq, timestamp: info.timestamp }
   }
 }
