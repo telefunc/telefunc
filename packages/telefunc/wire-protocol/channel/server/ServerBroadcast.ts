@@ -232,7 +232,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this.unsubBroadcast = this.adapter.subscribe(
       this.key,
       (serialized, rawInfo) => this.deliverBroadcastMessage(serialized, rawInfo),
-      this._wireRequest,
+      this.wireRequest,
     )
   }
 
@@ -242,7 +242,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this.unsubBinaryBroadcast = this.adapter.subscribeBinary(
       this.key,
       (data, rawInfo) => this.deliverBroadcastBinaryMessage(data, rawInfo),
-      this._wireRequest,
+      this.wireRequest,
     )
   }
 

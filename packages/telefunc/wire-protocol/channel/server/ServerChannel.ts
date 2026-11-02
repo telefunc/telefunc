@@ -95,8 +95,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _phase: 'open' | 'closing' | 'ended' = 'open'
   private didRegister = false
   protected peer: IndexedPeer | null = null
-  /** @internal The request that opened the wire the page last attached on. */
-  _wireRequest: Request | undefined = undefined
+  /** The request that opened the wire the page last attached on. */
+  protected wireRequest: Request | undefined = undefined
   private readonly listeners = new Listeners<ChannelListener<ClientToServer>>()
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
   protected offlineBuffer: ServerChannelBuffer<ChannelAck<ServerToClient>>
@@ -447,7 +447,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         void this.onPeerBinaryAckReqMessage(frame.data, frame.seq)
         return
       case TAG.ACK_RES:
-        this._onPageHas(frame.ackedSeq)
+        this.onPageHas(frame.ackedSeq)
         this.onPeerAckRes(frame.ackedSeq, frame.text, frame.status)
         return
       case TAG.PUBLISH:
@@ -475,7 +475,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.WINDOW:
         this.sendCredit.onPeerByteWindow(frame.bytes)
-        this._onPageHas(seqThrough(frame.lastSeq, this._replayBuffer?.seq ?? 0))
+        this.onPageHas(seqThrough(frame.lastSeq, this._replayBuffer?.seq ?? 0))
         return
       case TAG.MSG_WINDOW:
         this.sendCredit.onPeerMessageWindow(frame.count)
@@ -617,7 +617,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected onPeerCloseAck(): void {
     if (this._phase === 'ended') return
     // The page sends CLOSE_ACK when the close request arrives, so it has received everything sent before it.
-    this._onPageHas(this.closeRequestSeq)
+    this.onPageHas(this.closeRequestSeq)
     this.lifecycle.onCloseAck()
   }
 
@@ -662,16 +662,24 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.receiveCredit.acknowledge()
   }
 
-  /** @internal The page received this channel's frames through `lastSeq`, so the replay buffer lets them go. */
-  _onPageHas(lastSeq: number): void {
-    if (lastSeq > this.pageLastSeq) this.pageLastSeq = lastSeq
-    this._replayBuffer?.acknowledge(lastSeq)
+  /** @internal The page attaches on the wire `request` opened, having received this channel's frames through
+   *  `lastSeq`. */
+  _onPageAttach(lastSeq: number, request: Request | undefined): void {
+    this.onPageHas(lastSeq)
+    this.wireRequest = request
   }
 
-  /** @internal The page closed its end after receiving this channel's frames through `lastSeq`. */
+  /** @internal The page closed its end after receiving this channel's frames through `lastSeq`, the low 32 bits a PING
+   *  carries. */
   _onPageClosed(lastSeq: number): void {
     this.pageClosed = true
-    this._onPageHas(lastSeq)
+    this.onPageHas(seqThrough(lastSeq, this._replayBuffer?.seq ?? 0))
+  }
+
+  /** The page received this channel's frames through `lastSeq`, so the replay buffer lets them go. */
+  private onPageHas(lastSeq: number): void {
+    if (lastSeq > this.pageLastSeq) this.pageLastSeq = lastSeq
+    this._replayBuffer?.acknowledge(lastSeq)
   }
 
   /** True once the page needs nothing more: it closed its end, or it received every frame and nothing is pending. */

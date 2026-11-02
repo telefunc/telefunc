@@ -21,7 +21,6 @@ import {
 } from '../../constants.js'
 import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, withTook } from '../../wire/frame.js'
 import { TAG, isWireCtrlTag } from '../../wire/tags.js'
-import { seqThrough } from '../../wire/seq.js'
 import { textEncoder } from '../../wire/envelope.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
@@ -520,7 +519,7 @@ class ChannelMux implements UpgradeStagesOwner {
         answers.push({ ix, lastSeq: null })
         continue
       }
-      channel._onPageClosed(seqThrough(lastSeq, channel._replayBuffer?.seq ?? 0))
+      channel._onPageClosed(lastSeq)
       const released = this.endedChannels.has(channel)
       if (released) this.releaseEnded(channel)
       answers.push({ ix, lastSeq: released ? null : channel._lastClientSeq })
@@ -815,8 +814,7 @@ class ChannelMux implements UpgradeStagesOwner {
   ): ChannelHandle | null {
     const buffer = channel._replayBuffer
     if (buffer === null) return null
-    channel._onPageHas(open.lastSeq)
-    channel._wireRequest = request
+    channel._onPageAttach(open.lastSeq, request)
     const peer = new IndexedPeer({ sender, index: open.ix, replay: buffer })
     const missed = replay ? buffer.getAfter(open.lastSeq) : []
     if (missed === null) {
