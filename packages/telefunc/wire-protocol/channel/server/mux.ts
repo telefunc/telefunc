@@ -928,7 +928,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     this.armPingDeadline(entry, this.options.pingDeadline)
   }
 
-  private armPingDeadline(entry: WireEntry, ms: number): void {
+  /** `recheck`: the deadline had passed when the timer last ran, and is judged again once the server read its sockets. */
+  private armPingDeadline(entry: WireEntry, ms: number, recheck = false): void {
     const { wire, state, transport } = entry
     this.clearPingTimer(state)
     state.pingTimer = unrefTimer(
@@ -942,6 +943,9 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
         )
         const now = performance.now()
         if (now < deadAt) return this.armPingDeadline(entry, Math.min(deadAt - now, TIMER_DELAY_MAX_MS))
+        // Timers run before the sockets are read: after server code that held the event loop past the deadline, the
+        // page's PING may be waiting unread. The next turn reads it first.
+        if (!recheck) return this.armPingDeadline(entry, 0, true)
         // Transient close so each channel gets its `reconnectTimeout` grace via
         // `_onPeerDisconnect`. Wire-level state is rebuilt by the next reconcile.
         transport.terminateWire(wire)
