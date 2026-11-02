@@ -34,8 +34,8 @@ config.channel = {
 > - Slow/flaky clients dropping with `NetworkError` (`isChannel: true`) → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
 > - `ChannelOverflowError` while a client is briefly offline → raise `bufferLimit`/`bufferLimitBinary`, or apply backpressure by `await`-ing your `send()`s (an awaited `send()` waits until the client is back).
 > - `NetworkError` (`isChannel: true`) right after a reconnect, having missed more messages than the replay buffer holds → `await` your `send()`s, or raise the replay buffer that the error message names.
-> - A warning that a channel's `send()` calls are 64 MiB ahead of its client → `await` your `send()`s, or skip sends while one is pending (see <Link href="/channel#backpressure" />). The 64 MiB is fixed.
-> - Too much server memory per channel → `await` your `send()`s and lower the replay buffers. An awaited `send()` waits while half its replay buffer is unacknowledged, so smaller buffers slow channels to distant clients.
+> - A warning that 64 MiB of a channel's sends are waiting for its client → `await` your `send()`s, or skip sends while one is pending (see <Link href="/channel#backpressure" />). The 64 MiB is fixed.
+> - Too much server memory per channel → `await` your `send()`s and lower the replay buffers. An awaited `send()` resolves at once only while what the client hasn't taken yet fits its window, which grows up to half its replay buffer, so smaller buffers slow channels to distant clients.
 
 <ConfigWhereServer />
 
