@@ -21,19 +21,12 @@ import type {
   RoomHead,
   RoomSubscriptionSource,
 } from '../backend/contract.js'
-import type {
-  OrderingInfo,
-  Subscriber,
-  TelefuncExtensionNamespace,
-  TelefuncExtensionStub,
-  Unsubscribe,
-} from 'telefunc/__internal'
-import { currentCloudflareMember } from 'telefunc/__internal'
+import type { OrderingInfo, Subscriber, TelefuncExtensionNamespace, Unsubscribe } from 'telefunc/__internal'
+import { CLOUDFLARE_BUCKETS, currentCloudflareMember } from 'telefunc/__internal'
 import type { CloudflareRoomAuthorityStub } from './do.js'
 import { currentRoomSessionSubscriptions, getRoomSessionSubscriptions } from './subscription.js'
-import { ROOM_CLOUDFLARE_EXTENSION, ROOM_CLOUDFLARE_PREFIX } from '../server/constants.js'
-
-const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
+import { openRegionDirectory, openRoomAuthority } from './objects.js'
+import { compareCodePoints } from '../utils/SortedIds.js'
 
 type CloudflareRoomDriverOptions = { getNamespace: () => TelefuncExtensionNamespace }
 
@@ -120,50 +113,52 @@ class CloudflareRoomDriver implements RoomDriver {
     return this.stub(roomId).dropIncarnation(inc)
   }
 
+  // A room's listing is kept by its own authority, which also writes it to its region's directory for `Room.list()`.
+
   async directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
-    return this.directory().directoryPut(roomId, incTag, checkAt, minDelayMs)
+    return this.stub(roomId).directoryPut(
+      roomId,
+      incTag,
+      checkAt,
+      minDelayMs,
+      currentCloudflareMember()?.bucket ?? null,
+    )
   }
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
-    return this.directory().directoryDelete(roomId, incTag)
+    return this.stub(roomId).directoryDelete(roomId, incTag)
   }
 
   async directoryGet(roomId: string): Promise<string | undefined> {
-    return this.directory().directoryGet(roomId)
+    return this.stub(roomId).directoryGet(roomId)
   }
 
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
-    return this.directory().directoryList(prefix, cursor)
-  }
-
-  async directoryDue(): Promise<DirectoryPage['entries']> {
-    return this.directory().directoryDue()
-  }
-
-  /** A room's authority. Cloudflare places a Durable Object on its first `get()` and never moves it, so the call that
-   *  creates the room's authority puts it in the region of the session it runs in, if any. */
-  stub(roomId: string): CloudflareRoomAuthorityStub {
-    return this.object(ROOM_CLOUDFLARE_PREFIX + roomId, currentCloudflareMember()?.bucket ?? null)
-  }
-
-  private directory(): CloudflareRoomAuthorityStub {
-    return this.object(DIRECTORY_DO_NAME)
-  }
-
-  private object(name: string, locationHint: string | null = null): CloudflareRoomAuthorityStub {
     const namespace = this.getNamespace()
-    return roomAuthorityStub(
-      namespace.get(namespace.idFromName(name), locationHint === null ? undefined : { locationHint }),
+    const pages = await Promise.all(
+      CLOUDFLARE_BUCKETS.map((bucket) => openRegionDirectory(namespace, bucket).directoryList(prefix, cursor)),
     )
+    return mergeRegionPages(pages)
+  }
+
+  /** Never any: each room's authority settles its own listing on its alarm. */
+  async directoryDue(): Promise<DirectoryPage['entries']> {
+    return []
+  }
+
+  /** A room's authority, which the call that creates it places in the region of the session it runs in, if any. */
+  stub(roomId: string): CloudflareRoomAuthorityStub {
+    return openRoomAuthority(this.getNamespace(), roomId, currentCloudflareMember()?.bucket ?? null)
   }
 }
 
-/** A room authority's methods, called through its Durable Object's `telefuncDurableObjectCall()`. */
-function roomAuthorityStub(stub: TelefuncExtensionStub): CloudflareRoomAuthorityStub {
-  return new Proxy({} as CloudflareRoomAuthorityStub, {
-    get:
-      (_, method: string) =>
-      (...args: unknown[]) =>
-        stub.telefuncDurableObjectCall(ROOM_CLOUDFLARE_EXTENSION, method, args),
-  })
+/** One page of the regions' pages, in code point order. A region that has more past its page may list a room before
+ *  another region's later entries, so the page ends where the first such region's does. */
+function mergeRegionPages(pages: DirectoryPage[]): DirectoryPage {
+  const cursor = pages.flatMap((page) => (page.cursor === undefined ? [] : [page.cursor])).sort(compareCodePoints)[0]
+  const entries = pages
+    .flatMap((page) => page.entries)
+    .filter(({ roomId }) => cursor === undefined || compareCodePoints(roomId, cursor) <= 0)
+    .sort((a, b) => compareCodePoints(a.roomId, b.roomId))
+  return cursor === undefined ? { entries } : { entries, cursor }
 }

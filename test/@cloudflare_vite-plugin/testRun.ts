@@ -43,6 +43,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   if (!isDev) testRoomOrderAcrossSessions()
   testRoomAcrossSessions()
   testRoomAcrossRegions()
+  testRoomCreatedInRegion()
   testRoomStorage()
 }
 
@@ -460,6 +461,33 @@ function testRoomAcrossRegions() {
     const forwardedRegions = forwards.map(({ members }) => [...new Set(members.map((member) => regionOf.get(member)))])
     expect(forwardedRegions.sort()).deep.equal([['apac'], ['weur'], ['wnam']])
     expect(deliveries.length).toBe(new Set(forwards.flatMap(({ members }) => members)).size)
+    for (const page of pages) await page.context().close()
+  })
+}
+
+function testRoomCreatedInRegion() {
+  test("Room: creating a room calls only Durable Objects in its creator's region, and Room.list() finds rooms of every region", async () => {
+    const id = crypto.randomUUID()
+    // Los Angeles is wnam, Frankfurt is weur.
+    const pages = await openSessions(id, ['p1', 'p2'], { p1: 'LAX', p2: 'FRA' })
+    for (const [page, name, region] of [
+      [pages[0]!, 'p1', 'wnam'],
+      [pages[1]!, 'p2', 'weur'],
+    ] as const) {
+      await fetch(`${getServerUrl()}/__room-calls`, { method: 'PUT' })
+      expect(await clickRoomCard(page, 'create')).toBe('created')
+      const calls = (await (await fetch(`${getServerUrl()}/__room-calls`)).json()) as {
+        object: string
+        room: unknown
+      }[]
+      // Other tests' rooms keep their sessions' routes and listings meanwhile: only this room's calls count.
+      const room = `regions:${id}:${name}`
+      const objects = new Set(
+        calls.filter((call) => call.room === room || call.object.endsWith(room)).map((call) => call.object),
+      )
+      expect([...objects].sort()).deep.equal([`__telefunc_room__:${room}`, `__telefunc_room_directory__:${region}`])
+    }
+    expect(await clickRoomCard(pages[0]!, 'list-created')).deep.equal([`regions:${id}:p1`, `regions:${id}:p2`])
     for (const page of pages) await page.context().close()
   })
 }

@@ -20,11 +20,18 @@ import type {
   RetainedOf,
   DirectoryPage,
 } from '../backend/contract.js'
-import type { CloudflareRegions, OrderingInfo } from 'telefunc/__internal'
+import {
+  OrderedStubs,
+  type CloudflareExtensionKit,
+  type CloudflareRegions,
+  type OrderingInfo,
+  type TelefuncExtensionNamespace,
+} from 'telefunc/__internal'
 import { assert } from '../utils/assert.js'
 import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../backend/laneKey.js'
 import { commitPreconditionHolds, isOpenIncarnation, publicHead } from '../backend/semantics.js'
 import { Fanout } from './Fanout.js'
+import { openRegionDirectory } from './objects.js'
 import { deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
 import {
   deleteExpiredRoutes,
@@ -36,10 +43,10 @@ import {
 } from './routes.js'
 import {
   advanceOrder,
+  claimListingBucket,
   compareExchangeCells,
   compareExchangeHead,
   directoryDelete,
-  directoryDue,
   directoryGet,
   directoryList,
   directoryPut,
@@ -53,7 +60,9 @@ import {
   readCells,
   readCellPage,
   readLiveHead,
+  readListingBucket,
   readOrder,
+  settleDueListing,
   type CellPage,
 } from './storage.js'
 
@@ -72,15 +81,21 @@ type CloudflareRoomAuthorityStub = Omit<RoomAuthority, 'alarm'>
 
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
 
-/** Room's part of a Durable Object that is a room authority, or the room directory, fanning out through Broadcast's
- *  `regions`. Its tables are created on first use. */
+/** Room's part of a Durable Object that is a room authority, fanning out through Broadcast's `regions`, or a region's
+ *  directory. Its tables are created on first use. */
 class RoomAuthority {
   private readonly ctx: DurableObjectState
+  private readonly regions: CloudflareRegions
+  private readonly getNamespace: () => TelefuncExtensionNamespace
   private readonly fanout: Fanout
+  /** Its calls to its listing's region directory, which reach it in the order the listing changed. */
+  private readonly directoryCalls = new OrderedStubs<CloudflareRoomAuthorityStub>()
   private schema = false
 
-  constructor(ctx: DurableObjectState, regions: CloudflareRegions) {
+  constructor(ctx: DurableObjectState, { regions, getNamespace }: CloudflareExtensionKit) {
     this.ctx = ctx
+    this.regions = regions
+    this.getNamespace = getNamespace
     this.fanout = new Fanout({ regions })
   }
 
@@ -201,44 +216,83 @@ class RoomAuthority {
     await this.scheduleMaintenanceIfNeeded()
   }
 
-  async directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
+  /** At a room's authority: lists the room, in the region directory of `bucket` if it is the room's first listing, of
+   *  `regions.locationFallback` if that has no bucket either. */
+  async directoryPut(
+    roomId: string,
+    incTag: string,
+    checkAt: number,
+    minDelayMs: number,
+    bucket: string | null,
+  ): Promise<void> {
     const at = Math.max(checkAt, Date.now() + minDelayMs)
-    this.transaction((sql) => directoryPut(sql, roomId, incTag, at))
+    const listedIn = this.transaction((sql) => {
+      directoryPut(sql, roomId, incTag, at)
+      return claimListingBucket(sql, bucket ?? this.regions.locationFallback)
+    })
+    await this.callDirectory(listedIn, (directory) => directory.listInRegion(roomId, incTag))
+    await this.scheduleMaintenanceIfNeeded()
   }
 
+  /** At a room's authority. Its region directory forgets `incTag` even when the listing here is gone or newer, as after
+   *  an alarm that couldn't reach it. */
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
     this.transaction((sql) => directoryDelete(sql, roomId, incTag))
+    await this.unlistInItsRegion(roomId, incTag)
   }
 
   async directoryGet(roomId: string): Promise<string | undefined> {
     return directoryGet(this.sql(), roomId)
   }
 
+  /** At a region's directory. */
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
     return directoryList(this.sql(), prefix, cursor)
   }
 
-  async directoryDue(): Promise<DirectoryPage['entries']> {
-    return directoryDue(this.sql(), Date.now())
+  /** At a region's directory. */
+  async listInRegion(roomId: string, incTag: string): Promise<void> {
+    this.transaction((sql) => directoryPut(sql, roomId, incTag, Infinity))
+  }
+
+  /** At a region's directory. */
+  async unlistInRegion(roomId: string, incTag: string): Promise<void> {
+    this.transaction((sql) => directoryDelete(sql, roomId, incTag))
   }
 
   /** Only a room authority schedules alarms. */
   async alarm(): Promise<void> {
     try {
-      this.runSweep(Date.now())
+      const unlisted = this.runSweep(Date.now())
+      if (unlisted) await this.unlistInItsRegion(unlisted.roomId, unlisted.incTag)
     } finally {
       await this.scheduleMaintenanceIfNeeded()
     }
   }
 
-  /** Storage only: a session whose route lapsed or whose incarnation went learns it at its next renewal. */
-  private runSweep(now: number): void {
-    this.transaction((sql) => {
+  /** Storage only: a session whose route lapsed or whose incarnation went learns it at its next renewal. Returns the
+   *  listing it deleted, for its region directory to forget too. */
+  private runSweep(now: number): DirectoryPage['entries'][number] | null {
+    return this.transaction((sql) => {
+      const unlisted = settleDueListing(sql, now)
       const currentInc = readLiveHead(sql, now)?.currentInc ?? null
       deleteLapsedHead(sql, now)
       deleteExpiredRoutes(sql, now)
       for (const inc of listOrphanIncarnations(sql, currentInc)) dropIncarnationRows(sql, inc)
+      return unlisted
     })
+  }
+
+  private async unlistInItsRegion(roomId: string, incTag: string): Promise<void> {
+    const listedIn = readListingBucket(this.sql())
+    if (listedIn !== null) await this.callDirectory(listedIn, (directory) => directory.unlistInRegion(roomId, incTag))
+  }
+
+  private callDirectory(
+    bucket: string,
+    invoke: (directory: CloudflareRoomAuthorityStub) => Promise<void>,
+  ): Promise<void> {
+    return this.directoryCalls.call(bucket, () => openRegionDirectory(this.getNamespace(), bucket), invoke)
   }
 
   /** The schema is created outside the transaction, so a refused first write can't roll it back. */

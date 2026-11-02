@@ -9,6 +9,8 @@ import {
   onPublishFrom,
   onReceived,
   onListInOrder,
+  onCreateRoom,
+  onListRooms,
   onRetainLarge,
   onCloseWhenLeft,
   onHoldView,
@@ -77,6 +79,8 @@ function Page() {
       {card('publish', () => onPublishFrom(query().get('id')!, 'hello'))}
       {card('received', () => onReceived(query().get('id')!, query().get('page')!))}
       {card('list', () => onListInOrder())}
+      {card('create', () => onCreateRoom(query().get('id')!, query().get('page')!))}
+      {card('list-created', () => onListRooms(query().get('id')!))}
       {card('retain-large', () => onRetainLarge())}
       {card('close-when-left', () => onCloseWhenLeft())}
       {card('hold-view', () => onHoldView(query().get('id')!))}

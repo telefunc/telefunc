@@ -5,7 +5,9 @@ export {
   directoryDelete,
   directoryGet,
   directoryList,
-  directoryDue,
+  claimListingBucket,
+  readListingBucket,
+  settleDueListing,
   readLiveHead,
   deleteLapsedHead,
   listOrphanIncarnations,
@@ -64,7 +66,8 @@ type HeadRow = {
 }
 
 function initSchema(sql: SqlStorage): void {
-  // The DO is the room: `head` is one row or absent; `gen` is each installed incarnation's last cell version.
+  // The DO is the room: `head` is one row or absent; `gen` is each installed incarnation's last cell version. Its
+  // `directory` is its room's listing, one row or none; a region's directory DO lists the region's rooms in it instead.
   sql.exec(`
     CREATE TABLE IF NOT EXISTS head
       (id INTEGER PRIMARY KEY CHECK (id = 1), rev TEXT NOT NULL, inc TEXT, state TEXT NOT NULL, config BLOB NOT NULL, lease_id TEXT, lease_until INTEGER, expires_at INTEGER);
@@ -83,6 +86,7 @@ function initSchema(sql: SqlStorage): void {
     CREATE INDEX IF NOT EXISTS route_expires_at ON route(expires_at);
     CREATE TABLE IF NOT EXISTS directory (room_id TEXT PRIMARY KEY, inc_tag TEXT NOT NULL, check_at INTEGER);
     CREATE INDEX IF NOT EXISTS directory_check_at ON directory(check_at);
+    CREATE TABLE IF NOT EXISTS listing_bucket (id INTEGER PRIMARY KEY CHECK (id = 1), bucket TEXT NOT NULL);
   `)
 }
 
@@ -122,6 +126,31 @@ function directoryList(sql: SqlStorage, prefix: string, cursor?: string): Direct
   const last = page[page.length - 1]
   const more = last !== undefined && matching.length > DIRECTORY_PAGE_SIZE
   return more ? { entries, cursor: last.room_id } : { entries }
+}
+
+/** The bucket whose region's directory lists this authority's room: its first listing's, kept for good, as the
+ *  authority itself never moves. */
+function claimListingBucket(sql: SqlStorage, bucket: string): string {
+  sql.exec('INSERT OR IGNORE INTO listing_bucket (id, bucket) VALUES (1, ?)', bucket)
+  return readListingBucket(sql)!
+}
+
+function readListingBucket(sql: SqlStorage): string | null {
+  return sql.exec<{ bucket: string }>('SELECT bucket FROM listing_bucket WHERE id = 1').toArray()[0]?.bucket ?? null
+}
+
+/** At a room authority, its listing once due: due again when the head that still names it may lapse, or else deleted
+ *  and returned, as `repairRoomIndex()` does for a directory's sweep. */
+function settleDueListing(sql: SqlStorage, now: number): DirectoryPage['entries'][number] | null {
+  const due = directoryDue(sql, now)[0]
+  if (due === undefined) return null
+  const head = readLiveHead(sql, now)
+  if (head?.currentInc === due.incTag) {
+    directoryPut(sql, due.roomId, due.incTag, head.expiresAt ?? Infinity)
+    return null
+  }
+  directoryDelete(sql, due.roomId, due.incTag)
+  return due
 }
 
 /** A check_at range, so a page seeks its index instead of scanning every room. */
@@ -193,7 +222,7 @@ function hasIncarnation(sql: SqlStorage, inc: string): boolean {
 }
 
 /** When the alarm's sweep next has work: `now` while an orphaned incarnation waits, else the first lapse of a head or a
- *  route, or null for none. */
+ *  route or the listing's check, or null for none. */
 function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
   if (listOrphanIncarnations(sql, readLiveHead(sql, now)?.currentInc ?? null).length > 0) return now
   // Each table takes its own MIN, so the route table's seeks its expires_at index.
@@ -201,7 +230,7 @@ function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
     .exec<{
       deadline: number | null
     }>(
-      'SELECT MIN(deadline) AS deadline FROM (SELECT MIN(expires_at) AS deadline FROM head UNION ALL SELECT MIN(expires_at) FROM route)',
+      'SELECT MIN(deadline) AS deadline FROM (SELECT MIN(expires_at) AS deadline FROM head UNION ALL SELECT MIN(expires_at) FROM route UNION ALL SELECT MIN(check_at) FROM directory)',
     )
     .toArray()[0]!.deadline
 }

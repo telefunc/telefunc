@@ -6,6 +6,8 @@ export {
   onPublishFrom,
   onReceived,
   onListInOrder,
+  onCreateRoom,
+  onListRooms,
   onRetainLarge,
   onCloseWhenLeft,
   onHoldView,
@@ -83,6 +85,16 @@ async function onListInOrder() {
   const listed = (await Room.list({ prefix })).map((room) => room.id.slice(prefix.length))
   for (const id of ids) await Room.close(id)
   return listed
+}
+
+/** A room the page's session creates, under the regions test's prefix. */
+async function onCreateRoom(id: string, page: string) {
+  await Room.create(`regions:${id}:${page}`)
+  return 'created'
+}
+
+async function onListRooms(id: string) {
+  return (await Room.list({ prefix: `regions:${id}:` })).map((room) => room.id)
 }
 
 /** A member retains a frame larger than a SQLite row; a view that subscribes afterwards gets it. */

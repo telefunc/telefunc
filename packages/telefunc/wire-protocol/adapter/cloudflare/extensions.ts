@@ -1,8 +1,15 @@
-export { registerCloudflareExtension, getCloudflareExtension, getCloudflareExtensionPlanes, currentCloudflareMember }
+export {
+  registerCloudflareExtension,
+  getCloudflareExtension,
+  getCloudflareExtensionPlanes,
+  currentCloudflareMember,
+  CLOUDFLARE_BUCKETS,
+}
 export type {
   BroadcastDelivery,
   CloudflareExtension,
   CloudflareExtensionDurableObject,
+  CloudflareExtensionKit,
   CloudflareMember,
   CloudflareRegions,
   TelefuncExtensionNamespace,
@@ -13,6 +20,7 @@ import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import type { BroadcastPayload, BroadcastRoute, Subscriber, Unsubscribe } from '../../backend/driver.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import { currentCloudflareSession } from './session.js'
+import { DEFAULT_BROADCAST_BUCKETS } from './routing.js'
 
 // The types name no Cloudflare global, so that telefunc/__internal type-checks without @cloudflare/workers-types.
 
@@ -33,8 +41,13 @@ type TelefuncExtensionStub = {
 /** A sequenced payload for the subscribers of `routes` on each member DO it reaches. */
 type BroadcastDelivery = { routes: BroadcastRoute[]; payload: BroadcastPayload; info: OrderingInfo }
 
+/** The buckets a Durable Object can be placed in, by `locationHint`. */
+const CLOUDFLARE_BUCKETS: readonly string[] = DEFAULT_BROADCAST_BUCKETS
+
 /** Broadcast's regions, as an extension's Durable Object sends through them. */
 type CloudflareRegions = {
+  /** The bucket of what has no session's bucket to go by: the `locationFallback` option. */
+  readonly locationFallback: string
   /** Sends `delivery` across to each bucket of `members` once, to the coordinator `key` picks there, which hands it to
    *  the bucket's members; settles once every coordinator did. Calls made in order reach each coordinator in order. */
   forward(
@@ -42,6 +55,14 @@ type CloudflareRegions = {
     delivery: BroadcastDelivery,
     members: Iterable<{ member: string; bucket: string }>,
   ): Promise<void>
+}
+
+/** What an extension's Durable Object gets from Telefunc. */
+type CloudflareExtensionKit = {
+  /** Sends through Broadcast's regions from this Durable Object. */
+  regions: CloudflareRegions
+  /** The Telefunc Durable Object namespace, for calls to other Durable Objects. */
+  getNamespace: () => TelefuncExtensionNamespace
 }
 
 /** The Broadcast member of a session Durable Object, as an extension's code running in it uses it. */
@@ -60,8 +81,8 @@ type CloudflareExtension = {
   name: string
   /** Builds the extension's part of a Durable Object, once, on its first `telefuncDurableObjectCall()`; `ctx` and
    *  `env` are the Durable Object's `DurableObjectState` and `Cloudflare.Env`. Its `alarm()` gets the Durable Object's
-   *  alarms. `regions` sends through Broadcast's regions from this Durable Object. */
-  durableObject?: (ctx: never, env: never, regions: CloudflareRegions) => CloudflareExtensionDurableObject
+   *  alarms. */
+  durableObject?: (ctx: never, env: never, kit: CloudflareExtensionKit) => CloudflareExtensionDurableObject
   /** The backend planes the Cloudflare backend serves for the extension, by `backendPlane()` key. Each takes
    *  `getNamespace`, which reads the Telefunc Durable Object namespace of the Worker's current env. */
   planes?: Record<symbol, (getNamespace: () => TelefuncExtensionNamespace) => unknown>

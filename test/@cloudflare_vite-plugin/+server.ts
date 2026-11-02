@@ -39,6 +39,13 @@ export class TelefuncDurableObject extends (tf.TelefuncDurableObject as Telefunc
     if (isTraced(request)) regionTrace.deliveries.push({ member: this.ctx.id.toString(), region: this.region })
     return super.telefuncBroadcastDeliver(request)
   }
+
+  // Test-only: the Room Durable Objects called while `/__room-calls` traces, by name, with the room a listing call names.
+  override async telefuncDurableObjectCall(name: string, method: string, args: unknown[]) {
+    const room = /^(directory|listIn|unlistIn)/.test(method) ? args[0] : null
+    roomCalls?.push({ object: this.ctx.id.name ?? null, method, room })
+    return super.telefuncDurableObjectCall(name, method, args)
+  }
 }
 export { TodoListDurableObject } from './database/todoItems'
 
@@ -56,6 +63,7 @@ type TelefuncDurableObjectWithPresence = new (
   telefuncDurableObjectCall(name: string, method: string, args: unknown[]): Promise<unknown>
 }
 const refusedPresences = new Set<string>()
+let roomCalls: { object: string | null; method: string; room: unknown }[] | null = null
 
 // Test-only: the Room deliveries of the message `/__region-trace` names, as the regions test counts them.
 let tracedMessage: string | null = null
@@ -93,7 +101,7 @@ app.all('/__broadcast-subscribe-from-worker', (c) => {
 app.all('/__room-call-from-worker', async (c) => {
   const namespace = c.env.TelefuncDurableObject as DurableObjectNamespace<TelefuncDurableObject>
   await namespace
-    .get(namespace.idFromName('__telefunc_room_directory__'))
+    .get(namespace.idFromName('__telefunc_room__:x'))
     .telefuncDurableObjectCall('room', 'directoryGet', ['x'])
   return c.body(null, 204)
 })
@@ -111,6 +119,13 @@ app.all('/__region-trace', (c) => {
     regionTrace.deliveries.length = 0
   }
   return c.json(regionTrace)
+})
+// Test-only: a PUT starts tracing Room's Durable Object calls; a GET returns them and stops.
+app.all('/__room-calls', (c) => {
+  if (c.req.method === 'PUT') roomCalls = []
+  const calls = roomCalls
+  if (c.req.method === 'GET') roomCalls = null
+  return c.json(calls)
 })
 // Telefunc answers its requests and WebSocket upgrades; Vike renders the rest.
 app.use(async (c, next) => {
