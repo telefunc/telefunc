@@ -423,9 +423,22 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     let answer: string
     try {
-      let lastResult: unknown
-      for (const cb of listeners.list()) lastResult = await cb(data)
-      answer = stringify(lastResult)
+      let result: unknown
+      for (const cb of listeners.list()) {
+        const value = await cb(data)
+        if (value === undefined) continue
+        if (result !== undefined) {
+          this.connection.sendAckRes(
+            this,
+            seq,
+            'Only one channel listener may return an acknowledgement value',
+            ACK_STATUS.ERROR,
+          )
+          return
+        }
+        result = value
+      }
+      answer = stringify(result)
     } catch (err) {
       if (this.lifecycle.handleCallbackError(err)) return
       this.connection.sendAckRes(this, seq, 'Internal client channel error — see client logs', ACK_STATUS.ERROR)

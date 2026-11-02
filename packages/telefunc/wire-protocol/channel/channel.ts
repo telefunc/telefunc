@@ -39,7 +39,7 @@ function makePublishInfo(key: string, seq: number, timestamp: number): ChannelPu
 type ChannelListenReturn<T> = [T] extends [never]
   ? void
   : T extends (data: any) => infer R
-    ? Awaited<R> | Promise<Awaited<R>>
+    ? Awaited<R> | Promise<Awaited<R>> | void | Promise<void>
     : unknown | Promise<unknown> | void
 type ChannelListener<T> = (data: ChannelData<T>) => ChannelListenReturn<T>
 type ChannelBinaryListener = (data: Uint8Array) => unknown | Promise<unknown>

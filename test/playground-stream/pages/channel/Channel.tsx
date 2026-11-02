@@ -43,6 +43,7 @@ import {
   onChannelSlowUplink,
   onChannelOpenAnswer,
   onChannelOpenHello,
+  onChannelAckOwnership,
   onChannelApiProbe,
   onChannelLateCallbacks,
   onChannelOpenAbort,
@@ -1101,6 +1102,17 @@ function ChannelDemo() {
   }, [])
 
   // Once the channel opened, an onOpen runs at once; once it closed, an onClose runs at once with the Abort it ended with.
+  const testAckOwnership = useCallback(async () => {
+    const { channel } = await openChannel(onChannelAckOwnership)
+    const answer = await channel.send('one', { ack: true })
+    const conflict = await channel.send('conflict', { ack: true }).then(
+      () => false,
+      () => true,
+    )
+    await channel.close()
+    document.querySelector('#channel-ack-ownership-result')!.textContent = JSON.stringify({ answer, conflict })
+  }, [])
+
   const testApi = useCallback(async () => {
     const output = document.querySelector('#channel-api-result')!
     try {
@@ -1626,6 +1638,10 @@ function ChannelDemo() {
           >
             Server Says Hello as a Channel Opens Beside a 4 MiB Burst
           </button>
+          <button id="channel-test-ack-ownership" onClick={testAckOwnership}>
+            Test acknowledgement ownership
+          </button>
+          <output id="channel-ack-ownership-result" />
           <button id="channel-test-api" onClick={testApi}>
             Test channel API
           </button>

@@ -39,6 +39,7 @@ export {
   onChannelSlowUplink,
   onChannelOpenAnswer,
   onChannelOpenHello,
+  onChannelAckOwnership,
   onChannelApiProbe,
   onChannelLateCallbacks,
   onChannelOpenAbort,
@@ -854,5 +855,12 @@ async function onChannelApiProbe() {
       else await ch.sendBinary(message.data)
     }
   })
+  return { channel: ch.client }
+}
+
+async function onChannelAckOwnership() {
+  const ch = new Channel<string, string>()
+  ch.listen(() => 'answer')
+  ch.listen((data) => (data === 'conflict' ? 'other' : undefined))
   return { channel: ch.client }
 }

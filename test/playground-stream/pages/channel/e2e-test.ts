@@ -135,6 +135,17 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
+  test('channel: one listener answers even with a later observer, and conflicting answers reject', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-ack-ownership')
+    await autoRetry(async () => {
+      expect(JSON.parse((await page.textContent('#channel-ack-ownership-result'))!)).deep.equal({
+        answer: 'answer',
+        conflict: true,
+      })
+    })
+  })
+
   // ── Basic connection ─────────────────────────────────────────────────
 
   test('channel: connect — client onOpen fires, server responds with welcome via ping', async () => {
