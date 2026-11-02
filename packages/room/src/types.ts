@@ -214,28 +214,43 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   getParticipant(id: string): Promise<RemoteParticipant<P, Pub> | null>
 
   /** Receive all participant messages. Returns an unsubscribe function. */
-  subscribe(callback: (data: Pub, info: ChannelPublishInfo, from: Sender<P>) => unknown): () => void
+  subscribe(
+    callback: (data: Pub, info: ChannelPublishInfo, from: Sender<P>) => unknown,
+    options?: { signal?: AbortSignal },
+  ): () => void
   /** Receive all members' binary frames, optionally filtered to one track at the source. */
-  subscribeBinary(callback: RoomBinaryListener<P>, options?: { track?: string | null }): () => void
+  subscribeBinary(
+    callback: RoomBinaryListener<P>,
+    options?: { track?: string | null; signal?: AbortSignal },
+  ): () => void
 
   /** A participant joined. */
-  onJoin(callback: (member: RemoteParticipant<P, Pub>) => void): () => void
+  onJoin(callback: (member: RemoteParticipant<P, Pub>) => void, options?: { signal?: AbortSignal }): () => void
   /** A participant left, and why. */
-  onLeave(callback: (member: RemoteParticipant<P, Pub>, cause: LeaveCause) => void): () => void
+  onLeave(
+    callback: (member: RemoteParticipant<P, Pub>, cause: LeaveCause) => void,
+    options?: { signal?: AbortSignal },
+  ): () => void
   /** Any participant's metadata changed. */
-  onParticipantUpdate(callback: (member: RemoteParticipant<P, Pub>, meta: P, prev: P) => void): () => void
+  onParticipantUpdate(
+    callback: (member: RemoteParticipant<P, Pub>, meta: P, prev: P) => void,
+    options?: { signal?: AbortSignal },
+  ): () => void
   /** The room's metadata was replaced (`Room.setMeta()`) or merged (`Room.setAttributes()`). */
-  onUpdate(callback: (meta: M, prev: M) => void): () => void
+  onUpdate(callback: (meta: M, prev: M) => void, options?: { signal?: AbortSignal }): () => void
   /** A room-authored message arrived (`Room.announce()`), e.g. system notices. */
-  onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void): () => void
+  onAnnounce(
+    callback: (data: unknown, info: ChannelPublishInfo) => void,
+    options?: { signal?: AbortSignal },
+  ): () => void
   /** The last participant left. */
-  onEmpty(callback: () => void): () => void
+  onEmpty(callback: () => void, options?: { signal?: AbortSignal }): () => void
   /** The room was closed via `Room.close()` (on the client, also: the connection is gone, or the room sent it more
    *  while it was offline than the server holds for it). */
-  onClose(callback: () => void): () => void
+  onClose(callback: () => void, options?: { signal?: AbortSignal }): () => void
 
   /** Anything observable changed; pairs with `snapshot()`. */
-  onChange(callback: () => void): () => void
+  onChange(callback: () => void, options?: { signal?: AbortSignal }): () => void
   /** Immutable whole-room view, reference-stable until the next change. */
   snapshot(): RoomSnapshotView<M, P>
 } & RoomShield<Pub>
@@ -245,6 +260,10 @@ type ClientRoom<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Parti
   'join'
 > & {
   join(options?: ClientJoinOptions<P>): Promise<LocalParticipant<P, Pub>>
+  /** Iterate participant messages until aborted, closed, or the loop ends. */
+  messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<
+    { type: 'text'; data: Pub } | { type: 'binary'; data: Uint8Array }
+  >
 }
 
 /** Your returnable participant handle, returned by `join()`. */
@@ -268,10 +287,10 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   send(to: string | Sender<P>, data: unknown, options: { ack?: false }): Promise<RoomSendReceipt>
   send(to: string | Sender<P>, data: unknown, options: { ack: true }): Promise<RoomAckReceipt>
   /** Receive private messages; returning a value answers an acknowledged send. */
-  listen(callback: (data: unknown, from: Sender<P> | null) => unknown): () => void
+  listen(callback: (data: unknown, from: Sender<P> | null) => unknown, options?: { signal?: AbortSignal }): () => void
 
   /** Watch whether any observer wants each published track. */
-  onDemand(callback: (track: string | null, wanted: boolean) => void): () => void
+  onDemand(callback: (track: string | null, wanted: boolean) => void, options?: { signal?: AbortSignal }): () => void
   /** Replace your metadata wholesale. Propagates to all observers in real time. */
   setMeta(meta: P): Promise<void>
   /** Merge metadata per key; `undefined` deletes a key. */
@@ -280,11 +299,11 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   leave(): Promise<void>
   /** You left. `cause.type` says how: `'left'` (you), `'removed'` (kicked, with the kick's `reason`), `'closed'` (the
    *  room), `'disconnected'` (the connection died, or more was sent to it while offline than the server holds). */
-  onLeave(callback: (cause: LeaveCause) => void): () => void
+  onLeave(callback: (cause: LeaveCause) => void, options?: { signal?: AbortSignal }): () => void
   /** The page holding you can't reach the room; the room keeps you meanwhile. */
-  onDisconnect(callback: () => void): () => void
+  onDisconnect(callback: () => void, options?: { signal?: AbortSignal }): () => void
   /** The page holding you reaches the room again. */
-  onReconnect(callback: () => void): () => void
+  onReconnect(callback: () => void, options?: { signal?: AbortSignal }): () => void
 } & RoomShield<Pub>
 
 /** A returnable view of another room member, bound to its room's live state. */
@@ -299,16 +318,16 @@ type RemoteParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknow
   readonly isConnected: boolean
 
   /** Receive only this member's messages. Returns an unsubscribe function. */
-  subscribe(callback: (data: Pub, info: ChannelPublishInfo) => unknown): () => void
+  subscribe(callback: (data: Pub, info: ChannelPublishInfo) => unknown, options?: { signal?: AbortSignal }): () => void
   /** Receive only this member's binary frames, optionally filtered to one track. */
-  subscribeBinary(callback: MemberBinaryListener, options?: { track?: string | null }): () => void
+  subscribeBinary(callback: MemberBinaryListener, options?: { track?: string | null; signal?: AbortSignal }): () => void
 
   /** This member's metadata changed. */
-  onUpdate(callback: (meta: P, prev: P) => void): () => void
+  onUpdate(callback: (meta: P, prev: P) => void, options?: { signal?: AbortSignal }): () => void
   /** This member left the room. `cause` as on `Room`'s `onLeave`. */
-  onLeave(callback: (cause: LeaveCause) => void): () => void
+  onLeave(callback: (cause: LeaveCause) => void, options?: { signal?: AbortSignal }): () => void
   /** This member's page can't be reached. The room keeps it until it's back, or it leaves with `'disconnected'`. */
-  onDisconnect(callback: () => void): () => void
+  onDisconnect(callback: () => void, options?: { signal?: AbortSignal }): () => void
   /** This member's page is back. */
-  onReconnect(callback: () => void): () => void
+  onReconnect(callback: () => void, options?: { signal?: AbortSignal }): () => void
 }

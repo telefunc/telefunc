@@ -183,6 +183,21 @@ async function openChat(chatId: string, name: string, how: 'join' | 'sign-in' | 
 }
 
 function testRoom() {
+  testRoomScenario<{
+    unchanged: boolean
+    first: { type: string; data: string }
+    binary: number[]
+    stopped: boolean
+    abortedWithReason: boolean
+  }>('signals', 'room: abort removes registrations and messages can be iterated and stopped', (result) => {
+    expect(result).deep.equal({
+      unchanged: true,
+      first: { type: 'text', data: 'hello' },
+      binary: [7],
+      stopped: true,
+      abortedWithReason: true,
+    })
+  })
   testRoomScenario<ChatResult>('chat', 'room: join, publish with sender identity, setMeta, leave', (result) => {
     expect(result.events).deep.equal(['join:Alice', 'leave:Alice'])
     expect(result.countAfterJoin).toBe(1)

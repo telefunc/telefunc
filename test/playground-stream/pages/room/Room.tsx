@@ -222,6 +222,46 @@ function Room() {
       <pre id="room-result">{result}</pre>
       {liveRoom && <LiveCount room={liveRoom} />}
 
+      {scenario('signals', 'Subscriptions', 'Abort listeners and iterate messages', async () => {
+        const [, room] = await createRoom('signals')
+        const lobby = room as import('@telefunc/room/client').Room
+        const lifetime = new AbortController()
+        let calls = 0
+        lobby.subscribe(() => calls++, { signal: lifetime.signal })
+        lobby.onJoin(() => calls++, { signal: lifetime.signal })
+        const me = await lobby.join()
+        const remote = (await lobby.getParticipant(me.id))!
+        remote.subscribe(() => calls++, { signal: lifetime.signal })
+        me.listen(() => calls++, { signal: lifetime.signal })
+        lifetime.abort()
+        const before = calls
+        const stream = lobby.messages()
+        const pending = stream.next()
+        await me.publish('hello')
+        const first = await pending
+        const next = stream.next()
+        await me.publishBinary(new Uint8Array([7]))
+        const binary = (await next).value
+        await stream.return!()
+        const stopped = (await stream.next()).done
+        const aborted = lobby.messages({ signal: lifetime.signal })
+        const abortedWithReason = await aborted.next().then(
+          () => false,
+          (error) => error === lifetime.signal.reason,
+        )
+        await me.send(me.id, 'ignored')
+        await me.leave()
+        setResult(
+          JSON.stringify({
+            unchanged: calls === before,
+            first: first.value,
+            binary: binary?.type === 'binary' ? Array.from(binary.data) : null,
+            stopped,
+            abortedWithReason,
+          }),
+        )
+      })}
+
       {scenario('chat', 'Presence & Chat', 'Join, publish, setMeta, leave', async () => {
         const [roomId, lobby] = await createRoom('chat')
 
