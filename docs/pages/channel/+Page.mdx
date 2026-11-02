@@ -44,8 +44,12 @@ import { Channel } from 'telefunc'
 
 export async function onClock() {
   const channel = new Channel()
-  const interval = setInterval(() => channel.send(Date.now()), 1000)
-  channel.onClose(() => clearInterval(interval))
+  channel.onOpen(async () => {
+    while (!channel.isClosed) {
+      await channel.send(Date.now())
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+    }
+  })
   return { channel: channel.client }
 }
 ```
@@ -100,11 +104,16 @@ channel.send('Hello!')
 | `sendBinary(data, { ack: true })` | Send binary and await acknowledgement. |
 | `listen(cb)` | Receive messages. Return a value to ack. Returns an unlisten function. |
 | `listenBinary(cb)` | Receive binary. Return a value to ack. Returns an unlisten function. |
+| `opened` | Promise that resolves on open; rejects if the channel ends before opening. |
+| `closed` | Promise that resolves on clean close; rejects on failure. |
+| `messages({ signal })` | Iterate `{ type: 'text' \| 'binary', data }` messages; abort to stop. |
 | `onOpen(cb)` | Called when the channel opens. |
 | `onClose(cb)` | Called when the channel closes. |
 | `close()` | Close gracefully. |
 | `abort(value?)` | Terminate immediately. |
 
+
+> `listen()`, `listenBinary()`, `onOpen()` and `onClose()` accept `{ signal }` as their second argument. Aborting the signal removes that registration.
 
 ### TypeScript
 
@@ -167,6 +176,8 @@ On the server, `send()` sends `ServerMessage`. On the client, `send()` sends `Cl
 
 
 ### Acknowledgements
+
+> Exactly one listener may return an acknowledgement value. Other listeners can observe the message and return `undefined`; two answers reject the send.
 
 #### Channel-wide
 
@@ -237,25 +248,15 @@ channel.send({ type: 'ping' }) // no await needed
 
 What happens to a server channel's sends, awaited or not:
 
-- While the client is connected, the server delivers them all.
+- While the client is connected, the server delivers sends within `maxPendingBytes` and `maxPendingAcks` (see <Link href="/channel-config" />). Exceeding either budget closes the channel with `ChannelOverflowError` naming the setting.
 - While the client is offline, the server buffers them, up to `bufferLimit`/`bufferLimitBinary` (see <Link href="/channel-config" />). An awaited `send()` resolves once the client is back and the message went out.
 - Past that limit, the server drops the oldest buffered sends, and each dropped `send()` rejects with `ChannelOverflowError`. A single message larger than the limit is dropped even if you await it, together with the sends of its kind (text or binary) buffered before it.
 
 A `send()` that fails while nobody awaits it doesn't crash the process: Telefunc catches it. To see the error, `await` the send or `.catch()` it.
 
-Telefunc logs a warning (once per channel) when a server channel's sends get 64 MiB ahead of its client: sent beyond what the client is ready to take, counting `{ ack: true }` sends it hasn't answered yet. The server holds those messages in memory and still delivers them all, so it's a warning, not a limit. This threshold is unrelated to the 64 MiB message limit above.
+Telefunc logs a warning (once per channel) when a server channel's sends get 64 MiB ahead of its client: sent beyond what the client is ready to take, counting `{ ack: true }` sends it hasn't answered yet. The warning precedes the finite send budgets. This threshold is unrelated to the 64 MiB message limit above.
 
-To fix it, `await` each `send()` before the next. A sender driven by a timer or an event, like the clock above, can instead skip a send, or keep only the latest value, while its previous `send()` is still pending:
-
-```ts
-let pending = false
-const interval = setInterval(async () => {
-  if (pending) return // the previous send is still pending: skip this tick
-  pending = true
-  await channel.send(Date.now()).catch(console.error)
-  pending = false
-}, 1000)
-```
+To fix it, `await` each `send()` before the next, as in the clock example above.
 
 
 ## `Broadcast`

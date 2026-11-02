@@ -16,6 +16,9 @@ config.channel = {
   pingInterval: 5_000,                    // Client ping interval (ms)
   connectTtl: 15_000,                     // Wait for client to connect to new channel (ms)
 
+  maxPendingBytes: 268_435_456,           // Queued bytes beyond credit and awaiting acknowledgements
+  maxPendingAcks: 4096,                  // Outstanding acknowledgement requests
+
   // Text buffers
   serverReplayBuffer: 134_217_728,        // Server replay buffer for text messages (bytes)
   clientReplayBuffer: 134_217_728,        // Client replay buffer for text messages (bytes)
