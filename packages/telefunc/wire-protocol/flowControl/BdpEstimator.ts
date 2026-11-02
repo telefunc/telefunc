@@ -26,13 +26,7 @@ type AttachProbe = { probe: number; sentAt: number; roundTrips: RoundTrips }
 
 const NO_ATTACH_PROBES: readonly AttachProbe[] = []
 
-/** A channel's receive window: it grows, as gRPC's does, while what crosses in a round trip fills two thirds of it.
- *
- *  It stays over a fixed window with fixed-size pieces by measurement (2026-11-02, the playground's 52-cell bench,
- *  one pinned pass each). The fixed window never probed, so its byte window stayed at `CREDIT_WINDOW_INITIAL_BYTES`
- *  and its message window at `CREDIT_MSG_WINDOW_MAX`, with 64 KiB pieces. A pass took 25 min where this took 7, and
- *  the 64 B and 4 KiB rows of all four throughput cards hung past 120 s. Where it finished, it reached 2-5% of this
- *  one's throughput over SSE, 38-97% over a WebSocket, and 66-120% on the push cells. */
+/** A channel's receive window: it grows, as gRPC's does, while what crosses in a round trip fills two thirds of it. */
 class BdpEstimator {
   // Byte axis
   private currentByteWindow: number = CREDIT_WINDOW_INITIAL_BYTES
