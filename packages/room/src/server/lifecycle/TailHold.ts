@@ -12,7 +12,7 @@ type TailEntry = { serialized: string; ord: OrderingInfo; from: string }
 /** The room or stub whose tail it holds. */
 interface TailHoldOwner {
   /** The lease expired before the holder subscribed. */
-  _tailExpired(): void
+  tailExpired(): void
 }
 
 type TailHoldOptions = {
@@ -29,7 +29,7 @@ class TailHold {
   constructor({ owner, seed = [] }: TailHoldOptions) {
     this.entries = seed
     for (const entry of seed) this.codeUnits += entry.serialized.length
-    this.lease = unrefTimer(setTimeout(() => owner._tailExpired(), ROOM_TAIL_ATTACH_TIMEOUT_MS))
+    this.lease = unrefTimer(setTimeout(() => owner.tailExpired(), ROOM_TAIL_ATTACH_TIMEOUT_MS))
   }
 
   /** An entry larger than the whole budget is dropped, never held: the tail is best-effort. */

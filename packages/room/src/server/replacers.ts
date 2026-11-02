@@ -7,7 +7,7 @@ import {
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   SERIALIZER_PREFIX_ROOM_REMOTE,
 } from '../shared/constants.js'
-import { ServerLocalParticipant, ServerRoom } from './room.js'
+import { ServerLocalParticipant, ServerRoom, handleOf } from './room.js'
 import type { RemoteParticipant } from '../types.js'
 import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from '../shared/protocol.js'
 import { ResponseRoomGrants } from './RoomStub.js'
@@ -34,7 +34,7 @@ const roomReplacer: ReplacerType<RoomReplacerContract, ServerReplacerContext> = 
   },
   replace(serverRoom, context) {
     const end = context.createBroadcastChannel()
-    const metadata = serverRoom._openStub({
+    const metadata = handleOf(serverRoom).openStub({
       end,
       publishShield: context.validators.get('data'),
       grants: responseRoomGrants(context, serverRoom.id),
@@ -92,7 +92,7 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, Ser
     const end = context.createBroadcastChannel()
     const metadata = participant._openStub({ end, publishShield: context.validators.get('data') })
     // Its room's stub, if co-returned, drops this member's echo at the source; otherwise the grant goes unused.
-    if (!participant.selfDelivery) responseRoomGrants(context, participant._room.id).suppress(participant.id)
+    if (!participant.selfDelivery) responseRoomGrants(context, participant.room.id).suppress(participant.id)
     if (context.maxFrameBytes) metadata.maxFrameBytes = context.maxFrameBytes
     return {
       metadata,

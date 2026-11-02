@@ -46,7 +46,7 @@ import {
   reapAndResolveIdentity,
 } from './store/roster.js'
 import { SEMANTIC_LANE, acceptedOrThrow, commitLane, inboxOf, openConfig, encodeRoomRecord } from './lanes/lanes.js'
-import { ServerRoom } from './room.js'
+import { ServerRoom, handleOf } from './room.js'
 import { RoomReplica } from './RoomReplica.js'
 import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './store/meta.js'
 import { metaObjectOf } from '../shared/RoomMetaState.js'
@@ -138,7 +138,7 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
 async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
   assertKnownOptions(options, ['tail'], 'Room.get()')
   const room = await openRoom(id)
-  if (options?.tail === true) await room._startTail()
+  if (options?.tail === true) await handleOf(room).startTail()
   return room
 }
 
@@ -165,7 +165,7 @@ async function getOrCreateRoom(id: string, options?: RoomOptions & RoomGetOption
   const result = await tryCreateRoom(id, roomOptions)
   if (result.kind === 'closing') throw new RoomError(`Room is closing: ${id}`)
   const room = result.kind === 'created' ? result.room : await openRoom(id)
-  if (tail === true) await room._startTail()
+  if (tail === true) await handleOf(room).startTail()
   return room
 }
 
@@ -198,7 +198,9 @@ function guardRoom(room: Room, guards: Partial<Record<keyof RoomGuardHooks, unkn
       `Room.guard() ${key} should be a function`,
     )
   }
-  room._setGuards(Object.fromEntries(ROOM_GUARD_KEYS.map((key) => [key, guards[key]])) as Partial<RoomGuardHooks>)
+  handleOf(room).setGuards(
+    Object.fromEntries(ROOM_GUARD_KEYS.map((key) => [key, guards[key]])) as Partial<RoomGuardHooks>,
+  )
 }
 
 async function joinRoom(id: string, options?: JoinOptions): Promise<LocalParticipant> {
@@ -206,7 +208,7 @@ async function joinRoom(id: string, options?: JoinOptions): Promise<LocalPartici
   // A view made for a join alone counts no member until a handle reads its roster.
   const replica =
     RoomReplica.of(config.inc) ?? RoomReplica.seeded(id, config, await requireRoomMeta(id, config), { count: 0 })
-  return await replica.handle()._joinOpen(options)
+  return await handleOf(replica.handle()).joinOpen(options)
 }
 
 async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {

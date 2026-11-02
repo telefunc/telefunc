@@ -19,7 +19,7 @@ import {
   type ChannelPublishAck,
 } from 'telefunc/__internal'
 import { ShieldValidationError, type ShieldValidator } from 'telefunc'
-import type { ServerLocalParticipant, ServerRoom } from './room.js'
+import type { RoomHandle, ServerLocalParticipant } from './room.js'
 import type { RosterStream } from './lifecycle/RosterStream.js'
 import { reportRoomError } from './reportRoomError.js'
 import {
@@ -169,7 +169,7 @@ function receiveFromPage<T>(end: ServerBroadcastEnd, handle: () => T): T | Promi
 }
 
 type RoomStubOptions = {
-  room: ServerRoom
+  room: RoomHandle
   /** Whether every client of the view was sent every member it holds. */
   roster: Pick<RosterStream, 'settled'>
   end: ServerBroadcastEnd
@@ -181,7 +181,7 @@ type RoomStubOptions = {
 class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   /** Its channel to its client. */
   readonly end: ServerBroadcastEnd
-  private readonly room: ServerRoom
+  private readonly room: RoomHandle
   private readonly roster: RoomStubOptions['roster']
   private readonly publishShield: ShieldValidator | undefined
   private readonly members = new Set<string>()
@@ -214,11 +214,11 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     end.listen((message) => receiveFromPage(end, () => this.receive(message)))
     end.onClose(() => {
       this.dmReplies.drop()
-      room._detachStub(this)
+      room.detachStub(this)
     })
-    end.onDisconnect(() => room._setHeldConnected(this, false))
-    end.onReconnect(() => room._setHeldConnected(this, true))
-    grants.onSuppressed((member) => room._onStubSuppressed(this, member))
+    end.onDisconnect(() => room.setHeldConnected(this, false))
+    end.onReconnect(() => room.setHeldConnected(this, true))
+    grants.onSuppressed((member) => room.onStubSuppressed(this, member))
   }
 
   // Client publishes, subscriptions and attaches
@@ -239,12 +239,12 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     if (!on) this.replay.forgetUnwantedText((member) => this.wantsTextFrom(member))
     // The tail flush precedes the retained back-fill, so the replay dedupes against what the flush relayed.
     if (on) this.flushTail()
-    this.room._onHolderTextChanged(this, before)
+    this.room.onHolderTextChanged(this, before)
   }
 
   _onPageAttach(): void {
     this.rosterSent = false
-    this.room._replica.onStubAttached(this)
+    this.room.replica.onStubAttached(this)
   }
 
   // Client requests
@@ -262,16 +262,16 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     const room = this.room
     switch (req.__r) {
       case 'req-join':
-        return await room._joinStubMember(this, req)
+        return await room.joinStubMember(this, req)
       case 'req-leave':
-        await room._removeMember(this.requireMember(req.id), { type: 'left' })
+        await room.removeMember(this.requireMember(req.id), { type: 'left' })
         return undefined
       case 'req-set-meta':
-        return await room._writes.setMemberMeta(this.requireMember(req.id), req.meta)
+        return await room.writes.setMemberMeta(this.requireMember(req.id), req.meta)
       case 'req-set-attrs':
-        return await room._writes.mergeMemberMeta(this.requireMember(req.id), req.attrs)
+        return await room.writes.mergeMemberMeta(this.requireMember(req.id), req.attrs)
       case 'req-dm':
-        return await room._writes.sendDm(this.requireMember(req.id), req.to, req.data, req.ack === true)
+        return await room.writes.sendDm(this.requireMember(req.id), req.to, req.data, req.ack === true)
     }
   }
 
@@ -297,35 +297,35 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
    *  left or never was. */
   private declareBinaryWant(change: BinaryWantChange): void {
     const { member, track, on } = change
-    if (on && member !== EVERY_MEMBER && !this.room._model.hasMember(member)) return
+    if (on && member !== EVERY_MEMBER && !this.room.model.hasMember(member)) return
     if (!applyBinaryWantChange(this.binary, change)) return
     if (track !== EVERY_TRACK) this.trackWants += on ? 1 : -1
     if (!on) this.replay.forgetUnwantedBinary((member, track) => this.wantsBinary(member, track))
-    this.room._onHolderBinaryChanged(this, change)
+    this.room.onHolderBinaryChanged(this, change)
   }
 
   private declareTextWants(changes: Record<string, boolean>, announce: boolean): void {
     const members = new Map<string, boolean>()
     for (const [id, wanted] of Object.entries(changes)) {
-      if (wanted === this.textMemberWants.has(id) || (wanted && !this.room._model.hasMember(id))) continue
+      if (wanted === this.textMemberWants.has(id) || (wanted && !this.room.model.hasMember(id))) continue
       members.set(id, !wanted)
       toggle(this.textMemberWants, id, wanted)
     }
     this.replay.forgetUnwantedText((member) => this.wantsTextFrom(member))
     this.announce = announce
     this.flushTail()
-    this.room._onHolderTextChanged(this, { all: this.wantsText, members })
+    this.room.onHolderTextChanged(this, { all: this.wantsText, members })
   }
 
   private async publishText(publish: RoomDataPublish): Promise<ChannelPublishAck> {
     this.requireMember(publish.from)
     assertPublishShield(this.publishShield, publish.data)
-    return await this.room._writes.publishText(publish.from, publish.data, publish.retain)
+    return await this.room.writes.publishText(publish.from, publish.data, publish.retain)
   }
 
   private async publishBinary(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
     this.requireMember(frame.from)
-    return await this.room._writes.publishBinaryFrame(frame, framed)
+    return await this.room.writes.publishBinaryFrame(frame, framed)
   }
 
   // Membership
@@ -461,7 +461,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
    *  after it, none dropped while it was away. A hidden member's grant may reach the client after a message does. */
   private namesSender(member: string): boolean {
     return (
-      this.end.isAttached && this.rosterSent && this.roster.settled && this.room._model.memberHidden(member) === false
+      this.end.isAttached && this.rosterSent && this.roster.settled && this.room.model.memberHidden(member) === false
     )
   }
 
@@ -485,7 +485,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   private awaitDmReply(ackId: string, sender: string): void {
     void this.end
       ._trackAck(
-        this.dmReplies.await(ackId).then((reply) => reply && this.room._writes.publishDmAck(sender, ackId, reply)),
+        this.dmReplies.await(ackId).then((reply) => reply && this.room.writes.publishDmAck(sender, ackId, reply)),
       )
       .catch(reportRoomError)
   }
@@ -499,9 +499,9 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   }
 
   /** Its expiry ends only this stub's want of all text. */
-  _tailExpired(): void {
+  tailExpired(): void {
     this.tail = null
-    this.room._onHolderTextChanged(this, null)
+    this.room.onHolderTextChanged(this, null)
   }
 
   /** The first real text want flushes the tail in order through the replay gate. */

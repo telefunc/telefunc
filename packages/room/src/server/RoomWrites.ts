@@ -43,7 +43,7 @@ assertIsNotBrowser()
 
 /** The handle the writes go out through: its guards pass them. */
 interface RoomWritesOwner {
-  readonly _guards: Partial<RoomGuardHooks> | null
+  readonly guards: Partial<RoomGuardHooks> | null
 }
 
 type RoomWritesOptions = {
@@ -179,14 +179,14 @@ class RoomWrites {
     if (this.model.closed) throw roomClosedError(this.incarnation.id)
     const sender = this.memberSender(from)
     const stamp = this.stampOf(from, sender)
-    const onBeforePublish = this.owner._guards?.onBeforePublish
+    const onBeforePublish = this.owner.guards?.onBeforePublish
     if (onBeforePublish) await onBeforePublish(sender, payload)
     return { sender, stamp }
   }
 
   private async finishPublish(sender: Sender, payload: unknown, commit: CommitAccepted): Promise<ChannelPublishAck> {
     const receipt: Omit<ChannelPublishAck, 'key'> = { seq: commit.seq, timestamp: commit.timestamp }
-    const onAfterPublish = this.owner._guards?.onAfterPublish
+    const onAfterPublish = this.owner.guards?.onAfterPublish
     if (onAfterPublish) await runAfterHook(() => onAfterPublish(sender, payload, receipt))
     return { key: this.incarnation.id, ...receipt }
   }
@@ -248,7 +248,7 @@ class RoomWrites {
     if (!target) throw participantGoneError(to)
     const sender = this.memberSender(from)
     const stamp = this.stampOf(from, sender)
-    const onBeforeSend = this.owner._guards?.onBeforeSend
+    const onBeforeSend = this.owner.guards?.onBeforeSend
     if (onBeforeSend) await onBeforeSend(sender, target, data)
     const envelope: RoomDmEnvelope = { __r: 'dm', to, from, ...stamp, data }
     if (ackId) envelope.ackId = ackId
@@ -258,7 +258,7 @@ class RoomWrites {
     })
     const receipt = acceptedOrThrow(this.incarnation.id, await committing)
     const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
-    const onAfterSend = this.owner._guards?.onAfterSend
+    const onAfterSend = this.owner.guards?.onAfterSend
     if (onAfterSend) await runAfterHook(() => onAfterSend(sender, target, data, info))
     return info
   }
