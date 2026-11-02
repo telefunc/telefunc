@@ -38,7 +38,7 @@ type SubscriptionDriver<Source> = {
    *  throws, publish doesn't wait). */
   hostKey?(): string | null
   /** True where a publish can reach the store before the subscribe this host made just before it (Redis: PUBLISH and
-   *  SUBSCRIBE go by two connections). Core then holds a publish while one of its host's attempts on the publish's
+   *  SUBSCRIBE go by two connections). Core then makes a publish wait while one of its host's attempts on the publish's
    *  source is establishing, at most 60 s. Absent, a publish never waits. */
   readonly publishOvertakesSubscribe?: boolean
 }

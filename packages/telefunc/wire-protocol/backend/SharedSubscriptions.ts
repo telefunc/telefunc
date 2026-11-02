@@ -17,8 +17,8 @@ type Receive = (payload: BackendPayload, ordering: OrderingInfo) => void
 
 /** How long a send waits for its host's establishing attempts. */
 const ESTABLISH_WAIT_MS = 60_000
-/** What a held send keeps beyond its payload (130–160 bytes measured), so small ones are bounded too. */
-const HELD_OVERHEAD_BYTES = 256
+/** What a waiting send keeps beyond its payload (130–160 bytes measured), so small ones are bounded too. */
+const WAITING_SEND_OVERHEAD_BYTES = 256
 
 /** A consumer's subscription. */
 type BackendSubscription = {
@@ -48,7 +48,7 @@ type SourceWait<Source> = { domain: string; waitsFor: readonly Source[]; budget:
 type Wait = { readonly established: Promise<void>; sends: number }
 
 /** A waiting send's own copy of its payload, and what it counts against. */
-type HeldSend<Payload> = { waitKey: string; wait: Wait; budget: string; bytes: number; payload: Payload }
+type WaitingSend<Payload> = { waitKey: string; wait: Wait; budget: string; bytes: number; payload: Payload }
 
 type SharedSubscriptionsOptions<Source> = {
   driver: SubscriptionDriver<Source>
@@ -67,8 +67,8 @@ class SharedSubscriptions<Source> {
   private readonly sends: string
   /** By host and domain. */
   private readonly waits = new Map<string, Wait>()
-  /** Bytes held by host and budget. */
-  private readonly held = new Map<string, number>()
+  /** Bytes waiting, by host and budget. */
+  private readonly waitingBytes = new Map<string, number>()
   /** Slots never ready yet, counted down a microtask after: at 0, no send has anything to wait for. */
   private establishingSlots = 0
 
@@ -97,11 +97,11 @@ class SharedSubscriptions<Source> {
     const waitKey = JSON.stringify([hostKey, domain])
     const wait = this.waits.get(waitKey) ?? this.openWait(hostKey, waitsFor)
     if (wait === null) return send(payload)
-    const held = this.hold(waitKey, wait, JSON.stringify([hostKey, budget]), limit, payload)
-    if (held === null) return Promise.reject(new ChannelOverflowError(`${this.sends} readiness buffer overflow`))
+    const waiting = this.countWaiting(waitKey, wait, JSON.stringify([hostKey, budget]), limit, payload)
+    if (waiting === null) return Promise.reject(new ChannelOverflowError(`${this.sends} readiness buffer overflow`))
     // Sent inside the reaction, so a send that finds the wait gone can't reach the driver first. `then` adopts what
     // `send` returns, which TypeScript can't tell from `R`.
-    return wait.established.then(() => send(this.endWait(held))) as Promise<Awaited<R>>
+    return wait.established.then(() => send(this.endWait(waiting))) as Promise<Awaited<R>>
   }
 
   subscribe(source: Source, receive: Receive): BackendSubscription {
@@ -176,18 +176,19 @@ class SharedSubscriptions<Source> {
 
   /** Counts a waiting send against its budget: null past the budget's limit, read only now, as resolving the config is
    *  costly. */
-  private hold<Payload extends BackendPayload>(
+  private countWaiting<Payload extends BackendPayload>(
     waitKey: string,
     wait: Wait,
     budget: string,
     limit: 'text' | 'binary',
     payload: Payload,
-  ): HeldSend<Payload> | null {
-    const bytes = HELD_OVERHEAD_BYTES + (typeof payload === 'string' ? utf8ByteLength(payload) : payload.byteLength)
-    const total = (this.held.get(budget) ?? 0) + bytes
+  ): WaitingSend<Payload> | null {
+    const bytes =
+      WAITING_SEND_OVERHEAD_BYTES + (typeof payload === 'string' ? utf8ByteLength(payload) : payload.byteLength)
+    const total = (this.waitingBytes.get(budget) ?? 0) + bytes
     const limits = getChannelLimits()
     if (total > (limit === 'binary' ? limits.bufferLimitBinary : limits.bufferLimit)) return null
-    this.held.set(budget, total)
+    this.waitingBytes.set(budget, total)
     this.waits.set(waitKey, wait)
     wait.sends++
     const owned = (typeof payload === 'string' ? payload : new Uint8Array(payload)) as Payload
@@ -195,11 +196,11 @@ class SharedSubscriptions<Source> {
   }
 
   /** The wait ended: the last of its sends unmaps it, so a send its predecessor makes still queues behind the rest. */
-  private endWait<Payload>({ waitKey, wait, budget, bytes, payload }: HeldSend<Payload>): Payload {
+  private endWait<Payload>({ waitKey, wait, budget, bytes, payload }: WaitingSend<Payload>): Payload {
     if (--wait.sends === 0) this.waits.delete(waitKey)
-    const left = this.held.get(budget)! - bytes
-    if (left === 0) this.held.delete(budget)
-    else this.held.set(budget, left)
+    const left = this.waitingBytes.get(budget)! - bytes
+    if (left === 0) this.waitingBytes.delete(budget)
+    else this.waitingBytes.set(budget, left)
     return payload
   }
 

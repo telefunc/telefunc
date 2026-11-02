@@ -38,8 +38,8 @@ const laneSources: SourceRules<RoomSubscriptionSource> = {
   waitOf: (target) => {
     const domain = roomSubscriptionSourceKey(target)
     if (target.lane.kind !== 'binary') return { domain, waitsFor: [target], budget: domain, limit: 'text' }
-    // A binary commit also reaches its member's every-track lane and its track's every-member lane, and its held bytes
-    // count against its member's.
+    // A binary commit also reaches its member's every-track lane and its track's every-member lane, and its waiting
+    // bytes count against its member's.
     const { roomId, inc, lane } = target
     const everyTrack = { roomId, inc, lane: { kind: 'binary-all', member: lane.member } } as const
     const everyMember = { roomId, inc, lane: { kind: 'binary-track', track: lane.track } } as const
