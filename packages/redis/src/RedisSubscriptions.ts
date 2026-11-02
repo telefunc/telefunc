@@ -23,7 +23,7 @@ interface RedisPlane {
 }
 
 /** Where a subscription's frames arrive, which driver it belongs to, and whom it delivers to. */
-type RedisSubscriptionOptions = {
+type RedisAttemptOptions = {
   source: RedisSubscriptionSource
   laneChannel: string
   /** A Room lane's incarnation channel: a message on it means the incarnation was dropped. */
@@ -69,11 +69,11 @@ const REORDER_WAIT_MS = 1_000
 class RedisSubscriptions {
   private readonly connection: RedisConnection
   /** Every channel some subscription needs, with the subscriptions that listen on it. */
-  private readonly byChannel = new Map<string, Set<RedisSubscription>>()
+  private readonly byChannel = new Map<string, Set<RedisAttempt>>()
   /** The channels some subscription started or stopped needing since the last sync read them. */
   private changedChannels = new Set<string>()
   /** The subscriptions that may await confirmation; a sync confirms those its connection covers. */
-  private readonly unconfirmed = new Set<RedisSubscription>()
+  private readonly unconfirmed = new Set<RedisAttempt>()
   private socket: Connection = { phase: 'idle' }
   private nextId = 0
   private syncing: Promise<void> = Promise.resolve()
@@ -86,8 +86,8 @@ class RedisSubscriptions {
     this.connection = connection
   }
 
-  subscribe(options: RedisSubscriptionOptions): DriverAttempt {
-    const subscription = new RedisSubscription({ ...options, owner: this })
+  subscribe(options: RedisAttemptOptions): DriverAttempt {
+    const subscription = new RedisAttempt({ ...options, owner: this })
     for (const channel of subscription.channels) {
       const subscriptions = this.byChannel.get(channel)
       if (subscriptions !== undefined) {
@@ -133,7 +133,7 @@ class RedisSubscriptions {
   }
 
   /** Forgets a subscription that unsubscribed or ended. */
-  detach(subscription: RedisSubscription): void {
+  detach(subscription: RedisAttempt): void {
     this.unconfirmed.delete(subscription)
     for (const channel of subscription.channels) {
       const subscriptions = this.byChannel.get(channel)
@@ -253,7 +253,7 @@ class RedisSubscriptions {
       for (const channel of missing) subscribed.add(channel)
     }
     // A subscription made during the SUBSCRIBE above waits for the sync it queued.
-    const covered: RedisSubscription[] = []
+    const covered: RedisAttempt[] = []
     for (const subscription of this.unconfirmed) {
       if (!subscription.awaitsConfirmation()) {
         this.unconfirmed.delete(subscription)
@@ -267,7 +267,7 @@ class RedisSubscriptions {
 
   /** Its channels are subscribed on a live connection: ready from where each lane stands now, unless its incarnation is
    *  no longer open. */
-  private async confirm(subscription: RedisSubscription, id: number): Promise<void> {
+  private async confirm(subscription: RedisAttempt, id: number): Promise<void> {
     let starts: Map<string, OrderingInfo> | null
     try {
       starts = await subscription.plane.readLaneStarts(subscription.source)
@@ -283,8 +283,8 @@ class RedisSubscriptions {
     subscription.fail(new Error(`subscribeLane: the incarnation of '${subscription.laneChannel}' is not open`))
   }
 
-  private subscriptions(): Set<RedisSubscription> {
-    const all = new Set<RedisSubscription>()
+  private subscriptions(): Set<RedisAttempt> {
+    const all = new Set<RedisAttempt>()
     for (const subscriptions of this.byChannel.values()) for (const subscription of subscriptions) all.add(subscription)
     return all
   }
@@ -295,7 +295,7 @@ class RedisSubscriptions {
 }
 
 /** One source on the shared connection: delivers its lanes in seq order to core's `receiver`. */
-class RedisSubscription extends DriverAttempt {
+class RedisAttempt extends DriverAttempt {
   readonly source: RedisSubscriptionSource
   readonly laneChannel: string
   readonly invalidationChannel: string | null
@@ -321,7 +321,7 @@ class RedisSubscription extends DriverAttempt {
     invalidationChannel,
     plane,
     receiver,
-  }: RedisSubscriptionOptions & { owner: RedisSubscriptions }) {
+  }: RedisAttemptOptions & { owner: RedisSubscriptions }) {
     super()
     this.owner = owner
     this.source = source

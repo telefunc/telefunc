@@ -66,7 +66,7 @@ class RoomSessionSubscriptions {
     const laneKey = encodeLaneKey(lane)
     const route = { roomId, inc, laneKey, sessionDoId: this.id, leaseId: crypto.randomUUID(), bucket }
     const stopDeliveries = this.member.subscribeLocal(laneRoute(inc, laneKey), receiver)
-    const subscription = new CloudflareRoomSubscription({ owner: this, route, stopDeliveries })
+    const subscription = new CloudflareRoomAttempt({ owner: this, route, stopDeliveries })
     void subscription.register()
     return subscription
   }
@@ -78,7 +78,7 @@ class RoomSessionSubscriptions {
   }
 }
 
-type CloudflareRoomSubscriptionOptions = {
+type CloudflareRoomAttemptOptions = {
   owner: RoomSessionSubscriptions
   route: RouteInstallation
   /** Stops the lane's frames reaching its receiver. */
@@ -87,13 +87,13 @@ type CloudflareRoomSubscriptionOptions = {
 
 /** Ready once the authority has durably registered this subscription's exact route; Room owns retry and
  *  replacement. */
-class CloudflareRoomSubscription extends DriverAttempt {
+class CloudflareRoomAttempt extends DriverAttempt {
   readonly route: RouteInstallation
   private readonly owner: RoomSessionSubscriptions
   private readonly stopDeliveries: () => void
   private renewalTimer: ReturnType<typeof setTimeout> | undefined
 
-  constructor({ owner, route, stopDeliveries }: CloudflareRoomSubscriptionOptions) {
+  constructor({ owner, route, stopDeliveries }: CloudflareRoomAttemptOptions) {
     super()
     this.owner = owner
     this.route = route
