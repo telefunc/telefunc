@@ -178,10 +178,9 @@ function decodeBinaryFrame(data: Uint8Array): BinaryFrame | null {
 type TrackKey = string
 /** The default track's key; named tracks are non-empty, so `''` is unambiguous. */
 const DEFAULT_TRACK: TrackKey = ''
-/** Every member, and every track, as a want's target. One symbol, so a copy of Room built before the split still
- *  matches; the wire carries `null`. */
-const EVERY_MEMBER: unique symbol = Symbol.for('telefunc.RoomWantAll')
-const EVERY_TRACK: unique symbol = Symbol.for('telefunc.RoomWantAll')
+/** Every member, and every track, as a want's target; the wire carries `null`. */
+const EVERY_MEMBER: unique symbol = Symbol.for('telefunc.RoomEveryMember')
+const EVERY_TRACK: unique symbol = Symbol.for('telefunc.RoomEveryTrack')
 type EveryMember = typeof EVERY_MEMBER
 type EveryTrack = typeof EVERY_TRACK
 
