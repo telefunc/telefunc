@@ -227,10 +227,9 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
   do {
     const page = await plane.driver.directoryList(options?.prefix ?? '', cursor)
     cursor = page.cursor
-    for (const { roomId, incTag } of page.entries) {
-      const info = await listedRoom(plane, roomId, incTag)
-      if (info !== null) rooms.push(info)
-    }
+    // At once: a page holds at most `DIRECTORY_PAGE_SIZE` rooms, each read at its own authority.
+    const listed = await Promise.all(page.entries.map(({ roomId, incTag }) => listedRoom(plane, roomId, incTag)))
+    for (const info of listed) if (info !== null) rooms.push(info)
   } while (cursor !== undefined)
   return rooms
 }
