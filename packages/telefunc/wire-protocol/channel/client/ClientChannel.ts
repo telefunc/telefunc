@@ -43,6 +43,7 @@ import type { CreditOwner } from '../../flowControl/credit.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
 import type { MuxChannel, MuxConnection } from './ClientConnection.js'
 import { ChannelClosedError } from '../channelErrors.js'
+import { channelMessages } from '../channelMessages.js'
 import { isPromise } from '../../../utils/isPromise.js'
 
 /** The connection a channel rides (see `ClientConnection.getOrCreate`). */
@@ -78,7 +79,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected connection: MuxConnection
   private readonly listeners = new Listeners<ChannelListener<ServerToClient>>()
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
-  protected closed = false
+  protected stopped = false
   protected readonly lifecycle = new ChannelLifecycle({ owner: this, reportError: reportChannelError })
   /** The ack requests sent and not yet answered, by seq. `resolve` takes `any`: text, binary and publish sends
    *  resolve with different types, each with `parse(text)` of the answer. */
@@ -127,8 +128,20 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     })
   }
 
+  get opened(): Promise<void> {
+    return this.lifecycle.opened
+  }
+
+  get closed(): Promise<void> {
+    return this.lifecycle.closed
+  }
+
+  messages(options?: { signal?: AbortSignal }) {
+    return channelMessages<ChannelData<ServerToClient>>(this, options)
+  }
+
   get isClosed(): boolean {
-    return this.closed
+    return this.stopped
   }
 
   /** @internal The connection its frames go through. */
@@ -157,7 +170,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     data: ChannelData<ClientToServer>,
     opts?: { ack?: boolean },
   ): void | Promise<ChannelAck<ClientToServer>> | Promise<void> {
-    if (this.closed) throw new ChannelClosedError()
+    if (this.stopped) throw new ChannelClosedError()
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ack === true)
     const serialized = stringify(data)
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
@@ -183,7 +196,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   _sendBinary(data: Uint8Array, opts?: { ack?: boolean }): void | Promise<unknown> | Promise<void> {
-    if (this.closed) throw new ChannelClosedError()
+    if (this.stopped) throw new ChannelClosedError()
     // Ack-bearing path bypasses credit; see `sendData` for rationale.
     if (opts?.ack === true) {
       return this.sendAckReq<unknown, Uint8Array>(encode.binaryAckReq, data)
@@ -191,20 +204,20 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.sendCredit.decrement(this.connection.sendSequenced(this, 'data', encode.binary, data))
   }
 
-  listen(callback: ChannelListener<ServerToClient>): () => void {
-    return this.listeners.add(callback)
+  listen(callback: ChannelListener<ServerToClient>, options?: { signal?: AbortSignal }): () => void {
+    return this.listeners.add(callback, options)
   }
 
-  listenBinary(callback: ChannelBinaryListener): () => void {
-    return this.binaryListeners.add(callback)
+  listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): () => void {
+    return this.binaryListeners.add(callback, options)
   }
 
-  onClose(callback: ChannelCloseCallback): void {
-    this.lifecycle.onClose(callback)
+  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): void {
+    this.lifecycle.onClose(callback, options)
   }
 
-  onOpen(callback: () => void): void {
-    this.lifecycle.onOpen(callback)
+  onOpen(callback: () => void, options?: { signal?: AbortSignal }): void {
+    this.lifecycle.onOpen(callback, options)
   }
 
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
@@ -215,7 +228,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       timeout,
       peer: 'expected',
       send: () => {
-        this.closed = true
+        this.stopped = true
         this.connection.sendCloseRequest(this, timeout)
       },
     })
@@ -224,8 +237,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   abort(): void
   abort(abortValue: unknown, message?: string): void
   abort(abortValue?: unknown, message?: string): void {
-    if (this.closed) return
-    this.closed = true
+    if (this.stopped) return
+    this.stopped = true
     const abortError = createAbortError(abortValue, message)
     this.connection.sendAbort(this, stringify(abortValue))
     this._end(abortError)
@@ -234,7 +247,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   // ── Called by transport connection ──
 
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void {
-    if (this.closed) return
+    if (this.stopped) return
     if (batched) this.receiveCredit.useBatchTransportInitial()
     else this.receiveCredit.undoBatchTransportInitial()
     this.receiveCredit.attach(uplink, uplink.roundTrips, downlink)
@@ -385,7 +398,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   protected onPeerCloseRequest(timeoutMs: number): void {
     this.lifecycle.peerCloseReceived(normalizeCloseTimeout(timeoutMs), () => {
-      this.closed = true
+      this.stopped = true
       this.connection.sendCloseAck(this)
     })
   }
@@ -396,7 +409,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   _onEnded(err?: Error): void {
-    this.closed = true
+    this.stopped = true
     // A close the server acknowledged is graceful, whatever takes the channel off the wire before it finishes.
     this._end(this.lifecycle.closeAcked ? undefined : err)
   }
@@ -433,6 +446,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   _end(err?: Error): void {
     if (this.lifecycle.ended) return
     this.lifecycle.forcedTermination(err, () => {
+      this.listeners.clear()
+      this.binaryListeners.clear()
       this.sendCredit.shutdown(err)
       this.receiveCredit.detach()
       const ackErr = err ?? new ChannelClosedError()

@@ -26,7 +26,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
-    if (this.closed) throw new ChannelClosedError()
+    if (this.stopped) throw new ChannelClosedError()
     const serialized = stringify(data)
     const ret = this.sendAckReq<ChannelPublishAck, string>(encode.publishAckReq, serialized)
     ret.catch(reportChannelError)
@@ -43,7 +43,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
-    if (this.closed) throw new ChannelClosedError()
+    if (this.stopped) throw new ChannelClosedError()
     const ret = this.sendAckReq<ChannelPublishAck, Uint8Array>(encode.publishBinaryAckReq, data)
     ret.catch(reportChannelError)
     return ret
@@ -59,7 +59,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   private setSubscribed(kind: 'text' | 'binary', on: boolean): void {
-    if (on === this.subscribed[kind] || this.closed) return
+    if (on === this.subscribed[kind] || this.stopped) return
     this.subscribed[kind] = on
     if (on) this.connection.sendBroadcastSubscribe(this, kind === 'binary')
     else this.connection.sendBroadcastUnsubscribe(this, kind === 'binary')

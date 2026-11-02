@@ -39,6 +39,7 @@ export {
   onChannelSlowUplink,
   onChannelOpenAnswer,
   onChannelOpenHello,
+  onChannelApiProbe,
   onChannelLateCallbacks,
   onChannelOpenAbort,
 }
@@ -842,4 +843,16 @@ async function onChannelOpenAbort() {
     cleanupState[`openAbort_${id}_second`] = 'run'
   })
   return { channel: ch.client, channelId: id }
+}
+
+async function onChannelApiProbe() {
+  const ch = new Channel<string, string>()
+  ch.onOpen(async () => {
+    await ch.opened
+    for await (const message of ch.messages()) {
+      if (message.type === 'text') await ch.send(message.data)
+      else await ch.sendBinary(message.data)
+    }
+  })
+  return { channel: ch.client }
 }

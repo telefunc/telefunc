@@ -4,6 +4,7 @@ export { Listeners }
  *  mutated, so a dispatch iterates the ones it started with. */
 class Listeners<T> {
   private byRegistration: Map<object, T> | null = null
+  private readonly abortRemovers = new Map<object, () => void>()
   private snapshot: readonly T[] | undefined = NO_LISTENERS
 
   get size(): number {
@@ -11,14 +12,29 @@ class Listeners<T> {
   }
 
   /** Returns the function that removes this registration. */
-  add(listener: T): () => void {
+  add(listener: T, { signal }: { signal?: AbortSignal } = {}): () => void {
+    if (signal?.aborted) return () => {}
     const byRegistration = (this.byRegistration ??= new Map())
     const registration = {}
     byRegistration.set(registration, listener)
     this.snapshot = undefined
-    return () => {
+    const remove = () => {
       if (byRegistration.delete(registration)) this.snapshot = undefined
+      this.abortRemovers.get(registration)?.()
+      this.abortRemovers.delete(registration)
     }
+    if (signal) {
+      signal.addEventListener('abort', remove, { once: true })
+      this.abortRemovers.set(registration, () => signal.removeEventListener('abort', remove))
+    }
+    return remove
+  }
+
+  clear(): void {
+    for (const remove of this.abortRemovers.values()) remove()
+    this.abortRemovers.clear()
+    this.byRegistration?.clear()
+    this.snapshot = NO_LISTENERS
   }
 
   list(): readonly T[] {

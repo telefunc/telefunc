@@ -30,6 +30,7 @@ import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import { ChannelClosedError, replayLossError } from '../channelErrors.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
+import { channelMessages } from '../channelMessages.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES, SENDS_AHEAD_WARNING_BYTES } from '../../constants.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
@@ -171,6 +172,18 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       maxBytes: this.bufferLimit,
       binaryMaxBytes: this.bufferLimitBinary,
     })
+  }
+
+  get opened(): Promise<void> {
+    return this.lifecycle.opened
+  }
+
+  get closed(): Promise<void> {
+    return this.lifecycle.closed
+  }
+
+  messages(options?: { signal?: AbortSignal }) {
+    return channelMessages<ChannelData<ClientToServer>>(this, options)
   }
 
   get isClosed(): boolean {
@@ -315,20 +328,20 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.warnIfAhead()
   }
 
-  listen(callback: ChannelListener<ClientToServer>): () => void {
-    return this.listeners.add(callback)
+  listen(callback: ChannelListener<ClientToServer>, options?: { signal?: AbortSignal }): () => void {
+    return this.listeners.add(callback, options)
   }
 
-  listenBinary(callback: ChannelBinaryListener): () => void {
-    return this.binaryListeners.add(callback)
+  listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): () => void {
+    return this.binaryListeners.add(callback, options)
   }
 
-  onClose(callback: ChannelCloseCallback): void {
-    this.lifecycle.onClose(callback)
+  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): void {
+    this.lifecycle.onClose(callback, options)
   }
 
-  onOpen(callback: () => void): void {
-    this.lifecycle.onOpen(callback)
+  onOpen(callback: () => void, options?: { signal?: AbortSignal }): void {
+    this.lifecycle.onOpen(callback, options)
   }
 
   _setResponseAbort(abortResponse: (abortValue?: unknown) => void): void {
@@ -831,6 +844,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       const keep = !pageGone && !this.pageNeedsNothing()
       if (!keep) this._release()
       this.mux?.onChannelEnded(this, { keep, pageAttached })
+      this.listeners.clear()
+      this.binaryListeners.clear()
       this.sendCredit.shutdown(err)
       // Building an error captures a stack trace, so one is built only while an ack is awaited or a frame is buffered.
       if (this.pendingAcks.size > 0 || this.offlineBuffer.size > 0) {

@@ -43,6 +43,7 @@ import {
   onChannelSlowUplink,
   onChannelOpenAnswer,
   onChannelOpenHello,
+  onChannelApiProbe,
   onChannelLateCallbacks,
   onChannelOpenAbort,
 } from './Channel.telefunc'
@@ -1100,6 +1101,46 @@ function ChannelDemo() {
   }, [])
 
   // Once the channel opened, an onOpen runs at once; once it closed, an onClose runs at once with the Abort it ended with.
+  const testApi = useCallback(async () => {
+    const output = document.querySelector('#channel-api-result')!
+    try {
+      const { channel } = await openChannel(onChannelApiProbe)
+      await channel.opened
+      const controller = new AbortController()
+      channel.listen(
+        () => {
+          throw new Error('cancelled listener ran')
+        },
+        { signal: controller.signal },
+      )
+      channel.listenBinary(
+        () => {
+          throw new Error('cancelled binary listener ran')
+        },
+        { signal: controller.signal },
+      )
+      controller.abort()
+      const iterator = channel.messages({ signal: controller.signal })
+      const aborted = await iterator.next().then(
+        () => false,
+        () => true,
+      )
+      const messages = channel.messages()
+      const first = messages.next()
+      await channel.send('hello')
+      const text = (await first).value
+      const second = messages.next()
+      await channel.sendBinary(new Uint8Array([1, 2, 3]))
+      const binary = (await second).value
+      await messages.return?.()
+      await channel.close()
+      await channel.closed
+      output.textContent = JSON.stringify({ text, binary: Array.from(binary.data), aborted })
+    } catch (err) {
+      output.textContent = String(err)
+    }
+  }, [])
+
   const testLateCallbacks = useCallback(async () => {
     setChannelState((s) => ({ ...s, lateCallbacks: null }))
     const { channel, channelId } = await openChannel(onChannelLateCallbacks)
@@ -1585,6 +1626,10 @@ function ChannelDemo() {
           >
             Server Says Hello as a Channel Opens Beside a 4 MiB Burst
           </button>
+          <button id="channel-test-api" onClick={testApi}>
+            Test channel API
+          </button>
+          <output id="channel-api-result" />
           <button
             id="channel-test-late-callbacks"
             type="button"

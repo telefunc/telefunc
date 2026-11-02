@@ -4,6 +4,7 @@ export type { ChannelLifecycleOwner }
 import type { ChannelCloseCallback, ChannelCloseResult } from './channel.js'
 import { ChannelClosedError } from './channelErrors.js'
 import { isAbort, type AbortError } from '../../shared/Abort.js'
+import { Listeners } from '../../utils/Listeners.js'
 import { isPromise } from '../../utils/isPromise.js'
 
 /** The channel end, which ends itself and answers what its callbacks throw. */
@@ -25,9 +26,9 @@ type ChannelLifecycleOptions = {
 class ChannelLifecycle {
   private readonly owner: ChannelLifecycleOwner
   private readonly reportError: (err: unknown) => void
-  private openListeners: Array<() => void> = []
+  private openListeners = new Listeners<() => void>()
   private didFireOpen = false
-  private closeListeners: ChannelCloseCallback[] = []
+  private closeListeners = new Listeners<ChannelCloseCallback>()
   private didFireClose = false
   private runningCloseListeners = 0
   private inflightAcks = 0
@@ -43,6 +44,41 @@ class ChannelLifecycle {
   /** The close's one run, whichever end began it. */
   private run: Promise<ChannelCloseResult> | null = null
   private closePromise: Promise<ChannelCloseResult> | null = null
+
+  private openedPromise?: Promise<void>
+  private resolveOpened?: () => void
+  private rejectOpened?: (err: Error) => void
+  private closedPromise?: Promise<void>
+  private resolveClosed?: () => void
+  private rejectClosed?: (err: Error) => void
+
+  get opened(): Promise<void> {
+    if (!this.openedPromise) {
+      this.openedPromise = new Promise((resolve, reject) => {
+        this.resolveOpened = resolve
+        this.rejectOpened = reject
+        if (this.didFireOpen) resolve()
+        else if (this.didEnd) reject(this.endError ?? new ChannelClosedError())
+      })
+      this.openedPromise.catch(() => {})
+    }
+    return this.openedPromise
+  }
+
+  get closed(): Promise<void> {
+    if (!this.closedPromise) {
+      this.closedPromise = new Promise((resolve, reject) => {
+        this.resolveClosed = resolve
+        this.rejectClosed = reject
+        if (this.didEnd) {
+          if (this.endError) reject(this.endError)
+          else resolve()
+        }
+      })
+      this.closedPromise.catch(() => {})
+    }
+    return this.closedPromise
+  }
 
   constructor({ owner, reportError }: ChannelLifecycleOptions) {
     this.owner = owner
@@ -71,21 +107,23 @@ class ChannelLifecycle {
     return this.didReceiveCloseAck ? 0 : 1
   }
 
-  onOpen(callback: () => void): void {
+  onOpen(callback: () => void, options?: { signal?: AbortSignal }): void {
+    if (options?.signal?.aborted) return
     if (this.didFireOpen) {
       this.invokeOpenCallback(callback)
       return
     }
-    this.openListeners.push(callback)
+    this.openListeners.add(callback, options)
   }
 
   fireOpen(): void {
     if (this.didFireOpen) return
     this.didFireOpen = true
-    for (const cb of this.openListeners) {
+    this.resolveOpened?.()
+    for (const cb of this.openListeners.list()) {
       if (this.invokeOpenCallback(cb)) break
     }
-    this.openListeners.length = 0
+    this.openListeners.clear()
   }
 
   private invokeOpenCallback(callback: () => void): boolean {
@@ -108,12 +146,13 @@ class ChannelLifecycle {
     return false
   }
 
-  onClose(callback: ChannelCloseCallback): void {
+  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): void {
+    if (options?.signal?.aborted) return
     if (this.didFireClose) {
       void this.invokeCloseCallback(callback, this.endError)
       return
     }
-    this.closeListeners.push(callback)
+    this.closeListeners.add(callback, options)
   }
 
   localCloseRequested({
@@ -178,6 +217,9 @@ class ChannelLifecycle {
     if (this.deadlineTimer !== null) clearTimeout(this.deadlineTimer)
     this.deadlineTimer = null
     finalize()
+    if (!this.didFireOpen) this.rejectOpened?.(err ?? new ChannelClosedError())
+    if (err) this.rejectClosed?.(err)
+    else this.resolveClosed?.()
     this.fireClose(err)
     this.notifyProgress()
   }
@@ -185,7 +227,7 @@ class ChannelLifecycle {
   private fireClose(err?: Error): void {
     if (this.didFireClose) return
     this.didFireClose = true
-    for (const callback of this.closeListeners) {
+    for (const callback of this.closeListeners.list()) {
       const pending = this.invokeCloseCallback(callback, err)
       if (pending === undefined) continue
       this.runningCloseListeners++
@@ -194,8 +236,8 @@ class ChannelLifecycle {
         this.notifyProgress()
       })
     }
-    this.closeListeners.length = 0
-    this.openListeners.length = 0
+    this.closeListeners.clear()
+    this.openListeners.clear()
     this.notifyProgress()
   }
 

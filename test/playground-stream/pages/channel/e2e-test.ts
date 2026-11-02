@@ -123,6 +123,18 @@ function testChannel(isDev: boolean, inDocker = false) {
     throw new Error(`Unsupported channel transport in e2e: ${channelTransport}`)
   }
 
+  test('channel: promises, text and binary iteration, and cancelled registrations', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-api')
+    await autoRetry(async () => {
+      expect(JSON.parse((await page.textContent('#channel-api-result'))!)).deep.equal({
+        text: { type: 'text', data: 'hello' },
+        binary: [1, 2, 3],
+        aborted: true,
+      })
+    })
+  })
+
   // ── Basic connection ─────────────────────────────────────────────────
 
   test('channel: connect — client onOpen fires, server responds with welcome via ping', async () => {
