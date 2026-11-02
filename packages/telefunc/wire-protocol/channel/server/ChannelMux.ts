@@ -28,6 +28,7 @@ import type { BarrierPayload, PreparePayload, ReconcileOpenEntry, ReconcilePaylo
 import { IndexedPeer } from './IndexedPeer.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
 import { WireSender } from './WireSender.js'
+import { EndedChannels } from './EndedChannels.js'
 import { UpgradeStages, type UpgradeStagesOwner } from './UpgradeStages.js'
 import { SessionRegistry, type ChannelHandle } from './SessionRegistry.js'
 import { AwaitedChannels, expireAwaited, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
@@ -138,8 +139,12 @@ class ChannelMux implements UpgradeStagesOwner {
   private readonly wiresByConnId = new Map<string, Wire>()
   /** The SSE→WS upgrades staged on probe WebSockets. */
   private readonly stages = new UpgradeStages({ owner: this })
-  /** Ended channels whose page may still need them, each with its release timer (null while the page is attached). */
-  private readonly endedChannels = new Map<ServerChannel, ReturnType<typeof setTimeout> | null>()
+  private readonly ended = new EndedChannels({
+    onRelease: (channel) => {
+      this.unregisterChannel(channel.id)
+      channel._release()
+    },
+  })
 
   /** Resolved lazily so the mux can be constructed at module-load (the globalObject factory
    *  runs before `serverConfig` is initialized). */
@@ -162,7 +167,7 @@ class ChannelMux implements UpgradeStagesOwner {
     channel._registerChannel(this)
     this.channels.set(channel.id, channel)
     // A channel that ended before a response carried it waits for its page, as any ended channel does.
-    if (channel._phase === 'ended') this.keepEnded(channel, false)
+    if (channel._phase === 'ended') this.ended.keep(channel, this.options.reconnectTimeout)
     for (const awaited of this.registrationWaits.take(channel.id)) {
       if (this.registrationWaits.stop(awaited)) this.attachAwaited(awaited, channel)
     }
@@ -178,27 +183,9 @@ class ChannelMux implements UpgradeStagesOwner {
     channel: ServerChannel<any, any>,
     { keep, pageAttached }: { keep: boolean; pageAttached: boolean },
   ): void {
-    if (keep) this.keepEnded(channel, pageAttached)
+    // Kept until its page needs nothing more from it, leaves, or stays away for `reconnectTimeout`.
+    if (keep) this.ended.keep(channel, pageAttached ? null : this.options.reconnectTimeout)
     else this.unregisterChannel(channel.id)
-  }
-
-  /** Keeps an ended channel attachable until its page needs nothing more from it, leaves, or stays away for
-   *  `reconnectTimeout`. */
-  private keepEnded(channel: ServerChannel, pageAttached: boolean): void {
-    const timer = this.endedChannels.get(channel)
-    if (timer) clearTimeout(timer)
-    this.endedChannels.set(
-      channel,
-      pageAttached ? null : unrefTimer(setTimeout(() => this.releaseEnded(channel), this.options.reconnectTimeout)),
-    )
-  }
-
-  private releaseEnded(channel: ServerChannel): void {
-    const timer = this.endedChannels.get(channel)
-    if (timer) clearTimeout(timer)
-    this.endedChannels.delete(channel)
-    this.unregisterChannel(channel.id)
-    channel._release()
   }
 
   // ── Wire lifecycle (transport-facing) ───────────────────────────────
@@ -520,8 +507,7 @@ class ChannelMux implements UpgradeStagesOwner {
         continue
       }
       channel._onPageClosed(lastSeq)
-      const released = this.endedChannels.has(channel)
-      if (released) this.releaseEnded(channel)
+      const released = this.ended.release(channel)
       answers.push({ ix, lastSeq: released ? null : channel._lastClientSeq })
     }
     return answers
@@ -821,7 +807,7 @@ class ChannelMux implements UpgradeStagesOwner {
       for (const frame of missed) sender.send(frame)
       channel._attachPeer(peer, open)
     }
-    if (this.endedChannels.has(channel)) this.keepEnded(channel, true)
+    if (this.ended.has(channel)) this.ended.keep(channel, null)
     return { channel, ix: open.ix, peer }
   }
 
@@ -837,9 +823,9 @@ class ChannelMux implements UpgradeStagesOwner {
   private detachHandle(h: ChannelHandle, reason: DetachReason): void {
     // An ended channel waits out a lost wire for its page, which lets it go by releasing it, leaving it out of a new
     // wire's RECONCILE, or leaving for good.
-    if (this.endedChannels.has(h.channel)) {
-      if (reason === 'transient') this.keepEnded(h.channel, false)
-      else this.releaseEnded(h.channel)
+    if (this.ended.has(h.channel)) {
+      if (reason === 'transient') this.ended.keep(h.channel, this.options.reconnectTimeout)
+      else this.ended.release(h.channel)
       return
     }
     switch (reason) {
