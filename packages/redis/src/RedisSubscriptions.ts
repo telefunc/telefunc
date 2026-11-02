@@ -19,13 +19,13 @@ type RedisSubscriptionsOptions = { connection: RedisConnection }
 interface RedisDriver {
   /** Each of the source's lanes' last commit, by the lane key its frames carry on a fan-in channel and `''` on
    *  another; null once a Room source's incarnation is not the open head. */
-  readLaneStarts(source: RedisSubscriptionSource): Promise<Map<string, OrderingInfo> | null>
+  readStarts(source: RedisSubscriptionSource): Promise<Map<string, OrderingInfo> | null>
 }
 
 /** Where a subscription's frames arrive, which driver it belongs to, and whom it delivers to. */
 type RedisAttemptOptions = {
   source: RedisSubscriptionSource
-  laneChannel: string
+  channel: string
   /** A Room lane's incarnation channel: a message on it means the incarnation was dropped. */
   invalidationChannel: string | null
   driver: RedisDriver
@@ -270,7 +270,7 @@ class RedisSubscriptions {
   private async confirm(subscription: RedisAttempt, id: number): Promise<void> {
     let starts: Map<string, OrderingInfo> | null
     try {
-      starts = await subscription.driver.readLaneStarts(subscription.source)
+      starts = await subscription.driver.readStarts(subscription.source)
     } catch (error) {
       // A failed read (a command-connection error) fails this subscription, not the shared subscriber connection.
       if (this.isCurrent(id)) subscription.fail(error)
@@ -280,7 +280,7 @@ class RedisSubscriptions {
     if (starts !== null) return subscription.markReady(starts)
     // Closed on purpose since the caller read it open; gone after a loss, it may have gone with Redis's data.
     if (subscription.subscribing) return subscription.end()
-    subscription.fail(new Error(`subscribeLane: the incarnation of '${subscription.laneChannel}' is not open`))
+    subscription.fail(new Error(`subscribeLane: the incarnation of '${subscription.channel}' is not open`))
   }
 
   private subscriptions(): Set<RedisAttempt> {
@@ -297,7 +297,7 @@ class RedisSubscriptions {
 /** One source on the shared connection: delivers its lanes in seq order to core's `receiver`. */
 class RedisAttempt extends DriverAttempt {
   readonly source: RedisSubscriptionSource
-  readonly laneChannel: string
+  readonly channel: string
   readonly invalidationChannel: string | null
   readonly driver: RedisDriver
   readonly channels: readonly string[]
@@ -317,7 +317,7 @@ class RedisAttempt extends DriverAttempt {
   constructor({
     owner,
     source,
-    laneChannel,
+    channel,
     invalidationChannel,
     driver,
     receiver,
@@ -325,11 +325,11 @@ class RedisAttempt extends DriverAttempt {
     super()
     this.owner = owner
     this.source = source
-    this.laneChannel = laneChannel
+    this.channel = channel
     this.invalidationChannel = invalidationChannel
     this.driver = driver
     this.receiver = receiver
-    this.channels = invalidationChannel === null ? [laneChannel] : [laneChannel, invalidationChannel]
+    this.channels = invalidationChannel === null ? [channel] : [channel, invalidationChannel]
     if ('roomId' in source) {
       this.fanIn = source.lane.kind === 'binary-all' || source.lane.kind === 'binary-track'
       this.broadcast = false
@@ -413,7 +413,7 @@ class RedisAttempt extends DriverAttempt {
   /** Its incarnation was dropped: closed on purpose, with no reason. */
   end(): void {
     if (this.state() === 'closed') return
-    this.close(new Error(`Redis incarnation of '${this.laneChannel}' was dropped`))
+    this.close(new Error(`Redis incarnation of '${this.channel}' was dropped`))
     this.transition('closed')
   }
 

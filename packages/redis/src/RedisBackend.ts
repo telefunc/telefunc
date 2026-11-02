@@ -37,10 +37,10 @@ class RedisBackend implements BroadcastDriver, RedisDriver {
   }
 
   subscribe(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
-    const laneChannel = broadcastChannel(this.connection.prefix, route)
+    const channel = broadcastChannel(this.connection.prefix, route)
     return this.connection.subscriptions.subscribe({
       source: route,
-      laneChannel,
+      channel,
       invalidationChannel: null,
       driver: this,
       receiver,
@@ -48,7 +48,7 @@ class RedisBackend implements BroadcastDriver, RedisDriver {
   }
 
   /** The route's last publish, read once its SUBSCRIBE is acknowledged. */
-  readLaneStarts(route: BroadcastRoute): Promise<Map<string, OrderingInfo>> {
+  readStarts(route: BroadcastRoute): Promise<Map<string, OrderingInfo>> {
     return this.connection.run(REDIS_COMMANDS.broadcastStart, route)
   }
 }

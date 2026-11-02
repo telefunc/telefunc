@@ -104,7 +104,7 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
     const { prefix } = this.connection
     return this.connection.subscriptions.subscribe({
       source,
-      laneChannel: channelKey(prefix, source.roomId, source.inc, this.kit.encodeLaneKey(source.lane)),
+      channel: channelKey(prefix, source.roomId, source.inc, this.kit.encodeLaneKey(source.lane)),
       invalidationChannel: incarnationInvalidationChannel(prefix, source.roomId, source.inc),
       driver: this,
       receiver,
@@ -113,7 +113,7 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
 
   /** Each of the source's lanes' last commit, read once its SUBSCRIBE is acknowledged, by the lane key its frames carry
    *  on a fan-in channel and `''` on another; null once the source's incarnation is not the open head. */
-  async readLaneStarts(source: RoomSubscriptionSource): Promise<Map<string, OrderingInfo> | null> {
+  async readStarts(source: RoomSubscriptionSource): Promise<Map<string, OrderingInfo> | null> {
     const { roomId, inc, lane } = source
     if (lane.kind === 'binary-all') return await this.memberLaneStarts(roomId, inc, lane.member)
     if (lane.kind === 'binary-track') return await this.trackLaneStarts(roomId, inc, lane.track)
