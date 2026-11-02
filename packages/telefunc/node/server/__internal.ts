@@ -76,9 +76,9 @@ import type { ClientBroadcast as ClientBroadcastClass } from '../../wire-protoco
 type ServerBroadcastEnd = Pick<
   ServerBroadcastEndClass,
   | 'id'
-  | '_setOwner'
-  | '_terminateWire'
-  | '_trackAck'
+  | 'setOwner'
+  | 'terminateWire'
+  | 'trackAck'
   | 'isAttached'
   | 'isClosed'
   | 'isConnected'
@@ -91,7 +91,8 @@ type ServerBroadcastEnd = Pick<
   | 'close'
 >
 
-/** The members of a page's `ClientBroadcast` that an add-on drives. */
+/** The members of a page's `ClientBroadcast` that an add-on drives. A page holds the class as its `Broadcast`, so the
+ *  internal ones are `_`-prefixed, as `ClientChannel`'s are. */
 type ClientBroadcast = Pick<
   ClientBroadcastClass,
   | '_publishUnreported'

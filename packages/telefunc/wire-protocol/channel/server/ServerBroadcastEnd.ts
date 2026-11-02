@@ -25,7 +25,7 @@ type BroadcastEndOwner = {
 class ServerBroadcastEnd extends ServerChannel {
   private owner: BroadcastEndOwner | null = null
 
-  _setOwner(owner: BroadcastEndOwner): void {
+  setOwner(owner: BroadcastEndOwner): void {
     this.owner = owner
   }
 
@@ -34,12 +34,12 @@ class ServerBroadcastEnd extends ServerChannel {
   }
 
   /** Ends its page's wire, as a frame that breaks the protocol does. */
-  _terminateWire(): void {
+  terminateWire(): void {
     this.peer?.sender.terminate()
   }
 
   /** @internal Its close waits for `promise`, as for an ack's answer. */
-  _trackAck<T>(promise: Promise<T>): Promise<T> {
+  trackAck<T>(promise: Promise<T>): Promise<T> {
     return this.lifecycle.trackAck(promise)
   }
 

@@ -163,7 +163,7 @@ function receiveFromPage<T>(end: ServerBroadcastEnd, handle: () => T): T | Promi
     return handle()
   } catch (err) {
     if (!isProtocolViolationError(err)) throw err
-    end._terminateWire()
+    end.terminateWire()
     return Promise.resolve({ ok: false, kind: 'error', message: err.message })
   }
 }
@@ -210,7 +210,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     this.selfSuppressed = grants.selfSuppressed
     this.grantedHidden = grants.hidden
     this.end = end
-    end._setOwner(this)
+    end.setOwner(this)
     end.listen((message) => receiveFromPage(end, () => this.receive(message)))
     end.onClose(() => {
       this.dmReplies.drop()
@@ -484,7 +484,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   /** A closing stub's close waits for the reply, as for the replies a participant stub forwards. */
   private awaitDmReply(ackId: string, sender: string): void {
     void this.end
-      ._trackAck(
+      .trackAck(
         this.dmReplies.await(ackId).then((reply) => reply && this.room.writes.publishDmAck(sender, ackId, reply)),
       )
       .catch(reportRoomError)
@@ -545,7 +545,7 @@ class RoomParticipantStub implements BroadcastEndOwner {
     this.participant = participant
     this.publishShield = publishShield
     this.end = end
-    end._setOwner(this)
+    end.setOwner(this)
     end.listen((message) => receiveFromPage(end, () => this.receive(message)))
     this.mirrorParticipant()
   }
@@ -635,12 +635,12 @@ class RoomParticipantStub implements BroadcastEndOwner {
     if (this.end.isClosed) return Promise.resolve(DM_FAILURE.left)
     const reply = this.dmReplies.await(msg.ackId!)
     this.notify(dmNotice(msg))
-    return this.end._trackAck(reply.then((answer) => answer ?? DM_FAILURE.left))
+    return this.end.trackAck(reply.then((answer) => answer ?? DM_FAILURE.left))
   }
 
   /** Its close waits for the reply's commit, as a room stub's does (`awaitDmReply`). */
   trackReply(replied: Promise<void>): void {
-    if (!this.end.isClosed) void this.end._trackAck(replied).catch(() => {})
+    if (!this.end.isClosed) void this.end.trackAck(replied).catch(() => {})
   }
 
   /** A closed stub's client gets no notice: one sent after an overflow ended it would arrive after a gap. */

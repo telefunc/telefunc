@@ -59,7 +59,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     assertBroadcastKey(opts.key)
     this.key = opts.key
     this._end = new ServerBroadcastEnd()
-    this._end._setOwner(this)
+    this._end.setOwner(this)
     this.routes = {
       text: new RouteSubscription({
         route: { key: this.key, kind: 'text' },
@@ -204,7 +204,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     kind: Kind,
     payload: BroadcastPayload<Kind>,
   ): Promise<ChannelPublishAck> {
-    return markHandled(this._end._trackAck(Promise.resolve(this.publishPayload(kind, payload))))
+    return markHandled(this._end.trackAck(Promise.resolve(this.publishPayload(kind, payload))))
   }
 
   private publishPayload<Kind extends BroadcastKind>(
