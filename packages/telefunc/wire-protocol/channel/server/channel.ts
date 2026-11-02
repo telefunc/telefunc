@@ -291,8 +291,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return CREDIT_WINDOW_MAX_BYTES + this.pastCreditAllowance() + this.bufferLimit + this.bufferLimitBinary
   }
 
-  /** How many bytes past credit a page that is still reading may be sent: the largest window a page grants, and all
-   *  that its sends put ahead of the page, which only the server code's `await` holds back. */
+  /** What the wire cap lets a page hold past its credit: the largest window a page grants, and all that this channel's
+   *  sends put ahead of the page, which only the server code's `await` holds back. */
   protected pastCreditAllowance(): number {
     return CREDIT_WINDOW_MAX_BYTES + this.bytesAhead()
   }

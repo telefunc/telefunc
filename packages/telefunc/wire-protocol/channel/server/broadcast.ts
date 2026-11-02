@@ -61,7 +61,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this.key = opts.key
   }
 
-  /** Its page grants the largest window at once: a quarter of it past credit is more than the page reads unreported. */
+  /** A publish can't be awaited per page, so a broadcast's page gets a quarter of the largest window past credit, not
+   *  what was published to it: a page that stops reading has its wire cut, and reconnects. */
   protected override pastCreditAllowance(): number {
     return this.sendCredit.peerByteWindowMax / 4
   }
