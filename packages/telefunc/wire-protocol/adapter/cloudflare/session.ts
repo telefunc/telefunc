@@ -1,8 +1,7 @@
-export { currentCloudflareSession, requireCloudflareSession, withCloudflareSession }
+export { currentCloudflareSession, withCloudflareSession }
 export type { CloudflareSession }
 
 import { getRawContext, restoreContext } from '../../../node/server/context/context.js'
-import { assertUsage } from '../../../utils/assert.js'
 import { CHANNEL_MUX, type ChannelMux } from '../../channel/server/ChannelMux.js'
 import type { CloudflareBroadcastMember } from './broadcast.js'
 
@@ -21,13 +20,4 @@ function withCloudflareSession<T>(session: CloudflareSession, fn: () => T): T {
 
 function currentCloudflareSession(): CloudflareSession | undefined {
   return getRawContext()?.[SESSION] as CloudflareSession | undefined
-}
-
-function requireCloudflareSession(): CloudflareSession {
-  const session = currentCloudflareSession()
-  assertUsage(
-    session !== undefined,
-    'A Cloudflare subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.',
-  )
-  return session
 }

@@ -11,7 +11,8 @@ import type {
 } from '../../backend/driver.js'
 import type { CloudflareBroadcast } from './broadcast.js'
 import { getCloudflareExtensionPlanes, type CloudflarePlaneKit } from './extensions.js'
-import { currentCloudflareSession, requireCloudflareSession } from './session.js'
+import { currentCloudflareSession } from './session.js'
+import { assert } from '../../../utils/assert.js'
 
 type CloudflareBackendOptions = {
   planeKit: CloudflarePlaneKit
@@ -42,6 +43,8 @@ class CloudflareBackend implements BroadcastDriver {
   }
 
   subscribe(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
-    return requireCloudflareSession().broadcast.openSubscription(route, receiver)
+    const session = currentCloudflareSession()
+    assert(session !== undefined) // core refuses a subscribe outside a session
+    return session.broadcast.openSubscription(route, receiver)
   }
 }

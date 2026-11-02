@@ -1,4 +1,4 @@
-export { RoomSessionSubscriptions, currentRoomSessionSubscriptions, getRoomSessionSubscriptions }
+export { RoomSessionSubscriptions, currentRoomSessionSubscriptions }
 
 import {
   type BackendReceiver,
@@ -10,7 +10,7 @@ import {
 } from 'telefunc/__internal'
 import type { RoomSubscriptionSource } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
-import { assert, assertUsage } from '../utils/assert.js'
+import { assert } from '../utils/assert.js'
 import { ROUTE_RENEW_EVERY_MS, laneRoute, type RouteInstallation } from './routes.js'
 import type { CloudflareRoomAuthorityStub, RegisterWire, RenewWire } from './RoomAuthority.js'
 import type { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
@@ -32,15 +32,6 @@ function currentRoomSessionSubscriptions(driver: CloudflareRoomDriver): RoomSess
   const member = currentCloudflareMember()
   assert(member !== undefined) // a session DO's call runs in its Cloudflare session
   return (session.subscriptions ??= new RoomSessionSubscriptions({ sessionId: session.id, member, driver }))
-}
-
-function getRoomSessionSubscriptions(driver: CloudflareRoomDriver): RoomSessionSubscriptions {
-  const subscriptions = currentRoomSessionSubscriptions(driver)
-  assertUsage(
-    subscriptions !== null,
-    'A Cloudflare subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.',
-  )
-  return subscriptions
 }
 
 type RoomSessionSubscriptionsOptions = { sessionId: string; member: CloudflareMember; driver: CloudflareRoomDriver }

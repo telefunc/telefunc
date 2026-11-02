@@ -24,9 +24,10 @@ import type {
 import type { BackendReceiver, CloudflarePlaneKit, DriverAttempt, OrderingInfo } from 'telefunc/__internal'
 import { CLOUDFLARE_BUCKETS, currentCloudflareMember } from 'telefunc/__internal'
 import type { CloudflareRoomAuthorityStub } from './RoomAuthority.js'
-import { currentRoomSessionSubscriptions, getRoomSessionSubscriptions } from './RoomSessionSubscriptions.js'
+import { currentRoomSessionSubscriptions } from './RoomSessionSubscriptions.js'
 import { openRegionDirectory, openRoomAuthority } from './objects.js'
 import { compareCodePoints } from '../utils/SortedIds.js'
+import { assert } from '../utils/assert.js'
 
 /** A subscription requires its session DO's context; a lane commit made in one goes through that session's ordered
  *  stub. */
@@ -44,7 +45,9 @@ class CloudflareRoomDriver implements RoomDriver {
   }
 
   subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {
-    return getRoomSessionSubscriptions(this).subscribe(source, receiver)
+    const subscriptions = currentRoomSessionSubscriptions(this)
+    assert(subscriptions !== null) // core refuses a subscribe outside a session
+    return subscriptions.subscribe(source, receiver)
   }
 
   async readHead(roomId: string): Promise<RoomHead | null> {
