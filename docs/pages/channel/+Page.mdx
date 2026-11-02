@@ -268,6 +268,8 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 `seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted.
 
+`publish()` can't be awaited per subscriber, so a client that falls behind a broadcast is let go: once the server holds about 150 MiB for its connection (more when other channels share it; on Cloudflare with the `'ws'` transport it is never cut), the connection is cut, and the client reconnects with every channel on it. It then gets what it missed, unless its `BroadcastChannel` closes with one of the <Link href="#errors">errors</Link>: `ChannelOverflowError` if more was published to its key while it was offline than `bufferLimit`/`bufferLimitBinary` holds, or `NetworkError` if it missed more messages than the replay buffer holds.
+
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
 >
 > For <Link href="/stream/scale">scaling horizontally</Link>, you must configure `Broadcast` to publish across all server instances — see <Link href="/stream/scale#broadcast" />
