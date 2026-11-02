@@ -24,6 +24,7 @@ export {
 
 // A backend: one `installBackend` installs (`@telefunc/redis`, a test's), and the drivers of a plane (Room's).
 export type {
+  BackendListener,
   BackendPayload,
   BackendReceiver,
   BroadcastDriver,

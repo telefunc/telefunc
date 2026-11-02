@@ -1,10 +1,9 @@
 export { RoomPlane }
-export type { LaneConsumer }
 
 import {
   assertDriverOrdering,
   SharedSubscriptions,
-  type BackendPayload,
+  type BackendListener,
   type BackendSubscription,
   type OrderingInfo,
   type SourceRules,
@@ -25,9 +24,6 @@ import type {
 } from './contract.js'
 import { roomSubscriptionSourceKey } from './laneKey.js'
 import { assert } from '../utils/assert.js'
-
-/** A lane's consumer. */
-type LaneConsumer = (payload: Uint8Array, ordering: OrderingInfo) => void
 
 type RoomPlaneOptions = { driver: RoomDriver }
 
@@ -87,13 +83,10 @@ class RoomPlane {
     roomId: string,
     inc: string,
     lane: LaneId | EveryTrackLane | EveryMemberLane,
-    receive: LaneConsumer,
+    listener: BackendListener<Uint8Array>,
   ): BackendSubscription {
-    // The manager checked that a lane delivers bytes.
-    return this.subscriptions.subscribe(
-      { roomId, inc, lane },
-      receive as (payload: BackendPayload, ordering: OrderingInfo) => void,
-    )
+    // The shared subscriptions checked that a lane delivers bytes.
+    return this.subscriptions.subscribe({ roomId, inc, lane }, listener as BackendListener)
   }
 
   dispose(): Promise<void> {

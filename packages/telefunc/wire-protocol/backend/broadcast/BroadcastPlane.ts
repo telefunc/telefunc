@@ -1,8 +1,7 @@
 export { BroadcastPlane }
 
 import { SharedSubscriptions, type BackendSubscription, type SourceRules } from '../SharedSubscriptions.js'
-import type { BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult } from '../driver.js'
-import type { OrderingInfo } from '../../wire/orderingFrame.js'
+import type { BackendListener, BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult } from '../driver.js'
 import type { BroadcastKind } from '../../wire/payloads.js'
 import type { ChannelPublishAck } from '../../channel/channel.js'
 import { broadcastRouteKey } from './routeKey.js'
@@ -48,10 +47,10 @@ class BroadcastPlane {
 
   subscribe<Kind extends BroadcastKind>(
     route: BroadcastRoute<Kind>,
-    receive: (payload: BroadcastPayload<Kind>, ordering: OrderingInfo) => void,
+    listener: BackendListener<BroadcastPayload<Kind>>,
   ): BackendSubscription {
-    // The manager checked that a route delivers its kind.
-    const deliver = receive as (payload: BroadcastPayload, ordering: OrderingInfo) => void
+    // The shared subscriptions checked that a route delivers its kind.
+    const deliver = listener as BackendListener
     const published = this.driver.published?.(route.key) ?? 0
     if (published === 0) return this.subscriptions.subscribe(route, deliver)
     // A consumer gets only what is published after it subscribed, as the driver fixed each publish's recipients.

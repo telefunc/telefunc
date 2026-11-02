@@ -10,10 +10,15 @@ import { getChannelLimits } from '../../node/server/serverConfig.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import { assertDriverOrdering } from './driverOrdering.js'
-import type { AttemptState, BackendPayload, BackendReceiver, DriverAttempt, SubscriptionDriver } from './driver.js'
+import type {
+  AttemptState,
+  BackendListener,
+  BackendPayload,
+  BackendReceiver,
+  DriverAttempt,
+  SubscriptionDriver,
+} from './driver.js'
 import type { OrderingInfo } from '../wire/orderingFrame.js'
-
-type Receive = (payload: BackendPayload, ordering: OrderingInfo) => void
 
 /** How long a send waits for its host's establishing attempts. */
 const ESTABLISH_WAIT_MS = 60_000
@@ -104,12 +109,12 @@ class SharedSubscriptions<Source> {
     return wait.established.then(() => send(this.endWait(waiting))) as Promise<Awaited<R>>
   }
 
-  subscribe(source: Source, receive: Receive): BackendSubscription {
+  subscribe(source: Source, listener: BackendListener): BackendSubscription {
     const key = this.sources.key(source)
     const slotKey = JSON.stringify([this.hostKeyHere(), key])
     const delivers = this.sources.deliveryKind(source)
     const slot = getOrCreate(this.slots, slotKey, () => this.openSlot({ owner: this, source, key, slotKey, delivers }))
-    return slot.attach(receive)
+    return slot.attach(listener)
   }
 
   async dispose(): Promise<void> {
@@ -278,8 +283,8 @@ class SubscriptionSlot<Source> implements BackendReceiver {
     return this.readiness.promise
   }
 
-  attach(receiver: Receive): BackendSubscription {
-    const consumer = new Consumer({ slot: this, receiver })
+  attach(listener: BackendListener): BackendSubscription {
+    const consumer = new Consumer({ slot: this, listener })
     this.attached.add(consumer)
     this.snapshot = null
     if (this.attempt === null && !this.finished) this.start()
@@ -305,11 +310,11 @@ class SubscriptionSlot<Source> implements BackendReceiver {
   deliver(payload: BackendPayload, ordering: OrderingInfo): void {
     if (this.early !== null) return this.keepEarly(payload, ordering)
     if (!this.checked(payload, ordering)) return
-    // The receiver is called here, not through a method of the consumer: one call less on every message.
+    // The listener is called here, not through a method of the consumer: one call less on every message.
     for (const consumer of this.targets()) {
       // Consumers are isolated from each other: one that throws is reported.
       try {
-        consumer.receiver(payload, ordering)
+        consumer.listener(payload, ordering)
       } catch (error) {
         console.error(error)
       }
@@ -351,7 +356,7 @@ class SubscriptionSlot<Source> implements BackendReceiver {
         // A consumer may leave, or stop the subscription, on one of them.
         if (this.finished || !this.attached.has(consumer)) continue
         try {
-          consumer.receiver(payload, ordering)
+          consumer.listener(payload, ordering)
         } catch (error) {
           console.error(error)
         }
@@ -418,18 +423,18 @@ class SubscriptionSlot<Source> implements BackendReceiver {
   }
 }
 
-type ConsumerOptions = { slot: SubscriptionSlot<unknown>; receiver: Receive }
+type ConsumerOptions = { slot: SubscriptionSlot<unknown>; listener: BackendListener }
 
 /** One consumer's subscription on a slot. */
 class Consumer implements BackendSubscription {
-  readonly receiver: Receive
+  readonly listener: BackendListener
   private readonly slot: SubscriptionSlot<unknown>
   private attached = true
-  private readonly listeners = new Set<(state: AttemptState) => void>()
+  private readonly stateListeners = new Set<(state: AttemptState) => void>()
 
-  constructor({ slot, receiver }: ConsumerOptions) {
+  constructor({ slot, listener }: ConsumerOptions) {
     this.slot = slot
-    this.receiver = receiver
+    this.listener = listener
   }
 
   get ready(): Promise<void> {
@@ -442,20 +447,20 @@ class Consumer implements BackendSubscription {
 
   onStateChange(listener: (state: AttemptState) => void): () => void {
     assert(this.attached)
-    this.listeners.add(listener)
-    return () => this.listeners.delete(listener)
+    this.stateListeners.add(listener)
+    return () => this.stateListeners.delete(listener)
   }
 
   async unsubscribe(): Promise<void> {
     if (!this.attached) return
     this.attached = false
     if (this.slot.state !== 'closed') this.notify('closed')
-    this.listeners.clear()
+    this.stateListeners.clear()
     await this.slot.detach(this)
   }
 
   notify(state: AttemptState): void {
-    for (const listener of this.listeners) {
+    for (const listener of this.stateListeners) {
       try {
         listener(state)
       } catch (error) {

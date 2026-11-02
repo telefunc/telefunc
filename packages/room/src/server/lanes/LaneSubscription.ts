@@ -3,16 +3,15 @@ export type { LaneAddress, LaneSubscriptionOptions, LaneSubscriptionOwner }
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
-import type { BackendSubscription, OrderingInfo } from 'telefunc/__internal'
-import type { LaneConsumer } from '../../backend/RoomPlane.js'
+import type { BackendListener, BackendSubscription, OrderingInfo } from 'telefunc/__internal'
 import type { RoomSubscriptionSource } from '../../backend/contract.js'
 assertIsNotBrowser()
 
 /** The plan that holds a lane subscription: it subscribes the lane, takes what the lane delivers, and is told as the
  *  lane ends, recovers, and goes pending or ready. */
 interface LaneSubscriptionOwner {
-  /** One attempt at `address`, delivering to `receiver`. */
-  subscribeLane(address: LaneAddress, receiver: LaneConsumer): BackendSubscription
+  /** One attempt at `address`, delivering to `listener`. */
+  subscribeLane(address: LaneAddress, listener: BackendListener<Uint8Array>): BackendSubscription
   onLaneDelivery(lane: LaneSubscription, payload: Uint8Array, info: OrderingInfo): void
   /** The lane ended for good: the owner's recovery policy replaces it. */
   onLaneTerminal(lane: LaneSubscription): void
@@ -38,13 +37,13 @@ class LaneSubscription {
   /** The lane it subscribes, which tells its owner what its readiness replans. */
   readonly address: LaneAddress
   private readonly owner: LaneSubscriptionOwner
-  /** Each attempt's receiver, built once per lane. */
-  private readonly receive: LaneConsumer
+  /** Each attempt's listener, built once per lane. */
+  private readonly listener: BackendListener<Uint8Array>
 
   constructor({ owner, address }: LaneSubscriptionOptions) {
     this.owner = owner
     this.address = address
-    this.receive = (payload, info) => owner.onLaneDelivery(this, payload, info)
+    this.listener = (payload, info) => owner.onLaneDelivery(this, payload, info)
   }
 
   get established(): boolean {
@@ -86,7 +85,7 @@ class LaneSubscription {
     this.ensurePendingReady()
     const previous = this.subscription
     this.unobserve?.()
-    const subscription = this.owner.subscribeLane(this.address, this.receive)
+    const subscription = this.owner.subscribeLane(this.address, this.listener)
     this.subscription = subscription
     let wasReady = subscription.state() === 'ready'
     if (wasReady) this.settleReady()

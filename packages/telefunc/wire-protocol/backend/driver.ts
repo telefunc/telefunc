@@ -1,6 +1,7 @@
 export { DriverAttempt }
 export type {
   AttemptState,
+  BackendListener,
   BackendPayload,
   BackendReceiver,
   BroadcastDriver,
@@ -21,6 +22,12 @@ type BroadcastPayload<Kind extends BroadcastKind = BroadcastKind> = { text: stri
 
 /** What an attempt delivers: a string on a text route, bytes on a binary route or a Room lane. */
 type BackendPayload = string | Uint8Array
+
+/** A consumer's callback, called with each message its subscription delivers. */
+type BackendListener<Payload extends BackendPayload = BackendPayload> = (
+  payload: Payload,
+  ordering: OrderingInfo,
+) => void
 
 /** A publish's ordering, and how many subscribers the backend handed it to, counted its own way (absent where it
  *  can't tell). */
