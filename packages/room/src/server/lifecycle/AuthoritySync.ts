@@ -1,5 +1,5 @@
 export { AuthoritySync }
-export type { AuthoritySyncOptions, AuthoritySyncOwner }
+export type { AuthorityChange, AuthoritySyncOptions, AuthoritySyncOwner }
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { raceTimeout } from '../../utils/raceTimeout.js'
@@ -8,27 +8,30 @@ import { createDeferred } from 'telefunc/__internal'
 import { getRoomPlane } from '../../backend/plane.js'
 import { ROOM_HORIZON_MS, ROOM_META_REPAIR_MS } from '../constants.js'
 import type { RoomIncarnation } from '../protocol.js'
-import type { MembershipEvent, RoomModel, RosterRead } from '../../shared/RoomModel.js'
+import type { RoomModel } from '../../shared/RoomModel.js'
+import type { RoomCtrlEnvelope } from '../../shared/protocol.js'
 import { reportRoomError } from '../reportRoomError.js'
 import { CONTROL_LANE, readOpenConfig } from '../lanes/lanes.js'
 import { reapAndReadRoster } from '../store/roster.js'
-import { dropReplacedMetaGenerations, readRoomMeta, readRoomMetaSeq, type StoredRoomMeta } from '../store/meta.js'
+import { dropReplacedMetaGenerations, readRoomMeta, readRoomMetaSeq } from '../store/meta.js'
 import type { LanePlan } from '../lanes/LanePlan.js'
+import type { RosterStream } from './RosterStream.js'
 assertIsNotBrowser()
 
-/** The replica whose view the sync keeps: what it renews, and where what the sync reads applies. */
+/** What the sync's reads found, as the control lane would carry it: newer room meta, the room closed, or a failover
+ *  rewound the lane, so the view forgets its meta seqs. */
+type AuthorityChange = Extract<RoomCtrlEnvelope, { __r: 'update' | 'closed' }> | { __r: 'rewound' }
+
+/** The replica whose view the sync keeps, which applies what the sync reads. */
 interface AuthoritySyncOwner {
-  applyAuthorityMeta(stored: StoredRoomMeta): void
-  /** A failover rewound the control lane: the view forgets its meta seqs. */
-  onControlLaneRewound(): void
-  /** Applies a complete roster read, and sends it to the clients it concerns; false if the view moved past it. */
-  applyRoster(roster: RosterRead, events: readonly MembershipEvent[]): Promise<boolean>
-  closeFromAuthority(): void
+  applyControl(change: AuthorityChange): void
 }
 
 type AuthoritySyncOptions = {
   owner: AuthoritySyncOwner
   incarnation: RoomIncarnation
+  /** Reconciles a roster read into the view, and sends it to the clients it concerns. */
+  roster: Pick<RosterStream, 'reconcile'>
   /** Read-only here: every change goes through the owner's methods. */
   model: Pick<
     RoomModel,
@@ -56,12 +59,14 @@ class AuthoritySync {
 
   private readonly owner: AuthoritySyncOwner
   private readonly incarnation: RoomIncarnation
+  private readonly roster: AuthoritySyncOptions['roster']
   private readonly model: AuthoritySyncOptions['model']
   private readonly lanePlan: AuthoritySyncOptions['lanePlan']
 
-  constructor({ owner, incarnation, model, lanePlan }: AuthoritySyncOptions) {
+  constructor({ owner, incarnation, roster, model, lanePlan }: AuthoritySyncOptions) {
     this.owner = owner
     this.incarnation = incarnation
+    this.roster = roster
     this.model = model
     this.lanePlan = lanePlan
   }
@@ -126,7 +131,7 @@ class AuthoritySync {
     this.covered = 0
     this.received = 0
     this.runStart = 0
-    this.owner.onControlLaneRewound()
+    this.owner.applyControl({ __r: 'rewound' })
   }
 
   private cover(mark: number): void {
@@ -206,7 +211,6 @@ class AuthoritySync {
   /** The stored meta, applied if newer, and read whole only when it holds a write the view lacks or one waits; false
    *  once the room is gone. */
   async reconcileMeta(): Promise<boolean> {
-    const owner = this.owner
     const config = await readOpenConfig(this.incarnation)
     if (config !== null && !this.model.metaWaiting) {
       const seq = await readRoomMetaSeq(this.incarnation.id, config.inc)
@@ -214,17 +218,16 @@ class AuthoritySync {
     }
     const stored = config === null ? null : await readRoomMeta(this.incarnation.id, config)
     if (stored === null) {
-      owner.closeFromAuthority()
+      this.owner.applyControl({ __r: 'closed' })
       return false
     }
-    owner.applyAuthorityMeta(stored)
+    this.owner.applyControl({ __r: 'update', seq: stored.seq, meta: stored.entries })
     return true
   }
 
   /** One roster read, with the membership events this view got meanwhile replayed onto it, so it undoes none. It covers
    *  the control lane up to the order read before it, as a frame commits after the cells it changed. */
   private async runMemberRefresh(): Promise<void> {
-    const owner = this.owner
     if (this.model.closed) return
     const mark = await this.controlMark()
     // The events grow while the roster is read and reconciled.
@@ -232,7 +235,7 @@ class AuthoritySync {
     try {
       const roster = await reapAndReadRoster(this.incarnation)
       const behind = await this.deliveryBehind()
-      if (this.model.closed || !(await owner.applyRoster({ ...roster, behind }, events))) return
+      if (this.model.closed || !(await this.roster.reconcile({ ...roster, behind }, events))) return
     } finally {
       this.model.stopRecordingMembership()
     }

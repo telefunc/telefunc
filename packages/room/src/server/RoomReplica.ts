@@ -24,9 +24,9 @@ import type {
   SenderStamp,
 } from '../shared/protocol.js'
 import type { RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope, RoomIncarnation } from './protocol.js'
-import { RoomModel, type MembershipEvent, type RosterRead, type ServerModelOwner } from '../shared/RoomModel.js'
+import { RoomModel, type ServerModelOwner } from '../shared/RoomModel.js'
 import type { LeaveCause } from '../types.js'
-import { AuthoritySync, type AuthoritySyncOwner } from './lifecycle/AuthoritySync.js'
+import { AuthoritySync, type AuthorityChange, type AuthoritySyncOwner } from './lifecycle/AuthoritySync.js'
 import { PendingDmAcks } from './PendingDmAcks.js'
 import { reportRoomError } from './reportRoomError.js'
 import { SEMANTIC_LANE, decodeLaneEnvelope, decodeRoomText, withinRoomHorizon } from './lanes/lanes.js'
@@ -144,7 +144,8 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     const { outgoingDemand } = demandExchange
     this.lanePlan = new LanePlan({ owner: this, roles: this.roles, incarnation, model, outgoingDemand, demandExchange })
     const lanePlan = this.lanePlan
-    this.authority = new AuthoritySync({ owner: this, incarnation, model, lanePlan })
+    this.roster = new RosterStream({ model, stubs: this.stubs })
+    this.authority = new AuthoritySync({ owner: this, incarnation, roster: this.roster, model, lanePlan })
     const authority = this.authority
     this.heartbeat = new RoomHeartbeat({
       hosting: this.hosting,
@@ -155,7 +156,6 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
       demandExchange,
       authority,
     })
-    this.roster = new RosterStream({ model, stubs: this.stubs, authority })
   }
 
   /** A new handle on this view, given the parts of it a handle and its stubs, participants and writes use. */
@@ -188,10 +188,6 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
 
   recoverFromGap(): Promise<void> {
     return this.authority.reconcileAuthority()
-  }
-
-  applyRoster(roster: RosterRead, events: readonly MembershipEvent[]): Promise<boolean> {
-    return this.roster.reconcile(roster, events)
   }
 
   /** A handle's listeners changed. */
@@ -247,7 +243,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
 
   /** The stub's client attached: it gets the roster, the room's meta and the demand for the members it holds. */
   onStubAttached(stub: RoomStub): void {
-    this.roster.sendTo(stub)
+    this.roster.sendTo(stub, this.authority.ensureRoster())
     stub.relayEvent({ __r: 'update', seq: this.model.metaSeq, meta: this.model.metaEntries() })
     for (const member of stub.heldMembers()) {
       stub.relayEvent({ __r: 'demand-state', member, tracks: this.incomingDemand.wanted(member) })
@@ -295,8 +291,15 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
 
   /** Applies a presence event to the model and relays what it changed to the clients: as the lane carried it when
    *  `carried` is given, else as applied. A leave reaches them from `onMemberLeft`, whatever applied it, and an update
-   *  as each one it let apply, in seq order. */
-  applyControl(event: PresenceEvent, carried?: () => string): void {
+   *  as each one it let apply, in seq order. A failover's rewind of the control lane, and of the meta cells, which
+   *  share its slot, makes the view forget its meta seqs. */
+  applyControl(event: PresenceEvent | AuthorityChange, carried?: () => string): void {
+    if (event.__r === 'rewound') {
+      this.model.forgetMetaSeqs()
+      for (const mirror of this.metaMirrors) mirror.rewound()
+      for (const stub of this.stubs) stub.relayEvent({ __r: 'rewound' })
+      return
+    }
     const relay = () => this.relayControl(event, carried ?? (() => unorderedEventText(event)))
     switch (event.__r) {
       case 'join':
@@ -403,18 +406,6 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   }
 
   // What the replica's parts ask of it
-
-  /** A newer meta reaching this view through the authority never reached its clients as an event. */
-  applyAuthorityMeta({ entries, seq }: StoredRoomMeta): void {
-    this.applyControl({ __r: 'update', seq, meta: entries })
-  }
-
-  /** A failover rewound the room's control lane, and its meta cells with it, which share its slot. */
-  onControlLaneRewound(): void {
-    this.model.forgetMetaSeqs()
-    for (const mirror of this.metaMirrors) mirror.rewound()
-    for (const stub of this.stubs) stub.relayEvent({ __r: 'rewound' })
-  }
 
   /** The authority says the room closed; the lane that would have carried `closed` failed. */
   closeFromAuthority(): void {

@@ -8,7 +8,6 @@ import { Slice } from '../../shared/Slice.js'
 import type { MembershipEvent, RoomModel, RosterRead } from '../../shared/RoomModel.js'
 import { reportRoomError } from '../reportRoomError.js'
 import { type RoomStub, unorderedEventText } from '../RoomStub.js'
-import type { AuthoritySync } from './AuthoritySync.js'
 assertIsNotBrowser()
 
 /** One part of a roster stream: its index, its members' ids, and whether a part follows. */
@@ -21,7 +20,6 @@ type RosterStreamOptions = {
   model: RoomModel
   /** The view's attached stubs; one that leaves it drops out of a stream. */
   stubs: ReadonlySet<RoomStub>
-  authority: Pick<AuthoritySync, 'ensureRoster'>
 }
 
 /** A view's roster to its clients: on attach, and again to every client once a roster read corrected a drift. */
@@ -38,12 +36,10 @@ class RosterStream {
 
   private readonly model: RoomModel
   private readonly stubs: ReadonlySet<RoomStub>
-  private readonly authority: RosterStreamOptions['authority']
 
-  constructor({ model, stubs, authority }: RosterStreamOptions) {
+  constructor({ model, stubs }: RosterStreamOptions) {
     this.model = model
     this.stubs = stubs
-    this.authority = authority
   }
 
   /** Whether a client of the view was sent every member it holds, as it holds them:
@@ -69,10 +65,10 @@ class RosterStream {
     }
   }
 
-  /** An attached stub's first roster, once the view knows it; a failed read owes it the next one. */
-  sendTo(stub: RoomStub): void {
-    void this.authority
-      .ensureRoster()
+  /** An attached stub's first roster, once `known`, the view's roster read, settles; a failed read owes it the next
+   *  one. */
+  sendTo(stub: RoomStub, known: Promise<void>): void {
+    void known
       .then(() => {
         if (this.stubs.has(stub) && !this.model.closed) return this.stream([stub])
       })
