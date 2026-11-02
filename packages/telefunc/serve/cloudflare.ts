@@ -109,6 +109,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       const target = readForwardedTarget(request)
       if (target) broadcast.attachIsolateInfo(target.sessionInstanceName, target.locationBucket)
       if (request.headers.get('upgrade') === 'websocket') {
+        // crossws accepts it for hibernation, yet this object never hibernates while one is open, and is billed for
+        // that time: its channels live in memory, and each wire's ping deadline is a timer (`armPingDeadline`).
         return crosswsAdapter.handleDurableUpgrade(this, request)
       }
       const context = getContext ? await getContext(request, this.env as Cloudflare.Env) : undefined
