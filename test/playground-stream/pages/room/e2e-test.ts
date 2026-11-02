@@ -10,7 +10,16 @@ export {
 }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Response, WebSocket } from 'playwright-chromium'
-import { navigate, getResult, getCleanupState, runServerAction, cutWire, forceServerGc, sleep } from '../../e2e-utils'
+import {
+  navigate,
+  getResult,
+  getCleanupState,
+  runServerAction,
+  cutWire,
+  forceServerGc,
+  sleep,
+  canCutWire,
+} from '../../e2e-utils'
 import { newCDPSession } from '../../../utils'
 
 /** On SSE the server waits out the 60 s reconnectTimeout for a closed tab. */
@@ -731,6 +740,7 @@ function testRoom() {
       }
     })
   test("room: another page's member shows when its page drops and comes back, and leaves with 'disconnected' once its page never returns", async () => {
+    if (!canCutWire()) return
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-connection')
     const { roomId } = await autoRetry(() => getResult<{ roomId: string }>('#room-result'))
@@ -766,6 +776,7 @@ function testRoom() {
     }, CLOSED_TAB_WAIT)
   })
   test("room: in a chat, everyone sees a member whose tab went offline as reconnecting, in the list, the activity, Who's online and that member's profile, and as back once it is; the member sees itself reconnecting at once, in the list and on its own profile, and back at once with no flicker", async () => {
+    if (!canCutWire()) return
     const chatId = `e2e-chat:${crypto.randomUUID()}`
     const alice = await openChat(chatId, 'Alice', 'join')
     const bob = await openChat(chatId, 'Bob', 'join')
@@ -816,6 +827,7 @@ function testRoom() {
     }
   })
   test("room: in a members-only chat, a member whose tab goes offline while the membership service decides is shown reconnecting once admitted, and back once its tab is, and its tab then shows the member's own renames", async () => {
+    if (!canCutWire()) return
     const chatId = `e2e-chat:${crypto.randomUUID()}`
     const alice = await openChat(chatId, 'Alice', 'join')
     const context = await page.context().browser()!.newContext()
@@ -856,6 +868,7 @@ function testRoom() {
     }
   })
   test("room: in a chat, the server announces when a signed-in member's tab goes offline and comes back, and someone watching unseen drops without anyone seeing it; the signed-in member sees itself reconnecting, in the list and on its own profile", async () => {
+    if (!canCutWire()) return
     const chatId = `e2e-chat:${crypto.randomUUID()}`
     const alice = await openChat(chatId, 'Alice', 'join')
     const carol = await openChat(chatId, 'Carol', 'sign-in')
@@ -1101,6 +1114,7 @@ function testRoom() {
     },
   )
   test('room: a page back from offline gets what its room sent meanwhile, in order, and the leaves, kick and close that happened while it was away, with their causes', async () => {
+    if (!canCutWire()) return
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-away')
     let roomId = ''
@@ -1127,6 +1141,7 @@ function testRoom() {
     })
   })
   test("room: a page back from offline, twice, gets its room's meta each time, though its room sent it more meanwhile than bufferLimit holds", async () => {
+    if (!canCutWire()) return
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-meta-away')
     let roomId = ''
@@ -1148,6 +1163,7 @@ function testRoom() {
     }
   })
   test('room: a page offline while its room sent it more than bufferLimit holds is let go at its reconnect: its view closes and its member leaves, with no gap delivered', async () => {
+    if (!canCutWire()) return
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-overflow')
     let roomId = ''
@@ -1174,6 +1190,7 @@ function testRoom() {
     })
   })
   test('room: a page offline while its server-joined participant was sent more than bufferLimit holds is let go at its reconnect: its participant leaves, with no gap delivered', async () => {
+    if (!canCutWire()) return
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-participant-overflow')
     let roomId = ''
@@ -1276,6 +1293,7 @@ function testRoom() {
     },
   )
   test('room: a page that reconnects while its join is pending gets the leave, with its cause, of a member removed while it was away', async () => {
+    if (!canCutWire()) return
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-away-join')
     let roomId = ''
