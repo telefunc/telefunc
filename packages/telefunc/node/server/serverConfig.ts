@@ -27,7 +27,7 @@ import { registerShieldType } from './shield.js'
 import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
 import { toPosixPath, pathIsAbsolute, assertPosixPath } from '../../utils/path.js'
 import { configureBroadcastTransport } from '../../wire-protocol/backend/install.js'
-import type { BroadcastTransport } from '../../wire-protocol/backend/broadcast/transport.js'
+import type { BroadcastTransport } from '../../wire-protocol/backend/broadcast/TransportBroadcastDriver.js'
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
   CHANNEL_BUFFER_LIMIT_BINARY_BYTES,

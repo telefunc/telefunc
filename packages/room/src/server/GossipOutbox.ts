@@ -7,7 +7,7 @@ import { ROOM_DEMAND_PAGE_ENTRIES, ROOM_GOSSIP_IN_FLIGHT_MAX } from './constants
 import type { RoomDemandPage } from './protocol.js'
 import { reportRoomError } from './reportRoomError.js'
 import { DEMAND_LANE, encodeDemandPage } from './lanes/lanes.js'
-import type { RoomIncarnation } from './lifecycle/lifecycle.js'
+import type { RoomIncarnation } from './lifecycle/hold.js'
 import { Slice } from '../shared/Slice.js'
 assertIsNotBrowser()
 

@@ -17,7 +17,7 @@ import {
   decodeRoomRecord,
   encodeRoomRecord,
 } from '../lanes/lanes.js'
-import { afterHoldChange, holdDelta, type HoldDelta, type RoomIncarnation } from '../lifecycle/lifecycle.js'
+import { afterHoldChange, holdDelta, type HoldDelta, type RoomIncarnation } from '../lifecycle/hold.js'
 import { cleanupCellKey, dmReplyCellPrefix, identityCellKey, leaseMemberCellKey, memberCellKey } from './cells.js'
 import type { RoomLease } from './lease.js'
 import { mutateHosted } from './leases.js'

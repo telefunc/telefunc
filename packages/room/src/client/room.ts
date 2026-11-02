@@ -14,7 +14,13 @@ import {
   type BinaryWantChange,
   type TrackKey,
 } from '../shared/binary.js'
-import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetaArgument, recipientId } from '../shared/model.js'
+import {
+  assertKnownOptions,
+  normalizeJoinOptions,
+  ownMessage,
+  ownMetaArgument,
+  recipientId,
+} from '../shared/RoomModel.js'
 import {
   hasRoomTag,
   inboxMessageFromWire,
@@ -38,11 +44,11 @@ import {
   type RoomSnapshotMetadata,
   type RoomStubRequest,
 } from '../shared/protocol.js'
-import { RoomModel, type MembershipEvent, type RoomModelOwner } from '../shared/model.js'
+import { RoomModel, type MembershipEvent, type RoomModelOwner } from '../shared/RoomModel.js'
 import { RoomState, RoomStateView, type RoomStateOwner } from '../shared/state.js'
 import { ROOM_TRACK_WANTS_MAX } from '../shared/constants.js'
 import { CLIENT_ROOM_BUG_MESSAGE, roomResultValue } from '../shared/errors.js'
-import { ParticipantBase } from '../shared/participant.js'
+import { ParticipantBase } from '../shared/ParticipantBase.js'
 import type { MetaRewinds } from '../shared/MemberMeta.js'
 import type {
   BinaryPublishOptions,

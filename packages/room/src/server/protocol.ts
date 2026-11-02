@@ -17,7 +17,7 @@ import type { RoomMeta } from '../types.js'
 type RoomConfigRecord = {
   meta: RoomMeta
   inc: string
-  /** Its hold timeouts (see `lifecycle.ts`); a room that never closes on its own has none. */
+  /** Its hold timeouts (see `hold.ts`); a room that never closes on its own has none. */
   hold: HoldConfig | null
 }
 

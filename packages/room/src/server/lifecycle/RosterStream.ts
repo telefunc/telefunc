@@ -5,9 +5,9 @@ import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { ROOM_ROSTER_PART_MEMBERS } from '../constants.js'
 import type { MemberSnapshot, RoomRosterEvent } from '../../shared/protocol.js'
 import { Slice } from '../../shared/Slice.js'
-import type { MembershipEvent, RoomModel } from '../../shared/model.js'
+import type { MembershipEvent, RoomModel } from '../../shared/RoomModel.js'
 import { reportRoomError } from '../reportRoomError.js'
-import { type RoomStub, unorderedEventText } from '../stub.js'
+import { type RoomStub, unorderedEventText } from '../RoomStub.js'
 import type { AuthoritySync } from './AuthoritySync.js'
 assertIsNotBrowser()
 

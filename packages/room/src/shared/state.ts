@@ -18,7 +18,7 @@ import {
   type BinaryWantChange,
   type TrackKey,
 } from './binary.js'
-import { assertKnownOptions, senderOf, type MemberEntry, type RoomModel } from './model.js'
+import { assertKnownOptions, senderOf, type MemberEntry, type RoomModel } from './RoomModel.js'
 import type { MemberSnapshot, MemberWants, RoomDataEvent, SenderStamp } from './protocol.js'
 import type { BinaryFrameInfo, LeaveCause, ParticipantMeta, RemoteParticipant, RoomMeta, Sender } from '../types.js'
 

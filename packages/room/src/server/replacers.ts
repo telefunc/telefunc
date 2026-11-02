@@ -9,7 +9,7 @@ import {
 import { ServerLocalParticipant, ServerRoom } from './room.js'
 import type { RemoteParticipant } from '../types.js'
 import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from '../shared/protocol.js'
-import { ResponseRoomGrants } from './stub.js'
+import { ResponseRoomGrants } from './RoomStub.js'
 import { remoteBacking } from '../shared/state.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getOrCreate } from '../utils/getOrCreate.js'

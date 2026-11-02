@@ -5,7 +5,7 @@ import { ACK_STATUS, decode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { configureBroadcastTransport, disposeBackend } from '../../backend/install.js'
-import type { BroadcastTransport } from '../../backend/broadcast/transport.js'
+import type { BroadcastTransport } from '../../backend/broadcast/TransportBroadcastDriver.js'
 
 afterEach(() => disposeBackend())
 

@@ -10,7 +10,7 @@ export { MAX_CHANNELS_PER_CONNECTION } from '../../wire-protocol/constants.js'
 
 // An add-on that drives a page's channel ends: Room's stubs and its client.
 export type { ServerBroadcastEnd, ClientBroadcast }
-export type { BroadcastEndOwner } from '../../wire-protocol/channel/server/broadcastEnd.js'
+export type { BroadcastEndOwner } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 export type { BroadcastKind } from '../../wire-protocol/wire/payloads.js'
 export type { ChannelPublishAck, ChannelPublishInfo } from '../../wire-protocol/channel/channel.js'
 export { encodePublish } from '../../wire-protocol/wire/publishInfo.js'
@@ -39,7 +39,7 @@ export { SubscriptionManager } from '../../wire-protocol/backend/SubscriptionMan
 export { assertDriverOrdering } from '../../wire-protocol/backend/driverOrdering.js'
 export { decodeOrderingFrame } from '../../wire-protocol/wire/orderingFrame.js'
 export { MemoryBackend } from '../../wire-protocol/backend/memory/MemoryBackend.js'
-export { MemoryPubSub, type Subscribers } from '../../wire-protocol/backend/memory/deliveries.js'
+export { MemoryPubSub, type Subscribers } from '../../wire-protocol/backend/memory/MemoryPubSub.js'
 export { ChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
 
 // A Cloudflare extension: Room's session and authority Durable Objects.
@@ -57,7 +57,7 @@ export type {
 } from '../../wire-protocol/adapter/cloudflare/extensions.js'
 export { OrderedStubs } from '../../wire-protocol/adapter/cloudflare/OrderedStubs.js'
 
-import type { ServerBroadcastEnd as ServerBroadcastEndClass } from '../../wire-protocol/channel/server/broadcastEnd.js'
+import type { ServerBroadcastEnd as ServerBroadcastEndClass } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 import type { ClientBroadcast as ClientBroadcastClass } from '../../wire-protocol/channel/client/broadcast.js'
 
 /** The members of a page's broadcast end that an add-on drives. */

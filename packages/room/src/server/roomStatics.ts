@@ -13,7 +13,7 @@ import {
   ownMessage,
   ownMetadata,
   removedCause,
-} from '../shared/model.js'
+} from '../shared/RoomModel.js'
 import type { MemberSnapshot, RoomEnvelope } from '../shared/protocol.js'
 import type { RoomConfigRecord } from './protocol.js'
 import type {
@@ -46,11 +46,11 @@ import {
 } from './store/roster.js'
 import { SEMANTIC_LANE, acceptedOrThrow, commitLane, inboxOf, openConfig, encodeRoomRecord } from './lanes/lanes.js'
 import { ServerRoom } from './room.js'
-import { RoomReplica } from './replica.js'
+import { RoomReplica } from './RoomReplica.js'
 import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './store/meta.js'
-import { metaObjectOf } from '../shared/metaState.js'
+import { metaObjectOf } from '../shared/RoomMetaState.js'
 import { closeIncarnation } from './lifecycle/close.js'
-import { cancelClose, type RoomIncarnation } from './lifecycle/lifecycle.js'
+import { cancelClose, type RoomIncarnation } from './lifecycle/hold.js'
 import { repairRoomIndex } from './store/directory.js'
 import { ROOM_GUARD_USAGE } from './constants.js'
 

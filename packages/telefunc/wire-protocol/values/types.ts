@@ -42,7 +42,7 @@ export type {
 
 import type { ServerChannel } from '../channel/server/channel.js'
 import type { ServerBroadcast } from '../channel/server/broadcast.js'
-import type { ServerBroadcastEnd } from '../channel/server/broadcastEnd.js'
+import type { ServerBroadcastEnd } from '../channel/server/ServerBroadcastEnd.js'
 import type { ClientChannel } from '../channel/client/channel.js'
 import type { ClientBroadcast } from '../channel/client/broadcast.js'
 import type { AbortError } from '../../shared/Abort.js'

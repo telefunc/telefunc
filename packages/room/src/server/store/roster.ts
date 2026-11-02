@@ -7,7 +7,7 @@ import type { ParticipantMeta } from '../../types.js'
 import { memberMetaOf, readMembersMetaCells, type MemberMetaCells } from './meta.js'
 import { eachInFlight, readOpenCells, readPrefix, readPrefixAt } from './cellStore.js'
 import { decodeRoomRecord } from '../lanes/lanes.js'
-import type { RoomIncarnation } from '../lifecycle/lifecycle.js'
+import type { RoomIncarnation } from '../lifecycle/hold.js'
 import {
   CLEANUP_CELL_PREFIX,
   LEASE_CELL_PREFIX,

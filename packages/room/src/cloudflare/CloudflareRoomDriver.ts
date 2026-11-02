@@ -23,8 +23,8 @@ import type {
 } from '../backend/contract.js'
 import type { BackendReceiver, DriverAttempt, OrderingInfo, TelefuncExtensionNamespace } from 'telefunc/__internal'
 import { CLOUDFLARE_BUCKETS, currentCloudflareMember } from 'telefunc/__internal'
-import type { CloudflareRoomAuthorityStub } from './do.js'
-import { currentRoomSessionSubscriptions, getRoomSessionSubscriptions } from './subscription.js'
+import type { CloudflareRoomAuthorityStub } from './RoomAuthority.js'
+import { currentRoomSessionSubscriptions, getRoomSessionSubscriptions } from './RoomSessionSubscriptions.js'
 import { openRegionDirectory, openRoomAuthority } from './objects.js'
 import { compareCodePoints } from '../utils/SortedIds.js'
 

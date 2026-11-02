@@ -14,7 +14,7 @@ import type {
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 import { reportBug } from './channel.js'
-import { ServerBroadcastEnd, type BroadcastEndOwner } from './broadcastEnd.js'
+import { ServerBroadcastEnd, type BroadcastEndOwner } from './ServerBroadcastEnd.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import type { BroadcastPayload, BroadcastRoute } from '../../backend/driver.js'

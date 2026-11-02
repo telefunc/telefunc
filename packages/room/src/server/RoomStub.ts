@@ -42,7 +42,7 @@ import {
   type LaneHolder,
   type ReplayHold,
 } from './lifecycle/replay.js'
-import { TailHold, type TailEntry, type TailHoldOwner } from './lifecycle/tail.js'
+import { TailHold, type TailEntry, type TailHoldOwner } from './lifecycle/TailHold.js'
 import { EVERY_MEMBER, EVERY_TRACK, DEFAULT_TRACK, type BinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './lanes/binaryWants.js'
 import { DM_FAILURE, RoomError, ROOM_BUG_MESSAGE, toRoomFailure } from '../shared/errors.js'

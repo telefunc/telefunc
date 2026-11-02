@@ -11,7 +11,7 @@ export type { PlaneDefinition }
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import type { BroadcastDriver, SubscriptionDriver } from './driver.js'
 import { BroadcastPlane } from './broadcast/BroadcastPlane.js'
-import { TransportBroadcastDriver, type BroadcastTransport } from './broadcast/transport.js'
+import { TransportBroadcastDriver, type BroadcastTransport } from './broadcast/TransportBroadcastDriver.js'
 import { MemoryBackend } from './memory/MemoryBackend.js'
 import { assertUsage } from '../../utils/assert.js'
 import { getOrCreate } from '../../utils/getOrCreate.js'

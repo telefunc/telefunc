@@ -12,7 +12,7 @@ import type {
 } from '../driver.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import type { BroadcastKind } from '../../wire/payloads.js'
-import { MemoryPubSub, type MemoryAttemptOwner, type Subscribers } from './deliveries.js'
+import { MemoryPubSub, type MemoryAttemptOwner, type Subscribers } from './MemoryPubSub.js'
 
 class MemoryBackend implements BroadcastDriver, MemoryAttemptOwner {
   /** The order of each key subscribed here; an unsubscribed key's next publish starts above `broadcastHighest`. */

@@ -5,7 +5,7 @@ export { openRoomAuthority, openRegionDirectory }
 
 import type { TelefuncExtensionNamespace, TelefuncExtensionStub } from 'telefunc/__internal'
 import { ROOM_CLOUDFLARE_EXTENSION, ROOM_CLOUDFLARE_PREFIX } from '../server/constants.js'
-import type { CloudflareRoomAuthorityStub } from './do.js'
+import type { CloudflareRoomAuthorityStub } from './RoomAuthority.js'
 
 /** `roomId`'s authority, placed in `bucket` if this `get()` creates it: Cloudflare places a Durable Object on its first
  *  `get()` and never moves it. */

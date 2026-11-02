@@ -176,7 +176,7 @@ async function extendLapse(
 
 /** One close timer per room in this process, with the incarnation it closes; it checks the record again when it
  *  fires. */
-const { closeTimers } = getGlobalObject('server/lifecycle.ts', () => ({
+const { closeTimers } = getGlobalObject('server/lifecycle/hold.ts', () => ({
   closeTimers: new Map<string, { inc: string; timer: ReturnType<typeof setTimeout> }>(),
 }))
 

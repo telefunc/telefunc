@@ -22,7 +22,7 @@ import { isObject } from '../utils/isObject.js'
 import { untether } from 'telefunc/__internal'
 import { Slice } from './Slice.js'
 import { getOrCreate } from '../utils/getOrCreate.js'
-import { RoomMetaState } from './metaState.js'
+import { RoomMetaState } from './RoomMetaState.js'
 import { MemberMeta, assignAttributes, type MetaRewinds } from './MemberMeta.js'
 import type {
   MemberMetaUpdate,

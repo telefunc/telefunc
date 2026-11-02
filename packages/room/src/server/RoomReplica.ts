@@ -23,13 +23,13 @@ import type {
   SenderStamp,
 } from '../shared/protocol.js'
 import type { RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope } from './protocol.js'
-import { RoomModel, type MembershipEvent, type ServerModelOwner } from '../shared/model.js'
+import { RoomModel, type MembershipEvent, type ServerModelOwner } from '../shared/RoomModel.js'
 import type { LeaveCause } from '../types.js'
 import { AuthoritySync, type AuthoritySyncOwner } from './lifecycle/AuthoritySync.js'
-import { PendingDmAcks } from './dmAcks.js'
+import { PendingDmAcks } from './PendingDmAcks.js'
 import { reportRoomError } from './reportRoomError.js'
 import { SEMANTIC_LANE, decodeLaneEnvelope, decodeRoomText, openConfig, withinRoomHorizon } from './lanes/lanes.js'
-import type { RoomIncarnation } from './lifecycle/lifecycle.js'
+import type { RoomIncarnation } from './lifecycle/hold.js'
 import { dropDmReply, takeDmReplies } from './store/dmReplies.js'
 import { evictMember } from './store/members.js'
 import { finishLeaseCleanups, holdViews, removeView, renewLease } from './store/leases.js'
@@ -39,9 +39,9 @@ import { type MetaMirror, ServerRoom } from './room.js'
 import { RosterStream } from './lifecycle/RosterStream.js'
 import { toggle } from '../utils/sets.js'
 import { RoomLease } from './store/lease.js'
-import { MemberMessageTexts, type RoomStub, unorderedEventText } from './stub.js'
+import { MemberMessageTexts, type RoomStub, unorderedEventText } from './RoomStub.js'
 import { LanePlan, type LanePlanOwner } from './lanes/LanePlan.js'
-import { RoomHeartbeat, type RoomHeartbeatOwner } from './lifecycle/heartbeat.js'
+import { RoomHeartbeat, type RoomHeartbeatOwner } from './lifecycle/RoomHeartbeat.js'
 assertIsNotBrowser()
 
 /** What the control lane carries for the model: everything but another process's ask, which the report answers. */

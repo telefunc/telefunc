@@ -18,7 +18,7 @@ import {
   toRoomFailure,
   ROOM_BUG_MESSAGE,
 } from '../shared/errors.js'
-import { ownMetaArgument, senderOf } from '../shared/model.js'
+import { ownMetaArgument, senderOf } from '../shared/RoomModel.js'
 import type {
   MemberMetaUpdate,
   WholeMemberUpdate,
@@ -28,18 +28,18 @@ import type {
   SenderStamp,
 } from '../shared/protocol.js'
 import type { RoomDataEnvelope, RoomDmAckEnvelope } from './protocol.js'
-import type { RoomModel } from '../shared/model.js'
+import type { RoomModel } from '../shared/RoomModel.js'
 import type { RoomState } from '../shared/state.js'
 import type { ParticipantMeta, RoomAckReceipt, RoomSendReceipt, Sender } from '../types.js'
 import { memberCellKey } from './store/cells.js'
 import { reportRoomError } from './reportRoomError.js'
 import { SEMANTIC_LANE, acceptedOrThrow, commitLane, controlLane, encodeRoomRecord, inboxOf } from './lanes/lanes.js'
-import type { RoomIncarnation } from './lifecycle/lifecycle.js'
+import type { RoomIncarnation } from './lifecycle/hold.js'
 import { reapAndReadMembersById } from './store/roster.js'
 import { storeDmReply, takeDmReply } from './store/dmReplies.js'
 import { dropMemberMetaGeneration, writeMemberConnection, writeMemberMeta, type MemberMetaWrite } from './store/meta.js'
-import type { RoomReplica } from './replica.js'
-import type { PendingDmAcks } from './dmAcks.js'
+import type { RoomReplica } from './RoomReplica.js'
+import type { PendingDmAcks } from './PendingDmAcks.js'
 import type { RoomGuardHooks } from './roomStatics.js'
 assertIsNotBrowser()
 
