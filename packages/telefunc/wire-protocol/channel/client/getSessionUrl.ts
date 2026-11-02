@@ -3,7 +3,7 @@ export { getSessionUrl }
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { randomUuid } from '../../../utils/randomUuid.js'
 
-const globalObject = getGlobalObject<{ registry: Map<string, string> }>('sessionRegistry.ts', {
+const globalObject = getGlobalObject<{ registry: Map<string, string> }>('channel/client/getSessionUrl.ts', {
   registry: new Map<string, string>(),
 })
 
