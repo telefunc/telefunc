@@ -5,8 +5,9 @@ export {
   dropReplacedMetaGenerations,
   memberMetaMutations,
   SET_MEMBER_META,
+  SET_MEMBER_CONNECTION,
   setMemberMeta,
-  writeMemberConnection,
+  setMemberConnection,
   readMembersMetaCells,
   memberMetaOf,
 }
@@ -338,30 +339,39 @@ async function setMemberMeta(room: RoomIncarnation, id: string, write: MemberMet
   return value
 }
 
-/** The connection of the page holding member `id`, at the next `metaSeq`; null when the record already has it. */
-async function writeMemberConnection(
-  room: RoomIncarnation,
-  id: string,
-  connected: boolean,
-): Promise<{ update: MemberMetaUpdate; hidden: boolean } | null> {
-  const memberKey = memberCellKey(id)
-  return await retryCompareExchange(async () => {
-    const read = await readOpenCells(room.id, room.inc, [memberKey])
-    const raw = read.cells.get(memberKey)
-    if (raw === undefined) throw participantGoneError(id)
+type SetMemberConnectionArgs = { id: string; connected: boolean }
+
+/** The connection of the page holding member `id`, at the next `metaSeq`, and its event; null when the record already
+ *  has it, `'gone'` once the member left. */
+const SET_MEMBER_CONNECTION: RoomOperation<SetMemberConnectionArgs, MemberMetaWritten | null | 'gone'> = {
+  name: 'setMemberConnection',
+  plan(tx, { id, connected }) {
+    const memberKey = memberCellKey(id)
+    const raw = tx.cell(memberKey)
+    if (raw === undefined) return 'gone'
     const { disconnected, ...record } = decodeRoomRecord<RoomMemberRecord>(raw)
     if (connected === (disconnected !== true)) return null
     const seq = record.metaSeq + 1
     const next: RoomMemberRecord = { ...record, metaSeq: seq }
     if (!connected) next.disconnected = true
-    const result = await getRoomPlane().driver.compareExchangeCells(room.id, room.inc, {
-      expect: [{ key: memberKey, version: read.versions.get(memberKey)! }],
-      mutations: [{ key: memberKey, bytes: encodeRoomRecord(next) }],
-    })
-    if (result.kind === 'stale-incarnation') throw roomClosedError(room.id)
-    if (result.kind === 'conflict') return EXCHANGE_CONFLICT
-    return { update: { seq, connected }, hidden: record.hidden === true }
-  })
+    tx.write({ key: memberKey, bytes: encodeRoomRecord(next) })
+    const update: MemberMetaUpdate = { seq, connected }
+    const event: MemberMetaWritten['event'] = { __r: 'p-meta', id, ...update }
+    if (record.hidden) event.hidden = true
+    tx.commit(encodeRoomRecord(event))
+    return { update, event }
+  },
+}
+
+/** Writes the connection of member `id`'s page with its event; null when the record already has it. */
+async function setMemberConnection(
+  room: RoomIncarnation,
+  id: string,
+  connected: boolean,
+): Promise<MemberMetaWritten | null> {
+  const { value } = await runOperation(room, SET_MEMBER_CONNECTION, { id, connected })
+  if (value === 'gone') throw participantGoneError(id)
+  return value
 }
 
 /** The meta cells of every member, or of member `id`, by member, read after their `records` (by cell key). A page is

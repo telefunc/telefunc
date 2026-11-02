@@ -23,7 +23,6 @@ import type {
   MemberMetaUpdate,
   WholeMemberUpdate,
   RoomResult,
-  RoomCtrlEnvelope,
   RoomDmEnvelope,
   SenderStamp,
 } from '../shared/protocol.js'
@@ -33,10 +32,10 @@ import type { RoomState } from '../shared/state.js'
 import type { ParticipantMeta, RoomAckReceipt, RoomSendReceipt, Sender } from '../types.js'
 import { memberCellKey } from './store/cells.js'
 import { reportRoomError } from './reportRoomError.js'
-import { SEMANTIC_LANE, acceptedOrThrow, commitLane, controlLane, encodeRoomRecord, inboxOf } from './lanes/lanes.js'
+import { SEMANTIC_LANE, acceptedOrThrow, commitLane, encodeRoomRecord, inboxOf } from './lanes/lanes.js'
 import { reapAndReadMembersById } from './store/roster.js'
 import { storeDmReply, takeDmReply } from './store/dmReplies.js'
-import { setMemberMeta, writeMemberConnection, type MemberMetaWrite } from './store/meta.js'
+import { setMemberConnection, setMemberMeta, type MemberMetaWrite } from './store/meta.js'
 import type { RoomReplica } from './RoomReplica.js'
 import type { PendingDmAcks } from './PendingDmAcks.js'
 import type { RoomGuardHooks } from './roomStatics.js'
@@ -99,9 +98,9 @@ class RoomWrites {
 
   /** The connection of the page holding the member, which its holder here saw change. */
   async setMemberConnected(id: string, connected: boolean): Promise<void> {
-    await this.inCallOrder(`meta:${id}`, async (sent) => {
-      const written = await writeMemberConnection(this.incarnation, id, connected)
-      if (written !== null) await this.publishMemberUpdate(id, written.update, written.hidden, sent)
+    await this.inCallOrder(`meta:${id}`, async () => {
+      const written = await setMemberConnection(this.incarnation, id, connected)
+      if (written !== null) this.replica.applyControl(written.event)
     })
   }
 
@@ -113,20 +112,6 @@ class RoomWrites {
       this.replica.applyControl(event)
       return update
     })
-  }
-
-  private async publishMemberUpdate(
-    id: string,
-    update: MemberMetaUpdate,
-    hidden: boolean,
-    sent: () => void,
-  ): Promise<void> {
-    const accepted: Extract<RoomCtrlEnvelope, { __r: 'p-meta' }> = { __r: 'p-meta', id, ...update }
-    if (hidden) accepted.hidden = true
-    this.replica.applyControl(accepted)
-    const publishing = commitLane(controlLane(this.incarnation.id, this.incarnation.inc), encodeRoomRecord(accepted))
-    sent()
-    acceptedOrThrow(this.incarnation.id, await publishing)
   }
 
   async publishText(from: string, data: unknown, retain = false): Promise<ChannelPublishAck> {

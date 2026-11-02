@@ -5,9 +5,14 @@ import type { RoomOperation } from '../../backend/contract.js'
 import { recordOperation, type OperationReads, type OperationWrites } from '../../backend/operation.js'
 import { assert } from '../../utils/assert.js'
 import { JOIN, LEAVE } from './members.js'
-import { SET_MEMBER_META } from './meta.js'
+import { SET_MEMBER_CONNECTION, SET_MEMBER_META } from './meta.js'
 
-const OPERATIONS = { join: JOIN, leave: LEAVE, setMemberMeta: SET_MEMBER_META }
+const OPERATIONS = {
+  join: JOIN,
+  leave: LEAVE,
+  setMemberMeta: SET_MEMBER_META,
+  setMemberConnection: SET_MEMBER_CONNECTION,
+}
 
 type OperationArgs = { [Name in keyof typeof OPERATIONS]: Parameters<(typeof OPERATIONS)[Name]['plan']>[1] }
 
