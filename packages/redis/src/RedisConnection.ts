@@ -11,6 +11,7 @@ import {
 } from './ioredis.js'
 import { assertKeyPrefix } from './keys.js'
 import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
+import { SendWait } from './SendWait.js'
 import { RedisSubscriptions } from './RedisSubscriptions.js'
 
 type RedisConnectionOptions = { redis: RedisClient; prefix: string }
@@ -20,6 +21,8 @@ type RedisConnectionOptions = { redis: RedisClient; prefix: string }
 class RedisConnection {
   readonly prefix: string
   readonly subscriptions: RedisSubscriptions
+  /** Broadcast's and Room's: their queues and budgets are channel names, which never collide. */
+  readonly sends: SendWait
   private commands: RedisClient
   /** The app clients installed with this backend: its command client ends once the last one does. */
   private readonly holders = new Set<RedisClient>()
@@ -32,6 +35,7 @@ class RedisConnection {
     // Pub/Sub channels span every database, so a standalone client's names carry its database.
     this.prefix = isCluster(this.commands) ? prefix : `${prefix}${this.commands.options.db ?? 0}:`
     this.subscriptions = new RedisSubscriptions({ connection: this })
+    this.sends = new SendWait({ subscriptions: this.subscriptions })
   }
 
   /** A fresh, unconnected subscriber socket on the current command client, which never retries on its own. */

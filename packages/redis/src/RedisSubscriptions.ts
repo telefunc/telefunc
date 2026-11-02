@@ -74,6 +74,8 @@ class RedisSubscriptions {
   private changedChannels = new Set<string>()
   /** The attempts that may await confirmation; a sync confirms those its connection covers. */
   private readonly unconfirmed = new Set<RedisAttempt>()
+  /** Attempts never ready yet, counted down a microtask after: at 0, no send waits for one. */
+  private subscribingCount = 0
   private socket: Connection = { phase: 'idle' }
   private nextId = 0
   private syncing: Promise<void> = Promise.resolve()
@@ -88,6 +90,8 @@ class RedisSubscriptions {
 
   subscribe(options: RedisAttemptOptions): DriverAttempt {
     const attempt = new RedisAttempt({ ...options, owner: this })
+    this.subscribingCount++
+    void attempt.firstReady.then(() => this.subscribingCount--)
     for (const channel of attempt.channels) {
       const attempts = this.byChannel.get(channel)
       if (attempts !== undefined) {
@@ -101,6 +105,20 @@ class RedisSubscriptions {
     if (this.socket.phase === 'connected') this.syncChannels()
     else if (this.socket.phase === 'idle') void this.connect()
     return attempt
+  }
+
+  /** Whether one of ours was never ready yet. */
+  get subscribing(): boolean {
+    return this.subscribingCount > 0
+  }
+
+  /** When each of ours on `channels` that was never ready yet is first ready, or ends. */
+  subscribingOn(channels: readonly string[]): Promise<void>[] {
+    const pending: Promise<void>[] = []
+    for (const channel of channels) {
+      for (const attempt of this.byChannel.get(channel) ?? []) if (attempt.subscribing) pending.push(attempt.firstReady)
+    }
+    return pending
   }
 
   /** Arms a delivery fence on the ready attempts of each channel the commit is published on: `delivery` settles
@@ -309,6 +327,9 @@ class RedisAttempt extends DriverAttempt {
   private orders = new Map<string, LaneOrder>()
   /** The frames that arrived while it awaited confirmation, ordered once it knows where each lane starts. */
   private early: Buffer[] = []
+  private readonly firstReadiness = createDeferred()
+  /** Settles on its first ready or its end; never rejects. */
+  readonly firstReady: Promise<void> = this.firstReadiness.promise
   private readonly fanIn: boolean
   private readonly broadcast: boolean
   /** A Broadcast text source's deliveries are strings. */
@@ -330,6 +351,8 @@ class RedisAttempt extends DriverAttempt {
     this.driver = driver
     this.receiver = receiver
     this.channels = invalidationChannel === null ? [channel] : [channel, invalidationChannel]
+    // Its first state change ends its establishment: ready, or closed.
+    this.onStateChange(() => this.firstReadiness.resolve())
     if ('roomId' in source) {
       this.fanIn = source.lane.kind === 'binary-all' || source.lane.kind === 'binary-track'
       this.broadcast = false

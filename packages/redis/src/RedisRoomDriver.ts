@@ -37,11 +37,13 @@ import {
   retainedOfKey,
   retainedOfTrackKey,
   commitChannels,
+  type CommitChannels,
   type FenceTokens,
 } from './keys.js'
 import { LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrdering } from './commands.js'
 import type { RedisConnection } from './RedisConnection.js'
 import type { RedisDriver } from './RedisSubscriptions.js'
+import type { WaitRule } from './SendWait.js'
 
 const NO_FENCE_TOKENS: FenceTokens = { lane: '', everyTrack: '', everyMember: '' }
 
@@ -49,7 +51,6 @@ type RedisRoomDriverOptions = { connection: RedisConnection; kit: RoomPlaneKit }
 
 /** Room's driver on a Redis backend: its store and lanes on `connection`, keyed and paged by Room's `kit`. */
 class RedisRoomDriver implements RoomDriver, RedisDriver {
-  readonly publishOvertakesSubscribe = true
   private readonly connection: RedisConnection
   private readonly kit: RoomPlaneKit
   /** A Cluster's last commit per lane. */
@@ -93,11 +94,11 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
   }
 
   commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
-    const commit = () => this.sendCommit(target, payload, opts)
-    if (!isCluster(this.connection.client)) return commit()
-    // A Cluster re-sends a command Redis refused with TRYAGAIN (its slot migrating) or CLUSTERDOWN (a failover) after a
-    // delay, so a later commit on the lane could land first: each is sent once the one before it was answered.
-    return this.inLaneTurn(JSON.stringify([target.roomId, target.inc, this.kit.encodeLaneKey(target.lane)]), commit)
+    // A close commits under its lease, which would lapse before the wait ends.
+    if (!this.connection.sends.sendsMayWait || opts?.closingLease !== undefined) {
+      return this.commitNow(target, payload, opts)
+    }
+    return this.commitInTurn(target, payload, opts)
   }
 
   subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {
@@ -118,6 +119,28 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
     if (lane.kind === 'binary-all') return await this.memberLaneStarts(roomId, inc, lane.member)
     if (lane.kind === 'binary-track') return await this.trackLaneStarts(roomId, inc, lane.track)
     return await this.connection.run(REDIS_COMMANDS.laneStart, { ...source, laneKey: this.kit.encodeLaneKey(lane) })
+  }
+
+  /** While one of our subscriptions is new: commits in its turn, then lets later commits past. */
+  private async commitInTurn(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
+    const { roomId, inc, lane } = target
+    const channels = commitChannels(this.connection.prefix, roomId, inc, lane, this.kit.encodeLaneKey(lane), this.kit)
+    const waiting = this.connection.sends.waitTurn(commitWaitRule(channels), payload)
+    if (waiting === null) return this.commitNow(target, payload, opts)
+    const owned = await waiting.turn
+    try {
+      return this.commitNow(target, owned, opts)
+    } finally {
+      waiting.sent()
+    }
+  }
+
+  private commitNow(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
+    const commit = () => this.sendCommit(target, payload, opts)
+    if (!isCluster(this.connection.client)) return commit()
+    // A Cluster re-sends a command Redis refused with TRYAGAIN (its slot migrating) or CLUSTERDOWN (a failover) after a
+    // delay, so a later commit on the lane could land first: each is sent once the one before it was answered.
+    return this.inLaneTurn(JSON.stringify([target.roomId, target.inc, this.kit.encodeLaneKey(target.lane)]), commit)
   }
 
   private inLaneTurn<T>(turnKey: string, commit: () => Promise<T>): Promise<T> {
@@ -305,5 +328,19 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
       for (const [i, laneKey] of page.lanes.entries()) if (marks[i] !== null) starts.set(laneKey, marks[i]!)
     } while (cursor !== '0')
     return starts
+  }
+}
+
+/** A binary commit also reaches its member's every-track and its track's every-member channels, and its waiting bytes
+ *  count against its member's. */
+function commitWaitRule({ lane, everyTrack, everyMember }: CommitChannels): WaitRule {
+  if (everyTrack === null || everyMember === null) {
+    return { queue: lane, channels: [lane], budget: lane, bufferLimit: 'bufferLimit' }
+  }
+  return {
+    queue: lane,
+    channels: [lane, everyTrack, everyMember],
+    budget: everyTrack,
+    bufferLimit: 'bufferLimitBinary',
   }
 }
