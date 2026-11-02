@@ -43,7 +43,7 @@ import {
 import { LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrdering } from './commands.js'
 import type { RedisConnection } from './RedisConnection.js'
 import type { RedisDriver } from './RedisSubscriptions.js'
-import type { WaitingSend, WaitRule } from './SendWait.js'
+import type { WaitingSend, WaitRule } from './NewSubscriptionWait.js'
 
 const NO_FENCE_TOKENS: FenceTokens = { lane: '', everyTrack: '', everyMember: '' }
 

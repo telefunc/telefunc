@@ -15,7 +15,7 @@ import { broadcastChannel } from './keys.js'
 import type { RedisConnection } from './RedisConnection.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
 import type { RedisDriver } from './RedisSubscriptions.js'
-import type { WaitingSend, WaitRule } from './SendWait.js'
+import type { WaitingSend, WaitRule } from './NewSubscriptionWait.js'
 
 type RedisBackendOptions = { connection: RedisConnection }
 

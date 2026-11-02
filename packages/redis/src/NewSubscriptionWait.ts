@@ -1,4 +1,4 @@
-export { SendWait }
+export { NewSubscriptionWait }
 export type { WaitingSend, WaitRule }
 
 import { ChannelOverflowError, getChannelLimits } from 'telefunc/__internal'
@@ -24,7 +24,7 @@ type Wait = { readonly ready: Promise<void>; sends: number }
 /** A send's place in its queue's wait: `await turn` for its own copy of the payload, send that, then `sent()`. */
 type WaitingSend<Payload> = { readonly turn: Promise<Payload>; sent(): void }
 
-type SendWaitOptions = { subscriptions: RedisSubscriptions }
+type NewSubscriptionWaitOptions = { subscriptions: RedisSubscriptions }
 
 /**
  * Our PUBLISH and COMMIT go out on the command connection, so one can reach Redis before the SUBSCRIBE our subscriber
@@ -32,14 +32,14 @@ type SendWaitOptions = { subscriptions: RedisSubscriptions }
  * until our subscriptions on its channels were ready once, and a later send of its queue waits behind it. Each budget's
  * waiting bytes are bounded by `bufferLimit` (`bufferLimitBinary` for bytes).
  */
-class SendWait {
+class NewSubscriptionWait {
   private readonly subscriptions: RedisSubscriptions
   /** By queue. */
   private readonly waits = new Map<string, Wait>()
   /** Bytes waiting, by budget. */
   private readonly waitingBytes = new Map<string, number>()
 
-  constructor({ subscriptions }: SendWaitOptions) {
+  constructor({ subscriptions }: NewSubscriptionWaitOptions) {
     this.subscriptions = subscriptions
   }
 
