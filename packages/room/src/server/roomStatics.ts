@@ -49,7 +49,7 @@ import { SEMANTIC_LANE, acceptedOrThrow, commitLane, inboxOf, openConfig, encode
 import { ServerRoom, handleOf } from './room.js'
 import { RoomReplica } from './RoomReplica.js'
 import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './store/meta.js'
-import { metaObjectOf } from '../shared/RoomMetaState.js'
+import { metaObject } from '../shared/RoomMetaState.js'
 import { closeIncarnation } from './lifecycle/close.js'
 import { cancelClose } from './lifecycle/hold.js'
 import { repairRoomIndex } from './store/directory.js'
@@ -258,7 +258,7 @@ async function listedRoom(plane: RoomPlane, roomId: string, incTag: string): Pro
   if (count === null) return null
   const stored = await readRoomMeta(roomId, config)
   if (stored === null) return null
-  return { id: roomId, meta: metaObjectOf(stored.entries), count, isEmpty: count === 0 }
+  return { id: roomId, meta: metaObject(stored.entries), count, isEmpty: count === 0 }
 }
 
 async function setRoomMeta(id: string, meta: RoomMeta): Promise<void> {

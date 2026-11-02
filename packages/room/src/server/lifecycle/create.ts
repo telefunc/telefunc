@@ -47,7 +47,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     if (lapsedInc === undefined) await listRoom(plane, incarnation, undefined)
     // The new head, in the one exchange.
     const result = await plane.compareExchangeHead(id, replacing(current), { head: openHead(created) })
-    if (result.kind === 'conflict') return refusalOf(result.current)
+    if (result.kind === 'conflict') return refusalOrRetry(result.current)
     // The new incarnation: the head lapses only once the counters that keep it ahead are written. The lapsed
     // incarnation's data, which none of that touches, goes meanwhile: before the listing that names it is replaced.
     const [lapsing] = await Promise.all([
@@ -70,7 +70,7 @@ function openHead(created: RoomConfigRecord): HeadNext['head'] {
 }
 
 /** A head that went away (a lapsed tombstone) or closed meanwhile still allows the create: try again. */
-function refusalOf(conflicting: RoomHead | null): Refusal | typeof EXCHANGE_CONFLICT {
+function refusalOrRetry(conflicting: RoomHead | null): Refusal | typeof EXCHANGE_CONFLICT {
   if (conflicting === null || conflicting.state === 'closed') return EXCHANGE_CONFLICT
   return conflicting.state === 'closing' ? { kind: 'closing' } : { kind: 'exists' }
 }

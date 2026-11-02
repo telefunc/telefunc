@@ -1,4 +1,4 @@
-export { RoomMetaState, compareMetaEntries, metaEntriesAt, metaObjectOf }
+export { RoomMetaState, compareMetaEntries, metaEntriesAt, metaObject }
 
 import type { RoomMetaEntry, RoomMetaUpdate } from './protocol.js'
 import type { RoomMeta } from '../types.js'
@@ -13,7 +13,7 @@ function metaEntriesAt(meta: RoomMeta, seq: number): RoomMetaEntry[] {
   return Object.entries(meta).map(([key, value], index) => [key, value, seq, index])
 }
 
-function metaObjectOf(entries: Iterable<RoomMetaEntry>): RoomMeta {
+function metaObject(entries: Iterable<RoomMetaEntry>): RoomMeta {
   return Object.freeze(Object.fromEntries(Array.from(entries, ([key, value]) => [key, value])))
 }
 
@@ -49,7 +49,7 @@ class RoomMetaState {
   }
 
   get object(): RoomMeta {
-    return (this._object ??= metaObjectOf(this.orderedEntries()))
+    return (this._object ??= metaObject(this.orderedEntries()))
   }
 
   entries(): RoomMetaEntry[] {

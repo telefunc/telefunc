@@ -88,7 +88,7 @@ class CloudflareRoomDriver implements RoomDriver {
     // From a session DO, through its ordered stub, so its commits to a room keep the order Room sent them in.
     const session = currentRoomSessionSubscriptions(this)
     const wire = await (session ? session.callAuthority(roomId, commit) : commit(this.stub(roomId)))
-    return wire.kind === 'accepted' ? receiptOf(lane, wire) : wire
+    return wire.kind === 'accepted' ? acceptedCommit(lane, wire) : wire
   }
 
   /** In the room's authority, by the operation's name, through the session's ordered stub as a commit goes. */
@@ -104,7 +104,7 @@ class CloudflareRoomDriver implements RoomDriver {
     if (wire.kind !== 'done') return wire
     const { value, counters, commit } = wire
     const done: OperationResult<Value> = { kind: 'done', value: value as Value, counters }
-    if (commit !== undefined) done.commit = receiptOf(OPERATION_COMMIT_LANE, commit)
+    if (commit !== undefined) done.commit = acceptedCommit(OPERATION_COMMIT_LANE, commit)
     return done
   }
 
@@ -164,7 +164,7 @@ class CloudflareRoomDriver implements RoomDriver {
 
 /** An inbox or control commit's receipt comes once its delivery was handed off: its delivery rejects with why it was
  *  lost, if it was, for its committer to await. */
-function receiptOf(lane: LaneId, { seq, timestamp, lost }: AcceptedCommitWire): CommitAccepted {
+function acceptedCommit(lane: LaneId, { seq, timestamp, lost }: AcceptedCommitWire): CommitAccepted {
   const receipt: CommitAccepted = { kind: 'accepted', seq, timestamp }
   if (lane.kind !== 'inbox' && lane.kind !== 'control') return receipt
   receipt.delivery = lost === undefined ? Promise.resolve() : markHandled(Promise.reject(new Error(lost)))

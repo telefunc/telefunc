@@ -71,7 +71,7 @@ class WantsIndex {
     const gone = opts?.gone === true
     const ids = opts?.members === undefined ? undefined : new Set(opts.members)
     for (const _ of this.updateText(holder, { gone, members: ids })) yield NONE
-    const indexed = this.indexedOf(holder)
+    const indexed = this.holderIndex(holder)
     const wants = gone ? null : holder.binaryWants
     // Read live: a scope listed twice is indexed already when its second step comes.
     const scopeLists: Iterable<string | EveryMember>[] = ids
@@ -108,7 +108,7 @@ class WantsIndex {
   *updateText(holder: LaneHolder, opts?: { gone?: boolean; members?: Iterable<string> }): Generator<void> {
     const gone = opts?.gone === true
     const members = opts?.members
-    const indexed = this.indexedOf(holder)
+    const indexed = this.holderIndex(holder)
     const text = gone ? null : holder.textDemand()
     const textAll = text?.all ?? false
     if (textAll !== indexed.textAll) this.textAll += textAll ? 1 : -1
@@ -227,7 +227,7 @@ class WantsIndex {
     if (indexed.textMembers.size === 0 && indexed.binary.size === 0) this.indexed.delete(holder)
   }
 
-  private indexedOf(holder: LaneHolder): Indexed {
+  private holderIndex(holder: LaneHolder): Indexed {
     return getOrCreate(this.indexed, holder, () => ({
       textAll: false,
       announce: false,
@@ -238,7 +238,7 @@ class WantsIndex {
 
   /** Puts the holder in or out of one cover key of a scope. */
   private cover(holder: LaneHolder, scope: string | EveryMember, key: TrackKey | EveryTrack, on: boolean): Affected {
-    const indexed = this.indexedOf(holder)
+    const indexed = this.holderIndex(holder)
     if (hasEntry(indexed.binary, scope, key) === on) return NONE
     toggleEntry(indexed.binary, scope, key, on)
     if (scope !== EVERY_MEMBER) {

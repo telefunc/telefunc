@@ -448,7 +448,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     items: Iterable<T>,
     step: (item: T) => Iterable<void> | void,
   ): Promise<void> {
-    const pending = stepsOf(items, step)
+    const pending = eachStep(items, step)
     for (let done = false; !done; ) {
       if (slice.over) await slice.next()
       do {
@@ -852,7 +852,7 @@ function* chain<T>(...sources: Iterable<T>[]): Generator<T> {
 }
 
 /** Each item's step, then what it yields one at a time; an item whose step yields nothing is still one step. */
-function* stepsOf<T>(items: Iterable<T>, step: (item: T) => Iterable<void> | void): Generator<void> {
+function* eachStep<T>(items: Iterable<T>, step: (item: T) => Iterable<void> | void): Generator<void> {
   for (const item of items) {
     const parts = step(item)
     if (parts) yield* parts

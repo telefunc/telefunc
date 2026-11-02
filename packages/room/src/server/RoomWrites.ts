@@ -17,7 +17,7 @@ import {
   toRoomFailure,
   ROOM_BUG_MESSAGE,
 } from '../shared/errors.js'
-import { ownMetaArgument, senderOf } from '../shared/arguments.js'
+import { ownMetaArgument, senderSnapshot } from '../shared/arguments.js'
 import type {
   MemberMetaUpdate,
   WholeMemberUpdate,
@@ -178,7 +178,7 @@ class RoomWrites {
   private async admitPublish(from: string, payload: unknown): Promise<{ sender: Sender; stamp: SenderStamp }> {
     if (this.model.closed) throw roomClosedError(this.incarnation.id)
     const sender = this.memberSender(from)
-    const stamp = this.stampOf(from, sender)
+    const stamp = this.stampedSender(from, sender)
     const onBeforePublish = this.owner.guards?.onBeforePublish
     if (onBeforePublish) await onBeforePublish(sender, payload)
     return { sender, stamp }
@@ -192,7 +192,7 @@ class RoomWrites {
   }
 
   /** `sender` with the meta seq it reflects, read before a guard waits: a meta write meanwhile takes the next seq. */
-  private stampOf(from: string, sender: Sender): SenderStamp {
+  private stampedSender(from: string, sender: Sender): SenderStamp {
     const accepted = this.model.acceptedMeta(from) ?? this.localParticipants.get(from)!._acceptedMeta
     const stamp: SenderStamp = { fromMeta: sender.meta, fromMetaSeq: accepted.seq }
     if (sender.identity !== null) stamp.fromIdentity = sender.identity
@@ -204,7 +204,7 @@ class RoomWrites {
   private memberSender(from: string): Sender {
     const known = this.state.getRemote(from) ?? this.localParticipants.get(from)
     if (!known) throw participantLeftError()
-    return senderOf(from, known.meta, known.identity)
+    return senderSnapshot(from, known.meta, known.identity)
   }
 
   async sendDm(from: string, to: string, data: unknown, ack: boolean): Promise<RoomSendReceipt | RoomAckReceipt> {
@@ -247,7 +247,7 @@ class RoomWrites {
     const target = await this.resolveMember(to)
     if (!target) throw participantGoneError(to)
     const sender = this.memberSender(from)
-    const stamp = this.stampOf(from, sender)
+    const stamp = this.stampedSender(from, sender)
     const onBeforeSend = this.owner.guards?.onBeforeSend
     if (onBeforeSend) await onBeforeSend(sender, target, data)
     const envelope: RoomDmEnvelope = { __r: 'dm', to, from, ...stamp, data }
@@ -275,9 +275,9 @@ class RoomWrites {
 
   private async resolveMember(id: string): Promise<Sender | null> {
     const remote = this.state.getRemote(id)
-    if (remote) return senderOf(id, remote.meta, remote.identity)
+    if (remote) return senderSnapshot(id, remote.meta, remote.identity)
     const [member] = await reapAndReadMembersById(this.incarnation, [id])
-    return member === undefined ? null : senderOf(id, member.meta, member.identity ?? null)
+    return member === undefined ? null : senderSnapshot(id, member.meta, member.identity ?? null)
   }
 }
 

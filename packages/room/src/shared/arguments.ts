@@ -8,7 +8,7 @@ export {
   normalizeJoinOptions,
   assertParticipantIdentity,
   removedCause,
-  senderOf,
+  senderSnapshot,
   ownMetaArgument,
   recipientId,
 }
@@ -37,7 +37,7 @@ function ownLeaveCause(cause: LeaveCause): LeaveCause {
   return Object.freeze({ ...cause })
 }
 /** A detached snapshot of a member, for guards and for senders a view doesn't know. */
-function senderOf(id: string, meta: ParticipantMeta, identity: string | null): Sender {
+function senderSnapshot(id: string, meta: ParticipantMeta, identity: string | null): Sender {
   return Object.freeze({ id, meta, identity })
 }
 function removedCause(reason: unknown): LeaveCause {

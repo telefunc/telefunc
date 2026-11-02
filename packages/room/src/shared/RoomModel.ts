@@ -6,7 +6,7 @@ import { untether, getOrCreate } from 'telefunc/__internal'
 import { Slice } from './Slice.js'
 import { RoomMetaState } from './RoomMetaState.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
-import { ownLeaveCause, removedCause, senderOf } from './arguments.js'
+import { ownLeaveCause, removedCause, senderSnapshot } from './arguments.js'
 import type {
   MemberMetaUpdate,
   MemberSnapshot,
@@ -410,7 +410,7 @@ class RoomModel {
   }: { from: string } & Partial<SenderStamp>): { entry: MemberEntry } | { sender: Sender } {
     const entry = this.members.get(from)
     if (fromMeta !== undefined && fromMetaSeq !== undefined) {
-      if (!entry) return { sender: senderOf(from, fromMeta, fromIdentity ?? null) }
+      if (!entry) return { sender: senderSnapshot(from, fromMeta, fromIdentity ?? null) }
       if (entry.meta.newerStamp(fromMetaSeq)) {
         this.applyParticipantMeta(from, wholeUpdate(fromMetaSeq, fromMeta, fromDisconnected === true))
       }
@@ -427,7 +427,7 @@ class RoomModel {
     // With the meta changes relayed after the member's roster part.
     const meta = new MemberMeta({ meta: pending.meta, seq: pending.metaSeq })
     for (const update of this.preRosterMeta.get(from) ?? []) meta.apply(update)
-    return { sender: senderOf(from, meta.object, pending.identity ?? null) }
+    return { sender: senderSnapshot(from, meta.object, pending.identity ?? null) }
   }
 
   /** The first roster loads silently; later ones narrate the drift they correct as events. Runs `reconcilingRoster` a

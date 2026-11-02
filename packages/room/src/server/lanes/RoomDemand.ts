@@ -37,7 +37,7 @@ type RoomDemandOptions = {
   /** The members this process owns, kept current by the replica. */
   ownedMembers: ReadonlyMap<string, unknown>
   /** A report of a member's every track covers the tracks it published on. */
-  publishedTracks: Pick<PublishedTracks, 'has' | 'namedOf'>
+  publishedTracks: Pick<PublishedTracks, 'has' | 'namedTracks'>
 }
 
 /** The demand for the members a process owns: every process's reports, each process's leased, and one `wanted` boolean
@@ -351,7 +351,7 @@ class RoomDemand {
   }
 
   private everyTrackOf(member: string): string[] {
-    return [DEFAULT_TRACK, ...this.publishedTracks.namedOf(member)]
+    return [DEFAULT_TRACK, ...this.publishedTracks.namedTracks(member)]
   }
 }
 

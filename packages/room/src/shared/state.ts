@@ -17,7 +17,7 @@ import {
   type TrackKey,
 } from './binary.js'
 import { type MemberEntry, type RoomModel } from './RoomModel.js'
-import { assertKnownOptions, senderOf } from './arguments.js'
+import { assertKnownOptions, senderSnapshot } from './arguments.js'
 import type { MemberSnapshot, MemberWants, RoomDataEvent, SenderStamp } from './protocol.js'
 import type { BinaryFrameInfo, LeaveCause, ParticipantMeta, RemoteParticipant, RoomMeta, Sender } from '../types.js'
 
@@ -374,7 +374,7 @@ class RoomState {
       meta,
     }
     const entry = this.model.entry(from)
-    const sender = entry ? this.remote(entry) : senderOf(from, {}, null)
+    const sender = entry ? this.remote(entry) : senderSnapshot(from, {}, null)
     // Each listener gets bytes of its own: one may write into them or transfer their buffer.
     for (const { cb, track: want } of this.roomBinaryListeners.list()) {
       if (want === EVERY_TRACK || want === track) {
@@ -464,7 +464,7 @@ class RoomState {
     this.bumpListenerCount(
       1,
       entry,
-      filter && countTrack(filter.counts, filter.track, 1) ? wantOf(entry, filter, true) : null,
+      filter && countTrack(filter.counts, filter.track, 1) ? { ...wantedTrack(entry, filter), on: true } : null,
     )
     const cleanups = getOrCreate(this.listenerCleanups, list, () => new Set())
     return makeDisposer(() => {
@@ -472,7 +472,7 @@ class RoomState {
         this.bumpListenerCount(
           -1,
           entry,
-          filter && countTrack(filter.counts, filter.track, -1) ? wantOf(entry, filter, false) : null,
+          filter && countTrack(filter.counts, filter.track, -1) ? { ...wantedTrack(entry, filter), on: false } : null,
         )
       }
     }, cleanups)
@@ -552,6 +552,7 @@ function countTrack(counts: TrackCounts, track: TrackFilter, delta: 1 | -1): boo
   return count === (delta === 1 ? 1 : 0)
 }
 
-function wantOf(entry: MemberEntry | null, { track }: CountedTrack, on: boolean): BinaryWantChange {
-  return { member: entry?.id ?? EVERY_MEMBER, track, on }
+/** The member and track a listener's filter names. */
+function wantedTrack(entry: MemberEntry | null, { track }: CountedTrack): Omit<BinaryWantChange, 'on'> {
+  return { member: entry?.id ?? EVERY_MEMBER, track }
 }

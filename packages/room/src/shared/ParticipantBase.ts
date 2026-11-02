@@ -7,7 +7,7 @@ import { makeDisposer } from './disposer.js'
 import { Fifo } from '../utils/Fifo.js'
 import { utf8ByteLength } from '../utils/utf8ByteLength.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
-import { ownLeaveCause, ownMetadata, senderOf } from './arguments.js'
+import { ownLeaveCause, ownMetadata, senderSnapshot } from './arguments.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
 import { publicTrack, type TrackKey } from './binary.js'
 import type { MemberMetaUpdate, WholeMemberUpdate, RoomResult, InboxMessage } from './protocol.js'
@@ -164,7 +164,9 @@ abstract class ParticipantBase implements LocalParticipant {
    *  exists. An empty `from` is the wire encoding of a room-authored message → `null`. */
   private inboxSender(msg: InboxMessage): Sender | null {
     const { from, fromMeta, fromIdentity: identity } = msg
-    return from === '' ? null : (this._resolveSender(from) ?? senderOf(from, ownMetadata(fromMeta ?? {}), identity))
+    return from === ''
+      ? null
+      : (this._resolveSender(from) ?? senderSnapshot(from, ownMetadata(fromMeta ?? {}), identity))
   }
 
   private fireInbox(msg: InboxMessage): void {

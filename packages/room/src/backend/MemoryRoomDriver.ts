@@ -169,7 +169,7 @@ function takePage(keys: Iterator<string>, seen: Set<string>): string[] {
   return page
 }
 
-function readCellsOf(incarnation: Incarnation, keys: Iterable<string>, now: number): CellsRead {
+function cellsRead(incarnation: Incarnation, keys: Iterable<string>, now: number): CellsRead {
   const cells = new Map<string, Uint8Array>()
   const versions = new Map<string, string>()
   for (const key of keys) {
@@ -273,7 +273,7 @@ class MemoryRoomDriver implements RoomDriver {
   async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
     const incarnation = this.readableIncarnation(roomId, inc)
     if (incarnation === null) return { kind: 'stale-incarnation' }
-    return readCellsOf(incarnation, 'keys' in sel ? sel.keys : cellKeysWithPrefix(incarnation, sel.prefix), Date.now())
+    return cellsRead(incarnation, 'keys' in sel ? sel.keys : cellKeysWithPrefix(incarnation, sel.prefix), Date.now())
   }
 
   /** Skips a key it returned that was removed and added again (see `liveKeysWithPrefix`). */
@@ -289,7 +289,7 @@ class MemoryRoomDriver implements RoomDriver {
       }
       keys ??= liveKeysWithPrefix(incarnation, prefix)
       page = takePage(keys, seen)
-      yield readCellsOf(incarnation, page, Date.now())
+      yield cellsRead(incarnation, page, Date.now())
     } while (page.length === CELL_PAGE_SIZE)
   }
 

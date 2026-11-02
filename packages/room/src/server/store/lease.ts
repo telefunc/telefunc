@@ -106,17 +106,17 @@ function leaseHosting({ id, created }: LeaseState, raw: Uint8Array | undefined, 
 /** An exchange hosting something under a lease found it lost. */
 const LEASE_LOST: unique symbol = Symbol.for('telefunc.RoomLeaseLost')
 
-/** Commits what `writesOf` plans under the lease in one exchange with its cell, which it only expects while live: a
+/** Commits what `planWrites` plans under the lease in one exchange with its cell, which it only expects while live: a
  *  lease found lost is replaced, and the write planned again under the new one. */
 async function mutateHosted<T>(
   room: RoomIncarnation,
   lease: RoomLease,
-  writesOf: (id: string) => { keys: string[]; plan: (cells: ReadonlyMap<string, Uint8Array>) => CellPlan<T> },
+  planWrites: (id: string) => { keys: string[]; plan: (cells: ReadonlyMap<string, Uint8Array>) => CellPlan<T> },
 ): Promise<CellCommit<T>> {
   for (;;) {
     if (!lease.created) await createLease(room, lease)
     const id = lease.id
-    const { keys, plan } = writesOf(id)
+    const { keys, plan } = planWrites(id)
     const committed = await mutateCells<T | typeof LEASE_LOST>(
       room.id,
       room.inc,

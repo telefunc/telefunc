@@ -281,7 +281,7 @@ type CellRow = { key: string; bytes: ArrayBuffer; version: number }
 /** A prefix read's page, with the cursor its next page reads after while cells may remain. */
 type CellPage = (Extract<CellsRead, { kind: 'read' }> & { cursor?: string }) | StaleIncarnation
 
-function cellsOf(rows: CellRow[], now: number): Extract<CellPage, { kind: 'read' }> {
+function cellPage(rows: CellRow[], now: number): Extract<CellPage, { kind: 'read' }> {
   return {
     kind: 'read',
     cells: new Map(rows.map((row) => [row.key, new Uint8Array(row.bytes)])),
@@ -306,7 +306,7 @@ function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRo
 function readCells(sql: SqlStorage, inc: string, sel: CellSelector, now: number): CellsRead {
   const head = readLiveHead(sql, now)
   if (head === null || head.currentInc !== inc) return { kind: 'stale-incarnation' }
-  return cellsOf(selectCellRows(sql, inc, sel), now)
+  return cellPage(selectCellRows(sql, inc, sel), now)
 }
 
 function readCellPage(sql: SqlStorage, inc: string, prefix: string, cursor: string | undefined, now: number): CellPage {
@@ -321,7 +321,7 @@ function readCellPage(sql: SqlStorage, inc: string, prefix: string, cursor: stri
       CELL_PAGE_SIZE,
     )
     .toArray()
-  const page = cellsOf(rows, now)
+  const page = cellPage(rows, now)
   if (rows.length === CELL_PAGE_SIZE) page.cursor = rows[rows.length - 1]!.key
   return page
 }

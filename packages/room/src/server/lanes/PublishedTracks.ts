@@ -27,7 +27,7 @@ class PublishedTracks {
     return track === DEFAULT_TRACK || this.byMember.get(member)?.has(track) === true
   }
 
-  namedOf(member: string): Iterable<string> {
+  namedTracks(member: string): Iterable<string> {
     return this.byMember.get(member) ?? []
   }
 
