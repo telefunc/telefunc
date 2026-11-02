@@ -108,7 +108,8 @@ vi.mock('./routing.js', async (importOriginal) => ({
 import { Telefunc } from '../../../serve/cloudflare.js'
 import { resolveSessionRoutingTarget } from './routing.js'
 import { disposeBackend } from '../../backend/install.js'
-import type { BroadcastDeliverRequest, BroadcastPublishRequest } from './broadcast.js'
+import type { BroadcastPublishRequest } from './broadcast.js'
+import type { BroadcastDelivery } from './extensions.js'
 
 function createMockKV(): KVNamespace {
   const store = new Map<string, { value: string; expirationTtl?: number }>()
@@ -266,7 +267,7 @@ describe('cloudflare adapter entrypoint', () => {
       webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void
       webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): void
       telefuncBroadcastPublish(request: BroadcastPublishRequest): unknown
-      telefuncBroadcastDeliver(request: BroadcastDeliverRequest): void
+      telefuncBroadcastDeliver(delivery: BroadcastDelivery): void
     }
 
     expect(mocks.crosswsAdapter.handleDurableInit).toHaveBeenCalledWith(instance, ctx, {
@@ -310,8 +311,7 @@ describe('cloudflare adapter entrypoint', () => {
     )
 
     const delivery = {
-      key: 'room:test',
-      kind: 'text' as const,
+      routes: [{ key: 'room:test', kind: 'text' as const }],
       payload: '{"text":"hello"}',
       info: { seq: 1, timestamp: Date.now() },
     }

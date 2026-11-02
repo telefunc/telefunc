@@ -20,7 +20,7 @@ import type {
   RetainedOf,
   DirectoryPage,
 } from '../backend/contract.js'
-import type { OrderingInfo, TelefuncExtensionNamespace } from 'telefunc/__internal'
+import type { CloudflareRegions, OrderingInfo } from 'telefunc/__internal'
 import { assert } from '../utils/assert.js'
 import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../backend/laneKey.js'
 import { commitPreconditionHolds, isOpenIncarnation, publicHead } from '../backend/semantics.js'
@@ -58,6 +58,8 @@ import {
 } from './storage.js'
 
 type AcceptedCommitWire = { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken?: string }
+/** A commit the transaction accepted: its order, the lanes it reaches, and the routes subscribed to them then. */
+type AcceptedCommit = { mark: OrderingInfo; laneKeys: string[]; routes: RouteInstallation[] }
 type CommitWire = AcceptedCommitWire | StaleCommit
 
 /** A route registered, or refused because its incarnation is dropped or closing. */
@@ -70,16 +72,16 @@ type CloudflareRoomAuthorityStub = Omit<RoomAuthority, 'alarm'>
 
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
 
-/** Room's part of a Durable Object that is a room authority, or the room directory, fanning out to the session DOs of
- *  `sessions`. Its tables are created on first use. */
+/** Room's part of a Durable Object that is a room authority, or the room directory, fanning out through Broadcast's
+ *  `regions`. Its tables are created on first use. */
 class RoomAuthority {
   private readonly ctx: DurableObjectState
   private readonly fanout: Fanout
   private schema = false
 
-  constructor(ctx: DurableObjectState, sessions: TelefuncExtensionNamespace) {
+  constructor(ctx: DurableObjectState, regions: CloudflareRegions) {
     this.ctx = ctx
-    this.fanout = new Fanout({ sessions })
+    this.fanout = new Fanout({ regions })
   }
 
   async readHead(): Promise<RoomHead | null> {
@@ -112,7 +114,7 @@ class RoomAuthority {
   async commitLane(inc: string, lane: LaneId, payload: Uint8Array, opts?: CommitOptions): Promise<CommitWire> {
     const now = Date.now()
     const key = encodeLaneKey(lane)
-    const outcome = this.transaction((sql): StaleCommit | { mark: OrderingInfo; routes: RouteInstallation[] } => {
+    const outcome = this.transaction((sql): StaleCommit | AcceptedCommit => {
       if (!commitPreconditionHolds(readLiveHead(sql, now), inc, lane.kind, opts?.closingLease, now)) {
         return { stale: 'incarnation' }
       }
@@ -127,11 +129,11 @@ class RoomAuthority {
       // A binary commit also reaches its member's every-track lane and its track's every-member lane.
       const laneKeys =
         lane.kind === 'binary' ? [key, everyTrackLaneKey(lane.member), everyMemberLaneKey(lane.track)] : [key]
-      return { mark, routes: snapshotRoutes(sql, inc, laneKeys, now) }
+      return { mark, laneKeys, routes: snapshotRoutes(sql, inc, laneKeys, now) }
     })
     if ('stale' in outcome) return outcome
-    const { mark, routes } = outcome
-    const delivery = this.fanout.send(routes, payload, mark)
+    const { mark, laneKeys, routes } = outcome
+    const delivery = this.fanout.send(inc, laneKeys, routes, payload, mark)
     const receipt: AcceptedCommitWire = {
       accepted: true,
       seq: mark.seq,

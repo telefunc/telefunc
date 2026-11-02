@@ -24,19 +24,54 @@ export class TelefuncDurableObject extends (tf.TelefuncDurableObject as Telefunc
     }
     return super.telefuncBroadcastPresence(request)
   }
+
+  // Test-only: each Room delivery a coordinator forwards, and the region of each session that takes one.
+  private region: string | null = null
+  override async fetch(request: Request) {
+    this.region = request.headers.get('x-telefunc-broadcast-bucket') ?? this.region
+    return super.fetch(request)
+  }
+  override async telefuncBroadcastForward(request: DeliveryRequest & { members: string[] }) {
+    if (isTraced(request)) regionTrace.forwards.push({ members: request.members })
+    return super.telefuncBroadcastForward(request)
+  }
+  override async telefuncBroadcastDeliver(request: DeliveryRequest) {
+    if (isTraced(request)) regionTrace.deliveries.push({ member: this.ctx.id.toString(), region: this.region })
+    return super.telefuncBroadcastDeliver(request)
+  }
 }
 export { TodoListDurableObject } from './database/todoItems'
 
-// The Durable Object's Broadcast presence and extension Durable Object RPCs, which its public type doesn't name.
+// The Durable Object's Broadcast RPCs and extension Durable Object RPCs, which its public type doesn't name.
 type PresenceRequest = { key: string; bucket: string | null }
+type DeliveryRequest = { routes: { key: string }[]; payload: string | Uint8Array }
 type TelefuncDurableObjectWithPresence = new (
   ctx: DurableObjectState,
   env: Env,
 ) => InstanceType<typeof tf.TelefuncDurableObject> & {
+  fetch(request: Request): Promise<Response>
   telefuncBroadcastPresence(request: PresenceRequest): Promise<void>
+  telefuncBroadcastForward(request: DeliveryRequest & { members: string[] }): Promise<void>
+  telefuncBroadcastDeliver(request: DeliveryRequest): Promise<void>
   telefuncDurableObjectCall(name: string, method: string, args: unknown[]): Promise<unknown>
 }
 const refusedPresences = new Set<string>()
+
+// Test-only: the Room deliveries of the message `/__region-trace` names, as the regions test counts them.
+let tracedMessage: string | null = null
+const regionTrace = {
+  forwards: [] as { members: string[] }[],
+  deliveries: [] as { member: string; region: string | null }[],
+}
+function isTraced({ routes, payload }: DeliveryRequest): boolean {
+  if (tracedMessage === null || !routes.some(({ key }) => key.startsWith('__telefunc_room__:'))) return false
+  return (typeof payload === 'string' ? payload : new TextDecoder().decode(payload)).includes(tracedMessage)
+}
+// Test-only: a page's `test-colo` cookie names the Cloudflare colo its requests come from.
+function withTestColo(request: Request): Request {
+  const colo = /(?:^|;\s*)test-colo=([A-Z]+)/.exec(request.headers.get('cookie') ?? '')?.[1]
+  return colo ? new Request(request, { cf: { ...request.cf, colo } }) : request
+}
 
 const app = new Hono<{ Bindings: Env }>()
 vike(app)
@@ -68,9 +103,18 @@ app.all('/backlog-run', async (c) => {
   if (c.req.method === 'POST') await c.env.TelefuncKV.put(`${run}:stalled`, 'true')
   return new Response(await c.env.TelefuncKV.get(run))
 })
+// Test-only: a PUT starts tracing the Room deliveries of `message`; a GET returns what was traced.
+app.all('/__region-trace', (c) => {
+  if (c.req.method === 'PUT') {
+    tracedMessage = c.req.query('message')!
+    regionTrace.forwards.length = 0
+    regionTrace.deliveries.length = 0
+  }
+  return c.json(regionTrace)
+})
 // Telefunc answers its requests and WebSocket upgrades; Vike renders the rest.
 app.use(async (c, next) => {
-  const response = await tf.serve({ request: c.req.raw, env: c.env, ctx: c.executionCtx })
+  const response = await tf.serve({ request: withTestColo(c.req.raw), env: c.env, ctx: c.executionCtx })
   if (response) return response
   await next()
 })

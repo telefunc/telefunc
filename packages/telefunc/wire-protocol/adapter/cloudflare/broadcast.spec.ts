@@ -237,14 +237,43 @@ describe('cloudflare broadcast routing', () => {
     )
 
     await broadcast.forwardToBucket(new OrderedStubs(), {
-      key: 'room:test',
-      kind: 'text',
+      routes: [{ key: 'room:test', kind: 'text' }],
       payload: '{"text":"hello"}',
       info: { seq: 1, timestamp: Date.now() },
       members: ['telefunc-shard-weur-0', 'telefunc-shard-weur-1'],
     })
 
     expect(deliveredTo.sort()).toEqual(['telefunc-shard-weur-0', 'telefunc-shard-weur-1'])
+  })
+
+  it("forwards a delivery once to each bucket of its members, naming that bucket's members", async () => {
+    const forwards: [string, string[]][] = []
+    const broadcast = createBroadcast(
+      createBasicBinding({
+        onForward(id, { members }) {
+          forwards.push([id.name, members])
+          return Promise.resolve()
+        },
+      }),
+    )
+
+    await broadcast.forward(
+      new OrderedStubs(),
+      'room:test',
+      { routes: [{ key: 'room:test', kind: 'text' }], payload: '{"text":"hello"}', info: { seq: 1, timestamp: 0 } },
+      [
+        { member: 'telefunc-shard-wnam-0', bucket: 'wnam' },
+        { member: 'telefunc-shard-weur-0', bucket: 'weur' },
+        { member: 'telefunc-shard-weur-1', bucket: 'weur' },
+        { member: 'telefunc-shard-apac-0', bucket: 'apac' },
+      ],
+    )
+
+    expect(forwards.sort()).toEqual([
+      ['telefunc:broadcast:apac:0', ['telefunc-shard-apac-0']],
+      ['telefunc:broadcast:weur:0', ['telefunc-shard-weur-0', 'telefunc-shard-weur-1']],
+      ['telefunc:broadcast:wnam:0', ['telefunc-shard-wnam-0']],
+    ])
   })
 
   it('serializes authority dispatch without blocking later publishes on remote delivery completion', async () => {

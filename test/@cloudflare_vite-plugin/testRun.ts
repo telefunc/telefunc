@@ -42,6 +42,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   // Under `vite dev`, @cloudflare/vite-plugin awaits each Durable Object call apart, so one stub's calls can run out of order.
   if (!isDev) testRoomOrderAcrossSessions()
   testRoomAcrossSessions()
+  testRoomAcrossRegions()
   testRoomStorage()
 }
 
@@ -435,6 +436,34 @@ function testRoomAcrossSessions() {
   })
 }
 
+function testRoomAcrossRegions() {
+  test('Room: a message to sessions in three regions crosses to each region once, and reaches each session once', async () => {
+    const id = crypto.randomUUID()
+    // Los Angeles is wnam, Frankfurt and Amsterdam are weur, Tokyo is apac.
+    const colos = { p1: 'LAX', p2: 'FRA', p3: 'AMS', p4: 'NRT' }
+    const pages = await openSessions(id, Object.keys(colos), colos)
+    for (const page of pages) await clickRoomCard(page, 'listen')
+    await fetch(`${getServerUrl()}/__region-trace?message=hello`, { method: 'PUT' })
+    await clickRoomCard(pages[0]!, 'publish')
+    await autoRetry(async () => {
+      for (const page of pages) {
+        expect((await clickRoomCard(page, 'received')).sort()).deep.equal(['broadcast:hello', 'room:hello'])
+      }
+    })
+    const trace = await fetch(`${getServerUrl()}/__region-trace`)
+    const { forwards, deliveries } = (await trace.json()) as {
+      forwards: { members: string[] }[]
+      deliveries: { member: string; region: string }[]
+    }
+    // One forward per region, each naming only that region's sessions, and one delivery to each session.
+    const regionOf = new Map(deliveries.map(({ member, region }) => [member, region]))
+    const forwardedRegions = forwards.map(({ members }) => [...new Set(members.map((member) => regionOf.get(member)))])
+    expect(forwardedRegions.sort()).deep.equal([['apac'], ['weur'], ['wnam']])
+    expect(deliveries.length).toBe(new Set(forwards.flatMap(({ members }) => members)).size)
+    for (const page of pages) await page.context().close()
+  })
+}
+
 function testRoomStorage() {
   test('Room.list(): lists rooms in code point order', async () => {
     await openRoomPage()
@@ -483,12 +512,16 @@ async function openRoomPage() {
   })
 }
 
-/** Pages in browsers of their own, so each has its own Telefunc session. */
-async function openSessions(id: string, names: string[]) {
+/** Pages in browsers of their own, so each has its own Telefunc session; `colos` places a page's session in a colo's
+ *  region. */
+async function openSessions(id: string, names: string[], colos: Record<string, string> = {}) {
   const browser = page.context().browser()!
   return await Promise.all(
     names.map(async (name) => {
-      const session = await (await browser.newContext()).newPage()
+      const context = await browser.newContext()
+      const colo = colos[name]
+      if (colo) await context.addCookies([{ name: 'test-colo', value: colo, url: getServerUrl() }])
+      const session = await context.newPage()
       await session.goto(`${getServerUrl()}/room?id=${id}&page=${name}`)
       await autoRetry(async () => {
         expect(await session.locator('#hydrated').count()).toBe(1)

@@ -1,5 +1,6 @@
 export {
   ROOM_CLOUDFLARE_EXTENSION,
+  ROOM_CLOUDFLARE_PREFIX,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_LEASE_TTL_MS,
   ROOM_TAIL_HOLD_MAX,
@@ -62,7 +63,10 @@ const ROOM_TOMBSTONE_TTL_MS = 60_000
 const ROOM_CLOSE_LEASE_MS = 15_000
 /** How long past an unheld room's close its head lapses: the close that server's timer starts lands well before. */
 const ROOM_LAPSE_AFTER_CLOSE_MS = 5_000
-/** The name Room's Cloudflare extension registers its `durableObject` and session calls under. */
+/** The name Room's Cloudflare extension registers its `durableObject` under. */
 const ROOM_CLOUDFLARE_EXTENSION = 'room'
+/** Room shares the Telefunc Durable Object namespace with sessions and Broadcast, and Broadcast's routes with its keys,
+ *  so each of its Durable Object names and route keys starts with this. */
+const ROOM_CLOUDFLARE_PREFIX = '__telefunc_room__:'
 /** What `Room.guard()` says of a room Room's server code didn't make. */
 const ROOM_GUARD_USAGE = 'Room.guard() expects a room obtained from Room.get()/Room.create()'

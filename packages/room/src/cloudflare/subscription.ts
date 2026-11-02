@@ -1,19 +1,19 @@
-export { RoomSessionSubscriptions, currentRoomSessionSubscriptions, getRoomSessionSubscriptions, deliverToRoomSession }
-export type { RoomSessionDeliveryRequest }
+export { RoomSessionSubscriptions, currentRoomSessionSubscriptions, getRoomSessionSubscriptions }
 
-import { type OrderingInfo, type Subscriber, type Unsubscribe, OrderedStubs, hostLocal } from 'telefunc/__internal'
+import {
+  type CloudflareMember,
+  type Subscriber,
+  type Unsubscribe,
+  OrderedStubs,
+  currentCloudflareMember,
+  hostLocal,
+} from 'telefunc/__internal'
 import type { RoomSubscriptionSource } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
-import { assertUsage } from '../utils/assert.js'
-import { ROUTE_RENEW_EVERY_MS, type RouteInstallation } from './routes.js'
+import { assert, assertUsage } from '../utils/assert.js'
+import { ROUTE_RENEW_EVERY_MS, laneRoute, type RouteInstallation } from './routes.js'
 import type { CloudflareRoomAuthorityStub, RegisterWire, RenewWire } from './do.js'
 import type { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
-
-type RoomSessionDeliveryRequest = {
-  route: RouteInstallation
-  payload: Uint8Array
-  info: OrderingInfo
-}
 
 const ROOM_SESSION = Symbol.for('telefunc.room.cloudflareSession')
 
@@ -29,7 +29,9 @@ function currentRoomSession(): RoomSession | null {
 function currentRoomSessionSubscriptions(driver: CloudflareRoomDriver): RoomSessionSubscriptions | null {
   const session = currentRoomSession()
   if (session === null) return null
-  return (session.subscriptions ??= new RoomSessionSubscriptions({ sessionId: session.id, driver }))
+  const member = currentCloudflareMember()
+  assert(member !== undefined) // a session DO's call runs in its Cloudflare session
+  return (session.subscriptions ??= new RoomSessionSubscriptions({ sessionId: session.id, member, driver }))
 }
 
 function getRoomSessionSubscriptions(driver: CloudflareRoomDriver): RoomSessionSubscriptions {
@@ -41,33 +43,30 @@ function getRoomSessionSubscriptions(driver: CloudflareRoomDriver): RoomSessionS
   return subscriptions
 }
 
-/** A room authority's delivery to this session DO, which has no subscription to take it before its first one. */
-function deliverToRoomSession(request: RoomSessionDeliveryRequest): void {
-  currentRoomSession()?.subscriptions?.deliver(request)
-}
-
-function entryKey(route: Pick<RouteInstallation, 'roomId' | 'inc' | 'laneKey'>): string {
-  return JSON.stringify([route.roomId, route.inc, route.laneKey])
-}
-
-type RoomSessionSubscriptionsOptions = { sessionId: string; driver: CloudflareRoomDriver }
+type RoomSessionSubscriptionsOptions = { sessionId: string; member: CloudflareMember; driver: CloudflareRoomDriver }
 
 /** A session DO's Room subscriptions, and its calls to room authorities. */
 class RoomSessionSubscriptions {
   private readonly authorityCalls = new OrderedStubs<CloudflareRoomAuthorityStub>()
   private readonly id: string
+  private readonly member: CloudflareMember
   private readonly driver: CloudflareRoomDriver
-  private readonly entries = new Map<string, CloudflareRoomSubscription>()
 
-  constructor({ sessionId, driver }: RoomSessionSubscriptionsOptions) {
+  constructor({ sessionId, member, driver }: RoomSessionSubscriptionsOptions) {
     this.id = sessionId
+    this.member = member
     this.driver = driver
   }
 
+  /** Its lane's frames reach `subscriber` from Broadcast's coordinator in this session's bucket, which the route it
+   *  registers names. A later subscription to the lane takes them over, those committed under this one's lease too. */
   subscribe({ roomId, inc, lane }: RoomSubscriptionSource, subscriber: Subscriber): Unsubscribe {
-    const route = { roomId, inc, laneKey: encodeLaneKey(lane), sessionDoId: this.id, leaseId: crypto.randomUUID() }
-    const subscription = new CloudflareRoomSubscription({ owner: this, route, subscriber })
-    this.entries.set(entryKey(route), subscription)
+    const { bucket } = this.member
+    assert(bucket !== null, 'A Room subscription registers from a session that knows its bucket')
+    const laneKey = encodeLaneKey(lane)
+    const route = { roomId, inc, laneKey, sessionDoId: this.id, leaseId: crypto.randomUUID(), bucket }
+    const stopDeliveries = this.member.subscribeLocal(laneRoute(inc, laneKey), subscriber)
+    const subscription = new CloudflareRoomSubscription({ owner: this, route, subscriber, stopDeliveries })
     void subscription.register()
     return () => subscription.unsubscribe()
   }
@@ -77,26 +76,14 @@ class RoomSessionSubscriptions {
   callAuthority<T>(roomId: string, invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>): Promise<T> {
     return this.authorityCalls.call(roomId, () => this.driver.stub(roomId), invoke)
   }
-
-  /** `route`'s subscription ended: a delivery to it is dropped from now on. */
-  routeClosed(route: RouteInstallation): void {
-    const key = entryKey(route)
-    if (this.entries.get(key)?.route === route) this.entries.delete(key)
-  }
-
-  /** A delivery to a lease this session no longer holds, as after a restart, is dropped: delivery is at-most-once, and
-   *  the authority's route lapses with the lease. */
-  deliver(request: RoomSessionDeliveryRequest): void {
-    const entry = this.entries.get(entryKey(request.route))
-    if (entry?.route.leaseId !== request.route.leaseId) return
-    entry.deliver(request.payload, request.info)
-  }
 }
 
 type CloudflareRoomSubscriptionOptions = {
   owner: RoomSessionSubscriptions
   route: RouteInstallation
   subscriber: Subscriber
+  /** Stops the lane's frames reaching `subscriber`. */
+  stopDeliveries: Unsubscribe
 }
 
 /** Ready once the authority has durably registered this subscription's exact route; Room owns retry and
@@ -105,17 +92,15 @@ class CloudflareRoomSubscription {
   readonly route: RouteInstallation
   private readonly owner: RoomSessionSubscriptions
   private readonly subscriber: Subscriber
+  private readonly stopDeliveries: Unsubscribe
   private ended = false
   private renewalTimer: ReturnType<typeof setTimeout> | undefined
 
-  constructor({ owner, route, subscriber }: CloudflareRoomSubscriptionOptions) {
+  constructor({ owner, route, subscriber, stopDeliveries }: CloudflareRoomSubscriptionOptions) {
     this.owner = owner
     this.route = route
     this.subscriber = subscriber
-  }
-
-  deliver(payload: Uint8Array, info: OrderingInfo): void {
-    this.subscriber.message(payload, info)
+    this.stopDeliveries = stopDeliveries
   }
 
   async register(): Promise<void> {
@@ -170,7 +155,7 @@ class CloudflareRoomSubscription {
   private stop(): void {
     this.ended = true
     clearTimeout(this.renewalTimer)
-    this.owner.routeClosed(this.route)
+    void this.stopDeliveries()
   }
 
   private callAuthority<T>(invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>): Promise<T> {

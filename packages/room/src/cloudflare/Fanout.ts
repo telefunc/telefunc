@@ -1,47 +1,38 @@
 export { Fanout }
 
-import {
-  OrderedStubs,
-  reportLostDeliveries,
-  type OrderingInfo,
-  type TelefuncExtensionNamespace,
-  type TelefuncExtensionStub,
-} from 'telefunc/__internal'
-import { ROOM_CLOUDFLARE_EXTENSION, ROOM_HORIZON_MS } from '../server/constants.js'
-import type { RouteInstallation } from './routes.js'
-import type { RoomSessionDeliveryRequest } from './subscription.js'
+import type { CloudflareRegions, OrderingInfo } from 'telefunc/__internal'
+import { ROOM_CLOUDFLARE_PREFIX, ROOM_HORIZON_MS } from '../server/constants.js'
+import { laneRoute, type RouteInstallation } from './routes.js'
 
-type FanoutOptions = { sessions: TelefuncExtensionNamespace }
+type FanoutOptions = { regions: CloudflareRegions }
 
-/** A room authority's deliveries. Each session DO's frames go through one ordered stub, so they arrive in commit order
- *  without waiting on each other. A lane has one route per subscribed session DO, at most the deployment's session
- *  shards, so the authority calls each itself, well within an invocation's subrequest limit. */
+/** A room authority's deliveries, through Broadcast's regions: a frame crosses to each bucket with a subscribed
+ *  session once, and the bucket's coordinator hands it to each of them. An incarnation's frames go through the one
+ *  coordinator its id picks in each bucket, so each session DO gets them in commit order. */
 class Fanout {
-  private readonly sessions: TelefuncExtensionNamespace
-  private readonly calls = new OrderedStubs<TelefuncExtensionStub>()
+  private readonly regions: CloudflareRegions
   /** A token's delivery, kept until it is awaited or two rotations later, which come a horizon apart at the
    *  earliest. */
   private deliveries = new Map<string, Promise<void>>()
   private rotated = new Map<string, Promise<void>>()
   private rotatedAt = Date.now()
 
-  constructor({ sessions }: FanoutOptions) {
-    this.sessions = sessions
+  constructor({ regions }: FanoutOptions) {
+    this.regions = regions
   }
 
-  /** Hands a committed frame to every route's session DO; the returned delivery settles once every handoff did. */
-  send(routes: RouteInstallation[], payload: Uint8Array, info: OrderingInfo): Promise<void> {
-    const handoffs = routes.map((route) =>
-      this.calls.call(
-        route.sessionDoId,
-        () => this.sessions.get(this.sessions.idFromString(route.sessionDoId)),
-        (session) => {
-          const request: RoomSessionDeliveryRequest = { route, payload, info }
-          return session.telefuncSessionCall(ROOM_CLOUDFLARE_EXTENSION, 'deliver', [request])
-        },
-      ),
-    )
-    return Promise.allSettled(handoffs).then((outcomes) => reportLostDeliveries('Cloudflare Room delivery', outcomes))
+  /** Hands a frame committed on `laneKeys` to the session DO of every route, once per session DO however many of the
+   *  lanes it subscribes to; the returned delivery settles once each took it. */
+  send(
+    inc: string,
+    laneKeys: readonly string[],
+    routes: RouteInstallation[],
+    payload: Uint8Array,
+    info: OrderingInfo,
+  ): Promise<void> {
+    const members = new Map(routes.map(({ sessionDoId, bucket }) => [sessionDoId, { member: sessionDoId, bucket }]))
+    const delivery = { routes: laneKeys.map((laneKey) => laneRoute(inc, laneKey)), payload, info }
+    return this.regions.forward(ROOM_CLOUDFLARE_PREFIX + inc, delivery, members.values())
   }
 
   /** The token `awaitDelivery` awaits `delivery` by. */

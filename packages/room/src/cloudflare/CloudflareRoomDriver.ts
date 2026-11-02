@@ -30,10 +30,8 @@ import type {
 } from 'telefunc/__internal'
 import type { CloudflareRoomAuthorityStub } from './do.js'
 import { currentRoomSessionSubscriptions, getRoomSessionSubscriptions } from './subscription.js'
-import { ROOM_CLOUDFLARE_EXTENSION } from '../server/constants.js'
+import { ROOM_CLOUDFLARE_EXTENSION, ROOM_CLOUDFLARE_PREFIX } from '../server/constants.js'
 
-// Room authorities share the Telefunc namespace with sessions and Broadcast, so a room id is always prefixed.
-const ROOM_AUTHORITY_PREFIX = '__telefunc_room__:'
 const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
 
 type CloudflareRoomDriverOptions = { getNamespace: () => TelefuncExtensionNamespace }
@@ -142,7 +140,7 @@ class CloudflareRoomDriver implements RoomDriver {
   }
 
   stub(roomId: string): CloudflareRoomAuthorityStub {
-    return this.object(ROOM_AUTHORITY_PREFIX + roomId)
+    return this.object(ROOM_CLOUDFLARE_PREFIX + roomId)
   }
 
   private directory(): CloudflareRoomAuthorityStub {

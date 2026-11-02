@@ -2,10 +2,10 @@
 export { CloudflareBroadcast, CloudflareBroadcastAuthorityState, CloudflareBroadcastMember }
 export type {
   BroadcastCalls,
-  BroadcastDeliverRequest,
   BroadcastForwardRequest,
   BroadcastPresenceRequest,
   BroadcastPublishRequest,
+  MemberPlacement,
   TelefuncBroadcastStub,
 }
 
@@ -18,6 +18,7 @@ import { getOrCreate } from '../../../utils/getOrCreate.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 import { currentCloudflareSession } from './session.js'
+import type { BroadcastDelivery } from './extensions.js'
 
 const PRESENCE_TTL_MS = 90_000
 const PRESENCE_REFRESH_INTERVAL_MS = 30_000
@@ -28,10 +29,11 @@ type BroadcastPublishRequest = {
   payload: BroadcastPayload
 }
 
-type BroadcastDeliverRequest = BroadcastPublishRequest & { info: OrderingInfo }
+/** A delivery, handed to one bucket coordinator for the member DOs it names by id. */
+type BroadcastForwardRequest = BroadcastDelivery & { members: string[] }
 
-/** The authority's sequenced publish, handed to one bucket coordinator for the member DOs it names by id. */
-type BroadcastForwardRequest = BroadcastDeliverRequest & { members: string[] }
+/** A member DO, by id, and the bucket its session was placed in. */
+type MemberPlacement = { member: string; bucket: LocationBucket }
 
 /** A member DO's presence on a route, at the key's authority, by DO id; `bucket: null` withdraws it. */
 type BroadcastPresenceRequest = {
@@ -44,7 +46,7 @@ type BroadcastPresenceRequest = {
 type TelefuncBroadcastStub = {
   telefuncBroadcastPublish(request: BroadcastPublishRequest): Promise<PublishResult>
   telefuncBroadcastForward(request: BroadcastForwardRequest): Promise<void>
-  telefuncBroadcastDeliver(request: BroadcastDeliverRequest): Promise<void>
+  telefuncBroadcastDeliver(delivery: BroadcastDelivery): Promise<void>
   telefuncBroadcastPresence(request: BroadcastPresenceRequest): Promise<void>
 }
 
@@ -177,6 +179,8 @@ class CloudflareBroadcastMember {
   private readonly id: string
   private locatedBucket: LocationBucket | null = null
   private readonly routes = new Map<string, MemberRoute>()
+  /** The subscribers of routes whose sender keeps its own list of receivers, by route key. */
+  private readonly localSubscribers = new Map<string, Subscriber>()
 
   constructor({ broadcast, id, calls }: CloudflareBroadcastMemberOptions) {
     this.broadcast = broadcast
@@ -210,10 +214,24 @@ class CloudflareBroadcastMember {
     return () => this.unsubscribe(routeKey, subscribed)
   }
 
+  /** Takes `route`'s deliveries for `subscriber` with no presence at the key's authority: for a sender that keeps its
+   *  own list of receivers, as a room authority does. A later `subscribeLocal()` to the route replaces it. */
+  subscribeLocal(route: BroadcastRoute, subscriber: Subscriber): Unsubscribe {
+    const routeKey = broadcastRouteKey(route)
+    this.localSubscribers.set(routeKey, subscriber)
+    return async () => {
+      if (this.localSubscribers.get(routeKey) === subscriber) this.localSubscribers.delete(routeKey)
+    }
+  }
+
   /** A coordinator's delivery to this DO. The authority forwards only to an unexpired record, so what arrives is
    *  owed, lost route or not. */
-  deliver(request: BroadcastDeliverRequest): void {
-    this.routes.get(broadcastRouteKey(request))?.subscriber?.message(request.payload, request.info)
+  deliver({ routes, payload, info }: BroadcastDelivery): void {
+    for (const route of routes) {
+      const routeKey = broadcastRouteKey(route)
+      const subscriber = this.routes.get(routeKey)?.subscriber ?? this.localSubscribers.get(routeKey)
+      subscriber?.message(payload, info)
+    }
   }
 
   private async unsubscribe(routeKey: string, memberRoute: MemberRoute): Promise<void> {
@@ -299,8 +317,8 @@ class CloudflareBroadcast {
     )
   }
 
-  /** At the key's authority: sequences the publish, reads its presence and forwards once per populated bucket, all in
-   *  one synchronous turn, so forwards leave through this DO's ordered stubs in `seq` order. */
+  /** At the key's authority: sequences the publish, reads its presence and forwards it, all in one synchronous turn,
+   *  so forwards leave through this DO's ordered stubs in `seq` order. */
   async publishToSubscribers(
     authorityState: CloudflareBroadcastAuthorityState,
     calls: BroadcastCalls,
@@ -309,24 +327,35 @@ class CloudflareBroadcast {
     const { key, kind, payload } = request
     const info = { seq: authorityState.nextSequence(key), timestamp: Date.now() }
     const presence = authorityState.livePresence(broadcastRouteKey({ key, kind }), info.timestamp)
+    await this.forward(calls, key, { routes: [{ key, kind }], payload, info }, presence)
+    return { seq: info.seq, timestamp: info.timestamp, receivers: presence.length }
+  }
+
+  /** Sends `delivery` across to each bucket once, to the coordinator `key` picks there, which hands it to the bucket's
+   *  `members`; settles once every coordinator did. The forwards leave through `calls` before this returns, so a DO's
+   *  forwards for one key reach each coordinator in the order it made them. */
+  async forward(
+    calls: BroadcastCalls,
+    key: string,
+    delivery: BroadcastDelivery,
+    members: Iterable<MemberPlacement>,
+  ): Promise<void> {
     const membersByBucket = new Map<LocationBucket, string[]>()
-    for (const { member, bucket } of presence) getOrCreate(membersByBucket, bucket, () => []).push(member)
+    for (const { member, bucket } of members) getOrCreate(membersByBucket, bucket, () => []).push(member)
     const forwards = await Promise.allSettled(
       Array.from(membersByBucket, ([bucket, members]) =>
         this.callByName(calls, this.coordinatorName(key, bucket), bucket, (coordinator) =>
-          coordinator.telefuncBroadcastForward({ key, kind, payload, info, members }),
+          coordinator.telefuncBroadcastForward({ ...delivery, members }),
         ),
       ),
     )
     reportLostDeliveries(`Cloudflare Broadcast delivery of '${key}'`, forwards)
-    return { seq: info.seq, timestamp: info.timestamp, receivers: presence.length }
   }
 
-  /** At a bucket coordinator: delivers the authority's sequenced publish to the named member DOs, in arrival order. */
-  async forwardToBucket(calls: BroadcastCalls, request: BroadcastForwardRequest): Promise<void> {
-    const delivery = { key: request.key, kind: request.kind, payload: request.payload, info: request.info }
+  /** At a bucket coordinator: delivers a forwarded delivery to the named member DOs, in arrival order. */
+  async forwardToBucket(calls: BroadcastCalls, { members, ...delivery }: BroadcastForwardRequest): Promise<void> {
     const deliveries = await Promise.allSettled(
-      request.members.map((member) =>
+      members.map((member) =>
         calls.call(
           member,
           () => this.stubById(member),
@@ -334,7 +363,8 @@ class CloudflareBroadcast {
         ),
       ),
     )
-    reportLostDeliveries(`Cloudflare Broadcast delivery of '${delivery.key}'`, deliveries)
+    const keys = delivery.routes.map((route) => route.key).join("', '")
+    reportLostDeliveries(`Cloudflare Broadcast delivery of '${keys}'`, deliveries)
   }
 
   /** A call from the DO owning `calls`, through its stub for the named instance. */

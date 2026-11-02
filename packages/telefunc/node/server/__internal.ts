@@ -41,12 +41,17 @@ export { MemoryPubSub, type Subscribers } from '../../wire-protocol/backend/memo
 export { ChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
 
 // A Cloudflare extension: Room's session and authority Durable Objects.
-export { registerCloudflareExtension } from '../../wire-protocol/adapter/cloudflare/extensions.js'
+export {
+  registerCloudflareExtension,
+  currentCloudflareMember,
+} from '../../wire-protocol/adapter/cloudflare/extensions.js'
 export type {
+  CloudflareMember,
+  CloudflareRegions,
   TelefuncExtensionNamespace,
   TelefuncExtensionStub,
 } from '../../wire-protocol/adapter/cloudflare/extensions.js'
-export { OrderedStubs, reportLostDeliveries } from '../../wire-protocol/adapter/cloudflare/OrderedStubs.js'
+export { OrderedStubs } from '../../wire-protocol/adapter/cloudflare/OrderedStubs.js'
 
 import type { ServerBroadcastEnd as ServerBroadcastEndClass } from '../../wire-protocol/channel/server/broadcastEnd.js'
 import type { ClientBroadcast as ClientBroadcastClass } from '../../wire-protocol/channel/client/broadcast.js'

@@ -18,7 +18,6 @@ import {
 } from '../wire-protocol/adapter/cloudflare/broadcast.js'
 import type {
   BroadcastCalls,
-  BroadcastDeliverRequest,
   BroadcastForwardRequest,
   BroadcastPresenceRequest,
   BroadcastPublishRequest,
@@ -40,6 +39,7 @@ import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { CloudflareBackend } from '../wire-protocol/adapter/cloudflare/CloudflareBackend.js'
 import {
   getCloudflareExtension,
+  type BroadcastDelivery,
   type CloudflareExtensionDurableObject,
 } from '../wire-protocol/adapter/cloudflare/extensions.js'
 import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/adapter/cloudflare/session.js'
@@ -185,8 +185,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return broadcast.forwardToBucket(this.broadcastCalls, request)
     }
 
-    telefuncBroadcastDeliver(request: BroadcastDeliverRequest) {
-      return this.#runInSession(() => this.session.broadcast.deliver(request))
+    telefuncBroadcastDeliver(delivery: BroadcastDelivery) {
+      return this.#runInSession(() => this.session.broadcast.deliver(delivery))
     }
 
     telefuncBroadcastPresence(request: BroadcastPresenceRequest) {
@@ -210,12 +210,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return call.apply(durableObject, args)
     }
 
-    telefuncSessionCall(name: string, method: string, args: unknown[]): unknown {
-      const call = getCloudflareExtension(name)?.session?.[method] as ((...args: unknown[]) => unknown) | undefined
-      assertUsage(call, `The Cloudflare extension ${name} has no session call ${method}()`)
-      return this.#runInSession(() => call(...args))
-    }
-
     /** Only an extension's `durableObject` schedules alarms. */
     async alarm(): Promise<void> {
       const name = await this.ctx.storage.get<string>(EXTENSION_STORAGE_KEY)
@@ -236,9 +230,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         extension?.durableObject,
         `The Cloudflare extension ${name} isn't registered: is it installed, and does your worker's build use Telefunc's Vite plugin?`,
       )
-      const durableObject = extension.durableObject(this.ctx as never, this.env as never, () =>
-        telefuncNamespace(this.env),
-      )
+      const regions = { forward: broadcast.forward.bind(broadcast, this.broadcastCalls) }
+      const durableObject = extension.durableObject(this.ctx as never, this.env as never, regions)
       this.durableObjects.set(name, durableObject)
       return durableObject
     }
