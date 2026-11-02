@@ -1269,8 +1269,9 @@ function testChannelApi() {
     await autoRetry(async () => {
       expect(JSON.parse((await page.textContent('#channel-api-result'))!)).deep.equal({
         text: { type: 'text', data: 'hello' },
-        binary: [1, 2, 3],
+        binary: { type: 'binary', data: [1, 2, 3] },
         aborted: true,
+        removedHeard: false,
       })
     })
   })
@@ -1306,6 +1307,7 @@ function testChannelApi() {
     await autoRetry(async () => {
       const ids = JSON.parse((await page.textContent('#channel-budgets-result'))!)
       const state = await getCleanupState()
+      expect(state[`budget_${ids.bytes}_credit`]).toBe('accepted')
       expect(state[`budget_${ids.bytes}`]).toContain('maxPendingBytes')
       expect(state[`budget_${ids.acks}`]).toContain('maxPendingAcks')
     })

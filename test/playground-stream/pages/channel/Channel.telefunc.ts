@@ -873,6 +873,10 @@ async function onChannelBudgets() {
   const exercise = (ch: typeof bytes, ack: boolean) => {
     ch.onOpen(() => {
       try {
+        if (!ack) {
+          void ch.send('x'.repeat(16 * 1024))
+          cleanupState[`budget_${ch.id}_credit`] = 'accepted'
+        }
         for (let i = 0; i < 1000; i++) void ch.send('x'.repeat(1024), { ack: ack as false })
       } catch (err) {
         cleanupState[`budget_${ch.id}`] = (err as Error).message

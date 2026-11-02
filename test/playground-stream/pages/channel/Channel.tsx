@@ -1146,19 +1146,15 @@ function ChannelDemo() {
       const { channel } = await openChannel(onChannelApiProbe)
       await channel.opened
       const controller = new AbortController()
-      channel.listen(
-        () => {
-          throw new Error('cancelled listener ran')
-        },
-        { signal: controller.signal },
-      )
-      channel.listenBinary(
-        () => {
-          throw new Error('cancelled binary listener ran')
-        },
-        { signal: controller.signal },
-      )
+      let removedHeard = false
+      const hear = () => {
+        removedHeard = true
+      }
+      channel.listen(hear, { signal: controller.signal })
+      channel.listenBinary(hear, { signal: controller.signal })
+      channel.onClose(hear, { signal: controller.signal })
       controller.abort()
+      channel.onOpen(hear, { signal: controller.signal })
       const iterator = channel.messages({ signal: controller.signal })
       const aborted = await iterator.next().then(
         () => false,
@@ -1174,7 +1170,12 @@ function ChannelDemo() {
       await messages.return?.()
       await channel.close()
       await channel.closed
-      output.textContent = JSON.stringify({ text, binary: Array.from(binary.data), aborted })
+      output.textContent = JSON.stringify({
+        text,
+        binary: { type: binary.type, data: Array.from(binary.data) },
+        aborted,
+        removedHeard,
+      })
     } catch (err) {
       output.textContent = String(err)
     }

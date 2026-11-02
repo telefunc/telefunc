@@ -293,10 +293,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private checkPending(bytes: number, ack: boolean): void {
+    const held = ack || this.sendCredit.waitingCount > 0 ? bytes + 512 : 0
     const setting =
       ack && this.pendingAcks.size >= this.maxPendingAcks
         ? 'maxPendingAcks'
-        : this.bytesAhead() + bytes + 512 > this.maxPendingBytes
+        : this.bytesAhead() + held > this.maxPendingBytes
           ? 'maxPendingBytes'
           : null
     if (!setting) return
