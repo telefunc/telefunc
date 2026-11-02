@@ -2,6 +2,7 @@ export { testCounter }
 export { testRunClassic }
 export { withNetworkConditions }
 export { newCDPSession }
+export { sendsAheadWarning }
 
 import {
   page,
@@ -15,6 +16,9 @@ import {
   editFile,
   editFileRevert,
 } from '@brillout/test-e2e'
+
+/** What a server channel prints once its sends put 64 MiB ahead of its page. */
+const sendsAheadWarning = '`send()` calls put 64 MiB ahead of its client'
 
 function newCDPSession() {
   // test-e2e's `page` is a proxy, and a CDP session needs the page itself.

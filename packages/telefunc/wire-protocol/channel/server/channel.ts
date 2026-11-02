@@ -31,7 +31,7 @@ import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validate
 import { ChannelClosedError, replayLossError } from '../channelErrors.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { isPromise } from '../../../utils/isPromise.js'
-import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
+import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES, SENDS_AHEAD_WARNING_BYTES } from '../../constants.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
 import { replayWindow, type CreditOwner, type Urgency } from '../../flowControl/credit.js'
@@ -42,7 +42,7 @@ import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
 import { ServerChannelBuffer, type BufferedSender, type EntryCallback } from './ServerChannelBuffer.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
-import { assert } from '../../../utils/assert.js'
+import { assert, assertWarning } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/frame.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
@@ -112,6 +112,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected selfTime = new SelfTime()
   /** Paces fire-and-forget TEXT, BINARY and PUBLISH sends to what the page grants; see `constants.ts`. */
   protected sendCredit: SendCredit
+  /** Its sends put `SENDS_AHEAD_WARNING_BYTES` ahead of the page, and it warned. */
+  private warnedAhead = false
   protected receiveCredit: ReceiveCredit
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private responseAbort: ((abortValue?: unknown) => void) | null = null
@@ -216,7 +218,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     // Cooperative credit model: the send already fired; `decrement` only gates the return
     // value. Awaiting throttles the caller's next send; not awaiting bypasses credit.
-    return this.sendCredit.decrement(this.peer.sendSequenced(encode.text, serialized))
+    return this.countSend(this.peer.sendSequenced(encode.text, serialized))
   }
 
   sendBinary(data: Uint8Array): Promise<void>
@@ -259,12 +261,28 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       )
     }
     // Cooperative credit model; see `sendData`.
-    return this.sendCredit.decrement(this.peer.sendSequenced(encode.binary, data))
+    return this.countSend(this.peer.sendSequenced(encode.binary, data))
+  }
+
+  private countSend(bytes: number): void | Promise<void> {
+    const sent = this.sendCredit.decrement(bytes)
+    this.warnIfAhead()
+    return sent
   }
 
   /** What its sends put ahead of the page: past the page's credit, and the ack requests it hasn't answered. */
   private bytesAhead(): number {
     return this.sendCredit.bytesSentPastCredit + this.pendingAckBytes
+  }
+
+  private warnIfAhead(): void {
+    if (this.warnedAhead || this.bytesAhead() < SENDS_AHEAD_WARNING_BYTES) return
+    this.warnedAhead = true
+    assertWarning(
+      false,
+      `A channel's \`send()\` calls put ${SENDS_AHEAD_WARNING_BYTES / 1024 / 1024} MiB ahead of its client, which the server holds in memory until the client takes it. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next, to send only as fast as the client reads, or slow down what produces the data.`,
+      { onlyOnce: false },
+    )
   }
 
   /** @internal The most bytes that may wait for a reading page: the credit window, the allowance past it, and both
@@ -286,6 +304,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   ): void {
     this.pendingAcks.set(seq, { resolve: settle.resolve, reject: settle.reject, bytes })
     this.pendingAckBytes += bytes
+    this.warnIfAhead()
   }
 
   listen(callback: ChannelListener<ClientToServer>): () => void {

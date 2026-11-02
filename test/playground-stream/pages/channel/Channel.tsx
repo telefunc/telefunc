@@ -1043,7 +1043,7 @@ function ChannelDemo() {
     channel.close()
   }, [])
 
-  const testTextBurst = useCallback(async (mode: 'unawaited' | 'acks', count: number) => {
+  const testTextBurst = useCallback(async (mode: 'unawaited' | 'awaited' | 'acks', count: number) => {
     setChannelState((s) => ({ ...s, textBurst: null }))
     const { channel, channelId } = await openChannel(onChannelTextBurst)
     const received: number[] = []
@@ -1531,6 +1531,7 @@ function ChannelDemo() {
           {(
             [
               ['unawaited', 6000],
+              ['awaited', 6000],
               ['acks', 12800],
             ] as const
           ).map(([mode, count]) => (

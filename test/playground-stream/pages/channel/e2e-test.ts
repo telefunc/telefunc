@@ -11,7 +11,7 @@ import {
   startProxy,
   countConnections,
 } from '../../e2e-utils'
-import { newCDPSession, withNetworkConditions } from '../../../utils'
+import { newCDPSession, sendsAheadWarning, withNetworkConditions } from '../../../utils'
 
 type ChannelState = {
   connected: boolean
@@ -983,7 +983,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
-  test('channel: a burst of 200 MiB the server sends without awaiting all reaches the page', async () => {
+  test('channel: a burst of 200 MiB the server sends without awaiting all reaches the page, with a warning', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-unawaited-burst-200')
     await autoRetry(
@@ -992,14 +992,30 @@ function testChannel(isDev: boolean, inDocker = false) {
         expect(burst.received).toBe(200)
         expect(burst.inOrder).toBe(true)
         expect(burst.closeErr).toBe(null)
+        expectLog(sendsAheadWarning)
       },
       { timeout: 60_000 },
     )
   })
 
-  test('channel: 6,000 text messages of 16 KiB the server sends in one loop without awaiting all reach a page that reads', async () => {
+  test('channel: 6,000 text messages of 16 KiB the server sends in one loop without awaiting all reach a page that reads, with a warning', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-text-burst-unawaited-6000')
+    await autoRetry(
+      async () => {
+        const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
+        expect(burst.received).toBe(6000)
+        expect(burst.inOrder).toBe(true)
+        expect(burst.closeErr).toBe(null)
+        expectLog(sendsAheadWarning)
+      },
+      { timeout: 30_000 },
+    )
+  })
+
+  test('channel: the same 6,000 text messages, each send awaited, all reach the page with no warning', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-text-burst-awaited-6000')
     await autoRetry(
       async () => {
         const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
@@ -1009,9 +1025,10 @@ function testChannel(isDev: boolean, inDocker = false) {
       },
       { timeout: 30_000 },
     )
+    expect(() => expectLog(sendsAheadWarning)).throw()
   })
 
-  test('channel: 200 MiB of text messages the server sends in one loop with { ack: true }, awaiting the acks together, all reach the page and all resolve', async () => {
+  test('channel: 200 MiB of text messages the server sends in one loop with { ack: true }, awaiting the acks together, all reach the page and all resolve, with a warning', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-text-burst-acks-12800')
     await autoRetry(
@@ -1022,6 +1039,7 @@ function testChannel(isDev: boolean, inDocker = false) {
         expect(burst.closeErr).toBe(null)
         const ss = await getCleanupState()
         expect(ss[`textBurst_${burst.channelId}_acked`]).toBe('12800')
+        expectLog(sendsAheadWarning)
       },
       { timeout: 60_000 },
     )

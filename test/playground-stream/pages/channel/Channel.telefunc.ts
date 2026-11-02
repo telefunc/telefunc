@@ -704,18 +704,19 @@ async function onChannelUnawaitedBurst() {
 
 /**
  * At the page's message, sends that many 16 KiB text messages, each starting with its index, in one loop: without
- * awaiting them, or with `{ ack: true }`, awaiting the acks together.
+ * awaiting them, awaiting each, or with `{ ack: true }`, awaiting the acks together.
  * cleanupState keys:
  *   textBurst_<id>_acked = how many of the ack-requesting sends resolved
  */
 async function onChannelTextBurst() {
-  const ch = new Channel<(run: { count: number; mode: 'unawaited' | 'acks' }) => void, string>()
+  const ch = new Channel<(run: { count: number; mode: 'unawaited' | 'awaited' | 'acks' }) => void, string>()
   const id = ch.id
   ch.listen(async ({ count, mode }) => {
     const sends: Promise<unknown>[] = []
     for (let i = 0; i < count; i++) {
       const message = String(i).padEnd(16 * 1024)
       if (mode === 'acks') sends.push(ch.send(message, { ack: true }))
+      else if (mode === 'awaited') await ch.send(message)
       else void ch.send(message)
     }
     if (mode !== 'acks') return
