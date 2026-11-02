@@ -52,7 +52,7 @@ function createBasicBinding(
           return overrides?.onPublish?.(id, request) ?? Promise.resolve({ seq: 1, timestamp: Date.now() })
         },
         telefuncBroadcastForward(request: any) {
-          return overrides?.onForward?.(id, request) ?? Promise.resolve()
+          return overrides?.onForward?.(id, request) ?? Promise.resolve(0)
         },
         telefuncBroadcastDeliver(request: any) {
           return overrides?.onDeliver?.(id, request) ?? Promise.resolve()
@@ -207,7 +207,7 @@ describe('cloudflare broadcast routing', () => {
       createBasicBinding({
         onForward(id) {
           coordinators.push(id.name)
-          return Promise.resolve()
+          return Promise.resolve(0)
         },
       }),
     )
@@ -251,13 +251,13 @@ describe('cloudflare broadcast routing', () => {
     const authorityState = createAuthorityState()
     const calls: BroadcastCalls = new OrderedStubs()
     const coordinatorPublishes: string[] = []
-    const firstRemotePublish = Promise.withResolvers<void>()
+    const firstRemotePublish = Promise.withResolvers<number>()
     const broadcast = createBroadcast(
       createBasicBinding({
         onForward(id, { payload: text }) {
           coordinatorPublishes.push(`${id.name}:${text}`)
           if (id.name.includes(':broadcast:apac:') && text === '{"text":"first"}') return firstRemotePublish.promise
-          return Promise.resolve()
+          return Promise.resolve(0)
         },
       }),
     )
@@ -282,7 +282,7 @@ describe('cloudflare broadcast routing', () => {
     expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"second"}')
     expect(coordinatorPublishes).toContain('telefunc:broadcast:apac:0:{"text":"second"}')
 
-    firstRemotePublish.resolve()
+    firstRemotePublish.resolve(0)
     await Promise.all([firstPublish, secondPublish])
 
     expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"second"}')

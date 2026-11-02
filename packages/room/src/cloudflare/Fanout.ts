@@ -22,7 +22,8 @@ class Fanout {
   }
 
   /** Hands a frame committed on `laneKeys` to the session DO of every route, once per session DO however many of the
-   *  lanes it subscribes to; the returned delivery settles once each took it. */
+   *  lanes it subscribes to; the returned delivery resolves once each took it, and rejects once one failed to take it
+   *  twice. */
   send(
     inc: string,
     laneKeys: readonly string[],
@@ -32,7 +33,10 @@ class Fanout {
   ): Promise<void> {
     const members = new Map(routes.map(({ sessionDoId, bucket }) => [sessionDoId, { member: sessionDoId, bucket }]))
     const delivery = { routes: laneKeys.map((laneKey) => laneRoute(inc, laneKey)), payload, info }
-    return this.regions.forward(ROOM_CLOUDFLARE_PREFIX + inc, delivery, members.values())
+    const sent = this.regions.forward(ROOM_CLOUDFLARE_PREFIX + inc, delivery, members.values())
+    // Logged here: no committer awaits a binary or data frame's delivery.
+    sent.catch((error: unknown) => console.error(error))
+    return sent
   }
 
   /** The token `awaitDelivery` awaits `delivery` by. */
