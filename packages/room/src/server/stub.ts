@@ -20,6 +20,7 @@ import {
 } from 'telefunc/__internal'
 import { ShieldValidationError, type ShieldValidator } from 'telefunc'
 import type { ServerLocalParticipant, ServerRoom } from './room.js'
+import type { RosterStream } from './lifecycle/RosterStream.js'
 import { reportRoomError } from './reportRoomError.js'
 import {
   decodeParticipantDeclaration,
@@ -169,6 +170,8 @@ function receiveFromPage<T>(end: ServerBroadcastEnd, handle: () => T): T | Promi
 
 type RoomStubOptions = {
   room: ServerRoom
+  /** Whether every client of the view was sent every member it holds. */
+  roster: Pick<RosterStream, 'settled'>
   end: ServerBroadcastEnd
   publishShield?: ShieldValidator
   grants: ResponseRoomGrants
@@ -179,6 +182,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   /** Its channel to its client. */
   readonly end: ServerBroadcastEnd
   private readonly room: ServerRoom
+  private readonly roster: RoomStubOptions['roster']
   private readonly publishShield: ShieldValidator | undefined
   private readonly members = new Set<string>()
   /** Members whose own messages this client doesn't get back:
@@ -199,8 +203,9 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   /** Whether this client was sent the whole roster since it attached. */
   rosterSent = false
 
-  constructor({ room, end, publishShield, grants }: RoomStubOptions) {
+  constructor({ room, roster, end, publishShield, grants }: RoomStubOptions) {
     this.room = room
+    this.roster = roster
     this.publishShield = publishShield
     this.selfSuppressed = grants.selfSuppressed
     this.grantedHidden = grants.hidden
@@ -456,10 +461,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
    *  after it, none dropped while it was away. A hidden member's grant may reach the client after a message does. */
   private namesSender(member: string): boolean {
     return (
-      this.end.isAttached &&
-      this.rosterSent &&
-      this.room._replica.rosterSettled &&
-      this.room._model.memberHidden(member) === false
+      this.end.isAttached && this.rosterSent && this.roster.settled && this.room._model.memberHidden(member) === false
     )
   }
 

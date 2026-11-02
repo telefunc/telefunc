@@ -8,7 +8,7 @@ import { assertKnownOptions, isRecord, ownMetadata } from '../../shared/model.js
 import type { RoomConfigRecord } from '../protocol.js'
 import type { RoomMeta, RoomOptions } from '../../types.js'
 import { encodeRoomRecord } from '../lanes/lanes.js'
-import { ServerRoom } from '../room.js'
+import type { ServerRoom } from '../room.js'
 import { RoomReplica } from '../replica.js'
 import { metaEntriesAt } from '../../shared/metaState.js'
 import { EXCHANGE_CONFLICT, retryCompareExchange } from '../store/retryCompareExchange.js'
@@ -76,7 +76,7 @@ function refusalOf(conflicting: RoomHead | null): Refusal | typeof EXCHANGE_CONF
 /** This process's view of the new incarnation: its meta at seq 0, no members. */
 function seededRoom(id: string, created: RoomConfigRecord): ServerRoom {
   const meta = { entries: metaEntriesAt(created.meta, 0), seq: 0 }
-  return new ServerRoom({ replica: RoomReplica.seeded(id, created, meta, { members: [] }) })
+  return RoomReplica.seeded(id, created, meta, { members: [] }).handle()
 }
 
 function normalizeRoomOptions(options: RoomOptions | undefined): {

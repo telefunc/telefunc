@@ -46,6 +46,12 @@ import type { RoomRequest } from './requests.js'
 import { LocalHolder, type LaneHolder, type TextWantsChange } from './lifecycle/replay.js'
 import { TailHold, type TailHoldOwner } from './lifecycle/tail.js'
 import type { RoomReplica } from './replica.js'
+import type { LanePlan } from './lanes/LanePlan.js'
+import type { RoomDemand } from './lanes/RoomDemand.js'
+import type { AuthoritySync } from './lifecycle/AuthoritySync.js'
+import type { RosterStream } from './lifecycle/RosterStream.js'
+import type { PendingDmAcks } from './dmAcks.js'
+import type { RoomLease } from './store/lease.js'
 import { RoomWrites, runAfterHook, type RoomWritesOwner } from './writes.js'
 import { acceptedOrThrow, commitLane, controlLane, encodeRoomRecord, withinRoomHorizon } from './lanes/lanes.js'
 import { reportRoomError } from './reportRoomError.js'
@@ -72,7 +78,22 @@ const SERVER_PARTICIPANT_BRAND: unique symbol = Symbol.for('telefunc.ServerRoomP
 
 type MetaMirror = { accepted(update: MemberMetaUpdate): void; rewound(): void }
 
-type ServerRoomOptions = { replica: RoomReplica }
+type ServerRoomOptions = {
+  replica: RoomReplica
+  /** Where the handle's holders' wants replan. */
+  lanePlan: Pick<LanePlan, 'textChanged' | 'binaryChanged' | 'memberChanged'>
+  authority: Pick<AuthoritySync, 'ensureRoster'>
+  /** For the handle's stubs. */
+  roster: Pick<RosterStream, 'settled'>
+  /** For the handle's participants. */
+  incomingDemand: Pick<RoomDemand, 'wanted'>
+  /** For the handle's writes. */
+  acks: PendingDmAcks
+  /** Hosts the members the handle admits. */
+  lease: RoomLease
+  /** The meta of each participant a client holds, which the client mirrors. */
+  metaMirrors: Set<MetaMirror>
+}
 
 /** One `Room.get()`'s handle on a room: its guards, its tail, the stubs it opened, its participants and its listeners,
  *  over this process's one view of the room, which every handle to it shares. Each serialization opens a fresh stub. */
@@ -106,9 +127,22 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
   /** @internal */
   readonly _writes: RoomWrites
 
-  constructor({ replica }: ServerRoomOptions) {
+  private readonly lanePlan: ServerRoomOptions['lanePlan']
+  private readonly authority: ServerRoomOptions['authority']
+  private readonly roster: ServerRoomOptions['roster']
+  private readonly incomingDemand: ServerRoomOptions['incomingDemand']
+  private readonly lease: RoomLease
+  private readonly metaMirrors: Set<MetaMirror>
+
+  constructor({ replica, lanePlan, authority, roster, incomingDemand, acks, lease, metaMirrors }: ServerRoomOptions) {
     super()
     this._replica = replica
+    this.lanePlan = lanePlan
+    this.authority = authority
+    this.roster = roster
+    this.incomingDemand = incomingDemand
+    this.lease = lease
+    this.metaMirrors = metaMirrors
     this._incarnation = replica.incarnation
     this._state = new RoomState({ view: this, model: replica.model, owner: new ServerRoomStateOwner({ room: this }) })
     this._local = new LocalHolder({ state: this._state, suppressed: this.localSuppressed })
@@ -118,6 +152,7 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
       model: replica.model,
       state: this._state,
       replica,
+      acks,
       localParticipants: this._localParticipants,
     })
   }
@@ -146,6 +181,8 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
     const participant = new ServerLocalParticipant({
       room: this,
       participant: { id: admission.id, meta, selfDelivery, identity },
+      incomingDemand: this.incomingDemand,
+      metaMirrors: this.metaMirrors,
     })
     await this.admit(admission, () => {
       this._localParticipants.set(admission.id, participant)
@@ -158,18 +195,18 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
 
   async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
     assertKnownOptions(options, ['hidden'], 'getParticipants()')
-    await this._replica.ensureRoster()
+    await this.authority.ensureRoster()
     return options?.hidden ? this._state.listHidden() : this._state.listVisible()
   }
 
   async getParticipant(id: string): Promise<RemoteParticipant | null> {
-    await this._replica.ensureRoster()
+    await this.authority.ensureRoster()
     return this._state.getRemote(id)
   }
 
   snapshot(): RoomSnapshotView {
     // Loads the members for the next snapshot; their arrival fires onChange.
-    if (!this._model.rosterKnown) void this._replica.ensureRoster().catch(reportRoomError)
+    if (!this._model.rosterKnown) void this.authority.ensureRoster().catch(reportRoomError)
     return this._model.snapshot()
   }
 
@@ -201,7 +238,7 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
       // The member's inbox delivers (within the horizon) before its join is visible, and the admission still holds.
       await this._replica.openInbox(id)
       admission.assertLive(this._model)
-      await createMember(this._incarnation, this._replica.lease, id, record, meta)
+      await createMember(this._incarnation, this.lease, id, record, meta)
       admission.assertLive(this._model)
       admission.commit()
       // A member removed meanwhile gets no join after its leave, here or anywhere.
@@ -336,8 +373,8 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
 
   /** @internal A client's view of this room. It attaches before the snapshot, so every later event relays and every
    *  earlier one is in the snapshot. */
-  _openStub({ end, publishShield, grants }: Omit<RoomStubOptions, 'room'>): RoomSnapshotMetadata {
-    this._attachStub(new RoomStub({ room: this, end, publishShield, grants }))
+  _openStub({ end, publishShield, grants }: Omit<RoomStubOptions, 'room' | 'roster'>): RoomSnapshotMetadata {
+    this._attachStub(new RoomStub({ room: this, roster: this.roster, end, publishShield, grants }))
     return {
       channelId: end.id,
       roomId: this.id,
@@ -389,7 +426,7 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
 
   /** @internal A response serialized a participant whose own frames the stub's client doesn't get back. */
   _onStubSuppressed(stub: RoomStub, member: string): void {
-    if (this.stubs.has(stub)) this._replica.replanMember(member)
+    if (this.stubs.has(stub)) this.lanePlan.memberChanged(member)
   }
 
   async _joinStubMember(
@@ -410,13 +447,13 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
   /** @internal A holder's text wants changed (`before` is `null` when none did): replan, then replay the retained
    *  frame it now wants. */
   _onHolderTextChanged(holder: LaneHolder, before: TextWantsChange | null): void {
-    if (this.holdsLanes(holder)) this._replica.replanText(holder, before?.members.keys() ?? [])
+    if (this.holdsLanes(holder)) this.lanePlan.textChanged(holder, before?.members.keys() ?? [])
     if (before) void this._replica.replayText(holder, before).catch(reportRoomError)
   }
 
   /** @internal One of a holder's binary wants changed: replan the pairs it covers, then replay what it now wants. */
   _onHolderBinaryChanged(holder: LaneHolder, change: BinaryWantChange): void {
-    if (this.holdsLanes(holder)) this._replica.replanBinary(holder, change)
+    if (this.holdsLanes(holder)) this.lanePlan.binaryChanged(holder, change)
     if (change.on) void this._replica.replayBinary(holder, change).catch(reportRoomError)
   }
 
@@ -450,6 +487,10 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
 type ServerLocalParticipantOptions = {
   room: ServerRoom
   participant: ParticipantBaseOptions['participant']
+  /** Holds the participant's demand once for the whole room. */
+  incomingDemand: Pick<RoomDemand, 'wanted'>
+  /** Where a client holding the participant mirrors its meta. */
+  metaMirrors: Set<MetaMirror>
 }
 
 /** Server-side `LocalParticipant`, returned by `ServerRoom.join()`. */
@@ -462,9 +503,14 @@ class ServerLocalParticipant extends ParticipantBase {
   private holder: RoomParticipantStub | null = null
   protected readonly _bugMessage = ROOM_BUG_MESSAGE
 
-  constructor({ room, participant }: ServerLocalParticipantOptions) {
+  private readonly incomingDemand: ServerLocalParticipantOptions['incomingDemand']
+  private readonly metaMirrors: Set<MetaMirror>
+
+  constructor({ room, participant, incomingDemand, metaMirrors }: ServerLocalParticipantOptions) {
     super({ participant, rewinds: room._model.metaRewinds })
     this._room = room
+    this.incomingDemand = incomingDemand
+    this.metaMirrors = metaMirrors
   }
 
   static isServerLocalParticipant(value: unknown): value is ServerLocalParticipant {
@@ -473,7 +519,7 @@ class ServerLocalParticipant extends ParticipantBase {
 
   /** @internal Read from the room's demand, which holds it once. */
   get _demandedTracks(): TrackKey[] {
-    return this._left ? [] : this._room._replica.wantedTracks(this.id)
+    return this._left ? [] : this.incomingDemand.wanted(this.id)
   }
 
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
@@ -544,9 +590,9 @@ class ServerLocalParticipant extends ParticipantBase {
    *  it mirrors. */
   _onMeta(mirror: MetaMirror): () => void {
     this.metaMirror = mirror
-    const stopMirroring = this._room._replica.mirrorMeta(mirror)
+    this.metaMirrors.add(mirror)
     return () => {
-      stopMirroring()
+      this.metaMirrors.delete(mirror)
       if (this.metaMirror === mirror) this.metaMirror = null
     }
   }

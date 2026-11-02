@@ -39,6 +39,7 @@ import { reapAndReadMembersById } from './store/roster.js'
 import { storeDmReply, takeDmReply } from './store/dmReplies.js'
 import { dropMemberMetaGeneration, writeMemberConnection, writeMemberMeta, type MemberMetaWrite } from './store/meta.js'
 import type { RoomReplica } from './replica.js'
+import type { PendingDmAcks } from './dmAcks.js'
 import type { RoomGuardHooks } from './roomStatics.js'
 assertIsNotBrowser()
 
@@ -53,6 +54,8 @@ type RoomWritesOptions = {
   model: Pick<RoomModel, 'closed' | 'acceptedMeta'>
   state: Pick<RoomState, 'getRemote'>
   replica: RoomReplica
+  /** The view's in-flight ack DMs, which a leave of either end or the room's close settles too. */
+  acks: PendingDmAcks
   /** The handle's local participants, whose stamps a view that holds no roster yet doesn't hold. */
   localParticipants: ReadonlyMap<
     string,
@@ -72,14 +75,16 @@ class RoomWrites {
   private readonly model: RoomWritesOptions['model']
   private readonly state: RoomWritesOptions['state']
   private readonly replica: RoomReplica
+  private readonly acks: PendingDmAcks
   private readonly localParticipants: RoomWritesOptions['localParticipants']
 
-  constructor({ owner, incarnation, model, state, replica, localParticipants }: RoomWritesOptions) {
+  constructor({ owner, incarnation, model, state, replica, acks, localParticipants }: RoomWritesOptions) {
     this.owner = owner
     this.incarnation = incarnation
     this.model = model
     this.state = state
     this.replica = replica
+    this.acks = acks
     this.localParticipants = localParticipants
   }
 
@@ -212,14 +217,15 @@ class RoomWrites {
 
   private async sendDmAck(from: string, to: string, data: unknown): Promise<RoomAckReceipt> {
     const ackId = crypto.randomUUID()
-    const reply = this.replica.awaitDmReply(ackId, from, to)
+    const acks = this.acks
+    const reply = new Promise<RoomResult>((settle) => acks.add(ackId, { from, to, settle }))
     // Bounds the wait nothing else settles: a lost reply frame, or a recipient that never handled the DM.
     const timer = unrefTimer(setTimeout(() => void this.settleTimedOut(from, ackId), ROOM_DM_ACK_TIMEOUT_MS))
     let receipt: RoomSendReceipt
     try {
       receipt = await this.publishDm(from, to, data, ackId)
     } catch (err) {
-      this.replica.dropDmAck(ackId)
+      acks.delete(ackId)
       clearTimeout(timer)
       throw err
     }
@@ -237,7 +243,7 @@ class RoomWrites {
     } catch (err) {
       reply = toRoomFailure(err, reportRoomError, ROOM_BUG_MESSAGE)
     }
-    this.replica.settleDmAck(ackId, reply)
+    this.acks.settle(ackId, reply)
   }
 
   private async publishDm(from: string, to: string, data: unknown, ackId?: string): Promise<RoomSendReceipt> {

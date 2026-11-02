@@ -152,13 +152,10 @@ async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
 async function openRoom(id: string): Promise<ServerRoom> {
   const incarnation = await requireRoom(id)
   const held = RoomReplica.of(incarnation.inc)
-  if (held !== undefined) {
-    await held.catchUp()
-    return new ServerRoom({ replica: held })
-  }
+  if (held !== undefined) return await held.sharedHandle()
   const count = await reapAndCountPresence(incarnation)
   const replica = RoomReplica.seeded(id, incarnation, await requireRoomMeta(id, incarnation), { count })
-  return new ServerRoom({ replica })
+  return replica.handle()
 }
 
 async function requireRoomMeta(id: string, config: RoomConfigRecord): Promise<StoredRoomMeta> {
@@ -214,7 +211,7 @@ async function joinRoom(id: string, options?: JoinOptions): Promise<LocalPartici
   // A view made for a join alone counts no member until a handle reads its roster.
   const replica =
     RoomReplica.of(config.inc) ?? RoomReplica.seeded(id, config, await requireRoomMeta(id, config), { count: 0 })
-  return await new ServerRoom({ replica }).join(options)
+  return await replica.handle().join(options)
 }
 
 async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
