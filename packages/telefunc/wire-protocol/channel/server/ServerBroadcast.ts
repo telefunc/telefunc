@@ -211,7 +211,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     kind: Kind,
     payload: BroadcastPayload<Kind>,
   ): ChannelPublishAck | Promise<ChannelPublishAck> {
-    return getBroadcastPlane().publish({ key: this.key, kind }, payload)
+    return publishOnPlane({ key: this.key, kind }, payload)
   }
 
   /** @internal Without a shield, the page's payload is never parsed here. */
@@ -259,6 +259,18 @@ type BroadcastChannel<T = unknown> = {
   abort(abortValue: unknown, message?: string): void
 }
 
+/** A failed publish rejects, also when the backend or its transport throws, so a caller's `.catch()` sees it. */
+function publishOnPlane<Kind extends BroadcastKind>(
+  route: BroadcastRoute<Kind>,
+  payload: BroadcastPayload<Kind>,
+): ChannelPublishAck | Promise<ChannelPublishAck> {
+  try {
+    return markHandled(getBroadcastPlane().publish(route, payload))
+  } catch (err) {
+    return markHandled(Promise.reject(err))
+  }
+}
+
 const BroadcastChannel = ServerBroadcast as {
   new <T = unknown>(opts: { key: string }): BroadcastChannel<T>
 }
@@ -266,14 +278,14 @@ const BroadcastChannel = ServerBroadcast as {
 const Broadcast = {
   publish<U = unknown>(key: string, data: ChannelData<U>): ChannelPublishAck | Promise<ChannelPublishAck> {
     assertBroadcastKey(key)
-    return markHandled(getBroadcastPlane().publish({ key, kind: 'text' }, stringify(data)))
+    return publishOnPlane({ key, kind: 'text' }, stringify(data))
   },
   subscribe<U = unknown>(key: string, callback: BroadcastListener<U>): BroadcastUnsubscribe {
     return subscribeRoute({ key, kind: 'text' }, (payload) => parse(payload) as ChannelData<U>, callback)
   },
   publishBinary(key: string, data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     assertBroadcastKey(key)
-    return markHandled(getBroadcastPlane().publish({ key, kind: 'binary' }, data))
+    return publishOnPlane({ key, kind: 'binary' }, data)
   },
   subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
     // Bytes of its own: every subscriber on the key gets the same delivery.
