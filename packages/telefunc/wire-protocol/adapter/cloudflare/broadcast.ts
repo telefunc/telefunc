@@ -382,14 +382,16 @@ class CloudflareBroadcast {
     members: Iterable<MemberPlacement>,
   ): Promise<void> {
     const membersByBucket = new Map<LocationBucket, string[]>()
-    for (const { member, bucket } of members) getOrCreate(membersByBucket, bucket, () => []).push(member)
     let total = 0
+    for (const { member, bucket } of members) {
+      getOrCreate(membersByBucket, bucket, () => []).push(member)
+      total++
+    }
     let lost = 0
     let reason: unknown
     await Promise.all(
-      Array.from(membersByBucket, ([bucket, members]) => {
-        total += members.length
-        return this.callByName(calls, this.coordinatorName(key, bucket), bucket, (coordinator) =>
+      Array.from(membersByBucket, ([bucket, members]) =>
+        this.callByName(calls, this.coordinatorName(key, bucket), bucket, (coordinator) =>
           coordinator.telefuncBroadcastForward({ ...delivery, members }),
         ).then(
           (lostThere) => {
@@ -399,8 +401,8 @@ class CloudflareBroadcast {
             lost += members.length
             reason ??= error
           },
-        )
-      }),
+        ),
+      ),
     )
     if (lost === 0) return
     throw new Error(`Cloudflare Broadcast delivery of '${key}' lost to ${lost}/${total} Durable Objects`, {
