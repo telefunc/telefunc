@@ -57,7 +57,7 @@ class RedisBackend implements BroadcastDriver, RedisDriver {
   private async publishInTurn(route: BroadcastRoute, waiting: WaitingSend<BroadcastPayload>): Promise<PublishResult> {
     const payload = await waiting.turn
     try {
-      return this.connection.run(REDIS_COMMANDS.publish, { route, payload })
+      return await this.connection.run(REDIS_COMMANDS.publish, { route, payload })
     } finally {
       waiting.sent()
     }
