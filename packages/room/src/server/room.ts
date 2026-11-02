@@ -176,11 +176,12 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
   }
 
   async join(options?: JoinOptions): Promise<LocalParticipant> {
-    return await this._join(options, { foundOpen: false })
+    await this.assertOpen()
+    return await this._joinOpen(options)
   }
 
-  /** @internal `foundOpen`: the caller found the room open just now, as `Room.join(id)` does by reading its head. */
-  async _join(options: JoinOptions | undefined, { foundOpen }: { foundOpen: boolean }): Promise<LocalParticipant> {
+  /** @internal A join to a room the caller found open just now, as `Room.join(id)` does by reading its head. */
+  async _joinOpen(options?: JoinOptions): Promise<LocalParticipant> {
     const { meta, selfDelivery, identity, hidden } = normalizeJoinOptions(options)
     const admission = new Admission({ meta, identity, hidden })
     const participant = new ServerLocalParticipant({
@@ -189,7 +190,6 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
       incomingDemand: this.incomingDemand,
       metaMirrors: this.metaMirrors,
     })
-    if (!foundOpen) await this.assertOpen()
     await this.admit(admission, () => {
       this._localParticipants.set(admission.id, participant)
       this._replica.own(admission.id, this)
