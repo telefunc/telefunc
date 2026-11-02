@@ -62,7 +62,8 @@ this one too, applies the event to its model, and its views tell their listeners
 - **wants**: the lanes a holder asks for: text, and binary per member and track (`WantsIndex`).
 - **tail**: the recent messages a handle holds between its serialization and its client's first subscribe
   (`TailHold`).
-- **admission**: a join under way through one handle: its guard, then its record, then its inbox (`Admission`).
+- **admission**: a join under way through one handle: its guard, then its inbox, then its record and join event
+  (`Admission`).
 - **lease**: a process's claim on the members and views it hosts. Its heartbeat renews it; a lapsed lease's members
   are reaped by the next process that finds it (`store/lease.ts`).
 - **hold**: what keeps a room open: its holders and members are counted, and once nothing holds it, it closes after
