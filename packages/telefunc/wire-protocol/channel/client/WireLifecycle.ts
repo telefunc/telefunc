@@ -642,6 +642,10 @@ function channelErrorFor(reason: number): Error {
       )
     case ERROR_REASON.LOST:
       return replayLossError('server')
+    case ERROR_REASON.AHEAD:
+      return new ChannelOverflowError(
+        "Channel closed: the server's sends got further ahead of this client than config.channel.maxPendingBytes or maxPendingAcks lets the server hold",
+      )
     default:
       return makeBugError()
   }

@@ -303,7 +303,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const err = new ChannelOverflowError(
       `Channel closed: config.channel.${setting} exceeded; await each send or raise the setting`,
     )
-    this.endWithError(ERROR_REASON.OVERFLOW, err)
+    this.endWithError(ERROR_REASON.AHEAD, err)
     throw err
   }
 
