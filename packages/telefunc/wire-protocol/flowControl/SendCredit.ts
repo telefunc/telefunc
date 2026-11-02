@@ -63,11 +63,6 @@ class SendCredit {
     if (!this.limitRaised) this.limitBytes = Math.min(CREDIT_WINDOW_INITIAL_BYTES, this.peerByteWindowCap)
   }
 
-  /** No byte credit is left. */
-  get isPastByteCredit(): boolean {
-    return this.limitBytes - this.sentBytes <= 0
-  }
-
   /** Bytes sent past the byte limit and still past it, but the one frame that crossed it with credit. */
   get bytesSentPastCredit(): number {
     return Math.max(0, this.sentBytes - Math.max(this.limitBytes, this.sentWithCredit))
@@ -92,7 +87,7 @@ class SendCredit {
 
   /** Count a frame that went out without a credit gate, one buffered while no peer was attached. */
   countSent(bytes: number): void {
-    const hadCredit = !this.isPastByteCredit
+    const hadCredit = this.limitBytes > this.sentBytes
     this.sentBytes += bytes
     if (hadCredit) this.sentWithCredit = this.sentBytes
     this.sentMessages += 1
