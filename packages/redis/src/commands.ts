@@ -38,6 +38,7 @@ import {
   orderKey,
   retainedKey,
   retainedLanesKey,
+  retainedOwnersKey,
   retainedOfKey,
   retainedOfTrackKey,
   revKey,
@@ -364,6 +365,8 @@ const COMMIT_KEYS = {
   trackLanes: 10,
   /** The incarnation's retained lanes. */
   retainedLanes: 11,
+  /** The member each retained frame of a lane other than a binary one is from. */
+  retainedOwners: 12,
 } as const
 
 /** COMMIT's ARGV, by index; the required live cells follow the last. A fence token is the channel's local
@@ -380,7 +383,9 @@ const COMMIT_ARGS = {
   everyTrackFence: 6,
   laneKey: 7,
   everyMemberFence: 8,
-  requiredCells: 9,
+  /** The member a retained frame is from, `''` for none. */
+  owner: 9,
+  requiredCells: 10,
 } as const
 
 /** Each name of `table` as the script reads it from the table `array` names: index 0 is `KEYS[1]` or `ARGV[1]`.
@@ -459,6 +464,14 @@ if ${A.retain} == '1' then
     end
   end
   redis.call('SET', retained_key, frame)
+  if ${A.laneKind} ~= 'binary' then
+    if ${A.owner} == '' then
+      redis.call('HDEL', ${K.retainedOwners}, ${A.laneKey})
+    else
+      redis.call('HSET', ${K.retainedOwners}, ${A.laneKey}, ${A.owner})
+      redis.call('SADD', incarnation_keys_key, ${K.retainedOwners})
+    end
+  end
 end
 -- A channel's local subscriptions awaiting the commit find their fence token ahead of its frame, after a byte no frame
 -- starts with.
@@ -482,16 +495,10 @@ const COMMIT_LUA = `${HEAD_PRELUDE}
 ${REDIS_ORDERING_FRAME_LUA}
 ${commitLua(COMMIT_KEY, COMMIT_ARG, 'ARGV')}`
 
-// Deletes one lane's retained frame, optionally only while it still holds seq `if_seq`. `member` and `track` are the
-// retained lanes of a binary lane's member and its track; another lane repeats `retained` for both.
+// Deletes one lane's retained frame. `member` and `track` are the retained lanes of a binary lane's member and its
+// track; another lane repeats `retained` for both, and its owner leaves `owners`.
 const RETAINED_DELETE_FN_LUA = `
-local function tf_retained_delete(incarnation_keys, all, retained, member, track, if_seq, kind, lane_key)
-  if if_seq ~= '' then
-    local frame = redis.call('GET', retained)
-    if not frame then return 0 end
-    local seq_hi, seq_lo = struct.unpack('>I4I4', frame)
-    if seq_hi * 4294967296 + seq_lo ~= tonumber(if_seq) then return 0 end
-  end
+local function tf_retained_delete(incarnation_keys, all, owners, retained, member, track, kind, lane_key)
   redis.call('SREM', incarnation_keys, retained)
   redis.call('SREM', all, lane_key)
   if kind == 'binary' then
@@ -499,24 +506,29 @@ local function tf_retained_delete(incarnation_keys, all, retained, member, track
     if redis.call('SCARD', member) == 0 then redis.call('SREM', incarnation_keys, member) end
     redis.call('SREM', track, lane_key)
     if redis.call('SCARD', track) == 0 then redis.call('SREM', incarnation_keys, track) end
+  else
+    redis.call('HDEL', owners, lane_key)
   end
   return redis.call('DEL', retained)
 end
 `
 
 // OPERATION: an operation's writes, while the head names its incarnation open, every cell its plan read is still at
-// the version it read, and each member it drops has the lanes and retained frames the executor read: the prefix drops,
-// the mutations and counts at the incarnation's next revision, the members' lane orders, the retained frames, the
-// track lane sets of the members' binary lanes, then its commit, as COMMIT commits.
-//   KEYS: [1]=head [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions [7]=retained lanes, then per
-//         dropped member its order hash and retained lanes, then per retained frame deleted its key and its member's
-//         and track's retained lanes, then per binary lane dropped its track's lane set, then COMMIT's KEYS
+// the version it read, and each member it drops has the lanes and retained binary frames the executor read: the prefix
+// drops, the mutations and counts at the incarnation's next revision, the members' lane orders, their retained binary
+// frames and the semantic frame of each that owns it as the script finds it, the track lane sets of the members'
+// binary lanes, then its commit, as COMMIT commits.
+//   KEYS: [1]=head [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions [7]=retained lanes
+//         [8]=the semantic lane's retained frame [9]=retained owners, then per dropped member its order hash and
+//         retained lanes, then per retained binary frame deleted its key and its member's and track's retained lanes,
+//         then per binary lane dropped its track's lane set, then COMMIT's KEYS
 //   ARGV: [1]=inc [2]=the plan's JSON (see `operation.invoke`), then the mutations' bytes, then COMMIT's ARGV
 const OPERATION_LUA = `${HEAD_PRELUDE}${REDIS_ORDERING_FRAME_LUA}${CELL_WRITES_LUA}${RETAINED_DELETE_FN_LUA}
 local function tf_commit(CK, CA)
 ${commitLua(luaRefs('CK', COMMIT_KEYS), luaRefs('CA', COMMIT_ARGS), 'CA')}
 end
 local rev_key, incarnation_keys_key, cell_index_key, retained_lanes_key = KEYS[2], KEYS[3], KEYS[4], KEYS[7]
+local semantic_key, owners_key = KEYS[8], KEYS[9]
 local now = tf_now()
 local head = tf_live_head(KEYS[1], now)
 if (not head) or head.inc ~= ARGV[1] or head.state ~= 'open' then return '{"kind":"stale-incarnation"}' end
@@ -524,9 +536,9 @@ local plan = cjson.decode(ARGV[2])
 for _, read in ipairs(plan.expect) do
   if (redis.call('HGET', KEYS[6], read[1]) or '') ~= read[2] then return '{"kind":"conflict"}' end
 end
-local at = 8
+local at = 10
 for _, member in ipairs(plan.members) do
-  if redis.call('HLEN', KEYS[at]) ~= member[1] or redis.call('SCARD', KEYS[at + 1]) ~= member[2] then
+  if redis.call('HLEN', KEYS[at]) ~= member[2] or redis.call('SCARD', KEYS[at + 1]) ~= member[3] then
     return '{"kind":"conflict"}'
   end
   at = at + 2
@@ -543,15 +555,19 @@ end
 local counters = {}
 for _, count in ipairs(plan.counts) do tf_count(count[1], count[2], count[3], version, now, counters) end
 redis.call('SADD', incarnation_keys_key, rev_key, cell_index_key, KEYS[5], KEYS[6])
-at = 8
-for _ in ipairs(plan.members) do
+at = 10
+for _, member in ipairs(plan.members) do
   redis.call('SREM', incarnation_keys_key, KEYS[at])
   redis.call('UNLINK', KEYS[at])
   at = at + 2
+  if redis.call('HGET', owners_key, plan.semantic) == member[1] then
+    tf_retained_delete(incarnation_keys_key, retained_lanes_key, owners_key, semantic_key, semantic_key, semantic_key,
+      'semantic', plan.semantic)
+  end
 end
-for _, frame in ipairs(plan.retained) do
-  tf_retained_delete(incarnation_keys_key, retained_lanes_key, KEYS[at], KEYS[at + 1], KEYS[at + 2], frame[3], frame[2],
-    frame[1])
+for _, lane_key in ipairs(plan.retained) do
+  tf_retained_delete(incarnation_keys_key, retained_lanes_key, owners_key, KEYS[at], KEYS[at + 1], KEYS[at + 2],
+    'binary', lane_key)
   at = at + 3
 end
 for _, lane_key in ipairs(plan.trackLanes) do
@@ -629,6 +645,7 @@ type CommitInput = RoomInc & {
   channels: CommitChannels
   payload: Uint8Array
   retain: boolean
+  owner: string | undefined
   closingLease: string | undefined
   requiredCellKeys: readonly string[]
   fenceTokens: FenceTokens
@@ -877,6 +894,7 @@ const REDIS_COMMANDS = {
     lua: OPERATION_LUA,
     numberOfKeys: null,
     invoke: (prefix, { roomId, inc, writes, reads, members, commit, kit }: OperationInput) => {
+      const semanticLaneKey = kit.encodeLaneKey({ kind: 'semantic' })
       const keys = [
         headKey(prefix, roomId),
         revKey(prefix, roomId, inc),
@@ -885,6 +903,8 @@ const REDIS_COMMANDS = {
         cellValuesKey(prefix, roomId, inc),
         cellVersionsKey(prefix, roomId, inc),
         retainedLanesKey(prefix, roomId, inc),
+        retainedKey(prefix, roomId, inc, semanticLaneKey),
+        retainedOwnersKey(prefix, roomId, inc),
       ]
       const argv: (string | Buffer)[] = [inc, '']
       // Each mutation's bytes by its index in ARGV, 0 for a delete.
@@ -896,20 +916,15 @@ const REDIS_COMMANDS = {
       for (const { member } of members) {
         keys.push(memberOrderKey(prefix, roomId, inc, member), retainedOfKey(prefix, roomId, inc, member))
       }
-      const retained = [
-        ...members.flatMap((member) => member.retained.map((laneKey) => [laneKey, ''] as const)),
-        ...writes.retained.map(({ lane, seq }) => [kit.encodeLaneKey(lane), String(seq)] as const),
-      ].map(([laneKey, ifSeq]) => {
-        const lane = kit.decodeLaneKey(laneKey)
-        const key = retainedKey(prefix, roomId, inc, laneKey)
-        const binary = lane.kind === 'binary'
+      const retained = members.flatMap(({ retained }) => retained)
+      for (const laneKey of retained) {
+        const { member, track } = binaryLaneOf(kit, laneKey)
         keys.push(
-          key,
-          binary ? retainedOfKey(prefix, roomId, inc, lane.member) : key,
-          binary ? retainedOfTrackKey(prefix, roomId, inc, lane.track) : key,
+          retainedKey(prefix, roomId, inc, laneKey),
+          retainedOfKey(prefix, roomId, inc, member),
+          retainedOfTrackKey(prefix, roomId, inc, track),
         )
-        return [laneKey, lane.kind, ifSeq]
-      })
+      }
       const trackLanes = members.flatMap(({ lanes }) => lanes.filter((key) => kit.decodeLaneKey(key).kind === 'binary'))
       for (const laneKey of trackLanes) keys.push(trackLanesKey(prefix, roomId, inc, binaryLaneOf(kit, laneKey).track))
       let commitAt = 0
@@ -921,7 +936,8 @@ const REDIS_COMMANDS = {
       }
       argv[1] = JSON.stringify({
         expect: [...reads],
-        members: members.map(({ lanes, retained }) => [lanes.length, retained.length]),
+        members: members.map(({ member, lanes, retained }) => [member, lanes.length, retained.length]),
+        semantic: semanticLaneKey,
         prefixes: writes.prefixes,
         mutations,
         counts: writes.counts.map(({ key, delta, create }) => [key, delta, create === true]),
@@ -1060,6 +1076,7 @@ function commitInvocation(prefix: string, input: CommitInput): { keys: string[];
   keys[COMMIT_KEYS.everyMemberChannel] = channels.everyMember ?? channels.lane
   keys[COMMIT_KEYS.trackLanes] = lane.kind === 'binary' ? trackLanesKey(prefix, roomId, inc, lane.track) : order
   keys[COMMIT_KEYS.retainedLanes] = retainedLanesKey(prefix, roomId, inc)
+  keys[COMMIT_KEYS.retainedOwners] = retainedOwnersKey(prefix, roomId, inc)
   const argv: (string | Buffer)[] = []
   argv[COMMIT_ARGS.inc] = inc
   argv[COMMIT_ARGS.laneKind] = lane.kind
@@ -1070,6 +1087,7 @@ function commitInvocation(prefix: string, input: CommitInput): { keys: string[];
   argv[COMMIT_ARGS.everyTrackFence] = fenceTokens.everyTrack
   argv[COMMIT_ARGS.laneKey] = laneKey
   argv[COMMIT_ARGS.everyMemberFence] = fenceTokens.everyMember
+  argv[COMMIT_ARGS.owner] = input.owner ?? ''
   for (const key of input.requiredCellKeys) argv.push(key)
   return { keys, argv }
 }

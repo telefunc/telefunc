@@ -134,7 +134,7 @@ class RoomWrites {
       const envelope: RoomDataEnvelope = { __r: 'data', from, data, ...stamp }
       const record = encodeRoomRecord(envelope)
       const target = { roomId: this.incarnation.id, inc: this.incarnation.inc, lane: SEMANTIC_LANE }
-      const opts = { retain, requiredCellKeys: [memberCellKey(from)] }
+      const opts = { retain, owner: from, requiredCellKeys: [memberCellKey(from)] }
       const committing = commitLane(target, record, opts)
       sent()
       return { sender, commit: acceptedOrThrow(this.incarnation.id, await committing) }
@@ -150,7 +150,7 @@ class RoomWrites {
       const { sender } = await this.admitPublish(from, frame.payload)
       const admitted = this.replica.admitTrack(from, lane.track)
       if (admitted !== null) await admitted
-      const opts = { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] }
+      const opts = { retain: frame.retain, owner: from, requiredCellKeys: [memberCellKey(from)] }
       const committing = commitLane({ roomId: this.incarnation.id, inc: this.incarnation.inc, lane }, framed, opts)
       sent()
       return { sender, commit: acceptedOrThrow(this.incarnation.id, await committing) }

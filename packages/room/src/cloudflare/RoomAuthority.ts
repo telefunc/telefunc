@@ -37,7 +37,7 @@ import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../backend
 import { commitPreconditionHolds, isOpenIncarnation, publicHead } from '../backend/semantics.js'
 import { Fanout } from './Fanout.js'
 import { openRegionDirectory, type RegionDirectoryStub } from './objects.js'
-import { deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
+import { deleteRetained, installRetained, listRetained, readRetained, retainedOwner } from './retained.js'
 import {
   deleteExpiredRoutes,
   deleteRoute,
@@ -96,6 +96,7 @@ type RenewWire = 'renewed' | 'lapsed' | 'dropped'
 type CloudflareRoomAuthorityStub = Omit<RoomAuthority, 'alarm'>
 
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
+const SEMANTIC_LANE: LaneId = { kind: 'semantic' }
 
 /** Room's part of a Durable Object that is a room authority, fanning out through Broadcast's `regions`, or a region's
  *  directory. Its tables are created on first use. */
@@ -154,7 +155,7 @@ class RoomAuthority {
         const missing = opts.requiredCellKeys.find((cell) => !required.cells.has(cell))
         if (missing !== undefined) return { kind: 'stale-cell', key: missing }
       }
-      return commitIn(sql, inc, lane, payload, opts?.retain === true, now)
+      return commitIn(sql, inc, lane, payload, opts ?? {}, now)
     })
     if (outcome.kind !== 'accepted') return outcome
     return await this.deliver(inc, lane, payload, outcome)
@@ -171,7 +172,6 @@ class RoomAuthority {
       const { value, writes } = recordOperation(operation, args as never, {
         now,
         cell: (key) => selectCell(sql, inc, key, now),
-        retained: (lane) => readRetained(sql, inc, lane),
       })
       for (const prefix of writes.prefixes) dropCellPrefix(sql, inc, prefix)
       const exchange = { expect: [], mutations: writes.mutations, counts: writes.counts }
@@ -180,10 +180,9 @@ class RoomAuthority {
       for (const member of writes.members) {
         dropLaneOrderRows(sql, inc, member)
         for (const lane of listRetained(sql, inc, { member })) deleteRetained(sql, inc, lane)
+        if (retainedOwner(sql, inc, SEMANTIC_LANE) === member) deleteRetained(sql, inc, SEMANTIC_LANE)
       }
-      for (const { lane, seq } of writes.retained) deleteRetained(sql, inc, lane, { ifSeq: seq })
-      const commit =
-        writes.commit === null ? null : commitIn(sql, inc, OPERATION_COMMIT_LANE, writes.commit, false, now)
+      const commit = writes.commit === null ? null : commitIn(sql, inc, OPERATION_COMMIT_LANE, writes.commit, {}, now)
       return { kind: 'done', value, counters: exchanged.counters, commit, payload: writes.commit } as const
     })
     if (outcome.kind !== 'done') return outcome
@@ -363,12 +362,12 @@ function commitIn(
   inc: string,
   lane: LaneId,
   payload: Uint8Array,
-  retain: boolean,
+  { retain, owner }: Pick<CommitOptions, 'retain' | 'owner'>,
   now: number,
 ): AcceptedCommit {
   const key = encodeLaneKey(lane)
   const mark = advanceOrder(sql, inc, key, now)
-  if (retain) installRetained(sql, inc, lane, payload, mark)
+  if (retain === true) installRetained(sql, inc, lane, payload, mark, owner)
   // A binary commit also reaches its member's every-track lane and its track's every-member lane.
   const laneKeys =
     lane.kind === 'binary' ? [key, everyTrackLaneKey(lane.member), everyMemberLaneKey(lane.track)] : [key]

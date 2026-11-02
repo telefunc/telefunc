@@ -55,7 +55,7 @@ import { unrefTimer } from '../utils/unrefTimer.js'
 
 type Expiring = { expiresAt: number | null }
 type StoredCell = { bytes: Uint8Array; version: string }
-type RetainedEntry = { lane: LaneId; payload: Uint8Array; seq: number; timestamp: number }
+type RetainedEntry = { lane: LaneId; payload: Uint8Array; seq: number; timestamp: number; owner?: string }
 
 type Incarnation = {
   /** The last cell version this incarnation issued. */
@@ -86,6 +86,8 @@ type DirectoryEntry = { incTag: string; checkAt: number }
 type DirectoryCheck = { at: number; roomId: string }
 
 const NO_TARGETS = [] as const
+const SEMANTIC_LANE: LaneId = { kind: 'semantic' }
+const SEMANTIC_LANE_KEY = encodeLaneKey(SEMANTIC_LANE)
 
 function copyBytes(bytes: Uint8Array): Uint8Array {
   return new Uint8Array(bytes)
@@ -212,21 +214,21 @@ function applyCells(
   return counters
 }
 
-function deleteRetainedEntry(incarnation: Incarnation, lane: LaneId, ifSeq?: number): void {
+function deleteRetainedEntry(incarnation: Incarnation, lane: LaneId): void {
   const key = encodeLaneKey(lane)
-  if (ifSeq !== undefined && incarnation.retained.get(key)?.seq !== ifSeq) return
   incarnation.retained.delete(key)
   if (lane.kind !== 'binary') return
   unindex(incarnation.retainedOf, lane.member, key)
   unindex(incarnation.retainedOfTrack, lane.track, key)
 }
 
-/** Forgets `member`'s lanes' order and the frames its binary lanes retained. */
+/** Forgets `member`'s lanes' order, the frames its binary lanes retained, and the semantic frame while it owns it. */
 function dropMemberLanes(incarnation: Incarnation, member: string): void {
   incarnation.memberOrders.delete(member)
   for (const key of [...(incarnation.retainedOf.get(member) ?? [])]) {
     deleteRetainedEntry(incarnation, incarnation.retained.get(key)!.lane)
   }
+  if (incarnation.retained.get(SEMANTIC_LANE_KEY)?.owner === member) deleteRetainedEntry(incarnation, SEMANTIC_LANE)
 }
 
 function advanceOrder(order: Map<string, OrderingInfo>, domain: string, now: number): OrderingInfo {
@@ -327,19 +329,12 @@ class MemoryRoomDriver implements RoomDriver {
         const cell = incarnation.cells.get(key)
         return cell === undefined ? undefined : copyBytes(cell.bytes)
       },
-      retained: (lane) => {
-        const entry = incarnation.retained.get(encodeLaneKey(lane))
-        return entry === undefined
-          ? null
-          : { payload: copyBytes(entry.payload), seq: entry.seq, timestamp: entry.timestamp }
-      },
     })
     for (const prefix of writes.prefixes) {
       for (const key of [...cellKeysWithPrefix(incarnation, prefix)]) setCell(incarnation, key, null, '')
     }
     const counters = applyCells(incarnation, writes.mutations, writes.counts)
     for (const member of writes.members) dropMemberLanes(incarnation, member)
-    for (const { lane, seq } of writes.retained) deleteRetainedEntry(incarnation, lane, seq)
     if (writes.commit === null) return { kind: 'done', value, counters }
     return {
       kind: 'done',
@@ -362,7 +357,7 @@ class MemoryRoomDriver implements RoomDriver {
     const incarnation = this.incarnation(room, inc)
     const missing = opts?.requiredCellKeys?.find((key) => !incarnation.cells.has(key))
     if (missing !== undefined) return { kind: 'stale-cell', key: missing }
-    return await this.commitOn(incarnation, lane, payload, opts?.retain)
+    return await this.commitOn(incarnation, lane, payload, opts)
   }
 
   /** Assigns the commit's seq and queues its delivery in one synchronous step, so deliveries run in seq order. */
@@ -370,7 +365,7 @@ class MemoryRoomDriver implements RoomDriver {
     incarnation: Incarnation,
     lane: LaneId,
     payload: Uint8Array,
-    retain?: boolean,
+    { retain, owner }: CommitOptions = {},
   ): Promise<CommitAccepted> {
     const key = encodeLaneKey(lane)
     const frame = copyBytes(payload)
@@ -385,7 +380,9 @@ class MemoryRoomDriver implements RoomDriver {
         getOrCreate(incarnation.retainedOf, lane.member, () => new Set()).add(key)
         getOrCreate(incarnation.retainedOfTrack, lane.track, () => new Set()).add(key)
       }
-      incarnation.retained.set(key, { lane: copyLane(lane), payload: frame, seq: mark.seq, timestamp: mark.timestamp })
+      const entry: RetainedEntry = { lane: copyLane(lane), payload: frame, seq: mark.seq, timestamp: mark.timestamp }
+      if (owner !== undefined) entry.owner = owner
+      incarnation.retained.set(key, entry)
     }
     const targets = incarnation.subs.get(key) ?? NO_TARGETS
     // A binary commit also reaches its member's every-track lane and its track's every-member lane.

@@ -110,8 +110,8 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
     return this.connection.run(REDIS_COMMANDS.cellsExchange, { roomId, inc, exchange })
   }
 
-  /** Plans over the cells and frames it reads, then applies the plan in one script while they are as read; a cell
-   *  that moved meanwhile plans it again. */
+  /** Plans over the cells it reads, then applies the plan in one script while they are as read; a cell that moved
+   *  meanwhile plans it again. */
   async runOperation<Args, Value>(
     roomId: string,
     inc: string,
@@ -140,35 +140,23 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
   ): Promise<PlannedOperation<Value> | null> {
     const cells = new Map<string, Uint8Array | undefined>()
     const reads = new Map<string, string>()
-    const frames = new Map<string, RetainedFrame | null>()
     let now: number | null = null
     for (;;) {
       const missing = new Set<string>()
-      const missingFrames = new Map<string, LaneId>()
       const recorded = this.kit.recordOperation(operation, args, {
         now: now ?? 0,
         cell: (key) => {
           if (!reads.has(key)) missing.add(key)
           return cells.get(key)
         },
-        retained: (lane) => {
-          const key = this.kit.encodeLaneKey(lane)
-          if (!frames.has(key)) missingFrames.set(key, lane)
-          return frames.get(key) ?? null
-        },
       })
-      if (now !== null && missing.size === 0 && missingFrames.size === 0) {
+      if (now !== null && missing.size === 0) {
         const members = await Promise.all(
           recorded.writes.members.map((member) => this.memberLanes(roomId, inc, member)),
         )
         return { ...recorded, reads, members }
       }
-      const [read] = await Promise.all([
-        this.readCells(roomId, inc, { keys: [...missing] }),
-        ...Array.from(missingFrames, async ([key, lane]) =>
-          frames.set(key, await this.readRetained(roomId, inc, lane)),
-        ),
-      ])
+      const read = await this.readCells(roomId, inc, { keys: [...missing] })
       if (read.kind === 'stale-incarnation') return null
       now = read.now
       for (const key of missing) {
@@ -217,6 +205,7 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
       channels,
       payload,
       retain: false,
+      owner: undefined,
       closingLease: undefined,
       requiredCellKeys: [],
       fenceTokens: fence.tokens,
@@ -331,6 +320,7 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
         channels,
         payload,
         retain: opts?.retain === true,
+        owner: opts?.owner,
         closingLease: opts?.closingLease,
         requiredCellKeys: opts?.requiredCellKeys ?? [],
         fenceTokens: fence?.tokens ?? NO_FENCE_TOKENS,

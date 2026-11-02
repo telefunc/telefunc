@@ -141,7 +141,8 @@ type CellsExchangeResult =
   | { kind: 'conflict' }
   | StaleIncarnation
 
-type CommitOptions = { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] }
+/** `owner`: with `retain`, the member the frame is from; `dropMemberLanes()` of that member drops it. */
+type CommitOptions = { retain?: boolean; owner?: string; closingLease?: string; requiredCellKeys?: string[] }
 
 type RetainedFrame = OrderingInfo & { payload: Uint8Array }
 
@@ -168,15 +169,13 @@ type CommitResult = CommitAccepted | StaleCommit
 type OperationTx = {
   readonly now: number
   cell(key: string): Uint8Array | undefined
-  retained(lane: LaneId): RetainedFrame | null
   write(mutation: CellMutation): void
   count(count: CellCount): void
   /** Deletes every cell under `prefix`, before the operation's writes. */
   dropPrefix(prefix: string): void
-  /** Forgets `member`'s inbox and binary lanes: their order and their retained frames. */
+  /** Forgets `member`'s inbox and binary lanes, their order and their retained frames, and the semantic lane's
+   *  retained frame while `member` owns it, as the executor finds it when it applies the operation. */
   dropMemberLanes(member: string): void
-  /** Deletes `lane`'s retained frame while it still holds `seq`. */
-  deleteRetained(lane: LaneId, seq: number): void
   /** Commits `payload` on the control lane; once per operation. */
   commit(payload: Uint8Array): void
 }

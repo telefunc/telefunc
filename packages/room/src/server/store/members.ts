@@ -4,11 +4,11 @@ import { getRoomPlane } from '../../backend/plane.js'
 import type { RoomOperation } from '../../backend/contract.js'
 import { isOpenIncarnation } from '../../backend/semantics.js'
 import { leaveCauseToWire, type RoomCtrlEnvelope, type WireLeaveCause } from '../../shared/protocol.js'
-import type { HoldConfig, RoomDataEnvelope, RoomMemberRecord, RoomIncarnation } from '../protocol.js'
+import type { HoldConfig, RoomMemberRecord, RoomIncarnation } from '../protocol.js'
 import type { LeaveCause, ParticipantMeta } from '../../types.js'
 import { memberMetaMutations } from './meta.js'
 import { runOperation } from './operations.js'
-import { SEMANTIC_LANE, decodeRoomRecord, encodeRoomRecord } from '../lanes/lanes.js'
+import { decodeRoomRecord, encodeRoomRecord } from '../lanes/lanes.js'
 import { afterHoldChange, holdDelta } from '../lifecycle/hold.js'
 import {
   dmReplyCellPrefix,
@@ -71,10 +71,6 @@ const LEAVE: RoomOperation<LeaveArgs & { hold: HoldConfig | null }, { hidden: bo
     tx.dropPrefix(memberMetaCellPrefix(id))
     tx.dropPrefix(dmReplyCellPrefix(id))
     tx.dropMemberLanes(id)
-    const text = tx.retained(SEMANTIC_LANE)
-    if (text !== null && decodeRoomRecord<RoomDataEnvelope>(text.payload).from === id) {
-      tx.deleteRetained(SEMANTIC_LANE, text.seq)
-    }
     const leave: Extract<RoomCtrlEnvelope, { __r: 'leave' }> = { __r: 'leave', id, ...cause }
     if (record.hidden) leave.hidden = true
     tx.commit(encodeRoomRecord(leave))

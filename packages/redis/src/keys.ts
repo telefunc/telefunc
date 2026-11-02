@@ -14,6 +14,7 @@ export {
   trackLanesKey,
   retainedKey,
   retainedLanesKey,
+  retainedOwnersKey,
   retainedOfKey,
   retainedOfTrackKey,
   channelKey,
@@ -100,6 +101,10 @@ function retainedKey(prefix: string, roomId: string, inc: string, laneKey: strin
 /** The lane keys of the incarnation's retained frames. */
 function retainedLanesKey(prefix: string, roomId: string, inc: string): string {
   return `${incarnationPrefix(prefix, roomId, inc)}:rtl`
+}
+/** The member each retained frame of a lane other than a binary one is from, by lane key. */
+function retainedOwnersKey(prefix: string, roomId: string, inc: string): string {
+  return `${incarnationPrefix(prefix, roomId, inc)}:rt-owners`
 }
 /** The lane keys of one member's retained binary frames. */
 function retainedOfKey(prefix: string, roomId: string, inc: string, member: string): string {
