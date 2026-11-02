@@ -428,15 +428,6 @@ class MemoryRoomDriver implements RoomDriver {
     return Array.from(keys ?? [], (key) => copyLane(incarnation.retained.get(key)!.lane))
   }
 
-  async deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
-    const incarnation = this.rooms.get(roomId)?.incarnations.get(inc)
-    if (incarnation !== undefined) deleteRetainedEntry(incarnation, lane, opts?.ifSeq)
-  }
-
-  async dropLaneOrders(roomId: string, inc: string, member: string): Promise<void> {
-    this.rooms.get(roomId)?.incarnations.get(inc)?.memberOrders.delete(member)
-  }
-
   subscribe({ roomId, inc, lane }: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {
     const room = this.rooms.get(roomId)
     if (room === undefined || !isOpenIncarnation(this.liveHead(room), inc)) {

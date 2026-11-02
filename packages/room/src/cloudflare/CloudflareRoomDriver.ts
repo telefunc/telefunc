@@ -121,14 +121,6 @@ class CloudflareRoomDriver implements RoomDriver {
     return this.stub(roomId).listRetained(inc, of)
   }
 
-  async deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
-    return this.stub(roomId).deleteRetained(inc, lane, opts)
-  }
-
-  async dropLaneOrders(roomId: string, inc: string, member: string): Promise<void> {
-    return this.stub(roomId).dropLaneOrders(inc, member)
-  }
-
   async dropIncarnation(roomId: string, inc: string): Promise<void> {
     return this.stub(roomId).dropIncarnation(inc)
   }

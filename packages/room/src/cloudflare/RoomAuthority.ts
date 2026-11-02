@@ -219,10 +219,6 @@ class RoomAuthority {
     return listRetained(this.sql(), inc, of)
   }
 
-  async deleteRetained(inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
-    this.transaction((sql) => deleteRetained(sql, inc, lane, opts))
-  }
-
   async registerRoute(route: RouteInstallation): Promise<RegisterWire> {
     const now = Date.now()
     const registration = this.transaction((sql): RegisterWire => {
@@ -249,10 +245,6 @@ class RoomAuthority {
   async unsubscribeRoute(route: RouteInstallation): Promise<void> {
     this.transaction((sql) => deleteRoute(sql, route))
     await this.scheduleMaintenanceIfNeeded()
-  }
-
-  async dropLaneOrders(inc: string, member: string): Promise<void> {
-    this.transaction((sql) => dropLaneOrderRows(sql, inc, member))
   }
 
   async dropIncarnation(inc: string): Promise<void> {

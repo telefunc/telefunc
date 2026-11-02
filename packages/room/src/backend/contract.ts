@@ -221,9 +221,6 @@ type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
   /** The lanes holding a retained frame; with `of`, only that member's or that track's binary lanes, at a cost of
    *  their count. */
   listRetained(roomId: string, inc: string, of?: RetainedOf): Promise<LaneId[]>
-  deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void>
-  /** Forgets the order of `member`'s inbox and binary lanes; called once no commit to them can land. */
-  dropLaneOrders(roomId: string, inc: string, member: string): Promise<void>
   dropIncarnation(roomId: string, inc: string): Promise<void>
   /** Lists `roomId` under `incTag`, due at `checkAt` (authority ms) and no sooner than `minDelayMs` from the
    *  authority's now; an entry due at Infinity is never due. */

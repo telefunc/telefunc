@@ -382,29 +382,6 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
     return (await this.connection.client.smembers(index)).map((laneKey) => this.kit.decodeLaneKey(laneKey))
   }
 
-  deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
-    return this.connection.run(REDIS_COMMANDS.retainedDelete, {
-      roomId,
-      inc,
-      lane,
-      laneKey: this.kit.encodeLaneKey(lane),
-      ifSeq: opts?.ifSeq,
-    })
-  }
-
-  async dropLaneOrders(roomId: string, inc: string, member: string): Promise<void> {
-    const orders = memberOrderKey(this.connection.prefix, roomId, inc, member)
-    let cursor = '0'
-    do {
-      const [next, fields] = await this.connection.client.hscan(orders, cursor, 'COUNT', LANE_PAGE_SIZE)
-      cursor = next
-      const lanes = fields.filter((field, i) => i % 2 === 0 && this.kit.decodeLaneKey(field).kind === 'binary')
-      if (lanes.length > 0)
-        await this.connection.run(REDIS_COMMANDS.forgetTrackLanes, { roomId, inc, lanes, kit: this.kit })
-    } while (cursor !== '0')
-    await this.connection.run(REDIS_COMMANDS.dropLaneOrders, { roomId, inc, member })
-  }
-
   async dropIncarnation(roomId: string, inc: string): Promise<void> {
     // No head names the incarnation any more, so no commit adds to its manifest while it is paged.
     const manifest = incarnationKeysKey(this.connection.prefix, roomId, inc)

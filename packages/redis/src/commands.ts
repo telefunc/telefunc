@@ -504,13 +504,6 @@ local function tf_retained_delete(incarnation_keys, all, retained, member, track
 end
 `
 
-//   KEYS: [1]=incarnation-keys [2]=retained [3]=the retained lanes of a binary lane's member [4]=those of its track
-//         (another lane repeats [2] for both) [5]=the incarnation's retained lanes
-//   ARGV: [1]=ifSeq or '' [2]=lane kind [3]=lane key
-const RETAINED_DELETE_LUA = `${RETAINED_DELETE_FN_LUA}
-return tf_retained_delete(KEYS[1], KEYS[5], KEYS[2], KEYS[3], KEYS[4], ARGV[1], ARGV[2], ARGV[3])
-`
-
 // OPERATION: an operation's writes, while the head names its incarnation open, every cell its plan read is still at
 // the version it read, and each member it drops has the lanes and retained frames the executor read: the prefix drops,
 // the mutations and counts at the incarnation's next revision, the members' lane orders, the retained frames, the
@@ -574,23 +567,6 @@ if plan.commit > 0 then
   commit = tf_commit(CK, CA)
 end
 return {commit, unpack(counters)}
-`
-
-// Takes a page of a leaving member's binary lanes out of their tracks' lane sets.
-//   KEYS: [1]=incarnation-keys [2..]=each lane's track's lane set
-//   ARGV: [1..]=the lane keys, in KEYS[2..]'s order
-const FORGET_TRACK_LANES_LUA = `
-for i = 2, #KEYS do
-  redis.call('SREM', KEYS[i], ARGV[i - 1])
-  if redis.call('SCARD', KEYS[i]) == 0 then redis.call('SREM', KEYS[1], KEYS[i]) end
-end
-`
-
-// Forgets one member's lane order.
-//   KEYS: [1]=incarnation-keys [2]=the member's order hash
-const DROP_LANE_ORDERS_LUA = `
-redis.call('SREM', KEYS[1], KEYS[2])
-redis.call('UNLINK', KEYS[2])
 `
 
 // Directory records use three co-slotted global keys. Put and compare-delete are each one atomic record,
@@ -964,52 +940,6 @@ const REDIS_COMMANDS = {
       }
       return { kind: 'done', counters, commit: commit === 'null' ? null : (JSON.parse(commit!) as CommitReply) }
     },
-  }),
-  retainedDelete: command({
-    name: 'tfRoomRetainedDelete',
-    lua: RETAINED_DELETE_LUA,
-    numberOfKeys: 5,
-    invoke: (
-      prefix,
-      { roomId, inc, lane, laneKey, ifSeq }: RoomInc & { lane: LaneId; laneKey: string; ifSeq: number | undefined },
-    ) => {
-      const retained = retainedKey(prefix, roomId, inc, laneKey)
-      const binary = lane.kind === 'binary'
-      return {
-        keys: [
-          incarnationKeysKey(prefix, roomId, inc),
-          retained,
-          binary ? retainedOfKey(prefix, roomId, inc, lane.member) : retained,
-          binary ? retainedOfTrackKey(prefix, roomId, inc, lane.track) : retained,
-          retainedLanesKey(prefix, roomId, inc),
-        ],
-        argv: [ifSeq === undefined ? '' : String(ifSeq), lane.kind, laneKey],
-      }
-    },
-    parse: () => {},
-  }),
-  forgetTrackLanes: command({
-    name: 'tfRoomForgetTrackLanes',
-    lua: FORGET_TRACK_LANES_LUA,
-    numberOfKeys: null,
-    invoke: (prefix, { roomId, inc, lanes, kit }: RoomInc & { lanes: readonly string[]; kit: RoomPlaneKit }) => ({
-      keys: [
-        incarnationKeysKey(prefix, roomId, inc),
-        ...lanes.map((laneKey) => trackLanesKey(prefix, roomId, inc, binaryLaneOf(kit, laneKey).track)),
-      ],
-      argv: lanes,
-    }),
-    parse: () => {},
-  }),
-  dropLaneOrders: command({
-    name: 'tfRoomDropLaneOrders',
-    lua: DROP_LANE_ORDERS_LUA,
-    numberOfKeys: 2,
-    invoke: (prefix, { roomId, inc, member }: RoomInc & { member: string }) => ({
-      keys: [incarnationKeysKey(prefix, roomId, inc), memberOrderKey(prefix, roomId, inc, member)],
-      argv: [],
-    }),
-    parse: () => {},
   }),
   directoryPut: command({
     name: 'tfRoomDirectoryPut',
