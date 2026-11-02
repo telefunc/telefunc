@@ -66,9 +66,9 @@ class RoomSessionSubscriptions {
     const laneKey = encodeLaneKey(lane)
     const route = { roomId, inc, laneKey, sessionDoId: this.id, leaseId: crypto.randomUUID(), bucket }
     const stopDeliveries = this.member.subscribeLocal(laneRoute(inc, laneKey), receiver)
-    const subscription = new CloudflareRoomAttempt({ owner: this, route, stopDeliveries })
-    void subscription.register()
-    return subscription
+    const attempt = new CloudflareRoomAttempt({ owner: this, route, stopDeliveries })
+    void attempt.register()
+    return attempt
   }
 
   /** Calls the room's authority through the ordered stub this session keeps for it, so a room's commits and route calls
@@ -85,7 +85,7 @@ type CloudflareRoomAttemptOptions = {
   stopDeliveries: () => void
 }
 
-/** Ready once the authority has durably registered this subscription's exact route; Room owns retry and
+/** Ready once the authority has durably registered this attempt's exact route; Room owns retry and
  *  replacement. */
 class CloudflareRoomAttempt extends DriverAttempt {
   readonly route: RouteInstallation
