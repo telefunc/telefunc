@@ -194,7 +194,7 @@ A Durable Object registers with the authority on its first subscription to a key
 | Guarantee | Details |
 |---|---|
 | Ordering | Every subscriber receives a key's publishes in `seq` order. |
-| Delivery | `publish()` resolves once the key's authority has handed the message to every Durable Object with subscribers. Delivery to clients then happens over the channel connection. |
+| Delivery | `publish()` resolves once the message has reached every Durable Object with subscribers. If the message can't reach one, `publish()` still resolves, the failure is logged with `console.error`, and that Durable Object's subscribers never receive the message. Delivery to clients then happens over the channel connection. |
 
 > Once a broadcast message reaches a Durable Object, it has the same buffering and replay guarantees as regular channel messages.
 
