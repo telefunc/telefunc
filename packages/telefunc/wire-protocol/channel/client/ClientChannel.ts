@@ -80,7 +80,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private readonly listeners = new Listeners<ChannelListener<ServerToClient>>()
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
   protected closed = false
-  protected readonly lifecycle = new ChannelLifecycle({ owner: this })
+  protected readonly lifecycle = new ChannelLifecycle({ owner: this, reportError: reportChannelError })
   /** The ack requests sent and not yet answered, by seq. `resolve` takes `any`: text, binary and publish sends
    *  resolve with different types, each with `parse(text)` of the answer. */
   protected pendingAcks = new Map<number, { resolve: (v: any) => void; reject: (err: Error) => void }>()
@@ -432,11 +432,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal */
   _abortFromCallback(err: AbortError): void {
     this.abort(err.abortValue, err.message)
-  }
-
-  /** @internal */
-  _reportCallbackError(err: unknown): void {
-    reportChannelError(err)
   }
 }
 

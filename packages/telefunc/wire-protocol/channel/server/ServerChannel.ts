@@ -107,7 +107,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private pendingAckBytes = 0
   protected readonly bufferLimit: number
   protected readonly bufferLimitBinary: number
-  protected readonly lifecycle = new ChannelLifecycle({ owner: this })
+  protected readonly lifecycle = new ChannelLifecycle({ owner: this, reportError: reportServerChannelError })
   private ttlTimer: ReturnType<typeof setTimeout> | null = null
   protected selfTime = new SelfTime()
   /** Paces fire-and-forget TEXT, BINARY and PUBLISH sends to what the page grants; see `constants.ts`. */
@@ -807,11 +807,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     } else {
       this.abort(err.abortValue)
     }
-  }
-
-  /** @internal */
-  _reportCallbackError(err: unknown): void {
-    reportServerChannelError(err)
   }
 
   /** `pageGone`: the page left or never attached, so nothing the channel holds for it can reach it. */
