@@ -17,7 +17,7 @@ import {
   memberIdOfCellKey,
   memberIdOfCleanupKey,
 } from './cells.js'
-import { reapLeases } from './leases.js'
+import { reapLeases } from './lease.js'
 
 // The room's members as read from its cells, each read after reaping the lapsed leases it found.
 

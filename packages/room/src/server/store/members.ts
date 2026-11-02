@@ -19,8 +19,7 @@ import {
 } from '../lanes/lanes.js'
 import { afterHoldChange, holdDelta, type HoldDelta, type RoomIncarnation } from '../lifecycle/hold.js'
 import { cleanupCellKey, dmReplyCellPrefix, identityCellKey, leaseMemberCellKey, memberCellKey } from './cells.js'
-import type { RoomLease } from './lease.js'
-import { mutateHosted } from './leases.js'
+import { mutateHosted, type RoomLease } from './lease.js'
 
 // A member's cells: written by its join under a lease, removed by its eviction with a cleanup that finishes its leave.
 
