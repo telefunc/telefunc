@@ -3,7 +3,7 @@ export type { TELEFUNC_SHIELDS } from '../shared/transformer/generateShield/shie
 export type { OrderingInfo } from '../../wire-protocol/wire/orderingFrame.js'
 export { untether } from '../../utils/wrapProxy.js'
 export { invokeChannelListener } from '../../wire-protocol/channel/channel.js'
-export { reportBug } from '../../wire-protocol/channel/server/ServerChannel.js'
+export { reportBug } from './runTelefunc/validateTelefunctionError.js'
 export { hostLocal } from '../../wire-protocol/channel/server/ChannelMux.js'
 export { getChannelLimits } from './serverConfig.js'
 export { MAX_CHANNELS_PER_CONNECTION } from '../../wire-protocol/constants.js'

@@ -1,4 +1,4 @@
-export { Channel, ServerChannel, SERVER_CHANNEL_BRAND, reportBug }
+export { Channel, ServerChannel, SERVER_CHANNEL_BRAND }
 export { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
 export { NetworkError } from '../../../shared/NetworkError.js'
 
@@ -26,7 +26,7 @@ import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { ShieldValidator, ShieldValidators } from '../../../node/server/shield.js'
 import { createAbortError, type AbortError } from '../../../shared/Abort.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
-import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
+import { reportBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import { ChannelClosedError, replayLossError } from '../channelErrors.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { isPromise } from '../../../utils/isPromise.js'
@@ -879,10 +879,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.pendingAckRes.length = 0
     this.pendingEnd = null
   }
-}
-
-function reportBug(err: unknown): void {
-  handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
 }
 
 /** Server-side channel. `ClientToServer` = messages the server receives; `ServerToClient` = messages the server sends. */

@@ -1,5 +1,5 @@
 export { validateTelefunctionError }
-export { handleTelefunctionBug }
+export { handleTelefunctionBug, reportBug }
 
 import type { TelefuncId } from './serializeTelefunctionResult.js'
 import { Abort } from '../Abort.js'
@@ -21,4 +21,8 @@ function validateTelefunctionError(err: unknown, telefuncId: TelefuncId): void {
 function handleTelefunctionBug(err: unknown): void {
   callBugListeners(err)
   handleError(err)
+}
+
+function reportBug(err: unknown): void {
+  handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
 }

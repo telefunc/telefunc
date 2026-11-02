@@ -4,7 +4,7 @@ export type { BackendSubscription, SourceRules, SourceWait }
 import { assert, assertUsage } from '../../utils/assert.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 import { getOrCreate } from '../../utils/getOrCreate.js'
-import { reportBug } from '../channel/server/ServerChannel.js'
+import { reportBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import { ChannelOverflowError } from '../channel/channelErrors.js'
 import { getChannelLimits } from '../../node/server/serverConfig.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
