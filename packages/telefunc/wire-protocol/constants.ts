@@ -189,7 +189,8 @@ export const WIRE_PROBE_FIRST_BYTES = 64
 export const WIRE_PROBE_CLOCK_MS = 1
 /** A frame goes whole only if it would cross within a ping interval at the fastest measured rate divided by this. */
 export const WIRE_PIECE_RATE_MARGIN = 8
-/** The frames one task sends go in one message of at most this many bytes; a frame this size or larger goes alone. */
+/** The most bytes of the small frames one task sends that go in one message, which holds at most one data frame on a
+ *  page. A frame this size or larger goes alone. */
 export const WIRE_GATHER_BYTES = 16 * 1024
 /** An announced message may carry twice the one before it, or this many bytes whatever that carried. */
 export const WIRE_ANNOUNCED_MIN_BYTES = 8 * 1024

@@ -68,8 +68,8 @@ type PieceSenderOptions = {
   owner: PieceSenderOwner
 }
 
-/** Sends one WebSocket's frames. The small frames one task sends go in one message; a frame that could take longer
- *  than a ping interval to cross goes in pieces. */
+/** Sends one WebSocket's frames. The small frames one task sends go in one message, with at most one data frame on a
+ *  page; a frame that could take longer than a ping interval to cross goes in pieces. */
 class PieceSender {
   private readonly socket: PieceSocket
   private pingInterval: number
