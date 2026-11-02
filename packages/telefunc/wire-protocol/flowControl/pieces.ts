@@ -243,7 +243,6 @@ class PieceSender {
       messages.flush()
     }
     this.count(frame, data)
-    if (acknowledges(bytes)) this.track(bytes, performance.now(), false)
     messages.gather(frame)
     if (this.endQueued) return
     this.endQueued = true
