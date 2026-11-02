@@ -57,15 +57,15 @@ interface RoomModelOwner {
   /** Every leave, from an event or a reconciled roster, after every view's callbacks; `hidden` is null for a member
    *  this model didn't know. */
   onMemberLeft(id: string, cause: LeaveCause, hidden: boolean | null): void
+  // Only a client answers these: a server reads its rosters whole, and shows each member as the room records it.
   /** A member of a roster still streaming in or applying, which an unstamped message may name. */
-  pendingMember(id: string): MemberSnapshot | undefined
+  pendingMember?(id: string): MemberSnapshot | undefined
   /** This side's own connection to a member it holds, shown in place of the room's record of it; `null` for one it
    *  doesn't hold. */
-  heldConnection(id: string): boolean | null
+  heldConnection?(id: string): boolean | null
   // Only a server acts on these (see `ServerModelOwner`): a client's local participants take their meta where it
   // arrives, and the server repairs the meta.
   onMemberMeta?(id: string, update: MemberMetaUpdate): void
-  onMetaWaiting?(): void
   onMemberMetaGap?(): void
 }
 
@@ -73,8 +73,6 @@ interface RoomModelOwner {
 interface ServerModelOwner extends RoomModelOwner {
   /** A known member's meta update applied, from an event, a stamp or a roster read. */
   onMemberMeta(id: string, update: MemberMetaUpdate): void
-  /** A room meta change arrived ahead of one before it, and waits for it. */
-  onMetaWaiting(): void
   /** A member's meta change arrived ahead of one before it, which never arrived: the next roster read repairs it. */
   onMemberMetaGap(): void
 }
@@ -253,7 +251,7 @@ class RoomModel {
 
   /** As this side shows it: its own connection to a member it holds, the room's record for any other. */
   isConnected(entry: MemberEntry): boolean {
-    return this.owner.heldConnection(entry.id) ?? entry.meta.connected
+    return this.owner.heldConnection?.(entry.id) ?? entry.meta.connected
   }
 
   /** This side's own connection to a member it holds changed from `wasConnected`, or `null` for one it didn't hold. */
@@ -357,7 +355,6 @@ class RoomModel {
     const listening = [...this.views].filter((view) => view.listensToRoomMeta())
     const prev = listening.length > 0 ? this.metaState.object : null
     const applied = this.metaState.apply(update)
-    if (this.metaState.waiting) this.owner.onMetaWaiting?.()
     if (applied.length === 0) return applied
     this.bumpState()
     if (prev !== null) for (const view of listening) view.roomMetaChanged(this.metaState.object, prev)
@@ -421,7 +418,7 @@ class RoomModel {
       }
       return { entry }
     }
-    const pending = this.owner.pendingMember(from)
+    const pending = this.owner.pendingMember?.(from)
     if (entry) {
       if (pending !== undefined && pending.metaSeq > entry.meta.seq) {
         this.applyParticipantMeta(from, wholeUpdate(pending.metaSeq, pending.meta, pending.disconnected === true))

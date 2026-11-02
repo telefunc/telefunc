@@ -305,6 +305,8 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
         for (const applied of this.model.applyRoomUpdate(event)) {
           this.relayControl(applied, () => unorderedEventText(applied))
         }
+        // An update ahead of one before it waits for it, which a read repairs if it never arrives.
+        if (this.model.metaWaiting) this.authority.metaWaiting()
         return
       case 'closed':
         if (!this.model.applyClosed()) return
@@ -492,21 +494,8 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.owners.get(id)?.acceptMeta(id, update)
   }
 
-  onMetaWaiting(): void {
-    this.authority.metaWaiting()
-  }
-
   onMemberMetaGap(): void {
     this.authority.memberMetaGap()
-  }
-
-  // A server reads its rosters whole, and shows each member as the room records it.
-  pendingMember(): undefined {
-    return undefined
-  }
-
-  heldConnection(): null {
-    return null
   }
 
   /** Every leave the model applies, event or reconcile, runs the member's cleanup. */
