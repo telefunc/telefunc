@@ -166,89 +166,81 @@ class DemandReport {
    *  that a told track starts leaving out is told with the offs. Only a planning round sets what this reads, and no
    *  round runs until the telling ends, so this reads it as it goes. Each change it reads is one step. */
   private *tellChanges(): Generator<void, void, void> {
-    const { pairs, members, tracks, fetched, except } = this.untold
+    const changed = this.untold
     this.untold = new DemandSets()
-    const planned = this.planned
-    const told = this.told
-    for (const [member, byTrack] of pairs) {
-      for (const track of byTrack) {
-        if (hasEntry(planned.pairs, member, track) && !hasEntry(told.pairs, member, track)) {
-          toggleEntry(told.pairs, member, track, true)
-          this.owner.tellDemand({ member, track }, true)
+    yield* this.tellPairs(changed, true)
+    yield* this.tellMembers(changed, 'members', true)
+    yield* this.tellMembers(changed, 'fetched', true)
+    yield* this.startTracks(changed)
+    yield* this.tellExcepts(changed, false)
+    yield* this.tellExcepts(changed, true)
+    yield* this.stopTracks(changed)
+    yield* this.tellMembers(changed, 'fetched', false)
+    yield* this.tellMembers(changed, 'members', false)
+    yield* this.tellPairs(changed, false)
+  }
+
+  /** Tells each changed pair the planner started (`on`) or stopped since it was told. */
+  private *tellPairs(changed: DemandSets, on: boolean): Generator<void> {
+    for (const [member, tracks] of changed.pairs) {
+      for (const track of tracks) {
+        if (hasEntry(this.planned.pairs, member, track) === on && hasEntry(this.told.pairs, member, track) !== on) {
+          toggleEntry(this.told.pairs, member, track, on)
+          this.owner.tellDemand({ member, track }, on)
         }
         yield
       }
     }
-    for (const member of members) {
-      if (planned.members.has(member) && !told.members.has(member)) {
-        told.members.add(member)
-        this.owner.tellDemand({ member }, true)
+  }
+
+  /** Tells each changed member whose every track (`members`) or fetching by member (`fetched`) the planner started
+   *  (`on`) or stopped since it was told. */
+  private *tellMembers(changed: DemandSets, kind: 'members' | 'fetched', on: boolean): Generator<void> {
+    const planned = this.planned[kind]
+    const told = this.told[kind]
+    for (const member of changed[kind]) {
+      if (planned.has(member) === on && told.has(member) !== on) {
+        toggle(told, member, on)
+        this.owner.tellDemand(kind === 'members' ? { member } : { member, byMember: true }, on)
       }
       yield
     }
-    for (const member of fetched) {
-      if (planned.fetched.has(member) && !told.fetched.has(member)) {
-        told.fetched.add(member)
-        this.owner.tellDemand({ member, byMember: true }, true)
-      }
-      yield
-    }
-    for (const track of tracks) {
+  }
+
+  /** Tells each changed track of every member that started, or whose fetching changed, whole as planned. */
+  private *startTracks(changed: DemandSets): Generator<void> {
+    for (const track of changed.tracks) {
       const byMember = this.byMember.has(track)
-      if (planned.tracks.has(track) && told.tracks.get(track)?.byMember !== byMember) {
-        const entry = { except: new Set(planned.except.get(track)), byMember }
-        told.tracks.set(track, entry)
-        this.owner.tellDemand(trackEntry(track, entry), true)
+      if (this.planned.tracks.has(track) && this.told.tracks.get(track)?.byMember !== byMember) {
+        const told = { except: new Set(this.planned.except.get(track)), byMember }
+        this.told.tracks.set(track, told)
+        this.owner.tellDemand(trackEntry(track, told), true)
       }
       yield
     }
-    for (const [track, byTrack] of except) {
-      for (const member of byTrack) {
-        const was = told.tracks.get(track)
-        if (planned.tracks.has(track) && !hasEntry(planned.except, track, member) && was?.except.has(member) === true) {
-          was.except.delete(member)
-          this.owner.tellDemand({ track, member, except: true }, false)
-        }
-        yield
-      }
-    }
-    for (const [track, byTrack] of except) {
-      for (const member of byTrack) {
-        const was = told.tracks.get(track)
-        if (planned.tracks.has(track) && hasEntry(planned.except, track, member) && was?.except.has(member) === false) {
-          was.except.add(member)
-          this.owner.tellDemand({ track, member, except: true }, true)
-        }
-        yield
-      }
-    }
-    for (const track of tracks) {
-      const was = told.tracks.get(track)
-      if (!planned.tracks.has(track) && was !== undefined) {
-        told.tracks.delete(track)
-        this.owner.tellDemand(trackEntry(track, was), false)
+  }
+
+  /** Tells each changed track of every member that stopped. */
+  private *stopTracks(changed: DemandSets): Generator<void> {
+    for (const track of changed.tracks) {
+      const told = this.told.tracks.get(track)
+      if (!this.planned.tracks.has(track) && told !== undefined) {
+        this.told.tracks.delete(track)
+        this.owner.tellDemand(trackEntry(track, told), false)
       }
       yield
     }
-    for (const member of fetched) {
-      if (!planned.fetched.has(member) && told.fetched.has(member)) {
-        told.fetched.delete(member)
-        this.owner.tellDemand({ member, byMember: true }, false)
-      }
-      yield
-    }
-    for (const member of members) {
-      if (!planned.members.has(member) && told.members.has(member)) {
-        told.members.delete(member)
-        this.owner.tellDemand({ member }, false)
-      }
-      yield
-    }
-    for (const [member, byTrack] of pairs) {
-      for (const track of byTrack) {
-        if (!hasEntry(planned.pairs, member, track) && hasEntry(told.pairs, member, track)) {
-          toggleEntry(told.pairs, member, track, false)
-          this.owner.tellDemand({ member, track }, false)
+  }
+
+  /** Tells each changed member that a told track of every member started (`excepted`) or stopped leaving out. */
+  private *tellExcepts(changed: DemandSets, excepted: boolean): Generator<void> {
+    for (const [track, members] of changed.except) {
+      const told = this.told.tracks.get(track)
+      for (const member of members) {
+        const isPlanned = this.planned.tracks.has(track) && hasEntry(this.planned.except, track, member) === excepted
+        if (isPlanned && told?.except.has(member) === !excepted) {
+          toggle(told.except, member, excepted)
+          this.owner.tellDemand({ track, member, except: true }, excepted)
         }
         yield
       }

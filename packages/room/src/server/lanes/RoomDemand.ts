@@ -23,6 +23,8 @@ type TrackLeaseChange = { instance: string; was: TrackLease | undefined; now: Tr
 type Reporter = { expiresAt: number; page: number; telling: number; asked: boolean }
 /** A reporter's entry as it told it: started or stopped (`on`), in its `telling`. */
 type Report = { instance: string; on: boolean; telling: number }
+/** Whether a reporter's lease, last told in `telling`, is dropped. */
+type LeaseDropped = (instance: string, telling: number) => boolean
 
 /** The replica whose owned members the demand is for. */
 interface RoomDemandOwner {
@@ -156,8 +158,15 @@ class RoomDemand {
     this.settle()
   }
 
-  /** Drops each entry `dropped` names by its reporter and the telling it was last told in: a step per entry. */
-  private *drop(dropped: (instance: string, telling: number) => boolean): Generator<void> {
+  /** Drops each entry `dropped` names: a step per entry. */
+  private *drop(dropped: LeaseDropped): Generator<void> {
+    yield* this.dropPairs(dropped)
+    yield* this.dropMembers(dropped)
+    yield* this.dropFetched(dropped)
+    yield* this.dropTracks(dropped)
+  }
+
+  private *dropPairs(dropped: LeaseDropped): Generator<void> {
     for (const [member, byTrack] of this.pairs) {
       for (const [track, leases] of byTrack) {
         if (lapse(leases, dropped)) {
@@ -168,6 +177,9 @@ class RoomDemand {
       if (byTrack.size === 0) this.pairs.delete(member)
       yield
     }
+  }
+
+  private *dropMembers(dropped: LeaseDropped): Generator<void> {
     for (const [member, leases] of this.members) {
       if (lapse(leases, dropped)) {
         this.members.delete(member)
@@ -175,6 +187,9 @@ class RoomDemand {
       }
       yield
     }
+  }
+
+  private *dropFetched(dropped: LeaseDropped): Generator<void> {
     for (const [member, leases] of this.fetched) {
       for (const [instance, telling] of leases) {
         if (dropped(instance, telling)) {
@@ -185,6 +200,9 @@ class RoomDemand {
       if (leases.size === 0) this.fetched.delete(member)
       yield
     }
+  }
+
+  private *dropTracks(dropped: LeaseDropped): Generator<void> {
     for (const [track, leases] of this.tracks) {
       for (const [instance, held] of leases) {
         if (dropped(instance, held.telling)) {
@@ -352,7 +370,7 @@ function lease<K>(leases: Map<K, Leases>, key: K, { instance, on, telling }: Rep
 }
 
 /** Drops the leases `dropped` names, and whether none is left. */
-function lapse(leases: Leases, dropped: (instance: string, telling: number) => boolean): boolean {
+function lapse(leases: Leases, dropped: LeaseDropped): boolean {
   for (const [instance, telling] of leases) if (dropped(instance, telling)) leases.delete(instance)
   return leases.size === 0
 }
