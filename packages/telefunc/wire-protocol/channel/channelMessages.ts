@@ -37,12 +37,7 @@ async function* channelMessages<T>(
   channel.listenBinary((data) => receive({ type: 'binary', data }), {
     signal: registrations.signal,
   })
-  // The close promise outlives the registrations and doesn't retain the iterator after it exits.
-  let onClose: ((err?: unknown) => void) | undefined = finish
-  void channel.closed.then(
-    () => onClose?.(),
-    (err) => onClose?.(err),
-  )
+  const unobserve = observeClose(channel.closed, finish)
   try {
     while (true) {
       if (error !== undefined) throw error
@@ -61,9 +56,20 @@ async function* channelMessages<T>(
       }
     }
   } finally {
-    onClose = undefined
+    unobserve()
     registrations.abort()
     signal?.removeEventListener('abort', abort)
-    for (const item of queue) item.consumed()
+    for (let item = queue.shift(); item; item = queue.shift()) item.consumed()
+  }
+}
+
+// A pending close promise keeps its callbacks; their scope must release the iterator when it returns.
+function observeClose(closed: Promise<void>, callback?: (err?: unknown) => void): () => void {
+  void closed.then(
+    () => callback?.(),
+    (err) => callback?.(err),
+  )
+  return () => {
+    callback = undefined
   }
 }
