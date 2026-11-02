@@ -29,7 +29,7 @@ type InboxTarget = { deliver(msg: InboxMessage): void; deliverAck(msg: InboxMess
 
 type ParticipantBaseOptions = {
   participant: { id: string; meta: ParticipantMeta; selfDelivery: boolean; identity: string | null }
-  /** Its room view's, or its own for a participant a client holds alone. */
+  /** Shared with its room view's members; a participant a client holds without a room view has its own. */
   rewinds: MetaRewinds
 }
 
@@ -65,7 +65,7 @@ abstract class ParticipantBase implements LocalParticipant {
     return this.memberMeta.object
   }
 
-  /** @internal Whole, as an attach resends it. */
+  /** @internal The member's whole meta and its seq, which a client that attaches again is sent. */
   get _acceptedMeta(): WholeMemberUpdate {
     const update: WholeMemberUpdate = {
       meta: this.memberMeta.object,
@@ -198,7 +198,7 @@ abstract class ParticipantBase implements LocalParticipant {
     return unlisten
   }
 
-  /** @internal The wanted tracks, whole. */
+  /** @internal */
   abstract get _demandedTracks(): TrackKey[]
 
   /** @internal Room-wide demand for one of this member's tracks changed. */
@@ -232,7 +232,7 @@ abstract class ParticipantBase implements LocalParticipant {
     return this.register((this.leaveListeners ??= new Listeners()), callback)
   }
 
-  /** @internal The member is gone; `cause` says how. */
+  /** @internal */
   _onLeft(cause: LeaveCause): void {
     if (this.leftCause) return
     const ownedCause = ownLeaveCause(cause)
