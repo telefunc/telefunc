@@ -22,7 +22,7 @@ import type {
   RoomSubscriptionSource,
 } from '../backend/contract.js'
 import type { BackendReceiver, CloudflarePlaneKit, DriverAttempt, OrderingInfo } from 'telefunc/__internal'
-import { CLOUDFLARE_BUCKETS, currentCloudflareMember } from 'telefunc/__internal'
+import { CLOUDFLARE_BUCKETS, currentCloudflareHostKey, currentCloudflareMember } from 'telefunc/__internal'
 import type { CloudflareRoomAuthorityStub } from './RoomAuthority.js'
 import { currentRoomSessionSubscriptions } from './RoomSessionSubscriptions.js'
 import { openRegionDirectory, openRoomAuthority } from './objects.js'
@@ -40,13 +40,13 @@ class CloudflareRoomDriver implements RoomDriver {
     this.locationFallback = locationFallback
   }
 
-  hostKey(): string | null {
-    return currentCloudflareMember()?.hostKey ?? null
+  hostKey(): string {
+    return currentCloudflareHostKey()
   }
 
   subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {
     const subscriptions = currentRoomSessionSubscriptions(this)
-    assert(subscriptions !== null) // core refuses a subscribe outside a session
+    assert(subscriptions !== null) // `hostKey()` refused a subscribe outside a session
     return subscriptions.subscribe(source, receiver)
   }
 

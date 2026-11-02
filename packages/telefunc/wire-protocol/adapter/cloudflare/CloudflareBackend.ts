@@ -10,7 +10,7 @@ import type {
   PublishResult,
 } from '../../backend/driver.js'
 import type { CloudflareBroadcast } from './broadcast.js'
-import { getCloudflareExtensionPlanes, type CloudflarePlaneKit } from './extensions.js'
+import { currentCloudflareHostKey, getCloudflareExtensionPlanes, type CloudflarePlaneKit } from './extensions.js'
 import { currentCloudflareSession } from './session.js'
 import { assert } from '../../../utils/assert.js'
 
@@ -38,13 +38,13 @@ class CloudflareBackend implements BroadcastDriver {
     return this.broadcast.publish(route, payload)
   }
 
-  hostKey(): string | null {
-    return currentCloudflareSession()?.broadcast.hostKey ?? null
+  hostKey(): string {
+    return currentCloudflareHostKey()
   }
 
   subscribe(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
     const session = currentCloudflareSession()
-    assert(session !== undefined) // core refuses a subscribe outside a session
+    assert(session !== undefined) // `hostKey()` refused a subscribe outside a session
     return session.broadcast.openSubscription(route, receiver)
   }
 }

@@ -1,7 +1,7 @@
 export { SharedSubscriptions }
 export type { BackendSubscription, SourceRules, WaitRule }
 
-import { assert, assertUsage } from '../../utils/assert.js'
+import { assert } from '../../utils/assert.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 import { getOrCreate } from '../../utils/getOrCreate.js'
 import { reportBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
@@ -125,7 +125,7 @@ class SharedSubscriptions<Source> {
 
   subscribe(source: Source, listener: BackendListener): BackendSubscription {
     const key = this.sources.key(source)
-    const slotKey = JSON.stringify([this.hostKeyHere(), key])
+    const slotKey = JSON.stringify([this.driver.hostKey?.() ?? '', key])
     const delivers = this.sources.deliveryKind(source)
     const slot = getOrCreate(this.slots, slotKey, () => this.openSlot({ owner: this, source, key, slotKey, delivers }))
     return slot.attach(listener)
@@ -187,15 +187,6 @@ class SharedSubscriptions<Source> {
       if (slot?.establishing) left.push(slot.firstReady)
     }
     return left
-  }
-
-  private hostKeyHere(): string {
-    const hostKey = this.driver.hostKey ? this.driver.hostKey() : ''
-    assertUsage(
-      hostKey !== null,
-      'A Cloudflare subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.',
-    )
-    return hostKey
   }
 }
 

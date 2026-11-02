@@ -3,6 +3,7 @@ export {
   getCloudflareExtension,
   getCloudflareExtensionPlanes,
   currentCloudflareMember,
+  currentCloudflareHostKey,
   CLOUDFLARE_BUCKETS,
 }
 export type {
@@ -18,6 +19,7 @@ export type {
 }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+import { assertUsage } from '../../../utils/assert.js'
 import type { BackendReceiver, BroadcastPayload, BroadcastRoute } from '../../backend/driver.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import { currentCloudflareSession } from './session.js'
@@ -112,6 +114,17 @@ function getCloudflareExtension(name: string): CloudflareExtension | undefined {
 /** The Broadcast member of the session Durable Object whose call this is, undefined outside one. */
 function currentCloudflareMember(): CloudflareMember | undefined {
   return currentCloudflareSession()?.broadcast
+}
+
+/** A Cloudflare driver's `hostKey()`: core asks it at each subscribe, which a session Durable Object must make, as the
+ *  subscription delivers to that session. */
+function currentCloudflareHostKey(): string {
+  const member = currentCloudflareMember()
+  assertUsage(
+    member !== undefined,
+    'A Cloudflare subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.',
+  )
+  return member.hostKey
 }
 
 function getCloudflareExtensionPlanes(kit: CloudflarePlaneKit): Record<symbol, () => unknown> {

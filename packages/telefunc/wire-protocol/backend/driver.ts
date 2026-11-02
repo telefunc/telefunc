@@ -40,9 +40,9 @@ type PublishResult = OrderingInfo
 type SubscriptionDriver<Source> = {
   /** Returns the attempt at once, establishing or ready; throws a refusal it knows now. */
   subscribe(source: Source, receiver: BackendReceiver): DriverAttempt
-  /** This host's key: absent, the process; on Cloudflare this session DO's incarnation, null outside one: core refuses
-   *  a subscribe there, and a publish doesn't wait. */
-  hostKey?(): string | null
+  /** This host's key, read at each subscribe: absent, the process; on Cloudflare this session DO's incarnation, and a
+   *  usage error outside one. */
+  hostKey?(): string
   /** True where a publish can reach the store before the subscribe this host made just before it (Redis: PUBLISH and
    *  SUBSCRIBE go by two connections). Core then makes a publish wait while one of its host's attempts on the publish's
    *  source is establishing, at most 60 s. Absent, a publish never waits. */

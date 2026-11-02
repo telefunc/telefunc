@@ -47,6 +47,7 @@ export { ChannelOverflowError } from '../../wire-protocol/channel/channelErrors.
 export {
   registerCloudflareExtension,
   currentCloudflareMember,
+  currentCloudflareHostKey,
   CLOUDFLARE_BUCKETS,
 } from '../../wire-protocol/adapter/cloudflare/extensions.js'
 export type {
