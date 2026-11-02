@@ -276,7 +276,7 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
   ): Promise<CommitResult> {
     const payload = await waiting.turn
     try {
-      return this.commitNow(target, payload, opts)
+      return await this.commitNow(target, payload, opts)
     } finally {
       waiting.sent()
     }
