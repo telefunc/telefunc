@@ -29,7 +29,7 @@ import type { LeaveCause } from '../types.js'
 import { AuthoritySync, type AuthoritySyncOwner } from './lifecycle/AuthoritySync.js'
 import { PendingDmAcks } from './PendingDmAcks.js'
 import { reportRoomError } from './reportRoomError.js'
-import { SEMANTIC_LANE, decodeLaneEnvelope, decodeRoomText, openConfig, withinRoomHorizon } from './lanes/lanes.js'
+import { SEMANTIC_LANE, decodeLaneEnvelope, decodeRoomText, withinRoomHorizon } from './lanes/lanes.js'
 import { dropDmReply, takeDmReplies } from './store/dmReplies.js'
 import { evictMember } from './store/members.js'
 import { holdViews, removeView, renewLease, RoomLease } from './store/lease.js'
@@ -473,10 +473,6 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
       ),
     )
     await keys
-  }
-
-  async readOpenConfig(): Promise<RoomConfigRecord | null> {
-    return openConfig(await getRoomPlane().driver.readHead(this.id), this.incarnation.inc)
   }
 
   /** A newer meta reaching this view through the authority never reached its clients as an event. */

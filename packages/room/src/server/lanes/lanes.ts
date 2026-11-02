@@ -7,6 +7,7 @@ export {
   controlLane,
   inboxOf,
   openConfig,
+  readOpenConfig,
   configFromHead,
   decodeDemandPage,
   decodeLaneEnvelope,
@@ -31,7 +32,7 @@ import type {
   StaleIncarnation,
 } from '../../backend/contract.js'
 import { hasRoomTag } from '../../shared/protocol.js'
-import type { RoomConfigRecord, RoomDemandPage } from '../protocol.js'
+import type { RoomConfigRecord, RoomDemandPage, RoomIncarnation } from '../protocol.js'
 import { RoomError, participantGoneError, roomClosedError } from '../../shared/errors.js'
 import { assert } from '../../utils/assert.js'
 import { ROOM_HORIZON_MS } from '../constants.js'
@@ -83,6 +84,11 @@ function configFromHead(head: RoomHead): RoomConfigRecord {
 function openConfig(current: RoomHead | null, inc?: string): RoomConfigRecord | null {
   if (current?.state !== 'open' || (inc !== undefined && current.currentInc !== inc)) return null
   return configFromHead(current)
+}
+
+/** The config of `incarnation`, read from the head now; null once the room closed or a later incarnation replaced it. */
+async function readOpenConfig({ id, inc }: RoomIncarnation): Promise<RoomConfigRecord | null> {
+  return openConfig(await getRoomPlane().driver.readHead(id), inc)
 }
 
 /** An accepted commit; a member whose cell the commit required and that left; or the incarnation ended. */

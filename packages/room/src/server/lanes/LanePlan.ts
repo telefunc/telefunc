@@ -11,7 +11,7 @@ import { ROOM_MEMBER_NAMED_LANES_MAX } from '../constants.js'
 import { EVERY_TRACK, type BinaryWantChange, type EveryTrack, type TrackKey } from '../../shared/binary.js'
 import type { DemandReport } from './DemandReport.js'
 import type { DemandExchange } from './DemandExchange.js'
-import type { RoomConfigRecord, RoomIncarnation } from '../protocol.js'
+import type { RoomIncarnation } from '../protocol.js'
 import type { RoomModel } from '../../shared/RoomModel.js'
 import { reportRoomError } from '../reportRoomError.js'
 import { LaneSubscription, type LaneAddress, type LaneSubscriptionOwner } from './LaneSubscription.js'
@@ -19,7 +19,7 @@ import { Slice } from '../../shared/Slice.js'
 import type { LaneHolder } from '../lifecycle/replay.js'
 import { WantsIndex, type WantsIndexOwner } from './WantsIndex.js'
 import { runAll, toggle, toggleEntry } from '../../utils/sets.js'
-import { CONTROL_LANE, DEMAND_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
+import { CONTROL_LANE, DEMAND_LANE, SEMANTIC_LANE, decodeRoomText, readOpenConfig, withinRoomHorizon } from './lanes.js'
 assertIsNotBrowser()
 
 /** Where the lanes but the demand lane deliver. */
@@ -42,7 +42,6 @@ type LaneRoles = {
 
 /** What keeps the view in step with the authority, which the lanes ask for. */
 interface LaneAuthority {
-  readOpenConfig(): Promise<RoomConfigRecord | null>
   closeFromAuthority(): void
   /** A lane dropped deliveries: the view catches up with the authority. */
   recoverFromGap(): Promise<void>
@@ -820,7 +819,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   private async recover(lane: LaneSubscription): Promise<void> {
     let replaced = false
     try {
-      const config = await withinRoomHorizon(this.owner.readOpenConfig())
+      const config = await withinRoomHorizon(readOpenConfig(this.incarnation))
       if (config === null) return this.owner.closeFromAuthority()
       lane.retry()
       replaced = true

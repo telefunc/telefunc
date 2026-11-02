@@ -54,7 +54,14 @@ import type { RosterStream } from './lifecycle/RosterStream.js'
 import type { PendingDmAcks } from './PendingDmAcks.js'
 import type { RoomLease } from './store/lease.js'
 import { RoomWrites, runAfterHook, type RoomWritesOwner } from './RoomWrites.js'
-import { acceptedOrThrow, commitLane, controlLane, encodeRoomRecord, withinRoomHorizon } from './lanes/lanes.js'
+import {
+  acceptedOrThrow,
+  commitLane,
+  controlLane,
+  encodeRoomRecord,
+  readOpenConfig,
+  withinRoomHorizon,
+} from './lanes/lanes.js'
 import { reportRoomError } from './reportRoomError.js'
 import { Admission } from './Admission.js'
 import { evictMember, joinMember } from './store/members.js'
@@ -290,7 +297,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
   }
 
   private async assertOpen(): Promise<void> {
-    if (this.model.closed || (await this.replica.readOpenConfig()) === null) throw roomClosedError(this.id)
+    if (this.model.closed || (await readOpenConfig(this.incarnation)) === null) throw roomClosedError(this.id)
   }
 
   /** What the lane carried for this handle's own listeners, or for its tail while no stub took it. */

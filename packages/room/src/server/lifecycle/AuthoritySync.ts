@@ -5,11 +5,11 @@ import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { getRoomPlane } from '../../backend/plane.js'
 import { ROOM_META_REPAIR_MS } from '../constants.js'
-import type { RoomConfigRecord, RoomIncarnation } from '../protocol.js'
+import type { RoomIncarnation } from '../protocol.js'
 import type { MembershipEvent, RoomModel } from '../../shared/RoomModel.js'
 import type { MemberSnapshot } from '../../shared/protocol.js'
 import { reportRoomError } from '../reportRoomError.js'
-import { CONTROL_LANE } from '../lanes/lanes.js'
+import { CONTROL_LANE, readOpenConfig } from '../lanes/lanes.js'
 import { reapAndReadRoster } from '../store/roster.js'
 import { dropReplacedMetaGenerations, readRoomMeta, readRoomMetaSeq, type StoredRoomMeta } from '../store/meta.js'
 import type { LanePlan } from '../lanes/LanePlan.js'
@@ -17,7 +17,6 @@ assertIsNotBrowser()
 
 /** The replica whose view the sync keeps: what it renews, and where what the sync reads applies. */
 interface AuthoritySyncOwner {
-  readOpenConfig(): Promise<RoomConfigRecord | null>
   applyAuthorityMeta(stored: StoredRoomMeta): void
   /** A failover rewound the control lane: the view forgets its meta seqs. */
   onControlLaneRewound(): void
@@ -187,7 +186,7 @@ class AuthoritySync {
    *  once the room is gone. */
   async reconcileMeta(): Promise<boolean> {
     const owner = this.owner
-    const config = await owner.readOpenConfig()
+    const config = await readOpenConfig(this.incarnation)
     if (config !== null && !this.model.metaWaiting) {
       const seq = await readRoomMetaSeq(this.incarnation.id, config.inc)
       if (seq !== null && seq <= this.model.metaSeq) return true
