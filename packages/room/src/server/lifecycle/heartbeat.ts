@@ -6,6 +6,7 @@ import { unrefTimer } from '../../utils/unrefTimer.js'
 import type { RoomModel } from '../../shared/model.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS } from '../constants.js'
 import type { DemandReport } from '../lanes/DemandReport.js'
+import type { DemandExchange } from '../lanes/DemandExchange.js'
 import { sweepLapsedRoomsSoon } from '../store/directory.js'
 import { reportRoomError } from '../reportRoomError.js'
 import { reapLapsedLeases } from '../store/leases.js'
@@ -17,8 +18,6 @@ assertIsNotBrowser()
 
 /** The replica the heartbeat keeps at the authority. */
 interface RoomHeartbeatOwner {
-  /** Renews what the replica told of its demand. */
-  renewDemand(): Promise<void>
   maintainLease(): Promise<void>
 }
 
@@ -28,6 +27,8 @@ type RoomHeartbeatOptions = {
   model: Pick<RoomModel, 'closed'>
   lanePlan: Pick<LanePlan, 'observing' | 'ownsInbox' | 'resumeDropped'>
   outgoingDemand: Pick<DemandReport, 'reporting'>
+  /** Renews what this process told of its demand. */
+  demandExchange: Pick<DemandExchange, 'renew'>
   authority: Pick<AuthoritySync, 'reconcileMeta' | 'checkCoverage'>
 }
 
@@ -44,14 +45,24 @@ class RoomHeartbeat {
   private readonly model: RoomHeartbeatOptions['model']
   private readonly lanePlan: RoomHeartbeatOptions['lanePlan']
   private readonly outgoingDemand: RoomHeartbeatOptions['outgoingDemand']
+  private readonly demandExchange: RoomHeartbeatOptions['demandExchange']
   private readonly authority: RoomHeartbeatOptions['authority']
 
-  constructor({ owner, incarnation, model, lanePlan, outgoingDemand, authority }: RoomHeartbeatOptions) {
+  constructor({
+    owner,
+    incarnation,
+    model,
+    lanePlan,
+    outgoingDemand,
+    demandExchange,
+    authority,
+  }: RoomHeartbeatOptions) {
     this.owner = owner
     this.incarnation = incarnation
     this.model = model
     this.lanePlan = lanePlan
     this.outgoingDemand = outgoingDemand
+    this.demandExchange = demandExchange
     this.authority = authority
   }
 
@@ -72,7 +83,7 @@ class RoomHeartbeat {
     this.ticking = true
     const owner = this.owner
     try {
-      await owner.renewDemand()
+      await this.demandExchange.renew()
       const renewalFailure = await owner.maintainLease().then(
         () => null,
         (error: unknown) => ({ error }),

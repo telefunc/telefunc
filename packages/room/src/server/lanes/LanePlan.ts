@@ -11,6 +11,7 @@ import type { LaneConsumer } from '../../backend/RoomPlane.js'
 import { ROOM_MEMBER_NAMED_LANES_MAX } from '../constants.js'
 import { EVERY_TRACK, type BinaryWantChange, type EveryTrack, type TrackKey } from '../../shared/binary.js'
 import type { DemandReport } from './DemandReport.js'
+import type { DemandExchange } from './DemandExchange.js'
 import type { RoomConfigRecord } from '../protocol.js'
 import type { RoomModel } from '../../shared/model.js'
 import { reportRoomError } from '../reportRoomError.js'
@@ -23,17 +24,12 @@ import { runAll, toggle, toggleEntry } from '../../utils/sets.js'
 import { CONTROL_LANE, DEMAND_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
 assertIsNotBrowser()
 
-/** Where the lanes deliver; the demand lane also tells when it delivers and when it stops. */
+/** Where the lanes but the demand lane deliver. */
 interface LaneReceiver {
   onControl(serialized: string, info: OrderingInfo): void
   onTextData(serialized: string, info: OrderingInfo): void
   onBinary(framed: Uint8Array, info: OrderingInfo): void
   onDm(serialized: string, info: OrderingInfo): void
-  onDemand(serialized: string): void
-  /** The demand lane delivers, first or again: the other processes tell their demand, which it may have missed. */
-  askDemand(): void
-  /** The demand lane stopped: what it renewed lapses unread. */
-  forgetDemand(): void
 }
 
 /** What this process's handles are to the room, which decides the lanes it subscribes. */
@@ -73,6 +69,8 @@ type LanePlanOptions = {
   model: Pick<RoomModel, 'closed' | 'rosterKnown' | 'memberIds' | 'memberCount' | 'hasMember'>
   /** What this process tells of its demand, which the plan sets as it plans. */
   outgoingDemand: DemandReport
+  /** Where the demand lane delivers, and hears when it delivers and when it stops. */
+  demandExchange: Pick<DemandExchange, 'onPage' | 'ask' | 'forget'>
 }
 
 /** Fan-in lanes of one kind (every-track or every-member) that don't deliver yet. `waiting` lists, by member or by
@@ -152,12 +150,14 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   private readonly incarnation: RoomIncarnation
   private readonly model: LanePlanOptions['model']
   private readonly outgoingDemand: DemandReport
+  private readonly demandExchange: LanePlanOptions['demandExchange']
 
-  constructor({ owner, incarnation, model, outgoingDemand }: LanePlanOptions) {
+  constructor({ owner, incarnation, model, outgoingDemand, demandExchange }: LanePlanOptions) {
     this.owner = owner
     this.incarnation = incarnation
     this.model = model
     this.outgoingDemand = outgoingDemand
+    this.demandExchange = demandExchange
   }
 
   /** Whether some handle observes the room through the control lane. */
@@ -731,15 +731,14 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   }
 
   private syncDemandLane(): void {
-    const owner = this.owner
     const lane = this.demandLane
-    if (!this.model.closed && owner.ownsAnyMember()) {
+    if (!this.model.closed && this.owner.ownsAnyMember()) {
       lane.start()
       return
     }
     if (!lane.wanted) return
     lane.stop()
-    owner.forgetDemand()
+    this.demandExchange.forget()
   }
 
   /** `LaneSubscriptionOwner`: a lane of this incarnation. */
@@ -758,7 +757,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
       case 'inbox':
         return owner.onDm(decodeRoomText(payload), info)
       case 'demand':
-        return owner.onDemand(decodeRoomText(payload))
+        return this.demandExchange.onPage(decodeRoomText(payload))
       case 'binary':
       case 'binary-all':
       case 'binary-track':
@@ -779,7 +778,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   onLanePending(lane: LaneSubscription, pending: boolean): void {
     const address = lane.address
     if (address.kind === 'demand') {
-      if (!pending && lane.wanted) this.owner.askDemand()
+      if (!pending && lane.wanted) this.demandExchange.ask()
       return
     }
     if (address.kind !== 'binary' && address.kind !== 'binary-all' && address.kind !== 'binary-track') return

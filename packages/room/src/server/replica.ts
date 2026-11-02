@@ -147,12 +147,21 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
     this.incomingDemand = new RoomDemand({ owner: this, publishedTracks: this.publishedTracks })
     this.demand = new DemandExchange({ incarnation, incomingDemand: this.incomingDemand })
     const { model } = this
-    const { outgoingDemand } = this.demand
-    this.lanePlan = new LanePlan({ owner: this, incarnation, model, outgoingDemand })
+    const demandExchange = this.demand
+    const { outgoingDemand } = demandExchange
+    this.lanePlan = new LanePlan({ owner: this, incarnation, model, outgoingDemand, demandExchange })
     const lanePlan = this.lanePlan
     this.authority = new AuthoritySync({ owner: this, incarnation, model, lanePlan })
     const authority = this.authority
-    this.heartbeat = new RoomHeartbeat({ owner: this, incarnation, model, lanePlan, outgoingDemand, authority })
+    this.heartbeat = new RoomHeartbeat({
+      owner: this,
+      incarnation,
+      model,
+      lanePlan,
+      outgoingDemand,
+      demandExchange,
+      authority,
+    })
     this.roster = new RosterStream({ model, stubs: this.stubs, authority })
   }
 
@@ -474,22 +483,6 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
       ),
     )
     await keys
-  }
-
-  renewDemand(): Promise<void> {
-    return this.demand.renew()
-  }
-
-  onDemand(serialized: string): void {
-    this.demand.onPage(serialized)
-  }
-
-  askDemand(): void {
-    this.demand.ask()
-  }
-
-  forgetDemand(): void {
-    this.incomingDemand.forgetLeased()
   }
 
   async readOpenConfig(): Promise<RoomConfigRecord | null> {

@@ -75,6 +75,11 @@ class DemandExchange implements DemandReportOwner {
     )
   }
 
+  /** The demand lane stopped: what the other processes told lapses unread. */
+  forget(): void {
+    this.incomingDemand.forgetLeased()
+  }
+
   /** A closed room's demand has no reader. */
   close(): void {
     this.gossip.close()
