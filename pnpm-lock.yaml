@@ -387,7 +387,7 @@ importers:
         version: 1.0.28
       '@brillout/vite-plugin-server-entry':
         specifier: ^0.7.20
-        version: 0.7.20
+        version: 0.7.24
       crossws:
         specifier: ^0.4.4
         version: 0.4.6(srvx@0.12.8)
@@ -1455,11 +1455,8 @@ packages:
     peerDependencies:
       typescript: ^4.0.0
 
-  '@brillout/vite-plugin-server-entry@0.7.20':
-    resolution: {integrity: sha512-cLXispf4rBz0zk2p9LYuSQts264dhZFsIXEq9wCmCWH+tLNsqRxx2AwXcciIJ+1VdPtjB0STHnfkwcl9J8t7sg==}
-
-  '@brillout/vite-plugin-server-entry@0.7.23':
-    resolution: {integrity: sha512-tHI6zRUM+1yQxiC4CTwpPhYhU9Cdo4LkPy0JRxDiFBZSVSauzWTzZv/r7/+dKVk4/ihQmCtI1/XoegKVLMR7CQ==}
+  '@brillout/vite-plugin-server-entry@0.7.24':
+    resolution: {integrity: sha512-n2kylnpZ8xPUS4OwWes1B5lk6XxeUKYg/ZC2rGMkUT/1WHrRuVKSWzxhOT3+wYWPxofttt65yn/p8wmRLi8N+Q==}
 
   '@cloudflare/kv-asset-handler@0.4.0':
     resolution: {integrity: sha512-+tv3z+SPp+gqTIcImN9o0hqE9xyfQjI1XD9pL6NuKjua9B1y7mNYv0S9cP+QEbA4ppVgGZEmKOvHX5G5Ei1CVA==}
@@ -7917,12 +7914,7 @@ snapshots:
       source-map-support: 0.5.21
       typescript: 7.0.2
 
-  '@brillout/vite-plugin-server-entry@0.7.20':
-    dependencies:
-      '@brillout/import': 0.2.6
-      '@brillout/picocolors': 1.0.30
-
-  '@brillout/vite-plugin-server-entry@0.7.23':
+  '@brillout/vite-plugin-server-entry@0.7.24':
     dependencies:
       '@brillout/import': 0.2.6
       '@brillout/picocolors': 1.0.31
@@ -13484,7 +13476,7 @@ snapshots:
       '@brillout/import': 0.2.6
       '@brillout/json-serializer': 0.5.27
       '@brillout/picocolors': 1.0.31
-      '@brillout/vite-plugin-server-entry': 0.7.23
+      '@brillout/vite-plugin-server-entry': 0.7.24
       '@universal-deploy/store': 0.3.0(srvx@0.12.8)
       '@universal-deploy/vite': 0.2.2(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)(vite@8.0.16(@types/node@24.0.10)(esbuild@0.27.3)(jiti@2.7.0))
       '@universal-middleware/core': 0.7.2(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)
