@@ -235,9 +235,17 @@ Fire-and-forget is also fine — a send goes out as soon as the connection has r
 channel.send({ type: 'ping' }) // no await needed
 ```
 
-While the client is connected, the server delivers every send, awaited or not. While the client is offline, the server buffers your sends, and an awaited `send()` resolves once the client is back and the message went out. While the channel is open, a send without `{ ack: true }` rejects only if that buffer was full and dropped it (`ChannelOverflowError`, see <Link href="#errors" />).
+What happens to a server channel's sends, awaited or not:
 
-Telefunc logs a warning (once per channel) when a server channel's sends get 64 MiB ahead of its client: what your code sent that the client hasn't made room for yet, plus `{ ack: true }` sends it hasn't answered yet. It's only a warning: the server holds those messages in memory and still delivers them all. (It's unrelated to the 64 MiB limit on a message above.) To fix it, `await` each `send()` before the next.
+- While the client is connected, the server delivers them all.
+- While the client is offline, the server buffers them, up to `bufferLimit`/`bufferLimitBinary` (see <Link href="/channel-config" />). An awaited `send()` resolves once the client is back and the message went out.
+- Past that limit, the server drops buffered sends to stay within it, and their `send()` rejects with `ChannelOverflowError`.
+
+A `send()` that fails while nobody awaits it doesn't crash the process: Telefunc catches it. To see the error, `await` the send or `.catch()` it.
+
+Telefunc logs a warning (once per channel) when a server channel's sends get 64 MiB ahead of its client: 64 MiB more than the client is ready to take, counting `{ ack: true }` sends it hasn't answered yet. The server holds those messages in memory and still delivers them all, so it's a warning, not a limit. Its 64 MiB is unrelated to the 64 MiB limit on a message above.
+
+To fix it, `await` each `send()` before the next. A sender driven by a timer or an event, like the clock above, can instead skip a send, or keep only the latest value, while its previous `send()` is still pending.
 
 
 ## `Broadcast`
@@ -268,7 +276,7 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 `seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted.
 
-`publish()` can't be awaited per subscriber, so a client that falls behind a broadcast is let go: once the server holds about 150 MiB for its connection (more when other channels share it; on Cloudflare with the `'ws'` transport it is never cut), the connection is cut, and the client reconnects with every channel on it. It then gets what it missed, unless its `BroadcastChannel` closes with one of the <Link href="#errors">errors</Link>: `ChannelOverflowError` if more was published to its key while it was offline than `bufferLimit`/`bufferLimitBinary` holds, or `NetworkError` if it missed more messages than the replay buffer holds.
+`publish()` can't be awaited per subscriber, so the <Link href="#backpressure">64 MiB warning</Link> doesn't apply to a `BroadcastChannel`. Instead, a client that falls far behind a broadcast has its connection cut, and reconnects with every channel on it. It then gets what it missed, unless its `BroadcastChannel` closes with one of the <Link href="#errors">errors</Link>: `ChannelOverflowError` if more was published to its key while it was offline than `bufferLimit`/`bufferLimitBinary` holds, or `NetworkError` if it missed more messages than the replay buffer holds.
 
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
 >
@@ -421,7 +429,7 @@ Channels and broadcasts signal failure through four errors:
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
 | `NetworkError` (`isChannel: true`) | Offline longer than `reconnectTimeout`, or missed more messages than the replay buffer holds | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
-| `ChannelOverflowError` | A server `send()` while the client was offline overfilled `bufferLimit`/`bufferLimitBinary` | **Open** | Only the dropped `send()`s reject; `await` your sends |
+| `ChannelOverflowError` | A server channel's sends overfilled `bufferLimit`/`bufferLimitBinary` while its client was offline; the dropped ones reject | **Open** | `await` your sends, or raise `bufferLimit`/`bufferLimitBinary` |
 | `ChannelOverflowError` (`BroadcastChannel`) | More was published to its key while the client was offline than `bufferLimit`/`bufferLimitBinary` holds | Closed | Call its telefunction again to rejoin |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
