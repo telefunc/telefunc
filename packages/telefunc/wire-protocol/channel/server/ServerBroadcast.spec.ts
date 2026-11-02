@@ -345,13 +345,13 @@ describe('Broadcast shield validation', () => {
 })
 
 // ───────────────────────────────────────────────────────────────────────────
-// DefaultBroadcastAdapter with a custom transport — multi-node behavior. Each
-// node has its own DefaultBroadcastAdapter; the transport simulates the bus.
+// TransportBroadcastDriver, Broadcast on a custom `config.broadcast.transport` —
+// multi-node behavior; the transport simulates the bus.
 // Bug classes targeted: same-node echo causing double-delivery, cross-node
 // delivery silently dropped, transport subscription leaks (no refcount).
 // ───────────────────────────────────────────────────────────────────────────
 
-describe('DefaultBroadcastAdapter — multi-node transport', () => {
+describe('TransportBroadcastDriver — multi-node transport', () => {
   type TextListener = (payload: string, info: { seq: number; timestamp: number }) => void
 
   /** Synchronous-delivery bus for fast, deterministic tests. */
