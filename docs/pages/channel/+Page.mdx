@@ -293,8 +293,8 @@ info.timestamp  // server timestamp (Unix epoch ms)
 When `publish()` rejects depends on where Broadcast runs:
 
 - In memory (the default), it doesn't reject.
-- With <Link href="/redis">`@telefunc/redis`</Link>, when Redis can't run the publish (for example, the connection is down), or with `ChannelOverflowError` when this server's subscription to the key is still connecting and the publishes waiting for it exceed `bufferLimit`/`bufferLimitBinary` (see <Link href="/channel-config" />).
-- With a <Link href="/broadcast-config">`BroadcastTransport`</Link>, with the error its `send()` or `sendBinary()` throws.
+- With <Link href="/redis">`@telefunc/redis`</Link>, when Redis can't run the publish, for example while the connection is down. It also rejects with `ChannelOverflowError` when you publish more than `bufferLimit`/`bufferLimitBinary` (see <Link href="/channel-config" />) to a key this server has only just subscribed to.
+- With a <Link href="/broadcast-config">`BroadcastTransport`</Link>, when its `send()` or `sendBinary()` throws or rejects, with that error.
 - On Cloudflare, when a server <Link href="/stream/cloudflare#delivery-guarantees">couldn't take it</Link>.
 
 A rejected publish may still have reached some subscribers (on Cloudflare, every subscriber the failed server doesn't hold), so publishing it again can deliver it twice to them.
