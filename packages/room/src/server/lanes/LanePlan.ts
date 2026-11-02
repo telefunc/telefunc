@@ -68,9 +68,8 @@ type LanePlanOptions = {
   demandExchange: Pick<DemandExchange, 'onPage' | 'ask' | 'forget'>
 }
 
-/** Fan-in lanes of one kind (every-track or every-member) that don't deliver yet. `waiting` lists, by member or by
- *  track, the lanes of the other kind that wait until none of them is left; the last one to deliver or stop replans
- *  those, as `replans` says. */
+/** Fan-in lanes of one kind (every-track or every-member) that don't deliver yet. `waiting` holds the members or tracks
+ *  whose lanes of the other kind stay open meanwhile; once the last of `lanes` delivers or stops, they're replanned. */
 type Establishing = { lanes: Set<LaneSubscription>; waiting: Set<string>; replans: 'members' | 'tracks' }
 
 /** A lane of binary frames: a track of a member, every track of a member, or a track of every member. */
@@ -93,36 +92,32 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   /** While this process owns a member: only an owner reads demand. */
   private readonly demandLane = new LaneSubscription({ owner: this, address: DEMAND_LANE })
 
-  /** Named lanes, keyed by (member, track); `binaryTracks` lists each member's, `trackMembers` each track's. */
+  /** The (member, track) lanes; `binaryTracks` lists them by member, `trackMembers` by track. */
   private readonly binary = new Map<string, LaneSubscription>()
   private readonly binaryTracks = new Map<string, Set<string>>()
   private readonly trackMembers = new Map<string, Set<string>>()
-  /** Each member's every-track lane. A member has one while a holder here receives all of its tracks, while holders
-   *  here name more than `ROOM_MEMBER_NAMED_LANES_MAX` of its tracks for it alone, or while the tracks named of every
-   *  member are fetched by member. */
+  /** Each member's every-track lane, while the plan takes that member's tracks on one lane (`ARCHITECTURE.md`, "The
+   *  lane plan"). */
   private readonly everyTrack = new Map<string, LaneSubscription>()
-  /** Each track's every-member lane. A track has one while a holder here names it of every member, unless the tracks
-   *  are fetched by member. */
+  /** Each track's every-member lane, while a holder here wants that track of every member and `byMember` is off. */
   private readonly everyMember = new Map<string, LaneSubscription>()
-  /** Whether the tracks named of every member are fetched on each member's every-track lane, where a lane per track
-   *  would cost more. It turns on once those tracks outnumber both `ROOM_MEMBER_NAMED_LANES_MAX` and the members, and
-   *  off once the members are twice as many as the tracks. */
+  /** Whether the tracks wanted of every member come on the members' every-track lanes instead: on once those tracks
+   *  outnumber both `ROOM_MEMBER_NAMED_LANES_MAX` and the members, off once the members are twice as many. */
   private byMember = false
-  /** The tracks named of every member that are told as demand while every-track lanes deliver them. */
+  /** The tracks wanted of every member, told as demand while `byMember` has every-track lanes carry them. */
   private readonly byMemberTracks = new Set<string>()
 
-  /** Every-track lanes that don't deliver yet, and the tracks whose every-member lanes wait until none is left. */
+  /** Every-track lanes not delivering yet, and the tracks whose every-member lanes stay open until they do. */
   private readonly establishingEveryTrack: Establishing = { lanes: new Set(), waiting: new Set(), replans: 'tracks' }
 
-  /** Every-member lanes that don't deliver yet, and the members whose every-track lanes wait until none is left. */
+  /** Every-member lanes not delivering yet, and the members whose every-track lanes stay open until they do. */
   private readonly establishingEveryMember: Establishing = { lanes: new Set(), waiting: new Set(), replans: 'members' }
 
-  /** Members left out of the demand told for some track named of every member. */
+  /** Members left out of the demand told for a track wanted of every member. */
   private readonly excepted = new Set<string>()
-  /** For each present member, the number of its tracks that a holder here receives and names of it alone. */
+  /** For each present member, how many of its tracks holders here want of it alone. */
   private readonly counts = new Map<string, number>()
-  /** The member a planning pass is counting, a slice at a time; `stale` once a change of its wants made the count out
-   *  of date. */
+  /** The member a planning pass is counting, a slice at a time; `stale` once its wants changed under the count. */
   private counting: { member: string; stale: boolean } | null = null
   /** The members whose named tracks exceeded `ROOM_MEMBER_NAMED_LANES_MAX` when last planned. */
   private readonly overflowing = new Set<string>()

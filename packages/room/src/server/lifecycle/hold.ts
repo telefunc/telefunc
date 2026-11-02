@@ -24,9 +24,8 @@ assertIsNotBrowser()
 /** What holds a room (its non-hidden members and pages' views), and how many joins it had. */
 type HoldCounts = { holds: number; joins: number }
 
-/** `closesIn` is set while nothing holds the room: the time from `readAt` until its unheld timeout after the hold count
- *  last changed. `readAt` is the authority time of the read or exchange that gave the record; app servers' clocks may
- *  be off it. */
+/** `closesIn` is set while nothing holds the room: how long after `readAt` it closes, its unheld timeout counted from
+ *  the last hold change. `readAt` is on the authority's clock, which an app server's may differ from. */
 type HoldRecord = HoldConfig & HoldCounts & { closesIn?: number; readAt: number }
 
 type HoldChange = { before: HoldCounts; after: HoldRecord }
@@ -39,8 +38,8 @@ function newHoldConfig(emptyTimeout: number, departureTimeout: number): HoldConf
   return { emptyTimeout, departureTimeout }
 }
 
-/** Adds `delta` holds, and a join with `joining`: whichever comes first, the room's creation or its first hold, creates
- *  both counters, and both come back with the commit. No counts in a room without hold timeouts. */
+/** Adds `delta` holds, and one join when `joining`. The room's creation and its first hold may come in either order, so
+ *  each count creates both counters; the commit returns them. A room without hold timeouts counts nothing. */
 function holdDelta(config: HoldConfig | null, delta: number, opts?: { joining?: boolean }): HoldDelta {
   const joins = opts?.joining ? 1 : 0
   if (config === null) return { counts: [], after: () => null }
@@ -56,8 +55,8 @@ function holdDelta(config: HoldConfig | null, delta: number, opts?: { joining?: 
   }
 }
 
-/** Every count creates both counters, so a room with timeouts that was counted has both. An exchange's time is taken
- *  as its counters' latest change, which is its own once it changed one. */
+/** The record from both counters, which every count creates. Without `readAt` (after an exchange), the record is as of
+ *  the counters' last change. */
 function holdRecord(config: HoldConfig, counters: ReadonlyMap<string, CellCounter>, readAt?: number): HoldRecord {
   const holds = counters.get(HOLDS_CELL_KEY)
   const joins = counters.get(JOINS_CELL_KEY)
@@ -70,8 +69,8 @@ function holdRecord(config: HoldConfig, counters: ReadonlyMap<string, CellCounte
   return record
 }
 
-/** Null once the incarnation is gone, or while nothing counted it: it has no hold timeouts, or its creation's count
- *  failed and nothing has held it since. */
+/** Null once the incarnation is gone, and while nothing counted it: a room without hold timeouts, or one whose
+ *  creation's count failed and that nothing has held since. */
 async function readHoldRecord({ id, inc, hold }: RoomIncarnation): Promise<HoldRecord | null> {
   if (hold === null) return null
   const read = await getRoomPlane().driver.readCells(id, inc, { keys: [HOLDS_CELL_KEY, JOINS_CELL_KEY] })
@@ -119,9 +118,9 @@ async function maintainHold(room: RoomIncarnation): Promise<void> {
   else await extendLapse(room, record)
 }
 
-/** Once its creation is counted, a new room nothing holds yet lapses just past its close. The record is read under
- *  the head's revision, which the lapse write of a first hold moves, so that hold's lapse wins: first the head the
- *  create wrote, then the one each conflict returns. Returns the head it leaves, while that is the room's open head. */
+/** Once its creation is counted, a new room nothing holds yet lapses just after it would close. A first hold that
+ *  races this wins: its write moves the head, so this exchange conflicts, and the record it reads again is held.
+ *  Returns the head it leaves, while that is the room's open head. */
 async function lapseNewRoom(room: RoomIncarnation, created: RoomHead): Promise<RoomHead | null> {
   if (room.hold === null) return null
   const { id, inc } = room
@@ -145,9 +144,9 @@ async function lapseNewRoom(room: RoomIncarnation, created: RoomHead): Promise<R
   })
 }
 
-/** A held room's head lapses once its holders' records would have lapsed and its timeout passed, with a heartbeat to
- *  spare: pushed out whenever less than that is left, so a holder's every heartbeat keeps it ahead. A first hold
- *  always writes, which fences a new room's lapse (`lapseNewRoom`) it raced. */
+/** A held room's head lapses once its holders' leases would have lapsed and its timeout passed, plus a heartbeat. Each
+ *  heartbeat pushes it out when less than that is left. A first hold always writes, so a `lapseNewRoom()` it races
+ *  backs off. */
 async function extendLapse(
   { id, inc }: RoomIncarnation,
   record: HoldRecord,
