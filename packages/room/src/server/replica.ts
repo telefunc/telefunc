@@ -8,7 +8,7 @@ import { getRoomPlane } from '../backend/plane.js'
 import type { LaneId } from '../backend/contract.js'
 import { encodePublish, hostLocal, type OrderingInfo } from 'telefunc/__internal'
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../shared/binary.js'
-import { DemandReport, type DemandReportOwner } from './lanes/DemandReport.js'
+import { DemandExchange } from './lanes/DemandExchange.js'
 import { RoomDemand, type RoomDemandOwner } from './lanes/RoomDemand.js'
 import { PublishedTracks } from './lanes/PublishedTracks.js'
 import { DM_FAILURE } from '../shared/errors.js'
@@ -21,25 +21,13 @@ import type {
   RoomEnvelope,
   SenderStamp,
 } from '../shared/protocol.js'
-import type { DemandEntry, RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope } from './protocol.js'
-import { Slice } from '../shared/Slice.js'
+import type { RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope } from './protocol.js'
 import { RoomModel, type MembershipEvent, type ServerModelOwner } from '../shared/model.js'
 import type { LeaveCause } from '../types.js'
 import { AuthoritySync, type AuthoritySyncOwner } from './lifecycle/AuthoritySync.js'
 import { PendingDmAcks } from './dmAcks.js'
 import { reportRoomError } from './reportRoomError.js'
-import { GossipOutbox } from './gossip.js'
-import {
-  SEMANTIC_LANE,
-  commitLane,
-  controlLane,
-  decodeDemandPage,
-  decodeLaneEnvelope,
-  decodeRoomText,
-  encodeRoomRecord,
-  openConfig,
-  withinRoomHorizon,
-} from './lanes/lanes.js'
+import { SEMANTIC_LANE, decodeLaneEnvelope, decodeRoomText, openConfig, withinRoomHorizon } from './lanes/lanes.js'
 import type { RoomIncarnation } from './lifecycle/lifecycle.js'
 import { dropDmReply, takeDmReplies } from './store/dmReplies.js'
 import { evictMember } from './store/members.js'
@@ -76,9 +64,7 @@ type RoomReplicaOptions = {
  *  that hosts the members and pages the handles hold, and the heartbeat that renews the lease and checks the authority
  *  again. Each handle keeps its guards, its tail, the stubs it opened and its listeners. A replica that no handle
  *  observes, owns a member through or tails runs no heartbeat and holds no lane; it lives while a handle holds it. */
-class RoomReplica
-  implements ServerModelOwner, DemandReportOwner, RoomDemandOwner, LanePlanOwner, AuthoritySyncOwner, RoomHeartbeatOwner
-{
+class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, AuthoritySyncOwner, RoomHeartbeatOwner {
   private static readonly collected = new FinalizationRegistry<{
     replicas: Map<string, WeakRef<RoomReplica>>
     inc: string
@@ -113,8 +99,8 @@ class RoomReplica
   readonly model: RoomModel
   readonly incomingDemand: RoomDemand
   readonly publishedTracks = new PublishedTracks()
-  /** What every holder here receives, told to the other processes and to `demand`. */
-  readonly outgoingDemand = new DemandReport({ owner: this })
+  /** This process's demand to the other processes, and theirs to `incomingDemand`. */
+  private readonly demand: DemandExchange
   readonly lanePlan: LanePlan
   readonly authority: AuthoritySync
   readonly heartbeat: RoomHeartbeat
@@ -134,12 +120,8 @@ class RoomReplica
   private viewsLost = false
   /** Members whose eviction failed: the lease would host them for as long as it lives. */
   private readonly unevicted = new Set<string>()
-  /** Whether this process tells its demand again, and was asked to again meanwhile. */
-  private tellingAgain = false
-  private askedAgain = false
   /** The cleanups of the lease's members pending at the last heartbeat. */
   private pendingCleanups: ReadonlySet<string> = new Set()
-  private readonly gossip: GossipOutbox
   /** The handle holding each member it joined. */
   private readonly owners = new Map<string, ServerRoom>()
   /** The seq of the last frame each owned member's inbox delivered, 0 before its first. */
@@ -161,9 +143,10 @@ class RoomReplica
       metaSeq: stored.seq,
       owner: this,
     })
-    this.gossip = new GossipOutbox({ room: incarnation, instance: this.outgoingDemand.instance })
     this.incomingDemand = new RoomDemand({ owner: this, publishedTracks: this.publishedTracks })
-    const { model, outgoingDemand } = this
+    this.demand = new DemandExchange({ incarnation, incomingDemand: this.incomingDemand })
+    const { model } = this
+    const { outgoingDemand } = this.demand
     this.lanePlan = new LanePlan({ owner: this, incarnation, model, outgoingDemand })
     const lanePlan = this.lanePlan
     this.authority = new AuthoritySync({ owner: this, incarnation, model, lanePlan })
@@ -423,56 +406,16 @@ class RoomReplica
     await keys
   }
 
-  /** This process's demand entry, to the other processes and to its own owners. */
-  tellDemand(entry: DemandEntry, on: boolean): void {
-    this.gossip.push({ on, ...entry })
-    this.incomingDemand.take(this.outgoingDemand.instance, entry, on)
-  }
-
-  /** Renews this process's demand elsewhere with one page, and drops the reporters that lapsed,
-   *  a slice at a time. */
-  async renewDemand(): Promise<void> {
-    if (this.outgoingDemand.reporting) this.gossip.renew()
-    const slice = new Slice()
-    for (const _ of this.incomingDemand.expire()) if (slice.over) await slice.next()
-  }
-
-  /** Tells every entry of this process's demand again as all it receives, a slice at a time; once more after it when
-   *  asked again meanwhile, as an asker may not have read what it told before the ask. */
-  private async tellDemandAgain(): Promise<void> {
-    if (this.tellingAgain) {
-      this.askedAgain = true
-      return
-    }
-    this.tellingAgain = true
-    try {
-      do {
-        this.askedAgain = false
-        if (!this.outgoingDemand.reporting) continue
-        this.gossip.push({ again: true })
-        const slice = new Slice()
-        for (const _ of this.outgoingDemand.all()) if (slice.over) await slice.next()
-        this.gossip.push({ again: false })
-      } while (this.askedAgain)
-    } finally {
-      this.tellingAgain = false
-    }
+  renewDemand(): Promise<void> {
+    return this.demand.renew()
   }
 
   onDemand(serialized: string): void {
-    const page = decodeDemandPage(serialized)
-    if (page.instance !== this.outgoingDemand.instance) this.incomingDemand.applyPage(page)
+    this.demand.onPage(serialized)
   }
 
-  /** Asks `of`, or every other process, to tell its demand again. */
-  askDemand(of?: string): void {
-    const ask: Extract<RoomCtrlEnvelope, { __r: 'demand-ask' }> = {
-      __r: 'demand-ask',
-      instance: this.outgoingDemand.instance,
-    }
-    if (of) ask.of = of
-    // A stale commit is a closed room's, which has no demand.
-    void commitLane(controlLane(this.id, this.incarnation.inc), encodeRoomRecord(ask)).catch(reportRoomError)
+  askDemand(): void {
+    this.demand.ask()
   }
 
   forgetDemand(): void {
@@ -503,11 +446,7 @@ class RoomReplica
   onControl(serialized: string, info: OrderingInfo): void {
     this.authority.controlDelivered(info.seq)
     const ctrl = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
-    if (ctrl.__r === 'demand-ask') {
-      const self = this.outgoingDemand.instance
-      if (ctrl.instance !== self && (ctrl.of ?? self) === self) void this.tellDemandAgain().catch(reportRoomError)
-      return
-    }
+    if (ctrl.__r === 'demand-ask') return this.demand.onAsk(ctrl)
     this.applyControl(ctrl, () => encodePublish(serialized, info))
   }
 
@@ -623,7 +562,7 @@ class RoomReplica
     const handles = new Set(this.observers)
     for (const tail of this.tails) handles.add(tail)
     for (const handle of handles) handle._teardown()
-    this.gossip.close()
+    this.demand.close()
     void this.lanePlan.replan()
   }
 }

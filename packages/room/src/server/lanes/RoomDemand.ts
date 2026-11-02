@@ -33,8 +33,6 @@ interface RoomDemandOwner {
   ownedMembers(): Iterable<string>
   /** Tells an owned member whether a track of it is wanted. */
   deliverDemand(member: string, track: string, wanted: boolean): void
-  /** Asks the reporter to tell everything again. */
-  askDemand(instance: string): void
 }
 
 type RoomDemandOptions = {
@@ -70,10 +68,10 @@ class RoomDemand {
     this.publishedTracks = publishedTracks
   }
 
-  /** Another process's page, which renews its lease. A page count that skips one makes this process ask it to tell
-   *  everything again, once until it does or its next page is only a renewal; what it tells again replaces what it
-   *  told before. */
-  applyPage(page: RoomDemandPage): void {
+  /** Another process's page, which renews its lease, and whether to ask that process to tell everything again: once a
+   *  page count skips one, until it does or its next page is only a renewal; what it tells again replaces what it told
+   *  before. */
+  applyPage(page: RoomDemandPage): boolean {
     const { instance } = page
     const reporter = getOrCreate(this.reporters, instance, () => ({ expiresAt: 0, page: 0, telling: 0, asked: false }))
     const continues = page.page === reporter.page + 1
@@ -95,9 +93,9 @@ class RoomDemand {
     }
     // A renewal while asked means the ask or its answer was lost.
     const asksAgain = reporter.asked ? page.wants.length === 0 : !continues
-    if (tellsAgain || !asksAgain) return
+    if (tellsAgain || !asksAgain) return false
     reporter.asked = true
-    this.owner.askDemand(instance)
+    return true
   }
 
   /** Drops what the other processes told, read from a demand lane this one no longer subscribes. It owns no member
