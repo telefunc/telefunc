@@ -28,6 +28,7 @@ import { currentRoomSessionSubscriptions } from './RoomSessionSubscriptions.js'
 import { openRegionDirectory, openRoomAuthority } from './objects.js'
 import { compareCodePoints } from '../utils/SortedIds.js'
 import { assert } from '../utils/assert.js'
+import { markHandled } from '../utils/markHandled.js'
 
 /** A subscription requires its session DO's context; a lane commit made in one goes through that session's ordered
  *  stub. */
@@ -87,7 +88,8 @@ class CloudflareRoomDriver implements RoomDriver {
     const wire = await (session ? session.callAuthority(roomId, commit) : commit(this.stub(roomId)))
     if (wire.kind !== 'accepted') return wire
     const receipt: CommitAccepted = { kind: 'accepted', seq: wire.seq, timestamp: wire.timestamp }
-    if (wire.deliveryToken !== undefined) receipt.delivery = this.stub(roomId).awaitDelivery(wire.deliveryToken)
+    // The authority replied once the delivery was handed off.
+    if (lane.kind === 'inbox' || lane.kind === 'control') receipt.delivery = handoff(wire.lost)
     return receipt
   }
 
@@ -151,6 +153,11 @@ class CloudflareRoomDriver implements RoomDriver {
   private bucketHere(): string {
     return currentCloudflareMember()?.bucket ?? this.locationFallback
   }
+}
+
+/** A handoff the authority reported, rejecting with why it was lost; its committer awaits it. */
+function handoff(lost: string | undefined): Promise<void> {
+  return lost === undefined ? Promise.resolve() : markHandled(Promise.reject(new Error(lost)))
 }
 
 /** One page of the regions' pages, in code point order. A region that has more past its page may list a room before

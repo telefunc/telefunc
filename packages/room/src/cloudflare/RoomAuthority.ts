@@ -28,6 +28,8 @@ import {
   type TelefuncExtensionNamespace,
 } from 'telefunc/__internal'
 import { assert } from '../utils/assert.js'
+import { raceTimeout } from '../utils/raceTimeout.js'
+import { ROOM_HORIZON_MS } from '../server/constants.js'
 import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../backend/laneKey.js'
 import { commitPreconditionHolds, isOpenIncarnation, publicHead } from '../backend/semantics.js'
 import { Fanout } from './Fanout.js'
@@ -66,11 +68,12 @@ import {
   type CellPage,
 } from './storage.js'
 
+/** An inbox or control commit replies once its delivery was handed off, with why it was lost, if it was. */
 type AcceptedCommitWire = {
   kind: 'accepted'
   seq: number
   timestamp: number
-  deliveryToken?: string
+  lost?: string
 }
 /** A commit the transaction accepted: its order, the lanes it reaches, and the routes subscribed to them then. */
 type AcceptedCommit = { kind: 'accepted'; mark: OrderingInfo; laneKeys: string[]; routes: RouteInstallation[] }
@@ -154,17 +157,11 @@ class RoomAuthority {
     if (outcome.kind !== 'accepted') return outcome
     const { mark, laneKeys, routes } = outcome
     const delivery = this.fanout.send(inc, laneKeys, routes, payload, mark)
-    const receipt: AcceptedCommitWire = {
-      kind: 'accepted',
-      seq: mark.seq,
-      timestamp: mark.timestamp,
-    }
-    if (lane.kind === 'inbox' || lane.kind === 'control') receipt.deliveryToken = this.fanout.tokenOf(delivery)
+    const receipt: AcceptedCommitWire = { kind: 'accepted', seq: mark.seq, timestamp: mark.timestamp }
+    if (lane.kind !== 'inbox' && lane.kind !== 'control') return receipt
+    const lost = await lostReason(delivery)
+    if (lost !== null) receipt.lost = lost
     return receipt
-  }
-
-  async awaitDelivery(token: string): Promise<void> {
-    await this.fanout.awaitDelivery(token)
   }
 
   async readLaneOrder(inc: string, lane: LaneId): Promise<OrderingInfo | null> {
@@ -323,4 +320,13 @@ class RoomAuthority {
     if (deadline <= now && currentAlarm !== null && currentAlarm <= nextAlarm) return
     await this.ctx.storage.setAlarm(nextAlarm)
   }
+}
+
+/** Null once each session DO took the delivery, else why it was lost: a handoff unconfirmed within the horizon is. */
+function lostReason(delivery: Promise<void>): Promise<string | null> {
+  const settled = delivery.then(
+    () => null,
+    (reason: unknown) => String(reason),
+  )
+  return raceTimeout(settled, ROOM_HORIZON_MS, () => 'unconfirmed within the horizon')
 }
