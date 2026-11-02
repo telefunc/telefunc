@@ -638,6 +638,11 @@ class RoomParticipantStub implements BroadcastEndOwner {
     return this.end._trackAck(reply.then((answer) => answer ?? DM_FAILURE.left))
   }
 
+  /** Its close waits for the reply's commit, as a room stub's does (`awaitDmReply`). */
+  trackReply(replied: Promise<void>): void {
+    if (!this.end.isClosed) void this.end._trackAck(replied).catch(() => {})
+  }
+
   /** A closed stub's client gets no notice: one sent after an overflow ended it would arrive after a gap. */
   private notify(notice: ParticipantStubNotice): void {
     if (this.end.isClosed) return

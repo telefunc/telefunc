@@ -341,11 +341,13 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
     const msg = inboxMessageFromWire(envelope)
     const { ackId } = envelope
     if (ackId === undefined) return holder._deliverMessage(msg)
-    // A server participant, or one a client holds (its forwarder answers): the reply goes to the sender's inbox.
-    void holder
+    // A server participant, or one a client holds (its forwarder answers): the reply goes to the sender's inbox, and a
+    // client holding the participant closes once the reply is out, so its leave comes after it.
+    const replied = holder
       ._deliverMessageAck(msg)
       .then((reply) => this._writes.publishDmAck(envelope.from, ackId, reply))
-      .catch(reportRoomError)
+    holder._trackReply(replied)
+    void replied.catch(reportRoomError)
   }
 
   /** Resolves once the tail receives, so it holds everything committed after it returns. */
@@ -560,6 +562,11 @@ class ServerLocalParticipant extends ParticipantBase {
   override _deliverMessageAck(msg: InboxMessage): Promise<RoomResult> {
     if (this.holder) return this.holder.deliverAck(msg)
     return super._deliverMessageAck(msg)
+  }
+
+  /** @internal A reply to an acknowledged DM, on its way to the sender. */
+  _trackReply(replied: Promise<void>): void {
+    this.holder?.trackReply(replied)
   }
 
   /** @internal A client's hold on this participant, which its inbox forwards to. */
