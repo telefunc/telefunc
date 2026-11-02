@@ -36,6 +36,10 @@ type SubscriptionDriver<Source> = {
   subscribe(source: Source, receiver: BackendReceiver): DriverAttempt
   /** Absent: per process. Cloudflare: the session DO, null outside one (subscribe throws, publish doesn't wait). */
   scope?(): string | null
+  /** True where a publish can reach the store before the subscribe this host made just before it (Redis: PUBLISH and
+   *  SUBSCRIBE go by two connections). Core then holds a publish while one of its scope's attempts on the publish's
+   *  source is establishing, at most 60 s. Absent, a publish never waits. */
+  readonly publishOvertakesSubscribe?: boolean
 }
 
 /**

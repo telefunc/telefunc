@@ -1,15 +1,24 @@
 export { SubscriptionManager }
-export type { BackendSubscription, SourceRules }
+export type { BackendSubscription, SourceRules, SourceWait }
 
 import { assert, assertUsage } from '../../utils/assert.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 import { getOrCreate } from '../../utils/getOrCreate.js'
 import { reportBug } from '../channel/server/channel.js'
+import { ChannelOverflowError } from '../channel/channelErrors.js'
+import { getChannelLimits } from '../../node/server/serverConfig.js'
+import { unrefTimer } from '../../utils/unrefTimer.js'
+import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import { assertDriverOrdering } from './driverOrdering.js'
 import type { AttemptState, BackendPayload, BackendReceiver, DriverAttempt, SubscriptionDriver } from './driver.js'
 import type { OrderingInfo } from '../wire/orderingFrame.js'
 
 type Receive = (payload: BackendPayload, ordering: OrderingInfo) => void
+
+/** How long a send waits for its scope's establishing attempts. */
+const ESTABLISH_WAIT_MS = 60_000
+/** What a held send keeps beyond its payload (130–160 bytes measured), so small ones are bounded too. */
+const HELD_OVERHEAD_BYTES = 256
 
 /** A consumer's subscription. */
 type BackendSubscription = {
@@ -26,9 +35,27 @@ type SourceRules<Source> = {
   key(source: Source): string
   /** A string for 'text', bytes for 'binary'. */
   deliveryKind(source: Source): 'text' | 'binary'
+  /** What a send to `source` waits for; read only while some attempt establishes or some send waits. */
+  waitOf(source: Source): SourceWait<Source>
 }
 
-type SubscriptionManagerOptions<Source> = { driver: SubscriptionDriver<Source>; sources: SourceRules<Source> }
+/** A send waits while one of its scope's attempts on `waitsFor` is establishing, behind the sends that wait on its
+ *  `domain` (what one seq counts). Its bytes count against `budget`'s `bufferLimit`, or `bufferLimitBinary` when `limit`
+ *  is 'binary'. */
+type SourceWait<Source> = { domain: string; waitsFor: readonly Source[]; budget: string; limit: 'text' | 'binary' }
+
+/** The sends on one scope's domain, waiting for its establishing attempts. */
+type Wait = { readonly established: Promise<void>; sends: number }
+
+/** A waiting send's own copy of its payload, and what it counts against. */
+type HeldSend<Payload> = { waitKey: string; wait: Wait; budget: string; bytes: number; payload: Payload }
+
+type SubscriptionManagerOptions<Source> = {
+  driver: SubscriptionDriver<Source>
+  sources: SourceRules<Source>
+  /** What a send is, for its overflow error: 'Broadcast publish', 'Room commit'. */
+  sends: string
+}
 
 /** A plane's subscriptions (Broadcast's, Room's): consumers of one source in one scope share one driver attempt. */
 class SubscriptionManager<Source> {
@@ -37,21 +64,51 @@ class SubscriptionManager<Source> {
   /** By scope and source key. */
   private readonly slots = new Map<string, SubscriptionSlot<Source>>()
   private readonly cleanups = new Set<Promise<void>>()
+  private readonly sends: string
+  /** By scope and domain. */
+  private readonly waits = new Map<string, Wait>()
+  /** Bytes held by scope and budget. */
+  private readonly held = new Map<string, number>()
+  /** Slots never ready yet, counted down a microtask after: at 0, no send has anything to wait for. */
+  private establishingSlots = 0
 
-  constructor({ driver, sources }: SubscriptionManagerOptions<Source>) {
+  constructor({ driver, sources, sends }: SubscriptionManagerOptions<Source>) {
     this.driver = driver
     this.sources = sources
+    this.sends = sends
+  }
+
+  /** False on the fast path, read before a send builds anything: no attempt establishes and no send waits. */
+  get establishing(): boolean {
+    return this.establishingSlots > 0 || this.waits.size > 0
+  }
+
+  /** Sends `payload` once this scope's attempts on its source are established, at most `ESTABLISH_WAIT_MS` later; a
+   *  driver may get a publish before its own subscribe otherwise (Redis's go by two connections). `send` gets the
+   *  send's own copy: the caller reuses its bytes. */
+  afterEstablished<Payload extends BackendPayload, R>(
+    source: Source,
+    payload: Payload,
+    send: (owned: Payload) => R,
+  ): R | Promise<Awaited<R>> {
+    const scope = this.driver.scope ? this.driver.scope() : ''
+    if (scope === null) return send(payload)
+    const { domain, waitsFor, budget, limit } = this.sources.waitOf(source)
+    const waitKey = JSON.stringify([scope, domain])
+    const wait = this.waits.get(waitKey) ?? this.openWait(scope, waitsFor)
+    if (wait === null) return send(payload)
+    const held = this.hold(waitKey, wait, JSON.stringify([scope, budget]), limit, payload)
+    if (held === null) return Promise.reject(new ChannelOverflowError(`${this.sends} readiness buffer overflow`))
+    // Sent inside the reaction, so a send that finds the wait gone can't reach the driver first. `then` adopts what
+    // `send` returns, which TypeScript can't tell from `R`.
+    return wait.established.then(() => send(this.endWait(held))) as Promise<Awaited<R>>
   }
 
   subscribe(source: Source, receive: Receive): BackendSubscription {
     const key = this.sources.key(source)
     const slotKey = JSON.stringify([this.scopeHere(), key])
     const delivers = this.sources.deliveryKind(source)
-    const slot = getOrCreate(
-      this.slots,
-      slotKey,
-      () => new SubscriptionSlot({ owner: this, source, key, slotKey, delivers }),
-    )
+    const slot = getOrCreate(this.slots, slotKey, () => this.openSlot({ owner: this, source, key, slotKey, delivers }))
     return slot.attach(receive)
   }
 
@@ -74,6 +131,74 @@ class SubscriptionManager<Source> {
     this.cleanups.add(cleanup)
     void cleanup.finally(() => this.cleanups.delete(cleanup))
     return cleanup
+  }
+
+  private openSlot(options: SubscriptionSlotOptions<Source>): SubscriptionSlot<Source> {
+    const slot = new SubscriptionSlot(options)
+    // A driver whose publishes can't overtake its subscribes never makes a send wait.
+    if (!this.driver.publishOvertakesSubscribe) return slot
+    this.establishingSlots++
+    void slot.firstReady.then(() => this.establishingSlots--)
+    return slot
+  }
+
+  /** A wait for this scope's attempts on `waitsFor`, including ones made meanwhile; null when none is establishing. */
+  private openWait(scope: string, waitsFor: readonly Source[]): Wait | null {
+    if (this.establishingIn(scope, waitsFor).length === 0) return null
+    let timer!: ReturnType<typeof setTimeout>
+    const timeout = new Promise<void>((resolve) => {
+      timer = unrefTimer(setTimeout(resolve, ESTABLISH_WAIT_MS))
+    })
+    const established = Promise.race([this.establishedIn(scope, waitsFor), timeout]).finally(() => clearTimeout(timer))
+    return { established, sends: 0 }
+  }
+
+  private async establishedIn(scope: string, waitsFor: readonly Source[]): Promise<void> {
+    for (
+      let left = this.establishingIn(scope, waitsFor);
+      left.length > 0;
+      left = this.establishingIn(scope, waitsFor)
+    ) {
+      await Promise.all(left)
+    }
+  }
+
+  private establishingIn(scope: string, waitsFor: readonly Source[]): Promise<void>[] {
+    const left: Promise<void>[] = []
+    for (const source of waitsFor) {
+      const slot = this.slots.get(JSON.stringify([scope, this.sources.key(source)]))
+      if (slot?.establishing) left.push(slot.firstReady)
+    }
+    return left
+  }
+
+  /** Counts a waiting send against its budget: null past the budget's limit, read only now, as resolving the config is
+   *  costly. */
+  private hold<Payload extends BackendPayload>(
+    waitKey: string,
+    wait: Wait,
+    budget: string,
+    limit: 'text' | 'binary',
+    payload: Payload,
+  ): HeldSend<Payload> | null {
+    const bytes = HELD_OVERHEAD_BYTES + (typeof payload === 'string' ? utf8ByteLength(payload) : payload.byteLength)
+    const total = (this.held.get(budget) ?? 0) + bytes
+    const limits = getChannelLimits()
+    if (total > (limit === 'binary' ? limits.bufferLimitBinary : limits.bufferLimit)) return null
+    this.held.set(budget, total)
+    this.waits.set(waitKey, wait)
+    wait.sends++
+    const owned = (typeof payload === 'string' ? payload : new Uint8Array(payload)) as Payload
+    return { waitKey, wait, budget, bytes, payload: owned }
+  }
+
+  /** The wait ended: the last of its sends unmaps it, so a send its predecessor makes still queues behind the rest. */
+  private endWait<Payload>({ waitKey, wait, budget, bytes, payload }: HeldSend<Payload>): Payload {
+    if (--wait.sends === 0) this.waits.delete(waitKey)
+    const left = this.held.get(budget)! - bytes
+    if (left === 0) this.held.delete(budget)
+    else this.held.set(budget, left)
+    return payload
   }
 
   private scopeHere(): string {
@@ -119,6 +244,10 @@ class SubscriptionSlot<Source> implements BackendReceiver {
   private early: EarlyMessage[] | null = []
   /** It stopped or closed: what the attempt says from here on is ignored. */
   private finished = false
+  private readonly firstReadiness = createDeferred()
+  /** Settles on its first `ready`, its stop or its close; never rejects. */
+  readonly firstReady: Promise<void> = this.firstReadiness.promise
+  private wasReady = false
 
   constructor({ owner, source, key, slotKey, delivers }: SubscriptionSlotOptions<Source>) {
     this.owner = owner
@@ -130,6 +259,11 @@ class SubscriptionSlot<Source> implements BackendReceiver {
 
   get consumers(): number {
     return this.attached.size
+  }
+
+  /** It was never ready, and is still open. */
+  get establishing(): boolean {
+    return !this.wasReady && !this.finished
   }
 
   get state(): AttemptState {
@@ -202,6 +336,8 @@ class SubscriptionSlot<Source> implements BackendReceiver {
 
   private ready(): void {
     if (this.current === 'ready') return
+    this.wasReady = true
+    this.firstReadiness.resolve()
     this.readiness.resolve()
     this.enter('ready')
     const early = this.early
@@ -261,6 +397,7 @@ class SubscriptionSlot<Source> implements BackendReceiver {
   /** Stops listening first: the attempt's own `closed` on its unsubscribe is no end. */
   private finish(): void {
     this.finished = true
+    this.firstReadiness.resolve()
     this.early = []
     this.unobserve?.()
     this.unobserve = null

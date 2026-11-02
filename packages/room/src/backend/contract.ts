@@ -174,9 +174,7 @@ type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
    *  `stale-incarnation` page is the last. */
   readCellPages(roomId: string, inc: string, prefix: string): AsyncIterable<CellsRead>
   compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult>
-  /** A commit this host makes after `subscribe()` returned reaches that subscription: if your commits and
-   *  subscribes travel by different connections, hold a commit until your own new subscriptions on its lanes are
-   *  ready, as the Redis driver does. The caller may reuse `payload`'s bytes once this returns: copy what you keep. */
+  /** Keeps `payload` past the call only as a copy: the caller reuses its bytes. */
   commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult>
   /** The lane's last commit's seq and timestamp; null before its first, or once its incarnation or member is gone. */
   readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null>

@@ -74,8 +74,6 @@ class RedisSubscriptions {
   private changedChannels = new Set<string>()
   /** The subscriptions that may await confirmation; a sync confirms those its connection covers. */
   private readonly unconfirmed = new Set<RedisSubscription>()
-  /** Subscriptions not ready yet for the first time: at 0, no publish waits. */
-  private subscribingCount = 0
   private socket: Connection = { phase: 'idle' }
   private nextId = 0
   private syncing: Promise<void> = Promise.resolve()
@@ -90,8 +88,6 @@ class RedisSubscriptions {
 
   subscribe(options: RedisSubscriptionOptions): DriverAttempt {
     const subscription = new RedisSubscription({ ...options, owner: this })
-    this.subscribingCount++
-    void subscription.firstReady.then(() => this.subscribingCount--)
     for (const channel of subscription.channels) {
       const subscriptions = this.byChannel.get(channel)
       if (subscriptions !== undefined) {
@@ -105,21 +101,6 @@ class RedisSubscriptions {
     if (this.socket.phase === 'connected') this.syncChannels()
     else if (this.socket.phase === 'idle') void this.connect()
     return subscription
-  }
-
-  /** Whether one of ours is subscribing for the first time. */
-  get subscribing(): boolean {
-    return this.subscribingCount > 0
-  }
-
-  /** Settles once none of ours on `channels`, including ones added meanwhile, is subscribing for the first time;
-   *  null when none is now. */
-  firstReady(channels: readonly string[]): Promise<void> | null {
-    const pending = this.subscribingOn(channels)
-    if (pending.length === 0) return null
-    return (async () => {
-      for (let next = pending; next.length > 0; next = this.subscribingOn(channels)) await Promise.all(next)
-    })()
   }
 
   /** Arms a delivery fence on the ready subscriptions of each channel the commit is published on: `delivery` settles
@@ -308,16 +289,6 @@ class RedisSubscriptions {
     return all
   }
 
-  private subscribingOn(channels: readonly string[]): Promise<void>[] {
-    const pending: Promise<void>[] = []
-    for (const channel of channels) {
-      for (const subscription of this.byChannel.get(channel) ?? []) {
-        if (subscription.subscribing) pending.push(subscription.firstReady)
-      }
-    }
-    return pending
-  }
-
   private dispatch(channel: string, frame: Buffer): void {
     for (const subscription of [...(this.byChannel.get(channel) ?? [])]) subscription.receive(channel, frame)
   }
@@ -332,9 +303,6 @@ class RedisSubscription extends DriverAttempt {
   readonly channels: readonly string[]
   private readonly owner: RedisSubscriptions
   private readonly receiver: BackendReceiver
-  private readonly firstReadiness = createDeferred()
-  /** Settles on its first ready, its unsubscribe or its end; never rejects. */
-  readonly firstReady: Promise<void> = this.firstReadiness.promise
   private readonly fences = new Map<string, Deferred<void>>()
   /** Each lane's order: an every-track or every-member channel carries many binary lanes, keyed by lane key; any other
    *  channel one lane, keyed `''`. */
@@ -381,7 +349,6 @@ class RedisSubscription extends DriverAttempt {
   async unsubscribe(): Promise<void> {
     if (this.state() === 'closed') return
     this.transition('closed')
-    this.firstReadiness.resolve()
     this.dropParked()
     for (const token of this.fences.keys()) this.settleFence(token)
     this.owner.detach(this)
@@ -414,7 +381,6 @@ class RedisSubscription extends DriverAttempt {
     }
     const early = this.early
     this.early = []
-    this.firstReadiness.resolve()
     this.transition('ready')
     for (const message of early) {
       // A consumer may close the lane.
@@ -453,7 +419,6 @@ class RedisSubscription extends DriverAttempt {
 
   /** Over for good: the commits awaiting its fences see `reason`. Its consumers are told after, by `closed`. */
   private close(reason: unknown): void {
-    this.firstReadiness.resolve()
     this.dropParked()
     this.rejectFences(reason)
     this.owner.detach(this)

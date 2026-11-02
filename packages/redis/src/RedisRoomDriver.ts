@@ -49,6 +49,7 @@ type RedisRoomDriverOptions = { connection: RedisConnection; kit: RoomPlaneKit }
 
 /** Room's plane on a Redis backend: its store and lanes on `connection`, keyed and paged by Room's `kit`. */
 class RedisRoomDriver implements RoomDriver, RedisPlane {
+  readonly publishOvertakesSubscribe = true
   private readonly connection: RedisConnection
   private readonly kit: RoomPlaneKit
   /** A Cluster's last commit per lane. */
@@ -92,9 +93,11 @@ class RedisRoomDriver implements RoomDriver, RedisPlane {
   }
 
   commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
-    // A close commits under its lease, which would lapse before the hold ends.
-    if (!this.connection.hold.active || opts?.closingLease !== undefined) return this.commit(target, payload, opts)
-    return this.commitOnceReady(target, payload, opts)
+    const commit = () => this.sendCommit(target, payload, opts)
+    if (!isCluster(this.connection.client)) return commit()
+    // A Cluster re-sends a command Redis refused with TRYAGAIN (its slot migrating) or CLUSTERDOWN (a failover) after a
+    // delay, so a later commit on the lane could land first: each is sent once the one before it was answered.
+    return this.inLaneTurn(JSON.stringify([target.roomId, target.inc, this.kit.encodeLaneKey(target.lane)]), commit)
   }
 
   subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {
@@ -115,26 +118,6 @@ class RedisRoomDriver implements RoomDriver, RedisPlane {
     if (lane.kind === 'binary-all') return await this.memberLaneStarts(roomId, inc, lane.member)
     if (lane.kind === 'binary-track') return await this.trackLaneStarts(roomId, inc, lane.track)
     return await this.connection.run(REDIS_COMMANDS.laneStart, { ...source, laneKey: this.kit.encodeLaneKey(lane) })
-  }
-
-  private async commitOnceReady(
-    target: CommitTarget,
-    payload: Uint8Array,
-    opts?: CommitOptions,
-  ): Promise<CommitResult> {
-    const { roomId, inc, lane } = target
-    const channels = commitChannels(this.connection.prefix, roomId, inc, lane, this.kit.encodeLaneKey(lane), this.kit)
-    const held = this.connection.hold.holdCommit(channels, payload)
-    if (held !== null) payload = await held
-    return this.commit(target, payload, opts)
-  }
-
-  private commit(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
-    const commit = () => this.sendCommit(target, payload, opts)
-    if (!isCluster(this.connection.client)) return commit()
-    // A Cluster re-sends a command Redis refused with TRYAGAIN (its slot migrating) or CLUSTERDOWN (a failover) after a
-    // delay, so a later commit on the lane could land first: each is sent once the one before it was answered.
-    return this.inLaneTurn(JSON.stringify([target.roomId, target.inc, this.kit.encodeLaneKey(target.lane)]), commit)
   }
 
   private inLaneTurn<T>(turnKey: string, commit: () => Promise<T>): Promise<T> {

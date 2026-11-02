@@ -941,7 +941,7 @@ async function onStopChurn(roomId: string) {
 
 /** A view subscribes and a member publishes three 1,500-byte messages in the same turn, past the 4,096-byte
  *  bufferLimit of the lane that runs it: Redis's SUBSCRIBE round trip keeps the view's new subscription short of ready,
- *  so the Redis driver holds the three commits until it is. */
+ *  so the three commits wait until it is. */
 async function onPublishWhileEstablishing(roomId: string) {
   const me = await Room.join(roomId, { meta: { name: 'Me' } })
   const room = await Room.get(roomId)

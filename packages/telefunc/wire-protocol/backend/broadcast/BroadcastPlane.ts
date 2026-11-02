@@ -14,6 +14,16 @@ type BroadcastPlaneOptions = { driver: BroadcastDriver }
 const broadcastSources: SourceRules<BroadcastRoute> = {
   key: broadcastRouteKey,
   deliveryKind: (route) => route.kind,
+  // A key's two kinds share its order, so a publish of either waits behind the key's waiting ones.
+  waitOf: (route) => ({
+    domain: route.key,
+    waitsFor: [
+      { key: route.key, kind: 'text' },
+      { key: route.key, kind: 'binary' },
+    ],
+    budget: broadcastRouteKey(route),
+    limit: route.kind,
+  }),
 }
 
 /** What core consumes: Broadcast on a driver, its publishes checked, its subscriptions shared by route and host. */
@@ -23,7 +33,7 @@ class BroadcastPlane {
 
   constructor({ driver }: BroadcastPlaneOptions) {
     this.driver = driver
-    this.subscriptions = new SubscriptionManager({ driver, sources: broadcastSources })
+    this.subscriptions = new SubscriptionManager({ driver, sources: broadcastSources, sends: 'Broadcast publish' })
   }
 
   /** Publishes `payload` as it is at the call. */
@@ -31,8 +41,9 @@ class BroadcastPlane {
     route: BroadcastRoute<Kind>,
     payload: BroadcastPayload<Kind>,
   ): ChannelPublishAck | Promise<ChannelPublishAck> {
-    const result = this.driver.publish(route, payload)
-    return isPromise(result) ? result.then((receipt) => toAck(route.key, receipt)) : toAck(route.key, result)
+    return this.subscriptions.establishing
+      ? this.subscriptions.afterEstablished(route, payload, (owned) => this.publishNow(route, owned))
+      : this.publishNow(route, payload)
   }
 
   subscribe<Kind extends BroadcastKind>(
@@ -51,6 +62,14 @@ class BroadcastPlane {
 
   dispose(): Promise<void> {
     return this.subscriptions.dispose()
+  }
+
+  private publishNow<Kind extends BroadcastKind>(
+    route: BroadcastRoute<Kind>,
+    payload: BroadcastPayload<Kind>,
+  ): ChannelPublishAck | Promise<ChannelPublishAck> {
+    const result = this.driver.publish(route, payload)
+    return isPromise(result) ? result.then((receipt) => toAck(route.key, receipt)) : toAck(route.key, result)
   }
 }
 

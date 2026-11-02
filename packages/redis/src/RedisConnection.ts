@@ -12,7 +12,6 @@ import {
 import { assertKeyPrefix } from './keys.js'
 import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
 import { RedisSubscriptions } from './RedisSubscriptions.js'
-import { PublishHold } from './PublishHold.js'
 
 type RedisConnectionOptions = { redis: RedisClient; prefix: string }
 
@@ -23,8 +22,6 @@ class RedisConnection {
   /** A Cluster node's PUBLISH count is node-local, so it cannot prove global absence. */
   readonly reportsReceivers: boolean
   readonly subscriptions: RedisSubscriptions
-  /** Broadcast's and Room's: their queues and budgets are channel names, which never collide. */
-  readonly hold: PublishHold
   private commands: RedisClient
   /** The app clients installed with this backend: its command client ends once the last one does. */
   private readonly holders = new Set<RedisClient>()
@@ -38,7 +35,6 @@ class RedisConnection {
     this.prefix = isCluster(this.commands) ? prefix : `${prefix}${this.commands.options.db ?? 0}:`
     this.reportsReceivers = !isCluster(this.commands)
     this.subscriptions = new RedisSubscriptions({ connection: this })
-    this.hold = new PublishHold({ subscriptions: this.subscriptions, prefix: this.prefix })
   }
 
   /** A fresh, unconnected subscriber socket on the current command client, which never retries on its own. */

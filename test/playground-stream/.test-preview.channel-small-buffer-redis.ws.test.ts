@@ -7,7 +7,7 @@ process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS = JSON.stringify(['ws'])
 process.env.NO_HTTPS = 'true'
 process.env.CHANNEL_CONFIG = JSON.stringify({ bufferLimit: 4096 })
 
-// The Redis driver holds a publish while its own new subscriptions on the key establish (its SUBSCRIBE round trip),
+// A publish waits while the server's own new subscriptions on its key establish (Redis's SUBSCRIBE round trip),
 // within bufferLimit.
 runPlayground('pnpm preview:redis')
 testPublishSmallBuffer()

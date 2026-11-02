@@ -21,6 +21,7 @@ type RedisBackendOptions = { connection: RedisConnection }
 /** The installed backend: Broadcast on `connection`, and Room's plane, built on the same connection. */
 class RedisBackend implements BroadcastDriver, RedisPlane {
   readonly connection: RedisConnection
+  readonly publishOvertakesSubscribe = true
   readonly planes = {
     [Symbol.for('telefunc.room.plane')]: (kit: RoomPlaneKit): RoomDriver =>
       new RedisRoomDriver({ connection: this.connection, kit }),
@@ -31,9 +32,6 @@ class RedisBackend implements BroadcastDriver, RedisPlane {
   }
 
   async publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {
-    const { hold } = this.connection
-    const held = hold.active ? hold.holdBroadcast(route, payload) : null
-    if (held !== null) payload = await held
     const { seq, timestamp, receivers } = await this.connection.run(REDIS_COMMANDS.publish, { route, payload })
     return { seq, timestamp, receivers: this.connection.reportsReceivers ? receivers : undefined }
   }
