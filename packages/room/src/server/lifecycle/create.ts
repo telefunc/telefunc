@@ -13,12 +13,13 @@ import { RoomReplica } from '../RoomReplica.js'
 import { metaEntriesAt } from '../../shared/RoomMetaState.js'
 import { EXCHANGE_CONFLICT, retryCompareExchange } from '../store/retryCompareExchange.js'
 import { cleanupFinalizedIncarnation, takeOverClose } from './close.js'
-import { createHold, lapseNewRoom, newHoldConfig } from './hold.js'
+import { newHoldConfig, newRoomHold, scheduleNewRoomClose } from './hold.js'
 import { listRoom, sweepLapsedRoomsSoon } from '../store/directory.js'
 import { assertRoomTimeout, getRoomConfig } from '../config.js'
 
-// A create reads the head until it may replace it, replaces it in one compare-exchange, and only then sets up the new
-// incarnation; a head that changed under the exchange sends it back to the read. The three run in one async attempt.
+// A create reads the head until it may replace it, and replaces it in one compare-exchange, which counts the new
+// incarnation's holds and sets its lapse; a head that changed under the exchange sends it back to the read. Then it
+// lists the room. They run in one async attempt.
 
 type TryCreateRoomResult = { kind: 'created'; room: ServerRoom } | { kind: 'exists' } | { kind: 'closing' }
 type Refusal = { kind: 'exists' } | { kind: 'closing' }
@@ -45,16 +46,13 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     const lapsedInc = current === null ? await plane.driver.directoryGet(id) : undefined
     // A creator that stops past its head leaves a listing the sweep finds: the lapsed incarnation's, or this one.
     if (lapsedInc === undefined) await listRoom(plane, incarnation, undefined)
-    // The new head, in the one exchange.
-    const result = await plane.compareExchangeHead(id, replacing(current), { head: openHead(created) })
+    const next = { head: openHead(created), ...newRoomHold(incarnation.hold) }
+    const result = await plane.compareExchangeHead(id, replacing(current), next)
     if (result.kind === 'conflict') return refusalOrRetry(result.current)
-    // The new incarnation: the head lapses only once the counters that keep it ahead are written. The lapsed
-    // incarnation's data, which none of that touches, goes meanwhile: before the listing that names it is replaced.
-    const [lapsing] = await Promise.all([
-      createHold(incarnation).then(() => lapseNewRoom(incarnation, result.head)),
-      lapsedInc === undefined ? undefined : plane.driver.dropIncarnation(id, lapsedInc),
-    ])
-    await listRoom(plane, incarnation, lapsing?.expiresAt)
+    scheduleNewRoomClose(incarnation)
+    // The lapsed incarnation's data goes before the listing that names it is replaced.
+    if (lapsedInc !== undefined) await plane.driver.dropIncarnation(id, lapsedInc)
+    await listRoom(plane, incarnation, result.head.expiresAt)
     sweepLapsedRoomsSoon()
     return { kind: 'created', room: seededRoom(id, created) }
   })

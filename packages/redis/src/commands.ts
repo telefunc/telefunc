@@ -118,10 +118,43 @@ redis.call('PUBLISH', KEYS[2], frame)
 return {seq, ts}
 `
 
-// HEAD EXCHANGE: compares by form, then stores the next head.
-//   KEYS: [1]=head
-//   ARGV: [1]=HeadExpectation JSON {form,rev?,lease?} [2]=nextJson{state,inc?,config,lease?,ttlMs?}
-const HEAD_EXCHANGE_LUA = `${HEAD_PRELUDE}
+// Writes a cell at `version`, or deletes it with no value; counts a counter cell, appending its key, value and
+// changedAt to `reply` (see CellCount).
+//   KEYS: [4]=cell-index [5]=values [6]=versions, as every script that uses them has them
+const CELL_WRITES_LUA = `
+local function tf_write(key, value, version)
+  if value then
+    redis.call('HSET', KEYS[5], key, value)
+    redis.call('HSET', KEYS[6], key, version)
+    redis.call('ZADD', KEYS[4], 0, key)
+  else
+    redis.call('HDEL', KEYS[5], key)
+    redis.call('HDEL', KEYS[6], key)
+    redis.call('ZREM', KEYS[4], key)
+  end
+end
+local function tf_count(key, delta, create, version, now, reply)
+  local raw = redis.call('HGET', KEYS[5], key)
+  local counter = raw and cjson.decode(raw)
+  if not counter and create then counter = { value = 0 } end
+  if not counter then return end
+  if delta ~= 0 or not raw then
+    counter.value = counter.value + delta
+    counter.changedAt = now
+    tf_write(key, string.format('{"value":%d,"changedAt":%d}', counter.value, counter.changedAt), version)
+  end
+  reply[#reply + 1] = key
+  reply[#reply + 1] = string.format('%d', counter.value)
+  reply[#reply + 1] = string.format('%d', counter.changedAt)
+end
+`
+
+// HEAD EXCHANGE: compares by form, then stores the next head, and counts a create's cells in its incarnation.
+//   KEYS: [1]=head, and with counts [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions of the next
+//         head's incarnation
+//   ARGV: [1]=HeadExpectation JSON {form,rev?,lease?} [2]=nextJson{state,inc?,config,lease?,ttlMs?} [3..]=per counted
+//         cell its key, delta and create ('1' or '')
+const HEAD_EXCHANGE_LUA = `${HEAD_PRELUDE}${CELL_WRITES_LUA}
 local head_key = KEYS[1]
 local now = tf_now()
 local expected = cjson.decode(ARGV[1])
@@ -154,6 +187,11 @@ if nx.ttlMs ~= nil then stored.exp = now + nx.ttlMs end
 local encoded = cjson.encode(stored)
 redis.call('SET', head_key, encoded)
 if stored.exp ~= nil then redis.call('PEXPIREAT', head_key, stored.exp) end
+if #KEYS > 1 then
+  local version = redis.call('INCR', KEYS[2])
+  for at = 3, #ARGV, 3 do tf_count(ARGV[at], tonumber(ARGV[at + 1]), ARGV[at + 2] == '1', version, now, {}) end
+  redis.call('SADD', KEYS[3], KEYS[2], KEYS[4], KEYS[5], KEYS[6])
+end
 return '{"tag":"head","head":' .. encoded .. '}'
 `
 
@@ -282,37 +320,6 @@ redis.call('PUBLISH', KEYS[1], ARGV[1])
 //   ARGV: [1]=inc [2..4]=how many mutated, expected and counted cells, then per mutated cell its key, op('set'|'del')
 //         and value, per expected cell its key and version ('' while absent), and per counted cell its key, delta and
 //         create ('1' or '')
-// Writes a cell at `version`, or deletes it with no value; counts a counter cell, appending its key, value and
-// changedAt to `reply` (see CellCount).
-//   KEYS: [4]=cell-index [5]=values [6]=versions, as both scripts that use them have them
-const CELL_WRITES_LUA = `
-local function tf_write(key, value, version)
-  if value then
-    redis.call('HSET', KEYS[5], key, value)
-    redis.call('HSET', KEYS[6], key, version)
-    redis.call('ZADD', KEYS[4], 0, key)
-  else
-    redis.call('HDEL', KEYS[5], key)
-    redis.call('HDEL', KEYS[6], key)
-    redis.call('ZREM', KEYS[4], key)
-  end
-end
-local function tf_count(key, delta, create, version, now, reply)
-  local raw = redis.call('HGET', KEYS[5], key)
-  local counter = raw and cjson.decode(raw)
-  if not counter and create then counter = { value = 0 } end
-  if not counter then return end
-  if delta ~= 0 or not raw then
-    counter.value = counter.value + delta
-    counter.changedAt = now
-    tf_write(key, string.format('{"value":%d,"changedAt":%d}', counter.value, counter.changedAt), version)
-  end
-  reply[#reply + 1] = key
-  reply[#reply + 1] = string.format('%d', counter.value)
-  reply[#reply + 1] = string.format('%d', counter.changedAt)
-end
-`
-
 const CELLS_EXCHANGE_LUA = `${HEAD_PRELUDE}${CELL_WRITES_LUA}
 local head_key, rev_key, incarnation_keys_key, cell_index_key, values_key, versions_key =
   KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6]
@@ -696,11 +703,29 @@ const REDIS_COMMANDS = {
   headExchange: command({
     name: 'tfRoomHeadExchange',
     lua: HEAD_EXCHANGE_LUA,
-    numberOfKeys: 1,
-    invoke: (prefix, { roomId, expected, next }: { roomId: string; expected: HeadExpectation; next: HeadNext }) => ({
-      keys: [headKey(prefix, roomId)],
-      argv: [JSON.stringify(expected), encodeNext(next)],
-    }),
+    numberOfKeys: null,
+    invoke: (prefix, { roomId, expected, next }: { roomId: string; expected: HeadExpectation; next: HeadNext }) => {
+      const { counts = [] } = next
+      const inc = next.head.currentInc
+      const cells =
+        counts.length === 0 || inc === null
+          ? []
+          : [
+              revKey(prefix, roomId, inc),
+              incarnationKeysKey(prefix, roomId, inc),
+              cellIndexKey(prefix, roomId, inc),
+              cellValuesKey(prefix, roomId, inc),
+              cellVersionsKey(prefix, roomId, inc),
+            ]
+      return {
+        keys: [headKey(prefix, roomId), ...cells],
+        argv: [
+          JSON.stringify(expected),
+          encodeNext(next),
+          ...counts.flatMap(({ key, delta, create }) => [key, String(delta), create ? '1' : '']),
+        ],
+      }
+    },
     parse: (reply): HeadExchangeResult => {
       const parsed = JSON.parse(reply as string) as
         | { tag: 'head'; head: ScriptHead }

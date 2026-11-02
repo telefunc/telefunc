@@ -104,6 +104,9 @@ type HeadNext = {
   }
   /** The head lapses `ttlMs` after this exchange. */
   ttlMs?: number
+  /** Counted in the head's `currentInc` within the exchange: a create counts its incarnation's hold counters with its
+   *  head. */
+  counts?: CellCount[]
 }
 
 /** The incarnation a call names is no longer the head's open one: Room's one refusal for a room that closed or was

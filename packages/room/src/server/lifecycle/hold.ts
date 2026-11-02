@@ -1,4 +1,4 @@
-export { newHoldConfig, holdDelta, afterHoldChange, createHold, maintainHold, lapseNewRoom, cancelClose }
+export { newHoldConfig, newRoomHold, holdDelta, afterHoldChange, scheduleNewRoomClose, maintainHold, cancelClose }
 export type { HoldDelta }
 
 // An unheld room closes on its own: the server whose write leaves it unheld closes it on a timer, and the head's lapse,
@@ -9,12 +9,11 @@ import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { getRoomPlane } from '../../backend/plane.js'
-import type { CellCount, CellCounter, RoomHead } from '../../backend/contract.js'
+import type { CellCount, CellCounter, HeadNext } from '../../backend/contract.js'
 import { decodeCellCounter, isOpenIncarnation } from '../../backend/semantics.js'
 import { TIMER_DELAY_MAX_MS } from '../../shared/constants.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_LAPSE_AFTER_CLOSE_MS, ROOM_LEASE_TTL_MS } from '../constants.js'
 import type { HoldConfig, RoomIncarnation } from '../protocol.js'
-import { roomClosedError } from '../../shared/errors.js'
 import { HOLDS_CELL_KEY, JOINS_CELL_KEY } from '../store/cells.js'
 import { closeIncarnation } from './close.js'
 import { EXCHANGE_CONFLICT, retryCompareExchange } from '../store/retryCompareExchange.js'
@@ -38,8 +37,8 @@ function newHoldConfig(emptyTimeout: number, departureTimeout: number): HoldConf
   return { emptyTimeout, departureTimeout }
 }
 
-/** Adds `delta` holds, and one join when `joining`. The room's creation and its first hold may come in either order, so
- *  each count creates both counters; the commit returns them. A room without hold timeouts counts nothing. */
+/** Adds `delta` holds, and one join when `joining`; each count creates a counter it lacks, and the commit returns
+ *  them. A room without hold timeouts counts nothing. */
 function holdDelta(config: HoldConfig | null, delta: number, opts?: { joining?: boolean }): HoldDelta {
   const joins = opts?.joining ? 1 : 0
   if (config === null) return { counts: [], after: () => null }
@@ -69,8 +68,7 @@ function holdRecord(config: HoldConfig, counters: ReadonlyMap<string, CellCounte
   return record
 }
 
-/** Null once the incarnation is gone, and while nothing counted it: a room without hold timeouts, or one whose
- *  creation's count failed and that nothing has held since. */
+/** Null once the incarnation is gone, and for a room without hold timeouts, which counts nothing. */
 async function readHoldRecord({ id, inc, hold }: RoomIncarnation): Promise<HoldRecord | null> {
   if (hold === null) return null
   const read = await getRoomPlane().driver.readCells(id, inc, { keys: [HOLDS_CELL_KEY, JOINS_CELL_KEY] })
@@ -94,19 +92,17 @@ function afterHoldChange(room: RoomIncarnation, change: HoldChange | null): void
   }
 }
 
-/** Counts a new room's creation, which a first hold may have counted before it. */
-async function createHold(room: RoomIncarnation): Promise<void> {
-  const { hold } = room
-  if (hold === null) return
-  const result = await getRoomPlane().driver.compareExchangeCells(room.id, room.inc, {
-    expect: [],
-    mutations: [],
-    counts: holdDelta(hold, 0).counts,
-  })
-  if (result.kind === 'stale-incarnation') throw roomClosedError(room.id)
-  assert(result.kind === 'committed')
-  const record = holdRecord(hold, result.counters)
-  if (record.closesIn !== undefined) scheduleClose(room, record.closesIn)
+/** A new room's hold, which the exchange creating its head writes with it: both counters, and the head's lapse just
+ *  after the room would close, as nothing holds it yet. */
+function newRoomHold(hold: HoldConfig | null): Pick<HeadNext, 'counts' | 'ttlMs'> {
+  if (hold === null) return {}
+  const { counts } = holdDelta(hold, 0)
+  return hold.emptyTimeout === Infinity ? { counts } : { counts, ttlMs: hold.emptyTimeout + ROOM_LAPSE_AFTER_CLOSE_MS }
+}
+
+/** A new room nothing holds yet closes `emptyTimeout` after its creation. */
+function scheduleNewRoomClose(room: RoomIncarnation): void {
+  if (room.hold !== null && room.hold.emptyTimeout !== Infinity) scheduleClose(room, room.hold.emptyTimeout)
 }
 
 /** Each heartbeat, after it reaped lapsed leases: keeps a held room's lapse ahead, or arms the close of
@@ -118,35 +114,9 @@ async function maintainHold(room: RoomIncarnation): Promise<void> {
   else await extendLapse(room, record)
 }
 
-/** Once its creation is counted, a new room nothing holds yet lapses just after it would close. A first hold that
- *  races this wins: its write moves the head, so this exchange conflicts, and the record it reads again is held.
- *  Returns the head it leaves, while that is the room's open head. */
-async function lapseNewRoom(room: RoomIncarnation, created: RoomHead): Promise<RoomHead | null> {
-  if (room.hold === null) return null
-  const { id, inc } = room
-  const plane = getRoomPlane()
-  let head: RoomHead | null = created
-  return await retryCompareExchange(async () => {
-    if (!isOpenIncarnation(head, inc)) return null
-    const record = await readHoldRecord(room)
-    if (record?.closesIn === undefined) return head
-    const result = await plane.compareExchangeHead(
-      id,
-      { form: 'rev', rev: head.rev },
-      {
-        head: { currentInc: inc, state: 'open', config: head.config },
-        ttlMs: record.closesIn + ROOM_LAPSE_AFTER_CLOSE_MS,
-      },
-    )
-    if (result.kind === 'committed') return result.head
-    head = result.current
-    return EXCHANGE_CONFLICT
-  })
-}
-
 /** A held room's head lapses once its holders' leases would have lapsed and its timeout passed, plus a heartbeat. Each
- *  heartbeat pushes it out when less than that is left. A first hold always writes, so a `lapseNewRoom()` it races
- *  backs off. */
+ *  heartbeat pushes it out when less than that is left. A first hold always writes: the head lapses as a new
+ *  room's until then. */
 async function extendLapse(
   { id, inc }: RoomIncarnation,
   record: HoldRecord,

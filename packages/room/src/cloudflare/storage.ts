@@ -53,6 +53,7 @@ import {
 } from '../backend/semantics.js'
 import type { OrderingInfo } from 'telefunc/__internal'
 import { binaryLaneKeyPrefix, encodeLaneKey } from '../backend/laneKey.js'
+import { assert } from '../utils/assert.js'
 
 /** A head exchange's result, with the stored head: the authority hands out its public view. */
 type HeadExchangeOutcome = { kind: 'committed'; head: StoredHead } | { kind: 'conflict'; current: StoredHead | null }
@@ -269,9 +270,18 @@ function storeHead(sql: SqlStorage, next: HeadNext, now: number): StoredHead {
     head.closeLease?.until ?? null,
     head.expiresAt,
   )
-  // A new incarnation is registered inside the exchange that names it.
+  // A new incarnation is registered inside the exchange that names it, and counted there.
   if (head.currentInc !== null) {
     sql.exec('INSERT OR IGNORE INTO gen (inc, revision) VALUES (?, 0)', head.currentInc)
+    if (next.counts !== undefined) {
+      const counted = compareExchangeCells(
+        sql,
+        head.currentInc,
+        { expect: [], mutations: [], counts: next.counts },
+        now,
+      )
+      assert(counted.kind === 'committed') // the head just stored names it
+    }
   }
   return head
 }

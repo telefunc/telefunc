@@ -268,7 +268,10 @@ class MemoryRoomDriver implements RoomDriver {
     const materialized = materializeHead(next, Date.now(), `rev-${++this.revSeq}`)
     const stored = { ...materialized, config: copyBytes(materialized.config) }
     room.head = stored
-    if (stored.currentInc !== null) this.incarnation(room, stored.currentInc)
+    if (stored.currentInc !== null) {
+      const incarnation = this.incarnation(room, stored.currentInc)
+      if (next.counts !== undefined) applyCells(incarnation, [], next.counts)
+    }
     return stored
   }
 
