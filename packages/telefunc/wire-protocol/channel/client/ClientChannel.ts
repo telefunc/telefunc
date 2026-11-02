@@ -430,7 +430,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   _end(err?: Error): void {
     if (this.lifecycle.ended) return
     this.lifecycle.end(err)
-    this.sendCredit.shutdown()
+    this.sendCredit.shutdown(err)
     this.receiveCredit.detach()
     const ackErr = err ?? new ChannelClosedError()
     for (const { reject } of this.pendingAcks.values()) reject(ackErr)

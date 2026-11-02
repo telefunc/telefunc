@@ -830,7 +830,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (!keep) this._release()
     this.mux?.onChannelEnded(this, { keep, pageAttached })
     this.lifecycle.fireClose(err)
-    this.sendCredit.shutdown()
+    this.sendCredit.shutdown(err)
     // Building an error captures a stack trace, so one is built only while an ack is awaited or a frame is buffered.
     if (this.pendingAcks.size > 0 || this.offlineBuffer.size > 0) {
       const ackErr = err ?? new ChannelClosedError()
