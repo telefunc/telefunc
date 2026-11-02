@@ -32,7 +32,8 @@ type LoadingStatic = (typeof ROOM_STATICS)[number]
 
 /** `name` of Room's statics, loading Room's server code on the first call. */
 function onLoad<K extends LoadingStatic>(name: K): RoomStatic[K] {
-  const call = (server: RoomServer, args: unknown[]) => (server.Room[name] as (...args: unknown[]) => unknown)(...args)
+  const call = (server: RoomServer, args: unknown[]) =>
+    (server.roomStatics[name] as (...args: unknown[]) => unknown)(...args)
   return ((...args: unknown[]) => {
     const server = loadedRoomServer()
     return server === undefined ? loadRoomServer().then((loaded) => call(loaded, args)) : call(server, args)
@@ -49,6 +50,6 @@ const Room: RoomStatic = {
     const server = loadedRoomServer()
     // Only Room's server code makes a room.
     assertUsage(server !== undefined, ROOM_GUARD_USAGE)
-    server.Room.guard(room, guards)
+    server.roomStatics.guard(room, guards)
   },
 }

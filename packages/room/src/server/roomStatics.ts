@@ -1,4 +1,4 @@
-export { Room }
+export { roomStatics }
 export type { RoomGuardHooks, RoomStatic }
 
 import { assertUsage } from '../utils/assert.js'
@@ -27,7 +27,7 @@ import type {
   ParticipantRef,
   ParticipantSnapshotView,
   PublishGuard,
-  Room as RoomInstance,
+  Room,
   RoomGetOptions,
   RoomInfo,
   RoomMeta,
@@ -53,12 +53,6 @@ import { closeIncarnation } from './lifecycle/close.js'
 import { cancelClose, type RoomIncarnation } from './lifecycle/hold.js'
 import { repairRoomIndex } from './store/directory.js'
 import { ROOM_GUARD_USAGE } from './constants.js'
-
-type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = RoomInstance<
-  M,
-  P,
-  Pub
->
 
 type RoomStatic = {
   create<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown>(
@@ -94,7 +88,7 @@ type RoomStatic = {
   ): Promise<ParticipantSnapshotView<P>[]>
 }
 
-const Room: RoomStatic = {
+const roomStatics: RoomStatic = {
   create: createRoom as RoomStatic['create'],
   get: getRoom as RoomStatic['get'],
   getOrCreate: getOrCreateRoom as RoomStatic['getOrCreate'],

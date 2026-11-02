@@ -67,10 +67,11 @@ import type {
   ParticipantMeta,
   PublishOptions,
   RemoteParticipant,
+  Room,
   RoomSnapshotView,
   Sender,
 } from '../types.js'
-import type { Room, RoomGuardHooks } from './roomStatics.js'
+import type { RoomGuardHooks } from './roomStatics.js'
 assertIsNotBrowser()
 
 const SERVER_ROOM_BRAND: unique symbol = Symbol.for('telefunc.ServerRoom')
