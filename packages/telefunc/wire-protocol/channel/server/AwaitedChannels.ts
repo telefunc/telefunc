@@ -1,7 +1,7 @@
-export { AwaitedChannels }
+export { AwaitedChannels, expireAwaited }
 export type { AwaitedChannel, RecvBacklog }
 
-import type { ChannelFrame } from '../../wire/frame.js'
+import { encode, type ChannelFrame } from '../../wire/frame.js'
 import type { ReconcileOpenEntry } from '../../wire/payloads.js'
 import type { WireEntry } from './ChannelMux.js'
 import type { RegistrationWaits } from './RegistrationWaits.js'
@@ -23,6 +23,13 @@ type AwaitedChannel = {
   phase: 'waiting' | 'attached' | 'expired'
   /** The deadline of its wait for its channel's registration (see `RegistrationWaits`); null once it waits no more. */
   ttl: ReturnType<typeof setTimeout> | null
+}
+
+/** The awaited channel didn't register within `connectTtl`, or shut down as it registered: its wire gets an
+ *  ATTACH_RESULT null. */
+function expireAwaited(awaited: AwaitedChannel): void {
+  awaited.entry.state.awaited.expire(awaited)
+  awaited.entry.sender.send(encode.attachResult(awaited.open.ix, null))
 }
 
 type AwaitedChannelsOptions = {

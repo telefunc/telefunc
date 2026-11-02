@@ -28,11 +28,11 @@ import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type { BarrierPayload, PreparePayload, ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
-import { WireSender, type WireSenderOwner } from './WireSender.js'
+import { WireSender } from './WireSender.js'
 import { UpgradeStages, type UpgradeStagesOwner } from './UpgradeStages.js'
 import { SessionRegistry, type ChannelHandle } from './SessionRegistry.js'
-import { AwaitedChannels, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
-import { RegistrationWaits, type RegistrationWaitsOwner } from './RegistrationWaits.js'
+import { AwaitedChannels, expireAwaited, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
+import { RegistrationWaits } from './RegistrationWaits.js'
 import type { ServerChannel } from './ServerChannel.js'
 
 /** A transport-owned wire handle. The mux never looks inside one — it only compares them by
@@ -126,10 +126,10 @@ function getChannelMux(): ChannelMux {
 /** The server's channel kernel: it owns the channels, the sessions and each wire's state. Transports report a wire
  *  through `onWireOpen` and name it by identity from then on; a deployment with several instances relies on sticky
  *  sessions at its load balancer. */
-class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStagesOwner {
+class ChannelMux implements UpgradeStagesOwner {
   private readonly channels = new Map<string, ServerChannel>()
   /** The channels a reconcile named before they registered, which `registerChannel` attaches. */
-  private readonly registrationWaits = new RegistrationWaits({ owner: this })
+  private readonly registrationWaits = new RegistrationWaits()
   private readonly sessions = new SessionRegistry()
   /** The wire each session is on: the last to reconcile it, until another reconciles it or the wire closes. */
   private readonly sessionWires = new Map<string, Wire>()
@@ -169,12 +169,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     }
   }
 
-  /** `RegistrationWaitsOwner`: the awaited channel didn't register within `connectTtl`. */
-  onRegistrationTimeout(awaited: AwaitedChannel): void {
-    this.expireAwaited(awaited)
-  }
-
-  unregisterChannel(channelId: string): void {
+  private unregisterChannel(channelId: string): void {
     this.channels.delete(channelId)
     this.sessions.removeChannel(channelId)
   }
@@ -212,6 +207,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
   onWireOpen<TWire>(wire: TWire, transport: ServerTransport<TWire>, request?: Request): void {
     const recvBacklog = { bytes: 0, frames: 0 }
     const deliveries = new Deliveries()
+    const attaching = new Set<ServerChannel>()
     const entry: WireEntry = {
       wire,
       state: {
@@ -225,15 +221,16 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
         retiredByBarrier: false,
         recvBacklog,
         awaited: new AwaitedChannels({ backlog: recvBacklog, waits: this.registrationWaits }),
-        attaching: new Set(),
+        attaching,
       },
       transport: transport as ServerTransport<unknown>,
       sender: new WireSender({
-        owner: this,
         wire,
         transport: transport as ServerTransport<unknown>,
         pingInterval: this.options.pingInterval,
         deliveries,
+        sessions: this.sessions,
+        attaching,
       }),
       request,
     }
@@ -763,7 +760,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     const handle = this.attachChannel(channel, awaited.open, entry, false)
     entry.state.attaching.delete(channel)
     if (!handle) {
-      this.expireAwaited(awaited)
+      expireAwaited(awaited)
       return
     }
     this.sessions.add(sessionId, handle)
@@ -791,12 +788,6 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
       this.terminateWire(entry.wire)
       return false
     }
-  }
-
-  /** The awaited channel didn't register within `connectTtl`, or shut down as it registered: ATTACH_RESULT null. */
-  private expireAwaited(awaited: AwaitedChannel): void {
-    awaited.entry.state.awaited.expire(awaited)
-    awaited.entry.sender.send(encode.attachResult(awaited.open.ix, null))
   }
 
   /** Moves the barrier's awaited channels to the WebSocket; an attached one first gets what the old wire held. */
@@ -873,17 +864,6 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
   /** Sole send path, sync so wire order is call order; a wire closed or past its backlog drops the frame. */
   private send(wire: Wire, frame: Uint8Array<ArrayBuffer>): void {
     this.wires.get(wire)?.sender.send(frame)
-  }
-
-  /** The channels the wire's send headroom counts: its session's, and those attaching in this turn. */
-  channelsOn(wire: Wire): Set<ServerChannel> {
-    const entry = this.wires.get(wire)
-    if (entry === undefined) return new Set()
-    const sessionId = entry.transport.getSessionId(wire)
-    const session = sessionId === undefined ? undefined : this.sessions.peekSession(sessionId)
-    const channels = new Set(entry.state.attaching)
-    for (const { channel } of session?.values() ?? []) channels.add(channel)
-    return channels
   }
 
   private chainRecv<T>(entry: WireEntry, fn: () => Promise<T>): Promise<T> {

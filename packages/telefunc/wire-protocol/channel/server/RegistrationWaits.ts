@@ -1,25 +1,11 @@
 export { RegistrationWaits }
-export type { RegistrationWaitsOwner }
 
-import type { AwaitedChannel } from './AwaitedChannels.js'
+import { expireAwaited, type AwaitedChannel } from './AwaitedChannels.js'
 
-/** The mux, which expires an awaited channel whose channel didn't register in time. */
-interface RegistrationWaitsOwner {
-  onRegistrationTimeout(awaited: AwaitedChannel): void
-}
-
-type RegistrationWaitsOptions = {
-  owner: RegistrationWaitsOwner
-}
-
-/** The awaited channels on a mux's wires that wait for their channel's registration, by id, in the order they began. */
+/** The awaited channels on a mux's wires that wait for their channel's registration, by id, in the order they began;
+ *  one that waits `connectTtl` in vain expires. */
 class RegistrationWaits {
-  private readonly owner: RegistrationWaitsOwner
   private readonly byId = new Map<string, Set<AwaitedChannel>>()
-
-  constructor({ owner }: RegistrationWaitsOptions) {
-    this.owner = owner
-  }
 
   /** `awaited` waits for its channel's registration, `ttlMs` at most. */
   wait(awaited: AwaitedChannel, ttlMs: number): void {
@@ -27,7 +13,7 @@ class RegistrationWaits {
     if (waiting === undefined) this.byId.set(awaited.channelId, (waiting = new Set()))
     waiting.add(awaited)
     awaited.ttl = setTimeout(() => {
-      if (this.stop(awaited)) this.owner.onRegistrationTimeout(awaited)
+      if (this.stop(awaited)) expireAwaited(awaited)
     }, ttlMs)
   }
 
