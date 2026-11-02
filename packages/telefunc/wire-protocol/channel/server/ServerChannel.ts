@@ -589,7 +589,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const pending: Promise<unknown>[] = []
     for (const cb of listeners.list()) {
       try {
-        const result = cb(value)
+        const result = cb(value instanceof Uint8Array ? (new Uint8Array(value) as T) : value)
         if (isPromise(result)) {
           pending.push(result.catch((err: unknown) => this.lifecycle.handleCallbackError(err)))
         }
@@ -832,7 +832,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     try {
       let result: unknown
       for (const cb of listeners.list()) {
-        const value = await cb(data)
+        const value = await cb(data instanceof Uint8Array ? (new Uint8Array(data) as T) : data)
         if (value === undefined) continue
         if (result !== undefined) {
           this.sendAckRes(seq, 'Only one channel listener may return an acknowledgement value', ACK_STATUS.ERROR)
