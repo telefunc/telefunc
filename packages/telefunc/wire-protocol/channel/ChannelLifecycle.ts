@@ -25,14 +25,14 @@ type ChannelLifecycleOptions = {
 class ChannelLifecycle {
   private readonly owner: ChannelLifecycleOwner
   private readonly reportError: (err: unknown) => void
-  private openCallbacks: Array<() => void> = []
+  private openListeners: Array<() => void> = []
   private didFireOpen = false
-  private disconnectCallbacks: Array<() => void> = []
-  private reconnectCallbacks: Array<() => void> = []
+  private disconnectListeners: Array<() => void> = []
+  private reconnectListeners: Array<() => void> = []
   private isConnected = false
-  private closeCallbacks: ChannelCloseCallback[] = []
+  private closeListeners: ChannelCloseCallback[] = []
   private didFireClose = false
-  private pendingCloseCallbacks = 0
+  private runningCloseListeners = 0
   private inflightAcks = 0
   private awaitingCloseAck = false
   private didReceiveCloseAck = false
@@ -85,15 +85,15 @@ class ChannelLifecycle {
       if (isPromise(result)) result.catch((err: unknown) => this.handleCallbackError(err))
       return
     }
-    this.openCallbacks.push(callback)
+    this.openListeners.push(callback)
   }
 
   onDisconnect(callback: () => void): void {
-    if (!this.didFireClose) this.disconnectCallbacks.push(callback)
+    if (!this.didFireClose) this.disconnectListeners.push(callback)
   }
 
   onReconnect(callback: () => void): void {
-    if (!this.didFireClose) this.reconnectCallbacks.push(callback)
+    if (!this.didFireClose) this.reconnectListeners.push(callback)
   }
 
   /** Its peer attached: the onOpen callbacks run the first time, the onReconnect ones after a disconnect. */
@@ -104,22 +104,22 @@ class ChannelLifecycle {
     }
     this.didFireOpen = true
     this.isConnected = true
-    this.invokeAll(this.openCallbacks)
-    this.openCallbacks.length = 0
+    this.invokeAll(this.openListeners)
+    this.openListeners.length = 0
   }
 
   /** Its peer attached again, also while closing: the onReconnect callbacks run if it was disconnected. */
   fireReconnect(): void {
     if (!this.didFireOpen || this.isConnected || this.didFireClose) return
     this.isConnected = true
-    this.invokeAll(this.reconnectCallbacks)
+    this.invokeAll(this.reconnectListeners)
   }
 
   /** Its peer went away, and may come back. */
   fireDisconnect(): void {
     if (!this.isConnected) return
     this.isConnected = false
-    this.invokeAll(this.disconnectCallbacks)
+    this.invokeAll(this.disconnectListeners)
   }
 
   /** A callback's `Abort` aborts the channel: true where `err` is one. */
@@ -137,7 +137,7 @@ class ChannelLifecycle {
       void this.invokeCloseCallback(callback, this.endError)
       return
     }
-    this.closeCallbacks.push(callback)
+    this.closeListeners.push(callback)
   }
 
   /** This end closes, within `timeoutMs` or by its peer's earlier deadline; `awaitingCloseAck` where its peer
@@ -201,19 +201,19 @@ class ChannelLifecycle {
     if (this.didFireClose) return
     this.didFireClose = true
     this.isConnected = false
-    for (const callback of this.closeCallbacks) {
+    for (const callback of this.closeListeners) {
       const pending = this.invokeCloseCallback(callback, err)
       if (pending === undefined) continue
-      this.pendingCloseCallbacks++
+      this.runningCloseListeners++
       void pending.finally(() => {
-        this.pendingCloseCallbacks--
+        this.runningCloseListeners--
         this.notifyProgress()
       })
     }
-    this.closeCallbacks.length = 0
-    this.openCallbacks.length = 0
-    this.disconnectCallbacks.length = 0
-    this.reconnectCallbacks.length = 0
+    this.closeListeners.length = 0
+    this.openListeners.length = 0
+    this.disconnectListeners.length = 0
+    this.reconnectListeners.length = 0
     this.notifyProgress()
   }
 
@@ -222,7 +222,7 @@ class ChannelLifecycle {
       // Fire onClose only once the close roundtrip is settled and no inbound work is in flight,
       // so listeners see "closed" only after the channel can no longer receive frames.
       if (this.inflightAcks === 0 && (!this.awaitingCloseAck || this.didReceiveCloseAck)) this.fireClose()
-      if (this.didFireClose && this.pendingCloseCallbacks === 0) {
+      if (this.didFireClose && this.runningCloseListeners === 0) {
         this.owner._end()
         break
       }
