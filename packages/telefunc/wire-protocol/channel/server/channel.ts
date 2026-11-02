@@ -28,7 +28,7 @@ import type { ShieldValidator, ShieldValidators } from '../../../node/server/shi
 import { createAbortError, type AbortError } from '../../../shared/Abort.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
-import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channelErrors.js'
+import { ChannelClosedError, replayLossError } from '../channelErrors.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
@@ -206,7 +206,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
     // Promise already serializes the next send, so credit would add nothing.
     if (needsAck) {
-      if (this.isPeerBehind()) return rejectOverflow()
       return this.lifecycle.trackAck(
         new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
           this.peer!.sendSequenced(encode.textAckReq, serialized, (seq, bytes) =>
@@ -216,8 +215,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       )
     }
     // Cooperative credit model: the send already fired; `decrement` only gates the return
-    // value. Awaiting throttles the caller's next send; not awaiting bypasses credit, until the peer is behind.
-    if (this.sendCredit.isPastByteCredit && this.isPeerBehind()) return rejectOverflow()
+    // value. Awaiting throttles the caller's next send; not awaiting bypasses credit.
     return this.sendCredit.decrement(this.peer.sendSequenced(encode.text, serialized))
   }
 
@@ -252,7 +250,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     // Ack-bearing path bypasses credit; see `sendData` for rationale.
     if (needsAck) {
-      if (this.isPeerBehind()) return rejectOverflow()
       return this.lifecycle.trackAck(
         new Promise<unknown>((resolve, reject) => {
           this.peer!.sendSequenced(encode.binaryAckReq, data, (seq, bytes) =>
@@ -262,8 +259,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       )
     }
     // Cooperative credit model; see `sendData`.
-    if (this.sendCredit.isPastByteCredit && this.isPeerBehind()) return rejectOverflow()
     return this.sendCredit.decrement(this.peer.sendSequenced(encode.binary, data))
+  }
+
+  /** What its sends put ahead of the page: past the page's credit, and the ack requests it hasn't answered. */
+  private bytesAhead(): number {
+    return this.sendCredit.bytesSentPastCredit + this.pendingAckBytes
   }
 
   /** @internal The most bytes that may wait for a reading page: the credit window, the allowance past it, and both
@@ -272,19 +273,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return CREDIT_WINDOW_MAX_BYTES + this.pastCreditAllowance() + this.bufferLimit + this.bufferLimitBinary
   }
 
-  /** How many bytes past credit a page that is still reading may be sent: the largest window a page grants. */
+  /** How many bytes past credit a page that is still reading may be sent: the largest window a page grants, and all
+   *  that its sends put ahead of the page, which only the server code's `await` holds back. */
   protected pastCreditAllowance(): number {
-    return CREDIT_WINDOW_MAX_BYTES
-  }
-
-  /** Whether the page fell behind: the bytes sent past credit plus the unanswered ack requests, capped at what the
-   *  wire still buffers, reach the allowance. */
-  protected isPeerBehind(): boolean {
-    const allowance = this.pastCreditAllowance()
-    const behind = this.sendCredit.bytesSentPastCredit + this.pendingAckBytes
-    if (behind < allowance) return false
-    const buffered = this.peer!.sender.bufferedAmount()
-    return (buffered === undefined ? behind : Math.min(behind, buffered)) >= allowance
+    return CREDIT_WINDOW_MAX_BYTES + this.bytesAhead()
   }
 
   private addPendingAck(
@@ -863,10 +855,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.pendingAckRes.length = 0
     this.pendingEnd = null
   }
-}
-
-function rejectOverflow(): Promise<never> {
-  return Promise.reject(new ChannelOverflowError())
 }
 
 function reportServerChannelError(err: unknown): void {

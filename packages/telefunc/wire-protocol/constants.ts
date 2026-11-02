@@ -252,9 +252,7 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 //   PUBLISH, PUBLISH_BINARY   broadcast fan-out: counted in bytes only, taking no
 //                             message credit and starting no BDP probe, against the
 //                             largest byte window the page grants, from the start.
-//                             Nothing waits on them: the count tells the server how
-//                             far behind the page is, past which it closes the
-//                             page's broadcast channel.
+//                             Nothing waits on them.
 //
 // Window semantics: `WINDOW` and `MSG_WINDOW` advertise cumulative limits, as QUIC's MAX_DATA does.
 //

@@ -167,7 +167,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this.forwardPublish(encodePublishBinary(data, rawInfo))
   }
 
-  /** A text (`string`) or binary publish to the page, buffered while it is away; a page behind is let go. */
+  /** A text (`string`) or binary publish to the page, buffered while it is away. */
   private forwardPublish(wire: string | Uint8Array): void {
     const binary = typeof wire !== 'string'
     const peer = this.peer
@@ -177,20 +177,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       this.closeIfDroppedOffline(binary)
       return
     }
-    if (this.sendCredit.isPastByteCredit && this.isPeerBehind()) {
-      this.closeBehind()
-      return
-    }
     this.sendCredit.countPublishSent(
       binary ? peer.sendSequenced(encode.publishBinary, wire) : peer.sendSequenced(encode.publish, wire),
-    )
-  }
-
-  /** A page behind the broadcast has no send to reject: it leaves the group on both ends rather than get a gap. */
-  private closeBehind(): void {
-    this.endWithError(
-      ERROR_REASON.OVERFLOW,
-      new ChannelOverflowError('Broadcast closed: its client fell further behind than the server holds for a client'),
     )
   }
 

@@ -35,6 +35,7 @@ import {
   onChannelEndedValues,
   onChannelSlowLink,
   onChannelUnawaitedBurst,
+  onChannelTextBurst,
   onChannelOpenBurst,
   onChannelManyListeners,
   onChannelLinkShare,
@@ -166,7 +167,8 @@ type ChannelState = {
   endedValuesReady: boolean
   endedValuesCollected: boolean[] | null
   slowLinkReceived: number | null
-  unawaitedBurst: { rejected: Record<string, number>; received: number; isClosed: boolean } | null
+  unawaitedBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
+  textBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
   openBurstReceived: number | null
   freshBinaryEchoed: number | null
   helloBesideBurst: boolean
@@ -243,6 +245,7 @@ const initialState: ChannelState = {
   endedValuesCollected: null,
   slowLinkReceived: null,
   unawaitedBurst: null,
+  textBurst: null,
   openBurstReceived: null,
   freshBinaryEchoed: null,
   helloBesideBurst: false,
@@ -1024,16 +1027,37 @@ function ChannelDemo() {
 
   const testUnawaitedBurst = useCallback(async (count: number) => {
     setChannelState((s) => ({ ...s, unawaitedBurst: null }))
-    const { channel } = await openChannel(onChannelUnawaitedBurst)
-    let received = 0
-    channel.listenBinary(() => {
-      received++
+    const { channel, channelId } = await openChannel(onChannelUnawaitedBurst)
+    const received: number[] = []
+    const ended = new Promise<string | null>((resolve) => {
+      channel.listenBinary((data) => {
+        received.push(new DataView(data.buffer, data.byteOffset).getUint32(0))
+        if (received.length === count) resolve(null)
+      })
+      channel.onClose((err) => resolve(err?.name ?? 'none'))
     })
-    const rejected = await channel.send(count, { ack: true })
-    const sent = count - Object.values(rejected).reduce((sum, n) => sum + n, 0)
-    while (received < sent) await new Promise((r) => setTimeout(r, 100))
-    const unawaitedBurst = { rejected, received, isClosed: channel.isClosed }
-    setChannelState((s) => ({ ...s, unawaitedBurst }))
+    void channel.send(count)
+    const closeErr = await ended
+    const inOrder = received.every((index, i) => index === i)
+    setChannelState((s) => ({ ...s, unawaitedBurst: { channelId, received: received.length, inOrder, closeErr } }))
+    channel.close()
+  }, [])
+
+  const testTextBurst = useCallback(async (mode: 'unawaited' | 'acks', count: number) => {
+    setChannelState((s) => ({ ...s, textBurst: null }))
+    const { channel, channelId } = await openChannel(onChannelTextBurst)
+    const received: number[] = []
+    const ended = new Promise<string | null>((resolve) => {
+      channel.listen((message) => {
+        received.push(Number.parseInt(message))
+        if (received.length === count) resolve(null)
+      })
+      channel.onClose((err) => resolve(err?.name ?? 'none'))
+    })
+    void channel.send({ count, mode })
+    const closeErr = await ended
+    const inOrder = received.every((index, i) => index === i)
+    setChannelState((s) => ({ ...s, textBurst: { channelId, received: received.length, inOrder, closeErr } }))
     channel.close()
   }, [])
 
@@ -1062,7 +1086,7 @@ function ChannelDemo() {
     setChannelState((s) => ({ ...s, helloBesideBurst: false }))
     const { channel: burst } = await openChannel(onChannelUnawaitedBurst)
     const firstChunk = new Promise<void>((resolve) => burst.listenBinary(() => resolve()))
-    void burst.send(4, { ack: true }).catch(() => {})
+    void burst.send(4)
     await firstChunk
     const { channel } = await openChannel(onChannelOpenHello)
     channel.listen(() => {
@@ -1493,7 +1517,7 @@ function ChannelDemo() {
           >
             1 MB Download
           </button>
-          {[32, 100].map((count) => (
+          {[32, 200].map((count) => (
             <button
               key={count}
               id={`channel-test-unawaited-burst-${count}`}
@@ -1502,6 +1526,22 @@ function ChannelDemo() {
               className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
             >
               Server Bursts {count} MiB Unawaited
+            </button>
+          ))}
+          {(
+            [
+              ['unawaited', 6000],
+              ['acks', 12800],
+            ] as const
+          ).map(([mode, count]) => (
+            <button
+              key={`${mode}-${count}`}
+              id={`channel-test-text-burst-${mode}-${count}`}
+              type="button"
+              onClick={() => testTextBurst(mode, count)}
+              className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+            >
+              Server Bursts {count} × 16 KiB ({mode})
             </button>
           ))}
           <button

@@ -84,7 +84,8 @@ type ChannelState = {
   endedValuesReady: boolean
   endedValuesCollected: boolean[] | null
   slowLinkReceived: number | null
-  unawaitedBurst: { rejected: Record<string, number>; received: number; isClosed: boolean } | null
+  unawaitedBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
+  textBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
   openBurstReceived: number | null
   freshBinaryEchoed: number | null
   helloBesideBurst: boolean
@@ -975,23 +976,55 @@ function testChannel(isDev: boolean, inDocker = false) {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-unawaited-burst-32')
     await autoRetry(async () => {
-      expect((await getResult<ChannelState>('#channel-state')).unawaitedBurst).deep.equal({
-        rejected: {},
-        received: 32,
-        isClosed: false,
-      })
+      const burst = (await getResult<ChannelState>('#channel-state')).unawaitedBurst!
+      expect(burst.received).toBe(32)
+      expect(burst.inOrder).toBe(true)
+      expect(burst.closeErr).toBe(null)
     })
   })
 
-  test('channel: a burst of 100 MiB the server sends without awaiting rejects what is past what the page may be behind with ChannelOverflowError, and the page gets the rest', async () => {
+  test('channel: a burst of 200 MiB the server sends without awaiting all reaches the page', async () => {
     await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-unawaited-burst-100')
-    await autoRetry(async () => {
-      const burst = (await getResult<ChannelState>('#channel-state')).unawaitedBurst!
-      expect(Object.keys(burst.rejected)).deep.equal(['ChannelOverflowError'])
-      expect(burst.received + burst.rejected.ChannelOverflowError!).toBe(100)
-      expect(burst.isClosed).toBe(false)
-    })
+    await page.click('#channel-test-unawaited-burst-200')
+    await autoRetry(
+      async () => {
+        const burst = (await getResult<ChannelState>('#channel-state')).unawaitedBurst!
+        expect(burst.received).toBe(200)
+        expect(burst.inOrder).toBe(true)
+        expect(burst.closeErr).toBe(null)
+      },
+      { timeout: 60_000 },
+    )
+  })
+
+  test('channel: 6,000 text messages of 16 KiB the server sends in one loop without awaiting all reach a page that reads', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-text-burst-unawaited-6000')
+    await autoRetry(
+      async () => {
+        const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
+        expect(burst.received).toBe(6000)
+        expect(burst.inOrder).toBe(true)
+        expect(burst.closeErr).toBe(null)
+      },
+      { timeout: 30_000 },
+    )
+  })
+
+  test('channel: 200 MiB of text messages the server sends in one loop with { ack: true }, awaiting the acks together, all reach the page and all resolve', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-text-burst-acks-12800')
+    await autoRetry(
+      async () => {
+        const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
+        expect(burst.received).toBe(12800)
+        expect(burst.inOrder).toBe(true)
+        expect(burst.closeErr).toBe(null)
+        const ss = await getCleanupState()
+        expect(ss[`textBurst_${burst.channelId}_acked`]).toBe('12800')
+      },
+      { timeout: 60_000 },
+    )
   })
 
   if (channelTransport === 'ws') {

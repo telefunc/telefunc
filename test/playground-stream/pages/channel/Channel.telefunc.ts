@@ -31,6 +31,7 @@ export {
   onChannelEndedValues,
   onChannelSlowLink,
   onChannelUnawaitedBurst,
+  onChannelTextBurst,
   onChannelOpenBurst,
   onChannelManyListeners,
   onChannelLinkShare,
@@ -687,20 +688,41 @@ async function onChannelSlowLink() {
   return { channel: ch.client }
 }
 
-/** At the page's message, sends that many 1 MiB messages without awaiting them, and answers with the rejected ones by error name. */
+/** At the page's message, sends that many 1 MiB messages, each with its index in its first 4 bytes, without awaiting
+ *  them, in one loop. */
 async function onChannelUnawaitedBurst() {
-  const ch = new Channel<(count: number) => Promise<Record<string, number>>, never>()
-  ch.listen(async (count) => {
-    const rejected: Record<string, number> = {}
-    const sends = Array.from({ length: count }, () =>
-      ch.sendBinary(new Uint8Array(1024 * 1024)).catch((err: Error) => {
-        rejected[err.name] = (rejected[err.name] ?? 0) + 1
-      }),
-    )
-    await Promise.race([Promise.all(sends), new Promise((resolve) => setImmediate(resolve))])
-    return rejected
+  const ch = new Channel<(count: number) => void, never>()
+  ch.listen((count) => {
+    for (let i = 0; i < count; i++) {
+      const message = new Uint8Array(1024 * 1024)
+      new DataView(message.buffer).setUint32(0, i)
+      void ch.sendBinary(message)
+    }
   })
-  return { channel: ch.client }
+  return { channel: ch.client, channelId: ch.id }
+}
+
+/**
+ * At the page's message, sends that many 16 KiB text messages, each starting with its index, in one loop: without
+ * awaiting them, or with `{ ack: true }`, awaiting the acks together.
+ * cleanupState keys:
+ *   textBurst_<id>_acked = how many of the ack-requesting sends resolved
+ */
+async function onChannelTextBurst() {
+  const ch = new Channel<(run: { count: number; mode: 'unawaited' | 'acks' }) => void, string>()
+  const id = ch.id
+  ch.listen(async ({ count, mode }) => {
+    const sends: Promise<unknown>[] = []
+    for (let i = 0; i < count; i++) {
+      const message = String(i).padEnd(16 * 1024)
+      if (mode === 'acks') sends.push(ch.send(message, { ack: true }))
+      else void ch.send(message)
+    }
+    if (mode !== 'acks') return
+    const results = await Promise.allSettled(sends)
+    cleanupState[`textBurst_${id}_acked`] = String(results.filter((r) => r.status === 'fulfilled').length)
+  })
+  return { channel: ch.client, channelId: id }
 }
 
 /** As it opens, sends 500 small messages without awaiting them. */
