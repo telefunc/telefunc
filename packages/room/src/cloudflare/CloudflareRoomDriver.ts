@@ -28,6 +28,7 @@ import type {
   TelefuncExtensionStub,
   Unsubscribe,
 } from 'telefunc/__internal'
+import { currentCloudflareMember } from 'telefunc/__internal'
 import type { CloudflareRoomAuthorityStub } from './do.js'
 import { currentRoomSessionSubscriptions, getRoomSessionSubscriptions } from './subscription.js'
 import { ROOM_CLOUDFLARE_EXTENSION, ROOM_CLOUDFLARE_PREFIX } from '../server/constants.js'
@@ -139,17 +140,21 @@ class CloudflareRoomDriver implements RoomDriver {
     return this.directory().directoryDue()
   }
 
+  /** A room's authority. Cloudflare places a Durable Object on its first `get()` and never moves it, so the call that
+   *  creates the room's authority puts it in the region of the session it runs in, if any. */
   stub(roomId: string): CloudflareRoomAuthorityStub {
-    return this.object(ROOM_CLOUDFLARE_PREFIX + roomId)
+    return this.object(ROOM_CLOUDFLARE_PREFIX + roomId, currentCloudflareMember()?.bucket ?? null)
   }
 
   private directory(): CloudflareRoomAuthorityStub {
     return this.object(DIRECTORY_DO_NAME)
   }
 
-  private object(name: string): CloudflareRoomAuthorityStub {
+  private object(name: string, locationHint: string | null = null): CloudflareRoomAuthorityStub {
     const namespace = this.getNamespace()
-    return roomAuthorityStub(namespace.get(namespace.idFromName(name)))
+    return roomAuthorityStub(
+      namespace.get(namespace.idFromName(name), locationHint === null ? undefined : { locationHint }),
+    )
   }
 }
 
