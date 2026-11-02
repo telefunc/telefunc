@@ -15,7 +15,7 @@ import { broadcastChannel } from './keys.js'
 import type { RedisConnection } from './RedisConnection.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
 import type { RedisDriver } from './RedisSubscriptions.js'
-import type { WaitRule } from './SendWait.js'
+import type { WaitingSend, WaitRule } from './SendWait.js'
 
 type RedisBackendOptions = { connection: RedisConnection }
 
@@ -33,7 +33,10 @@ class RedisBackend implements BroadcastDriver, RedisDriver {
 
   /** Publishes `payload` as it is at the call. */
   publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {
-    return this.connection.sends.sendsMayWait ? this.publishInTurn(route, payload) : this.publishNow(route, payload)
+    const { sends, prefix } = this.connection
+    const waiting = sends.sendsMayWait ? sends.waitTurn(broadcastWaitRule(prefix, route), payload) : null
+    if (waiting === null) return this.connection.run(REDIS_COMMANDS.publish, { route, payload })
+    return this.publishInTurn(route, waiting)
   }
 
   subscribe(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
@@ -47,20 +50,14 @@ class RedisBackend implements BroadcastDriver, RedisDriver {
     })
   }
 
-  /** While one of our subscriptions is new: publishes in its turn, then lets later publishes past. */
-  private async publishInTurn(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {
-    const waiting = this.connection.sends.waitTurn(broadcastWaitRule(this.connection.prefix, route), payload)
-    if (waiting === null) return this.publishNow(route, payload)
-    const owned = await waiting.turn
+  /** Publishes in its turn while one of our subscriptions is new, then lets later publishes past. */
+  private async publishInTurn(route: BroadcastRoute, waiting: WaitingSend<BroadcastPayload>): Promise<PublishResult> {
+    const payload = await waiting.turn
     try {
-      return this.publishNow(route, owned)
+      return this.connection.run(REDIS_COMMANDS.publish, { route, payload })
     } finally {
       waiting.sent()
     }
-  }
-
-  private publishNow(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {
-    return this.connection.run(REDIS_COMMANDS.publish, { route, payload })
   }
 
   /** The route's last publish, read once its SUBSCRIBE is acknowledged. */

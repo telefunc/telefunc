@@ -43,7 +43,7 @@ import {
 import { LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrdering } from './commands.js'
 import type { RedisConnection } from './RedisConnection.js'
 import type { RedisDriver } from './RedisSubscriptions.js'
-import type { WaitRule } from './SendWait.js'
+import type { WaitingSend, WaitRule } from './SendWait.js'
 
 const NO_FENCE_TOKENS: FenceTokens = { lane: '', everyTrack: '', everyMember: '' }
 
@@ -94,11 +94,14 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
   }
 
   commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
+    const { sends, prefix } = this.connection
     // A close commits under its lease, which would lapse before the wait ends.
-    if (!this.connection.sends.sendsMayWait || opts?.closingLease !== undefined) {
-      return this.commitNow(target, payload, opts)
-    }
-    return this.commitInTurn(target, payload, opts)
+    if (!sends.sendsMayWait || opts?.closingLease !== undefined) return this.commitNow(target, payload, opts)
+    const { roomId, inc, lane } = target
+    const channels = commitChannels(prefix, roomId, inc, lane, this.kit.encodeLaneKey(lane), this.kit)
+    const waiting = sends.waitTurn(commitWaitRule(channels), payload)
+    if (waiting === null) return this.commitNow(target, payload, opts)
+    return this.commitInTurn(target, waiting, opts)
   }
 
   subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {
@@ -121,15 +124,15 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
     return await this.connection.run(REDIS_COMMANDS.laneStart, { ...source, laneKey: this.kit.encodeLaneKey(lane) })
   }
 
-  /** While one of our subscriptions is new: commits in its turn, then lets later commits past. */
-  private async commitInTurn(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
-    const { roomId, inc, lane } = target
-    const channels = commitChannels(this.connection.prefix, roomId, inc, lane, this.kit.encodeLaneKey(lane), this.kit)
-    const waiting = this.connection.sends.waitTurn(commitWaitRule(channels), payload)
-    if (waiting === null) return this.commitNow(target, payload, opts)
-    const owned = await waiting.turn
+  /** Commits in its turn while one of our subscriptions is new, then lets later commits past. */
+  private async commitInTurn(
+    target: CommitTarget,
+    waiting: WaitingSend<Uint8Array>,
+    opts?: CommitOptions,
+  ): Promise<CommitResult> {
+    const payload = await waiting.turn
     try {
-      return this.commitNow(target, owned, opts)
+      return this.commitNow(target, payload, opts)
     } finally {
       waiting.sent()
     }
