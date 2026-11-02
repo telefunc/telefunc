@@ -1,6 +1,14 @@
 // ioredis policy: a client's deployment, the connection the backend's commands run on, subscriber creation, and calls
 // to defined commands.
-export { createCommandClient, createSubscriberSocket, callDefinedCommand, isCluster, deploymentOf }
+export {
+  createCommandClient,
+  createSubscriberSocket,
+  callDefinedCommand,
+  isCluster,
+  deploymentOf,
+  addressOf,
+  isUnreachable,
+}
 export type { RedisClient, SubscriberSocket }
 
 import { randomUUID } from 'node:crypto'
@@ -31,6 +39,29 @@ function deploymentOf(redis: RedisClient): string {
   if (isCluster(redis)) return JSON.stringify((redis as unknown as { startupNodes: unknown }).startupNodes)
   const { path, host, port, db, sentinels, name } = redis.options
   return JSON.stringify({ path, host, port, db, sentinels, name })
+}
+
+/** Where a client connects, as a person reads it: its startup nodes, socket path, Sentinel master or host:port. */
+function addressOf(redis: RedisClient): string {
+  if (isCluster(redis)) {
+    const nodes = (redis as unknown as { startupNodes: Array<{ host?: string; port?: number } | string | number> })
+      .startupNodes
+    return nodes.map((node) => (typeof node === 'object' ? `${node.host}:${node.port}` : String(node))).join(', ')
+  }
+  const { path, host, port, sentinels, name } = redis.options
+  if (path) return path
+  return sentinels?.length ? `Sentinel master ${name}` : `${host}:${port}`
+}
+
+/** ioredis' errors for a command it couldn't send: with no retries, an unreachable Redis fails it at once. */
+function isUnreachable(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return (
+    error.name === 'MaxRetriesPerRequestError' ||
+    error.name === 'ClusterAllFailedError' ||
+    error.message === 'Connection is closed.' ||
+    error.message === 'None of startup nodes is available'
+  )
 }
 
 /** A clone of the app's client for the backend's commands: it never resends a command (at-most-once) and reads masters

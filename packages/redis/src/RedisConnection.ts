@@ -2,8 +2,10 @@ export { RedisConnection }
 
 import { assert } from './assert.js'
 import {
+  addressOf,
   callDefinedCommand,
   createCommandClient,
+  isUnreachable,
   createSubscriberSocket,
   isCluster,
   type RedisClient,
@@ -43,9 +45,20 @@ class RedisConnection {
     return createSubscriberSocket(this.commands)
   }
 
-  /** The command client, for the commands that need no script. */
+  /** The command client, for the commands that need no script: sent through `send()`. */
   get client(): RedisClient {
     return this.commands
+  }
+
+  /** Sends `command` on the command client. A Redis it can't reach rejects with where it looked, ioredis' error as the
+   *  cause: that error names a retry limit the backend set, not the app. */
+  async send<Output>(command: (client: RedisClient) => Promise<Output>): Promise<Output> {
+    try {
+      return await command(this.commands)
+    } catch (error) {
+      if (!isUnreachable(error)) throw error
+      throw new Error(`Telefunc's Redis backend can't reach Redis at ${addressOf(this.commands)}`, { cause: error })
+    }
   }
 
   /** The backend's command client lives while `redis`, or another app client installed with it, does; a client
@@ -70,7 +83,7 @@ class RedisConnection {
     assert(command.numberOfKeys === null || command.numberOfKeys === keys.length)
     const keysAndArgs = command.numberOfKeys === null ? [String(keys.length), ...keys, ...argv] : [...keys, ...argv]
     const name = command.binaryReply ? `${command.name}Buffer` : command.name
-    return command.parse(await callDefinedCommand(this.commands, name, keysAndArgs), input)
+    return command.parse(await this.send((client) => callDefinedCommand(client, name, keysAndArgs)), input)
   }
 }
 

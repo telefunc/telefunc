@@ -357,14 +357,16 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
     const laneKey = this.kit.encodeLaneKey(lane)
     const mark =
       lane.kind === 'inbox' || lane.kind === 'binary'
-        ? await this.connection.client.hget(memberOrderKey(this.connection.prefix, roomId, inc, lane.member), laneKey)
-        : await this.connection.client.get(orderKey(this.connection.prefix, roomId, inc, laneKey))
+        ? await this.connection.send((client) =>
+            client.hget(memberOrderKey(this.connection.prefix, roomId, inc, lane.member), laneKey),
+          )
+        : await this.connection.send((client) => client.get(orderKey(this.connection.prefix, roomId, inc, laneKey)))
     return mark === null ? null : parseOrdering(mark)
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
-    const frame = await this.connection.client.getBuffer(
-      retainedKey(this.connection.prefix, roomId, inc, this.kit.encodeLaneKey(lane)),
+    const frame = await this.connection.send((client) =>
+      client.getBuffer(retainedKey(this.connection.prefix, roomId, inc, this.kit.encodeLaneKey(lane))),
     )
     if (frame === null) return null
     const { payload, info } = decodeOrderingFrame(frame)
@@ -379,7 +381,9 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
           ? retainedOfKey(this.connection.prefix, roomId, inc, of.member)
           : retainedOfTrackKey(this.connection.prefix, roomId, inc, of.track)
     }
-    return (await this.connection.client.smembers(index)).map((laneKey) => this.kit.decodeLaneKey(laneKey))
+    return (await this.connection.send((client) => client.smembers(index))).map((laneKey) =>
+      this.kit.decodeLaneKey(laneKey),
+    )
   }
 
   async dropIncarnation(roomId: string, inc: string): Promise<void> {
@@ -387,9 +391,11 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
     const manifest = incarnationKeysKey(this.connection.prefix, roomId, inc)
     let cursor = '0'
     do {
-      const [next, keys] = await this.connection.client.sscan(manifest, cursor, 'COUNT', LANE_PAGE_SIZE)
+      const [next, keys] = await this.connection.send((client) =>
+        client.sscan(manifest, cursor, 'COUNT', LANE_PAGE_SIZE),
+      )
       cursor = next
-      if (keys.length > 0) await this.connection.client.unlink(...keys)
+      if (keys.length > 0) await this.connection.send((client) => client.unlink(...keys))
     } while (cursor !== '0')
     await this.connection.run(REDIS_COMMANDS.dropIncarnation, { roomId, inc })
   }
@@ -403,13 +409,18 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
   }
 
   async directoryGet(roomId: string): Promise<string | undefined> {
-    return (await this.connection.client.hget(directoryTagsKey(this.connection.prefix), roomId)) ?? undefined
+    return (
+      (await this.connection.send((client) => client.hget(directoryTagsKey(this.connection.prefix), roomId))) ??
+      undefined
+    )
   }
 
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
     const index = directoryIndexKey(this.connection.prefix)
     const min = cursor === undefined ? `[${prefix}` : `(${cursor}`
-    const page = await this.connection.client.zrangebylex(index, min, '+', 'LIMIT', 0, this.kit.DIRECTORY_PAGE_SIZE + 1)
+    const page = await this.connection.send((client) =>
+      client.zrangebylex(index, min, '+', 'LIMIT', 0, this.kit.DIRECTORY_PAGE_SIZE + 1),
+    )
     const matching: string[] = []
     for (const member of page) {
       if (member.startsWith(prefix)) matching.push(member)
@@ -418,7 +429,9 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
     const roomIds = matching.slice(0, this.kit.DIRECTORY_PAGE_SIZE)
     const last = roomIds.at(-1)
     if (last === undefined) return { entries: [] }
-    const tags = await this.connection.client.hmget(directoryTagsKey(this.connection.prefix), ...roomIds)
+    const tags = await this.connection.send((client) =>
+      client.hmget(directoryTagsKey(this.connection.prefix), ...roomIds),
+    )
     const entries = roomIds.flatMap((roomId, i) => {
       const incTag = tags[i]
       return incTag === null || incTag === undefined ? [] : [{ roomId, incTag }]
