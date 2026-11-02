@@ -21,6 +21,7 @@ import type {
   RoomHead,
   RoomSubscriptionSource,
 } from '../backend/contract.js'
+import { DIRECTORY_PAGE_SIZE } from '../backend/contract.js'
 import type { BackendReceiver, CloudflarePlaneKit, DriverAttempt, OrderingInfo } from 'telefunc/__internal'
 import { CLOUDFLARE_BUCKETS, currentCloudflareMember } from 'telefunc/__internal'
 import type { CloudflareRoomAuthorityStub } from './RoomAuthority.js'
@@ -155,13 +156,17 @@ class CloudflareRoomDriver implements RoomDriver {
   }
 }
 
-/** One page of the regions' pages, in code point order. A region that has more past its page may list a room before
- *  another region's later entries, so the page ends where the first such region's does. */
+/** One page of the regions' pages, in code point order, of at most `DIRECTORY_PAGE_SIZE` rooms. A region that has
+ *  more past its page may list a room before another region's later entries, so the page ends where the first such
+ *  region's does, or sooner at its `DIRECTORY_PAGE_SIZE`th room. */
 function mergeRegionPages(pages: DirectoryPage[]): DirectoryPage {
   const cursor = pages.flatMap((page) => (page.cursor === undefined ? [] : [page.cursor])).sort(compareCodePoints)[0]
   const entries = pages
     .flatMap((page) => page.entries)
     .filter(({ roomId }) => cursor === undefined || compareCodePoints(roomId, cursor) <= 0)
     .sort((a, b) => compareCodePoints(a.roomId, b.roomId))
+  // Each room is listed by one region only, so the next page starts right after the last one kept.
+  if (entries.length > DIRECTORY_PAGE_SIZE)
+    return { entries: entries.slice(0, DIRECTORY_PAGE_SIZE), cursor: entries[DIRECTORY_PAGE_SIZE - 1]!.roomId }
   return cursor === undefined ? { entries } : { entries, cursor }
 }
