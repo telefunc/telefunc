@@ -1,6 +1,6 @@
 export { BroadcastPlane }
 
-import { SubscriptionManager, type BackendSubscription, type SourceRules } from '../SubscriptionManager.js'
+import { SharedSubscriptions, type BackendSubscription, type SourceRules } from '../SharedSubscriptions.js'
 import type { BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult } from '../driver.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import type { BroadcastKind } from '../../wire/payloads.js'
@@ -29,11 +29,11 @@ const broadcastSources: SourceRules<BroadcastRoute> = {
 /** What core consumes: Broadcast on a driver, its publishes checked, its subscriptions shared by route and host. */
 class BroadcastPlane {
   private readonly driver: BroadcastDriver
-  private readonly subscriptions: SubscriptionManager<BroadcastRoute>
+  private readonly subscriptions: SharedSubscriptions<BroadcastRoute>
 
   constructor({ driver }: BroadcastPlaneOptions) {
     this.driver = driver
-    this.subscriptions = new SubscriptionManager({ driver, sources: broadcastSources, sends: 'Broadcast publish' })
+    this.subscriptions = new SharedSubscriptions({ driver, sources: broadcastSources, sends: 'Broadcast publish' })
   }
 
   /** Publishes `payload` as it is at the call. */

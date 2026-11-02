@@ -1,4 +1,4 @@
-export { SubscriptionManager }
+export { SharedSubscriptions }
 export type { BackendSubscription, SourceRules, SourceWait }
 
 import { assert, assertUsage } from '../../utils/assert.js'
@@ -50,7 +50,7 @@ type Wait = { readonly established: Promise<void>; sends: number }
 /** A waiting send's own copy of its payload, and what it counts against. */
 type HeldSend<Payload> = { waitKey: string; wait: Wait; budget: string; bytes: number; payload: Payload }
 
-type SubscriptionManagerOptions<Source> = {
+type SharedSubscriptionsOptions<Source> = {
   driver: SubscriptionDriver<Source>
   sources: SourceRules<Source>
   /** What a send is, for its overflow error: 'Broadcast publish', 'Room commit'. */
@@ -58,7 +58,7 @@ type SubscriptionManagerOptions<Source> = {
 }
 
 /** A plane's subscriptions (Broadcast's, Room's): consumers of one source in one scope share one driver attempt. */
-class SubscriptionManager<Source> {
+class SharedSubscriptions<Source> {
   readonly driver: SubscriptionDriver<Source>
   private readonly sources: SourceRules<Source>
   /** By scope and source key. */
@@ -72,7 +72,7 @@ class SubscriptionManager<Source> {
   /** Slots never ready yet, counted down a microtask after: at 0, no send has anything to wait for. */
   private establishingSlots = 0
 
-  constructor({ driver, sources, sends }: SubscriptionManagerOptions<Source>) {
+  constructor({ driver, sources, sends }: SharedSubscriptionsOptions<Source>) {
     this.driver = driver
     this.sources = sources
     this.sends = sends
@@ -215,7 +215,7 @@ class SubscriptionManager<Source> {
 type EarlyMessage = { payload: BackendPayload; ordering: OrderingInfo; targets: readonly Consumer[] }
 
 type SubscriptionSlotOptions<Source> = {
-  owner: SubscriptionManager<Source>
+  owner: SharedSubscriptions<Source>
   source: Source
   /** The source's key, and the key of the source in its scope. */
   key: string
@@ -226,7 +226,7 @@ type SubscriptionSlotOptions<Source> = {
 /** One driver attempt, shared by the consumers of its source in its scope. */
 class SubscriptionSlot<Source> implements BackendReceiver {
   readonly slotKey: string
-  private readonly owner: SubscriptionManager<Source>
+  private readonly owner: SharedSubscriptions<Source>
   private readonly source: Source
   private readonly key: string
   private readonly delivers: 'text' | 'binary'

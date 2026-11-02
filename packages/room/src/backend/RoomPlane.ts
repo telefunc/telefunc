@@ -3,7 +3,7 @@ export type { LaneConsumer }
 
 import {
   assertDriverOrdering,
-  SubscriptionManager,
+  SharedSubscriptions,
   type BackendPayload,
   type BackendSubscription,
   type OrderingInfo,
@@ -52,11 +52,11 @@ const laneSources: SourceRules<RoomSubscriptionSource> = {
  *  and host. Room reads the rest from `driver` itself. */
 class RoomPlane {
   readonly driver: RoomDriver
-  private readonly subscriptions: SubscriptionManager<RoomSubscriptionSource>
+  private readonly subscriptions: SharedSubscriptions<RoomSubscriptionSource>
 
   constructor({ driver }: RoomPlaneOptions) {
     this.driver = driver
-    this.subscriptions = new SubscriptionManager({ driver, sources: laneSources, sends: 'Room commit' })
+    this.subscriptions = new SharedSubscriptions({ driver, sources: laneSources, sends: 'Room commit' })
   }
 
   async compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult> {
