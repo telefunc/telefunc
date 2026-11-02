@@ -167,7 +167,7 @@ type ChannelState = {
   endedValuesReady: boolean
   endedValuesCollected: boolean[] | null
   slowLinkReceived: number | null
-  unawaitedBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
+  unawaitedBurst: { received: number; inOrder: boolean; closeErr: string | null } | null
   textBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
   openBurstReceived: number | null
   freshBinaryEchoed: number | null
@@ -1027,7 +1027,7 @@ function ChannelDemo() {
 
   const testUnawaitedBurst = useCallback(async (count: number) => {
     setChannelState((s) => ({ ...s, unawaitedBurst: null }))
-    const { channel, channelId } = await openChannel(onChannelUnawaitedBurst)
+    const { channel } = await openChannel(onChannelUnawaitedBurst)
     const received: number[] = []
     const ended = new Promise<string | null>((resolve) => {
       channel.listenBinary((data) => {
@@ -1039,7 +1039,7 @@ function ChannelDemo() {
     void channel.send(count)
     const closeErr = await ended
     const inOrder = received.every((index, i) => index === i)
-    setChannelState((s) => ({ ...s, unawaitedBurst: { channelId, received: received.length, inOrder, closeErr } }))
+    setChannelState((s) => ({ ...s, unawaitedBurst: { received: received.length, inOrder, closeErr } }))
     channel.close()
   }, [])
 

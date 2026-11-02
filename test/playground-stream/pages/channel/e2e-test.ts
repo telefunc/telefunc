@@ -84,7 +84,7 @@ type ChannelState = {
   endedValuesReady: boolean
   endedValuesCollected: boolean[] | null
   slowLinkReceived: number | null
-  unawaitedBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
+  unawaitedBurst: { received: number; inOrder: boolean; closeErr: string | null } | null
   textBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
   openBurstReceived: number | null
   freshBinaryEchoed: number | null
