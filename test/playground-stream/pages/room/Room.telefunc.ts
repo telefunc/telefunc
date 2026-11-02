@@ -6,6 +6,7 @@ export {
   onGetOrCreateRoomTail,
   onCreateTypedRoom,
   onOpenGuardedRoom,
+  onGetUnguardedRoom,
   onOpenAuditedRoom,
   onGetAudit,
   onJoinAsServer,
@@ -85,6 +86,7 @@ export {
 import { Buffer } from 'node:buffer'
 import { Abort, onBug } from 'telefunc'
 import { Room, type LeaveCause, type LocalParticipant } from '@telefunc/room'
+import { anyoneCanJoin } from '../../anyone-can-join'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
 import {
@@ -96,30 +98,32 @@ import {
 } from '../../failing-backend'
 
 async function onCreateRoom(roomId: string) {
-  return await Room.create(roomId, { meta: { topic: 'e2e' } })
+  return anyoneCanJoin(await Room.create(roomId, { meta: { topic: 'e2e' } }))
 }
 
 async function onGetRoom(roomId: string) {
-  return await Room.get(roomId)
+  return anyoneCanJoin(await Room.get(roomId))
 }
 
 /** Tail starts at serialization, covering the gap before the client's first subscribe. */
 async function onGetRoomTail(roomId: string) {
-  return await Room.get(roomId, { tail: true })
+  return anyoneCanJoin(await Room.get(roomId, { tail: true }))
 }
 
 async function onGetOrCreateRoom(roomId: string) {
-  return await Room.getOrCreate(roomId, { meta: { topic: 'e2e' } })
+  return anyoneCanJoin(await Room.getOrCreate(roomId, { meta: { topic: 'e2e' } }))
 }
 
 async function onGetOrCreateRoomTail(roomId: string) {
-  return await Room.getOrCreate(roomId, { meta: { topic: 'e2e' }, tail: true })
+  return anyoneCanJoin(await Room.getOrCreate(roomId, { meta: { topic: 'e2e' }, tail: true }))
 }
 
 type ChatMsg = { kind: 'chat'; text: string }
 
 async function onCreateTypedRoom(roomId: string) {
-  return await Room.create<{ topic: string }, { name: string }, ChatMsg>(roomId, { meta: { topic: 'typed' } })
+  return anyoneCanJoin(
+    await Room.create<{ topic: string }, { name: string }, ChatMsg>(roomId, { meta: { topic: 'typed' } }),
+  )
 }
 
 async function onOpenGuardedRoom(roomId: string) {
@@ -138,6 +142,11 @@ async function onOpenGuardedRoom(roomId: string) {
   return room
 }
 
+/** The room as a telefunction returns it when it says nothing of who may join. */
+async function onGetUnguardedRoom(roomId: string) {
+  return await Room.get(roomId)
+}
+
 const auditLog = new Map<string, Array<Record<string, unknown>>>()
 
 function audit(roomId: string, entry: Record<string, unknown>) {
@@ -149,6 +158,7 @@ function audit(roomId: string, entry: Record<string, unknown>) {
 async function onOpenAuditedRoom(roomId: string) {
   const room = await Room.get(roomId)
   Room.guard(room, {
+    anyoneCanJoin: true,
     onAfterJoin: (member, info) => {
       audit(roomId, { kind: 'join', name: member.meta.name, joinedAt: info.joinedAt })
     },
@@ -172,13 +182,13 @@ async function onJoinAsServer(roomId: string, name: string) {
 
 /** Co-returned `{ room, me }` suppresses `me`'s echo while preserving other-member delivery. */
 async function onJoinRoomAsServerSelf(roomId: string, name: string) {
-  const room = await Room.get(roomId)
+  const room = anyoneCanJoin(await Room.get(roomId))
   const me = await room.join({ meta: { name }, selfDelivery: false })
   return { room, me }
 }
 
 async function onGetRoomWithMember(roomId: string, memberId: string) {
-  const room = await Room.get(roomId)
+  const room = anyoneCanJoin(await Room.get(roomId))
   const member = await room.getParticipant(memberId)
   return { room, member }
 }
@@ -252,7 +262,7 @@ const hiddenBots = new Map<string, LocalParticipant>()
 
 /** A hidden member, handed to this call's page only. */
 async function onJoinHiddenAndHand(roomId: string) {
-  const room = await Room.get(roomId)
+  const room = anyoneCanJoin(await Room.get(roomId))
   const bot = await room.join({ hidden: true, meta: { name: 'Bot' } })
   hiddenBots.set(roomId, bot)
   return { room, member: await room.getParticipant(bot.id) }
@@ -287,7 +297,7 @@ async function onGetHiddenAfterPlayers(roomId: string) {
 
 /** Returns a room closed under its member, as a page gets one that closed while the call ran. */
 async function onCloseRoomWithMember(roomId: string) {
-  const room = await Room.create(roomId)
+  const room = anyoneCanJoin(await Room.create(roomId))
   const member = await room.getParticipant((await room.join({ meta: { name: 'Gone' } })).id)
   const { promise: closed, resolve } = Promise.withResolvers<void>()
   room.onClose(resolve)
@@ -577,7 +587,7 @@ async function onCloseRoom(roomId: string) {
 const watchedBinary = new Map<string, number[][]>()
 
 async function onWatchRoomBinary(roomId: string) {
-  const room = await Room.get(roomId)
+  const room = anyoneCanJoin(await Room.get(roomId))
   const seen: number[][] = []
   watchedBinary.set(roomId, seen)
   watchedRooms.set(roomId, room)
@@ -646,6 +656,7 @@ async function onPublishRightAfterSubscribe(roomId: string) {
 async function onOpenSlowGuardRoom(roomId: string) {
   const room = await Room.get(roomId)
   Room.guard(room, {
+    anyoneCanJoin: true,
     onBeforePublish: async (_from, data) => {
       const n = data instanceof Uint8Array ? data[0]! : (data as number)
       await new Promise((resolve) => setTimeout(resolve, 50 - n))
@@ -830,7 +841,7 @@ async function onCreateRoomWith(roomId: string, options: { emptyTimeout?: number
 
 /** The page this returns the room to holds it open. */
 async function onCreateRoomHeld(roomId: string) {
-  return await Room.create(roomId, { emptyTimeout: 1000 })
+  return anyoneCanJoin(await Room.create(roomId, { emptyTimeout: 1000 }))
 }
 
 async function onJoinAndLeaveAsServer(roomId: string) {

@@ -2,16 +2,21 @@ export { onGetChat, onGetMembersChat, onSignIn, onWatchChat, onWhoIsOnline, onGe
 
 import { Abort } from 'telefunc'
 import { Room } from '@telefunc/room'
+import { anyoneCanJoin } from '../../anyone-can-join'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
 
 async function onGetChat(chatId: string) {
+  return anyoneCanJoin(await getChat(chatId))
+}
+
+async function getChat(chatId: string) {
   return await Room.getOrCreate<Record<string, never>, { name: string }>(chatId)
 }
 
 /** A members-only chat: each join waits for the membership service to say the name is a member, then to welcome it. */
 async function onGetMembersChat(chatId: string) {
-  const chat = await onGetChat(chatId)
+  const chat = await getChat(chatId)
   Room.guard(chat, {
     onBeforeJoin: async ({ meta }) => {
       if (!(await isMember(chatId, meta.name))) throw Abort(`${meta.name} is not a member`)

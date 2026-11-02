@@ -36,7 +36,9 @@ A telefunction returns the room, and the client joins it:
 import { Room } from '@telefunc/room'
 
 export async function onGetLobby() {
-  return await Room.getOrCreate('lobby')
+  const room = await Room.getOrCreate('lobby')
+  Room.guard(room, { anyoneCanJoin: true })
+  return room
 }
 ```
 ```js
@@ -55,6 +57,8 @@ await me.publish({ text: 'hello' })
 ```
 
 `join()` returns your participant, `me`.
+
+A client joins only a room whose telefunction says who may: `anyoneCanJoin: true` lets anyone in, and an `onBeforeJoin()` hook decides per join (see <Link href="#control-who-can-join-and-post" />). Without either, `room.join()` on the client is refused.
 
 > `meta` is what a participant shows about itself, such as its name. A room has a `meta` too: set it with `Room.create('lobby', { meta: { topic: 'General' } })`, and read it on the client with `room.meta`.
 
@@ -235,11 +239,6 @@ export async function onJoinChat(roomId) {
   const { user } = getContext()
   const room = await Room.getOrCreate(roomId)
   Room.guard(room, {
-    onBeforeJoin: (member) => {
-      // Rejects a client calling room.join() itself (it has no identity): users join only below
-      if (member.identity !== user.id) throw Abort('join through onJoinChat()')
-      if (isBanned(user.id)) throw Abort('banned')
-    },
     onBeforePublish: (from, message) => {
       if (isSpam(message)) throw Abort('spam')
     },
@@ -247,6 +246,7 @@ export async function onJoinChat(roomId) {
       if (!(await areFriends(user.id, to.identity))) throw Abort('not friends')
     },
   })
+  if (isBanned(user.id)) throw Abort('banned')
   const me = await room.join({ meta: { name: user.name }, identity: user.id })
   return { room, me }
 }
@@ -265,13 +265,11 @@ try {
 }
 ```
 
-`identity` is your user id, set by the server at `join()`. Every message carries its sender's `identity` (`from.identity`), and a client can't change it.
+With no `onBeforeJoin()` and no `anyoneCanJoin`, the client can't call `room.join()` itself: users join only through `onJoinChat()`, as themselves. `identity` is your user id, set by the server at `join()`. Every message carries its sender's `identity` (`from.identity`), and a client can't change it.
 
 <Warning>Check permissions on `identity`, never on `meta`: a client can set its `meta` to anything.</Warning>
 
 The hooks run for the client this telefunction returns the room to, so `user` in them is that client's user.
-
-<Warning>Call `Room.guard()` once, with all its hooks, in every telefunction that returns the room: a client that gets the room from a telefunction without it skips the hooks.</Warning>
 
 To run code after a join or a message, such as saving the message, use `onAfterJoin()`, `onAfterPublish()` and `onAfterSend()` (see <Link href="#load-chat-history" />).
 
@@ -535,7 +533,7 @@ Server-side.
 | `Room.create(id, options?)` | Create a room. Throws if it exists. |
 | `Room.get(id, { tail? }?)` | Get a room. Throws if it doesn't exist. With `tail: true`, the client also gets the messages published after the history you load (see <Link href="#load-chat-history" />). |
 | `Room.getOrCreate(id, { ...options, tail? }?)` | Get a room, or create it. `tail` as for `Room.get()`. |
-| `Room.guard(room, hooks)` | Add `onBefore*()` and `onAfter*()` hooks to a room. |
+| `Room.guard(room, hooks)` | Add `onBefore*()` and `onAfter*()` hooks to a room, once, and say who may join it from the client. |
 | `Room.join(id, { meta?, selfDelivery?, identity?, hidden? }?)` | Join a room from the server, without getting the room first. |
 | `Room.list({ prefix? }?)` | List the open rooms. |
 | `Room.setMeta(id, meta)` / `Room.setAttributes(id, attributes)` | Replace / update the room's `meta`. |
@@ -592,6 +590,7 @@ Properties: `id`, `meta`, `identity`, `isConnected`.
 
 | Hook | Description |
 |---|---|
+| `anyoneCanJoin` | `true`: any client may join. Without it or `onBeforeJoin()`, a client's `room.join()` is refused. |
 | `onBeforeJoin(member)` | Before a join. Throw `Abort()` to reject it. |
 | `onBeforePublish(from, message)` | Before a message to everyone. Throw `Abort()` to reject it. |
 | `onBeforeSend(from, to, message)` | Before a private message. Throw `Abort()` to reject it. |

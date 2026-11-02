@@ -35,10 +35,9 @@ type Numbered = { from: string; n: number }
 
 /** A Broadcast key and a room each page publishes on, from its own session. */
 async function onOrderChannels(id: string) {
-  return {
-    channel: new BroadcastChannel<Numbered>({ key: `order:${id}` }),
-    room: await Room.getOrCreate<Record<string, never>, { name: string }, Numbered>(`order:${id}`),
-  }
+  const room = await Room.getOrCreate<Record<string, never>, { name: string }, Numbered>(`order:${id}`)
+  Room.guard(room, { anyoneCanJoin: true })
+  return { channel: new BroadcastChannel<Numbered>({ key: `order:${id}` }), room }
 }
 
 /** Subscribes, then publishes at once. */

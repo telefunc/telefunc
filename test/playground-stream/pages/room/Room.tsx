@@ -11,6 +11,7 @@ import {
   onGetOrCreateRoomTail,
   onCreateTypedRoom,
   onOpenGuardedRoom,
+  onGetUnguardedRoom,
   onOpenAuditedRoom,
   onGetAudit,
   onJoinAsServer,
@@ -369,6 +370,10 @@ function Room() {
           () => null,
           (err: Error) => err.message,
         )
+        const unguardedJoinError = await (await onGetUnguardedRoom(roomId)).join({ meta: { name: 'Anyone' } }).then(
+          () => null,
+          (err: Error) => err.message,
+        )
         const me = await room.join({ meta: { name: 'Mallory' } })
         const peer = await room.join({ meta: { name: 'Peer' } })
         const inbox: unknown[] = []
@@ -386,7 +391,7 @@ function Room() {
         await me.send(peer.id, 'psst')
 
         await pollUntil(() => ({
-          result: { joinError, publishError, sendError, received, inbox },
+          result: { joinError, unguardedJoinError, publishError, sendError, received, inbox },
           done: received.length >= 1 && inbox.length >= 1,
         }))
       })}

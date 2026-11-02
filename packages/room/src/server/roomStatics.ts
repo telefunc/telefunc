@@ -1,5 +1,5 @@
 export { roomStatics }
-export type { RoomGuardHooks, RoomStatic }
+export type { RoomGuardHooks, RoomGuards, RoomStatic }
 
 import { assertUsage } from '../utils/assert.js'
 import { isObject } from 'telefunc/__internal'
@@ -70,7 +70,7 @@ type RoomStatic = {
   ): Promise<Room<M, P, Pub>>
   guard<M extends RoomMeta, P extends ParticipantMeta, Pub = unknown>(
     room: Room<M, P, Pub>,
-    guards: Partial<RoomGuardHooks<P>>,
+    guards: RoomGuards<P>,
   ): void
   join<P extends ParticipantMeta = ParticipantMeta, Pub = unknown>(
     id: string,
@@ -179,6 +179,9 @@ type RoomGuardHooks<P extends ParticipantMeta = ParticipantMeta> = {
   onAfterPublish: AfterPublishHook<P>
 }
 
+/** What `Room.guard()` takes: the hooks, and `anyoneCanJoin`, which lets any page join without an `onBeforeJoin`. */
+type RoomGuards<P extends ParticipantMeta = ParticipantMeta> = Partial<RoomGuardHooks<P>> & { anyoneCanJoin?: boolean }
+
 const ROOM_GUARD_KEYS = Object.keys({
   onBeforeJoin: true,
   onAfterJoin: true,
@@ -188,19 +191,26 @@ const ROOM_GUARD_KEYS = Object.keys({
   onAfterPublish: true,
 } satisfies Record<keyof RoomGuardHooks, true>) as (keyof RoomGuardHooks)[]
 
-function guardRoom(room: Room, guards: Partial<Record<keyof RoomGuardHooks, unknown>>): void {
+function guardRoom(
+  room: Room,
+  guards: Partial<Record<keyof RoomGuardHooks, unknown>> & { anyoneCanJoin?: unknown },
+): void {
   assertUsage(ServerRoom.isServerRoom(room), ROOM_GUARD_USAGE)
   assertUsage(isObject(guards), 'Room.guard() guards should be an object')
-  assertKnownOptions(guards, ROOM_GUARD_KEYS, 'Room.guard()')
+  assertKnownOptions(guards, [...ROOM_GUARD_KEYS, 'anyoneCanJoin'], 'Room.guard()')
+  const { anyoneCanJoin } = guards
+  assertUsage(
+    anyoneCanJoin === undefined || typeof anyoneCanJoin === 'boolean',
+    'Room.guard() anyoneCanJoin should be a boolean',
+  )
   for (const key of ROOM_GUARD_KEYS) {
     assertUsage(
       guards[key] === undefined || typeof guards[key] === 'function',
       `Room.guard() ${key} should be a function`,
     )
   }
-  handleOf(room).setGuards(
-    Object.fromEntries(ROOM_GUARD_KEYS.map((key) => [key, guards[key]])) as Partial<RoomGuardHooks>,
-  )
+  const hooks = Object.fromEntries(ROOM_GUARD_KEYS.map((key) => [key, guards[key]])) as Partial<RoomGuardHooks>
+  handleOf(room).setGuards({ ...hooks, anyoneCanJoin: anyoneCanJoin === true })
 }
 
 async function joinRoom(id: string, options?: JoinOptions): Promise<LocalParticipant> {

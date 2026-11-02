@@ -52,6 +52,7 @@ type BinaryResult = {
 
 type GuardResult = {
   joinError: string | null
+  unguardedJoinError: string | null
   publishError: string | null
   sendError: string | null
   received: string[]
@@ -466,13 +467,19 @@ function testRoom() {
       expect(result.sameObject).toBe(true) // ref-identity binds the view to its room
     },
   )
-  testRoomScenario<GuardResult>('guard', 'room: guards reject over the wire; allowed messages flow', (result) => {
-    expect(result.joinError).toBe('blocked join of Banned')
-    expect(result.publishError).toBe('blocked publish from Mallory')
-    expect(result.sendError).toBe('blocked send from Mallory')
-    expect(result.received).deep.equal(['fine'])
-    expect(result.inbox).deep.equal(['psst'])
-  })
+  testRoomScenario<GuardResult>(
+    'guard',
+    "room: guards reject over the wire, a room returned unguarded refuses a page's join, and allowed messages flow",
+    (result) => {
+      expect(result.joinError).toBe('blocked join of Banned')
+      // A room returned without Room.guard() refuses a page's join, and says how to allow it
+      expect(result.unguardedJoinError).toContain('Room.guard(room, { anyoneCanJoin: true })')
+      expect(result.publishError).toBe('blocked publish from Mallory')
+      expect(result.sendError).toBe('blocked send from Mallory')
+      expect(result.received).deep.equal(['fine'])
+      expect(result.inbox).deep.equal(['psst'])
+    },
+  )
   testRoomScenario<{ okAck: boolean; badError: string | null; received: string[] }>(
     'shield',
     'room: the declared message type is shielded at runtime (a malformed publish is rejected)',

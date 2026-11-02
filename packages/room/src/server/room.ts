@@ -18,7 +18,7 @@ import {
   type BinaryWantChange,
   type TrackKey,
 } from '../shared/binary.js'
-import { roomClosedError, ROOM_BUG_MESSAGE } from '../shared/errors.js'
+import { RoomError, roomClosedError, ROOM_BUG_MESSAGE } from '../shared/errors.js'
 import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetadata, recipientId } from '../shared/arguments.js'
 import {
   inboxMessageFromWire,
@@ -70,7 +70,7 @@ import type {
   RoomSnapshotView,
   Sender,
 } from '../types.js'
-import type { RoomGuardHooks } from './roomStatics.js'
+import type { RoomGuards } from './roomStatics.js'
 assertIsNotBrowser()
 
 const SERVER_ROOM_BRAND: unique symbol = Symbol.for('telefunc.ServerRoom')
@@ -107,7 +107,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
   readonly replica: RoomReplica
   /** `Room.get({ tail: true })`'s hold until a stub attaches and takes it. */
   private tail: TailHold | null = null
-  guards: Partial<RoomGuardHooks> | null = null
+  guards: RoomGuards | null = null
   /** This handle's listeners over the replica's model. */
   readonly state: RoomState
   readonly local: LocalHolder
@@ -169,7 +169,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
   }
 
   /** See `Room.guard()`. One declaration per instance keeps the grant declarative. */
-  setGuards(guards: Partial<RoomGuardHooks>): void {
+  setGuards(guards: RoomGuards): void {
     assertUsage(
       this.guards === null,
       'Room.guard() was already called for this room instance: declare all guards in one call',
@@ -428,6 +428,14 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     stub: RoomStub,
     req: Extract<RoomRequest, { __r: 'req-join' }>,
   ): Promise<{ id: string; joinedAt: number }> {
+    // A page joins only where the telefunction that gave it the room decided who may.
+    if (this.guards?.onBeforeJoin === undefined && this.guards?.anyoneCanJoin !== true) {
+      throw new RoomError(
+        `A page called join() on room ${this.id}, but the telefunction that returned the room doesn't say who may ` +
+          'join: call Room.guard(room, { onBeforeJoin }) there to admit whom you choose, or ' +
+          'Room.guard(room, { anyoneCanJoin: true }) to admit anyone',
+      )
+    }
     const admission = new Admission({ meta: ownMetadata(req.meta), identity: null, hidden: false })
     await this.assertOpen()
     await this.admit(admission, () => {
