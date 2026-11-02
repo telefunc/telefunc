@@ -54,8 +54,8 @@ class ServerBroadcastEnd extends ServerChannel {
     return this.lifecycle.handleCallbackError(err)
   }
 
-  /** A PUBLISH frame to its page, never refused: a page too far behind is let go. One `resentOnAttach`, which the owner
-   *  sends again at each attach, may be dropped while the page is away without leaving it a gap. */
+  /** A PUBLISH frame to its page, never refused. One `resentOnAttach`, which the owner sends again at each attach, may
+   *  be dropped while the page is away without leaving it a gap. */
   deliver(frame: string, opts?: { resentOnAttach?: boolean }): void {
     this.deliverOrHold(frame, opts?.resentOnAttach !== true)
   }
@@ -81,13 +81,6 @@ class ServerBroadcastEnd extends ServerChannel {
           ),
         )
       }
-      return
-    }
-    if (this.sendCredit.isPastByteCredit && this.isPeerBehind()) {
-      this.endWithError(
-        ERROR_REASON.OVERFLOW,
-        new ChannelOverflowError('Channel closed: its client fell further behind than the server holds for a client'),
-      )
       return
     }
     const bytes = binary ? peer.sendSequenced(encode.publishBinary, frame) : peer.sendSequenced(encode.publish, frame)

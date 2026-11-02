@@ -3,7 +3,7 @@ export { Uplink }
 import { DrainRate } from '../DrainRate.js'
 import { PieceRate } from '../PieceRate.js'
 import { RoundTrips } from '../RoundTrips.js'
-import { SendWaits, type SendWait } from '../SendWait.js'
+import { SendWaits, type SendWait } from '../SendWaits.js'
 
 /** A page's uplink: the rate the server takes data at, and what the uplink holds. */
 class Uplink implements SendWait {

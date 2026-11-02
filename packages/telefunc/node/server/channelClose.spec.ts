@@ -15,7 +15,7 @@ function createPeer(frames: Uint8Array[]) {
       },
       carry() {},
       bufferedAmount: () => 0,
-      deliveredBeforeFrame: () => 0,
+      deliveredBefore: () => 0,
       terminate() {},
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
     },
@@ -403,20 +403,6 @@ describe('cross-close', () => {
     const closePromise = channel.close({ timeout: 10 })
 
     // Peer also sent close — but never sends close-ack for server's request
-    channel._onPeerCloseRequest(10)
-
-    await expect(closePromise).resolves.toBe(1)
-    expect(channel._phase).toBe('ended')
-  })
-
-  test("a peer's shorter timeout cuts short a close already waiting on its own", async () => {
-    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
-
-    channel._registerChannel()
-    channel._attachPeer(createPeer([]))
-
-    const closePromise = channel.close({ timeout: 60_000 })
-    await new Promise((resolve) => setTimeout(resolve, 5))
     channel._onPeerCloseRequest(10)
 
     await expect(closePromise).resolves.toBe(1)

@@ -4,7 +4,7 @@ export type { PeerSender }
 import { ACK_STATUS, encode } from '../../wire/frame.js'
 import type { AckResultStatus, ErrorReason, SequencedEncoder } from '../../wire/frame.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
-import type { SendWait } from '../../flowControl/SendWait.js'
+import type { SendWait } from '../../flowControl/SendWaits.js'
 import type { Urgency } from '../../flowControl/credit.js'
 
 interface PeerSender {
@@ -16,7 +16,7 @@ interface PeerSender {
   /** The wait the wire reports for the frames that go at once (see `SocketWait`). */
   sendWait(): SendWait
   /** The bytes the wire delivered in the `ms` before the frame it's handling arrived. */
-  deliveredBeforeFrame(ms: number): number
+  deliveredBefore(ms: number): number
   /** Ends the wire, as a frame that breaks the protocol does. */
   terminate(): void
 }

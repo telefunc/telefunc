@@ -5,7 +5,7 @@ import { BdpEstimator } from './BdpEstimator.js'
 import type { CreditOwner, Urgency } from './credit.js'
 import type { RoundTrips } from './RoundTrips.js'
 import type { SelfTime } from './SelfTime.js'
-import type { SendWait } from './SendWait.js'
+import type { SendWait } from './SendWaits.js'
 import { CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_INITIAL_BYTES_BATCH, FC_SELF_UTIL_THRESHOLD } from '../constants.js'
 import type { BdpPingAck } from '../wire/frame.js'
 
@@ -77,7 +77,7 @@ class ReceiveCredit {
     this.bdp.capByteWindow(window)
   }
 
-  /** Account one received frame off the wire, emitting a `BDP_PING` iff the estimator opens a probe. */
+  /** Counts a frame that arrived, and sends a `BDP_PING` when the estimator opens a probe. */
   onReceived(bytes: number): void {
     this.arrived = true
     this.receivedBytes += bytes
@@ -95,7 +95,7 @@ class ReceiveCredit {
     this.bdp.settleAttachProbe(probe)
   }
 
-  /** Account post-callback consumption of one frame. */
+  /** Counts a frame of `bytes` as consumed: its listeners are done with it, or it was dropped. */
   onConsumed(bytes: number): void {
     this.consume(bytes, 1)
   }
@@ -118,9 +118,9 @@ class ReceiveCredit {
     this.arrived = false
   }
 
-  /** Settles a `BDP_PING_ACK`; `deliveredBefore(ms)`: what the wire delivered in the `ms` before the ack arrived. */
-  onPingAck(ack: BdpPingAck, deliveredBefore: (ms: number) => number): void {
-    const suggest = this.bdp.onPingAck(ack, deliveredBefore, this.sendWait)
+  /** Settles a `BDP_PING_ACK`, reading what the wire delivered before it through `owner._deliveredBefore`. */
+  onPingAck(ack: BdpPingAck): void {
+    const suggest = this.bdp.onPingAck(ack, this.owner, this.sendWait)
     const wantBytes = suggest.bytes === 'grow'
     const wantMsgs = suggest.msgs === 'grow'
     if (!wantBytes && !wantMsgs) return
@@ -189,7 +189,7 @@ class ReceiveCredit {
     this.consume(bytes, 0)
   }
 
-  /** Bump to the batch-POST initial window and advertise it. Grow-only / idempotent. */
+  /** Raises the window to the batch-POST initial window and advertises it; never lowers it. */
   useBatchTransportInitial(): void {
     const prev = this.byteWindow
     this.bdp.raiseByteWindow(CREDIT_WINDOW_INITIAL_BYTES_BATCH)

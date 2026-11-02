@@ -27,10 +27,10 @@ import type { ShieldValidator, ShieldValidators } from '../../../node/server/shi
 import { createAbortError, type AbortError } from '../../../shared/Abort.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
-import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channelErrors.js'
+import { ChannelClosedError, replayLossError } from '../channelErrors.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { isPromise } from '../../../utils/isPromise.js'
-import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
+import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES, SENDS_AHEAD_WARNING_BYTES } from '../../constants.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
 import { replayWindow, type CreditOwner, type Urgency } from '../../flowControl/credit.js'
@@ -38,10 +38,10 @@ import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import { SelfTime } from '../../flowControl/SelfTime.js'
 import { SendCredit } from '../../flowControl/SendCredit.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
-import { ServerChannelBuffer, type BufferedSender, type EntryCallback } from './channelBuffer.js'
+import { ServerChannelBuffer, type BufferedSender, type EntryCallback } from './ServerChannelBuffer.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
-import { assert } from '../../../utils/assert.js'
+import { assert, assertWarning } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/frame.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
@@ -100,6 +100,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected selfTime = new SelfTime()
   /** Paces fire-and-forget TEXT, BINARY and PUBLISH sends to what the page grants; see `constants.ts`. */
   protected sendCredit: SendCredit
+  /** Its sends put `SENDS_AHEAD_WARNING_BYTES` ahead of the page, and it warned. */
+  private warnedAhead = false
   protected receiveCredit: ReceiveCredit
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private responseAbort: ((abortValue?: unknown) => void) | null = null
@@ -114,13 +116,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private pageClosed = false
 
   // ── Wire state — channel-owned, kept across the page's attaches ────
-  /** Buffer of outgoing wire frames, used to replay missed frames on reconnect.
-   *  Allocated in `_registerChannel`; disposed in `_release`. Null only between
-   *  construction and registration (no peer can attach before registration). */
-  /** @internal */ _replayBuffer: ReplayBuffer | null = null
-  /** Highest client→server seq the channel has received and dispatched. Used for
-   *  frame deduplication and reported back to the client in `ReconciledPayload.open[].lastSeq`. */
-  /** @internal */ _lastClientSeq = 0
+  /** @internal Buffer of outgoing wire frames, used to replay missed frames on reconnect. Allocated in
+   *  `_registerChannel` and disposed in `_release`: null before registration, when no peer can attach, and after. */
+  _replayBuffer: ReplayBuffer | null = null
+  /** @internal Highest client→server seq the channel has received and dispatched. Used for frame deduplication and
+   *  reported back to the client in `ReconciledPayload.open[].lastSeq`. */
+  _lastClientSeq = 0
 
   /** Shield validators keyed by name (see `ChannelShield` in ../channel.ts).
    *  - `data`: validates incoming client data (_onPeerMessage / answerAckReq)
@@ -146,7 +147,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.sendCredit.fitReplay(replayWindow(c.serverReplayBuffer, c.serverReplayBufferBinary))
     this.bufferLimit = bufferLimit ?? c.bufferLimit
     this.bufferLimitBinary = c.bufferLimitBinary
-    this.offlineBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(this.bufferLimit, this.bufferLimitBinary)
+    this.offlineBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>({
+      maxBytes: this.bufferLimit,
+      binaryMaxBytes: this.bufferLimitBinary,
+    })
   }
 
   get isClosed(): boolean {
@@ -196,7 +200,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
     // Promise already serializes the next send, so credit would add nothing.
     if (needsAck) {
-      if (this.isPeerBehind()) return rejectOverflow()
       return this.lifecycle.trackAck(
         new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
           this.peer!.sendSequenced(encode.textAckReq, serialized, (seq, bytes) =>
@@ -206,9 +209,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       )
     }
     // Cooperative credit model: the send already fired; `decrement` only gates the return
-    // value. Awaiting throttles the caller's next send; not awaiting bypasses credit, until the peer is behind.
-    if (this.sendCredit.isPastByteCredit && this.isPeerBehind()) return rejectOverflow()
-    return this.sendCredit.decrement(this.peer.sendSequenced(encode.text, serialized))
+    // value. Awaiting throttles the caller's next send; not awaiting bypasses credit.
+    return this.countSend(this.peer.sendSequenced(encode.text, serialized))
   }
 
   sendBinary(data: Uint8Array): Promise<void>
@@ -242,7 +244,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     // Ack-bearing path bypasses credit; see `sendData` for rationale.
     if (needsAck) {
-      if (this.isPeerBehind()) return rejectOverflow()
       return this.lifecycle.trackAck(
         new Promise<unknown>((resolve, reject) => {
           this.peer!.sendSequenced(encode.binaryAckReq, data, (seq, bytes) =>
@@ -252,8 +253,28 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       )
     }
     // Cooperative credit model; see `sendData`.
-    if (this.sendCredit.isPastByteCredit && this.isPeerBehind()) return rejectOverflow()
-    return this.sendCredit.decrement(this.peer.sendSequenced(encode.binary, data))
+    return this.countSend(this.peer.sendSequenced(encode.binary, data))
+  }
+
+  private countSend(bytes: number): void | Promise<void> {
+    const sent = this.sendCredit.decrement(bytes)
+    this.warnIfAhead()
+    return sent
+  }
+
+  /** What its sends put ahead of the page: past the page's credit, and the ack requests it hasn't answered. */
+  private bytesAhead(): number {
+    return this.sendCredit.bytesSentPastCredit + this.pendingAckBytes
+  }
+
+  private warnIfAhead(): void {
+    if (this.warnedAhead || this.bytesAhead() < SENDS_AHEAD_WARNING_BYTES) return
+    this.warnedAhead = true
+    assertWarning(
+      false,
+      `A channel's \`send()\` calls put ${SENDS_AHEAD_WARNING_BYTES / 1024 / 1024} MiB ahead of its client, which the server holds in memory until the client takes it. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next, to send only as fast as the client reads, or slow down what produces the data.`,
+      { onlyOnce: false },
+    )
   }
 
   /** @internal The most bytes that may wait for a reading page: the credit window, the allowance past it, and both
@@ -262,19 +283,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return CREDIT_WINDOW_MAX_BYTES + this.pastCreditAllowance() + this.bufferLimit + this.bufferLimitBinary
   }
 
-  /** How many bytes past credit a page that is still reading may be sent: the largest window a page grants. */
+  /** How many bytes past credit a page that is still reading may be sent: the largest window a page grants, and all
+   *  that its sends put ahead of the page, which only the server code's `await` holds back. */
   protected pastCreditAllowance(): number {
-    return CREDIT_WINDOW_MAX_BYTES
-  }
-
-  /** Whether the page fell behind: the bytes sent past credit plus the unanswered ack requests, capped at what the
-   *  wire still buffers, reach the allowance. */
-  protected isPeerBehind(): boolean {
-    const allowance = this.pastCreditAllowance()
-    const behind = this.sendCredit.bytesSentPastCredit + this.pendingAckBytes
-    if (behind < allowance) return false
-    const buffered = this.peer!.sender.bufferedAmount()
-    return (buffered === undefined ? behind : Math.min(behind, buffered)) >= allowance
+    return CREDIT_WINDOW_MAX_BYTES + this.bytesAhead()
   }
 
   private addPendingAck(
@@ -284,6 +296,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   ): void {
     this.pendingAcks.set(seq, { resolve: settle.resolve, reject: settle.reject, bytes })
     this.pendingAckBytes += bytes
+    this.warnIfAhead()
   }
 
   listen(callback: ChannelListener<ClientToServer>): () => void {
@@ -368,7 +381,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  an open one applies the RECONCILE's broadcast subscriptions before `onOpen` fires. */
   _attachPeer(peer: IndexedPeer, state?: AttachState): void {
     if (this._phase === 'ended') {
-      this.flushOfflineBuffer(peer)
+      this.offlineBuffer.flush(this, peer)
       this.sendPendingAckRes(peer)
       this.sendPendingEnd(peer)
       return
@@ -379,7 +392,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.reconnectTimer = null
     this.peer = peer
     this.receiveCredit.attach(peer.sender.sendWait())
-    this.flushOfflineBuffer(peer)
+    this.offlineBuffer.flush(this, peer)
     this.sendPendingAckRes(peer)
     // After the swap, so what they send reaches this peer even if the previous one never detached.
     if (state?.broadcast) {
@@ -445,7 +458,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  /** @internal — Per-channel ctrl-message switch. Connection-level ctrls (ping,
+  /** @internal — Per-channel ctrl-message switch. Wire-level ctrls (ping,
    *  reconcile, fin) never reach here — the mux's `handleFrame` handles them. */
   private dispatchCtrl(frame: ChannelCtrlFrame): void {
     switch (frame.tag) {
@@ -474,7 +487,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this.peer?.sendBdpPingAck(frame.probe, this.sendCredit.onPing(), Infinity)
         return
       case TAG.BDP_PING_ACK:
-        this.receiveCredit.onPingAck(frame, (ms) => this.peer?.sender.deliveredBeforeFrame(ms) ?? 0)
+        this.receiveCredit.onPingAck(frame)
         return
       case TAG.BROADCAST_SUB:
       case TAG.BROADCAST_UNSUB:
@@ -502,6 +515,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal */
   _backlogBytes(): number | undefined {
     return this.peer?.sender.bufferedAmount()
+  }
+
+  /** @internal */
+  _deliveredBefore(ms: number): number {
+    return this.peer?.sender.deliveredBefore(ms) ?? 0
   }
 
   // Only a page's ClientBroadcast publishes and subscribes, and its server end is a ServerBroadcastEnd.
@@ -710,10 +728,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return (this.pendingEnd ??= { closeAck: false, closeRequest: false, abort: null, error: null })
   }
 
-  private flushOfflineBuffer(peer: IndexedPeer): void {
-    this.offlineBuffer.flush(this, peer)
-  }
-
   /** @internal `BufferedSender`: sends `peer` a frame buffered while no page was attached, as it would have gone then.
    *  An ack request already rejected at shutdown has no callback left to answer. */
   _sendBuffered(peer: IndexedPeer, tag: number, data: string | Uint8Array, callback: EntryCallback | null): void {
@@ -861,7 +875,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.mux?.onChannelEnded(this, { keep, pageAttached })
     this.lifecycle.fireClose(err)
     this.sendCredit.shutdown()
-    // Building an error captures a stack trace, so one is built only when an ack is still awaited.
+    // Building an error captures a stack trace, so one is built only while an ack is awaited or a frame is buffered.
     if (this.pendingAcks.size > 0 || this.offlineBuffer.size > 0) {
       const ackErr = err ?? new ChannelClosedError()
       for (const { reject } of this.pendingAcks.values()) reject(ackErr)
@@ -887,10 +901,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.pendingAckRes.length = 0
     this.pendingEnd = null
   }
-}
-
-function rejectOverflow(): Promise<never> {
-  return Promise.reject(new ChannelOverflowError())
 }
 
 function reportBug(err: unknown): void {

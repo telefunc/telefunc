@@ -10,14 +10,14 @@ import {
   CREDIT_WINDOW_MAX_BYTES,
 } from '../constants.js'
 
-// `Date.now()` drives the min-interval throttle; fake time so tests can pin the
+// `performance.now()` drives the min-interval throttle; fake time so tests can pin the
 // "ping is allowed to fire" / "throttled" boundary deterministically.
 beforeEach(() => vi.useFakeTimers({ now: 1_000_000 }))
 afterEach(() => vi.useRealTimers())
 
 /** A sender's wire that held nothing as its credit ran out, and delivered right up to the ack. */
 const EMPTY = 0
-const upToAck = () => Infinity
+const upToAck = { _deliveredBefore: () => Infinity }
 
 // Sample shape: `bytesAtPingSent` is snapshotted *after* the first `onReceive`
 // increments the byte counter, so the sample is the bytes that arrive

@@ -58,14 +58,14 @@ interface MuxChannel {
   readonly isClosed: boolean
   /** The largest frame the server accepts from this channel on a WebSocket. */
   readonly _maxFrameBytes: number
-  /** The channel is open on `uplink`'s wire. The last attach's `uplink` means the same wire, which lost nothing. */
+  /** The channel is open on `uplink`'s wire; called again with the same `uplink`, that wire lost nothing. */
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void
   /** The wire's streaming upload failed after the channel opened, so its frames now go in batch POSTs. */
   _onTransportBatched(): void
   /** The upgrade joined: the channel is on the WebSocket and has already received the frames the join held. */
   _onUpgradeJoined(): void
   /** Entry point for every per-channel wire frame (data + per-channel ctrl). The
-   *  channel splits ctrl vs data internally. Connection-level frames (PING/PONG/
+   *  channel splits ctrl vs data internally. Wire-level frames (PING/PONG/
    *  FIN/RECONCILED), channel-termination ctrls (ABORT/ERROR) and ATTACH_RESULT stay with the
    *  connection — they involve connection-side cleanup. */
   _dispatchFrame(frame: ChannelFrame): void
@@ -105,7 +105,7 @@ interface MuxConnection {
   /** Bytes the wire holds that haven't gone out. */
   bufferedAmount(): number
   /** Bytes the wire delivered in the `ms` before its latest delivery: the frame being handled, on arrival. */
-  deliveredBeforeLast(ms: number): number
+  deliveredBefore(ms: number): number
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
   sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void
   unregister(channel: MuxChannel): void
@@ -139,7 +139,7 @@ type ClientChannelTransport = {
   start(): void
   hasWire(): boolean
   isConnecting(): boolean
-  /** Send a connection-level ping on this wire. Heartbeat's send callback calls this. */
+  /** Send a wire-level ping on this wire. Heartbeat's send callback calls this. */
   sendPing(frame: Uint8Array<ArrayBuffer>): void
   sendFrame(frame: OutboundFrame): void
   /** How many bytes of data frames it accepts now, `Infinity` if nothing bounds them. Other frames go at once. */
@@ -279,16 +279,8 @@ class ClientConnection
     return this.connected && !this.exchange.reconciling && !this.upgrade.gatesSends && !this.exchange.reconcileOwed
   }
 
-  get sessionId(): string | null {
-    return this.exchange.sessionId
-  }
-
   get reconcileHeld(): boolean {
     return !this.connected || this.upgrade.committing !== null || this.upgrade.ready
-  }
-
-  get upgradeReady(): boolean {
-    return this.upgrade.ready
   }
 
   private register(channel: MuxChannel): void {
@@ -363,7 +355,7 @@ class ClientConnection
     const { replay } = record
     const frame = encodeFrame(record.ix, data, replay.seq + 1)
     const maxFrameBytes = this.maxFrameBytesOf(channel)
-    // The server ends any wire a larger frame arrives on, the next one its replay goes out on too.
+    // The server ends any wire a larger frame arrives on, and the replay would send it again on the next one.
     assertUsage(
       frame.byteLength <= maxFrameBytes,
       `Channel message too large: ${frame.byteLength} bytes encoded, the server accepts ${maxFrameBytes} at most`,
@@ -448,7 +440,7 @@ class ClientConnection
     return this.transport.bufferedAmount() + this.gate.waitingBytes
   }
 
-  deliveredBeforeLast(ms: number): number {
+  deliveredBefore(ms: number): number {
     return this.transport.heartbeat?.deliveredBefore(ms) ?? 0
   }
 
@@ -470,12 +462,12 @@ class ClientConnection
     this.enterOpen()
     if (!this.transport.carriesReconcileInOpen) {
       this.exchange.sendReconcileBatch(this.exchange.stageReconcileBatch())
-      this.liveness.beatFromReconcile(transport)
+      this.liveness.beatFromReconcile(transport, this.exchange.sessionId)
       return
     }
     if (!this.exchange.reconciling) {
       // A register-reconcile queued during the connecting window sends its RECONCILE here and
-      // carries the buffered frames after it, emptying the buffer; with none queued, flush
+      // carries the buffered frames after it, emptying the buffer; with none queued, the buffered frames go out alone.
       this.exchange.flushPendingRegisterReconcile()
       this.drainBufferedFramesToWire()
     }
@@ -510,7 +502,7 @@ class ClientConnection
       this.channels.serverHasThrough(frame.index, this.channels.sentThrough(frame.index, frame.lastSeq))
     }
     if (frame.tag === TAG.ACK_RES) this.channels.serverHasThrough(frame.index, frame.ackedSeq)
-    // ATTACH_RESULT and the connection-level and closing ctrls need connection bookkeeping; the rest is per-channel.
+    // ATTACH_RESULT and the wire-level and closing ctrls need connection bookkeeping; the rest is per-channel.
     switch (frame.tag) {
       case TAG.FIN:
         this.upgrade.handleFin()
@@ -545,7 +537,7 @@ class ClientConnection
 
   onTransportReconcileSent(transport: ClientChannelTransport): void {
     if (this.closed || transport !== this.transport) return
-    this.liveness.beatFromReconcile(transport)
+    this.liveness.beatFromReconcile(transport, this.exchange.sessionId)
   }
 
   onTransportPong(ended: PongEntry[]): void {
@@ -585,8 +577,11 @@ class ClientConnection
   handleReconciled(ctrl: ReconciledPayload): void {
     if (!this.upgrade.onReconciled(ctrl)) return
     this.transport.applyReconciledSettings(ctrl)
-    const deferredOmitted = this.upgrade.committing?.deferredOmitted ?? null
-    const outcome = this.exchange.applyReconciled(ctrl, deferredOmitted)
+    this.takeServerSettings(ctrl)
+    const outcome = this.exchange.applyReconciled(ctrl, {
+      deferredOmitted: this.upgrade.committing?.deferredOmitted ?? null,
+      upgradeReady: this.upgrade.ready,
+    })
     this.liveness.install(this.transport, ctrl.pingInterval)
     this.transport.closeAbandonedTransport()
     for (const frame of outcome.frames) this.transport.sendFrame(frame)
@@ -711,7 +706,7 @@ class ClientConnection
   }
 
   /** Takes the timeouts, replay sizes and frame limit the server sets, and fits each replay buffer to them. */
-  takeServerSettings(ctrl: ReconciledPayload): void {
+  private takeServerSettings(ctrl: ReconciledPayload): void {
     this.reconnectTimeoutMs = ctrl.reconnectTimeout
     this.maxFrameBytes = ctrl.maxFrameBytes
     // A per-call `idleTimeout` (withContext) is kept over the server's.
@@ -788,7 +783,7 @@ function channelErrorFor(reason: number): Error {
   switch (reason) {
     case ERROR_REASON.OVERFLOW:
       return new ChannelOverflowError(
-        'Channel closed: this client fell further behind than the server holds for a client',
+        'Channel closed: more was published while this client was offline than the server holds for a client',
       )
     case ERROR_REASON.LOST:
       return replayLossError('server')

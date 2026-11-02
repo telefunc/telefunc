@@ -15,6 +15,8 @@ export {
   onChannelClientAbortThenSend,
   onChannelClientPendingAckCloseReconnect,
   onChannelClientPendingAckClose,
+  onChannelPeerShorterClose,
+  onChannelLongerCloseAfterPeer,
   onChannelServerPendingAckCloseReconnectOpen,
   onChannelUpstreamReconnect,
   onChannelNoListenerAckServer,
@@ -29,6 +31,7 @@ export {
   onChannelEndedValues,
   onChannelSlowLink,
   onChannelUnawaitedBurst,
+  onChannelTextBurst,
   onChannelOpenBurst,
   onChannelManyListeners,
   onChannelLinkShare,
@@ -356,6 +359,30 @@ async function onChannelClientPendingAckClose() {
 }
 
 /**
+ * A close the page cuts short. The page sends a message with an ack the server never answers; the server tells the
+ * page it closes and closes within 60 s, waiting on that ack; the page answers with a close within 1 s.
+ * cleanupState keys:
+ *   peerShorterClose_<id>_closeMs    = how long the server's close() took
+ *   peerShorterClose_<id>_onCloseErr = 'none' | error message
+ */
+async function onChannelPeerShorterClose() {
+  const ch = new Channel<(msg: string) => void, (msg: string) => void>()
+  const id = ch.id
+  ch.listen(() => {
+    void ch.send('closing')
+    const start = performance.now()
+    void ch.close({ timeout: 60_000 }).then(() => {
+      cleanupState[`peerShorterClose_${id}_closeMs`] = String(Math.round(performance.now() - start))
+    })
+    return new Promise(() => {})
+  })
+  ch.onClose((err) => {
+    cleanupState[`peerShorterClose_${id}_onCloseErr`] = formatCloseError(err as CloseError)
+  })
+  return { channel: ch.client, channelId: id }
+}
+
+/**
  * Channel for reconnect-tolerant client close semantics.
  * The client may go offline, call send({ ack: true }) + close(), then reconnect.
  * The buffered ack request is delivered after reconcile, the server replies,
@@ -375,6 +402,18 @@ async function onChannelClientPendingAckCloseReconnect() {
     cleanupState[`clientClose_${id}_serverOnCloseErr`] = formatCloseError(err as CloseError)
   })
   return { channel: ch.client, channelId: id }
+}
+
+/**
+ * A close() the page makes after the server's. The page asks the server to close within 1 s; the page's onClose never
+ * settles, so its close lasts until its deadline, which its own close() within 60 s must not push back.
+ */
+async function onChannelLongerCloseAfterPeer() {
+  const ch = new Channel<(msg: string) => void, never>()
+  ch.listen(() => {
+    void ch.close({ timeout: 1_000 })
+  })
+  return { channel: ch.client }
 }
 
 // Global store keyed by channel id — survives across telefunc invocations.
@@ -649,20 +688,42 @@ async function onChannelSlowLink() {
   return { channel: ch.client }
 }
 
-/** At the page's message, sends that many 1 MiB messages without awaiting them, and answers with the rejected ones by error name. */
+/** At the page's message, sends that many 1 MiB messages, each with its index in its first 4 bytes, without awaiting
+ *  them, in one loop. */
 async function onChannelUnawaitedBurst() {
-  const ch = new Channel<(count: number) => Promise<Record<string, number>>, never>()
-  ch.listen(async (count) => {
-    const rejected: Record<string, number> = {}
-    const sends = Array.from({ length: count }, () =>
-      ch.sendBinary(new Uint8Array(1024 * 1024)).catch((err: Error) => {
-        rejected[err.name] = (rejected[err.name] ?? 0) + 1
-      }),
-    )
-    await Promise.race([Promise.all(sends), new Promise((resolve) => setImmediate(resolve))])
-    return rejected
+  const ch = new Channel<(count: number) => void, never>()
+  ch.listen((count) => {
+    for (let i = 0; i < count; i++) {
+      const message = new Uint8Array(1024 * 1024)
+      new DataView(message.buffer).setUint32(0, i)
+      void ch.sendBinary(message)
+    }
   })
-  return { channel: ch.client }
+  return { channel: ch.client, channelId: ch.id }
+}
+
+/**
+ * At the page's message, sends that many 16 KiB text messages, each starting with its index, in one loop: without
+ * awaiting them, awaiting each, or with `{ ack: true }`, awaiting the acks together.
+ * cleanupState keys:
+ *   textBurst_<id>_acked = how many of the ack-requesting sends resolved
+ */
+async function onChannelTextBurst() {
+  const ch = new Channel<(run: { count: number; mode: 'unawaited' | 'awaited' | 'acks' }) => void, string>()
+  const id = ch.id
+  ch.listen(async ({ count, mode }) => {
+    const sends: Promise<unknown>[] = []
+    for (let i = 0; i < count; i++) {
+      const message = String(i).padEnd(16 * 1024)
+      if (mode === 'acks') sends.push(ch.send(message, { ack: true }))
+      else if (mode === 'awaited') await ch.send(message)
+      else void ch.send(message)
+    }
+    if (mode !== 'acks') return
+    const results = await Promise.allSettled(sends)
+    cleanupState[`textBurst_${id}_acked`] = String(results.filter((r) => r.status === 'fulfilled').length)
+  })
+  return { channel: ch.client, channelId: id }
 }
 
 /** As it opens, sends 500 small messages without awaiting them. */

@@ -121,13 +121,13 @@ export const WIRE_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
  *  65 536 — a u16 index — but that is exhaustion, not a working limit.) */
 export const MAX_CHANNELS_PER_CONNECTION = 4_096
 
-/** Largest control frame the server will decode, checked on the raw bytes. Derived, never picked:
+/** Largest wire control frame the server will decode, checked on the raw bytes. Derived, never picked:
  *  the biggest legitimate one lists every channel at the id cap, and a cap that refuses a legal
  *  frame is worse than no cap. */
-export const WIRE_MAX_CONN_CTRL_FRAME_BYTES =
+export const WIRE_MAX_CTRL_FRAME_BYTES =
   MAX_CHANNELS_PER_CONNECTION * (UPGRADE_MAX_ID_BYTES + RECONCILE_ENTRY_ENVELOPE_BYTES) + 1_024
 
-/** A peer past its connection's allowance of unprocessed frames is terminated: this base, plus a window per channel. */
+/** A peer past its wire's allowance of unprocessed frames is terminated: this base, plus a window per channel. */
 export const WIRE_RECV_BACKLOG_BASE_BYTES = 64 * 1024 * 1024
 export const WIRE_RECV_BACKLOG_BASE_FRAMES = 50_000
 
@@ -252,9 +252,7 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 //   PUBLISH, PUBLISH_BINARY   a BroadcastChannel's or an extension's fan-out: counted in
 //                             bytes only, taking no message credit and starting no
 //                             BDP probe, against the largest byte window the page
-//                             grants, from the start. Nothing waits on them: the
-//                             count tells the server how far behind the page is,
-//                             past which it closes the channel they ride.
+//                             grants, from the start. Nothing waits on them.
 //
 // Window semantics: `WINDOW` and `MSG_WINDOW` advertise cumulative limits, as QUIC's MAX_DATA does.
 //
@@ -271,6 +269,9 @@ export const CREDIT_WINDOW_INITIAL_BYTES_BATCH = 8 * 1024 * 1024
 /** Hard cap on the adaptive credit window — bounds per-channel buffering worst case.
  *  Covers ~5 Gbit/s × 100 ms RTT or ~500 Mbit/s × 1 s RTT. */
 export const CREDIT_WINDOW_MAX_BYTES = 64 * 1024 * 1024
+
+/** A server channel warns, once, when its sends put this much ahead of its page: past its credit, or awaiting acks. */
+export const SENDS_AHEAD_WARNING_BYTES = 64 * 1024 * 1024
 
 /** The most a batch POST is sized to carry (see `SSE_POST_TARGET_MS`). */
 export const SSE_POST_MAX_BYTES = CREDIT_WINDOW_MAX_BYTES / 2

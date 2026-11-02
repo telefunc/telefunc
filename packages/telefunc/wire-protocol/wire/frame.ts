@@ -40,6 +40,7 @@ import {
 } from './payloads.js'
 import { decodePublishBinary, decodePublishText, type WirePublishInfo } from './publishInfo.js'
 import { ProtocolViolationError, assertProtocol } from './protocolViolation.js'
+import { textDecoder, textEncoder } from './envelope.js'
 
 const PING_ENTRY_BYTES = 6
 const PONG_ENTRY_BYTES = 7
@@ -47,9 +48,6 @@ const PONG_ENTRY_BYTES = 7
 const ACK_RES_PREFIX = 9
 /** The most a frame adds to a channel message or its ack answer: an ACK_RES's header and prefix. */
 const MESSAGE_FRAME_OVERHEAD_MAX_BYTES = HEADER + ACK_RES_PREFIX
-
-const textEncoder = new TextEncoder()
-const textDecoder = new TextDecoder()
 
 /** A closed channel of the page's: the last seq the page has of what the server sent on it. */
 type PingEntry = { ix: number; lastSeq: number }
@@ -79,7 +77,7 @@ type AckResultStatus = (typeof ACK_STATUS)[keyof typeof ACK_STATUS]
 const ERROR_REASON = {
   /** An unhandled server error. */
   BUG: 0x00 as const,
-  /** Its page fell further behind than the server holds for it, where no sender could be refused. */
+  /** More was published to its channel while its page was offline than the server holds for it. */
   OVERFLOW: 0x01 as const,
   /** A reconnect needed frames its sender's replay buffer had dropped to stay within its size. */
   LOST: 0x02 as const,
@@ -128,7 +126,7 @@ type PiecesAck = { bytes: number; heldMs: number; spanUs: number }
 /** `backlog` in bytes, `Infinity` where credit didn't run out; `pathRtt` in ms, `Infinity` where none was measured. */
 type BdpPingAck = { probe: number; backlog: number; pathRtt: number }
 
-type ConnCtrlFrame =
+type WireCtrlFrame =
   | { tag: typeof TAG.PING; ended: PingEntry[]; took: number }
   | { tag: typeof TAG.PONG; ended: PongEntry[]; took: number }
   | { tag: typeof TAG.FIN }
@@ -142,7 +140,7 @@ type ConnCtrlFrame =
   | ({ tag: typeof TAG.PIECES_ACK } & PiecesAck)
   | { tag: typeof TAG.ANNOUNCE; bytes: number; floor: number }
 
-type DecodedFrame = ChannelFrame | ConnCtrlFrame
+type DecodedFrame = ChannelFrame | WireCtrlFrame
 
 /** What a replay holds: data, and the closing frames. */
 function isSequencedFrame(frame: DecodedFrame): frame is SequencedFrame {
@@ -217,7 +215,7 @@ const encode = {
     return frame
   },
 
-  // ── Connection-level ctrls ──
+  // ── Wire-level ctrls ──
   /** Wire: [header]([u16 ix][u32 lastSeq])* */
   ping(ended: PingEntry[] = []): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + PING_ENTRY_BYTES * ended.length)

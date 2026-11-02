@@ -1,5 +1,5 @@
 export { ChannelMux, getChannelMux, hostLocal, CHANNEL_MUX }
-export type { WireEntry, ReconcileOutcome, ServerTransport, Wire, WirePieces }
+export type { WireEntry, ReconcileOutcome, ServerTransport, Wire }
 
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
@@ -16,25 +16,24 @@ import {
   MAX_CHANNELS_PER_CONNECTION,
   TIMER_DELAY_MAX_MS,
   UPGRADE_MAX_ID_BYTES,
-  WIRE_MAX_CONN_CTRL_FRAME_BYTES,
+  WIRE_MAX_CTRL_FRAME_BYTES,
   WIRE_MAX_RAW_FRAME_BYTES,
   WIRE_RECV_BACKLOG_BASE_BYTES,
   WIRE_RECV_BACKLOG_BASE_FRAMES,
   type ChannelTransports,
 } from '../../constants.js'
 import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, withTook } from '../../wire/frame.js'
-import { TAG, isConnCtrlTag } from '../../wire/tags.js'
+import { TAG, isWireCtrlTag } from '../../wire/tags.js'
 import { seqThrough } from '../../wire/seq.js'
+import { textEncoder } from '../../wire/envelope.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type { BarrierPayload, PreparePayload, ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
 import { IndexedPeer } from './IndexedPeer.js'
-import { ServerHeadroom } from '../../flowControl/server/headroom.js'
-import type { ServerPieceReceiver } from '../../flowControl/server/pieceReceiver.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
 import { WireSender, type WireSenderOwner } from './WireSender.js'
 import { UpgradeStages, type UpgradeStagesOwner } from './UpgradeStages.js'
-import { TransportSocket } from './TransportSocket.js'
+import { SessionRegistry, type ChannelHandle } from './SessionRegistry.js'
 import { AwaitedChannels, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
 import { RegistrationWaits, type RegistrationWaitsOwner } from './RegistrationWaits.js'
 import type { ServerChannel } from './channel.js'
@@ -42,10 +41,6 @@ import type { ServerChannel } from './channel.js'
 /** A transport-owned wire handle. The mux never looks inside one — it only compares them by
  *  identity and hands them back to the transport that created it. */
 type Wire = unknown
-
-// Single-instance kernel: owns channels, sessions, per-wire runtime. Transports talk
-// to this class via `onWireOpen` and from then on identify wires by object
-// identity. Multi-instance deployments rely on sticky sessions at the load balancer.
 
 type ServerTransport<TWire> = {
   getSessionId(wire: TWire): string | undefined
@@ -81,8 +76,6 @@ function retargetToProbe(err: unknown, probe: Wire): unknown {
   return new ProtocolViolationError(err.message, probe)
 }
 
-const textEncoder = new TextEncoder()
-
 type MuxServerOptions = {
   reconnectTimeout: number
   idleTimeout: number
@@ -99,10 +92,6 @@ type MuxServerOptions = {
 }
 
 type DetachReason = 'transient' | 'permanent' | 'recoveryFailed'
-
-type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer }
-
-type WirePieces = { headroom: ServerHeadroom; receiver: ServerPieceReceiver }
 
 type WireState = {
   pingTimer: ReturnType<typeof setTimeout> | null
@@ -146,6 +135,9 @@ function hostLocal<T>(key: symbol, init: (host: { id: string | null }) => T): T 
 
 type ChannelMuxOptions = { hostId?: string }
 
+/** The server's channel kernel: it owns the channels, the sessions and each wire's state. Transports report a wire
+ *  through `onWireOpen` and name it by identity from then on; a deployment with several instances relies on sticky
+ *  sessions at its load balancer. */
 class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStagesOwner {
   /** Its session Durable Object's id on Cloudflare, else null. */
   readonly hostId: string | null
@@ -241,12 +233,6 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
 
   onWireOpen<TWire>(wire: TWire, transport: ServerTransport<TWire>): void {
     const recvBacklog = { bytes: 0, frames: 0 }
-    const headroom = transport.wholeMessages
-      ? new ServerHeadroom({
-          socket: new TransportSocket({ transport: transport as ServerTransport<unknown>, wire }),
-          pingInterval: this.options.pingInterval,
-        })
-      : null
     const deliveries = new Deliveries()
     const entry: WireEntry = {
       wire,
@@ -268,7 +254,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
         owner: this,
         wire,
         transport: transport as ServerTransport<unknown>,
-        pieceHeadroom: headroom,
+        pingInterval: this.options.pingInterval,
         deliveries,
       }),
     }
@@ -279,14 +265,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
   }
 
   async onWireMessage(wire: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<void> {
-    const outcome = await this.dispatchInbound(wire, rawFrame)
+    const outcome = await this.dispatchWireMessage(wire, rawFrame)
     if (outcome) this.sendReconciled(outcome)
-  }
-
-  /** As `onWireMessage`, but a RECONCILE's outcome is returned for the caller to send: SSE sends the RECONCILED once
-   *  the stream it answers is open. */
-  dispatchWireMessage(wire: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
-    return this.dispatchInbound(wire, rawFrame)
   }
 
   sendReconciled(outcome: ReconcileOutcome): void {
@@ -318,7 +298,6 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     const entry = this.wires.get(wire)
     if (!entry) return
     entry.state.closed = { isPermanent: permanent }
-    entry.sender.pieces?.headroom.close()
     this.clearPingTimer(entry.state)
     entry.state.awaited.stop()
     entry.sender.close()
@@ -357,7 +336,9 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
 
   // ── Inbound dispatch ────────────────────────────────────────────────
 
-  private dispatchInbound(wire: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
+  /** As `onWireMessage`, but a RECONCILE's outcome is returned for the caller to send: SSE sends the RECONCILED once
+   *  the stream it answers is open. */
+  dispatchWireMessage(wire: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
     const entry = this.wires.get(wire)
     if (!entry) return Promise.resolve(null)
     let outcome: Promise<ReconcileOutcome | null> = Promise.resolve(null)
@@ -418,7 +399,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     state.lastReceivedAt = now
     state.deliveries.note(now, rawFrame.byteLength)
     this.answerArrival(entry)
-    const piece = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
+    const piece = decodeClientFrame(rawFrame, WIRE_MAX_CTRL_FRAME_BYTES)
     assert(piece.tag === TAG.PIECE)
     assertProtocol(entry.sender.pieces, 'PIECE on a wire that takes no pieces')
     // Pieces let a frame exceed the runtime's limit on one message, so its total is checked against that limit here.
@@ -438,7 +419,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     const now = performance.now()
     entry.state.lastReceivedAt = now
     entry.state.deliveries.note(now, rawFrame.byteLength)
-    const announce = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
+    const announce = decodeClientFrame(rawFrame, WIRE_MAX_CTRL_FRAME_BYTES)
     assert(announce.tag === TAG.ANNOUNCE)
     assertProtocol(entry.sender.pieces, 'ANNOUNCE on a wire that takes no pieces')
     entry.sender.pieces.receiver.announce(announce.bytes, now, announce.floor)
@@ -462,8 +443,8 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
   private isOverBudget(entry: WireEntry, rawFrame: Uint8Array<ArrayBuffer>): boolean {
     const tag = peekTag(rawFrame)
     const maxFrameBytes =
-      tag !== undefined && isConnCtrlTag(tag) && tag !== TAG.PIECE
-        ? WIRE_MAX_CONN_CTRL_FRAME_BYTES
+      tag !== undefined && isWireCtrlTag(tag) && tag !== TAG.PIECE
+        ? WIRE_MAX_CTRL_FRAME_BYTES
         : WIRE_MAX_RAW_FRAME_BYTES
     const byteLength = rawFrame.byteLength
     if (byteLength > maxFrameBytes) return true
@@ -508,13 +489,13 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
     entry.transport.terminateWire(wire)
   }
 
-  /** Returns a `ReconcileOutcome` only on reconcile (so the caller decides when to send
-   *  `reconciled`). Anything but reconcile/ping before reconciliation is a violation. */
+  /** Returns a RECONCILE's or barrier's `ReconcileOutcome` for the caller to send. Before a RECONCILE, a channel frame
+   *  is a violation; PING, PIECES_ACK, PREPARE and BARRIER go through their own checks. */
   private handleFrame(
     entry: WireEntry,
     rawFrame: Uint8Array<ArrayBuffer>,
   ): null | ReconcileOutcome | Promise<ReconcileOutcome | null> {
-    const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
+    const frame = decodeClientFrame(rawFrame, WIRE_MAX_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.PING) {
       const pieces = entry.sender.pieces
       if (pieces)
@@ -628,7 +609,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
       const wsEntry = this.wires.get(probe)
       assert(wsEntry, 'staged probe has no wire entry')
 
-      stage.phase = 'committing'
+      this.stages.commit(probe)
       entry.state.retiredByBarrier = true
       this.moveAwaited(entry, wsEntry, ctrl.open)
       return this.attachBarrier(entry, wsEntry, ctrl, stage.upgradeId)
@@ -693,7 +674,7 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
       const session = this.sessions.removeSession(newSessionId)
       if (session) for (const handle of session.values()) this.detachHandle(handle, reason)
       state.awaited.stop()
-      throw new ProtocolViolationError('connection closed mid-reconcile')
+      throw new ProtocolViolationError('wire closed mid-reconcile')
     }
 
     this.sessionWires.set(newSessionId, wire)
@@ -966,87 +947,6 @@ class ChannelMux implements RegistrationWaitsOwner, WireSenderOwner, UpgradeStag
         transport.terminateWire(wire)
       }, ms),
     )
-  }
-}
-
-/** Forward (`bySession`: sessionId → ix → handle) for per-frame routing; reverse
- *  (`byChannel`: channelId → sessionId → ix) for O(bindings) channel eviction.
- *  Mutations stay atomic across both maps. */
-class SessionRegistry {
-  private readonly bySession = new Map<string, Map<number, ChannelHandle>>()
-  private readonly byChannel = new Map<string, Map<string, number>>()
-
-  get(sessionId: string, ix: number): ChannelHandle | undefined {
-    return this.bySession.get(sessionId)?.get(ix)
-  }
-
-  /** Read without mutating. Used by transient-close handling so the next reconcile's
-   *  prev-comparison can still detect channels the client dropped. */
-  peekSession(sessionId: string): Map<number, ChannelHandle> | undefined {
-    return this.bySession.get(sessionId)
-  }
-
-  /** Replaces the session's channels. An empty session isn't stored: a transient close keeps sessions, and no
-   *  channel's removal would delete an empty one. */
-  setSession(sessionId: string, handles: Iterable<ChannelHandle>): void {
-    this.removeSession(sessionId)
-    for (const h of handles) this.add(sessionId, h)
-  }
-
-  add(sessionId: string, h: ChannelHandle): void {
-    let session = this.bySession.get(sessionId)
-    if (!session) {
-      session = new Map()
-      this.bySession.set(sessionId, session)
-    }
-    session.set(h.ix, h)
-    let bindings = this.byChannel.get(h.channel.id)
-    if (!bindings) {
-      bindings = new Map()
-      this.byChannel.set(h.channel.id, bindings)
-    }
-    bindings.set(sessionId, h.ix)
-  }
-
-  /** Takes the channel at `ix` out of the session and returns it; an emptied session goes, as in `removeChannel`. */
-  remove(sessionId: string, ix: number): ChannelHandle | undefined {
-    const session = this.bySession.get(sessionId)
-    const handle = session?.get(ix)
-    if (session === undefined || handle === undefined) return undefined
-    session.delete(ix)
-    if (session.size === 0) this.bySession.delete(sessionId)
-    const bindings = this.byChannel.get(handle.channel.id)!
-    bindings.delete(sessionId)
-    if (bindings.size === 0) this.byChannel.delete(handle.channel.id)
-    return handle
-  }
-
-  /** Returns the removed session so callers can drive per-handle lifecycle side effects. */
-  removeSession(sessionId: string): Map<number, ChannelHandle> | undefined {
-    const session = this.bySession.get(sessionId)
-    if (!session) return undefined
-    this.bySession.delete(sessionId)
-    for (const handle of session.values()) {
-      const bindings = this.byChannel.get(handle.channel.id)
-      if (!bindings) continue
-      bindings.delete(sessionId)
-      if (bindings.size === 0) this.byChannel.delete(handle.channel.id)
-    }
-    return session
-  }
-
-  removeChannel(channelId: string): void {
-    const bindings = this.byChannel.get(channelId)
-    if (!bindings) return
-    this.byChannel.delete(channelId)
-    for (const [sessionId, ix] of bindings) {
-      const session = this.bySession.get(sessionId)
-      if (!session) continue
-      session.delete(ix)
-      // Last channel gone: drop the session, or it outlives every reconcile that could
-      // ever name it (transient-closed sessions are otherwise only removed by reconcile).
-      if (session.size === 0) this.bySession.delete(sessionId)
-    }
   }
 }
 

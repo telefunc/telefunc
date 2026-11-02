@@ -19,13 +19,9 @@ import { Listeners } from '../../../utils/Listeners.js'
 import { ChannelClosedError, isExpectedChannelFailure } from '../channelErrors.js'
 import { classifyTelefuncError } from '../errorClassification.js'
 import { isPromise } from '../../../utils/isPromise.js'
-import { hasProp } from '../../../utils/hasProp.js'
 import { ClientChannel, reportChannelError, type ClientChannelOptions } from './channel.js'
 
-const CLIENT_BROADCAST_BRAND = Symbol.for('telefunc.ClientBroadcast')
-
 class ClientBroadcast<T = unknown> extends ClientChannel {
-  readonly [CLIENT_BROADCAST_BRAND] = true
   private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
   /** The subscriptions this page asks the server for. */
   private readonly subscribed: BroadcastSubscriptions = { text: false, binary: false }
@@ -34,10 +30,6 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     super(options)
     // Nothing waits on a publish's credit: the window only bounds how far behind the server lets the page fall.
     this.receiveCredit.widenByteWindow()
-  }
-
-  static isClientBroadcast(value: unknown): value is ClientBroadcast {
-    return hasProp(value, CLIENT_BROADCAST_BRAND)
   }
 
   /** @internal Register a local listener without changing what it asks the server for. */

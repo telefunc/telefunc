@@ -10,8 +10,9 @@ import {
   CREDIT_WINDOW_MAX_BYTES,
 } from '../constants.js'
 import type { RoundTrips } from './RoundTrips.js'
-import type { SendWait } from './SendWait.js'
+import type { SendWait } from './SendWaits.js'
 import type { BdpPingAck } from '../wire/frame.js'
+import type { CreditOwner } from './credit.js'
 
 /** Per-axis verdict on a settled probe; `grow` needs the sample to saturate ≥ 2/3 of a window not at cap. */
 type AxisDecision = 'grow' | 'sample-too-small' | 'wire-busy' | 'window-grew' | 'at-cap'
@@ -62,8 +63,8 @@ class BdpEstimator {
   private grewSincePing = false
   /** The ping in flight went out after the byte window grew: its answer covers credit the smaller window granted. */
   private pingFollowsGrowth = false
-  /** Adaptive probe interval: snaps to `MIN` on grow, doubles up to `MAX` on
-   *  non-grow. Slows but never freezes — a real rate change rediscovers. */
+  /** The probe interval, which `pace` sets: the minimum after a grow, kept after `'window-grew'`, doubled up to the
+   *  maximum otherwise. It slows but never stops, so a real rate change is found again. */
   private probeIntervalMs = BDP_PING_MIN_INTERVAL_MS
 
   /** The byte window the estimator sets, which `ReceiveCredit` grants unless it grants more. */
@@ -76,7 +77,7 @@ class BdpEstimator {
     return this.byteWindowCap
   }
 
-  /** Currently advertised message-count window. */
+  /** The message window the estimator sets, which `ReceiveCredit` advertises. */
   get msgWindow(): number {
     return this.currentMsgWindow
   }
@@ -124,10 +125,11 @@ class BdpEstimator {
     this.roundTrips = roundTrips
   }
 
-  /** Settles the ping in flight; `deliveredBefore(ms)`: what the wire delivered from any channel in the `ms` before. */
+  /** Settles the ping in flight. `channel._deliveredBefore(ms)` is what the channel's wire delivered, from any
+   *  channel, in the `ms` before. */
   onPingAck(
     { probe, backlog: senderBacklog, pathRtt: senderPathRtt }: BdpPingAck,
-    deliveredBefore: (ms: number) => number,
+    channel: Pick<CreditOwner, '_deliveredBefore'>,
     sendWait: SendWait | null = null,
   ): GrowDecision {
     if (this.settleAttachProbe(probe)) return NOT_SETTLED
@@ -140,7 +142,7 @@ class BdpEstimator {
     const roundWait = sendWait?.longestWaitSince(this.lastPingAt) ?? 0
     const received = this.bytesReceived - this.bytesAtPingSent
     const starved = senderBacklog * 8 < this.currentByteWindow
-    this.boundRoundTrip(rtt, received, starved, deliveredBefore)
+    this.boundRoundTrip(rtt, received, starved, channel)
     const pathRtt = this.pathRtt(senderPathRtt)
     // A round of credit on a batch-POST wire also waits for its POST.
     const loopRtt = pathRtt + roundWait + (roundTrips?.longestPostWaitSince(this.lastPingAt) ?? 0)
@@ -161,12 +163,12 @@ class BdpEstimator {
     rtt: number,
     received: number,
     starved: boolean,
-    deliveredBefore: (ms: number) => number,
+    channel: Pick<CreditOwner, '_deliveredBefore'>,
   ): void {
     const roundRtt = Math.max(1, rtt - this.pingWait)
     if (this.boundRtt < Infinity && roundRtt < this.boundRtt) this.boundRtt = roundRtt
     // Starved, the wire near idle before the ack: no queue held it, so the round trip less its wait is the path's.
-    if (starved && received * 3 >= this.currentByteWindow * 2 && deliveredBefore(rtt / 8) * 16 < received) {
+    if (starved && received * 3 >= this.currentByteWindow * 2 && channel._deliveredBefore(rtt / 8) * 16 < received) {
       this.boundRtt = roundRtt
     }
   }
@@ -194,7 +196,9 @@ class BdpEstimator {
     return msgSample * 3 < msgWindow * 2 ? 'sample-too-small' : 'grow'
   }
 
-  /** Cadence: snap to MIN on grow (more headroom may exist), exponential backoff on a verdict against growing. */
+  /** Sets the probe interval: back to the minimum after a grow, since more headroom may exist; kept after a
+   *  `'window-grew'` byte decision, whose ping followed the window's growth; doubled, up to the maximum, after any
+   *  other verdict against growing. */
   private pace(bytes: AxisDecision, msgs: AxisDecision): void {
     if (bytes === 'grow' || msgs === 'grow') {
       this.probeIntervalMs = BDP_PING_MIN_INTERVAL_MS
@@ -203,7 +207,7 @@ class BdpEstimator {
     }
   }
 
-  /** Commit a byte-window growth: a doubling, or less as the last settled probe says. Idempotent at the cap. */
+  /** Grows the byte window: doubles it, or less where the last settled probe says so; no change at the cap. */
   growBytes(): void {
     this.currentByteWindow = Math.min(this.byteWindowCap, this.grownWindow || this.currentByteWindow * 2)
     this.grownWindow = 0
@@ -233,7 +237,7 @@ class BdpEstimator {
     this.currentByteWindow = Math.min(this.currentByteWindow, this.byteWindowCap)
   }
 
-  /** Commit a message-window doubling. Idempotent at the cap. */
+  /** Doubles the message window; no change at the cap. */
   growMsgs(): void {
     this.msgWindowBeforeGrowth = this.currentMsgWindow
     this.currentMsgWindow = Math.min(CREDIT_MSG_WINDOW_MAX, this.currentMsgWindow * 2)
@@ -251,8 +255,7 @@ class BdpEstimator {
 
   private pingDue(now: number): boolean {
     if (this.pingInFlight) return false
-    // Skip probe only when *both* axes have already hit their cap — otherwise one of them
-    // might still want to grow.
+    // A probe is skipped only when both windows are at their cap: otherwise one may still grow.
     if (this.currentByteWindow >= this.byteWindowCap && this.currentMsgWindow >= CREDIT_MSG_WINDOW_MAX) return false
     return now - this.lastPingAt >= this.probeIntervalMs
   }

@@ -230,8 +230,8 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void): () => void
   /** The last participant left. */
   onEmpty(callback: () => void): () => void
-  /** The room was closed via `Room.close()` (on the client, also: the connection is gone, or fell further behind the
-   *  room than the server holds for it). */
+  /** The room was closed via `Room.close()` (on the client, also: the connection is gone, or the room sent it more
+   *  while it was offline than the server holds for it). */
   onClose(callback: () => void): () => void
 
   /** Anything observable changed; pairs with `snapshot()`. */
@@ -279,7 +279,7 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
 
   leave(): Promise<void>
   /** You left. `cause.type` says how: `'left'` (you), `'removed'` (kicked, with the kick's `reason`), `'closed'` (the
-   *  room), `'disconnected'` (the connection died, or fell further behind than the server holds for it). */
+   *  room), `'disconnected'` (the connection died, or more was sent to it while offline than the server holds). */
   onLeave(callback: (cause: LeaveCause) => void): () => void
   /** The page holding you can't reach the room; the room keeps you meanwhile. */
   onDisconnect(callback: () => void): () => void

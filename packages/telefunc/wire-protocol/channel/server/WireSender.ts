@@ -6,12 +6,13 @@ import { encode } from '../../wire/frame.js'
 import { TAG, passesData } from '../../wire/tags.js'
 import type { ServerChannel } from './channel.js'
 import type { PeerSender } from './IndexedPeer.js'
-import type { ServerTransport, Wire, WirePieces } from './mux.js'
+import type { ServerTransport, Wire } from './mux.js'
 import type { Deliveries } from '../../flowControl/Deliveries.js'
 import { SocketWait, type SocketWaitOwner } from '../../flowControl/server/SocketWait.js'
-import type { ServerHeadroom } from '../../flowControl/server/headroom.js'
+import { ServerHeadroom } from '../../flowControl/server/headroom.js'
 import { ServerPieceReceiver } from '../../flowControl/server/pieceReceiver.js'
 import type { PieceReceiverOwner } from '../../flowControl/pieces.js'
+import { TransportSocket } from './TransportSocket.js'
 
 /** The mux, which knows the channels on a wire and ends it. */
 interface WireSenderOwner {
@@ -25,11 +26,14 @@ type WireSenderOptions = {
   owner: WireSenderOwner
   wire: Wire
   transport: ServerTransport<unknown>
-  /** The headroom of a wire that takes pieces (a WebSocket), else null. */
-  pieceHeadroom: ServerHeadroom | null
+  /** The wire's ping interval, which sizes the frames its headroom sends whole. */
+  pingInterval: number
   /** What the wire delivered. */
   deliveries: Deliveries
 }
+
+/** A wire's headroom and the receiver that acknowledges what the wire took, on a wire that takes pieces. */
+type WirePieces = { headroom: ServerHeadroom; receiver: ServerPieceReceiver }
 
 /** Sends a wire's frames in call order, and terminates the wire once its backlog passes what its channels allow; the
  *  peers of its channels send through it, and once the wire closed it drops what they send. */
@@ -37,7 +41,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   private readonly owner: WireSenderOwner
   private readonly wire: Wire
   private readonly transport: ServerTransport<unknown>
-  /** Its headroom and the receiver that acknowledges what the wire took, on a wire that takes pieces. */
+  /** Null on a wire that doesn't take pieces (SSE). */
   readonly pieces: WirePieces | null
   /** How long the frames that go at once wait behind what the socket holds. */
   private readonly wait = new SocketWait({ owner: this })
@@ -53,11 +57,16 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   /** The RECONCILE's probes its RECONCILED hasn't answered: a frame ahead of it goes behind their BDP_PING_ACKs. */
   private probed: { ix: number; probe: number }[] = []
 
-  constructor({ owner, wire, transport, pieceHeadroom, deliveries }: WireSenderOptions) {
+  constructor({ owner, wire, transport, pingInterval, deliveries }: WireSenderOptions) {
     this.owner = owner
     this.wire = wire
     this.transport = transport
-    this.pieces = pieceHeadroom && { headroom: pieceHeadroom, receiver: new ServerPieceReceiver({ owner: this }) }
+    this.pieces = transport.wholeMessages
+      ? {
+          headroom: new ServerHeadroom({ socket: new TransportSocket({ transport, wire }), pingInterval }),
+          receiver: new ServerPieceReceiver({ owner: this }),
+        }
+      : null
     this.deliveries = deliveries
   }
 
@@ -99,7 +108,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
     return this.wait
   }
 
-  deliveredBeforeFrame(ms: number): number {
+  deliveredBefore(ms: number): number {
     return this.closed ? 0 : this.deliveries.beforeHandled(ms)
   }
 
@@ -107,8 +116,10 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
     this.owner.terminateWire(this.wire)
   }
 
+  /** The wire closed: drops what is sent from now on, and stops its headroom. */
   close(): void {
     this.closed = true
+    this.pieces?.headroom.close()
   }
 
   /** Answers the probe ahead of the next frame, unless the RECONCILED goes first. */

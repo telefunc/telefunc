@@ -11,7 +11,7 @@ import {
   startProxy,
   countConnections,
 } from '../../e2e-utils'
-import { newCDPSession, withNetworkConditions } from '../../../utils'
+import { newCDPSession, sendsAheadWarning, withNetworkConditions } from '../../../utils'
 
 type ChannelState = {
   connected: boolean
@@ -50,6 +50,8 @@ type ChannelState = {
   pendingAckAbortChannelId: string | null
   clientAbortThenSendErr: string | null
   clientPendingAckCloseErr: string | null
+  peerShorterCloseChannelId: string | null
+  longerCloseAfterPeerMs: number | null
   clientPendingAckCloseReconnectChannelId: string | null
   clientPendingAckCloseReconnectOnOpenFired: boolean | null
   clientPendingAckCloseReconnectErr: string | null
@@ -82,7 +84,8 @@ type ChannelState = {
   endedValuesReady: boolean
   endedValuesCollected: boolean[] | null
   slowLinkReceived: number | null
-  unawaitedBurst: { rejected: Record<string, number>; received: number; isClosed: boolean } | null
+  unawaitedBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
+  textBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
   openBurstReceived: number | null
   freshBinaryEchoed: number | null
   helloBesideBurst: boolean
@@ -753,6 +756,28 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
+  test("channel: a close() the page makes within 1 s cuts short the server's close() waiting up to 60 s on an ack", async () => {
+    await page.click('#channel-test-peer-shorter-close')
+    let channelId: string | null = null
+    await autoRetry(async () => {
+      channelId = (await getResult<ChannelState>('#channel-state')).peerShorterCloseChannelId
+      expect(channelId).not.toBe(null)
+    })
+    await autoRetry(async () => {
+      const ss = await getCleanupState()
+      expect(Number(ss[`peerShorterClose_${channelId}_closeMs`])).lessThan(10_000)
+      expect(ss[`peerShorterClose_${channelId}_onCloseErr`]).toBe('Channel close timed out')
+    })
+  })
+
+  test("channel: a close() the page makes within 60 s after the server's close() within 1 s ends by the server's deadline", async () => {
+    await page.click('#channel-test-longer-close-after-peer')
+    await autoRetry(async () => {
+      const { longerCloseAfterPeerMs } = await getResult<ChannelState>('#channel-state')
+      expect(longerCloseAfterPeerMs).lessThan(10_000)
+    })
+  })
+
   // ── No listener ack rejection ───────────────────────────────────────
 
   test('channel: no listener ack (server→client) — server send({ ack: true }) rejects when client has no listener', async () => {
@@ -951,23 +976,73 @@ function testChannel(isDev: boolean, inDocker = false) {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-unawaited-burst-32')
     await autoRetry(async () => {
-      expect((await getResult<ChannelState>('#channel-state')).unawaitedBurst).deep.equal({
-        rejected: {},
-        received: 32,
-        isClosed: false,
-      })
+      const burst = (await getResult<ChannelState>('#channel-state')).unawaitedBurst!
+      expect(burst.received).toBe(32)
+      expect(burst.inOrder).toBe(true)
+      expect(burst.closeErr).toBe(null)
     })
   })
 
-  test('channel: a burst of 100 MiB the server sends without awaiting rejects what is past what the page may be behind with ChannelOverflowError, and the page gets the rest', async () => {
+  test('channel: a burst of 200 MiB the server sends without awaiting all reaches the page, with a warning', async () => {
     await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-unawaited-burst-100')
-    await autoRetry(async () => {
-      const burst = (await getResult<ChannelState>('#channel-state')).unawaitedBurst!
-      expect(Object.keys(burst.rejected)).deep.equal(['ChannelOverflowError'])
-      expect(burst.received + burst.rejected.ChannelOverflowError!).toBe(100)
-      expect(burst.isClosed).toBe(false)
-    })
+    await page.click('#channel-test-unawaited-burst-200')
+    await autoRetry(
+      async () => {
+        const burst = (await getResult<ChannelState>('#channel-state')).unawaitedBurst!
+        expect(burst.received).toBe(200)
+        expect(burst.inOrder).toBe(true)
+        expect(burst.closeErr).toBe(null)
+        expectLog(sendsAheadWarning)
+      },
+      { timeout: 60_000 },
+    )
+  })
+
+  test('channel: 6,000 text messages of 16 KiB the server sends in one loop without awaiting all reach a page that reads, with a warning', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-text-burst-unawaited-6000')
+    await autoRetry(
+      async () => {
+        const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
+        expect(burst.received).toBe(6000)
+        expect(burst.inOrder).toBe(true)
+        expect(burst.closeErr).toBe(null)
+        expectLog(sendsAheadWarning)
+      },
+      { timeout: 30_000 },
+    )
+  })
+
+  test('channel: the same 6,000 text messages, each send awaited, all reach the page with no warning', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-text-burst-awaited-6000')
+    await autoRetry(
+      async () => {
+        const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
+        expect(burst.received).toBe(6000)
+        expect(burst.inOrder).toBe(true)
+        expect(burst.closeErr).toBe(null)
+      },
+      { timeout: 30_000 },
+    )
+    expect(() => expectLog(sendsAheadWarning)).throw()
+  })
+
+  test('channel: 200 MiB of text messages the server sends in one loop with { ack: true }, awaiting the acks together, all reach the page and all resolve, with a warning', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-text-burst-acks-12800')
+    await autoRetry(
+      async () => {
+        const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
+        expect(burst.received).toBe(12800)
+        expect(burst.inOrder).toBe(true)
+        expect(burst.closeErr).toBe(null)
+        const ss = await getCleanupState()
+        expect(ss[`textBurst_${burst.channelId}_acked`]).toBe('12800')
+        expectLog(sendsAheadWarning)
+      },
+      { timeout: 60_000 },
+    )
   })
 
   if (channelTransport === 'ws') {

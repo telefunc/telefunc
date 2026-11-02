@@ -19,14 +19,16 @@ type ServerHeadroomOptions = Pick<PieceSenderOptions, 'socket' | 'pingInterval'>
 
 /** The path to the page holds what `headroom` allows; the rest waits whole in its sender. */
 class ServerHeadroom implements PieceSenderOwner {
-  /** Every frame the WebSocket carries goes through it. */
+  /** Sends every frame the WebSocket carries. */
   readonly sender: PieceSender
   private readonly socket: PieceSocket
   /** The rate the page takes data at. */
   private readonly drain = new DrainRate()
-  /** In ms, the page's clock from the first data an acknowledgement covered. */
+  /** When the newest acknowledged data arrived, in ms on the page's clock, counted from the first data an
+   *  acknowledgement covered. */
   private arrivedAt = 0
-  /** In ms, the least time an acknowledgement took back, up to the clocks' offset. */
+  /** The shortest time, in ms, an acknowledgement took to come back, up to the clocks' offset: one that waited behind
+   *  no queue on the path. */
   private leastBack = Number.POSITIVE_INFINITY
   /** The least time from data handed to the acknowledgement that covered it, `Infinity` before one. */
   private leastRtt = Number.POSITIVE_INFINITY
@@ -83,7 +85,7 @@ class ServerHeadroom implements PieceSenderOwner {
     if (acknowledges(bytes)) this.sent.push({ end, at: now })
   }
 
-  /** Takes a PIECES_ACK (see `PieceSender.acknowledged`), and sends what it made headroom for. */
+  /** Takes a PIECES_ACK (see `PieceSender.acknowledged`), then sends what the freed headroom allows. */
   acknowledged(ack: PiecesAck): boolean {
     const before = this.sender.acknowledgedBytes
     if (!this.sender.acknowledged(ack)) return false
@@ -110,7 +112,7 @@ class ServerHeadroom implements PieceSenderOwner {
     return true
   }
 
-  /** Its socket closed. */
+  /** The socket closed: pacing stops, and nothing more is handed to it. */
   close(): void {
     if (this.paceTimer !== null) clearTimeout(this.paceTimer)
     this.paceTimer = null

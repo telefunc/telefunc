@@ -14,6 +14,8 @@ interface CreditOwner {
   _sendBdpPing(probe: number): void
   /** Bytes waiting to go out on the channel's wire, `undefined` where the runtime can't tell. */
   _backlogBytes(): number | undefined
+  /** The bytes the channel's wire delivered in the `ms` before the frame being handled arrived. */
+  _deliveredBefore(ms: number): number
 }
 
 /** The largest window a sender whose replay queues hold `text` and `binary` bytes gets: what it holds in flight fits. */

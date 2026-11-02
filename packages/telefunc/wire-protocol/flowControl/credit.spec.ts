@@ -12,10 +12,8 @@ afterEach(() => vi.useRealTimers())
 /** What the wire delivered before an ack: right up to it, as a queue does. */
 const upToAck = () => Infinity
 
-// The async `_waitForGates` re-check loop adds a couple of microtask hops
-// between a waiter-drain and the outer `decrement` Promise resolving. Tests
-// that observe post-drain resolution must flush enough microtasks to settle
-// the chain — `Promise.resolve()` once isn't enough.
+// Lets the credit's pending microtasks settle before the next assertion: a released waiter reaches the
+// `decrement` promise through more than one hop, so one `Promise.resolve()` isn't enough.
 async function flushMicrotasks(): Promise<void> {
   for (let i = 0; i < 6; i++) await Promise.resolve()
 }
@@ -47,6 +45,7 @@ function makeEmit(): Emit {
       e.probe = probe
     },
     _backlogBytes: () => 0,
+    _deliveredBefore: upToAck,
   }
   return e
 }
@@ -80,9 +79,8 @@ describe('SendCredit', () => {
     expect(flow.send.decrement(1024)).toBeUndefined()
   })
 
-  // When the decrement zeroes-or-crosses-below credit, decrement returns a
-  // Promise → caller's next `await` blocks until the peer's WINDOW arrives.
-  // The gate is `_peerWindow > 0`, so exactly draining to 0 also blocks.
+  // Once a send uses up the credit, `decrement` returns a Promise, so the caller's next `await` waits for the peer's
+  // WINDOW. The gate is `isOutOfCredit`: using up exactly the last byte blocks too.
   it('decrement returns a Promise once credit is depleted', () => {
     const { flow } = makeFlow()
     expect(flow.send.decrement(CREDIT_WINDOW_INITIAL_BYTES - 1)).toBeUndefined()
@@ -128,7 +126,7 @@ describe('ReceiveCredit — consumption (byte axis)', () => {
     const { flow, emit } = makeFlow()
     flow.receive.onReceived(1)
     flow.receive.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
-    flow.receive.onPingAck({ probe: emit.probe, backlog: 0, pathRtt: Infinity }, upToAck)
+    flow.receive.onPingAck({ probe: emit.probe, backlog: 0, pathRtt: Infinity })
     expect(flow.receive.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES * 2)
     // BDP growth itself emits a WINDOW with the new value; reset the spy so the
     // consumption assertions below are clean.
@@ -149,7 +147,7 @@ describe('ReceiveCredit — BDP integration', () => {
   const cycle = ({ flow, emit }: { flow: Flow; emit: Emit }, sampleBytes: number) => {
     flow.receive.onReceived(1)
     flow.receive.onReceived(sampleBytes)
-    flow.receive.onPingAck({ probe: emit.probe, backlog: 0, pathRtt: Infinity }, upToAck)
+    flow.receive.onPingAck({ probe: emit.probe, backlog: 0, pathRtt: Infinity })
   }
 
   it('emits BDP_PING on the first onReceived', () => {

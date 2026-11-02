@@ -2,7 +2,7 @@ export { SocketWait }
 export type { SocketWaitOwner }
 
 import { DRAIN_SPAN_MS, DrainRate } from '../DrainRate.js'
-import { SendWaits, type SendWait } from '../SendWait.js'
+import { SendWaits, type SendWait } from '../SendWaits.js'
 
 interface SocketWaitOwner {
   /** All the wire holds, which drains as the frames it is handed arrive. */
