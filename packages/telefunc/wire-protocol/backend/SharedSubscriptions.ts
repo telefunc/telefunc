@@ -87,7 +87,7 @@ class SharedSubscriptions<Source> {
   }
 
   /** False on the fast path, read before a send builds anything: no attempt establishes and no send waits. */
-  get establishing(): boolean {
+  get sendsMayWait(): boolean {
     return this.establishingSlots.size > 0 || this.waits.size > 0
   }
 
@@ -246,7 +246,7 @@ class SubscriptionSlot<Source> implements BackendReceiver {
    *  it started with. */
   private snapshot: readonly Consumer[] | null = null
   private current: AttemptState = 'establishing'
-  private readiness: Deferred<void> = createReadiness()
+  private latestReadiness: Deferred<void> = createReadiness()
   private attempt: DriverAttempt | null = null
   private unobserve: (() => void) | null = null
   /** What the attempt delivered before its first `ready`; null from then on, as a message after a loss goes out as it
@@ -278,8 +278,8 @@ class SubscriptionSlot<Source> implements BackendReceiver {
   }
 
   /** Settles when the current establishment does. */
-  get established(): Promise<void> {
-    return this.readiness.promise
+  get readiness(): Promise<void> {
+    return this.latestReadiness.promise
   }
 
   attach(listener: BackendListener): BackendSubscription {
@@ -301,7 +301,7 @@ class SubscriptionSlot<Source> implements BackendReceiver {
     if (this.finished) return Promise.resolve()
     const attempt = this.attempt
     this.finish()
-    this.readiness.resolve()
+    this.latestReadiness.resolve()
     this.enter('closed')
     return attempt === null ? Promise.resolve() : this.owner.releaseAttempt(attempt)
   }
@@ -336,16 +336,16 @@ class SubscriptionSlot<Source> implements BackendReceiver {
 
   private attemptChanged(state: Exclude<AttemptState, 'establishing'>, reason: Error | undefined): void {
     if (this.finished) return
-    if (state === 'ready') return this.ready()
+    if (state === 'ready') return this.becameReady()
     if (state === 'lost') return this.lost()
     this.close(reason)
   }
 
-  private ready(): void {
+  private becameReady(): void {
     if (this.current === 'ready') return
     this.wasReady = true
     this.firstReadiness.resolve()
-    this.readiness.resolve()
+    this.latestReadiness.resolve()
     this.enter('ready')
     const early = this.early
     if (early === null) return
@@ -365,7 +365,7 @@ class SubscriptionSlot<Source> implements BackendReceiver {
 
   private lost(): void {
     if (this.current === 'lost') return
-    if (this.current === 'ready') this.readiness = createReadiness()
+    if (this.current === 'ready') this.latestReadiness = createReadiness()
     this.enter('lost')
   }
 
@@ -375,10 +375,10 @@ class SubscriptionSlot<Source> implements BackendReceiver {
     const failure = new Error(`Backend subscription closed: ${this.key}`, reason === undefined ? {} : { cause: reason })
     this.finish()
     // A resolved readiness can't carry the failure, so `ready` read from here on is a fresh, rejected one.
-    if (this.current === 'ready') this.readiness = createReadiness()
+    if (this.current === 'ready') this.latestReadiness = createReadiness()
     this.enter('closed')
-    this.readiness.reject(failure)
-    if (reason !== undefined) void this.readiness.promise.catch(reportBug)
+    this.latestReadiness.reject(failure)
+    if (reason !== undefined) void this.latestReadiness.promise.catch(reportBug)
   }
 
   /** A consumer sees `ready` before any message, so a driver needn't order its acknowledgment before what it delivers:
@@ -437,7 +437,7 @@ class Consumer implements BackendSubscription {
   }
 
   get ready(): Promise<void> {
-    return this.attached ? this.slot.established : Promise.resolve()
+    return this.attached ? this.slot.readiness : Promise.resolve()
   }
 
   state(): AttemptState {

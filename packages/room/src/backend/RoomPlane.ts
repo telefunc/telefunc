@@ -65,7 +65,7 @@ class RoomPlane {
 
   commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
     // A close commits under its lease, which would lapse before the wait ends.
-    if (!this.subscriptions.establishing || opts?.closingLease !== undefined)
+    if (!this.subscriptions.sendsMayWait || opts?.closingLease !== undefined)
       return this.commitNow(target, payload, opts)
     return this.commitInTurn(target, payload, opts)
   }

@@ -40,7 +40,7 @@ class BroadcastPlane {
     route: BroadcastRoute<Kind>,
     payload: BroadcastPayload<Kind>,
   ): ChannelPublishAck | Promise<ChannelPublishAck> {
-    return this.subscriptions.establishing ? this.publishInTurn(route, payload) : this.publishNow(route, payload)
+    return this.subscriptions.sendsMayWait ? this.publishInTurn(route, payload) : this.publishNow(route, payload)
   }
 
   subscribe<Kind extends BroadcastKind>(

@@ -44,8 +44,8 @@ type SubscriptionDriver<Source> = {
    *  usage error outside one. */
   hostKey?(): string
   /** True where a publish can reach the store before the subscribe this host made just before it (Redis: PUBLISH and
-   *  SUBSCRIBE go by two connections). Core then makes a publish wait while one of its host's attempts on the publish's
-   *  source is establishing, at most 60 s. Absent, a publish never waits. */
+   *  SUBSCRIBE go by two connections). Core makes a publish or commit wait while an attempt on its source establishes,
+   *  bounded in time and bytes. Absent, a send never waits. */
   readonly publishOvertakesSubscribe?: boolean
 }
 
