@@ -79,6 +79,10 @@ export const DEFAULT_SERVER_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRA
 /** How long to wait for a WebSocket probe ping/pong before giving up on the upgrade. */
 export const WS_PROBE_TIMEOUT_MS = 3_000
 
+/** The close code of a WebSocket its page closes for good. Not 1000 or 1001: a proxy that restarts closes its sockets
+ *  with 1001, as a browser does for a page that unloads, and the page will come back. */
+export const WS_CLOSE_PAGE_LEFT = 4000
+
 /** How long to wait for the stream-request POST handshake ack on the SSE downstream
  *  before declaring the upstream wire dead and falling back to outbox+batch POSTs. */
 export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
@@ -193,7 +197,7 @@ export const WIRE_ANNOUNCED_WAIT_MARGIN = 2
 export const WIRE_PIECE_RATE_WINDOW_MS = 60_000
 /** A receiver sends at most one PIECES_ACK this often, covering every frame it took since the last. */
 export const WIRE_PIECES_ACK_GAP_MS = 50
-/** The same where its peer holds data back by what it acknowledges (see `flowControl/client/headroom.ts`). */
+/** The same where its peer holds data back by what it acknowledges (see `flowControl/client/ClientHeadroom.ts`). */
 export const WIRE_SEND_ACK_GAP_MS = 10
 /** Where its peer holds data back, a receiver acks data this soon once `WIRE_SEND_ACK_MIN_BYTES` wait, not 16 KiB. */
 export const WIRE_SEND_ACK_MS = 25
@@ -249,10 +253,11 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 //                             deadlocks (server with depleted credit could otherwise
 //                             never reply to a client that's waiting for that reply
 //                             to free credit).
-//   PUBLISH, PUBLISH_BINARY   a BroadcastChannel's or an extension's fan-out: counted in
-//                             bytes only, taking no message credit and starting no
-//                             BDP probe, against the largest byte window the page
-//                             grants, from the start. Nothing waits on them.
+//   PUBLISH, PUBLISH_BINARY   a BroadcastChannel's or an extension's fan-out: nothing waits
+//                             on them, so the server counts no credit for them. The page
+//                             counts them in bytes only, taking no message credit and
+//                             starting no BDP probe, against the largest byte window from
+//                             the start.
 //
 // Window semantics: `WINDOW` and `MSG_WINDOW` advertise cumulative limits, as QUIC's MAX_DATA does.
 //

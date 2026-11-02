@@ -13,7 +13,7 @@ import type {
   ChannelPublishInfo,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
-import { reportBug } from './channel.js'
+import { reportBug } from './ServerChannel.js'
 import { ServerBroadcastEnd, type BroadcastEndOwner } from './ServerBroadcastEnd.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'

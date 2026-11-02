@@ -8,7 +8,7 @@ import { DurableObject, env as workerEnv } from 'cloudflare:workers'
 import '../node/server/async_hooks.js'
 import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
-import { ChannelMux } from '../wire-protocol/channel/server/mux.js'
+import { ChannelMux } from '../wire-protocol/channel/server/ChannelMux.js'
 import { getServerConfig, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import { installBackend } from '../wire-protocol/backend/install.js'
@@ -31,7 +31,7 @@ import {
   readForwardedTarget,
   resolveSessionRoutingTarget,
 } from '../wire-protocol/adapter/cloudflare/routing.js'
-import { SessionPins, readSessionPin } from '../wire-protocol/adapter/cloudflare/sessionPin.js'
+import { SessionPins, readSessionPin } from '../wire-protocol/adapter/cloudflare/SessionPins.js'
 import { assert, assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale } from '../wire-protocol/adapter/cloudflare/routing.js'

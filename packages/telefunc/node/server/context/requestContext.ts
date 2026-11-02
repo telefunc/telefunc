@@ -4,7 +4,7 @@ export type { RequestContext, ResponseAbortSource }
 
 import { Abort } from '../Abort.js'
 import type { AbortError } from '../Abort.js'
-import { reportBug } from '../../../wire-protocol/channel/server/channel.js'
+import { reportBug } from '../../../wire-protocol/channel/server/ServerChannel.js'
 import { invokeChannelListener } from '../../../wire-protocol/channel/channel.js'
 
 const REQUEST_CONTEXT: unique symbol = Symbol.for('telefunc.requestContext')

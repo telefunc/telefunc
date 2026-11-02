@@ -3,7 +3,7 @@ export type { CloudflareSession }
 
 import { getRawContext, restoreContext } from '../../../node/server/context/context.js'
 import { assertUsage } from '../../../utils/assert.js'
-import { CHANNEL_MUX, type ChannelMux } from '../../channel/server/mux.js'
+import { CHANNEL_MUX, type ChannelMux } from '../../channel/server/ChannelMux.js'
 import type { CloudflareBroadcastMember } from './broadcast.js'
 
 /** What a session DO lends the code it runs: its Broadcast membership and its channels, both of which end with this

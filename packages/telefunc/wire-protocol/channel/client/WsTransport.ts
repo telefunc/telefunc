@@ -1,16 +1,22 @@
 export { WsTransport }
 
 import { assert } from '../../../utils/assert.js'
-import { CHANNEL_PING_INTERVAL_MIN_MS, CHANNEL_TRANSPORT, WS_PROBE_TIMEOUT_MS } from '../../constants.js'
+import {
+  CHANNEL_PING_INTERVAL_MIN_MS,
+  CHANNEL_TRANSPORT,
+  WS_CLOSE_PAGE_LEFT,
+  WS_PROBE_TIMEOUT_MS,
+} from '../../constants.js'
 import { PieceSender } from '../../flowControl/pieces.js'
-import { ClientHeadroom, type ClientHeadroomOwner } from '../../flowControl/client/headroom.js'
-import { ClientPieceReceiver } from '../../flowControl/client/pieceReceiver.js'
+import { ClientHeadroom, type ClientHeadroomOwner } from '../../flowControl/client/ClientHeadroom.js'
+import { ClientPieceReceiver } from '../../flowControl/client/ClientPieceReceiver.js'
 import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
 import { decode, encode, isOneFrame, messageFrames, withTook, type DecodedFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
-import type { OutboundFrame, TransportOwner } from './connection.js'
+import type { OutboundFrame } from './ClientConnection.js'
+import type { TransportOwner } from './WireLifecycle.js'
 import type { ProbeOwner, ProbeWire, UpgradeTarget } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 
@@ -54,6 +60,18 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     const url = new URL(telefuncUrl, base)
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
     this.wsUrl = url.href
+    // React Native has a `window` without `addEventListener`.
+    globalThis.addEventListener?.('pagehide', this.onPageHide)
+  }
+
+  /** A page that leaves for good says so in its sockets' close code; one kept in the back/forward cache keeps them. */
+  private readonly onPageHide = (event: PageTransitionEvent): void => {
+    if (event.persisted) return
+    for (const ws of [this.ws, this.probed?.ws]) {
+      try {
+        ws?.close(WS_CLOSE_PAGE_LEFT)
+      } catch {}
+    }
   }
 
   async probe(owner: ProbeOwner): Promise<ProbeWire | null> {
@@ -337,6 +355,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   }
 
   dispose(): void {
+    globalThis.removeEventListener?.('pagehide', this.onPageHide)
     this.connecting = false
     // A socket sends what it was handed before its close.
     this.probed?.pieces.sender.flush()
@@ -348,7 +367,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     if (wsProbed) {
       wsProbed.onopen = wsProbed.onmessage = wsProbed.onerror = wsProbed.onclose = null
       try {
-        wsProbed.close(1000)
+        wsProbed.close(WS_CLOSE_PAGE_LEFT)
       } catch {}
     }
     const ws = this.ws
@@ -356,7 +375,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     if (ws) {
       ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null
       try {
-        ws.close(1000)
+        ws.close(WS_CLOSE_PAGE_LEFT)
       } catch {}
     }
     this.closeAbandonedTransport()

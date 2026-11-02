@@ -12,13 +12,13 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { encode, type ChannelDataFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
-import type { BroadcastKind, BroadcastSubscriptions, AttachState } from '../../wire/payloads.js'
+import type { BroadcastKind, BroadcastSubscriptions } from '../../wire/payloads.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ChannelClosedError, isExpectedChannelFailure } from '../channelErrors.js'
 import { classifyTelefuncError } from '../errorClassification.js'
 import { isPromise } from '../../../utils/isPromise.js'
-import { ClientChannel, reportChannelError, type ClientChannelOptions } from './channel.js'
+import { ClientChannel, reportChannelError, type ClientChannelOptions } from './ClientChannel.js'
 
 class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
@@ -27,8 +27,9 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   constructor(options: ClientChannelOptions) {
     super(options)
-    // Nothing waits on a publish's credit: the window only bounds how far behind the server lets the page fall.
+    // Nothing waits on a publish's credit, so the page grants the largest window from the start.
     this.receiveCredit.widenByteWindow()
+    this._attach.declareSubscriptions(this.subscribed)
   }
 
   /** @internal Register a local listener without changing what it asks the server for. */
@@ -57,11 +58,6 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this.subscribed[kind] = on
     if (on) this.connection.sendBroadcastSubscribe(this, kind === 'binary')
     else this.connection.sendBroadcastUnsubscribe(this, kind === 'binary')
-  }
-
-  /** @internal Declares the subscriptions on every (re)attach: a SUB or UNSUB written to a dead wire isn't replayed. */
-  override _attachState(): AttachState {
-    return { broadcast: this.subscribed }
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
@@ -105,21 +101,20 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private sendReplyData(data: unknown): void {
     this.sendCredit.countSent(this.connection.sendSequenced(this, 'data', encode.text, stringify(data)))
   }
-
   protected override dispatchDataFrame(frame: ChannelDataFrame): void {
     if (frame.tag === TAG.PUBLISH) {
-      this._onPeerPublish(frame.text, frame.info, frame.bytes)
+      this.onPeerPublish(frame.text, frame.info, frame.bytes)
       return
     }
     if (frame.tag === TAG.PUBLISH_BINARY) {
-      this._onPeerPublishBinary(frame.data as Uint8Array<ArrayBuffer>, frame.info, frame.bytes)
+      this.onPeerPublishBinary(frame.data as Uint8Array<ArrayBuffer>, frame.info, frame.bytes)
       return
     }
     super.dispatchDataFrame(frame)
   }
 
   /** A publish counts in bytes, consumed once the listeners ran, so the server sees how far behind the page is. */
-  _onPeerPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
+  private onPeerPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
     const parsed = parse(data) as ChannelData<T>
     const info = { key: this.key!, seq: wireInfo.seq, timestamp: wireInfo.timestamp }
@@ -134,7 +129,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this.receiveCredit.onPublishConsumed(bytes)
   }
 
-  _onPeerPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
+  private onPeerPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
     const info = { key: this.key!, seq: wireInfo.seq, timestamp: wireInfo.timestamp }
     for (const cb of this.subscribers.binary.list()) {

@@ -410,24 +410,33 @@ class PieceSender {
     }
     this.acknowledgedAt = performance.now()
     const arrived = this.acknowledgedAt - heldMs
+    this.sampleAnnouncements(arrived)
+    this.sampleSent(arrived)
+    if (probe !== null && this.acknowledgedBytes >= probe.end) this.probe = null
+    return true
+  }
+
+  /** Raises the floor from the announcements an ack that arrived at `arrived` covers, and drops them. */
+  private sampleAnnouncements(arrived: number): void {
     const oldest = this.announcements.peek()
-    if (oldest !== undefined && oldest.end <= this.acknowledgedBytes) {
-      let end = oldest.end
-      while (this.announcements.length > 0 && this.announcements.peek()!.end <= this.acknowledgedBytes) {
-        end = this.announcements.shift()!.end
-      }
-      // The acknowledged announcements went no earlier than the oldest opened and arrived by `arrived`, so this rate
-      // is at most the link's.
-      this.raiseFloor((end - oldest.start) / Math.max(arrived - oldest.at, WIRE_PROBE_CLOCK_MS))
+    if (oldest === undefined || oldest.end > this.acknowledgedBytes) return
+    let end = oldest.end
+    while (this.announcements.length > 0 && this.announcements.peek()!.end <= this.acknowledgedBytes) {
+      end = this.announcements.shift()!.end
     }
+    // The acknowledged announcements went no earlier than the oldest opened and arrived by `arrived`, so this rate
+    // is at most the link's.
+    this.raiseFloor((end - oldest.start) / Math.max(arrived - oldest.at, WIRE_PROBE_CLOCK_MS))
+  }
+
+  /** Samples the rate of each sent piece an ack that arrived at `arrived` covers, and drops them. */
+  private sampleSent(arrived: number): void {
     while (this.unacknowledged.length > 0 && this.unacknowledged.peek()!.end <= this.acknowledgedBytes) {
       const sent = this.unacknowledged.shift()!
       // A sample within one tick of a coarse clock says nothing, except a probe's: being small, it crossed in one.
       if (sent.probe) this.rise(sent.crossing / Math.max(arrived - sent.at, WIRE_PROBE_CLOCK_MS), arrived)
       else if (arrived > sent.at) this.rise(sent.crossing / (arrived - sent.at), arrived)
     }
-    if (probe !== null && this.acknowledgedBytes >= probe.end) this.probe = null
-    return true
   }
 
   /** Takes a PING or PONG that arrived at `at`, saying the receiver took `bytes`; false if more than was sent. */

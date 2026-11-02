@@ -63,16 +63,6 @@ class SendCredit {
     if (!this.limitRaised) this.limitBytes = Math.min(CREDIT_WINDOW_INITIAL_BYTES, this.peerByteWindowCap)
   }
 
-  /** Its peer grants the largest window from the start: the limit is that window, at once. */
-  takePeerWindowMax(): void {
-    this.onPeerByteWindow(this.peerByteWindowCap)
-  }
-
-  /** No byte credit is left. */
-  get isPastByteCredit(): boolean {
-    return this.limitBytes - this.sentBytes <= 0
-  }
-
   /** Bytes sent past the byte limit and still past it, but the one frame that crossed it with credit. */
   get bytesSentPastCredit(): number {
     return Math.max(0, this.sentBytes - Math.max(this.limitBytes, this.sentWithCredit))
@@ -97,7 +87,9 @@ class SendCredit {
 
   /** Count a frame that went out without a credit gate, one buffered while no peer was attached. */
   countSent(bytes: number): void {
-    this.countSentBytes(bytes)
+    const hadCredit = this.limitBytes > this.sentBytes
+    this.sentBytes += bytes
+    if (hadCredit) this.sentWithCredit = this.sentBytes
     this.sentMessages += 1
   }
 
@@ -127,25 +119,14 @@ class SendCredit {
     return backlog
   }
 
-  /** Counts a broadcast's publish, in bytes only, which nothing waits on. */
-  countPublishSent(bytes: number): void {
-    this.countSentBytes(bytes)
-  }
-
   shutdown(): void {
     this.isShutdown = true
     this.tryWakeCreditWaiters()
   }
 
-  private countSentBytes(bytes: number): void {
-    const hadCredit = !this.isPastByteCredit
-    this.sentBytes += bytes
-    if (hadCredit) this.sentWithCredit = this.sentBytes
-  }
-
   private noteBacklog(): void {
     if (this.leastBacklog === 0 || !this.isOutOfCredit()) return
-    this.leastBacklog = Math.min(this.leastBacklog, this.owner._backlogBytes() ?? 0)
+    this.leastBacklog = Math.min(this.leastBacklog, this.owner.backlogBytes() ?? 0)
   }
 
   private isOutOfCredit(): boolean {

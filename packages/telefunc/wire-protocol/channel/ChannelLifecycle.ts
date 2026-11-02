@@ -12,17 +12,19 @@ interface ChannelLifecycleOwner {
   _end(err?: Error): void
   /** A callback threw `Abort`. */
   _abortFromCallback(err: AbortError): void
-  _reportCallbackError(err: unknown): void
 }
 
 type ChannelLifecycleOptions = {
   owner: ChannelLifecycleOwner
+  /** Reports what a callback throws or rejects with, other than `Abort`. */
+  reportError: (err: unknown) => void
 }
 
 /** A channel end's open, disconnect, reconnect and close callbacks, and its close handshake: the onClose callbacks run
  *  once its CLOSE is acknowledged and no ack is in flight, and it ends once they settled, or at the deadline. */
 class ChannelLifecycle {
   private readonly owner: ChannelLifecycleOwner
+  private readonly reportError: (err: unknown) => void
   private openCallbacks: Array<() => void> = []
   private didFireOpen = false
   private disconnectCallbacks: Array<() => void> = []
@@ -45,8 +47,9 @@ class ChannelLifecycle {
   private run: Promise<ChannelCloseResult> | null = null
   private closePromise: Promise<ChannelCloseResult> | null = null
 
-  constructor({ owner }: ChannelLifecycleOptions) {
+  constructor({ owner, reportError }: ChannelLifecycleOptions) {
     this.owner = owner
+    this.reportError = reportError
   }
 
   /** It opened, and its peer hasn't gone away since, nor has it closed. */
@@ -125,7 +128,7 @@ class ChannelLifecycle {
       this.owner._abortFromCallback(err)
       return true
     }
-    this.owner._reportCallbackError(err)
+    this.reportError(err)
     return false
   }
 
@@ -270,9 +273,9 @@ class ChannelLifecycle {
     try {
       const pending = callback(err)
       if (!isPromise(pending)) return undefined
-      return pending.catch((e: unknown) => this.owner._reportCallbackError(e))
+      return pending.catch((e: unknown) => this.reportError(e))
     } catch (callbackErr) {
-      this.owner._reportCallbackError(callbackErr)
+      this.reportError(callbackErr)
       return undefined
     }
   }

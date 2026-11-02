@@ -9,7 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 
-import { ClientConnection } from './connection.js'
+import { ClientConnection } from './ClientConnection.js'
 import { decode, encode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { DecodedFrame } from '../../wire/frame.js'
@@ -36,13 +36,15 @@ function createChannel(dispatched: DecodedFrame[]) {
       dispatched.push(frame)
     },
     _onEnded() {},
-    _onTransportBatched() {},
-    _onUpgradeJoined() {},
-    _attachState: () => ({}),
-    _onProbeAnswered() {},
-    _fitReplays() {},
-    _acknowledge() {},
-    _answered() {},
+    _attach: {
+      state: () => ({}),
+      onProbeAnswered() {},
+      fitReplays() {},
+      acknowledge() {},
+      answered() {},
+      onBatched() {},
+      onUpgradeJoined() {},
+    },
   }
 }
 

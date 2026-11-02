@@ -34,18 +34,18 @@ function makeEmit(): Emit {
     msgWindowCalls: [],
     bdpPingCalls: 0,
     probe: 0,
-    _sendByteLimit(b) {
+    sendByteLimit(b) {
       e.windowCalls.push(b)
     },
-    _sendMessageLimit(c) {
+    sendMessageLimit(c) {
       e.msgWindowCalls.push(c)
     },
-    _sendBdpPing(probe) {
+    sendBdpPing(probe) {
       e.bdpPingCalls++
       e.probe = probe
     },
-    _backlogBytes: () => 0,
-    _deliveredBefore: upToAck,
+    backlogBytes: () => 0,
+    deliveredBefore: upToAck,
   }
   return e
 }

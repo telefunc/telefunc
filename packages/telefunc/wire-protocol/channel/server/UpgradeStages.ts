@@ -5,7 +5,7 @@ import { UPGRADE_MAX_STAGED_BYTES, UPGRADE_MAX_STAGED_RECORDS, UPGRADE_STAGE_TTL
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { assertProtocol } from '../../wire/protocolViolation.js'
 import type { PreparePayload } from '../../wire/payloads.js'
-import type { Wire } from './mux.js'
+import type { Wire } from './ChannelMux.js'
 
 /** The mux, which ends a probe whose stage is abandoned. */
 interface UpgradeStagesOwner {

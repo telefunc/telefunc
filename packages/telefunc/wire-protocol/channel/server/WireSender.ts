@@ -4,24 +4,22 @@ export type { WireSenderOwner }
 import { WIRE_SEND_BACKLOG_BASE_BYTES } from '../../constants.js'
 import { encode } from '../../wire/frame.js'
 import { TAG, passesData } from '../../wire/tags.js'
-import type { ServerChannel } from './channel.js'
+import type { ServerChannel } from './ServerChannel.js'
 import type { PeerSender } from './IndexedPeer.js'
-import type { ServerTransport, Wire } from './mux.js'
+import type { ServerTransport, Wire } from './ChannelMux.js'
+import type { SessionRegistry } from './SessionRegistry.js'
 import type { Deliveries } from '../../flowControl/Deliveries.js'
 import { SocketWait, type SocketWaitOwner } from '../../flowControl/server/SocketWait.js'
-import { ServerHeadroom } from '../../flowControl/server/headroom.js'
-import { ServerPieceReceiver } from '../../flowControl/server/pieceReceiver.js'
+import { ServerHeadroom } from '../../flowControl/server/ServerHeadroom.js'
+import { ServerPieceReceiver } from '../../flowControl/server/ServerPieceReceiver.js'
 import type { PieceReceiverOwner } from '../../flowControl/pieces.js'
 import { TransportSocket } from './TransportSocket.js'
 
-/** The mux, which knows the channels on a wire and ends it. */
+/** The mux, which ends a wire. */
 interface WireSenderOwner {
-  /** The channels whose flow control the wire's headroom counts. */
-  channelsOn(wire: Wire): Iterable<ServerChannel>
   /** Ends the wire for good, as a frame that breaks the protocol does. */
   terminateWire(wire: Wire): void
 }
-
 type WireSenderOptions = {
   owner: WireSenderOwner
   wire: Wire
@@ -30,6 +28,10 @@ type WireSenderOptions = {
   pingInterval: number
   /** What the wire delivered. */
   deliveries: Deliveries
+  /** The mux's sessions, whose channels on the wire its headroom counts. */
+  sessions: SessionRegistry
+  /** The channels attaching to the wire in this turn, which its headroom counts too. */
+  attaching: ReadonlySet<ServerChannel>
 }
 
 /** A wire's headroom and the receiver that acknowledges what the wire took, on a wire that takes pieces. */
@@ -46,6 +48,8 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   /** How long the frames that go at once wait behind what the socket holds. */
   private readonly wait = new SocketWait({ owner: this })
   private readonly deliveries: Deliveries
+  private readonly sessions: SessionRegistry
+  private readonly attaching: ReadonlySet<ServerChannel>
   /** The wire closed: it sends nothing more, holds nothing and delivered nothing. */
   private closed = false
   /** What may be written before the backlog is read again against what its channels' flow control allows. */
@@ -57,7 +61,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   /** The RECONCILE's probes its RECONCILED hasn't answered: a frame ahead of it goes behind their BDP_PING_ACKs. */
   private probed: { ix: number; probe: number }[] = []
 
-  constructor({ owner, wire, transport, pingInterval, deliveries }: WireSenderOptions) {
+  constructor({ owner, wire, transport, pingInterval, deliveries, sessions, attaching }: WireSenderOptions) {
     this.owner = owner
     this.wire = wire
     this.transport = transport
@@ -68,6 +72,8 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
         }
       : null
     this.deliveries = deliveries
+    this.sessions = sessions
+    this.attaching = attaching
   }
 
   send(frame: Uint8Array<ArrayBuffer>): void {
@@ -157,7 +163,16 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
     const backlog = this.bufferedAmount()
     if (backlog === undefined) return Infinity
     let allowed = WIRE_SEND_BACKLOG_BASE_BYTES
-    for (const channel of this.owner.channelsOn(this.wire)) allowed += channel._sendAllowance() + this.largestSent
+    for (const channel of this.channels()) allowed += channel._sendAllowance() + this.largestSent
     return allowed - backlog
+  }
+
+  /** The channels the wire's send headroom counts: its session's, and those attaching in this turn. */
+  private channels(): Set<ServerChannel> {
+    const sessionId = this.transport.getSessionId(this.wire)
+    const session = sessionId === undefined ? undefined : this.sessions.peekSession(sessionId)
+    const channels = new Set(this.attaching)
+    for (const { channel } of session?.values() ?? []) channels.add(channel)
+    return channels
   }
 }

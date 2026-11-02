@@ -1,5 +1,5 @@
-export { ClientConnection }
-export type { ClientChannelTransport, MuxChannel, MuxConnection, OutboundFrame, OutboundFrameKind, TransportOwner }
+export { WireLifecycle }
+export type { TransportOwner, WireLifecycleOwner }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
@@ -16,148 +16,29 @@ import {
   CHANNEL_TRANSPORT,
   MAX_CHANNELS_PER_CONNECTION,
   type ChannelTransport,
-  type ChannelTransports,
   TIMER_DELAY_MAX_MS,
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../../constants.js'
-import { replayWindow, type Urgency } from '../../flowControl/credit.js'
+import { replayWindow } from '../../flowControl/credit.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
-import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/frame.js'
+import { ERROR_REASON, isSequencedFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { seqNear } from '../../wire/seq.js'
-import type {
-  AckResultStatus,
-  BdpPingAck,
-  ChannelFrame,
-  DecodedFrame,
-  PongEntry,
-  SequencedEncoder,
-} from '../../wire/frame.js'
-import type { AttachState, ReconciledPayload } from '../../wire/payloads.js'
-import type { Heartbeat } from './Heartbeat.js'
-import { ChannelTable, type ChannelRecord } from './ChannelTable.js'
+import type { ChannelFrame, DecodedFrame, PongEntry } from '../../wire/frame.js'
+import type { ReconciledPayload } from '../../wire/payloads.js'
+
+import { ChannelTable } from './ChannelTable.js'
 import { SendGate, type SendGateOwner } from './SendGate.js'
 import { Liveness, type LivenessOwner } from './Liveness.js'
 import { Upgrade, type UpgradeOwner, type UpgradeTarget } from './Upgrade.js'
 import { AttachExchange, type AttachExchangeOwner, type ReconcileBatch } from './AttachExchange.js'
+
 import { pingDeadline } from '../../wire/pingDeadline.js'
-import type { Uplink } from '../../flowControl/client/Uplink.js'
-import type { Downlink } from '../../flowControl/client/Downlink.js'
-import { WsTransport } from './ws.js'
-import { SseTransport } from './sse.js'
 
-type OutboundFrameKind = 'reconcile' | 'released' | 'control' | Urgency | 'ack' | 'data' | 'heartbeat'
+import { WsTransport } from './WsTransport.js'
+import { SseTransport } from './SseTransport.js'
 
-type OutboundFrame = {
-  kind: OutboundFrameKind
-  frame: Uint8Array<ArrayBuffer>
-}
-
-interface MuxChannel {
-  readonly id: string
-  readonly isClosed: boolean
-  /** The largest frame the server accepts from this channel on a WebSocket. */
-  readonly _maxFrameBytes: number
-  /** The channel is open on `uplink`'s wire; called again with the same `uplink`, that wire lost nothing. */
-  _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void
-  /** The wire's streaming upload failed after the channel opened, so its frames now go in batch POSTs. */
-  _onTransportBatched(): void
-  /** The upgrade joined: the channel is on the WebSocket and has already received the frames the join held. */
-  _onUpgradeJoined(): void
-  /** Entry point for every per-channel wire frame (data + per-channel ctrl). The
-   *  channel splits ctrl vs data internally. Wire-level frames (PING/PONG/
-   *  FIN/RECONCILED), channel-termination ctrls (ABORT/ERROR) and ATTACH_RESULT stay with the
-   *  connection — they involve connection-side cleanup. */
-  _dispatchFrame(frame: ChannelFrame): void
-  _onEnded(err?: Error): void
-  /** The channel's wire went away, and the connection reconnects. */
-  _onTransportDisconnect(): void
-  /** The channel's entry in the RECONCILE sent each time it attaches to `uplink`'s wire. */
-  _attachState(uplink: Uplink): AttachState
-  /** The RECONCILED answered the `probe` in the channel's RECONCILE entry. */
-  _onProbeAnswered(probe: number): void
-  /** Caps the credit windows at what the replay buffers allow: `window` for what the page grants, `peerWindow` for
-   *  what the server grants it. */
-  _fitReplays(window: number, peerWindow: number): void
-  /** Called on each heartbeat: a WINDOW for what arrived since the last one lets the server's replay buffer release
-   *  it while the channel is quiet. */
-  _acknowledge(): void
-  /** The channel answered the newest frame from the server, which acknowledges every earlier frame too. */
-  _answered(): void
-}
-
-interface MuxConnection {
-  sendSequenced<T>(
-    channel: MuxChannel,
-    kind: 'data' | 'ack',
-    encodeFrame: SequencedEncoder<T>,
-    data: T,
-    onQueued?: (seq: number) => void,
-  ): number
-  sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status?: AckResultStatus): void
-  sendAbort(channel: MuxChannel, abortValue: string): void
-  sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
-  sendCloseAck(channel: MuxChannel): void
-  sendByteLimit(channel: MuxChannel, limit: number, urgency: Urgency): void
-  sendMessageLimit(channel: MuxChannel, limit: number, urgency: Urgency): void
-  sendBdpPing(channel: MuxChannel, probe: number): void
-  sendBdpPingAck(channel: MuxChannel, ack: BdpPingAck): void
-  /** Bytes the wire holds that haven't gone out. */
-  bufferedAmount(): number
-  /** Bytes the wire delivered in the `ms` before its latest delivery: the frame being handled, on arrival. */
-  deliveredBefore(ms: number): number
-  sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
-  sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void
-  unregister(channel: MuxChannel): void
-  reconnectWindow(): number
-}
-
-type ClientConnectionOptions = {
-  transports: ChannelTransports
-  fetchImpl: typeof fetch
-  /** Client-side cache-key extension — distinct values get distinct `ClientConnection` instances. Never sent on the wire. */
-  connectionKey?: string
-  /** User headers (config.headers + per-call `withContext({ headers })`) merged into every transport fetch. The first
-   *  channel's headers serve every channel the connection carries. */
-  headers?: Record<string, string>
-  /** Override the idle-close delay after all channels close. Default: the server's `idleTimeout` once a RECONCILED says
-   *  it, 60 000 ms before. Pass 0 to dispose immediately. */
-  idleTimeout?: number
-}
-
-type ClientChannelTransport = {
-  readonly type: ChannelTransport
-  /** True if the request that opens the wire carries the RECONCILE and the frames buffered behind it. If false, the
-   *  RECONCILE goes once the wire is open, and the buffered frames after its RECONCILED. */
-  readonly carriesReconcileInOpen: boolean
-  /** True iff client→server frames are per-POST batched instead of pushed onto
-   *  one streaming body — signals the channel to use a larger initial window. */
-  readonly batched: boolean
-  /** The uplink and downlink of the wire this transport carries, or of the one it opens next. */
-  readonly uplink: Uplink
-  readonly downlink: Downlink
-  start(): void
-  hasWire(): boolean
-  isConnecting(): boolean
-  /** Send a wire-level ping on this wire. Heartbeat's send callback calls this. */
-  sendPing(frame: Uint8Array<ArrayBuffer>): void
-  sendFrame(frame: OutboundFrame): void
-  /** How many bytes of data frames it accepts now, `Infinity` if nothing bounds them. Other frames go at once. */
-  headroom(): number
-  /** Bytes of the frames it was handed that haven't gone out to the network. */
-  bufferedAmount(): number
-  abandonActiveTransport(): void
-  closeAbandonedTransport(): void
-  applyReconciledSettings(ctrl: ReconciledPayload): void
-  /** The heartbeat of its current wire, which also tracks what the wire delivers. */
-  readonly heartbeat: Heartbeat | null
-  /** Liveness builds the Heartbeat and hands it over; the transport's receive path then reports each PONG to it. */
-  attachHeartbeat(heartbeat: Heartbeat): void
-  detachHeartbeat(): void
-  /** Settles once the frames it was handed have left it, or its wire is gone. */
-  drained(): Promise<void>
-  dispose(): void
-}
+import type { ClientChannelTransport, ClientConnectionOptions, MuxChannel } from './ClientConnection.js'
 
 /** What a transport tells its connection, and the reconcile batch it asks for when its wire opens. */
 interface TransportOwner {
@@ -172,7 +53,7 @@ interface TransportOwner {
   /** An SSE wire's RECONCILE went out with the request that opens it, before the wire opens (see `beatFromReconcile`). */
   onTransportReconcileSent(transport: ClientChannelTransport): void
   /** A batch POST has been out longer than its upload takes at the slowest rate a wire is held to. */
-  onTransportPostLate(transport: ClientChannelTransport): void
+  onWireLate(transport: ClientChannelTransport): void
   /** What a transport's wire carries as it opens: the RECONCILE, and the frames buffered behind it. */
   stageInitialReconcileBatch(): ReconcileBatch
 }
@@ -188,29 +69,23 @@ type ConnectionState =
     }
   | { tag: 'closed' }
 
-class ClientConnection
-  implements MuxConnection, TransportOwner, SendGateOwner, LivenessOwner, UpgradeOwner, AttachExchangeOwner
-{
-  private static cache = new Map<string, ClientConnection>()
+/** The connection, which a disposed wire lifecycle's next `getOrCreate` replaces. */
+interface WireLifecycleOwner {
+  onDisposed(): void
+}
 
-  static getOrCreate(telefuncUrl: string, channel: MuxChannel, options: ClientConnectionOptions): ClientConnection {
-    // `connectionKey` opts callers out of the shared connection without the server seeing it.
-    const key = `${options.transports.join(',')}:${telefuncUrl}|${options.connectionKey ?? ''}`
-    let connection = ClientConnection.cache.get(key)
-    // Wire indexes are u16 and never reused, so a new channel starts a fresh connection once they run out.
-    if (!connection || connection.closed || connection.nextIndex > 0xffff) {
-      connection = new ClientConnection(telefuncUrl, options, key)
-      ClientConnection.cache.set(key, connection)
-    }
-    connection.register(channel)
-    return connection
-  }
+type WireLifecycleOptions = {
+  owner: WireLifecycleOwner
+  telefuncUrl: string
+  options: ClientConnectionOptions
+}
 
-  private readonly cacheKey: string
+/** The wire a connection's channels ride, from its first open to its idle close: the transports, the reconnects and the
+ *  upgrade, the liveness and the attach exchange, and the frames the wire delivers to the channels. */
+class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, UpgradeOwner, AttachExchangeOwner {
+  private readonly owner: WireLifecycleOwner
   private readonly telefuncUrl: string
   private readonly connectionOptions: ClientConnectionOptions
-  /** True if its transports include a WebSocket, whose runtime may accept smaller frames than the wire's limit. */
-  private readonly usesWebSocket: boolean
   transport: ClientChannelTransport
 
   private state: ConnectionState = { tag: 'fresh' }
@@ -226,8 +101,8 @@ class ClientConnection
    *  arrived. */
   wire = 0
   private nextIndex = 0
-  private readonly channels = new ChannelTable()
-  private readonly gate = new SendGate({ owner: this, channels: this.channels })
+  readonly channels = new ChannelTable()
+  readonly gate = new SendGate({ owner: this, channels: this.channels })
   private readonly liveness = new Liveness({ owner: this, channels: this.channels, gate: this.gate })
   private readonly exchange = new AttachExchange({ owner: this, channels: this.channels, gate: this.gate })
   private readonly upgrade: Upgrade
@@ -238,24 +113,21 @@ class ClientConnection
   /** The credit windows the replay buffers allow, the page's and the server's, from the last RECONCILED. */
   private replayWindows: { window: number; peerWindow: number } | null = null
   /** The largest frame the server accepts on a WebSocket, from the last RECONCILED. */
-  private maxFrameBytes = WIRE_MAX_RAW_FRAME_BYTES
-  private constructor(telefuncUrl: string, options: ClientConnectionOptions, cacheKey: string) {
-    this.cacheKey = cacheKey
+  maxFrameBytes = WIRE_MAX_RAW_FRAME_BYTES
+  constructor({ owner, telefuncUrl, options }: WireLifecycleOptions) {
+    this.owner = owner
     this.telefuncUrl = telefuncUrl
     this.connectionOptions = options
-    this.usesWebSocket = options.transports.includes(CHANNEL_TRANSPORT.WS)
     this.upgrade = new Upgrade({
       owner: this,
       channels: this.channels,
       liveness: this.liveness,
       exchange: this.exchange,
-      allowsWebSocket: this.usesWebSocket,
+      allowsWebSocket: options.transports.includes(CHANNEL_TRANSPORT.WS),
     })
     this.idleTimeoutMs = options.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS
     this.transport = TRANSPORT_REGISTRY[options.transports[0]!](telefuncUrl, options, this)
   }
-
-  // ── State transitions: every `this.state =` write goes through these. ──
 
   private enterOpen(): void {
     if (this.state.tag === 'open') return
@@ -283,13 +155,18 @@ class ClientConnection
     return !this.connected || this.upgrade.committing !== null || this.upgrade.ready
   }
 
-  private register(channel: MuxChannel): void {
+  /** Wire indexes are u16 and never reused, so once they run out a new channel needs a fresh connection. */
+  get takesChannels(): boolean {
+    return !this.closed && this.nextIndex <= 0xffff
+  }
+
+  register(channel: MuxChannel): void {
     // A new wire's RECONCILE lists closed channels too, so at the limit the oldest closed one the server has in full
     // makes way.
     if (this.channels.size === MAX_CHANNELS_PER_CONNECTION) {
       for (const record of this.channels.values()) {
         if (record.state.tag !== 'closed' || !record.state.delivered) continue
-        this.releaseChannel(record)
+        this.gate.release(record)
         break
       }
     }
@@ -319,7 +196,7 @@ class ClientConnection
    *  default initial window fits any replay buffer. */
   private fitReplays(channel: MuxChannel): void {
     if (this.replayWindows === null) return
-    channel._fitReplays(this.replayWindows.window, this.replayWindows.peerWindow)
+    channel._attach.fitReplays(this.replayWindows.window, this.replayWindows.peerWindow)
   }
 
   onTransportHeadroom(transport: ClientChannelTransport): void {
@@ -339,121 +216,6 @@ class ClientConnection
     if (record === undefined) return
     this.channels.close(record)
     this.startTtlIfIdle()
-  }
-
-  /** Encodes `data` with `encodeFrame` at the next seq and only then takes the seq, so a refused frame uses none.
-   *  `onQueued` runs before the wire has the frame. Returns its bytes, or 0 once the channel sends nothing more. */
-  sendSequenced<T>(
-    channel: MuxChannel,
-    kind: 'data' | 'ack',
-    encodeFrame: SequencedEncoder<T>,
-    data: T,
-    onQueued?: (seq: number) => void,
-  ): number {
-    const record = this.channels.of(channel)
-    if (record === undefined) return 0
-    const { replay } = record
-    const frame = encodeFrame(record.ix, data, replay.seq + 1)
-    const maxFrameBytes = this.maxFrameBytesOf(channel)
-    // The server ends any wire a larger frame arrives on, and the replay would send it again on the next one.
-    assertUsage(
-      frame.byteLength <= maxFrameBytes,
-      `Channel message too large: ${frame.byteLength} bytes encoded, the server accepts ${maxFrameBytes} at most`,
-    )
-    const seq = replay.nextSeq()
-    onQueued?.(seq)
-    this.gate.send(record, seq, frame, kind)
-    return frame.byteLength
-  }
-
-  sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
-    const record = this.channels.of(channel)
-    if (record === undefined) return
-    const { ix } = record
-    const seq = record.replay.nextSeq()
-    let frame = encode.ackRes(ix, seq, ackedSeq, result, status)
-    const maxFrameBytes = this.maxFrameBytesOf(channel)
-    // The server ends any wire a larger frame arrives on, so the awaiting send gets an error answer instead.
-    if (frame.byteLength > maxFrameBytes) {
-      const error = `Channel ack answer too large: ${frame.byteLength} bytes encoded, the server accepts ${maxFrameBytes} at most`
-      frame = encode.ackRes(ix, seq, ackedSeq, error, ACK_STATUS.ERROR)
-    }
-    this.gate.send(record, seq, frame, 'ack')
-    if (ackedSeq === record.lastSeq) channel._answered()
-  }
-
-  /** The largest frame the server accepts from `channel`; on a WebSocket, a runtime's lower limit wins. */
-  private maxFrameBytesOf(channel: MuxChannel): number {
-    if (!this.usesWebSocket) return WIRE_MAX_RAW_FRAME_BYTES
-    return Math.min(channel._maxFrameBytes, this.maxFrameBytes)
-  }
-
-  /** Sequenced like data, as CLOSE and CLOSE_ACK are, so a closing frame lost with a dead wire is replayed. */
-  sendAbort(channel: MuxChannel, abortValue: string): void {
-    const record = this.channels.of(channel)
-    if (record === undefined) return
-    const seq = record.replay.nextSeq()
-    this.gate.send(record, seq, encode.abort(record.ix, abortValue, seq), 'control')
-  }
-
-  sendCloseRequest(channel: MuxChannel, timeoutMs: number): void {
-    const record = this.channels.of(channel)
-    if (record === undefined) return
-    const seq = record.replay.nextSeq()
-    this.gate.send(record, seq, encode.close(record.ix, timeoutMs, seq), 'control')
-  }
-
-  sendCloseAck(channel: MuxChannel): void {
-    const record = this.channels.of(channel)
-    if (record === undefined) return
-    const seq = record.replay.nextSeq()
-    this.gate.send(record, seq, encode.closeAck(record.ix, seq), 'control')
-  }
-
-  sendByteLimit(channel: MuxChannel, limit: number, urgency: Urgency): void {
-    const record = this.channels.of(channel)
-    if (record === undefined) return
-    this.gate.sendUnsequenced(record, encode.window(record.ix, limit, record.lastSeq), urgency)
-  }
-
-  sendMessageLimit(channel: MuxChannel, limit: number, urgency: Urgency): void {
-    const record = this.channels.of(channel)
-    if (record === undefined) return
-    this.gate.sendUnsequenced(record, encode.msgWindow(record.ix, limit), urgency)
-  }
-
-  sendBdpPing(channel: MuxChannel, probe: number): void {
-    const record = this.channels.of(channel)
-    if (record === undefined) return
-    this.gate.sendUnsequenced(record, encode.bdpPing(record.ix, probe), 'flow-control')
-  }
-
-  sendBdpPingAck(channel: MuxChannel, { probe, backlog, pathRtt }: BdpPingAck): void {
-    const record = this.channels.of(channel)
-    if (record === undefined) return
-    // On batch POSTs the page's measured round trip leaves out the wait for its POST, so it reports no path RTT.
-    const frame = encode.bdpPingAck(record.ix, probe, backlog, this.transport.batched ? Infinity : pathRtt)
-    this.gate.sendUnsequenced(record, frame, 'flow-control')
-  }
-
-  bufferedAmount(): number {
-    return this.transport.bufferedAmount() + this.gate.waitingBytes
-  }
-
-  deliveredBefore(ms: number): number {
-    return this.transport.heartbeat?.deliveredBefore(ms) ?? 0
-  }
-
-  sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void {
-    const record = this.channels.of(channel)
-    if (record === undefined) return
-    this.gate.sendUnsequenced(record, encode.broadcastSub(record.ix, binary), 'control')
-  }
-
-  sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void {
-    const record = this.channels.of(channel)
-    if (record === undefined) return
-    this.gate.sendUnsequenced(record, encode.broadcastUnsub(record.ix, binary), 'control')
   }
 
   onTransportOpen(transport: ClientChannelTransport): void {
@@ -477,7 +239,7 @@ class ClientConnection
   onTransportBatched(transport: ClientChannelTransport): void {
     if (transport !== this.transport) return
     // Open channels only, as the join's undo does: one still opening gets the batched window as it opens on this wire.
-    for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._onTransportBatched()
+    for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._attach.onBatched()
   }
 
   onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void {
@@ -550,12 +312,9 @@ class ClientConnection
     this.onTransportClosed(transport)
   }
 
-  onTransportPostLate(transport: ClientChannelTransport): void {
-    this.onPongTimeout(transport)
-  }
-
-  /** Until a wire's first RECONCILED, the RECONCILE deadline bounds it: the wait may outlast the pong deadline. */
-  onPongTimeout(transport: ClientChannelTransport): void {
+  /** Its PONG or a batch POST came late. Until a wire's first RECONCILED, the RECONCILE deadline bounds it: the wait
+   *  may outlast the pong deadline. */
+  onWireLate(transport: ClientChannelTransport): void {
     if (this.exchange.boundsWire) return
     this.dropWire(transport)
   }
@@ -595,8 +354,6 @@ class ClientConnection
       this.upgrade.maybeStart()
     }
   }
-
-  // ── SSE→WS upgrade ──
 
   createWebSocket(): UpgradeTarget {
     return new WsTransport({ telefuncUrl: this.telefuncUrl, owner: this })
@@ -646,7 +403,7 @@ class ClientConnection
     }
     // A closed channel whose frames the server all has needs nothing from another wire.
     for (const record of this.channels.values()) {
-      if (record.state.tag === 'closed' && record.state.delivered) this.releaseChannel(record)
+      if (record.state.tag === 'closed' && record.state.delivered) this.gate.release(record)
     }
     if (this.channels.size === 0) {
       this.dispose()
@@ -695,11 +452,8 @@ class ClientConnection
     this.channels.clear()
     this.gate.clear()
     this.exchange.forgetWire()
-    // The next `getOrCreate` opens a fresh connection; one that already replaced this one stays cached.
-    if (ClientConnection.cache.get(this.cacheKey) === this) ClientConnection.cache.delete(this.cacheKey)
+    this.owner.onDisposed()
   }
-
-  // ── Protocol internals ──
 
   stageInitialReconcileBatch(): ReconcileBatch {
     return this.exchange.stageInitialReconcileBatch()
@@ -757,13 +511,6 @@ class ClientConnection
     record.lastSeq = seq
     return seq
   }
-
-  /** Drops all the channel holds, its ATTACH_RESULT wait included. On the server, the RECONCILE that releases it, or a
-   *  new wire's RECONCILE that leaves it out, ends it too. */
-  releaseChannel(record: ChannelRecord): void {
-    this.channels.release(record)
-    this.gate.dropQueue(record.ix)
-  }
 }
 
 // ── Transport registry ──
@@ -771,7 +518,7 @@ class ClientConnection
 /** Maps each ChannelTransport to a factory that creates the corresponding ClientChannelTransport. */
 const TRANSPORT_REGISTRY: Record<
   ChannelTransport,
-  (telefuncUrl: string, options: ClientConnectionOptions, owner: ClientConnection) => ClientChannelTransport
+  (telefuncUrl: string, options: ClientConnectionOptions, owner: WireLifecycle) => ClientChannelTransport
 > = {
   [CHANNEL_TRANSPORT.WS]: (telefuncUrl, _options, owner) => new WsTransport({ telefuncUrl, owner }),
   [CHANNEL_TRANSPORT.SSE]: (telefuncUrl, options, owner) =>

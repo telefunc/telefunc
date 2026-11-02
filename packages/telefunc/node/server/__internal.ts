@@ -3,8 +3,8 @@ export type { TELEFUNC_SHIELDS } from '../shared/transformer/generateShield/shie
 export type { OrderingInfo } from '../../wire-protocol/wire/orderingFrame.js'
 export { untether } from '../../utils/wrapProxy.js'
 export { invokeChannelListener } from '../../wire-protocol/channel/channel.js'
-export { reportBug } from '../../wire-protocol/channel/server/channel.js'
-export { hostLocal } from '../../wire-protocol/channel/server/mux.js'
+export { reportBug } from '../../wire-protocol/channel/server/ServerChannel.js'
+export { hostLocal } from '../../wire-protocol/channel/server/ChannelMux.js'
 export { getChannelLimits } from './serverConfig.js'
 export { MAX_CHANNELS_PER_CONNECTION } from '../../wire-protocol/constants.js'
 
@@ -59,7 +59,7 @@ export type {
 export { OrderedStubs } from '../../wire-protocol/adapter/cloudflare/OrderedStubs.js'
 
 import type { ServerBroadcastEnd as ServerBroadcastEndClass } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
-import type { ClientBroadcast as ClientBroadcastClass } from '../../wire-protocol/channel/client/broadcast.js'
+import type { ClientBroadcast as ClientBroadcastClass } from '../../wire-protocol/channel/client/ClientBroadcast.js'
 
 /** The members of a page's broadcast end that an add-on drives. */
 type ServerBroadcastEnd = Pick<

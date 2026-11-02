@@ -3,7 +3,7 @@ export type { BarrierEmission, ProbeOwner, ProbeSession, ProbeWire, UpgradeOwner
 
 import type { AttachExchange } from './AttachExchange.js'
 import type { ChannelTable } from './ChannelTable.js'
-import type { ClientChannelTransport, OutboundFrame } from './connection.js'
+import type { ClientChannelTransport, OutboundFrame } from './ClientConnection.js'
 import type { Liveness } from './Liveness.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { DecodedFrame } from '../../wire/frame.js'
@@ -288,7 +288,7 @@ class Upgrade implements ProbeOwner {
     for (const entry of buffer.old) this.owner.dispatchFrame(entry.frame)
     this.exchange.closeUnacknowledged(deferredOmitted)
     for (const entry of buffer.new) this.owner.dispatchFrame(entry.frame)
-    for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._onUpgradeJoined()
+    for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._attach.onUpgradeJoined()
     this.owner.startTtlIfIdle()
   }
 

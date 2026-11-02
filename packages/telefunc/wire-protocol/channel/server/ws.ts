@@ -2,8 +2,9 @@ export { getTelefuncChannelHooks }
 
 import { defineHooks, type Hooks, type Peer } from 'crossws'
 import { enableChannelTransports } from '../../../node/server/serverConfig.js'
-import { getChannelMux } from './mux.js'
-import type { ServerTransport } from './mux.js'
+import { WS_CLOSE_PAGE_LEFT } from '../../constants.js'
+import { getChannelMux } from './ChannelMux.js'
+import type { ServerTransport } from './ChannelMux.js'
 
 declare module 'crossws' {
   interface PeerContext {
@@ -56,7 +57,7 @@ function getTelefuncChannelHooks({
     },
     close: (peer, details) => {
       const mux = getChannelMux()
-      const isPermanent = mux.readPermanentTermination(peer) || details?.code === 1000 || details?.code === 1001
+      const isPermanent = mux.readPermanentTermination(peer) || details?.code === WS_CLOSE_PAGE_LEFT
       mux.onWireClosed(peer, { permanent: isPermanent })
     },
     error: (peer) => getChannelMux().onWireClosed(peer, { permanent: false }),

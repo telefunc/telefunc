@@ -1,7 +1,7 @@
 export { ServerBroadcastEnd }
 export type { BroadcastEndOwner }
 
-import { ServerChannel } from './channel.js'
+import { ServerChannel } from './ServerChannel.js'
 import { assert } from '../../../utils/assert.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import { ChannelOverflowError, isChannelOverflowError } from '../channelErrors.js'
@@ -24,12 +24,6 @@ type BroadcastEndOwner = {
  *  subscriptions, and delivers publishes to it. */
 class ServerBroadcastEnd extends ServerChannel {
   private owner: BroadcastEndOwner | null = null
-
-  constructor() {
-    super()
-    // Its page grants it the largest window from the start (see `ClientBroadcast`).
-    this.sendCredit.takePeerWindowMax()
-  }
 
   _setOwner(owner: BroadcastEndOwner): void {
     this.owner = owner
@@ -83,11 +77,12 @@ class ServerBroadcastEnd extends ServerChannel {
       }
       return
     }
-    const bytes = binary ? peer.sendSequenced(encode.publishBinary, frame) : peer.sendSequenced(encode.publish, frame)
-    this.sendCredit.countPublishSent(bytes)
+    if (binary) peer.sendSequenced(encode.publishBinary, frame)
+    else peer.sendSequenced(encode.publish, frame)
   }
 
-  /** Its page grants the largest window at once: a quarter of it past credit is more than the page reads unreported. */
+  /** A publish can't be awaited per page, so a broadcast's page gets a quarter of the largest window past credit, not
+   *  what was published to it: a page that stops reading has its wire cut, and reconnects. */
   protected override pastCreditAllowance(): number {
     return this.sendCredit.peerByteWindowMax / 4
   }
@@ -118,7 +113,7 @@ class ServerBroadcastEnd extends ServerChannel {
     super.sendRequestFailure(seq, err)
   }
 
-  override _onPeerSubscription(kind: BroadcastKind, on: boolean): void {
+  protected override onPeerSubscription(kind: BroadcastKind, on: boolean): void {
     assert(this.owner)
     this.owner._onPageSubscription?.(kind, on)
   }

@@ -82,7 +82,7 @@ class ReceiveCredit {
     this.arrived = true
     this.receivedBytes += bytes
     this.downlink?.creditArrived(bytes)
-    if (this.bdp.onReceive(bytes, this.sendWait)) this.owner._sendBdpPing(this.bdp.probe)
+    if (this.bdp.onReceive(bytes, this.sendWait)) this.owner.sendBdpPing(this.bdp.probe)
   }
 
   /** A probe number for an attach's RECONCILE entry on `roundTrips`' wire; `undefined` where it is measured. */
@@ -118,7 +118,7 @@ class ReceiveCredit {
     this.arrived = false
   }
 
-  /** Settles a `BDP_PING_ACK`, reading what the wire delivered before it through `owner._deliveredBefore`. */
+  /** Settles a `BDP_PING_ACK`, reading what the wire delivered before it through `owner.deliveredBefore`. */
   onPingAck(ack: BdpPingAck): void {
     const suggest = this.bdp.onPingAck(ack, this.owner, this.sendWait)
     const wantBytes = suggest.bytes === 'grow'
@@ -233,7 +233,7 @@ class ReceiveCredit {
     if (sent !== 'acknowledgement' && this.consumedMessages > this.advertisedMessages) {
       this.advertiseMessages('acknowledgement')
     }
-    this.owner._sendByteLimit(limit >>> 0, sent)
+    this.owner.sendByteLimit(limit >>> 0, sent)
   }
 
   /** An `acknowledgement` rides the next message, so it is never urgent. */
@@ -244,6 +244,6 @@ class ReceiveCredit {
       this.urgentMessages = this.consumedMessages
       sent = 'urgent-flow-control'
     }
-    this.owner._sendMessageLimit((this.consumedMessages + this.bdp.msgWindow) >>> 0, sent)
+    this.owner.sendMessageLimit((this.consumedMessages + this.bdp.msgWindow) >>> 0, sent)
   }
 }

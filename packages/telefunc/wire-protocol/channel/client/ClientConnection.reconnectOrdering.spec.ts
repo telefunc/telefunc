@@ -1,5 +1,5 @@
 // Regression: SSE client→server reconnect must preserve seq order, so the server's seq-dedup
-// (server/channel.ts: `seq <= _lastClientSeq` ⇒ drop) never drops a real message.
+// (server/ServerChannel.ts: `seq <= _lastClientSeq` ⇒ drop) never drops a real message.
 //
 // The hazard: a fire-and-forget send (seq 1) goes out on the streamRequest wire and is lost (a
 // transient disconnect before the server reads it). A second send (seq 2) is buffered during the
@@ -9,14 +9,14 @@
 //
 // Drives the REAL ClientConnection (send/buffer/replay/reconnect) against a mock SSE server that
 // uses the REAL ServerChannel for seq-dedup. Only the network + RECONCILED plumbing is modelled,
-// faithfully mirroring server/sse.ts runStreamResponse + server/mux.ts:313 (RECONCILED.lastSeq is
+// faithfully mirroring server/sse.ts runStreamResponse + server/ChannelMux.ts (RECONCILED.lastSeq is
 // captured from _lastClientSeq at reconcile time, before the initial-batch data frames dispatch).
 
 import { describe, expect, test } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 
-import { ClientConnection } from './connection.js'
-import { ServerChannel } from '../server/channel.js'
+import { ClientConnection } from './ClientConnection.js'
+import { ServerChannel } from '../server/ServerChannel.js'
 import { decode, encode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { decodeU32, concat } from '../../wire/envelope.js'
@@ -34,13 +34,15 @@ function createChannel(id = crypto.randomUUID()) {
     _onTransportDisconnect() {},
     _dispatchFrame() {},
     _onEnded() {},
-    _onTransportBatched() {},
-    _onUpgradeJoined() {},
-    _attachState: () => ({}),
-    _onProbeAnswered() {},
-    _fitReplays() {},
-    _acknowledge() {},
-    _answered() {},
+    _attach: {
+      state: () => ({}),
+      onProbeAnswered() {},
+      fitReplays() {},
+      acknowledge() {},
+      answered() {},
+      onBatched() {},
+      onUpgradeJoined() {},
+    },
   }
 }
 
@@ -128,7 +130,7 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
       if (f.tag === TAG.RECONCILE) ix = f.payload.open[0]!.ix
       else if (f.tag === TAG.TEXT) dataFrames.push(f)
     }
-    const lastSeqAtReconcile = serverCh._lastClientSeq // mux.ts:313 — captured at reconcile time
+    const lastSeqAtReconcile = serverCh._lastClientSeq // ChannelMux.ts — captured at reconcile time
     for (const f of dataFrames) serverCh._dispatchFrame(f) // bumps _lastClientSeq, real dedup
     sse.open()
     sse.pushFrame(encode.streamRequestOpenAck())

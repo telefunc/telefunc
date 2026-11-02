@@ -1,7 +1,7 @@
 export { SessionRegistry }
 export type { ChannelHandle }
 
-import type { ServerChannel } from './channel.js'
+import type { ServerChannel } from './ServerChannel.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 
 /** A channel as one session holds it: its index there and the peer it sends through. */

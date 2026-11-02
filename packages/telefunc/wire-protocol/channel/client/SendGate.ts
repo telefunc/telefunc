@@ -2,7 +2,7 @@ export { SendGate }
 export type { SendGateOwner }
 
 import type { ChannelRecord, ChannelTable } from './ChannelTable.js'
-import type { ClientChannelTransport, OutboundFrame, OutboundFrameKind } from './connection.js'
+import type { ClientChannelTransport, OutboundFrame, OutboundFrameKind } from './ClientConnection.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { TAG } from '../../wire/tags.js'
 
@@ -162,6 +162,13 @@ class SendGate {
     for (const { channelIx } of this.settleQueue()) ixes.add(channelIx)
     for (const { channelIx } of this.waitingForHeadroom) ixes.add(channelIx)
     return ixes
+  }
+
+  /** Drops all the channel holds, its ATTACH_RESULT wait included. On the server, the RECONCILE that releases it, or a
+   *  new wire's RECONCILE that leaves it out, ends it too. */
+  release(record: ChannelRecord): void {
+    this.channels.release(record)
+    this.dropQueue(record.ix)
   }
 
   /** Drops the frames channel `ix` holds or has waiting, at the next read. */

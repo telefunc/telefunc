@@ -26,22 +26,22 @@ import {
   type SequencedEncoder,
 } from '../../wire/frame.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
-import type { AttachState } from '../../wire/payloads.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
-import { ClientConnection } from './connection.js'
+import { ClientConnection } from './ClientConnection.js'
 import { getSessionUrl } from './getSessionUrl.js'
 import { FC_PAGE_YIELD_BYTES, WIRE_MAX_RAW_FRAME_BYTES, type ChannelTransports } from '../../constants.js'
-import type { CreditOwner, Urgency } from '../../flowControl/credit.js'
 import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import { SelfTime } from '../../flowControl/SelfTime.js'
 import { SendCredit } from '../../flowControl/SendCredit.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
+import { ChannelAttach } from './ChannelAttach.js'
+import { ClientCreditOwner } from './ClientCreditOwner.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
-import type { MuxChannel, MuxConnection } from './connection.js'
+import type { MuxChannel, MuxConnection } from './ClientConnection.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
 import { isPromise } from '../../../utils/isPromise.js'
 
@@ -63,7 +63,7 @@ type ClientChannelOptions = {
 }
 
 class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
-  implements ClientChannelType<ClientToServer, ServerToClient>, MuxChannel, CreditOwner, ChannelLifecycleOwner
+  implements ClientChannelType<ClientToServer, ServerToClient>, MuxChannel, ChannelLifecycleOwner
 {
   /** @see ChannelShield in ../channel.ts — the server checks with it: `data` what this page sends, `ack` its answers
    *  to the server's ack requests. */
@@ -79,7 +79,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private readonly listeners = new Listeners<ChannelListener<ServerToClient>>()
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
   protected closed = false
-  protected readonly lifecycle = new ChannelLifecycle({ owner: this })
+  protected readonly lifecycle = new ChannelLifecycle({ owner: this, reportError: reportChannelError })
   /** The ack requests sent and not yet answered, by seq. `resolve` takes `any`: text, binary and publish sends
    *  resolve with different types, each with `parse(text)` of the answer. */
   protected pendingAcks = new Map<number, { resolve: (v: any) => void; reject: (err: Error) => void }>()
@@ -87,6 +87,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** Paces fire-and-forget TEXT, BINARY and PUBLISH sends to what the server grants; see `constants.ts`. */
   protected sendCredit: SendCredit
   protected receiveCredit: ReceiveCredit
+  /** @internal Its credits as its connection drives them across wires. */
+  readonly _attach: ChannelAttach
 
   constructor({
     channelId,
@@ -99,8 +101,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.ack = ack
     this.key = key
     this._maxFrameBytes = maxFrameBytes
-    this.sendCredit = new SendCredit({ owner: this, selfTime: this.selfTime, yieldBytes: FC_PAGE_YIELD_BYTES })
-    this.receiveCredit = new ReceiveCredit({ owner: this, selfTime: this.selfTime })
+    // Built before the connection: registering the channel fits its credits to the replay buffers.
+    const owner = new ClientCreditOwner({ channel: this })
+    this.sendCredit = new SendCredit({ owner, selfTime: this.selfTime, yieldBytes: FC_PAGE_YIELD_BYTES })
+    this.receiveCredit = new ReceiveCredit({ owner, selfTime: this.selfTime })
+    this._attach = new ChannelAttach({ channel: this, sendCredit: this.sendCredit, receiveCredit: this.receiveCredit })
     const config = resolveClientConfig()
     this.connection = ClientConnection.getOrCreate(getSessionUrl(connection.telefuncUrl), this, {
       transports: connection.transports,
@@ -119,6 +124,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.lifecycle.connected
   }
 
+  /** @internal The connection its frames go through. */
+  get _connection(): MuxConnection {
+    return this.connection
+  }
   send(data: ChannelData<ClientToServer>): Promise<void>
   send(data: ChannelData<ClientToServer>, opts: { ack: true }): Promise<ChannelAck<ClientToServer>>
   send(data: ChannelData<ClientToServer>, opts: { ack: false }): Promise<void>
@@ -208,11 +217,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.lifecycle.runClose()
   }
 
-  /** @internal How long a server that is away is waited for. */
-  _reconnectWindow(): number {
-    return this.connection.reconnectWindow()
-  }
-
   abort(): void
   abort(abortValue: unknown, message?: string): void
   abort(abortValue?: unknown, message?: string): void {
@@ -223,73 +227,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._end(abortError)
   }
 
-  // ── Called by its credit (see `CreditOwner`) ──
-
-  /** @internal A closed channel's server ends its sends with the close, so the channel grants it no more credit. */
-  _sendByteLimit(limit: number, urgency: Urgency): void {
-    if (!this.closed) this.connection.sendByteLimit(this, limit, urgency)
-  }
-
-  /** @internal */
-  _sendMessageLimit(limit: number, urgency: Urgency): void {
-    if (!this.closed) this.connection.sendMessageLimit(this, limit, urgency)
-  }
-
-  /** @internal */
-  _sendBdpPing(probe: number): void {
-    this.connection.sendBdpPing(this, probe)
-  }
-
-  /** @internal */
-  _backlogBytes(): number | undefined {
-    return this.connection.bufferedAmount()
-  }
-
-  /** @internal */
-  _deliveredBefore(ms: number): number {
-    return this.connection.deliveredBefore(ms)
-  }
-
   // ── Called by transport connection ──
-
-  /** @internal Probes a path it hasn't measured. */
-  _attachState(uplink: Uplink): AttachState {
-    const probe = this.receiveCredit.probeAttach(uplink.roundTrips)
-    return probe === undefined ? {} : { probe }
-  }
-
-  /** @internal */
-  _onProbeAnswered(probe: number): void {
-    this.receiveCredit.onProbeAnswered(probe)
-  }
-
-  /** @internal */
-  _fitReplays(window: number, peerWindow: number): void {
-    this.receiveCredit.fitReplay(window)
-    this.sendCredit.fitReplay(peerWindow)
-  }
-
-  /** @internal At each heartbeat: see `ReceiveCredit.acknowledge`. */
-  _acknowledge(): void {
-    this.receiveCredit.acknowledge()
-  }
-
-  /** @internal See `ReceiveCredit.answered`. */
-  _answered(): void {
-    this.receiveCredit.answered()
-  }
-
-  /** @internal */
-  _onTransportBatched(): void {
-    if (!this.closed) this.receiveCredit.useBatchTransportInitial()
-  }
-
-  /** @internal */
-  _onUpgradeJoined(): void {
-    if (this.closed) return
-    this.receiveCredit.undoBatchTransportInitial()
-    this.receiveCredit.restartRound()
-  }
 
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void {
     if (this.closed) {
@@ -307,7 +245,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.lifecycle.fireDisconnect()
   }
 
-  _onPeerMessage(data: string, bytes: number): void {
+  protected onPeerMessage(data: string, bytes: number): void {
     const t0 = performance.now()
     try {
       this.receiveCredit.onReceived(bytes)
@@ -317,15 +255,15 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  _onPeerAckReqMessage(data: string, seq: number): Promise<void> {
+  protected onPeerAckReqMessage(data: string, seq: number): Promise<void> {
     return this.lifecycle.trackAck(this.answerAckReq(this.listeners, parse(data) as ChannelData<ServerToClient>, seq))
   }
 
-  _onPeerBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
+  protected onPeerBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
     return this.lifecycle.trackAck(this.answerAckReq(this.binaryListeners, data, seq))
   }
 
-  _onPeerBinaryMessage(data: Uint8Array<ArrayBuffer>, bytes: number): void {
+  protected onPeerBinaryMessage(data: Uint8Array<ArrayBuffer>, bytes: number): void {
     const t0 = performance.now()
     try {
       this.receiveCredit.onReceived(bytes)
@@ -370,20 +308,20 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal — Tag-keyed data-frame switch. `ClientBroadcast` overrides to add the
    *  PUBLISH variants and falls back to `super` for the common cases. Receive-time
-   *  BDP accounting happens inside `_onPeerMessage` and `_onPeerBinaryMessage`. */
+   *  BDP accounting happens inside `onPeerMessage` and `onPeerBinaryMessage`. */
   protected dispatchDataFrame(frame: ChannelDataFrame): void {
     switch (frame.tag) {
       case TAG.TEXT:
-        this._onPeerMessage(frame.text, frame.bytes)
+        this.onPeerMessage(frame.text, frame.bytes)
         return
       case TAG.TEXT_ACK_REQ:
-        void this._onPeerAckReqMessage(frame.text, frame.seq)
+        void this.onPeerAckReqMessage(frame.text, frame.seq)
         return
       case TAG.BINARY:
-        this._onPeerBinaryMessage(frame.data as Uint8Array<ArrayBuffer>, frame.bytes)
+        this.onPeerBinaryMessage(frame.data as Uint8Array<ArrayBuffer>, frame.bytes)
         return
       case TAG.BINARY_ACK_REQ:
-        void this._onPeerBinaryAckReqMessage(frame.data, frame.seq)
+        void this.onPeerBinaryAckReqMessage(frame.data, frame.seq)
         return
       case TAG.ACK_RES:
         this.onPeerAckRes(frame.ackedSeq, frame.text, frame.status)
@@ -404,10 +342,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected dispatchCtrl(frame: ChannelCtrlFrame): void {
     switch (frame.tag) {
       case TAG.CLOSE:
-        this._onPeerCloseRequest(frame.timeoutMs)
+        this.onPeerCloseRequest(frame.timeoutMs)
         return
       case TAG.CLOSE_ACK:
-        this._onPeerCloseAck()
+        this.onPeerCloseAck()
         return
       case TAG.WINDOW:
         this.sendCredit.onPeerByteWindow(frame.bytes)
@@ -429,7 +367,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  /** Settle an outstanding ack-bearing send. Mirrors server-side `_onPeerAckRes`. */
+  /** Settle an outstanding ack-bearing send. Mirrors server-side `onPeerAckRes`. */
   protected onPeerAckRes(ackedSeq: number, text: string, status: AckResultStatus): void {
     const pending = this.pendingAcks.get(ackedSeq)
     if (!pending) return
@@ -452,7 +390,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  _onPeerCloseRequest(timeoutMs: number): void {
+  protected onPeerCloseRequest(timeoutMs: number): void {
     this.lifecycle.shortenDeadline(normalizeCloseTimeout(timeoutMs))
     this.connection.sendCloseAck(this)
     if (this.closed) return
@@ -460,7 +398,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     void this.lifecycle.finish()
   }
 
-  _onPeerCloseAck(): void {
+  protected onPeerCloseAck(): void {
     if (this.lifecycle.ended) return
     this.lifecycle.onCloseAck()
   }
@@ -515,11 +453,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal */
   _abortFromCallback(err: AbortError): void {
     this.abort(err.abortValue, err.message)
-  }
-
-  /** @internal */
-  _reportCallbackError(err: unknown): void {
-    reportChannelError(err)
   }
 }
 

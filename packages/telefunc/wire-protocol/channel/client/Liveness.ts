@@ -1,18 +1,17 @@
 export { Liveness }
 export type { LivenessOwner }
 
-import type { ChannelRecord, ChannelTable } from './ChannelTable.js'
-import type { ClientChannelTransport } from './connection.js'
+import type { ChannelTable } from './ChannelTable.js'
+import type { ClientChannelTransport } from './ClientConnection.js'
 import type { SendGate } from './SendGate.js'
 import { CHANNEL_PING_INTERVAL_MIN_MS, CHANNEL_PING_INTERVAL_MS } from '../../constants.js'
 import { encode, type PingEntry, type PongEntry } from '../../wire/frame.js'
 import { pingDeadline } from '../../wire/pingDeadline.js'
 import { Heartbeat } from './Heartbeat.js'
 
-/** The connection, which drops a wire whose PONG came late and lets go of a channel the server needs nothing more of. */
+/** The connection's wire lifecycle, which drops a wire whose PONG came late. */
 interface LivenessOwner {
-  onPongTimeout(transport: ClientChannelTransport): void
-  releaseChannel(record: ChannelRecord): void
+  onWireLate(transport: ClientChannelTransport): void
 }
 
 type LivenessOptions = {
@@ -76,7 +75,7 @@ class Liveness {
       intervalMs,
       pongTimeoutMs: pingDeadline(intervalMs),
       send: () => this.beat(transport),
-      onDead: () => this.owner.onPongTimeout(transport),
+      onDead: () => this.owner.onWireLate(transport),
     })
     transport.attachHeartbeat(heartbeat)
     return heartbeat
@@ -87,14 +86,14 @@ class Liveness {
     for (const { ix, lastSeq } of ended) {
       const record = this.channels.get(ix)
       if (record === undefined || record.state.tag !== 'closed') continue
-      if (lastSeq === null) this.owner.releaseChannel(record)
+      if (lastSeq === null) this.gate.release(record)
       else this.channels.serverHas(record, record.state, this.channels.sentThrough(ix, lastSeq))
     }
   }
 
   /** Each open channel acknowledges what arrived since its last WINDOW, then the PING goes. */
   private beat(transport: ClientChannelTransport): void {
-    for (const { channel, state } of this.channels.values()) if (state.tag !== 'closed') channel._acknowledge()
+    for (const { channel, state } of this.channels.values()) if (state.tag !== 'closed') channel._attach.acknowledge()
     transport.sendPing(this.buildPing())
   }
 
@@ -108,7 +107,7 @@ class Liveness {
       if (state.reported && record.replay.length === 0) {
         queued ??= this.gate.queuedIxes()
         if (!queued.has(ix)) {
-          this.owner.releaseChannel(record)
+          this.gate.release(record)
           continue
         }
       }

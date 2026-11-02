@@ -699,7 +699,7 @@ async function onChannelUnawaitedBurst() {
       void ch.sendBinary(message)
     }
   })
-  return { channel: ch.client, channelId: ch.id }
+  return { channel: ch.client }
 }
 
 /**
