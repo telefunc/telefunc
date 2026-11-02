@@ -34,7 +34,6 @@ import type { RoomConfigRecord, RoomDemandPage } from '../protocol.js'
 import { RoomError, participantGoneError, roomClosedError } from '../../shared/errors.js'
 import { assert } from '../../utils/assert.js'
 import { ROOM_HORIZON_MS } from '../constants.js'
-import { reportRoomError } from '../reportRoomError.js'
 import { memberIdOfCellKey } from '../store/cells.js'
 
 const roomTextEncoder = new TextEncoder()
@@ -115,20 +114,19 @@ function inboxOf(roomId: string, inc: string, member: string): CommitTarget {
   return { roomId, inc, lane: { kind: 'inbox', member } }
 }
 
-/** Delivery is at-most-once: a handoff that rejects or never settles is lost, not the committer's failure. */
+/** Delivery is at-most-once: a handoff that rejects or never settles is lost, not the committer's failure, and no bug
+ *  (an authority a deploy evicts rejects it), so it is logged, as a Broadcast delivery that can't reach a DO is. */
 async function handedOff(roomId: string, commit: CommitAccepted): Promise<void> {
   assert(commit.delivery !== undefined)
-  const delivered = raceTimeout(
+  const lost = await raceTimeout(
     commit.delivery.then(
-      () => true,
-      () => false,
+      () => null,
+      (reason: unknown) => String(reason),
     ),
     ROOM_HORIZON_MS,
-    () => false,
+    () => 'unconfirmed within the horizon',
   )
-  if (!(await delivered)) {
-    reportRoomError(new Error(`Room delivery handoff lost (rejected or unconfirmed within the horizon): ${roomId}`))
-  }
+  if (lost !== null) console.error(`Room delivery handoff of '${roomId}' lost: ${lost}`)
 }
 
 function withinRoomHorizon<T>(promise: Promise<T>): Promise<T> {
