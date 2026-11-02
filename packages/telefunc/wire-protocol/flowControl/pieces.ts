@@ -258,10 +258,7 @@ class PieceSender {
   /** Counts `frame` as it joins the task's message, after the LENGTH the frame before it needs now. */
   private count(frame: Uint8Array<ArrayBuffer>, data: boolean): void {
     const length = this.messages.lengthAhead
-    if (length > 0) {
-      this.countHanded(length, false)
-      this.messages.addLength()
-    }
+    if (length > 0) this.countHanded(length, false)
     this.countHanded(frame.byteLength, data)
   }
 
@@ -565,11 +562,6 @@ class SocketMessages {
     this.socket = socket
   }
 
-  /** Counts the LENGTH the next frame added puts ahead of the last. */
-  addLength(): void {
-    this.bytes += this.lengthAhead
-  }
-
   /** Adds `frame`, which the task sent. */
   gather(frame: Uint8Array<ArrayBuffer>): void {
     this.gathered = true
@@ -577,10 +569,10 @@ class SocketMessages {
     this.add(frame)
   }
 
-  /** Adds a gathered or carried `frame`, after its LENGTH. */
+  /** Adds a gathered or carried `frame`, after the LENGTH the frame before it now needs. */
   add(frame: Uint8Array<ArrayBuffer>): void {
     this.frames.push(frame)
-    this.bytes += frame.byteLength
+    this.bytes += this.lengthAhead + frame.byteLength
     this.lengthAhead = lengthBytes(frame[0]!)
   }
 
