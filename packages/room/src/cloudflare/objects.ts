@@ -12,10 +12,10 @@ import type { CloudflareRoomAuthorityStub } from './RoomAuthority.js'
 function openRoomAuthority(
   namespace: TelefuncExtensionNamespace,
   roomId: string,
-  bucket: string | null,
+  bucket: string,
 ): CloudflareRoomAuthorityStub {
   const id = namespace.idFromName(ROOM_CLOUDFLARE_PREFIX + roomId)
-  return roomObjectStub(namespace.get(id, bucket === null ? undefined : { locationHint: bucket }))
+  return roomObjectStub(namespace.get(id, { locationHint: bucket }))
 }
 
 /** The directory of the rooms listed in `bucket`, placed there. */

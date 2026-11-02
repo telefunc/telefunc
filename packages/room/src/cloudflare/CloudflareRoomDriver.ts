@@ -21,22 +21,22 @@ import type {
   RoomHead,
   RoomSubscriptionSource,
 } from '../backend/contract.js'
-import type { BackendReceiver, DriverAttempt, OrderingInfo, TelefuncExtensionNamespace } from 'telefunc/__internal'
+import type { BackendReceiver, CloudflarePlaneKit, DriverAttempt, OrderingInfo } from 'telefunc/__internal'
 import { CLOUDFLARE_BUCKETS, currentCloudflareMember } from 'telefunc/__internal'
 import type { CloudflareRoomAuthorityStub } from './RoomAuthority.js'
 import { currentRoomSessionSubscriptions, getRoomSessionSubscriptions } from './RoomSessionSubscriptions.js'
 import { openRegionDirectory, openRoomAuthority } from './objects.js'
 import { compareCodePoints } from '../utils/SortedIds.js'
 
-type CloudflareRoomDriverOptions = { getNamespace: () => TelefuncExtensionNamespace }
-
 /** A subscription requires its session DO's context; a lane commit made in one goes through that session's ordered
  *  stub. */
 class CloudflareRoomDriver implements RoomDriver {
-  private readonly getNamespace: () => TelefuncExtensionNamespace
+  private readonly getNamespace: CloudflarePlaneKit['getNamespace']
+  private readonly locationFallback: string
 
-  constructor({ getNamespace }: CloudflareRoomDriverOptions) {
+  constructor({ getNamespace, locationFallback }: CloudflarePlaneKit) {
     this.getNamespace = getNamespace
+    this.locationFallback = locationFallback
   }
 
   scope(): string | null {
@@ -120,13 +120,7 @@ class CloudflareRoomDriver implements RoomDriver {
   // A room's listing is kept by its own authority, which also writes it to its region's directory for `Room.list()`.
 
   async directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
-    return this.stub(roomId).directoryPut(
-      roomId,
-      incTag,
-      checkAt,
-      minDelayMs,
-      currentCloudflareMember()?.bucket ?? null,
-    )
+    return this.stub(roomId).directoryPut(roomId, incTag, checkAt, minDelayMs, this.bucketHere())
   }
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
@@ -150,9 +144,14 @@ class CloudflareRoomDriver implements RoomDriver {
     return []
   }
 
-  /** A room's authority, which the call that creates it places in the region of the session it runs in, if any. */
+  /** A room's authority, which the call that creates it places in `bucketHere()`. */
   stub(roomId: string): CloudflareRoomAuthorityStub {
-    return openRoomAuthority(this.getNamespace(), roomId, currentCloudflareMember()?.bucket ?? null)
+    return openRoomAuthority(this.getNamespace(), roomId, this.bucketHere())
+  }
+
+  /** The bucket of the session this call runs in, else `locationFallback`: a cron or queue handler has none. */
+  private bucketHere(): string {
+    return currentCloudflareMember()?.bucket ?? this.locationFallback
   }
 }
 

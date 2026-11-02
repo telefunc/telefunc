@@ -311,6 +311,7 @@ class CloudflareBroadcastMember {
 type CloudflareBroadcastOptions = {
   baseInstanceName: string
   scale?: CloudflareScale
+  locationFallback: LocationBucket
   getNamespace: () => BroadcastNamespace
 }
 
@@ -319,11 +320,13 @@ type CloudflareBroadcastOptions = {
 class CloudflareBroadcast {
   private readonly baseInstanceName: string
   private readonly scale: CloudflareScale | undefined
+  private readonly locationFallback: LocationBucket
   private readonly getNamespace: () => BroadcastNamespace
 
-  constructor({ baseInstanceName, scale, getNamespace }: CloudflareBroadcastOptions) {
+  constructor({ baseInstanceName, scale, locationFallback, getNamespace }: CloudflareBroadcastOptions) {
     this.baseInstanceName = baseInstanceName
     this.scale = scale
+    this.locationFallback = locationFallback
     this.getNamespace = getNamespace
   }
 
@@ -423,9 +426,10 @@ class CloudflareBroadcast {
     return `${this.baseInstanceName}:broadcast:${locationBucket}:${bucketShardOrdinal}`
   }
 
+  /** Hinted with `locationFallback` outside a session: Cloudflare places a DO on its first `get()`, for good. */
   private stubByName(name: string, locationHint: LocationBucket | null): TelefuncBroadcastStub {
     const namespace = this.getNamespace()
-    return namespace.get(namespace.idFromName(name), locationHint === null ? undefined : { locationHint })
+    return namespace.get(namespace.idFromName(name), { locationHint: locationHint ?? this.locationFallback })
   }
 
   private stubById(id: string): TelefuncBroadcastStub {

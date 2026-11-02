@@ -51,6 +51,7 @@ export {
 export type {
   CloudflareExtensionKit,
   CloudflareMember,
+  CloudflarePlaneKit,
   CloudflareRegions,
   TelefuncExtensionNamespace,
   TelefuncExtensionStub,

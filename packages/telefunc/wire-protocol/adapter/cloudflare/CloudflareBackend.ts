@@ -10,27 +10,27 @@ import type {
   PublishResult,
 } from '../../backend/driver.js'
 import type { CloudflareBroadcast } from './broadcast.js'
-import { getCloudflareExtensionPlanes, type TelefuncExtensionNamespace } from './extensions.js'
+import { getCloudflareExtensionPlanes, type CloudflarePlaneKit } from './extensions.js'
 import { currentCloudflareSession, requireCloudflareSession } from './session.js'
 
 type CloudflareBackendOptions = {
-  getNamespace: () => TelefuncExtensionNamespace
+  planeKit: CloudflarePlaneKit
   broadcast: CloudflareBroadcast
 }
 
 /** A subscription requires its session DO's context. */
 class CloudflareBackend implements BroadcastDriver {
   readonly broadcast: CloudflareBroadcast
-  private readonly getNamespace: () => TelefuncExtensionNamespace
+  private readonly planeKit: CloudflarePlaneKit
 
-  constructor({ getNamespace, broadcast }: CloudflareBackendOptions) {
+  constructor({ planeKit, broadcast }: CloudflareBackendOptions) {
     this.broadcast = broadcast
-    this.getNamespace = getNamespace
+    this.planeKit = planeKit
   }
 
   /** The planes of the Cloudflare extensions registered so far. */
   get planes(): { readonly [key: symbol]: (kit: never) => unknown } {
-    return getCloudflareExtensionPlanes(this.getNamespace)
+    return getCloudflareExtensionPlanes(this.planeKit)
   }
 
   publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {

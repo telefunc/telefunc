@@ -113,10 +113,11 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const cloudflareBackend = installBackend(
     () =>
       new CloudflareBackend({
-        getNamespace: () => telefuncNamespace(workerEnv),
+        planeKit: { getNamespace: () => telefuncNamespace(workerEnv), locationFallback },
         broadcast: new CloudflareBroadcast({
           baseInstanceName,
           scale,
+          locationFallback,
           getNamespace: () => telefuncNamespace(workerEnv),
         }),
       }),
@@ -230,7 +231,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         extension?.durableObject,
         `The Cloudflare extension ${name} isn't registered: is it installed, and does your worker's build use Telefunc's Vite plugin?`,
       )
-      const regions = { locationFallback, forward: broadcast.forward.bind(broadcast, this.broadcastCalls) }
+      const regions = { forward: broadcast.forward.bind(broadcast, this.broadcastCalls) }
       const getNamespace = () => telefuncNamespace(this.env)
       const durableObject = extension.durableObject(this.ctx as never, this.env as never, { regions, getNamespace })
       this.durableObjects.set(name, durableObject)

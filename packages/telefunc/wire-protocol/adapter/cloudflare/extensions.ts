@@ -11,6 +11,7 @@ export type {
   CloudflareExtensionDurableObject,
   CloudflareExtensionKit,
   CloudflareMember,
+  CloudflarePlaneKit,
   CloudflareRegions,
   TelefuncExtensionNamespace,
   TelefuncExtensionStub,
@@ -46,8 +47,6 @@ const CLOUDFLARE_BUCKETS: readonly string[] = DEFAULT_BROADCAST_BUCKETS
 
 /** Broadcast's regions, as an extension's Durable Object sends through them. */
 type CloudflareRegions = {
-  /** The bucket of what has no session's bucket to go by: the `locationFallback` option. */
-  readonly locationFallback: string
   /** Sends `delivery` across to each bucket of `members` once, to the coordinator `key` picks there, which hands it to
    *  the bucket's members; settles once every coordinator did. Calls made in order reach each coordinator in order. */
   forward(
@@ -63,6 +62,14 @@ type CloudflareExtensionKit = {
   regions: CloudflareRegions
   /** The Telefunc Durable Object namespace, for calls to other Durable Objects. */
   getNamespace: () => TelefuncExtensionNamespace
+}
+
+/** What an extension's backend plane gets from Telefunc. */
+type CloudflarePlaneKit = {
+  /** Reads the Telefunc Durable Object namespace of the Worker's current env. */
+  getNamespace: () => TelefuncExtensionNamespace
+  /** The bucket of a call that has no session's bucket to go by: the `locationFallback` option. */
+  locationFallback: string
 }
 
 /** The Broadcast member of a session Durable Object, as an extension's code running in it uses it. */
@@ -85,9 +92,8 @@ type CloudflareExtension = {
    *  `env` are the Durable Object's `DurableObjectState` and `Cloudflare.Env`. Its `alarm()` gets the Durable Object's
    *  alarms. */
   durableObject?: (ctx: never, env: never, kit: CloudflareExtensionKit) => CloudflareExtensionDurableObject
-  /** The backend planes the Cloudflare backend serves for the extension, by `backendPlane()` key. Each takes
-   *  `getNamespace`, which reads the Telefunc Durable Object namespace of the Worker's current env. */
-  planes?: Record<symbol, (getNamespace: () => TelefuncExtensionNamespace) => unknown>
+  /** The backend planes the Cloudflare backend serves for the extension, by `backendPlane()` key. */
+  planes?: Record<symbol, (kit: CloudflarePlaneKit) => unknown>
 }
 
 const globalObject = getGlobalObject<{ extensions: Map<string, CloudflareExtension> }>('extensions.ts', () => ({
@@ -108,10 +114,10 @@ function currentCloudflareMember(): CloudflareMember | undefined {
   return currentCloudflareSession()?.broadcast
 }
 
-function getCloudflareExtensionPlanes(getNamespace: () => TelefuncExtensionNamespace): Record<symbol, () => unknown> {
+function getCloudflareExtensionPlanes(kit: CloudflarePlaneKit): Record<symbol, () => unknown> {
   const planes: Record<symbol, () => unknown> = {}
   for (const { planes: own = {} } of globalObject.extensions.values()) {
-    for (const key of Object.getOwnPropertySymbols(own)) planes[key] = () => own[key]!(getNamespace)
+    for (const key of Object.getOwnPropertySymbols(own)) planes[key] = () => own[key]!(kit)
   }
   return planes
 }

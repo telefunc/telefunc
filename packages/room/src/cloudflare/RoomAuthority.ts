@@ -222,19 +222,18 @@ class RoomAuthority {
     await this.scheduleMaintenanceIfNeeded()
   }
 
-  /** At a room's authority: lists the room, in the region directory of `bucket` if it is the room's first listing, of
-   *  `regions.locationFallback` if that has no bucket either. */
+  /** At a room's authority: lists the room, in the region directory of `bucket` if it is the room's first listing. */
   async directoryPut(
     roomId: string,
     incTag: string,
     checkAt: number,
     minDelayMs: number,
-    bucket: string | null,
+    bucket: string,
   ): Promise<void> {
     const at = Math.max(checkAt, Date.now() + minDelayMs)
     const listedIn = this.transaction((sql) => {
       directoryPut(sql, roomId, incTag, at)
-      return claimListingBucket(sql, bucket ?? this.regions.locationFallback)
+      return claimListingBucket(sql, bucket)
     })
     await this.callDirectory(listedIn, (directory) => directory.listInRegion(roomId, incTag))
     await this.scheduleMaintenanceIfNeeded()
