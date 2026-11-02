@@ -25,11 +25,11 @@ type ChannelLifecycleOptions = {
 class ChannelLifecycle {
   private readonly owner: ChannelLifecycleOwner
   private readonly reportError: (err: unknown) => void
-  private openCallbacks: Array<() => void> = []
+  private openListeners: Array<() => void> = []
   private didFireOpen = false
-  private closeCallbacks: ChannelCloseCallback[] = []
+  private closeListeners: ChannelCloseCallback[] = []
   private didFireClose = false
-  private pendingCloseCallbacks = 0
+  private runningCloseListeners = 0
   private inflightAcks = 0
   private awaitingCloseAck = false
   private didReceiveCloseAck = false
@@ -77,13 +77,13 @@ class ChannelLifecycle {
       if (isPromise(result)) result.catch((err: unknown) => this.handleCallbackError(err))
       return
     }
-    this.openCallbacks.push(callback)
+    this.openListeners.push(callback)
   }
 
   fireOpen(): void {
     if (this.didFireOpen) return
     this.didFireOpen = true
-    for (const cb of this.openCallbacks) {
+    for (const cb of this.openListeners) {
       try {
         const result = cb()
         if (isPromise(result)) result.catch((err: unknown) => this.handleCallbackError(err))
@@ -91,7 +91,7 @@ class ChannelLifecycle {
         if (this.handleCallbackError(err)) return
       }
     }
-    this.openCallbacks.length = 0
+    this.openListeners.length = 0
   }
 
   /** A callback's `Abort` aborts the channel: true where `err` is one. */
@@ -109,7 +109,7 @@ class ChannelLifecycle {
       void this.invokeCloseCallback(callback, this.endError)
       return
     }
-    this.closeCallbacks.push(callback)
+    this.closeListeners.push(callback)
   }
 
   /** This end closes, within `timeoutMs` or by its peer's earlier deadline; `awaitingCloseAck` where its peer
@@ -172,17 +172,17 @@ class ChannelLifecycle {
   fireClose(err?: Error): void {
     if (this.didFireClose) return
     this.didFireClose = true
-    for (const callback of this.closeCallbacks) {
+    for (const callback of this.closeListeners) {
       const pending = this.invokeCloseCallback(callback, err)
       if (pending === undefined) continue
-      this.pendingCloseCallbacks++
+      this.runningCloseListeners++
       void pending.finally(() => {
-        this.pendingCloseCallbacks--
+        this.runningCloseListeners--
         this.notifyProgress()
       })
     }
-    this.closeCallbacks.length = 0
-    this.openCallbacks.length = 0
+    this.closeListeners.length = 0
+    this.openListeners.length = 0
     this.notifyProgress()
   }
 
@@ -191,7 +191,7 @@ class ChannelLifecycle {
       // Fire onClose only once the close roundtrip is settled and no inbound work is in flight,
       // so listeners see "closed" only after the channel can no longer receive frames.
       if (this.inflightAcks === 0 && (!this.awaitingCloseAck || this.didReceiveCloseAck)) this.fireClose()
-      if (this.didFireClose && this.pendingCloseCallbacks === 0) {
+      if (this.didFireClose && this.runningCloseListeners === 0) {
         this.owner._end()
         break
       }
