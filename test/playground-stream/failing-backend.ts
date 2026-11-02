@@ -15,12 +15,14 @@ import {
   type BackendPayload,
   type BackendReceiver,
   type BroadcastRoute,
+  servePlane,
   type OrderingInfo,
   type SubscriptionDriver,
 } from 'telefunc/__internal'
 import {
   getRoomPlane,
   MemoryRoomDriver,
+  ROOM_PLANE,
   type CellsRead,
   type RoomDriver,
   type RoomPlane,
@@ -135,9 +137,7 @@ class FailingAttempt extends DriverAttempt implements BackendReceiver {
 /** Installs the in-memory backend, failing what a test asks it to fail. */
 function installFailingBackend() {
   const room = failing(new MemoryRoomDriver())
-  const backend = failing(
-    Object.assign(new MemoryBackend(), { planes: { [Symbol.for('telefunc.room.plane')]: () => room } }),
-  )
+  const backend = failing(Object.assign(new MemoryBackend(), { planes: [servePlane(ROOM_PLANE, () => room)] }))
   installBackend(() => backend, ['failing-backend'])
 }
 

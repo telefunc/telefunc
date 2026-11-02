@@ -9,7 +9,7 @@ export {
 }
 export type { PlaneDefinition }
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
-import type { BroadcastDriver, SubscriptionDriver } from './driver.js'
+import type { BroadcastDriver, PlaneKey, SubscriptionDriver } from './driver.js'
 import { BroadcastPlane } from './broadcast/BroadcastPlane.js'
 import { TransportBroadcastDriver, type BroadcastTransport } from './broadcast/TransportBroadcastDriver.js'
 import { MemoryBackend } from './memory/MemoryBackend.js'
@@ -31,11 +31,11 @@ type BackendPlane = { dispose(): Promise<void> }
 type PlaneDriver = SubscriptionDriver<never>
 
 /** An extension's plane, which `backendPlane()` builds once per installed backend. */
-type PlaneDefinition<Driver extends PlaneDriver, Plane extends BackendPlane> = {
+type PlaneDefinition<Kit, Driver extends PlaneDriver, Plane extends BackendPlane> = {
   /** The key a backend serves it under in `planes`. */
-  readonly key: symbol
+  readonly key: PlaneKey<string, Kit, Driver>
   /** What the extension gives a backend's `planes` entry to build its driver with. */
-  readonly kit?: unknown
+  readonly kit: Kit
   /** The driver of a process that installed no backend. */
   memoryDriver(): Driver
   /** The plane over `driver`. */
@@ -99,8 +99,8 @@ function getBroadcastPlane(): BroadcastPlane {
 }
 
 /** The installed backend's `plane`, built on first use. */
-function backendPlane<Driver extends PlaneDriver, Plane extends BackendPlane>(
-  plane: PlaneDefinition<Driver, Plane>,
+function backendPlane<Kit, Driver extends PlaneDriver, Plane extends BackendPlane>(
+  plane: PlaneDefinition<Kit, Driver, Plane>,
 ): Plane {
   assertUsage(
     !(state.transport && (state.installed?.fallback ?? true)),
@@ -112,9 +112,10 @@ function backendPlane<Driver extends PlaneDriver, Plane extends BackendPlane>(
     let driver: Driver
     if (installed.fallback) driver = plane.memoryDriver()
     else {
-      const build = installed.backend.planes?.[plane.key]
-      assertUsage(build, `The installed backend doesn't serve ${String(plane.key)}, which this call needs`)
-      driver = build(plane.kit as never) as Driver
+      const server = installed.backend.planes?.find(({ key }) => key === plane.key)
+      assertUsage(server, `The installed backend doesn't serve ${String(plane.key)}, which this call needs`)
+      // servePlane() typed the entry by its key, which is plane.key
+      driver = (server.build as (kit: Kit) => Driver)(plane.kit)
     }
     return plane.create(driver)
   }) as Plane

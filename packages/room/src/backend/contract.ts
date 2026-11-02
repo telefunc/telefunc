@@ -28,17 +28,22 @@ export type {
   RoomDriver,
   RoomOperation,
   RoomHead,
+  RoomPlaneKey,
   RoomPlaneKit,
   RoomSubscriptionSource,
 }
 
-import type { BackendReceiver, DriverAttempt, OrderingInfo, SubscriptionDriver } from 'telefunc/__internal'
+import type { BackendReceiver, DriverAttempt, OrderingInfo, PlaneKey, SubscriptionDriver } from 'telefunc/__internal'
 import type { recordOperation } from './operation.js'
 
 /** The cells a prefix read's page holds. */
 const CELL_PAGE_SIZE = 1024
 /** The entries a due read's page holds, and a directory list's per region: a Cloudflare page merges each region's. */
 const DIRECTORY_PAGE_SIZE = 100
+
+/** The key a backend serves Room's plane by:
+ *  `servePlane(planeKey<RoomPlaneKey>('telefunc.room.plane'), (kit) => …)`. */
+type RoomPlaneKey = PlaneKey<'telefunc.room.plane', RoomPlaneKit, RoomDriver>
 
 /** Room's lane keys, page sizes and operation recorder, which `backendPlane()` hands a backend's Room driver: a backend
  *  package imports Room for types only, as a Broadcast-only app doesn't install it. */

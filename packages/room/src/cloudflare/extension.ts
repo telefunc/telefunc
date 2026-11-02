@@ -13,5 +13,5 @@ import { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
 registerCloudflareExtension({
   name: ROOM_CLOUDFLARE_EXTENSION,
   durableObject: (ctx: DurableObjectState, _env, kit) => new RoomAuthority(ctx, kit),
-  planes: { [ROOM_PLANE]: (kit) => new CloudflareRoomDriver(kit) },
+  planes: [{ key: ROOM_PLANE, build: (kit) => new CloudflareRoomDriver(kit) }],
 })

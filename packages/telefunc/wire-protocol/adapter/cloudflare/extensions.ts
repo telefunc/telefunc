@@ -20,7 +20,7 @@ export type {
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { assertUsage } from '../../../utils/assert.js'
-import type { BackendReceiver, BroadcastPayload, BroadcastRoute } from '../../backend/driver.js'
+import type { BackendReceiver, BroadcastPayload, BroadcastRoute, PlaneKey, PlaneServer } from '../../backend/driver.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import { currentCloudflareSession } from './session.js'
 import { DEFAULT_BROADCAST_BUCKETS } from './routing.js'
@@ -94,8 +94,8 @@ type CloudflareExtension = {
    *  `env` are the Durable Object's `DurableObjectState` and `Cloudflare.Env`. Its `alarm()` gets the Durable Object's
    *  alarms. */
   durableObject?: (ctx: never, env: never, kit: CloudflareExtensionKit) => CloudflareExtensionDurableObject
-  /** The backend planes the Cloudflare backend serves for the extension, by `backendPlane()` key. */
-  planes?: Record<symbol, (kit: CloudflarePlaneKit) => unknown>
+  /** The backend planes the Cloudflare backend serves for the extension, each built from Cloudflare's kit. */
+  planes?: readonly { key: PlaneKey; build(kit: CloudflarePlaneKit): unknown }[]
 }
 
 const globalObject = getGlobalObject<{ extensions: Map<string, CloudflareExtension> }>('extensions.ts', () => ({
@@ -128,10 +128,8 @@ function currentCloudflareHostKey(): string {
   return member.hostKey
 }
 
-function getCloudflareExtensionPlanes(kit: CloudflarePlaneKit): Record<symbol, () => unknown> {
-  const planes: Record<symbol, () => unknown> = {}
-  for (const { planes: own = {} } of globalObject.extensions.values()) {
-    for (const key of Object.getOwnPropertySymbols(own)) planes[key] = () => own[key]!(kit)
-  }
-  return planes
+function getCloudflareExtensionPlanes(kit: CloudflarePlaneKit): PlaneServer[] {
+  return [...globalObject.extensions.values()].flatMap(({ planes = [] }) =>
+    planes.map(({ key, build }) => ({ key, build: () => build(kit) })),
+  )
 }

@@ -7,6 +7,7 @@ import type {
   BroadcastPayload,
   BroadcastRoute,
   DriverAttempt,
+  PlaneServer,
   PublishResult,
 } from '../../backend/driver.js'
 import type { CloudflareBroadcast } from './broadcast.js'
@@ -30,7 +31,7 @@ class CloudflareBackend implements BroadcastDriver {
   }
 
   /** The planes of the Cloudflare extensions registered so far. */
-  get planes(): { readonly [key: symbol]: (kit: never) => unknown } {
+  get planes(): PlaneServer[] {
     return getCloudflareExtensionPlanes(this.planeKit)
   }
 

@@ -9,7 +9,8 @@ import type {
   OrderingInfo,
   PublishResult,
 } from 'telefunc/__internal'
-import type { RoomDriver, RoomPlaneKit } from '@telefunc/room/backend'
+import { planeKey, servePlane } from 'telefunc/__internal'
+import type { RoomPlaneKey } from '@telefunc/room/backend'
 import { REDIS_COMMANDS } from './commands.js'
 import { broadcastChannel } from './keys.js'
 import type { RedisConnection } from './RedisConnection.js'
@@ -22,10 +23,12 @@ type RedisBackendOptions = { connection: RedisConnection }
 /** The installed backend: Broadcast on `connection`, and Room's driver, built on the same connection. */
 class RedisBackend implements BroadcastDriver, RedisDriver {
   readonly connection: RedisConnection
-  readonly planes = {
-    [Symbol.for('telefunc.room.plane')]: (kit: RoomPlaneKit): RoomDriver =>
-      new RedisRoomDriver({ connection: this.connection, kit }),
-  } satisfies BroadcastDriver['planes']
+  readonly planes = [
+    servePlane(
+      planeKey<RoomPlaneKey>('telefunc.room.plane'),
+      (kit) => new RedisRoomDriver({ connection: this.connection, kit }),
+    ),
+  ]
 
   constructor({ connection }: RedisBackendOptions) {
     this.connection = connection

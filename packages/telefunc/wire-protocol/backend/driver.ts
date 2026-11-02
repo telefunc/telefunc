@@ -1,4 +1,4 @@
-export { DriverAttempt }
+export { DriverAttempt, planeKey, servePlane }
 export type {
   AttemptState,
   BackendListener,
@@ -7,6 +7,8 @@ export type {
   BroadcastDriver,
   BroadcastPayload,
   BroadcastRoute,
+  PlaneKey,
+  PlaneServer,
   PublishResult,
   SubscriptionDriver,
 }
@@ -59,9 +61,31 @@ type BroadcastDriver = SubscriptionDriver<BroadcastRoute> & {
   /** Memory only, as it fixes a publish's recipients as it publishes: the `seq` of `key`'s last publish, so a consumer
    *  joining a live attempt skips what was published before it. */
   published?(key: string): number
-  /** The planes this backend serves, by extension key; each is built on its first `backendPlane()` call, given the
-   *  `kit` the extension passes it. */
-  readonly planes?: { readonly [key: symbol]: (kit: never) => unknown }
+  /** The planes this backend serves; each is built on its first `backendPlane()` call, given the `kit` the extension
+   *  passes it. */
+  readonly planes?: readonly PlaneServer[]
+}
+
+declare const planeTypes: unique symbol
+
+/** A plane's key: `Symbol.for(Name)`, typed by the kit a backend builds the plane's driver from and the driver it
+ *  builds. The extension that defines the plane exports the type, so a backend checks against it without importing
+ *  the extension at runtime. */
+type PlaneKey<Name extends string = string, Kit = never, Driver = unknown> = symbol & {
+  readonly [planeTypes]?: { name: Name; build(kit: Kit): Driver }
+}
+
+/** How a backend builds one plane's driver; `servePlane()` makes it. */
+type PlaneServer = { readonly key: PlaneKey; build(kit: never): unknown }
+
+/** The key `Key` types, by its name, which the compiler checks against `Key`. */
+function planeKey<Key extends PlaneKey>(name: Key extends PlaneKey<infer Name> ? Name : never): Key {
+  return Symbol.for(name) as Key
+}
+
+/** A backend's entry in `planes`: `build` makes the driver of the plane `key` names, typed by the key. */
+function servePlane<Kit, Driver>(key: PlaneKey<string, Kit, Driver>, build: (kit: Kit) => Driver): PlaneServer {
+  return { key, build }
 }
 
 /**
