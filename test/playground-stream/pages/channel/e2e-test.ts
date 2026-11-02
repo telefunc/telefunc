@@ -171,6 +171,14 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
+  test('channel: late onOpen Abort terminates the channel', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-late-open-abort')
+    await autoRetry(async () => {
+      expect(await page.textContent('#channel-late-abort-result')).toBe('late-stop')
+    })
+  })
+
   // ── Basic connection ─────────────────────────────────────────────────
 
   test('channel: connect — client onOpen fires, server responds with welcome via ping', async () => {
@@ -368,7 +376,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
-  test('channel: an Abort a late server onOpen throws aborts the channel with its value', async () => {
+  test("channel: an Abort the server's onOpen throws aborts the channel with its value, and the onOpen after it doesn't run", async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-open-abort')
     let openAbort: ChannelState['openAbort'] = null
@@ -377,7 +385,7 @@ function testChannel(isDev: boolean, inDocker = false) {
       expect(openAbort?.abortValue).toBe('stop')
     })
     const ss = await getCleanupState()
-    expect(ss[`openAbort_${openAbort!.channelId}_second`]).toBe('run')
+    expect(ss[`openAbort_${openAbort!.channelId}_second`]).toBe('not run')
   })
 
   // ── Binary sendBinary / listenBinary round-trip ───────────────────────

@@ -45,6 +45,7 @@ export {
   onChannelApiProbe,
   onChannelLateCallbacks,
   onChannelOpenAbort,
+  onChannelLateOpenAbort,
 }
 
 import { Channel, Abort, BroadcastChannel, config } from 'telefunc'
@@ -836,11 +837,7 @@ async function onChannelOpenAbort() {
   const id = ch.id
   cleanupState[`openAbort_${id}_second`] = 'not run'
   ch.onOpen(() => {
-    setTimeout(() =>
-      ch.onOpen(() => {
-        throw Abort('stop')
-      }),
-    )
+    throw Abort('stop')
   })
   ch.onOpen(() => {
     cleanupState[`openAbort_${id}_second`] = 'run'
@@ -896,6 +893,18 @@ async function onChannelCreditFailure() {
     void Promise.allSettled(sends).then((results) => {
       cleanupState[`credit_${ch.id}`] = String(results.some((r) => r.status === 'rejected'))
     })
+  })
+  return { channel: ch.client }
+}
+
+async function onChannelLateOpenAbort() {
+  const ch = new Channel<never, never>()
+  ch.onOpen(() => {
+    setTimeout(() =>
+      ch.onOpen(() => {
+        throw Abort('late-stop')
+      }),
+    )
   })
   return { channel: ch.client }
 }

@@ -49,6 +49,7 @@ import {
   onChannelApiProbe,
   onChannelLateCallbacks,
   onChannelOpenAbort,
+  onChannelLateOpenAbort,
 } from './Channel.telefunc'
 
 /**
@@ -1104,6 +1105,12 @@ function ChannelDemo() {
   }, [])
 
   // Once the channel opened, an onOpen runs at once; once it closed, an onClose runs at once with the Abort it ended with.
+  const testLateOpenAbort = useCallback(async () => {
+    const { channel } = await openChannel(onChannelLateOpenAbort)
+    const err = await channel.closed.catch((error) => error)
+    document.querySelector('#channel-late-abort-result')!.textContent = err.abortValue
+  }, [])
+
   const testBudgets = useCallback(async () => {
     const { bytes, acks } = await openChannel(onChannelBudgets)
     acks.listen(() => new Promise<void>(() => {}))
@@ -1670,6 +1677,10 @@ function ChannelDemo() {
             Test failed credit waits
           </button>
           <output id="channel-credit-result" />
+          <button id="channel-test-late-open-abort" onClick={testLateOpenAbort}>
+            Test late open abort
+          </button>
+          <output id="channel-late-abort-result" />
           <button id="channel-test-api" onClick={testApi}>
             Test channel API
           </button>
