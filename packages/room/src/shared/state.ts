@@ -4,7 +4,7 @@ export type { RoomStateOwner }
 import { assert, assertUsage } from '../utils/assert.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { invokeChannelListener, type ChannelPublishInfo, getOrCreate, Listeners } from 'telefunc/__internal'
-import { makeDisposer } from './disposer.js'
+import { makeDisposer, type ListenerOptions } from './disposer.js'
 import {
   EVERY_MEMBER,
   EVERY_TRACK,
@@ -21,6 +21,7 @@ import { assertKnownOptions, senderSnapshot } from './arguments.js'
 import type { MemberSnapshot, MemberWants, RoomDataEvent, SenderStamp } from './protocol.js'
 import type { BinaryFrameInfo, LeaveCause, ParticipantMeta, RemoteParticipant, RoomMeta, Sender } from '../types.js'
 
+type BinaryListenerOptions = ListenerOptions & { track?: string | null }
 /** A binary listener's track filter: one track, or `EVERY_TRACK`. */
 type TrackFilter = TrackKey | EveryTrack
 /** A binary listener list's filters as counts: every-track listeners, and listeners per lane track. */
@@ -99,49 +100,53 @@ abstract class RoomStateView {
     return this._state.model.closed
   }
 
-  subscribe(callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
-    return this._state.subscribe(callback)
+  subscribe(
+    callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown,
+    options?: ListenerOptions,
+  ): () => void {
+    return this._state.subscribe(callback, options)
   }
 
   subscribeBinary(
     callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
-    options?: { track?: string | null },
+    options?: BinaryListenerOptions,
   ): () => void {
     return this._state.subscribeBinary(callback, options)
   }
 
-  onJoin(callback: (member: RemoteParticipant) => void): () => void {
-    return this._state.onJoin(callback)
+  onJoin(callback: (member: RemoteParticipant) => void, options?: ListenerOptions): () => void {
+    return this._state.onJoin(callback, options)
   }
 
-  onLeave(callback: (member: RemoteParticipant, cause: LeaveCause) => void): () => void {
-    return this._state.onLeave(callback)
+  onLeave(callback: (member: RemoteParticipant, cause: LeaveCause) => void, options?: ListenerOptions): () => void {
+    return this._state.onLeave(callback, options)
   }
 
   onParticipantUpdate(
     callback: (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void,
+    options?: ListenerOptions,
   ): () => void {
-    return this._state.onParticipantUpdate(callback)
+    return this._state.onParticipantUpdate(callback, options)
   }
 
-  onUpdate(callback: (meta: RoomMeta, prev: RoomMeta) => void): () => void {
-    return this._state.onUpdate(callback)
+  onUpdate(callback: (meta: RoomMeta, prev: RoomMeta) => void, options?: ListenerOptions): () => void {
+    return this._state.onUpdate(callback, options)
   }
 
-  onEmpty(callback: () => void): () => void {
-    return this._state.onEmpty(callback)
+  onEmpty(callback: () => void, options?: ListenerOptions): () => void {
+    return this._state.onEmpty(callback, options)
   }
 
-  onClose(callback: () => void): () => void {
-    return this._state.onClose(callback)
+  onClose(callback: () => void, options?: ListenerOptions): () => void {
+    return this._state.onClose(callback, options)
   }
 
-  onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void): () => void {
-    return this._state.onAnnounce(callback)
+  onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void, options?: ListenerOptions): () => void {
+    return this._state.onAnnounce(callback, options)
   }
 
-  onChange(callback: () => void): () => void {
-    return this._state.onChange(callback)
+  onChange(callback: () => void, options?: ListenerOptions): () => void {
+    return this._state.onChange(callback, options)
   }
 }
 
@@ -234,56 +239,60 @@ class RoomState {
   }
 
   // Each registration returns its unlisten function.
-  subscribe(cb: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
-    return this.register(this.roomDataListeners, cb)
+  subscribe(
+    cb: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown,
+    opts?: ListenerOptions,
+  ): () => void {
+    return this.register(this.roomDataListeners, cb, opts)
   }
 
   subscribeBinary(
     cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
-    opts?: { track?: string | null },
+    opts?: BinaryListenerOptions,
   ): () => void {
     const listener = binaryListener(cb, opts)
-    return this.register(this.roomBinaryListeners, listener, null, {
+    return this.register(this.roomBinaryListeners, listener, opts, null, {
       counts: this.roomBinaryTracks,
       track: listener.track,
     })
   }
 
-  onJoin(cb: (member: RemoteParticipant) => void): () => void {
-    return this.register(this.joinListeners, cb)
+  onJoin(cb: (member: RemoteParticipant) => void, opts?: ListenerOptions): () => void {
+    return this.register(this.joinListeners, cb, opts)
   }
 
-  onLeave(cb: (member: RemoteParticipant, cause: LeaveCause) => void): () => void {
-    return this.register(this.leaveListeners, cb)
+  onLeave(cb: (member: RemoteParticipant, cause: LeaveCause) => void, opts?: ListenerOptions): () => void {
+    return this.register(this.leaveListeners, cb, opts)
   }
 
   onParticipantUpdate(
     cb: (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void,
+    opts?: ListenerOptions,
   ): () => void {
-    return this.register(this.participantUpdateListeners, cb)
+    return this.register(this.participantUpdateListeners, cb, opts)
   }
 
-  onUpdate(cb: (meta: RoomMeta, prev: RoomMeta) => void): () => void {
-    return this.register(this.updateListeners, cb)
+  onUpdate(cb: (meta: RoomMeta, prev: RoomMeta) => void, opts?: ListenerOptions): () => void {
+    return this.register(this.updateListeners, cb, opts)
   }
 
-  onEmpty(cb: () => void): () => void {
-    return this.register(this.emptyListeners, cb)
+  onEmpty(cb: () => void, opts?: ListenerOptions): () => void {
+    return this.register(this.emptyListeners, cb, opts)
   }
 
-  onClose(cb: () => void): () => void {
-    if (!this.model.closed) return this.register(this.closeListeners, cb)
+  onClose(cb: () => void, opts?: ListenerOptions): () => void {
+    if (!this.model.closed) return this.register(this.closeListeners, cb, opts)
     // Terminal, like a departed member's onLeave: a late listener hears it at once.
-    invokeChannelListener(cb, [], this.reportError)
+    if (!opts?.signal?.aborted) invokeChannelListener(cb, [], this.reportError)
     return makeDisposer()
   }
 
-  onChange(cb: () => void): () => void {
-    return this.register(this.changeListeners, cb)
+  onChange(cb: () => void, opts?: ListenerOptions): () => void {
+    return this.register(this.changeListeners, cb, opts)
   }
 
-  onAnnounce(cb: (data: unknown, info: ChannelPublishInfo) => void): () => void {
-    return this.register(this.announceListeners, cb)
+  onAnnounce(cb: (data: unknown, info: ChannelPublishInfo) => void, opts?: ListenerOptions): () => void {
+    return this.register(this.announceListeners, cb, opts)
   }
 
   // Each of these tells one change of the model, while this view has a listener.
@@ -423,19 +432,23 @@ class RoomState {
       get isConnected() {
         return model.isConnected(entry)
       },
-      subscribe: (cb) => this.registerLive(entry, (listeners.dataListeners ??= new Listeners()), cb),
+      subscribe: (cb, opts) => this.registerLive(entry, (listeners.dataListeners ??= new Listeners()), cb, opts),
       subscribeBinary: (cb, opts) => {
         const listener = binaryListener(cb, opts)
         const binary = (listeners.binary ??= { listeners: new Listeners(), tracks: newTrackCounts() })
-        return this.registerLive(entry, binary.listeners, listener, { counts: binary.tracks, track: listener.track })
+        return this.registerLive(entry, binary.listeners, listener, opts, {
+          counts: binary.tracks,
+          track: listener.track,
+        })
       },
-      onUpdate: (cb) => this.registerLive(entry, (listeners.updateListeners ??= new Listeners()), cb),
-      onDisconnect: (cb) => this.registerLive(entry, (listeners.disconnectListeners ??= new Listeners()), cb),
-      onReconnect: (cb) => this.registerLive(entry, (listeners.reconnectListeners ??= new Listeners()), cb),
-      onLeave: (cb: (cause: LeaveCause) => void) => {
-        if (!entry.left) return this.register((listeners.leaveListeners ??= new Listeners()), cb, entry)
+      onUpdate: (cb, opts) => this.registerLive(entry, (listeners.updateListeners ??= new Listeners()), cb, opts),
+      onDisconnect: (cb, opts) =>
+        this.registerLive(entry, (listeners.disconnectListeners ??= new Listeners()), cb, opts),
+      onReconnect: (cb, opts) => this.registerLive(entry, (listeners.reconnectListeners ??= new Listeners()), cb, opts),
+      onLeave: (cb: (cause: LeaveCause) => void, opts?: ListenerOptions) => {
+        if (!entry.left) return this.register((listeners.leaveListeners ??= new Listeners()), cb, opts, entry)
         assert(entry.leaveCause)
-        invokeChannelListener(cb, [entry.leaveCause], this.reportError)
+        if (!opts?.signal?.aborted) invokeChannelListener(cb, [entry.leaveCause], this.reportError)
         return makeDisposer()
       },
     }
@@ -445,13 +458,27 @@ class RoomState {
   }
 
   /** A departed member's listeners were released at its leave, so one added after it is never held. */
-  private registerLive<T>(entry: MemberEntry, list: Listeners<T>, cb: T, filter?: CountedTrack): () => void {
+  private registerLive<T>(
+    entry: MemberEntry,
+    list: Listeners<T>,
+    cb: T,
+    opts: ListenerOptions | undefined,
+    filter?: CountedTrack,
+  ): () => void {
     if (entry.left) return makeDisposer()
-    return this.register(list, cb, entry, filter)
+    return this.register(list, cb, opts, entry, filter)
   }
 
   /** `entry` owns the list (`null`: the room); a binary listener's `filter` is counted in its list's counts. */
-  private register<T>(list: Listeners<T>, cb: T, entry: MemberEntry | null = null, filter?: CountedTrack): () => void {
+  private register<T>(
+    list: Listeners<T>,
+    cb: T,
+    opts: ListenerOptions | undefined,
+    entry: MemberEntry | null = null,
+    filter?: CountedTrack,
+  ): () => void {
+    const signal = opts?.signal
+    if (signal?.aborted) return makeDisposer()
     assertUsage(
       filter === undefined ||
         filter.track === EVERY_TRACK ||
@@ -467,15 +494,19 @@ class RoomState {
       filter && countTrack(filter.counts, filter.track, 1) ? { ...wantedTrack(entry, filter), on: true } : null,
     )
     const cleanups = getOrCreate(this.listenerCleanups, list, () => new Set())
-    return makeDisposer(() => {
-      if (remove()) {
-        this.bumpListenerCount(
-          -1,
-          entry,
-          filter && countTrack(filter.counts, filter.track, -1) ? { ...wantedTrack(entry, filter), on: false } : null,
-        )
-      }
-    }, cleanups)
+    return makeDisposer(
+      () => {
+        if (remove()) {
+          this.bumpListenerCount(
+            -1,
+            entry,
+            filter && countTrack(filter.counts, filter.track, -1) ? { ...wantedTrack(entry, filter), on: false } : null,
+          )
+        }
+      },
+      cleanups,
+      signal,
+    )
   }
 
   /** A discarded entry's listeners die with it, so the counters let owners drop what it held open. */
@@ -519,12 +550,12 @@ class RoomState {
 
 /** Validate a `subscribeBinary` track option: `undefined` = every track, `null` = the default track, a non-empty name =
  *  that track. */
-function normalizeTrackFilter(opts: { track?: string | null } | undefined): TrackFilter {
+function normalizeTrackFilter(opts: BinaryListenerOptions | undefined): TrackFilter {
   assertUsage(
     opts === undefined || (typeof opts === 'object' && opts !== null && !Array.isArray(opts)),
     'subscribeBinary() options should be an object',
   )
-  assertKnownOptions(opts, ['track'], 'subscribeBinary()')
+  assertKnownOptions(opts, ['track', 'signal'], 'subscribeBinary()')
   const track = opts?.track
   if (track === undefined) return EVERY_TRACK
   if (track === null) return DEFAULT_TRACK
@@ -532,7 +563,7 @@ function normalizeTrackFilter(opts: { track?: string | null } | undefined): Trac
   return track
 }
 
-function binaryListener<CB>(cb: CB, opts: { track?: string | null } | undefined): { cb: CB; track: TrackFilter } {
+function binaryListener<CB>(cb: CB, opts: BinaryListenerOptions | undefined): { cb: CB; track: TrackFilter } {
   return { cb, track: normalizeTrackFilter(opts) }
 }
 

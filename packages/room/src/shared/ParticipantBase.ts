@@ -3,7 +3,7 @@ export type { ParticipantBaseOptions }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { invokeChannelListener, type ChannelPublishAck, type TELEFUNC_SHIELDS, Listeners } from 'telefunc/__internal'
-import { makeDisposer } from './disposer.js'
+import { makeDisposer, type ListenerOptions } from './disposer.js'
 import { Fifo } from '../utils/Fifo.js'
 import { utf8ByteLength } from '../utils/utf8ByteLength.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
@@ -110,8 +110,9 @@ abstract class ParticipantBase implements LocalParticipant {
   /** The bytes of DMs held before the first `listen()`, past which the oldest is dropped. */
   protected abstract _inboxBufferLimit(): number
 
-  listen(callback: (data: unknown, from: Sender | null) => unknown): () => void {
-    const unlisten = this.register((this.messageListeners ??= new Listeners()), callback)
+  listen(callback: (data: unknown, from: Sender | null) => unknown, options?: ListenerOptions): () => void {
+    if (options?.signal?.aborted) return makeDisposer()
+    const unlisten = this.register((this.messageListeners ??= new Listeners()), callback, options)
     this._flushHeld({ deliver: (msg) => this.fireInbox(msg), deliverAck: (msg) => this.fireInboxAck(msg) })
     return unlisten
   }
@@ -194,8 +195,9 @@ abstract class ParticipantBase implements LocalParticipant {
     return null
   }
 
-  onDemand(callback: (track: string | null, wanted: boolean) => void): () => void {
-    const unlisten = this.register((this.demandListeners ??= new Listeners()), callback)
+  onDemand(callback: (track: string | null, wanted: boolean) => void, options?: ListenerOptions): () => void {
+    if (options?.signal?.aborted) return makeDisposer()
+    const unlisten = this.register((this.demandListeners ??= new Listeners()), callback, options)
     for (const track of this._demandedTracks) this.invoke(callback, publicTrack(track), true)
     return unlisten
   }
@@ -208,12 +210,12 @@ abstract class ParticipantBase implements LocalParticipant {
     for (const cb of this.demandListeners?.list() ?? []) this.invoke(cb, publicTrack(track), wanted)
   }
 
-  onDisconnect(callback: () => void): () => void {
-    return this.register((this.disconnectListeners ??= new Listeners()), callback)
+  onDisconnect(callback: () => void, options?: ListenerOptions): () => void {
+    return this.register((this.disconnectListeners ??= new Listeners()), callback, options)
   }
 
-  onReconnect(callback: () => void): () => void {
-    return this.register((this.reconnectListeners ??= new Listeners()), callback)
+  onReconnect(callback: () => void, options?: ListenerOptions): () => void {
+    return this.register((this.reconnectListeners ??= new Listeners()), callback, options)
   }
 
   /** @internal */
@@ -226,12 +228,13 @@ abstract class ParticipantBase implements LocalParticipant {
     for (const cb of this.reconnectListeners?.list() ?? []) this.invoke(cb)
   }
 
-  onLeave(callback: (cause: LeaveCause) => void): () => void {
+  onLeave(callback: (cause: LeaveCause) => void, options?: ListenerOptions): () => void {
+    if (options?.signal?.aborted) return makeDisposer()
     if (this.leftCause) {
       this.invoke(callback, this.leftCause)
       return makeDisposer()
     }
-    return this.register((this.leaveListeners ??= new Listeners()), callback)
+    return this.register((this.leaveListeners ??= new Listeners()), callback, options)
   }
 
   /** @internal */
@@ -253,9 +256,10 @@ abstract class ParticipantBase implements LocalParticipant {
     if (this._left) throw participantLeftError()
   }
 
-  private register<T>(list: Listeners<T>, cb: T): () => void {
+  private register<T>(list: Listeners<T>, cb: T, options: ListenerOptions | undefined): () => void {
+    if (options?.signal?.aborted) return makeDisposer()
     const remove = list.add(cb)
-    return makeDisposer(() => void remove(), (this.listenerCleanups ??= new Set()))
+    return makeDisposer(() => void remove(), (this.listenerCleanups ??= new Set()), options?.signal)
   }
 
   private invoke<Args extends unknown[]>(cb: (...args: Args) => unknown, ...args: Args): void {

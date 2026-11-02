@@ -1,7 +1,6 @@
 export { ClientRoom, ClientStandaloneParticipant }
 
 import { roomMessages, type RoomMessage } from './messages.js'
-import { installAbortableListeners } from './listeners.js'
 import { assert, assertUsage } from '../utils/assert.js'
 import { createDeferred, getOrCreate, markHandled } from 'telefunc/__internal'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
@@ -156,8 +155,6 @@ class ClientRoom extends RoomStateView implements Room {
   _rosterStream: RosterStream | null = null
   /** @internal */
   readonly _bufferLimit: number
-  declare subscribeBinary: Room['subscribeBinary']
-  private readonly abortableRemotes = new WeakSet<RemoteParticipant>()
 
   messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<RoomMessage> {
     return roomMessages(this, this._bufferLimit, options?.signal)
@@ -177,22 +174,6 @@ class ClientRoom extends RoomStateView implements Room {
       owner,
     })
     this._state = new RoomState({ view: this, model: this.model, owner, trackWantsMax: ROOM_TRACK_WANTS_MAX })
-    installAbortableListeners(
-      this,
-      [
-        'subscribe',
-        'subscribeBinary',
-        'onJoin',
-        'onLeave',
-        'onParticipantUpdate',
-        'onUpdate',
-        'onAnnounce',
-        'onEmpty',
-        'onClose',
-        'onChange',
-      ],
-      'onClose',
-    )
     if (snapshot.closed) this.roster.resolve()
 
     // Delivery handlers are local-only. What the server relays is driven by the declared wants: control always arrives,
@@ -271,12 +252,12 @@ class ClientRoom extends RoomStateView implements Room {
     assertKnownOptions(options, ['hidden'], 'getParticipants()')
     assertUsage(!options?.hidden, 'Hidden participants can only be enumerated on the server')
     await this.awaitRoster()
-    return this._state.listVisible().map((remote) => this.abortableRemote(remote)!)
+    return this._state.listVisible()
   }
 
   async getParticipant(id: string): Promise<RemoteParticipant | null> {
     await this.awaitRoster()
-    return this.abortableRemote(this._state.getRemote(id))
+    return this._state.getRemote(id)
   }
 
   private async awaitRoster(): Promise<void> {
@@ -285,33 +266,7 @@ class ClientRoom extends RoomStateView implements Room {
 
   /** @internal Sync view read for sender resolution (delivery must not wait on I/O). */
   _getRemote(id: string): RemoteParticipant | null {
-    return this.abortableRemote(this._state.getRemote(id))
-  }
-
-  override onJoin(callback: (member: RemoteParticipant) => void): () => void {
-    return super.onJoin((member) => callback(this.abortableRemote(member)!))
-  }
-
-  override onLeave(callback: (member: RemoteParticipant, cause: LeaveCause) => void): () => void {
-    return super.onLeave((member, cause) => callback(this.abortableRemote(member)!, cause))
-  }
-
-  override onParticipantUpdate(
-    callback: (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void,
-  ): () => void {
-    return super.onParticipantUpdate((member, meta, prev) => callback(this.abortableRemote(member)!, meta, prev))
-  }
-
-  private abortableRemote(remote: RemoteParticipant | null): RemoteParticipant | null {
-    if (remote && !this.abortableRemotes.has(remote)) {
-      this.abortableRemotes.add(remote)
-      installAbortableListeners(
-        remote,
-        ['subscribe', 'subscribeBinary', 'onUpdate', 'onLeave', 'onDisconnect', 'onReconnect'],
-        'onLeave',
-      )
-    }
-    return remote
+    return this._state.getRemote(id)
   }
 
   /** Plain DM fires local listeners; ack DM returns their reply through the symmetric `dm-reply`/`dm-ack` path. */
@@ -325,7 +280,7 @@ class ClientRoom extends RoomStateView implements Room {
 
   /** @internal Revival of a serialized `RemoteParticipant` (see `roomRemoteReviver`). */
   _reviveRemote(snap: MemberSnapshot): RemoteParticipant {
-    return this.abortableRemote(this._state.ensureRemoteFromSnapshot(snap))!
+    return this._state.ensureRemoteFromSnapshot(snap)
   }
 
   snapshot(): RoomSnapshotView {
@@ -596,7 +551,6 @@ abstract class ClientParticipantBase extends ParticipantBase {
   constructor({ participant, rewinds }: ClientParticipantBaseOptions) {
     super({ participant, rewinds })
     this.bufferLimit = participant.bufferLimit
-    installAbortableListeners(this, ['listen', 'onDemand', 'onLeave', 'onDisconnect', 'onReconnect'], 'onLeave')
   }
 
   get _demandedTracks(): TrackKey[] {
