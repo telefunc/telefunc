@@ -48,8 +48,9 @@ class SendWait {
     return this.subscriptions.subscribing || this.waits.size > 0
   }
 
-  /** A send's turn, with its own copy of `payload`: the caller reuses its bytes. Null when it has nothing to wait for. Throws `ChannelOverflowError` when its bytes would pass its buffer limit;
-   *  the config is read only then, as resolving it is costly. */
+  /** A send's turn, with its own copy of `payload`: the caller reuses its bytes. Null when it has nothing to wait for.
+   *  Throws `ChannelOverflowError` when its bytes would pass its buffer limit; the config is read only then, as
+   *  resolving it is costly. */
   waitTurn<Payload extends string | Uint8Array>(rule: WaitRule, payload: Payload): WaitingSend<Payload> | null {
     const { queue, channels, budget, bufferLimit } = rule
     let wait = this.waits.get(queue)

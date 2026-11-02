@@ -370,8 +370,8 @@ class RouteSubscription<Kind extends BroadcastKind> {
     const subscription = getBroadcastPlane().subscribe(this.route, this.receiver)
     this.current = subscription
     let wasReady = subscription.state() === 'ready'
-    // Only a terminal end rejects `ready`, after the shared subscriptions retired and reported the subscription; an unsubscribe
-    // resolves it.
+    // Only a terminal end rejects `ready`, after the shared subscriptions retired and reported the subscription; an
+    // unsubscribe resolves it.
     const ended = () =>
       void subscription.ready.catch(() => {
         if (this.current !== subscription) return
