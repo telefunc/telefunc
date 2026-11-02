@@ -13,16 +13,6 @@ type BroadcastPlaneOptions = { driver: BroadcastDriver }
 const broadcastSources: SourceRules<BroadcastRoute> = {
   key: broadcastRouteKey,
   deliveryKind: (route) => route.kind,
-  // A key's two kinds share its order, so a publish of either waits behind the key's waiting ones.
-  sendWaitsFor: (route) => ({
-    orderedWith: route.key,
-    subscriptions: [
-      { key: route.key, kind: 'text' },
-      { key: route.key, kind: 'binary' },
-    ],
-    countsAgainst: broadcastRouteKey(route),
-    bufferLimit: route.kind === 'binary' ? 'bufferLimitBinary' : 'bufferLimit',
-  }),
 }
 
 /** What core consumes: Broadcast on a driver, its publishes checked, its subscriptions shared by route and host. */
@@ -32,7 +22,7 @@ class BroadcastPlane {
 
   constructor({ driver }: BroadcastPlaneOptions) {
     this.driver = driver
-    this.subscriptions = new SharedSubscriptions({ driver, sources: broadcastSources, sendName: 'Broadcast publish' })
+    this.subscriptions = new SharedSubscriptions({ driver, sources: broadcastSources })
   }
 
   /** Publishes `payload` as it is at the call. */
@@ -40,7 +30,8 @@ class BroadcastPlane {
     route: BroadcastRoute<Kind>,
     payload: BroadcastPayload<Kind>,
   ): ChannelPublishAck | Promise<ChannelPublishAck> {
-    return this.subscriptions.sendsMayWait ? this.publishInTurn(route, payload) : this.publishNow(route, payload)
+    const result = this.driver.publish(route, payload)
+    return isPromise(result) ? result.then((receipt) => toAck(route.key, receipt)) : toAck(route.key, result)
   }
 
   subscribe<Kind extends BroadcastKind>(
@@ -59,29 +50,6 @@ class BroadcastPlane {
 
   dispose(): Promise<void> {
     return this.subscriptions.dispose()
-  }
-
-  /** While a subscription on this host establishes: publishes in its turn, then lets later publishes past. */
-  private async publishInTurn<Kind extends BroadcastKind>(
-    route: BroadcastRoute<Kind>,
-    payload: BroadcastPayload<Kind>,
-  ): Promise<ChannelPublishAck> {
-    const waiting = this.subscriptions.waitTurn(route, payload)
-    if (waiting === null) return this.publishNow(route, payload)
-    const owned = await waiting.turn
-    try {
-      return this.publishNow(route, owned)
-    } finally {
-      waiting.sent()
-    }
-  }
-
-  private publishNow<Kind extends BroadcastKind>(
-    route: BroadcastRoute<Kind>,
-    payload: BroadcastPayload<Kind>,
-  ): ChannelPublishAck | Promise<ChannelPublishAck> {
-    const result = this.driver.publish(route, payload)
-    return isPromise(result) ? result.then((receipt) => toAck(route.key, receipt)) : toAck(route.key, result)
   }
 }
 

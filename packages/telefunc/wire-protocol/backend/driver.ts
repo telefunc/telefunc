@@ -43,10 +43,6 @@ type SubscriptionDriver<Source> = {
   /** This host's key, read at each subscribe: absent, the process; on Cloudflare this session DO's incarnation, and a
    *  usage error outside one. */
   hostKey?(): string
-  /** True where a publish can reach the store before the subscribe this host made just before it (Redis: PUBLISH and
-   *  SUBSCRIBE go by two connections). Core makes a publish or commit wait while an attempt on its source establishes,
-   *  bounded in time and bytes. Absent, a send never waits. */
-  readonly publishOvertakesSubscribe?: boolean
 }
 
 /**

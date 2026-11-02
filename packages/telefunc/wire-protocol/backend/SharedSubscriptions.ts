@@ -1,14 +1,10 @@
 export { SharedSubscriptions }
-export type { BackendSubscription, SourceRules, WaitRule }
+export type { BackendSubscription, SourceRules }
 
 import { assert } from '../../utils/assert.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 import { getOrCreate } from '../../utils/getOrCreate.js'
 import { reportBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
-import { ChannelOverflowError } from '../channel/channelErrors.js'
-import { getChannelLimits } from '../../node/server/serverConfig.js'
-import { unrefTimer } from '../../utils/unrefTimer.js'
-import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import { assertDriverOrdering } from './driverOrdering.js'
 import type {
   AttemptState,
@@ -19,11 +15,6 @@ import type {
   SubscriptionDriver,
 } from './driver.js'
 import type { OrderingInfo } from '../wire/orderingFrame.js'
-
-/** How long a send waits for the establishing attempts it waits for. */
-const ESTABLISH_WAIT_MS = 60_000
-/** What a waiting send keeps beyond its payload (130–160 bytes measured), so small ones are bounded too. */
-const WAITING_SEND_OVERHEAD_BYTES = 256
 
 /** A consumer's subscription. */
 type BackendSubscription = {
@@ -40,27 +31,11 @@ type SourceRules<Source> = {
   key(source: Source): string
   /** A string for 'text', bytes for 'binary'. */
   deliveryKind(source: Source): 'text' | 'binary'
-  /** What a send to `source` waits for; read only while some attempt establishes or some send waits. */
-  sendWaitsFor(source: Source): WaitRule<Source>
 }
-
-/** A send waits while one of the attempts on `subscriptions` is establishing, behind the waiting sends ordered with it
- *  (`orderedWith`: what one seq counts). Its bytes count against `countsAgainst`'s `bufferLimit`. */
-type WaitRule<Source> = {
-  orderedWith: string
-  subscriptions: readonly Source[]
-  countsAgainst: string
-  bufferLimit: 'bufferLimit' | 'bufferLimitBinary'
-}
-
-/** The sends on one domain, waiting for its establishing attempts. */
-type Wait = { readonly established: Promise<void>; sends: number }
 
 type SharedSubscriptionsOptions<Source> = {
   driver: SubscriptionDriver<Source>
   sources: SourceRules<Source>
-  /** What a send is, for its overflow error: 'Broadcast publish', 'Room commit'. */
-  sendName: string
 }
 
 /** A plane's subscriptions (Broadcast's, Room's): consumers of one source on one host share one driver attempt. */
@@ -70,64 +45,21 @@ class SharedSubscriptions<Source> {
   /** By host and source key. */
   private readonly slots = new Map<string, SubscriptionSlot<Source>>()
   private readonly cleanups = new Set<Promise<void>>()
-  private readonly sendName: string
-  /** By domain. */
-  private readonly waits = new Map<string, Wait>()
-  /** Bytes waiting, by budget. */
-  private readonly waitingBytes = new Map<string, number>()
-  /** By source key, the slots never ready yet, unmapped a microtask after: empty, no send has anything to wait for. */
-  private readonly establishingSlots = new Map<string, SubscriptionSlot<Source>>()
 
-  constructor({ driver, sources, sendName }: SharedSubscriptionsOptions<Source>) {
-    // A process runs one host of an overtaking driver, so a wait has no host to tell apart.
-    assert(!(driver.publishOvertakesSubscribe && driver.hostKey))
+  constructor({ driver, sources }: SharedSubscriptionsOptions<Source>) {
     this.driver = driver
     this.sources = sources
-    this.sendName = sendName
-  }
-
-  /** False on the fast path, read before a send builds anything: no attempt establishes and no send waits. */
-  get sendsMayWait(): boolean {
-    return this.establishingSlots.size > 0 || this.waits.size > 0
-  }
-
-  /** A send's turn once the attempts on its source are established, at most `ESTABLISH_WAIT_MS` later; a driver
-   *  may get a publish before its own subscribe otherwise (Redis's go by two connections). Null when it has nothing to
-   *  wait for. The turn gives the send its own copy: the caller reuses its bytes. Throws `ChannelOverflowError` when its
-   *  bytes would pass its buffer limit; the config is read only then, as resolving it is costly. */
-  waitTurn<Payload extends BackendPayload>(source: Source, payload: Payload): WaitingSend<Payload> | null {
-    const { orderedWith, subscriptions, countsAgainst, bufferLimit } = this.sources.sendWaitsFor(source)
-    let wait = this.waits.get(orderedWith)
-    if (wait === undefined && this.establishingIn(subscriptions).length === 0) return null
-    const bytes =
-      WAITING_SEND_OVERHEAD_BYTES + (typeof payload === 'string' ? utf8ByteLength(payload) : payload.byteLength)
-    const total = (this.waitingBytes.get(countsAgainst) ?? 0) + bytes
-    if (total > getChannelLimits()[bufferLimit]) {
-      throw new ChannelOverflowError(`${this.sendName} waiting for a new subscription, past ${bufferLimit}`)
-    }
-    wait ??= this.openWait(subscriptions)
-    this.waits.set(orderedWith, wait)
-    wait.sends++
-    this.waitingBytes.set(countsAgainst, total)
-    const owned = (typeof payload === 'string' ? payload : new Uint8Array(payload)) as Payload
-    const turn = wait.established.then(() => owned)
-    return new WaitingSend({ owner: this, orderedWith, wait, countsAgainst, bytes, turn })
-  }
-
-  /** A waiting send went to the driver: the last of its wait's sends unmaps it, so a send made before then still
-   *  queues behind the rest. */
-  endWait({ orderedWith, wait, countsAgainst, bytes }: WaitingSend<unknown>): void {
-    if (--wait.sends === 0) this.waits.delete(orderedWith)
-    const left = this.waitingBytes.get(countsAgainst)! - bytes
-    if (left === 0) this.waitingBytes.delete(countsAgainst)
-    else this.waitingBytes.set(countsAgainst, left)
   }
 
   subscribe(source: Source, listener: BackendListener): BackendSubscription {
     const key = this.sources.key(source)
     const slotKey = JSON.stringify([this.driver.hostKey?.() ?? '', key])
     const delivers = this.sources.deliveryKind(source)
-    const slot = getOrCreate(this.slots, slotKey, () => this.openSlot({ owner: this, source, key, slotKey, delivers }))
+    const slot = getOrCreate(
+      this.slots,
+      slotKey,
+      () => new SubscriptionSlot({ owner: this, source, key, slotKey, delivers }),
+    )
     return slot.attach(listener)
   }
 
@@ -150,75 +82,6 @@ class SharedSubscriptions<Source> {
     this.cleanups.add(cleanup)
     void cleanup.finally(() => this.cleanups.delete(cleanup))
     return cleanup
-  }
-
-  private openSlot(options: SubscriptionSlotOptions<Source>): SubscriptionSlot<Source> {
-    const slot = new SubscriptionSlot(options)
-    // A driver whose publishes can't overtake its subscribes never makes a send wait.
-    if (!this.driver.publishOvertakesSubscribe) return slot
-    const { key } = options
-    this.establishingSlots.set(key, slot)
-    void slot.firstReady.then(() => {
-      if (this.establishingSlots.get(key) === slot) this.establishingSlots.delete(key)
-    })
-    return slot
-  }
-
-  /** A wait for the attempts on `subscriptions`, including ones made meanwhile. */
-  private openWait(subscriptions: readonly Source[]): Wait {
-    let timer!: ReturnType<typeof setTimeout>
-    const timeout = new Promise<void>((resolve) => {
-      timer = unrefTimer(setTimeout(resolve, ESTABLISH_WAIT_MS))
-    })
-    const established = Promise.race([this.establishedIn(subscriptions), timeout]).finally(() => clearTimeout(timer))
-    return { established, sends: 0 }
-  }
-
-  private async establishedIn(subscriptions: readonly Source[]): Promise<void> {
-    for (let left = this.establishingIn(subscriptions); left.length > 0; left = this.establishingIn(subscriptions)) {
-      await Promise.all(left)
-    }
-  }
-
-  private establishingIn(subscriptions: readonly Source[]): Promise<void>[] {
-    const left: Promise<void>[] = []
-    for (const source of subscriptions) {
-      const slot = this.establishingSlots.get(this.sources.key(source))
-      if (slot?.establishing) left.push(slot.firstReady)
-    }
-    return left
-  }
-}
-
-type WaitingSendOptions<Payload> = {
-  owner: SharedSubscriptions<unknown>
-  orderedWith: string
-  wait: Wait
-  countsAgainst: string
-  bytes: number
-  turn: Promise<Payload>
-}
-
-/** A send's place in its domain's wait: `await turn` for its own copy of the payload, send that, then `sent()`. */
-class WaitingSend<Payload> {
-  readonly turn: Promise<Payload>
-  readonly orderedWith: string
-  readonly wait: Wait
-  readonly countsAgainst: string
-  readonly bytes: number
-  private readonly owner: SharedSubscriptions<unknown>
-
-  constructor({ owner, orderedWith, wait, countsAgainst, bytes, turn }: WaitingSendOptions<Payload>) {
-    this.owner = owner
-    this.orderedWith = orderedWith
-    this.wait = wait
-    this.countsAgainst = countsAgainst
-    this.bytes = bytes
-    this.turn = turn
-  }
-
-  sent(): void {
-    this.owner.endWait(this)
   }
 }
 
@@ -255,10 +118,6 @@ class SubscriptionSlot<Source> implements BackendReceiver {
   private early: EarlyMessage[] | null = []
   /** It stopped or closed: what the attempt says from here on is ignored. */
   private finished = false
-  private readonly firstReadiness = createDeferred()
-  /** Settles on its first `ready`, its stop or its close; never rejects. */
-  readonly firstReady: Promise<void> = this.firstReadiness.promise
-  private wasReady = false
 
   constructor({ owner, source, key, slotKey, delivers }: SubscriptionSlotOptions<Source>) {
     this.owner = owner
@@ -266,11 +125,6 @@ class SubscriptionSlot<Source> implements BackendReceiver {
     this.key = key
     this.slotKey = slotKey
     this.delivers = delivers
-  }
-
-  /** It was never ready, and is still open. */
-  get establishing(): boolean {
-    return !this.wasReady && !this.finished
   }
 
   get state(): AttemptState {
@@ -343,8 +197,6 @@ class SubscriptionSlot<Source> implements BackendReceiver {
 
   private becameReady(): void {
     if (this.current === 'ready') return
-    this.wasReady = true
-    this.firstReadiness.resolve()
     this.latestReadiness.resolve()
     this.enter('ready')
     const early = this.early
@@ -404,7 +256,6 @@ class SubscriptionSlot<Source> implements BackendReceiver {
   /** Stops listening first: the attempt's own `closed` on its unsubscribe is no end. */
   private finish(): void {
     this.finished = true
-    this.firstReadiness.resolve()
     this.early = []
     this.unobserve?.()
     this.unobserve = null
