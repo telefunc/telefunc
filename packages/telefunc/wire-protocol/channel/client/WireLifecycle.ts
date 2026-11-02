@@ -410,8 +410,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
    *  ends, the RECONCILE a registration owes goes after it. */
   private async runUpgrade(from: UpgradeSource, sessionId: string): Promise<void> {
     const attempt = this.upgrade.start()
+    const to = new WsTransport({ telefuncUrl: this.telefuncUrl, owner: this })
+    let adopted = false
     try {
-      const to = new WsTransport({ telefuncUrl: this.telefuncUrl, owner: this })
       const session = await this.upgrade.stage(to, sessionId, this.liveness.pingInterval, attempt)
       if (session === 'no-probe') return
       if (session === 'not-ready') {
@@ -435,9 +436,15 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
         return
       }
       this.adoptTransport(to)
+      adopted = true
       for (const frame of this.upgrade.flip()) this.applyCompletionFrame(frame)
       this.releaseJoin(this.upgrade.tryComplete())
     } finally {
+      // A target it didn't adopt goes with it: its probe closes with the attempt, then its page listener.
+      if (!adopted) {
+        attempt.abort()
+        to.dispose()
+      }
       this.upgrade.endAttempt(attempt)
       this.onReconcileDue()
     }
