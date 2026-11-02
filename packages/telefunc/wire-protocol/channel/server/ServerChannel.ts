@@ -649,13 +649,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.lifecycle.fireDisconnect()
   }
 
+  /** @internal The page reattached but never acknowledged this channel: it ends. */
   _onPeerRecoveryFailure(): void {
     if (this._phase === 'ended') return
     this.peer = null
     this.shutdown(new NetworkError('Channel not acknowledged by client after reconnect', true), { pageGone: true })
   }
 
-  _onPeerClose(): void {
+  /** @internal The page's wire ended for good: the channel ends with it. */
+  _onPeerGone(): void {
     if (this._phase === 'ended') return
     this.peer = null
     this.shutdown(undefined, { pageGone: true })

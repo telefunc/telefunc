@@ -866,7 +866,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
     }
     switch (reason) {
       case 'permanent':
-        h.channel._onPeerClose()
+        h.channel._onPeerGone()
         return
       case 'transient':
         h.channel._onPeerDisconnect(h.peer, this.options.reconnectTimeout)
