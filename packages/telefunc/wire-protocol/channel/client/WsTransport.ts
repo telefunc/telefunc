@@ -92,49 +92,54 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     const pieces = this.wirePieces(ws)
     const { headroom, sender, receiver } = pieces
 
-    // Till its first PONG proves the wire, `proved` settles the wait below; from then on it tells `owner`, till closed.
-    let proved: ((alive: boolean) => void) | null = null
-    let reporting = false
+    // Its first PONG proves the wire; from then on, till it ends, what it receives goes to `owner`.
+    let phase = 'proving' as 'proving' | 'reporting' | 'ended'
+    let settleProof: (alive: boolean) => void = () => {}
+    const proof = new Promise<boolean>((resolve) => (settleProof = resolve))
+    const timer = setTimeout(() => settleProof(false), WS_PROBE_TIMEOUT_MS)
+    // The one way it ends: its socket closed, its proof timed out, or the upgrade let it go.
+    const end = (): void => {
+      phase = 'ended'
+      clearTimeout(timer)
+      settleProof(false)
+      headroom.close()
+      if (this.probed?.ws === ws) this.probed = null
+      try {
+        ws.close()
+      } catch {}
+    }
     const take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
       if (frame.tag === TAG.PIECES_ACK) return headroom.acknowledged(frame)
       if (frame.tag === TAG.PONG) {
         sender.heartbeat(frame.took, at)
-        if (reporting) owner.onProbePong()
-        else proved?.(true)
-      } else if (reporting) owner.onProbeFrame(frame, byteLength)
+        if (phase === 'reporting') owner.onProbePong()
+        else settleProof(true)
+      } else if (phase === 'reporting') owner.onProbeFrame(frame, byteLength)
       return true
     }
     ws.onmessage = ({ data }: MessageEvent) => {
       if (!receiveMessage(receiver, new Uint8Array(data as ArrayBuffer), performance.now(), take)) ws.close()
     }
     ws.onclose = () => {
-      headroom.close()
-      if (this.probed?.ws === ws) this.probed = null
-      if (reporting) owner.onProbeClosed()
-      else proved?.(false)
+      const wasReporting = phase === 'reporting'
+      end()
+      if (wasReporting) owner.onProbeClosed()
     }
     ws.onerror = () => {}
     ws.onopen = () => sender.send(encode.ping(), 0)
 
-    const ready = await new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => resolve(false), WS_PROBE_TIMEOUT_MS)
-      proved = (alive) => {
-        clearTimeout(timer)
-        resolve(alive)
-      }
-    })
-    if (!ready) {
-      headroom.close()
-      try {
-        ws.close()
-      } catch {}
+    const alive = await proof
+    clearTimeout(timer)
+    // Its socket may have closed between the PONG and this line.
+    if (!alive || phase === 'ended') {
+      end()
       return null
     }
 
     this.probed = { ws, pieces }
     // A RECONCILED may have come while it waited for the PONG.
     sender.setPingInterval(this.pingInterval)
-    reporting = true
+    phase = 'reporting'
     return {
       ping: () => {
         try {
@@ -148,14 +153,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
           // Socket died between the open event and this send — `onProbeClosed` aborts the attempt.
         }
       },
-      close: () => {
-        reporting = false
-        if (this.probed?.ws === ws) this.probed = null
-        headroom.close()
-        try {
-          ws.close()
-        } catch {}
-      },
+      close: end,
       uplink: pieces.uplink,
     }
   }
