@@ -34,7 +34,7 @@ import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES, SENDS_AHEAD_WARNING_BYTES 
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
 import { replayWindow } from '../../flowControl/credit.js'
-import { ServerCreditOwner } from './ServerCreditOwner.js'
+import { ServerCreditSender } from './ServerCreditSender.js'
 import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import { SelfTime } from '../../flowControl/SelfTime.js'
 import { SendCredit } from '../../flowControl/SendCredit.js'
@@ -140,7 +140,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   } = {}) {
     this.ack = ack
     this.id = id ?? crypto.randomUUID()
-    const owner = new ServerCreditOwner({ channel: this })
+    const owner = new ServerCreditSender({ channel: this })
     this.sendCredit = new SendCredit({ owner, selfTime: this.selfTime })
     this.receiveCredit = new ReceiveCredit({ owner, selfTime: this.selfTime })
     const c = getServerConfig().channel

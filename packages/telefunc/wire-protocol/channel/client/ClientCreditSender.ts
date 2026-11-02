@@ -1,4 +1,4 @@
-export { ClientCreditOwner }
+export { ClientCreditSender }
 
 import type { CreditOwner, Urgency } from '../../flowControl/credit.js'
 import type { MuxChannel, MuxConnection } from './ClientConnection.js'
@@ -6,15 +6,16 @@ import type { MuxChannel, MuxConnection } from './ClientConnection.js'
 /** The channel whose credits these are, and the connection it rides, read when a credit frame goes. */
 type CreditChannel = MuxChannel & { readonly _connection: MuxConnection }
 
-type ClientCreditOwnerOptions = {
+type ClientCreditSenderOptions = {
   channel: CreditChannel
 }
 
-/** What a page channel's credits send to the server through its connection, and what they read of its wire. */
-class ClientCreditOwner implements CreditOwner {
+/** The `CreditOwner` of a page channel's credits, kept off the channel's public surface: what they send to the server
+ *  through its connection, and what they read of its wire. */
+class ClientCreditSender implements CreditOwner {
   private readonly channel: CreditChannel
 
-  constructor({ channel }: ClientCreditOwnerOptions) {
+  constructor({ channel }: ClientCreditSenderOptions) {
     this.channel = channel
   }
 
