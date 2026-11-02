@@ -4,7 +4,7 @@ export type { ReplayKind }
 import { assert } from '../../utils/assert.js'
 
 // Tag layout — sparse ranges so range checks classify:
-//   0x01–0x0f  wire-level control (no ix; seq 0 except on a WebSocket's PING, PONG and ANNOUNCE)
+//   0x01–0x0f  wire-level control (no ix; seq 0 except on a LENGTH and a WebSocket's PING, PONG and ANNOUNCE)
 //   0x10–0x29  data plane (carries seq, payload varies)
 //   0x30–      per-channel control (carries ix; seq 0 except on the four closing frames)
 
@@ -40,6 +40,8 @@ const TAG = {
   PIECES_ACK: 0x0b as const,
   /** The bytes of the frames that follow at once (see `pieces.ts`). Payload: u32; its seq: the floor in bytes/s. */
   ANNOUNCE: 0x0c as const,
+  /** Its seq: the bytes of the next frame, not its message's last, whose tag doesn't fix them (see `messageFrames`). */
+  LENGTH: 0x0d as const,
 
   // ─── Data plane ───
   TEXT: 0x10 as const,

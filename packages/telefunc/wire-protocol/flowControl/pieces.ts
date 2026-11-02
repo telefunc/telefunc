@@ -20,10 +20,9 @@ import {
   WIRE_SEND_AHEAD_MIN_BYTES,
 } from '../constants.js'
 import type { PieceRate } from './PieceRate.js'
-import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES, encode, type PiecesAck } from '../wire/frame.js'
+import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES, encode, lengthBytes, type PiecesAck } from '../wire/frame.js'
 import { TAG, isSequencedTag, passesData } from '../wire/tags.js'
 import { assertProtocol } from '../wire/protocolViolation.js'
-import { concatAll } from '../wire/envelope.js'
 import { pingDeadline } from '../wire/pingDeadline.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
@@ -524,7 +523,7 @@ class SocketMessages {
   flush(): void {
     const n = this.frames.length
     if (n === 0 || this.closed) return
-    const message = n === 1 ? this.frames[0]! : concatAll(this.frames)
+    const message = n === 1 ? this.frames[0]! : encode.message(this.frames, this.bytes)
     this.frames.length = 0
     this.bytes = 0
     if (message.byteLength > this.largest) this.largest = message.byteLength
@@ -595,9 +594,9 @@ abstract class PieceReceiver implements AckScheduleOwner {
   protected abstract ackWait(): number
 
   /** A whole frame of `tag` and `bytes` arrived at `at`. Only a message's last frame dates the message: one
-   *  `'riding'` ahead of it is not dated. */
+   *  `'riding'` ahead of it is not dated, and came after its LENGTH if its tag doesn't fix its bytes. */
   arrived(tag: number, bytes: number, at: number, arrival: 'alone' | 'riding'): void {
-    this.took += bytes
+    this.took += arrival === 'riding' ? bytes + lengthBytes(tag) : bytes
     const announced = arrival === 'alone' && this.paced(bytes, at)
     this.tookFrame({ bytes, data: isSequencedTag(tag), announced, at })
   }
