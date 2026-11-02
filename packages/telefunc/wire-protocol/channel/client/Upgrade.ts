@@ -4,12 +4,10 @@ export type { BarrierEmission, ProbeOwner, ProbeSession, ProbeWire, UpgradeOwner
 import type { AttachExchange } from './AttachExchange.js'
 import type { ChannelTable } from './ChannelTable.js'
 import type { ClientChannelTransport, OutboundFrame } from './ClientConnection.js'
-import type { Liveness } from './Liveness.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { DecodedFrame } from '../../wire/frame.js'
 import type { ReadyPayload, ReconciledPayload } from '../../wire/payloads.js'
 import {
-  CHANNEL_TRANSPORT,
   UPGRADE_ATTEMPT_TIMEOUT_MS,
   UPGRADE_HANDOFF_BUFFER_BYTES,
   UPGRADE_HANDOFF_BUFFER_FRAMES,
@@ -114,12 +112,6 @@ function isUpgradeCompletionFrame(frame: DecodedFrame): boolean {
 /** The connection an upgrade moves from its SSE wire to a WebSocket. */
 interface UpgradeOwner {
   readonly transport: ClientChannelTransport
-  readonly connected: boolean
-  drainBufferedFramesToWire(): void
-  /** A WebSocket transport of the connection, its wire not opened yet. */
-  createWebSocket(): UpgradeTarget
-  /** The connection moves to `transport`, whose wire the upgrade opened. */
-  adoptTransport(transport: UpgradeTarget): void
   dispatchFrame(frame: DecodedFrame): void
   handleReconciled(ctrl: ReconciledPayload): void
   fallbackToSse(err: Error): void
@@ -129,35 +121,25 @@ interface UpgradeOwner {
 type UpgradeOptions = {
   owner: UpgradeOwner
   channels: ChannelTable
-  liveness: Liveness
   exchange: AttachExchange
-  /** The page's transports include a WebSocket. */
-  allowsWebSocket: boolean
 }
 
 /** The SSE→WS upgrade: a WebSocket probe staged beside the SSE wire, the barrier that ends the old wire, and the join
- *  of both wires' frames once the connection flipped to the new one. */
+ *  of both wires' frames once the connection flipped to the new one. The connection runs an attempt's steps in order:
+ *  `start`, `stage`, `commit`, `flip`, then `endAttempt` however it ended. */
 class Upgrade implements ProbeOwner {
   private readonly owner: UpgradeOwner
   private readonly channels: ChannelTable
-  private readonly liveness: Liveness
   private readonly exchange: AttachExchange
-  private readonly allowsWebSocket: boolean
   /** Only while the connection is open: it goes with the open state it was in (see `forget`). */
   private state: UpgradeState = { tag: 'none' }
   /** Set by a permanent upgrade abort, and kept through every state change until dispose. */
   private disabled = false
-  /** Server-allowed transports from the last settled RECONCILED. Kept so `maybeStart`
-   *  can run from both `handleReconciled` and `onTransportOpen` — transport-open and the
-   *  first RECONCILED can arrive in either order on the SSE path. */
-  serverTransports: ReconciledPayload['transports'] | null = null
 
-  constructor({ owner, channels, liveness, exchange, allowsWebSocket }: UpgradeOptions) {
+  constructor({ owner, channels, exchange }: UpgradeOptions) {
     this.owner = owner
     this.channels = channels
-    this.liveness = liveness
     this.exchange = exchange
-    this.allowsWebSocket = allowsWebSocket
   }
 
   private get committing(): CommittingUpgrade | null {
@@ -209,18 +191,9 @@ class Upgrade implements ProbeOwner {
     this.state = { tag: 'none' }
   }
 
-  maybeStart(): void {
-    if (this.disabled) return
-    if (!this.owner.connected || this.state.tag !== 'none') return
-    // Settled-reconcile gate; a flush above may have just re-armed `reconciling` — the next
-    // RECONCILED retries via `handleReconciled`.
-    if (this.exchange.reconciling) return
-    // Only SSE can carry a barrier as its last frame, and only SSE has anywhere to upgrade to.
-    const { transport } = this.owner
-    if (transport.type !== CHANNEL_TRANSPORT.SSE) return
-    if (!this.allowsWebSocket) return
-    if (!this.serverTransports?.includes(CHANNEL_TRANSPORT.WS)) return
-    void this.probeAndUpgrade(transport as UpgradeSource)
+  /** No attempt is in flight, and none gave the upgrade up for good. */
+  get canStart(): boolean {
+    return !this.disabled && this.state.tag === 'none'
   }
 
   /** False where `ctrl` answers another upgrade: a RECONCILED that does not echo the committing attempt's id. */
@@ -248,7 +221,7 @@ class Upgrade implements ProbeOwner {
       return record
     }
     u.attempt.abort()
-    this.exitAttempt(u.attempt)
+    this.endAttempt(u.attempt)
     return null
   }
 
@@ -317,7 +290,7 @@ class Upgrade implements ProbeOwner {
   // ── State transitions: every `this.state =` write goes through these. ──
 
   private enterStaging(attempt: AbortController): void {
-    assert(this.owner.connected && this.state.tag === 'none')
+    assert(this.state.tag === 'none')
     this.state = { tag: 'staging', attempt, deadline: null, probeHeartbeat: null, settleReady: null, ready: false }
   }
 
@@ -360,7 +333,8 @@ class Upgrade implements ProbeOwner {
     }
   }
 
-  private exitAttempt(attempt: AbortController): void {
+  /** The attempt ended, however: its state goes, unless it flipped and its join is under way. */
+  endAttempt(attempt: AbortController): void {
     const u = this.state
     if (u.tag === 'none' || u.attempt !== attempt) return
     if (u.tag === 'committing' && this.owner.transport === u.to) return
@@ -379,35 +353,30 @@ class Upgrade implements ProbeOwner {
 
   // ── The attempt ──
 
-  private async probeAndUpgrade(from: UpgradeSource): Promise<void> {
-    const { sessionId } = this.exchange
-    if (sessionId === null) return
+  /** Starts an attempt; its signal aborts on any failure of it. */
+  start(): AbortController {
     const attempt = new AbortController()
     this.enterStaging(attempt)
-    try {
-      const to = this.owner.createWebSocket()
-      const session = await this.stageProbe(to, sessionId, attempt)
-      if (!session) return
-      await this.commitBarrier(from, to, session, attempt)
-    } finally {
-      this.exitAttempt(attempt)
-      this.exchange.flushPendingRegisterReconcile()
-    }
+    return attempt
   }
 
-  private async stageProbe(
+  /** Opens `to`'s probe and exchanges PREPARE/READY on it: the session its barrier commits, or why not.
+   *  `'no-probe'`: no probe opened, or the attempt aborted meanwhile; `'not-ready'`: no matching READY came, and the
+   *  attempt is aborted. */
+  async stage(
     to: UpgradeTarget,
     sessionId: string,
+    pingInterval: number,
     attempt: AbortController,
-  ): Promise<ProbeSession | null> {
+  ): Promise<ProbeSession | 'no-probe' | 'not-ready'> {
     const probe = await to.probe(this)
     if (attempt.signal.aborted || !probe) {
       probe?.close()
-      return null
+      return 'no-probe'
     }
     const staging = this.state
     assert(staging.tag === 'staging' && staging.attempt === attempt)
-    const probeHeartbeat = this.keepProbeAlive(probe, attempt)
+    const probeHeartbeat = this.keepProbeAlive(probe, attempt, pingInterval)
     staging.probeHeartbeat = probeHeartbeat
 
     const upgradeId = randomUuid()
@@ -420,8 +389,7 @@ class Upgrade implements ProbeOwner {
     const ready = await readyP
     if (!ready || ready.upgradeId !== upgradeId || attempt.signal.aborted) {
       attempt.abort()
-      if (!this.exchange.reconcileOwed) this.owner.drainBufferedFramesToWire()
-      return null
+      return 'not-ready'
     }
     this.enterReady(attempt)
     return { upgradeId, sessionId, probeHeartbeat, uplink: probe.uplink }
@@ -429,8 +397,7 @@ class Upgrade implements ProbeOwner {
 
   /** The probe is nobody's transport yet, so it has no heartbeat of its own: this one keeps it
    *  alive until the flip adopts it, and any death — its own or the attempt's — closes both. */
-  private keepProbeAlive(probe: ProbeWire, attempt: AbortController): Heartbeat {
-    const intervalMs = this.liveness.pingInterval
+  private keepProbeAlive(probe: ProbeWire, attempt: AbortController, intervalMs: number): Heartbeat {
     const heartbeat = new Heartbeat({
       intervalMs,
       pongTimeoutMs: pingDeadline(intervalMs),
@@ -449,35 +416,15 @@ class Upgrade implements ProbeOwner {
     return heartbeat
   }
 
-  private async commitBarrier(
-    from: UpgradeSource,
-    to: UpgradeTarget,
-    session: ProbeSession,
-    attempt: AbortController,
-  ): Promise<void> {
-    // After the RECONCILED of the one in flight, which may name a channel the barrier lists.
-    await this.exchange.reconcileSettled(attempt.signal)
-    if (attempt.signal.aborted) return
+  /** The barrier goes next, on `from`: from here sends wait for its COMMITTED. */
+  commit(from: UpgradeSource, to: UpgradeTarget, session: ProbeSession, attempt: AbortController): void {
     this.enterCommitting(from, to, session, attempt)
-    const emission = await from.emitBarrier(() => this.exchange.buildBarrierFrame(session), attempt.signal)
-
-    if (emission === 'not-emitted') {
-      attempt.abort()
-      if (!this.exchange.reconcileOwed) this.owner.drainBufferedFramesToWire()
-      // An attempt that ended without its barrier goes again once the outbox drained.
-      void from.drained().then(() => this.maybeStart())
-      return
-    }
-    if (attempt.signal.aborted) {
-      this.owner.fallbackToSse(new NetworkError('Upgrade barrier attempt timed out', true))
-      return
-    }
-    this.flip()
   }
 
   // ── The join ──
 
-  private flip(): void {
+  /** The barrier went and the connection adopted the new wire: the probe becomes it, and the join begins. */
+  flip(): void {
     const u = this.committing
     assert(u !== null)
     if (u.deadline) {
@@ -485,7 +432,6 @@ class Upgrade implements ProbeOwner {
       u.deadline = null
     }
     u.probeHeartbeat.stop()
-    this.owner.adoptTransport(u.to)
     u.to.adoptProbe()
     u.joinTimer = setTimeout(() => this.onJoinTimeout(), UPGRADE_HANDOFF_JOIN_TIMEOUT_MS)
     // What the probe delivered before the swap can be acted on now. The buffer is made whole
