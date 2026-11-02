@@ -40,7 +40,7 @@ async function takeDmReplies(roomId: string, inc: string, sender: string): Promi
   const replies = new Map<string, RoomResult>()
   const slice = new Slice()
   for await (const page of plane.readCellPages(roomId, inc, dmReplyCellPrefix(sender))) {
-    if ('staleInc' in page) throw roomClosedError(roomId)
+    if (page.kind === 'stale-incarnation') throw roomClosedError(roomId)
     for (const [key, raw] of page.cells) replies.set(ackIdOfDmReplyCellKey(key), decodeRoomRecord<RoomResult>(raw))
     if (!(await deleteCells(roomId, inc, page.cells.keys()))) throw roomClosedError(roomId)
     if (slice.over) await slice.next()

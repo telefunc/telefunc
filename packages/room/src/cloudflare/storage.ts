@@ -26,24 +26,25 @@ export {
 
 export type { CellPage }
 
-// Room-DO `transactionSync` makes head CX, cell batches, and order advance atomic under authority time.
+// Room-DO `transactionSync` makes head exchanges, cell batches, and order advance atomic under authority time.
 
 import {
   CELL_PAGE_SIZE,
   DIRECTORY_PAGE_SIZE,
   type CellCounter,
-  type CellsCx,
-  type CxResult,
-  type HeadCx,
+  type CellsExchange,
+  type CellsExchangeResult,
+  type HeadExpectation,
   type HeadNext,
   type CellSelector,
   type CellsRead,
   type DirectoryPage,
+  type StaleIncarnation,
 } from '../backend/contract.js'
 import {
   countCell,
   encodeCellCounter,
-  headCxMatches,
+  headExpectationHolds,
   isOpenIncarnation,
   materializeHead,
   nextOrdering,
@@ -52,7 +53,8 @@ import {
 import type { OrderingInfo } from 'telefunc/__internal'
 import { binaryLaneKeyPrefix, encodeLaneKey } from '../backend/laneKey.js'
 
-type HeadCxOutcome = { head: StoredHead } | { conflict: true; current: StoredHead | null }
+/** A head exchange's result, with the stored head: the authority hands out its public view. */
+type HeadExchangeOutcome = { kind: 'committed'; head: StoredHead } | { kind: 'conflict'; current: StoredHead | null }
 
 /** The `head` row as SQLite hands it back: its BLOB column arrives as an ArrayBuffer. */
 type HeadRow = {
@@ -236,10 +238,15 @@ function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
 }
 
 /** Called inside `transactionSync`; a lost race returns the current head. */
-function compareExchangeHead(sql: SqlStorage, cx: HeadCx, next: HeadNext, now: number): HeadCxOutcome {
+function compareExchangeHead(
+  sql: SqlStorage,
+  expected: HeadExpectation,
+  next: HeadNext,
+  now: number,
+): HeadExchangeOutcome {
   const current = readLiveHead(sql, now)
-  if (!headCxMatches(cx, current, now)) return { conflict: true, current }
-  return { head: storeHead(sql, next, now) }
+  if (!headExpectationHolds(expected, current, now)) return { kind: 'conflict', current }
+  return { kind: 'committed', head: storeHead(sql, next, now) }
 }
 
 function storeHead(sql: SqlStorage, next: HeadNext, now: number): StoredHead {
@@ -254,7 +261,7 @@ function storeHead(sql: SqlStorage, next: HeadNext, now: number): StoredHead {
     head.closeLease?.until ?? null,
     head.expiresAt,
   )
-  // A new incarnation is registered inside the CX that names it.
+  // A new incarnation is registered inside the exchange that names it.
   if (head.currentInc !== null) {
     sql.exec('INSERT OR IGNORE INTO gen (inc, revision) VALUES (?, 0)', head.currentInc)
   }
@@ -264,12 +271,11 @@ function storeHead(sql: SqlStorage, next: HeadNext, now: number): StoredHead {
 type CellRow = { key: string; bytes: ArrayBuffer; version: number }
 
 /** A prefix read's page, with the cursor its next page reads after while cells may remain. */
-type CellPage =
-  | { cells: Map<string, Uint8Array>; versions: Map<string, string>; now: number; cursor?: string }
-  | { staleInc: true }
+type CellPage = (Extract<CellsRead, { kind: 'read' }> & { cursor?: string }) | StaleIncarnation
 
-function cellsOf(rows: CellRow[], now: number): Exclude<CellPage, { staleInc: true }> {
+function cellsOf(rows: CellRow[], now: number): Extract<CellPage, { kind: 'read' }> {
   return {
+    kind: 'read',
     cells: new Map(rows.map((row) => [row.key, new Uint8Array(row.bytes)])),
     versions: new Map(rows.map((row) => [row.key, String(row.version)])),
     now,
@@ -288,16 +294,16 @@ function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRo
     .toArray()
 }
 
-/** Reads stay available while closing; staleInc means the head is absent or names another incarnation. */
+/** Reads stay available while closing; a stale incarnation is one the head is absent for or doesn't name. */
 function readCells(sql: SqlStorage, inc: string, sel: CellSelector, now: number): CellsRead {
   const head = readLiveHead(sql, now)
-  if (head === null || head.currentInc !== inc) return { staleInc: true }
+  if (head === null || head.currentInc !== inc) return { kind: 'stale-incarnation' }
   return cellsOf(selectCellRows(sql, inc, sel), now)
 }
 
 function readCellPage(sql: SqlStorage, inc: string, prefix: string, cursor: string | undefined, now: number): CellPage {
   const head = readLiveHead(sql, now)
-  if (head === null || head.currentInc !== inc) return { staleInc: true }
+  if (head === null || head.currentInc !== inc) return { kind: 'stale-incarnation' }
   const range = keyRange('key', prefix, cursor)
   const rows = sql
     .exec<CellRow>(
@@ -328,22 +334,22 @@ function writeCell(sql: SqlStorage, inc: string, key: string, bytes: Uint8Array 
 }
 
 /** Cell writes are all-or-nothing while every expected cell is at its version, and require an open head. */
-function compareExchangeCells(sql: SqlStorage, inc: string, cx: CellsCx, now: number): CxResult {
+function compareExchangeCells(sql: SqlStorage, inc: string, exchange: CellsExchange, now: number): CellsExchangeResult {
   const head = readLiveHead(sql, now)
-  if (!isOpenIncarnation(head, inc)) return 'stale-inc'
-  if (cx.expect.some(({ key, version }) => cellVersion(sql, inc, key) !== version)) return 'conflict'
+  if (!isOpenIncarnation(head, inc)) return { kind: 'stale-incarnation' }
+  if (exchange.expect.some(({ key, version }) => cellVersion(sql, inc, key) !== version)) return { kind: 'conflict' }
   sql.exec('UPDATE gen SET revision = revision + 1 WHERE inc = ?', inc)
   const version = readRevision(sql, inc)
-  for (const mutation of cx.mutations) writeCell(sql, inc, mutation.key, mutation.bytes, version)
+  for (const mutation of exchange.mutations) writeCell(sql, inc, mutation.key, mutation.bytes, version)
   const counters = new Map<string, CellCounter>()
-  for (const count of cx.counts ?? []) {
+  for (const count of exchange.counts ?? []) {
     const current = selectCellRows(sql, inc, { keys: [count.key] })[0]
     const counted = countCell(current === undefined ? undefined : new Uint8Array(current.bytes), count, now)
     if (counted === null) continue
     if (counted.written) writeCell(sql, inc, count.key, encodeCellCounter(counted.counter), version)
     counters.set(count.key, counted.counter)
   }
-  return { committed: counters }
+  return { kind: 'committed', counters }
 }
 
 function readOrder(sql: SqlStorage, inc: string, domain: string): OrderingInfo | null {

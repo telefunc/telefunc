@@ -2,17 +2,17 @@
 export { CloudflareRoomDriver }
 
 import type {
-  CellsCx,
+  CellsExchange,
+  CellsExchangeResult,
   CellSelector,
   CellsRead,
   CommitAccepted,
   CommitOptions,
   CommitTarget,
   CommitResult,
-  CxResult,
   DirectoryPage,
-  HeadCx,
-  HeadCxResult,
+  HeadExchangeResult,
+  HeadExpectation,
   HeadNext,
   LaneId,
   RetainedFrame,
@@ -47,8 +47,8 @@ class CloudflareRoomDriver implements RoomDriver {
     return this.stub(roomId).readHead()
   }
 
-  async compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
-    return this.stub(roomId).compareExchangeHead(cx, next)
+  async compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult> {
+    return this.stub(roomId).compareExchangeHead(expected, next)
   }
 
   async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
@@ -60,13 +60,13 @@ class CloudflareRoomDriver implements RoomDriver {
     do {
       const page = await this.stub(roomId).readCellPage(inc, prefix, cursor)
       yield page
-      if ('staleInc' in page) return
+      if (page.kind === 'stale-incarnation') return
       cursor = page.cursor
     } while (cursor !== undefined)
   }
 
-  async compareExchangeCells(roomId: string, inc: string, cx: CellsCx): Promise<CxResult> {
-    return this.stub(roomId).compareExchangeCells(inc, cx)
+  async compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult> {
+    return this.stub(roomId).compareExchangeCells(inc, exchange)
   }
 
   async commitLane(
@@ -78,9 +78,9 @@ class CloudflareRoomDriver implements RoomDriver {
     // From a session DO, through its ordered stub, so its commits to a room keep the order Room sent them in.
     const session = currentRoomSessionSubscriptions(this)
     const wire = await (session ? session.callAuthority(roomId, commit) : commit(this.stub(roomId)))
-    if ('stale' in wire) return wire
+    if (wire.kind !== 'accepted') return wire
     const receipt: CommitAccepted = {
-      accepted: true,
+      kind: 'accepted',
       seq: wire.seq,
       timestamp: wire.timestamp,
       receivers: wire.receivers,

@@ -4,11 +4,11 @@ export { MemoryRoomDriver }
 
 import type {
   CellCounter,
-  CellsCx,
-  HeadCxResult,
+  CellsExchange,
+  CellsExchangeResult,
   CommitResult,
-  CxResult,
-  HeadCx,
+  HeadExchangeResult,
+  HeadExpectation,
   HeadNext,
   LaneId,
   RoomDriver,
@@ -28,7 +28,7 @@ import {
   commitPreconditionHolds,
   countCell,
   encodeCellCounter,
-  headCxMatches,
+  headExpectationHolds,
   isOpenIncarnation,
   materializeHead,
   nextOrdering,
@@ -172,7 +172,7 @@ function readCellsOf(incarnation: Incarnation, keys: Iterable<string>, now: numb
     cells.set(key, copyBytes(cell.bytes))
     versions.set(key, cell.version)
   }
-  return { cells, versions, now }
+  return { kind: 'read', cells, versions, now }
 }
 
 function setCell(incarnation: Incarnation, key: string, bytes: Uint8Array | null, version: string): void {
@@ -210,14 +210,15 @@ class MemoryRoomDriver implements RoomDriver {
     return head === null ? null : publicHead(head, copyBytes(head.config))
   }
 
-  async compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
+  async compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult> {
     const current = this.liveHead(this.rooms.get(roomId))
-    if (!headCxMatches(cx, current, Date.now())) {
-      return { conflict: true, current: current === null ? null : publicHead(current, copyBytes(current.config)) }
+    if (!headExpectationHolds(expected, current, Date.now())) {
+      const currentView = current === null ? null : publicHead(current, copyBytes(current.config))
+      return { kind: 'conflict', current: currentView }
     }
-    // Only a CX that actually applies materializes a room record.
+    // Only an exchange that actually applies materializes a room record.
     const head = this.storeHead(this.roomFor(roomId), next)
-    return { head: publicHead(head, copyBytes(head.config)) }
+    return { kind: 'committed', head: publicHead(head, copyBytes(head.config)) }
   }
 
   private storeHead(room: RoomRecord, next: HeadNext): StoredHead {
@@ -230,7 +231,7 @@ class MemoryRoomDriver implements RoomDriver {
 
   async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
     const incarnation = this.readableIncarnation(roomId, inc)
-    if (incarnation === null) return { staleInc: true }
+    if (incarnation === null) return { kind: 'stale-incarnation' }
     return readCellsOf(incarnation, 'keys' in sel ? sel.keys : cellKeysWithPrefix(incarnation, sel.prefix), Date.now())
   }
 
@@ -242,7 +243,7 @@ class MemoryRoomDriver implements RoomDriver {
     do {
       const incarnation = this.readableIncarnation(roomId, inc)
       if (incarnation === null) {
-        yield { staleInc: true }
+        yield { kind: 'stale-incarnation' }
         return
       }
       keys ??= liveKeysWithPrefix(incarnation, prefix)
@@ -259,23 +260,23 @@ class MemoryRoomDriver implements RoomDriver {
     return this.incarnation(room, inc)
   }
 
-  async compareExchangeCells(roomId: string, inc: string, cx: CellsCx): Promise<CxResult> {
+  async compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult> {
     const room = this.rooms.get(roomId)
     const head = this.liveHead(room)
-    if (room === undefined || !isOpenIncarnation(head, inc)) return 'stale-inc'
+    if (room === undefined || !isOpenIncarnation(head, inc)) return { kind: 'stale-incarnation' }
     const incarnation = this.incarnation(room, inc)
-    if (cx.expect.some(({ key, version }) => (incarnation.cells.get(key)?.version ?? null) !== version))
-      return 'conflict'
+    if (exchange.expect.some(({ key, version }) => (incarnation.cells.get(key)?.version ?? null) !== version))
+      return { kind: 'conflict' }
     const version = String(++incarnation.version)
-    for (const mutation of cx.mutations) setCell(incarnation, mutation.key, mutation.bytes, version)
+    for (const mutation of exchange.mutations) setCell(incarnation, mutation.key, mutation.bytes, version)
     const counters = new Map<string, CellCounter>()
-    for (const count of cx.counts ?? []) {
+    for (const count of exchange.counts ?? []) {
       const counted = countCell(incarnation.cells.get(count.key)?.bytes, count, Date.now())
       if (counted === null) continue
       if (counted.written) setCell(incarnation, count.key, encodeCellCounter(counted.counter), version)
       counters.set(count.key, counted.counter)
     }
-    return { committed: counters }
+    return { kind: 'committed', counters }
   }
 
   async commitLane(
@@ -286,11 +287,11 @@ class MemoryRoomDriver implements RoomDriver {
     const room = this.rooms.get(roomId)
     const head = this.liveHead(room)
     if (room === undefined || !commitPreconditionHolds(head, inc, lane.kind, opts?.closingLease, Date.now())) {
-      return { stale: 'incarnation' }
+      return { kind: 'stale-incarnation' }
     }
     const incarnation = this.incarnation(room, inc)
     const missing = opts?.requiredCellKeys?.find((key) => !incarnation.cells.has(key))
-    if (missing !== undefined) return { stale: 'cell', key: missing }
+    if (missing !== undefined) return { kind: 'stale-cell', key: missing }
     const key = encodeLaneKey(lane)
     const frame = copyBytes(payload)
     const order =
@@ -323,8 +324,8 @@ class MemoryRoomDriver implements RoomDriver {
     })
     const receivers = this.pubSub.consumers(targets, everyTrack, everyMember)
     if (nextTurn !== null) await nextTurn
-    if (delivered === null) return { accepted: true, seq: mark.seq, timestamp: mark.timestamp, receivers }
-    return { accepted: true, seq: mark.seq, timestamp: mark.timestamp, receivers, delivery: delivered.promise }
+    if (delivered === null) return { kind: 'accepted', seq: mark.seq, timestamp: mark.timestamp, receivers }
+    return { kind: 'accepted', seq: mark.seq, timestamp: mark.timestamp, receivers, delivery: delivered.promise }
   }
 
   async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {

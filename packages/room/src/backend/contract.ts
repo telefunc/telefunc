@@ -4,7 +4,8 @@ export type {
   CellExpectation,
   CellCount,
   CellCounter,
-  CellsCx,
+  CellsExchange,
+  CellsExchangeResult,
   CellSelector,
   CellsRead,
   CommitOptions,
@@ -17,9 +18,9 @@ export type {
   CommitAccepted,
   CommitResult,
   StaleCommit,
-  CxResult,
-  HeadCx,
-  HeadCxResult,
+  StaleIncarnation,
+  HeadExpectation,
+  HeadExchangeResult,
   HeadNext,
   LaneId,
   RoomPlane,
@@ -66,15 +67,16 @@ type RoomHead = {
   currentInc: string | null
   state: 'open' | 'closing' | 'closed'
   config: Uint8Array
-  /** Closing only. CX mints `until` from authority time and returns the stored head; this lease alone
+  /** Closing only. The head exchange mints `until` from authority time and returns the stored head; this lease alone
    * authorizes closing-control commit and finalization. */
   closeLease?: { id: string; until: number }
   /** Authority time at which the head lapses and reads as absent. */
   expiresAt?: number
 }
 
-/** Drivers compare-exchange; core is the only writer and decides every transition. */
-type HeadCx =
+/** What a head exchange expects the stored head to be. Drivers compare-exchange; core is the only writer and decides
+ *  every transition. */
+type HeadExpectation =
   | { form: 'absent' }
   | { form: 'rev'; rev: string }
   /** At `rev`, closing, and the close lease has lapsed. */
@@ -89,11 +91,15 @@ type HeadNext = {
     config: Uint8Array
     closeLease?: { id: string; durationMs: number }
   }
-  /** The head lapses `ttlMs` after this CX. */
+  /** The head lapses `ttlMs` after this exchange. */
   ttlMs?: number
 }
 
-type HeadCxResult = { head: RoomHead } | { conflict: true; current: RoomHead | null }
+/** The incarnation a call names is no longer the head's open one: Room's one refusal for a room that closed or was
+ *  recreated. */
+type StaleIncarnation = { kind: 'stale-incarnation' }
+
+type HeadExchangeResult = { kind: 'committed'; head: RoomHead } | { kind: 'conflict'; current: RoomHead | null }
 
 /** `bytes: null` deletes the cell. */
 type CellMutation = { key: string; bytes: Uint8Array | null }
@@ -102,7 +108,9 @@ type CellSelector = { keys: string[] } | { prefix: string }
 
 /** The cells found, each with its version, and the authority time of the read; or the incarnation is no longer the
  *  head's. A write gives each cell it writes a version that cell never had in its incarnation. */
-type CellsRead = { cells: Map<string, Uint8Array>; versions: Map<string, string>; now: number } | { staleInc: true }
+type CellsRead =
+  | { kind: 'read'; cells: Map<string, Uint8Array>; versions: Map<string, string>; now: number }
+  | StaleIncarnation
 
 /** A cell still at the version read; `null`: still absent. */
 type CellExpectation = { key: string; version: string | null }
@@ -114,10 +122,13 @@ type CellCounter = { value: number; changedAt: number }
 type CellCount = { key: string; delta: number; create?: true }
 
 /** Commits only while every expectation holds: applies the mutations and the counts, which never conflict. */
-type CellsCx = { expect: CellExpectation[]; mutations: CellMutation[]; counts?: CellCount[] }
+type CellsExchange = { expect: CellExpectation[]; mutations: CellMutation[]; counts?: CellCount[] }
 
-/** A commit returns each counted counter as it left it. */
-type CxResult = { committed: Map<string, CellCounter> } | 'conflict' | 'stale-inc'
+/** A committed exchange returns each counted counter as it left it. */
+type CellsExchangeResult =
+  | { kind: 'committed'; counters: Map<string, CellCounter> }
+  | { kind: 'conflict' }
+  | StaleIncarnation
 
 type CommitOptions = { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] }
 
@@ -129,7 +140,7 @@ type RetainedOf = { member: string } | { track: string }
 type DirectoryPage = { entries: { roomId: string; incTag: string }[]; cursor?: string }
 
 type CommitAccepted = {
-  accepted: true
+  kind: 'accepted'
   seq: number
   timestamp: number
   receivers?: number
@@ -139,7 +150,7 @@ type CommitAccepted = {
 }
 
 /** Why a commit was refused: the incarnation isn't open (or its closing lease lapsed), or a required cell is gone. */
-type StaleCommit = { stale: 'incarnation' } | { stale: 'cell'; key: string }
+type StaleCommit = StaleIncarnation | { kind: 'stale-cell'; key: string }
 
 type CommitResult = CommitAccepted | StaleCommit
 
@@ -155,15 +166,15 @@ type RoomSubscriptionSource = {
 /** What a backend implements for Room: durable heads, cells, lanes and retained frames, and lane subscriptions. */
 type RoomDriver = {
   readHead(roomId: string): Promise<RoomHead | null>
-  compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext): Promise<HeadCxResult>
+  compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult>
   readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead>
   /** The cells under `prefix`, a bounded page at a time, each page read at once, in one order for the whole read that
    *  keeps the keys sharing the prefix's next `:`-ended segment together (key order on Redis and Cloudflare). Each key
    *  comes at most once: one present for the whole read comes, one written during it and kept that the order puts after
-   *  every key returned before the write comes, any other written or removed during it may or may not. A `staleInc`
-   *  page is the last. */
+   *  every key returned before the write comes, any other written or removed during it may or may not. A
+   *  `stale-incarnation` page is the last. */
   readCellPages(roomId: string, inc: string, prefix: string): AsyncIterable<CellsRead>
-  compareExchangeCells(roomId: string, inc: string, cx: CellsCx): Promise<CxResult>
+  compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult>
   /** A commit this host makes after `subscribe()` returned reaches that subscription: if your commits and
    *  subscribes travel by different connections, hold a commit until your own new subscriptions on its lanes are
    *  ready, as the Redis driver does. The caller may reuse `payload`'s bytes once this returns: copy what you keep. */

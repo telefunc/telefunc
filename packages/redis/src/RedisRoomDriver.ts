@@ -2,12 +2,12 @@ export { RedisRoomDriver }
 
 import type { OrderingInfo, Subscriber, Unsubscribe } from 'telefunc/__internal'
 import type {
-  CellsCx,
+  CellsExchange,
+  CellsExchangeResult,
   CommitAccepted,
   CommitResult,
-  CxResult,
-  HeadCx,
-  HeadCxResult,
+  HeadExchangeResult,
+  HeadExpectation,
   HeadNext,
   LaneId,
   RoomDriver,
@@ -63,8 +63,8 @@ class RedisRoomDriver implements RoomDriver, RedisPlane {
     return this.connection.run(REDIS_COMMANDS.readHead, roomId)
   }
 
-  compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
-    return this.connection.run(REDIS_COMMANDS.headCx, { roomId, cx, next })
+  compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult> {
+    return this.connection.run(REDIS_COMMANDS.headExchange, { roomId, expected, next })
   }
 
   readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
@@ -82,13 +82,13 @@ class RedisRoomDriver implements RoomDriver, RedisPlane {
         pageSize: this.kit.CELL_PAGE_SIZE,
       })
       yield page
-      if ('staleInc' in page) return
+      if (page.kind === 'stale-incarnation') return
       after = page.after
     } while (after !== undefined)
   }
 
-  compareExchangeCells(roomId: string, inc: string, cx: CellsCx): Promise<CxResult> {
-    return this.connection.run(REDIS_COMMANDS.cellsCx, { roomId, inc, cx })
+  compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult> {
+    return this.connection.run(REDIS_COMMANDS.cellsExchange, { roomId, inc, exchange })
   }
 
   commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
@@ -175,12 +175,12 @@ class RedisRoomDriver implements RoomDriver, RedisPlane {
       fence?.cancel()
       throw error
     }
-    if ('stale' in reply) {
+    if (reply.kind !== 'accepted') {
       fence?.cancel()
       return reply
     }
     const accepted: CommitAccepted = {
-      accepted: true,
+      kind: 'accepted',
       seq: reply.seq,
       timestamp: reply.timestamp,
       receivers: this.connection.reportsReceivers ? reply.receivers : undefined,

@@ -78,7 +78,7 @@ function holdRecord(config: HoldConfig, counters: ReadonlyMap<string, CellCounte
 async function readHoldRecord({ id, inc, hold }: RoomIncarnation): Promise<HoldRecord | null> {
   if (hold === null) return null
   const read = await getRoomPlane().readCells(id, inc, { keys: [HOLDS_CELL_KEY, JOINS_CELL_KEY] })
-  if ('staleInc' in read || read.cells.size === 0) return null
+  if (read.kind === 'stale-incarnation' || read.cells.size === 0) return null
   const counters = new Map<string, CellCounter>()
   for (const [key, raw] of read.cells) counters.set(key, decodeCellCounter(raw))
   return holdRecord(hold, counters, read.now)
@@ -107,9 +107,9 @@ async function createHold(room: RoomIncarnation): Promise<void> {
     mutations: [],
     counts: holdDelta(hold, 0).counts,
   })
-  if (result === 'stale-inc') throw roomClosedError(room.id)
-  assert(result !== 'conflict')
-  const record = holdRecord(hold, result.committed)
+  if (result.kind === 'stale-incarnation') throw roomClosedError(room.id)
+  assert(result.kind === 'committed')
+  const record = holdRecord(hold, result.counters)
   if (record.closesIn !== undefined) scheduleClose(room, record.closesIn)
 }
 
@@ -142,7 +142,7 @@ async function lapseNewRoom(room: RoomIncarnation): Promise<RoomHead | null> {
         ttlMs: record.closesIn + ROOM_LAPSE_AFTER_CLOSE_MS,
       },
     )
-    return 'conflict' in result ? EXCHANGE_CONFLICT : result.head
+    return result.kind === 'conflict' ? EXCHANGE_CONFLICT : result.head
   })
 }
 
@@ -170,7 +170,7 @@ async function extendLapse(
       { form: 'rev', rev: head.rev },
       { head: { currentInc: inc, state: 'open', config: head.config }, ttlMs },
     )
-    return 'conflict' in result ? EXCHANGE_CONFLICT : undefined
+    return result.kind === 'conflict' ? EXCHANGE_CONFLICT : undefined
   })
 }
 

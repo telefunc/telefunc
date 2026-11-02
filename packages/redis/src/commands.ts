@@ -7,16 +7,18 @@ import type { BroadcastPayload, BroadcastRoute, OrderingInfo } from 'telefunc/__
 import type {
   CellCounter,
   CellSelector,
-  CellsCx,
-  CxResult,
-  HeadCx,
-  HeadCxResult,
+  CellsExchange,
+  CellsExchangeResult,
+  HeadExchangeResult,
+  HeadExpectation,
   HeadNext,
   LaneId,
   RoomHead,
   RoomSubscriptionSource,
   CellsRead,
   RoomPlaneKit,
+  StaleCommit,
+  StaleIncarnation,
 } from '@telefunc/room/backend'
 import { assert } from './assert.js'
 import {
@@ -114,24 +116,24 @@ local receivers = redis.call('PUBLISH', KEYS[2], frame)
 return {seq, ts, receivers}
 `
 
-// HEAD CX: compares by form, then stores the next head.
+// HEAD EXCHANGE: compares by form, then stores the next head.
 //   KEYS: [1]=head
-//   ARGV: [1]=HeadCx JSON {form,rev?,lease?} [2]=nextJson{state,inc?,config,lease?,ttlMs?}
-const HEAD_CX_LUA = `${HEAD_PRELUDE}
+//   ARGV: [1]=HeadExpectation JSON {form,rev?,lease?} [2]=nextJson{state,inc?,config,lease?,ttlMs?}
+const HEAD_EXCHANGE_LUA = `${HEAD_PRELUDE}
 local head_key = KEYS[1]
 local now = tf_now()
-local cx = cjson.decode(ARGV[1])
+local expected = cjson.decode(ARGV[1])
 local nx = cjson.decode(ARGV[2])
 local cur = tf_live_head(head_key, now)
 
 local matches = false
-if cx.form == 'absent' then
+if expected.form == 'absent' then
   matches = (cur == nil)
-elseif cur ~= nil and cur.rev == cx.rev then
-  if cx.form == 'takeover' then
+elseif cur ~= nil and cur.rev == expected.rev then
+  if expected.form == 'takeover' then
     matches = (cur.state == 'closing' and cur.lease ~= nil and cur.lease['until'] < now)
-  elseif cx.form == 'finalize' then
-    matches = (cur.state == 'closing' and cur.lease ~= nil and cur.lease.id == cx.lease)
+  elseif expected.form == 'finalize' then
+    matches = (cur.state == 'closing' and cur.lease ~= nil and cur.lease.id == expected.lease)
   else
     matches = true
   end
@@ -185,7 +187,7 @@ end
 const READ_CELLS_LUA = `${HEAD_PRELUDE}${CELLS_REPLY_LUA}
 local now = tf_now()
 local head = tf_live_head(KEYS[1], now)
-if not head or head.inc ~= ARGV[1] then return {'stale'} end
+if not head or head.inc ~= ARGV[1] then return {'stale-incarnation'} end
 local keys, first = ARGV, 3
 if ARGV[2] == 'prefix' then
   keys, first = redis.call('ZRANGEBYLEX', KEYS[2], '[' .. ARGV[3], '(' .. ARGV[3] .. '\\255'), 1
@@ -201,7 +203,7 @@ return tf_cells_reply({'cells', string.format('%.0f', now)}, keys, first)
 const READ_CELL_PAGE_LUA = `${HEAD_PRELUDE}${CELLS_REPLY_LUA}
 local now = tf_now()
 local head = tf_live_head(KEYS[1], now)
-if not head or head.inc ~= ARGV[1] then return {'stale'} end
+if not head or head.inc ~= ARGV[1] then return {'stale-incarnation'} end
 local limit = tonumber(ARGV[4])
 local keys = redis.call('ZRANGEBYLEX', KEYS[2], ARGV[2], '(' .. ARGV[3] .. '\\255', 'LIMIT', 0, limit)
 local time = string.format('%.0f', now)
@@ -272,18 +274,18 @@ redis.call('UNLINK', KEYS[2])
 redis.call('PUBLISH', KEYS[1], ARGV[1])
 `
 
-// CELLS CX: all mutations and counts or none, while each expected cell is at its version; success implies the head
+// CELLS EXCHANGE: all mutations and counts or none, while each expected cell is at its version; success implies the head
 // precondition (open + inc) held at apply time. A commit's writes take the incarnation's next revision as version.
 //   KEYS: [1]=head [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions
 //   ARGV: [1]=inc [2..4]=how many mutated, expected and counted cells, then per mutated cell its key, op('set'|'del')
 //         and value, per expected cell its key and version ('' while absent), and per counted cell its key, delta and
 //         create ('1' or '')
-const CELLS_CX_LUA = `${HEAD_PRELUDE}
+const CELLS_EXCHANGE_LUA = `${HEAD_PRELUDE}
 local head_key, rev_key, incarnation_keys_key, cell_index_key, values_key, versions_key =
   KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6]
 local now = tf_now()
 local head = tf_live_head(head_key, now)
-if (not head) or head.inc ~= ARGV[1] or head.state ~= 'open' then return {'stale-inc'} end
+if (not head) or head.inc ~= ARGV[1] or head.state ~= 'open' then return {'stale-incarnation'} end
 local mutated, expected, counted = tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4])
 local first_expected = 5 + 3 * mutated
 local first_counted = first_expected + 2 * expected
@@ -396,9 +398,9 @@ if head and head.inc == ${COMMIT_ARG.inc} then
           and head.lease.id == ${COMMIT_ARG.closingLease} and now <= head.lease['until'])
   end
 end
-if not ok then return '{"stale":"incarnation"}' end
+if not ok then return '{"kind":"stale-incarnation"}' end
 for i = ${COMMIT_ARGS.requiredCells + 1}, #ARGV do
-  if redis.call('HEXISTS', ${COMMIT_KEY.cellValues}, ARGV[i]) == 0 then return '{"stale":"cell","index":' .. (i - ${COMMIT_ARGS.requiredCells + 1}) .. '}' end
+  if redis.call('HEXISTS', ${COMMIT_KEY.cellValues}, ARGV[i]) == 0 then return '{"kind":"stale-cell","index":' .. (i - ${COMMIT_ARGS.requiredCells + 1}) .. '}' end
 end
 
 local member_lane = ${COMMIT_ARG.laneKind} == 'inbox' or ${COMMIT_ARG.laneKind} == 'binary'
@@ -454,7 +456,7 @@ if ${COMMIT_ARG.laneKind} == 'binary' then
   if ${COMMIT_ARG.everyMemberFence} ~= '' then every_member = fence .. ${COMMIT_ARG.everyMemberFence} .. fan_in end
   receivers = receivers + redis.call('PUBLISH', ${COMMIT_KEY.everyTrackChannel}, every_track) + redis.call('PUBLISH', ${COMMIT_KEY.everyMemberChannel}, every_member)
 end
-return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',"receivers":' .. receivers .. '}'
+return '{"kind":"accepted","seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',"receivers":' .. receivers .. '}'
 `
 
 // Deletes one lane's retained frame, optionally only while it still holds seq ARGV[1].
@@ -561,10 +563,14 @@ type CommitInput = RoomInc & {
   fenceTokens: FenceTokens
 }
 
+/** The commit script's JSON reply: a missing required cell by its index among them. */
 type CommitReply =
-  | { stale: 'incarnation' }
-  | { stale: 'cell'; index: number }
-  | { accepted: true; seq: number; timestamp: number; receivers: number }
+  | StaleIncarnation
+  | { kind: 'stale-cell'; index: number }
+  | { kind: 'accepted'; seq: number; timestamp: number; receivers: number }
+
+/** A commit as the driver hands it on: a missing required cell by its key. */
+type CommitOutcome = StaleCommit | Extract<CommitReply, { kind: 'accepted' }>
 
 const REDIS_COMMANDS = {
   publish: command({
@@ -584,20 +590,20 @@ const REDIS_COMMANDS = {
       return { seq, timestamp, receivers }
     },
   }),
-  headCx: command({
-    name: 'tfRoomHeadCx',
-    lua: HEAD_CX_LUA,
+  headExchange: command({
+    name: 'tfRoomHeadExchange',
+    lua: HEAD_EXCHANGE_LUA,
     numberOfKeys: 1,
-    invoke: (prefix, { roomId, cx, next }: { roomId: string; cx: HeadCx; next: HeadNext }) => ({
+    invoke: (prefix, { roomId, expected, next }: { roomId: string; expected: HeadExpectation; next: HeadNext }) => ({
       keys: [headKey(prefix, roomId)],
-      argv: [JSON.stringify(cx), encodeNext(next)],
+      argv: [JSON.stringify(expected), encodeNext(next)],
     }),
-    parse: (reply): HeadCxResult => {
+    parse: (reply): HeadExchangeResult => {
       const parsed = JSON.parse(reply as string) as
         | { tag: 'head'; head: ScriptHead }
         | { tag: 'conflict'; current: ScriptHead | null }
-      if (parsed.tag === 'head') return { head: toPublicHead(parsed.head) }
-      return { conflict: true, current: parsed.current === null ? null : toPublicHead(parsed.current) }
+      if (parsed.tag === 'head') return { kind: 'committed', head: toPublicHead(parsed.head) }
+      return { kind: 'conflict', current: parsed.current === null ? null : toPublicHead(parsed.current) }
     },
   }),
   readHead: command({
@@ -626,7 +632,7 @@ const REDIS_COMMANDS = {
     }),
     parse: (reply): CellsRead => {
       const [tag, now, ...found] = reply as Buffer[]
-      return tag!.toString() === 'stale' ? { staleInc: true } : parseCells(now!, found)
+      return tag!.toString() === 'stale-incarnation' ? { kind: 'stale-incarnation' } : parseCells(now!, found)
     },
   }),
   readCellPage: command({
@@ -648,7 +654,7 @@ const REDIS_COMMANDS = {
     }),
     parse: (reply): CellsRead & { after?: string } => {
       const [tag, now, ...found] = reply as Buffer[]
-      if (tag!.toString() === 'stale') return { staleInc: true }
+      if (tag!.toString() === 'stale-incarnation') return { kind: 'stale-incarnation' }
       if (tag!.toString() === 'cells') return parseCells(now!, found)
       return { ...parseCells(now!, found.slice(1)), after: found[0]!.toString() }
     },
@@ -729,12 +735,12 @@ const REDIS_COMMANDS = {
     }),
     parse: () => {},
   }),
-  cellsCx: command({
-    name: 'tfRoomCellsCx',
-    lua: CELLS_CX_LUA,
+  cellsExchange: command({
+    name: 'tfRoomCellsExchange',
+    lua: CELLS_EXCHANGE_LUA,
     numberOfKeys: 6,
-    invoke: (prefix, { roomId, inc, cx }: RoomInc & { cx: CellsCx }) => {
-      const { counts = [] } = cx
+    invoke: (prefix, { roomId, inc, exchange }: RoomInc & { exchange: CellsExchange }) => {
+      const { counts = [] } = exchange
       return {
         keys: [
           headKey(prefix, roomId),
@@ -746,25 +752,25 @@ const REDIS_COMMANDS = {
         ],
         argv: [
           inc,
-          String(cx.mutations.length),
-          String(cx.expect.length),
+          String(exchange.mutations.length),
+          String(exchange.expect.length),
           String(counts.length),
-          ...cx.mutations.flatMap(({ key, bytes }) =>
+          ...exchange.mutations.flatMap(({ key, bytes }) =>
             bytes === null ? [key, 'del', ''] : [key, 'set', toBuffer(bytes)],
           ),
-          ...cx.expect.flatMap(({ key, version }) => [key, version ?? '']),
+          ...exchange.expect.flatMap(({ key, version }) => [key, version ?? '']),
           ...counts.flatMap(({ key, delta, create }) => [key, String(delta), create ? '1' : '']),
         ],
       }
     },
-    parse: (reply): CxResult => {
+    parse: (reply): CellsExchangeResult => {
       const [tag, ...counted] = reply as string[]
-      if (tag !== 'committed') return tag as 'conflict' | 'stale-inc'
+      if (tag !== 'committed') return { kind: tag as 'conflict' | 'stale-incarnation' }
       const counters = new Map<string, CellCounter>()
       for (let i = 0; i < counted.length; i += 3) {
         counters.set(counted[i]!, { value: Number(counted[i + 1]), changedAt: Number(counted[i + 2]) })
       }
-      return { committed: counters }
+      return { kind: 'committed', counters }
     },
   }),
   commit: command({
@@ -805,12 +811,12 @@ const REDIS_COMMANDS = {
       for (const key of input.requiredCellKeys) argv.push(key)
       return { keys, argv }
     },
-    parse: (reply, { requiredCellKeys }) => {
+    parse: (reply, { requiredCellKeys }): CommitOutcome => {
       const parsed = JSON.parse(reply as string) as CommitReply
-      if (!('stale' in parsed) || parsed.stale === 'incarnation') return parsed
+      if (parsed.kind !== 'stale-cell') return parsed
       const key = requiredCellKeys[parsed.index]
       assert(key !== undefined)
-      return { stale: 'cell' as const, key }
+      return { kind: 'stale-cell', key }
     },
   }),
   retainedDelete: command({
@@ -929,10 +935,7 @@ function encodeNext(next: HeadNext): string {
 }
 
 /** The read's time, then key, value and version triples. */
-function parseCells(
-  now: Buffer,
-  found: Buffer[],
-): { cells: Map<string, Uint8Array>; versions: Map<string, string>; now: number } {
+function parseCells(now: Buffer, found: Buffer[]): Extract<CellsRead, { kind: 'read' }> {
   const cells = new Map<string, Uint8Array>()
   const versions = new Map<string, string>()
   for (let i = 0; i < found.length; i += 3) {
@@ -940,7 +943,7 @@ function parseCells(
     cells.set(key, Uint8Array.from(found[i + 1]!))
     versions.set(key, found[i + 2]!.toString())
   }
-  return { cells, versions, now: Number(now.toString()) }
+  return { kind: 'read', cells, versions, now: Number(now.toString()) }
 }
 
 /** A copy, as ioredis may hold a command past the call (connecting, auto-pipelining, a NOSCRIPT or TRYAGAIN retry). */

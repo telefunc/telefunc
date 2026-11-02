@@ -276,7 +276,7 @@ class RoomWrites {
     const envelope: RoomDmAckEnvelope = { __r: 'dm-ack', to, ackId, ...reply }
     const requiredCellKeys = [memberCellKey(to)]
     const acked = await commitLane(inboxOf(id, inc, to), encodeRoomRecord(envelope), { requiredCellKeys })
-    if ('stale' in acked) throw roomClosedError(id)
+    if (acked.kind === 'stale-incarnation') throw roomClosedError(id)
   }
 
   private async resolveMember(id: string): Promise<Sender | null> {

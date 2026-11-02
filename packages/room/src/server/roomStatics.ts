@@ -341,7 +341,7 @@ async function sendToParticipant(id: string, target: ParticipantRef, data: unkno
     const requiredCellKeys = [memberCellKey(member.id)]
     const inbox = inboxOf(id, incarnation.inc, member.id)
     const receipt = await commitLane(inbox, encodeRoomRecord(envelope), { requiredCellKeys })
-    if ('stale' in receipt) throw roomClosedError(id)
-    if ('gone' in receipt && exact) throw participantGoneError(member.id)
+    if (receipt.kind === 'stale-incarnation') throw roomClosedError(id)
+    if (receipt.kind === 'gone' && exact) throw participantGoneError(member.id)
   }
 }

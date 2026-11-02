@@ -14,16 +14,16 @@ import { assert } from '../utils/assert.js'
 function superviseRoomDriver(driver: RoomDriver, subscriptions: Subscriptions<RoomSubscriptionSource>): RoomPlane {
   return {
     readHead: (roomId) => driver.readHead(roomId),
-    compareExchangeHead: async (roomId, cx, next) => {
+    compareExchangeHead: async (roomId, expected, next) => {
       assertHeadNextWellFormed(next)
-      return driver.compareExchangeHead(roomId, cx, next)
+      return driver.compareExchangeHead(roomId, expected, next)
     },
     readCells: (roomId, inc, sel) => driver.readCells(roomId, inc, sel),
     readCellPages: (roomId, inc, prefix) => driver.readCellPages(roomId, inc, prefix),
-    compareExchangeCells: (roomId, inc, cx) => driver.compareExchangeCells(roomId, inc, cx),
+    compareExchangeCells: (roomId, inc, exchange) => driver.compareExchangeCells(roomId, inc, exchange),
     commitLane: async (target, payload, opts) => {
       const result = await driver.commitLane(target, payload, opts)
-      if ('accepted' in result) assertDriverOrdering(result)
+      if (result.kind === 'accepted') assertDriverOrdering(result)
       return result
     },
     readLaneOrder: async (roomId, inc, lane) => {
@@ -58,25 +58,25 @@ function superviseRoomDriver(driver: RoomDriver, subscriptions: Subscriptions<Ro
 function assertHeadNextWellFormed(next: HeadNext): void {
   const { head, ttlMs } = next
   if (head.state === 'closing') {
-    assert(head.closeLease !== undefined, 'head CX: a head entering closing must carry a close lease')
+    assert(head.closeLease !== undefined, 'head exchange: a head entering closing must carry a close lease')
     const { durationMs } = head.closeLease
     assert(
       Number.isFinite(durationMs) && durationMs > 0,
-      `head CX: close lease durationMs ${durationMs} must be finite and positive`,
+      `head exchange: close lease durationMs ${durationMs} must be finite and positive`,
     )
   } else {
-    assert(head.closeLease === undefined, `head CX: a '${head.state}' head must not carry a close lease`)
+    assert(head.closeLease === undefined, `head exchange: a '${head.state}' head must not carry a close lease`)
   }
   assert(
     ttlMs === undefined || head.state !== 'closing',
-    'head CX: a closing head lapses with its close lease, not a ttl',
+    'head exchange: a closing head lapses with its close lease, not a ttl',
   )
   assert(
     head.state !== 'closed' || head.currentInc === null,
-    'head CX: a closed tombstone must clear currentInc to null',
+    'head exchange: a closed tombstone must clear currentInc to null',
   )
   assert(
     head.state === 'closed' || head.currentInc !== null,
-    `head CX: a '${head.state}' head must name an incarnation`,
+    `head exchange: a '${head.state}' head must name an incarnation`,
   )
 }

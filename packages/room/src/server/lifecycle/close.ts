@@ -43,8 +43,7 @@ async function acquireClosingLease(plane: RoomPlane, roomId: string, current: Ro
       },
     },
   )
-  if ('conflict' in result) return null
-  assert('head' in result)
+  if (result.kind === 'conflict') return null
   return result.head
 }
 
@@ -54,7 +53,7 @@ async function finishClose(plane: RoomPlane, roomId: string, closing: RoomHead):
   assert(inc !== null && lease !== undefined) // the closing head acquireClosingLease just wrote
   const closed = encodeRoomRecord({ __r: 'closed' })
   const closedEvent = await commitLane(controlLane(roomId, inc), closed, { closingLease: lease.id })
-  if ('stale' in closedEvent) return false
+  if (closedEvent.kind !== 'accepted') return false
   const finalized = await plane.compareExchangeHead(
     roomId,
     { form: 'finalize', rev: closing.rev, lease: lease.id },
@@ -63,8 +62,7 @@ async function finishClose(plane: RoomPlane, roomId: string, closing: RoomHead):
       ttlMs: ROOM_TOMBSTONE_TTL_MS,
     },
   )
-  if ('conflict' in finalized) return false
-  assert('head' in finalized)
+  if (finalized.kind === 'conflict') return false
   await cleanupFinalizedIncarnation(plane, roomId, finalized.head)
   return true
 }

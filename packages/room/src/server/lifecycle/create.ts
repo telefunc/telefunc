@@ -3,7 +3,7 @@ export { tryCreateRoom }
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import { getRoomPlane } from '../../backend/plane.js'
-import type { HeadCx, HeadNext, RoomHead } from '../../backend/contract.js'
+import type { HeadExpectation, HeadNext, RoomHead } from '../../backend/contract.js'
 import { assertKnownOptions, isRecord, ownMetadata } from '../../shared/model.js'
 import type { RoomConfigRecord } from '../protocol.js'
 import type { RoomMeta, RoomOptions } from '../../types.js'
@@ -47,8 +47,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     if (lapsedInc === undefined) await listRoom(plane, incarnation, undefined)
     // The new head, in the one exchange.
     const result = await plane.compareExchangeHead(id, replacing(current), { head: openHead(created) })
-    if ('conflict' in result) return refusalOf(result.current)
-    assert('head' in result)
+    if (result.kind === 'conflict') return refusalOf(result.current)
     // The new incarnation: the head lapses only once the counters that keep it ahead are written.
     await createHold(incarnation)
     const lapsing = await lapseNewRoom(incarnation)
@@ -60,7 +59,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
 }
 
 /** What the head exchange expects of the head the create read: still absent, or still at its revision. */
-function replacing(current: RoomHead | null): HeadCx {
+function replacing(current: RoomHead | null): HeadExpectation {
   return current === null ? { form: 'absent' } : { form: 'rev', rev: current.rev }
 }
 

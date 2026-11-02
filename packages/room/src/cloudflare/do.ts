@@ -5,10 +5,10 @@ export type { AcceptedCommitWire, CloudflareRoomAuthorityStub, CommitWire, Regis
 // A room's authority owns its time, state and fanout.
 
 import type {
-  CellsCx,
-  CxResult,
-  HeadCx,
-  HeadCxResult,
+  CellsExchange,
+  CellsExchangeResult,
+  HeadExchangeResult,
+  HeadExpectation,
   HeadNext,
   LaneId,
   RoomHead,
@@ -66,9 +66,15 @@ import {
   type CellPage,
 } from './storage.js'
 
-type AcceptedCommitWire = { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken?: string }
+type AcceptedCommitWire = {
+  kind: 'accepted'
+  seq: number
+  timestamp: number
+  receivers: number
+  deliveryToken?: string
+}
 /** A commit the transaction accepted: its order, the lanes it reaches, and the routes subscribed to them then. */
-type AcceptedCommit = { mark: OrderingInfo; laneKeys: string[]; routes: RouteInstallation[] }
+type AcceptedCommit = { kind: 'accepted'; mark: OrderingInfo; laneKeys: string[]; routes: RouteInstallation[] }
 type CommitWire = AcceptedCommitWire | StaleCommit
 
 /** A route registered, or refused because its incarnation is dropped or closing. */
@@ -104,13 +110,13 @@ class RoomAuthority {
     return head === null ? null : publicHead(head, head.config)
   }
 
-  async compareExchangeHead(cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
+  async compareExchangeHead(expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult> {
     const now = Date.now()
-    const outcome = this.transaction((sql) => compareExchangeHead(sql, cx, next, now))
+    const outcome = this.transaction((sql) => compareExchangeHead(sql, expected, next, now))
     await this.scheduleMaintenanceIfNeeded()
-    if ('head' in outcome) return { head: publicHead(outcome.head, outcome.head.config) }
+    if (outcome.kind === 'committed') return { kind: 'committed', head: publicHead(outcome.head, outcome.head.config) }
     const { current } = outcome
-    return { conflict: true, current: current === null ? null : publicHead(current, current.config) }
+    return { kind: 'conflict', current: current === null ? null : publicHead(current, current.config) }
   }
 
   async readCells(inc: string, sel: CellSelector): Promise<CellsRead> {
@@ -121,9 +127,9 @@ class RoomAuthority {
     return readCellPage(this.sql(), inc, prefix, cursor, Date.now())
   }
 
-  async compareExchangeCells(inc: string, cx: CellsCx): Promise<CxResult> {
+  async compareExchangeCells(inc: string, exchange: CellsExchange): Promise<CellsExchangeResult> {
     const now = Date.now()
-    return this.transaction((sql) => compareExchangeCells(sql, inc, cx, now))
+    return this.transaction((sql) => compareExchangeCells(sql, inc, exchange, now))
   }
 
   async commitLane(inc: string, lane: LaneId, payload: Uint8Array, opts?: CommitOptions): Promise<CommitWire> {
@@ -131,26 +137,26 @@ class RoomAuthority {
     const key = encodeLaneKey(lane)
     const outcome = this.transaction((sql): StaleCommit | AcceptedCommit => {
       if (!commitPreconditionHolds(readLiveHead(sql, now), inc, lane.kind, opts?.closingLease, now)) {
-        return { stale: 'incarnation' }
+        return { kind: 'stale-incarnation' }
       }
       if (opts?.requiredCellKeys !== undefined) {
         const required = readCells(sql, inc, { keys: opts.requiredCellKeys }, now)
-        assert(!('staleInc' in required)) // the precondition just found this incarnation open
+        assert(required.kind === 'read') // the precondition just found this incarnation open
         const missing = opts.requiredCellKeys.find((cell) => !required.cells.has(cell))
-        if (missing !== undefined) return { stale: 'cell', key: missing }
+        if (missing !== undefined) return { kind: 'stale-cell', key: missing }
       }
       const mark = advanceOrder(sql, inc, key, now)
       if (opts?.retain === true) installRetained(sql, inc, lane, payload, mark)
       // A binary commit also reaches its member's every-track lane and its track's every-member lane.
       const laneKeys =
         lane.kind === 'binary' ? [key, everyTrackLaneKey(lane.member), everyMemberLaneKey(lane.track)] : [key]
-      return { mark, laneKeys, routes: snapshotRoutes(sql, inc, laneKeys, now) }
+      return { kind: 'accepted', mark, laneKeys, routes: snapshotRoutes(sql, inc, laneKeys, now) }
     })
-    if ('stale' in outcome) return outcome
+    if (outcome.kind !== 'accepted') return outcome
     const { mark, laneKeys, routes } = outcome
     const delivery = this.fanout.send(inc, laneKeys, routes, payload, mark)
     const receipt: AcceptedCommitWire = {
-      accepted: true,
+      kind: 'accepted',
       seq: mark.seq,
       timestamp: mark.timestamp,
       receivers: routes.length,

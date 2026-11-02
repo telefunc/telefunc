@@ -15,7 +15,7 @@ export type { StoredRoomMeta, RoomMetaWrite, MemberMetaWrite, MemberMetaCells }
 
 import { getOrCreate } from '../../utils/getOrCreate.js'
 import { getRoomPlane } from '../../backend/plane.js'
-import { CELL_PAGE_SIZE, type CellMutation, type CxResult } from '../../backend/contract.js'
+import { CELL_PAGE_SIZE, type CellMutation, type CellsExchangeResult } from '../../backend/contract.js'
 import { decodeCellCounter } from '../../backend/semantics.js'
 import { Slice } from '../../shared/Slice.js'
 import { participantGoneError, roomClosedError } from '../../shared/errors.js'
@@ -134,25 +134,25 @@ async function readRoomMeta(roomId: string, { inc, meta }: RoomConfigRecord): Pr
   const plane = getRoomPlane()
   for (let attempt = 0; attempt < META_PAGED_READS; attempt++) {
     const before = await plane.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY, META_GEN_CELL_KEY] })
-    if ('staleInc' in before) return null
+    if (before.kind === 'stale-incarnation') return null
     const seq = before.cells.get(META_SEQ_CELL_KEY)
     if (seq === undefined) return { entries: metaEntriesAt(meta, 0), seq: 0 }
     const prefix = roomMetaGenPrefix(decodeRoomRecord<number>(before.cells.get(META_GEN_CELL_KEY)!))
     const runs: RoomMetaEntry[][] = []
     const slice = new Slice()
     for await (const page of plane.readCellPages(roomId, inc, prefix)) {
-      if ('staleInc' in page) return null
+      if (page.kind === 'stale-incarnation') return null
       runs.push(metaRun(page.cells, prefix))
       if (slice.over) await slice.next()
     }
     const after = await plane.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY] })
-    if ('staleInc' in after) return null
+    if (after.kind === 'stale-incarnation') return null
     if (after.versions.get(META_SEQ_CELL_KEY) === before.versions.get(META_SEQ_CELL_KEY)) {
       return { entries: await mergeRuns(runs), seq: decodeCellCounter(seq).value }
     }
   }
   const read = await plane.readCells(roomId, inc, { prefix: META_CELL_PREFIX })
-  if ('staleInc' in read) return null
+  if (read.kind === 'stale-incarnation') return null
   const prefix = roomMetaGenPrefix(decodeRoomRecord<number>(read.cells.get(META_GEN_CELL_KEY)!))
   const runs: RoomMetaEntry[][] = []
   let run = new Map<string, Uint8Array>()
@@ -171,7 +171,7 @@ async function readRoomMeta(roomId: string, { inc, meta }: RoomConfigRecord): Pr
 /** How many writes the stored meta reflects; null once the incarnation is gone. */
 async function readRoomMetaSeq(roomId: string, inc: string): Promise<number | null> {
   const read = await getRoomPlane().readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY] })
-  if ('staleInc' in read) return null
+  if (read.kind === 'stale-incarnation') return null
   const seq = read.cells.get(META_SEQ_CELL_KEY)
   return seq === undefined ? 0 : decodeCellCounter(seq).value
 }
@@ -209,7 +209,7 @@ async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: Ro
       const drop = { key: metaDropCellKey(gen), bytes: encodeRoomRecord(gen) }
       const mutations = [genMutation(count), drop, ...meta.map((entry) => metaKeyMutation(prefix, entry))]
       const result = await plane.compareExchangeCells(roomId, inc, { expect, mutations, counts })
-      return result === 'conflict' ? null : committed(roomId, result, (seq) => ({ __r: 'update', seq, meta }))
+      return result.kind === 'conflict' ? null : committed(roomId, result, (seq) => ({ __r: 'update', seq, meta }))
     }
     const prefix = roomMetaGenPrefix(gen)
     const keys = Object.keys(write.merge).map((key) => metaKeyCellKey(prefix, key))
@@ -227,12 +227,12 @@ async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: Ro
 /** The update a committed exchange made, at the `meta:seq` it left. */
 function committed(
   roomId: string,
-  result: CxResult,
+  result: CellsExchangeResult,
   update: (seq: number) => RoomMetaUpdate,
 ): RoomMetaUpdate | typeof EXCHANGE_CONFLICT {
-  if (result === 'stale-inc') throw roomClosedError(roomId)
-  if (result === 'conflict') return EXCHANGE_CONFLICT
-  return update(result.committed.get(META_SEQ_CELL_KEY)!.value)
+  if (result.kind === 'stale-incarnation') throw roomClosedError(roomId)
+  if (result.kind === 'conflict') return EXCHANGE_CONFLICT
+  return update(result.counters.get(META_SEQ_CELL_KEY)!.value)
 }
 
 /** Each generation a replace marked, a page per exchange and a `ROOM_PLAN_SLICE_MS` slice per turn, its mark going with
@@ -241,13 +241,13 @@ function committed(
 async function dropReplacedMetaGenerations(roomId: string, inc: string): Promise<void> {
   const plane = getRoomPlane()
   const marks = await plane.readCells(roomId, inc, { prefix: META_DROP_CELL_PREFIX })
-  if ('staleInc' in marks) return
+  if (marks.kind === 'stale-incarnation') return
   const slice = new Slice()
   // The loop is `dropCells`' marked one, inline so that a replace's drop runs in this one async frame.
   for (const [mark, raw] of marks.cells) {
     let held: string[] = []
     for await (const page of plane.readCellPages(roomId, inc, roomMetaGenPrefix(decodeRoomRecord<number>(raw)))) {
-      if ('staleInc' in page || (held.length > 0 && !(await deleteCells(roomId, inc, held)))) return
+      if (page.kind === 'stale-incarnation' || (held.length > 0 && !(await deleteCells(roomId, inc, held)))) return
       held = [...page.cells.keys()]
       if (slice.over) await slice.next()
     }
@@ -298,8 +298,8 @@ async function writeMemberMeta(
     mutations.push({ key: memberKey, bytes: encodeRoomRecord(next) })
     const expect = [{ key: memberKey, version: read.versions.get(memberKey)! }]
     const result = await plane.compareExchangeCells(room.id, room.inc, { expect, mutations })
-    if (result === 'stale-inc') throw roomClosedError(room.id)
-    if (result === 'conflict') return EXCHANGE_CONFLICT
+    if (result.kind === 'stale-incarnation') throw roomClosedError(room.id)
+    if (result.kind === 'conflict') return EXCHANGE_CONFLICT
     let update: MemberMetaUpdate
     if ('replace' in write) {
       update = { seq, meta: write.replace }
@@ -331,8 +331,8 @@ async function writeMemberConnection(
       expect: [{ key: memberKey, version: read.versions.get(memberKey)! }],
       mutations: [{ key: memberKey, bytes: encodeRoomRecord(next) }],
     })
-    if (result === 'stale-inc') throw roomClosedError(room.id)
-    if (result === 'conflict') return EXCHANGE_CONFLICT
+    if (result.kind === 'stale-incarnation') throw roomClosedError(room.id)
+    if (result.kind === 'conflict') return EXCHANGE_CONFLICT
     return { update: { seq, connected }, hidden: record.hidden === true }
   })
 }
@@ -379,7 +379,7 @@ async function readMetaCellPages(
   let last: string | undefined
   const slice = new Slice()
   for await (const page of getRoomPlane().readCellPages(room.id, room.inc, prefix)) {
-    if ('staleInc' in page) throw roomClosedError(room.id)
+    if (page.kind === 'stale-incarnation') throw roomClosedError(room.id)
     if (last !== undefined) cut.add(last)
     for (const cell of page.cells) {
       last = memberIdOfMetaCellKey(cell[0])
@@ -409,7 +409,7 @@ async function settleMemberMetaCells(
     if (read.cut.size === 0) return cells
   }
   const read = await getRoomPlane().readCells(room.id, room.inc, { prefix: memberMetaCellPrefix(id) })
-  if ('staleInc' in read) throw roomClosedError(room.id)
+  if (read.kind === 'stale-incarnation') throw roomClosedError(room.id)
   return Array.from(read.cells)
 }
 

@@ -21,7 +21,14 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { raceTimeout } from '../../utils/raceTimeout.js'
 import { getRoomPlane } from '../../backend/plane.js'
-import type { CommitAccepted, CommitOptions, CommitTarget, LaneId, RoomHead } from '../../backend/contract.js'
+import type {
+  CommitAccepted,
+  CommitOptions,
+  CommitTarget,
+  LaneId,
+  RoomHead,
+  StaleIncarnation,
+} from '../../backend/contract.js'
 import { hasRoomTag } from '../../shared/protocol.js'
 import type { RoomConfigRecord, RoomDemandPage } from '../protocol.js'
 import { RoomError, participantGoneError, roomClosedError } from '../../shared/errors.js'
@@ -79,7 +86,7 @@ function openConfig(current: RoomHead | null, inc?: string): RoomConfigRecord | 
 }
 
 /** An accepted commit; a member whose cell the commit required and that left; or the incarnation ended. */
-type LaneCommit = CommitAccepted | { gone: string } | { stale: 'incarnation' }
+type LaneCommit = CommitAccepted | { kind: 'gone'; member: string } | StaleIncarnation
 
 /** Commits `payload` on `target`'s lane. An accepted inbox or control commit waits for its handoff up to the horizon: a
  *  server applies its own joins and leaves as it commits them, so a join's frame must not reach it after the member's
@@ -87,15 +94,16 @@ type LaneCommit = CommitAccepted | { gone: string } | { stale: 'incarnation' }
 async function commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<LaneCommit> {
   const result = await getRoomPlane().commitLane(target, payload, opts)
   // Required cells are member records, so a missing one names the member that left.
-  if ('stale' in result) return result.stale === 'cell' ? { gone: memberIdOfCellKey(result.key) } : result
+  if (result.kind === 'stale-cell') return { kind: 'gone', member: memberIdOfCellKey(result.key) }
+  if (result.kind === 'stale-incarnation') return result
   if (result.delivery !== undefined) await handedOff(target.roomId, result)
   return result
 }
 
 /** The accepted commit; a member that left or an ended incarnation throws. */
 function acceptedOrThrow(roomId: string, commit: LaneCommit): CommitAccepted {
-  if ('gone' in commit) throw participantGoneError(commit.gone)
-  if ('stale' in commit) throw roomClosedError(roomId)
+  if (commit.kind === 'gone') throw participantGoneError(commit.member)
+  if (commit.kind === 'stale-incarnation') throw roomClosedError(roomId)
   return commit
 }
 
