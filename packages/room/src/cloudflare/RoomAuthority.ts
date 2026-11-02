@@ -31,7 +31,7 @@ import { assert } from '../utils/assert.js'
 import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../backend/laneKey.js'
 import { commitPreconditionHolds, isOpenIncarnation, publicHead } from '../backend/semantics.js'
 import { Fanout } from './Fanout.js'
-import { openRegionDirectory } from './objects.js'
+import { openRegionDirectory, type RegionDirectoryStub } from './objects.js'
 import { deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
 import {
   deleteExpiredRoutes,
@@ -95,7 +95,7 @@ class RoomAuthority {
   private readonly getNamespace: () => TelefuncExtensionNamespace
   private readonly fanout: Fanout
   /** Its calls to its listing's region directory, which reach it in the order the listing changed. */
-  private readonly directoryCalls = new OrderedStubs<CloudflareRoomAuthorityStub>()
+  private readonly directoryCalls = new OrderedStubs<RegionDirectoryStub>()
   private schema = false
 
   constructor(ctx: DurableObjectState, { regions, getNamespace }: CloudflareExtensionKit) {
@@ -293,10 +293,7 @@ class RoomAuthority {
     if (listedIn !== null) await this.callDirectory(listedIn, (directory) => directory.unlistInRegion(roomId, incTag))
   }
 
-  private callDirectory(
-    bucket: string,
-    invoke: (directory: CloudflareRoomAuthorityStub) => Promise<void>,
-  ): Promise<void> {
+  private callDirectory(bucket: string, invoke: (directory: RegionDirectoryStub) => Promise<void>): Promise<void> {
     return this.directoryCalls.call(bucket, () => openRegionDirectory(this.getNamespace(), bucket), invoke)
   }
 

@@ -1,4 +1,5 @@
 export { openRoomAuthority, openRegionDirectory }
+export type { RegionDirectoryStub }
 
 // Room's Durable Objects share the Telefunc namespace with sessions and Broadcast: a room's authority, and each
 // region's directory, which lists the rooms whose authority it was first written from.
@@ -18,8 +19,11 @@ function openRoomAuthority(
   return roomObjectStub(namespace.get(id, { locationHint: bucket }))
 }
 
+/** The methods a region's directory serves. */
+type RegionDirectoryStub = Pick<CloudflareRoomAuthorityStub, 'directoryList' | 'listInRegion' | 'unlistInRegion'>
+
 /** The directory of the rooms listed in `bucket`, placed there. */
-function openRegionDirectory(namespace: TelefuncExtensionNamespace, bucket: string): CloudflareRoomAuthorityStub {
+function openRegionDirectory(namespace: TelefuncExtensionNamespace, bucket: string): RegionDirectoryStub {
   // Not under ROOM_CLOUDFLARE_PREFIX, which a room id may follow with anything.
   const id = namespace.idFromName(`__telefunc_room_directory__:${bucket}`)
   return roomObjectStub(namespace.get(id, { locationHint: bucket }))
