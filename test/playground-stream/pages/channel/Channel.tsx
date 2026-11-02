@@ -1104,7 +1104,6 @@ function ChannelDemo() {
     })
   }, [])
 
-  // Once the channel opened, an onOpen runs at once; once it closed, an onClose runs at once with the Abort it ended with.
   const testLateOpenAbort = useCallback(async () => {
     const { channel } = await openChannel(onChannelLateOpenAbort)
     const err = await channel.closed.catch((error) => error)
@@ -1114,8 +1113,12 @@ function ChannelDemo() {
   const testBudgets = useCallback(async () => {
     const { bytes, acks } = await openChannel(onChannelBudgets)
     acks.listen(() => new Promise<void>(() => {}))
-    await Promise.allSettled([bytes.closed, acks.closed])
-    document.querySelector('#channel-budgets-result')!.textContent = JSON.stringify({ bytes: bytes.id, acks: acks.id })
+    const ends = await Promise.allSettled([bytes.closed, acks.closed])
+    document.querySelector('#channel-budgets-result')!.textContent = JSON.stringify({
+      bytes: bytes.id,
+      acks: acks.id,
+      errors: ends.map((end) => (end.status === 'rejected' ? `${end.reason.name}: ${end.reason.message}` : 'clean')),
+    })
   }, [])
 
   const testCreditFailure = useCallback(async () => {
@@ -1181,6 +1184,7 @@ function ChannelDemo() {
     }
   }, [])
 
+  // Once the channel opened, an onOpen runs at once; once it closed, an onClose runs at once with the Abort it ended with.
   const testLateCallbacks = useCallback(async () => {
     setChannelState((s) => ({ ...s, lateCallbacks: null }))
     const { channel, channelId } = await openChannel(onChannelLateCallbacks)

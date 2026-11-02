@@ -1310,6 +1310,11 @@ function testChannelApi() {
       expect(state[`budget_${ids.bytes}_credit`]).toBe('accepted')
       expect(state[`budget_${ids.bytes}`]).toContain('maxPendingBytes')
       expect(state[`budget_${ids.acks}`]).toContain('maxPendingAcks')
+      for (const error of ids.errors) {
+        expect(error).toContain('ChannelOverflowError')
+        expect(error).toContain('maxPendingBytes')
+        expect(error).toContain('maxPendingAcks')
+      }
     })
   })
 
