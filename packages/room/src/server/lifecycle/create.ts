@@ -48,10 +48,12 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     // The new head, in the one exchange.
     const result = await plane.compareExchangeHead(id, replacing(current), { head: openHead(created) })
     if (result.kind === 'conflict') return refusalOf(result.current)
-    // The new incarnation: the head lapses only once the counters that keep it ahead are written.
-    await createHold(incarnation)
-    const lapsing = await lapseNewRoom(incarnation)
-    if (lapsedInc !== undefined) await plane.driver.dropIncarnation(id, lapsedInc)
+    // The new incarnation: the head lapses only once the counters that keep it ahead are written. The lapsed
+    // incarnation's data, which none of that touches, goes meanwhile: before the listing that names it is replaced.
+    const [lapsing] = await Promise.all([
+      createHold(incarnation).then(() => lapseNewRoom(incarnation, result.head)),
+      lapsedInc === undefined ? undefined : plane.driver.dropIncarnation(id, lapsedInc),
+    ])
     await listRoom(plane, incarnation, lapsing?.expiresAt)
     sweepLapsedRoomsSoon()
     return { kind: 'created', room: seededRoom(id, created) }

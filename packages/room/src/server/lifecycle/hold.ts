@@ -120,14 +120,17 @@ async function maintainHold(room: RoomIncarnation): Promise<void> {
 }
 
 /** Once its creation is counted, a new room nothing holds yet lapses just past its close. The record is read under
- *  the head's revision, which the lapse write of a first hold moves, so that hold's lapse wins. Returns the head it
- *  leaves, while that is the room's open head. */
-async function lapseNewRoom(room: RoomIncarnation): Promise<RoomHead | null> {
+ *  the head's revision, which the lapse write of a first hold moves, so that hold's lapse wins: first the head the
+ *  create wrote, `created`, then after a conflict the head read again. Returns the head it leaves, while that is the
+ *  room's open head. */
+async function lapseNewRoom(room: RoomIncarnation, created: RoomHead): Promise<RoomHead | null> {
   if (room.hold === null) return null
   const { id, inc } = room
   const plane = getRoomPlane()
+  let written: RoomHead | null = created
   return await retryCompareExchange(async () => {
-    const head = await plane.driver.readHead(id)
+    const head = written ?? (await plane.driver.readHead(id))
+    written = null
     if (!isOpenIncarnation(head, inc)) return null
     const record = await readHoldRecord(room)
     if (record?.closesIn === undefined) return head

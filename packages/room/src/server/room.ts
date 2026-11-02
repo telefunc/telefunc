@@ -176,6 +176,11 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
   }
 
   async join(options?: JoinOptions): Promise<LocalParticipant> {
+    return await this._join(options, { foundOpen: false })
+  }
+
+  /** @internal `foundOpen`: the caller found the room open just now, as `Room.join(id)` does by reading its head. */
+  async _join(options: JoinOptions | undefined, { foundOpen }: { foundOpen: boolean }): Promise<LocalParticipant> {
     const { meta, selfDelivery, identity, hidden } = normalizeJoinOptions(options)
     const admission = new Admission({ meta, identity, hidden })
     const participant = new ServerLocalParticipant({
@@ -184,6 +189,7 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
       incomingDemand: this.incomingDemand,
       metaMirrors: this.metaMirrors,
     })
+    if (!foundOpen) await this.assertOpen()
     await this.admit(admission, () => {
       this._localParticipants.set(admission.id, participant)
       this._replica.own(admission.id, this)
@@ -210,9 +216,8 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
     return this._model.snapshot()
   }
 
-  /** Both join paths: the room is open, the guard passes, the holder takes the member, then the member commits. */
+  /** Both join paths, in a room found open: the guard passes, the holder takes the member, then the member commits. */
   private async admit(admission: Admission, hold: () => void): Promise<void> {
-    await this.assertOpen()
     const { id, meta, identity, joinedAt, hidden } = admission
     const onBeforeJoin = this._guards?.onBeforeJoin
     if (!hidden && onBeforeJoin) await onBeforeJoin({ id, meta, identity })
@@ -434,6 +439,7 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
     req: Extract<RoomRequest, { __r: 'req-join' }>,
   ): Promise<{ id: string; joinedAt: number }> {
     const admission = new Admission({ meta: ownMetadata(req.meta), identity: null, hidden: false })
+    await this.assertOpen()
     await this.admit(admission, () => {
       stub.addMember(req.reqId, admission.id, req.selfDelivery)
       if (this.stubs.has(stub)) {

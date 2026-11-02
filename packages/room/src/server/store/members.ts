@@ -8,7 +8,8 @@ import { leaveCauseToWire, type RoomCtrlEnvelope, type WireLeaveCause } from '..
 import type { RoomDataEnvelope, RoomMemberRecord, RoomIncarnation } from '../protocol.js'
 import type { LeaveCause, ParticipantMeta } from '../../types.js'
 import { dropMemberMeta, memberMetaMutations } from './meta.js'
-import { dropCells, mutateCells, readOpenCells } from './cellStore.js'
+import { deleteCells, dropCells, mutateCells } from './cellStore.js'
+import { roomClosedError } from '../../shared/errors.js'
 import {
   SEMANTIC_LANE,
   acceptedOrThrow,
@@ -67,12 +68,13 @@ async function evictMember(room: RoomIncarnation, id: string, cause: LeaveCause)
 async function removeMemberCells(room: RoomIncarnation, id: string, cause: LeaveCause): Promise<boolean> {
   const memberKey = memberCellKey(id)
   const cleanupKey = cleanupCellKey(id)
-  const { value: outcome, counters } = await mutateCells<{ cleanup: boolean; hold: HoldDelta | null }>(
+  // The cleanup is the one pending, else the one this exchange writes: either way the cell holds it once it commits.
+  const { value: outcome, counters } = await mutateCells<{ cleanup: Uint8Array | undefined; hold: HoldDelta | null }>(
     room.id,
     room.inc,
     [memberKey, cleanupKey],
     (cells) => {
-      const pending = cells.has(cleanupKey)
+      const pending = cells.get(cleanupKey)
       const raw = cells.get(memberKey)
       const record = raw === undefined ? null : decodeRoomRecord<RoomMemberRecord>(raw)
       if (record === null) return { value: { cleanup: pending, hold: null }, mutations: [] }
@@ -82,13 +84,14 @@ async function removeMemberCells(room: RoomIncarnation, id: string, cause: Leave
       // The marker is written with the record, so the record's version covers it.
       const mutations: CellMutation[] = [{ key: memberKey, bytes: null }]
       if (record.identity !== undefined) mutations.push({ key: identityCellKey(record.identity, id), bytes: null })
-      if (!pending) mutations.push({ key: cleanupKey, bytes: encodeRoomRecord(cleanup) })
-      return { value: { cleanup: true, hold }, mutations, counts: hold.counts }
+      const written = pending ?? encodeRoomRecord(cleanup)
+      if (pending === undefined) mutations.push({ key: cleanupKey, bytes: written })
+      return { value: { cleanup: written, hold }, mutations, counts: hold.counts }
     },
   )
   if (outcome.hold !== null) afterHoldChange(room, outcome.hold.after(counters))
-  if (outcome.cleanup) await finishPendingMemberCleanup(room.id, room.inc, id)
-  return outcome.cleanup
+  if (outcome.cleanup !== undefined) await completeCleanup(room.id, room.inc, id, outcome.cleanup)
+  return outcome.cleanup !== undefined
 }
 
 async function dropRetainedOwnedBy(roomId: string, inc: string, memberId: string): Promise<void> {
@@ -102,27 +105,21 @@ async function dropRetainedOwnedBy(roomId: string, inc: string, memberId: string
   }
 }
 
-async function finishPendingMemberCleanup(roomId: string, inc: string, memberId: string): Promise<void> {
-  const key = cleanupCellKey(memberId)
-  const raw = (await readOpenCells(roomId, inc, [key])).cells.get(key)
-  if (raw !== undefined) await completeCleanup(roomId, inc, memberId, raw)
-}
-
 async function completeCleanup(roomId: string, inc: string, memberId: string, raw: Uint8Array): Promise<void> {
   const key = cleanupCellKey(memberId)
   const cleanup = decodeRoomRecord<PendingMemberCleanup>(raw)
-  await dropRetainedOwnedBy(roomId, inc, memberId)
-  // Every commit to the member's lanes requires its cell, which the eviction removed.
-  await getRoomPlane().driver.dropLaneOrders(roomId, inc, memberId)
-  await dropMemberMeta(roomId, inc, memberId)
-  await dropCells(roomId, inc, dmReplyCellPrefix(memberId))
+  // The member's state goes before its leave is out, its four parts at once: none reads what another drops. Every
+  // commit to the member's lanes requires its cell, which the eviction removed.
+  await Promise.all([
+    dropRetainedOwnedBy(roomId, inc, memberId),
+    getRoomPlane().driver.dropLaneOrders(roomId, inc, memberId),
+    dropMemberMeta(roomId, inc, memberId),
+    dropCells(roomId, inc, dmReplyCellPrefix(memberId)),
+  ])
   const leave: Extract<RoomCtrlEnvelope, { __r: 'leave' }> = { __r: 'leave', id: memberId, ...cleanup.cause }
   if (cleanup.hidden) leave.hidden = true
   acceptedOrThrow(roomId, await commitLane(controlLane(roomId, inc), encodeRoomRecord(leave)))
   // The mark goes last, so a lease's cleaner finds the member until its leave is out.
   const mark = leaseMemberCellKey(cleanup.session, memberId)
-  await mutateCells(roomId, inc, [key, mark], (cells) => ({
-    value: undefined,
-    mutations: [key, mark].filter((at) => cells.has(at)).map((at) => ({ key: at, bytes: null })),
-  }))
+  if (!(await deleteCells(roomId, inc, [key, mark]))) throw roomClosedError(roomId)
 }
