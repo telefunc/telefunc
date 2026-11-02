@@ -430,10 +430,11 @@ class RoomModel {
     return { sender: senderSnapshot(from, meta.object, pending.identity ?? null) }
   }
 
-  /** The first roster loads silently; later ones narrate the drift they correct as events. Runs `reconcilingRoster` a
-   *  `ROOM_PLAN_SLICE_MS` slice per turn; null if the room closed between slices. */
+  /** The first roster loads silently; later ones narrate the drift they correct as events. A departing member stays
+   *  until its leave event, which carries the cause. Runs `reconcilingRoster` a `ROOM_PLAN_SLICE_MS` slice per turn;
+   *  null if the room closed between slices. */
   async reconcileRoster(
-    roster: { members: MemberSnapshot[] },
+    roster: { members: MemberSnapshot[]; departing?: ReadonlySet<string> },
     events: readonly MembershipEvent[],
   ): Promise<boolean | null> {
     const steps = this.reconcilingRoster(roster, events)
@@ -450,7 +451,7 @@ class RoomModel {
   /** Reconciles with a roster read a member per step, the membership `events` since the read began, which may grow
    *  between steps, replayed onto it first, so no step undoes one. Returns whether a drift was narrated. */
   *reconcilingRoster(
-    roster: { members: MemberSnapshot[] },
+    roster: { members: MemberSnapshot[]; departing?: ReadonlySet<string> },
     events: readonly MembershipEvent[],
   ): Generator<void, boolean> {
     const listed = new Map<string, MemberSnapshot>()
@@ -458,9 +459,10 @@ class RoomModel {
       listed.set(member.id, member)
       yield
     }
+    const departing = new Set(roster.departing)
     let replayed = 0
     const replay = () => {
-      for (; replayed < events.length; replayed++) replayMembershipEvent(listed, events[replayed]!)
+      for (; replayed < events.length; replayed++) replayMembershipEvent(listed, departing, events[replayed]!)
     }
     replay()
     // The first roster narrates nothing, and `count` stays the seed until its members are in.
@@ -478,7 +480,7 @@ class RoomModel {
       this.bumpState()
     }
     for (const id of [...this.members.keys()]) {
-      if (this.members.has(id) && !listed.has(id)) {
+      if (this.members.has(id) && !listed.has(id) && !departing.has(id)) {
         // No leave event reached this model, so its cause is unknown: it is reported as removed.
         this.applyLeave(id, removedCause(undefined))
         narratedDrift = true
@@ -532,11 +534,16 @@ function newEntry(
   }
 }
 
-function replayMembershipEvent(members: Map<string, MemberSnapshot>, event: MembershipEvent): void {
+function replayMembershipEvent(
+  members: Map<string, MemberSnapshot>,
+  departing: Set<string>,
+  event: MembershipEvent,
+): void {
   if ('join' in event) {
     if (!members.has(event.join.id)) members.set(event.join.id, event.join)
   } else if ('leave' in event) {
     members.delete(event.leave)
+    departing.delete(event.leave)
   } else {
     const { id, update } = event.meta
     const member = members.get(id)

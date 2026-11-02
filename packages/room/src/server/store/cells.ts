@@ -2,6 +2,9 @@ export {
   MEMBER_CELL_PREFIX,
   memberCellKey,
   memberIdOfCellKey,
+  DEPARTING_CELL_PREFIX,
+  departingCellKey,
+  memberIdOfDepartingKey,
   identityCellKey,
   identityCellPrefix,
   HOLDS_CELL_KEY,
@@ -38,6 +41,15 @@ function memberCellKey(memberId: string): string {
 }
 function memberIdOfCellKey(key: string): string {
   return key.slice(MEMBER_CELL_PREFIX.length)
+}
+/** A member that left, from its leave until the leave is handed off: a roster read meanwhile keeps it departing, so
+ *  its leave event, which carries the cause, ends it. */
+const DEPARTING_CELL_PREFIX = 'departing:'
+function departingCellKey(memberId: string): string {
+  return DEPARTING_CELL_PREFIX + memberId
+}
+function memberIdOfDepartingKey(key: string): string {
+  return key.slice(DEPARTING_CELL_PREFIX.length)
 }
 /** One marker per (identity, member), written and removed in the compare-exchange that writes or removes the member. */
 function identityCellPrefix(identity: string): string {

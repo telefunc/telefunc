@@ -198,7 +198,10 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
     return this.authority.reconcileAuthority()
   }
 
-  applyRoster(roster: { members: MemberSnapshot[] }, events: readonly MembershipEvent[]): Promise<boolean> {
+  applyRoster(
+    roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
+    events: readonly MembershipEvent[],
+  ): Promise<boolean> {
     return this.roster.reconcile(roster, events)
   }
 

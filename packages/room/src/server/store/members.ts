@@ -7,10 +7,12 @@ import { leaveCauseToWire, type RoomCtrlEnvelope, type WireLeaveCause } from '..
 import type { HoldConfig, RoomMemberRecord, RoomIncarnation } from '../protocol.js'
 import type { LeaveCause, ParticipantMeta } from '../../types.js'
 import { memberMetaMutations } from './meta.js'
+import { deleteCells } from './cellStore.js'
 import { runOperation } from './operations.js'
 import { decodeRoomRecord, encodeRoomRecord } from '../lanes/lanes.js'
 import { afterHoldChange, holdDelta } from '../lifecycle/hold.js'
 import {
+  departingCellKey,
   dmReplyCellPrefix,
   identityCellKey,
   leaseCellKey,
@@ -20,6 +22,7 @@ import {
 } from './cells.js'
 import { leaseHosting, type LeaseState, type RoomLease } from './lease.js'
 import { assert } from '../../utils/assert.js'
+import { reportRoomError } from '../reportRoomError.js'
 
 // A member's cells: written with its join under a lease, removed with its leave, each one operation.
 
@@ -56,7 +59,8 @@ const JOIN: RoomOperation<JoinArgs, 'joined' | 'lease-lost'> = {
 type LeaveArgs = { id: string; cause: WireLeaveCause }
 
 /** A leave: the member's record, identity marker, lease mark, meta, DM replies, lanes and the frames it retained go,
- *  with its leave event. Null once the member was gone; else whether it was hidden, as a hidden one held nothing. */
+ *  with its leave event, and it is marked departing. Null once the member was gone; else whether it was hidden, as a
+ *  hidden one held nothing. */
 const LEAVE: RoomOperation<LeaveArgs & { hold: HoldConfig | null }, { hidden: boolean } | null> = {
   name: 'leave',
   plan(tx, { id, cause, hold }) {
@@ -65,6 +69,7 @@ const LEAVE: RoomOperation<LeaveArgs & { hold: HoldConfig | null }, { hidden: bo
     if (raw === undefined) return null
     const record = decodeRoomRecord<RoomMemberRecord>(raw)
     tx.write({ key: memberKey, bytes: null })
+    tx.write({ key: departingCellKey(id), bytes: new Uint8Array() })
     tx.write({ key: leaseMemberCellKey(record.session, id), bytes: null })
     if (record.identity !== undefined) tx.write({ key: identityCellKey(record.identity, id), bytes: null })
     for (const count of holdDelta(record.hidden ? null : hold, -1).counts) tx.count(count)
@@ -106,6 +111,8 @@ async function evictMember(room: RoomIncarnation, id: string, cause: LeaveCause)
   try {
     const left = await runOperation(room, LEAVE, { id, cause: leaveCauseToWire(cause), hold: room.hold })
     if (left.value === null) return false
+    // Handed off: from here the leave event reaches the views, and a roster read no longer waits for it.
+    void deleteCells(room.id, room.inc, [departingCellKey(id)]).catch(reportRoomError)
     afterHoldChange(room, holdDelta(left.value.hidden ? null : room.hold, -1).after(left.counters))
     return true
   } catch (error) {

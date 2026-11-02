@@ -22,7 +22,10 @@ interface AuthoritySyncOwner {
   /** A failover rewound the control lane: the view forgets its meta seqs. */
   onControlLaneRewound(): void
   /** Applies a complete roster read, and sends it to the clients it concerns; false if the view moved past it. */
-  applyRoster(roster: { members: MemberSnapshot[] }, events: readonly MembershipEvent[]): Promise<boolean>
+  applyRoster(
+    roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
+    events: readonly MembershipEvent[],
+  ): Promise<boolean>
   closeFromAuthority(): void
 }
 
