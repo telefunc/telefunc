@@ -4,7 +4,7 @@ export type { RequestContext, ResponseAbortSource }
 
 import { Abort } from '../Abort.js'
 import type { AbortError } from '../Abort.js'
-import { reportServerChannelError } from '../../../wire-protocol/channel/server/ServerChannel.js'
+import { handleCallbackBug } from '../runTelefunc/validateTelefunctionError.js'
 import { isPromise } from '../../../utils/isPromise.js'
 
 const REQUEST_CONTEXT: unique symbol = Symbol.for('telefunc.requestContext')
@@ -165,8 +165,8 @@ function createResponseAbortSource(onAbort: () => void): ResponseAbortSource {
 function invokeCloseCallback(cb: () => void): void {
   try {
     const result = cb()
-    if (isPromise(result)) result.catch(reportServerChannelError)
+    if (isPromise(result)) result.catch(handleCallbackBug)
   } catch (err) {
-    reportServerChannelError(err)
+    handleCallbackBug(err)
   }
 }

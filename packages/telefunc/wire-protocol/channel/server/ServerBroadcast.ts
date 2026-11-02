@@ -12,7 +12,8 @@ import type {
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 import { makePublishInfo } from '../channel.js'
-import { ServerChannel, reportServerChannelError } from './ServerChannel.js'
+import { ServerChannel } from './ServerChannel.js'
+import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import { getBroadcastAdapter } from '../../broadcast/broadcastAdapter.js'
 import type {
   BroadcastPublishResult,
@@ -370,5 +371,5 @@ function callStaticListener<D>(
 }
 
 function reportStaticListenerError(err: unknown): void {
-  if (!isAbort(err)) reportServerChannelError(err)
+  if (!isAbort(err)) handleCallbackBug(err)
 }

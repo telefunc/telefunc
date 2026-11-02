@@ -1,4 +1,4 @@
-export { Channel, ServerChannel, SERVER_CHANNEL_BRAND, reportServerChannelError }
+export { Channel, ServerChannel, SERVER_CHANNEL_BRAND }
 export { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
 export { NetworkError } from '../../../shared/NetworkError.js'
 
@@ -27,7 +27,7 @@ import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { ShieldValidator, ShieldValidators } from '../../../node/server/shield.js'
 import { createAbortError, type AbortError } from '../../../shared/Abort.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
-import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
+import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import { ChannelClosedError, replayLossError } from '../channelErrors.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { isPromise } from '../../../utils/isPromise.js'
@@ -107,7 +107,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private pendingAckBytes = 0
   protected readonly bufferLimit: number
   protected readonly bufferLimitBinary: number
-  protected readonly lifecycle = new ChannelLifecycle({ owner: this, reportError: reportServerChannelError })
+  protected readonly lifecycle = new ChannelLifecycle({ owner: this, reportError: handleCallbackBug })
   private ttlTimer: ReturnType<typeof setTimeout> | null = null
   protected selfTime = new SelfTime()
   /** Paces fire-and-forget TEXT, BINARY and PUBLISH sends to what the page grants; see `constants.ts`. */
@@ -855,10 +855,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.pendingAckRes.length = 0
     this.pendingEnd = null
   }
-}
-
-function reportServerChannelError(err: unknown): void {
-  handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
 }
 
 /** Server-side channel. `ClientToServer` = messages the server receives; `ServerToClient` = messages the server sends. */
