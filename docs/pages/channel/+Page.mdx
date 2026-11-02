@@ -288,7 +288,16 @@ info.seq        // monotonic sequence number for this key
 info.timestamp  // server timestamp (Unix epoch ms)
 ```
 
-`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to its receipt, and rejects if the publish fails: on Cloudflare, when a Durable Object with subscribers <Link href="/stream/cloudflare#delivery-guarantees">couldn't take it</Link>.
+`seq` is monotonic per `key`, which is useful for ordering and gap detection.
+
+When `publish()` rejects depends on where Broadcast runs:
+
+- In memory (the default), it doesn't reject.
+- With <Link href="/redis">`@telefunc/redis`</Link>, when Redis can't run the publish (for example, the connection is down), or with `ChannelOverflowError` when this server's subscription to the key is still connecting and the publishes waiting for it exceed `bufferLimit`/`bufferLimitBinary` (see <Link href="/channel-config" />).
+- With a <Link href="/broadcast-config">`BroadcastTransport`</Link>, with the error its `send()` or `sendBinary()` throws.
+- On Cloudflare, when a server <Link href="/stream/cloudflare#delivery-guarantees">couldn't take it</Link>.
+
+A rejected publish may still have reached some subscribers (on Cloudflare, every subscriber the failed server doesn't hold), so publishing it again can deliver it twice to them.
 
 `publish()` can't be awaited per subscriber, so the <Link href="#backpressure">64 MiB warning</Link> doesn't apply to a `BroadcastChannel`. Instead, a client that falls far behind a broadcast has its connection cut and reconnects. The client's other channels on that connection reconnect too, and lose nothing they can replay. The `BroadcastChannel` then gets what it missed, unless it missed more than the server's buffers hold: then it closes (see <Link href="#errors">errors</Link>).
 
