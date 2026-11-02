@@ -126,7 +126,7 @@ class SendCredit {
 
   private noteBacklog(): void {
     if (this.leastBacklog === 0 || !this.isOutOfCredit()) return
-    this.leastBacklog = Math.min(this.leastBacklog, this.owner._backlogBytes() ?? 0)
+    this.leastBacklog = Math.min(this.leastBacklog, this.owner.backlogBytes() ?? 0)
   }
 
   private isOutOfCredit(): boolean {

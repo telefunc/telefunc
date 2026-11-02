@@ -36,13 +36,15 @@ function createChannel(dispatched: DecodedFrame[]) {
       dispatched.push(frame)
     },
     _onEnded() {},
-    _onTransportBatched() {},
-    _onUpgradeJoined() {},
-    _attachState: () => ({}),
-    _onProbeAnswered() {},
-    _fitReplays() {},
-    _acknowledge() {},
-    _answered() {},
+    _attach: {
+      state: () => ({}),
+      onProbeAnswered() {},
+      fitReplays() {},
+      acknowledge() {},
+      answered() {},
+      onBatched() {},
+      onUpgradeJoined() {},
+    },
   }
 }
 

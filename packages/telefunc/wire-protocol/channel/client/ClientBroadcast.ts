@@ -6,7 +6,6 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { encode, type ChannelDataFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
-import type { AttachState } from '../../wire/payloads.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ChannelClosedError } from '../channelErrors.js'
@@ -23,6 +22,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     super(options)
     // Nothing waits on a publish's credit, so the page grants the largest window from the start.
     this.receiveCredit.widenByteWindow()
+    this._attach.declareSubscriptions(this.subscribed)
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
@@ -65,25 +65,20 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     else this.connection.sendBroadcastUnsubscribe(this, kind === 'binary')
   }
 
-  /** @internal Declares the subscriptions on every (re)attach: a SUB or UNSUB written to a dead wire isn't replayed. */
-  override _attachState(): AttachState {
-    return { broadcast: this.subscribed }
-  }
-
   protected override dispatchDataFrame(frame: ChannelDataFrame): void {
     if (frame.tag === TAG.PUBLISH) {
-      this._onPeerPublish(frame.text, frame.info, frame.bytes)
+      this.onPeerPublish(frame.text, frame.info, frame.bytes)
       return
     }
     if (frame.tag === TAG.PUBLISH_BINARY) {
-      this._onPeerPublishBinary(frame.data as Uint8Array<ArrayBuffer>, frame.info, frame.bytes)
+      this.onPeerPublishBinary(frame.data as Uint8Array<ArrayBuffer>, frame.info, frame.bytes)
       return
     }
     super.dispatchDataFrame(frame)
   }
 
   /** A publish counts in bytes, consumed once the listeners ran, so the server sees how far behind the page is. */
-  _onPeerPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
+  private onPeerPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
     const parsed = parse(data) as ChannelData<T>
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
@@ -98,7 +93,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this.receiveCredit.onPublishConsumed(bytes)
   }
 
-  _onPeerPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
+  private onPeerPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     for (const cb of this.broadcastBinaryListeners.list()) {

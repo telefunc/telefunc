@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 
 import { ReplayBuffer } from '../../wire-protocol/channel/ReplayBuffer.js'
-import { ACK_STATUS, decode } from '../../wire-protocol/wire/frame.js'
+import { ACK_STATUS, decode, encode, type AckResultStatus, type ChannelFrame } from '../../wire-protocol/wire/frame.js'
 import { TAG } from '../../wire-protocol/wire/tags.js'
 import { ProtocolViolationError } from '../../wire-protocol/wire/protocolViolation.js'
 import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'
@@ -21,6 +21,33 @@ function createPeer(frames: Uint8Array[]) {
     index: 7,
     replay: new ReplayBuffer({ maxBytes: 1024 * 1024, binaryMaxBytes: 2 * 1024 * 1024 }),
   })
+}
+
+/** What the page sends `channel`, through the entry its mux hands frames to; each frame takes the page's next seq. */
+function fromPage(channel: Pick<ServerChannel, '_dispatchFrame'>, frames: Uint8Array[]) {
+  let seq = 0
+  const dispatch = (frame: Uint8Array<ArrayBuffer>) => channel._dispatchFrame(decode(frame) as ChannelFrame)
+  return {
+    ackRes(ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK) {
+      dispatch(encode.ackRes(7, ++seq, ackedSeq, result, status))
+    },
+    closeRequest(timeoutMs: number) {
+      dispatch(encode.close(7, timeoutMs, ++seq))
+    },
+    closeAck() {
+      dispatch(encode.closeAck(7, ++seq))
+    },
+    /** Resolves once the channel sent its answer. */
+    async ackReq(text: string): Promise<void> {
+      const ackedSeq = ++seq
+      dispatch(encode.textAckReq(7, text, ackedSeq))
+      const isAnswer = (frame: Uint8Array) => {
+        const decoded = decode(frame)
+        return decoded.tag === TAG.ACK_RES && decoded.ackedSeq === ackedSeq
+      }
+      while (!frames.some(isAnswer)) await new Promise((resolve) => setTimeout(resolve, 1))
+    },
+  }
 }
 
 function expectCloseFrame(frame: Uint8Array) {
@@ -45,11 +72,12 @@ describe('self-initiated close', () => {
     const frames: Uint8Array[] = []
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
+    const page = fromPage(channel, frames)
     const pending = channel.send('hello', { ack: true })
     const frame = decode(frames[0]!)
     if (frame.tag !== TAG.TEXT_ACK_REQ) throw new Error('Expected TEXT_ACK_REQ')
 
-    expect(() => channel._onPeerAckRes(frame.seq, '{', status)).toThrow(ProtocolViolationError)
+    expect(() => page.ackRes(frame.seq, '{', status)).toThrow(ProtocolViolationError)
 
     await expect(pending).rejects.toBeInstanceOf(ProtocolViolationError)
   })
@@ -67,13 +95,14 @@ describe('self-initiated close', () => {
 
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
+    const page = fromPage(channel, frames)
     const closePromise = channel.close()
 
     expect(channel.isClosed).toBe(true)
     expect(didFireClose).toBe(false)
     expect(channel._phase).not.toBe('ended')
 
-    channel._onPeerCloseAck()
+    page.closeAck()
     await expect(closePromise).resolves.toBe(0)
     expect(didFireClose).toBe(true)
     expect(closeErr).toBe(undefined)
@@ -86,6 +115,7 @@ describe('self-initiated close', () => {
 
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
+    const page = fromPage(channel, frames)
     const closePromise = channel.close()
 
     expect(frames).toHaveLength(1)
@@ -93,7 +123,7 @@ describe('self-initiated close', () => {
     expect(ctrl.index).toBe(7)
     expect(ctrl.timeoutMs).toBeGreaterThanOrEqual(0)
 
-    channel._onPeerCloseAck()
+    page.closeAck()
     await expect(closePromise).resolves.toBe(0)
     expect(channel._phase).toBe('ended')
   })
@@ -104,6 +134,7 @@ describe('self-initiated close', () => {
 
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
+    const page = fromPage(channel, frames)
     const closePromise = channel.close({ timeout: 10 })
 
     expect(channel.isClosed).toBe(true)
@@ -120,6 +151,7 @@ describe('self-initiated close', () => {
 
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
+    const page = fromPage(channel, frames)
     channel.listen(
       () =>
         new Promise<string>((resolve) => {
@@ -128,11 +160,11 @@ describe('self-initiated close', () => {
     )
 
     // Start inbound ack-req processing
-    const inboundPending = channel._onPeerAckReqMessage('"work"', 1)
+    const inboundPending = page.ackReq('"work"')
     const closePromise = channel.close({ timeout: 100 })
 
     expect(channel.isClosed).toBe(true)
-    channel._onPeerCloseAck()
+    page.closeAck()
 
     // close() hasn't resolved yet — inflight inbound ack still in progress
     await new Promise((resolve) => setTimeout(resolve, 10))
@@ -150,12 +182,13 @@ describe('self-initiated close', () => {
 
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
+    const page = fromPage(channel, frames)
 
     const sendPromise = channel.send('hello', { ack: true })
     const closePromise = channel.close({ timeout: 100 })
 
     expect(channel.isClosed).toBe(true)
-    channel._onPeerCloseAck()
+    page.closeAck()
 
     // close() hasn't resolved yet — outbound ack still pending
     await new Promise((resolve) => setTimeout(resolve, 10))
@@ -164,7 +197,7 @@ describe('self-initiated close', () => {
     // Ack arrives → close resolves
     const ackReqFrame = decode(frames[0]!)
     if (ackReqFrame.tag !== TAG.TEXT_ACK_REQ) throw new Error('Expected TEXT_ACK_REQ')
-    channel._onPeerAckRes(ackReqFrame.seq, '"received"')
+    page.ackRes(ackReqFrame.seq, '"received"')
 
     await expect(sendPromise).resolves.toBe('received')
     await expect(closePromise).resolves.toBe(0)
@@ -178,6 +211,7 @@ describe('self-initiated close', () => {
 
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
+    const page = fromPage(channel, frames)
     channel.onClose(async () => {
       await new Promise((resolve) => setTimeout(resolve, 30))
       didFinishOnClose = true
@@ -185,7 +219,7 @@ describe('self-initiated close', () => {
 
     const closePromise = channel.close({ timeout: 100 })
     expect(channel.isClosed).toBe(true)
-    channel._onPeerCloseAck()
+    page.closeAck()
 
     // close() hasn't resolved — async onClose still running
     await new Promise((resolve) => setTimeout(resolve, 10))
@@ -207,6 +241,7 @@ describe('self-initiated close', () => {
 
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
+    const page = fromPage(channel, frames)
     await Promise.resolve()
 
     expect(frames).toHaveLength(2)
@@ -223,14 +258,15 @@ describe('self-initiated close', () => {
 
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
+    const page = fromPage(channel, frames)
 
     const sendPromise = channel.send('hello', { ack: true })
     const closePromise = channel.close({ timeout: 100 })
 
     const ackReqFrame = decode(frames[0]!)
     if (ackReqFrame.tag !== TAG.TEXT_ACK_REQ) throw new Error('Expected TEXT_ACK_REQ')
-    channel._onPeerAckRes(ackReqFrame.seq, '"ok"')
-    channel._onPeerCloseAck()
+    page.ackRes(ackReqFrame.seq, '"ok"')
+    page.closeAck()
 
     await expect(sendPromise).resolves.toBe('ok')
     await expect(closePromise).resolves.toBe(0)
@@ -242,6 +278,7 @@ describe('self-initiated close', () => {
 
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
+    const page = fromPage(channel, frames)
 
     const sendPromise = channel.send('hello', { ack: true })
     const sendOutcome = sendPromise.then(
@@ -255,7 +292,7 @@ describe('self-initiated close', () => {
 
     const ackReqFrame = decode(frames[0]!)
     if (ackReqFrame.tag !== TAG.TEXT_ACK_REQ) throw new Error('Expected TEXT_ACK_REQ')
-    channel._onPeerAckRes(ackReqFrame.seq, '"received"')
+    page.ackRes(ackReqFrame.seq, '"received"')
 
     const result = await sendOutcome
     expect(result.status).toBe('rejected')
@@ -275,12 +312,13 @@ describe('peer-initiated close', () => {
 
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
+    const page = fromPage(channel, frames)
     channel.onClose((err) => {
       didFireClose = true
       closeErr = err
     })
 
-    channel._onPeerCloseRequest(100)
+    page.closeRequest(100)
 
     // All synchronous
     expect(channel.isClosed).toBe(true)
@@ -296,6 +334,7 @@ describe('peer-initiated close', () => {
 
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
+    const page = fromPage(channel, frames)
     channel.listen(
       () =>
         new Promise<string>((resolve) => {
@@ -303,8 +342,8 @@ describe('peer-initiated close', () => {
         }),
     )
 
-    const pending = channel._onPeerAckReqMessage('"work"', 1)
-    channel._onPeerCloseRequest(100)
+    const pending = page.ackReq('"work"')
+    page.closeRequest(100)
 
     expect(channel.isClosed).toBe(true)
 
@@ -322,6 +361,7 @@ describe('peer-initiated close', () => {
 
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
+    const page = fromPage(channel, frames)
     channel.listen(
       () =>
         new Promise<string>((resolve) => {
@@ -329,8 +369,8 @@ describe('peer-initiated close', () => {
         }),
     )
 
-    channel._onPeerAckReqMessage('"work"', 1)
-    channel._onPeerCloseRequest(10)
+    page.ackReq('"work"')
+    page.closeRequest(10)
 
     expect(channel.isClosed).toBe(true)
     expectCloseAckFrame(frames[0]!)
@@ -343,14 +383,16 @@ describe('peer-initiated close', () => {
     const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     let didFinishOnClose = false
 
+    const frames: Uint8Array[] = []
     channel._registerChannel()
-    channel._attachPeer(createPeer([]))
+    channel._attachPeer(createPeer(frames))
+    const page = fromPage(channel, frames)
     channel.onClose(async () => {
       await new Promise((resolve) => setTimeout(resolve, 25))
       didFinishOnClose = true
     })
 
-    channel._onPeerCloseRequest(100)
+    page.closeRequest(100)
 
     await new Promise((resolve) => setTimeout(resolve, 10))
     expect(didFinishOnClose).toBe(false)
@@ -371,6 +413,7 @@ describe('cross-close', () => {
 
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
+    const page = fromPage(channel, frames)
 
     // Server calls close
     const closePromise = channel.close({ timeout: 100 })
@@ -379,14 +422,14 @@ describe('cross-close', () => {
     expectCloseFrame(frames[0]!)
 
     // Peer also sent close (arrives after server's close)
-    channel._onPeerCloseRequest(100)
+    page.closeRequest(100)
 
     // close-ack was sent for the peer's request
     expect(frames).toHaveLength(2)
     expectCloseAckFrame(frames[1]!)
 
     // Peer acks server's close
-    channel._onPeerCloseAck()
+    page.closeAck()
 
     await expect(closePromise).resolves.toBe(0)
     expect(channel._phase).toBe('ended')
@@ -398,11 +441,12 @@ describe('cross-close', () => {
 
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
+    const page = fromPage(channel, frames)
 
     const closePromise = channel.close({ timeout: 10 })
 
     // Peer also sent close — but never sends close-ack for server's request
-    channel._onPeerCloseRequest(10)
+    page.closeRequest(10)
 
     await expect(closePromise).resolves.toBe(1)
     expect(channel._phase).toBe('ended')

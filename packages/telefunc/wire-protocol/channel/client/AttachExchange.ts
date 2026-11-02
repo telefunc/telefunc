@@ -184,7 +184,7 @@ class AttachExchange {
     for (const channel of ctrl.open) serverMap.set(channel.ix, channel.lastSeq)
     const { ixes, probes, attachResults, carriedFrom } = this.inFlight
     this.inFlight = reconcileInFlight()
-    for (const [ix, probe] of probes) this.channels.get(ix)?.channel._onProbeAnswered(probe)
+    for (const [ix, probe] of probes) this.channels.get(ix)?.channel._attach.onProbeAnswered(probe)
     for (const [ix, lastSeq] of attachResults) if (lastSeq !== null && !serverMap.has(ix)) serverMap.set(ix, lastSeq)
     // An initial channel left out is one the server awaits, until its ATTACH_RESULT.
     for (const [ix, initial] of ixes) {
@@ -351,7 +351,7 @@ class AttachExchange {
         lastSeq: record.lastSeq,
       }
       if (isInitial) payloadEntry.initial = true
-      const state = record.channel._attachState(uplink)
+      const state = record.channel._attach.state(uplink)
       if (state.probe !== undefined) this.inFlight.probes.set(ix, state.probe)
       Object.assign(payloadEntry, state)
       if (state.broadcast) subscribing.add(ix)

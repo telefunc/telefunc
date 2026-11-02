@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { Broadcast, ServerBroadcast } from '../channel/server/ServerBroadcast.js'
 import { ReplayBuffer } from '../channel/ReplayBuffer.js'
-import { ACK_STATUS, decode } from '../wire/frame.js'
+import { ACK_STATUS, decode, encode, type ChannelFrame } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
 import { IndexedPeer } from '../channel/server/IndexedPeer.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcastAdapter.js'
@@ -152,7 +152,7 @@ describe('keyed in-process broadcast', () => {
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
     sender._registerChannel()
     receiver._registerChannel()
-    receiver._onPeerSubscription({ binary: false, subscribed: true }) // simulate client subscribe over wire
+    receiver._dispatchFrame(decode(encode.broadcastSub(0, false)) as ChannelFrame) // the page subscribes
 
     sender.publish({ text: 'hello' })
 

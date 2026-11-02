@@ -33,13 +33,14 @@ import type {
   PongEntry,
   SequencedEncoder,
 } from '../../wire/frame.js'
-import type { AttachState, ReconciledPayload } from '../../wire/payloads.js'
+import type { ReconciledPayload } from '../../wire/payloads.js'
 import type { Heartbeat } from './Heartbeat.js'
 import { ChannelTable, type ChannelRecord } from './ChannelTable.js'
 import { SendGate, type SendGateOwner } from './SendGate.js'
 import { Liveness, type LivenessOwner } from './Liveness.js'
 import { Upgrade, type UpgradeOwner, type UpgradeTarget } from './Upgrade.js'
 import { AttachExchange, type AttachExchangeOwner, type ReconcileBatch } from './AttachExchange.js'
+import type { ChannelAttach } from './ChannelAttach.js'
 import { pingDeadline } from '../../wire/pingDeadline.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
@@ -60,28 +61,14 @@ interface MuxChannel {
   readonly _maxFrameBytes: number
   /** The channel is open on `uplink`'s wire; called again with the same `uplink`, that wire lost nothing. */
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void
-  /** The wire's streaming upload failed after the channel opened, so its frames now go in batch POSTs. */
-  _onTransportBatched(): void
-  /** The upgrade joined: the channel is on the WebSocket and has already received the frames the join held. */
-  _onUpgradeJoined(): void
   /** Entry point for every per-channel wire frame (data + per-channel ctrl). The
    *  channel splits ctrl vs data internally. Wire-level frames (PING/PONG/
    *  FIN/RECONCILED), channel-termination ctrls (ABORT/ERROR) and ATTACH_RESULT stay with the
    *  connection — they involve connection-side cleanup. */
   _dispatchFrame(frame: ChannelFrame): void
   _onEnded(err?: Error): void
-  /** The channel's entry in the RECONCILE sent each time it attaches to `uplink`'s wire. */
-  _attachState(uplink: Uplink): AttachState
-  /** The RECONCILED answered the `probe` in the channel's RECONCILE entry. */
-  _onProbeAnswered(probe: number): void
-  /** Caps the credit windows at what the replay buffers allow: `window` for what the page grants, `peerWindow` for
-   *  what the server grants it. */
-  _fitReplays(window: number, peerWindow: number): void
-  /** Called on each heartbeat: a WINDOW for what arrived since the last one lets the server's replay buffer release
-   *  it while the channel is quiet. */
-  _acknowledge(): void
-  /** The channel answered the newest frame from the server, which acknowledges every earlier frame too. */
-  _answered(): void
+  /** Its credits as the connection drives them across wires. */
+  readonly _attach: ChannelAttach
 }
 
 interface MuxConnection {
@@ -317,7 +304,7 @@ class ClientConnection
    *  default initial window fits any replay buffer. */
   private fitReplays(channel: MuxChannel): void {
     if (this.replayWindows === null) return
-    channel._fitReplays(this.replayWindows.window, this.replayWindows.peerWindow)
+    channel._attach.fitReplays(this.replayWindows.window, this.replayWindows.peerWindow)
   }
 
   onTransportHeadroom(transport: ClientChannelTransport): void {
@@ -377,7 +364,7 @@ class ClientConnection
       frame = encode.ackRes(ix, seq, ackedSeq, error, ACK_STATUS.ERROR)
     }
     this.gate.send(record, seq, frame, 'ack')
-    if (ackedSeq === record.lastSeq) channel._answered()
+    if (ackedSeq === record.lastSeq) channel._attach.answered()
   }
 
   /** The largest frame the server accepts from `channel`; on a WebSocket, a runtime's lower limit wins. */
@@ -475,7 +462,7 @@ class ClientConnection
   onTransportBatched(transport: ClientChannelTransport): void {
     if (transport !== this.transport) return
     // Open channels only, as the join's undo does: one still opening gets the batched window as it opens on this wire.
-    for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._onTransportBatched()
+    for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._attach.onBatched()
   }
 
   onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void {

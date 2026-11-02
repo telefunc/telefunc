@@ -17,13 +17,15 @@ function createChannel(id = crypto.randomUUID()) {
     _onTransportOpen() {},
     _dispatchFrame() {},
     _onEnded() {},
-    _onTransportBatched() {},
-    _onUpgradeJoined() {},
-    _attachState: () => ({}),
-    _onProbeAnswered() {},
-    _fitReplays() {},
-    _acknowledge() {},
-    _answered() {},
+    _attach: {
+      state: () => ({}),
+      onProbeAnswered() {},
+      fitReplays() {},
+      acknowledge() {},
+      answered() {},
+      onBatched() {},
+      onUpgradeJoined() {},
+    },
   }
 }
 

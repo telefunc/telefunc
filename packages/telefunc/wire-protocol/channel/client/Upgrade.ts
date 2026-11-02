@@ -288,7 +288,7 @@ class Upgrade implements ProbeOwner {
     for (const entry of buffer.old) this.owner.dispatchFrame(entry.frame)
     this.exchange.closeUnacknowledged(deferredOmitted)
     for (const entry of buffer.new) this.owner.dispatchFrame(entry.frame)
-    for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._onUpgradeJoined()
+    for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._attach.onUpgradeJoined()
     this.owner.startTtlIfIdle()
   }
 

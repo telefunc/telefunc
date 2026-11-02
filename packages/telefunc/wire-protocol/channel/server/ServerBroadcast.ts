@@ -192,7 +192,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     )
   }
 
-  override _onPeerSubscription({ binary, subscribed }: { binary: boolean; subscribed: boolean }): void {
+  protected override onPeerSubscription({ binary, subscribed }: { binary: boolean; subscribed: boolean }): void {
     if (binary) this.peerSubscribedBinary = subscribed
     else this.peerSubscribedText = subscribed
     if (subscribed) {

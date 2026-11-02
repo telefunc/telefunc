@@ -94,7 +94,7 @@ class Liveness {
 
   /** Each open channel acknowledges what arrived since its last WINDOW, then the PING goes. */
   private beat(transport: ClientChannelTransport): void {
-    for (const { channel, state } of this.channels.values()) if (state.tag !== 'closed') channel._acknowledge()
+    for (const { channel, state } of this.channels.values()) if (state.tag !== 'closed') channel._attach.acknowledge()
     transport.sendPing(this.buildPing())
   }
 
