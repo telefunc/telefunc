@@ -543,14 +543,8 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
    * Delivers a publish to the subscribers here of the Durable Object `request.doName`, which the RPC went to.
    */
   deliverToLocal({ key, doName, serialized, binaryData, info }: BroadcastDeliverRequest): void {
-    if (serialized !== undefined) {
-      const subs = this.textSubs.get(key)
-      if (subs) for (const [cb, owner] of subs) if (owner === doName) cb(serialized, info)
-    }
-    if (binaryData !== undefined) {
-      const subs = this.binarySubs.get(key)
-      if (subs) for (const [cb, owner] of subs) if (owner === doName) cb(binaryData, info)
-    }
+    if (serialized !== undefined) deliverToOwned(this.textSubs.get(key), doName, serialized, info)
+    if (binaryData !== undefined) deliverToOwned(this.binarySubs.get(key), doName, binaryData, info)
   }
 
   // --- Private ---
@@ -631,4 +625,15 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       locationHint ? { locationHint } : undefined,
     ) as TelefuncBroadcastStub
   }
+}
+
+/** Calls each of `subs` the Durable Object `doName` owns with `payload`. */
+function deliverToOwned<T>(
+  subs: Map<(payload: T, info: WirePublishInfo) => void, string> | undefined,
+  doName: string,
+  payload: T,
+  info: WirePublishInfo,
+): void {
+  if (subs === undefined) return
+  for (const [cb, owner] of subs) if (owner === doName) cb(payload, info)
 }

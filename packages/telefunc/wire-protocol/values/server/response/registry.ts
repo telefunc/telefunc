@@ -51,28 +51,27 @@ function createStreamingReplacer(
   const replacements = new Set<string>()
   const replacer = (_key: string, value: unknown, serializer: (v: unknown) => string) => {
     for (const type of allTypes) {
-      if (type.detect(value)) {
-        // Primitives have no reference identity — only objects and functions are deduplicated.
-        const hasIdentity = isObjectOrFunction(value)
-        if (hasIdentity) {
-          const cached = replaced.get(value)
-          if (cached !== undefined) return { replacement: cached, resolved: true }
-        }
-        const { metadata, close, abort } = type.replace(value as never, getContext(value))
-        onReplaced({ close, abort })
-        const replacement = type.prefix + serializer(metadata)
-        if (hasIdentity) {
-          // The client treats equal wire strings as the same identity, so two distinct values
-          // must never serialize identically — see the metadata contract on ReplacerType.
-          assertUsage(
-            !replacements.has(replacement),
-            `Two distinct values serialize to the same wire representation (${type.prefix}…). replace() must return metadata that identifies the value uniquely within the payload — mint a fresh id per replace() call, the way every built-in type does.`,
-          )
-          replacements.add(replacement)
-          replaced.set(value, replacement)
-        }
-        return { replacement, resolved: true }
+      if (!type.detect(value)) continue
+      // Primitives have no reference identity — only objects and functions are deduplicated.
+      const hasIdentity = isObjectOrFunction(value)
+      if (hasIdentity) {
+        const cached = replaced.get(value)
+        if (cached !== undefined) return { replacement: cached, resolved: true }
       }
+      const { metadata, close, abort } = type.replace(value as never, getContext(value))
+      onReplaced({ close, abort })
+      const replacement = type.prefix + serializer(metadata)
+      if (hasIdentity) {
+        // The client treats equal wire strings as the same identity, so two distinct values
+        // must never serialize identically — see the metadata contract on ReplacerType.
+        assertUsage(
+          !replacements.has(replacement),
+          `Two distinct values serialize to the same wire representation (${type.prefix}…). replace() must return metadata that identifies the value uniquely within the payload — mint a fresh id per replace() call, the way every built-in type does.`,
+        )
+        replacements.add(replacement)
+        replaced.set(value, replacement)
+      }
+      return { replacement, resolved: true }
     }
     return undefined
   }

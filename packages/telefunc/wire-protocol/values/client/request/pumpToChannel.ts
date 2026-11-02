@@ -50,18 +50,7 @@ function pumpClientProducerToChannel(createProducer: () => StreamingProducer, co
         channel.onOpen(resolve)
         channel.onClose(() => reject(new ChannelClosedError()))
       })
-      while (true) {
-        const { done, value } = await Promise.race([cancelledPromise, producer.chunks.next()])
-        if (cancelled) break
-        if (done) {
-          channel.sendBinary(TAG_END)
-          break
-        }
-        for (let at = 0; at < value.byteLength; at += CHUNK_PART_BYTES) {
-          const pending = channel._sendBinary(concat(TAG_DATA, value.subarray(at, at + CHUNK_PART_BYTES)))
-          if (pending) await pending
-        }
-      }
+      await sendChunks(channel, producer, cancelledPromise, () => cancelled)
     } catch (err) {
       // ChannelClosedError — either from onOpen rejection (closed before connect)
       // or from sendBinary (closed mid-send, e.g. by abort(res)).
@@ -87,5 +76,26 @@ function pumpClientProducerToChannel(createProducer: () => StreamingProducer, co
     abort() {
       channel.abort()
     },
+  }
+}
+
+/** Sends the producer's chunks, each in parts, then its end; stops at the first chunk read once cancelled. */
+async function sendChunks(
+  channel: ClientChannel,
+  producer: StreamingProducer,
+  cancelledPromise: Promise<IteratorResult<Uint8Array<ArrayBuffer>>>,
+  isCancelled: () => boolean,
+): Promise<void> {
+  while (true) {
+    const { done, value } = await Promise.race([cancelledPromise, producer.chunks.next()])
+    if (isCancelled()) return
+    if (done) {
+      channel.sendBinary(TAG_END)
+      return
+    }
+    for (let at = 0; at < value.byteLength; at += CHUNK_PART_BYTES) {
+      const pending = channel._sendBinary(concat(TAG_DATA, value.subarray(at, at + CHUNK_PART_BYTES)))
+      if (pending) await pending
+    }
   }
 }

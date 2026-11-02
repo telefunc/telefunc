@@ -69,6 +69,8 @@ function parsePeerText(text: string): unknown {
 
 /** Closing frames the channel produced while no page was attached; the next attach sends them. */
 type PendingEnd = { closeAck: boolean; closeRequest: boolean; abort: string | null; error: ErrorReason | null }
+/** A `sendAck` awaiting the peer's ACK_RES; `bytes` is its payload's share of `pendingAckBytes`. */
+type PendingAck<T> = { resolve: (result: ChannelAck<T>) => void; reject: (err: Error) => void; bytes: number }
 
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements Channel<ClientToServer, ServerToClient>, ChannelLifecycleOwner, BufferedSender
@@ -100,10 +102,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private readonly listeners = new Listeners<ChannelListener<ClientToServer>>()
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
   protected offlineBuffer: ServerChannelBuffer<ChannelAck<ServerToClient>>
-  protected pendingAcks = new Map<
-    number,
-    { resolve: (result: ChannelAck<ServerToClient>) => void; reject: (err: Error) => void; bytes: number }
-  >()
+  protected pendingAcks = new Map<number, PendingAck<ServerToClient>>()
   /** Payload bytes of the ack requests in `pendingAcks`. */
   private pendingAckBytes = 0
   protected readonly bufferLimit: number
@@ -565,21 +564,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (!pending) return
     try {
       switch (status) {
-        case ACK_STATUS.OK: {
-          const parsed = parsePeerText(resultText) as ChannelAck<ServerToClient>
-          const validateAck = this._validators.get('ack')
-          if (validateAck) {
-            const result = validateAck(parsed)
-            // Server-declared ack shield rejected the peer's response — same class as every
-            // other shield-fail surface, so user code can catch with `isShieldValidationError`.
-            if (result !== true) {
-              pending.reject(new ShieldValidationError(result))
-              return
-            }
-          }
-          pending.resolve(parsed)
+        case ACK_STATUS.OK:
+          this.settleAck(pending, parsePeerText(resultText) as ChannelAck<ServerToClient>)
           return
-        }
         case ACK_STATUS.ABORT:
           pending.reject(createAbortError(parsePeerText(resultText)))
           return
@@ -601,6 +588,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this.pendingAcks.delete(ackedSeq)
       this.pendingAckBytes -= pending.bytes
     }
+  }
+
+  /** Resolves `pending` with the peer's ack, unless the server-declared ack shield rejects it. */
+  private settleAck(pending: PendingAck<ServerToClient>, parsed: ChannelAck<ServerToClient>): void {
+    const validateAck = this._validators.get('ack')
+    const result = validateAck ? validateAck(parsed) : true
+    // Same class as every other shield-fail surface, so user code can catch with `isShieldValidationError`.
+    if (result !== true) pending.reject(new ShieldValidationError(result))
+    else pending.resolve(parsed)
   }
 
   protected onPeerCloseRequest(timeoutMs: number): void {

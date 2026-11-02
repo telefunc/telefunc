@@ -669,12 +669,10 @@ class ChannelMux implements UpgradeStagesOwner {
     const handles = open.map((each) => this.attach(each, entry, replay)).filter((h): h is ChannelHandle => h !== null)
 
     // Channels in the previous session that the client did NOT re-include are recovery-failed.
-    if (prevSessionId) {
-      const prev = this.sessions.removeSession(prevSessionId)
-      if (prev) {
-        const keptIxes = new Set(handles.map((h) => h.ix))
-        for (const [ix, prevHandle] of prev) if (!keptIxes.has(ix)) this.detachHandle(prevHandle, 'recoveryFailed')
-      }
+    const prev = prevSessionId ? this.sessions.removeSession(prevSessionId) : undefined
+    if (prev) {
+      const keptIxes = new Set(handles.map((h) => h.ix))
+      for (const [ix, prevHandle] of prev) if (!keptIxes.has(ix)) this.detachHandle(prevHandle, 'recoveryFailed')
     }
     entry.state.awaited.forgetUnnamed(open)
     this.sessions.setSession(newSessionId, handles)

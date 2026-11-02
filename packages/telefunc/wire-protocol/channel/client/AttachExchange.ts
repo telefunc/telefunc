@@ -179,54 +179,71 @@ class AttachExchange {
   ): ReconcileOutcome {
     this.reconciledWire = this.owner.wire
     this.session = ctrl.sessionId
-    const serverMap = new Map<number, number>()
-    for (const channel of ctrl.open) serverMap.set(channel.ix, channel.lastSeq)
-    const { ixes, probes, attachResults, carriedFrom } = this.inFlight
+    const inFlight = this.inFlight
     this.inFlight = reconcileInFlight()
-    for (const [ix, probe] of probes) this.channels.get(ix)?.channel._attach.onProbeAnswered(probe)
-    for (const [ix, lastSeq] of attachResults) if (lastSeq !== null && !serverMap.has(ix)) serverMap.set(ix, lastSeq)
-    // An initial channel left out is one the server awaits, until its ATTACH_RESULT.
-    for (const [ix, initial] of ixes) {
-      const record = this.channels.get(ix)
-      if (record !== undefined) record.awaited = initial && !serverMap.has(ix) && !attachResults.has(ix)
-    }
-    const releaseFrames: OutboundFrame[] = []
-    const channelsToOpen: MuxChannel[] = []
+    const serverHas = this.settleAnswers(ctrl, inFlight)
     // Channels registered after this RECONCILE was built wait for the next one.
     const hasNewChannels = this.channels.hasUnnamed
-
-    for (const ix of ixes.keys()) {
-      const record = this.channels.get(ix)
-      if (record === undefined || record.awaited) continue
-      const replay = this.attachRecord(
-        record,
-        serverMap.get(ix),
-        (carriedFrom.get(ix) ?? Infinity) - 1,
-        deferredOmitted,
-      )
-      if (replay === null) continue
-      for (const frame of replay) releaseFrames.push(frame)
-      if (record.state.tag !== 'closed') channelsToOpen.push(record.channel)
-    }
+    const { frames, channelsToOpen } = this.attachNamed(inFlight, serverHas, deferredOmitted)
 
     // What the server has: the channels this RECONCILE named that it attached, and those the ones before named.
     const attached = (ix: number): boolean => {
-      if (ixes.has(ix)) return serverMap.has(ix)
+      if (inFlight.ixes.has(ix)) return serverHas.has(ix)
       const record = this.channels.get(ix)
       return record !== undefined && !this.channels.isUnnamed(record) && !record.awaited
     }
-    for (const frame of this.gate.drain(attached)) releaseFrames.push(frame)
+    for (const frame of this.gate.drain(attached)) frames.push(frame)
 
     if (hasNewChannels && !upgradeReady) {
-      const reconcileBatch = this.stageReconcileBatch()
-      appendReconcileBatch(releaseFrames, reconcileBatch)
+      appendReconcileBatch(frames, this.stageReconcileBatch())
     } else {
       this.exitReconciling()
       // The barrier leaves out what the follow-up would name.
       if (hasNewChannels) this.scheduleRegisterReconcile()
     }
 
-    return { frames: releaseFrames, channelsToOpen, reconcileComplete: !hasNewChannels }
+    return { frames, channelsToOpen, reconcileComplete: !hasNewChannels }
+  }
+
+  /** Settles what `inFlight` asked with the RECONCILED that answers it: its probes, the ATTACH_RESULT frames that came
+   *  first, and which initial channels the server awaits. Returns the last seq the server has of each channel it
+   *  attached. */
+  private settleAnswers(
+    ctrl: ReconciledPayload,
+    { ixes, probes, attachResults }: ReconcileInFlight,
+  ): Map<number, number> {
+    const serverHas = new Map<number, number>()
+    for (const channel of ctrl.open) serverHas.set(channel.ix, channel.lastSeq)
+    for (const [ix, probe] of probes) this.channels.get(ix)?.channel._attach.onProbeAnswered(probe)
+    for (const [ix, lastSeq] of attachResults) if (lastSeq !== null && !serverHas.has(ix)) serverHas.set(ix, lastSeq)
+    // An initial channel left out is one the server awaits, until its ATTACH_RESULT.
+    for (const [ix, initial] of ixes) {
+      const record = this.channels.get(ix)
+      if (record !== undefined) record.awaited = initial && !serverHas.has(ix) && !attachResults.has(ix)
+    }
+    return serverHas
+  }
+
+  /** Brings each channel `inFlight` named and the server attached to the server's state: the frames that replays, and
+   *  the channels that open on the wire. */
+  private attachNamed(
+    { ixes, carriedFrom }: ReconcileInFlight,
+    serverHas: Map<number, number>,
+    deferredOmitted: number[] | null,
+  ): { frames: OutboundFrame[]; channelsToOpen: MuxChannel[] } {
+    const frames: OutboundFrame[] = []
+    const channelsToOpen: MuxChannel[] = []
+    for (const ix of ixes.keys()) {
+      const record = this.channels.get(ix)
+      if (record === undefined || record.awaited) continue
+      // The replay stops before the first seq the wire carries behind the RECONCILE.
+      const carriedSeq = carriedFrom.get(ix) ?? Infinity
+      const replay = this.attachRecord(record, serverHas.get(ix), carriedSeq - 1, deferredOmitted)
+      if (replay === null) continue
+      for (const frame of replay) frames.push(frame)
+      if (record.state.tag !== 'closed') channelsToOpen.push(record.channel)
+    }
+    return { frames, channelsToOpen }
   }
 
   /** An awaited channel's own RECONCILED entry: `lastSeq` if the server attached it, null if not. False where it

@@ -98,11 +98,7 @@ class ChannelStreamSource {
   private async readNextChunk(): Promise<Uint8Array<ArrayBuffer> | null> {
     while (this.readHead >= this.queue.length) {
       if (this.ended) return null
-      if (this.closed) {
-        if (this.closeError) throw this.closeError
-        if (!this.cancelled) throw new NetworkError('Channel closed before the end of its stream', true)
-        return null
-      }
+      if (this.closed) return this.endOfClosed()
       await new Promise<void>((r) => {
         this.wake = r
       })
@@ -131,6 +127,13 @@ class ChannelStreamSource {
       throw new Error('Streaming error frame received')
     }
     return payload
+  }
+
+  /** A read of the stream once its channel closed with nothing left queued: the end only if the reader cancelled. */
+  private endOfClosed(): null {
+    if (this.closeError) throw this.closeError
+    if (!this.cancelled) throw new NetworkError('Channel closed before the end of its stream', true)
+    return null
   }
 
   private cancel(): void {

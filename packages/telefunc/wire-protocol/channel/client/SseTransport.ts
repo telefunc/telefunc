@@ -253,28 +253,12 @@ class SseTransport implements UpgradeSource {
     const upload = this.streamRequest.tag === 'failed' ? null : this.openUpload(abortController)
     this.owner.onTransportReconcileSent(this)
 
-    let response: Response
-    this.openPending = true
-    try {
-      response = await ssePromise
-    } catch {
-      // Its wire was dropped already: what the open carried goes as that wire's outbox does (see `flushOutbox`).
-      if (this.transportAbort !== abortController) this.requeue(stage.movedOutbox)
-      else this.failOpen(stage, abortController, false)
-      return
-    } finally {
-      if (this.transportAbort === abortController) this.openPending = false
-    }
-    // Its wire was dropped while the open went unanswered: the answer is ignored, as a successor may be opening.
-    if (this.transportAbort !== abortController) return abortController.abort()
-    if (!response.ok || !response.body) {
-      this.failOpen(stage, abortController, true)
-      return
-    }
+    const body = await this.openDownstream(ssePromise, stage, abortController)
+    if (!body) return
     if (this.outbox.length > 0) void this.flushOutbox()
 
     const reader = createSseEventStreamReader(
-      response.body.getReader() as ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
+      body.getReader() as ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
       abortController,
       (bytes) => this.heartbeat?.noteReceived(bytes),
     )
@@ -285,21 +269,61 @@ class SseTransport implements UpgradeSource {
       resolveHandshakeOk = () => resolve('ok')
     })
     void this.readEvents(reader, abortController, resolveHandshakeOk)
-
-    // Race upstream readiness: ack (ok), fetch ended (dead), or timeout. Non-ok → outbox+batch.
-    if (upload) {
-      const timeoutP = new Promise<'timeout'>((resolve) =>
-        setTimeout(() => resolve('timeout'), STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS),
-      )
-      const result = await Promise.race([handshakeOkP, timeoutP, upload.ended])
-      if (this.transportAbort !== abortController) return abortController.abort()
-      if (result === 'ok') this.confirmUpload(upload, abortController)
-      else this.abandonUpload(upload)
-    }
+    if (upload && !(await this.settleUpload(upload, handshakeOkP, abortController))) return
 
     this.connecting = false
     this.owner.onTransportOpen(this)
     if (this.outbox.length > 0) void this.flushOutbox()
+  }
+
+  /** The downstream's body, or `null` when it didn't open or its wire was dropped meanwhile. */
+  private async openDownstream(
+    ssePromise: Promise<Response>,
+    stage: SseInitialBatchStage,
+    abortController: AbortController,
+  ): Promise<ReadableStream<Uint8Array> | null> {
+    let response: Response
+    this.openPending = true
+    try {
+      response = await ssePromise
+    } catch {
+      // Its wire was dropped already: what the open carried goes as that wire's outbox does (see `flushOutbox`).
+      if (this.transportAbort !== abortController) this.requeue(stage.movedOutbox)
+      else this.failOpen(stage, abortController, false)
+      return null
+    } finally {
+      if (this.transportAbort === abortController) this.openPending = false
+    }
+    // Its wire was dropped while the open went unanswered: the answer is ignored, as a successor may be opening.
+    if (this.transportAbort !== abortController) {
+      abortController.abort()
+      return null
+    }
+    if (!response.ok || !response.body) {
+      this.failOpen(stage, abortController, true)
+      return null
+    }
+    return response.body
+  }
+
+  /** Races the upload's acknowledgement against its end and a timeout; `false` when its wire was dropped meanwhile. */
+  private async settleUpload(
+    upload: StreamUpload,
+    handshakeOk: Promise<'ok'>,
+    abortController: AbortController,
+  ): Promise<boolean> {
+    const timeout = new Promise<'timeout'>((resolve) =>
+      setTimeout(() => resolve('timeout'), STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS),
+    )
+    const result = await Promise.race([handshakeOk, timeout, upload.ended])
+    if (this.transportAbort !== abortController) {
+      abortController.abort()
+      return false
+    }
+    // Not acknowledged in time, or the POST ended: frames go in batch POSTs from now on.
+    if (result === 'ok') this.confirmUpload(upload, abortController)
+    else this.abandonUpload(upload)
+    return true
   }
 
   /** The streaming upload POST, aborted with the wire's `abortController` or alone. */
