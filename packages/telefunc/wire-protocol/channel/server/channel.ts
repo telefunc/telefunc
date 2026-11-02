@@ -727,7 +727,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.PUBLISH:
         assert(typeof data === 'string')
-        this.sendCredit.countPublishSent(peer.sendSequenced(encode.publish, data))
+        peer.sendSequenced(encode.publish, data)
         return
       case TAG.BINARY:
         assert(data instanceof Uint8Array && callback)
@@ -742,7 +742,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.PUBLISH_BINARY:
         assert(data instanceof Uint8Array)
-        this.sendCredit.countPublishSent(peer.sendSequenced(encode.publishBinary, data))
+        peer.sendSequenced(encode.publishBinary, data)
         return
     }
   }

@@ -59,8 +59,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   constructor(opts: { key: string }) {
     super()
     this.key = opts.key
-    // Its page grants it the largest window from the start (see `ClientBroadcast`).
-    this.sendCredit.takePeerWindowMax()
   }
 
   /** Its page grants the largest window at once: a quarter of it past credit is more than the page reads unreported. */
@@ -177,9 +175,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       this.closeIfDroppedOffline(binary)
       return
     }
-    this.sendCredit.countPublishSent(
-      binary ? peer.sendSequenced(encode.publishBinary, wire) : peer.sendSequenced(encode.publish, wire),
-    )
+    if (binary) peer.sendSequenced(encode.publishBinary, wire)
+    else peer.sendSequenced(encode.publish, wire)
   }
 
   /** A publish the buffer for an offline page dropped would leave it a gap: it gets the end at its next attach instead. */

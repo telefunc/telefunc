@@ -21,7 +21,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   constructor(options: ClientChannelOptions) {
     super(options)
-    // Nothing waits on a publish's credit: the window only bounds how far behind the server lets the page fall.
+    // Nothing waits on a publish's credit, so the page grants the largest window from the start.
     this.receiveCredit.widenByteWindow()
   }
 
