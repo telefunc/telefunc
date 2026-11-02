@@ -155,8 +155,18 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     return this.connected && !this.exchange.reconciling && !this.upgrade.gatesSends && !this.exchange.reconcileOwed
   }
 
-  get reconcileHeld(): boolean {
+  /** The wire can't take a RECONCILE now: it isn't open, or an upgrade is between its READY and its handoff. */
+  private get reconcileHeld(): boolean {
     return !this.connected || this.upgrade.holdsReconcile
+  }
+
+  /** Sends the RECONCILE a registration owes, where the wire takes one; no-op when none is owed. While the wire can't
+   *  (connecting, awaiting a RECONCILED, from an upgrade's READY until its handoff) it stays owed: `reconcileOwed` keeps
+   *  `sendsOpen` false, so data frames buffer behind it, and the wire's open and an upgrade attempt's end call this
+   *  again. A RECONCILED, the handoff's too, names what registered meanwhile in its follow-up. */
+  onReconcileDue(): void {
+    if (!this.exchange.reconcileOwed || this.reconcileHeld || this.exchange.reconciling) return
+    this.exchange.sendReconcileBatch(this.exchange.stageReconcileBatch())
   }
 
   /** Wire indexes are u16 and never reused, so once they run out a new channel needs a fresh connection. */
@@ -234,7 +244,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     if (!this.exchange.reconciling) {
       // A register-reconcile queued during the connecting window sends its RECONCILE here and
       // carries the buffered frames after it, emptying the buffer; with none queued, the buffered frames go out alone.
-      this.exchange.flushPendingRegisterReconcile()
+      this.onReconcileDue()
       this.drainBufferedFramesToWire()
     }
     this.maybeUpgrade()
@@ -315,7 +325,11 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.liveness.onPong(ended)
   }
 
-  dropWire(transport: ClientChannelTransport): void {
+  onReconcileLate(transport: ClientChannelTransport): void {
+    this.dropWire(transport)
+  }
+
+  private dropWire(transport: ClientChannelTransport): void {
     transport.detachHeartbeat()
     transport.abandonActiveTransport()
     this.onTransportClosed(transport)
@@ -425,7 +439,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.releaseJoin(this.upgrade.tryComplete())
     } finally {
       this.upgrade.endAttempt(attempt)
-      this.exchange.flushPendingRegisterReconcile()
+      this.onReconcileDue()
     }
   }
 

@@ -40,15 +40,15 @@ type ReconcileBatch = {
   movedBufferedFrames: OutboundFrame[]
 }
 
-/** The connection, whose wire carries the RECONCILEs. */
+/** The connection, whose wire carries the RECONCILEs, and which decides when one may go. */
 interface AttachExchangeOwner {
   readonly transport: ClientChannelTransport
-  readonly closed: boolean
   /** Advances each time the connection moves to another wire: what went out on the one before may not have arrived. */
   readonly wire: number
-  /** The wire can't take a RECONCILE now: it isn't open, or an upgrade is between its READY and its handoff. */
-  readonly reconcileHeld: boolean
-  dropWire(transport: ClientChannelTransport): void
+  /** A registration owes a RECONCILE, the task that registered it over: it goes now if the wire can take one. */
+  onReconcileDue(): void
+  /** The RECONCILED didn't come by the deadline, and the wire delivered nothing meanwhile. */
+  onReconcileLate(transport: ClientChannelTransport): void
 }
 
 type AttachExchangeOptions = {
@@ -108,19 +108,8 @@ class AttachExchange {
     this.isReconcileOwed = true
     this.registerReconcileTimer = setTimeout(() => {
       this.registerReconcileTimer = null
-      this.flushPendingRegisterReconcile()
+      this.owner.onReconcileDue()
     }, 0)
-  }
-
-  /** Sends the owed RECONCILE on the live wire; no-op when none is owed. While the wire can't take it (connecting,
-   *  awaiting a RECONCILED, from an upgrade's READY until its handoff) it stays owed: `reconcileOwed` keeps `sendsOpen`
-   *  false, so data frames buffer behind it, and `onTransportOpen` and an upgrade attempt's exit call this again. A
-   *  RECONCILED, the handoff's too, names what registered meanwhile in its follow-up. */
-  flushPendingRegisterReconcile(): void {
-    if (!this.isReconcileOwed) return
-    if (this.owner.reconcileHeld) return
-    if (this.isReconciling) return
-    this.sendReconcileBatch(this.stageReconcileBatch())
   }
 
   cancelRegisterReconcile(): void {
@@ -311,12 +300,12 @@ class AttachExchange {
   /** The RECONCILED didn't come by the deadline. Unless the wire delivered something meanwhile, it is dropped as on a
    *  missed pong, and `handleTransportLoss` reconnects. */
   private onReconcileTimeout(): void {
-    if (this.owner.closed || !this.isReconciling) return
+    if (!this.isReconciling) return
     const { transport } = this.owner
     // A RECONCILE waits behind what the page sent before: the wire is dead once it delivered nothing for the deadline.
     const quiet = transport.heartbeat?.quietFor() ?? Infinity
     if (quiet < RECONCILE_TIMEOUT_MS) return this.armReconcileDeadline(RECONCILE_TIMEOUT_MS - quiet)
-    this.owner.dropWire(transport)
+    this.owner.onReconcileLate(transport)
   }
 
   // ── The RECONCILE ──
