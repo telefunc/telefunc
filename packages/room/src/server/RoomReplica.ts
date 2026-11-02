@@ -129,6 +129,9 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
   /** The handles that observe the room (a client stub, a participant or a listener) or hold a tail. The replica keeps
    *  it in its own methods that a handle's change goes through, and holds them while they are served. */
   private readonly served = new Set<RoomHandle>()
+  /** The served handles that take what a lane carries: those with a listener or a tail. A message goes to each, so it
+   *  costs nothing per handle that takes none. */
+  private readonly receivers = new Set<RoomHandle>()
   /** What the served handles are to the room, which the lane plan reads. */
   private readonly roles = { observed: false, listened: false, tailHeld: false, owned: this.owners }
 
@@ -210,9 +213,11 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
     this.reconsider(handle)
   }
 
-  /** Keeps `served` and the roles the lane plan reads current with the handle. */
+  /** Keeps `served`, `receivers` and the roles the lane plan reads current with the handle. */
   private reconsider(handle: RoomHandle): void {
-    toggle(this.served, handle, handle.isObserved() || handle.holdsTail())
+    const tailHeld = handle.holdsTail()
+    toggle(this.served, handle, handle.isObserved() || tailHeld)
+    toggle(this.receivers, handle, handle.state.listenerCount > 0 || tailHeld)
     const roles = this.roles
     roles.observed = roles.listened = roles.tailHeld = false
     for (const served of this.served) {
@@ -220,11 +225,6 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
       roles.listened ||= served.state.listenerCount > 0
       roles.tailHeld ||= served.holdsTail()
     }
-  }
-
-  /** The served handles that take what a lane carries: those with a listener or a tail. */
-  private *receivers(): Generator<RoomHandle> {
-    for (const handle of this.served) if (handle.state.listenerCount > 0 || handle.holdsTail()) yield handle
   }
 
   own(member: string, handle: RoomHandle): void {
@@ -506,13 +506,13 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
   onTextData(serialized: string, info: OrderingInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope | Extract<RoomEnvelope, { __r: 'announce' }>
     if (envelope.__r === 'announce') {
-      for (const handle of this.receivers()) handle.local.relayAnnouncement(envelope.data, info)
+      for (const handle of this.receivers) handle.local.relayAnnouncement(envelope.data, info)
       const wireText = encodePublish(serialized, info)
       for (const stub of this.stubs) stub.relayAnnouncement(wireText, info)
       return
     }
     this.applyStamp(envelope.from, envelope)
-    for (const handle of this.receivers()) handle.relayData(serialized, envelope, info)
+    for (const handle of this.receivers) handle.relayData(serialized, envelope, info)
     if (this.stubs.size === 0) return
     const texts = new MemberMessageTexts(serialized, info, envelope)
     for (const stub of this.stubs) stub.relayText(serialized, texts, envelope.from, info)
@@ -521,7 +521,7 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
   onBinary(framed: Uint8Array, info: OrderingInfo): void {
     const unframed = decodeBinaryFrame(framed)
     assert(unframed)
-    for (const handle of this.receivers()) handle.local.relayBinary(unframed, info)
+    for (const handle of this.receivers) handle.local.relayBinary(unframed, info)
     if (this.stubs.size === 0) return
     const wireData = encodePublish(framed, info)
     for (const stub of this.stubs) stub.relayBinary(wireData, unframed.from, unframed.track, info)
@@ -586,7 +586,7 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
   /** Every leave the model applies, event or reconcile, runs the member's cleanup. */
   onMemberLeft(id: string, cause: LeaveCause, hidden: boolean | null): void {
     this.acks.settleMember(id, DM_FAILURE.left) // strand no waiter on a gone sender or recipient
-    for (const handle of this.receivers()) handle.local.forgetMember(id)
+    for (const handle of this.receivers) handle.local.forgetMember(id)
     const owner = this.owners.get(id)
     if (owner !== undefined) {
       this.disown(id, owner)
