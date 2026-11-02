@@ -1,10 +1,11 @@
 /// <reference types="@cloudflare/workers-types" />
 export { RoomAuthority }
-export type { AcceptedCommitWire, CloudflareRoomAuthorityStub, CommitWire, RegisterWire, RenewWire }
+export type { AcceptedCommitWire, CloudflareRoomAuthorityStub, CommitWire, OperationWire, RegisterWire, RenewWire }
 
 // A room's authority owns its time, state and fanout.
 
 import type {
+  CellCounter,
   CellsExchange,
   CellsExchangeResult,
   HeadExchangeResult,
@@ -28,6 +29,8 @@ import {
   type TelefuncExtensionNamespace,
 } from 'telefunc/__internal'
 import { assert } from '../utils/assert.js'
+import { OPERATION_COMMIT_LANE, recordOperation } from '../backend/operation.js'
+import { ROOM_OPERATIONS } from '../server/store/roomOperations.js'
 import { raceTimeout } from '../utils/raceTimeout.js'
 import { ROOM_HORIZON_MS } from '../server/constants.js'
 import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../backend/laneKey.js'
@@ -48,6 +51,7 @@ import {
   claimListingBucket,
   compareExchangeCells,
   compareExchangeHead,
+  dropCellPrefix,
   directoryDelete,
   directoryGet,
   directoryList,
@@ -78,6 +82,10 @@ type AcceptedCommitWire = {
 /** A commit the transaction accepted: its order, the lanes it reaches, and the routes subscribed to them then. */
 type AcceptedCommit = { kind: 'accepted'; mark: OrderingInfo; laneKeys: string[]; routes: RouteInstallation[] }
 type CommitWire = AcceptedCommitWire | StaleCommit
+/** An operation that ran, with its commit's receipt, or its incarnation stale. */
+type OperationWire =
+  | { kind: 'done'; value: unknown; counters: Map<string, CellCounter>; commit?: AcceptedCommitWire }
+  | { kind: 'stale-incarnation' }
 
 /** A route registered, or refused because its incarnation is dropped or closing. */
 type RegisterWire = 'registered' | 'dropped'
@@ -136,7 +144,6 @@ class RoomAuthority {
 
   async commitLane(inc: string, lane: LaneId, payload: Uint8Array, opts?: CommitOptions): Promise<CommitWire> {
     const now = Date.now()
-    const key = encodeLaneKey(lane)
     const outcome = this.transaction((sql): StaleCommit | AcceptedCommit => {
       if (!commitPreconditionHolds(readLiveHead(sql, now), inc, lane.kind, opts?.closingLease, now)) {
         return { kind: 'stale-incarnation' }
@@ -147,15 +154,51 @@ class RoomAuthority {
         const missing = opts.requiredCellKeys.find((cell) => !required.cells.has(cell))
         if (missing !== undefined) return { kind: 'stale-cell', key: missing }
       }
-      const mark = advanceOrder(sql, inc, key, now)
-      if (opts?.retain === true) installRetained(sql, inc, lane, payload, mark)
-      // A binary commit also reaches its member's every-track lane and its track's every-member lane.
-      const laneKeys =
-        lane.kind === 'binary' ? [key, everyTrackLaneKey(lane.member), everyMemberLaneKey(lane.track)] : [key]
-      return { kind: 'accepted', mark, laneKeys, routes: snapshotRoutes(sql, inc, laneKeys, now) }
+      return commitIn(sql, inc, lane, payload, opts?.retain === true, now)
     })
     if (outcome.kind !== 'accepted') return outcome
-    const { mark, laneKeys, routes } = outcome
+    return await this.deliver(inc, lane, payload, outcome)
+  }
+
+  /** Runs the operation `name` names in one transaction, which a plan that throws rolls back, then fans its commit
+   *  out. */
+  async runOperation(inc: string, name: string, args: unknown): Promise<OperationWire> {
+    const operation = ROOM_OPERATIONS.get(name)
+    assert(operation !== undefined)
+    const now = Date.now()
+    const outcome = this.transaction((sql) => {
+      if (!isOpenIncarnation(readLiveHead(sql, now), inc)) return { kind: 'stale-incarnation' } as const
+      const { value, writes } = recordOperation(operation, args as never, {
+        now,
+        cell: (key) => selectCell(sql, inc, key, now),
+        retained: (lane) => readRetained(sql, inc, lane),
+      })
+      for (const prefix of writes.prefixes) dropCellPrefix(sql, inc, prefix)
+      const exchange = { expect: [], mutations: writes.mutations, counts: writes.counts }
+      const exchanged = compareExchangeCells(sql, inc, exchange, now)
+      assert(exchanged.kind === 'committed') // nothing expected, in an incarnation found open
+      for (const member of writes.members) {
+        dropLaneOrderRows(sql, inc, member)
+        for (const lane of listRetained(sql, inc, { member })) deleteRetained(sql, inc, lane)
+      }
+      for (const { lane, seq } of writes.retained) deleteRetained(sql, inc, lane, { ifSeq: seq })
+      const commit =
+        writes.commit === null ? null : commitIn(sql, inc, OPERATION_COMMIT_LANE, writes.commit, false, now)
+      return { kind: 'done', value, counters: exchanged.counters, commit, payload: writes.commit } as const
+    })
+    if (outcome.kind !== 'done') return outcome
+    const { value, counters, commit, payload } = outcome
+    if (commit === null || payload === null) return { kind: 'done', value, counters }
+    return { kind: 'done', value, counters, commit: await this.deliver(inc, OPERATION_COMMIT_LANE, payload, commit) }
+  }
+
+  /** Fans a commit out; an inbox or control commit's receipt waits for its handoff. */
+  private async deliver(
+    inc: string,
+    lane: LaneId,
+    payload: Uint8Array,
+    { mark, laneKeys, routes }: AcceptedCommit,
+  ): Promise<AcceptedCommitWire> {
     const delivery = this.fanout.send(inc, laneKeys, routes, payload, mark)
     const receipt: AcceptedCommitWire = { kind: 'accepted', seq: mark.seq, timestamp: mark.timestamp }
     if (lane.kind !== 'inbox' && lane.kind !== 'control') return receipt
@@ -320,6 +363,30 @@ class RoomAuthority {
     if (deadline <= now && currentAlarm !== null && currentAlarm <= nextAlarm) return
     await this.ctx.storage.setAlarm(nextAlarm)
   }
+}
+
+/** Orders a commit on `lane` in a transaction that found the incarnation open, and retains it with `retain`. */
+function commitIn(
+  sql: SqlStorage,
+  inc: string,
+  lane: LaneId,
+  payload: Uint8Array,
+  retain: boolean,
+  now: number,
+): AcceptedCommit {
+  const key = encodeLaneKey(lane)
+  const mark = advanceOrder(sql, inc, key, now)
+  if (retain) installRetained(sql, inc, lane, payload, mark)
+  // A binary commit also reaches its member's every-track lane and its track's every-member lane.
+  const laneKeys =
+    lane.kind === 'binary' ? [key, everyTrackLaneKey(lane.member), everyMemberLaneKey(lane.track)] : [key]
+  return { kind: 'accepted', mark, laneKeys, routes: snapshotRoutes(sql, inc, laneKeys, now) }
+}
+
+function selectCell(sql: SqlStorage, inc: string, key: string, now: number): Uint8Array | undefined {
+  const read = readCells(sql, inc, { keys: [key] }, now)
+  assert(read.kind === 'read') // the operation found this incarnation open
+  return read.cells.get(key)
 }
 
 /** Null once each session DO took the delivery, else why it was lost: a handoff unconfirmed within the horizon is. */

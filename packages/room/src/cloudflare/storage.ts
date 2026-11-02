@@ -18,6 +18,7 @@ export {
   readCellPage,
   readOrder,
   compareExchangeCells,
+  dropCellPrefix,
   advanceOrder,
   dropLaneOrderRows,
   dropIncarnationRows,
@@ -331,6 +332,12 @@ function cellVersion(sql: SqlStorage, inc: string, key: string): string | null {
 function writeCell(sql: SqlStorage, inc: string, key: string, bytes: Uint8Array | null, version: number): void {
   if (bytes === null) sql.exec('DELETE FROM cell WHERE inc = ? AND key = ?', inc, key)
   else sql.exec('INSERT OR REPLACE INTO cell (inc, key, bytes, version) VALUES (?, ?, ?, ?)', inc, key, bytes, version)
+}
+
+/** Deletes the incarnation's cells under `prefix`. */
+function dropCellPrefix(sql: SqlStorage, inc: string, prefix: string): void {
+  const range = keyRange('key', prefix)
+  sql.exec(`DELETE FROM cell WHERE inc = ? AND ${range.where}`, inc, ...range.args)
 }
 
 /** Cell writes are all-or-nothing while every expected cell is at its version, and require an open head. */

@@ -3,7 +3,9 @@ export { MemoryRoomDriver }
 // The in-process Room driver, and the reference for Room SPI semantics: its clock is authority time.
 
 import type {
+  CellCount,
   CellCounter,
+  CellMutation,
   CellsExchange,
   CellsExchangeResult,
   CommitResult,
@@ -16,14 +18,18 @@ import type {
   RoomSubscriptionSource,
   CellSelector,
   CellsRead,
+  CommitAccepted,
   CommitOptions,
   CommitTarget,
+  OperationResult,
   RetainedFrame,
   RetainedOf,
+  RoomOperation,
   DirectoryPage,
 } from './contract.js'
 import { CELL_PAGE_SIZE, DIRECTORY_PAGE_SIZE } from './contract.js'
 import { encodeLaneKey } from './laneKey.js'
+import { OPERATION_COMMIT_LANE, recordOperation } from './operation.js'
 import {
   commitPreconditionHolds,
   countCell,
@@ -188,6 +194,41 @@ function setCell(incarnation: Incarnation, key: string, bytes: Uint8Array | null
   incarnation.cells.set(key, { bytes: copyBytes(bytes), version })
 }
 
+/** Applies the mutations and counts as one write, at the incarnation's next version; returns each counted counter. */
+function applyCells(
+  incarnation: Incarnation,
+  mutations: readonly CellMutation[],
+  counts: readonly CellCount[],
+): Map<string, CellCounter> {
+  const version = String(++incarnation.version)
+  for (const mutation of mutations) setCell(incarnation, mutation.key, mutation.bytes, version)
+  const counters = new Map<string, CellCounter>()
+  for (const count of counts) {
+    const counted = countCell(incarnation.cells.get(count.key)?.bytes, count, Date.now())
+    if (counted === null) continue
+    if (counted.written) setCell(incarnation, count.key, encodeCellCounter(counted.counter), version)
+    counters.set(count.key, counted.counter)
+  }
+  return counters
+}
+
+function deleteRetainedEntry(incarnation: Incarnation, lane: LaneId, ifSeq?: number): void {
+  const key = encodeLaneKey(lane)
+  if (ifSeq !== undefined && incarnation.retained.get(key)?.seq !== ifSeq) return
+  incarnation.retained.delete(key)
+  if (lane.kind !== 'binary') return
+  unindex(incarnation.retainedOf, lane.member, key)
+  unindex(incarnation.retainedOfTrack, lane.track, key)
+}
+
+/** Forgets `member`'s lanes' order and the frames its binary lanes retained. */
+function dropMemberLanes(incarnation: Incarnation, member: string): void {
+  incarnation.memberOrders.delete(member)
+  for (const key of [...(incarnation.retainedOf.get(member) ?? [])]) {
+    deleteRetainedEntry(incarnation, incarnation.retained.get(key)!.lane)
+  }
+}
+
 function advanceOrder(order: Map<string, OrderingInfo>, domain: string, now: number): OrderingInfo {
   const mark = nextOrdering(order.get(domain), now)
   order.set(domain, mark)
@@ -267,16 +308,45 @@ class MemoryRoomDriver implements RoomDriver {
     const incarnation = this.incarnation(room, inc)
     if (exchange.expect.some(({ key, version }) => (incarnation.cells.get(key)?.version ?? null) !== version))
       return { kind: 'conflict' }
-    const version = String(++incarnation.version)
-    for (const mutation of exchange.mutations) setCell(incarnation, mutation.key, mutation.bytes, version)
-    const counters = new Map<string, CellCounter>()
-    for (const count of exchange.counts ?? []) {
-      const counted = countCell(incarnation.cells.get(count.key)?.bytes, count, Date.now())
-      if (counted === null) continue
-      if (counted.written) setCell(incarnation, count.key, encodeCellCounter(counted.counter), version)
-      counters.set(count.key, counted.counter)
+    return { kind: 'committed', counters: applyCells(incarnation, exchange.mutations, exchange.counts ?? []) }
+  }
+
+  /** Synchronous from its read to its commit's seq, so nothing runs between. */
+  async runOperation<Args, Value>(
+    roomId: string,
+    inc: string,
+    operation: RoomOperation<Args, Value>,
+    args: Args,
+  ): Promise<OperationResult<Value>> {
+    const room = this.rooms.get(roomId)
+    if (room === undefined || !isOpenIncarnation(this.liveHead(room), inc)) return { kind: 'stale-incarnation' }
+    const incarnation = this.incarnation(room, inc)
+    const { value, writes } = recordOperation(operation, args, {
+      now: Date.now(),
+      cell: (key) => {
+        const cell = incarnation.cells.get(key)
+        return cell === undefined ? undefined : copyBytes(cell.bytes)
+      },
+      retained: (lane) => {
+        const entry = incarnation.retained.get(encodeLaneKey(lane))
+        return entry === undefined
+          ? null
+          : { payload: copyBytes(entry.payload), seq: entry.seq, timestamp: entry.timestamp }
+      },
+    })
+    for (const prefix of writes.prefixes) {
+      for (const key of [...cellKeysWithPrefix(incarnation, prefix)]) setCell(incarnation, key, null, '')
     }
-    return { kind: 'committed', counters }
+    const counters = applyCells(incarnation, writes.mutations, writes.counts)
+    for (const member of writes.members) dropMemberLanes(incarnation, member)
+    for (const { lane, seq } of writes.retained) deleteRetainedEntry(incarnation, lane, seq)
+    if (writes.commit === null) return { kind: 'done', value, counters }
+    return {
+      kind: 'done',
+      value,
+      counters,
+      commit: await this.commitOn(incarnation, OPERATION_COMMIT_LANE, writes.commit),
+    }
   }
 
   async commitLane(
@@ -292,6 +362,16 @@ class MemoryRoomDriver implements RoomDriver {
     const incarnation = this.incarnation(room, inc)
     const missing = opts?.requiredCellKeys?.find((key) => !incarnation.cells.has(key))
     if (missing !== undefined) return { kind: 'stale-cell', key: missing }
+    return await this.commitOn(incarnation, lane, payload, opts?.retain)
+  }
+
+  /** Assigns the commit's seq and queues its delivery in one synchronous step, so deliveries run in seq order. */
+  private async commitOn(
+    incarnation: Incarnation,
+    lane: LaneId,
+    payload: Uint8Array,
+    retain?: boolean,
+  ): Promise<CommitAccepted> {
     const key = encodeLaneKey(lane)
     const frame = copyBytes(payload)
     const order =
@@ -299,7 +379,7 @@ class MemoryRoomDriver implements RoomDriver {
         ? getOrCreate(incarnation.memberOrders, lane.member, () => new Map())
         : incarnation.order
     const mark = advanceOrder(order, key, Date.now())
-    if (opts?.retain) {
+    if (retain) {
       // A lane holding a retained frame is already indexed: its frame and index entries leave together.
       if (lane.kind === 'binary' && !incarnation.retained.has(key)) {
         getOrCreate(incarnation.retainedOf, lane.member, () => new Set()).add(key)
@@ -313,10 +393,9 @@ class MemoryRoomDriver implements RoomDriver {
     const everyTrack = binary ? (incarnation.everyTrackSubs.get(lane.member) ?? NO_TARGETS) : NO_TARGETS
     const everyMember = binary ? (incarnation.everyMemberSubs.get(lane.track) ?? NO_TARGETS) : NO_TARGETS
     const delivered = lane.kind === 'inbox' || lane.kind === 'control' ? createDeferred() : null
-    // Commits assign their seq and queue their delivery in one synchronous step, so deliveries run in seq order.
     const nextTurn = this.pubSub.deliverSoon(() => {
       // A subscriber may write into the bytes it is given, which a retained frame must not share.
-      const shared = opts?.retain ? copyBytes(frame) : frame
+      const shared = retain ? copyBytes(frame) : frame
       for (const target of targets) target.deliver(shared, mark)
       for (const target of everyTrack) target.deliver(shared, mark)
       for (const target of everyMember) target.deliver(shared, mark)
@@ -351,13 +430,7 @@ class MemoryRoomDriver implements RoomDriver {
 
   async deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
     const incarnation = this.rooms.get(roomId)?.incarnations.get(inc)
-    const key = encodeLaneKey(lane)
-    if (incarnation === undefined || (opts?.ifSeq !== undefined && incarnation.retained.get(key)?.seq !== opts.ifSeq))
-      return
-    incarnation.retained.delete(key)
-    if (lane.kind !== 'binary') return
-    unindex(incarnation.retainedOf, lane.member, key)
-    unindex(incarnation.retainedOfTrack, lane.track, key)
+    if (incarnation !== undefined) deleteRetainedEntry(incarnation, lane, opts?.ifSeq)
   }
 
   async dropLaneOrders(roomId: string, inc: string, member: string): Promise<void> {

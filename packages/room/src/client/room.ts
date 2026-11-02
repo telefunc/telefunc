@@ -425,7 +425,7 @@ class ClientRoom extends RoomStateView implements Room {
 
   private async applyRoster(stream: RosterStream, members: MemberSnapshot[]): Promise<void> {
     try {
-      await this.model.reconcileRoster({ members, departing: new Set() }, stream.events)
+      await this.model.reconcileRoster({ members }, stream.events)
       // A meta change of one's own that a gap dropped, as while offline, is in the roster whole.
       for (const [id, local] of this.localParticipants) {
         const accepted = this.model.acceptedMeta(id)

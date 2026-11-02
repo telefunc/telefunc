@@ -15,20 +15,23 @@ import type {
   HeadExpectation,
   HeadNext,
   LaneId,
+  OperationResult,
   RetainedFrame,
   RetainedOf,
   RoomDriver,
   RoomHead,
+  RoomOperation,
   RoomSubscriptionSource,
 } from '../backend/contract.js'
 import type { BackendReceiver, CloudflarePlaneKit, DriverAttempt, OrderingInfo } from 'telefunc/__internal'
 import { CLOUDFLARE_BUCKETS, currentCloudflareHostKey, currentCloudflareMember } from 'telefunc/__internal'
-import type { CloudflareRoomAuthorityStub } from './RoomAuthority.js'
+import type { AcceptedCommitWire, CloudflareRoomAuthorityStub } from './RoomAuthority.js'
 import { currentRoomSessionSubscriptions } from './RoomSessionSubscriptions.js'
 import { openRegionDirectory, openRoomAuthority } from './objects.js'
 import { compareCodePoints } from '../utils/SortedIds.js'
 import { assert } from '../utils/assert.js'
 import { markHandled } from '../utils/markHandled.js'
+import { OPERATION_COMMIT_LANE } from '../backend/operation.js'
 
 /** A subscription requires its session DO's context; a lane commit made in one goes through that session's ordered
  *  stub. */
@@ -86,11 +89,24 @@ class CloudflareRoomDriver implements RoomDriver {
     // From a session DO, through its ordered stub, so its commits to a room keep the order Room sent them in.
     const session = currentRoomSessionSubscriptions(this)
     const wire = await (session ? session.callAuthority(roomId, commit) : commit(this.stub(roomId)))
-    if (wire.kind !== 'accepted') return wire
-    const receipt: CommitAccepted = { kind: 'accepted', seq: wire.seq, timestamp: wire.timestamp }
-    // The authority replied once the delivery was handed off.
-    if (lane.kind === 'inbox' || lane.kind === 'control') receipt.delivery = handoff(wire.lost)
-    return receipt
+    return wire.kind === 'accepted' ? receiptOf(lane, wire) : wire
+  }
+
+  /** In the room's authority, by the operation's name, through the session's ordered stub as a commit goes. */
+  async runOperation<Args, Value>(
+    roomId: string,
+    inc: string,
+    operation: RoomOperation<Args, Value>,
+    args: Args,
+  ): Promise<OperationResult<Value>> {
+    const run = (stub: CloudflareRoomAuthorityStub) => stub.runOperation(inc, operation.name, args)
+    const session = currentRoomSessionSubscriptions(this)
+    const wire = await (session ? session.callAuthority(roomId, run) : run(this.stub(roomId)))
+    if (wire.kind !== 'done') return wire
+    const { value, counters, commit } = wire
+    const done: OperationResult<Value> = { kind: 'done', value: value as Value, counters }
+    if (commit !== undefined) done.commit = receiptOf(OPERATION_COMMIT_LANE, commit)
+    return done
   }
 
   async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {
@@ -155,9 +171,13 @@ class CloudflareRoomDriver implements RoomDriver {
   }
 }
 
-/** A handoff the authority reported, rejecting with why it was lost; its committer awaits it. */
-function handoff(lost: string | undefined): Promise<void> {
-  return lost === undefined ? Promise.resolve() : markHandled(Promise.reject(new Error(lost)))
+/** An inbox or control commit's receipt comes once its delivery was handed off: its delivery rejects with why it was
+ *  lost, if it was, for its committer to await. */
+function receiptOf(lane: LaneId, { seq, timestamp, lost }: AcceptedCommitWire): CommitAccepted {
+  const receipt: CommitAccepted = { kind: 'accepted', seq, timestamp }
+  if (lane.kind !== 'inbox' && lane.kind !== 'control') return receipt
+  receipt.delivery = lost === undefined ? Promise.resolve() : markHandled(Promise.reject(new Error(lost)))
+  return receipt
 }
 
 /** One page of the regions' pages, in code point order. A region that has more past its page may list a room before

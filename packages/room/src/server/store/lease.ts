@@ -1,4 +1,5 @@
-export { RoomLease, mutateHosted, holdViews, removeView, renewLease, finishLeaseCleanups, reapLapsedLeases, reapLeases }
+export { RoomLease, leaseHosting, mutateHosted, holdViews, removeView, renewLease, reapLapsedLeases, reapLeases }
+export type { LeaseState }
 
 // A server's lease in one room incarnation, on the store's clock: the members it joined and the pages' views it holds
 // name it, its server renews it, and once it lapses one other server claims it and removes them.
@@ -10,13 +11,11 @@ import { decodeRoomRecord, decodeRoomText } from '../lanes/lanes.js'
 import { afterHoldChange, holdDelta } from '../lifecycle/hold.js'
 import type { RoomIncarnation } from '../protocol.js'
 import {
-  CLEANUP_CELL_PREFIX,
   LEASE_CELL_PREFIX,
   leaseCellKey,
   leaseMemberCellKey,
   leaseMemberCellPrefix,
   leaseViewCellPrefix,
-  memberIdOfCleanupKey,
   memberIdOfLeaseMemberKey,
   viewCellKey,
 } from './cells.js'
@@ -29,7 +28,7 @@ import {
   type CellPlan,
   type CellsAt,
 } from './cellStore.js'
-import { evictMember, finishCleanup, type PendingMemberCleanup } from './members.js'
+import { evictMember } from './members.js'
 assertIsNotBrowser()
 
 const leaseTextEncoder = new TextEncoder()
@@ -67,12 +66,7 @@ class RoomLease {
    *  cell is live, a new lease while it is absent or lapsed unclaimed, `null` once the lease is lost. */
   hosting(id: string, cells: ReadonlyMap<string, Uint8Array>, now: number): CellMutation[] | null {
     if (id !== this._id) return null
-    const key = leaseCellKey(id)
-    const raw = cells.get(key)
-    if (raw === undefined) return this._created ? null : [{ key, bytes: leaseRecordBytes(now) }]
-    const record = decodeLeaseRecord(raw)
-    if (record.cleaner !== undefined) return null
-    return record.until < now ? [{ key, bytes: leaseRecordBytes(now) }] : []
+    return leaseHosting({ id, created: this._created }, cells.get(leaseCellKey(id)), now)
   }
 
   /** Runs `write`, the exchange writing the cell, unless one already runs: the writes waiting to host something await
@@ -94,6 +88,19 @@ class RoomLease {
     this._id = crypto.randomUUID()
     this._created = false
   }
+}
+
+/** A lease as a write hosting something under it saw it: its id, and whether a write created its cell. */
+type LeaseState = { id: string; created: boolean }
+
+/** What a write hosting something under `lease` adds, given the lease's cell as it read it: nothing while the cell is
+ *  live, a new lease while it is absent or lapsed unclaimed, `null` once the lease is lost. */
+function leaseHosting({ id, created }: LeaseState, raw: Uint8Array | undefined, now: number): CellMutation[] | null {
+  const key = leaseCellKey(id)
+  if (raw === undefined) return created ? null : [{ key, bytes: leaseRecordBytes(now) }]
+  const record = decodeLeaseRecord(raw)
+  if (record.cleaner !== undefined) return null
+  return record.until < now ? [{ key, bytes: leaseRecordBytes(now) }] : []
 }
 
 /** An exchange hosting something under a lease found it lost. */
@@ -187,27 +194,8 @@ async function renewLease(room: RoomIncarnation, lease: RoomLease): Promise<bool
   return renewed
 }
 
-/** Finishes the cleanups of the lease's members that were pending at the last call too: their evicting server, this
- *  one or another, stopped before finishing them. Returns the ones pending now, for the next call. */
-async function finishLeaseCleanups(
-  room: RoomIncarnation,
-  lease: RoomLease,
-  pendingBefore: ReadonlySet<string>,
-): Promise<Set<string>> {
-  const pending = new Set<string>()
-  if (!lease.created) return pending
-  const cleanups = await readPrefix(room.id, room.inc, CLEANUP_CELL_PREFIX)
-  await eachInFlight(cleanups, async ([key, raw]) => {
-    if (decodeRoomRecord<PendingMemberCleanup>(raw).session !== lease.id) return
-    if (pendingBefore.has(key)) await finishCleanup(room, memberIdOfCleanupKey(key))
-    else pending.add(key)
-  })
-  return pending
-}
-
-/** Claims each lapsed lease and removes what it hosted: its members, each leaving `'disconnected'`, their cleanups
- *  its server left unfinished, and its pages' views; then the lease. A claim lapses as a lease does, so a claimant
- *  that stops leaves the rest to the next. */
+/** Claims each lapsed lease and removes what it hosted: its members, each leaving `'disconnected'`, and its pages'
+ *  views; then the lease. A claim lapses as a lease does, so a claimant that stops leaves the rest to the next. */
 async function reapLapsedLeases(room: RoomIncarnation): Promise<void> {
   await reapLeases(room, await readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX))
 }
@@ -231,7 +219,7 @@ async function reapLeases(room: RoomIncarnation, { cells, now }: CellsAt): Promi
 
 async function cleanLease(room: RoomIncarnation, lease: string, cleaner: string): Promise<void> {
   const marks = await readPrefix(room.id, room.inc, leaseMemberCellPrefix(lease))
-  await eachInFlight(marks.keys(), (key) => finishLeaseMember(room, lease, memberIdOfLeaseMemberKey(key)))
+  await eachInFlight(marks.keys(), (key) => evictMember(room, memberIdOfLeaseMemberKey(key), { type: 'disconnected' }))
   const views = await readPrefix(room.id, room.inc, leaseViewCellPrefix(lease))
   await eachInFlight(views.keys(), (key) => removeView(room, key))
   const key = leaseCellKey(lease)
@@ -240,14 +228,4 @@ async function cleanLease(room: RoomIncarnation, lease: string, cleaner: string)
     const ours = raw !== undefined && decodeLeaseRecord(raw).cleaner === cleaner
     return { value: undefined, mutations: ours ? [{ key, bytes: null }] : [] }
   })
-}
-
-/** A member of a lapsed lease leaves, or finishes leaving. */
-async function finishLeaseMember(room: RoomIncarnation, lease: string, id: string): Promise<void> {
-  if (await evictMember(room, id, { type: 'disconnected' })) return
-  const mark = leaseMemberCellKey(lease, id)
-  await mutateCells(room.id, room.inc, [mark], (current) => ({
-    value: undefined,
-    mutations: current.has(mark) ? [{ key: mark, bytes: null }] : [],
-  }))
 }

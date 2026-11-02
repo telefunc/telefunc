@@ -14,6 +14,7 @@ export {
   decodeRoomText,
   encodeDemandPage,
   encodeRoomRecord,
+  handedOff,
   withinRoomHorizon,
 }
 

@@ -18,8 +18,10 @@ import type {
   HeadExpectation,
   HeadNext,
   LaneId,
+  OperationResult,
   RetainedFrame,
   RoomDriver,
+  RoomOperation,
   RoomSubscriptionSource,
 } from './contract.js'
 import { roomSubscriptionSourceKey } from './laneKey.js'
@@ -52,6 +54,17 @@ class RoomPlane {
   async commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
     const result = await this.driver.commitLane(target, payload, opts)
     if (result.kind === 'accepted') assertDriverOrdering(result)
+    return result
+  }
+
+  async runOperation<Args, Value>(
+    roomId: string,
+    inc: string,
+    operation: RoomOperation<Args, Value>,
+    args: Args,
+  ): Promise<OperationResult<Value>> {
+    const result = await this.driver.runOperation(roomId, inc, operation, args)
+    if (result.kind === 'done' && result.commit !== undefined) assertDriverOrdering(result.commit)
     return result
   }
 

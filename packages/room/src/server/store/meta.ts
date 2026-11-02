@@ -4,10 +4,9 @@ export {
   writeRoomMeta,
   dropReplacedMetaGenerations,
   memberMetaMutations,
-  writeMemberMeta,
+  SET_MEMBER_META,
+  setMemberMeta,
   writeMemberConnection,
-  dropMemberMetaGeneration,
-  dropMemberMeta,
   readMembersMetaCells,
   memberMetaOf,
 }
@@ -15,13 +14,18 @@ export type { StoredRoomMeta, RoomMetaWrite, MemberMetaWrite, MemberMetaCells }
 
 import { getOrCreate } from '../../utils/getOrCreate.js'
 import { getRoomPlane } from '../../backend/plane.js'
-import { CELL_PAGE_SIZE, type CellMutation, type CellsExchangeResult } from '../../backend/contract.js'
+import {
+  CELL_PAGE_SIZE,
+  type CellMutation,
+  type CellsExchangeResult,
+  type RoomOperation,
+} from '../../backend/contract.js'
 import { decodeCellCounter } from '../../backend/semantics.js'
 import { Slice } from '../../shared/Slice.js'
 import { participantGoneError, roomClosedError } from '../../shared/errors.js'
 import { compareMetaEntries, metaEntriesAt } from '../../shared/RoomMetaState.js'
 import { mergeAttributes } from '../../shared/RoomModel.js'
-import type { MemberMetaUpdate, RoomMetaEntry, RoomMetaUpdate } from '../../shared/protocol.js'
+import type { MemberMetaUpdate, RoomCtrlEnvelope, RoomMetaEntry, RoomMetaUpdate } from '../../shared/protocol.js'
 import type { RoomConfigRecord, RoomMemberRecord, RoomIncarnation } from '../protocol.js'
 import type { ParticipantMeta, RoomMeta } from '../../types.js'
 import {
@@ -42,6 +46,7 @@ import {
 } from './cells.js'
 import { EXCHANGE_CONFLICT, retryCompareExchange } from './retryCompareExchange.js'
 import { deleteCells, dropCells, readOpenCells } from './cellStore.js'
+import { runOperation } from './operations.js'
 import { acceptedOrThrow, commitLane, controlLane, decodeRoomRecord, encodeRoomRecord } from '../lanes/lanes.js'
 
 // A meta, the room's or a member's, is a cell per top-level key under its generation's prefix, each holding the
@@ -282,49 +287,55 @@ function memberMetaMutations(id: string, meta: ParticipantMeta): CellMutation[] 
   return metaEntriesAt(meta, 0).map((entry) => metaKeyMutation(prefix, entry))
 }
 
-/** One exchange that expects the member's record, which counts each meta write in `metaSeq`.
- *  A merge writes its keys, a key already there keeping its place; a replace writes its keys and its mark into a new
- *  generation and returns the one it `replaced`, for `dropMemberMetaGeneration`. New keys are placed at the write's own
- *  `metaSeq`. Each costs the keys it was given. */
-async function writeMemberMeta(
-  room: RoomIncarnation,
-  id: string,
-  write: MemberMetaWrite,
-): Promise<{ update: MemberMetaUpdate; hidden: boolean; replaced: number | null }> {
-  const plane = getRoomPlane()
-  const memberKey = memberCellKey(id)
-  return await retryCompareExchange(async () => {
-    const read = await readOpenCells(room.id, room.inc, [memberKey])
-    const raw = read.cells.get(memberKey)
-    if (raw === undefined) throw participantGoneError(id)
+type SetMemberMetaArgs = { id: string; write: MemberMetaWrite }
+type MemberMetaWritten = { update: MemberMetaUpdate; event: Extract<RoomCtrlEnvelope, { __r: 'p-meta' }> }
+
+/** A member's meta write and its event, counted in the record's `metaSeq`; `'gone'` once the member left. A merge
+ *  writes its keys, a key already there keeping its place; a replace writes its keys and its mark into a new
+ *  generation, which the old one's cells leave with. New keys are placed at the write's own `metaSeq`. */
+const SET_MEMBER_META: RoomOperation<SetMemberMetaArgs, MemberMetaWritten | 'gone'> = {
+  name: 'setMemberMeta',
+  plan(tx, { id, write }) {
+    const memberKey = memberCellKey(id)
+    const raw = tx.cell(memberKey)
+    if (raw === undefined) return 'gone'
     const record = decodeRoomRecord<RoomMemberRecord>(raw)
     const seq = record.metaSeq + 1
     const gen = 'replace' in write ? seq : record.metaGen
     const prefix = memberMetaGenPrefix(id, gen)
-    let mutations: CellMutation[]
-    if ('replace' in write) {
-      mutations = metaEntriesAt(write.replace, seq).map((entry) => metaKeyMutation(prefix, entry))
-      mutations.push({ key: prefix, bytes: new Uint8Array() })
-    } else {
-      const keys = Object.keys(write.merge).map((key) => metaKeyCellKey(prefix, key))
-      const merging = keys.length === 0 ? new Map() : (await readOpenCells(room.id, room.inc, keys)).cells
-      mutations = metaChanges(write.merge, prefix, seq, merging).map((change) => changeMutation(prefix, change))
-    }
-    const next: RoomMemberRecord = { ...record, metaSeq: seq, metaGen: gen }
-    mutations.push({ key: memberKey, bytes: encodeRoomRecord(next) })
-    const expect = [{ key: memberKey, version: read.versions.get(memberKey)! }]
-    const result = await plane.driver.compareExchangeCells(room.id, room.inc, { expect, mutations })
-    if (result.kind === 'stale-incarnation') throw roomClosedError(room.id)
-    if (result.kind === 'conflict') return EXCHANGE_CONFLICT
     let update: MemberMetaUpdate
     if ('replace' in write) {
+      tx.dropPrefix(memberMetaGenPrefix(id, record.metaGen))
+      for (const entry of metaEntriesAt(write.replace, seq)) tx.write(metaKeyMutation(prefix, entry))
+      tx.write({ key: prefix, bytes: new Uint8Array() })
       update = { seq, meta: write.replace }
       if (record.disconnected) update.disconnected = true
     } else {
+      const merging = new Map<string, Uint8Array>()
+      for (const key of Object.keys(write.merge)) {
+        const cellKey = metaKeyCellKey(prefix, key)
+        const cell = tx.cell(cellKey)
+        if (cell !== undefined) merging.set(cellKey, cell)
+      }
+      for (const change of metaChanges(write.merge, prefix, seq, merging)) tx.write(changeMutation(prefix, change))
       update = { seq, attrs: write.merge }
     }
-    return { update, hidden: record.hidden === true, replaced: gen === record.metaGen ? null : record.metaGen }
-  })
+    tx.write({
+      key: memberKey,
+      bytes: encodeRoomRecord({ ...record, metaSeq: seq, metaGen: gen } satisfies RoomMemberRecord),
+    })
+    const event: MemberMetaWritten['event'] = { __r: 'p-meta', id, ...update }
+    if (record.hidden) event.hidden = true
+    tx.commit(encodeRoomRecord(event))
+    return { update, event }
+  },
+}
+
+/** Writes member `id`'s meta with its event. */
+async function setMemberMeta(room: RoomIncarnation, id: string, write: MemberMetaWrite): Promise<MemberMetaWritten> {
+  const { value } = await runOperation(room, SET_MEMBER_META, { id, write })
+  if (value === 'gone') throw participantGoneError(id)
+  return value
 }
 
 /** The connection of the page holding member `id`, at the next `metaSeq`; null when the record already has it. */
@@ -351,18 +362,6 @@ async function writeMemberConnection(
     if (result.kind === 'conflict') return EXCHANGE_CONFLICT
     return { update: { seq, connected }, hidden: record.hidden === true }
   })
-}
-
-/** A generation a replace left, which stopped being the record's `metaGen` in its exchange, a page per exchange and a
- *  `ROOM_PLAN_SLICE_MS` slice per turn; its last page goes with the mark the replace wrote under its own generation
- *  `next`, so a read finding part of it finds a newer generation too. */
-function dropMemberMetaGeneration(room: RoomIncarnation, id: string, gen: number, next: number): Promise<boolean> {
-  return dropCells(room.id, room.inc, memberMetaGenPrefix(id, gen), memberMetaGenPrefix(id, next))
-}
-
-/** Every generation of a member's meta, once its eviction removed the record. */
-async function dropMemberMeta(roomId: string, inc: string, id: string): Promise<void> {
-  await dropCells(roomId, inc, memberMetaCellPrefix(id))
 }
 
 /** The meta cells of every member, or of member `id`, by member, read after their `records` (by cell key). A page is

@@ -23,20 +23,25 @@ export type {
   HeadExchangeResult,
   HeadNext,
   LaneId,
+  OperationResult,
+  OperationTx,
   RoomDriver,
+  RoomOperation,
   RoomHead,
   RoomPlaneKit,
   RoomSubscriptionSource,
 }
 
 import type { BackendReceiver, DriverAttempt, OrderingInfo, SubscriptionDriver } from 'telefunc/__internal'
+import type { recordOperation } from './operation.js'
 
 /** The cells a prefix read's page holds. */
 const CELL_PAGE_SIZE = 1024
 /** The entries a due read's page holds, and a directory list's per region: a Cloudflare page merges each region's. */
 const DIRECTORY_PAGE_SIZE = 100
 
-/** Room's lane keys and page sizes, which `backendPlane()` hands a backend's Room driver. */
+/** Room's lane keys, page sizes and operation recorder, which `backendPlane()` hands a backend's Room driver: a backend
+ *  package imports Room for types only, as a Broadcast-only app doesn't install it. */
 type RoomPlaneKit = {
   encodeLaneKey(lane: LaneId | EveryTrackLane | EveryMemberLane): string
   decodeLaneKey(key: string): LaneId
@@ -44,6 +49,8 @@ type RoomPlaneKit = {
   everyTrackLaneKey(member: string): string
   CELL_PAGE_SIZE: number
   DIRECTORY_PAGE_SIZE: number
+  recordOperation: typeof recordOperation
+  OPERATION_COMMIT_LANE: LaneId
 }
 
 /** Each lane is its own ordering domain: one semantic, one control, one demand, one per member for inbox, and one per
@@ -152,6 +159,31 @@ type StaleCommit = StaleIncarnation | { kind: 'stale-cell'; key: string }
 
 type CommitResult = CommitAccepted | StaleCommit
 
+/** What an operation's plan reads, the room's state as the operation found it, and the writes it records. */
+type OperationTx = {
+  readonly now: number
+  cell(key: string): Uint8Array | undefined
+  retained(lane: LaneId): RetainedFrame | null
+  write(mutation: CellMutation): void
+  count(count: CellCount): void
+  /** Deletes every cell under `prefix`, before the operation's writes. */
+  dropPrefix(prefix: string): void
+  /** Forgets `member`'s inbox and binary lanes: their order and their retained frames. */
+  dropMemberLanes(member: string): void
+  /** Deletes `lane`'s retained frame while it still holds `seq`. */
+  deleteRetained(lane: LaneId, seq: number): void
+  /** Commits `payload` on the control lane; once per operation. */
+  commit(payload: Uint8Array): void
+}
+
+/** A pure plan, by the name a Cloudflare room authority runs it by. Its args and value cross an RPC there. */
+type RoomOperation<Args, Value> = { readonly name: string; plan(tx: OperationTx, args: Args): Value }
+
+/** An operation that ran: its plan's value, each counted counter as it left it, and its commit. */
+type OperationResult<Value> =
+  | { kind: 'done'; value: Value; counters: Map<string, CellCounter>; commit?: CommitAccepted }
+  | StaleIncarnation
+
 /** The lane a commit lands on, in `inc` of `roomId`. */
 type CommitTarget = { roomId: string; inc: string; lane: LaneId }
 
@@ -173,6 +205,14 @@ type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
    *  `stale-incarnation` page is the last. */
   readCellPages(roomId: string, inc: string, prefix: string): AsyncIterable<CellsRead>
   compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult>
+  /** Runs `operation`'s plan where the room's state lives, while `inc` is open, and applies every write it recorded at
+   *  once: none, if the plan throws. */
+  runOperation<Args, Value>(
+    roomId: string,
+    inc: string,
+    operation: RoomOperation<Args, Value>,
+    args: Args,
+  ): Promise<OperationResult<Value>>
   /** Keeps `payload` past the call only as a copy: the caller reuses its bytes. */
   commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult>
   /** The lane's last commit's seq and timestamp; null before its first, or once its incarnation or member is gone. */

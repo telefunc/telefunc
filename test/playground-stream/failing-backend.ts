@@ -34,8 +34,8 @@ import { createDeferred } from './createDeferred'
  *  subscription is ready only after its first message, as a store whose acknowledgment comes after what it delivered;
  *  each further time, one message later) or 'published' (the next matching call answers 0, as a store that doesn't fix
  *  a publish's recipients, like Redis). `roomId`, or `key` (a Broadcast
- *  key, the start of a Room cell key the call reads or writes, or a commit's lane kind or required cell), narrows what
- *  matches. */
+ *  key, the start of a Room cell key the call reads or writes, a commit's lane kind or required cell, or an operation's
+ *  name), narrows what matches. */
 type BackendFault = { op: string; roomId?: string; key?: string; times?: number }
 
 type Source = BroadcastRoute | RoomSubscriptionSource
@@ -271,6 +271,7 @@ function callOfArgs(op: string, args: unknown[]): Call {
     return { roomId: target.roomId, keys: [target.lane.kind, ...(opts?.requiredCellKeys ?? [])] }
   }
   const [roomId, , selector] = args as [string, string, unknown]
+  if (op === 'runOperation') return { roomId, keys: [(selector as { name: string }).name] }
   if (op === 'readCellPages') return { roomId, keys: [selector as string] }
   if (op === 'readCells') {
     const sel = selector as { keys: string[] } | { prefix: string }

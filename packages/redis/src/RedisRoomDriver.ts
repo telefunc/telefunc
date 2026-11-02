@@ -2,6 +2,7 @@ export { RedisRoomDriver }
 
 import type { BackendReceiver, DriverAttempt, OrderingInfo } from 'telefunc/__internal'
 import type {
+  CellCounter,
   CellsExchange,
   CellsExchangeResult,
   CommitAccepted,
@@ -10,8 +11,11 @@ import type {
   HeadExpectation,
   HeadNext,
   LaneId,
+  OperationResult,
+  OperationWrites,
   RoomDriver,
   RoomHead,
+  RoomOperation,
   CellSelector,
   CellsRead,
   CommitOptions,
@@ -21,6 +25,7 @@ import type {
   DirectoryPage,
   RoomPlaneKit,
   RoomSubscriptionSource,
+  StaleIncarnation,
 } from '@telefunc/room/backend'
 import { decodeOrderingFrame } from 'telefunc/__internal'
 import { isCluster } from './ioredis.js'
@@ -40,12 +45,24 @@ import {
   type CommitChannels,
   type FenceTokens,
 } from './keys.js'
-import { LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrdering } from './commands.js'
+import { LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrdering, type CommitInput } from './commands.js'
+import { assert } from './assert.js'
 import type { RedisConnection } from './RedisConnection.js'
 import type { RedisDriver } from './RedisSubscriptions.js'
 import type { WaitingSend, WaitRule } from './NewSubscriptionWait.js'
 
 const NO_FENCE_TOKENS: FenceTokens = { lane: '', everyTrack: '', everyMember: '' }
+
+/** A member an operation drops, with the lanes its order hash had and the binary lanes it retained when read. */
+type DroppedMember = { member: string; lanes: string[]; retained: string[] }
+/** A plan run over what it read: its value and writes, each cell's version as read ('' while absent), and the members
+ *  it drops as read. */
+type PlannedOperation<Value> = {
+  value: Value
+  writes: OperationWrites
+  reads: ReadonlyMap<string, string>
+  members: DroppedMember[]
+}
 
 type RedisRoomDriverOptions = { connection: RedisConnection; kit: RoomPlaneKit }
 
@@ -91,6 +108,144 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
 
   compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult> {
     return this.connection.run(REDIS_COMMANDS.cellsExchange, { roomId, inc, exchange })
+  }
+
+  /** Plans over the cells and frames it reads, then applies the plan in one script while they are as read; a cell
+   *  that moved meanwhile plans it again. */
+  async runOperation<Args, Value>(
+    roomId: string,
+    inc: string,
+    operation: RoomOperation<Args, Value>,
+    args: Args,
+  ): Promise<OperationResult<Value>> {
+    for (;;) {
+      const planned = await this.planOperation(roomId, inc, operation, args)
+      if (planned === null) return { kind: 'stale-incarnation' }
+      const outcome = await this.applyOperation(roomId, inc, planned)
+      if (outcome.kind === 'conflict') continue
+      if (outcome.kind === 'stale-incarnation') return outcome
+      const done: OperationResult<Value> = { kind: 'done', value: planned.value, counters: outcome.counters }
+      if (outcome.commit !== undefined) done.commit = outcome.commit
+      return done
+    }
+  }
+
+  /** Runs the pure plan until it read nothing it hadn't read yet: each run reads what the one before it missed, as
+   *  absent, at once. Null once the incarnation is not readable. */
+  private async planOperation<Args, Value>(
+    roomId: string,
+    inc: string,
+    operation: RoomOperation<Args, Value>,
+    args: Args,
+  ): Promise<PlannedOperation<Value> | null> {
+    const cells = new Map<string, Uint8Array | undefined>()
+    const reads = new Map<string, string>()
+    const frames = new Map<string, RetainedFrame | null>()
+    let now: number | null = null
+    for (;;) {
+      const missing = new Set<string>()
+      const missingFrames = new Map<string, LaneId>()
+      const recorded = this.kit.recordOperation(operation, args, {
+        now: now ?? 0,
+        cell: (key) => {
+          if (!reads.has(key)) missing.add(key)
+          return cells.get(key)
+        },
+        retained: (lane) => {
+          const key = this.kit.encodeLaneKey(lane)
+          if (!frames.has(key)) missingFrames.set(key, lane)
+          return frames.get(key) ?? null
+        },
+      })
+      if (now !== null && missing.size === 0 && missingFrames.size === 0) {
+        const members = await Promise.all(
+          recorded.writes.members.map((member) => this.memberLanes(roomId, inc, member)),
+        )
+        return { ...recorded, reads, members }
+      }
+      const [read] = await Promise.all([
+        this.readCells(roomId, inc, { keys: [...missing] }),
+        ...Array.from(missingFrames, async ([key, lane]) =>
+          frames.set(key, await this.readRetained(roomId, inc, lane)),
+        ),
+      ])
+      if (read.kind === 'stale-incarnation') return null
+      now = read.now
+      for (const key of missing) {
+        cells.set(key, read.cells.get(key))
+        reads.set(key, read.versions.get(key) ?? '')
+      }
+    }
+  }
+
+  /** The lanes in `member`'s order hash and its retained binary lanes, which its drop removes. */
+  private async memberLanes(roomId: string, inc: string, member: string): Promise<DroppedMember> {
+    const { prefix, client } = this.connection
+    const [lanes, retained] = await Promise.all([
+      client.hkeys(memberOrderKey(prefix, roomId, inc, member)),
+      client.smembers(retainedOfKey(prefix, roomId, inc, member)),
+    ])
+    return { member, lanes, retained }
+  }
+
+  private async applyOperation<Value>(
+    roomId: string,
+    inc: string,
+    { writes, reads, members }: PlannedOperation<Value>,
+  ): Promise<
+    | { kind: 'conflict' }
+    | StaleIncarnation
+    | { kind: 'done'; counters: Map<string, CellCounter>; commit?: CommitAccepted }
+  > {
+    const input = { roomId, inc, writes, reads, members, kit: this.kit }
+    if (writes.commit === null) {
+      const outcome = await this.connection.run(REDIS_COMMANDS.operation, { ...input, commit: null })
+      return outcome.kind === 'done' ? { kind: 'done', counters: outcome.counters } : outcome
+    }
+    const { sends, prefix } = this.connection
+    const lane = this.kit.OPERATION_COMMIT_LANE
+    const laneKey = this.kit.encodeLaneKey(lane)
+    const channels = commitChannels(prefix, roomId, inc, lane, laneKey, this.kit)
+    const waiting = sends.sendsMayWait ? sends.waitTurn(commitWaitRule(channels), writes.commit) : null
+    const payload = waiting === null ? writes.commit : await waiting.turn
+    const fence = this.connection.subscriptions.prepareFence(channels)
+    const commit: CommitInput = {
+      roomId,
+      inc,
+      lane,
+      laneKey,
+      channels,
+      payload,
+      retain: false,
+      closingLease: undefined,
+      requiredCellKeys: [],
+      fenceTokens: fence.tokens,
+    }
+    const run = () => this.connection.run(REDIS_COMMANDS.operation, { ...input, commit })
+    let outcome
+    try {
+      outcome = await (isCluster(this.connection.client)
+        ? this.inLaneTurn(laneTurnKey(roomId, inc, laneKey), run)
+        : run())
+    } catch (error) {
+      fence.cancel()
+      throw error
+    } finally {
+      waiting?.sent()
+    }
+    if (outcome.kind !== 'done' || outcome.commit?.kind !== 'accepted') {
+      fence.cancel()
+      if (outcome.kind !== 'done') return outcome
+      assert(outcome.commit === null) // the script found the incarnation open
+      return { kind: 'done', counters: outcome.counters }
+    }
+    const { seq, timestamp } = outcome.commit
+    // The frame carries the fence token, so observing the fence proves local dispatch.
+    return {
+      kind: 'done',
+      counters: outcome.counters,
+      commit: { kind: 'accepted', seq, timestamp, delivery: fence.delivery },
+    }
   }
 
   commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
@@ -143,7 +298,7 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
     if (!isCluster(this.connection.client)) return commit()
     // A Cluster re-sends a command Redis refused with TRYAGAIN (its slot migrating) or CLUSTERDOWN (a failover) after a
     // delay, so a later commit on the lane could land first: each is sent once the one before it was answered.
-    return this.inLaneTurn(JSON.stringify([target.roomId, target.inc, this.kit.encodeLaneKey(target.lane)]), commit)
+    return this.inLaneTurn(laneTurnKey(target.roomId, target.inc, this.kit.encodeLaneKey(target.lane)), commit)
   }
 
   private inLaneTurn<T>(turnKey: string, commit: () => Promise<T>): Promise<T> {
@@ -346,4 +501,9 @@ function commitWaitRule({ lane, everyTrack, everyMember }: CommitChannels): Wait
     budget: everyTrack,
     bufferLimit: 'bufferLimitBinary',
   }
+}
+
+/** The turn a Cluster's commits to one lane take. */
+function laneTurnKey(roomId: string, inc: string, laneKey: string): string {
+  return JSON.stringify([roomId, inc, laneKey])
 }

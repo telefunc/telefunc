@@ -55,10 +55,7 @@ class RosterStream {
   /** Reconciles with a roster read in `ROOM_PLAN_SLICE_MS` slices, replaying `events`, which grow until it ends; false
    *  if the room closed first. Every client gets a roster that corrected a drift; otherwise only the clients still owed
    *  their first. */
-  async reconcile(
-    roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
-    events: readonly MembershipEvent[],
-  ): Promise<boolean> {
+  async reconcile(roster: { members: MemberSnapshot[] }, events: readonly MembershipEvent[]): Promise<boolean> {
     this.reconciling = this.model.rosterKnown
     try {
       const drifted = await this.model.reconcileRoster(roster, events)

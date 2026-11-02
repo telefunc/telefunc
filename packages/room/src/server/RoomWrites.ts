@@ -36,7 +36,7 @@ import { reportRoomError } from './reportRoomError.js'
 import { SEMANTIC_LANE, acceptedOrThrow, commitLane, controlLane, encodeRoomRecord, inboxOf } from './lanes/lanes.js'
 import { reapAndReadMembersById } from './store/roster.js'
 import { storeDmReply, takeDmReply } from './store/dmReplies.js'
-import { dropMemberMetaGeneration, writeMemberConnection, writeMemberMeta, type MemberMetaWrite } from './store/meta.js'
+import { setMemberMeta, writeMemberConnection, type MemberMetaWrite } from './store/meta.js'
 import type { RoomReplica } from './RoomReplica.js'
 import type { PendingDmAcks } from './PendingDmAcks.js'
 import type { RoomGuardHooks } from './roomStatics.js'
@@ -105,13 +105,12 @@ class RoomWrites {
     })
   }
 
-  /** The member's writes, from its single owner here, each start once the one before it was sent, so they publish in
-   *  seq order. */
+  /** The member's writes, from its single owner here, each start once the one before it committed, so they publish
+   *  in seq order. */
   private async writeMetaInOrder(id: string, write: MemberMetaWrite): Promise<MemberMetaUpdate> {
-    return await this.inCallOrder(`meta:${id}`, async (sent) => {
-      const { update, hidden, replaced } = await writeMemberMeta(this.incarnation, id, write)
-      await this.publishMemberUpdate(id, update, hidden, sent)
-      if (replaced !== null) await dropMemberMetaGeneration(this.incarnation, id, replaced, update.seq)
+    return await this.inCallOrder(`meta:${id}`, async () => {
+      const { update, event } = await setMemberMeta(this.incarnation, id, write)
+      this.replica.applyControl(event)
       return update
     })
   }

@@ -56,7 +56,7 @@ import { RoomWrites, runAfterHook, type RoomWritesOwner } from './RoomWrites.js'
 import { acceptedOrThrow, commitLane, controlLane, encodeRoomRecord, withinRoomHorizon } from './lanes/lanes.js'
 import { reportRoomError } from './reportRoomError.js'
 import { Admission } from './Admission.js'
-import { createMember, evictMember } from './store/members.js'
+import { evictMember, joinMember } from './store/members.js'
 import { memberCellKey } from './store/cells.js'
 import type {
   BinaryPublishOptions,
@@ -243,15 +243,10 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner, TailHol
       // The member's inbox delivers (within the horizon) before its join is visible, and the admission still holds.
       await this._replica.openInbox(id)
       admission.assertLive(this._model)
-      await createMember(this._incarnation, this.lease, id, record, meta)
+      // The member's record and its join event are one write, so its leave always follows its join.
+      await joinMember(this._incarnation, this.lease, { id, record, meta, join })
       admission.assertLive(this._model)
       admission.commit()
-      // A member removed meanwhile gets no join after its leave, here or anywhere.
-      const committing = commitLane(controlLane(this.id, this._incarnation.inc), encodeRoomRecord(join), {
-        requiredCellKeys: [memberCellKey(id)],
-      })
-      acceptedOrThrow(this.id, await committing)
-      admission.assertLive(this._model)
       this.admissions.delete(id)
       this._replica.applyControl(join)
       // A drop of the page's wire during the admission skipped this member: it starts disconnected.

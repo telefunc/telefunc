@@ -66,7 +66,6 @@ import {
   onReplaceMetaInLoop,
   onStopReplacingMeta,
   onReadMetaAcrossWrite,
-  onReadMetaAcrossDrop,
   onReadSplitMetaAcrossMerge,
   onOpenRecordingGuardRoom,
   onGetGuardCalls,
@@ -572,10 +571,6 @@ function Room() {
           )
           setResult(JSON.stringify(reads))
         }
-      })}
-
-      {scenario('meta-across-drop', null, "Read a member's big meta across its drop", async () => {
-        setResult(JSON.stringify({ read: await onReadMetaAcrossDrop(await createRoomId('meta-across-drop')) }))
       })}
 
       {scenario('split-meta-across-merge', null, "Read a member's split meta across a merge", async () => {
@@ -1952,16 +1947,14 @@ function Room() {
         const leaves: string[] = []
         leaveView.onLeave((member, cause) => leaves.push(`${member.meta.name}:${cause.type}`))
         const me = await leaveView.join({ meta: { name: 'Me' } })
-        // The leave's write of the member record.
-        await onFailBackend({ op: 'compareExchangeCells', roomId: leaveRoomId, key: 'm:' })
+        await onFailBackend({ op: 'runOperation', roomId: leaveRoomId, key: 'leave' })
         const firstLeave = await settle(me.leave())
         const publishAfter = await settle(me.publish('still-here'))
         const secondLeave = await settle(me.leave())
         await pollUntil(() => ({ done: leaveView.count === 0 }))
 
         const [joinRoomId, joinView] = await createRoom('hiccup-join')
-        // The join's announcement, after its member record committed.
-        await onFailBackend({ op: 'commitLane', roomId: joinRoomId, key: 'm:' })
+        await onFailBackend({ op: 'runOperation', roomId: joinRoomId, key: 'join' })
         const firstJoin = await settle(joinView.join({ meta: { name: 'First' } }))
         await joinView.join({ meta: { name: 'Second' } })
         await pollUntil(() => ({ done: joinView.count === 1 }))
@@ -1997,7 +1990,7 @@ function Room() {
         const view = await onGetRoom(viewRoomId)
 
         const [joinRoomId, joinView] = await createRoom('hiccup-join')
-        await onFailBackend({ op: 'commitLane', roomId: joinRoomId, key: 'm:' })
+        await onFailBackend({ op: 'runOperation', roomId: joinRoomId, key: 'join' })
         const firstJoin = await joinView.join({ meta: { name: 'First' } }).then(
           () => 'ok',
           (err: Error) => err.message,

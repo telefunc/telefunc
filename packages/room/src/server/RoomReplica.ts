@@ -32,7 +32,7 @@ import { reportRoomError } from './reportRoomError.js'
 import { SEMANTIC_LANE, decodeLaneEnvelope, decodeRoomText, openConfig, withinRoomHorizon } from './lanes/lanes.js'
 import { dropDmReply, takeDmReplies } from './store/dmReplies.js'
 import { evictMember } from './store/members.js'
-import { finishLeaseCleanups, holdViews, removeView, renewLease, RoomLease } from './store/lease.js'
+import { holdViews, removeView, renewLease, RoomLease } from './store/lease.js'
 import type { StoredRoomMeta } from './store/meta.js'
 import type { LaneHolder, ReplayHold, TextWantsChange } from './lifecycle/replay.js'
 import { type MetaMirror, ServerRoom } from './room.js'
@@ -122,8 +122,6 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
   private viewsLost = false
   /** Members whose eviction failed: the lease would host them for as long as it lives. */
   private readonly unevicted = new Set<string>()
-  /** The cleanups of the lease's members pending at the last heartbeat. */
-  private pendingCleanups: ReadonlySet<string> = new Set()
   /** The handle holding each member it joined. */
   private readonly owners = new Map<string, ServerRoom>()
   /** The seq of the last frame each owned member's inbox delivered, 0 before its first. */
@@ -197,10 +195,7 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
     return this.authority.reconcileAuthority()
   }
 
-  applyRoster(
-    roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
-    events: readonly MembershipEvent[],
-  ): Promise<boolean> {
+  applyRoster(roster: { members: MemberSnapshot[] }, events: readonly MembershipEvent[]): Promise<boolean> {
     return this.roster.reconcile(roster, events)
   }
 
@@ -460,16 +455,14 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
     this.unevicted.add(id)
   }
 
-  /** Renews the lease, evicts again whom it failed to, and finishes the leaves its members' evicting
-   *  servers left unfinished; once the lease was lost, or a view write failed, writes every stub's view again in one
-   *  write, after each one's earlier write. */
+  /** Renews the lease and evicts again whom it failed to; once the lease was lost, or a view write failed, writes every
+   *  stub's view again in one write, after each one's earlier write. */
   async maintainLease(): Promise<void> {
     if (!(await renewLease(this.incarnation, this.lease))) this.viewsLost = true
     for (const id of this.unevicted) {
       await evictMember(this.incarnation, id, { type: 'disconnected' })
       this.unevicted.delete(id)
     }
-    this.pendingCleanups = await finishLeaseCleanups(this.incarnation, this.lease, this.pendingCleanups)
     if (!this.viewsLost) return
     this.viewsLost = false
     const stubs = [...this.views.keys()]

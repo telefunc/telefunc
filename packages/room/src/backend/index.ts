@@ -5,3 +5,4 @@ export { decodeLaneKey, encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } f
 export { getRoomPlane, ROOM_PLANE } from './plane.js'
 export type { RoomPlane } from './RoomPlane.js'
 export { MemoryRoomDriver } from './MemoryRoomDriver.js'
+export type { OperationReads, OperationWrites } from './operation.js'

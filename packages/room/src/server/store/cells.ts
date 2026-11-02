@@ -1,10 +1,7 @@
 export {
   MEMBER_CELL_PREFIX,
-  CLEANUP_CELL_PREFIX,
   memberCellKey,
   memberIdOfCellKey,
-  cleanupCellKey,
-  memberIdOfCleanupKey,
   identityCellKey,
   identityCellPrefix,
   HOLDS_CELL_KEY,
@@ -36,19 +33,11 @@ export {
 
 // Cell keys: drivers scope cells by (room, incarnation), so a key names only what is inside the room.
 const MEMBER_CELL_PREFIX = 'm:'
-const CLEANUP_CELL_PREFIX = 'cleanup:'
 function memberCellKey(memberId: string): string {
   return MEMBER_CELL_PREFIX + memberId
 }
 function memberIdOfCellKey(key: string): string {
   return key.slice(MEMBER_CELL_PREFIX.length)
-}
-/** Durable eviction work: committed with the member's removal, cleared once retained data and the leave are done. */
-function cleanupCellKey(memberId: string): string {
-  return CLEANUP_CELL_PREFIX + memberId
-}
-function memberIdOfCleanupKey(key: string): string {
-  return key.slice(CLEANUP_CELL_PREFIX.length)
 }
 /** One marker per (identity, member), written and removed in the compare-exchange that writes or removes the member. */
 function identityCellPrefix(identity: string): string {
@@ -66,8 +55,7 @@ const LEASE_CELL_PREFIX = 'session:'
 function leaseCellKey(lease: string): string {
   return LEASE_CELL_PREFIX + lease
 }
-/** A member's mark under its lease, written with its record and removed with its cleanup, so the lease's cleaner
- *  finds it. */
+/** A member's mark under its lease, written and removed with its record, so the lease's cleaner finds it. */
 function leaseMemberCellPrefix(lease: string): string {
   return `sm:${lease}:`
 }
