@@ -1,5 +1,5 @@
-// The SSE→WS handoff's join: the client flips to the new wire, then waits for BOTH limbs — FIN on
-// the old wire, RECONCILED on the new one — before it resumes dispatching. The limbs cross two
+// The SSE→WS handoff's join: the client flips to the new wire, then waits for BOTH completion frames — FIN on
+// the old wire, RECONCILED on the new one — before it resumes dispatching. They cross two
 // sockets, so they can arrive in either order, and anything that lands mid-join must be held and
 // replayed in the right order afterwards.
 //
@@ -138,7 +138,7 @@ type Harness = {
 }
 
 /** Connect over SSE, reconcile, let the client probe WS, answer PREPARE with READY, and stop at
- *  the moment the barrier has been emitted — the start of the join, before either limb lands. */
+ *  the moment the barrier has been emitted — the start of the join, before either completion frame lands. */
 async function upgradeToBarrier(): Promise<Harness> {
   const dispatched: DecodedFrame[] = []
   const channel = createChannel(dispatched)
@@ -260,7 +260,7 @@ describe('SSE→WS handoff join', () => {
     expect(h.dispatched.map((f) => (f as { text: string }).text)).toEqual(['"old-1"', '"new-1"'])
   })
 
-  test('FIN then COMMITTED: the reordered limbs still complete the join', async () => {
+  test('FIN then COMMITTED: the reordered completion frames still complete the join', async () => {
     const h = await upgradeToBarrier()
     const { upgradeId } = await h.barrierSent
 

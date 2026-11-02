@@ -147,6 +147,10 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
   private readonly lifecycle: WireLifecycle
   private readonly channels: ChannelTable
   private readonly gate: SendGate
+  /** The transport its wire runs on now: the lifecycle replaces it on an upgrade, or a fallback to SSE. */
+  private get transport(): ClientChannelTransport {
+    return this.lifecycle.transport
+  }
 
   private constructor(telefuncUrl: string, options: ClientConnectionOptions, cacheKey: string) {
     this.cacheKey = cacheKey
@@ -262,16 +266,16 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     const record = this.channels.of(channel)
     if (record === undefined) return
     // On batch POSTs the page's measured round trip leaves out the wait for its POST, so it reports no path RTT.
-    const frame = encode.bdpPingAck(record.ix, probe, backlog, this.lifecycle.transport.batched ? Infinity : pathRtt)
+    const frame = encode.bdpPingAck(record.ix, probe, backlog, this.transport.batched ? Infinity : pathRtt)
     this.gate.sendUnsequenced(record, frame, 'flow-control')
   }
 
   bufferedAmount(): number {
-    return this.lifecycle.transport.bufferedAmount() + this.gate.waitingBytes
+    return this.transport.bufferedAmount() + this.gate.waitingBytes
   }
 
   deliveredBefore(ms: number): number {
-    return this.lifecycle.transport.heartbeat?.deliveredBefore(ms) ?? 0
+    return this.transport.heartbeat?.deliveredBefore(ms) ?? 0
   }
 
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void {

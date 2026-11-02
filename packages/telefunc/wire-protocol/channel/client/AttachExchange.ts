@@ -165,7 +165,7 @@ class AttachExchange {
   buildBarrierFrame({ sessionId, upgradeId, uplink }: ProbeSession): OutboundFrame {
     this.enterReconciling()
     // Its entries attach on the WebSocket, `uplink`'s wire, the one after this one.
-    const open = this.declareOpenEntries(this.channels.values(), { skipUnnamed: true, uplink })
+    const open = this.declareOpenEntries(this.channels.values(), { skipUndeclared: true, uplink })
     // A new wire's RECONCILE releases what it leaves out.
     this.channels.takeReleased()
     return { kind: 'reconcile', frame: encode.barrier({ sessionId, upgradeId, open }) }
@@ -183,14 +183,14 @@ class AttachExchange {
     this.inFlight = reconcileInFlight()
     const serverHas = this.settleAnswers(ctrl, inFlight)
     // Channels registered after this RECONCILE was built wait for the next one.
-    const hasNewChannels = this.channels.hasUnnamed
+    const hasNewChannels = this.channels.hasUndeclared
     const { frames, channelsToOpen } = this.attachNamed(inFlight, serverHas, deferredOmitted)
 
     // What the server has: the channels this RECONCILE named that it attached, and those the ones before named.
     const attached = (ix: number): boolean => {
       if (inFlight.ixes.has(ix)) return serverHas.has(ix)
       const record = this.channels.get(ix)
-      return record !== undefined && !this.channels.isUnnamed(record) && !record.awaited
+      return record !== undefined && !this.channels.isUndeclared(record) && !record.awaited
     }
     for (const frame of this.gate.drain(attached)) frames.push(frame)
 
@@ -328,7 +328,7 @@ class AttachExchange {
     const changes = this.session !== null && this.reconciledWire === this.owner.wire
     const records = changes ? this.channels.changed() : this.channels.values()
     const open = this.declareOpenEntries(records, {
-      skipUnnamed: false,
+      skipUndeclared: false,
       uplink,
     })
     const released = this.channels.takeReleased()
@@ -341,10 +341,10 @@ class AttachExchange {
   private declareOpenEntries(
     records: Iterable<ChannelRecord>,
     {
-      skipUnnamed,
+      skipUndeclared,
       uplink,
     }: {
-      skipUnnamed: boolean
+      skipUndeclared: boolean
       uplink: Uplink
     },
   ): ReconcileOpenEntry[] {
@@ -358,8 +358,8 @@ class AttachExchange {
         continue
       }
       const isInitial = record.state.tag !== 'open' && record.state.initial
-      if (skipUnnamed && isInitial && !record.awaited) continue
-      this.channels.name(record)
+      if (skipUndeclared && isInitial && !record.awaited) continue
+      this.channels.markDeclared(record)
       this.inFlight.ixes.set(ix, isInitial)
       const payloadEntry: ReconcileOpenEntry = {
         id: record.channel.id,

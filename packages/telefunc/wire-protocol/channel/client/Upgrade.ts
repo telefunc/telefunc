@@ -86,7 +86,7 @@ type UpgradeState =
       to: UpgradeTarget
       probeHeartbeat: Heartbeat
       upgradeId: string
-      /** The join's two limbs, one per wire. Both must land before dispatching resumes. */
+      /** The join's two completion frames, one per wire. Both must land before dispatching resumes. */
       finReceived: boolean
       committed: boolean
       /** Frames the probe delivered before the flip. The swap has not happened, so not even a
@@ -106,8 +106,8 @@ type BufferedWireFrame = { frame: DecodedFrame; byteLength: number }
 /** Per source wire, `old` draining first: the server wrote all of it before anything the new wire carries. */
 type UpgradeBuffer = { old: BufferedWireFrame[]; new: BufferedWireFrame[] }
 
-/** FIN (old wire) and RECONCILED (new wire) are the join's two limbs; everything else is payload. */
-function isJoinLimb(frame: DecodedFrame): boolean {
+/** FIN (old wire) and RECONCILED (new wire) complete the join; everything else is payload. */
+function isUpgradeCompletionFrame(frame: DecodedFrame): boolean {
   return frame.tag === TAG.FIN || frame.tag === TAG.RECONCILED
 }
 
@@ -241,13 +241,13 @@ class Upgrade implements ProbeOwner {
   }
 
   /** Takes every frame that arrives during the handoff, and is the one place that counts it against the handoff's
-   *  budget. Before the flip the probe is nobody's wire, so even a join limb waits: acting on one would settle a swap
-   *  that hasn't happened. After it, limbs apply and the rest waits, split by the wire it came from. */
+   *  budget. Before the flip the probe is nobody's wire, so even a completion frame waits: acting on one would settle a
+   *  swap that hasn't happened. After it, completion frames apply and the rest waits, split by the wire it came from. */
   ingestDuringHandoff(frame: DecodedFrame, source: 'old' | 'new', byteLength: number): void {
     const u = this.committing
     if (u === null) return
     const flipped = this.owner.transport === u.to
-    if (flipped && this.applyJoinLimb(frame)) return
+    if (flipped && this.applyCompletionFrame(frame)) return
     ;(flipped ? u.buffer[source] : u.heldBeforeFlip).push({ frame, byteLength })
     u.bufferedFrames += 1
     u.bufferedBytes += byteLength
@@ -469,13 +469,14 @@ class Upgrade implements ProbeOwner {
     // What the probe delivered before the swap can be acted on now. The buffer is made whole
     // first, so the COMMITTED that may be among them cannot complete a join over a partial one.
     const held = u.heldBeforeFlip.splice(0)
-    for (const { frame, byteLength } of held) if (!isJoinLimb(frame)) u.buffer.new.push({ frame, byteLength })
-    for (const { frame } of held) if (isJoinLimb(frame)) this.applyJoinLimb(frame)
+    for (const { frame, byteLength } of held)
+      if (!isUpgradeCompletionFrame(frame)) u.buffer.new.push({ frame, byteLength })
+    for (const { frame } of held) if (isUpgradeCompletionFrame(frame)) this.applyCompletionFrame(frame)
     this.tryComplete()
   }
 
-  /** True if the frame was one of the join's limbs, and has been applied. */
-  private applyJoinLimb(frame: DecodedFrame): boolean {
+  /** True if the frame was one of the join's completion frames, and has been applied. */
+  private applyCompletionFrame(frame: DecodedFrame): boolean {
     if (frame.tag === TAG.FIN) {
       this.handleFin()
       return true
