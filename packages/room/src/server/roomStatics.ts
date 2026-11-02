@@ -153,7 +153,7 @@ async function openRoom(id: string): Promise<ServerRoom> {
   const incarnation = await requireRoom(id)
   const held = RoomReplica.of(incarnation.inc)
   if (held !== undefined) {
-    await held.authority.catchUp()
+    await held.catchUp()
     return new ServerRoom({ replica: held })
   }
   const count = await reapAndCountPresence(incarnation)

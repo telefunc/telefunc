@@ -8,10 +8,11 @@ import { getRoomPlane } from '../backend/plane.js'
 import type { LaneId } from '../backend/contract.js'
 import { encodePublish, hostLocal, type OrderingInfo } from 'telefunc/__internal'
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../shared/binary.js'
+import { ROOM_MEMBER_TRACKS_MAX } from '../shared/constants.js'
 import { DemandExchange } from './lanes/DemandExchange.js'
 import { RoomDemand, type RoomDemandOwner } from './lanes/RoomDemand.js'
 import { PublishedTracks } from './lanes/PublishedTracks.js'
-import { DM_FAILURE } from '../shared/errors.js'
+import { DM_FAILURE, RoomError } from '../shared/errors.js'
 import { joinedMember, leaveCauseFromWire, leaveCauseToWire } from '../shared/protocol.js'
 import type {
   MemberMetaUpdate,
@@ -22,6 +23,7 @@ import type {
   SenderStamp,
 } from '../shared/protocol.js'
 import type { RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope } from './protocol.js'
+import type { RoomResult } from '../shared/protocol.js'
 import { RoomModel, type MembershipEvent, type ServerModelOwner } from '../shared/model.js'
 import type { LeaveCause } from '../types.js'
 import { AuthoritySync, type AuthoritySyncOwner } from './lifecycle/AuthoritySync.js'
@@ -97,22 +99,22 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
   readonly id: string
   readonly incarnation: RoomIncarnation
   readonly model: RoomModel
-  readonly incomingDemand: RoomDemand
-  readonly publishedTracks = new PublishedTracks()
+  private readonly incomingDemand: RoomDemand
+  private readonly publishedTracks = new PublishedTracks()
   /** This process's demand to the other processes, and theirs to `incomingDemand`. */
   private readonly demand: DemandExchange
-  readonly lanePlan: LanePlan
-  readonly authority: AuthoritySync
-  readonly heartbeat: RoomHeartbeat
-  readonly roster: RosterStream
+  private readonly lanePlan: LanePlan
+  private readonly authority: AuthoritySync
+  private readonly heartbeat: RoomHeartbeat
+  private readonly roster: RosterStream
   /** Hosts the members the handles join and the pages' views. */
   readonly lease = new RoomLease()
   /** In-flight `send(…, { ack: true })`s; a leave of either end, or a close, fails the ones it strands. */
-  readonly acks = new PendingDmAcks()
+  private readonly acks = new PendingDmAcks()
   /** Every handle's attached stubs. */
-  readonly stubs = new Set<RoomStub>()
+  private readonly stubs = new Set<RoomStub>()
   /** The meta of each participant a client holds, which the client mirrors. */
-  readonly metaMirrors = new Set<MetaMirror>()
+  private readonly metaMirrors = new Set<MetaMirror>()
   /** Each stub's latest view write, from its attach or a rewrite, to the key it wrote, null if it failed; its removal
    *  comes after it. */
   private readonly views = new Map<RoomStub, Promise<string | null>>()
@@ -189,8 +191,14 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
     this.incomingDemand.owned(member)
   }
 
+  /** The handle let the member go: it owns it here no more, and the member's lanes follow. */
+  release(member: string, handle: ServerRoom): void {
+    this.disown(member, handle)
+    this.lanePlan.memberReleased(member)
+  }
+
   /** The member's demand goes with it. */
-  disown(member: string, handle: ServerRoom): void {
+  private disown(member: string, handle: ServerRoom): void {
     if (this.owners.get(member) !== handle) return
     this.owners.delete(member)
     this.inboxSeqs.delete(member)
@@ -198,14 +206,26 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
     this.publishedTracks.forget(member)
   }
 
+  /** After the stub's handle tracked it: its view is written and its wants planned. */
   attachStub(stub: RoomStub): void {
     this.stubs.add(stub)
     this.views.set(
       stub,
       this.hostViews([stub]).then(([key]) => key ?? null),
     )
+    this.lanePlan.holderChanged(stub)
   }
 
+  /** The stub's client attached: it gets the roster, the room's meta and the demand for the members it holds. */
+  onStubAttached(stub: RoomStub): void {
+    this.roster.sendTo(stub)
+    stub.relayEvent({ __r: 'update', seq: this.model.metaSeq, meta: this.model.metaEntries() })
+    for (const member of stub.heldMembers()) {
+      stub.relayEvent({ __r: 'demand-state', member, tracks: this.incomingDemand.wanted(member) })
+    }
+  }
+
+  /** After the stub's handle tracked it: its view is removed and its wants dropped. */
   detachStub(stub: RoomStub): void {
     this.stubs.delete(stub)
     const view = this.views.get(stub)
@@ -216,6 +236,91 @@ class RoomReplica implements ServerModelOwner, RoomDemandOwner, LanePlanOwner, A
       })
       .catch(reportRoomError)
     this.roster.forget(stub)
+    this.lanePlan.holderGone(stub)
+  }
+
+  /** A handle's tail started or ended: text ingestion follows it, ready once the returned promise resolves. */
+  tailChanged(handle: ServerRoom): Promise<void> {
+    this.track(handle)
+    this.lanePlan.syncLanes()
+    return this.lanePlan.semanticReady
+  }
+
+  /** The member a handle admits gets its inbox, which delivers (within the horizon) when this resolves. */
+  async openInbox(member: string): Promise<void> {
+    this.lanePlan.memberOwned(member)
+    const inbox = this.lanePlan.inboxOf(member)
+    if (inbox !== undefined) await withinRoomHorizon(inbox.ready)
+  }
+
+  /** A holder's text wants changed: its room-wide ones, and those of `members`. */
+  replanText(holder: LaneHolder, members: Iterable<string>): void {
+    this.lanePlan.textChanged(holder, members)
+  }
+
+  /** One of a holder's binary wants changed. */
+  replanBinary(holder: LaneHolder, change: BinaryWantChange): void {
+    this.lanePlan.binaryChanged(holder, change)
+  }
+
+  /** Which holders suppress the member changed. */
+  replanMember(member: string): void {
+    this.lanePlan.memberChanged(member)
+  }
+
+  /** The member's publish on `track` goes out after the planning pass that would carry it here, if one runs (else
+   *  null), within the member's named-track limit; a new track joins what its every-track readers cover. */
+  admitTrack(member: string, track: string): Promise<void> | null {
+    const planned = this.lanePlan.lanePlanned(member, track)
+    if (planned !== null) return planned.then(() => this.publishOnTrack(member, track))
+    this.publishOnTrack(member, track)
+    return null
+  }
+
+  private publishOnTrack(member: string, track: string): void {
+    if (!this.publishedTracks.admits(member, track)) {
+      throw new RoomError(`A participant publishes on at most ${ROOM_MEMBER_TRACKS_MAX} named tracks`)
+    }
+    if (this.publishedTracks.add(member, track)) this.incomingDemand.published(member, track)
+  }
+
+  /** The tracks of an owned member that some process wants. */
+  wantedTracks(member: string): string[] {
+    return this.incomingDemand.wanted(member)
+  }
+
+  ensureRoster(): Promise<void> {
+    return this.authority.ensureRoster()
+  }
+
+  /** A held view catches up with the authority unless it is current. */
+  catchUp(): Promise<void> {
+    return this.authority.catchUp()
+  }
+
+  /** Whether every client here was sent every member it holds: no roster reconciles into it unsent. */
+  get rosterSettled(): boolean {
+    return this.roster.settled
+  }
+
+  /** The mirror takes each failover rewind of the meta seqs until the returned function stops it. */
+  mirrorMeta(mirror: MetaMirror): () => void {
+    this.metaMirrors.add(mirror)
+    return () => this.metaMirrors.delete(mirror)
+  }
+
+  /** The reply to an ack DM, settled by its reply frame, a leave of either end, the room's close or `settleDmAck`. */
+  awaitDmReply(ackId: string, from: string, to: string): Promise<RoomResult> {
+    return new Promise((settle) => this.acks.add(ackId, { from, to, settle }))
+  }
+
+  settleDmAck(ackId: string, reply: RoomResult): void {
+    this.acks.settle(ackId, reply)
+  }
+
+  /** The ack DM never went out: nothing waits on its reply. */
+  dropDmAck(ackId: string): void {
+    this.acks.delete(ackId)
   }
 
   /** The stubs' views' keys, in order; each null and the views lost if the write failed. */

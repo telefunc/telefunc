@@ -8,7 +8,6 @@ import type { CommitAccepted } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
 import { type ChannelPublishAck, reportBug } from 'telefunc/__internal'
 import type { BinaryFrame } from '../shared/binary.js'
-import { ROOM_MEMBER_TRACKS_MAX } from '../shared/constants.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import {
   DM_FAILURE,
@@ -16,7 +15,6 @@ import {
   participantLeftError,
   roomClosedError,
   roomFailureError,
-  RoomError,
   toRoomFailure,
   ROOM_BUG_MESSAGE,
 } from '../shared/errors.js'
@@ -148,13 +146,8 @@ class RoomWrites {
     const lane = { kind: 'binary', member: from, track: frame.track } as const
     const { sender, commit } = await this.inCallOrder(encodeLaneKey(lane), async (sent) => {
       const { sender } = await this.admitPublish(from, frame.payload)
-      const planned = this.replica.lanePlan.lanePlanned(from, lane.track)
-      if (planned !== null) await planned
-      const tracks = this.replica.publishedTracks
-      if (!tracks.admits(from, lane.track)) {
-        throw new RoomError(`A participant publishes on at most ${ROOM_MEMBER_TRACKS_MAX} named tracks`)
-      }
-      if (tracks.add(from, lane.track)) this.replica.incomingDemand.published(from, lane.track)
+      const admitted = this.replica.admitTrack(from, lane.track)
+      if (admitted !== null) await admitted
       const opts = { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] }
       const committing = commitLane({ roomId: this.incarnation.id, inc: this.incarnation.inc, lane }, framed, opts)
       sent()
@@ -218,16 +211,15 @@ class RoomWrites {
   }
 
   private async sendDmAck(from: string, to: string, data: unknown): Promise<RoomAckReceipt> {
-    const acks = this.replica.acks
     const ackId = crypto.randomUUID()
-    const reply = new Promise<RoomResult>((settle) => acks.add(ackId, { from, to, settle }))
+    const reply = this.replica.awaitDmReply(ackId, from, to)
     // Bounds the wait nothing else settles: a lost reply frame, or a recipient that never handled the DM.
     const timer = unrefTimer(setTimeout(() => void this.settleTimedOut(from, ackId), ROOM_DM_ACK_TIMEOUT_MS))
     let receipt: RoomSendReceipt
     try {
       receipt = await this.publishDm(from, to, data, ackId)
     } catch (err) {
-      acks.delete(ackId)
+      this.replica.dropDmAck(ackId)
       clearTimeout(timer)
       throw err
     }
@@ -245,7 +237,7 @@ class RoomWrites {
     } catch (err) {
       reply = toRoomFailure(err, reportRoomError, ROOM_BUG_MESSAGE)
     }
-    this.replica.acks.settle(ackId, reply)
+    this.replica.settleDmAck(ackId, reply)
   }
 
   private async publishDm(from: string, to: string, data: unknown, ackId?: string): Promise<RoomSendReceipt> {

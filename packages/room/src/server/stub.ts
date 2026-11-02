@@ -239,7 +239,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
 
   _onPageAttach(): void {
     this.rosterSent = false
-    this.room._onStubAttached(this)
+    this.room._replica.onStubAttached(this)
   }
 
   // Client requests
@@ -458,7 +458,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     return (
       this.end.isAttached &&
       this.rosterSent &&
-      this.room._replica.roster.settled &&
+      this.room._replica.rosterSettled &&
       this.room._model.memberHidden(member) === false
     )
   }
@@ -499,7 +499,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   /** Its expiry ends only this stub's want of all text. */
   _tailExpired(): void {
     this.tail = null
-    this.room._replica.lanePlan.textChanged(this, [])
+    this.room._onHolderTextChanged(this, null)
   }
 
   /** The first real text want flushes the tail in order through the replay gate. */
