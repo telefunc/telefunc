@@ -36,7 +36,7 @@ async function repairRoomIndex(plane: RoomPlane, id: string, listedInc: string, 
   else await plane.driver.directoryDelete(id, listedInc)
 }
 
-const globalObject = getGlobalObject('server/directory.ts', {
+const globalObject = getGlobalObject('server/store/directory.ts', {
   /** When this process may sweep again: once a heartbeat interval at most, as a room is created or a heartbeat ticks. */
   nextSweepAt: 0,
 })
