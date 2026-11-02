@@ -211,10 +211,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this.lifecycle.closing) return this.lifecycle.closing
     if (this.lifecycle.ended) return Promise.resolve(this.lifecycle.result)
     const timeout = normalizeCloseTimeout(opts?.timeout)
-    this.lifecycle.startClose(timeout, true)
-    this.closed = true
-    this.connection.sendCloseRequest(this, timeout)
-    return this.lifecycle.runClose()
+    return this.lifecycle.localCloseRequested({
+      timeout,
+      peer: 'expected',
+      send: () => {
+        this.closed = true
+        this.connection.sendCloseRequest(this, timeout)
+      },
+    })
   }
 
   abort(): void
@@ -380,16 +384,15 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   protected onPeerCloseRequest(timeoutMs: number): void {
-    this.lifecycle.shortenDeadline(normalizeCloseTimeout(timeoutMs))
-    this.connection.sendCloseAck(this)
-    if (this.closed) return
-    this.closed = true
-    void this.lifecycle.finish()
+    this.lifecycle.peerCloseReceived(normalizeCloseTimeout(timeoutMs), () => {
+      this.closed = true
+      this.connection.sendCloseAck(this)
+    })
   }
 
   protected onPeerCloseAck(): void {
     if (this.lifecycle.ended) return
-    this.lifecycle.onCloseAck()
+    this.lifecycle.closeAckReceived()
   }
 
   _onEnded(err?: Error): void {
@@ -429,14 +432,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal */
   _end(err?: Error): void {
     if (this.lifecycle.ended) return
-    this.lifecycle.end(err)
-    this.sendCredit.shutdown(err)
-    this.receiveCredit.detach()
-    const ackErr = err ?? new ChannelClosedError()
-    for (const { reject } of this.pendingAcks.values()) reject(ackErr)
-    this.pendingAcks.clear()
-    this.connection.unregister(this)
-    this.lifecycle.fireClose(err)
+    this.lifecycle.forcedTermination(err, () => {
+      this.sendCredit.shutdown(err)
+      this.receiveCredit.detach()
+      const ackErr = err ?? new ChannelClosedError()
+      for (const { reject } of this.pendingAcks.values()) reject(ackErr)
+      this.pendingAcks.clear()
+      this.connection.unregister(this)
+    })
   }
 
   /** @internal */

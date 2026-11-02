@@ -116,27 +116,33 @@ class ChannelLifecycle {
     this.closeListeners.push(callback)
   }
 
-  /** This end closes, within `timeoutMs` or by its peer's earlier deadline; `awaitingCloseAck` where its peer
-   *  acknowledges the CLOSE. */
-  startClose(timeoutMs: number, awaitingCloseAck: boolean): void {
-    this.awaitingCloseAck = awaitingCloseAck
-    this.shortenDeadline(timeoutMs)
-  }
-
-  /** Runs the close `startClose` began until the channel ended, for `close()` to return. */
-  runClose(): Promise<ChannelCloseResult> {
-    this.closePromise = this.finish()
+  localCloseRequested({
+    timeout,
+    peer,
+    send,
+  }: {
+    timeout: number
+    peer: 'expected' | 'absent'
+    send: () => void
+  }): Promise<ChannelCloseResult> {
+    if (this.closePromise) return this.closePromise
+    if (this.didEnd) return Promise.resolve(this.result)
+    this.awaitingCloseAck = peer === 'expected'
+    this.shortenDeadline(timeout)
+    send()
+    this.closePromise = this.run ??= this.runUntilEnded()
     return this.closePromise
   }
 
-  /** Runs the close until the channel ended. */
-  finish(): Promise<ChannelCloseResult> {
+  peerCloseReceived(timeout: number, acknowledge: () => void): void {
+    if (this.didEnd) return
+    this.shortenDeadline(timeout)
+    acknowledge()
     this.run ??= this.runUntilEnded()
-    return this.run
   }
 
   /** This end or its peer closes within `timeoutMs`, which only shortens the deadline. */
-  shortenDeadline(timeoutMs: number): void {
+  private shortenDeadline(timeoutMs: number): void {
     const deadline = performance.now() + timeoutMs
     if (this.deadline && deadline >= this.deadline) return
     this.deadline = deadline
@@ -148,7 +154,7 @@ class ChannelLifecycle {
     return Math.max(0, this.deadline - performance.now())
   }
 
-  onCloseAck(): void {
+  closeAckReceived(): void {
     this.didReceiveCloseAck = true
     this.awaitingCloseAck = false
     this.notifyProgress()
@@ -164,16 +170,19 @@ class ChannelLifecycle {
   }
 
   /** The channel ended, with `err` where it didn't close gracefully: its close waits no more. */
-  end(err: Error | undefined): void {
+  forcedTermination(err: Error | undefined, finalize: () => void): void {
+    if (this.didEnd) return
     this.didEnd = true
     this.endError = err
     this.awaitingCloseAck = false
     if (this.deadlineTimer !== null) clearTimeout(this.deadlineTimer)
     this.deadlineTimer = null
+    finalize()
+    this.fireClose(err)
     this.notifyProgress()
   }
 
-  fireClose(err?: Error): void {
+  private fireClose(err?: Error): void {
     if (this.didFireClose) return
     this.didFireClose = true
     for (const callback of this.closeListeners) {

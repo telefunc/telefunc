@@ -350,12 +350,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this.lifecycle.closing) return this.lifecycle.closing
     if (this._phase === 'ended') return Promise.resolve(this.lifecycle.result)
     const timeout = normalizeCloseTimeout(opts?.timeout)
-    // Until a response carries the channel, no page exists to acknowledge its close.
-    this.lifecycle.startClose(timeout, this.didRegister)
-    this._phase = 'closing'
-    if (this.peer) this.closeRequestSeq = this.peer.sendCloseRequest(timeout)
-    else this.ensurePendingEnd().closeRequest = true
-    return this.lifecycle.runClose()
+    return this.lifecycle.localCloseRequested({
+      timeout,
+      peer: this.didRegister ? 'expected' : 'absent',
+      send: () => {
+        this._phase = 'closing'
+        if (this.peer) this.closeRequestSeq = this.peer.sendCloseRequest(timeout)
+        else this.ensurePendingEnd().closeRequest = true
+      },
+    })
   }
 
   /** @internal — Prepare channel state so the mux can register it. Called by
@@ -604,19 +607,18 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected onPeerCloseRequest(timeoutMs: number): void {
     if (this._phase === 'ended') return
     assertProtocol(timeoutMs <= TIMER_DELAY_MAX_MS, `CLOSE timeout ${timeoutMs}`)
-    this.lifecycle.shortenDeadline(timeoutMs)
-    if (this.peer) this.peer.sendCloseAck()
-    else this.ensurePendingEnd().closeAck = true
-    if (this._phase === 'closing') return
-    this._phase = 'closing'
-    void this.lifecycle.finish()
+    this.lifecycle.peerCloseReceived(timeoutMs, () => {
+      this._phase = 'closing'
+      if (this.peer) this.peer.sendCloseAck()
+      else this.ensurePendingEnd().closeAck = true
+    })
   }
 
   protected onPeerCloseAck(): void {
     if (this._phase === 'ended') return
     // The page sends CLOSE_ACK when the close request arrives, so it has received everything sent before it.
     this.onPageHas(this.closeRequestSeq)
-    this.lifecycle.onCloseAck()
+    this.lifecycle.closeAckReceived()
   }
 
   /** @internal The wire of `peer` went away. A channel a later RECONCILE already moved to another wire stays there. */
@@ -817,29 +819,29 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected shutdown(err?: Error, { pageGone = false } = {}): void {
     if (this._phase === 'ended') return
     this._phase = 'ended'
-    this.lifecycle.end(err)
-    const pageAttached = this.peer !== null
-    this.peer = null
-    this.receiveCredit.detach()
-    if (this.ttlTimer) clearTimeout(this.ttlTimer)
-    this.ttlTimer = null
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
-    this.reconnectTimer = null
-    // Kept for a page that may still attach and lacks something, or for a response that has yet to carry it.
-    const keep = !pageGone && !this.pageNeedsNothing()
-    if (!keep) this._release()
-    this.mux?.onChannelEnded(this, { keep, pageAttached })
-    this.lifecycle.fireClose(err)
-    this.sendCredit.shutdown(err)
-    // Building an error captures a stack trace, so one is built only while an ack is awaited or a frame is buffered.
-    if (this.pendingAcks.size > 0 || this.offlineBuffer.size > 0) {
-      const ackErr = err ?? new ChannelClosedError()
-      for (const { reject } of this.pendingAcks.values()) reject(ackErr)
-      // The buffered ack requests stay for the page, but their callbacks reject now.
-      this.offlineBuffer.rejectAcks(ackErr)
-    }
-    this.pendingAcks.clear()
-    this.pendingAckBytes = 0
+    this.lifecycle.forcedTermination(err, () => {
+      const pageAttached = this.peer !== null
+      this.peer = null
+      this.receiveCredit.detach()
+      if (this.ttlTimer) clearTimeout(this.ttlTimer)
+      this.ttlTimer = null
+      if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+      // Kept for a page that may still attach and lacks something, or for a response that has yet to carry it.
+      const keep = !pageGone && !this.pageNeedsNothing()
+      if (!keep) this._release()
+      this.mux?.onChannelEnded(this, { keep, pageAttached })
+      this.sendCredit.shutdown(err)
+      // Building an error captures a stack trace, so one is built only while an ack is awaited or a frame is buffered.
+      if (this.pendingAcks.size > 0 || this.offlineBuffer.size > 0) {
+        const ackErr = err ?? new ChannelClosedError()
+        for (const { reject } of this.pendingAcks.values()) reject(ackErr)
+        // The buffered ack requests stay for the page, but their callbacks reject now.
+        this.offlineBuffer.rejectAcks(ackErr)
+      }
+      this.pendingAcks.clear()
+      this.pendingAckBytes = 0
+    })
   }
 
   /** @internal Drops what the channel holds for its page: the replay buffer and all it buffered while detached. */
