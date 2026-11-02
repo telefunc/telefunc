@@ -458,7 +458,8 @@ class RoomState {
         filter.track === EVERY_TRACK ||
         this.trackWants < this.trackWantsMax ||
         filter.counts.named.has(filter.track),
-      `Too many binary tracks subscribed on one room (${this.trackWantsMax} max): subscribe without \`{ track }\` to receive every track`,
+      `Too many binary tracks subscribed on one room (${this.trackWantsMax} max): subscribe without \`{ track }\` ` +
+        `to receive every track`,
     )
     const remove = list.add(cb)
     this.bumpListenerCount(

@@ -525,8 +525,8 @@ class RoomModel {
     return { sender: senderOf(from, meta.object, pending.identity ?? null) }
   }
 
-  /** The first roster loads silently; later ones narrate the drift they correct as events. Runs `reconcilingRoster` a `ROOM_PLAN_SLICE_MS` slice per turn;
-   *  null if the room closed between slices. */
+  /** The first roster loads silently; later ones narrate the drift they correct as events. Runs `reconcilingRoster` a
+   *  `ROOM_PLAN_SLICE_MS` slice per turn; null if the room closed between slices. */
   async reconcileRoster(
     roster: { members: MemberSnapshot[] },
     events: readonly MembershipEvent[],

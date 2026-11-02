@@ -51,6 +51,7 @@ function assertRoomTimeout(value: unknown, what: string): asserts value is numbe
   assertUsage(
     value === Infinity ||
       (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= TIMER_DELAY_MAX_MS),
-    `\`${what}\` should be a non-negative safe integer of milliseconds, at most ${TIMER_DELAY_MAX_MS}, the longest a timer waits, or Infinity`,
+    `\`${what}\` should be a non-negative safe integer of milliseconds, at most ${TIMER_DELAY_MAX_MS}, the longest ` +
+      `a timer waits, or Infinity`,
   )
 }

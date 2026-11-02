@@ -561,7 +561,8 @@ function applyBroadcastConfig(val: unknown): void {
           (['send', 'listen', 'sendBinary', 'listenBinary'] as const).every(
             (method) => typeof value[method] === 'function',
           ),
-        'config.broadcast.transport must be a BroadcastTransport with send(), listen(), sendBinary() and listenBinary() methods',
+        'config.broadcast.transport must be a BroadcastTransport with send(), listen(), sendBinary() and ' +
+          'listenBinary() methods',
       )
       next.transport = value as BroadcastTransport
     } else {

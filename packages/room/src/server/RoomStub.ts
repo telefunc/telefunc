@@ -629,7 +629,8 @@ class RoomParticipantStub implements BroadcastEndOwner {
     this.notify(dmNotice(msg))
   }
 
-  /** A closed stub's client left with the participant; a closing stub's close waits for the replies to DMs it forwarded. */
+  /** A closed stub's client left with the participant; a closing stub's close waits for the replies to DMs it
+   *  forwarded. */
   deliverAck(msg: InboxMessage): Promise<RoomResult> {
     if (this.end.isClosed) return Promise.resolve(DM_FAILURE.left)
     const reply = this.dmReplies.await(msg.ackId!)

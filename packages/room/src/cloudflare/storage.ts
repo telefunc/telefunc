@@ -73,19 +73,24 @@ function initSchema(sql: SqlStorage): void {
   // `directory` is the room's listing, one row or none; a regional directory DO lists the region's rooms in it instead.
   sql.exec(`
     CREATE TABLE IF NOT EXISTS head
-      (id INTEGER PRIMARY KEY CHECK (id = 1), rev TEXT NOT NULL, inc TEXT, state TEXT NOT NULL, config BLOB NOT NULL, lease_id TEXT, lease_until INTEGER, expires_at INTEGER);
+      (id INTEGER PRIMARY KEY CHECK (id = 1), rev TEXT NOT NULL, inc TEXT, state TEXT NOT NULL, config BLOB NOT NULL,
+       lease_id TEXT, lease_until INTEGER, expires_at INTEGER);
     CREATE TABLE IF NOT EXISTS gen (inc TEXT PRIMARY KEY, revision INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS cell
       (inc TEXT NOT NULL, key TEXT NOT NULL, bytes BLOB NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (inc, key));
     CREATE TABLE IF NOT EXISTS ord
       (inc TEXT NOT NULL, domain TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (inc, domain));
     CREATE TABLE IF NOT EXISTS rt_manifest
-      (inc TEXT NOT NULL, lane_key TEXT NOT NULL, track TEXT, size INTEGER NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (inc, lane_key));
+      (inc TEXT NOT NULL, lane_key TEXT NOT NULL, track TEXT, size INTEGER NOT NULL, seq INTEGER NOT NULL,
+       ts INTEGER NOT NULL, PRIMARY KEY (inc, lane_key));
     CREATE INDEX IF NOT EXISTS rt_manifest_track ON rt_manifest(inc, track, lane_key);
     CREATE TABLE IF NOT EXISTS rt_chunk
-      (inc TEXT NOT NULL, lane_key TEXT NOT NULL, i INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (inc, lane_key, i));
+      (inc TEXT NOT NULL, lane_key TEXT NOT NULL, i INTEGER NOT NULL, bytes BLOB NOT NULL,
+       PRIMARY KEY (inc, lane_key, i));
     CREATE TABLE IF NOT EXISTS route
-      (room_id TEXT NOT NULL, inc TEXT NOT NULL, lane_key TEXT NOT NULL, session_do_id TEXT NOT NULL, lease_id TEXT NOT NULL, bucket TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (inc, lane_key, session_do_id));
+      (room_id TEXT NOT NULL, inc TEXT NOT NULL, lane_key TEXT NOT NULL, session_do_id TEXT NOT NULL,
+       lease_id TEXT NOT NULL, bucket TEXT NOT NULL, expires_at INTEGER NOT NULL,
+       PRIMARY KEY (inc, lane_key, session_do_id));
     CREATE INDEX IF NOT EXISTS route_expires_at ON route(expires_at);
     CREATE TABLE IF NOT EXISTS directory (room_id TEXT PRIMARY KEY, inc_tag TEXT NOT NULL, check_at INTEGER);
     CREATE INDEX IF NOT EXISTS directory_check_at ON directory(check_at);
@@ -233,7 +238,8 @@ function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
     .exec<{
       deadline: number | null
     }>(
-      'SELECT MIN(deadline) AS deadline FROM (SELECT MIN(expires_at) AS deadline FROM head UNION ALL SELECT MIN(expires_at) FROM route UNION ALL SELECT MIN(check_at) FROM directory)',
+      'SELECT MIN(deadline) AS deadline FROM (SELECT MIN(expires_at) AS deadline FROM head ' +
+        'UNION ALL SELECT MIN(expires_at) FROM route UNION ALL SELECT MIN(check_at) FROM directory)',
     )
     .toArray()[0]!.deadline
 }
@@ -253,7 +259,8 @@ function compareExchangeHead(
 function storeHead(sql: SqlStorage, next: HeadNext, now: number): StoredHead {
   const head = materializeHead(next, now, crypto.randomUUID())
   sql.exec(
-    'INSERT OR REPLACE INTO head (id, rev, inc, state, config, lease_id, lease_until, expires_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT OR REPLACE INTO head (id, rev, inc, state, config, lease_id, lease_until, expires_at) ' +
+      'VALUES (1, ?, ?, ?, ?, ?, ?, ?)',
     head.rev,
     head.currentInc,
     head.state,

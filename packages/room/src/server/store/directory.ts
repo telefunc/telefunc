@@ -37,7 +37,8 @@ async function repairRoomIndex(plane: RoomPlane, id: string, listedInc: string, 
 }
 
 const globalObject = getGlobalObject('server/store/directory.ts', {
-  /** When this process may sweep again: once a heartbeat interval at most, as a room is created or a heartbeat ticks. */
+  /** When this process may sweep again: once a heartbeat interval at most, as a room is created or a heartbeat
+   *  ticks. */
   nextSweepAt: 0,
 })
 

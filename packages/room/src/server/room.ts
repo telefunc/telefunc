@@ -572,7 +572,9 @@ class ServerLocalParticipant extends ParticipantBase {
     // A LocalParticipant has one holder; rebinding would overwrite its inbox forwarder and let either close drop it.
     assertUsage(
       this.holder === null,
-      'This LocalParticipant is already bound to a client and cannot be handed to another. A LocalParticipant is a single member: give each client its own join(), or share a getParticipants() view (which is read-only) instead.',
+      'This LocalParticipant is already bound to a client and cannot be handed to another. A LocalParticipant is a ' +
+        'single member: give each client its own join(), or share a getParticipants() view (which is read-only) ' +
+        'instead.',
     )
     this.holder = new RoomParticipantStub({ participant: this, end, publishShield })
     this._flushHeld(this.holder)

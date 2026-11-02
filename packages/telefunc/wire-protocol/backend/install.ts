@@ -49,7 +49,8 @@ const state = getGlobalObject<{
   installed: Installed | null
   /** The public broadcast-only override: Broadcast goes through it instead of the installed backend. */
   transport?: BroadcastTransport
-  /** Built on first Broadcast use, from the transport or else the installed backend; `null` again once either changes. */
+  /** Built on first Broadcast use, from the transport or else the installed backend; `null` again once either
+   *  changes. */
   broadcast: BroadcastPlane | null
   planeFollowers: Set<BroadcastPlaneFollower>
 }>('wire-protocol/backend/install.ts', () => ({ installed: null, broadcast: null, planeFollowers: new Set() }))
@@ -64,7 +65,8 @@ function installBackend<B extends BroadcastDriver>(factory: () => B, key: readon
   if (sameKey(installed.key, key)) return installed.backend as B
   assertUsage(
     !installed.fallback,
-    'Install the backend (for example with installRedis()) before its first use: an earlier use already started the in-memory backend',
+    'Install the backend (for example with installRedis()) before its first use: an earlier use already started ' +
+      'the in-memory backend',
   )
   assertUsage(false, 'Install one backend per process: a different backend is already installed')
 }
@@ -102,7 +104,8 @@ function backendPlane<Driver extends PlaneDriver, Plane extends BackendPlane>(
 ): Plane {
   assertUsage(
     !(state.transport && (state.installed?.fallback ?? true)),
-    'config.broadcast.transport configures Broadcast only, and this call needs a full backend: install the Redis backend or use the Cloudflare adapter.',
+    'config.broadcast.transport configures Broadcast only, and this call needs a full backend: install the Redis ' +
+      'backend or use the Cloudflare adapter.',
   )
   const installed = currentBackend()
   return getOrCreate(installed.planes, plane.key, () => {

@@ -152,7 +152,8 @@ type RoomFailure =
   | { ok: false; kind: 'abort'; abortValue: unknown }
   | { ok: false; kind: 'shield' | 'overflow' | 'error'; message: string }
 
-/** A Room answer: to a request or publish, or an ack DM's reply; the value the call resolves to, or what it rejects with. */
+/** A Room answer: to a request or publish, or an ack DM's reply; the value the call resolves to, or what it rejects
+ *  with. */
 type RoomResult = { ok: true; value: unknown } | RoomFailure
 
 /** A member's meta, attributes and DM requests, as a participant stub carries them. */

@@ -35,7 +35,8 @@ const roomRemoteReviver: ReviverType<RoomRemoteReviverContract, ClientReviverCon
     assert(metadata.room instanceof ClientRoom)
     const room = metadata.room
     const remote = room._reviveRemote(metadata)
-    // A call through the room's wrapper tethers the result to it, but only the member `join()` returns holds its room open.
+    // A call through the room's wrapper tethers the result to it, but only the member `join()` returns holds its room
+    // open.
     untether(remote)
     context.shareLifecycle(remote, room)
     return {

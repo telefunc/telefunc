@@ -122,7 +122,8 @@ function currentCloudflareHostKey(): string {
   const member = currentCloudflareMember()
   assertUsage(
     member !== undefined,
-    'A Cloudflare subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.',
+    'A Cloudflare subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, ' +
+      'not from outside a request.',
   )
   return member.hostKey
 }

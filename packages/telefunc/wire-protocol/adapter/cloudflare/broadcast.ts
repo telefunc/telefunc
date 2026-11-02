@@ -140,7 +140,8 @@ class MemberAttempt extends DriverAttempt {
 const AUTHORITY_SCHEMA = `
   CREATE TABLE IF NOT EXISTS broadcast_key (key TEXT PRIMARY KEY, seq INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS broadcast_presence
-    (route_key TEXT NOT NULL, member TEXT NOT NULL, bucket TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (route_key, member));
+    (route_key TEXT NOT NULL, member TEXT NOT NULL, bucket TEXT NOT NULL, expires_at INTEGER NOT NULL,
+     PRIMARY KEY (route_key, member));
 `
 
 /** The Broadcast state of a key authority DO, in its SQLite storage: each key's `seq` and each route's member presence.

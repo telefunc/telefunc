@@ -75,7 +75,8 @@ class ListenAttempt extends DriverAttempt {
 function checkOrdering<Ordering extends { seq: number; timestamp: number }>(ordering: Ordering): Ordering {
   assertUsage(
     isOrdering(ordering),
-    `config.broadcast.transport returned { seq: ${ordering.seq}, timestamp: ${ordering.timestamp} }: seq must be a positive safe integer and timestamp a non-negative safe integer.`,
+    `config.broadcast.transport returned { seq: ${ordering.seq}, timestamp: ${ordering.timestamp} }: seq must be a ` +
+      `positive safe integer and timestamp a non-negative safe integer.`,
   )
   return ordering
 }

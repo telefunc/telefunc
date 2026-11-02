@@ -17,7 +17,8 @@ import type { LaneHolder } from '../lifecycle/replay.js'
 import { hasEntry, toggle, toggleEntry } from '../../utils/sets.js'
 assertIsNotBrowser()
 
-/** A holder's text wants as last indexed, and the binary cover keys it is in per scope (`EVERY_MEMBER`: every member). */
+/** A holder's text wants as last indexed, and the binary cover keys it is in per scope (`EVERY_MEMBER`: every
+ *  member). */
 type Indexed = {
   textAll: boolean
   announce: boolean

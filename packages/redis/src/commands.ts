@@ -275,8 +275,8 @@ redis.call('UNLINK', KEYS[2])
 redis.call('PUBLISH', KEYS[1], ARGV[1])
 `
 
-// CELLS EXCHANGE: all mutations and counts or none, while each expected cell is at its version; success implies the head
-// precondition (open + inc) held at apply time. A commit's writes take the incarnation's next revision as version.
+// CELLS EXCHANGE: all mutations and counts or none, while each expected cell is at its version; success implies the
+// head precondition (open + inc) held at apply time. A commit's writes take the incarnation's next revision as version.
 //   KEYS: [1]=head [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions
 //   ARGV: [1]=inc [2..4]=how many mutated, expected and counted cells, then per mutated cell its key, op('set'|'del')
 //         and value, per expected cell its key and version ('' while absent), and per counted cell its key, delta and
@@ -366,8 +366,8 @@ const COMMIT_KEYS = {
   retainedLanes: 11,
 } as const
 
-/** COMMIT's ARGV, by index; the required live cells follow the last. A fence token is the channel's local delivery-fence
- *  token, or `''`. */
+/** COMMIT's ARGV, by index; the required live cells follow the last. A fence token is the channel's local
+ *  delivery-fence token, or `''`. */
 const COMMIT_ARGS = {
   inc: 0,
   laneKind: 1,
@@ -415,7 +415,9 @@ if head and head.inc == ${A.inc} then
 end
 if not ok then return '{"kind":"stale-incarnation"}' end
 for i = ${COMMIT_ARGS.requiredCells + 1}, #${args} do
-  if redis.call('HEXISTS', ${K.cellValues}, ${args}[i]) == 0 then return '{"kind":"stale-cell","index":' .. (i - ${COMMIT_ARGS.requiredCells + 1}) .. '}' end
+  if redis.call('HEXISTS', ${K.cellValues}, ${args}[i]) == 0 then
+    return '{"kind":"stale-cell","index":' .. (i - ${COMMIT_ARGS.requiredCells + 1}) .. '}'
+  end
 end
 
 local member_lane = ${A.laneKind} == 'inbox' or ${A.laneKind} == 'binary'

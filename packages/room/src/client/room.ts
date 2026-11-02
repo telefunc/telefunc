@@ -205,11 +205,13 @@ class ClientRoom extends RoomStateView implements Room {
   private async requestJoin(options?: JoinOptions): Promise<ClientRoomParticipant> {
     assertUsage(
       options?.identity === undefined,
-      'join() options.identity is server-assigned: identity is trusted, so set it where trust lives, in the granting telefunction (server-side join()), not on the client.',
+      'join() options.identity is server-assigned: identity is trusted, so set it where trust lives, in the ' +
+        'granting telefunction (server-side join()), not on the client.',
     )
     assertUsage(
       options?.hidden === undefined,
-      'join() options.hidden is server-side only: a hidden participant is created by the granting telefunction (server-side join({ hidden: true })), not by a client.',
+      'join() options.hidden is server-side only: a hidden participant is created by the granting telefunction ' +
+        '(server-side join({ hidden: true })), not by a client.',
     )
     const { meta, selfDelivery } = normalizeJoinOptions(options)
     const reqId = this.joinReqs++
@@ -738,7 +740,8 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return this.room._request({ ...request, id: this.id })
   }
 
-  /** @internal The page's handle: it holds the room open until this member leaves, and nothing in the room reaches it. */
+  /** @internal The page's handle: it holds the room open until this member leaves, and nothing in the room reaches
+   *  it. */
   _handOut(joining: Promise<LocalParticipant>): LocalParticipant {
     const bound = new Map<PropertyKey, unknown>()
     const handle = new Proxy<LocalParticipant>(this, {

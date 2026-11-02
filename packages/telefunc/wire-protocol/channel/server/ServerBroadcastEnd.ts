@@ -71,7 +71,8 @@ class ServerBroadcastEnd extends ServerChannel {
         this.endWithError(
           ERROR_REASON.OVERFLOW,
           new ChannelOverflowError(
-            `Channel closed: more was sent to its client while it was offline than config.channel.${limit} lets the server hold`,
+            `Channel closed: more was sent to its client while it was offline than config.channel.${limit} lets ` +
+              `the server hold`,
           ),
         )
       }

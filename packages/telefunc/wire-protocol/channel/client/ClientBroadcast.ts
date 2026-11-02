@@ -37,8 +37,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return this.subscribers[kind].add(callback)
   }
 
-  /** @internal Sends what `reply` resolves to, also while closing: a graceful close waits for it, as for an ack's answer.
-   *  A reply it can't send is reported, and `failure` goes instead. */
+  /** @internal Sends what `reply` resolves to, also while closing: a graceful close waits for it, as for an ack's
+   *  answer. A reply it can't send is reported, and `failure` goes instead. */
   _sendReply(reply: Promise<unknown>, failure: unknown): void {
     void this.lifecycle.trackAck(
       reply.then((data) => {

@@ -229,7 +229,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       const extension = getCloudflareExtension(name)
       assertUsage(
         extension?.durableObject,
-        `The Cloudflare extension ${name} isn't registered: is it installed, and does your worker's build use Telefunc's Vite plugin?`,
+        `The Cloudflare extension ${name} isn't registered: is it installed, and does your worker's build use ` +
+          `Telefunc's Vite plugin?`,
       )
       const regions = { forward: broadcast.forward.bind(broadcast, this.broadcastCalls) }
       const getNamespace = () => telefuncNamespace(this.env)

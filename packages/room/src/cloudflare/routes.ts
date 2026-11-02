@@ -31,7 +31,8 @@ function exact(route: RouteInstallation): string[] {
 /** The DO checks the open head; this UPSERT atomically replaces the prior exact lease. */
 function upsertRoute(sql: SqlStorage, route: RouteInstallation, now: number): void {
   sql.exec(
-    'INSERT OR REPLACE INTO route (room_id, inc, lane_key, session_do_id, lease_id, bucket, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    'INSERT OR REPLACE INTO route (room_id, inc, lane_key, session_do_id, lease_id, bucket, expires_at) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?)',
     route.roomId,
     ...exact(route),
     route.bucket,
@@ -69,7 +70,8 @@ function laneRoute(inc: string, laneKey: string): BroadcastRoute<'binary'> {
 function snapshotRoutes(sql: SqlStorage, inc: string, laneKeys: readonly string[], now: number): RouteInstallation[] {
   return sql
     .exec<RouteInstallation>(
-      `SELECT ${ROUTE_COLUMNS} FROM route WHERE inc = ? AND lane_key IN (${laneKeys.map(() => '?').join(', ')}) AND expires_at > ?`,
+      `SELECT ${ROUTE_COLUMNS} FROM route
+        WHERE inc = ? AND lane_key IN (${laneKeys.map(() => '?').join(', ')}) AND expires_at > ?`,
       inc,
       ...laneKeys,
       now,

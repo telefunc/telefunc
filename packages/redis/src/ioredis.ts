@@ -39,7 +39,8 @@ function createCommandClient(redis: RedisClient): RedisClient {
   // A Cluster copies redisOptions.keyPrefix to its own options, so this reads either form.
   if (redis.options.keyPrefix) {
     throw new Error(
-      "installRedis(): ioredis keyPrefix isn't supported (it doesn't apply to Pub/Sub channels). Use installRedis(redis, { prefix }) instead",
+      "installRedis(): ioredis keyPrefix isn't supported (it doesn't apply to Pub/Sub channels). Use " +
+        'installRedis(redis, { prefix }) instead',
     )
   }
   const commands = isCluster(redis)
@@ -120,6 +121,7 @@ function callDefinedCommand(
 ): Promise<unknown> {
   const fn = (redis as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>)[command]
   assert(typeof fn === 'function', `Redis command "${command}" was not registered via defineCommand`)
-  // One array argument, which ioredis flattens into the command: an incarnation's keys can outnumber a call's arguments.
+  // One array argument, which ioredis flattens into the command: an incarnation's keys can outnumber a call's
+  // arguments.
   return fn.call(redis, keysAndArgs)
 }

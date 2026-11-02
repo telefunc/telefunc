@@ -22,8 +22,8 @@ const counterTextDecoder = new TextDecoder()
 /** A head as an authority stores it; `expiresAt` is when it lapses. */
 type StoredHead = Omit<RoomHead, 'expiresAt'> & { expiresAt: number | null }
 
-/** The exchange's next head as stored: its expiry and close-lease deadline are minted here, from authority time, and never
- *  supplied by a caller. */
+/** The exchange's next head as stored: its expiry and close-lease deadline are minted here, from authority time, and
+ *  never supplied by a caller. */
 function materializeHead(next: HeadNext, now: number, rev: string): StoredHead {
   const { currentInc, state, config, closeLease } = next.head
   const { ttlMs } = next
