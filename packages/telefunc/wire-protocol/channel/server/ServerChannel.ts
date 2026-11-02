@@ -34,8 +34,7 @@ import { isPromise } from '../../../utils/isPromise.js'
 import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES, SENDS_AHEAD_WARNING_BYTES } from '../../constants.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
-import { replayWindow } from '../../flowControl/credit.js'
-import { ServerCreditSender } from './ServerCreditSender.js'
+import { replayWindow, type CreditOwner } from '../../flowControl/credit.js'
 import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import { SelfTime } from '../../flowControl/SelfTime.js'
 import { SendCredit } from '../../flowControl/SendCredit.js'
@@ -152,7 +151,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   } = {}) {
     this.ack = ack
     this.id = id ?? crypto.randomUUID()
-    const owner = new ServerCreditSender({ peer: () => this.peer, lastClientSeq: () => this._lastClientSeq })
+    // Its credits send to the page attached, nothing while none is, and read that page's wire.
+    const owner: CreditOwner = {
+      // The limit carries the last seq the channel has, which acknowledges what arrived.
+      sendByteLimit: (limit, urgency) => this.peer?.sendByteLimit(limit, this._lastClientSeq, urgency),
+      sendMessageLimit: (limit, urgency) => this.peer?.sendMessageLimit(limit, urgency),
+      sendBdpPing: (probe) => this.peer?.sendBdpPing(probe),
+      backlogBytes: () => this.peer?.sender.bufferedAmount(),
+      deliveredBefore: (ms) => this.peer?.sender.deliveredBefore(ms) ?? 0,
+    }
     this.sendCredit = new SendCredit({ owner, selfTime: this.selfTime })
     this.receiveCredit = new ReceiveCredit({ owner, selfTime: this.selfTime })
     const c = getServerConfig().channel
