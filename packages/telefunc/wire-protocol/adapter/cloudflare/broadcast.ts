@@ -6,6 +6,7 @@ import { CHANNEL_BUFFER_LIMIT_BYTES } from '../../constants.js'
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorScale, getDeterministicKeyBucketIndex } from './routing.js'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
+import { OrderedStubs } from './OrderedStubs.js'
 import type {
   BroadcastBinaryOnMessage,
   BroadcastOnMessage,
@@ -177,7 +178,7 @@ class MemberBucketState {
   /** Each Durable Object with subscribers on the key here, with how many: each has a presence of its own. */
   readonly owners = new Map<string, number>()
   refreshTimer: ReturnType<typeof setInterval> | null = null
-  /** A stub can only be used by the Durable Object that got it, so each publish gets its own. */
+  /** A stub can only be used by the Durable Object that got it, and this state is the isolate's, so it holds none. */
   private readonly authority: () => TelefuncBroadcastStub
   private readonly key: string
   private readonly locationBucket: LocationBucket
@@ -223,6 +224,7 @@ class MemberBucketState {
 // ---------------------------------------------------------------------------
 
 class CloudflareBroadcastAuthorityState {
+  readonly broadcastCalls = new OrderedStubs<TelefuncBroadcastStub>()
   private readonly state: DurableObjectState
   private authorityPublishChain: Promise<void> = Promise.resolve()
   private readonly keySeqCache = new Map<string, number>()
@@ -296,6 +298,9 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   private readonly binarySubs = new Map<string, Map<BroadcastBinaryOnMessage, string>>()
   /** Each request a Durable Object received, with its name: a wire it opens is that Durable Object's. */
   private readonly requestOwners = new WeakMap<Request, string>()
+  /** The stub to each key's authority of this synchronous run, which is one Durable Object's: its publishes in one run
+   *  stay in order. Later runs may be another's, so they get their own. */
+  private readonly authorityStubsOfThisRun = new Map<string, TelefuncBroadcastStub>()
 
   constructor({ baseInstanceName, scale }: { baseInstanceName: string; scale?: CloudflareScale }) {
     this.baseInstanceName = baseInstanceName
@@ -508,7 +513,11 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       const doNames = request.doNames ?? []
       await Promise.all(
         doNames.map((doName) =>
-          this.getBoundStub(doName).telefuncBroadcastDeliver({ key, doName, serialized, binaryData, info }),
+          authorityState.broadcastCalls.call(
+            doName,
+            () => this.getBoundStub(doName),
+            (stub) => stub.telefuncBroadcastDeliver({ key, doName, serialized, binaryData, info }),
+          ),
         ),
       )
       return { seq: info.seq, timestamp: info.timestamp }
@@ -524,17 +533,23 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     const info = { seq, timestamp }
     const activeBuckets = Array.from(presenceByBucket.keys())
     await Promise.all(
-      activeBuckets.map((activeBucket) =>
-        this.getBucketCoordinatorStub(key, activeBucket).telefuncBroadcastPublish({
-          key,
-          serialized,
-          binaryData,
-          forwarded: true,
-          locationBucket: activeBucket,
-          doNames: presenceByBucket.get(activeBucket)!,
-          info,
-        }),
-      ),
+      activeBuckets.map((activeBucket) => {
+        const coordinator = this.getBucketCoordinatorName(key, activeBucket)
+        return authorityState.broadcastCalls.call(
+          coordinator,
+          () => this.getBoundStub(coordinator, activeBucket),
+          (stub) =>
+            stub.telefuncBroadcastPublish({
+              key,
+              serialized,
+              binaryData,
+              forwarded: true,
+              locationBucket: activeBucket,
+              doNames: presenceByBucket.get(activeBucket)!,
+              info,
+            }),
+        )
+      }),
     )
     return { seq, timestamp, meta: { authorityBucket, fanoutBuckets: activeBuckets } }
   }
@@ -605,17 +620,20 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     this.teardownPresenceIfEmpty(key)
   }
 
-  private getBucketCoordinatorStub(key: string, locationBucket: LocationBucket): TelefuncBroadcastStub {
+  private getBucketCoordinatorName(key: string, locationBucket: LocationBucket): string {
     const bucketShardCount = getBucketCoordinatorScale(this.scale, locationBucket)
     const bucketShardOrdinal = getDeterministicKeyBucketIndex(key, bucketShardCount)
-    return this.getBoundStub(
-      `${this.baseInstanceName}:broadcast:${locationBucket}:${bucketShardOrdinal}`,
-      locationBucket,
-    )
+    return `${this.baseInstanceName}:broadcast:${locationBucket}:${bucketShardOrdinal}`
   }
 
   private getAuthorityStub(key: string, locationHint?: DurableObjectLocationHint): TelefuncBroadcastStub {
-    return this.getBoundStub(`${this.baseInstanceName}:broadcast:authority:${key}`, locationHint)
+    let stub = this.authorityStubsOfThisRun.get(key)
+    if (!stub) {
+      if (this.authorityStubsOfThisRun.size === 0) queueMicrotask(() => this.authorityStubsOfThisRun.clear())
+      stub = this.getBoundStub(`${this.baseInstanceName}:broadcast:authority:${key}`, locationHint)
+      this.authorityStubsOfThisRun.set(key, stub)
+    }
+    return stub
   }
 
   private getBoundStub(instanceName: string, locationHint?: DurableObjectLocationHint): TelefuncBroadcastStub {

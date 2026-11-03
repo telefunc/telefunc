@@ -156,7 +156,7 @@ Publisher (Durable Object)
 
 ### Ordering
 
-<Link href="/channel#broadcast">Broadcast</Link> publishes for a given `key` go through a single authority, so subscribers receive messages in order with a <Link href="/channel#broadcast">monotonic `seq`</Link>.
+<Link href="/channel#broadcast">Broadcast</Link> publishes for a given `key` go through a single authority, so subscribers receive messages in order with a <Link href="/channel#broadcast">monotonic `seq`</Link>. A Durable Object's publishes get their `seq` in call order when they are made in one synchronous run or awaited one by one. Any others get it in the order they reach the authority.
 
 ### Presence
 
@@ -186,7 +186,7 @@ A KV record is created on subscribe and deleted on unsubscribe. If a Durable Obj
 
 | Guarantee | Details |
 |---|---|
-| Ordering | Publishes for a given key are serialized and delivered in order. |
+| Ordering | Publishes for a given key are serialized and delivered in `seq` order, which is call order for a Durable Object's publishes made in one synchronous run or awaited one by one. |
 | Delivery | `publish()` resolves after all Durable Objects whose KV presence record the publish found have received the message. Delivery to clients then happens over the channel connection. |
 | Presence lag | A new subscriber's presence reaches the key's authority through KV, which [can take 60 seconds or more](https://developers.cloudflare.com/kv/concepts/how-kv-works/) to show a write in other locations. A presence write KV refuses is retried at the next refresh, within 30 s. Publishes made meanwhile can miss the subscriber. |
 
