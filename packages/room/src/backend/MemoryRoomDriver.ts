@@ -63,8 +63,8 @@ type Incarnation = {
   /** The last cell version this incarnation issued. */
   version: number
   cells: Map<string, StoredCell>
-  /** Each expiring cell, with the timer that deletes it. */
-  expiring: Map<string, { bytes: Uint8Array; timer: ReturnType<typeof setTimeout> }>
+  /** Each expiring cell, with when it expires, which a read checks, and the timer that deletes it. */
+  expiring: Map<string, { bytes: Uint8Array; expiresAt: number; timer: ReturnType<typeof setTimeout> }>
   /** Cell keys by each of their prefixes ending in ':', the separator of cell keys, so a prefix read lists its own. */
   cellsByPrefix: Map<string, Set<string>>
   /** The room-wide lanes' order, by lane key. */
@@ -201,7 +201,7 @@ function setCell(incarnation: Incarnation, key: string, bytes: Uint8Array | null
   incarnation.cells.set(key, { bytes: copyBytes(bytes), version })
 }
 
-/** Writes an expiring cell, replacing one at its key, and the timer that deletes it. */
+/** Writes an expiring cell, replacing one at its key, and the timer that deletes it, which may run late. */
 function setExpiring(incarnation: Incarnation, { key, bytes, ttlMs }: ExpiringCell): void {
   clearTimeout(incarnation.expiring.get(key)?.timer)
   const timer = unrefTimer(
@@ -209,7 +209,7 @@ function setExpiring(incarnation: Incarnation, { key, bytes, ttlMs }: ExpiringCe
       if (incarnation.expiring.get(key)?.timer === timer) incarnation.expiring.delete(key)
     }, ttlMs),
   )
-  incarnation.expiring.set(key, { bytes: copyBytes(bytes), timer })
+  incarnation.expiring.set(key, { bytes: copyBytes(bytes), expiresAt: Date.now() + ttlMs, timer })
 }
 
 /** Applies the mutations and counts as one write, at the incarnation's next version; returns each counted counter. */
@@ -326,9 +326,10 @@ class MemoryRoomDriver implements RoomDriver {
     const incarnation = this.readableIncarnation(roomId, inc)
     if (incarnation === null) return { kind: 'stale-incarnation' }
     const cells = new Map<string, Uint8Array>()
+    const now = Date.now()
     for (const key of keys) {
       const cell = incarnation.expiring.get(key)
-      if (cell !== undefined) cells.set(key, copyBytes(cell.bytes))
+      if (cell !== undefined && cell.expiresAt > now) cells.set(key, copyBytes(cell.bytes))
     }
     return { kind: 'read', cells }
   }
