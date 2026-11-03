@@ -1,32 +1,38 @@
-export { getTelefuncSseChannelHooks, handleSseChannelRequest }
-export type { SseChannelHttpResponse, SseConnection }
+export { handleSseChannelRequest }
+export type { SseChannelHttpResponse, SseWire }
 
 import type { Readable } from 'node:stream'
-import { assert } from '../../../utils/assert.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
-import { CHANNEL_TRANSPORT, SSE_METADATA_MAX_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
+import {
+  CHANNEL_TRANSPORT,
+  SSE_METADATA_MAX_BYTES,
+  STATUS_CODE_WIRE_VERSION,
+  WIRE_MAX_RAW_FRAME_BYTES,
+} from '../../constants.js'
+import { namesWireVersion } from '../../wire/requestKind.js'
 import { createPushReadableStream, type PushReadableStream } from '../../../utils/pushReadableStream.js'
 import { createPushReadable, type PushReadable } from '../../../utils/pushReadable.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
-import { textEncoder } from '../../wire/frame.js'
-import { parseSseRequestMetadata, type SseRequestMetadata } from '../sseRequest.js'
-import { OversizeFrameError, StreamReader, StreamTruncatedError } from '../../wire/StreamReader.js'
-import { getChannelMux } from './mux.js'
-import type { ChannelMux, ReconcileOutcome, ServerTransport } from './mux.js'
-import { encode, isProtocolViolationError, passesData, ProtocolViolationError } from '../../wire/connectionFrame.js'
+import { parseSseRequestMetadata, textEncoder, type SseRequestMetadata } from '../../wire/envelope.js'
+import { OversizeFrameError, BodyReader, StreamTruncatedError } from '../../wire/BodyReader.js'
+import { getChannelMux } from './ChannelMux.js'
+import type { ChannelMux, ReconcileOutcome, ServerTransport } from './ChannelMux.js'
+import { encode } from '../../wire/frame.js'
+import { passesData } from '../../wire/tags.js'
+import { isProtocolViolationError, ProtocolViolationError } from '../../wire/protocolViolation.js'
 
 type SseChannelHttpResponse = {
-  statusCode: 200 | 400
+  statusCode: 200 | 400 | 409
   contentType: 'text/plain' | 'text/event-stream'
   headers: [string, string][]
   body: string | Readable | ReadableStream<Uint8Array<ArrayBuffer>>
 }
 
-type SseConnection = {
+type SseWire = {
   connId: string
   events: EventStream
   closed: boolean
@@ -35,7 +41,7 @@ type SseConnection = {
    *  POSTs gate on this before dispatching so they can't race ahead of the reconcile. */
   ready: Promise<void>
   resolveReady: () => void
-  /** Dispatches in flight for this connection. A reconcile waits on these before reporting a seq,
+  /** Dispatches in flight for this wire. A reconcile waits on these before reporting a seq,
    *  so a batch POST's `_lastClientSeq` mutations can't land after the RECONCILED that reports them. */
   pendingDispatches: Set<Promise<unknown>>
 }
@@ -99,14 +105,14 @@ class EventStream {
 }
 
 const globalObject = getGlobalObject('wire-protocol/channel/server/sse.ts', {
-  defaultHooks: null as ReturnType<typeof getTelefuncSseChannelHooks> | null,
+  sseTransport: null as SseServerTransport | null,
 })
 
-class SseConnectionTransport {
+class SseServerTransport {
   /** Resolvers for data POSTs that arrived before the stream-response POST registered the
-   *  connection — covers the same-instance race where the long-lived stream-request POST
+   *  wire — covers the same-instance race where the long-lived stream-request POST
    *  lands before the stream-response POST. */
-  private readonly pendingConnections = new Map<string, Set<(connection: SseConnection | null) => void>>()
+  private readonly pendingWires = new Map<string, Set<(wire: SseWire | null) => void>>()
   /** When each wire closed and the session it had, for `connectTtl`: a page never reuses a connId, so a POST for one is
    *  refused. */
   private readonly closedWires = new Map<string, { at: number; sessionId: string | null }>()
@@ -114,43 +120,53 @@ class SseConnectionTransport {
   private get mux(): ChannelMux {
     return getChannelMux()
   }
-  private readonly transport: ServerTransport<SseConnection> = {
-    getSessionId: (connection) => connection.sessionId ?? undefined,
-    setSessionId: (connection, sessionId) => {
-      connection.sessionId = sessionId
+  private readonly transport: ServerTransport<SseWire> = {
+    getSessionId: (wire) => wire.sessionId ?? undefined,
+    setSessionId: (wire, sessionId) => {
+      wire.sessionId = sessionId
     },
-    getConnId: (connection) => connection.connId,
-    sendNow: (connection, frame) => this.sendNow(connection, frame),
+    getConnId: (wire) => wire.connId,
+    sendNow: (wire, frame) => this.sendNow(wire, frame),
     wholeMessages: false,
     // Events carry frames in base64 plus framing, so three quarters of what waits is at least the frames it carries.
-    bufferedAmount: (connection) => Math.floor((connection.events.heldBytes * 3) / 4),
+    bufferedAmount: (wire) => Math.floor((wire.events.heldBytes * 3) / 4),
     // A frame that goes at once passes the data waiting for the stream to ask: it waits behind the stream's alone.
-    queuedAhead: (connection) => Math.floor((connection.events.streamBytes * 3) / 4),
-    terminateConnection: (connection) => this.terminateConnection(connection),
+    queuedAhead: (wire) => Math.floor((wire.events.streamBytes * 3) / 4),
+    terminateWire: (wire) => this.terminateWire(wire),
   }
 
-  async handleRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse | null> {
+  async handleRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse> {
     if (!getServerConfig().channel.transports.includes(CHANNEL_TRANSPORT.SSE)) return badRequest()
     if (request.method !== 'POST') return badRequest()
+    if (!namesWireVersion(request)) return wireVersionRefused()
     const source = readable ?? request.body
-    assert(source)
+    // A Web `Request` sent without a body has `body === null`; a Node one, an empty stream (below).
+    if (!source) return noBody()
     // Adapter mode: a Node `IncomingMessage` means we're on the Node-native serve path
     // and should answer with a Node `Readable` so it pipes straight to the socket. Web
     // adapters get `request.body` (no `readable`) and want a `ReadableStream` back.
     const useNodeStream = readable !== undefined
     let connId: string | null = null
     try {
-      const reader = new StreamReader(source)
-      const metadata = parseMetadata(await reader.readMetadata(SSE_METADATA_MAX_BYTES))
+      const reader = new BodyReader(source)
+      const rawMetadata = await reader.readLengthPrefixedBytesOrNull(SSE_METADATA_MAX_BYTES)
+      if (rawMetadata === null) return noBody()
+      const metadata = parseMetadata(new TextDecoder().decode(rawMetadata))
       connId = metadata.connId
-      if (metadata.streamResponse) return await this.handleStreamResponsePost(connId, reader, useNodeStream)
-      if (metadata.streamRequest) return await this.handleStreamRequestPost(connId, reader)
-      if (metadata.close) return this.handleClosePost(connId)
-      return await this.handleBatchPost(connId, reader)
+      switch (metadata.kind) {
+        case 'streamResponse':
+          return await this.handleStreamResponsePost(connId, reader, useNodeStream)
+        case 'streamRequest':
+          return await this.handleStreamRequestPost(connId, reader)
+        case 'close':
+          return this.handleClosePost(connId)
+        case 'batch':
+          return await this.handleBatchPost(connId, reader)
+      }
     } catch (err) {
       // An oversize frame leaves no next frame boundary to resume from, so it ends the wire, not
       // just this POST.
-      if (err instanceof OversizeFrameError && connId !== null) this.closeWire(connId)
+      if (err instanceof OversizeFrameError && connId !== null) this.closeWireOf(connId)
       // A typed protocol-input fault is the client's: answer 400 and stay quiet. Anything else is our
       // bug — rethrow so the request pipeline (`runTelefunc`) logs it and masks it as a 500.
       if (isProtocolViolationError(err) || err instanceof OversizeFrameError || err instanceof StreamTruncatedError) {
@@ -164,15 +180,15 @@ class SseConnectionTransport {
    *  (`runStreamResponse`). Returns immediately so the response headers can flush. */
   private async handleStreamResponsePost(
     connId: string,
-    reader: StreamReader,
+    reader: BodyReader,
     useNodeStream: boolean,
   ): Promise<SseChannelHttpResponse> {
-    const existing = this.mux.getConnectionByConnId<SseConnection>(connId)
-    if (existing) this.closeConnection(existing, { permanent: false })
+    const existing = this.mux.getWireByConnId<SseWire>(connId)
+    if (existing) this.closeWire(existing, { permanent: false })
 
     const onCancel = () => {
-      const conn = this.mux.getConnectionByConnId<SseConnection>(connId)
-      if (conn) this.closeConnection(conn, { permanent: false })
+      const wire = this.mux.getWireByConnId<SseWire>(connId)
+      if (wire) this.closeWire(wire, { permanent: false })
     }
     const events = new EventStream({ useNodeStream, onCancel })
 
@@ -180,7 +196,7 @@ class SseConnectionTransport {
     const ready = new Promise<void>((resolve) => {
       resolveReady = resolve
     })
-    const connection: SseConnection = {
+    const wire: SseWire = {
       connId,
       events,
       closed: false,
@@ -189,9 +205,9 @@ class SseConnectionTransport {
       resolveReady,
       pendingDispatches: new Set(),
     }
-    this.mux.onConnectionOpen(connection, this.transport)
-    this.resolvePendingConnections(connId, connection)
-    void this.runStreamResponse(connection, reader)
+    this.mux.onWireOpen(wire, this.transport)
+    this.resolvePendingWires(connId, wire)
+    void this.runStreamResponse(wire, reader)
 
     return {
       statusCode: 200,
@@ -200,32 +216,32 @@ class SseConnectionTransport {
         ['Cache-Control', 'no-cache, no-transform'],
         ['X-Accel-Buffering', 'no'],
       ],
-      body: events.stream,
+      body: events.stream.readable,
     }
   }
 
-  /** Long-lived client→server upload POST. The body streams for the connection's lifetime, so every
+  /** Long-lived client→server upload POST. The body streams for the wire's lifetime, so every
    *  frame is dispatched fire-and-forget — awaiting one would stall the read loop behind it. */
-  private async handleStreamRequestPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
-    const connection = await this.resolveConnection(connId)
-    if (!connection) return badRequest()
-    reader.onChunk = () => this.mux.onConnectionBytes(connection)
+  private async handleStreamRequestPost(connId: string, reader: BodyReader): Promise<SseChannelHttpResponse> {
+    const wire = await this.resolveWire(connId)
+    if (!wire) return badRequest()
+    reader.onChunk = () => this.mux.onWireBytes(wire)
     // The open-ack is the client's duplex probe (ACK ⇒ its upload bytes reached the server) and must
     // not wait on reconcile settlement, or a slow attach would falsely demote a healthy duplex wire to
     // sticky batch. Dispatch safety is owned by `runStreamResponse` releasing `ready` only after
     // RECONCILED — the read loop below still waits on that gate, so early bytes sit unread until then.
-    this.sendNow(connection, encode.streamRequestOpenAck())
+    this.sendNow(wire, encode.streamRequestOpenAck())
     // No deadline: the client trusts this POST from the ack on; runStreamResponse's end or the close opens the gate.
-    await connection.ready
-    if (connection.closed) return badRequest()
+    await wire.ready
+    if (wire.closed) return badRequest()
     try {
       while (true) {
         const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
-        if (!raw || connection.closed) break
-        this.dispatchAndReport(connection, raw)
+        if (!raw || wire.closed) break
+        this.dispatchAndReport(wire, raw)
       }
     } finally {
-      await this.settlePendingDispatches(connection)
+      await this.settlePendingDispatches(wire)
     }
     return okResponse()
   }
@@ -233,9 +249,9 @@ class SseConnectionTransport {
   /** The page left for good: its wire closes as a WebSocket's does when its page leaves. One its page lost first has
    *  left its session's channels waiting for a reconnect, which end now. */
   private handleClosePost(connId: string): SseChannelHttpResponse {
-    const connection = this.mux.getConnectionByConnId<SseConnection>(connId)
-    if (connection) {
-      this.closeConnection(connection, { permanent: true })
+    const wire = this.mux.getWireByConnId<SseWire>(connId)
+    if (wire) {
+      this.closeWire(wire, { permanent: true })
       return okResponse()
     }
     const sessionId = this.closedWires.get(connId)?.sessionId
@@ -246,19 +262,19 @@ class SseConnectionTransport {
   /** Short-lived outbox batch POST. A RECONCILE's RECONCILED goes as it is answered, ahead of what the frames behind it
    *  send: those are what the page carries with it, which it doesn't replay. Tracked in `pendingDispatches` so
    *  `runStreamResponse` won't send its own reconciled mid-batch. */
-  private async handleBatchPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
-    const connection = await this.resolveConnection(connId)
-    if (!connection) return badRequest()
-    reader.onChunk = () => this.mux.onConnectionBytes(connection)
-    if (!(await this.waitReady(connection))) return badRequest()
-    const drain = this.drain(connection, reader, (outcome) => {
-      if (shouldSendReconciled(outcome, connection)) this.mux.sendReconciled(outcome)
+  private async handleBatchPost(connId: string, reader: BodyReader): Promise<SseChannelHttpResponse> {
+    const wire = await this.resolveWire(connId)
+    if (!wire) return badRequest()
+    reader.onChunk = () => this.mux.onWireBytes(wire)
+    if (!(await this.waitReady(wire))) return badRequest()
+    const drain = this.drain(wire, reader, (outcome) => {
+      if (shouldSendReconciled(outcome, wire)) this.mux.sendReconciled(outcome)
     })
-    connection.pendingDispatches.add(drain)
+    wire.pendingDispatches.add(drain)
     try {
       await drain
     } finally {
-      connection.pendingDispatches.delete(drain)
+      wire.pendingDispatches.delete(drain)
     }
     return okResponse()
   }
@@ -266,11 +282,11 @@ class SseConnectionTransport {
   /** Stream-response POST lifecycle: consume the initial reconcile batch; once its RECONCILE is answered, drain the
    *  batch POSTs in flight so their `_lastClientSeq` mutations land first and emit `reconciled`, ahead of what the
    *  frames carried behind it send; then release the `ready` gate the other POSTs are parked on. */
-  private async runStreamResponse(connection: SseConnection, reader: StreamReader): Promise<void> {
+  private async runStreamResponse(wire: SseWire, reader: BodyReader): Promise<void> {
     try {
-      await this.drain(connection, reader, async (outcome) => {
-        if (!shouldSendReconciled(outcome, connection)) return
-        await this.settlePendingDispatches(connection)
+      await this.drain(wire, reader, async (outcome) => {
+        if (!shouldSendReconciled(outcome, wire)) return
+        await this.settlePendingDispatches(wire)
         this.mux.sendReconciled(outcome)
       })
     } catch (err) {
@@ -278,19 +294,19 @@ class SseConnectionTransport {
       // A truncation is the client hanging up (channels keep their grace); an oversize frame leaves
       // no next frame boundary, so that wire is finished.
       reportDispatchBug(err)
-      this.closeConnection(connection, { permanent: err instanceof OversizeFrameError })
+      this.closeWire(wire, { permanent: err instanceof OversizeFrameError })
     } finally {
       // Every path releases the gate here — the parked POSTs then see whatever state we left.
-      connection.resolveReady()
+      wire.resolveReady()
     }
   }
 
   /** Registered so a reconcile waits for it, and reported here because nothing else will — awaited
    *  dispatches (the batch POST's) report through their caller. */
-  private dispatchAndReport(connection: SseConnection, raw: Uint8Array<ArrayBuffer>): void {
-    const dispatch = this.mux.onConnectionRawMessage(connection, raw)
-    connection.pendingDispatches.add(dispatch)
-    const evict = () => connection.pendingDispatches.delete(dispatch)
+  private dispatchAndReport(wire: SseWire, raw: Uint8Array<ArrayBuffer>): void {
+    const dispatch = this.mux.onWireMessage(wire, raw)
+    wire.pendingDispatches.add(dispatch)
+    const evict = () => wire.pendingDispatches.delete(dispatch)
     dispatch.then(evict, (err) => {
       evict()
       reportDispatchBug(err)
@@ -298,33 +314,33 @@ class SseConnectionTransport {
   }
 
   /** Waits without consuming failures — every dispatch is reported by whoever started it. */
-  private settlePendingDispatches(connection: SseConnection): Promise<unknown> {
-    return Promise.allSettled([...connection.pendingDispatches])
+  private settlePendingDispatches(wire: SseWire): Promise<unknown> {
+    return Promise.allSettled([...wire.pendingDispatches])
   }
 
-  /** Reads `reader`'s frames and dispatches each through the deferred-reconcile path; a RECONCILE's outcome goes to
+  /** Reads `reader`'s frames and dispatches each with `dispatchWireMessage`; a RECONCILE's outcome goes to
    *  `onReconciled` before the next frame is read. */
   private async drain(
-    connection: SseConnection,
-    reader: StreamReader,
+    wire: SseWire,
+    reader: BodyReader,
     onReconciled: (outcome: ReconcileOutcome) => void | Promise<void>,
   ): Promise<void> {
     while (true) {
       const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
-      if (!raw || connection.closed) break
-      const outcome = await this.mux.onConnectionRawMessageDeferredReconciled(connection, raw)
+      if (!raw || wire.closed) break
+      const outcome = await this.mux.dispatchWireMessage(wire, raw)
       if (outcome !== null) await onReconciled(outcome)
     }
   }
 
-  private async resolveConnection(connId: string): Promise<SseConnection | null> {
-    const connection = this.mux.getConnectionByConnId<SseConnection>(connId)
-    if (connection) return connection
+  private async resolveWire(connId: string): Promise<SseWire | null> {
+    const wire = this.mux.getWireByConnId<SseWire>(connId)
+    if (wire) return wire
     if (this.closedWires.has(connId)) return null
-    return await this.waitForConnection(connId)
+    return await this.waitForWire(connId)
   }
 
-  private rememberClosed({ connId, sessionId }: SseConnection): void {
+  private rememberClosed({ connId, sessionId }: SseWire): void {
     const now = performance.now()
     for (const [closed, { at }] of this.closedWires) {
       if (now - at < this.mux.connectTtl) break
@@ -333,82 +349,84 @@ class SseConnectionTransport {
     this.closedWires.set(connId, { at: now, sessionId })
   }
 
-  /** Mirrors `ChannelMux.waitForChannelRegistration`: the timeout path must remove the
+  /** As `RegistrationWaits.stop`: the timeout path must remove the
    *  waiter and (when last) the map entry, or abandoned data POSTs leak an entry forever. */
-  private waitForConnection(connId: string): Promise<SseConnection | null> {
-    return new Promise<SseConnection | null>((resolve) => {
+  private waitForWire(connId: string): Promise<SseWire | null> {
+    return new Promise<SseWire | null>((resolve) => {
       let settled = false
       let timer: ReturnType<typeof setTimeout>
-      const pending = this.pendingConnections.get(connId) ?? new Set()
-      this.pendingConnections.set(connId, pending)
+      const pending = this.pendingWires.get(connId) ?? new Set()
+      this.pendingWires.set(connId, pending)
 
-      const settle = (connection: SseConnection | null): void => {
+      const settle = (wire: SseWire | null): void => {
         if (settled) return
         settled = true
         pending.delete(waiter)
         // Identity-equality guards against deleting a replacement set registered after
-        // `resolvePendingConnections` already consumed ours.
-        if (pending.size === 0 && this.pendingConnections.get(connId) === pending) {
-          this.pendingConnections.delete(connId)
+        // `resolvePendingWires` already consumed ours.
+        if (pending.size === 0 && this.pendingWires.get(connId) === pending) {
+          this.pendingWires.delete(connId)
         }
         clearTimeout(timer)
-        resolve(connection)
+        resolve(wire)
       }
-      const waiter = (connection: SseConnection | null): void => settle(connection)
+      const waiter = (wire: SseWire | null): void => settle(wire)
       pending.add(waiter)
       timer = setTimeout(() => settle(null), this.mux.connectTtl)
     })
   }
 
-  private resolvePendingConnections(connId: string, connection: SseConnection): void {
-    const pending = this.pendingConnections.get(connId)
+  private resolvePendingWires(connId: string, wire: SseWire): void {
+    const pending = this.pendingWires.get(connId)
     if (!pending) return
-    this.pendingConnections.delete(connId)
-    for (const resolve of pending) resolve(connection)
+    this.pendingWires.delete(connId)
+    for (const resolve of pending) resolve(wire)
   }
 
-  private closeWire(connId: string): void {
-    const connection = this.mux.getConnectionByConnId<SseConnection>(connId)
-    if (connection) this.closeConnection(connection, { permanent: true })
+  private closeWireOf(connId: string): void {
+    const wire = this.mux.getWireByConnId<SseWire>(connId)
+    if (wire) this.closeWire(wire, { permanent: true })
   }
 
-  private sendNow(connection: SseConnection, frame: Uint8Array<ArrayBuffer>): void {
-    if (!connection.closed) connection.events.send(frame)
+  private sendNow(wire: SseWire, frame: Uint8Array<ArrayBuffer>): void {
+    if (!wire.closed) wire.events.send(frame)
   }
 
   /** Resolves false on timeout — caller drops the POST. */
-  private waitReady(connection: SseConnection): Promise<boolean> {
+  private waitReady(wire: SseWire): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       const timer = unrefTimer(setTimeout(() => resolve(false), this.mux.connectTtl))
-      connection.ready.then(() => {
+      wire.ready.then(() => {
         clearTimeout(timer)
         resolve(true)
       })
     })
   }
 
-  private closeConnection(connection: SseConnection, { permanent }: { permanent: boolean }): void {
-    if (connection.closed) return
-    connection.closed = true
-    this.rememberClosed(connection)
-    // Unblock any data POST awaiting `ready` — its dispatch sees the closed connection and bails.
-    connection.resolveReady()
-    this.mux.onConnectionClosed(connection, { permanent })
-    connection.events.close()
+  private closeWire(wire: SseWire, { permanent }: { permanent: boolean }): void {
+    if (wire.closed) return
+    wire.closed = true
+    this.rememberClosed(wire)
+    // Unblock any data POST awaiting `ready` — its dispatch sees the closed wire and bails.
+    wire.resolveReady()
+    this.mux.onWireClosed(wire, { permanent })
+    wire.events.close()
   }
 
-  private terminateConnection(connection: SseConnection): void {
-    this.closeConnection(connection, { permanent: this.mux.readPermanentTermination(connection) })
+  private terminateWire(wire: SseWire): void {
+    this.closeWire(wire, { permanent: this.mux.readPermanentTermination(wire) })
   }
 }
 
 /** Malformed metadata is untrusted client ingress, not a truncation — same class as the decode seam. */
 function parseMetadata(raw: string): SseRequestMetadata {
+  let metadata: unknown
   try {
-    return parseSseRequestMetadata(raw)
+    metadata = JSON.parse(raw)
   } catch {
     throw new ProtocolViolationError('malformed SSE request metadata')
   }
+  return parseSseRequestMetadata(metadata)
 }
 
 function reportDispatchBug(err: unknown): void {
@@ -418,28 +436,28 @@ function reportDispatchBug(err: unknown): void {
 
 /** A closed SSE wire has nothing to say — except on a barrier commit, where the RECONCILED is
  *  bound for the WS and this wire's own retirement is exactly what the upgrade just did. */
-function shouldSendReconciled(outcome: ReconcileOutcome, connection: SseConnection): boolean {
-  return outcome.deliverTo !== connection || !connection.closed
+function shouldSendReconciled(outcome: ReconcileOutcome, wire: SseWire): boolean {
+  return outcome.deliverTo !== wire || !wire.closed
 }
 
-function badRequest(): SseChannelHttpResponse {
-  return { statusCode: 400, contentType: 'text/plain', headers: [], body: '' }
+function badRequest(message = ''): SseChannelHttpResponse {
+  return { statusCode: 400, contentType: 'text/plain', headers: [], body: message }
+}
+
+function noBody(): SseChannelHttpResponse {
+  return badRequest('The request has no body: an SSE channel request starts with its metadata.')
+}
+
+/** A page on another version reloads: none of its frames could be read. */
+function wireVersionRefused(): SseChannelHttpResponse {
+  return { statusCode: STATUS_CODE_WIRE_VERSION, contentType: 'text/plain', headers: [], body: 'reload the page' }
 }
 
 function okResponse(): SseChannelHttpResponse {
   return { statusCode: 200, contentType: 'text/plain', headers: [], body: '' }
 }
 
-async function handleSseChannelRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse | null> {
-  globalObject.defaultHooks ??= getTelefuncSseChannelHooks()
-  return globalObject.defaultHooks.handleRequest(request, readable)
-}
-
-function getTelefuncSseChannelHooks() {
-  const server = new SseConnectionTransport()
-  return {
-    handleRequest(request: Request, readable?: Readable) {
-      return server.handleRequest(request, readable)
-    },
-  }
+async function handleSseChannelRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse> {
+  globalObject.sseTransport ??= new SseServerTransport()
+  return globalObject.sseTransport.handleRequest(request, readable)
 }

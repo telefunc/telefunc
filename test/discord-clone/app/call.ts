@@ -7,9 +7,10 @@ export { joinCall, leaveCall, toggleMute, toggleCamera, toggleScreenShare, regis
 // { track })`, `info.meta.keyFrame`), which deleted this app's hand-rolled `[kind][flags]` frame
 // envelope and demux switch (README finding 6, fixed upstream).
 //
-// Rounds 3–4: tracks are source-selective. An unwatched stream pauses its encoder — the publish
-// ack's `receivers` count pauses it while it's still publishing, and `me.onDemand((track, wanted))`
-// wakes it the moment a viewer returns. That first-class demand event replaced the hand-rolled
+// Rounds 3–4: tracks are source-selective. An unwatched stream pauses its encoder:
+// `me.onDemand((track, wanted))` pauses it once the last viewer leaves and wakes it the moment one
+// returns (the publish ack's `receivers` count, which also paused it, left #436). That first-class
+// demand event replaced the hand-rolled
 // keyframe-probe loop this app used to poll with (`demandGate` below). Alone in a voice channel,
 // nothing is encoded or uploaded.
 //
@@ -110,7 +111,7 @@ async function joinCall(channelId: string): Promise<void> {
       current.cleanups.push(gate.stop)
       const encoder = encodeOpus(resampledTrack(mic, current.cleanups), (frame) => {
         if (session !== current || current.muted || gate.paused) return
-        void current.membership.publishBinary(frame, { track: 'mic' }).then(gate.onAck, () => {})
+        void current.membership.publishBinary(frame, { track: 'mic' }).catch(() => {})
       })
       current.cleanups.push(encoder.stop)
     } catch {
@@ -388,9 +389,7 @@ function videoPipeline(
       // Retain keyframes so a late subscriber is seeded with one before any delta (see file header).
       // `takeResumed` still forces a fresh keyframe on resume — a retained frame is stale after a pause.
       const keyFrame = chunk.type === 'key'
-      void current.membership
-        .publishBinary(bytes, { track, meta: { keyFrame }, retain: keyFrame })
-        .then(gate.onAck, () => {})
+      void current.membership.publishBinary(bytes, { track, meta: { keyFrame }, retain: keyFrame }).catch(() => {})
     },
     error(err) {
       console.error('[discord:call] video encode error', err)
@@ -459,21 +458,19 @@ function decodeVp8(draw: (frame: VideoFrame) => void): {
   }
 }
 
-/** Pause-when-unwatched, on one named track. Two signals settle `paused`: the publish ack's live
- *  `receivers` count pauses the stream *while it's still publishing* (the fastest way to notice the
- *  last viewer left), and `me.onDemand` — a first-class demand event — flips it back the instant a
- *  viewer returns, so a paused (silent) stream needs no keyframe polling to notice. `takeResumed`
- *  lets the video pipeline force a keyframe on the first frame after a resume. */
+/** Pause-when-unwatched, on one named track. `me.onDemand` settles `paused`: it fires as it is
+ *  registered for a track already watched, then whenever the last viewer leaves or one returns, so a
+ *  paused (silent) stream needs no keyframe polling to notice. The stream starts paused until it does.
+ *  `takeResumed` lets the video pipeline force a keyframe on the first frame after a resume. */
 function demandGate(
   me: LocalParticipant<MemberMeta>,
   track: string,
 ): {
   readonly paused: boolean
-  onAck(ack: { receivers?: number }): void
   takeResumed(): boolean
   stop(): void
 } {
-  let paused = false
+  let paused = true
   let justResumed = false
   const stop = me.onDemand((t, wanted) => {
     if (t !== track) return
@@ -483,9 +480,6 @@ function demandGate(
   return {
     get paused() {
       return paused
-    },
-    onAck(ack) {
-      if (ack.receivers === 0) paused = true
     },
     takeResumed() {
       const resumed = justResumed

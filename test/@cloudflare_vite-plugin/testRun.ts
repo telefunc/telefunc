@@ -23,10 +23,13 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
       // (the message flow is asserted by testChannel()/testChat()).
       log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
       // workerd logs a response it wrote to a connection the browser closed as it navigated away,
-      // before the request's signal could report it.
-      (log.logText.includes('disconnected: ::write(') && log.logText.includes('Broken pipe')) ||
+      // before the request's signal could report it: "Broken pipe" and "Connection reset by peer" are both that write.
+      (log.logText.includes('disconnected: ::write(') &&
+        (log.logText.includes('Broken pipe') || log.logText.includes('Connection reset by peer'))) ||
       // testRefusedPresence()'s authority refuses a presence, and the subscription it ended is reported.
-      log.logText.includes('Backend subscription closed: text:refused-presence'),
+      log.logText.includes('Backend subscription closed: text:refused-presence') ||
+      // testRefusedDelivery()'s session refuses a delivery, which its coordinator reports.
+      log.logText.includes('Test: the session refused the delivery'),
   })
   testTodolist()
   testChannel()
@@ -37,10 +40,13 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testUnsubscribeTwice()
   testResubscribe()
   testRefusedPresence()
+  testRefusedDelivery()
   testRoom()
   // Under `vite dev`, @cloudflare/vite-plugin awaits each Durable Object call apart, so one stub's calls can run out of order.
   if (!isDev) testRoomOrderAcrossSessions()
   testRoomAcrossSessions()
+  testRoomAcrossRegions()
+  testRoomCreatedInRegion()
   testRoomStorage()
 }
 
@@ -238,7 +244,7 @@ function testChat() {
 }
 
 function testBacklog() {
-  test('Backlog: sends nobody awaits to a page that stops reading are refused with ChannelOverflowError, and what was taken arrives in order once it reads', async () => {
+  test('Backlog: 96 MiB the server sends nobody awaiting to a page that stops reading all go out, and arrive whole and in order once it reads, the channel open', async () => {
     await page.goto(getServerUrl() + '/backlog')
     await autoRetry(async () => {
       expect(await page.locator('#hydrated').count()).toBe(1)
@@ -257,20 +263,20 @@ function testBacklog() {
     // A page that reads nothing: what the server sends waits on the way. The page can't see the run while stalled.
     const { sent, refused } = await withNetworkConditions({ downloadThroughput: 1, uploadThroughput: -1 }, async () => {
       await fetch(runUrl, { method: 'POST' })
-      let run: { sent: number; refused: string[] } | undefined
+      let run: { sent: number; refused: string | null } | undefined
       await autoRetry(async () => {
         run = await (await fetch(runUrl)).json()
-        expect(run!.sent).toBe(6000)
+        expect(run!.sent).not.toBe(undefined)
       })
       return run!
     })
-    expect(refused.length).greaterThan(0)
-    expect(new Set(refused)).deep.equal(new Set(['ChannelOverflowError']))
+    expect({ sent, refused }).deep.equal({ sent: 6000, refused: null })
     await autoRetry(
       async () => {
         const state = JSON.parse((await page.textContent('#backlog-state'))!)
-        expect(state.received).toBe(sent - refused.length)
+        expect(state.received).toBe(6000)
         expect(state.outOfOrder).toBe(0)
+        expect(state.closeErr).toBe(null)
       },
       { timeout: 30_000 },
     )
@@ -380,6 +386,59 @@ function testRefusedPresence() {
   })
 }
 
+function testRefusedDelivery() {
+  test('Broadcast: a publish a session Durable Object refuses to take rejects, the other session still gets it, and the next publish reaches both', async () => {
+    const key = `refused-delivery:${Math.random()}`
+    const browser = page.context().browser()!
+    // Two regions, so each session takes its deliveries in a Durable Object of its own (LAX is wnam, FRA is weur).
+    const pages = await Promise.all(
+      Object.entries({ p1: 'LAX', p2: 'FRA' }).map(async ([name, colo]) => {
+        const context = await browser.newContext()
+        await context.addCookies([{ name: 'test-colo', value: colo, url: getServerUrl() }])
+        const session = await context.newPage()
+        await session.goto(`${getServerUrl()}/refused-delivery?key=${key}&page=${name}`)
+        await autoRetry(async () => {
+          expect(await session.locator('#hydrated').count()).toBe(1)
+        })
+        await session.click('#subscribe')
+        await autoRetry(async () => {
+          expect(JSON.parse((await session.textContent('#refused-delivery-state'))!).subscribed).toBe(true)
+        })
+        return session
+      }),
+    )
+    const publish = async (message: string) => {
+      const query = new URLSearchParams({ key, message })
+      const response = await fetch(`${getServerUrl()}/__refused-delivery-publish?${query}`)
+      return ((await response.json()) as { rejected: string | null }).rejected
+    }
+    const received = async () =>
+      await Promise.all(
+        pages.map(async (session) => {
+          await session.click('#read')
+          return JSON.parse((await session.textContent('#refused-delivery-state'))!).received as string[]
+        }),
+      )
+    // Each try publishes again until both presences are recorded.
+    await autoRetry(
+      async () => {
+        await publish('ready')
+        for (const got of await received()) expect(got).toContain('ready')
+      },
+      { timeout: 10_000 },
+    )
+    expect(await publish('refused')).toContain('lost to 1/2 Durable Objects')
+    await autoRetry(async () => {
+      expect((await received()).map((got) => got.includes('refused')).sort()).deep.equal([false, true])
+    })
+    expect(await publish('after')).toBe(null)
+    await autoRetry(async () => {
+      for (const got of await received()) expect(got).toContain('after')
+    })
+    for (const session of pages) await session.context().close()
+  })
+}
+
 function testRoom() {
   test('Room inside a telefunction', async () => {
     await page.goto(getServerUrl() + '/room')
@@ -433,6 +492,61 @@ function testRoomAcrossSessions() {
   })
 }
 
+function testRoomAcrossRegions() {
+  test('Room: a message to sessions in three regions crosses to each region once, and reaches each session once', async () => {
+    const id = crypto.randomUUID()
+    // Los Angeles is wnam, Frankfurt and Amsterdam are weur, Tokyo is apac.
+    const colos = { p1: 'LAX', p2: 'FRA', p3: 'AMS', p4: 'NRT' }
+    const pages = await openSessions(id, Object.keys(colos), colos)
+    for (const page of pages) await clickRoomCard(page, 'listen')
+    await fetch(`${getServerUrl()}/__region-trace?message=hello`, { method: 'PUT' })
+    await clickRoomCard(pages[0]!, 'publish')
+    await autoRetry(async () => {
+      for (const page of pages) {
+        expect((await clickRoomCard(page, 'received')).sort()).deep.equal(['broadcast:hello', 'room:hello'])
+      }
+    })
+    const trace = await fetch(`${getServerUrl()}/__region-trace`)
+    const { forwards, deliveries } = (await trace.json()) as {
+      forwards: { members: string[] }[]
+      deliveries: { member: string; region: string }[]
+    }
+    // One forward per region, each naming only that region's sessions, and one delivery to each session.
+    const regionOf = new Map(deliveries.map(({ member, region }) => [member, region]))
+    const forwardedRegions = forwards.map(({ members }) => [...new Set(members.map((member) => regionOf.get(member)))])
+    expect(forwardedRegions.sort()).deep.equal([['apac'], ['weur'], ['wnam']])
+    expect(deliveries.length).toBe(new Set(forwards.flatMap(({ members }) => members)).size)
+    for (const page of pages) await page.context().close()
+  })
+}
+
+function testRoomCreatedInRegion() {
+  test("Room: creating a room calls only Durable Objects in its creator's region, and Room.list() finds rooms of every region", async () => {
+    const id = crypto.randomUUID()
+    // Los Angeles is wnam, Frankfurt is weur.
+    const pages = await openSessions(id, ['p1', 'p2'], { p1: 'LAX', p2: 'FRA' })
+    for (const [page, name, region] of [
+      [pages[0]!, 'p1', 'wnam'],
+      [pages[1]!, 'p2', 'weur'],
+    ] as const) {
+      await fetch(`${getServerUrl()}/__room-calls`, { method: 'PUT' })
+      expect(await clickRoomCard(page, 'create')).toBe('created')
+      const calls = (await (await fetch(`${getServerUrl()}/__room-calls`)).json()) as {
+        object: string
+        room: unknown
+      }[]
+      // Other tests' rooms keep their sessions' routes and listings meanwhile: only this room's calls count.
+      const room = `regions:${id}:${name}`
+      const objects = new Set(
+        calls.filter((call) => call.room === room || call.object.endsWith(room)).map((call) => call.object),
+      )
+      expect([...objects].sort()).deep.equal([`__telefunc_room__:${room}`, `__telefunc_room_directory__:${region}`])
+    }
+    expect(await clickRoomCard(pages[0]!, 'list-created')).deep.equal([`regions:${id}:p1`, `regions:${id}:p2`])
+    for (const page of pages) await page.context().close()
+  })
+}
+
 function testRoomStorage() {
   test('Room.list(): lists rooms in code point order', async () => {
     await openRoomPage()
@@ -447,6 +561,15 @@ function testRoomStorage() {
   test('Room: a room closes by itself once its last member left, and is no longer listed', async () => {
     await openRoomPage()
     expect(await clickRoomCard(page, 'close-when-left')).deep.equal({ listed: 0 })
+  })
+
+  test('Room: a view that subscribes after another session closed its room closes, and no bug is reported', async () => {
+    const id = crypto.randomUUID()
+    const [holder, closer] = await openSessions(id, ['holder', 'closer'])
+    await clickRoomCard(holder!, 'hold-view')
+    await clickRoomCard(closer!, 'close-held')
+    expect(await clickRoomCard(holder!, 'subscribe-held')).deep.equal([])
+    for (const page of [holder!, closer!]) await page.context().close()
   })
 
   test('Room: its meta keeps the key order its writes gave it', async () => {
@@ -472,12 +595,16 @@ async function openRoomPage() {
   })
 }
 
-/** Pages in browsers of their own, so each has its own Telefunc session. */
-async function openSessions(id: string, names: string[]) {
+/** Pages in browsers of their own, so each has its own Telefunc session; `colos` places a page's session in a colo's
+ *  region. */
+async function openSessions(id: string, names: string[], colos: Record<string, string> = {}) {
   const browser = page.context().browser()!
   return await Promise.all(
     names.map(async (name) => {
-      const session = await (await browser.newContext()).newPage()
+      const context = await browser.newContext()
+      const colo = colos[name]
+      if (colo) await context.addCookies([{ name: 'test-colo', value: colo, url: getServerUrl() }])
+      const session = await context.newPage()
       await session.goto(`${getServerUrl()}/room?id=${id}&page=${name}`)
       await autoRetry(async () => {
         expect(await session.locator('#hydrated').count()).toBe(1)

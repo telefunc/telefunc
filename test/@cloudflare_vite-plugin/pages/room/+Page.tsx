@@ -9,8 +9,13 @@ import {
   onPublishFrom,
   onReceived,
   onListInOrder,
+  onCreateRoom,
+  onListRooms,
   onRetainLarge,
   onCloseWhenLeft,
+  onHoldView,
+  onCloseHeld,
+  onSubscribeHeld,
   onMetaKeyOrder,
 } from './Room.telefunc'
 
@@ -74,8 +79,13 @@ function Page() {
       {card('publish', () => onPublishFrom(query().get('id')!, 'hello'))}
       {card('received', () => onReceived(query().get('id')!, query().get('page')!))}
       {card('list', () => onListInOrder())}
+      {card('create', () => onCreateRoom(query().get('id')!, query().get('page')!))}
+      {card('list-created', () => onListRooms(query().get('id')!))}
       {card('retain-large', () => onRetainLarge())}
       {card('close-when-left', () => onCloseWhenLeft())}
+      {card('hold-view', () => onHoldView(query().get('id')!))}
+      {card('close-held', () => onCloseHeld(query().get('id')!))}
+      {card('subscribe-held', () => onSubscribeHeld(query().get('id')!))}
       {card('meta-key-order', () => onMetaKeyOrder())}
     </div>
   )

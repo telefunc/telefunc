@@ -118,7 +118,7 @@ async function onUploadAbortSingle(file: File): Promise<{ bytesRead: number; err
 // Multiple file upload — read each file fully, sleep between files.
 // Client aborts during the sleep after file1. File2+file3 should error.
 // The 5s sleep after file1 is where the abort lands. File2/file3 may have
-// leftover bytes in StreamReader's buffer from chunk boundaries.
+// leftover bytes in BodyReader's buffer from chunk boundaries.
 async function onUploadAbortMultiple(
   file1: File,
   file2: File,

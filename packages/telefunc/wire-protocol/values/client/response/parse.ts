@@ -15,15 +15,16 @@ import { makeAbortError, throwAbortError, throwBugError } from '../../../../clie
 import { BaseStreamReader } from './BaseStreamReader.js'
 import { PendingValue, resolvePendingValues } from './PendingValue.js'
 import { StreamReader } from './StreamReader.js'
-import { SSEStreamReader } from './SSEStreamReader.js'
-import { ClientChannel, ClientBroadcast, type ConnectionOptions } from '../../../channel/client/channel.js'
+import { SseStreamReader } from './SseStreamReader.js'
+import { ClientChannel, type ConnectionOptions } from '../../../channel/client/ClientChannel.js'
+import { ClientBroadcast } from '../../../channel/client/ClientBroadcast.js'
 import { wrapProxy } from '../../../../utils/wrapProxy.js'
 import { GcRegistry } from '../../../../utils/GcRegistry.js'
 import { ChannelStreamSource } from '../../ChannelStreamSource.js'
 import { createReadableChunkStream } from '../../createReadableChunkStream.js'
 import { readChunksToBytes } from '../../readChunksToBytes.js'
 import { STREAMING_ERROR_TYPE } from '../../../constants.js'
-import { ownIndexedPayload } from '../../../wire/frame.js'
+import { ownIndexedPayload } from '../../../wire/envelope.js'
 import { getGlobalObject } from '../../../../utils/getGlobalObject.js'
 
 const globalObject = getGlobalObject('wire-protocol/values/client/response/parse.ts', {
@@ -67,7 +68,7 @@ async function parseResponse(
     const isSSE = contentType.includes('text/event-stream')
     const streamReader = isSSE
       ? //
-        new SSEStreamReader(reader, callContext)
+        new SseStreamReader(reader, callContext)
       : new StreamReader(reader, callContext)
     const metaLen = await streamReader.readU32()
     const metaBytes = await streamReader.readExact(metaLen)
@@ -301,40 +302,8 @@ class FrameDemuxer {
     try {
       while (this.indexWaiters.size > 0) {
         const frame = await this.streamReader.readNextFrame()
-        if (frame === null) {
-          this.ended = true
-          for (const [, w] of this.indexWaiters) w.resolve(null)
-          this.indexWaiters.clear()
-          return
-        }
-
-        // Drop frames for cancelled indices
-        if (this.cancelledIndices.has(frame.index)) continue
-
-        const waiter = this.indexWaiters.get(frame.index)
-
-        // Empty payload = per-index "done" signal
-        if (frame.payload.length === 0) {
-          this.doneIndices.add(frame.index)
-          this.cancelUpstreamIfAllTerminal()
-          if (waiter) {
-            this.indexWaiters.delete(frame.index)
-            waiter.resolve(null)
-          }
-          continue
-        }
-
-        // Direct dispatch — no buffering, no delay
-        if (waiter) {
-          this.indexWaiters.delete(frame.index)
-          waiter.resolve(frame.payload)
-          continue
-        }
-
-        // No consumer waiting — buffer it
-        let pending = this.pendingFrames.get(frame.index)
-        if (!pending) this.pendingFrames.set(frame.index, (pending = new Fifo()))
-        pending.push(frame.payload)
+        if (frame === null) return this.endAll()
+        this.dispatch(frame.index, frame.payload)
       }
     } catch (err) {
       this.streamError ??= err
@@ -343,5 +312,39 @@ class FrameDemuxer {
     } finally {
       this.reading = false
     }
+  }
+
+  /** The response ended: every waiting index ends too. */
+  private endAll(): void {
+    this.ended = true
+    for (const [, w] of this.indexWaiters) w.resolve(null)
+    this.indexWaiters.clear()
+  }
+
+  /** Hands one frame to its index's waiter, or buffers it; an empty payload is the index's "done" signal. */
+  private dispatch(index: number, payload: Uint8Array<ArrayBuffer>): void {
+    // Drop frames for cancelled indices
+    if (this.cancelledIndices.has(index)) return
+    const waiter = this.indexWaiters.get(index)
+    // Empty payload = per-index "done" signal
+    if (payload.length === 0) {
+      this.doneIndices.add(index)
+      this.cancelUpstreamIfAllTerminal()
+      if (waiter) {
+        this.indexWaiters.delete(index)
+        waiter.resolve(null)
+      }
+      return
+    }
+    // Direct dispatch — no buffering, no delay
+    if (waiter) {
+      this.indexWaiters.delete(index)
+      waiter.resolve(payload)
+      return
+    }
+    // No consumer waiting — buffer it
+    let pending = this.pendingFrames.get(index)
+    if (!pending) this.pendingFrames.set(index, (pending = new Fifo()))
+    pending.push(payload)
   }
 }

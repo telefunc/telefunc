@@ -6,9 +6,9 @@ import { assert, assertUsage } from '../../../utils/assert.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
 import { createStreamingReplacer } from '../../../wire-protocol/values/server/response/registry.js'
-import { ServerChannel } from '../../../wire-protocol/channel/server/channel.js'
+import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
 import { ServerBroadcastEnd } from '../../../wire-protocol/channel/server/ServerBroadcastEnd.js'
-import { getChannelMux } from '../../../wire-protocol/channel/server/mux.js'
+import { getChannelMux } from '../../../wire-protocol/channel/server/ChannelMux.js'
 import {
   buildShieldValidators,
   type ShieldValidators,
@@ -20,7 +20,7 @@ import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import { buildInlineResponseBody } from '../../../wire-protocol/values/server/response/StreamingResponseBody.js'
 import { pumpProducerToChannel } from '../../../wire-protocol/values/server/response/ChannelResponseBody.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
-import { textEncoder } from '../../../wire-protocol/wire/frame.js'
+import { textEncoder } from '../../../wire-protocol/wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../../wire-protocol/wire/base64url.js'
 import type {
   ServerReplacerContext,

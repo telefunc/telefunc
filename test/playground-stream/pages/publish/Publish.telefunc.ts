@@ -1,5 +1,7 @@
 export {
   onTextBroadcast,
+  onBroadcastApi,
+  onBroadcastBacklog,
   onBinaryBroadcastPair,
   onBinaryBroadcast,
   onBroadcastShieldClient,
@@ -8,7 +10,10 @@ export {
   onBroadcastAnswers,
   onBroadcastAnsweringLoop,
   onBroadcastWhileEstablishing,
-  onSubscribeThrows,
+  onSubscribeRefused,
+  onDeliveredBeforeReady,
+  onJoinedBeforeReady,
+  onDeliveredWhileLost,
   onChatLeaveOnClose,
   onGetChatWatched,
   onServerBroadcastChecks,
@@ -32,6 +37,7 @@ export {
 import { Buffer } from 'node:buffer'
 import { Abort, Broadcast, BroadcastChannel, onBug } from 'telefunc'
 import { addBackendFault, pendingBackendFaults } from '../../failing-backend'
+import { prepareBroadcastApi } from './broadcastApiProbe'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
 
@@ -180,15 +186,18 @@ async function onBroadcastAnsweringLoop() {
   return { timerFired: true, deliveredAtLastReceipt, delivered }
 }
 
-/** While another key's publishes are delivered, an instance subscribes and publishes three 1,500-byte messages at once,
- *  past the 4,096-byte bufferLimit of the lane that runs it. */
+/** An instance subscribes and publishes three 1,500-byte messages in the same turn, past the 4,096-byte bufferLimit of
+ *  the lane that runs it: Redis's SUBSCRIBE round trip keeps the new subscription short of ready, so the Redis driver
+ *  holds the three publishes until it is. It returns once its listener saw two, or 10 s pass. */
 async function onBroadcastWhileEstablishing() {
-  const busy = new BroadcastChannel<number>({ key: `room:busy-test:${crypto.randomUUID()}` })
-  busy.subscribe(() => {})
-  for (let i = 0; i < 2000; i++) void busy.publish(i)
   const room = new BroadcastChannel<string>({ key: `room:held-test:${crypto.randomUUID()}` })
   const seen: string[] = []
-  room.subscribe((data) => seen.push(data[0]!))
+  // publish() resolves once the message is accepted: a store like Redis delivers it to local subscribers after that.
+  const sawBoth = Promise.withResolvers<void>()
+  room.subscribe((data) => {
+    seen.push(data[0]!)
+    if (seen.length === 2) sawBoth.resolve()
+  })
   const outcomes = await Promise.all(
     ['1', '2', '3'].map((n) =>
       room.publish(n.padEnd(1500, '.')).then(
@@ -197,29 +206,81 @@ async function onBroadcastWhileEstablishing() {
       ),
     ),
   )
-  await new Promise((resolve) => setTimeout(resolve, 0))
-  await Promise.all([busy.close(), room.close()])
+  await within10s(sawBoth.promise)
+  await room.close()
   return { outcomes, seen }
 }
 
 /** The store refuses the first subscribe on this key (a test asks it to, see `failBackend()`). */
-async function onSubscribeThrows() {
-  const channel = new BroadcastChannel<{ n: number }>({ key: `room:subscribe-throws:${crypto.randomUUID()}` })
+/** The store refuses this key's first subscribe (a test asks it to, see `failBackend()`). */
+async function onSubscribeRefused() {
+  const channel = new BroadcastChannel<{ n: number }>({ key: `room:subscribe-refused:${crypto.randomUUID()}` })
   const seen: string[] = []
-  let thrown: string | null = null
-  try {
-    channel.subscribe((msg) => seen.push(`first:${msg.n}`))
-  } catch (err) {
-    thrown = (err as Error).message
-  }
   const { promise: delivered, resolve } = Promise.withResolvers<void>()
   channel.subscribe((msg) => {
-    seen.push(`second:${msg.n}`)
+    seen.push(`first:${msg.n}`)
     resolve()
   })
+  // The refused subscription is replaced a few microtasks later.
+  await new Promise((resolve) => setTimeout(resolve, 0))
   await channel.publish({ n: 1 })
   await delivered
-  return { thrown, seen }
+  return { seen }
+}
+
+/** The store delivers the first message on this key before it acknowledges the subscription (a test asks it to, see
+ *  `failBackend()`). */
+async function onDeliveredBeforeReady() {
+  const channel = new BroadcastChannel<{ n: number }>({ key: `room:delivered-before-ready:${crypto.randomUUID()}` })
+  const seen: number[] = []
+  const { promise: delivered, resolve } = Promise.withResolvers<void>()
+  channel.subscribe((msg) => {
+    seen.push(msg.n)
+    if (msg.n === 2) resolve()
+  })
+  await channel.publish({ n: 1 })
+  await channel.publish({ n: 2 })
+  await within10s(delivered)
+  await channel.close()
+  return seen
+}
+
+/** The store delivers two messages on this key before it acknowledges the subscription, and a second listener joins
+ *  between them; like Redis, the store leaves it to core to keep the first message from that listener. */
+async function onJoinedBeforeReady() {
+  const key = `room:joined-before-ready:${crypto.randomUUID()}`
+  addBackendFault({ op: 'early', key, times: 2 })
+  const first = new BroadcastChannel<{ n: number }>({ key })
+  const second = new BroadcastChannel<{ n: number }>({ key })
+  const seen = { first: [] as number[], second: [] as number[] }
+  const { promise: delivered, resolve } = Promise.withResolvers<void>()
+  first.subscribe((msg) => seen.first.push(msg.n))
+  await first.publish({ n: 1 })
+  addBackendFault({ op: 'published', key })
+  second.subscribe((msg) => {
+    seen.second.push(msg.n)
+    if (msg.n === 2) resolve()
+  })
+  await first.publish({ n: 2 })
+  await within10s(delivered)
+  await Promise.all([first.close(), second.close()])
+  return seen
+}
+
+/** The store loses the subscription on this key and goes on delivering (a test asks it to, see `failBackend()`). */
+async function onDeliveredWhileLost() {
+  const channel = new BroadcastChannel<{ n: number }>({ key: `room:delivered-while-lost:${crypto.randomUUID()}` })
+  const seen: number[] = []
+  const { promise: delivered, resolve } = Promise.withResolvers<void>()
+  channel.subscribe((msg) => {
+    seen.push(msg.n)
+    if (msg.n === 2) resolve()
+  })
+  await channel.publish({ n: 1 })
+  await channel.publish({ n: 2 })
+  await within10s(delivered)
+  await channel.close()
+  return seen
 }
 
 const chatWatched = new Map<string, { received: string[]; unsubscribe(): void }>()
@@ -245,12 +306,14 @@ async function onServerBroadcastChecks() {
 
   const aborted = new BroadcastChannel({ key })
   aborted.abort()
-  aborted.subscribe(() => {})
-  aborted.subscribeBinary(() => {})
-  const afterAbort = [
-    (await Broadcast.publish(key, 'after-abort')).receivers,
-    (await Broadcast.publishBinary(key, new Uint8Array([1]))).receivers,
-  ]
+  const afterAbort: unknown[] = []
+  aborted.subscribe((msg) => afterAbort.push(msg))
+  aborted.subscribeBinary((bytes) => afterAbort.push(bytes))
+  // A live subscriber of the key sees both publishes, so the aborted channel had its chance to.
+  const liveSeen = Promise.withResolvers<void>()
+  const unsubscribeLive = Broadcast.subscribe<string>(key, () => liveSeen.resolve())
+  await Broadcast.publishBinary(key, new Uint8Array([1]))
+  await Broadcast.publish(key, 'after-abort')
 
   // publish() resolves once the message is accepted: a store like Redis delivers it to local subscribers after that.
   const leavingSeen = Promise.withResolvers<void>()
@@ -269,10 +332,8 @@ async function onServerBroadcastChecks() {
     Broadcast.subscribe(`${key}:joining`, () => {})
     joiningSeen.resolve()
   })
-  const duringDelivery = [
-    (await Broadcast.publish(`${key}:leaving`, 'leaving')).receivers,
-    (await Broadcast.publish(`${key}:joining`, 'joining')).receivers,
-  ]
+  await Broadcast.publish(`${key}:leaving`, 'leaving')
+  await Broadcast.publish(`${key}:joining`, 'joining')
 
   const statically: string[] = []
   const unsubscribe = Broadcast.subscribe<string>(`${key}:static`, (msg) => {
@@ -280,11 +341,12 @@ async function onServerBroadcastChecks() {
     firstSeen.resolve()
   })
   await Broadcast.publish(`${key}:static`, 'first')
-  await within10s(Promise.all([leavingSeen.promise, joiningSeen.promise, firstSeen.promise]))
+  await within10s(Promise.all([liveSeen.promise, leavingSeen.promise, joiningSeen.promise, firstSeen.promise]))
+  unsubscribeLive()
   unsubscribe()
   await Broadcast.publish(`${key}:static`, 'second')
 
-  return { afterAbort, received, duringDelivery, statically }
+  return { afterAbort, received, statically }
 }
 
 let bugs: string[] | null = null
@@ -588,5 +650,57 @@ function connectToDatabase() {
       saved.push(message)
       cleanupState.chatSaved = JSON.stringify(saved)
     },
+  }
+}
+
+async function onBroadcastApi() {
+  const room = new BroadcastChannel<string>({ key: `room:api:${crypto.randomUUID()}` })
+  const probe = prepareBroadcastApi(room)
+  const controller = new AbortController()
+  let staticCalls = 0
+  Broadcast.subscribe(room.key, () => staticCalls++, { signal: controller.signal })
+  Broadcast.subscribeBinary(room.key, () => staticCalls++, { signal: controller.signal })
+  Broadcast.subscribe(room.key, () => (staticCalls += 100), { signal: AbortSignal.abort() })
+  Broadcast.subscribeBinary(room.key, () => (staticCalls += 100), { signal: AbortSignal.abort() })
+  room.onClose(() => controller.abort())
+  return {
+    room,
+    stop: async () => {
+      const result = await probe.stop()
+      controller.abort()
+      return result
+    },
+    snapshot: () => ({ callbacks: probe.callbacks(), staticCalls }),
+  }
+}
+
+/** A busy key: `flood()` publishes 2 KiB messages without awaiting them. With `slow`, a server loop over the key's
+ *  messages takes 20 ms per message, as the page's slow loop does. */
+async function onBroadcastBacklog(slow: boolean) {
+  const room = new BroadcastChannel<string>({ key: `room:backlog:${crypto.randomUUID()}` })
+  const payload = 'x'.repeat(2048)
+  const serverLoop = slow ? readSlowly(room) : null
+  return {
+    room,
+    flood: async (count: number) => {
+      for (let i = 0; i < count; i++) void room.publish(`${i}:${payload}`)
+    },
+    publishAwaited: async (count: number) => {
+      for (let i = 0; i < count; i++) await room.publish(`${i}:${payload}`)
+    },
+    serverLoop: () => serverLoop,
+  }
+}
+
+async function readSlowly(room: BroadcastChannel<string>) {
+  let received = 0
+  try {
+    for await (const _ of room.messages()) {
+      received++
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    return { received, error: null }
+  } catch (err) {
+    return { received, error: (err as Error).name }
   }
 }

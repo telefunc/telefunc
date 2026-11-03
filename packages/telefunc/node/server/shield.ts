@@ -7,7 +7,6 @@ export { verifyOuter }
 export { shieldKey }
 export { logShieldError }
 export { buildShieldValidators }
-export { assertPublishShield }
 export { __applyReturnShields, __applyArgumentShields, resolveReturnShields, getArgumentShields }
 export type { ShieldValidator, ShieldValidators, ValueShields, ShieldLogConfig, ShieldValidatorCtx }
 
@@ -20,7 +19,6 @@ import { unique } from '../../utils/unique.js'
 import { get } from '../../utils/get.js'
 import { fromPathKey } from '../../utils/pathKey.js'
 import { isLazyFile, isLazyBlob } from '../../wire-protocol/values/LazyFile.js'
-import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 
 /** The subset of `config.log.shieldErrors` that gates server-side logging of shield failures. */
 type ShieldLogConfig = { dev: boolean; prod: boolean }
@@ -52,13 +50,6 @@ function logShieldError(detail: ShieldErrorDetail, shieldErrors: ShieldLogConfig
   if (detail.extra) parts.push(detail.extra)
   parts.push(`Wrong type: ${detail.wrongType}`)
   console.error(parts.join(' '))
-}
-
-/** The publish shield validates a page's Broadcast data at ingress only. */
-function assertPublishShield(validate: ShieldValidator | undefined, data: unknown): void {
-  if (!validate) return
-  const result = validate(data)
-  if (result !== true) throw new ShieldValidationError(result)
 }
 
 /** Turn `{ name: shieldExpr }` entries into a `ShieldValidators` map where each validator

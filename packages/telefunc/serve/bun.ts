@@ -4,7 +4,7 @@ import crossws from 'crossws/adapters/bun'
 import type { Peer } from 'crossws'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
-import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
+import { getServerConfig } from '../node/server/serverConfig.js'
 import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
 import { CHANNEL_TRANSPORT, WIRE_MAX_RAW_FRAME_BYTES } from '../wire-protocol/constants.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
@@ -32,7 +32,6 @@ class Telefunc {
 }
 
 function telefunc(): TelefuncServe {
-  enableChannelTransports([CHANNEL_TRANSPORT.WS])
   // TODO: remove once Telefunc's own WebSocket adapter replaces crossws.
   // A peer's `websocket` is a Proxy, and Bun's methods refuse one as `this`: the socket itself answers.
   const sockets = new WeakMap<Peer, BunSocket>()

@@ -8,11 +8,11 @@ import { getUrlPathname } from '../../../utils/getUrlPathname.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/values/server/request/registry.js'
-import { StreamReader } from '../../../wire-protocol/wire/StreamReader.js'
+import { BodyReader } from '../../../wire-protocol/wire/BodyReader.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire-protocol/wire/requestKind.js'
 import type { RequestContext } from '../context/requestContext.js'
-import { ServerChannel } from '../../../wire-protocol/channel/server/channel.js'
-import { getChannelMux } from '../../../wire-protocol/channel/server/mux.js'
+import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
+import { getChannelMux } from '../../../wire-protocol/channel/server/ChannelMux.js'
 import { ChannelStreamSource } from '../../../wire-protocol/values/ChannelStreamSource.js'
 import { wrapProxy } from '../../../utils/wrapProxy.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
@@ -76,7 +76,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   }
   if (requestKind === REQUEST_KIND.SSE) {
     const sseResponse = await handleSseChannelRequest(request, readable)
-    return sseResponse ? { isMalformedRequest: false, isSseRequest: true, sseResponse } : { isMalformedRequest: true }
+    return { isMalformedRequest: false, isSseRequest: true, sseResponse }
   }
 
   // Body + base reviver context (file handling differs between binary and text; channels are the same).
@@ -163,7 +163,7 @@ async function readBody(
   if (requestKind === REQUEST_KIND.BINARY) {
     const source = readable ?? request.body
     assert(source)
-    const reader = new StreamReader(source)
+    const reader = new BodyReader(source)
     return {
       text: await reader.readMetadata(Number.POSITIVE_INFINITY),
       registerFile: (i, s) => reader.registerFile(i, s),

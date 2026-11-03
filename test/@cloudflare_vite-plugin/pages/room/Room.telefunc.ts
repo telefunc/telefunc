@@ -6,12 +6,17 @@ export {
   onPublishFrom,
   onReceived,
   onListInOrder,
+  onCreateRoom,
+  onListRooms,
   onRetainLarge,
   onCloseWhenLeft,
+  onHoldView,
+  onCloseHeld,
+  onSubscribeHeld,
   onMetaKeyOrder,
 }
 
-import { Broadcast, BroadcastChannel } from 'telefunc'
+import { Broadcast, BroadcastChannel, onBug } from 'telefunc'
 import { Room } from '@telefunc/room'
 
 async function onRoomRoundTrip() {
@@ -30,10 +35,9 @@ type Numbered = { from: string; n: number }
 
 /** A Broadcast key and a room each page publishes on, from its own session. */
 async function onOrderChannels(id: string) {
-  return {
-    channel: new BroadcastChannel<Numbered>({ key: `order:${id}` }),
-    room: await Room.getOrCreate<Record<string, never>, { name: string }, Numbered>(`order:${id}`),
-  }
+  const room = await Room.getOrCreate<Record<string, never>, { name: string }, Numbered>(`order:${id}`)
+  Room.guard(room, { anyoneCanJoin: true })
+  return { channel: new BroadcastChannel<Numbered>({ key: `order:${id}` }), room }
 }
 
 /** Subscribes, then publishes at once. */
@@ -82,6 +86,16 @@ async function onListInOrder() {
   return listed
 }
 
+/** A room the page's session creates, under the regions test's prefix. */
+async function onCreateRoom(id: string, page: string) {
+  await Room.create(`regions:${id}:${page}`)
+  return 'created'
+}
+
+async function onListRooms(id: string) {
+  return (await Room.list({ prefix: `regions:${id}:` })).map((room) => room.id)
+}
+
 /** A member retains a frame larger than a SQLite row; a view that subscribes afterwards gets it. */
 async function onRetainLarge() {
   const id = `retain:${crypto.randomUUID()}`
@@ -106,6 +120,36 @@ async function onCloseWhenLeft() {
   await (await room.join()).leave()
   await closed
   return { listed: (await Room.list({ prefix: id })).length }
+}
+
+let bugs: string[] | null = null
+onBug((err) => bugs?.push((err as Error).message))
+
+// The views of a room each page holds, by the id the test gave it.
+const heldViews = new Map<string, Room>()
+
+/** A view of a new room, which the page subscribes once another session closed the room. */
+async function onHoldView(id: string) {
+  await Room.create(`held:${id}`)
+  heldViews.set(id, await Room.get(`held:${id}`))
+}
+
+async function onCloseHeld(id: string) {
+  await Room.close(`held:${id}`)
+}
+
+/** Subscribes the held view, waits for it to close, and returns the bugs reported meanwhile. */
+async function onSubscribeHeld(id: string) {
+  bugs = []
+  const room = heldViews.get(id)!
+  const { promise, resolve } = Promise.withResolvers<void>()
+  room.onClose(resolve)
+  room.subscribe(() => {})
+  room.subscribeBinary(() => {}, { track: 'cam' })
+  await promise
+  const reported = bugs
+  bugs = null
+  return reported
 }
 
 async function onMetaKeyOrder() {

@@ -1,0 +1,725 @@
+export { LanePlan }
+export type { LaneDelivery, LaneEvent, LanePlanOwner, LanePlanOptions, LaneRoles }
+
+import { assert } from '../../utils/assert.js'
+import { getOrCreate } from 'telefunc/__internal'
+import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
+import { getRoomPlane } from '../../backend/plane.js'
+import type { BackendListener, BackendSubscription, OrderingInfo } from 'telefunc/__internal'
+import { ROOM_MEMBER_NAMED_LANES_MAX } from '../constants.js'
+import { EVERY_TRACK, type BinaryWantChange, type EveryTrack, type TrackKey } from '../../shared/binary.js'
+import type { DemandReport } from './DemandReport.js'
+import type { DemandExchange } from './DemandExchange.js'
+import type { RoomIncarnation } from '../protocol.js'
+import type { RoomModel } from '../../shared/RoomModel.js'
+import { reportRoomError } from '../reportRoomError.js'
+import { LaneSubscription, type LaneAddress, type LaneSubscriptionOwner } from './LaneSubscription.js'
+import { BinaryLanes, type PairShape } from './BinaryLanes.js'
+import { Slice } from '../../shared/Slice.js'
+import type { LaneHolder } from '../lifecycle/replay.js'
+import { WantsIndex, type WantsIndexOwner } from './WantsIndex.js'
+import { runAll, toggle, toggleEntry } from '../../utils/sets.js'
+import { CONTROL_LANE, DEMAND_LANE, SEMANTIC_LANE, decodeRoomText, readOpenConfig, withinRoomHorizon } from './lanes.js'
+assertIsNotBrowser()
+
+/** What a lane but the demand lane carries: the text of a control, semantic or inbox frame, or a framed binary one. */
+type LaneDelivery = { kind: 'control' | 'semantic' | 'inbox'; text: string } | { kind: 'binary'; framed: Uint8Array }
+
+/** What the lanes ask of the view: its roster read again, a catch-up with the authority once a lane dropped
+ *  deliveries (a closed room's lanes too), a look at the heartbeat, as the lanes changed, or the mark a control
+ *  subscription, new or recovered, starts at. */
+type LaneEvent = 'roster-needed' | 'deliveries-lost' | 'lanes-changed' | 'control-subscribed'
+
+/** The replica the subscriptions serve: it aggregates every handle's holders, applies what the lanes carry, and
+ *  answers what they ask. */
+interface LanePlanOwner {
+  laneDelivered(delivery: LaneDelivery, info: OrderingInfo): void
+  laneEvent(event: LaneEvent): void
+}
+
+/** What this process's handles are to the room, which decides the lanes it subscribes: data the replica keeps
+ *  current. Whether a handle observes the room (a client stub, a participant or a listener), has a listener, or holds a
+ *  tail, which ingests all text; and the members it owns, each pending admission's included, as it owns its inbox. */
+type LaneRoles = {
+  readonly observed: boolean
+  readonly listened: boolean
+  readonly tailHeld: boolean
+  readonly owned: ReadonlyMap<string, unknown>
+}
+
+type LanePlanOptions = {
+  owner: LanePlanOwner
+  roles: LaneRoles
+  /** The incarnation the lanes are subscribed at. */
+  incarnation: RoomIncarnation
+  /** Read-only here: every change goes through the owner's methods. */
+  model: Pick<RoomModel, 'closed' | 'rosterKnown' | 'memberIds' | 'memberCount' | 'hasMember'>
+  /** What this process tells of its demand, which the plan sets as it plans. */
+  outgoingDemand: DemandReport
+  /** Where the demand lane delivers, and hears when it delivers and when it stops. */
+  demandExchange: Pick<DemandExchange, 'onPage' | 'ask' | 'forget'>
+}
+
+/** What a planning pass replans. `all`: the binary lanes of every member and every track. `members`: the binary lanes
+ *  of each listed member. `tracks`: the lanes of each listed track that holders name of every member. `pairs`: the
+ *  named pairs of some members. */
+type BinaryPlan = { all: boolean; members: Set<string>; tracks: Set<string>; pairs: Map<string, Set<string>> }
+
+/** Decides which lanes of a room this process subscribes. The plan follows the holders' wants, the members this process
+ *  owns and the room's membership, and changes with each of them: it chooses the shape that serves each binary pair,
+ *  `BinaryLanes` switches the lanes to it, and the plan tells the demand from both. A lane that ends is recovered
+ *  within Room's horizon; once a recovery gives up, the heartbeat subscribes the lane again. */
+class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
+  private readonly wants = new WantsIndex({ owner: this })
+  /** Whether some handle observes the room, which the control lane serves. */
+  private _observing = false
+  private readonly control = new LaneSubscription({ owner: this, address: CONTROL_LANE })
+  private readonly semantic = new LaneSubscription({ owner: this, address: SEMANTIC_LANE })
+  /** While this process owns a member: only an owner reads demand. */
+  private readonly demandLane = new LaneSubscription({ owner: this, address: DEMAND_LANE })
+
+  private readonly lanes: BinaryLanes
+  /** Whether the tracks wanted of every member come on the members' every-track lanes instead: on once those tracks
+   *  outnumber both `ROOM_MEMBER_NAMED_LANES_MAX` and the members, off once the members are twice as many. */
+  private byMember = false
+
+  /** Members left out of the demand told for a track wanted of every member. */
+  private readonly excepted = new Set<string>()
+  /** For each present member, how many of its tracks holders here want of it alone. */
+  private readonly counts = new Map<string, number>()
+  /** The member a planning pass is counting, a slice at a time; `stale` once its wants changed under the count. */
+  private counting: { member: string; stale: boolean } | null = null
+  /** The members whose named tracks exceeded `ROOM_MEMBER_NAMED_LANES_MAX` when last planned. */
+  private readonly overflowing = new Set<string>()
+  private readonly inbox = new Map<string, LaneSubscription>()
+  private readonly recovering = new Set<LaneSubscription>()
+  /** The lanes whose recovery gave up, which the heartbeat subscribes again while they are wanted. */
+  private readonly dropped = new Set<LaneSubscription>()
+  /** What the next planning pass replans. Binary want changes and lane readiness queue here and wait for that pass, so
+   *  it plans a burst of them from the whole want set before it opens any lane. */
+  private queued = newBinaryPlan()
+  /** The holders gone whose wants the next planning pass drops. */
+  private readonly gone = new Set<LaneHolder>()
+  private planning: Promise<void> | null = null
+
+  private readonly owner: LanePlanOwner
+  private readonly roles: LaneRoles
+  private readonly incarnation: RoomIncarnation
+  private readonly model: LanePlanOptions['model']
+  private readonly outgoingDemand: DemandReport
+  private readonly demandExchange: LanePlanOptions['demandExchange']
+
+  constructor({ owner, roles, incarnation, model, outgoingDemand, demandExchange }: LanePlanOptions) {
+    this.owner = owner
+    this.roles = roles
+    this.incarnation = incarnation
+    this.model = model
+    this.outgoingDemand = outgoingDemand
+    this.demandExchange = demandExchange
+    this.lanes = new BinaryLanes({ laneOwner: this, model })
+  }
+
+  /** Whether some handle observes the room through the control lane. */
+  get observing(): boolean {
+    return this._observing
+  }
+
+  /** Whether this process owns an inbox, which a member it owns reads. */
+  get ownsInbox(): boolean {
+    return this.inbox.size > 0
+  }
+
+  get controlEstablished(): boolean {
+    return this.control.established
+  }
+
+  get semanticReady(): Promise<void> {
+    return this.semantic.ready
+  }
+
+  inboxOf(member: string): LaneSubscription | undefined {
+    return this.inbox.get(member)
+  }
+
+  /** Plans everything in the next planning pass, resolving once it ends; it also retries every still-wanted lane whose
+   *  recovery failed. */
+  replan(): Promise<void> {
+    this.queued.all = true
+    this.schedulePlan()
+    this.syncLanes()
+    return this.planning!
+  }
+
+  /** Subscribes again each lane whose recovery gave up and that is still wanted, as a planning pass would. */
+  resumeDropped(): void {
+    for (const lane of drain(this.dropped)) lane.resume()
+  }
+
+  /** A holder attached, or its wants changed wholesale: its room-wide ones, and those of `members` when given. The next
+   *  planning pass recounts each member it may have changed. */
+  holderChanged(holder: LaneHolder, members?: Iterable<string>): void {
+    runAll(this.indexHolder(holder, { members }))
+    this.schedulePlan()
+    this.syncLanes()
+  }
+
+  /** A holder is gone. A planning pass in a later turn drops its wants, so the holders gone in one turn (the clients of
+   *  a mass expiry) are dropped together, a slice at a time. */
+  holderGone(holder: LaneHolder): void {
+    this.gone.add(holder)
+    this.schedulePlan()
+    this.syncLanes()
+  }
+
+  /** A holder's text wants changed: its room-wide ones, and those of `members`. */
+  textChanged(holder: LaneHolder, members: Iterable<string>): void {
+    runAll(this.wants.updateText(holder, { members }))
+    this.syncLanes()
+  }
+
+  /** One of a holder's binary wants changed: a want of one track replans only that track's pairs, in the next
+   *  planning pass. */
+  binaryChanged(holder: LaneHolder, change: BinaryWantChange): void {
+    const { track } = change
+    if (track !== EVERY_TRACK) {
+      this.namedTrackChanged(holder, { member: change.member, track, on: change.on })
+    } else {
+      const affected = this.wants.applyBinary(holder, change)
+      if (affected === 'all') this.queued.all = true
+      else for (const member of affected) this.queued.members.add(member)
+    }
+    this.schedulePlan()
+    this.syncLanes()
+  }
+
+  /** A want of one named track: each member it affects is recounted and its pairs of the track replanned. */
+  private namedTrackChanged(holder: LaneHolder, pair: BinaryWantChange & { track: TrackKey }): void {
+    const { track } = pair
+    const wasEveryMember = this.wants.namesEveryMember(track)
+    const affected = this.wants.applyBinary(holder, pair)
+    // Only a want of every track of every member concerns every member.
+    assert(affected !== 'all')
+    const everyMember = this.wants.namesEveryMember(track)
+    // A track counts for a member while it is named of the member alone; one named of every member counts for none.
+    for (const member of affected) {
+      const count = this.counts.get(member)
+      if (count === undefined) {
+        this.forgetCount(member)
+        continue
+      }
+      const [before, after] = this.wants.namedPairChange(holder, pair, member)
+      this.counts.set(member, count + Number(!everyMember && after) - Number(!wasEveryMember && before))
+    }
+    for (const member of affected) this.queuePair(member, track)
+    // Whom the track's every-member lane serves here may have changed.
+    if (everyMember || wasEveryMember) this.queued.tracks.add(track)
+  }
+
+  /** A member joined, or which holders suppress it changed: the next planning pass recounts it. */
+  memberChanged(member: string): void {
+    this.forgetCount(member)
+    this.queued.members.add(member)
+    this.schedulePlan()
+    this.syncLanes()
+  }
+
+  /** A member this instance now owns gets its inbox. */
+  memberOwned(member: string): void {
+    this.openInbox(member)
+    this.syncLanes()
+  }
+
+  /** A member left, or this instance no longer owns it. */
+  memberReleased(member: string): void {
+    this.queued.members.add(member)
+    this.closeInbox(member)
+    this.schedulePlan()
+    this.syncLanes()
+  }
+
+  /** The planning pass under way, while a holder here receives the member's `track` and no lane here carries it yet;
+   *  else null. Once the pass ends, the lane is establishing, and it holds a commit made on it until it delivers. */
+  lanePlanned(member: string, track: string): Promise<void> | null {
+    if (this.planning === null || !this.wants.wantsBinary || this.lanes.carries(member, track)) return null
+    if (!this.wants.receives(member, track)) return null
+    return this.planning
+  }
+
+  /** The lanes delivering the member's `track` (or `EVERY_TRACK`) are ready, so a retained read after this
+   *  misses no live frame. */
+  async pairsReady(member: string, track: TrackKey | EveryTrack): Promise<void> {
+    await this.planning
+    await this.lanes.pairReady(member, track)
+  }
+
+  /** Every binary lane planned so far is ready; concurrent callers share one wait. */
+  async binaryReady(): Promise<void> {
+    await this.planning
+    await this.lanes.allReady()
+  }
+
+  /** What the room-wide lanes depend on changed (observers, listeners, the tail, the text wants): they follow it, and
+   *  the demand lane and the heartbeat after them. */
+  syncLanes(): void {
+    const model = this.model
+    const open = !model.closed
+    const observing = open && this.roles.observed
+    const becomesObserved = observing && !this._observing
+    if (observing) this.control.start()
+    else this.control.stop()
+    this._observing = observing
+    if (open && (this.roles.tailHeld || this.wants.wantsText)) this.semantic.start()
+    else this.semantic.stop()
+    const needsRoster = this.roles.listened || (open && this.wants.wantsBinary)
+    if ((becomesObserved && model.rosterKnown) || (open && !model.rosterKnown && needsRoster)) {
+      this.owner.laneEvent('roster-needed')
+    }
+    this.syncDemandLane()
+    this.owner.laneEvent('lanes-changed')
+  }
+
+  /** Indexes the holder's wants a step at a time, each step queueing the members it affected. */
+  private *indexHolder(holder: LaneHolder, opts: { gone?: boolean; members?: Iterable<string> }): Generator<void> {
+    for (const affected of this.wants.update(holder, opts)) {
+      if (affected === 'all') {
+        this.forgetCounts()
+        this.queued.all = true
+      } else {
+        for (const member of affected) {
+          this.forgetCount(member)
+          this.queued.members.add(member)
+        }
+      }
+      yield
+    }
+  }
+
+  /** Forgets the member's count; one a pass is counting is stale. */
+  private forgetCount(member: string): void {
+    this.counts.delete(member)
+    if (this.counting?.member === member) this.counting.stale = true
+  }
+
+  private forgetCounts(): void {
+    this.counts.clear()
+    if (this.counting) this.counting.stale = true
+  }
+
+  private queuePair(member: string, track: string): void {
+    toggleEntry(this.queued.pairs, member, track, true)
+  }
+
+  private schedulePlan(): void {
+    this.planning ??= this.runPlan().catch(reportRoomError)
+  }
+
+  /** Plans what is queued once the current turn's changes are in, then tells the changed demand. Each round runs in
+   *  `ROOM_PLAN_SLICE_MS` slices, so timers and I/O run between slices; what is queued meanwhile waits for the next
+   *  round. No other demand is told until the pass ends, so no owner sees the demand between two slices. */
+  private async runPlan(): Promise<void> {
+    try {
+      await Promise.resolve()
+      const slice = new Slice()
+      for (;;) {
+        this.lanes.takeReplans(this.queued)
+        const plan = this.queued
+        if (this.gone.size > 0) {
+          await slice.next()
+          await this.replanEach(slice, drain(this.gone), (holder) => this.indexHolder(holder, { gone: true }))
+        } else if (!isEmpty(plan)) {
+          await this.planRound(slice, plan)
+        } else if (this.outgoingDemand.changed) {
+          while (!this.outgoingDemand.tellUntil(slice.end)) await slice.next()
+        } else {
+          return
+        }
+      }
+    } finally {
+      this.planning = null
+      this.owner.laneEvent('lanes-changed')
+    }
+  }
+
+  /** One round of what was queued: the every-member lanes kept, each member planned, the every-member lanes released,
+   *  and with `all`, the inboxes. */
+  private async planRound(slice: Slice, plan: BinaryPlan): Promise<void> {
+    this.queued = newBinaryPlan()
+    if (this.syncByMember()) plan.all = true
+    const members = chain(
+      plan.members,
+      plan.pairs.keys(),
+      plan.all ? this.model.memberIds() : [],
+      // Lanes of members no longer present close too.
+      plan.all ? this.lanes.members() : [],
+      plan.all ? this.excepted : [],
+    )
+    const tracks = () =>
+      plan.all ? chain(this.lanes.everyMemberTracks(), this.wants.everyMemberTracks()) : plan.tracks
+    // Every lane opens before any lane it replaces is released.
+    await this.replanEach(
+      slice,
+      tracks(),
+      once((track) => this.keepEveryMember(track)),
+    )
+    await this.replanEach(
+      slice,
+      members,
+      once((member) => {
+        this.syncExcept(member)
+        if (!this.unconcerned(member)) return this.planMember(member, plan)
+        this.forgetCount(member)
+      }),
+    )
+    await this.replanEach(
+      slice,
+      tracks(),
+      once((track) => this.releaseEveryMember(track)),
+    )
+    if (plan.all) {
+      await this.replanEach(
+        slice,
+        chain(this.inbox.keys(), this.roles.owned.keys()),
+        once((member) => {
+          if (!this.model.closed && this.roles.owned.has(member)) this.openInbox(member)
+          else this.closeInbox(member)
+        }),
+      )
+    }
+  }
+
+  /** Runs `step` on each item within `slice`, the room-wide lanes synced after each slice; a step that yields
+   *  can end a slice at each yield. */
+  private async replanEach<T>(
+    slice: Slice,
+    items: Iterable<T>,
+    step: (item: T) => Iterable<void> | void,
+  ): Promise<void> {
+    const pending = eachStep(items, step)
+    for (let done = false; !done; ) {
+      if (slice.over) await slice.next()
+      do {
+        done = pending.next().done === true
+      } while (!done && !slice.over)
+      this.syncLanes()
+    }
+  }
+
+  /** Whether `byMember` changed. */
+  private syncByMember(): boolean {
+    const { memberCount, rosterKnown } = this.model
+    const byMember = nextByMember(this.byMember, this.wants.everyMemberTrackCount, memberCount, rosterKnown)
+    if (byMember === this.byMember) return false
+    this.byMember = byMember
+    return true
+  }
+
+  /** Plans a member's binary lanes. The member gets its every-track lane while a holder here receives all of its
+   *  tracks, while holders here name more than `ROOM_MEMBER_NAMED_LANES_MAX` of its tracks for it alone, or while the
+   *  tracks named of every member are fetched by member; otherwise it gets a lane per track named of it alone. A switch
+   *  keeps the lanes it leaves until the lanes it takes deliver. The plan yields between tracks and resumes a slice at
+   *  a time: it plans from the counts and lanes it read first, and any change meanwhile queues the member again. */
+  private *syncMemberBinary(member: string): Generator<void> {
+    const present = this.present(member)
+    if (!present) this.forgetCount(member)
+    const count = present ? (this.counts.get(member) ?? (yield* this.countNamed(member))) : undefined
+    const wantsAll = present && this.wants.wantsEveryTrack(member)
+    const overflows = this.overflows(count)
+    toggle(this.overflowing, member, overflows)
+    const servedByAll = this.servesByAll(member, present, count)
+    const all = this.lanes.serveEveryTrack(member, servedByAll)
+    this.outgoingDemand.setMember(member, wantsAll && all.delivers)
+    this.outgoingDemand.setFetched(member, present && all.delivers && (this.byMember || all.fetching))
+    for (const track of chain(this.lanes.namedTracksOf(member), this.outgoingDemand.localTracks(member))) {
+      this.syncLane(member, track, servedByAll)
+      yield
+    }
+    // An establishing every-track lane keeps the named lanes as they are.
+    for (const track of !servedByAll || all.delivers ? this.wants.memberTracksOf(member) : []) {
+      this.syncLane(member, track, servedByAll)
+      yield
+    }
+    // Stopping a lane a change meanwhile wants again would only open it again.
+    const stillServed = this.servesByAll(member, present, count)
+    if (!servedByAll && !stillServed && this.lanes.releaseEveryTrack(member)) {
+      this.outgoingDemand.setFetched(member, false)
+    }
+  }
+
+  /** Whether the member's every-track lane serves all of its tracks: while it is `present` and a holder here wants
+   *  all of them, names more than `ROOM_MEMBER_NAMED_LANES_MAX` of them (`count`), or the tracks named of every member
+   *  are fetched by member. */
+  private servesByAll(member: string, present: boolean, count: number | undefined): boolean {
+    return present && (this.wants.wantsEveryTrack(member) || this.overflows(count) || this.byMember)
+  }
+
+  /** No want, lane or demand concerns the member, so its plan has nothing to do; the change that concerns it next
+   *  counts it again. */
+  private unconcerned(member: string): boolean {
+    return (
+      !(this.byMember && this.present(member)) &&
+      !this.wants.concerns(member) &&
+      !this.lanes.holds(member) &&
+      !this.overflowing.has(member) &&
+      !this.outgoingDemand.receivesFrom(member)
+    )
+  }
+
+  /** The member's queued pairs; a change that moved it across `ROOM_MEMBER_NAMED_LANES_MAX` replans
+   *  all of its lanes. */
+  private *planMember(member: string, plan: BinaryPlan): Generator<void> {
+    const count = this.counts.get(member)
+    if (plan.all || plan.members.has(member) || (count === undefined && this.present(member))) {
+      return yield* this.syncMemberBinary(member)
+    }
+    const overflows = this.overflows(count)
+    if (overflows !== this.overflowing.has(member)) return yield* this.syncMemberBinary(member)
+    const servedByAll = this.servesByAll(member, count !== undefined, count)
+    for (const track of plan.pairs.get(member) ?? []) {
+      this.syncLane(member, track, servedByAll)
+      yield
+    }
+  }
+
+  /** Plans the named lane of one (member, track) pair. The pair has a named lane while a holder names the track of the
+   *  member alone and neither the member's every-track lane nor the track's every-member lane serves it; once either
+   *  one does, the named lane stays until that lane delivers. The pair is demand while a lane here delivers it to a
+   *  holder that wants it, and is told as a pair unless the every-member lane delivers it. */
+  private syncLane(member: string, track: string, servedByAll: boolean): void {
+    const present = this.present(member)
+    const named = present && this.wants.wantsNamedPair(member, track)
+    const everyMember = this.wants.namesEveryMember(track)
+    const coverage = this.lanes.servePair(member, track, shapeOf(servedByAll, everyMember, named), everyMember)
+    if (everyMember) this.setExcept(track, member, present && !named)
+    this.outgoingDemand.setPair(member, track, (named || coverage.named) && coverage.delivery === 'own')
+  }
+
+  /** Plans the every-member lane of `track`: the track has one while a holder here names it of every member, unless the
+   *  tracks are fetched by member. Its demand is one entry, told once the lane delivers, or while the every-track lanes
+   *  it replaces still deliver. */
+  private keepEveryMember(track: string): void {
+    if (this.byMember || !this.namesEveryMember(track)) return
+    const coverage = this.lanes.keepEveryMember(track)
+    this.outgoingDemand.setTrack(track, coverage !== null, { byMember: coverage === 'by-member' })
+  }
+
+  /** Stops an every-member lane that serves no holder here, once the lanes replacing it deliver. When no holder names
+   *  the track any more, the named lanes and every-track lanes replace it; while the tracks are fetched by member, each
+   *  member's every-track lane replaces it and tells the track's demand. Until then, each replacing lane that becomes
+   *  ready replans the track. */
+  private releaseEveryMember(track: string): void {
+    const named = this.namesEveryMember(track)
+    if (named && !this.byMember) return
+    const coverage = this.lanes.retireEveryMember(track, named)
+    if (coverage === undefined) return
+    if (coverage === 'by-member') this.outgoingDemand.setTrack(track, true, { byMember: true })
+    else this.outgoingDemand.forgetTrack(track)
+  }
+
+  private namesEveryMember(track: string): boolean {
+    return !this.model.closed && this.wants.namesEveryMember(track)
+  }
+
+  /** Leaves `member` out of the demand of each track named of every member that no holder here receives from it. Only a
+   *  holder's own member can be left out, since a holder suppresses its own member; so this reads only an owned member
+   *  while some track has its every-member lane or is told by member, or a member left out before. */
+  private syncExcept(member: string): void {
+    const served = this.lanes.servesTracks
+    if (!this.excepted.has(member) && (!served || !this.roles.owned.has(member))) return
+    const present = this.present(member)
+    let excepted = false
+    for (const track of this.wants.everyMemberTracks()) {
+      const unreached = present && !this.wants.wantsNamedPair(member, track)
+      this.setExcept(track, member, unreached)
+      excepted ||= unreached
+    }
+    toggle(this.excepted, member, excepted)
+  }
+
+  private setExcept(track: string, member: string, on: boolean): void {
+    this.outgoingDemand.setExcept(track, member, on)
+    if (on) this.excepted.add(member)
+  }
+
+  private present(member: string): boolean {
+    const model = this.model
+    return !model.closed && model.hasMember(member)
+  }
+
+  /** Counted a slice at a time, and kept unless a change of the member's wants meanwhile made it stale: the change
+   *  queued the member, so the next pass counts it again. */
+  private *countNamed(member: string): Generator<void, number> {
+    let count = 0
+    const counting = (this.counting = { member, stale: false })
+    try {
+      for (const track of this.wants.memberTracksOf(member)) {
+        count += Number(this.wants.wantsNamedPair(member, track))
+        yield
+      }
+    } finally {
+      this.counting = null
+    }
+    if (!counting.stale) this.counts.set(member, count)
+    return count
+  }
+
+  private overflows(count: number | undefined): boolean {
+    return count !== undefined && count > ROOM_MEMBER_NAMED_LANES_MAX
+  }
+
+  private openInbox(member: string): void {
+    if (this.model.closed || !this.roles.owned.has(member)) return
+    const address = { kind: 'inbox', member } as const
+    getOrCreate(this.inbox, member, () => new LaneSubscription({ owner: this, address })).start()
+  }
+
+  private closeInbox(member: string): void {
+    this.inbox.get(member)?.stop()
+    this.inbox.delete(member)
+  }
+
+  private syncDemandLane(): void {
+    const lane = this.demandLane
+    if (!this.model.closed && this.roles.owned.size > 0) {
+      lane.start()
+      return
+    }
+    if (!lane.wanted) return
+    lane.stop()
+    this.demandExchange.forget()
+  }
+
+  /** `LaneSubscriptionOwner`: a lane of this incarnation. */
+  subscribeLane(address: LaneAddress, listener: BackendListener<Uint8Array>): BackendSubscription {
+    return getRoomPlane().subscribeLane(this.incarnation.id, this.incarnation.inc, address, listener)
+  }
+
+  /** `LaneSubscriptionOwner`: what a lane carries goes to the replica, the demand lane's to the exchange. */
+  onLaneDelivery(lane: LaneSubscription, payload: Uint8Array, info: OrderingInfo): void {
+    const { kind } = lane.address
+    switch (kind) {
+      case 'control':
+      case 'semantic':
+      case 'inbox':
+        return this.owner.laneDelivered({ kind, text: decodeRoomText(payload) }, info)
+      case 'demand':
+        return this.demandExchange.onPage(decodeRoomText(payload))
+      case 'binary':
+      case 'binary-all':
+      case 'binary-track':
+        return this.owner.laneDelivered({ kind: 'binary', framed: payload }, info)
+    }
+  }
+
+  onEveryMemberCoverChanged(track: string): void {
+    this.queued.tracks.add(track)
+  }
+
+  onLaneRecovered(): void {
+    this.owner.laneEvent('deliveries-lost')
+  }
+
+  /** When the demand lane delivers, the plan asks for demand. What a binary lane carries counts as demand once it
+   *  delivers, so its readiness replans what it serves. */
+  onLanePending(lane: LaneSubscription, pending: boolean): void {
+    const address = lane.address
+    if (address.kind === 'demand') {
+      if (!pending && lane.wanted) this.demandExchange.ask()
+      return
+    }
+    if (address.kind === 'control') {
+      if (!pending && lane.wanted) this.owner.laneEvent('control-subscribed')
+      return
+    }
+    if (address.kind !== 'binary' && address.kind !== 'binary-all' && address.kind !== 'binary-track') return
+    this.lanes.lanePending(lane, pending)
+    if (pending || !lane.wanted) return
+    this.schedulePlan()
+  }
+
+  onLaneTerminal(lane: LaneSubscription): void {
+    // A replacement that ends is its recovery's failure.
+    if (this.recovering.has(lane)) return
+    this.recovering.add(lane)
+    void this.recover(lane).catch(reportRoomError)
+  }
+
+  /** A still-wanted terminal lane gets one replacement after a head read; if that fails too, the heartbeat subscribes
+   *  it again. A lane of an incarnation that ended isn't replaced: the view's catch-up finds the close. */
+  private async recover(lane: LaneSubscription): Promise<void> {
+    let replaced = false
+    try {
+      const config = await withinRoomHorizon(readOpenConfig(this.incarnation))
+      if (config === null) return this.owner.laneEvent('deliveries-lost')
+      lane.retry()
+      replaced = true
+      await withinRoomHorizon(lane.attemptReady)
+    } catch (error) {
+      if (lane.wanted) {
+        lane.dropAttempt()
+        this.dropped.add(lane)
+      }
+      // The backend reported the replacement's end; the horizon's RoomError goes unreported.
+      if (replaced) return
+      throw error
+    } finally {
+      this.recovering.delete(lane)
+    }
+    // Catch up on what the outage dropped; a later end of the lane gets its own recovery.
+    this.owner.laneEvent('deliveries-lost')
+  }
+}
+
+/** The `byMember` band: on once the tracks named of every member outnumber both `ROOM_MEMBER_NAMED_LANES_MAX` and the
+ *  members, off once the members are twice as many; off until the roster is known. */
+function nextByMember(previous: boolean, tracks: number, members: number, rosterKnown: boolean): boolean {
+  return rosterKnown && tracks > ROOM_MEMBER_NAMED_LANES_MAX && (previous ? tracks * 2 > members : tracks > members)
+}
+
+/** The lane shape that serves a pair: the member's every-track lane while it serves all of the member's tracks;
+ *  otherwise, while a holder names the pair, the track's every-member lane if a holder names the track of every
+ *  member, else the pair's named lane. */
+function shapeOf(servedByAll: boolean, everyMember: boolean, named: boolean): PairShape {
+  if (servedByAll) return 'every-track'
+  if (!named) return null
+  return everyMember ? 'every-member' : 'named'
+}
+
+/** Each source's items in turn, each source read live as the iteration reaches it. */
+function* chain<T>(...sources: Iterable<T>[]): Generator<T> {
+  for (const source of sources) yield* source
+}
+
+/** Each item's step, then what it yields one at a time; an item whose step yields nothing is still one step. */
+function* eachStep<T>(items: Iterable<T>, step: (item: T) => Iterable<void> | void): Generator<void> {
+  for (const item of items) {
+    const parts = step(item)
+    if (parts) yield* parts
+    yield
+  }
+}
+
+/** `step` on each item it is called with the first time; an item seen before is still one call, so one step. */
+function once<T, R>(step: (item: T) => R): (item: T) => R | void {
+  const seen = new Set<T>()
+  return (item) => {
+    if (seen.has(item)) return
+    seen.add(item)
+    return step(item)
+  }
+}
+
+/** Each item, removed as it is taken; one added meanwhile comes too. */
+function* drain<T>(items: Set<T>): Generator<T> {
+  for (const item of items) {
+    items.delete(item)
+    yield item
+  }
+}
+
+function newBinaryPlan(): BinaryPlan {
+  return { all: false, members: new Set(), tracks: new Set(), pairs: new Map() }
+}
+
+function isEmpty(plan: BinaryPlan): boolean {
+  return !plan.all && plan.members.size === 0 && plan.tracks.size === 0 && plan.pairs.size === 0
+}

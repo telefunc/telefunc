@@ -1,9 +1,13 @@
 export { Publish }
 
+import { prepareBroadcastApi } from './broadcastApiProbe'
+import { close } from 'telefunc/client'
 import React, { useEffect, useRef, useState } from 'react'
 import { keepReachable } from '../keepReachable'
 import {
   onTextBroadcast,
+  onBroadcastApi,
+  onBroadcastBacklog,
   onBinaryBroadcastPair,
   onBinaryBroadcast,
   onBroadcastShieldClient,
@@ -12,7 +16,10 @@ import {
   onBroadcastAnswers,
   onBroadcastAnsweringLoop,
   onBroadcastWhileEstablishing,
-  onSubscribeThrows,
+  onSubscribeRefused,
+  onDeliveredBeforeReady,
+  onJoinedBeforeReady,
+  onDeliveredWhileLost,
   onChatLeaveOnClose,
   onGetChatWatched,
   onServerBroadcastChecks,
@@ -55,11 +62,136 @@ function Publish() {
   const reconnectRef = useRef<Awaited<ReturnType<typeof onBroadcastReconnect>> | null>(null)
   // A broadcast the page drops closes once garbage-collected.
   const listenedRef = useRef<unknown>(null)
+  const backlogRef = useRef<Awaited<ReturnType<typeof onBroadcastBacklog>> | null>(null)
 
   return (
     <div id={hydrated ? 'hydrated' : undefined}>
       <pre id="publish-result">{result}</pre>
       <pre id="publish-shield-state">{JSON.stringify(shieldState)}</pre>
+
+      <button
+        id="test-broadcast-api"
+        onClick={async () => {
+          try {
+            const remote = await onBroadcastApi()
+            const { room } = remote
+            await room.opened
+            const local = prepareBroadcastApi(room)
+            const receipts = [await room.publish('first'), await room.publishBinary(new Uint8Array([2]))]
+            const client = await local.stop()
+            const server = await remote.stop()
+            await room.publish('after')
+            const snapshot = await remote.snapshot()
+            const open = !room.isClosed
+            const ending = room.messages().next()
+            await room.close()
+            const ended = (await ending).done
+            await room.closed
+            close(remote)
+            setResult(JSON.stringify({ client, server, snapshot, receipts, open, ended }))
+          } catch (err) {
+            setResult(String(err))
+          }
+        }}
+      >
+        Broadcast iteration and signals
+      </button>
+
+      <button
+        id="test-broadcast-slow-loop"
+        onClick={async () => {
+          try {
+            const remote = await onBroadcastBacklog(true)
+            backlogRef.current = remote
+            const { room } = remote
+            await room.opened
+            let received = 0
+            const loop = (async () => {
+              try {
+                for await (const _ of room.messages()) {
+                  received++
+                  await new Promise((resolve) => setTimeout(resolve, 20))
+                }
+                return null
+              } catch (err) {
+                return (err as Error).name
+              }
+            })()
+            // On the wire after the loop's subscribe, so the server has the subscription before the flood.
+            await room.publish('ready')
+            await remote.flood(1000)
+            const error = await loop
+            setResult(JSON.stringify({ error, received, server: await remote.serverLoop() }))
+          } catch (err) {
+            setResult(String(err))
+          }
+        }}
+      >
+        A slow loop over a busy broadcast
+      </button>
+      <button
+        id="test-broadcast-after-overflow"
+        onClick={async () => {
+          const remote = backlogRef.current!
+          // On the wire after the ended loop's unsubscribe, so the server has that before this flood.
+          await remote.room.publish('after')
+          await remote.flood(400)
+          await new Promise((resolve) => setTimeout(resolve, 1000))
+          close(remote)
+          setResult('flooded')
+        }}
+      >
+        Publish after the slow loop ended
+      </button>
+      <button
+        id="test-broadcast-keeps-up"
+        onClick={async () => {
+          try {
+            const remote = await onBroadcastBacklog(false)
+            const { room } = remote
+            await room.opened
+            const seen: number[] = []
+            const loop = (async () => {
+              for await (const message of room.messages()) {
+                if (message.type !== 'text' || message.data === 'ready') continue
+                seen.push(Number(message.data.split(':')[0]))
+                if (seen.length === 600) break
+              }
+            })()
+            await room.publish('ready')
+            await remote.publishAwaited(600)
+            await loop
+            close(remote)
+            setResult(JSON.stringify({ received: seen.length, inOrder: seen.every((n, i) => n === i) }))
+          } catch (err) {
+            setResult(String(err))
+          }
+        }}
+      >
+        A loop that keeps up with a broadcast
+      </button>
+
+      <button
+        id="test-broadcast-publish-failures"
+        onClick={async () => {
+          const outcomes = []
+          for (const binary of [false, true]) {
+            for (const caught of [false, true]) {
+              const remote = await onBroadcastServerListener()
+              const { room } = remote
+              const pending = binary ? room.publishBinary(new Uint8Array([1])) : room.publish('failure')
+              room.abort('stop')
+              if (caught) outcomes.push(await pending.catch((err) => err.abortValue))
+              else outcomes.push('ignored')
+              await room.closed.catch(() => {})
+              close(remote)
+            }
+          }
+          setResult(JSON.stringify(outcomes))
+        }}
+      >
+        Observe or ignore publish failures
+      </button>
 
       <h2>Text Pub/Sub</h2>
 
@@ -253,16 +385,46 @@ function Publish() {
         Broadcast Shield
       </button>
 
-      <h2>Subscribe that throws</h2>
+      <h2>Subscribe the store refuses</h2>
 
       <button
-        id="test-subscribe-throws"
+        id="test-subscribe-refused"
         onClick={async () => {
           setResult('')
-          setResult(JSON.stringify(await onSubscribeThrows()))
+          setResult(JSON.stringify(await onSubscribeRefused()))
         }}
       >
         Subscribe refused by the store
+      </button>
+
+      <button
+        id="test-delivered-before-ready"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify({ seen: await onDeliveredBeforeReady() }))
+        }}
+      >
+        Message delivered before the store acknowledges the subscription
+      </button>
+
+      <button
+        id="test-joined-before-ready"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onJoinedBeforeReady()))
+        }}
+      >
+        Listener joining between messages delivered before the store acknowledges the subscription
+      </button>
+
+      <button
+        id="test-delivered-while-lost"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify({ seen: await onDeliveredWhileLost() }))
+        }}
+      >
+        Messages delivered while the store restores a lost subscription
       </button>
 
       <h2>Leave message from onClose</h2>
@@ -294,7 +456,7 @@ function Publish() {
           setResult(JSON.stringify(await onServerBroadcastChecks()))
         }}
       >
-        Abort, receivers, unsubscribe
+        Abort, unsubscribe
       </button>
 
       <h2>Failing subscribers and publishes</h2>

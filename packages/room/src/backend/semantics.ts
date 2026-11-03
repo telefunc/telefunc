@@ -1,17 +1,17 @@
 export {
-  headCxMatches,
+  headExpectationHolds,
   commitPreconditionHolds,
   isOpenIncarnation,
   materializeHead,
   publicHead,
-  nextOrderMark,
+  nextOrdering,
   countCell,
   encodeCellCounter,
   decodeCellCounter,
 }
 export type { StoredHead }
 
-import type { CellCount, CellCounter, HeadCx, HeadNext, LaneId, RoomHead } from './contract.js'
+import type { CellCount, CellCounter, HeadExpectation, HeadNext, LaneId, RoomHead } from './contract.js'
 import type { OrderingInfo } from 'telefunc/__internal'
 
 // The authority rules both TypeScript drivers apply; Redis spells the same rules in Lua.
@@ -22,8 +22,8 @@ const counterTextDecoder = new TextDecoder()
 /** A head as an authority stores it; `expiresAt` is when it lapses. */
 type StoredHead = Omit<RoomHead, 'expiresAt'> & { expiresAt: number | null }
 
-/** The CX's next head as stored: its expiry and close-lease deadline are minted here, from authority time, and never
- *  supplied by a caller. */
+/** The exchange's next head as stored: its expiry and close-lease deadline are minted here, from authority time, and
+ *  never supplied by a caller. */
 function materializeHead(next: HeadNext, now: number, rev: string): StoredHead {
   const { currentInc, state, config, closeLease } = next.head
   const { ttlMs } = next
@@ -44,16 +44,20 @@ function isOpenIncarnation<H extends Omit<RoomHead, 'expiresAt'>>(head: H | null
   return head !== null && head.currentInc === inc && head.state === 'open'
 }
 
-function headCxMatches(cx: HeadCx, current: Omit<RoomHead, 'expiresAt'> | null, now: number): boolean {
-  if (cx.form === 'absent') return current === null
-  if (current === null || current.rev !== cx.rev) return false
-  switch (cx.form) {
+function headExpectationHolds(
+  expected: HeadExpectation,
+  current: Omit<RoomHead, 'expiresAt'> | null,
+  now: number,
+): boolean {
+  if (expected.form === 'absent') return current === null
+  if (current === null || current.rev !== expected.rev) return false
+  switch (expected.form) {
     case 'rev':
       return true
     case 'takeover':
       return current.state === 'closing' && current.closeLease !== undefined && current.closeLease.until < now
     case 'finalize':
-      return current.state === 'closing' && current.closeLease?.id === cx.lease
+      return current.state === 'closing' && current.closeLease?.id === expected.lease
   }
 }
 
@@ -76,7 +80,7 @@ function commitPreconditionHolds(
 }
 
 /** `seq` strictly increases per domain; `timestamp` is authority time, clamped so it never goes back. */
-function nextOrderMark(previous: OrderingInfo | undefined, now: number): OrderingInfo {
+function nextOrdering(previous: OrderingInfo | undefined, now: number): OrderingInfo {
   return { seq: (previous?.seq ?? 0) + 1, timestamp: Math.max(now, previous?.timestamp ?? 0) }
 }
 

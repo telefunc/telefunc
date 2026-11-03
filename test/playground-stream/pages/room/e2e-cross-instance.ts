@@ -380,6 +380,32 @@ function testServerCrash() {
       })
     }
   })
+
+  test("room: a server that stopped watching a room while a member left, longer ago than the room keeps why, sees the member gone with cause 'unknown' once it watches again", async () => {
+    const roomId = newId('redis-resume')
+    try {
+      await joinRoom('a', roomId, 'Alice')
+      await joinRoom('b', roomId, 'Bob')
+      await request('b', '/api/room-cross-instance/join-many?name=Carol&count=1', roomId, 'POST')
+      await retry(10_000, async () => {
+        expect((await view('a', roomId)).count).equal(3)
+      })
+      await request('a', '/api/room-cross-instance/member-leave', roomId, 'POST')
+      await request('a', '/api/room-cross-instance/listen?on=false', roomId, 'POST')
+      await request('b', '/api/room-cross-instance/member-leave', roomId, 'POST')
+      // Past the two minutes the room keeps why Bob left: no frame and no record tells server A anything any more.
+      await new Promise((resolve) => setTimeout(resolve, 2 * 60_000 + 5_000))
+      await request('a', '/api/room-cross-instance/listen?on=true', roomId, 'POST')
+      await retry(30_000, async () => {
+        const seen = await view('a', roomId)
+        expect(seen.events).to.include('leave:Bob:unknown')
+        expect(Object.keys(seen.members)).deep.equal(['Carol0'])
+        expect(Object.keys(seen.stored)).deep.equal(['Carol0'])
+      })
+    } finally {
+      await leaveRoom(['a', 'b'], roomId)
+    }
+  })
 }
 
 // docker compose prints a server's stderr on its stdout, each line prefixed with the container's name, and one log can hold several containers' lines.

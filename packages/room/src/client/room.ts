@@ -1,14 +1,25 @@
 export { ClientRoom, ClientStandaloneParticipant }
 
-import { createDeferred } from '../utils/createDeferred.js'
+import { roomMessages } from './messages.js'
 import { assert, assertUsage } from '../utils/assert.js'
-import { markHandled } from '../utils/markHandled.js'
-import { getOrCreate } from '../utils/getOrCreate.js'
+import { createDeferred, getOrCreate, markHandled } from 'telefunc/__internal'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
-import type { TELEFUNC_SHIELDS, ChannelPublishAck, ChannelPublishInfo, PageClient } from 'telefunc/__internal'
-import { makePublishInfo } from '../channel.js'
-import { ALL, decodeBinaryFrame, encodeBinaryFrame, type BinaryWantChange, type TrackKey } from '../binary.js'
-import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetaArgument, recipientId } from '../model.js'
+import type { TELEFUNC_SHIELDS, ChannelPublishAck, ChannelPublishInfo, ClientBroadcast } from 'telefunc/__internal'
+import {
+  EVERY_MEMBER,
+  EVERY_TRACK,
+  decodeBinaryFrame,
+  encodeBinaryFrame,
+  type BinaryWantChange,
+  type TrackKey,
+} from '../shared/binary.js'
+import {
+  assertKnownOptions,
+  normalizeJoinOptions,
+  ownMessage,
+  ownMetaArgument,
+  recipientId,
+} from '../shared/arguments.js'
 import {
   hasRoomTag,
   inboxMessageFromWire,
@@ -31,12 +42,13 @@ import {
   type RoomRosterEvent,
   type RoomSnapshotMetadata,
   type RoomStubRequest,
-} from '../protocol.js'
-import { RoomModel, RoomState, RoomStateView, type MembershipEvent } from '../state.js'
-import { ROOM_TRACK_WANTS_MAX } from '../constants.js'
-import { CLIENT_ROOM_BUG_MESSAGE, roomResultValue } from '../errors.js'
-import { ParticipantBase } from '../participant.js'
-import type { MetaRewinds } from '../MemberMeta.js'
+} from '../shared/protocol.js'
+import { RoomModel, type MembershipEvent, type RoomModelOwner } from '../shared/RoomModel.js'
+import { RoomState, RoomStateView, type RoomStateOwner } from '../shared/state.js'
+import { ROOM_TRACK_WANTS_MAX } from '../shared/constants.js'
+import { CLIENT_ROOM_BUG_MESSAGE, roomResultValue } from '../shared/errors.js'
+import { ParticipantBase } from '../shared/ParticipantBase.js'
+import type { MetaRewinds } from '../shared/MemberMeta.js'
 import type {
   BinaryPublishOptions,
   JoinOptions,
@@ -46,6 +58,7 @@ import type {
   PublishOptions,
   RemoteParticipant,
   Room,
+  RoomMessage,
   RoomSnapshotView,
   Sender,
 } from '../types.js'
@@ -54,7 +67,7 @@ import type {
 type ClientRoomEvent = RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent
 
 /** A reply that can't be sent is reported, and the sender gets an error instead. */
-function sendDmReply(end: PageClient, ackId: string, reply: Promise<RoomResult>): void {
+function sendDmReply(end: ClientBroadcast, ackId: string, reply: Promise<RoomResult>): void {
   const declare = (answer: RoomResult): RoomStubRequest => ({ __r: 'dm-reply', ackId, reply: answer })
   end._sendReply(reply.then(declare), declare({ ok: false, kind: 'error', message: CLIENT_ROOM_BUG_MESSAGE }))
 }
@@ -68,13 +81,14 @@ function heldMemberOf(event: ClientRoomEvent): string | null {
     case 'demand-state':
       return event.member
     case 'leave':
+    case 'p-meta':
       return event.id
     default:
       return null
   }
 }
 
-/** One awaiter of a conflated publish, resolved with the winning send's receipt (see `_drainCoalesce`). */
+/** One awaiter of a conflated publish, resolved with the winning send's receipt (see `drainCoalesce`). */
 type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err: unknown) => void }
 /** A key's conflation: at most one send in flight, while the newest value waits in `pending`, superseding any
  *  earlier one. */
@@ -118,91 +132,95 @@ function heldConnectionChanged(id: string, wasConnected: boolean | null): void {
   }
 }
 
+type ClientRoomOptions = { end: ClientBroadcast; snapshot: RoomSnapshotMetadata }
+
 /** A server room through one Broadcast channel: its frames carry events and data, its acked messages requests. */
 class ClientRoom extends RoomStateView implements Room {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
-  private readonly _end: PageClient
-  private readonly _model: RoomModel
+  private readonly end: ClientBroadcast
+  private readonly model: RoomModel
   protected readonly _state: RoomState
-  private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
+  private readonly localParticipants = new Map<string, ClientRoomParticipant>()
   /** Joins awaiting their ack, by request, and by the member `joined` named. The server relays to a member from its
    *  admission, before the ack registers it here, so events naming it wait for its ack. */
-  private readonly _joins = new Map<number, PendingJoin>()
-  private readonly _joiners = new Map<string, PendingJoin>()
-  private _joinReqs = 0
+  private readonly joins = new Map<number, PendingJoin>()
+  private readonly joiners = new Map<string, PendingJoin>()
+  private joinReqs = 0
   /** The wants the server stub holds, as last declared; a fresh stub holds none. */
-  private _declaredAnnounce = false
-  private readonly _declaredText = new Set<string>()
+  private declaredAnnounce = false
+  private readonly declaredText = new Set<string>()
   /** Settled by the first `roster` or `roster-error` event, or when this view closes. Gates `getParticipants()`. */
-  private readonly _roster = createDeferred()
-  private _rosterStream: RosterStream | null = null
+  private readonly roster = createDeferred()
+  /** @internal */
+  _rosterStream: RosterStream | null = null
   /** @internal */
   readonly _bufferLimit: number
 
-  constructor(end: PageClient, snapshot: RoomSnapshotMetadata) {
+  messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<RoomMessage> {
+    return roomMessages(this, this._bufferLimit, options?.signal)
+  }
+
+  constructor({ end, snapshot }: ClientRoomOptions) {
     super()
-    this._end = end
+    this.end = end
     this._bufferLimit = snapshot.bufferLimit
-    this._model = new RoomModel({
+    const owner = new ClientRoomOwner({ room: this })
+    this.model = new RoomModel({
       roomId: snapshot.roomId,
       meta: snapshot.meta,
       seed: { count: snapshot.count }, // the roster itself streams right behind the response
       metaSeq: snapshot.metaSeq,
       closed: snapshot.closed,
-      onLeave: (id, cause) => this._onLeave(id, cause),
-      pendingMember: (id) => this._rosterStream?.pending.get(id),
-      heldConnection,
+      owner,
     })
-    this._state = new RoomState({
-      owner: this,
-      model: this._model,
-      onListenersChanged: (member, binary) => this._syncWants(member, binary),
-      onCallbackError: reportClientCallbackError,
-      trackWantsMax: ROOM_TRACK_WANTS_MAX,
-    })
-    if (snapshot.closed) this._roster.resolve()
+    this._state = new RoomState({ view: this, model: this.model, owner, trackWantsMax: ROOM_TRACK_WANTS_MAX })
+    if (snapshot.closed) this.roster.resolve()
 
     // Delivery handlers are local-only. What the server relays is driven by the declared wants: control always arrives,
     // text while subscribed, binary per `sub-binary`.
-    end._subscribeLocal('text', (envelope, info) => this._onEnvelope(envelope, info))
-    end._subscribeLocal('binary', (framed, info) => this._onBinaryFrame(framed, info))
+    end._subscribeLocal('text', (envelope, info) => this.onEnvelope(envelope, info))
+    end._subscribeLocal('binary', (framed, info) => this.onBinaryFrame(framed, info))
     // Wire death; a server `Room.close()` arrives before it, as the `closed` event.
     const view = new WeakRef(this)
     roomViews.add(view)
     end.onClose(() => {
       roomViews.delete(view)
-      this._applyClosed('disconnected')
+      this.applyClosed('disconnected')
     })
     end.onDisconnect(() => {
-      for (const local of this._localParticipants.values()) local._onDisconnected()
+      for (const local of this.localParticipants.values()) local._onDisconnected()
     })
     end.onReconnect(() => {
-      for (const local of this._localParticipants.values()) local._onReconnected()
+      for (const local of this.localParticipants.values()) local._onReconnected()
     })
     // A backend rejection can arrive before the application asks for the roster. Mark it handled here while preserving
     // the original rejection for each later getter.
-    void this._roster.promise.catch(() => {})
+    void this.roster.promise.catch(() => {})
   }
 
   join(options?: JoinOptions): Promise<LocalParticipant> {
-    const joining: Promise<LocalParticipant> = this._join(options).then((participant) => participant._handOut(joining))
+    const joining: Promise<LocalParticipant> = this.requestJoin(options).then((participant) =>
+      participant._handOut(joining),
+    )
     return joining
   }
 
-  private async _join(options?: JoinOptions): Promise<ClientRoomParticipant> {
+  private async requestJoin(options?: JoinOptions): Promise<ClientRoomParticipant> {
     assertUsage(
       options?.identity === undefined,
-      'join() options.identity is server-assigned: identity is trusted, so set it where trust lives, in the granting telefunction (server-side join()), not on the client.',
+      'join() options.identity is server-assigned: identity is trusted, so set it where trust lives, in the ' +
+        'granting telefunction (server-side join()), not on the client.',
     )
     assertUsage(
       options?.hidden === undefined,
-      'join() options.hidden is server-side only: a hidden participant is created by the granting telefunction (server-side join({ hidden: true })), not by a client.',
+      'join() options.hidden is server-side only: a hidden participant is created by the granting telefunction ' +
+        '(server-side join({ hidden: true })), not by a client.',
     )
     const { meta, selfDelivery } = normalizeJoinOptions(options)
-    const reqId = this._joinReqs++
+    const reqId = this.joinReqs++
     const join: PendingJoin = { id: null, held: [] }
-    this._joins.set(reqId, join)
+    this.joins.set(reqId, join)
     try {
       const { id, joinedAt } = (await this._request({ __r: 'req-join', reqId, meta, selfDelivery })) as {
         id: string
@@ -213,38 +231,38 @@ class ClientRoom extends RoomStateView implements Room {
         id,
         meta,
         selfDelivery,
-        rewinds: this._model.metaRewinds,
+        rewinds: this.model.metaRewinds,
       })
-      const closedCause = this._model.closedCause
+      const closedCause = this.model.closedCause
       if (closedCause) {
         participant._onLeft(closedCause)
         return participant
       }
-      this._localParticipants.set(id, participant)
-      this._model.applyJoin({ id, meta, joinedAt, metaSeq: 0, identity: null })
+      this.localParticipants.set(id, participant)
+      this.model.applyJoin({ id, meta, joinedAt, metaSeq: 0, identity: null })
       participant._holdOnPage()
       return participant
     } finally {
-      this._joins.delete(reqId)
-      if (join.id !== null) this._joiners.delete(join.id)
-      for (const { envelope, rawInfo } of join.held) this._onEnvelope(envelope, rawInfo)
+      this.joins.delete(reqId)
+      if (join.id !== null) this.joiners.delete(join.id)
+      for (const { envelope, rawInfo } of join.held) this.onEnvelope(envelope, rawInfo)
     }
   }
 
   async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
     assertKnownOptions(options, ['hidden'], 'getParticipants()')
     assertUsage(!options?.hidden, 'Hidden participants can only be enumerated on the server')
-    await this._awaitRoster()
+    await this.awaitRoster()
     return this._state.listVisible()
   }
 
   async getParticipant(id: string): Promise<RemoteParticipant | null> {
-    await this._awaitRoster()
+    await this.awaitRoster()
     return this._state.getRemote(id)
   }
 
-  private async _awaitRoster(): Promise<void> {
-    if (!this._model.rosterKnown) await this._roster.promise
+  private async awaitRoster(): Promise<void> {
+    if (!this.model.rosterKnown) await this.roster.promise
   }
 
   /** @internal Sync view read for sender resolution (delivery must not wait on I/O). */
@@ -253,12 +271,12 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   /** Plain DM fires local listeners; ack DM returns their reply through the symmetric `dm-reply`/`dm-ack` path. */
-  private _deliverDm(participant: ClientRoomParticipant, msg: InboxMessage): void {
+  private deliverDm(participant: ClientRoomParticipant, msg: InboxMessage): void {
     if (msg.ackId === undefined) {
       participant._deliverMessage(msg)
       return
     }
-    sendDmReply(this._end, msg.ackId, participant._deliverMessageAck(msg))
+    sendDmReply(this.end, msg.ackId, participant._deliverMessageAck(msg))
   }
 
   /** @internal Revival of a serialized `RemoteParticipant` (see `roomRemoteReviver`). */
@@ -267,89 +285,89 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   snapshot(): RoomSnapshotView {
-    return this._model.snapshot()
+    return this.model.snapshot()
   }
 
   /** @internal */
   async _request(req: RoomStubRequest): Promise<unknown> {
-    return roomResultValue(this._end.send(req, { ack: true }))
+    return roomResultValue(this.end.send(req, { ack: true }))
   }
 
   /** @internal `from` is a claim: the server checks it against this stub's members and stamps `fromMeta` itself. */
   async _publishText(from: string, data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
     const publish: RoomDataPublish = { __r: 'data', from, data }
     if (retain) publish.retain = true
-    return roomResultValue<ChannelPublishAck>(this._end._publishUnreported(publish))
+    return roomResultValue<ChannelPublishAck>(this.end._publishUnreported(publish))
   }
 
   /** @internal */
   async _publishBinaryFramed(framed: Uint8Array): Promise<ChannelPublishAck> {
-    return roomResultValue<ChannelPublishAck>(this._end._publishBinaryUnreported(framed))
+    return roomResultValue<ChannelPublishAck>(this.end._publishBinaryUnreported(framed))
   }
 
   /** @internal A local participant completed its voluntary leave. */
   _dropParticipant(id: string): void {
-    this._localParticipants.delete(id)
-    this._model.applyLeave(id, { type: 'left' }) // the relayed event is absorbed
+    this.localParticipants.delete(id)
+    this.model.applyLeave(id, { type: 'left' }) // the relayed event is absorbed
   }
 
-  private _onEnvelope(envelope: unknown, rawInfo: ChannelPublishInfo): void {
+  private onEnvelope(envelope: unknown, rawInfo: ChannelPublishInfo): void {
     assert(hasRoomTag(envelope))
     const event = envelope as ClientRoomEvent
     const member = heldMemberOf(event)
-    const join = member === null ? undefined : this._joiners.get(member)
+    const join = member === null ? undefined : this.joiners.get(member)
     if (join !== undefined) {
       join.held.push({ envelope, rawInfo })
       return
     }
     switch (event.__r) {
       case 'joined': {
-        const joined = this._joins.get(event.reqId)
+        const joined = this.joins.get(event.reqId)
         if (joined === undefined) return
         joined.id = event.id
-        this._joiners.set(event.id, joined)
+        this.joiners.set(event.id, joined)
         return
       }
       case 'roster':
-        this._onRosterPart(event)
+        this.onRosterPart(event)
         return
       case 'roster-error':
-        this._roster.reject(new Error('Failed to load room participants'))
+        this.roster.reject(new Error('Failed to load room participants'))
         return
       case 'rewound':
-        this._model.forgetMetaSeqs()
+        this.model.forgetMetaSeqs()
         return
       case 'data':
-        this._state.applyData(event, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
+        this._state.applyData(event, { key: this.id, seq: rawInfo.seq, timestamp: rawInfo.timestamp })
         return
       case 'join':
-        this._model.applyJoin(joinedMember(event))
+        this.model.applyJoin(joinedMember(event))
         return
       case 'leave':
-        this._model.applyRelayedLeave(event.id, leaveCauseFromWire(event), event.hidden === true)
+        this.model.applyRelayedLeave(event.id, leaveCauseFromWire(event), event.hidden === true)
         return
       case 'p-meta':
         this._acceptParticipantMeta(event.id, event)
         return
       case 'update':
-        this._model.applyRoomUpdate(event)
+        this.model.applyRoomUpdate(event)
         return
       case 'closed':
-        this._applyClosed('closed')
+        this.applyClosed('closed')
         return
       case 'announce':
-        this._state.applyAnnounce(event.data, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
+        this._state.applyAnnounce(event.data, { key: this.id, seq: rawInfo.seq, timestamp: rawInfo.timestamp })
         return
       case 'demand':
         // Whether anyone wants one of our own members' tracks flipped (onDemand).
-        this._localParticipants.get(event.member)?._onDemand(event.track, event.wanted)
+        this.localParticipants.get(event.member)?._onDemand(event.track, event.wanted)
         return
       case 'demand-state':
-        this._localParticipants.get(event.member)?._applyDemandState(event.tracks)
+        this.localParticipants.get(event.member)?._applyDemandState(event.tracks)
         return
       case 'dm': {
         // Relayed from this member's private inbox: only its own stub ever receives it.
-        const local = this._localParticipants.get(event.to)
+        const local = this.localParticipants.get(event.to)
         if (!local) return
         const msg = inboxMessageFromWire(event)
         // A room-authored DM has no sender to resolve.
@@ -358,33 +376,33 @@ class ClientRoom extends RoomStateView implements Room {
           msg.fromMeta = sender.meta
           msg.fromIdentity = sender.identity
         }
-        this._deliverDm(local, msg)
+        this.deliverDm(local, msg)
         return
       }
     }
   }
 
-  /** Every leave the state applies ends the member's local participant: kicked (with the kick's reason), left through
-   *  another handle, or missing from a roster. */
-  private _onLeave(id: string, cause: LeaveCause): void {
-    const local = this._localParticipants.get(id)
+  /** @internal Every leave the state applies ends the member's local participant: kicked (with the kick's reason),
+   *  left through another handle, or missing from a roster. */
+  _onLeave(id: string, cause: LeaveCause): void {
+    const local = this.localParticipants.get(id)
     if (!local) return
-    this._localParticipants.delete(id)
+    this.localParticipants.delete(id)
     local._onLeft(cause)
   }
 
-  private _onBinaryFrame(framed: Uint8Array, rawInfo: ChannelPublishInfo): void {
+  private onBinaryFrame(framed: Uint8Array, rawInfo: ChannelPublishInfo): void {
     const frame = decodeBinaryFrame(framed)
     assert(frame)
-    this._state.applyBinary(frame, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
+    this._state.applyBinary(frame, { key: this.id, seq: rawInfo.seq, timestamp: rawInfo.timestamp })
   }
 
-  private _onRosterPart({ members, part, more }: Extract<RoomRosterEvent, { __r: 'roster' }>): void {
+  private onRosterPart({ members, part, more }: Extract<RoomRosterEvent, { __r: 'roster' }>): void {
     if (part === 0) {
       this._rosterStream ??= {
         parts: null,
         pending: new Map(),
-        events: this._model.recordMembership(),
+        events: this.model.recordMembership(),
         applying: 0,
         applied: Promise.resolve(),
       }
@@ -396,7 +414,7 @@ class ClientRoom extends RoomStateView implements Room {
     // A part lost while offline: the next attach sends the whole roster again.
     if (parts === null || part !== parts.next) {
       stream.parts = null
-      this._stopRosterEvents()
+      this.stopRosterEvents()
       return
     }
     for (const member of members) {
@@ -406,105 +424,109 @@ class ClientRoom extends RoomStateView implements Room {
     parts.next++
     if (more) return
     stream.parts = null
-    const apply = () => this._applyRoster(stream, parts.members)
+    const apply = () => this.applyRoster(stream, parts.members)
     stream.applying++
     stream.applied = stream.applying === 1 ? apply() : stream.applied.then(apply)
   }
 
-  private async _applyRoster(stream: RosterStream, members: MemberSnapshot[]): Promise<void> {
+  private async applyRoster(stream: RosterStream, members: MemberSnapshot[]): Promise<void> {
     try {
-      await this._model.reconcileRoster({ members, departing: new Set() }, stream.events)
+      await this.model.reconcileRoster({ members }, stream.events)
       // A meta change of one's own that a gap dropped, as while offline, is in the roster whole.
-      for (const [id, local] of this._localParticipants) {
-        const accepted = this._model.acceptedMeta(id)
+      for (const [id, local] of this.localParticipants) {
+        const accepted = this.model.acceptedMeta(id)
         if (accepted !== null) local._acceptMeta(accepted)
       }
-      this._roster.resolve()
+      this.roster.resolve()
     } finally {
       stream.applying--
-      this._stopRosterEvents()
+      this.stopRosterEvents()
     }
   }
 
-  private _stopRosterEvents(): void {
+  private stopRosterEvents(): void {
     const stream = this._rosterStream
     if (stream === null || stream.parts !== null || stream.applying > 0) return
     this._rosterStream = null
-    this._model.stopRecordingMembership()
+    this.model.stopRecordingMembership()
   }
 
   /** @internal */
   get _isConnected(): boolean {
-    return this._end.isConnected
+    return this.end.isConnected
   }
 
   /** @internal */
   _heldConnectionChanged(id: string, wasConnected: boolean | null): void {
-    this._model.heldConnectionChanged(id, wasConnected)
+    this.model.heldConnectionChanged(id, wasConnected)
   }
 
   /** @internal Apply an accepted member meta (event or own write's ack) and mirror it into a local participant. */
   _acceptParticipantMeta(id: string, accepted: MemberMetaUpdate): void {
-    this._model.applyParticipantMeta(id, accepted)
-    this._localParticipants.get(id)?._acceptMeta(accepted)
+    this.model.applyParticipantMeta(id, accepted)
+    this.localParticipants.get(id)?._acceptMeta(accepted)
   }
 
-  private _applyClosed(causeType: 'closed' | 'disconnected'): void {
+  private applyClosed(causeType: 'closed' | 'disconnected'): void {
     const cause: LeaveCause = { type: causeType }
-    if (!this._model.applyClosed(cause)) return
-    this._roster.resolve() // unblock any getParticipants() waiting on a wire that just died
+    if (!this.model.applyClosed(cause)) return
+    this.roster.resolve() // unblock any getParticipants() waiting on a wire that just died
     // Local participants end after onClose, as on the server.
-    for (const local of this._localParticipants.values()) local._onLeft(cause)
-    this._localParticipants.clear()
+    for (const local of this.localParticipants.values()) local._onLeft(cause)
+    this.localParticipants.clear()
   }
 
-  /** Room-wide text wants ride the Broadcast subscription, which reattaches before the channel's `onOpen`. Declarations
-   *  are replayed channel messages, so the server keeps them across reconnects: each one carries only what changed,
-   *  the room-wide text wants and those of `member`, whose listeners changed, or the one binary want that did. */
-  private _syncWants(member: string | null, binary: BinaryWantChange | null): void {
-    if (this._model.closed) {
-      this._end._setSubscribed('text', false) // a closed room takes no declaration
+  /** Room-wide text wants ride the Broadcast subscription, which attaches again before the channel's `onOpen`.
+   *  Declarations are replayed channel messages, so the server keeps them across reconnects: each carries only what
+   *  changed, the room-wide text wants and those of `member`, whose listeners changed, or the binary want that did. */
+  /** @internal */
+  _syncWants(member: string | null, binary: BinaryWantChange | null): void {
+    if (this.model.closed) {
+      this.end._setSubscribed('text', false) // a closed room takes no declaration
       return
     }
     const text = this._state.textWants()
-    this._end._setSubscribed('text', text.all)
+    this.end._setSubscribed('text', text.all)
     // Declared under the room-wide stream too, so the server keeps these members' lane when that stream stops.
     const textChanges: Record<string, boolean> = Object.create(null)
-    const memberText = member !== null && text.members.has(member) !== this._declaredText.has(member)
+    const memberText = member !== null && text.members.has(member) !== this.declaredText.has(member)
     if (memberText) {
       const wanted = text.members.has(member)
       textChanges[member] = wanted
-      if (wanted) this._declaredText.add(member)
-      else this._declaredText.delete(member)
+      if (wanted) this.declaredText.add(member)
+      else this.declaredText.delete(member)
     }
-    if (memberText || this._state.wantsAnnounce !== this._declaredAnnounce) {
-      this._declaredAnnounce = this._state.wantsAnnounce
-      this._notify({ __r: 'sub-text', announce: this._state.wantsAnnounce, members: textChanges })
+    if (memberText || this._state.wantsAnnounce !== this.declaredAnnounce) {
+      this.declaredAnnounce = this._state.wantsAnnounce
+      this.notify({ __r: 'sub-text', announce: this._state.wantsAnnounce, members: textChanges })
     }
     if (binary === null) return
     const { member: wantMember, track, on } = binary
-    this._notify({
+    this.notify({
       __r: 'sub-binary',
-      member: wantMember === ALL ? null : wantMember,
-      track: track === ALL ? null : track,
+      member: wantMember === EVERY_MEMBER ? null : wantMember,
+      track: track === EVERY_TRACK ? null : track,
       on,
     })
   }
 
   /** A closed channel's server side is gone with its wants. */
-  private _notify(notice: RoomStubRequest): void {
-    if (!this._end.isClosed) void this._end.send(notice, { ack: false }).catch(() => {})
+  private notify(notice: RoomStubRequest): void {
+    if (!this.end.isClosed) void this.end.send(notice, { ack: false }).catch(() => {})
   }
+}
+
+type ClientParticipantBaseOptions = {
+  participant: Pick<ParticipantStubMetadata, 'id' | 'meta' | 'selfDelivery' | 'identity' | 'bufferLimit'>
+  rewinds: MetaRewinds
 }
 
 abstract class ClientParticipantBase extends ParticipantBase {
   /** `publish(data, { coalesce })`'s conflation, by key. */
-  private readonly _coalescers = new Map<string, CoalesceSlot>()
-  private readonly _wantedTracks = new Set<TrackKey>()
-  private readonly _bufferLimit: number
+  private readonly coalescers = new Map<string, CoalesceSlot>()
+  private readonly wantedTracks = new Set<TrackKey>()
+  private readonly bufferLimit: number
   protected readonly _bugMessage = CLIENT_ROOM_BUG_MESSAGE
-
-  private readonly _requestParticipant: (request: MemberMutationRequest) => Promise<unknown>
 
   /** @internal The page holds this member from now on, until it leaves. */
   _holdOnPage(): void {
@@ -527,40 +549,33 @@ abstract class ClientParticipantBase extends ParticipantBase {
     if (heldMembers.get(this.id) === this) heldMembers.delete(this.id)
   }
 
-  constructor({
-    participant,
-    rewinds,
-    request,
-  }: {
-    participant: Pick<ParticipantStubMetadata, 'id' | 'meta' | 'selfDelivery' | 'identity' | 'bufferLimit'>
-    rewinds: MetaRewinds
-    request: (request: MemberMutationRequest) => Promise<unknown>
-  }) {
-    super(participant, rewinds)
-    this._bufferLimit = participant.bufferLimit
-    this._requestParticipant = request
+  constructor({ participant, rewinds }: ClientParticipantBaseOptions) {
+    super({ participant, rewinds })
+    this.bufferLimit = participant.bufferLimit
   }
 
   get _demandedTracks(): TrackKey[] {
-    return this._left ? [] : [...this._wantedTracks]
+    return this._left ? [] : [...this.wantedTracks]
   }
 
-  /** @internal The whole wanted set, as a reattached holder hears it: only the tracks that changed fire. */
+  /** @internal The whole wanted set, as a holder hears it when it attaches again: only the tracks that changed fire. */
   _applyDemandState(tracks: TrackKey[]): void {
     const next = new Set(tracks)
-    for (const track of this._wantedTracks) if (!next.has(track)) this._onDemand(track, false)
-    for (const track of next) if (!this._wantedTracks.has(track)) this._onDemand(track, true)
+    for (const track of this.wantedTracks) if (!next.has(track)) this._onDemand(track, false)
+    for (const track of next) if (!this.wantedTracks.has(track)) this._onDemand(track, true)
   }
 
   override _onDemand(track: TrackKey, wanted: boolean): void {
-    if (wanted) this._wantedTracks.add(track)
-    else this._wantedTracks.delete(track)
+    if (wanted) this.wantedTracks.add(track)
+    else this.wantedTracks.delete(track)
     super._onDemand(track, wanted)
   }
 
   /** Each flavor's wire publish; `publish()` adds conflation. */
   protected abstract _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck>
   protected abstract _sendPublishBinary(framed: Uint8Array): Promise<ChannelPublishAck>
+  /** The wire request of a flavor: the base's DMs and metadata writes, and the standalone's publish and leave. */
+  protected abstract _request(request: MemberMutationRequest): Promise<unknown>
 
   // Messaging is often fire-and-forget: a usage error throws, and a failure is a rejection left handled.
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
@@ -577,12 +592,12 @@ abstract class ClientParticipantBase extends ParticipantBase {
     if (key === undefined) return markHandled(this._sendPublish(data, options?.retain))
     return markHandled(
       new Promise<ChannelPublishAck>((resolve, reject) => {
-        const slot = getOrCreate(this._coalescers, key, () => ({ sending: false, pending: null }))
+        const slot = getOrCreate(this.coalescers, key, () => ({ sending: false, pending: null }))
         // Supersede any queued value; its waiters ride along and all resolve with the winning send.
         const waiters = slot.pending?.waiters ?? []
         waiters.push({ resolve, reject })
         slot.pending = { data: ownMessage(data), retain: options?.retain, waiters }
-        this._drainCoalesce(key)
+        this.drainCoalesce(key)
       }),
     )
   }
@@ -597,33 +612,33 @@ abstract class ClientParticipantBase extends ParticipantBase {
       options?.ack === undefined || typeof options.ack === 'boolean',
       'send() options.ack should be a boolean',
     )
-    return markHandled(this._sendDm(recipientId(to), data, options?.ack === true))
+    return markHandled(this.sendDm(recipientId(to), data, options?.ack === true))
   }
 
-  private async _sendDm(to: string, data: unknown, ack: boolean): Promise<unknown> {
+  private async sendDm(to: string, data: unknown, ack: boolean): Promise<unknown> {
     this._assertActive()
     const request: MemberMutationRequest = { __r: 'req-dm', to, data }
     if (ack) request.ack = true
-    return await this._requestParticipant(request)
+    return await this._request(request)
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
     this._assertActive()
     const owned = ownMetaArgument(meta, 'setMeta() meta')
-    this._onOwnMetaWritten((await this._requestParticipant({ __r: 'req-set-meta', meta: owned })) as MemberMetaUpdate)
+    this._onOwnMetaWritten((await this._request({ __r: 'req-set-meta', meta: owned })) as MemberMetaUpdate)
   }
 
   async setAttributes(attrs: ParticipantMeta): Promise<void> {
     this._assertActive()
     const owned = ownMetaArgument(attrs, 'setAttributes() attributes')
-    this._onOwnMetaWritten((await this._requestParticipant({ __r: 'req-set-attrs', attrs: owned })) as MemberMetaUpdate)
+    this._onOwnMetaWritten((await this._request({ __r: 'req-set-attrs', attrs: owned })) as MemberMetaUpdate)
   }
 
   /** Concurrent writes can commit out of request order: adopt the sequence-accepted value, as observers do. */
   protected abstract _onOwnMetaWritten(accepted: MemberMetaUpdate): void
 
-  private _drainCoalesce(key: string): void {
-    const slot = this._coalescers.get(key)
+  private drainCoalesce(key: string): void {
+    const slot = this.coalescers.get(key)
     if (!slot || slot.sending || !slot.pending) return
     const { data, retain, waiters } = slot.pending
     slot.pending = null
@@ -635,8 +650,8 @@ abstract class ClientParticipantBase extends ParticipantBase {
       )
       .finally(() => {
         slot.sending = false
-        if (slot.pending) this._drainCoalesce(key)
-        else this._coalescers.delete(key)
+        if (slot.pending) this.drainCoalesce(key)
+        else this.coalescers.delete(key)
       })
   }
 
@@ -645,61 +660,92 @@ abstract class ClientParticipantBase extends ParticipantBase {
   }
 
   protected _inboxBufferLimit(): number {
-    return this._bufferLimit
+    return this.bufferLimit
   }
+}
+
+type ClientRoomOwnerOptions = { room: ClientRoom }
+
+/** What a `ClientRoom`'s model and state ask of it, kept off the room itself, which is the user's `Room`. */
+class ClientRoomOwner implements RoomModelOwner, RoomStateOwner {
+  private readonly room: ClientRoom
+
+  constructor({ room }: ClientRoomOwnerOptions) {
+    this.room = room
+  }
+
+  reportCallbackError(error: unknown): void {
+    reportClientCallbackError(error)
+  }
+
+  onMemberLeft(id: string, cause: LeaveCause): void {
+    this.room._onLeave(id, cause)
+  }
+
+  pendingMember(id: string): MemberSnapshot | undefined {
+    return this.room._rosterStream?.pending.get(id)
+  }
+
+  heldConnection(id: string): boolean | null {
+    return heldConnection(id)
+  }
+
+  onListenersChanged(member: string | null, binary: BinaryWantChange | null): void {
+    this.room._syncWants(member, binary)
+  }
+}
+
+type ClientRoomParticipantOptions = {
+  clientRoom: ClientRoom
+  id: string
+  meta: ParticipantMeta
+  selfDelivery: boolean
+  rewinds: MetaRewinds
 }
 
 /** `LocalParticipant` returned by `ClientRoom.join()`. Operates through the room's channel. */
 class ClientRoomParticipant extends ClientParticipantBase {
-  private readonly _room: ClientRoom
+  private readonly room: ClientRoom
   /** Weak: the room reaches this member, so a strong one would hold the room open for good. */
-  private _handle: WeakRef<LocalParticipant> | null = null
+  private handle: WeakRef<LocalParticipant> | null = null
 
-  constructor({
-    clientRoom,
-    id,
-    meta,
-    selfDelivery,
-    rewinds,
-  }: {
-    clientRoom: ClientRoom
-    id: string
-    meta: ParticipantMeta
-    selfDelivery: boolean
-    rewinds: MetaRewinds
-  }) {
+  constructor({ clientRoom, id, meta, selfDelivery, rewinds }: ClientRoomParticipantOptions) {
     super({
       // Client-side joins carry no identity: it's server-assigned (see JoinOptions.identity).
       participant: { id, meta, selfDelivery, identity: null, bufferLimit: clientRoom._bufferLimit },
       rewinds,
-      request: (request) => clientRoom._request({ ...request, id }),
     })
-    this._room = clientRoom
+    this.room = clientRoom
   }
 
   get isConnected(): boolean {
-    return this._room._isConnected
+    return this.room._isConnected
   }
 
   protected override _resolveSender(id: string): Sender | null {
-    return this._room._getRemote(id)
+    return this.room._getRemote(id)
   }
 
   protected override _onOwnMetaWritten(accepted: MemberMetaUpdate): void {
-    this._room._acceptParticipantMeta(this.id, accepted)
+    this.room._acceptParticipantMeta(this.id, accepted)
   }
 
   protected async _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishText(this.id, data, retain)
+    return await this.room._publishText(this.id, data, retain)
   }
 
   protected async _sendPublishBinary(framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishBinaryFramed(framed)
+    return await this.room._publishBinaryFramed(framed)
   }
 
-  /** @internal The page's handle: it holds the room open until this member leaves, and nothing in the room reaches it. */
+  protected _request(request: MemberMutationRequest): Promise<unknown> {
+    return this.room._request({ ...request, id: this.id })
+  }
+
+  /** @internal The page's handle: it holds the room open until this member leaves, and nothing in the room reaches
+   *  it. */
   _handOut(joining: Promise<LocalParticipant>): LocalParticipant {
     const bound = new Map<PropertyKey, unknown>()
     const handle = new Proxy<LocalParticipant>(this, {
@@ -710,37 +756,36 @@ class ClientRoomParticipant extends ClientParticipantBase {
     })
     if (this._left) return handle
     roomHolds.set(handle, joining)
-    this._handle = new WeakRef(handle)
+    this.handle = new WeakRef(handle)
     return handle
   }
 
   override _onLeft(cause: LeaveCause): void {
     super._onLeft(cause)
-    const handle = this._handle?.deref()
+    const handle = this.handle?.deref()
     if (handle) roomHolds.delete(handle)
   }
 
   async leave(): Promise<void> {
     if (this._left) return
-    await this._room._request({ __r: 'req-leave', id: this.id })
-    this._room._dropParticipant(this.id)
+    await this.room._request({ __r: 'req-leave', id: this.id })
+    this.room._dropParticipant(this.id)
     this._onLeft({ type: 'left' })
   }
 }
 
+type ClientStandaloneParticipantOptions = { end: ClientBroadcast; metadata: ParticipantStubMetadata }
+
 /** `LocalParticipant` revived from a serialized `ServerLocalParticipant`. Owns its channel. */
 class ClientStandaloneParticipant extends ClientParticipantBase {
-  private readonly _end: PageClient
-  private readonly _request: (req: ParticipantStubRequest) => Promise<unknown>
+  private readonly end: ClientBroadcast
 
-  constructor(end: PageClient, metadata: ParticipantStubMetadata) {
-    const request = async (req: ParticipantStubRequest) => roomResultValue(end.send(req, { ack: true }))
+  constructor({ end, metadata }: ClientStandaloneParticipantOptions) {
     // Its own: the `rewound` notice forgets its seq.
-    super({ participant: metadata, rewinds: { count: 0 }, request })
-    this._end = end
-    this._request = request
+    super({ participant: metadata, rewinds: { count: 0 } })
+    this.end = end
 
-    end._subscribeLocal('text', (notice) => this._onNotice(notice))
+    end._subscribeLocal('text', (notice) => this.onNotice(notice))
     end.onClose(() => this._onLeft({ type: 'disconnected' }))
     // Held from its channel's open: before it, the channel reads disconnected.
     end.onOpen(() => this._holdOnPage())
@@ -749,10 +794,10 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
   }
 
   get isConnected(): boolean {
-    return this._end.isConnected
+    return this.end.isConnected
   }
 
-  private _onNotice(notice: unknown): void {
+  private onNotice(notice: unknown): void {
     assert(hasRoomTag(notice))
     const msg = notice as ParticipantStubNotice
     switch (msg.__r) {
@@ -766,7 +811,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
         return this._applyDemandState(msg.tracks)
       case 'dm':
         if (msg.ackId === undefined) return this._deliverMessage(inboxMessageFromWire(msg))
-        return sendDmReply(this._end, msg.ackId, this._deliverMessageAck(inboxMessageFromWire(msg)))
+        return sendDmReply(this.end, msg.ackId, this._deliverMessageAck(inboxMessageFromWire(msg)))
       case 'left':
         return this._onLeft(leaveCauseFromWire(msg))
     }
@@ -786,14 +831,18 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
 
   protected async _sendPublishBinary(framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
-    return roomResultValue<ChannelPublishAck>(this._end._publishBinaryUnreported(framed))
+    return roomResultValue<ChannelPublishAck>(this.end._publishBinaryUnreported(framed))
+  }
+
+  protected async _request(request: ParticipantStubRequest): Promise<unknown> {
+    return roomResultValue(this.end.send(request, { ack: true }))
   }
 
   async leave(): Promise<void> {
     if (this._left) return
     await this._request({ __r: 'req-leave' })
     this._onLeft({ type: 'left' })
-    void this._end.close().catch(() => {})
+    void this.end.close().catch(() => {})
   }
 }
 

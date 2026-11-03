@@ -9,6 +9,7 @@ export type {
   ClientJoinOptions,
   PublishOptions,
   ParticipantMeta,
+  ReadonlyMeta,
   LocalParticipant,
   RemoteParticipant,
   Sender,
@@ -24,6 +25,7 @@ export type {
   ParticipantRef,
   BinaryFrameInfo,
   BinaryPublishOptions,
+  RoomMessage,
   RoomSnapshotView,
   ParticipantSnapshotView,
 }
@@ -37,15 +39,24 @@ type RoomShield<Pub> = {
   }
 }
 
-/** Room metadata (e.g. topic). Must be serializable. */
+/** Room metadata (e.g. topic). Must be serializable. Read-only: freezing doesn't lock a `Map`, `Set` or `Date` in it,
+ *  so build a new value to change any of it. */
 type RoomMeta = Record<string, unknown>
-/** Participant metadata (e.g. name, score). Must be serializable. */
+/** Participant metadata (e.g. name, score). Must be serializable. Read-only: freezing doesn't lock a `Map`, `Set` or
+ *  `Date` in it, so build a new value to change any of it. */
 type ParticipantMeta = Record<string, unknown>
+/** A meta as Room hands it to you: its records and arrays read-only all the way down. A `Map`, `Set` or `Date` in it
+ *  keeps its type, and the rule that meta is read-only. */
+type ReadonlyMeta<T> = T extends Date | Map<unknown, unknown> | Set<unknown> | ((...args: never[]) => unknown)
+  ? T
+  : T extends object
+    ? { readonly [K in keyof T]: ReadonlyMeta<T[K]> }
+    : T
 
 /** A verified sender: a plain `{ id, meta, identity }`, or a live `RemoteParticipant`, which has the same fields. */
 type Sender<P extends ParticipantMeta = ParticipantMeta> = {
   readonly id: string
-  readonly meta: P
+  readonly meta: ReadonlyMeta<P>
   readonly identity: string | null
 }
 
@@ -76,7 +87,7 @@ type RoomAckReceipt = RoomSendReceipt & { response: unknown }
 type AfterPublishHook<P extends ParticipantMeta = ParticipantMeta> = (
   from: Sender<P>,
   data: unknown,
-  info: RoomSendReceipt & { receivers?: number },
+  info: RoomSendReceipt,
 ) => void | Promise<void>
 
 /** Runs after a private message is delivered; throwing cannot undo delivery. */
@@ -93,12 +104,15 @@ type AfterJoinHook<P extends ParticipantMeta = ParticipantMeta> = (
   info: { joinedAt: number },
 ) => void | Promise<void>
 
-/** Why a participant left; one a roster no longer lists is reported as `removed`. */
+/** Why a participant left. One a roster no longer lists left with the cause its departing record keeps, or `unknown`
+ *  once that record expired. */
 type LeaveCause =
   | { readonly type: 'left' }
   | { readonly type: 'removed'; readonly reason?: unknown }
   | { readonly type: 'closed' }
   | { readonly type: 'disconnected' }
+  /** It left while this side didn't follow the room, and its cause is no longer kept. */
+  | { readonly type: 'unknown' }
 
 /** One membership by id, or all memberships of an app identity. */
 type ParticipantRef = { id: string } | { identity: string }
@@ -107,10 +121,10 @@ type RoomOptions<M extends RoomMeta = RoomMeta> = {
   /** Room metadata, visible to all observers. Default: `{}`. */
   meta?: M
   /** Milliseconds an unheld room nobody joined stays before it closes; `Infinity` never. Default:
-   *  `config.emptyTimeout` from `@telefunc/room`. */
+   *  `roomConfig.emptyTimeout` from `@telefunc/room`. */
   emptyTimeout?: number
   /** Milliseconds an unheld room a member had joined stays before it closes; `Infinity` never. Default:
-   *  `config.departureTimeout` from `@telefunc/room`. */
+   *  `roomConfig.departureTimeout` from `@telefunc/room`. */
   departureTimeout?: number
 }
 
@@ -138,7 +152,7 @@ type ClientJoinOptions<P extends ParticipantMeta = ParticipantMeta> = Omit<JoinO
 type ParticipantSnapshotView<P extends ParticipantMeta = ParticipantMeta> = {
   readonly id: string
   readonly identity: string | null
-  readonly meta: P
+  readonly meta: ReadonlyMeta<P>
   readonly joinedAt: number
   /** False while the participant's page can't be reached and the room waits for it. */
   readonly isConnected: boolean
@@ -147,7 +161,7 @@ type ParticipantSnapshotView<P extends ParticipantMeta = ParticipantMeta> = {
 /** Immutable and reference-stable until the room changes. */
 type RoomSnapshotView<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta> = {
   readonly id: string
-  readonly meta: M
+  readonly meta: ReadonlyMeta<M>
   readonly count: number
   readonly isClosed: boolean
   readonly participants: readonly ParticipantSnapshotView<P>[]
@@ -156,7 +170,7 @@ type RoomSnapshotView<M extends RoomMeta = RoomMeta, P extends ParticipantMeta =
 /** Lightweight room snapshot returned by `Room.list()`. */
 type RoomInfo<M extends RoomMeta = RoomMeta> = {
   readonly id: string
-  readonly meta: M
+  readonly meta: ReadonlyMeta<M>
   readonly count: number
   readonly isEmpty: boolean
 }
@@ -187,6 +201,12 @@ type BinaryPublishOptions = {
   retain?: boolean
 }
 
+/** One message `messages()` yields: what a `subscribe()` or `subscribeBinary()` listener receives, `from` being the
+ *  sender as it was when the message arrived. */
+type RoomMessage<Pub = unknown, P extends ParticipantMeta = ParticipantMeta> =
+  | { type: 'text'; data: Pub; info: ChannelPublishInfo; from: Sender<P> }
+  | { type: 'binary'; data: Uint8Array; info: ChannelPublishInfo & BinaryFrameInfo; from: Sender<P> }
+
 type RoomBinaryListener<P extends ParticipantMeta = ParticipantMeta> = (
   data: Uint8Array,
   info: ChannelPublishInfo & BinaryFrameInfo,
@@ -200,7 +220,7 @@ type MemberBinaryListener = (data: Uint8Array, info: ChannelPublishInfo & Binary
 type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = {
   /** The ID the room was created with. */
   readonly id: string
-  readonly meta: M
+  readonly meta: ReadonlyMeta<M>
   readonly count: number
   readonly isEmpty: boolean
   readonly isClosed: boolean
@@ -214,28 +234,46 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   getParticipant(id: string): Promise<RemoteParticipant<P, Pub> | null>
 
   /** Receive all participant messages. Returns an unsubscribe function. */
-  subscribe(callback: (data: Pub, info: ChannelPublishInfo, from: Sender<P>) => unknown): () => void
+  subscribe(
+    callback: (data: Pub, info: ChannelPublishInfo, from: Sender<P>) => unknown,
+    options?: { signal?: AbortSignal },
+  ): () => void
   /** Receive all members' binary frames, optionally filtered to one track at the source. */
-  subscribeBinary(callback: RoomBinaryListener<P>, options?: { track?: string | null }): () => void
+  subscribeBinary(
+    callback: RoomBinaryListener<P>,
+    options?: { track?: string | null; signal?: AbortSignal },
+  ): () => void
 
   /** A participant joined. */
-  onJoin(callback: (member: RemoteParticipant<P, Pub>) => void): () => void
+  onJoin(callback: (member: RemoteParticipant<P, Pub>) => void, options?: { signal?: AbortSignal }): () => void
   /** A participant left, and why. */
-  onLeave(callback: (member: RemoteParticipant<P, Pub>, cause: LeaveCause) => void): () => void
+  onLeave(
+    callback: (member: RemoteParticipant<P, Pub>, cause: LeaveCause) => void,
+    options?: { signal?: AbortSignal },
+  ): () => void
   /** Any participant's metadata changed. */
-  onParticipantUpdate(callback: (member: RemoteParticipant<P, Pub>, meta: P, prev: P) => void): () => void
+  onParticipantUpdate(
+    callback: (member: RemoteParticipant<P, Pub>, meta: ReadonlyMeta<P>, prev: ReadonlyMeta<P>) => void,
+    options?: { signal?: AbortSignal },
+  ): () => void
   /** The room's metadata was replaced (`Room.setMeta()`) or merged (`Room.setAttributes()`). */
-  onUpdate(callback: (meta: M, prev: M) => void): () => void
+  onUpdate(
+    callback: (meta: ReadonlyMeta<M>, prev: ReadonlyMeta<M>) => void,
+    options?: { signal?: AbortSignal },
+  ): () => void
   /** A room-authored message arrived (`Room.announce()`), e.g. system notices. */
-  onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void): () => void
+  onAnnounce(
+    callback: (data: unknown, info: ChannelPublishInfo) => void,
+    options?: { signal?: AbortSignal },
+  ): () => void
   /** The last participant left. */
-  onEmpty(callback: () => void): () => void
-  /** The room was closed via `Room.close()` (on the client, also: the connection is gone, or fell further behind the
-   *  room than the server holds for it). */
-  onClose(callback: () => void): () => void
+  onEmpty(callback: () => void, options?: { signal?: AbortSignal }): () => void
+  /** The room was closed via `Room.close()` (on the client, also: the connection is gone, or the room sent it more
+   *  while it was offline than the server holds for it). */
+  onClose(callback: () => void, options?: { signal?: AbortSignal }): () => void
 
   /** Anything observable changed; pairs with `snapshot()`. */
-  onChange(callback: () => void): () => void
+  onChange(callback: () => void, options?: { signal?: AbortSignal }): () => void
   /** Immutable whole-room view, reference-stable until the next change. */
   snapshot(): RoomSnapshotView<M, P>
 } & RoomShield<Pub>
@@ -245,12 +283,14 @@ type ClientRoom<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Parti
   'join'
 > & {
   join(options?: ClientJoinOptions<P>): Promise<LocalParticipant<P, Pub>>
+  /** Iterate participant messages until aborted, closed, or the loop ends. */
+  messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<RoomMessage<Pub, P>>
 }
 
 /** Your returnable participant handle, returned by `join()`. */
 type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = {
   readonly id: string
-  readonly meta: P
+  readonly meta: ReadonlyMeta<P>
   /** The app identity this membership was joined with (`null` when none was set). */
   readonly identity: string | null
   /** Whether the messages you publish are delivered back to the room object on your side. Set at `join()`. */
@@ -268,29 +308,30 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   send(to: string | Sender<P>, data: unknown, options: { ack?: false }): Promise<RoomSendReceipt>
   send(to: string | Sender<P>, data: unknown, options: { ack: true }): Promise<RoomAckReceipt>
   /** Receive private messages; returning a value answers an acknowledged send. */
-  listen(callback: (data: unknown, from: Sender<P> | null) => unknown): () => void
+  listen(callback: (data: unknown, from: Sender<P> | null) => unknown, options?: { signal?: AbortSignal }): () => void
 
   /** Watch whether any observer wants each published track. */
-  onDemand(callback: (track: string | null, wanted: boolean) => void): () => void
-  /** Replace your metadata wholesale. Propagates to all observers in real time. */
-  setMeta(meta: P): Promise<void>
+  onDemand(callback: (track: string | null, wanted: boolean) => void, options?: { signal?: AbortSignal }): () => void
+  /** Replace your metadata wholesale. Propagates to all observers in real time. Takes a new object, or one built from
+   *  the read-only meta Room handed you. */
+  setMeta(meta: ReadonlyMeta<P>): Promise<void>
   /** Merge metadata per key; `undefined` deletes a key. */
-  setAttributes(attributes: Partial<P>): Promise<void>
+  setAttributes(attributes: Partial<ReadonlyMeta<P>>): Promise<void>
 
   leave(): Promise<void>
   /** You left. `cause.type` says how: `'left'` (you), `'removed'` (kicked, with the kick's `reason`), `'closed'` (the
-   *  room), `'disconnected'` (the connection died, or fell further behind than the server holds for it). */
-  onLeave(callback: (cause: LeaveCause) => void): () => void
+   *  room), `'disconnected'` (the connection died, or more was sent to it while offline than the server holds). */
+  onLeave(callback: (cause: LeaveCause) => void, options?: { signal?: AbortSignal }): () => void
   /** The page holding you can't reach the room; the room keeps you meanwhile. */
-  onDisconnect(callback: () => void): () => void
+  onDisconnect(callback: () => void, options?: { signal?: AbortSignal }): () => void
   /** The page holding you reaches the room again. */
-  onReconnect(callback: () => void): () => void
+  onReconnect(callback: () => void, options?: { signal?: AbortSignal }): () => void
 } & RoomShield<Pub>
 
 /** A returnable view of another room member, bound to its room's live state. */
 type RemoteParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = {
   readonly id: string
-  readonly meta: P
+  readonly meta: ReadonlyMeta<P>
   /** The app identity stamped at join, or `null`. */
   readonly identity: string | null
   /** Unix epoch milliseconds. */
@@ -299,16 +340,19 @@ type RemoteParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknow
   readonly isConnected: boolean
 
   /** Receive only this member's messages. Returns an unsubscribe function. */
-  subscribe(callback: (data: Pub, info: ChannelPublishInfo) => unknown): () => void
+  subscribe(callback: (data: Pub, info: ChannelPublishInfo) => unknown, options?: { signal?: AbortSignal }): () => void
   /** Receive only this member's binary frames, optionally filtered to one track. */
-  subscribeBinary(callback: MemberBinaryListener, options?: { track?: string | null }): () => void
+  subscribeBinary(callback: MemberBinaryListener, options?: { track?: string | null; signal?: AbortSignal }): () => void
 
   /** This member's metadata changed. */
-  onUpdate(callback: (meta: P, prev: P) => void): () => void
+  onUpdate(
+    callback: (meta: ReadonlyMeta<P>, prev: ReadonlyMeta<P>) => void,
+    options?: { signal?: AbortSignal },
+  ): () => void
   /** This member left the room. `cause` as on `Room`'s `onLeave`. */
-  onLeave(callback: (cause: LeaveCause) => void): () => void
+  onLeave(callback: (cause: LeaveCause) => void, options?: { signal?: AbortSignal }): () => void
   /** This member's page can't be reached. The room keeps it until it's back, or it leaves with `'disconnected'`. */
-  onDisconnect(callback: () => void): () => void
+  onDisconnect(callback: () => void, options?: { signal?: AbortSignal }): () => void
   /** This member's page is back. */
-  onReconnect(callback: () => void): () => void
+  onReconnect(callback: () => void, options?: { signal?: AbortSignal }): () => void
 }

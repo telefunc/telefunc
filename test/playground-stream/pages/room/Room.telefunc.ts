@@ -6,6 +6,7 @@ export {
   onGetOrCreateRoomTail,
   onCreateTypedRoom,
   onOpenGuardedRoom,
+  onGetUnguardedRoom,
   onOpenAuditedRoom,
   onGetAudit,
   onJoinAsServer,
@@ -27,6 +28,7 @@ export {
   onGetHiddenAfterPlayers,
   onCloseRoomWithMember,
   onBackgroundErrors,
+  onCloseWhileSubscribing,
   onRoomWhileAway,
   onRoomMetaWhileAway,
   onRoomLeaveWhileJoining,
@@ -60,7 +62,6 @@ export {
   onReplaceMetaInLoop,
   onStopReplacingMeta,
   onReadMetaAcrossWrite,
-  onReadMetaAcrossDrop,
   onReadSplitMetaAcrossMerge,
   onOpenRecordingGuardRoom,
   onGetGuardCalls,
@@ -85,42 +86,44 @@ export {
 import { Buffer } from 'node:buffer'
 import { Abort, onBug } from 'telefunc'
 import { Room, type LeaveCause, type LocalParticipant } from '@telefunc/room'
+import { anyoneCanJoin } from '../../anyone-can-join'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
 import {
   addBackendFault,
   endBackendSubscriptions,
   holdCellPages,
-  holdSubscriptions,
   holdRetainedReads,
   type BackendFault,
 } from '../../failing-backend'
 
 async function onCreateRoom(roomId: string) {
-  return await Room.create(roomId, { meta: { topic: 'e2e' } })
+  return anyoneCanJoin(await Room.create(roomId, { meta: { topic: 'e2e' } }))
 }
 
 async function onGetRoom(roomId: string) {
-  return await Room.get(roomId)
+  return anyoneCanJoin(await Room.get(roomId))
 }
 
 /** Tail starts at serialization, covering the gap before the client's first subscribe. */
 async function onGetRoomTail(roomId: string) {
-  return await Room.get(roomId, { tail: true })
+  return anyoneCanJoin(await Room.get(roomId, { tail: true }))
 }
 
 async function onGetOrCreateRoom(roomId: string) {
-  return await Room.getOrCreate(roomId, { meta: { topic: 'e2e' } })
+  return anyoneCanJoin(await Room.getOrCreate(roomId, { meta: { topic: 'e2e' } }))
 }
 
 async function onGetOrCreateRoomTail(roomId: string) {
-  return await Room.getOrCreate(roomId, { meta: { topic: 'e2e' }, tail: true })
+  return anyoneCanJoin(await Room.getOrCreate(roomId, { meta: { topic: 'e2e' }, tail: true }))
 }
 
 type ChatMsg = { kind: 'chat'; text: string }
 
 async function onCreateTypedRoom(roomId: string) {
-  return await Room.create<{ topic: string }, { name: string }, ChatMsg>(roomId, { meta: { topic: 'typed' } })
+  return anyoneCanJoin(
+    await Room.create<{ topic: string }, { name: string }, ChatMsg>(roomId, { meta: { topic: 'typed' } }),
+  )
 }
 
 async function onOpenGuardedRoom(roomId: string) {
@@ -139,6 +142,11 @@ async function onOpenGuardedRoom(roomId: string) {
   return room
 }
 
+/** The room as a telefunction returns it when it says nothing of who may join. */
+async function onGetUnguardedRoom(roomId: string) {
+  return await Room.get(roomId)
+}
+
 const auditLog = new Map<string, Array<Record<string, unknown>>>()
 
 function audit(roomId: string, entry: Record<string, unknown>) {
@@ -150,6 +158,7 @@ function audit(roomId: string, entry: Record<string, unknown>) {
 async function onOpenAuditedRoom(roomId: string) {
   const room = await Room.get(roomId)
   Room.guard(room, {
+    anyoneCanJoin: true,
     onAfterJoin: (member, info) => {
       audit(roomId, { kind: 'join', name: member.meta.name, joinedAt: info.joinedAt })
     },
@@ -173,13 +182,13 @@ async function onJoinAsServer(roomId: string, name: string) {
 
 /** Co-returned `{ room, me }` suppresses `me`'s echo while preserving other-member delivery. */
 async function onJoinRoomAsServerSelf(roomId: string, name: string) {
-  const room = await Room.get(roomId)
+  const room = anyoneCanJoin(await Room.get(roomId))
   const me = await room.join({ meta: { name }, selfDelivery: false })
   return { room, me }
 }
 
 async function onGetRoomWithMember(roomId: string, memberId: string) {
-  const room = await Room.get(roomId)
+  const room = anyoneCanJoin(await Room.get(roomId))
   const member = await room.getParticipant(memberId)
   return { room, member }
 }
@@ -253,7 +262,7 @@ const hiddenBots = new Map<string, LocalParticipant>()
 
 /** A hidden member, handed to this call's page only. */
 async function onJoinHiddenAndHand(roomId: string) {
-  const room = await Room.get(roomId)
+  const room = anyoneCanJoin(await Room.get(roomId))
   const bot = await room.join({ hidden: true, meta: { name: 'Bot' } })
   hiddenBots.set(roomId, bot)
   return { room, member: await room.getParticipant(bot.id) }
@@ -288,7 +297,7 @@ async function onGetHiddenAfterPlayers(roomId: string) {
 
 /** Returns a room closed under its member, as a page gets one that closed while the call ran. */
 async function onCloseRoomWithMember(roomId: string) {
-  const room = await Room.create(roomId)
+  const room = anyoneCanJoin(await Room.create(roomId))
   const member = await room.getParticipant((await room.join({ meta: { name: 'Gone' } })).id)
   const { promise: closed, resolve } = Promise.withResolvers<void>()
   room.onClose(resolve)
@@ -344,6 +353,27 @@ async function onBackgroundErrors(roomId: string) {
   const reported = bugs.sort()
   bugs = null
   return { reported, unhandled: unhandled.length, awaited }
+}
+
+/** Rooms closed while a view of each subscribes, and the bugs reported meanwhile. */
+async function onCloseWhileSubscribing() {
+  bugs = []
+  const prefix = `e2e-close-while-subscribing:${crypto.randomUUID()}:`
+  const closed = await Promise.all(
+    Array.from({ length: 10 }, async (_, i) => {
+      await Room.create(prefix + i)
+      const room = await Room.get(prefix + i)
+      const { promise, resolve } = Promise.withResolvers<void>()
+      room.onClose(resolve)
+      room.subscribe(() => {})
+      room.subscribeBinary(() => {}, { track: 'cam' })
+      await Room.close(prefix + i)
+      await promise
+    }),
+  )
+  const reported = bugs
+  bugs = null
+  return { closed: closed.length, reported }
 }
 
 const awayMembers = new Map<string, LocalParticipant[]>()
@@ -557,7 +587,7 @@ async function onCloseRoom(roomId: string) {
 const watchedBinary = new Map<string, number[][]>()
 
 async function onWatchRoomBinary(roomId: string) {
-  const room = await Room.get(roomId)
+  const room = anyoneCanJoin(await Room.get(roomId))
   const seen: number[][] = []
   watchedBinary.set(roomId, seen)
   watchedRooms.set(roomId, room)
@@ -626,6 +656,7 @@ async function onPublishRightAfterSubscribe(roomId: string) {
 async function onOpenSlowGuardRoom(roomId: string) {
   const room = await Room.get(roomId)
   Room.guard(room, {
+    anyoneCanJoin: true,
     onBeforePublish: async (_from, data) => {
       const n = data instanceof Uint8Array ? data[0]! : (data as number)
       await new Promise((resolve) => setTimeout(resolve, 50 - n))
@@ -711,23 +742,6 @@ async function onReadMetaAcrossWrite(roomId: string, write: 'replace' | 'replace
   held.release()
   const [read] = await reading
   return metaName(read!.meta, { before: bigMeta('a'), after })
-}
-
-/** A member's `a` meta read by the room's roster once a replace with no keys deleted the first of the two pages it
- *  drops and before it deleted the second: 'before', 'after', or the keys the read got. */
-async function onReadMetaAcrossDrop(roomId: string) {
-  const member = await Room.join(roomId, { meta: bigMeta('a') })
-  const reading = holdCellPages(roomId, 'pm:', 0)
-  const participants = Room.getParticipants(roomId)
-  await reading.reached
-  const dropping = holdCellPages(roomId, `pm:${member.id}:0:`, 2)
-  const replacing = member.setMeta({})
-  await dropping.reached
-  reading.release()
-  const [read] = await participants
-  dropping.release()
-  await replacing
-  return metaName(read!.meta, { before: bigMeta('a'), after: {} })
 }
 
 /** Member A's meta, whose last key it wrote after member B joined with the `b` meta, read by the room's roster while a
@@ -827,7 +841,7 @@ async function onCreateRoomWith(roomId: string, options: { emptyTimeout?: number
 
 /** The page this returns the room to holds it open. */
 async function onCreateRoomHeld(roomId: string) {
-  return await Room.create(roomId, { emptyTimeout: 1000 })
+  return anyoneCanJoin(await Room.create(roomId, { emptyTimeout: 1000 }))
 }
 
 async function onJoinAndLeaveAsServer(roomId: string) {
@@ -918,15 +932,15 @@ async function onStopChurn(roomId: string) {
   return await churning.get(roomId)!()
 }
 
-/** While the store holds a view's new subscription short of ready, a member publishes three 1,500-byte messages at once,
- *  past the 4,096-byte bufferLimit of the lane that runs it. */
+/** A view subscribes and a member publishes three 1,500-byte messages in the same turn, past the 4,096-byte
+ *  bufferLimit of the lane that runs it: Redis's SUBSCRIBE round trip keeps the view's new subscription short of ready,
+ *  so the three commits wait until it is. */
 async function onPublishWhileEstablishing(roomId: string) {
   const me = await Room.join(roomId, { meta: { name: 'Me' } })
   const room = await Room.get(roomId)
   const seen: string[] = []
   watched.set(roomId, seen)
   watchedRooms.set(roomId, room)
-  const release = holdSubscriptions(roomId)
   room.subscribe((data, _info, from) => {
     if (from.id === me.id) seen.push((data as string)[0]!)
   })
@@ -936,8 +950,5 @@ async function onPublishWhileEstablishing(roomId: string) {
       (err: Error) => err.name,
     ),
   )
-  // The one past bufferLimit settles while the others are held.
-  await publishes[2]
-  release()
   return await Promise.all(publishes)
 }

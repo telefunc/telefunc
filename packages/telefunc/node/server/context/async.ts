@@ -1,6 +1,6 @@
-export { provideTelefuncContext_async }
+export { installAsyncContext }
 
-import { AsyncLocalStorage } from 'node:async_hooks'
+import type { AsyncLocalStorage } from 'node:async_hooks'
 import { assert, assertWarning, assertUsage } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { isObject } from '../../../utils/isObject.js'
@@ -14,15 +14,19 @@ const globalObject = getGlobalObject<{ asyncStore?: AsyncLocalStorage<Context>; 
   {},
 )
 
-installAsyncMode({
-  provideTelefuncContext_async,
-  restoreContext_async,
-  getContextStore: () => globalObject.asyncStore?.getStore() ?? null,
-})
+/** Takes `AsyncLocalStorage` from its caller, so that a runtime that may lack `node:async_hooks` loads it itself. */
+function installAsyncContext(AsyncLocalStorageClass: typeof AsyncLocalStorage): void {
+  globalObject.asyncStore = globalObject.asyncStore ?? new AsyncLocalStorageClass()
+  installAsyncMode({
+    provideTelefuncContext_async,
+    restoreContext_async,
+    getContextStore: () => globalObject.asyncStore?.getStore() ?? null,
+  })
+}
 
 function provideTelefuncContext_async(context: Telefunc.Context): void {
   assertUsage(isObject(context), '[provideTelefuncContext(context)] Argument `context` should be an object')
-  globalObject.asyncStore = globalObject.asyncStore ?? new AsyncLocalStorage()
+  assert(globalObject.asyncStore)
   assertUsage(
     typeof globalObject.asyncStore.enterWith === 'function',
     '[provideTelefuncContext()] This runtime does not support AsyncLocalStorage.enterWith(). Pass context directly to serve() instead.',
@@ -39,7 +43,7 @@ function restoreContext_async<T>(rawContext: Context, fn: () => T): T {
     'When using `provideTelefuncContext()` (i.e. Async Hooks), then providing the `context` object to the server middleware `serve()` has no effect.',
     { onlyOnce: true },
   )
-  globalObject.asyncStore = globalObject.asyncStore ?? new AsyncLocalStorage()
+  assert(globalObject.asyncStore)
   // A nested scope, such as a request in Cloudflare's session scope, overrides only the keys it sets.
   return globalObject.asyncStore.run({ ...globalObject.asyncStore.getStore(), ...rawContext }, fn)
 }

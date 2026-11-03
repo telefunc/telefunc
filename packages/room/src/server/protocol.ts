@@ -2,6 +2,7 @@
 export type {
   RoomConfigRecord,
   HoldConfig,
+  RoomIncarnation,
   RoomMemberRecord,
   DemandEntry,
   RoomDemandPage,
@@ -9,7 +10,7 @@ export type {
   RoomDmAckEnvelope,
 }
 
-import type { RoomResult, SenderStamp } from '../protocol.js'
+import type { RoomResult, SenderStamp } from '../shared/protocol.js'
 import type { RoomMeta } from '../types.js'
 
 /** The head's config. `meta` is the one the room was created with, until its first meta write (see `meta.ts`). `inc`
@@ -17,17 +18,20 @@ import type { RoomMeta } from '../types.js'
 type RoomConfigRecord = {
   meta: RoomMeta
   inc: string
-  /** Its hold timeouts (see `lifecycle.ts`); a room that never closes on its own has none. */
+  /** Its hold timeouts (see `hold.ts`); a room that never closes on its own has none. */
   hold: HoldConfig | null
 }
 
 type HoldConfig = { emptyTimeout: number; departureTimeout: number }
 
-/** A member cell. It lives while the session that joined it does (see `session.ts`). Its meta is a cell per key in
+/** A room incarnation as the server's writes and lanes carry it: its id, its `inc` and its hold timeouts. */
+type RoomIncarnation = { id: string; inc: string; hold: HoldConfig | null }
+
+/** A member cell. It lives while the lease that joined it does (see `lease.ts`). Its meta is a cell per key in
  *  generation `metaGen` (see `memberMetaGenPrefix`). */
 type RoomMemberRecord = {
   joinedAt: number
-  /** The session hosting the member. */
+  /** The lease hosting the member; stored as `session`. */
   session: string
   /** Issued by the member's single owner, counting its meta and connection writes; orders `p-meta` events. */
   metaSeq: number

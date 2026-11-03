@@ -1,5 +1,7 @@
-export { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl, getRequestKind }
+export { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl, getRequestKind, namesWireVersion }
 export type { RequestKind }
+
+import { WIRE_VERSION } from '../constants.js'
 
 const REQUEST_KIND_PARAM = '_telefunc'
 const REQUEST_KIND_HEADER = 'x-telefunc-request'
@@ -36,4 +38,9 @@ function getRequestKind(
   const urlKind = url.searchParams.get(REQUEST_KIND_PARAM)
   if (urlKind !== null && urlKind !== headerKind) return REQUEST_KIND.INVALID
   return headerKind
+}
+
+/** Whether a channel request names this server's `WIRE_VERSION`, as the page's `getWireUrl` does. */
+function namesWireVersion(request: Pick<Request, 'url'>): boolean {
+  return new URL(request.url, 'http://localhost').searchParams.get('wire') === String(WIRE_VERSION)
 }

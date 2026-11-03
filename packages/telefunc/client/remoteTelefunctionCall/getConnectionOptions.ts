@@ -1,6 +1,6 @@
 export { getConnectionOptions }
 
-import type { ConnectionOptions } from '../../wire-protocol/channel/client/channel.js'
+import type { ConnectionOptions } from '../../wire-protocol/channel/client/ClientChannel.js'
 import type { ChannelTransports } from '../../wire-protocol/constants.js'
 
 /** The connection a call's channels ride, as its context configures it. */

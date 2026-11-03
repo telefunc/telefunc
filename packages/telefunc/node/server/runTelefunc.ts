@@ -40,7 +40,7 @@ type StreamReadableWeb = ReadableStream
 /** The HTTP Response of a telefunction remote call HTTP Request */
 type HttpResponse = {
   /** HTTP Response Status Code */
-  statusCode: 200 | 400 | 403 | 422 | 500
+  statusCode: 200 | 400 | 403 | 409 | 422 | 500
   /** HTTP Response Body (only for non-streaming responses, throws for streaming — use `pipe()` or `getReadableWebStream()` instead) */
   body: string
   /** HTTP Response Headers */

@@ -1,53 +1,85 @@
+// Every add-on: Room (`@telefunc/room`), `@telefunc/rxjs` and `@telefunc/redis`.
 export type { TELEFUNC_SHIELDS } from '../shared/transformer/generateShield/shieldKey.js'
+export type { OrderingInfo } from '../../wire-protocol/wire/orderingFrame.js'
+export { untether } from '../../utils/wrapProxy.js'
+export { invokeChannelListener } from '../../wire-protocol/channel/channel.js'
+export { handleCallbackBug } from './runTelefunc/validateTelefunctionError.js'
+export { hostLocal } from '../../wire-protocol/channel/server/ChannelMux.js'
+export { getChannelLimits } from './serverConfig.js'
+export { MAX_CHANNELS_PER_CONNECTION } from '../../wire-protocol/constants.js'
+
+// Utilities the add-ons share with core.
+export { createDeferred, type Deferred } from '../../utils/createDeferred.js'
+export { getOrCreate } from '../../utils/getOrCreate.js'
+export { isObject } from '../../utils/isObject.js'
+export { Listeners } from '../../utils/Listeners.js'
+export { markHandled } from '../../utils/markHandled.js'
+
+// An add-on that drives a page's channel ends: Room's stubs and its client.
+export type { ServerBroadcastEnd, ClientBroadcast }
+export type { BroadcastEndOwner } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
+export type { BroadcastKind } from '../../wire-protocol/wire/payloads.js'
+export type { ChannelPublishAck, ChannelPublishInfo } from '../../wire-protocol/channel/channel.js'
+export { encodePublish } from '../../wire-protocol/wire/publishInfo.js'
+export { isChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
+export {
+  ProtocolViolationError,
+  assertProtocol,
+  isProtocolViolationError,
+  parsePeerText,
+} from '../../wire-protocol/wire/protocolViolation.js'
+
+// A backend: one `installBackend` installs (`@telefunc/redis`, a test's), and the drivers of a plane (Room's).
 export type {
+  BackendListener,
+  BackendPayload,
+  BackendReceiver,
   BroadcastDriver,
   BroadcastPayload,
   BroadcastRoute,
+  PlaneKey,
+  PlaneServer,
   PublishResult,
-} from '../../wire-protocol/backend/broadcast/contract.js'
-export { installBackend, backendPlane } from '../../wire-protocol/backend/install.js'
-export type { BackendDriver } from '../../wire-protocol/backend/install.js'
-export { DriverAttempt } from '../../wire-protocol/backend/attempt.js'
-export { MemoryBackend } from '../../wire-protocol/backend/memory/backend.js'
-export type { PlaneSubscriptions, SendHold } from '../../wire-protocol/backend/SubscriptionManager.js'
-export { decodeOrderingFrame } from '../../wire-protocol/wire/orderingFrame.js'
-export type { OrderingInfo } from '../../wire-protocol/wire/orderingFrame.js'
-export type {
-  BackendPayload,
-  BackendReceiver,
-  BackendSubscription,
-  SubscriptionAttempt,
-  SubscriptionBinding,
   SubscriptionDriver,
-} from '../../wire-protocol/backend/subscription.js'
-export type { BroadcastEndOwner } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
-export type { PageEnd, PageClient }
-export { encodePublish } from '../../wire-protocol/wire/connectionFrame.js'
-export type { BroadcastKind } from '../../wire-protocol/wire/connectionFrame.js'
-export { hostLocal } from '../../wire-protocol/channel/server/mux.js'
-export { reportBug } from '../../wire-protocol/channel/server/channel.js'
-export { getChannelLimits } from './serverConfig.js'
-export { untether } from '../../utils/wrapProxy.js'
-export { MAX_CHANNELS_PER_CONNECTION } from '../../wire-protocol/constants.js'
-export { registerCloudflareExtension } from '../../wire-protocol/adapter/cloudflare/extensions.js'
+} from '../../wire-protocol/backend/driver.js'
+export { DriverAttempt, planeKey, servePlane } from '../../wire-protocol/backend/driver.js'
+export { installBackend, backendPlane, type PlaneDefinition } from '../../wire-protocol/backend/install.js'
+export type { BackendSubscription, SourceRules } from '../../wire-protocol/backend/SharedSubscriptions.js'
+export { SharedSubscriptions } from '../../wire-protocol/backend/SharedSubscriptions.js'
+export { assertDriverOrdering } from '../../wire-protocol/backend/driverOrdering.js'
+export { decodeOrderingFrame } from '../../wire-protocol/wire/orderingFrame.js'
+export { MemoryBackend } from '../../wire-protocol/backend/memory/MemoryBackend.js'
+export { MemoryPubSub, type Subscribers } from '../../wire-protocol/backend/memory/MemoryPubSub.js'
+export { ChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
+
+// A Cloudflare extension: Room's session and authority Durable Objects.
+export {
+  registerCloudflareExtension,
+  serveCloudflarePlane,
+  currentCloudflareMember,
+  currentCloudflareHostKey,
+  CLOUDFLARE_BUCKETS,
+} from '../../wire-protocol/adapter/cloudflare/extensions.js'
 export type {
+  CloudflareExtensionKit,
+  CloudflareMember,
+  CloudflarePlaneKit,
+  CloudflareRegions,
   TelefuncExtensionNamespace,
   TelefuncExtensionStub,
 } from '../../wire-protocol/adapter/cloudflare/extensions.js'
-export type { ChannelPublishAck, ChannelPublishInfo } from '../../wire-protocol/channel/channel.js'
-export { MemoryPubSub, type Subscriptions } from '../../wire-protocol/backend/memory/deliveries.js'
-export { isChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
+export { OrderedStubs } from '../../wire-protocol/adapter/cloudflare/OrderedStubs.js'
 
-import type { ServerBroadcastEnd } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
-import type { ClientBroadcast } from '../../wire-protocol/channel/client/channel.js'
+import type { ServerBroadcastEnd as ServerBroadcastEndClass } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
+import type { ClientBroadcast as ClientBroadcastClass } from '../../wire-protocol/channel/client/ClientBroadcast.js'
 
 /** The members of a page's broadcast end that an add-on drives. */
-type PageEnd = Pick<
-  ServerBroadcastEnd,
+type ServerBroadcastEnd = Pick<
+  ServerBroadcastEndClass,
   | 'id'
-  | '_setOwner'
-  | '_terminateWire'
-  | '_trackAck'
+  | 'setOwner'
+  | 'terminateWire'
+  | 'trackAck'
   | 'isAttached'
   | 'isClosed'
   | 'isConnected'
@@ -60,9 +92,10 @@ type PageEnd = Pick<
   | 'close'
 >
 
-/** The members of a page's `ClientBroadcast` that an add-on drives. */
-type PageClient = Pick<
-  ClientBroadcast,
+/** The members of a page's `ClientBroadcast` that an add-on drives. A page holds the class as its `Broadcast`, so the
+ *  internal ones are `_`-prefixed, as `ClientChannel`'s are. */
+type ClientBroadcast = Pick<
+  ClientBroadcastClass,
   | '_publishUnreported'
   | '_publishBinaryUnreported'
   | '_setSubscribed'

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_BROADCAST_BUCKETS,
   assertLocationFallbackIsScaled,
-  getBucketCoordinatorShardIndices,
+  getBucketCoordinatorScale,
   getDeterministicKeyBucketIndex,
   resolveCloudflareLocationHint,
   resolveSessionRoutingTarget,
@@ -52,7 +52,7 @@ function createBasicBinding(
           return overrides?.onPublish?.(id, request) ?? Promise.resolve({ seq: 1, timestamp: Date.now() })
         },
         telefuncBroadcastForward(request: any) {
-          return overrides?.onForward?.(id, request) ?? Promise.resolve()
+          return overrides?.onForward?.(id, request) ?? Promise.resolve(0)
         },
         telefuncBroadcastDeliver(request: any) {
           return overrides?.onDeliver?.(id, request) ?? Promise.resolve()
@@ -67,7 +67,7 @@ function createBroadcast(binding = createBasicBinding()): CloudflareBroadcast {
     baseInstanceName: 'telefunc',
     scale: 1,
     locationFallback: 'weur',
-    namespace: () => binding,
+    getNamespace: () => binding,
   })
 }
 
@@ -132,45 +132,49 @@ describe('cloudflare broadcast routing', () => {
   })
 
   it('maps the same room to the same bucket-coordinator offset for a bucket', () => {
-    const shardIndices = getBucketCoordinatorShardIndices(2, 'weur')
+    const shardCount = getBucketCoordinatorScale(2, 'weur')
 
-    expect(getDeterministicKeyBucketIndex('room/alpha', shardIndices.length)).toBe(
-      getDeterministicKeyBucketIndex('room/alpha', shardIndices.length),
+    expect(getDeterministicKeyBucketIndex('room/alpha', shardCount)).toBe(
+      getDeterministicKeyBucketIndex('room/alpha', shardCount),
     )
   })
 
   it('assigns room keys only within the bucket-coordinator subset', () => {
-    const weurShards = getBucketCoordinatorShardIndices(2, 'weur')
-    const apacShards = getBucketCoordinatorShardIndices(2, 'apac')
-    const ocShards = getBucketCoordinatorShardIndices(2, 'oc')
-
-    expect(weurShards).toContain(weurShards[getDeterministicKeyBucketIndex('room/alpha', weurShards.length)]!)
-    expect(apacShards).toContain(apacShards[getDeterministicKeyBucketIndex('room/alpha', apacShards.length)]!)
-    expect(ocShards).toContain(ocShards[getDeterministicKeyBucketIndex('room/alpha', ocShards.length)]!)
+    for (const bucket of ['weur', 'apac', 'oc'] as const) {
+      expect(getDeterministicKeyBucketIndex('room/alpha', getBucketCoordinatorScale(2, bucket))).toBe(0)
+    }
   })
 
   it('partitions bucket coordinators at ceil(sessionScale / 2) per bucket', () => {
-    expect(getBucketCoordinatorShardIndices(1, 'wnam')).toEqual([0])
-    expect(getBucketCoordinatorShardIndices(2, 'wnam')).toEqual([0])
-    expect(getBucketCoordinatorShardIndices(3, 'wnam')).toEqual([0, 1])
-    expect(getBucketCoordinatorShardIndices(4, 'wnam')).toEqual([0, 1])
-    expect(getBucketCoordinatorShardIndices(4, 'enam')).toEqual([0, 1])
+    expect(getBucketCoordinatorScale(1, 'wnam')).toBe(1)
+    expect(getBucketCoordinatorScale(2, 'wnam')).toBe(1)
+    expect(getBucketCoordinatorScale(3, 'wnam')).toBe(2)
+    expect(getBucketCoordinatorScale(4, 'wnam')).toBe(2)
+    expect(getBucketCoordinatorScale(4, 'enam')).toBe(2)
   })
 
   it('uses only canonical bucket scale entries', () => {
-    expect(getBucketCoordinatorShardIndices({ weur: 2, apac: 1 }, 'apac')).toEqual([0])
+    expect(getBucketCoordinatorScale({ weur: 2, apac: 1 }, 'apac')).toBe(1)
   })
 
   it('resolves session targets from request location and scale', () => {
     const exactRequest = createCloudflareRequest({ colo: 'LHR' })
     const unknownRequest = createCloudflareRequest({ continent: 'EU' })
-    const exactTarget = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, exactRequest, 'weur', 'token')
+    const exactTarget = resolveSessionRoutingTarget(
+      'telefunc',
+      { weur: 2, apac: 1 },
+      exactRequest,
+      'weur',
+      'token',
+      null,
+    )
     const fallbackTarget = resolveSessionRoutingTarget(
       'telefunc',
       { weur: 1, apac: 1 },
       unknownRequest,
       'weur',
       'token',
+      null,
     )
 
     expect(exactTarget).toMatchObject({
@@ -180,20 +184,18 @@ describe('cloudflare broadcast routing', () => {
     expect(fallbackTarget).toMatchObject({
       sessionInstanceName: 'telefunc-shard-weur-0',
       locationBucket: 'weur',
-      shardOrdinal: 0,
     })
   })
 
   it('routes a recognized region missing from the scale map to locationFallback instead of throwing', () => {
     // `ABQ` resolves to `wnam`, which is absent from this per-region scale map.
     const wnamRequest = createCloudflareRequest({ colo: 'ABQ' })
-    const target = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, wnamRequest, 'weur', 'token')
+    const target = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, wnamRequest, 'weur', 'token', null)
 
     expect(target).toMatchObject({
-      sessionInstanceName: expect.stringMatching(/^telefunc-shard-weur-/),
+      sessionInstanceName: expect.stringMatching(/^telefunc-shard-weur-[01]$/),
       locationBucket: 'weur',
     })
-    expect([0, 1]).toContain(target.shardOrdinal)
   })
 
   it('rejects a per-region scale map whose locationFallback region has no shards', () => {
@@ -213,7 +215,7 @@ describe('cloudflare broadcast routing', () => {
       createBasicBinding({
         onForward(id) {
           coordinators.push(id.name)
-          return Promise.resolve()
+          return Promise.resolve(0)
         },
       }),
     )
@@ -244,8 +246,7 @@ describe('cloudflare broadcast routing', () => {
     )
 
     await broadcast.forwardToBucket(new OrderedStubs(), {
-      key: 'room:test',
-      kind: 'text',
+      routes: [{ key: 'room:test', kind: 'text' }],
       payload: '{"text":"hello"}',
       info: { seq: 1, timestamp: Date.now() },
       members: ['telefunc-shard-weur-0', 'telefunc-shard-weur-1'],
@@ -258,13 +259,13 @@ describe('cloudflare broadcast routing', () => {
     const authorityState = createAuthorityState()
     const calls: BroadcastCalls = new OrderedStubs()
     const coordinatorPublishes: string[] = []
-    const firstRemotePublish = Promise.withResolvers<void>()
+    const firstRemotePublish = Promise.withResolvers<number>()
     const broadcast = createBroadcast(
       createBasicBinding({
         onForward(id, { payload: text }) {
           coordinatorPublishes.push(`${id.name}:${text}`)
           if (id.name.includes(':broadcast:apac:') && text === '{"text":"first"}') return firstRemotePublish.promise
-          return Promise.resolve()
+          return Promise.resolve(0)
         },
       }),
     )
@@ -289,7 +290,7 @@ describe('cloudflare broadcast routing', () => {
     expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"second"}')
     expect(coordinatorPublishes).toContain('telefunc:broadcast:apac:0:{"text":"second"}')
 
-    firstRemotePublish.resolve()
+    firstRemotePublish.resolve(0)
     await Promise.all([firstPublish, secondPublish])
 
     expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"second"}')

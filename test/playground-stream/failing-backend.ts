@@ -4,128 +4,172 @@ export {
   pendingBackendFaults,
   endBackendSubscriptions,
   holdCellPages,
-  holdSubscriptions,
   holdRetainedReads,
 }
 export type { BackendFault }
 
 import {
-  installBackend,
   DriverAttempt,
+  installBackend,
   MemoryBackend,
   type BackendPayload,
   type BackendReceiver,
   type BroadcastRoute,
-  type SubscriptionAttempt,
+  servePlane,
+  type OrderingInfo,
   type SubscriptionDriver,
 } from 'telefunc/__internal'
 import {
-  getRoomBackend,
+  getRoomPlane,
   MemoryRoomDriver,
+  ROOM_PLANE,
   type CellsRead,
-  type RoomBackend,
+  type CommitResult,
+  type RoomDriver,
+  type RoomPlane,
   type RoomSubscriptionSource,
 } from '@telefunc/room/backend'
 import { createDeferred } from './createDeferred'
 
-/** `op` is a driver method (its next matching call rejects), 'bind' (the next matching subscribe throws), 'subscribe'
- *  (the next matching subscription refuses to open) or 'deliver' (the next message a matching subscription gets is
- *  dropped). `roomId`, or `key` (a Broadcast key, the start of a Room cell key the call reads or writes, or a commit's
- *  lane kind or required cell), narrows what matches. */
-type BackendFault = { op: string; roomId?: string; key?: string; times?: number }
+/** `op` is a driver method (its next matching call rejects; with `after`, once it ran, as a store whose reply is lost),
+ *  'subscribe' (the next matching subscribe throws, a refusal), 'deliver' (the next message a matching subscription
+ *  gets is dropped), 'lost' (a matching subscription is lost right before its next message, as a store that keeps
+ *  delivering while it restores its link), 'early' (the next matching subscription is ready only after its first
+ *  message, as a store whose acknowledgment comes after what it delivered; each further time, one message later),
+ *  'handoff' (the next matching Room commit's handoff rejects once it committed, as a fan-out that failed) or
+ *  'published' (the next matching call answers 0, as a store that doesn't fix a publish's recipients, like Redis).
+ *  `roomId`, or `key` (a Broadcast key, the start of a Room cell key the call reads or writes, a commit's or a
+ *  subscription's lane kind or a required cell, or an operation's name), narrows what matches. */
+type BackendFault = { op: string; roomId?: string; key?: string; times?: number; after?: boolean }
 
 type Source = BroadcastRoute | RoomSubscriptionSource
 type Call = { roomId?: string; keys: string[] }
 type CellPagesHold = { roomId: string; key: string; pages: number; wait: () => Promise<void> }
 type RetainedReadsHold = { roomId: string; waiting: number; released: Promise<void> }
 
-const { faults, attempts, holds, holding, subscriptionHolds, retainedHolds, holdingRetained } = ((
+const { faults, subscriptions, holds, holding, retainedHolds, holdingRetained } = ((
   globalThis as Record<symbol, unknown>
 )[Symbol.for('playground-stream:failingBackend')] ??= {
   faults: [],
-  attempts: new Set(),
+  subscriptions: new Set(),
   holds: [],
   holding: new WeakSet(),
-  subscriptionHolds: new Map(),
   retainedHolds: [],
   holdingRetained: new WeakSet(),
 }) as {
   faults: (BackendFault & { times: number })[]
-  attempts: Set<FailingAttempt>
+  subscriptions: Set<FailingAttempt>
   holds: CellPagesHold[]
-  holding: WeakSet<RoomBackend>
-  subscriptionHolds: Map<string, Promise<void>>
+  holding: WeakSet<RoomDriver>
   retainedHolds: RetainedReadsHold[]
-  holdingRetained: WeakSet<RoomBackend>
+  holdingRetained: WeakSet<RoomPlane>
 }
 
-class FailingAttempt extends DriverAttempt {
-  constructor(
-    readonly source: Source,
-    private readonly _inner: SubscriptionAttempt,
-    held: Promise<void> | undefined,
-  ) {
+type FailingAttemptOptions = {
+  source: Source
+  /** Core's end, which this one passes the memory attempt's deliveries on to. */
+  outer: BackendReceiver
+}
+
+/** An attempt of the in-memory backend as core sees it: what the memory attempt says, passed on unless a test drops
+ *  it. */
+class FailingAttempt extends DriverAttempt implements BackendReceiver {
+  readonly source: Source
+  private readonly outer: BackendReceiver
+  private inner: DriverAttempt | null = null
+  private unobserve: (() => void) | null = null
+  /** It is ready only after its next message (the 'early' fault). */
+  private readyAfterMessage = false
+
+  constructor({ source, outer }: FailingAttemptOptions) {
     super()
-    const follow = () => {
-      this.transition(_inner.state())
-      _inner.onStateChange((state, reason) => this.transition(state, reason))
-    }
-    if (held === undefined) follow()
-    else void held.then(follow)
+    this.source = source
+    this.outer = outer
+  }
+
+  /** Follows the memory attempt, which this one is the receiver of. */
+  follow(inner: DriverAttempt): void {
+    this.inner = inner
+    this.unobserve = inner.onStateChange((state, reason) => this.innerChanged(state, reason))
+    const state = inner.state()
+    if (state !== 'establishing') this.innerChanged(state, undefined)
+  }
+
+  deliver(payload: BackendPayload, ordering: OrderingInfo): void {
+    const call = callOf(this.source)
+    if (takeFault('deliver', call)) return
+    if (takeFault('lost', call)) this.transition('lost')
+    this.outer.deliver(payload, ordering)
+    if (!this.readyAfterMessage) return
+    this.readyAfterMessage = false
+    this.ready()
   }
 
   async unsubscribe(): Promise<void> {
-    attempts.delete(this)
-    await this._inner.unsubscribe()
+    this.stop()
+    this.transition('closed')
+    await this.inner?.unsubscribe()
   }
 
   end(): void {
-    attempts.delete(this)
+    this.stop()
     this.transition('closed', new Error('failing-backend: subscription ended'))
-    void this._inner.unsubscribe()
+    void this.inner?.unsubscribe()
+  }
+
+  private innerChanged(state: 'ready' | 'lost' | 'closed', reason: Error | undefined): void {
+    if (state === 'ready') return this.ready()
+    if (state === 'lost') return this.transition('lost')
+    this.stop()
+    this.transition('closed', reason)
+  }
+
+  private ready(): void {
+    if (takeFault('early', callOf(this.source))) this.readyAfterMessage = true
+    else this.transition('ready')
+  }
+
+  private stop(): void {
+    subscriptions.delete(this)
+    this.unobserve?.()
+    this.unobserve = null
   }
 }
 
 /** Installs the in-memory backend, failing what a test asks it to fail. */
 function installFailingBackend() {
   const room = failing(new MemoryRoomDriver())
-  const backend = failing(
-    Object.assign(new MemoryBackend(), { planes: { [Symbol.for('telefunc.room.plane')]: () => room } }),
-  )
+  const backend = failing(Object.assign(new MemoryBackend(), { planes: [servePlane(ROOM_PLANE, () => room)] }))
   installBackend(() => backend, ['failing-backend'])
 }
 
 /** `memory`, failing what a test asks it to fail. */
-function failing<Driver extends { subscriptions: SubscriptionDriver<Source> }>(memory: Driver): Driver {
-  const subscriptions = {
-    bind(source: Source) {
-      const call = callOf(source)
-      if (takeFault('bind', call)) throw new Error('failing-backend: bind refused')
-      const binding = memory.subscriptions.bind(source)
-      return {
-        partition: binding.partition,
-        open(receiver: BackendReceiver<BackendPayload>, localReceiverCount: () => number) {
-          if (takeFault('subscribe', call)) throw new Error('failing-backend: subscribe refused')
-          const inner = binding.open((payload, info) => {
-            if (!takeFault('deliver', call)) receiver(payload, info)
-          }, localReceiverCount)
-          const held = 'roomId' in source ? subscriptionHolds.get(source.roomId) : undefined
-          const attempt = new FailingAttempt(source, inner, held)
-          attempts.add(attempt)
-          return attempt
-        },
-      }
-    },
-    partitionHere: (source: Source) => memory.subscriptions.partitionHere(source),
+function failing<Driver extends SubscriptionDriver<Source>>(memory: Driver): Driver {
+  const subscribe = (source: Source, outer: BackendReceiver): DriverAttempt => {
+    if (takeFault('subscribe', callOf(source))) throw new Error('failing-backend: subscribe refused')
+    const attempt = new FailingAttempt({ source, outer })
+    subscriptions.add(attempt)
+    attempt.follow(memory.subscribe(source, attempt))
+    return attempt
   }
   return new Proxy(memory, {
     get(target, op) {
-      if (op === 'subscriptions') return subscriptions
+      if (op === 'subscribe') return subscribe
       const value = Reflect.get(target, op)
       if (typeof value !== 'function' || typeof op !== 'string') return value
+      if (op === 'published')
+        return (key: string) => (takeFault(op, { keys: [key] }) ? 0 : Reflect.apply(value, target, [key]))
       return (...args: unknown[]) => {
-        if (!takeFault(op, callOfArgs(op, args))) return Reflect.apply(value, target, args)
+        const call = callOfArgs(op, args)
+        if (op === 'commitLane' && takeFault('handoff', call)) {
+          return handoffLost(Reflect.apply(value, target, args) as Promise<CommitResult>)
+        }
+        const fault = takeFault(op, call)
+        if (!fault) return Reflect.apply(value, target, args)
         const error = new Error(`failing-backend: ${op} failed`)
+        if (fault.after) {
+          return (Reflect.apply(value, target, args) as Promise<unknown>).then(() => Promise.reject(error))
+        }
         return value.constructor.name === 'AsyncGeneratorFunction'
           ? (async function* () {
               throw error
@@ -136,14 +180,13 @@ function failing<Driver extends { subscriptions: SubscriptionDriver<Source> }>(m
   })
 }
 
-/** Holds the subscriptions opened on `roomId` until `release()` short of ready, as a store slow to confirm them would. */
-function holdSubscriptions(roomId: string): () => void {
-  const released = createDeferred()
-  subscriptionHolds.set(roomId, released.promise)
-  return () => {
-    subscriptionHolds.delete(roomId)
-    released.resolve()
-  }
+/** `commit`, its handoff rejected. */
+async function handoffLost(commit: Promise<CommitResult>): Promise<CommitResult> {
+  const result = await commit
+  if (result.kind !== 'accepted' || result.delivery === undefined) return result
+  const delivery = Promise.reject(new Error('failing-backend: handoff lost'))
+  delivery.catch(() => {})
+  return { ...result, delivery }
 }
 
 function addBackendFault(fault: BackendFault) {
@@ -157,8 +200,8 @@ function pendingBackendFaults(): number {
 
 /** Ends every subscription open on `roomId` or the Broadcast `key`, as a store that drops them would; returns how many. */
 function endBackendSubscriptions(match: { roomId?: string; key?: string }): number {
-  const ended = [...attempts].filter((attempt) => matches(match, callOf(attempt.source)))
-  for (const attempt of ended) attempt.end()
+  const ended = [...subscriptions].filter((subscription) => matches(match, callOf(subscription.source)))
+  for (const subscription of ended) subscription.end()
   return ended.length
 }
 
@@ -172,11 +215,11 @@ function holdCellPages(roomId: string, key: string, pages: number): { reached: P
     return released.promise
   }
   holds.push({ roomId, key, pages, wait })
-  const backend = getRoomBackend()
-  if (!holding.has(backend)) {
-    holding.add(backend)
-    const read = backend.readCellPages
-    backend.readCellPages = (roomId, inc, prefix) => heldCellPages(read(roomId, inc, prefix), takeHold(roomId, prefix))
+  const { driver } = getRoomPlane()
+  if (!holding.has(driver)) {
+    holding.add(driver)
+    const read = driver.readCellPages.bind(driver)
+    driver.readCellPages = (roomId, inc, prefix) => heldCellPages(read(roomId, inc, prefix), takeHold(roomId, prefix))
   }
   return { reached: reached.promise, release: released.resolve }
 }
@@ -187,11 +230,11 @@ function holdRetainedReads(roomId: string): { held: () => number; release: () =>
   const released = createDeferred()
   const hold: RetainedReadsHold = { roomId, waiting: 0, released: released.promise }
   retainedHolds.push(hold)
-  const backend = getRoomBackend()
-  if (!holdingRetained.has(backend)) {
-    holdingRetained.add(backend)
-    const read = backend.readRetained
-    backend.readRetained = async (roomId, inc, lane) => {
+  const plane = getRoomPlane()
+  if (!holdingRetained.has(plane)) {
+    holdingRetained.add(plane)
+    const read = plane.readRetained.bind(plane)
+    plane.readRetained = async (roomId, inc, lane) => {
       const hold = lane.kind === 'binary' ? retainedHolds.find((hold) => hold.roomId === roomId) : undefined
       if (hold !== undefined) {
         hold.waiting++
@@ -223,11 +266,12 @@ async function* heldCellPages(pages: AsyncIterable<CellsRead>, hold: CellPagesHo
   }
 }
 
-function takeFault(op: string, call: Call): boolean {
+function takeFault(op: string, call: Call): BackendFault | null {
   const index = faults.findIndex((fault) => fault.op === op && matches(fault, call))
-  if (index === -1) return false
-  if (--faults[index]!.times === 0) faults.splice(index, 1)
-  return true
+  if (index === -1) return null
+  const fault = faults[index]!
+  if (--fault.times === 0) faults.splice(index, 1)
+  return fault
 }
 
 function matches(fault: { roomId?: string; key?: string }, call: Call): boolean {
@@ -236,7 +280,7 @@ function matches(fault: { roomId?: string; key?: string }, call: Call): boolean 
 }
 
 function callOf(source: Source): Call {
-  return 'roomId' in source ? { roomId: source.roomId, keys: [] } : { keys: [source.key] }
+  return 'roomId' in source ? { roomId: source.roomId, keys: [source.lane.kind] } : { keys: [source.key] }
 }
 
 function callOfArgs(op: string, args: unknown[]): Call {
@@ -247,6 +291,7 @@ function callOfArgs(op: string, args: unknown[]): Call {
     return { roomId: target.roomId, keys: [target.lane.kind, ...(opts?.requiredCellKeys ?? [])] }
   }
   const [roomId, , selector] = args as [string, string, unknown]
+  if (op === 'runOperation') return { roomId, keys: [(selector as { name: string }).name] }
   if (op === 'readCellPages') return { roomId, keys: [selector as string] }
   if (op === 'readCells') {
     const sel = selector as { keys: string[] } | { prefix: string }

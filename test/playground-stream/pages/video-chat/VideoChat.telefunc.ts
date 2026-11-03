@@ -1,11 +1,12 @@
 export { onGetCall, onJoinCall, onSwitchHere }
 
 import { Room } from '@telefunc/room'
+import { anyoneCanJoin } from '../../anyone-can-join'
 
 const callId = 'video-chat'
 
 async function onGetCall() {
-  return await Room.getOrCreate<Record<string, never>, { name: string }, { text: string }>(callId)
+  return anyoneCanJoin(await Room.getOrCreate<Record<string, never>, { name: string }, { text: string }>(callId))
 }
 
 async function onJoinCall(name: string) {

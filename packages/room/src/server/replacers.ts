@@ -1,18 +1,18 @@
 export { roomReplacer, roomParticipantReplacer, roomRemoteReplacer }
 
 import type { ReplacerType, ServerReplacerContext, TypeContract } from 'telefunc'
+import { getOrCreate } from 'telefunc/__internal'
 import {
   SERIALIZER_PREFIX_ROOM,
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   SERIALIZER_PREFIX_ROOM_REMOTE,
-} from '../constants.js'
-import { ServerLocalParticipant, ServerRoom } from './room.js'
+} from '../shared/constants.js'
+import { ServerLocalParticipant, ServerRoom, handleOf } from './room.js'
 import type { RemoteParticipant } from '../types.js'
-import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from '../protocol.js'
-import { ResponseRoomGrants } from './stub.js'
-import { remoteBacking } from '../state.js'
+import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from '../shared/protocol.js'
+import { ResponseRoomGrants } from './RoomStub.js'
+import { remoteBacking } from '../shared/state.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
-import { getOrCreate } from '../utils/getOrCreate.js'
 assertIsNotBrowser()
 
 type RoomReplacerContract = TypeContract<ServerRoom, never, RoomSnapshotMetadata>
@@ -34,7 +34,7 @@ const roomReplacer: ReplacerType<RoomReplacerContract, ServerReplacerContext> = 
   },
   replace(serverRoom, context) {
     const end = context.createBroadcastChannel()
-    const metadata = serverRoom._openStub({
+    const metadata = handleOf(serverRoom).openStub({
       end,
       publishShield: context.validators.get('data'),
       grants: responseRoomGrants(context, serverRoom.id),
@@ -58,7 +58,7 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, ServerReplace
   prefix: SERIALIZER_PREFIX_ROOM_REMOTE,
   detect(value): value is RoomRemoteReplacerContract['value'] {
     // A brand, not instanceof: a dev server can load two module graphs.
-    return ServerRoom.isServerRoom(remoteBacking(value)?.state._owner)
+    return ServerRoom.isServerRoom(remoteBacking(value)?.state.view)
   },
   replace(remote, context) {
     const { state, entry } = remoteBacking(remote)!
@@ -66,7 +66,7 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, ServerReplace
     if (entry.hidden) responseRoomGrants(context, state.roomId).hidden.add(entry.id)
     // The entry outlives a racing leave, so the snapshot stays coherent and the client's roster heals it.
     const metadata: RemoteParticipantMetadata = {
-      room: state._owner,
+      room: state.view,
       id: entry.id,
       meta: entry.meta.object,
       joinedAt: entry.joinedAt,
@@ -92,7 +92,7 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, Ser
     const end = context.createBroadcastChannel()
     const metadata = participant._openStub({ end, publishShield: context.validators.get('data') })
     // Its room's stub, if co-returned, drops this member's echo at the source; otherwise the grant goes unused.
-    if (!participant.selfDelivery) responseRoomGrants(context, participant._room.id).suppress(participant.id)
+    if (!participant.selfDelivery) responseRoomGrants(context, participant.room.id).suppress(participant.id)
     if (context.maxFrameBytes) metadata.maxFrameBytes = context.maxFrameBytes
     return {
       metadata,

@@ -1,34 +1,54 @@
-export { AwaitedChannels }
+export { AwaitedChannels, expireAwaited }
 export type { AwaitedChannel, RecvBacklog }
 
-import type { ChannelFrame, ReconcileOpenEntry } from '../../wire/connectionFrame.js'
-import type { ConnectionEntry, Wire } from './mux.js'
+import { encode, type ChannelFrame } from '../../wire/frame.js'
+import type { ReconcileOpenEntry } from '../../wire/payloads.js'
+import type { WireEntry } from './ChannelMux.js'
+import type { RegistrationWaits } from './RegistrationWaits.js'
 
 /** What a wire received and hasn't handled yet. */
 type RecvBacklog = { bytes: number; frames: number }
 
 /** An initial channel a RECONCILE named while unregistered: left out of the RECONCILED, settled by an ATTACH_RESULT. */
 type AwaitedChannel = {
+  /** The id of the channel it waits for: the first entry's, which a later one under its index names too. */
+  readonly channelId: string
   /** The latest RECONCILE entry naming it. */
   open: ReconcileOpenEntry
   /** The wire awaiting it: the one whose RECONCILE named it, until a barrier moves it to the WebSocket. */
-  entry: ConnectionEntry
-  wire: Wire
+  entry: WireEntry
   /** What the page sent it meanwhile, dispatched after its attach. */
   held: { frame: ChannelFrame; bytes: number }[]
   /** `attached` until what it holds is dispatched; `expired` stays while a RECONCILE names it, never awaited again. */
   phase: 'waiting' | 'attached' | 'expired'
-  stopWaiting: () => void
+  /** The deadline of its wait for its channel's registration (see `RegistrationWaits`); null once it waits no more. */
+  ttl: ReturnType<typeof setTimeout> | null
+}
+
+/** The awaited channel didn't register within `connectTtl`, or shut down as it registered: its wire gets an
+ *  ATTACH_RESULT null. */
+function expireAwaited(awaited: AwaitedChannel): void {
+  awaited.entry.state.awaited.expire(awaited)
+  awaited.entry.sender.send(encode.attachResult(awaited.open.ix, null))
+}
+
+type AwaitedChannelsOptions = {
+  /** The wire's recv backlog, which counts what it holds. */
+  backlog: RecvBacklog
+  /** The mux's, which every wire's awaited channels wait in. */
+  waits: RegistrationWaits
 }
 
 /** The channels a wire awaits, by index; what it holds for them counts in its recv backlog. */
 class AwaitedChannels {
   private readonly byIx = new Map<number, AwaitedChannel>()
   private readonly backlog: RecvBacklog
+  private readonly waits: RegistrationWaits
   private attachedCount = 0
 
-  constructor(backlog: RecvBacklog) {
+  constructor({ backlog, waits }: AwaitedChannelsOptions) {
     this.backlog = backlog
+    this.waits = waits
   }
 
   get(ix: number): AwaitedChannel | undefined {
@@ -40,7 +60,9 @@ class AwaitedChannels {
     return this.byIx.size - this.attachedCount
   }
 
-  add(awaited: AwaitedChannel): void {
+  /** Awaits it, with what it `held` on the wire that awaited it before. */
+  add(awaited: AwaitedChannel, held: AwaitedChannel['held'] = NOTHING_HELD): void {
+    for (const { frame, bytes } of held) this.hold(awaited, frame, bytes)
     this.byIx.set(awaited.open.ix, awaited)
   }
 
@@ -95,7 +117,7 @@ class AwaitedChannels {
 
   /** Awaits it no more, and drops what it held. */
   private forgetOne(awaited: AwaitedChannel): void {
-    awaited.stopWaiting()
+    this.waits.stop(awaited)
     this.drop(awaited)
     this.delete(awaited)
   }
@@ -105,18 +127,11 @@ class AwaitedChannels {
     if (awaited.phase === 'attached') this.attachedCount--
   }
 
-  /** The wire `wire` awaits it from now on, with what it held. */
-  move(awaited: AwaitedChannel, entry: ConnectionEntry, wire: Wire): void {
-    const held = this.take(awaited)
-    awaited.entry = entry
-    awaited.wire = wire
-    for (const { frame, bytes } of held) entry.state.awaited.hold(awaited, frame, bytes)
-    entry.state.awaited.add(awaited)
-  }
-
   stop(): void {
-    for (const awaited of this.byIx.values()) awaited.stopWaiting()
+    for (const awaited of this.byIx.values()) this.waits.stop(awaited)
     this.byIx.clear()
     this.attachedCount = 0
   }
 }
+
+const NOTHING_HELD: AwaitedChannel['held'] = []
