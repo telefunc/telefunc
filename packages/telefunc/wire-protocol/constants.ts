@@ -83,6 +83,17 @@ export const WS_PROBE_TIMEOUT_MS = 3_000
  *  with 1001, as a browser does for a page that unloads, and the page will come back. */
 export const WS_CLOSE_PAGE_LEFT = 4000
 
+/** The version of the channel wire, which each channel request names in its URL. A server on another version refuses
+ *  the page's channels with `WS_CLOSE_WIRE_VERSION` or `STATUS_CODE_WIRE_VERSION`, which the page reports as a page to
+ *  reload: those two never change. */
+export const WIRE_VERSION = 1
+export const WS_CLOSE_WIRE_VERSION = 4001
+export const STATUS_CODE_WIRE_VERSION = 409
+
+/** A response header naming where the page's session lives (Cloudflare: its Durable Object's region). The page then
+ *  names it in its session URL, so its requests reach that session from wherever they come. */
+export const SESSION_HOME_HEADER = 'x-telefunc-home'
+
 /** How long to wait for the stream-request POST handshake ack on the SSE downstream
  *  before declaring the upstream wire dead and falling back to outbox+batch POSTs. */
 export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
@@ -189,6 +200,9 @@ export const WIRE_PROBE_FIRST_BYTES = 64
 export const WIRE_PROBE_CLOCK_MS = 1
 /** A frame goes whole only if it would cross within a ping interval at the fastest measured rate divided by this. */
 export const WIRE_PIECE_RATE_MARGIN = 8
+/** The most bytes of the small frames one task sends that go in one message, which holds at most one data frame on a
+ *  page. A frame this size or larger goes alone. */
+export const WIRE_GATHER_BYTES = 16 * 1024
 /** An announced message may carry twice the one before it, or this many bytes whatever that carried. */
 export const WIRE_ANNOUNCED_MIN_BYTES = 8 * 1024
 /** A receiver waits this many times as long for the next announced message as it takes at the last one's rate. */
@@ -217,6 +231,11 @@ export const WIRE_QUEUE_DELAY_MS = 300
 export const CHANNEL_BUFFER_LIMIT_BYTES = 512 * 1024
 /** Maximum bytes buffered per channel for binary messages sent before a peer connects. */
 export const CHANNEL_BUFFER_LIMIT_BINARY_BYTES = 2 * 1024 * 1024
+/** The most a server channel holds for its page past the page's credit and in unanswered ack requests: a sender that
+ *  awaits each send holds one, so only sends nobody awaits reach it. */
+export const CHANNEL_MAX_PENDING_BYTES = 256 * 1024 * 1024
+/** The most ack requests a server channel holds unanswered. */
+export const CHANNEL_MAX_PENDING_ACKS = 16_384
 
 /** How long a channel waits for its peer to connect: it outlasts a page's noticing its wire died, and a reconnect. */
 export const CHANNEL_CONNECT_TTL_MS = 15_000
@@ -275,8 +294,9 @@ export const CREDIT_WINDOW_INITIAL_BYTES_BATCH = 8 * 1024 * 1024
  *  Covers ~5 Gbit/s × 100 ms RTT or ~500 Mbit/s × 1 s RTT. */
 export const CREDIT_WINDOW_MAX_BYTES = 64 * 1024 * 1024
 
-/** A server channel warns, once, when its sends put this much ahead of its page: past its credit, or awaiting acks. */
-export const SENDS_AHEAD_WARNING_BYTES = 64 * 1024 * 1024
+/** A server channel's sends outrun its page once, each time the page takes some for this long, more is ahead of it than
+ *  when that began, and more than the page takes in this long: a few round trips of Slow 3G's 400 ms. */
+export const SENDS_OUTRUN_MS = 1_000
 
 /** The most a batch POST is sized to carry (see `SSE_POST_TARGET_MS`). */
 export const SSE_POST_MAX_BYTES = CREDIT_WINDOW_MAX_BYTES / 2

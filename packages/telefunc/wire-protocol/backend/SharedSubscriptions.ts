@@ -4,7 +4,7 @@ export type { BackendSubscription, SourceRules }
 import { assert } from '../../utils/assert.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 import { getOrCreate } from '../../utils/getOrCreate.js'
-import { reportBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
+import { handleCallbackBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import { assertDriverOrdering } from './driverOrdering.js'
 import type {
   AttemptState,
@@ -230,7 +230,7 @@ class SubscriptionSlot<Source> implements BackendReceiver {
     if (this.current === 'ready') this.latestReadiness = createReadiness()
     this.enter('closed')
     this.latestReadiness.reject(failure)
-    if (reason !== undefined) void this.latestReadiness.promise.catch(reportBug)
+    if (reason !== undefined) void this.latestReadiness.promise.catch(handleCallbackBug)
   }
 
   /** A consumer sees `ready` before any message, so a driver needn't order its acknowledgment before what it delivers:

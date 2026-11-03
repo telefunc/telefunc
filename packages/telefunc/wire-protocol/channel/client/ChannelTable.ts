@@ -40,8 +40,8 @@ class ChannelTable {
   private readonly records = new Map<number, ChannelRecord>()
   /** The channels not closed: `close` takes one out while `records` still lists it. */
   private readonly byChannel = new Map<MuxChannel, ChannelRecord>()
-  /** Channels no RECONCILE named on the wire yet: the next one there names them. */
-  private readonly unnamed = new Set<ChannelRecord>()
+  /** Channels no RECONCILE on the wire declared yet: the next one there declares them. */
+  private readonly undeclared = new Set<ChannelRecord>()
   /** Closed channels not let go: a RECONCILE names them, as the server's answer tells when it has all they sent. */
   private readonly closed = new Set<ChannelRecord>()
   /** Channels let go since the last RECONCILE: the next one on the same wire releases them on the server. */
@@ -56,8 +56,8 @@ class ChannelTable {
     return this.byChannel.size === 0
   }
 
-  get hasUnnamed(): boolean {
-    return this.unnamed.size > 0
+  get hasUndeclared(): boolean {
+    return this.undeclared.size > 0
   }
 
   get(ix: number): ChannelRecord | undefined {
@@ -73,18 +73,18 @@ class ChannelTable {
     return this.records.values()
   }
 
-  /** The channels a RECONCILE on the wire that has the session names: the unnamed and the closed. */
+  /** The channels a RECONCILE on the wire that has the session names: the undeclared and the closed. */
   changed(): Set<ChannelRecord> {
-    return new Set([...this.unnamed, ...this.closed])
+    return new Set([...this.undeclared, ...this.closed])
   }
 
-  isUnnamed(record: ChannelRecord): boolean {
-    return this.unnamed.has(record)
+  isUndeclared(record: ChannelRecord): boolean {
+    return this.undeclared.has(record)
   }
 
-  /** A RECONCILE names `record`. */
-  name(record: ChannelRecord): void {
-    this.unnamed.delete(record)
+  /** A RECONCILE declared `record` to the server. */
+  markDeclared(record: ChannelRecord): void {
+    this.undeclared.delete(record)
   }
 
   /** The channels let go since the last call. */
@@ -117,7 +117,7 @@ class ChannelTable {
     }
     this.records.set(ix, record)
     this.byChannel.set(channel, record)
-    this.unnamed.add(record)
+    this.undeclared.add(record)
     return record
   }
 
@@ -153,7 +153,7 @@ class ChannelTable {
 
   /** Drops all the channel holds, its ATTACH_RESULT wait too. */
   release(record: ChannelRecord): void {
-    if (!this.unnamed.delete(record)) this.released.push(record.ix)
+    if (!this.undeclared.delete(record)) this.released.push(record.ix)
     this.closed.delete(record)
     this.records.delete(record.ix)
     this.byChannel.delete(record.channel)
@@ -169,7 +169,7 @@ class ChannelTable {
     for (const { replay } of this.records.values()) replay.dispose()
     this.records.clear()
     this.byChannel.clear()
-    this.unnamed.clear()
+    this.undeclared.clear()
     this.closed.clear()
     this.released = []
   }

@@ -276,7 +276,7 @@ describe('Broadcast disallows channel methods', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('Broadcast shield validation', () => {
-  it('rejects client publishes that fail the data shield with a SHIELD_ERROR ack', () => {
+  it('rejects client publishes that fail the data shield with a SHIELD_ERROR ack', async () => {
     const broadcast = new ServerBroadcast<{ text: string }>({ key: 'room:shield' })
     broadcast._publishShield = (value) => {
       const v = value as { text?: unknown }
@@ -302,7 +302,7 @@ describe('Broadcast shield validation', () => {
       }),
     )
 
-    void broadcast._end._onPeerPublishAckReqMessage(JSON.stringify({ text: 42 }), 1)
+    await broadcast._end._onPeerPublishAckReqMessage(JSON.stringify({ text: 42 }), 1)
 
     const ack = frames.map((f) => decode(f as Uint8Array<ArrayBuffer>)).find((d) => d.tag === TAG.ACK_RES)
     expect(ack).toBeDefined()
@@ -313,7 +313,7 @@ describe('Broadcast shield validation', () => {
 
   // Shield rejection MUST short-circuit the publish — bad payloads should never reach
   // any subscriber, including the publisher's own self-echo.
-  it('a shield-rejected publish is not delivered to subscribers', () => {
+  it('a shield-rejected publish is not delivered to subscribers', async () => {
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:shield-drop' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:shield-drop' })
     sender._end._registerChannel()
@@ -338,7 +338,7 @@ describe('Broadcast shield validation', () => {
         replay: new ReplayBuffer({ maxBytes: 1024 * 1024, binaryMaxBytes: 2 * 1024 * 1024 }),
       }),
     )
-    void sender._end._onPeerPublishAckReqMessage(JSON.stringify({ text: 'malicious' }), 1)
+    await sender._end._onPeerPublishAckReqMessage(JSON.stringify({ text: 'malicious' }), 1)
 
     expect(seen).toEqual([])
   })

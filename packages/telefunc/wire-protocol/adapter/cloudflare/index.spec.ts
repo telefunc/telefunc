@@ -86,26 +86,6 @@ vi.mock('./broadcast.js', () => ({
   CloudflareBroadcast: mocks.MockCloudflareBroadcast,
 }))
 
-vi.mock('./routing.js', async (importOriginal) => ({
-  readForwardedTarget: (await importOriginal<typeof import('./routing.js')>()).readForwardedTarget,
-  DEFAULT_BROADCAST_BUCKETS: (await importOriginal<typeof import('./routing.js')>()).DEFAULT_BROADCAST_BUCKETS,
-  TELEFUNC_BROADCAST_BUCKET_HEADER: 'x-telefunc-broadcast-bucket',
-  TELEFUNC_SESSION_HEADER: 'x-telefunc-session',
-  TELEFUNC_SHARD_HEADER: 'x-telefunc-shard',
-  assertLocationFallbackIsScaled: vi.fn(),
-  resolveSessionRoutingTarget: vi.fn(
-    (baseInstanceName: string, scale: unknown, request: Request, locationFallback: string) => {
-      void scale
-      void request
-      void locationFallback
-      return {
-        sessionInstanceName: `${baseInstanceName}-shard-weur-0`,
-        locationBucket: 'weur',
-      }
-    },
-  ),
-}))
-
 import { Telefunc } from '../../../serve/cloudflare.js'
 import { resolveSessionRoutingTarget } from './routing.js'
 import { disposeBackend } from '../../backend/install.js'
@@ -173,30 +153,25 @@ afterEach(async () => {
 })
 
 describe('cloudflare adapter entrypoint', () => {
-  it('resolves shard from KV token and forwards routing headers', async () => {
+  it('routes by the home its page names and forwards routing headers', async () => {
     const { binding, get, fetch } = createBinding()
     const tf = new Telefunc()
-    const kv = createMockKV()
-    await kv.put('session:my-token', JSON.stringify({ s: 'telefunc-shard-weur-1', b: 'weur' }))
-    const request = new Request('https://telefunc.test/_telefunc?session=my-token', {
+    const request = new Request('https://telefunc.test/_telefunc?session=my-token&home=oc', {
       headers: { 'x-telefunc-request': 'txt' },
     })
 
     await tf.serve({
       request,
-      env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
+      env: { TelefuncDurableObject: binding, TelefuncKV: createMockKV() } as unknown as Cloudflare.Env,
     })
 
     expect(mocks.transportInstances).toHaveLength(1)
-    expect(get).toHaveBeenCalledWith(expect.objectContaining({ name: 'telefunc-shard-weur-1' }), {
-      locationHint: 'weur',
-    })
+    expect(get).toHaveBeenCalledWith(expect.objectContaining({ name: 'telefunc-shard-oc-0' }), { locationHint: 'oc' })
     expect(fetch).toHaveBeenCalledTimes(1)
 
     const forwardedRequest = fetch.mock.calls[0]![0] as Request
-    expect(forwardedRequest.headers.get('x-telefunc-shard')).toBe('telefunc-shard-weur-1')
-    expect(forwardedRequest.headers.get('x-telefunc-broadcast-bucket')).toBe('weur')
-    expect(forwardedRequest.headers.get('x-telefunc-session')).toBe('my-token')
+    expect(forwardedRequest.headers.get('x-telefunc-shard')).toBe('telefunc-shard-oc-0')
+    expect(forwardedRequest.headers.get('x-telefunc-broadcast-bucket')).toBe('oc')
   })
 
   it('returns undefined for non-telefunc traffic', async () => {
@@ -288,6 +263,7 @@ describe('cloudflare adapter entrypoint', () => {
       }),
     )
     expect(mocks.telefuncMock).toHaveBeenCalled()
+    expect(response.headers.get('x-telefunc-home')).toBe('weur')
     const member = mocks.transportInstances[0]!.members[0]!
     expect(member.locate).toHaveBeenCalledWith('weur')
 

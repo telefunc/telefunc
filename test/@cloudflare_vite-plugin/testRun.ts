@@ -1,9 +1,9 @@
 export { testRun }
 export { testCloudflareBindings }
 
-import { autoRetry, expect, expectLog, getServerUrl, page, test } from '@brillout/test-e2e'
+import { autoRetry, expect, getServerUrl, page, test } from '@brillout/test-e2e'
 import type { WebSocket } from 'playwright-chromium'
-import { testCounter, testRunClassic, sendsAheadWarning, withNetworkConditions } from '../../test/utils'
+import { testCounter, testRunClassic, withNetworkConditions } from '../../test/utils'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   const isDev = cmd === 'pnpm run dev'
@@ -244,7 +244,7 @@ function testChat() {
 }
 
 function testBacklog() {
-  test('Backlog: 96 MiB the server sends nobody awaiting to a page that stops reading all go out, with a warning, and arrive whole and in order once it reads, the channel open', async () => {
+  test('Backlog: 96 MiB the server sends nobody awaiting to a page that stops reading all go out, and arrive whole and in order once it reads, the channel open', async () => {
     await page.goto(getServerUrl() + '/backlog')
     await autoRetry(async () => {
       expect(await page.locator('#hydrated').count()).toBe(1)
@@ -277,7 +277,6 @@ function testBacklog() {
         expect(state.received).toBe(6000)
         expect(state.outOfOrder).toBe(0)
         expect(state.closeErr).toBe(null)
-        expectLog(sendsAheadWarning)
       },
       { timeout: 30_000 },
     )

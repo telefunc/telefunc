@@ -2,13 +2,18 @@ export { handleSseChannelRequest }
 export type { SseChannelHttpResponse, SseWire }
 
 import type { Readable } from 'node:stream'
-import { assert } from '../../../utils/assert.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
-import { CHANNEL_TRANSPORT, SSE_METADATA_MAX_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
+import {
+  CHANNEL_TRANSPORT,
+  SSE_METADATA_MAX_BYTES,
+  STATUS_CODE_WIRE_VERSION,
+  WIRE_MAX_RAW_FRAME_BYTES,
+} from '../../constants.js'
+import { namesWireVersion } from '../../wire/requestKind.js'
 import { createPushReadableStream, type PushReadableStream } from '../../../utils/pushReadableStream.js'
 import { createPushReadable, type PushReadable } from '../../../utils/pushReadable.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
@@ -21,7 +26,7 @@ import { passesData } from '../../wire/tags.js'
 import { isProtocolViolationError, ProtocolViolationError } from '../../wire/protocolViolation.js'
 
 type SseChannelHttpResponse = {
-  statusCode: 200 | 400
+  statusCode: 200 | 400 | 409
   contentType: 'text/plain' | 'text/event-stream'
   headers: [string, string][]
   body: string | Readable | ReadableStream<Uint8Array<ArrayBuffer>>
@@ -133,8 +138,10 @@ class SseServerTransport {
   async handleRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse> {
     if (!getServerConfig().channel.transports.includes(CHANNEL_TRANSPORT.SSE)) return badRequest()
     if (request.method !== 'POST') return badRequest()
+    if (!namesWireVersion(request)) return wireVersionRefused()
     const source = readable ?? request.body
-    assert(source)
+    // A Web `Request` sent without a body has `body === null`; a Node one, an empty stream (below).
+    if (!source) return noBody()
     // Adapter mode: a Node `IncomingMessage` means we're on the Node-native serve path
     // and should answer with a Node `Readable` so it pipes straight to the socket. Web
     // adapters get `request.body` (no `readable`) and want a `ReadableStream` back.
@@ -142,7 +149,9 @@ class SseServerTransport {
     let connId: string | null = null
     try {
       const reader = new BodyReader(source)
-      const metadata = parseMetadata(await reader.readMetadata(SSE_METADATA_MAX_BYTES))
+      const rawMetadata = await reader.readLengthPrefixedBytesOrNull(SSE_METADATA_MAX_BYTES)
+      if (rawMetadata === null) return noBody()
+      const metadata = parseMetadata(new TextDecoder().decode(rawMetadata))
       connId = metadata.connId
       switch (metadata.kind) {
         case 'streamResponse':
@@ -207,7 +216,7 @@ class SseServerTransport {
         ['Cache-Control', 'no-cache, no-transform'],
         ['X-Accel-Buffering', 'no'],
       ],
-      body: events.stream,
+      body: events.stream.readable,
     }
   }
 
@@ -431,8 +440,17 @@ function shouldSendReconciled(outcome: ReconcileOutcome, wire: SseWire): boolean
   return outcome.deliverTo !== wire || !wire.closed
 }
 
-function badRequest(): SseChannelHttpResponse {
-  return { statusCode: 400, contentType: 'text/plain', headers: [], body: '' }
+function badRequest(message = ''): SseChannelHttpResponse {
+  return { statusCode: 400, contentType: 'text/plain', headers: [], body: message }
+}
+
+function noBody(): SseChannelHttpResponse {
+  return badRequest('The request has no body: an SSE channel request starts with its metadata.')
+}
+
+/** A page on another version reloads: none of its frames could be read. */
+function wireVersionRefused(): SseChannelHttpResponse {
+  return { statusCode: STATUS_CODE_WIRE_VERSION, contentType: 'text/plain', headers: [], body: 'reload the page' }
 }
 
 function okResponse(): SseChannelHttpResponse {

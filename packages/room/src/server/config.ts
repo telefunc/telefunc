@@ -3,7 +3,7 @@ export type { RoomConfig }
 
 import { ROOM_DEPARTURE_TIMEOUT_MS, ROOM_EMPTY_TIMEOUT_MS } from './constants.js'
 import { TIMER_DELAY_MAX_MS } from '../shared/constants.js'
-import { reportBug } from 'telefunc/__internal'
+import { handleCallbackBug } from 'telefunc/__internal'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { assertUsage } from '../utils/assert.js'
 
@@ -66,7 +66,7 @@ function reportDeliveryLost(roomId: string, reason: string): void {
   try {
     onDeliveryLost({ roomId, reason })
   } catch (err) {
-    reportBug(err)
+    handleCallbackBug(err)
   }
 }
 

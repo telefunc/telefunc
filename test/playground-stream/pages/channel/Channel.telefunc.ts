@@ -30,19 +30,29 @@ export {
   onChannelUnattachedFlood,
   onChannelEndedValues,
   onChannelSlowLink,
-  onChannelUnawaitedBurst,
+  onChannelBinaryBurst,
+  onChannelPaced,
   onChannelTextBurst,
   onChannelOpenBurst,
+  onChannelSmallPush,
   onChannelManyListeners,
   onChannelLinkShare,
   onChannelSlowUplink,
   onChannelOpenAnswer,
   onChannelOpenHello,
+  onChannelBudgets,
+  onChannelCreditFailure,
+  onChannelAckOwnership,
+  onChannelApiProbe,
+  onChannelIteratorAck,
   onChannelLateCallbacks,
   onChannelOpenAbort,
+  onChannelLateOpenAbort,
 }
 
-import { Channel, Abort, BroadcastChannel } from 'telefunc'
+import { prepareIteratorAck, sendIteratorAck, type IteratorAckOptions } from './iteratorAckProbe'
+
+import { Channel, Abort, BroadcastChannel, config } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 
 type ServerMessage = { type: 'tick'; count: number } | { type: 'echo'; text: string } | { type: 'welcome' }
@@ -688,24 +698,57 @@ async function onChannelSlowLink() {
   return { channel: ch.client }
 }
 
-/** At the page's message, sends that many 1 MiB messages, each with its index in its first 4 bytes, without awaiting
- *  them, in one loop. */
-async function onChannelUnawaitedBurst() {
-  const ch = new Channel<(count: number) => void, never>()
-  ch.listen((count) => {
-    for (let i = 0; i < count; i++) {
-      const message = new Uint8Array(1024 * 1024)
-      new DataView(message.buffer).setUint32(0, i)
-      void ch.sendBinary(message)
+/**
+ * At the page's message, sends that many 1 MiB messages, each with its index in its first 4 bytes, in one loop:
+ * awaiting each, or not.
+ * cleanupState keys:
+ *   binaryBurst_<id> = what the send that closed the channel threw, if one did
+ */
+async function onChannelBinaryBurst() {
+  const ch = new Channel<(run: { count: number; awaited: boolean }) => void, never>()
+  ch.listen(async ({ count, awaited }) => {
+    try {
+      for (let i = 0; i < count; i++) {
+        const message = new Uint8Array(1024 * 1024)
+        new DataView(message.buffer).setUint32(0, i)
+        if (awaited) await ch.sendBinary(message)
+        else void ch.sendBinary(message)
+      }
+    } catch (err) {
+      cleanupState[`binaryBurst_${ch.id}`] = (err as Error).message
     }
   })
-  return { channel: ch.client }
+  return { channel: ch.client, channelId: ch.id }
 }
 
 /**
- * At the page's message, sends that many 16 KiB text messages, each starting with its index, in one loop: without
- * awaiting them, awaiting each, or with `{ ack: true }`, awaiting the acks together.
+ * At the page's message, sends `burst` 1 MiB messages at once, then a message of `tick` bytes every `everyMs` ms,
+ * `ticks` times, none of them awaited.
  * cleanupState keys:
+ *   paced_<id> = what the send that closed the channel threw, or `done`
+ */
+async function onChannelPaced() {
+  const ch = new Channel<(run: { burst: number; tick: number; everyMs: number; ticks: number }) => void, never>()
+  ch.listen(async ({ burst, tick, everyMs, ticks }) => {
+    try {
+      for (let i = 0; i < burst; i++) void ch.sendBinary(new Uint8Array(1024 * 1024))
+      for (let i = 0; i < ticks; i++) {
+        await new Promise((resolve) => setTimeout(resolve, everyMs))
+        void ch.sendBinary(new Uint8Array(tick))
+      }
+      cleanupState[`paced_${ch.id}`] = 'done'
+    } catch (err) {
+      cleanupState[`paced_${ch.id}`] = (err as Error).message
+    }
+  })
+  return { channel: ch.client, channelId: ch.id }
+}
+
+/**
+ * At the page's message, sends that many text messages, each starting with its index, in one loop: of 16 KiB, without
+ * awaiting them or awaiting each, or of 1 KiB with `{ ack: true }`, awaiting the acks together.
+ * cleanupState keys:
+ *   textBurst_<id>_error = what the send that closed the channel threw, if one did
  *   textBurst_<id>_acked = how many of the ack-requesting sends resolved
  */
 async function onChannelTextBurst() {
@@ -713,11 +756,15 @@ async function onChannelTextBurst() {
   const id = ch.id
   ch.listen(async ({ count, mode }) => {
     const sends: Promise<unknown>[] = []
-    for (let i = 0; i < count; i++) {
-      const message = String(i).padEnd(16 * 1024)
-      if (mode === 'acks') sends.push(ch.send(message, { ack: true }))
-      else if (mode === 'awaited') await ch.send(message)
-      else void ch.send(message)
+    try {
+      for (let i = 0; i < count; i++) {
+        const message = String(i).padEnd(mode === 'acks' ? 1024 : 16 * 1024)
+        if (mode === 'acks') sends.push(ch.send(message, { ack: true }))
+        else if (mode === 'awaited') await ch.send(message)
+        else void ch.send(message)
+      }
+    } catch (err) {
+      cleanupState[`textBurst_${id}_error`] = (err as Error).message
     }
     if (mode !== 'acks') return
     const results = await Promise.allSettled(sends)
@@ -731,6 +778,15 @@ async function onChannelOpenBurst() {
   const ch = new Channel<never, number>()
   ch.onOpen(() => {
     for (let seq = 0; seq < 500; seq++) void ch.send(seq).catch(() => {})
+  })
+  return { channel: ch.client }
+}
+
+/** At the page's message, sends that many small messages without awaiting them. */
+async function onChannelSmallPush() {
+  const ch = new Channel<(count: number) => Promise<void>, (seq: number) => void>()
+  ch.listen(async (count) => {
+    for (let seq = 0; seq < count; seq++) void ch.send(seq)
   })
   return { channel: ch.client }
 }
@@ -828,4 +884,90 @@ async function onChannelOpenAbort() {
     cleanupState[`openAbort_${id}_second`] = 'run'
   })
   return { channel: ch.client, channelId: id }
+}
+
+async function onChannelApiProbe() {
+  const ch = new Channel<string, string>()
+  ch.onOpen(async () => {
+    await ch.opened
+    for await (const message of ch.messages()) {
+      if (message.type === 'text') await ch.send(message.data)
+      else await ch.sendBinary(message.data)
+    }
+  })
+  return { channel: ch.client }
+}
+
+async function onChannelAckOwnership() {
+  const ch = new Channel<string, string>()
+  ch.listen(() => 'answer')
+  ch.listen((data) => (data === 'conflict' ? 'other' : undefined))
+  return { channel: ch.client }
+}
+
+async function onChannelBudgets() {
+  const original = config.channel
+  config.channel = { ...original, maxPendingBytes: 8192 }
+  const bytes = new Channel<never, string>()
+  config.channel = { ...original, maxPendingAcks: 2 }
+  const acks = new Channel<never, string>()
+  config.channel = original
+  const exercise = (ch: typeof bytes, ack: boolean) => {
+    ch.onOpen(() => {
+      try {
+        if (!ack) {
+          void ch.send('x'.repeat(16 * 1024))
+          cleanupState[`budget_${ch.id}_credit`] = 'accepted'
+        }
+        for (let i = 0; i < 1000; i++) void ch.send('x'.repeat(1024), { ack: ack as false })
+      } catch (err) {
+        cleanupState[`budget_${ch.id}`] = (err as Error).message
+      }
+    })
+  }
+  exercise(bytes, false)
+  exercise(acks, true)
+  return { bytes: bytes.client, acks: acks.client }
+}
+
+async function onChannelCreditFailure() {
+  const ch = new Channel<string, string>()
+  ch.listen(() => new Promise<void>(() => {}))
+  ch.onOpen(() => {
+    const sends = Array.from({ length: 300 }, () => ch.send('x'))
+    ch.abort('capacity-failure')
+    void Promise.allSettled(sends).then((results) => {
+      cleanupState[`credit_${ch.id}`] = String(
+        results.some((r) => r.status === 'rejected' && r.reason.abortValue === 'capacity-failure'),
+      )
+    })
+  })
+  return { channel: ch.client }
+}
+
+async function onChannelLateOpenAbort() {
+  const ch = new Channel<never, never>()
+  ch.onOpen(() => {
+    setTimeout(() =>
+      ch.onOpen(() => {
+        throw Abort('late-stop')
+      }),
+    )
+  })
+  return { channel: ch.client }
+}
+
+async function onChannelIteratorAck() {
+  const channel = new Channel<string, string>()
+  let receiver: ReturnType<typeof prepareIteratorAck>
+  return {
+    channel: channel.client,
+    prepare: (options: IteratorAckOptions) => {
+      receiver = prepareIteratorAck(channel, options)
+    },
+    primed: () => receiver.primed(),
+    cancel: () => receiver.cancel(),
+    answers: () => receiver.answers(),
+    send: (options: { binary: boolean; prime: boolean }) => sendIteratorAck(channel, options),
+  }
 }

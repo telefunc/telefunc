@@ -1,5 +1,6 @@
 export {
   onTextBroadcast,
+  onBroadcastApi,
   onBinaryBroadcastPair,
   onBinaryBroadcast,
   onBroadcastShieldClient,
@@ -35,6 +36,7 @@ export {
 import { Buffer } from 'node:buffer'
 import { Abort, Broadcast, BroadcastChannel, onBug } from 'telefunc'
 import { addBackendFault, pendingBackendFaults } from '../../failing-backend'
+import { prepareBroadcastApi } from './broadcastApiProbe'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
 
@@ -647,5 +649,26 @@ function connectToDatabase() {
       saved.push(message)
       cleanupState.chatSaved = JSON.stringify(saved)
     },
+  }
+}
+
+async function onBroadcastApi() {
+  const room = new BroadcastChannel<string>({ key: `room:api:${crypto.randomUUID()}` })
+  const probe = prepareBroadcastApi(room)
+  const controller = new AbortController()
+  let staticCalls = 0
+  Broadcast.subscribe(room.key, () => staticCalls++, { signal: controller.signal })
+  Broadcast.subscribeBinary(room.key, () => staticCalls++, { signal: controller.signal })
+  Broadcast.subscribe(room.key, () => (staticCalls += 100), { signal: AbortSignal.abort() })
+  Broadcast.subscribeBinary(room.key, () => (staticCalls += 100), { signal: AbortSignal.abort() })
+  room.onClose(() => controller.abort())
+  return {
+    room,
+    stop: async () => {
+      const result = await probe.stop()
+      controller.abort()
+      return result
+    },
+    snapshot: () => ({ callbacks: probe.callbacks(), staticCalls }),
   }
 }

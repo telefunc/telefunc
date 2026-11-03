@@ -1,8 +1,8 @@
 export { testBacklog }
 
-import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult, getCleanupState } from '../../e2e-utils'
-import { sendsAheadWarning, withNetworkConditions } from '../../../utils'
+import { withNetworkConditions } from '../../../utils'
 
 type BacklogState = { channelId: string | null; received: number; outOfOrder: number; closeErr: string | null }
 type Run = { sent: number; refused: string | null }
@@ -47,7 +47,7 @@ function testBacklog() {
     )
   })
 
-  test('backlog: 96 MiB the server sends nobody awaiting to a page that stops reading all go out, with a warning, and arrive whole and in order once it reads, the channel open', async () => {
+  test('backlog: 96 MiB the server sends nobody awaiting to a page that stops reading all go out, and arrive whole and in order once it reads, the channel open', async () => {
     const channelId = await openBacklog()
     // A page that reads nothing: what the server sends waits on the way.
     const { sent, refused } = await withNetworkConditions({ downloadThroughput: 1, uploadThroughput: -1 }, async () => {
@@ -63,7 +63,6 @@ function testBacklog() {
           outOfOrder: 0,
           closeErr: null,
         })
-        expectLog(sendsAheadWarning)
       },
       { timeout: 30_000 },
     )

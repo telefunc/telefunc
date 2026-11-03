@@ -12,8 +12,8 @@ import { getConnectionOptions } from './getConnectionOptions.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import type { CloseHandler } from '../close.js'
 import { ConnectionError } from '../ConnectionError.js'
-import { getSessionUrl } from '../../wire-protocol/channel/client/getSessionUrl.js'
-import type { ChannelTransports } from '../../wire-protocol/constants.js'
+import { getSessionUrl, setSessionHome } from '../../wire-protocol/channel/client/getSessionUrl.js'
+import { SESSION_HOME_HEADER, type ChannelTransports } from '../../wire-protocol/constants.js'
 import {
   STATUS_CODE_SUCCESS,
   STATUS_CODE_THROW_ABORT,
@@ -68,6 +68,7 @@ async function makeHttpRequest(callContext: {
     throw new ConnectionError()
   }
 
+  setSessionHome(callContext.telefuncUrl, response.headers.get(SESSION_HOME_HEADER))
   const statusCode = response.status
 
   if (statusCode === STATUS_CODE_SUCCESS) {

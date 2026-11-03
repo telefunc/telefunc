@@ -43,9 +43,6 @@ export default {
       { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
     ]
   },
-  "kv_namespaces": [
-    { "binding": "TelefuncKV", "id": "your-kv-namespace-id" }
-  ],
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["TelefuncDurableObject"] }
   ]
@@ -53,12 +50,9 @@ export default {
 ```
 {/* spellcheck-ignore:off */}
 
-> Fundamentally, channels are stateful: the server holds live state for each open channel. Cloudflare Workers, however, are stateless and ephemeral — any request can be served by any worker, and nothing is remembered between requests. The state therefore needs to live somewhere else — Durable Objects and KV are Cloudflare's primitives for exactly that:
+> Fundamentally, channels are stateful: the server holds live state for each open channel. Cloudflare Workers, however, are stateless and ephemeral — any request can be served by any worker, and nothing is remembered between requests. The state therefore needs to live somewhere else — Durable Objects are Cloudflare's primitive for exactly that: each channel lives on a Durable Object, which holds the connection and its state.
 >
-> - **Durable Objects** provide stateful compute: each channel lives on a Durable Object, which holds the connection and its state.
-> - **KV** provides shared storage: it's how stateless workers find the Durable Object that holds the state, no matter which worker a request lands on.
->
-> The Durable Object and KV bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel`, `Broadcast`, or `Room`, you can skip these bindings and use <Link href="/serve"><code>serve()</code></Link> instead.
+> The Durable Object binding is required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel`, `Broadcast`, or `Room`, you can skip this binding and use <Link href="/serve"><code>serve()</code></Link> instead.
 >
 > See <Link href="#architecture" /> for implementation details.
 
@@ -81,8 +75,6 @@ See: <Link href="/Telefunc" />.
 
 Telefunc uses [Durable Objects](https://developers.cloudflare.com/durable-objects/) for <Link href="/channel">channel</Link> state and <Link href="/channel#broadcast">broadcast</Link> fan-out. Channel state is in-memory JavaScript (closures, callbacks, local variables), so it must live on the same Durable Object that holds the WebSocket connection.
 
-[KV](https://developers.cloudflare.com/kv/) stores session tokens, which pin a browser to the same Durable Object across requests.
-
 ### Regions
 
 Telefunc maps each request to one of six geographic regions using Cloudflare's colocation data:
@@ -104,9 +96,11 @@ Every telefunction call and channel message from a client must reach the **same 
 
 The client sends a session token with every request, as the `session` query parameter. Telefunc routes all requests with the same token to the same Durable Object, in the region nearest to the client.
 
+That Durable Object names its region in its responses' `x-telefunc-home` header, and the client then sends it as the `home` query parameter, so its requests reach the same Durable Object from any region.
+
 <Warning>
 
-**CDN / reverse proxy** — make sure the `session` query parameter isn't stripped from requests. Without it, each request would be routed to a random Durable Object and channel state would be lost.
+**CDN / reverse proxy** — make sure the `session` and `home` query parameters aren't stripped from requests, nor the `x-telefunc-home` header from responses (a cross-origin server exposes it with `Access-Control-Expose-Headers`). Without the token, each request would be routed to a random Durable Object and channel state would be lost.
 
 </Warning>
 
@@ -209,7 +203,6 @@ A Durable Object registers with the authority on its first subscription to a key
 ```js
 const telefunc = new Telefunc({
   bindingName: 'TelefuncDurableObject',  // DO binding name (default)
-  kvBindingName: 'TelefuncKV',           // KV binding name (default)
   instanceName: 'telefunc',              // Base name for DO instances (default)
   scale: 1,                              // DOs per region (default)
   locationFallback: 'weur',              // Fallback region (default)

@@ -147,7 +147,7 @@ app.all('/__room-calls', (c) => {
 })
 // Telefunc answers its requests and WebSocket upgrades; Vike renders the rest.
 app.use(async (c, next) => {
-  const response = await tf.serve({ request: withTestColo(c.req.raw), env: c.env, ctx: c.executionCtx })
+  const response = await tf.serve({ request: withTestColo(c.req.raw), env: c.env })
   if (response) return response
   await next()
 })

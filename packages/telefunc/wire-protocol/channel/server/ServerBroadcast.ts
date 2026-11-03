@@ -13,7 +13,8 @@ import type {
   ChannelPublishInfo,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
-import { reportBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
+import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
+import { broadcastMessages } from '../channelMessages.js'
 import { ServerBroadcastEnd, type BroadcastEndOwner } from './ServerBroadcastEnd.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
@@ -72,6 +73,8 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     }
     this._end.onClose(() => {
       for (const route of Object.values(this.routes)) route.close()
+      this.subscribers.text.clear()
+      this.subscribers.binary.clear()
     })
   }
 
@@ -89,6 +92,18 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
 
   get isConnected(): boolean {
     return this._end.isConnected
+  }
+
+  get opened(): Promise<void> {
+    return this._end.opened
+  }
+
+  get closed(): Promise<void> {
+    return this._end.closed
+  }
+
+  messages(options?: { signal?: AbortSignal }) {
+    return broadcastMessages<ChannelData<T>>(this, options)
   }
 
   // Channel methods that don't apply to broadcast: throw at runtime.
@@ -109,32 +124,32 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     return this.publishTracked('text', stringify(data))
   }
 
-  subscribe(callback: BroadcastListener<T>): () => void {
-    return this.subscribeKind('text', callback)
+  subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {
+    return this.subscribeKind('text', callback, options)
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
     return this.publishTracked('binary', data)
   }
 
-  subscribeBinary(callback: BroadcastBinaryListener): () => void {
-    return this.subscribeKind('binary', callback)
+  subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
+    return this.subscribeKind('binary', callback, options)
   }
 
-  onClose(callback: ChannelCloseCallback): void {
-    this._end.onClose(callback)
+  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): void {
+    this._end.onClose(callback, options)
   }
 
-  onOpen(callback: () => void): void {
-    this._end.onOpen(callback)
+  onOpen(callback: () => void, options?: { signal?: AbortSignal }): void {
+    this._end.onOpen(callback, options)
   }
 
-  onDisconnect(callback: () => void): void {
-    this._end.onDisconnect(callback)
+  onDisconnect(callback: () => void, options?: { signal?: AbortSignal }): void {
+    this._end.onDisconnect(callback, options)
   }
 
-  onReconnect(callback: () => void): void {
-    this._end.onReconnect(callback)
+  onReconnect(callback: () => void, options?: { signal?: AbortSignal }): void {
+    this._end.onReconnect(callback, options)
   }
 
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
@@ -184,12 +199,11 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
   private subscribeKind<K extends BroadcastKind>(
     kind: K,
     callback: BroadcastListenerByKind<T>[K],
+    options: { signal?: AbortSignal },
   ): BroadcastUnsubscribe {
+    if (options.signal?.aborted) return () => {}
     if (!this._end.isClosed) this.routes[kind].open()
-    const remove = this.subscribers[kind].add(callback)
-    return () => {
-      if (remove()) this.syncSubscription(kind)
-    }
+    return this.subscribers[kind].add(callback, { ...options, onRemove: () => this.syncSubscription(kind) })
   }
 
   private syncSubscription(kind: BroadcastKind): void {
@@ -242,18 +256,23 @@ type BroadcastChannel<T = unknown> = {
   readonly id: string
   readonly isClosed: boolean
   readonly isConnected: boolean
+  readonly opened: Promise<void>
+  readonly closed: Promise<void>
+  messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<
+    ({ type: 'text'; data: ChannelData<T> } | { type: 'binary'; data: Uint8Array }) & { info: ChannelPublishInfo }
+  >
   readonly [TELEFUNC_SHIELDS]: {
     data: ChannelData<T>
     ack: unknown
   }
   publish(data: ChannelData<T>): Promise<ChannelPublishAck>
-  subscribe(callback: BroadcastListener<T>): () => void
+  subscribe(callback: BroadcastListener<T>, options?: { signal?: AbortSignal }): () => void
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
-  subscribeBinary(callback: BroadcastBinaryListener): () => void
-  onClose(callback: ChannelCloseCallback): void
-  onOpen(callback: () => void): void
-  onDisconnect(callback: () => void): void
-  onReconnect(callback: () => void): void
+  subscribeBinary(callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): () => void
+  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): void
+  onOpen(callback: () => void, options?: { signal?: AbortSignal }): void
+  onDisconnect(callback: () => void, options?: { signal?: AbortSignal }): void
+  onReconnect(callback: () => void, options?: { signal?: AbortSignal }): void
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>
   abort(): void
   abort(abortValue: unknown, message?: string): void
@@ -280,16 +299,30 @@ const Broadcast = {
     assertBroadcastKey(key)
     return publishOnPlane({ key, kind: 'text' }, stringify(data))
   },
-  subscribe<U = unknown>(key: string, callback: BroadcastListener<U>): BroadcastUnsubscribe {
-    return subscribeRoute({ key, kind: 'text' }, (payload) => parse(payload) as ChannelData<U>, callback)
+  subscribe<U = unknown>(
+    key: string,
+    callback: BroadcastListener<U>,
+    options?: { signal?: AbortSignal },
+  ): BroadcastUnsubscribe {
+    return subscribeWithSignal(
+      () => subscribeRoute({ key, kind: 'text' }, (payload) => parse(payload) as ChannelData<U>, callback),
+      options,
+    )
   },
   publishBinary(key: string, data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     assertBroadcastKey(key)
     return publishOnPlane({ key, kind: 'binary' }, data)
   },
-  subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
+  subscribeBinary(
+    key: string,
+    callback: BroadcastBinaryListener,
+    options?: { signal?: AbortSignal },
+  ): BroadcastUnsubscribe {
     // Bytes of its own: every subscriber on the key gets the same delivery.
-    return subscribeRoute({ key, kind: 'binary' }, (payload) => new Uint8Array(payload), callback)
+    return subscribeWithSignal(
+      () => subscribeRoute({ key, kind: 'binary' }, (payload) => new Uint8Array(payload), callback),
+      options,
+    )
   },
 }
 
@@ -324,7 +357,21 @@ function callStaticListener<D>(
 }
 
 function reportStaticListenerError(err: unknown): void {
-  if (!isAbort(err)) reportBug(err)
+  if (!isAbort(err)) handleCallbackBug(err)
+}
+
+function subscribeWithSignal(subscribe: () => () => void, { signal }: { signal?: AbortSignal } = {}): () => void {
+  if (signal?.aborted) return () => {}
+  let unsubscribe: (() => void) | undefined = subscribe()
+  const remove = () => {
+    const current = unsubscribe
+    unsubscribe = undefined
+    signal?.removeEventListener('abort', remove)
+    current?.()
+  }
+  signal?.addEventListener('abort', remove, { once: true })
+  if (signal?.aborted) remove()
+  return remove
 }
 
 type RouteReceiver<Kind extends BroadcastKind> = (payload: BroadcastPayload<Kind>, ordering: OrderingInfo) => void

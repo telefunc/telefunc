@@ -1,5 +1,6 @@
 export { testPublish, testPublishSmallBuffer, testPublishFailingBackend }
 
+import type { ConsoleMessage } from 'playwright-chromium'
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import {
   navigate,
@@ -44,6 +45,45 @@ function consecutive(first: number): number[] {
 }
 
 function testPublish(isDev: boolean, inDocker = false) {
+  test('broadcast: publish rejections stay silent whether caught or ignored', async () => {
+    const reports: string[] = []
+    const onConsole = (message: ConsoleMessage) => {
+      if (message.text().includes('[telefunc:channel-error]')) reports.push(message.text())
+    }
+    page.on('console', onConsole)
+    try {
+      await navigate(`${getServerUrl()}/publish`)
+      await page.click('#test-broadcast-publish-failures')
+      await autoRetry(async () => {
+        expect(await getResult('#publish-result')).deep.equal(['ignored', 'stop', 'ignored', 'stop'])
+      })
+      expect(reports).deep.equal([])
+    } finally {
+      page.off('console', onConsole)
+    }
+  })
+
+  test('broadcast: iteration preserves publish info and signals remove subscriptions on both ends', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-api')
+    await autoRetry(async () => {
+      const result = await getResult<any>('#publish-result')
+      const info = result.receipts.map(({ key, seq, timestamp }: any) => ({ key, seq, timestamp }))
+      expect(info.map(({ seq }: any) => seq)).deep.equal([info[0].seq, info[0].seq + 1])
+      expect(info.every(({ key, timestamp }: any) => /^room:api:/.test(key) && timestamp > 0)).toBe(true)
+      const messages = [
+        { type: 'text', data: 'first', info: info[0] },
+        { type: 'binary', data: [2], info: info[1] },
+      ]
+      const expected = { messages, callbacks: messages, cancelled: 'stop', preAborted: 'skipped', skippedCalls: 0 }
+      expect(result.client).deep.equal(expected)
+      expect(result.server).deep.equal(expected)
+      expect(result.snapshot).deep.equal({ callbacks: messages, staticCalls: 2 })
+      expect(result.open).toBe(true)
+      expect(result.ended).toBe(true)
+    })
+  })
+
   test('broadcast: paired text publish/subscribe roundtrip', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-text-broadcast')
@@ -313,7 +353,7 @@ function testPublish(isDev: boolean, inDocker = false) {
   })
 
   // The in-memory backend's: Redis delivers what reaches a key's subscription once it is there.
-  if (!inDocker) {
+  if (!inDocker && !process.env.REDIS_URL) {
     test('broadcast: a subscriber that comes while publishes queue gets only what is published after it, text and binary alike', async () => {
       await navigate(`${getServerUrl()}/publish`)
       await page.click('#test-broadcast-join-while-queued')
@@ -325,7 +365,7 @@ function testPublish(isDev: boolean, inDocker = false) {
   }
 
   // Preview on Node only: the margin is measured there. A leak of 100,000 keys' seq counters grows the heap by 7 MB or more.
-  if (!isDev && !inDocker && serverRuntime() === 'node') {
+  if (!isDev && !inDocker && !process.env.REDIS_URL && serverRuntime() === 'node') {
     for (const subscribed of [false, true]) {
       test(`broadcast: publishes to 100,000 distinct keys, ${subscribed ? 'each while a subscriber comes and goes' : 'none subscribed'}, leave the server's heap where it was`, async () => {
         await navigate(`${getServerUrl()}/publish`)

@@ -12,6 +12,7 @@ import {
   SSE_POST_MIN_BYTES_PER_S,
   SSE_POST_TARGET_MS,
   SSE_RECONCILE_DEADLINE_MS,
+  STATUS_CODE_WIRE_VERSION,
   STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS,
   UPGRADE_DRAIN_TIMEOUT_MS,
 } from '../../constants.js'
@@ -20,6 +21,7 @@ import { createPushReadableStream, type PushReadableStream } from '../../../util
 import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire/requestKind.js'
+import { getWireUrl } from './getSessionUrl.js'
 import { decode } from '../../wire/frame.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
@@ -289,7 +291,7 @@ class SseTransport implements UpgradeSource {
     } catch {
       // Its wire was dropped already: what the open carried goes as that wire's outbox does (see `flushOutbox`).
       if (this.transportAbort !== abortController) this.requeue(stage.movedOutbox)
-      else this.failOpen(stage, abortController, false)
+      else this.failOpen(stage, abortController, null)
       return null
     } finally {
       if (this.transportAbort === abortController) this.openPending = false
@@ -300,7 +302,7 @@ class SseTransport implements UpgradeSource {
       return null
     }
     if (!response.ok || !response.body) {
-      this.failOpen(stage, abortController, true)
+      this.failOpen(stage, abortController, { otherWireVersion: response.status === STATUS_CODE_WIRE_VERSION })
       return null
     }
     return response.body
@@ -334,7 +336,7 @@ class SseTransport implements UpgradeSource {
     // Metadata header first — the server classifies the POST by it; `streamRequest: true`
     // makes it emit `reconciled` inline (the body never ends, can't defer to body-end).
     body.push(encodeSseRequestMetadata({ connId: this.connId, streamRequest: true }))
-    const fetch = this.postAndRead(body, abort.signal, { duplex: 'half' })
+    const fetch = this.postAndRead(body.readable, abort.signal, { duplex: 'half' })
     this.streamRequest = { tag: 'active', body, unconfirmed: [] }
     // The POST ends with its body or when cut on the way; `ended` handles its rejection if openStream exits.
     const ended = fetch.then(
@@ -366,13 +368,17 @@ class SseTransport implements UpgradeSource {
   }
 
   /** The downstream didn't open: what the reconcile took goes back to the outbox, and the wire closes. */
-  private failOpen(stage: SseInitialBatchStage, abortController: AbortController, rejectedByServer: boolean): void {
+  private failOpen(
+    stage: SseInitialBatchStage,
+    abortController: AbortController,
+    refused: { otherWireVersion: boolean } | null,
+  ): void {
     this.rollbackInitialBatch(stage)
     this.closeStreamRequest()
     abortController.abort()
     this.transportAbort = null
     this.connecting = false
-    this.owner.onTransportClosed(this, { rejectedByServer })
+    this.owner.onTransportClosed(this, { rejectedByServer: refused !== null, ...refused })
   }
 
   /** Dispatches the downstream's events until it ends; `onOpenAck` runs as the upload's acknowledgement arrives. */
@@ -548,7 +554,7 @@ class SseTransport implements UpgradeSource {
       [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
     }
     if (extra?.accept) headers.Accept = extra.accept
-    return this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
+    return this.fetchImpl(getMarkedRequestUrl(getWireUrl(this.telefuncUrl), REQUEST_KIND.SSE), {
       method: 'POST',
       headers,
       body,

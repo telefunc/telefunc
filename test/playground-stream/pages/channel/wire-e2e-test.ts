@@ -293,7 +293,8 @@ function testWire(isDev: boolean) {
     // MAX_CHANNELS_PER_CONNECTION
     const maxChannels = 4_096
     const connect = async () => {
-      const url = new URL('/_telefunc', getServerUrl())
+      // The wire's version, as the page's `getWireUrl` names it.
+      const url = new URL('/_telefunc?wire=1', getServerUrl())
       url.protocol = 'ws:'
       const ws = new globalThis.WebSocket(url)
       ws.binaryType = 'arraybuffer'
@@ -392,6 +393,52 @@ function testWire(isDev: boolean) {
       } finally {
         full.ws.close()
         renaming.ws.close()
+      }
+    })
+
+    test('channel: a LENGTH frame that lies about the frame after it closes its WebSocket alone, and the server serves the others', async () => {
+      // A frame's 7-byte header: tag, u16 index, u32 seq (a LENGTH's seq: the bytes of the frame after it).
+      const frame = (tag: number, seq: number, bytes = 7) => {
+        const f = new Uint8Array(bytes)
+        f[0] = tag
+        new DataView(f.buffer).setUint32(3, seq, true)
+        return f
+      }
+      const LENGTH = 0x0d
+      const text = frame(0x10, 1, 10)
+      const window = frame(0x34, 0, 15)
+      const message = (...frames: Uint8Array[]) => {
+        const m = new Uint8Array(frames.reduce((n, f) => n + f.byteLength, 0))
+        let at = 0
+        for (const f of frames) {
+          m.set(f, at)
+          at += f.byteLength
+        }
+        return m
+      }
+      const lies = {
+        'last in its message': message(frame(LENGTH, 10)),
+        'past its message': message(frame(LENGTH, 1000), text, text),
+        'shorter than a header': message(frame(LENGTH, 3), text, text),
+        'ahead of a frame of fixed size': message(frame(LENGTH, 15), window, text),
+        'ahead of a LENGTH': message(frame(LENGTH, 17), frame(LENGTH, 10), text, text),
+      }
+      const healthy = await connect()
+      try {
+        expect(await healthy.answer({ open: [] })).toBe('reconciled')
+        for (const [lie, bytes] of Object.entries(lies)) {
+          const hostile = await connect()
+          expect(await hostile.answer({ open: [] })).toBe('reconciled')
+          const closed = await new Promise<boolean>((resolve) => {
+            hostile.ws.addEventListener('close', () => resolve(true))
+            setTimeout(() => resolve(false), 5_000)
+            hostile.ws.send(bytes)
+          })
+          expect({ lie, closed }).deep.equal({ lie, closed: true })
+        }
+        expect(await healthy.answer({ released: [], open: [] })).toBe('reconciled')
+      } finally {
+        healthy.ws.close()
       }
     })
 

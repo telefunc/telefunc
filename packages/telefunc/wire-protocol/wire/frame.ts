@@ -6,6 +6,7 @@ export {
   MESSAGE_FRAME_OVERHEAD_MAX_BYTES,
   isOneFrame,
   messageFrames,
+  lengthBytes,
   decode,
   decodeClientFrame,
   isSequencedFrame,
@@ -81,6 +82,8 @@ const ERROR_REASON = {
   OVERFLOW: 0x01 as const,
   /** A reconnect needed frames its sender's replay buffer had dropped to stay within its size. */
   LOST: 0x02 as const,
+  /** Its sends got further ahead of its page than `maxPendingBytes` or `maxPendingAcks` lets the server hold. */
+  AHEAD: 0x03 as const,
 }
 
 type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON]
@@ -269,6 +272,22 @@ const encode = {
     writeU32(frame, HEADER, bytes)
     return frame
   },
+  /** `frames`, of `bytes` in all with the LENGTH each before the last needs (`lengthBytes`), in one message. */
+  message(frames: readonly Uint8Array[], bytes: number): Uint8Array<ArrayBuffer> {
+    const message = new Uint8Array(bytes)
+    const last = frames.length - 1
+    let at = 0
+    for (let i = 0; i <= last; i++) {
+      const frame = frames[i]!
+      if (i < last && lengthBytes(frame[0]!) > 0) {
+        writeHeader(message.subarray(at), TAG.LENGTH, 0, frame.byteLength)
+        at += HEADER
+      }
+      message.set(frame, at)
+      at += frame.byteLength
+    }
+    return message
+  },
 
   // ── Per-channel ctrls ──
   close(index: number, timeoutMs: number, seq: number): Uint8Array<ArrayBuffer> {
@@ -370,10 +389,16 @@ const FIXED_BYTES: Partial<Record<number, number>> = {
   [TAG.ATTACH_RESULT]: encode.attachResult(0, null).byteLength,
 }
 
+/** The bytes of the LENGTH a frame of `tag` needs ahead of it when another follows it in its message: 0 where its
+ *  tag fixes its bytes. */
+function lengthBytes(tag: number): number {
+  return fixedBytes(tag) === 0 ? HEADER : 0
+}
+
 /** Whether a WebSocket `message` holds one frame. */
 function isOneFrame(message: Uint8Array): boolean {
   const bytes = fixedBytes(message[0]!)
-  return bytes === 0 || message.byteLength <= bytes
+  return message[0] !== TAG.LENGTH && (bytes === 0 || message.byteLength <= bytes)
 }
 
 /** The frames of a message of several, each a copy (a `Buffer`'s `slice` is a view), read only as it is taken. */
@@ -381,8 +406,13 @@ function* messageFrames(message: Uint8Array<ArrayBuffer>): Generator<Uint8Array<
   const end = message.byteLength
   let at = 0
   for (;;) {
-    const bytes = fixedBytes(message[at]!)
-    if (bytes === 0 || end - at <= bytes) {
+    let bytes = fixedBytes(message[at]!)
+    if (message[at] === TAG.LENGTH) {
+      assertProtocol(end - at > HEADER, 'LENGTH last in its message')
+      bytes = readU32(message, at + SEQ_OFFSET)
+      at += HEADER
+      assertProtocol(fixedBytes(message[at]!) === 0 && bytes >= HEADER && end - at > bytes, 'LENGTH of no frame')
+    } else if (bytes === 0 || end - at <= bytes) {
       yield new Uint8Array(message.subarray(at))
       return
     }

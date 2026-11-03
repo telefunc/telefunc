@@ -24,17 +24,15 @@ import type {
 import { OrderedStubs } from '../wire-protocol/adapter/cloudflare/OrderedStubs.js'
 import {
   TELEFUNC_BROADCAST_BUCKET_HEADER,
-  TELEFUNC_SESSION_HEADER,
   TELEFUNC_SHARD_HEADER,
   assertLocationFallbackIsScaled,
   readForwardedTarget,
   resolveSessionRoutingTarget,
 } from '../wire-protocol/adapter/cloudflare/routing.js'
-import { SessionPins, readSessionPin } from '../wire-protocol/adapter/cloudflare/SessionPins.js'
 import { assert, assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale } from '../wire-protocol/adapter/cloudflare/routing.js'
-import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
+import { CHANNEL_TRANSPORT, SESSION_HOME_HEADER, STATUS_CODE_WIRE_VERSION } from '../wire-protocol/constants.js'
 import { CloudflareBackend } from '../wire-protocol/adapter/cloudflare/CloudflareBackend.js'
 import {
   getCloudflareExtension,
@@ -44,7 +42,7 @@ import {
 import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/adapter/cloudflare/session.js'
 import type { TelefuncDurableObjectNamespace } from '../wire-protocol/adapter/cloudflare/namespace.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
-import { REQUEST_KIND, getRequestKind } from '../wire-protocol/wire/requestKind.js'
+import { REQUEST_KIND, getRequestKind, namesWireVersion } from '../wire-protocol/wire/requestKind.js'
 import { STATUS_BODY_MALFORMED_REQUEST, STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
 import { importBundledEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
 
@@ -69,7 +67,6 @@ const DURABLE_OBJECT_MAX_RECEIVED_MESSAGE_BYTES = 32 * 1024 * 1024
 
 type CloudflareOptions = {
   bindingName?: string
-  kvBindingName?: string
   instanceName?: string
   context?: (request: Request, env: Cloudflare.Env) => TelefuncNamespace.Context | Promise<TelefuncNamespace.Context>
   scale?: CloudflareScale
@@ -80,8 +77,6 @@ type CloudflareOptions = {
 type ServeInput = {
   request: Request
   env: Cloudflare.Env
-  /** Not read: serve() leaves no work running past its response. */
-  ctx?: ExecutionContext
 }
 
 interface TelefuncServe {
@@ -99,20 +94,13 @@ class Telefunc {
 function telefunc(options?: CloudflareOptions): TelefuncServe {
   setAdapterMaxFrameBytes(DURABLE_OBJECT_MAX_RECEIVED_MESSAGE_BYTES)
   const bindingName = options?.bindingName ?? 'TelefuncDurableObject'
-  const kvBindingName = options?.kvBindingName ?? 'TelefuncKV'
   const baseInstanceName = options?.instanceName ?? 'telefunc'
   const scale = options?.scale
   const locationFallback = options?.locationFallback ?? 'weur'
   assertLocationFallbackIsScaled(scale, locationFallback)
   const jurisdiction = options?.jurisdiction
 
-  const sessionPins = new SessionPins()
-  function pinSession(request: Request): void {
-    sessionPins.pin(request, () => requireBinding<KVNamespace>(workerEnv, kvBindingName, 'KV namespace'))
-  }
-
-  // A page may use its session over its WebSocket alone, so each message renews its pin when due, as a request does.
-  const hooks = getTelefuncChannelHooks({ onMessage: (peer) => pinSession(peer.request) })
+  const hooks = getTelefuncChannelHooks()
   const crosswsAdapter = crossws({ bindingName, instanceName: baseInstanceName, hooks })
   function telefuncNamespace(env: Cloudflare.Env): TelefuncDurableObjectNamespace {
     const namespace = requireBinding<TelefuncDurableObjectNamespace>(env, bindingName, 'Durable Object')
@@ -160,12 +148,16 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return this.#runInSession(async () => {
         const target = readForwardedTarget(request)
         if (target) this.session.broadcast.locate(target.locationBucket)
-        pinSession(request)
         if (request.headers.get('upgrade') === 'websocket') {
+          // crossws accepts it for hibernation, yet this object never hibernates while one is open, and is billed for
+          // that time: its channels live in memory, and each wire's ping deadline is a timer (`armPingDeadline`).
           return crosswsAdapter.handleDurableUpgrade(this, request)
         }
         const context = getContext ? await getContext(request, this.env) : undefined
-        return toResponse(await serveTelefunc(context ? { request, context } : { request }))
+        const response = toResponse(await serveTelefunc(context ? { request, context } : { request }))
+        // The page names it from then on, so it reaches this Durable Object from any region.
+        if (target) response.headers.set(SESSION_HOME_HEADER, target.locationBucket)
+        return response
       })
     }
 
@@ -261,25 +253,30 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         return new Response(null, { status: 400 })
       }
       // Reject before forwarding: a Durable Object that answers without reading the forwarded body fails the request.
-      if (!isWebSocketRequest && getRequestKind(request, config.telefuncUrl) === REQUEST_KIND.INVALID) {
+      const requestKind = isWebSocketRequest ? null : getRequestKind(request, config.telefuncUrl)
+      if (requestKind === REQUEST_KIND.INVALID) {
         return new Response(STATUS_BODY_MALFORMED_REQUEST, {
           status: STATUS_CODE_MALFORMED_REQUEST,
           headers: { 'Content-Type': 'text/plain' },
         })
       }
+      if (requestKind === REQUEST_KIND.SSE && !namesWireVersion(request)) {
+        return new Response('reload the page', { status: STATUS_CODE_WIRE_VERSION })
+      }
 
-      const kv = requireBinding<KVNamespace>(env, kvBindingName, 'KV namespace')
-      const presented = new URL(request.url).searchParams.get('session')
-      const token = presented || crypto.randomUUID()
-      const pinned = presented ? await readSessionPin(kv, presented) : null
-      // Without a pin, the token's hash picks its shard in the request's region.
-      const { sessionInstanceName, locationBucket } =
-        pinned ?? resolveSessionRoutingTarget(baseInstanceName, scale, request, locationFallback, token)
+      const { searchParams } = new URL(request.url)
+      const token = searchParams.get('session') || crypto.randomUUID()
+      // No lookup and nothing shared: each request names the home its session's responses gave its page.
+      const { sessionInstanceName, locationBucket } = resolveSessionRoutingTarget(
+        baseInstanceName,
+        scale,
+        request,
+        locationFallback,
+        token,
+        searchParams.get('home'),
+      )
 
       const forwardedHeaders = new Headers(request.headers as Headers)
-      // A token the client didn't name is never presented again: its session Durable Object pins none.
-      if (presented) forwardedHeaders.set(TELEFUNC_SESSION_HEADER, presented)
-      else forwardedHeaders.delete(TELEFUNC_SESSION_HEADER)
       forwardedHeaders.set(TELEFUNC_SHARD_HEADER, sessionInstanceName)
       forwardedHeaders.set(TELEFUNC_BROADCAST_BUCKET_HEADER, locationBucket)
       const forwardedRequest = new Request(request, { headers: forwardedHeaders })

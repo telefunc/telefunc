@@ -1,4 +1,4 @@
-export { ServerChannelBuffer }
+export { ServerChannelBuffer, HELD_SEND_OVERHEAD_BYTES }
 export type { BufferedSender, EntryCallback }
 
 import { ChannelOverflowError } from '../channelErrors.js'
@@ -6,9 +6,10 @@ import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import { TAG } from '../../wire/tags.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 
-/** What holding an entry retains beyond its payload, so many small messages are bounded by memory too: a send's
- *  callbacks and the promise its caller got (about 480 bytes measured), and a publish's slots (about 52). */
+/** What a send held in memory (buffered, or awaiting its answer or credit) takes beyond its payload: its callbacks and
+ *  promise, about 480 B. */
 const HELD_SEND_OVERHEAD_BYTES = 512
+/** What a buffered publish takes beyond its payload: its slots, about 52 B. */
 const HELD_PUBLISH_OVERHEAD_BYTES = 64
 
 /** Callback pair for buffered entries — resolve on flush, reject on eviction. */

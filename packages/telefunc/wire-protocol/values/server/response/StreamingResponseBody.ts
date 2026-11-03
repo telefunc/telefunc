@@ -201,7 +201,7 @@ function buildInlineResponseBody(runContext: {
     }
   })()
 
-  return sink
+  return sink.readable
 }
 
 /** Serialize a streaming error as its on-wire payload string. Used by both the

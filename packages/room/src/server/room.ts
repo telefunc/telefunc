@@ -5,7 +5,7 @@ import {
   type TELEFUNC_SHIELDS,
   type ChannelPublishAck,
   getChannelLimits,
-  reportBug,
+  handleCallbackBug,
   type OrderingInfo,
   markHandled,
 } from 'telefunc/__internal'
@@ -730,7 +730,7 @@ class ServerLocalParticipant extends ParticipantBase {
   }
 
   protected _reportError(err: unknown): void {
-    reportBug(err)
+    handleCallbackBug(err)
   }
 
   protected _inboxBufferLimit(): number {
@@ -749,7 +749,7 @@ class RoomHandleStateOwner implements RoomStateOwner {
   }
 
   reportCallbackError(error: unknown): void {
-    reportBug(error)
+    handleCallbackBug(error)
   }
 
   onListenersChanged(member: string | null, binary: BinaryWantChange | null): void {

@@ -34,7 +34,7 @@ class SendCredit {
   /** `sentBytes` after the last frame sent while the byte limit was ahead of it. */
   private sentWithCredit = 0
   /** Senders waiting on credit, oldest first, from the first that waited on. */
-  private waiters: Fifo<() => void> | null = null
+  private waiters: Fifo<{ resolve: () => void; reject: (err: Error) => void }> | null = null
   /** A waiter was handed the credit and no send was counted since. */
   private released = false
   private releases = 0
@@ -42,6 +42,7 @@ class SendCredit {
   private unyieldedBytes = 0
   private readonly yieldBytes: number
   private isShutdown = false
+  private shutdownError: Error | undefined
   /** Since it last answered a `BDP_PING`, the least its wire held as credit ran out; 0: unknown, `Infinity`: none. */
   private leastBacklog = Infinity
 
@@ -50,6 +51,10 @@ class SendCredit {
     this.selfTime = selfTime
     this.yieldBytes = yieldBytes ?? Infinity
     macrotaskYield.assertSupported()
+  }
+
+  get waitingCount(): number {
+    return this.waiters?.length ?? 0
   }
 
   /** The largest window the peer grants. */
@@ -93,14 +98,16 @@ class SendCredit {
     this.sentMessages += 1
   }
 
-  /** A limit that doesn't raise the current one is stale, and ignored, as in QUIC. */
-  onPeerByteWindow(limit: number): void {
+  /** Returns the bytes `limit` raised the byte limit by. A limit that doesn't raise the current one is stale, and
+   *  ignored, as in QUIC. */
+  onPeerByteWindow(limit: number): number {
     const raise = (limit - this.limitBytes) | 0
-    if (raise <= 0) return
+    if (raise <= 0) return 0
     this.noteBacklog()
     this.limitBytes += raise
     this.limitRaised = true
     this.tryWakeCreditWaiters()
+    return raise
   }
 
   onPeerMessageWindow(limit: number): void {
@@ -119,7 +126,8 @@ class SendCredit {
     return backlog
   }
 
-  shutdown(): void {
+  shutdown(err?: Error): void {
+    this.shutdownError = err
     this.isShutdown = true
     this.tryWakeCreditWaiters()
   }
@@ -137,7 +145,10 @@ class SendCredit {
     const waiters = this.waiters
     if (waiters === null) return
     if (this.isShutdown) {
-      for (let resolve = waiters.shift(); resolve; resolve = waiters.shift()) resolve()
+      for (let waiter = waiters.shift(); waiter; waiter = waiters.shift()) {
+        if (this.shutdownError) waiter.reject(this.shutdownError)
+        else waiter.resolve()
+      }
       return
     }
     if (this.released || this.isOutOfCredit()) return
@@ -148,11 +159,11 @@ class SendCredit {
   private releaseOne(): void {
     const waiters = this.waiters
     if (waiters === null) return
-    const resolve = waiters.shift()
-    if (!resolve) return
+    const waiter = waiters.shift()
+    if (!waiter) return
     this.released = true
     const release = ++this.releases
-    resolve()
+    waiter.resolve()
     if (waiters.length === 0) return
     void macrotaskYield.yield().then(() => {
       if (!this.released || this.releases !== release) return
@@ -162,10 +173,10 @@ class SendCredit {
   }
 
   private waitForCredit(): Promise<void> {
-    if (this.isShutdown) return resolvedPromise
+    if (this.isShutdown) return this.shutdownError ? Promise.reject(this.shutdownError) : resolvedPromise
     this.unyieldedBytes = 0
     const waiters = (this.waiters ??= new Fifo())
-    return new Promise<void>((resolve) => waiters.push(resolve))
+    return new Promise<void>((resolve, reject) => waiters.push({ resolve, reject }))
   }
 }
 

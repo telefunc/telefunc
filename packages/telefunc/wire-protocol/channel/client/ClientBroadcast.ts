@@ -15,6 +15,7 @@ import { TAG } from '../../wire/tags.js'
 import type { BroadcastKind, BroadcastSubscriptions } from '../../wire/payloads.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { Listeners } from '../../../utils/Listeners.js'
+import { broadcastMessages } from '../channelMessages.js'
 import { ChannelClosedError, isExpectedChannelFailure } from '../channelErrors.js'
 import { classifyTelefuncError } from '../errorClassification.js'
 import { isPromise } from '../../../utils/isPromise.js'
@@ -54,7 +55,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   /** @internal Declare what it asks the server for; a reconnect carries it in the RECONCILE entry. */
   _setSubscribed(kind: BroadcastKind, on: boolean): void {
-    if (on === this.subscribed[kind] || this.closed) return
+    if (on === this.subscribed[kind] || this.stopped) return
     this.subscribed[kind] = on
     if (on) this.connection.sendBroadcastSubscribe(this, kind === 'binary')
     else this.connection.sendBroadcastUnsubscribe(this, kind === 'binary')
@@ -66,12 +67,16 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   /** @internal A publish that leaves reporting its rejection to the caller. */
   _publishUnreported(data: ChannelData<T>): Promise<ChannelPublishAck> {
-    if (this.closed) throw new ChannelClosedError()
+    if (this.stopped) throw new ChannelClosedError()
     return this.sendAckReq<ChannelPublishAck, string>(encode.publishAckReq, stringify(data))
   }
 
-  subscribe(callback: BroadcastListener<T>): () => void {
-    return this.subscribeWired('text', callback)
+  override messages(options?: { signal?: AbortSignal }) {
+    return broadcastMessages<ChannelData<T>>(this, options)
+  }
+
+  subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {
+    return this.subscribeWired('text', callback, options)
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
@@ -80,22 +85,34 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   /** @internal A publish that leaves reporting its rejection to the caller. */
   _publishBinaryUnreported(data: Uint8Array): Promise<ChannelPublishAck> {
-    if (this.closed) throw new ChannelClosedError()
+    if (this.stopped) throw new ChannelClosedError()
     return this.sendAckReq<ChannelPublishAck, Uint8Array>(encode.publishBinaryAckReq, data)
   }
 
-  subscribeBinary(callback: BroadcastBinaryListener): () => void {
-    return this.subscribeWired('binary', callback)
+  subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
+    return this.subscribeWired('binary', callback, options)
   }
 
-  /** The first listener of a kind subscribes the wire, and the last one unsubscribes it. */
-  private subscribeWired<K extends BroadcastKind>(kind: K, callback: BroadcastListenerByKind<T>[K]): () => void {
+  override _end(err?: Error): void {
+    super._end(err)
+    this.subscribers.text.clear()
+    this.subscribers.binary.clear()
+  }
+
+  /** The first listener of a kind subscribes the wire, and the last one's removal unsubscribes it. */
+  private subscribeWired<K extends BroadcastKind>(
+    kind: K,
+    callback: BroadcastListenerByKind<T>[K],
+    options: { signal?: AbortSignal },
+  ): () => void {
+    if (options.signal?.aborted) return () => {}
     if (this.subscribers[kind].size === 0) this._setSubscribed(kind, true)
-    const unsubscribe = this._subscribeLocal(kind, callback)
-    return () => {
-      unsubscribe()
-      if (this.subscribers[kind].size === 0) this._setSubscribed(kind, false)
-    }
+    return this.subscribers[kind].add(callback, {
+      ...options,
+      onRemove: () => {
+        if (this.subscribers[kind].size === 0) this._setSubscribed(kind, false)
+      },
+    })
   }
 
   private sendReplyData(data: unknown): void {

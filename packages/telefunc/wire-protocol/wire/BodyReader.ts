@@ -204,7 +204,7 @@ class BodyReader {
 
   /** Read exactly `n` bytes, or null on clean EOF before any bytes are read. */
   private async readExactOrNull(n: number) {
-    if (this.buffer.length === 0) {
+    while (this.buffer.length === 0) {
       const chunk = await this.pullChunk()
       if (!chunk) return null
       this.buffer = chunk

@@ -30,7 +30,7 @@ import type { ReconciledPayload } from '../../wire/payloads.js'
 import { ChannelTable } from './ChannelTable.js'
 import { SendGate, type SendGateOwner } from './SendGate.js'
 import { Liveness, type LivenessOwner } from './Liveness.js'
-import { Upgrade, type UpgradeOwner, type UpgradeTarget } from './Upgrade.js'
+import { Upgrade, type JoinRelease, type UpgradeOwner, type UpgradeSource, type UpgradeTarget } from './Upgrade.js'
 import { AttachExchange, type AttachExchangeOwner, type ReconcileBatch } from './AttachExchange.js'
 
 import { pingDeadline } from '../../wire/pingDeadline.js'
@@ -43,7 +43,11 @@ import type { ClientChannelTransport, ClientConnectionOptions, MuxChannel } from
 /** What a transport tells its connection, and the reconcile batch it asks for when its wire opens. */
 interface TransportOwner {
   onTransportOpen(transport: ClientChannelTransport): void
-  onTransportClosed(transport: ClientChannelTransport, options?: { rejectedByServer?: boolean }): void
+  /** `rejectedByServer`: it refused the wire's opening; `otherWireVersion`: it runs another `WIRE_VERSION`. */
+  onTransportClosed(
+    transport: ClientChannelTransport,
+    options?: { rejectedByServer?: boolean; otherWireVersion?: boolean },
+  ): void
   onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void
   onTransportPong(ended: PongEntry[]): void
   /** The transport may have headroom again, so the frames waiting for it are sent. */
@@ -106,6 +110,11 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private readonly liveness = new Liveness({ owner: this, channels: this.channels, gate: this.gate })
   private readonly exchange = new AttachExchange({ owner: this, channels: this.channels, gate: this.gate })
   private readonly upgrade: Upgrade
+  /** The page's transports include a WebSocket. */
+  private readonly allowsWebSocket: boolean
+  /** The transports the server allows, from the last settled RECONCILED: an upgrade may start once it came, whether
+   *  before or after the SSE wire opened. */
+  private serverTransports: ReconciledPayload['transports'] | null = null
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
   private idleTimeoutMs: number
   private clientReplayBufferBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BYTES
@@ -118,13 +127,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.owner = owner
     this.telefuncUrl = telefuncUrl
     this.connectionOptions = options
-    this.upgrade = new Upgrade({
-      owner: this,
-      channels: this.channels,
-      liveness: this.liveness,
-      exchange: this.exchange,
-      allowsWebSocket: options.transports.includes(CHANNEL_TRANSPORT.WS),
-    })
+    this.upgrade = new Upgrade({ owner: this })
+    this.allowsWebSocket = options.transports.includes(CHANNEL_TRANSPORT.WS)
     this.idleTimeoutMs = options.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS
     this.transport = TRANSPORT_REGISTRY[options.transports[0]!](telefuncUrl, options, this)
   }
@@ -151,8 +155,18 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     return this.connected && !this.exchange.reconciling && !this.upgrade.gatesSends && !this.exchange.reconcileOwed
   }
 
-  get reconcileHeld(): boolean {
-    return !this.connected || this.upgrade.committing !== null || this.upgrade.ready
+  /** The wire can't take a RECONCILE now: it isn't open, or an upgrade is between its READY and its handoff. */
+  private get reconcileHeld(): boolean {
+    return !this.connected || this.upgrade.holdsReconcile
+  }
+
+  /** Sends the RECONCILE a registration owes, where the wire takes one; no-op when none is owed. While the wire can't
+   *  (connecting, awaiting a RECONCILED, from an upgrade's READY until its handoff) it stays owed: `reconcileOwed` keeps
+   *  `sendsOpen` false, so data frames buffer behind it, and the wire's open and an upgrade attempt's end call this
+   *  again. A RECONCILED, the handoff's too, names what registered meanwhile in its follow-up. */
+  onReconcileDue(): void {
+    if (!this.exchange.reconcileOwed || this.reconcileHeld || this.exchange.reconciling) return
+    this.exchange.sendReconcileBatch(this.exchange.stageReconcileBatch())
   }
 
   /** Wire indexes are u16 and never reused, so once they run out a new channel needs a fresh connection. */
@@ -230,10 +244,10 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     if (!this.exchange.reconciling) {
       // A register-reconcile queued during the connecting window sends its RECONCILE here and
       // carries the buffered frames after it, emptying the buffer; with none queued, the buffered frames go out alone.
-      this.exchange.flushPendingRegisterReconcile()
+      this.onReconcileDue()
       this.drainBufferedFramesToWire()
     }
-    this.upgrade.maybeStart()
+    this.maybeUpgrade()
   }
 
   onTransportBatched(transport: ClientChannelTransport): void {
@@ -245,15 +259,20 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void {
     // An abandoned wire still delivers, but its RECONCILED answers a RECONCILE the next wire's has replaced.
     if (abandoned && frame.tag === TAG.RECONCILED) return
-    const u = this.upgrade.committing
-    if (u !== null && this.transport === u.to) {
-      this.upgrade.ingestDuringHandoff(frame, source === u.from ? 'old' : 'new', byteLength)
-    } else {
-      this.dispatchFrame(frame)
+    switch (this.upgrade.takeHandoffFrame(frame, source, byteLength)) {
+      case 'dispatch':
+        this.dispatchFrame(frame)
+        return
+      case 'complete':
+        this.applyCompletionFrame(frame)
+        return
+      case 'fallback':
+        this.fallbackToSse(new NetworkError('Upgrade handoff buffer limit exceeded', true))
+        return
     }
   }
 
-  dispatchFrame(frame: DecodedFrame): void {
+  private dispatchFrame(frame: DecodedFrame): void {
     // Track seq for ALL sequenced frames, ACK_RES and the closing ones too; otherwise reconciles under-report lastSeq.
     if (isSequencedFrame(frame)) {
       const seq = this.trackSeq(frame.index, frame.seq)
@@ -267,7 +286,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     // ATTACH_RESULT and the wire-level and closing ctrls need connection bookkeeping; the rest is per-channel.
     switch (frame.tag) {
       case TAG.FIN:
-        this.upgrade.handleFin()
+        this.releaseJoin(this.upgrade.handleFin())
         return
       case TAG.RECONCILED:
         this.handleReconciled(frame.payload)
@@ -276,7 +295,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
         const lastSeq = frame.lastSeq === null ? null : this.channels.sentThrough(frame.index, frame.lastSeq)
         if (!this.exchange.handleAttachResult(frame.index, lastSeq)) return
         this.startTtlIfIdle()
-        this.upgrade.maybeStart()
+        this.maybeUpgrade()
         return
       }
       case TAG.ABORT:
@@ -306,7 +325,11 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.liveness.onPong(ended)
   }
 
-  dropWire(transport: ClientChannelTransport): void {
+  onReconcileLate(transport: ClientChannelTransport): void {
+    this.dropWire(transport)
+  }
+
+  private dropWire(transport: ClientChannelTransport): void {
     transport.detachHeartbeat()
     transport.abandonActiveTransport()
     this.onTransportClosed(transport)
@@ -319,11 +342,19 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.dropWire(transport)
   }
 
-  onTransportClosed(transport: ClientChannelTransport, { rejectedByServer = false } = {}): void {
+  onTransportClosed(
+    transport: ClientChannelTransport,
+    { rejectedByServer = false, otherWireVersion = false } = {},
+  ): void {
     if (this.closed) return
     transport.detachHeartbeat()
+    // No reconnect reaches a server that speaks this page's wire.
+    if (otherWireVersion) {
+      this.closeAll(new NetworkError('The server was updated since this page loaded: reload the page.', true))
+      return
+    }
     if (transport !== this.transport) {
-      if (this.upgrade.flipped && transport === this.upgrade.committing!.from) {
+      if (this.upgrade.isLeftWire(transport)) {
         this.fallbackToSse(new NetworkError('Connection dropped', true))
       }
       return
@@ -333,47 +364,119 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.handleTransportLoss(err, rejectedByServer)
   }
 
-  handleReconciled(ctrl: ReconciledPayload): void {
+  private handleReconciled(ctrl: ReconciledPayload): void {
     if (!this.upgrade.onReconciled(ctrl)) return
     this.transport.applyReconciledSettings(ctrl)
     this.takeServerSettings(ctrl)
     const outcome = this.exchange.applyReconciled(ctrl, {
-      deferredOmitted: this.upgrade.committing?.deferredOmitted ?? null,
+      deferOmitted: this.upgrade.handingOff,
       upgradeReady: this.upgrade.ready,
     })
+    this.upgrade.deferOmitted(outcome.omitted)
     this.liveness.install(this.transport, ctrl.pingInterval)
     this.transport.closeAbandonedTransport()
     for (const frame of outcome.frames) this.transport.sendFrame(frame)
     for (const channel of outcome.channelsToOpen) {
       channel._onTransportOpen(this.transport.batched, this.transport.uplink, this.transport.downlink)
     }
-    this.upgrade.tryComplete()
+    this.releaseJoin(this.upgrade.tryComplete())
     if (outcome.reconcileComplete) {
-      this.upgrade.serverTransports = ctrl.transports
+      this.serverTransports = ctrl.transports
       this.startTtlIfIdle()
-      this.upgrade.maybeStart()
+      this.maybeUpgrade()
     }
   }
 
-  createWebSocket(): UpgradeTarget {
-    return new WsTransport({ telefuncUrl: this.telefuncUrl, owner: this })
-  }
-
-  adoptTransport(transport: UpgradeTarget): void {
+  private adoptTransport(transport: UpgradeTarget): void {
     this.transport = transport
     this.wire++
   }
 
-  fallbackToSse(err: Error): void {
+  // ── The SSE→WS upgrade: when one starts, and an attempt's steps ──
+
+  /** Starts an upgrade where one may: on an open SSE wire, the only kind that can end with a barrier, with no
+   *  RECONCILE in flight, when both the page and the server take WebSockets and no attempt is under way. */
+  private maybeUpgrade(): void {
+    if (!this.connected || !this.upgrade.canStart) return
+    // A RECONCILE in flight retries it once its RECONCILED settles (`handleReconciled`).
+    if (this.exchange.reconciling) return
+    if (this.transport.type !== CHANNEL_TRANSPORT.SSE) return
+    if (!this.allowsWebSocket || !this.serverTransports?.includes(CHANNEL_TRANSPORT.WS)) return
+    const { sessionId } = this.exchange
+    if (sessionId === null) return
+    void this.runUpgrade(this.transport as UpgradeSource, sessionId)
+  }
+
+  /** One attempt, then what its end leaves to the connection. However it ends, the RECONCILE a registration owes goes
+   *  after it. */
+  private async runUpgrade(from: UpgradeSource, sessionId: string): Promise<void> {
+    const to = new WsTransport({ telefuncUrl: this.telefuncUrl, owner: this })
+    const end = await this.upgrade.run(
+      from,
+      to,
+      { sessionId, pingInterval: this.liveness.pingInterval },
+      {
+        reconcileSettled: (signal) => this.exchange.reconcileSettled(signal),
+        barrier: (session) => this.exchange.buildBarrierFrame(session),
+        adopt: (target) => this.adoptTransport(target),
+      },
+    )
+    switch (end.tag) {
+      case 'not-ready':
+        if (!this.exchange.reconcileOwed) this.drainBufferedFramesToWire()
+        break
+      case 'not-emitted':
+        if (!this.exchange.reconcileOwed) this.drainBufferedFramesToWire()
+        // An attempt that ended without its barrier goes again once the outbox drained.
+        void from.drained().then(() => this.maybeUpgrade())
+        break
+      case 'stranded':
+        this.fallbackToSse(new NetworkError('Upgrade barrier attempt timed out', true))
+        break
+      case 'flipped':
+        for (const frame of end.completion) this.applyCompletionFrame(frame)
+        this.releaseJoin(this.upgrade.tryComplete())
+        break
+    }
+    this.onReconcileDue()
+  }
+
+  /** A completion frame of the join, applied once the connection flipped: FIN from the old wire, RECONCILED from the
+   *  new. */
+  private applyCompletionFrame(frame: DecodedFrame): void {
+    if (frame.tag === TAG.FIN) this.releaseJoin(this.upgrade.handleFin())
+    else if (frame.tag === TAG.RECONCILED) this.handleReconciled(frame.payload)
+  }
+
+  /** The join completed: the old wire's frames, then the channels its RECONCILED left out closed, then the new wire's,
+   *  as the server wrote them; then the channels learn they are on the WebSocket. */
+  private releaseJoin(release: JoinRelease | null): void {
+    if (release === null) return
+    for (const frame of release.old) this.dispatchFrame(frame)
+    this.exchange.closeUnacknowledged(release.deferredOmitted)
+    for (const frame of release.new) this.dispatchFrame(frame)
+    for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._attach.onUpgradeJoined()
+    this.startTtlIfIdle()
+  }
+
+  onHandoffFailed(err: Error): void {
+    this.fallbackToSse(err)
+  }
+
+  private fallbackToSse(err: Error): void {
     if (this.closed) return
-    this.upgrade.abandon()
+    const abandoned = this.upgrade.abandon()
+    if (abandoned) {
+      for (const frame of abandoned.old) this.dispatchFrame(frame)
+      this.exchange.closeUnacknowledged(abandoned.deferredOmitted)
+    }
     this.transport.abandonActiveTransport()
     this.transport.dispose()
     this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.SSE](this.telefuncUrl, this.connectionOptions, this)
     this.handleTransportLoss(err, false)
   }
 
-  drainBufferedFramesToWire(): void {
+  private drainBufferedFramesToWire(): void {
     for (const frame of this.gate.drainSendable()) this.transport.sendFrame(frame)
     this.startTtlIfIdle()
   }
@@ -424,7 +527,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 
   /** Starts the idle timer on a live wire with no channel open and nothing queued; the transport drains first. */
-  startTtlIfIdle(): void {
+  private startTtlIfIdle(): void {
     if (!this.connected || this.ttl || !this.gate.idle || !this.channels.idle) {
       return
     }
@@ -445,7 +548,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.exchange.cancelRegisterReconcile()
     // Tear down any in-flight phase before transitioning to `closed`.
     if (this.state.tag === 'reconnecting') clearTimeout(this.state.timer)
-    this.upgrade.teardown()
+    this.upgrade.abandon()
     this.enterClosed()
     this.transport.detachHeartbeat()
     this.transport.dispose()
@@ -534,6 +637,10 @@ function channelErrorFor(reason: number): Error {
       )
     case ERROR_REASON.LOST:
       return replayLossError('server')
+    case ERROR_REASON.AHEAD:
+      return new ChannelOverflowError(
+        "Channel closed: the server's sends got further ahead of this client than config.channel.maxPendingBytes or maxPendingAcks lets the server hold",
+      )
     default:
       return makeBugError()
   }

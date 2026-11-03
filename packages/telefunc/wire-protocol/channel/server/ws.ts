@@ -2,7 +2,8 @@ export { getTelefuncChannelHooks }
 
 import { defineHooks, type Hooks, type Peer } from 'crossws'
 import { enableChannelTransports } from '../../../node/server/serverConfig.js'
-import { WS_CLOSE_PAGE_LEFT } from '../../constants.js'
+import { WS_CLOSE_PAGE_LEFT, WS_CLOSE_WIRE_VERSION } from '../../constants.js'
+import { namesWireVersion } from '../../wire/requestKind.js'
 import { getChannelMux } from './ChannelMux.js'
 import type { ServerTransport } from './ChannelMux.js'
 
@@ -12,20 +13,17 @@ declare module 'crossws' {
   }
 }
 
-/** `bufferedAmount` reads the socket's: `undefined` on workerd, whose WebSocket has none. `onMessage` runs as each
- *  message arrives, before the mux takes it. */
+/** `bufferedAmount` reads the socket's: `undefined` on workerd, whose WebSocket has none. */
 function getTelefuncChannelHooks({
   upgrade,
   send = (peer, frame) => peer.send(frame),
   terminate = (peer) => peer.terminate(),
   bufferedAmount = (peer) => peer.websocket.bufferedAmount,
-  onMessage = () => {},
 }: {
   upgrade?: Hooks['upgrade']
   send?: (peer: Peer, frame: Uint8Array<ArrayBuffer>) => void
   terminate?: (peer: Peer) => void
   bufferedAmount?: (peer: Peer) => number | undefined
-  onMessage?: (peer: Peer) => void
 } = {}) {
   enableChannelTransports(['ws'])
   const transport: ServerTransport<Peer> = {
@@ -50,11 +48,12 @@ function getTelefuncChannelHooks({
 
   return defineHooks({
     upgrade,
-    open: (peer) => getChannelMux().onWireOpen(peer, transport),
-    message: (peer, message) => {
-      onMessage(peer)
-      return getChannelMux().onWireMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>)
+    open: (peer) => {
+      // A page on another version reloads: none of its frames could be read.
+      if (!namesWireVersion(peer.request)) return peer.close(WS_CLOSE_WIRE_VERSION, 'reload the page')
+      getChannelMux().onWireOpen(peer, transport)
     },
+    message: (peer, message) => getChannelMux().onWireMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
     close: (peer, details) => {
       const mux = getChannelMux()
       const isPermanent = mux.readPermanentTermination(peer) || details?.code === WS_CLOSE_PAGE_LEFT

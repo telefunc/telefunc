@@ -35,6 +35,8 @@ import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_CONNECT_TTL_MS,
   CHANNEL_IDLE_TIMEOUT_MS,
+  CHANNEL_MAX_PENDING_ACKS,
+  CHANNEL_MAX_PENDING_BYTES,
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
@@ -110,10 +112,11 @@ type ChannelConfigUser = {
    * connect before it is closed automatically.
    */
   connectTtl?: number
-  /**
-   * Maximum number of bytes buffered per channel for text messages
-   * while no client peer is currently attached.
-   */
+  /** Maximum bytes queued beyond credit or awaiting acknowledgements. @default 268435456 */
+  maxPendingBytes?: number
+  /** Maximum simultaneous acknowledgement requests. @default 16384 */
+  maxPendingAcks?: number
+  /** Maximum text bytes buffered per channel while no client is attached. */
   bufferLimit?: number
   /** Maximum number of bytes buffered per channel for binary messages while no client peer is attached. */
   bufferLimitBinary?: number
@@ -145,6 +148,8 @@ type ChannelConfigResolved = {
   clientReplayBuffer: number
   clientReplayBufferBinary: number
   connectTtl: number
+  maxPendingBytes: number
+  maxPendingAcks: number
   bufferLimit: number
   bufferLimitBinary: number
   sseFlushThrottle: number
@@ -356,6 +361,8 @@ function getServerConfig(): ConfigResolved {
       clientReplayBufferBinary:
         configState.channel.clientReplayBufferBinary ?? CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
       connectTtl: configState.channel.connectTtl ?? CHANNEL_CONNECT_TTL_MS,
+      maxPendingBytes: configState.channel.maxPendingBytes ?? CHANNEL_MAX_PENDING_BYTES,
+      maxPendingAcks: configState.channel.maxPendingAcks ?? CHANNEL_MAX_PENDING_ACKS,
       bufferLimit: configState.channel.bufferLimit ?? CHANNEL_BUFFER_LIMIT_BYTES,
       bufferLimitBinary: configState.channel.bufferLimitBinary ?? CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
       sseFlushThrottle: configState.channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
@@ -536,6 +543,8 @@ function applyChannelConfig(val: unknown): void {
       case 'serverReplayBufferBinary':
       case 'clientReplayBuffer':
       case 'clientReplayBufferBinary':
+      case 'maxPendingBytes':
+      case 'maxPendingAcks':
       case 'bufferLimit':
       case 'bufferLimitBinary':
         assertUsage(

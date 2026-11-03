@@ -5,7 +5,7 @@ import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../utils/unrefTimer.js'
 import type { CommitAccepted } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
-import { type ChannelPublishAck, reportBug, createDeferred } from 'telefunc/__internal'
+import { type ChannelPublishAck, handleCallbackBug, createDeferred } from 'telefunc/__internal'
 import type { BinaryFrame } from '../shared/binary.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import {
@@ -274,6 +274,6 @@ async function runAfterHook(hook: () => unknown): Promise<void> {
   try {
     await hook()
   } catch (error) {
-    reportBug(error)
+    handleCallbackBug(error)
   }
 }

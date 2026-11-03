@@ -16,6 +16,8 @@ import { settledOrAborted } from '../../../utils/settledOrAborted.js'
 type ReconcileOutcome = {
   frames: OutboundFrame[]
   channelsToOpen: MuxChannel[]
+  /** With `deferOmitted`, the channels the RECONCILED left out, for the caller to close unacknowledged; else none. */
+  omitted: number[]
   reconcileComplete: boolean
 }
 
@@ -40,15 +42,15 @@ type ReconcileBatch = {
   movedBufferedFrames: OutboundFrame[]
 }
 
-/** The connection, whose wire carries the RECONCILEs. */
+/** The connection, whose wire carries the RECONCILEs, and which decides when one may go. */
 interface AttachExchangeOwner {
   readonly transport: ClientChannelTransport
-  readonly closed: boolean
   /** Advances each time the connection moves to another wire: what went out on the one before may not have arrived. */
   readonly wire: number
-  /** The wire can't take a RECONCILE now: it isn't open, or an upgrade is between its READY and its handoff. */
-  readonly reconcileHeld: boolean
-  dropWire(transport: ClientChannelTransport): void
+  /** A registration owes a RECONCILE, the task that registered it over: it goes now if the wire can take one. */
+  onReconcileDue(): void
+  /** The RECONCILED didn't come by the deadline, and the wire delivered nothing meanwhile. */
+  onReconcileLate(transport: ClientChannelTransport): void
 }
 
 type AttachExchangeOptions = {
@@ -108,19 +110,8 @@ class AttachExchange {
     this.isReconcileOwed = true
     this.registerReconcileTimer = setTimeout(() => {
       this.registerReconcileTimer = null
-      this.flushPendingRegisterReconcile()
+      this.owner.onReconcileDue()
     }, 0)
-  }
-
-  /** Sends the owed RECONCILE on the live wire; no-op when none is owed. While the wire can't take it (connecting,
-   *  awaiting a RECONCILED, from an upgrade's READY until its handoff) it stays owed: `reconcileOwed` keeps `sendsOpen`
-   *  false, so data frames buffer behind it, and `onTransportOpen` and an upgrade attempt's exit call this again. A
-   *  RECONCILED, the handoff's too, names what registered meanwhile in its follow-up. */
-  flushPendingRegisterReconcile(): void {
-    if (!this.isReconcileOwed) return
-    if (this.owner.reconcileHeld) return
-    if (this.isReconciling) return
-    this.sendReconcileBatch(this.stageReconcileBatch())
   }
 
   cancelRegisterReconcile(): void {
@@ -165,17 +156,17 @@ class AttachExchange {
   buildBarrierFrame({ sessionId, upgradeId, uplink }: ProbeSession): OutboundFrame {
     this.enterReconciling()
     // Its entries attach on the WebSocket, `uplink`'s wire, the one after this one.
-    const open = this.declareOpenEntries(this.channels.values(), { skipUnnamed: true, uplink })
+    const open = this.declareOpenEntries(this.channels.values(), { skipUndeclared: true, uplink })
     // A new wire's RECONCILE releases what it leaves out.
     this.channels.takeReleased()
     return { kind: 'reconcile', frame: encode.barrier({ sessionId, upgradeId, open }) }
   }
 
-  /** `deferredOmitted` collects, during an upgrade's handoff, the channels it leaves out; `upgradeReady`: an upgrade's
-   *  READY came, so its barrier, a RECONCILE too, goes next. */
+  /** `deferOmitted`: in an upgrade's handoff, the channels the RECONCILED left out close once its join ends, so they are
+   *  returned, not closed; `upgradeReady`: an upgrade's READY came, so its barrier, a RECONCILE too, goes next. */
   applyReconciled(
     ctrl: ReconciledPayload,
-    { deferredOmitted, upgradeReady }: { deferredOmitted: number[] | null; upgradeReady: boolean },
+    { deferOmitted, upgradeReady }: { deferOmitted: boolean; upgradeReady: boolean },
   ): ReconcileOutcome {
     this.reconciledWire = this.owner.wire
     this.session = ctrl.sessionId
@@ -183,14 +174,16 @@ class AttachExchange {
     this.inFlight = reconcileInFlight()
     const serverHas = this.settleAnswers(ctrl, inFlight)
     // Channels registered after this RECONCILE was built wait for the next one.
-    const hasNewChannels = this.channels.hasUnnamed
-    const { frames, channelsToOpen } = this.attachNamed(inFlight, serverHas, deferredOmitted)
+    const hasNewChannels = this.channels.hasUndeclared
+    const { frames, channelsToOpen, omitted } = this.attachNamed(inFlight, serverHas)
+    // Before the drain: what their close sends queues behind the replays.
+    if (!deferOmitted) this.closeUnacknowledged(omitted)
 
     // What the server has: the channels this RECONCILE named that it attached, and those the ones before named.
     const attached = (ix: number): boolean => {
       if (inFlight.ixes.has(ix)) return serverHas.has(ix)
       const record = this.channels.get(ix)
-      return record !== undefined && !this.channels.isUnnamed(record) && !record.awaited
+      return record !== undefined && !this.channels.isUndeclared(record) && !record.awaited
     }
     for (const frame of this.gate.drain(attached)) frames.push(frame)
 
@@ -202,7 +195,7 @@ class AttachExchange {
       if (hasNewChannels) this.scheduleRegisterReconcile()
     }
 
-    return { frames, channelsToOpen, reconcileComplete: !hasNewChannels }
+    return { frames, channelsToOpen, omitted: deferOmitted ? omitted : [], reconcileComplete: !hasNewChannels }
   }
 
   /** Settles what `inFlight` asked with the RECONCILED that answers it: its probes, the ATTACH_RESULT frames that came
@@ -224,26 +217,31 @@ class AttachExchange {
     return serverHas
   }
 
-  /** Brings each channel `inFlight` named and the server attached to the server's state: the frames that replays, and
-   *  the channels that open on the wire. */
+  /** Brings each channel `inFlight` named and the server attached to the server's state: the frames that replays, the
+   *  channels that open on the wire, and those the server no longer has. */
   private attachNamed(
     { ixes, carriedFrom }: ReconcileInFlight,
     serverHas: Map<number, number>,
-    deferredOmitted: number[] | null,
-  ): { frames: OutboundFrame[]; channelsToOpen: MuxChannel[] } {
+  ): { frames: OutboundFrame[]; channelsToOpen: MuxChannel[]; omitted: number[] } {
     const frames: OutboundFrame[] = []
     const channelsToOpen: MuxChannel[] = []
+    const omitted: number[] = []
     for (const ix of ixes.keys()) {
       const record = this.channels.get(ix)
       if (record === undefined || record.awaited) continue
+      const lastSeq = serverHas.get(ix)
+      if (lastSeq === undefined) {
+        // One the server no longer has needs nothing more from the page, if closed; else it closes unacknowledged.
+        if (record.state.tag === 'closed') this.gate.release(record)
+        else omitted.push(ix)
+        continue
+      }
       // The replay stops before the first seq the wire carries behind the RECONCILE.
       const carriedSeq = carriedFrom.get(ix) ?? Infinity
-      const replay = this.attachRecord(record, serverHas.get(ix), carriedSeq - 1, deferredOmitted)
-      if (replay === null) continue
-      for (const frame of replay) frames.push(frame)
+      for (const frame of this.attachRecord(record, lastSeq, carriedSeq - 1)) frames.push(frame)
       if (record.state.tag !== 'closed') channelsToOpen.push(record.channel)
     }
-    return { frames, channelsToOpen }
+    return { frames, channelsToOpen, omitted }
   }
 
   /** An awaited channel's own RECONCILED entry: `lastSeq` if the server attached it, null if not. False where it
@@ -311,12 +309,12 @@ class AttachExchange {
   /** The RECONCILED didn't come by the deadline. Unless the wire delivered something meanwhile, it is dropped as on a
    *  missed pong, and `handleTransportLoss` reconnects. */
   private onReconcileTimeout(): void {
-    if (this.owner.closed || !this.isReconciling) return
+    if (!this.isReconciling) return
     const { transport } = this.owner
     // A RECONCILE waits behind what the page sent before: the wire is dead once it delivered nothing for the deadline.
     const quiet = transport.heartbeat?.quietFor() ?? Infinity
     if (quiet < RECONCILE_TIMEOUT_MS) return this.armReconcileDeadline(RECONCILE_TIMEOUT_MS - quiet)
-    this.owner.dropWire(transport)
+    this.owner.onReconcileLate(transport)
   }
 
   // ── The RECONCILE ──
@@ -328,7 +326,7 @@ class AttachExchange {
     const changes = this.session !== null && this.reconciledWire === this.owner.wire
     const records = changes ? this.channels.changed() : this.channels.values()
     const open = this.declareOpenEntries(records, {
-      skipUnnamed: false,
+      skipUndeclared: false,
       uplink,
     })
     const released = this.channels.takeReleased()
@@ -341,10 +339,10 @@ class AttachExchange {
   private declareOpenEntries(
     records: Iterable<ChannelRecord>,
     {
-      skipUnnamed,
+      skipUndeclared,
       uplink,
     }: {
-      skipUnnamed: boolean
+      skipUndeclared: boolean
       uplink: Uplink
     },
   ): ReconcileOpenEntry[] {
@@ -358,8 +356,8 @@ class AttachExchange {
         continue
       }
       const isInitial = record.state.tag !== 'open' && record.state.initial
-      if (skipUnnamed && isInitial && !record.awaited) continue
-      this.channels.name(record)
+      if (skipUndeclared && isInitial && !record.awaited) continue
+      this.channels.markDeclared(record)
       this.inFlight.ixes.set(ix, isInitial)
       const payloadEntry: ReconcileOpenEntry = {
         id: record.channel.id,
@@ -398,26 +396,9 @@ class AttachExchange {
 
   // ── The RECONCILED ──
 
-  /** What a channel the RECONCILE named replays to the server, its state brought to the server's; null if let go. */
-  private attachRecord(
-    record: ChannelRecord,
-    lastSeq: number | undefined,
-    throughSeq: number,
-    deferredOmitted: number[] | null,
-  ): OutboundFrame[] | null {
-    if (record.state.tag === 'closed') {
-      // One the server no longer has needs nothing more from the page.
-      if (lastSeq === undefined) {
-        this.gate.release(record)
-        return null
-      }
-      this.channels.serverHas(record, record.state, lastSeq)
-    }
-    if (lastSeq === undefined) {
-      if (deferredOmitted) deferredOmitted.push(record.ix)
-      else this.closeUnacknowledged([record.ix])
-      return null
-    }
+  /** What a channel the RECONCILE named and the server attached replays to it, its state brought to the server's. */
+  private attachRecord(record: ChannelRecord, lastSeq: number, throughSeq: number): OutboundFrame[] {
+    if (record.state.tag === 'closed') this.channels.serverHas(record, record.state, lastSeq)
     if (record.state.tag === 'pending') this.channels.open(record)
     return this.replayTo(record, lastSeq, throughSeq)
   }
