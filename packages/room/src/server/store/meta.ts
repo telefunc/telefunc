@@ -194,13 +194,17 @@ async function readRoomMetaSeq(roomId: string, inc: string): Promise<number | nu
   return seq === undefined ? 0 : decodeCellCounter(seq).value
 }
 
-/** Once the room's meta was first written, a write is one exchange that expects only `meta:gen`, which only a replace
- *  writes, so concurrent merges never conflict; the first write stores the whole meta, and only the writes racing it
- *  conflict, once. A merge reads its keys with `meta:seq`, so a key already there keeps its place, and retries once a
- *  replace landed. A replace writes its keys into a new generation and marks the old one to drop; one that finds a
- *  replace landed since its read is ordered just before it, so it is overwritten whole and writes nothing. Each write
- *  that commits publishes what it changed with the `meta:seq` it left, so a view applies it in what it changed. New
- *  keys are placed at the `meta:seq` the write read. */
+/** Writes the room's meta in one compare-exchange. Each commit adds one to `meta:seq` and publishes what it changed at
+ *  that seq, and views apply the changes in seq order.
+ *  - First write (no `meta:seq` yet): stores the whole meta as generation 0, the replace, or the merge applied to the
+ *    meta the room was created with. It expects no `meta:seq`, so of racing first writes one commits and the others
+ *    retry as a merge or a replace.
+ *  - Merge: writes only its keys, in the current generation. It expects `meta:gen` unchanged, which only a replace
+ *    changes, so merges never conflict with each other (a key two of them write ends as the later commit wrote it), and
+ *    one that a replace overtook retries on the new meta. A key already there keeps its place; a new one is placed at
+ *    the `meta:seq` the merge read.
+ *  - Replace: writes the whole meta as a new generation and marks the old one to drop. It also expects `meta:gen`
+ *    unchanged: one that another replace overtook counts as the earlier of the two, and writes nothing. */
 async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: RoomMetaWrite): Promise<void> {
   const { inc } = config
   const plane = getRoomPlane()
