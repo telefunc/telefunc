@@ -41,12 +41,18 @@ import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import { SelfTime } from '../../flowControl/SelfTime.js'
 import { SendCredit } from '../../flowControl/SendCredit.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
-import { ServerChannelBuffer, type BufferedSender, type EntryCallback } from './ServerChannelBuffer.js'
+import {
+  ServerChannelBuffer,
+  HELD_SEND_OVERHEAD_BYTES,
+  type BufferedSender,
+  type EntryCallback,
+} from './ServerChannelBuffer.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 import { assert, assertWarning } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/frame.js'
+import { HEADER } from '../../wire/header.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
 import { seqNear, seqThrough } from '../../wire/seq.js'
 import { ProtocolViolationError, assertProtocol } from '../../wire/protocolViolation.js'
@@ -231,7 +237,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this.offlineBuffer.pushText(serialized, resolve, reject)
       })
     }
-    this.checkPending(utf8ByteLength(serialized) + 7, needsAck)
+    this.checkPending(utf8ByteLength(serialized) + HEADER, needsAck)
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
     // Promise already serializes the next send, so credit would add nothing.
     if (needsAck) {
@@ -277,7 +283,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this.offlineBuffer.pushBinary(data, resolve, reject)
       })
     }
-    this.checkPending(data.byteLength + 7, needsAck)
+    this.checkPending(data.byteLength + HEADER, needsAck)
     // Ack-bearing path bypasses credit; see `sendData` for rationale.
     if (needsAck) {
       return this.lifecycle.trackAck(
@@ -292,15 +298,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.countSend(this.peer.sendSequenced(encode.binary, data))
   }
 
+  /** Ends the channel and throws where a send of `bytes` (its frame included) would pass a send budget the app set. */
   private checkPending(bytes: number, ack: boolean): void {
-    const held = ack || this.sendCredit.waitingCount > 0 ? bytes + 512 : 0
-    const setting =
-      ack && this.pendingAcks.size >= this.maxPendingAcks
-        ? 'maxPendingAcks'
-        : this.bytesAhead() + held > this.maxPendingBytes
-          ? 'maxPendingBytes'
-          : null
-    if (!setting) return
+    if (ack && this.pendingAcks.size >= this.maxPendingAcks) this.overflow('maxPendingAcks')
+    // Only a send that waits, for its answer or behind sends waiting for credit, is held with its promise.
+    const held = ack || this.sendCredit.waitingCount > 0 ? bytes + HELD_SEND_OVERHEAD_BYTES : 0
+    if (this.bytesAhead() + held > this.maxPendingBytes) this.overflow('maxPendingBytes')
+  }
+
+  private overflow(setting: 'maxPendingAcks' | 'maxPendingBytes'): never {
     const err = new ChannelOverflowError(
       `Channel closed: config.channel.${setting} exceeded; await each send or raise the setting`,
     )
@@ -318,9 +324,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private bytesAhead(): number {
     return (
       this.sendCredit.bytesSentPastCredit +
-      this.sendCredit.waitingCount * 512 +
+      this.sendCredit.waitingCount * HELD_SEND_OVERHEAD_BYTES +
       this.pendingAckBytes +
-      this.pendingAcks.size * 512
+      this.pendingAcks.size * HELD_SEND_OVERHEAD_BYTES
     )
   }
 
