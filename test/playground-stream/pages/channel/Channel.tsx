@@ -1,6 +1,6 @@
 export { ChannelDemo }
 
-import { prepareIteratorAck, sendIteratorAck } from './iteratorAckProbe'
+import { prepareIteratorAck, sendIteratorAck, type IteratorAckOptions } from './iteratorAckProbe'
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Abort as TelefuncAbort, abort, close, ConnectionError, withContext } from 'telefunc/client'
@@ -269,6 +269,35 @@ const initialState: ChannelState = {
   slowUplink: null,
   lateCallbacks: null,
   openAbort: null,
+}
+
+/** One case of a cancelled iterator: `direction` is the side whose iterator is cancelled. */
+async function runIteratorAck(iteratorCase: IteratorAckOptions & { direction: 'server' | 'client' }) {
+  const { direction, ...options } = iteratorCase
+  const { binary } = options
+  const remote = await onChannelIteratorAck()
+  const { channel } = remote
+  if (direction === 'server') await remote.prepare(options)
+  const receiver = direction === 'server' ? remote : prepareIteratorAck(channel, options)
+  const send = (prime: boolean) =>
+    direction === 'client' ? remote.send({ binary, prime }) : sendIteratorAck(channel, { binary, prime })
+  if (options.mode === 'return') {
+    await send(true)
+    await receiver.primed()
+  }
+  const pending = send(false)
+  await receiver.cancel()
+  const control = await send(false)
+  const result = {
+    ...iteratorCase,
+    ack: String(await pending),
+    control: String(control),
+    answers: await receiver.answers(),
+    open: !channel.isClosed,
+  }
+  await channel.close()
+  close(remote)
+  return result
 }
 
 function timestamp() {
@@ -1192,29 +1221,7 @@ function ChannelDemo() {
       for (const direction of ['server', 'client'] as const) {
         for (const binary of [false, true]) {
           for (const mode of ['abort', 'return'] as const) {
-            for (const answer of [false, true]) {
-              const remote = await onChannelIteratorAck()
-              const { channel } = remote
-              if (direction === 'server') await remote.prepare({ binary, mode, answer })
-              const receiver = direction === 'server' ? remote : prepareIteratorAck(channel, { binary, mode, answer })
-              const send = (prime: boolean) =>
-                direction === 'client' ? remote.send({ binary, prime }) : sendIteratorAck(channel, { binary, prime })
-              if (mode === 'return') {
-                await send(true)
-                await receiver.primed()
-              }
-              const pending = send(false)
-              await receiver.cancel()
-              const control = await send(false)
-              results.push({
-                ack: String(await pending),
-                control: String(control),
-                answers: await receiver.answers(),
-                open: !channel.isClosed,
-              })
-              await channel.close()
-              close(remote)
-            }
+            for (const answer of [false, true]) results.push(await runIteratorAck({ direction, binary, mode, answer }))
           }
         }
       }

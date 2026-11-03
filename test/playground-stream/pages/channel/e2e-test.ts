@@ -1375,9 +1375,20 @@ function testChannelApi() {
     await autoRetry(async () => {
       const results = JSON.parse((await page.textContent('#channel-iterator-ack-result'))!)
       expect(results.length).toBe(16)
-      for (let i = 0; i < 16; i += 2) {
-        expect(results[i]).deep.equal({ ack: 'undefined', control: 'undefined', answers: 0, open: true })
-        expect(results[i + 1]).deep.equal({ ack: 'answer', control: 'undefined', answers: 1, open: true })
+      const cases = results.map(({ direction, binary, mode, answer }: any) => [direction, binary, mode, answer].join())
+      expect(new Set(cases).size).toBe(16)
+      for (const result of results) {
+        const { direction, binary, mode, answer } = result
+        expect(result).deep.equal({
+          direction,
+          binary,
+          mode,
+          answer,
+          ack: answer ? 'answer' : 'undefined',
+          control: 'undefined',
+          answers: answer ? 1 : 0,
+          open: true,
+        })
       }
     })
   })
