@@ -14,7 +14,7 @@ import type { RoomIncarnation } from '../protocol.js'
 import type { RoomModel } from '../../shared/RoomModel.js'
 import { reportRoomError } from '../reportRoomError.js'
 import { LaneSubscription, type LaneAddress, type LaneSubscriptionOwner } from './LaneSubscription.js'
-import { BinaryLanes, type PairShape, type Replans } from './BinaryLanes.js'
+import { BinaryLanes, type PairShape } from './BinaryLanes.js'
 import { Slice } from '../../shared/Slice.js'
 import type { LaneHolder } from '../lifecycle/replay.js'
 import { WantsIndex, type WantsIndexOwner } from './WantsIndex.js'
@@ -321,6 +321,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
       await Promise.resolve()
       const slice = new Slice()
       for (;;) {
+        this.lanes.takeReplans(this.queued)
         const plan = this.queued
         if (this.gone.size > 0) {
           await slice.next()
@@ -384,7 +385,6 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
         }),
       )
     }
-    this.queueReplans(this.lanes.takeReplans())
   }
 
   /** Runs `step` on each item within `slice`, the room-wide lanes synced after each slice; a step that yields
@@ -639,15 +639,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     if (address.kind !== 'binary' && address.kind !== 'binary-all' && address.kind !== 'binary-track') return
     this.lanes.lanePending(lane, pending)
     if (pending || !lane.wanted) return
-    this.queueReplans(this.lanes.takeReplans())
     this.schedulePlan()
-  }
-
-  /** What the binary lanes replanned joins the next planning round. */
-  private queueReplans({ members, tracks, pairs }: Replans): void {
-    for (const member of members) this.queued.members.add(member)
-    for (const track of tracks) this.queued.tracks.add(track)
-    for (const [member, memberTracks] of pairs) for (const track of memberTracks) this.queuePair(member, track)
   }
 
   onLaneTerminal(lane: LaneSubscription): void {

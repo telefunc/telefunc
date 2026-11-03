@@ -55,7 +55,7 @@ class BinaryLanes {
   private readonly pending = new Set<LaneSubscription>()
   /** The wait for `pending`, until another lane starts pending. */
   private allReadyWait: Promise<void> | null = null
-  private replans: Replans = newReplans()
+  private readonly replans: Replans = { members: new Set(), tracks: new Set(), pairs: new Map() }
 
   private readonly laneOwner: LaneSubscriptionOwner
   private readonly model: BinaryLanesOptions['model']
@@ -65,11 +65,16 @@ class BinaryLanes {
     this.model = model
   }
 
-  /** What the lanes replanned since the last call. */
-  takeReplans(): Replans {
-    const replans = this.replans
-    this.replans = newReplans()
-    return replans
+  /** Moves what the lanes replanned since the last call into `next`, the plan's next round. */
+  takeReplans(next: Replans): void {
+    const { members, tracks, pairs } = this.replans
+    for (const member of members) next.members.add(member)
+    for (const track of tracks) next.tracks.add(track)
+    for (const [member, memberTracks] of pairs)
+      for (const track of memberTracks) toggleEntry(next.pairs, member, track, true)
+    members.clear()
+    tracks.clear()
+    pairs.clear()
   }
 
   /** Whether a lane here carries the member's `track`. */
@@ -294,8 +299,4 @@ class BinaryLanes {
 
 function namedKey(member: string, track: string): string {
   return encodeLaneKey({ kind: 'binary', member, track })
-}
-
-function newReplans(): Replans {
-  return { members: new Set(), tracks: new Set(), pairs: new Map() }
 }
