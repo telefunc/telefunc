@@ -81,6 +81,28 @@ function Publish() {
         Broadcast iteration and signals
       </button>
 
+      <button
+        id="test-broadcast-publish-failures"
+        onClick={async () => {
+          const outcomes = []
+          for (const binary of [false, true]) {
+            for (const caught of [false, true]) {
+              const remote = await onBroadcastServerListener()
+              const { room } = remote
+              const pending = binary ? room.publishBinary(new Uint8Array([1])) : room.publish('failure')
+              room.abort('stop')
+              if (caught) outcomes.push(await pending.catch((err) => err.abortValue))
+              else outcomes.push('ignored')
+              await room.closed.catch(() => {})
+              close(remote)
+            }
+          }
+          setResult(JSON.stringify(outcomes))
+        }}
+      >
+        Observe or ignore publish failures
+      </button>
+
       <h2>Text Pub/Sub</h2>
 
       <button

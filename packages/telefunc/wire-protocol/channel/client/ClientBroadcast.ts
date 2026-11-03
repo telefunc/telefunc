@@ -11,7 +11,7 @@ import { Listeners } from '../../../utils/Listeners.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { ChannelClosedError } from '../channelErrors.js'
 import { isPromise } from '../../../utils/isPromise.js'
-import { ClientChannel, reportChannelError, type ClientChannelOptions } from './ClientChannel.js'
+import { ClientChannel, type ClientChannelOptions } from './ClientChannel.js'
 
 class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly broadcastListeners = new Listeners<BroadcastListener<T>>()
@@ -30,7 +30,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     if (this.stopped) throw new ChannelClosedError()
     const serialized = stringify(data)
     const ret = this.sendAckReq<ChannelPublishAck, string>(encode.publishAckReq, serialized)
-    ret.catch(reportChannelError)
+    ret.catch(() => {})
     return ret
   }
 
@@ -53,7 +53,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
     if (this.stopped) throw new ChannelClosedError()
     const ret = this.sendAckReq<ChannelPublishAck, Uint8Array>(encode.publishBinaryAckReq, data)
-    ret.catch(reportChannelError)
+    ret.catch(() => {})
     return ret
   }
 

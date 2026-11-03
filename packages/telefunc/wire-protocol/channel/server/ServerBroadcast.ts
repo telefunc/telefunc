@@ -355,7 +355,10 @@ function receiptOf(
     timestamp: r.timestamp,
     meta: r.meta,
   })
-  return isPromise(result) ? result.then(toAck) : toAck(result)
+  if (!isPromise(result)) return toAck(result)
+  const receipt = result.then(toAck)
+  receipt.catch(() => {})
+  return receipt
 }
 
 const Broadcast = {

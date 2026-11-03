@@ -287,8 +287,6 @@ What happens to a server channel's sends, awaited or not:
 - While the client is offline, the server buffers them, up to `bufferLimit`/`bufferLimitBinary` (see <Link href="/channel-config" />). An awaited `send()` resolves once the client is back and the message went out.
 - Past that limit, the server drops the oldest buffered sends, and each dropped `send()` rejects with `ChannelOverflowError`. A single message larger than the limit is dropped even if you await it. Earlier buffered sends of the same kind (text or binary) are dropped too.
 
-A `send()` that fails while nobody awaits it doesn't crash the process: Telefunc catches it. To see the error, `await` the send or `.catch()` it.
-
 Telefunc logs a warning once per channel when sends get 64 MiB ahead of the client. This is separate from the message-size and send-budget limits.
 
 To fix it, `await` each `send()` before the next, as in the clock example above.
@@ -486,6 +484,8 @@ Only the two ends of a channel can use it, while anything that knows a broadcast
 
 
 ## Errors
+
+Telefunc silently handles rejected promises from `send()`, `sendBinary()`, `publish()` and `publishBinary()`. To observe a failure, `await` the call or use `.catch()`.
 
 Channels and broadcasts signal failure through four errors:
 

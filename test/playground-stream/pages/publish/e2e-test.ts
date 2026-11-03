@@ -1,5 +1,6 @@
 export { testPublish }
 
+import type { ConsoleMessage } from 'playwright-chromium'
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import {
   navigate,
@@ -38,6 +39,24 @@ type ServerBroadcastResult = {
 }
 
 function testPublish(isDev: boolean, inDocker = false) {
+  test('broadcast: publish rejections stay silent whether caught or ignored', async () => {
+    const reports: string[] = []
+    const onConsole = (message: ConsoleMessage) => {
+      if (message.text().includes('[telefunc:channel-error]')) reports.push(message.text())
+    }
+    page.on('console', onConsole)
+    try {
+      await navigate(`${getServerUrl()}/publish`)
+      await page.click('#test-broadcast-publish-failures')
+      await autoRetry(async () => {
+        expect(await getResult('#publish-result')).deep.equal(['ignored', 'stop', 'ignored', 'stop'])
+      })
+      expect(reports).deep.equal([])
+    } finally {
+      page.off('console', onConsole)
+    }
+  })
+
   test('broadcast: iteration preserves publish info and signals remove subscriptions on both ends', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-api')
