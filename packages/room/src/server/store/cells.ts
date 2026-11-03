@@ -2,9 +2,7 @@ export {
   MEMBER_CELL_PREFIX,
   memberCellKey,
   memberIdOfCellKey,
-  DEPARTING_CELL_PREFIX,
   departingCellKey,
-  memberIdOfDepartingKey,
   identityCellKey,
   identityCellPrefix,
   HOLDS_CELL_KEY,
@@ -42,14 +40,11 @@ function memberCellKey(memberId: string): string {
 function memberIdOfCellKey(key: string): string {
   return key.slice(MEMBER_CELL_PREFIX.length)
 }
-/** A member that left, with its cause, written by its leave and swept `ROOM_DEPARTING_RECORD_MS` after it: a view
- *  that missed the leave event ends the member with it (`DepartingRecord`). */
+/** A member that left, with its cause: an expiring cell its leave writes, which the backend deletes
+ *  `ROOM_DEPARTING_RECORD_MS` later. A view that missed the leave event ends the member with it. */
 const DEPARTING_CELL_PREFIX = 'departing:'
 function departingCellKey(memberId: string): string {
   return DEPARTING_CELL_PREFIX + memberId
-}
-function memberIdOfDepartingKey(key: string): string {
-  return key.slice(DEPARTING_CELL_PREFIX.length)
 }
 /** One marker per (identity, member), written and removed in the compare-exchange that writes or removes the member. */
 function identityCellPrefix(identity: string): string {

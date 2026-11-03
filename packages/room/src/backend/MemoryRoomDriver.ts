@@ -6,6 +6,8 @@ import type {
   CellCount,
   CellCounter,
   CellMutation,
+  ExpiringCell,
+  ExpiringCellsRead,
   CellsExchange,
   CellsExchangeResult,
   CommitResult,
@@ -61,6 +63,8 @@ type Incarnation = {
   /** The last cell version this incarnation issued. */
   version: number
   cells: Map<string, StoredCell>
+  /** Each expiring cell, with the timer that deletes it. */
+  expiring: Map<string, { bytes: Uint8Array; timer: ReturnType<typeof setTimeout> }>
   /** Cell keys by each of their prefixes ending in ':', the separator of cell keys, so a prefix read lists its own. */
   cellsByPrefix: Map<string, Set<string>>
   /** The room-wide lanes' order, by lane key. */
@@ -105,6 +109,7 @@ function newIncarnation(): Incarnation {
   return {
     version: 0,
     cells: new Map(),
+    expiring: new Map(),
     cellsByPrefix: new Map(),
     order: new Map(),
     memberOrders: new Map(),
@@ -194,6 +199,17 @@ function setCell(incarnation: Incarnation, key: string, bytes: Uint8Array | null
       getOrCreate(incarnation.cellsByPrefix, prefix, () => new Set()).add(key)
   }
   incarnation.cells.set(key, { bytes: copyBytes(bytes), version })
+}
+
+/** Writes an expiring cell, replacing one at its key, and the timer that deletes it. */
+function setExpiring(incarnation: Incarnation, { key, bytes, ttlMs }: ExpiringCell): void {
+  clearTimeout(incarnation.expiring.get(key)?.timer)
+  const timer = unrefTimer(
+    setTimeout(() => {
+      if (incarnation.expiring.get(key)?.timer === timer) incarnation.expiring.delete(key)
+    }, ttlMs),
+  )
+  incarnation.expiring.set(key, { bytes: copyBytes(bytes), timer })
 }
 
 /** Applies the mutations and counts as one write, at the incarnation's next version; returns each counted counter. */
@@ -306,6 +322,17 @@ class MemoryRoomDriver implements RoomDriver {
     return this.incarnation(room, inc)
   }
 
+  async readExpiringCells(roomId: string, inc: string, keys: readonly string[]): Promise<ExpiringCellsRead> {
+    const incarnation = this.readableIncarnation(roomId, inc)
+    if (incarnation === null) return { kind: 'stale-incarnation' }
+    const cells = new Map<string, Uint8Array>()
+    for (const key of keys) {
+      const cell = incarnation.expiring.get(key)
+      if (cell !== undefined) cells.set(key, copyBytes(cell.bytes))
+    }
+    return { kind: 'read', cells }
+  }
+
   async compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult> {
     const room = this.rooms.get(roomId)
     const head = this.liveHead(room)
@@ -337,6 +364,7 @@ class MemoryRoomDriver implements RoomDriver {
       for (const key of [...cellKeysWithPrefix(incarnation, prefix)]) setCell(incarnation, key, null, '')
     }
     const counters = applyCells(incarnation, writes.mutations, writes.counts)
+    for (const cell of writes.expiring) setExpiring(incarnation, cell)
     for (const member of writes.members) dropMemberLanes(incarnation, member)
     if (writes.commit === null) return { kind: 'done', value, counters }
     return {
@@ -456,6 +484,7 @@ class MemoryRoomDriver implements RoomDriver {
     if (room === undefined) return
     const incarnation = room.incarnations.get(inc)
     if (incarnation === undefined) return // already dropped (the janitor is resumable)
+    for (const { timer } of incarnation.expiring.values()) clearTimeout(timer)
     room.incarnations.delete(inc)
     this.releaseWhenLapsed(roomId, room)
   }

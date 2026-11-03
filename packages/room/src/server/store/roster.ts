@@ -1,4 +1,4 @@
-export { reapAndReadRoster, reapAndReadMembersById, reapAndCountPresence, reapAndResolveIdentity }
+export { reapAndReadRoster, readLeaveCauses, reapAndReadMembersById, reapAndCountPresence, reapAndResolveIdentity }
 
 import { assert } from '../../utils/assert.js'
 import type { MemberSnapshot } from '../../shared/protocol.js'
@@ -6,26 +6,25 @@ import type { RoomMemberRecord, RoomIncarnation } from '../protocol.js'
 import type { LeaveCause, ParticipantMeta } from '../../types.js'
 import { memberMetaOf, readMembersMetaCells, type MemberMetaCells } from './meta.js'
 import { eachInFlight, readOpenCells, readPrefix, readPrefixAt } from './cellStore.js'
-import { leaveCauseFromWire } from '../../shared/protocol.js'
+import { getRoomPlane } from '../../backend/plane.js'
+import { roomClosedError } from '../../shared/errors.js'
+import { leaveCauseFromWire, type WireLeaveCause } from '../../shared/protocol.js'
 import { decodeRoomRecord } from '../lanes/lanes.js'
-import type { DepartingRecord } from './members.js'
 import {
-  DEPARTING_CELL_PREFIX,
   LEASE_CELL_PREFIX,
   MEMBER_CELL_PREFIX,
+  departingCellKey,
   identityCellPrefix,
   memberCellKey,
   memberIdOfCellKey,
-  memberIdOfDepartingKey,
 } from './cells.js'
 import { reapLeases } from './lease.js'
 
 // The room's members as read from its cells, each read after reaping the lapsed leases it found.
 
-type Roster = { members: MemberSnapshot[]; departing: Map<string, LeaveCause> }
+type Roster = { members: MemberSnapshot[] }
 
-/** Live members, and why each recent leaver left (its departing record); read again after a lapsed lease's were
- *  removed. */
+/** Live members, read again after a lapsed lease's were removed. */
 async function reapAndReadRoster(room: RoomIncarnation): Promise<Roster> {
   const [leases, roster] = await Promise.all([readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX), readRoster(room)])
   return (await reapLeases(room, leases)) ? await readRoster(room) : roster
@@ -33,18 +32,24 @@ async function reapAndReadRoster(room: RoomIncarnation): Promise<Roster> {
 
 async function readRoster(room: RoomIncarnation): Promise<Roster> {
   const cells = await readPrefix(room.id, room.inc, MEMBER_CELL_PREFIX)
-  // Both after the member read: a leave committing in between shows up as departing, and each member's cells are as new
-  // as its record or newer, so the updates after the record's seq bring a view to them.
-  const [departingCells, metaCells] = await Promise.all([
-    readPrefix(room.id, room.inc, DEPARTING_CELL_PREFIX),
-    readMembersMetaCells(room, cells),
-  ])
-  const departing = new Map<string, LeaveCause>()
-  for (const [key, raw] of departingCells) {
-    departing.set(memberIdOfDepartingKey(key), leaveCauseFromWire(decodeRoomRecord<DepartingRecord>(raw)))
+  // After the member read: each member's cells are as new as its record or newer, so the updates after the record's
+  // seq bring a view to them.
+  const metaCells = await readMembersMetaCells(room, cells)
+  return { members: await liveMembers(memberRecords(cells), metaCells) }
+}
+
+/** Why each of `ids` left, for those whose departing record the backend hasn't expired yet. Read after the members, a
+ *  leave committing in between has its record. */
+async function readLeaveCauses(room: RoomIncarnation, ids: readonly string[]): Promise<Map<string, LeaveCause>> {
+  const causes = new Map<string, LeaveCause>()
+  if (ids.length === 0) return causes
+  const read = await getRoomPlane().driver.readExpiringCells(room.id, room.inc, ids.map(departingCellKey))
+  if (read.kind === 'stale-incarnation') throw roomClosedError(room.id)
+  for (const id of ids) {
+    const raw = read.cells.get(departingCellKey(id))
+    if (raw !== undefined) causes.set(id, leaveCauseFromWire(decodeRoomRecord<WireLeaveCause>(raw)))
   }
-  const members = await liveMembers(memberRecords(cells), metaCells)
-  return { members, departing }
+  return causes
 }
 
 function* memberRecords(cells: ReadonlyMap<string, Uint8Array>): Generator<readonly [string, Uint8Array]> {

@@ -15,6 +15,9 @@ export {
   nextMaintenanceDeadline,
   compareExchangeHead,
   readCells,
+  readExpiringCells,
+  writeExpiringCell,
+  deleteExpiredCells,
   readCellPage,
   readOrder,
   compareExchangeCells,
@@ -40,6 +43,8 @@ import {
   type CellSelector,
   type CellsRead,
   type DirectoryPage,
+  type ExpiringCell,
+  type ExpiringCellsRead,
   type StaleIncarnation,
 } from '../backend/contract.js'
 import {
@@ -79,6 +84,9 @@ function initSchema(sql: SqlStorage): void {
     CREATE TABLE IF NOT EXISTS gen (inc TEXT PRIMARY KEY, revision INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS cell
       (inc TEXT NOT NULL, key TEXT NOT NULL, bytes BLOB NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (inc, key));
+    CREATE TABLE IF NOT EXISTS expiring_cell
+      (inc TEXT NOT NULL, key TEXT NOT NULL, bytes BLOB NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (inc, key));
+    CREATE INDEX IF NOT EXISTS expiring_cell_expires_at ON expiring_cell(expires_at);
     CREATE TABLE IF NOT EXISTS ord
       (inc TEXT NOT NULL, domain TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (inc, domain));
     CREATE TABLE IF NOT EXISTS rt_manifest
@@ -230,8 +238,8 @@ function hasIncarnation(sql: SqlStorage, inc: string): boolean {
   return sql.exec('SELECT 1 FROM gen WHERE inc = ?', inc).toArray().length > 0
 }
 
-/** When the alarm's sweep next has work: `now` while an orphaned incarnation waits, else the first lapse of a head or a
- *  route or the listing's check, or null for none. */
+/** When the alarm's sweep next has work: `now` while an orphaned incarnation waits, else the first lapse of a head, a
+ *  route or an expiring cell, or the listing's check, or null for none. */
 function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
   if (listOrphanIncarnations(sql, readLiveHead(sql, now)?.currentInc ?? null).length > 0) return now
   // Each table takes its own MIN, so the route table's seeks its expires_at index.
@@ -240,7 +248,8 @@ function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
       deadline: number | null
     }>(
       'SELECT MIN(deadline) AS deadline FROM (SELECT MIN(expires_at) AS deadline FROM head ' +
-        'UNION ALL SELECT MIN(expires_at) FROM route UNION ALL SELECT MIN(check_at) FROM directory)',
+        'UNION ALL SELECT MIN(expires_at) FROM route UNION ALL SELECT MIN(expires_at) FROM expiring_cell ' +
+        'UNION ALL SELECT MIN(check_at) FROM directory)',
     )
     .toArray()[0]!.deadline
 }
@@ -317,6 +326,35 @@ function readCells(sql: SqlStorage, inc: string, sel: CellSelector, now: number)
   const head = readLiveHead(sql, now)
   if (head === null || head.currentInc !== inc) return { kind: 'stale-incarnation' }
   return cellPage(selectCellRows(sql, inc, sel), now)
+}
+
+/** The expiring cells of `keys` that haven't expired; the expired ones it finds go. */
+function readExpiringCells(sql: SqlStorage, inc: string, keys: readonly string[], now: number): ExpiringCellsRead {
+  const head = readLiveHead(sql, now)
+  if (head === null || head.currentInc !== inc) return { kind: 'stale-incarnation' }
+  const cells = new Map<string, Uint8Array>()
+  for (const key of keys) {
+    sql.exec('DELETE FROM expiring_cell WHERE inc = ? AND key = ? AND expires_at <= ?', inc, key, now)
+    const row = sql
+      .exec<{ bytes: ArrayBuffer }>('SELECT bytes FROM expiring_cell WHERE inc = ? AND key = ?', inc, key)
+      .toArray()[0]
+    if (row !== undefined) cells.set(key, new Uint8Array(row.bytes))
+  }
+  return { kind: 'read', cells }
+}
+
+function writeExpiringCell(sql: SqlStorage, inc: string, { key, bytes, ttlMs }: ExpiringCell, now: number): void {
+  sql.exec(
+    'INSERT OR REPLACE INTO expiring_cell (inc, key, bytes, expires_at) VALUES (?, ?, ?, ?)',
+    inc,
+    key,
+    bytes,
+    now + ttlMs,
+  )
+}
+
+function deleteExpiredCells(sql: SqlStorage, now: number): void {
+  sql.exec('DELETE FROM expiring_cell WHERE expires_at <= ?', now)
 }
 
 function readCellPage(sql: SqlStorage, inc: string, prefix: string, cursor: string | undefined, now: number): CellPage {
@@ -408,7 +446,7 @@ function dropLaneOrderRows(sql: SqlStorage, inc: string, member: string): void {
 }
 
 function dropIncarnationRows(sql: SqlStorage, inc: string): void {
-  for (const table of ['cell', 'ord', 'rt_manifest', 'rt_chunk', 'route', 'gen']) {
+  for (const table of ['cell', 'expiring_cell', 'ord', 'rt_manifest', 'rt_chunk', 'route', 'gen']) {
     sql.exec(`DELETE FROM ${table} WHERE inc = ?`, inc)
   }
 }

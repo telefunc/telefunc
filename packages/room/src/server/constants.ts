@@ -62,7 +62,7 @@ const ROOM_DEMAND_PAGE_ENTRIES = 1024
 const ROOM_META_REPAIR_MS = 1_000
 const ROOM_TOMBSTONE_TTL_MS = 60_000
 // How long a member's departing record outlives its leave: several heartbeats, each of which reads the roster of a view
-// behind the control lane, so a view that missed the leave event reads the record before the next sweep removes it.
+// behind the control lane, so a view that missed the leave event reads the record before the backend expires it.
 const ROOM_DEPARTING_RECORD_MS = ROOM_HEARTBEAT_INTERVAL_MS * 4
 const ROOM_CLOSE_LEASE_MS = 15_000
 /** How long past an unheld room's close its head lapses: the close that server's timer starts lands well before. */

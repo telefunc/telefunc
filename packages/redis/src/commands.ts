@@ -17,6 +17,7 @@ import type {
   RoomHead,
   RoomSubscriptionSource,
   CellsRead,
+  ExpiringCellsRead,
   RoomPlaneKit,
   StaleCommit,
   StaleIncarnation,
@@ -31,6 +32,7 @@ import {
   directoryChecksKey,
   directoryIndexKey,
   directoryTagsKey,
+  expiringCellKey,
   incarnationInvalidationChannel,
   incarnationKeysKey,
   headKey,
@@ -233,6 +235,23 @@ if ARGV[2] == 'prefix' then
   keys, first = redis.call('ZRANGEBYLEX', KEYS[2], '[' .. ARGV[3], '(' .. ARGV[3] .. '\\255'), 1
 end
 return tf_cells_reply({'cells', string.format('%.0f', now)}, keys, first)
+`
+
+// The expiring cells of the keys that Redis hasn't expired yet, after the head names the incarnation.
+//   KEYS: [1]=head, then per cell its expiring key
+//   ARGV: [1]=inc, then per cell its key
+const READ_EXPIRING_CELLS_LUA = `${HEAD_PRELUDE}
+local head = tf_live_head(KEYS[1], tf_now())
+if not head or head.inc ~= ARGV[1] then return {'stale-incarnation'} end
+local reply = {'cells'}
+for i = 2, #KEYS do
+  local bytes = redis.call('GET', KEYS[i])
+  if bytes then
+    reply[#reply + 1] = ARGV[i]
+    reply[#reply + 1] = bytes
+  end
+end
+return reply
 `
 
 // A prefix read's page: up to ARGV[4] cells of the index range from ARGV[2] ('[' then the prefix, or '(' then the
@@ -528,8 +547,9 @@ end
 //   KEYS: [1]=head [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions [7]=retained lanes
 //         [8]=the semantic lane's retained frame [9]=retained owners, then per dropped member its order hash and
 //         retained lanes, then per retained binary frame deleted its key and its member's and track's retained lanes,
-//         then per binary lane dropped its track's lane set, then COMMIT's KEYS
-//   ARGV: [1]=inc [2]=the plan's JSON (see `operation.invoke`), then the mutations' bytes, then COMMIT's ARGV
+//         then per binary lane dropped its track's lane set, then per expiring cell its key, then COMMIT's KEYS
+//   ARGV: [1]=inc [2]=the plan's JSON (see `operation.invoke`), then the mutations' and the expiring cells' bytes,
+//         then COMMIT's ARGV
 const OPERATION_LUA = `${HEAD_PRELUDE}${REDIS_ORDERING_FRAME_LUA}${CELL_WRITES_LUA}${RETAINED_DELETE_FN_LUA}
 local function tf_commit(CK, CA)
 ${commitLua(luaRefs('CK', COMMIT_KEYS), luaRefs('CA', COMMIT_ARGS), 'CA')}
@@ -580,6 +600,10 @@ end
 for _, lane_key in ipairs(plan.trackLanes) do
   redis.call('SREM', KEYS[at], lane_key)
   if redis.call('SCARD', KEYS[at]) == 0 then redis.call('SREM', incarnation_keys_key, KEYS[at]) end
+  at = at + 1
+end
+for _, cell in ipairs(plan.expiring) do
+  redis.call('SET', KEYS[at], ARGV[cell[1]], 'PX', cell[2])
   at = at + 1
 end
 local commit = 'null'
@@ -761,6 +785,23 @@ const REDIS_COMMANDS = {
     parse: (reply): CellsRead => {
       const [tag, now, ...found] = reply as Buffer[]
       return tag!.toString() === 'stale-incarnation' ? { kind: 'stale-incarnation' } : parseCells(now!, found)
+    },
+  }),
+  readExpiringCells: command({
+    name: 'tfRoomReadExpiringCells',
+    lua: READ_EXPIRING_CELLS_LUA,
+    numberOfKeys: null,
+    binaryReply: true,
+    invoke: (prefix, { roomId, inc, keys }: RoomInc & { keys: readonly string[] }) => ({
+      keys: [headKey(prefix, roomId), ...keys.map((key) => expiringCellKey(prefix, roomId, inc, key))],
+      argv: [inc, ...keys],
+    }),
+    parse: (reply): ExpiringCellsRead => {
+      const [tag, ...found] = reply as Buffer[]
+      if (tag!.toString() === 'stale-incarnation') return { kind: 'stale-incarnation' }
+      const cells = new Map<string, Uint8Array>()
+      for (let i = 0; i < found.length; i += 2) cells.set(found[i]!.toString(), Uint8Array.from(found[i + 1]!))
+      return { kind: 'read', cells }
     },
   }),
   readCellPage: command({
@@ -952,6 +993,12 @@ const REDIS_COMMANDS = {
       }
       const trackLanes = members.flatMap(({ lanes }) => lanes.filter((key) => kit.decodeLaneKey(key).kind === 'binary'))
       for (const laneKey of trackLanes) keys.push(trackLanesKey(prefix, roomId, inc, binaryLaneOf(kit, laneKey).track))
+      // Each expiring cell's bytes by its index in ARGV, and its TTL.
+      const expiring = writes.expiring.map(({ key, bytes, ttlMs }) => {
+        keys.push(expiringCellKey(prefix, roomId, inc, key))
+        argv.push(toBuffer(bytes))
+        return [argv.length, ttlMs]
+      })
       let commitAt = 0
       if (commit !== null) {
         const invocation = commitInvocation(prefix, commit)
@@ -968,6 +1015,7 @@ const REDIS_COMMANDS = {
         counts: writes.counts.map(({ key, delta, create }) => [key, delta, create === true]),
         retained,
         trackLanes,
+        expiring,
         commit: commitAt,
       })
       return { keys, argv }

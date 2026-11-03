@@ -13,6 +13,7 @@ const ROOM_AUTHORITY_METHODS = [
   'readHead',
   'compareExchangeHead',
   'readCells',
+  'readExpiringCells',
   'readCellPage',
   'compareExchangeCells',
   'commitLane',

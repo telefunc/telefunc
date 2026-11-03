@@ -1,5 +1,4 @@
-export { JOIN, LEAVE, joinMember, evictMember, sweepDepartingRecords }
-export type { DepartingRecord }
+export { JOIN, LEAVE, joinMember, evictMember }
 
 import { getRoomPlane } from '../../backend/plane.js'
 import type { RoomOperation } from '../../backend/contract.js'
@@ -8,13 +7,11 @@ import { leaveCauseToWire, type RoomCtrlEnvelope, type WireLeaveCause } from '..
 import type { HoldConfig, RoomMemberRecord, RoomIncarnation } from '../protocol.js'
 import type { LeaveCause, ParticipantMeta } from '../../types.js'
 import { memberMetaMutations } from './meta.js'
-import { deleteCells, readPrefixAt } from './cellStore.js'
 import { runOperation } from './operations.js'
 import { decodeRoomRecord, encodeRoomRecord } from '../lanes/lanes.js'
 import { afterHoldChange, holdDelta } from '../lifecycle/hold.js'
 import { ROOM_DEPARTING_RECORD_MS } from '../constants.js'
 import {
-  DEPARTING_CELL_PREFIX,
   departingCellKey,
   dmReplyCellPrefix,
   identityCellKey,
@@ -60,9 +57,6 @@ const JOIN: RoomOperation<JoinArgs, 'joined' | 'lease-lost'> = {
 
 type LeaveArgs = { id: string; cause: WireLeaveCause }
 
-/** What a member's leave keeps of it, until `until` (authority time): why it left. */
-type DepartingRecord = WireLeaveCause & { until: number }
-
 /** A leave: the member's record, identity marker, lease mark, meta, DM replies, lanes and the frames it retained go,
  *  with its leave event, and its departing record is written. Null once the member was gone; else whether it was
  *  hidden, as a hidden one held nothing. */
@@ -74,8 +68,7 @@ const LEAVE: RoomOperation<LeaveArgs & { hold: HoldConfig | null }, { hidden: bo
     if (raw === undefined) return null
     const record = decodeRoomRecord<RoomMemberRecord>(raw)
     tx.write({ key: memberKey, bytes: null })
-    const departing: DepartingRecord = { ...cause, until: tx.now + ROOM_DEPARTING_RECORD_MS }
-    tx.write({ key: departingCellKey(id), bytes: encodeRoomRecord(departing) })
+    tx.writeExpiring({ key: departingCellKey(id), bytes: encodeRoomRecord(cause), ttlMs: ROOM_DEPARTING_RECORD_MS })
     tx.write({ key: leaseMemberCellKey(record.session, id), bytes: null })
     if (record.identity !== undefined) tx.write({ key: identityCellKey(record.identity, id), bytes: null })
     for (const count of holdDelta(record.hidden ? null : hold, -1).counts) tx.count(count)
@@ -110,13 +103,6 @@ async function joinMember(
   assert(joined.value === 'joined')
   lease.hosted(id)
   afterHoldChange(room, holdDelta(member.record.hidden ? null : room.hold, 1, { joining: true }).after(joined.counters))
-}
-
-/** Removes the departing records past their `until`; any server's heartbeat may, as often as it runs. */
-async function sweepDepartingRecords(room: RoomIncarnation): Promise<void> {
-  const { cells, now } = await readPrefixAt(room.id, room.inc, DEPARTING_CELL_PREFIX)
-  const swept = [...cells].filter(([, raw]) => decodeRoomRecord<DepartingRecord>(raw).until < now).map(([key]) => key)
-  if (swept.length > 0) await deleteCells(room.id, room.inc, swept)
 }
 
 /** Removes a member with its leave; false once it was gone. */

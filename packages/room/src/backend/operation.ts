@@ -1,7 +1,7 @@
 export { OPERATION_COMMIT_LANE, recordOperation }
 export type { OperationReads, OperationWrites }
 
-import type { CellCount, CellMutation, LaneId, OperationTx, RoomOperation } from './contract.js'
+import type { CellCount, CellMutation, ExpiringCell, LaneId, OperationTx, RoomOperation } from './contract.js'
 import { assert } from '../utils/assert.js'
 
 // An operation's plan runs once over what its executor reads; the executor then applies what it recorded at once.
@@ -19,6 +19,7 @@ type OperationWrites = {
   members: string[]
   mutations: CellMutation[]
   counts: CellCount[]
+  expiring: ExpiringCell[]
   commit: Uint8Array | null
 }
 
@@ -27,7 +28,7 @@ function recordOperation<Args, Value>(
   args: Args,
   reads: OperationReads,
 ): { value: Value; writes: OperationWrites } {
-  const writes: OperationWrites = { prefixes: [], members: [], mutations: [], counts: [], commit: null }
+  const writes: OperationWrites = { prefixes: [], members: [], mutations: [], counts: [], expiring: [], commit: null }
   const tx: OperationTx = {
     now: reads.now,
     cell: (key) => reads.cell(key),
@@ -35,6 +36,7 @@ function recordOperation<Args, Value>(
     count: (count) => void writes.counts.push(count),
     dropPrefix: (prefix) => void writes.prefixes.push(prefix),
     dropMemberLanes: (member) => void writes.members.push(member),
+    writeExpiring: (cell) => void writes.expiring.push(cell),
     commit(payload) {
       assert(writes.commit === null)
       writes.commit = payload

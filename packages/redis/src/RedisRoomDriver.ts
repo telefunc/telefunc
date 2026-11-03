@@ -19,6 +19,7 @@ import type {
   CellSelector,
   CellsRead,
   CommitOptions,
+  ExpiringCellsRead,
   CommitTarget,
   RetainedFrame,
   RetainedOf,
@@ -104,6 +105,10 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
       if (page.kind === 'stale-incarnation') return
       after = page.after
     } while (after !== undefined)
+  }
+
+  async readExpiringCells(roomId: string, inc: string, keys: readonly string[]): Promise<ExpiringCellsRead> {
+    return await this.connection.run(REDIS_COMMANDS.readExpiringCells, { roomId, inc, keys })
   }
 
   compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult> {

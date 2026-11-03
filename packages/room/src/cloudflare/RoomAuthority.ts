@@ -20,6 +20,7 @@ import type {
   RetainedFrame,
   RetainedOf,
   DirectoryPage,
+  ExpiringCellsRead,
 } from '../backend/contract.js'
 import {
   OrderedStubs,
@@ -69,6 +70,9 @@ import {
   readOrder,
   settleDueListing,
   type CellPage,
+  readExpiringCells,
+  writeExpiringCell,
+  deleteExpiredCells,
 } from './storage.js'
 
 /** An inbox or control commit replies once its delivery was handed off, with why it was lost, if it was. */
@@ -128,6 +132,10 @@ class RoomAuthority {
     return readCells(this.sql(), inc, sel, Date.now())
   }
 
+  async readExpiringCells(inc: string, keys: readonly string[]): Promise<ExpiringCellsRead> {
+    return this.transaction((sql) => readExpiringCells(sql, inc, keys, Date.now()))
+  }
+
   async readCellPage(inc: string, prefix: string, cursor?: string): Promise<CellPage> {
     return readCellPage(this.sql(), inc, prefix, cursor, Date.now())
   }
@@ -172,10 +180,14 @@ class RoomAuthority {
         for (const lane of listRetained(sql, inc, { member })) deleteRetained(sql, inc, lane)
         if (retainedOwner(sql, inc, SEMANTIC_LANE) === member) deleteRetained(sql, inc, SEMANTIC_LANE)
       }
+      for (const cell of writes.expiring) writeExpiringCell(sql, inc, cell, now)
       const commit = writes.commit === null ? null : commitIn(sql, inc, OPERATION_COMMIT_LANE, writes.commit, {}, now)
-      return { kind: 'done', value, counters: exchanged.counters, commit, payload: writes.commit } as const
+      const expiring = writes.expiring.length > 0
+      return { kind: 'done', value, counters: exchanged.counters, commit, payload: writes.commit, expiring } as const
     })
     if (outcome.kind !== 'done') return outcome
+    // The alarm deletes the expiring cells, as no server may be on the room by then.
+    if (outcome.expiring) await this.scheduleMaintenanceIfNeeded()
     const { value, counters, commit, payload } = outcome
     if (commit === null || payload === null) return { kind: 'done', value, counters }
     return { kind: 'done', value, counters, commit: await this.deliver(inc, OPERATION_COMMIT_LANE, payload, commit) }
@@ -306,6 +318,7 @@ class RoomAuthority {
       const currentInc = readLiveHead(sql, now)?.currentInc ?? null
       deleteLapsedHead(sql, now)
       deleteExpiredRoutes(sql, now)
+      deleteExpiredCells(sql, now)
       for (const inc of listOrphanIncarnations(sql, currentInc)) dropIncarnationRows(sql, inc)
       return unlisted
     })

@@ -22,6 +22,7 @@ export {
   incarnationInvalidationChannel,
   directoryIndexKey,
   directoryTagsKey,
+  expiringCellKey,
   directoryChecksKey,
 }
 export type { CommitChannels, FenceTokens }
@@ -83,6 +84,11 @@ function cellValuesKey(prefix: string, roomId: string, inc: string): string {
 /** Each cell's version, by its key. */
 function cellVersionsKey(prefix: string, roomId: string, inc: string): string {
   return `${incarnationPrefix(prefix, roomId, inc)}:versions`
+}
+/** An expiring cell's bytes, under a TTL of its own, so Redis deletes it. It isn't in the incarnation's manifest:
+ *  it expires by itself. */
+function expiringCellKey(prefix: string, roomId: string, inc: string, cellKey: string): string {
+  return `${incarnationPrefix(prefix, roomId, inc)}:x:${cellKey}`
 }
 function orderKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
   return `${incarnationPrefix(prefix, roomId, inc)}:o:${laneKey}`

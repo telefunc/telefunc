@@ -12,7 +12,7 @@ import type { RoomModel } from '../../shared/RoomModel.js'
 import type { RoomCtrlEnvelope } from '../../shared/protocol.js'
 import { reportRoomError } from '../reportRoomError.js'
 import { CONTROL_LANE, readOpenConfig } from '../lanes/lanes.js'
-import { reapAndReadRoster } from '../store/roster.js'
+import { readLeaveCauses, reapAndReadRoster } from '../store/roster.js'
 import { dropReplacedMetaGenerations, readRoomMeta, readRoomMetaSeq } from '../store/meta.js'
 import type { LanePlan } from '../lanes/LanePlan.js'
 import type { RosterStream } from './RosterStream.js'
@@ -35,7 +35,7 @@ type AuthoritySyncOptions = {
   /** Read-only here: every change goes through the owner's methods. */
   model: Pick<
     RoomModel,
-    'closed' | 'metaWaiting' | 'metaSeq' | 'rosterKnown' | 'recordMembership' | 'stopRecordingMembership'
+    'closed' | 'metaWaiting' | 'metaSeq' | 'rosterKnown' | 'memberIds' | 'recordMembership' | 'stopRecordingMembership'
   >
   lanePlan: Pick<LanePlan, 'replan' | 'resumeDropped' | 'observing' | 'controlEstablished'>
 }
@@ -234,8 +234,13 @@ class AuthoritySync {
     const events = this.model.recordMembership()
     try {
       const roster = await reapAndReadRoster(this.incarnation)
-      const behind = await this.deliveryBehind()
-      if (this.model.closed || !(await this.roster.reconcile({ ...roster, behind }, events))) return
+      const listed = new Set(roster.members.map((member) => member.id))
+      const unlisted = [...this.model.memberIds()].filter((id) => !listed.has(id))
+      const [departing, behind] = await Promise.all([
+        readLeaveCauses(this.incarnation, unlisted),
+        this.deliveryBehind(),
+      ])
+      if (this.model.closed || !(await this.roster.reconcile({ ...roster, departing, behind }, events))) return
     } finally {
       this.model.stopRecordingMembership()
     }

@@ -8,6 +8,8 @@ export type {
   CellsExchangeResult,
   CellSelector,
   CellsRead,
+  ExpiringCell,
+  ExpiringCellsRead,
   CommitOptions,
   CommitTarget,
   DirectoryPage,
@@ -181,7 +183,15 @@ type OperationTx = {
   dropMemberLanes(member: string): void
   /** Commits `payload` on the control lane; once per operation. */
   commit(payload: Uint8Array): void
+  /** Writes an expiring cell, which the backend deletes on its own `ttlMs` after this write, with or without a server
+   *  on the room. It is read only by `readExpiringCells()`: neither a plan nor a cell read sees it. */
+  writeExpiring(cell: ExpiringCell): void
 }
+
+type ExpiringCell = { key: string; bytes: Uint8Array; ttlMs: number }
+
+/** The expiring cells of the keys read that haven't expired. */
+type ExpiringCellsRead = { kind: 'read'; cells: Map<string, Uint8Array> } | StaleIncarnation
 
 /** A pure plan, by the name a Cloudflare room authority runs it by. Its args and value cross an RPC there. */
 type RoomOperation<Args, Value> = { readonly name: string; plan(tx: OperationTx, args: Args): Value }
@@ -205,6 +215,7 @@ type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
   readHead(roomId: string): Promise<RoomHead | null>
   compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult>
   readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead>
+  readExpiringCells(roomId: string, inc: string, keys: readonly string[]): Promise<ExpiringCellsRead>
   /** The cells under `prefix`, a bounded page at a time, each page read at once, in one order for the whole read that
    *  keeps the keys sharing the prefix's next `:`-ended segment together (key order on Redis and Cloudflare). Each key
    *  comes at most once: one present for the whole read comes, one written during it and kept that the order puts after

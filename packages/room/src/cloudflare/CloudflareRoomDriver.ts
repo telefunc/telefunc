@@ -22,6 +22,7 @@ import type {
   RoomHead,
   RoomOperation,
   RoomSubscriptionSource,
+  ExpiringCellsRead,
 } from '../backend/contract.js'
 import type { BackendReceiver, CloudflarePlaneKit, DriverAttempt, OrderingInfo } from 'telefunc/__internal'
 import { CLOUDFLARE_BUCKETS, currentCloudflareHostKey, currentCloudflareMember, markHandled } from 'telefunc/__internal'
@@ -64,6 +65,10 @@ class CloudflareRoomDriver implements RoomDriver {
 
   async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
     return this.stub(roomId).readCells(inc, sel)
+  }
+
+  async readExpiringCells(roomId: string, inc: string, keys: readonly string[]): Promise<ExpiringCellsRead> {
+    return this.stub(roomId).readExpiringCells(inc, keys)
   }
 
   async *readCellPages(roomId: string, inc: string, prefix: string): AsyncGenerator<CellsRead> {
