@@ -408,8 +408,8 @@ async function onBroadcastBurstThenClose() {
   return serverLoop
 }
 
-/** The in-memory adapter: a loop of publishes, a listener publishing a batch, then one big message, and a listener
- *  answering its own key. */
+/** The in-memory adapter: a loop of publishes, a listener publishing a batch, then one big message, producers awaiting
+ *  each publish to one key, and a listener answering its own key. */
 async function onInMemoryPublishes() {
   const id = crypto.randomUUID()
   const seen: number[] = []
@@ -454,6 +454,20 @@ async function onInMemoryPublishes() {
   stopAlone()
   stopAloneStart()
 
+  let producerMessages = 0
+  const stopProducers = Broadcast.subscribe(`producers:${id}`, () => void producerMessages++)
+  const payload = 'x'.repeat(400 * 1024)
+  const producerRuns = await Promise.allSettled(
+    Array.from({ length: 4 }, async () => {
+      for (let i = 0; i < 2000; i++) await Broadcast.publish(`producers:${id}`, payload)
+    }),
+  )
+  stopProducers()
+  const producers = {
+    received: producerMessages,
+    rejected: producerRuns.filter((r) => r.status === 'rejected').length,
+  }
+
   let answers = 0
   let answersWhenTimerFired = -1
   setTimeout(() => (answersWhenTimerFired = answers), 0)
@@ -470,6 +484,7 @@ async function onInMemoryPublishes() {
     loop,
     listenerBatch,
     aloneBytes,
+    producers,
     timerFiredMidChain: answersWhenTimerFired >= 0 && answersWhenTimerFired < 20_000,
   }
 }

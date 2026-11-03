@@ -78,8 +78,8 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   private highestSeq = 0
   /** In-memory publishes waiting for the ones before them, in publish order. */
   private readonly queued = new Fifo<() => void>()
-  /** What `queued` holds of each kind: a publish that finds some of its kind waiting and would pass `bufferLimit` or
-   *  `bufferLimitBinary` rejects. */
+  /** What listeners' publishes in `queued` hold of each kind: one that finds some of its kind waiting and would pass
+   *  `bufferLimit` or `bufferLimitBinary` rejects. */
   private readonly queuedBytes = { text: 0, binary: 0 }
   private delivering = false
   /** A publish ran in this synchronous run: code publishing in a loop holds the event loop itself, so one made while
@@ -218,15 +218,17 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   ): Promise<BroadcastPublishResult> {
     const isText = typeof data === 'string'
     const kind = isText ? 'text' : 'binary'
-    const size = (isText ? utf8ByteLength(data) : data.byteLength) + HELD_SEND_OVERHEAD_BYTES
+    // What is bounded is what listeners pile up, one message alone going through whatever its size. A publish from
+    // outside a listener waits its turn.
+    const fromListener = this.delivering
+    const size = fromListener ? (isText ? utf8ByteLength(data) : data.byteLength) + HELD_SEND_OVERHEAD_BYTES : 0
     const { bufferLimit, bufferLimitBinary } = getServerConfig().channel
     const limit = isText ? bufferLimit : bufferLimitBinary
-    // What is bounded is how much waits: one message alone goes through, whatever its size.
-    if (this.queuedBytes[kind] > 0 && this.queuedBytes[kind] + size > limit) {
+    if (fromListener && this.queuedBytes[kind] > 0 && this.queuedBytes[kind] + size > limit) {
       const setting = isText ? 'bufferLimit' : 'bufferLimitBinary'
       return Promise.reject(
         new ChannelOverflowError(
-          `Publish rejected: publishes waiting to be delivered exceeded config.channel.${setting}; await each publish or raise the setting`,
+          `Publish rejected: publishes made from a listener, waiting to be delivered, exceeded config.channel.${setting}; raise the setting or publish less from the listener`,
         ),
       )
     }
