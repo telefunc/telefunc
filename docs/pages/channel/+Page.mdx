@@ -115,6 +115,8 @@ channel.send('Hello!')
 
 > `listen()`, `listenBinary()`, `onOpen()` and `onClose()` accept `{ signal }` as their second argument. Aborting the signal removes that registration.
 
+> Message listeners are called in registration order. A listener aborted by an earlier listener still gets that message.
+
 ### Receive messages in a loop
 
 You can receive text and binary messages with an async loop:
@@ -140,9 +142,13 @@ try {
 
 > `controller.abort()` makes the loop throw `signal.reason`. Aborting or breaking out of the loop leaves the channel open.
 
-> Listeners and active iterators each receive the incoming messages.
+> Listeners and active iterators each receive the incoming messages. An iterator starts listening at its first `next()` call.
 
-> To return an acknowledgement value, use `listen()` or `listenBinary()`. An iterator supplies `undefined` after the loop advances past the message.
+> Without `{ ack: true }`, listener callbacks are called before the iterator's loop resumes. Their returned promises can still be pending.
+
+> With `{ ack: true }`, callbacks and iterators are awaited in registration order. Advance past the message or stop iteration to let later listeners or iterators receive it.
+
+> To return an acknowledgement value, use `listen()` or `listenBinary()`. An iterator supplies `undefined` when you advance past the message or stop iteration.
 
 ### TypeScript
 

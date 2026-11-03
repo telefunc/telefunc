@@ -1263,6 +1263,19 @@ function parseChannelTransports(value: string | undefined): Array<'sse' | 'ws'> 
 }
 
 function testChannelApi() {
+  test('channel: cancelled iterators settle acknowledgements and preserve captured listener replies', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-iterator-ack')
+    await autoRetry(async () => {
+      const results = JSON.parse((await page.textContent('#channel-iterator-ack-result'))!)
+      expect(results.length).toBe(16)
+      for (let i = 0; i < 16; i += 2) {
+        expect(results[i]).deep.equal({ ack: 'undefined', control: 'undefined', answers: 0, open: true })
+        expect(results[i + 1]).deep.equal({ ack: 'answer', control: 'undefined', answers: 1, open: true })
+      }
+    })
+  })
+
   test('channel: promises, text and binary iteration, and cancelled registrations', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-api')

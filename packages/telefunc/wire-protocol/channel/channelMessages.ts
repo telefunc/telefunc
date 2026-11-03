@@ -26,11 +26,13 @@ async function* channelMessages<T>(
     wake?.()
   }
   const abort = () => finish(signal!.reason)
-  const receive = (message: Message<T>) =>
-    new Promise<void>((consumed) => {
+  const receive = (message: Message<T>) => {
+    if (registrations.signal.aborted) return
+    return new Promise<void>((consumed) => {
       queue.push({ message, consumed })
       wake?.()
     })
+  }
   signal?.addEventListener('abort', abort, { once: true })
   if (signal?.aborted) abort()
   channel.listen((data) => receive({ type: 'text', data }), { signal: registrations.signal })

@@ -43,10 +43,13 @@ export {
   onChannelCreditFailure,
   onChannelAckOwnership,
   onChannelApiProbe,
+  onChannelIteratorAck,
   onChannelLateCallbacks,
   onChannelOpenAbort,
   onChannelLateOpenAbort,
 }
+
+import { prepareIteratorAck, sendIteratorAck, type IteratorAckOptions } from './iteratorAckProbe'
 
 import { Channel, Abort, BroadcastChannel, config } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
@@ -914,4 +917,19 @@ async function onChannelLateOpenAbort() {
     )
   })
   return { channel: ch.client }
+}
+
+async function onChannelIteratorAck() {
+  const channel = new Channel<string, string>()
+  let receiver: ReturnType<typeof prepareIteratorAck>
+  return {
+    channel: channel.client,
+    prepare: (options: IteratorAckOptions) => {
+      receiver = prepareIteratorAck(channel, options)
+    },
+    primed: () => receiver.primed(),
+    cancel: () => receiver.cancel(),
+    answers: () => receiver.answers(),
+    send: (options: { binary: boolean; prime: boolean }) => sendIteratorAck(channel, options),
+  }
 }

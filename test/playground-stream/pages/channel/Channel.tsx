@@ -1,7 +1,9 @@
 export { ChannelDemo }
 
+import { prepareIteratorAck, sendIteratorAck } from './iteratorAckProbe'
+
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Abort as TelefuncAbort, abort, ConnectionError, withContext } from 'telefunc/client'
+import { Abort as TelefuncAbort, abort, close, ConnectionError, withContext } from 'telefunc/client'
 import {
   onChannelInit,
   onChannelAbortTest,
@@ -47,6 +49,7 @@ import {
   onChannelCreditFailure,
   onChannelAckOwnership,
   onChannelApiProbe,
+  onChannelIteratorAck,
   onChannelLateCallbacks,
   onChannelOpenAbort,
   onChannelLateOpenAbort,
@@ -1143,6 +1146,45 @@ function ChannelDemo() {
     document.querySelector('#channel-ack-ownership-result')!.textContent = JSON.stringify({ answer, conflict })
   }, [])
 
+  const testIteratorAck = useCallback(async () => {
+    const output = document.querySelector('#channel-iterator-ack-result')!
+    const results = []
+    try {
+      for (const direction of ['server', 'client'] as const) {
+        for (const binary of [false, true]) {
+          for (const mode of ['abort', 'return'] as const) {
+            for (const answer of [false, true]) {
+              const remote = await onChannelIteratorAck()
+              const { channel } = remote
+              if (direction === 'server') await remote.prepare({ binary, mode, answer })
+              const receiver = direction === 'server' ? remote : prepareIteratorAck(channel, { binary, mode, answer })
+              const send = (prime: boolean) =>
+                direction === 'client' ? remote.send({ binary, prime }) : sendIteratorAck(channel, { binary, prime })
+              if (mode === 'return') {
+                await send(true)
+                await receiver.primed()
+              }
+              const pending = send(false)
+              await receiver.cancel()
+              const control = await send(false)
+              results.push({
+                ack: String(await pending),
+                control: String(control),
+                answers: await receiver.answers(),
+                open: !channel.isClosed,
+              })
+              await channel.close()
+              close(remote)
+            }
+          }
+        }
+      }
+      output.textContent = JSON.stringify(results)
+    } catch (err) {
+      output.textContent = String(err)
+    }
+  }, [])
+
   const testApi = useCallback(async () => {
     const output = document.querySelector('#channel-api-result')!
     try {
@@ -1686,6 +1728,10 @@ function ChannelDemo() {
             Test late open abort
           </button>
           <output id="channel-late-abort-result" />
+          <button id="channel-test-iterator-ack" onClick={testIteratorAck}>
+            Cancel iteration during acknowledgement
+          </button>
+          <output id="channel-iterator-ack-result" />
           <button id="channel-test-api" onClick={testApi}>
             Test channel API
           </button>
