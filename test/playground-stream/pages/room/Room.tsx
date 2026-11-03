@@ -68,6 +68,7 @@ import {
   onStopReplacingMeta,
   onReadMetaAcrossWrite,
   onReadSplitMetaAcrossMerge,
+  onCreateRoomWithBytes,
   onOpenRecordingGuardRoom,
   onGetGuardCalls,
   onOpenSlowJoinRoom,
@@ -862,6 +863,19 @@ function Room() {
           releaseOther()
         },
       )}
+
+      {scenario('meta-bytes', 'Bytes in a meta', 'Room.create() and join() with a Uint8Array', async () => {
+        const { room, memberId, onServer } = await onCreateRoomWithBytes(`e2e-meta-bytes:${crypto.randomUUID()}`)
+        const member = await getParticipantWhenJoined(room, memberId)
+        const me = await room.join({ meta: { avatar: new Uint8Array([7, 8]) } })
+        const read = [room.meta.thumbnail, member.meta.avatar, me.meta.avatar]
+        setResult(
+          JSON.stringify({
+            onServer,
+            onPage: read.map((value) => (value instanceof Uint8Array ? Array.from(value) : value)),
+          }),
+        )
+      })}
 
       {scenario('join-races', 'Join races', 'A closed tab during a slow join', async () => {
         const roomId = await createRoomId('join-races')

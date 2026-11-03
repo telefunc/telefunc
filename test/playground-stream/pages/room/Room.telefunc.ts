@@ -63,6 +63,7 @@ export {
   onStopReplacingMeta,
   onReadMetaAcrossWrite,
   onReadSplitMetaAcrossMerge,
+  onCreateRoomWithBytes,
   onOpenRecordingGuardRoom,
   onGetGuardCalls,
   onOpenSlowJoinRoom,
@@ -99,6 +100,14 @@ import {
 
 async function onCreateRoom(roomId: string) {
   return anyoneCanJoin(await Room.create(roomId, { meta: { topic: 'e2e' } }))
+}
+
+/** A room and a member with bytes in their meta, and what the server reads back. */
+async function onCreateRoomWithBytes(roomId: string) {
+  const room = anyoneCanJoin(await Room.create(roomId, { meta: { thumbnail: new Uint8Array([1, 2, 3]) } }))
+  const member = await room.join({ meta: { avatar: new Uint8Array([4, 5, 6]) } })
+  const onServer = { isBytes: [room.meta.thumbnail, member.meta.avatar].map((value) => value instanceof Uint8Array) }
+  return { room, memberId: member.id, onServer }
 }
 
 async function onGetRoom(roomId: string) {

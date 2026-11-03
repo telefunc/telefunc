@@ -389,6 +389,18 @@ function testRoom() {
       expect(r.remote).deep.equal(stored)
     },
   )
+  testRoomScenario<{ onServer: { isBytes: boolean[] }; onPage: unknown[] }>(
+    'meta-bytes',
+    "room: bytes in a room's and a member's meta stay bytes, on the server and on the page",
+    (r) => {
+      expect(r.onServer.isBytes).deep.equal([true, true])
+      expect(r.onPage).deep.equal([
+        [1, 2, 3],
+        [4, 5, 6],
+        [7, 8],
+      ])
+    },
+  )
   testRoomScenario<{
     leave: string
     kick: string
