@@ -80,6 +80,42 @@ this one too, applies the event to its model, and its views tell their listeners
 - **mirror** / **rewind**: a client's copy of a participant's meta (`metaMirrors`); a failover that resets meta seqs
   (`MetaRewinds`).
 
+## Implementing a backend
+
+A backend serves Room's plane with a `RoomDriver` (`backend/contract.ts`, whose JSDoc defines each name below;
+`MemoryRoomDriver.ts` is the shortest driver to read). Each of these writes is one atomic step at the authority: what it
+checks and what it applies hold together, with no other call in between. A step whose check fails applies nothing,
+and returns the refusal its result type names (`conflict`, `stale-incarnation` or `stale-cell`).
+
+- `compareExchangeHead()` writes the head and counts `counts` in its `currentInc`, if the stored head is what
+  `expected` names.
+- `compareExchangeCells()` applies the mutations and the counts, if the head's open incarnation is `inc` and each
+  expected cell is at its version (`null`: still absent).
+- `runOperation()` applies the writes its plan recorded (`OperationTx`) and takes the seq of its control commit, if
+  it has one, while the head's open incarnation is `inc`. A driver that plans outside the step, as Redis does, also
+  checks that each cell the plan read, and each dropped member's lanes, are as the plan read them, and plans again if
+  one changed (`RedisRoomDriver.runOperation()`).
+- `commitLane()` takes the lane's next seq, keeps the retained frame, and hands the frame to the lane's subscriptions
+  in seq order, if the head's open incarnation is `inc`, or, with `closingLease`, the commit is a control commit and
+  the head is closing under that lease. Each of `requiredCellKeys` must exist too.
+- `directoryPut()` writes one room's entry, with its tag and when it is due. `directoryDelete()` deletes it if it is
+  still listed under `incTag`.
+
+The other calls are each atomic only on their own. A cell read, and each page of `readCellPages()`, is taken at once,
+but nothing holds between two of them. `subscribe()` delivers each lane's commits in seq order from when it confirms;
+a frame retained before that is read with `readRetained()`. `dropIncarnation()` returns quietly for an incarnation
+already dropped, because a close, a create and the directory's due check can each drop one that was left over. An
+inbox or control commit's `delivery`, its handoff to the subscriptions, settles after the step, outside it.
+
+**Redis's operation packet.** `OPERATION_LUA` (`redis/src/commands.ts`) takes a number of KEYS and ARGV that depends on
+the operation. `operation.invoke()` in the same file lays them out, and the script walks them in the same order with a
+running index. The `OperationPacket` type writes down that layout: its fields say how many KEYS each part takes and
+which ARGV holds its bytes, in this order: the fixed KEYS, two per dropped member, three per retained binary frame, one
+per track lane set, one per expiring cell, then the lane commit's. Nothing checks it at runtime, and a mismatch reads,
+writes or deletes the wrong key without an error, so a change to the order on one side changes the other in the same
+commit. The lane commit's own KEYS and ARGV, which `commitLane()` and an operation share, can't drift: `COMMIT_KEYS`
+and `COMMIT_ARGS` name each slot once, and both its script and `commitInvocation()` are built from them.
+
 ## The lane plan
 
 `LanePlan` subscribes the fewest lanes that carry what this process's holders want, and no frame they don't. Text is

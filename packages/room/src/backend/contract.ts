@@ -211,7 +211,8 @@ type RoomSubscriptionSource = {
   lane: LaneId | EveryTrackLane | EveryMemberLane
 }
 
-/** What a backend implements for Room: durable heads, cells, lanes and retained frames, and lane subscriptions. */
+/** What a backend implements for Room: durable heads, cells, lanes and retained frames, and lane subscriptions.
+ *  `ARCHITECTURE.md`, "Implementing a backend", says which of its writes are atomic and which stand alone. */
 type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
   readHead(roomId: string): Promise<RoomHead | null>
   compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult>
