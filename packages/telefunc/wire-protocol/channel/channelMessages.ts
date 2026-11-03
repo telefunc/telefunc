@@ -80,6 +80,7 @@ async function* iterateMessages<M extends Message<unknown>>(
   let wake: (() => void) | undefined
   let ended = false
   let error: unknown
+  let behindCheck: ReturnType<typeof setTimeout> | undefined
   const release = () => {
     for (let item = queue.shift(); item; item = queue.shift()) item.consumed()
     held.text = held.binary = 0
@@ -89,19 +90,25 @@ async function* iterateMessages<M extends Message<unknown>>(
     ended = true
     error = err
     registrations.abort()
+    clearTimeout(behindCheck)
     if (err !== undefined) release()
     wake?.()
   }
   const abort = () => finish(signal!.reason)
+  // A burst delivered in one task reaches the loop only once that task ends, so the loop is behind where it still
+  // holds more than `budget` after it could run.
+  const checkBehind = () => {
+    behindCheck = undefined
+    const type = held.text > budget!.text ? 'text' : held.binary > budget!.binary ? 'binary' : null
+    if (type === null) return
+    const behind = `${budget![type]} bytes of ${type} messages`
+    finish(new ChannelOverflowError(`messages() ended: its loop fell behind the publishes by more than ${behind}`))
+  }
   const receive = (message: M, bytes = 0) => {
     if (registrations.signal.aborted) return
     const size = budget ? bytes + QUEUED_MESSAGE_OVERHEAD_BYTES : 0
-    if (budget && held[message.type] + size > budget[message.type]) {
-      const behind = `${budget[message.type]} bytes of ${message.type} messages`
-      finish(new ChannelOverflowError(`messages() ended: its loop fell behind the publishes by more than ${behind}`))
-      return
-    }
     held[message.type] += size
+    if (budget && held[message.type] > budget[message.type]) behindCheck ??= setTimeout(checkBehind, 0)
     return new Promise<void>((consumed) => {
       queue.push({ message, consumed, size })
       wake?.()
@@ -132,6 +139,7 @@ async function* iterateMessages<M extends Message<unknown>>(
   } finally {
     unobserve()
     registrations.abort()
+    clearTimeout(behindCheck)
     signal?.removeEventListener('abort', abort)
     release()
   }
