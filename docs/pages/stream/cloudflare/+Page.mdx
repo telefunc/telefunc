@@ -187,8 +187,8 @@ A KV record is created on subscribe and deleted on unsubscribe. If a Durable Obj
 | Guarantee | Details |
 |---|---|
 | Ordering | Publishes for a given key are serialized and delivered in order. |
-| Delivery | `publish()` resolves after all Durable Objects with subscribers have received the message. Delivery to clients then happens over the channel connection. |
-| Presence lag | A new subscriber may miss publishes during the few milliseconds it takes to write its KV presence record. |
+| Delivery | `publish()` resolves after all Durable Objects whose KV presence record the publish found have received the message. Delivery to clients then happens over the channel connection. |
+| Presence lag | A new subscriber's presence reaches the key's authority through KV, which [can take 60 seconds or more](https://developers.cloudflare.com/kv/concepts/how-kv-works/) to show a write in other locations. A presence write KV refuses is retried at the next refresh, within 30 s. Publishes made meanwhile can miss the subscriber. |
 
 > Once a broadcast message reaches a Durable Object, it has the same buffering and replay guarantees as regular channel messages.
 
