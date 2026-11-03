@@ -31,20 +31,31 @@ async function onRedisSubscribeFailure() {
     ])
     const later = await Promise.allSettled([transport.send(user, 'later')])
     await redis!.acl('SETUSER', user, '+subscribe')
-    stop()
-    const delivered = new Promise<void>((resolve) => {
-      stop = transport.listen(user, (value) => {
-        received.push(value)
-        resolve()
+    // Dragonfly applies an ACL change to an open connection a moment after it answers, so a new subscription may still
+    // be refused.
+    let delivered: Promise<void>
+    for (let attempt = 1; ; attempt++) {
+      stop()
+      delivered = new Promise<void>((resolve) => {
+        stop = transport.listen(user, (value) => {
+          received.push(value)
+          resolve()
+        })
       })
-    })
-    await transport.send(user, 'recovered')
+      try {
+        await transport.send(user, 'recovered')
+        break
+      } catch (err) {
+        if (attempt === 50) throw err
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+    }
     await delivered
     return { rejected: [...pending, ...later].every((result) => result.status === 'rejected'), received }
   } finally {
     stop()
     publisher.disconnect()
-    await redis!.client('KILL', 'USER', user)
+    // Also closes the transport's subscriber connection, which runs as `user` too.
     await redis!.acl('DELUSER', user)
   }
 }
