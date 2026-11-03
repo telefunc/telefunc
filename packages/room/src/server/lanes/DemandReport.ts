@@ -109,11 +109,6 @@ class DemandReport {
     return told.pairs.size > 0 || told.members.size > 0 || told.tracks.size > 0 || told.fetched.size > 0
   }
 
-  /** Tells the planned changes, each once. */
-  flush(): void {
-    this.tellUntil(Infinity)
-  }
-
   /** Whether some planned change isn't told yet. */
   get changed(): boolean {
     const changed = this.untold

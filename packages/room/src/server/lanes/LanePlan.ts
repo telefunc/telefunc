@@ -275,7 +275,6 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
       this.owner.laneEvent('roster-needed')
     }
     this.syncDemandLane()
-    if (this.planning === null) this.outgoingDemand.flush()
     this.owner.laneEvent('lanes-changed')
   }
 
@@ -443,7 +442,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     }
     // Stopping a lane a change meanwhile wants again would only open it again.
     const stillServed = this.servesByAll(member, present, count)
-    if (!servedByAll && !stillServed && this.lanes.releaseEveryTrack(member, all)) {
+    if (!servedByAll && !stillServed && this.lanes.releaseEveryTrack(member)) {
       this.outgoingDemand.setFetched(member, false)
     }
   }

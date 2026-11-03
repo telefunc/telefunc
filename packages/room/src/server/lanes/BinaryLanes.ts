@@ -164,10 +164,11 @@ class BinaryLanes {
     return lane.delivering
   }
 
-  /** Stops `lane`, still the member's every-track lane, once the named lanes and every-member lanes replacing it
-   *  deliver; until then, each one's readiness replans the member. Whether it stopped. */
-  releaseEveryTrack(member: string, lane: LaneSubscription | undefined): boolean {
-    if (lane === undefined || this.everyTrack.get(member) !== lane) return false
+  /** Stops the member's every-track lane once the named lanes and every-member lanes replacing it deliver; until
+   *  then, each one's readiness replans the member. Whether it stopped. */
+  releaseEveryTrack(member: string): boolean {
+    const lane = this.everyTrack.get(member)
+    if (lane === undefined) return false
     for (const track of this.namedByMember.get(member) ?? []) {
       if (!this.named.get(namedKey(member, track))!.delivering) return false
     }
