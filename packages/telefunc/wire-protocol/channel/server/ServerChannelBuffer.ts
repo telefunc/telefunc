@@ -18,9 +18,10 @@ type EntryCallback = {
   reject: (err: Error) => void
 }
 
-/** The channel `flush` hands each held entry to, with the entry's tag, data and callbacks (null once rejected). */
+/** The channel `flush` hands each held entry to, with the entry's tag, data and callbacks (null once rejected); false
+ *  where it ended the channel instead, which cleared the buffer. */
 interface BufferedSender {
-  _sendBuffered(peer: IndexedPeer, tag: number, data: string | Uint8Array, callback: EntryCallback | null): void
+  _sendBuffered(peer: IndexedPeer, tag: number, data: string | Uint8Array, callback: EntryCallback | null): boolean
 }
 
 type ServerChannelBufferOptions = {
@@ -84,30 +85,32 @@ class ServerChannelBuffer<TAck = never> {
     this.binary.push(TAG.PUBLISH_BINARY, data, data.byteLength, null, this.insertionSeq++)
   }
 
-  /** Sends every entry to `sender` in insertion order across both queues, then empties them. */
-  flush(sender: BufferedSender, peer: IndexedPeer): void {
+  /** Sends every entry to `sender` in insertion order across both queues, then empties them; false where `sender`
+   *  refused one, which ended its channel. */
+  flush(sender: BufferedSender, peer: IndexedPeer): boolean {
     let ti = this.text.head
     let bi = this.binary.head
     const textLen = this.text.dataLength
     const binaryLen = this.binary.dataLength
 
     while (ti < textLen && bi < binaryLen) {
-      if (this.text.orderAt(ti) < this.binary.orderAt(bi)) {
-        this.flushEntry(this.text, ti++, sender, peer)
-      } else {
-        this.flushEntry(this.binary, bi++, sender, peer)
-      }
+      const sent =
+        this.text.orderAt(ti) < this.binary.orderAt(bi)
+          ? this.flushEntry(this.text, ti++, sender, peer)
+          : this.flushEntry(this.binary, bi++, sender, peer)
+      if (!sent) return false
     }
-    while (ti < textLen) this.flushEntry(this.text, ti++, sender, peer)
-    while (bi < binaryLen) this.flushEntry(this.binary, bi++, sender, peer)
+    while (ti < textLen) if (!this.flushEntry(this.text, ti++, sender, peer)) return false
+    while (bi < binaryLen) if (!this.flushEntry(this.binary, bi++, sender, peer)) return false
 
     this.text.clear()
     this.binary.clear()
     this.insertionSeq = 0
+    return true
   }
 
-  private flushEntry(queue: BufferQueue, i: number, sender: BufferedSender, peer: IndexedPeer): void {
-    sender._sendBuffered(peer, queue.tagAt(i), queue.dataAt(i), queue.callbackAt(i))
+  private flushEntry(queue: BufferQueue, i: number, sender: BufferedSender, peer: IndexedPeer): boolean {
+    return sender._sendBuffered(peer, queue.tagAt(i), queue.dataAt(i), queue.callbackAt(i))
   }
 
   clear(err?: Error): void {

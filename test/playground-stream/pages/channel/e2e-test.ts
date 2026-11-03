@@ -1437,6 +1437,25 @@ function testChannelApi() {
     })
   })
 
+  test('channel: acknowledged sends made before the page attaches close it with ChannelOverflowError once they pass maxPendingAcks or maxPendingBytes', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-offline-budgets')
+    await autoRetry(async () => {
+      const ids = JSON.parse((await page.textContent('#channel-offline-budgets-result'))!)
+      const state = await getCleanupState()
+      for (const [id, setting] of [
+        [ids.bytes, 'maxPendingBytes'],
+        [ids.acks, 'maxPendingAcks'],
+      ]) {
+        const sends: string[] = JSON.parse(state[`offline_budget_${id}`] ?? '[]')
+        expect(sends.length).toBe(3)
+        for (const send of sends)
+          expect(send).toContain(`ChannelOverflowError: Channel closed: config.channel.${setting}`)
+      }
+      for (const error of ids.errors) expect(error).toContain('ChannelOverflowError')
+    })
+  })
+
   test('channel: late onOpen Abort terminates the channel', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-late-open-abort')
