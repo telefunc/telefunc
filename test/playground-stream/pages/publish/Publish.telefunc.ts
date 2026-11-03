@@ -367,12 +367,13 @@ async function onBroadcastApi() {
   }
 }
 
-/** A busy key: `flood()` publishes 2 KiB messages without awaiting them. With `slow`, a server loop over the key's
- *  messages takes 20 ms per message, as the page's slow loop does. */
-async function onBroadcastBacklog(slow: boolean) {
+/** A busy key: `flood()` publishes 2 KiB messages without awaiting them. A `'slow'` server loop over the key's
+ *  messages takes 20 ms per message, as the page's slow loop does; a `'held'` one holds its first message until the
+ *  key's channel closes. */
+async function onBroadcastBacklog(serverLoopKind: 'slow' | 'held' | null) {
   const room = new BroadcastChannel<string>({ key: `room:backlog:${crypto.randomUUID()}` })
   const payload = 'x'.repeat(2048)
-  const serverLoop = slow ? readSlowly(room) : null
+  const serverLoop = serverLoopKind === null ? null : readSlowly(room, serverLoopKind)
   return {
     room,
     flood: async (count: number) => {
@@ -382,15 +383,19 @@ async function onBroadcastBacklog(slow: boolean) {
       for (let i = 0; i < count; i++) await room.publish(`${i}:${payload}`)
     },
     serverLoop: () => serverLoop,
+    close: async () => {
+      await room.close()
+    },
   }
 }
 
-async function readSlowly(room: BroadcastChannel<string>) {
+async function readSlowly(room: BroadcastChannel<string>, kind: 'slow' | 'held') {
   let received = 0
   try {
     for await (const _ of room.messages()) {
       received++
-      await new Promise((resolve) => setTimeout(resolve, 20))
+      if (kind === 'slow') await new Promise((resolve) => setTimeout(resolve, 20))
+      else if (received === 1) await room.closed.catch(() => {})
     }
     return { received, error: null }
   } catch (err) {

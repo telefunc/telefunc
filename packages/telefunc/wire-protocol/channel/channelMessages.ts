@@ -85,8 +85,10 @@ async function* iterateMessages<M extends Message<unknown>>(
     for (let item = queue.shift(); item; item = queue.shift()) item.consumed()
     held.text = held.binary = 0
   }
-  // A failure drops what is queued: the loop throws at its next step.
+  // A failure drops what is queued: the loop throws at its next step. The first failure stays, and a clean end can't
+  // erase it.
   const finish = (err?: unknown) => {
+    if (error !== undefined || (ended && err === undefined)) return
     ended = true
     error = err
     registrations.abort()

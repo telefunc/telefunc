@@ -71,6 +71,22 @@ function testPublish(isDev: boolean, inDocker = false) {
     }
   })
 
+  test('broadcast: a messages() loop that fell behind still ends with ChannelOverflowError after the server closes the broadcast, on the page and on the server', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-overflow-then-close')
+    await autoRetry(
+      async () => {
+        expect(await getResult('#publish-result')).deep.equal({
+          error: 'ChannelOverflowError',
+          received: 1,
+          closed: 'clean',
+          server: { error: 'ChannelOverflowError', received: 1 },
+        })
+      },
+      { timeout: 30_000 },
+    )
+  })
+
   test('broadcast: a messages() loop that keeps up gets every one of 600 awaited publishes of 2 KiB, in order', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-keeps-up')

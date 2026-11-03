@@ -87,7 +87,7 @@ function Publish() {
         id="test-broadcast-slow-loop"
         onClick={async () => {
           try {
-            const remote = await onBroadcastBacklog(true)
+            const remote = await onBroadcastBacklog('slow')
             backlogRef.current = remote
             const { room } = remote
             await room.opened
@@ -116,6 +116,43 @@ function Publish() {
         A slow loop over a busy broadcast
       </button>
       <button
+        id="test-broadcast-overflow-then-close"
+        onClick={async () => {
+          try {
+            const remote = await onBroadcastBacklog('held')
+            const { room } = remote
+            await room.opened
+            const closed = room.closed.then(
+              () => 'clean',
+              (err) => (err as Error).name,
+            )
+            let received = 0
+            const loop = (async () => {
+              try {
+                for await (const _ of room.messages()) {
+                  received++
+                  // Holds its first message until the server closed the broadcast, after the loop fell behind.
+                  if (received === 1) await closed
+                }
+                return null
+              } catch (err) {
+                return (err as Error).name
+              }
+            })()
+            await room.publish('ready')
+            await remote.flood(1000)
+            await new Promise((resolve) => setTimeout(resolve, 1000))
+            await remote.close()
+            const error = await loop
+            setResult(JSON.stringify({ error, received, closed: await closed, server: await remote.serverLoop() }))
+          } catch (err) {
+            setResult(String(err))
+          }
+        }}
+      >
+        A held loop over a busy broadcast that then closes
+      </button>
+      <button
         id="test-broadcast-after-overflow"
         onClick={async () => {
           const remote = backlogRef.current!
@@ -133,7 +170,7 @@ function Publish() {
         id="test-broadcast-keeps-up"
         onClick={async () => {
           try {
-            const remote = await onBroadcastBacklog(false)
+            const remote = await onBroadcastBacklog(null)
             const { room } = remote
             await room.opened
             const seen: number[] = []
