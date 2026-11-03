@@ -518,12 +518,13 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.dispose()
       return
     }
+    const delay = Math.min(CHANNEL_RECONNECT_INITIAL_DELAY_MS * 2 ** prevAttempt, CHANNEL_RECONNECT_MAX_DELAY_MS)
+    this.enterReconnecting(prevAttempt + 1, startedAt, delay)
+    // Told once the wire is reconnecting, so what an `onDisconnect` callback sends (a `close()`) waits for the next wire.
     if (prevAttempt === 0) {
       for (const { channel, state } of this.channels.values())
         if (state.tag === 'open') channel._onTransportDisconnect()
     }
-    const delay = Math.min(CHANNEL_RECONNECT_INITIAL_DELAY_MS * 2 ** prevAttempt, CHANNEL_RECONNECT_MAX_DELAY_MS)
-    this.enterReconnecting(prevAttempt + 1, startedAt, delay)
   }
 
   /** Starts the idle timer on a live wire with no channel open and nothing queued; the transport drains first. */

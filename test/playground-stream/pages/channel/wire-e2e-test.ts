@@ -36,6 +36,13 @@ type WireState = {
   connection: { channelId: string; events: string[] } | null
   chat: { channelId: string; events: string[] } | null
   presence: { channelId: string; online: boolean; closed?: string } | null
+  closeOnDisconnect: {
+    open: boolean
+    disconnected: boolean
+    reconnects: number
+    close: number | null
+    closed: boolean
+  } | null
 }
 
 // The end card's channel sends these before the server ends it.
@@ -89,6 +96,25 @@ function testWire(isDev: boolean) {
       await autoRetry(async () => {
         const seen = ['start:false', 'open:true', 'disconnect:false', 'reconnect:true', 'close:false']
         expect(await events()).deep.equal({ page: seen, server: seen })
+      })
+    })
+
+  if (canCutWire())
+    test('channel: a close() that onDisconnect starts, by aborting a signal, completes once the page is back', async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await page.click('#wire-close-on-disconnect')
+      const seen = async () => (await getResult<WireState>('#wire-state')).closeOnDisconnect
+      await autoRetry(async () => {
+        expect((await seen())?.open).toBe(true)
+      })
+      await page.context().setOffline(true)
+      await cutWire()
+      await autoRetry(async () => {
+        expect((await seen())?.disconnected).toBe(true)
+      })
+      await page.context().setOffline(false)
+      await autoRetry(async () => {
+        expect(await seen()).deep.equal({ open: true, disconnected: true, reconnects: 0, close: 0, closed: true })
       })
     })
 

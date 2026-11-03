@@ -37,6 +37,15 @@ type WireState = {
   chat: { channelId: string; events: string[] } | null
   /** closed: 'abort:<value as JSON>' or the error's name, once the channel closed. */
   presence: { channelId: string; online: boolean; closed?: string } | null
+  /** A channel whose onDisconnect aborts a signal that closes it: the onReconnect callbacks that signal removed and
+   *  that ran anyway, what close() resolved to, and whether `closed` settled. */
+  closeOnDisconnect: {
+    open: boolean
+    disconnected: boolean
+    reconnects: number
+    close: number | null
+    closed: boolean
+  } | null
 }
 
 const RESUME_COUNT = 256
@@ -63,6 +72,7 @@ function WireDemo() {
     connection: null,
     chat: null,
     presence: null,
+    closeOnDisconnect: null,
   })
   const endChannel = useRef<Awaited<ReturnType<typeof onWireEnd>>['channel'] | null>(null)
   const overrunChannel = useRef<Awaited<ReturnType<typeof onWireOverrun>>['channel'] | null>(null)
@@ -73,6 +83,7 @@ function WireDemo() {
   const chatChannel = useRef<Awaited<ReturnType<typeof onWireChat>>['channel'] | null>(null)
   const chatReport = useRef<(event: string) => void>(() => {})
   const presenceChannel = useRef<Awaited<ReturnType<typeof onWirePresence>>['channel'] | null>(null)
+  const closeOnDisconnectChannel = useRef<Awaited<ReturnType<typeof onWireConnection>>['channel'] | null>(null)
 
   const connection = useCallback(async () => {
     const { channel, channelId } = await onWireConnection()
@@ -87,6 +98,40 @@ function WireDemo() {
     channel.onDisconnect(() => report('disconnect'))
     channel.onReconnect(() => report('reconnect'))
     channel.onClose(() => report('close'))
+  }, [])
+
+  const closeOnDisconnect = useCallback(async () => {
+    const { channel } = await onWireConnection()
+    closeOnDisconnectChannel.current = channel
+    const seen = { open: false, disconnected: false, reconnects: 0, close: null as number | null, closed: false }
+    const show = () => setState((s) => ({ ...s, closeOnDisconnect: { ...seen } }))
+    const controller = new AbortController()
+    channel.onReconnect(
+      () => {
+        seen.reconnects++
+        show()
+      },
+      { signal: controller.signal },
+    )
+    controller.signal.addEventListener('abort', () => {
+      void channel.close().then((close) => {
+        seen.close = close
+        show()
+      })
+      void channel.closed.then(() => {
+        seen.closed = true
+        show()
+      })
+    })
+    channel.onOpen(() => {
+      seen.open = true
+      show()
+    })
+    channel.onDisconnect(() => {
+      seen.disconnected = true
+      show()
+      controller.abort()
+    })
   }, [])
 
   const chat = useCallback(async () => {
@@ -360,6 +405,14 @@ function WireDemo() {
           className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
         >
           Open a channel that shows its connection
+        </button>
+        <button
+          id="wire-close-on-disconnect"
+          type="button"
+          onClick={closeOnDisconnect}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Open a channel that closes itself when its connection drops
         </button>
         <button
           id="wire-connection-close"
