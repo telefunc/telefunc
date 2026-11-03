@@ -8,6 +8,7 @@ import { encode, type ChannelDataFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { Listeners } from '../../../utils/Listeners.js'
+import { broadcastMessages } from '../channelMessages.js'
 import { ChannelClosedError } from '../channelErrors.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { ClientChannel, reportChannelError, type ClientChannelOptions } from './ClientChannel.js'
@@ -33,13 +34,20 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return ret
   }
 
-  subscribe(callback: BroadcastListener<T>): () => void {
-    if (this.broadcastListeners.size === 0) this.setSubscribed('text', true)
-    const remove = this.broadcastListeners.add(callback)
-    return () => {
-      remove()
-      if (this.broadcastListeners.size === 0) this.setSubscribed('text', false)
-    }
+  override messages(options?: { signal?: AbortSignal }) {
+    return broadcastMessages<ChannelData<T>>(this, options)
+  }
+
+  subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {
+    if (options.signal?.aborted) return () => {}
+    const remove = this.broadcastListeners.add(callback, {
+      ...options,
+      onRemove: () => {
+        if (this.broadcastListeners.size === 0) this.setSubscribed('text', false)
+      },
+    })
+    if (this.broadcastListeners.size === 1) this.setSubscribed('text', true)
+    return remove
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
@@ -49,13 +57,22 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return ret
   }
 
-  subscribeBinary(callback: BroadcastBinaryListener): () => void {
-    if (this.broadcastBinaryListeners.size === 0) this.setSubscribed('binary', true)
-    const remove = this.broadcastBinaryListeners.add(callback)
-    return () => {
-      remove()
-      if (this.broadcastBinaryListeners.size === 0) this.setSubscribed('binary', false)
-    }
+  subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
+    if (options.signal?.aborted) return () => {}
+    const remove = this.broadcastBinaryListeners.add(callback, {
+      ...options,
+      onRemove: () => {
+        if (this.broadcastBinaryListeners.size === 0) this.setSubscribed('binary', false)
+      },
+    })
+    if (this.broadcastBinaryListeners.size === 1) this.setSubscribed('binary', true)
+    return remove
+  }
+
+  override _end(err?: Error): void {
+    super._end(err)
+    this.broadcastListeners.clear()
+    this.broadcastBinaryListeners.clear()
   }
 
   private setSubscribed(kind: 'text' | 'binary', on: boolean): void {

@@ -1,6 +1,7 @@
-export { channelMessages }
+export { channelMessages, broadcastMessages }
 
 import { Fifo } from '../../utils/Fifo.js'
+import type { ChannelPublishInfo } from './channel.js'
 
 interface MessageSource<T> {
   listen(callback: (data: T) => any, options: { signal: AbortSignal }): () => void
@@ -8,14 +9,46 @@ interface MessageSource<T> {
   readonly closed: Promise<void>
 }
 
+interface BroadcastSource<T> {
+  subscribe(callback: (data: T, info: ChannelPublishInfo) => any, options: { signal: AbortSignal }): () => void
+  subscribeBinary(
+    callback: (data: Uint8Array, info: ChannelPublishInfo) => any,
+    options: { signal: AbortSignal },
+  ): () => void
+  readonly closed: Promise<void>
+}
+
 type Message<T> = { type: 'text'; data: T } | { type: 'binary'; data: Uint8Array }
 
-async function* channelMessages<T>(
-  channel: MessageSource<T>,
+function channelMessages<T>(channel: MessageSource<T>, options?: { signal?: AbortSignal }) {
+  return iterateMessages<Message<T>>(
+    channel,
+    (receive, registration) => {
+      channel.listen((data) => receive({ type: 'text', data }), registration)
+      channel.listenBinary((data) => receive({ type: 'binary', data }), registration)
+    },
+    options,
+  )
+}
+
+function broadcastMessages<T>(broadcast: BroadcastSource<T>, options?: { signal?: AbortSignal }) {
+  return iterateMessages<Message<T> & { info: ChannelPublishInfo }>(
+    broadcast,
+    (receive, registration) => {
+      broadcast.subscribe((data, info) => receive({ type: 'text', data, info }), registration)
+      broadcast.subscribeBinary((data, info) => receive({ type: 'binary', data, info }), registration)
+    },
+    options,
+  )
+}
+
+async function* iterateMessages<M>(
+  source: { readonly closed: Promise<void> },
+  subscribe: (receive: (message: M) => Promise<void> | undefined, options: { signal: AbortSignal }) => void,
   { signal }: { signal?: AbortSignal } = {},
-): AsyncIterableIterator<Message<T>> {
+): AsyncIterableIterator<M> {
   const registrations = new AbortController()
-  const queue = new Fifo<{ message: Message<T>; consumed: () => void }>()
+  const queue = new Fifo<{ message: M; consumed: () => void }>()
   let wake: (() => void) | undefined
   let ended = false
   let error: unknown
@@ -26,7 +59,7 @@ async function* channelMessages<T>(
     wake?.()
   }
   const abort = () => finish(signal!.reason)
-  const receive = (message: Message<T>) => {
+  const receive = (message: M) => {
     if (registrations.signal.aborted) return
     return new Promise<void>((consumed) => {
       queue.push({ message, consumed })
@@ -35,12 +68,9 @@ async function* channelMessages<T>(
   }
   signal?.addEventListener('abort', abort, { once: true })
   if (signal?.aborted) abort()
-  channel.listen((data) => receive({ type: 'text', data }), { signal: registrations.signal })
-  channel.listenBinary((data) => receive({ type: 'binary', data }), {
-    signal: registrations.signal,
-  })
-  const unobserve = observeClose(channel.closed, finish)
+  const unobserve = observeClose(source.closed, finish)
   try {
+    subscribe(receive, { signal: registrations.signal })
     while (true) {
       if (error !== undefined) throw error
       const next = queue.shift()

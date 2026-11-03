@@ -12,6 +12,7 @@ import type {
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 import { makePublishInfo } from '../channel.js'
+import { broadcastMessages } from '../channelMessages.js'
 import { ServerChannel } from './ServerChannel.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import { getBroadcastAdapter } from '../../broadcast/broadcastAdapter.js'
@@ -95,10 +96,20 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     return ret
   }
 
-  subscribe(callback: BroadcastListener<T>): () => void {
+  override messages(options?: { signal?: AbortSignal }) {
+    return broadcastMessages<ChannelData<T>>(this, options)
+  }
+
+  subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {
+    if (options.signal?.aborted) return () => {}
     this.ensureBroadcast()
+    const remove = this.broadcastListeners.add(callback, {
+      ...options,
+      onRemove: () => this.unsubscribeUnusedBroadcasts(),
+    })
     this.subscribeBroadcast()
-    return this.broadcastListeners.add(callback)
+    this.unsubscribeUnusedBroadcasts()
+    return remove
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
@@ -109,10 +120,16 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     return ret
   }
 
-  subscribeBinary(callback: BroadcastBinaryListener): () => void {
+  subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
+    if (options.signal?.aborted) return () => {}
     this.ensureBroadcast()
+    const remove = this.broadcastBinaryListeners.add(callback, {
+      ...options,
+      onRemove: () => this.unsubscribeUnusedBroadcasts(),
+    })
     this.subscribeBinaryBroadcast()
-    return this.broadcastBinaryListeners.add(callback)
+    this.unsubscribeUnusedBroadcasts()
+    return remove
   }
 
   // --- Transport callbacks ---
@@ -202,11 +219,15 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       else this.subscribeBroadcast()
       return
     }
-    if (binary && this.broadcastBinaryListeners.size === 0) {
+    this.unsubscribeUnusedBroadcasts()
+  }
+
+  private unsubscribeUnusedBroadcasts(): void {
+    if (!this.peerSubscribedBinary && this.broadcastBinaryListeners.size === 0) {
       this.unsubBinaryBroadcast?.()
       this.unsubBinaryBroadcast = null
     }
-    if (!binary && this.broadcastListeners.size === 0) {
+    if (!this.peerSubscribedText && this.broadcastListeners.size === 0) {
       this.unsubBroadcast?.()
       this.unsubBroadcast = null
     }
@@ -218,6 +239,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this.unsubBinaryBroadcast?.()
     this.unsubBinaryBroadcast = null
     super.shutdown(err, options)
+    this.broadcastListeners.clear()
+    this.broadcastBinaryListeners.clear()
   }
 
   // --- Internal broadcast helpers ---
@@ -297,16 +320,21 @@ type BroadcastChannel<T = unknown> = {
   readonly key: string
   readonly id: string
   readonly isClosed: boolean
+  readonly opened: Promise<void>
+  readonly closed: Promise<void>
+  messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<
+    ({ type: 'text'; data: ChannelData<T> } | { type: 'binary'; data: Uint8Array }) & { info: ChannelPublishInfo }
+  >
   readonly [TELEFUNC_SHIELDS]: {
     data: ChannelData<T>
     ack: unknown
   }
   publish(data: ChannelData<T>): Promise<ChannelPublishAck>
-  subscribe(callback: BroadcastListener<T>): () => void
+  subscribe(callback: BroadcastListener<T>, options?: { signal?: AbortSignal }): () => void
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
-  subscribeBinary(callback: BroadcastBinaryListener): () => void
-  onClose(callback: ChannelCloseCallback): void
-  onOpen(callback: () => void): void
+  subscribeBinary(callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): () => void
+  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): void
+  onOpen(callback: () => void, options?: { signal?: AbortSignal }): void
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>
   abort(): void
   abort(abortValue: unknown, message?: string): void
@@ -336,23 +364,39 @@ const Broadcast = {
     const serialized = stringify(data)
     return receiptOf(key, adapter.publish(key, serialized))
   },
-  subscribe<U = unknown>(key: string, callback: BroadcastListener<U>): BroadcastUnsubscribe {
+  subscribe<U = unknown>(
+    key: string,
+    callback: BroadcastListener<U>,
+    options?: { signal?: AbortSignal },
+  ): BroadcastUnsubscribe {
     const adapter = getBroadcastAdapter()
-    return adapter.subscribe(key, (serialized, info) => {
-      const data = parse(serialized) as ChannelData<U>
-      callStaticListener(callback, data, makePublishInfo(key, info.seq, info.timestamp))
-    })
+    return subscribeWithSignal(
+      () =>
+        adapter.subscribe(key, (serialized, info) => {
+          const data = parse(serialized) as ChannelData<U>
+          callStaticListener(callback, data, makePublishInfo(key, info.seq, info.timestamp))
+        }),
+      options,
+    )
   },
   publishBinary(key: string, data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     const adapter = getBroadcastAdapter()
     return receiptOf(key, adapter.publishBinary(key, data))
   },
-  subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
+  subscribeBinary(
+    key: string,
+    callback: BroadcastBinaryListener,
+    options?: { signal?: AbortSignal },
+  ): BroadcastUnsubscribe {
     const adapter = getBroadcastAdapter()
-    return adapter.subscribeBinary(key, (data, info) => {
-      // A copy of its own, as a `BroadcastChannel` listener gets.
-      callStaticListener(callback, new Uint8Array(data), makePublishInfo(key, info.seq, info.timestamp))
-    })
+    return subscribeWithSignal(
+      () =>
+        adapter.subscribeBinary(key, (data, info) => {
+          // A copy of its own, as a `BroadcastChannel` listener gets.
+          callStaticListener(callback, new Uint8Array(data), makePublishInfo(key, info.seq, info.timestamp))
+        }),
+      options,
+    )
   },
 }
 
@@ -372,4 +416,18 @@ function callStaticListener<D>(
 
 function reportStaticListenerError(err: unknown): void {
   if (!isAbort(err)) handleCallbackBug(err)
+}
+
+function subscribeWithSignal(subscribe: () => () => void, { signal }: { signal?: AbortSignal } = {}): () => void {
+  if (signal?.aborted) return () => {}
+  let unsubscribe: (() => void) | undefined = subscribe()
+  const remove = () => {
+    const current = unsubscribe
+    unsubscribe = undefined
+    signal?.removeEventListener('abort', remove)
+    current?.()
+  }
+  signal?.addEventListener('abort', remove, { once: true })
+  if (signal?.aborted) remove()
+  return remove
 }

@@ -38,6 +38,27 @@ type ServerBroadcastResult = {
 }
 
 function testPublish(isDev: boolean, inDocker = false) {
+  test('broadcast: iteration preserves publish info and signals remove subscriptions on both ends', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-api')
+    await autoRetry(async () => {
+      const result = await getResult<any>('#publish-result')
+      const info = result.receipts.map(({ key, seq, timestamp }: any) => ({ key, seq, timestamp }))
+      expect(info.map(({ seq }: any) => seq)).deep.equal([info[0].seq, info[0].seq + 1])
+      expect(info.every(({ key, timestamp }: any) => /^room:api:/.test(key) && timestamp > 0)).toBe(true)
+      const messages = [
+        { type: 'text', data: 'first', info: info[0] },
+        { type: 'binary', data: [2], info: info[1] },
+      ]
+      const expected = { messages, callbacks: messages, cancelled: 'stop', preAborted: 'skipped', skippedCalls: 0 }
+      expect(result.client).deep.equal(expected)
+      expect(result.server).deep.equal(expected)
+      expect(result.snapshot).deep.equal({ callbacks: messages, staticCalls: 2 })
+      expect(result.open).toBe(true)
+      expect(result.ended).toBe(true)
+    })
+  })
+
   test('broadcast: paired text publish/subscribe roundtrip', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-text-broadcast')

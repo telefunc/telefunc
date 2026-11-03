@@ -1,8 +1,11 @@
 export { Publish }
 
+import { prepareBroadcastApi } from './broadcastApiProbe'
+import { close } from 'telefunc/client'
 import React, { useEffect, useRef, useState } from 'react'
 import {
   onTextBroadcast,
+  onBroadcastApi,
   onBinaryBroadcastPair,
   onBinaryBroadcast,
   onBroadcastShieldClient,
@@ -49,6 +52,34 @@ function Publish() {
     <div id={hydrated ? 'hydrated' : undefined}>
       <pre id="publish-result">{result}</pre>
       <pre id="publish-shield-state">{JSON.stringify(shieldState)}</pre>
+
+      <button
+        id="test-broadcast-api"
+        onClick={async () => {
+          try {
+            const remote = await onBroadcastApi()
+            const { room } = remote
+            await room.opened
+            const local = prepareBroadcastApi(room)
+            const receipts = [await room.publish('first'), await room.publishBinary(new Uint8Array([2]))]
+            const client = await local.stop()
+            const server = await remote.stop()
+            await room.publish('after')
+            const snapshot = await remote.snapshot()
+            const open = !room.isClosed
+            const ending = room.messages().next()
+            await room.close()
+            const ended = (await ending).done
+            await room.closed
+            close(remote)
+            setResult(JSON.stringify({ client, server, snapshot, receipts, open, ended }))
+          } catch (err) {
+            setResult(String(err))
+          }
+        }}
+      >
+        Broadcast iteration and signals
+      </button>
 
       <h2>Text Pub/Sub</h2>
 

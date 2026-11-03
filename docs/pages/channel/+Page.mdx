@@ -392,6 +392,22 @@ chat.subscribe((msg, info) => {
 chat.publish({ user: 'Alice', text: 'Hello!' })
 ```
 
+### Receive broadcast messages in a loop
+
+```ts
+// Chat.tsx
+// Environment: client
+
+const controller = new AbortController()
+for await (const message of chat.messages({ signal: controller.signal })) {
+  console.log(message.type, message.data, message.info.seq)
+}
+```
+
+> `messages()` works on both server and client. Each message includes the same `info` as a subscription callback. The loop follows the <Link href="#receive-messages-in-a-loop">channel loop's cancellation and close behavior</Link>.
+
+> `subscribe()`, `subscribeBinary()`, `onOpen()` and `onClose()` accept `{ signal }` after the callback. The static `Broadcast.subscribe()` and `Broadcast.subscribeBinary()` accept it too. Aborting removes that registration.
+
 ### Notifications
 
 A per-user key with a subscribe-only client — the server returns a `BroadcastChannel` keyed to the user, and the client only listens:
@@ -425,10 +441,13 @@ broadcast.subscribe((n) => showToast(n))
 
 | Method | Description |
 |---|---|
+| `opened` | Promise that resolves on open; rejects if the channel ends before opening. |
+| `closed` | Promise that resolves on clean close; rejects on failure. |
+| `messages({ signal }?)` | Receive text and binary messages with publish info in an async loop. |
 | `publish(data)` | Publish to every subscriber of the key. Returns a receipt. |
-| `subscribe(cb)` | Receive `(data, info)`. Returns an unsubscribe function. |
+| `subscribe(cb, { signal }?)` | Receive `(data, info)`. Returns an unsubscribe function. |
 | `publishBinary(data)` | Publish raw binary to every subscriber. Returns a receipt. |
-| `subscribeBinary(cb)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function. |
+| `subscribeBinary(cb, { signal }?)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function. |
 | `onOpen(cb)` | Called when the channel opens. |
 | `onClose(cb)` | Called when the channel closes. |
 | `close()` | Close gracefully. |
