@@ -1,5 +1,6 @@
 export {
   registerCloudflareExtension,
+  serveCloudflarePlane,
   getCloudflareExtension,
   getCloudflareExtensionPlanes,
   currentCloudflareMember,
@@ -98,9 +99,12 @@ type CloudflareExtension = {
    *  `env` are the Durable Object's `DurableObjectState` and `Cloudflare.Env`. Its `alarm()` gets the Durable Object's
    *  alarms. */
   durableObject?: (ctx: never, env: never, kit: CloudflareExtensionKit) => CloudflareExtensionDurableObject
-  /** The backend planes the Cloudflare backend serves for the extension, each built from Cloudflare's kit. */
-  planes?: readonly { key: PlaneKey; build(kit: CloudflarePlaneKit): unknown }[]
+  /** The backend planes the Cloudflare backend serves for the extension; `serveCloudflarePlane()` makes each. */
+  planes?: readonly CloudflarePlane[]
 }
+
+/** How the Cloudflare backend builds one of an extension's planes, from Cloudflare's kit. */
+type CloudflarePlane = { readonly key: PlaneKey; build(kit: CloudflarePlaneKit): unknown }
 
 const globalObject = getGlobalObject<{ extensions: Map<string, CloudflareExtension> }>('extensions.ts', () => ({
   extensions: new Map(),
@@ -109,6 +113,15 @@ const globalObject = getGlobalObject<{ extensions: Map<string, CloudflareExtensi
 /** Registering a name again replaces its extension, as a module re-evaluated in dev does. */
 function registerCloudflareExtension(extension: CloudflareExtension): void {
   globalObject.extensions.set(extension.name, extension)
+}
+
+/** An extension's entry in `planes`: `build` makes, from Cloudflare's kit, the driver of the plane `key` names, typed by
+ *  the key. */
+function serveCloudflarePlane<Kit, Driver>(
+  key: PlaneKey<string, Kit, Driver>,
+  build: (kit: CloudflarePlaneKit) => Driver,
+): CloudflarePlane {
+  return { key, build }
 }
 
 function getCloudflareExtension(name: string): CloudflareExtension | undefined {

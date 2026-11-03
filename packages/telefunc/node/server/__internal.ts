@@ -55,6 +55,7 @@ export { ChannelOverflowError } from '../../wire-protocol/channel/channelErrors.
 // A Cloudflare extension: Room's session and authority Durable Objects.
 export {
   registerCloudflareExtension,
+  serveCloudflarePlane,
   currentCloudflareMember,
   currentCloudflareHostKey,
   CLOUDFLARE_BUCKETS,

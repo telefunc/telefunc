@@ -4,7 +4,7 @@
 // Object, its frames reach session Durable Objects through Broadcast's regions, and Room's storage driver is
 // `CloudflareRoomDriver`.
 
-import { registerCloudflareExtension } from 'telefunc/__internal'
+import { registerCloudflareExtension, serveCloudflarePlane } from 'telefunc/__internal'
 import { ROOM_CLOUDFLARE_EXTENSION } from '../server/constants.js'
 import { ROOM_PLANE } from '../backend/plane.js'
 import { RoomAuthority } from './RoomAuthority.js'
@@ -20,5 +20,5 @@ registerCloudflareExtension({
     )
     return { methods, alarm: () => authority.alarm() }
   },
-  planes: [{ key: ROOM_PLANE, build: (kit) => new CloudflareRoomDriver(kit) }],
+  planes: [serveCloudflarePlane(ROOM_PLANE, (kit) => new CloudflareRoomDriver(kit))],
 })

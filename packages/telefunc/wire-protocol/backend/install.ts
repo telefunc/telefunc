@@ -114,7 +114,7 @@ function backendPlane<Kit, Driver extends PlaneDriver, Plane extends BackendPlan
     else {
       const server = installed.backend.planes?.find(({ key }) => key === plane.key)
       assertUsage(server, `The installed backend doesn't serve ${String(plane.key)}, which this call needs`)
-      // servePlane() typed the entry by its key, which is plane.key
+      // servePlane() or serveCloudflarePlane() typed the entry by its key, which is plane.key
       driver = (server.build as (kit: Kit) => Driver)(plane.kit)
     }
     return plane.create(driver)
