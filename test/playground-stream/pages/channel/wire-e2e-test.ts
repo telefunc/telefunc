@@ -1,4 +1,4 @@
-export { testWire, testWireSmallReplay, testWireSlowPing }
+export { testWire, testWireSmallReplay, testWireSlowPing, testWireShortReconnect }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { startBlackHoleProxy } from '../../black-hole-proxy'
@@ -546,5 +546,65 @@ function testWireSlowPing() {
     } finally {
       await proxy.close()
     }
+  })
+}
+
+// Run by the lane whose server waits 2 s for a page that is away.
+function testWireShortReconnect() {
+  const startHeldDownload = async (button: string, ready: (id: string, state: Record<string, string>) => void) => {
+    await navigate(`${getServerUrl()}/file-download`)
+    await page.click(button)
+    let id = ''
+    await autoRetry(
+      async () => {
+        ;({ id } = await getResult<{ id: string }>('#download-result'))
+        ready(id, await getCleanupState())
+      },
+      { timeout: 30_000 },
+    )
+    return id
+  }
+  const goAway = async () => {
+    await page.context().setOffline(true)
+    await cutWire()
+  }
+  const expectServerRuns = async () => {
+    const state = await getCleanupState()
+    expect(Object.keys(state).filter((key) => key.startsWith('unhandledRejection:'))).deep.equal([])
+    await page.context().setOffline(false)
+    await navigate(`${getServerUrl()}/file-download`)
+    await page.click('#test-file-eager')
+    await autoRetry(async () => {
+      expect((await getResult<{ name: string }>('#download-result')).name).toBe('eager.txt')
+    })
+  }
+
+  test('file download: a page that goes away for good while the server waits to send it more ends the download, and the server keeps running', async () => {
+    let sent: string | undefined
+    const id = await startHeldDownload('#test-nobody-reads', (id, state) => {
+      const before = sent
+      sent = state[`downloadNobodyReads_${id}_sent`]
+      expect(sent).not.toBe(undefined)
+      expect(sent).toBe(before)
+    })
+    await goAway()
+    await autoRetry(async () => {
+      expect((await getCleanupState())[`downloadNobodyReads_${id}_cancelled`]).toBe('true')
+    })
+    // A rejection nothing handles comes just after.
+    await new Promise((resolve) => setTimeout(resolve, 1_000))
+    await expectServerRuns()
+  })
+
+  test('file download: a source that fails while its page is away, which then goes for good, leaves the server running', async () => {
+    const id = await startHeldDownload('#test-fails-when-told', (id, state) => {
+      expect(state[`downloadFailsWhenTold_${id}_reading`]).toBe('true')
+    })
+    await goAway()
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    await runServerAction(`downloadFailsWhenTold_${id}`)
+    // Past the 2 s the server waits for the page.
+    await new Promise((resolve) => setTimeout(resolve, 3_000))
+    await expectServerRuns()
   })
 }

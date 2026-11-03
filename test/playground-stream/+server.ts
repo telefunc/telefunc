@@ -20,6 +20,11 @@ if (process.env.CHANNEL_CONFIG) Object.assign(config.channel, JSON.parse(process
 
 const INST = process.env.INSTANCE_ID ?? '?'
 
+// Vike logs these and keeps the process, which Node's default would end.
+process.on('unhandledRejection', (err) => {
+  cleanupState[`unhandledRejection:${String(err)}`] = 'reported'
+})
+
 onBug((err) => {
   cleanupState[`bug:${err instanceof Error ? err.message : String(err)}`] = 'reported'
 })

@@ -101,9 +101,14 @@ function pumpProducerToChannel(
         if (isAbort(err)) {
           runContext.requestContext.responseAbort.abort(err.abortValue)
         }
-        const errorFrame = concat(TAG_ERROR, encodeErrorPayload(err, telefuncId))
-        const pending = channel._sendBinary(errorFrame)
-        if (pending) await pending
+        if (!channel.isClosed) {
+          const errorFrame = concat(TAG_ERROR, encodeErrorPayload(err, telefuncId))
+          try {
+            await channel._sendBinary(errorFrame)
+          } catch {
+            // The channel ended before the frame went out: no page is left to tell.
+          }
+        }
       }
     } finally {
       doCancel()
