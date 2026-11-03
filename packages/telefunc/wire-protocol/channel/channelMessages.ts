@@ -92,13 +92,12 @@ async function* iterateMessages<M extends Message<unknown>>(
     ended = true
     error = err
     registrations.abort()
-    clearTimeout(behindCheck)
     if (err !== undefined) release()
     wake?.()
   }
   const abort = () => finish(signal!.reason)
   // A burst delivered in one task reaches the loop only once that task ends, so the loop is behind where it still
-  // holds more than `budget` after it could run.
+  // holds more than `budget` then, whether or not its source closed meanwhile.
   const checkBehind = () => {
     behindCheck = undefined
     const type = held.text > budget!.text ? 'text' : held.binary > budget!.binary ? 'binary' : null

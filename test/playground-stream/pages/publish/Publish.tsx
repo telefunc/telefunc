@@ -7,6 +7,7 @@ import {
   onTextBroadcast,
   onBroadcastApi,
   onBroadcastBacklog,
+  onBroadcastBurstThenClose,
   onBinaryBroadcastPair,
   onBinaryBroadcast,
   onBroadcastShieldClient,
@@ -151,6 +152,18 @@ function Publish() {
         }}
       >
         A held loop over a busy broadcast that then closes
+      </button>
+      <button
+        id="test-broadcast-burst-then-close"
+        onClick={async () => {
+          try {
+            setResult(JSON.stringify(await onBroadcastBurstThenClose()))
+          } catch (err) {
+            setResult(String(err))
+          }
+        }}
+      >
+        A server loop over a burst published and closed in one task
       </button>
       <button
         id="test-broadcast-after-overflow"

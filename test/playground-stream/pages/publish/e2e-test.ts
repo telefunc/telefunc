@@ -87,6 +87,16 @@ function testPublish(isDev: boolean, inDocker = false) {
     )
   })
 
+  test('broadcast: a slow server messages() loop over a burst published and closed in one task ends with ChannelOverflowError', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-burst-then-close')
+    await autoRetry(async () => {
+      const result = await getResult<any>('#publish-result')
+      expect(result.error).toBe('ChannelOverflowError')
+      expect(result.received).lessThan(1000)
+    })
+  })
+
   test('broadcast: a messages() loop that keeps up gets every one of 600 awaited publishes of 2 KiB, in order', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-keeps-up')

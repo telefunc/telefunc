@@ -2,6 +2,7 @@ export {
   onTextBroadcast,
   onBroadcastApi,
   onBroadcastBacklog,
+  onBroadcastBurstThenClose,
   onBinaryBroadcastPair,
   onBinaryBroadcast,
   onBroadcastShieldClient,
@@ -387,6 +388,17 @@ async function onBroadcastBacklog(serverLoopKind: 'slow' | 'held' | null) {
       await room.close()
     },
   }
+}
+
+/** A job publishes a burst and closes its broadcast in one task, while a server loop over it takes 20 ms per message. */
+async function onBroadcastBurstThenClose() {
+  const room = new BroadcastChannel<string>({ key: `room:burst:${crypto.randomUUID()}` })
+  const serverLoop = readSlowly(room, 'slow')
+  await room.publish('start')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  for (let i = 0; i < 1000; i++) await room.publish(`${i}:${'x'.repeat(2048)}`)
+  await room.close()
+  return serverLoop
 }
 
 async function readSlowly(room: BroadcastChannel<string>, kind: 'slow' | 'held') {
