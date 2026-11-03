@@ -30,7 +30,8 @@ export {
   onChannelUnattachedFlood,
   onChannelEndedValues,
   onChannelSlowLink,
-  onChannelUnawaitedBurst,
+  onChannelBinaryBurst,
+  onChannelPaced,
   onChannelTextBurst,
   onChannelOpenBurst,
   onChannelSmallPush,
@@ -697,24 +698,57 @@ async function onChannelSlowLink() {
   return { channel: ch.client }
 }
 
-/** At the page's message, sends that many 1 MiB messages, each with its index in its first 4 bytes, without awaiting
- *  them, in one loop. */
-async function onChannelUnawaitedBurst() {
-  const ch = new Channel<(count: number) => void, never>()
-  ch.listen((count) => {
-    for (let i = 0; i < count; i++) {
-      const message = new Uint8Array(1024 * 1024)
-      new DataView(message.buffer).setUint32(0, i)
-      void ch.sendBinary(message)
+/**
+ * At the page's message, sends that many 1 MiB messages, each with its index in its first 4 bytes, in one loop:
+ * awaiting each, or not.
+ * cleanupState keys:
+ *   binaryBurst_<id> = what the send that closed the channel threw, if one did
+ */
+async function onChannelBinaryBurst() {
+  const ch = new Channel<(run: { count: number; awaited: boolean }) => void, never>()
+  ch.listen(async ({ count, awaited }) => {
+    try {
+      for (let i = 0; i < count; i++) {
+        const message = new Uint8Array(1024 * 1024)
+        new DataView(message.buffer).setUint32(0, i)
+        if (awaited) await ch.sendBinary(message)
+        else void ch.sendBinary(message)
+      }
+    } catch (err) {
+      cleanupState[`binaryBurst_${ch.id}`] = (err as Error).message
     }
   })
-  return { channel: ch.client }
+  return { channel: ch.client, channelId: ch.id }
 }
 
 /**
- * At the page's message, sends that many 16 KiB text messages, each starting with its index, in one loop: without
- * awaiting them, awaiting each, or with `{ ack: true }`, awaiting the acks together.
+ * At the page's message, sends `burst` 1 MiB messages at once, then a message of `tick` bytes every `everyMs` ms,
+ * `ticks` times, none of them awaited.
  * cleanupState keys:
+ *   paced_<id> = what the send that closed the channel threw, or `done`
+ */
+async function onChannelPaced() {
+  const ch = new Channel<(run: { burst: number; tick: number; everyMs: number; ticks: number }) => void, never>()
+  ch.listen(async ({ burst, tick, everyMs, ticks }) => {
+    try {
+      for (let i = 0; i < burst; i++) void ch.sendBinary(new Uint8Array(1024 * 1024))
+      for (let i = 0; i < ticks; i++) {
+        await new Promise((resolve) => setTimeout(resolve, everyMs))
+        void ch.sendBinary(new Uint8Array(tick))
+      }
+      cleanupState[`paced_${ch.id}`] = 'done'
+    } catch (err) {
+      cleanupState[`paced_${ch.id}`] = (err as Error).message
+    }
+  })
+  return { channel: ch.client, channelId: ch.id }
+}
+
+/**
+ * At the page's message, sends that many text messages, each starting with its index, in one loop: of 16 KiB, without
+ * awaiting them or awaiting each, or of 1 KiB with `{ ack: true }`, awaiting the acks together.
+ * cleanupState keys:
+ *   textBurst_<id>_error = what the send that closed the channel threw, if one did
  *   textBurst_<id>_acked = how many of the ack-requesting sends resolved
  */
 async function onChannelTextBurst() {
@@ -722,11 +756,15 @@ async function onChannelTextBurst() {
   const id = ch.id
   ch.listen(async ({ count, mode }) => {
     const sends: Promise<unknown>[] = []
-    for (let i = 0; i < count; i++) {
-      const message = String(i).padEnd(16 * 1024)
-      if (mode === 'acks') sends.push(ch.send(message, { ack: true }))
-      else if (mode === 'awaited') await ch.send(message)
-      else void ch.send(message)
+    try {
+      for (let i = 0; i < count; i++) {
+        const message = String(i).padEnd(mode === 'acks' ? 1024 : 16 * 1024)
+        if (mode === 'acks') sends.push(ch.send(message, { ack: true }))
+        else if (mode === 'awaited') await ch.send(message)
+        else void ch.send(message)
+      }
+    } catch (err) {
+      cleanupState[`textBurst_${id}_error`] = (err as Error).message
     }
     if (mode !== 'acks') return
     const results = await Promise.allSettled(sends)

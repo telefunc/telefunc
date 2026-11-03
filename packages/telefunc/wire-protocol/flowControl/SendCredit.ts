@@ -98,14 +98,16 @@ class SendCredit {
     this.sentMessages += 1
   }
 
-  /** A limit that doesn't raise the current one is stale, and ignored, as in QUIC. */
-  onPeerByteWindow(limit: number): void {
+  /** Returns the bytes `limit` raised the byte limit by. A limit that doesn't raise the current one is stale, and
+   *  ignored, as in QUIC. */
+  onPeerByteWindow(limit: number): number {
     const raise = (limit - this.limitBytes) | 0
-    if (raise <= 0) return
+    if (raise <= 0) return 0
     this.noteBacklog()
     this.limitBytes += raise
     this.limitRaised = true
     this.tryWakeCreditWaiters()
+    return raise
   }
 
   onPeerMessageWindow(limit: number): void {

@@ -11,7 +11,7 @@ import {
   startProxy,
   countConnections,
 } from '../../e2e-utils'
-import { newCDPSession, sendsAheadWarning, withNetworkConditions } from '../../../utils'
+import { newCDPSession, sendsOutrunWarning, withNetworkConditions } from '../../../utils'
 
 type ChannelState = {
   connected: boolean
@@ -84,7 +84,8 @@ type ChannelState = {
   endedValuesReady: boolean
   endedValuesCollected: boolean[] | null
   slowLinkReceived: number | null
-  unawaitedBurst: { received: number; inOrder: boolean; closeErr: string | null } | null
+  binaryBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
+  paced: { channelId: string; receivedBytes: number; closeErr: string | null; ended: boolean } | null
   textBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
   openBurstReceived: number | null
   freshBinaryEchoed: number | null
@@ -1017,31 +1018,98 @@ function testChannel(isDev: boolean, inDocker = false) {
 
   test('channel: a burst of 32 MiB the server sends without awaiting all reaches the page', async () => {
     await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-unawaited-burst-32')
+    await page.click('#channel-test-binary-burst-unawaited-32')
     await autoRetry(async () => {
-      const burst = (await getResult<ChannelState>('#channel-state')).unawaitedBurst!
+      const burst = (await getResult<ChannelState>('#channel-state')).binaryBurst!
       expect(burst.received).toBe(32)
       expect(burst.inOrder).toBe(true)
       expect(burst.closeErr).toBe(null)
     })
   })
 
-  test('channel: with default caps, a burst of 300 MiB the server sends without awaiting arrives in full, with one warning', async () => {
+  test('channel: a burst of 300 MiB the server sends without awaiting passes maxPendingBytes and closes the channel with ChannelOverflowError', async () => {
     await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-unawaited-burst-300')
+    await page.click('#channel-test-binary-burst-unawaited-300')
     await autoRetry(
       async () => {
-        const burst = (await getResult<ChannelState>('#channel-state')).unawaitedBurst!
-        expect(burst.received).toBe(300)
+        const burst = (await getResult<ChannelState>('#channel-state')).binaryBurst!
+        expect(burst.closeErr).toBe('ChannelOverflowError')
+        expect(burst.received).lessThan(300)
         expect(burst.inOrder).toBe(true)
-        expect(burst.closeErr).toBe(null)
-        expectLog(sendsAheadWarning)
+        expect((await getCleanupState())[`binaryBurst_${burst.channelId}`]).toContain('config.channel.maxPendingBytes')
       },
       { timeout: 60_000 },
     )
   })
 
-  test('channel: 6,000 text messages of 16 KiB the server sends in one loop without awaiting all reach a page that reads, with a warning', async () => {
+  test('channel: 300 MiB the server sends awaiting each send all reach the page, with no warning', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-binary-burst-awaited-300')
+    await autoRetry(
+      async () => {
+        const burst = (await getResult<ChannelState>('#channel-state')).binaryBurst!
+        expect(burst.received).toBe(300)
+        expect(burst.inOrder).toBe(true)
+        expect(burst.closeErr).toBe(null)
+      },
+      { timeout: 60_000 },
+    )
+    expect(() => expectLog(sendsOutrunWarning)).throw()
+  })
+
+  test('channel: sends nobody awaits that keep outrunning a 1 MB/s page warn once, then close the channel at maxPendingBytes', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    // 1 MiB every 50 ms to a page that takes 1 MB/s.
+    await withNetworkConditions({ downloadThroughput: 1_000_000, uploadThroughput: -1 }, async () => {
+      await page.click('#channel-test-paced-outrun')
+      await autoRetry(
+        async () => {
+          const { channelId } = (await getResult<ChannelState>('#channel-state')).paced!
+          expect((await getCleanupState())[`paced_${channelId}`]).toContain('config.channel.maxPendingBytes')
+        },
+        { timeout: 60_000 },
+      )
+    })
+    expectLog(sendsOutrunWarning)
+    await autoRetry(
+      async () => {
+        const paced = (await getResult<ChannelState>('#channel-state')).paced!
+        expect(paced.ended).toBe(true)
+        expect(paced.closeErr).toBe('ChannelOverflowError')
+      },
+      { timeout: 60_000 },
+    )
+  })
+
+  test('channel: an 8 MiB burst nobody awaits, then small sends while a 1 MB/s page takes it, all reach the page with no warning', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    // 16 KiB every 100 ms, for 3 s, while the page takes the 8 MiB.
+    await withNetworkConditions({ downloadThroughput: 1_000_000, uploadThroughput: -1 }, async () => {
+      await page.click('#channel-test-paced-drains')
+      await autoRetry(
+        async () => {
+          const { channelId } = (await getResult<ChannelState>('#channel-state')).paced!
+          expect((await getCleanupState())[`paced_${channelId}`]).toBe('done')
+        },
+        { timeout: 30_000 },
+      )
+    })
+    await autoRetry(
+      async () => {
+        const paced = (await getResult<ChannelState>('#channel-state')).paced!
+        expect(paced).deep.equal({
+          channelId: paced.channelId,
+          receivedBytes: 8 * 1024 * 1024 + 30 * 16 * 1024,
+          closeErr: null,
+          ended: true,
+        })
+      },
+      { timeout: 30_000 },
+    )
+    expect(() => expectLog(sendsOutrunWarning)).throw()
+  })
+
+  test('channel: 6,000 text messages of 16 KiB the server sends in one loop without awaiting all reach a page that reads', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-text-burst-unawaited-6000')
     await autoRetry(
@@ -1050,7 +1118,6 @@ function testChannel(isDev: boolean, inDocker = false) {
         expect(burst.received).toBe(6000)
         expect(burst.inOrder).toBe(true)
         expect(burst.closeErr).toBe(null)
-        expectLog(sendsAheadWarning)
       },
       { timeout: 30_000 },
     )
@@ -1068,21 +1135,20 @@ function testChannel(isDev: boolean, inDocker = false) {
       },
       { timeout: 30_000 },
     )
-    expect(() => expectLog(sendsAheadWarning)).throw()
+    expect(() => expectLog(sendsOutrunWarning)).throw()
   })
 
-  test('channel: with default caps, 18,000 unawaited acknowledgement requests all arrive and resolve, with a warning', async () => {
+  test('channel: 18,000 acknowledgement requests the server sends in one loop pass maxPendingAcks and close the channel with ChannelOverflowError', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-text-burst-acks-18000')
     await autoRetry(
       async () => {
         const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
-        expect(burst.received).toBe(18000)
+        expect(burst.closeErr).toBe('ChannelOverflowError')
+        expect(burst.received).toBe(16384)
         expect(burst.inOrder).toBe(true)
-        expect(burst.closeErr).toBe(null)
         const ss = await getCleanupState()
-        expect(ss[`textBurst_${burst.channelId}_acked`]).toBe('18000')
-        expectLog(sendsAheadWarning)
+        expect(ss[`textBurst_${burst.channelId}_error`]).toContain('config.channel.maxPendingAcks')
       },
       { timeout: 60_000 },
     )

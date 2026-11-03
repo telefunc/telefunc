@@ -36,7 +36,8 @@ import {
   onChannelUnattachedFlood,
   onChannelEndedValues,
   onChannelSlowLink,
-  onChannelUnawaitedBurst,
+  onChannelBinaryBurst,
+  onChannelPaced,
   onChannelTextBurst,
   onChannelOpenBurst,
   onChannelSmallPush,
@@ -176,7 +177,8 @@ type ChannelState = {
   endedValuesReady: boolean
   endedValuesCollected: boolean[] | null
   slowLinkReceived: number | null
-  unawaitedBurst: { received: number; inOrder: boolean; closeErr: string | null } | null
+  binaryBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
+  paced: { channelId: string; receivedBytes: number; closeErr: string | null; ended: boolean } | null
   textBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
   openBurstReceived: number | null
   freshBinaryEchoed: number | null
@@ -254,7 +256,8 @@ const initialState: ChannelState = {
   endedValuesReady: false,
   endedValuesCollected: null,
   slowLinkReceived: null,
-  unawaitedBurst: null,
+  binaryBurst: null,
+  paced: null,
   textBurst: null,
   openBurstReceived: null,
   freshBinaryEchoed: null,
@@ -1041,9 +1044,9 @@ function ChannelDemo() {
     await channel.send(1_000_000)
   }, [])
 
-  const testUnawaitedBurst = useCallback(async (count: number) => {
-    setChannelState((s) => ({ ...s, unawaitedBurst: null }))
-    const { channel } = await openChannel(onChannelUnawaitedBurst)
+  const testBinaryBurst = useCallback(async (count: number, awaited: boolean) => {
+    setChannelState((s) => ({ ...s, binaryBurst: null }))
+    const { channel, channelId } = await openChannel(onChannelBinaryBurst)
     const received: number[] = []
     const ended = new Promise<string | null>((resolve) => {
       channel.listenBinary((data) => {
@@ -1052,10 +1055,29 @@ function ChannelDemo() {
       })
       channel.onClose((err) => resolve(err?.name ?? 'none'))
     })
-    void channel.send(count)
+    void channel.send({ count, awaited })
     const closeErr = await ended
     const inOrder = received.every((index, i) => index === i)
-    setChannelState((s) => ({ ...s, unawaitedBurst: { received: received.length, inOrder, closeErr } }))
+    setChannelState((s) => ({ ...s, binaryBurst: { channelId, received: received.length, inOrder, closeErr } }))
+    channel.close()
+  }, [])
+
+  const testPaced = useCallback(async (run: { burst: number; tick: number; everyMs: number; ticks: number }) => {
+    setChannelState((s) => ({ ...s, paced: null }))
+    const { channel, channelId } = await openChannel(onChannelPaced)
+    setChannelState((s) => ({ ...s, paced: { channelId, receivedBytes: 0, closeErr: null, ended: false } }))
+    const expected = run.burst * 1024 * 1024 + run.ticks * run.tick
+    let receivedBytes = 0
+    const ended = new Promise<string | null>((resolve) => {
+      channel.listenBinary((data) => {
+        receivedBytes += data.byteLength
+        if (receivedBytes === expected) resolve(null)
+      })
+      channel.onClose((err) => resolve(err?.name ?? 'none'))
+    })
+    void channel.send(run)
+    const closeErr = await ended
+    setChannelState((s) => ({ ...s, paced: { channelId, receivedBytes, closeErr, ended: true } }))
     channel.close()
   }, [])
 
@@ -1100,9 +1122,9 @@ function ChannelDemo() {
 
   const testHelloBesideBurst = useCallback(async () => {
     setChannelState((s) => ({ ...s, helloBesideBurst: false }))
-    const { channel: burst } = await openChannel(onChannelUnawaitedBurst)
+    const { channel: burst } = await openChannel(onChannelBinaryBurst)
     const firstChunk = new Promise<void>((resolve) => burst.listenBinary(() => resolve()))
-    void burst.send(4)
+    void burst.send({ count: 4, awaited: false })
     await firstChunk
     const { channel } = await openChannel(onChannelOpenHello)
     channel.listen(() => {
@@ -1665,15 +1687,37 @@ function ChannelDemo() {
           >
             1 MB Download
           </button>
-          {[32, 300].map((count) => (
+          {(
+            [
+              ['unawaited', 32],
+              ['unawaited', 300],
+              ['awaited', 300],
+            ] as const
+          ).map(([mode, count]) => (
             <button
-              key={count}
-              id={`channel-test-unawaited-burst-${count}`}
+              key={`${mode}-${count}`}
+              id={`channel-test-binary-burst-${mode}-${count}`}
               type="button"
-              onClick={() => testUnawaitedBurst(count)}
+              onClick={() => testBinaryBurst(count, mode === 'awaited')}
               className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
             >
-              Server Bursts {count} MiB Unawaited
+              Server Bursts {count} MiB ({mode})
+            </button>
+          ))}
+          {(
+            [
+              ['outrun', { burst: 0, tick: 1024 * 1024, everyMs: 50, ticks: 1000 }],
+              ['drains', { burst: 8, tick: 16 * 1024, everyMs: 100, ticks: 30 }],
+            ] as const
+          ).map(([name, run]) => (
+            <button
+              key={name}
+              id={`channel-test-paced-${name}`}
+              type="button"
+              onClick={() => testPaced(run)}
+              className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+            >
+              Server Sends Paced ({name})
             </button>
           ))}
           {(
@@ -1690,7 +1734,7 @@ function ChannelDemo() {
               onClick={() => testTextBurst(mode, count)}
               className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
             >
-              Server Bursts {count} × 16 KiB ({mode})
+              Server Bursts {count} × {mode === 'acks' ? 1 : 16} KiB ({mode})
             </button>
           ))}
           <button

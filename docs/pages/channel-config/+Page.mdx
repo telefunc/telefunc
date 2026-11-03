@@ -16,9 +16,8 @@ config.channel = {
   pingInterval: 5_000,                    // Client ping interval (ms)
   connectTtl: 15_000,                     // Wait for client to connect to new channel (ms)
 
-  // Optional send caps (no limit by default)
-  // maxPendingBytes: 268_435_456,        // Sends ahead of the client and unanswered acknowledgements (bytes)
-  // maxPendingAcks: 16_384,              // Unanswered acknowledgement requests (count)
+  maxPendingBytes: 268_435_456,           // Sends ahead of the client and unanswered acknowledgements (bytes)
+  maxPendingAcks: 16_384,                 // Unanswered acknowledgement requests (count)
 
   // Text buffers
   serverReplayBuffer: 134_217_728,        // Server replay buffer for text messages (bytes)
@@ -32,8 +31,6 @@ config.channel = {
 }
 ```
 
-> Set `maxPendingBytes`/`maxPendingAcks` only if you want growing send backlogs to close a channel. Both are opt-in; neither limits sends by default.
-
 > `maxPendingBytes` covers text and binary sends beyond what the client is ready to take, plus unanswered acknowledgement requests. Both limits apply per channel.
 
 > This is the **server-side** `config.channel` — a separate object from the **client-side** <Link href="/transport"><code>config.channel.transports</code></Link> (`telefunc/client`).
@@ -41,10 +38,9 @@ config.channel = {
 > **What to tune**: the defaults suit typical stream use cases; tune these only if you run into one of the issues below:
 > - Slow/flaky clients dropping with `NetworkError` (`isChannel: true`) → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
 > - `ChannelOverflowError` while a client is briefly offline → raise `bufferLimit`/`bufferLimitBinary` above your largest message and `await` your sends.
-> - You want to bound growing send backlogs by closing channels → set `maxPendingBytes`/`maxPendingAcks` (opt-in; no limit by default).
-> - `ChannelOverflowError` with an opt-in send cap → `await` the server's sends or raise or remove the named cap, then recreate the channel.
+> - `ChannelOverflowError` while the client is connected → `await` the server's sends or raise `maxPendingBytes`/`maxPendingAcks`, then recreate the channel.
+> - A warning that a channel's sends outrun its client → `await` your `send()`s, or send slower (see <Link href="/channel#backpressure" />); otherwise the channel closes with that `ChannelOverflowError`.
 > - `NetworkError` (`isChannel: true`) right after a reconnect, having missed more messages than the replay buffer holds → `await` your `send()`s, or raise the replay buffer that the error message names.
-> - A warning that 64 MiB of a channel's sends are waiting for its client → `await` your `send()`s, or skip sends while one is pending (see <Link href="/channel#backpressure" />). The 64 MiB is fixed.
 > - Too much server memory per channel → `await` your `send()`s and lower the replay buffers. Smaller replay buffers can slow sends to distant clients.
 
 <ConfigWhereServer />

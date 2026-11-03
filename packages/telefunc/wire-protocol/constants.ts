@@ -231,6 +231,11 @@ export const WIRE_QUEUE_DELAY_MS = 300
 export const CHANNEL_BUFFER_LIMIT_BYTES = 512 * 1024
 /** Maximum bytes buffered per channel for binary messages sent before a peer connects. */
 export const CHANNEL_BUFFER_LIMIT_BINARY_BYTES = 2 * 1024 * 1024
+/** The most a server channel holds for its page past the page's credit and in unanswered ack requests: a sender that
+ *  awaits each send holds one, so only sends nobody awaits reach it. */
+export const CHANNEL_MAX_PENDING_BYTES = 256 * 1024 * 1024
+/** The most ack requests a server channel holds unanswered. */
+export const CHANNEL_MAX_PENDING_ACKS = 16_384
 
 /** How long a channel waits for its peer to connect: it outlasts a page's noticing its wire died, and a reconnect. */
 export const CHANNEL_CONNECT_TTL_MS = 15_000
@@ -289,8 +294,9 @@ export const CREDIT_WINDOW_INITIAL_BYTES_BATCH = 8 * 1024 * 1024
  *  Covers ~5 Gbit/s × 100 ms RTT or ~500 Mbit/s × 1 s RTT. */
 export const CREDIT_WINDOW_MAX_BYTES = 64 * 1024 * 1024
 
-/** A server channel warns, once, when its sends put this much ahead of its page: past its credit, or awaiting acks. */
-export const SENDS_AHEAD_WARNING_BYTES = 64 * 1024 * 1024
+/** A server channel's sends outrun its page once, each time the page takes some for this long, more is ahead of it than
+ *  when that began, and more than the page takes in this long: a few round trips of Slow 3G's 400 ms. */
+export const SENDS_OUTRUN_MS = 1_000
 
 /** The most a batch POST is sized to carry (see `SSE_POST_TARGET_MS`). */
 export const SSE_POST_MAX_BYTES = CREDIT_WINDOW_MAX_BYTES / 2
