@@ -77,6 +77,32 @@ function testPublish(isDev: boolean, inDocker = false) {
     }
   })
 
+  test('broadcast: a messages() loop that fell behind still ends with ChannelOverflowError after the server closes the broadcast, on the page and on the server', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-overflow-then-close')
+    await autoRetry(
+      async () => {
+        expect(await getResult('#publish-result')).deep.equal({
+          error: 'ChannelOverflowError',
+          received: 1,
+          closed: 'clean',
+          server: { error: 'ChannelOverflowError', received: 1 },
+        })
+      },
+      { timeout: 30_000 },
+    )
+  })
+
+  test('broadcast: a slow server messages() loop over a burst published and closed in one task ends with ChannelOverflowError', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-burst-then-close')
+    await autoRetry(async () => {
+      const result = await getResult<any>('#publish-result')
+      expect(result.error).toBe('ChannelOverflowError')
+      expect(result.received).lessThan(1000)
+    })
+  })
+
   test('broadcast: a messages() loop that keeps up gets every one of 600 awaited publishes of 2 KiB, in order', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-keeps-up')
@@ -84,6 +110,29 @@ function testPublish(isDev: boolean, inDocker = false) {
       expect(await getResult('#publish-result')).deep.equal({ received: 600, inOrder: true })
     })
   })
+
+  // The in-memory adapter: these lanes publish through Redis.
+  if (!inDocker && !process.env.REDIS_URL) {
+    test('broadcast: in memory, a loop of publishes delivers in it, a listener publishing 125 MiB holds at most bufferLimitBinary and rejects the rest, one 8 MiB message alone goes through, and answers that await let a timer fire', async () => {
+      await navigate(`${getServerUrl()}/publish`)
+      await page.click('#test-in-memory-publishes')
+      await autoRetry(
+        async () => {
+          const { loop, listenerBatch, aloneBytes, timerFiredMidChain } = await getResult<any>('#publish-result')
+          expect(loop).deep.equal({ deliveredInLoop: 3000, inOrder: true })
+          // 2 MiB of 64 KiB messages.
+          expect(listenerBatch.delivered).greaterThan(20)
+          expect(listenerBatch.delivered).lessThan(40)
+          expect(listenerBatch.delivered + listenerBatch.rejected).toBe(2000)
+          expect(listenerBatch.errors).deep.equal(['ChannelOverflowError'])
+          expect(listenerBatch.admittedInOrder).toBe(true)
+          expect(aloneBytes).toBe(8 * 1024 * 1024)
+          expect(timerFiredMidChain).toBe(true)
+        },
+        { timeout: 30_000 },
+      )
+    })
+  }
 
   test('broadcast: publish rejections stay silent whether caught or ignored', async () => {
     const reports: string[] = []

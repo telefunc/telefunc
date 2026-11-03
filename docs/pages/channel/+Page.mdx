@@ -516,6 +516,7 @@ Channels and broadcasts signal failure through four errors:
 | `ChannelOverflowError` | A server channel's sends overfilled `bufferLimit`/`bufferLimitBinary` while its client was offline; the dropped ones reject | **Open** | `await` your sends, and raise `bufferLimit`/`bufferLimitBinary` above your largest message |
 | `ChannelOverflowError` (send budget) | A connected channel exceeded `maxPendingBytes`/`maxPendingAcks` | Closed | `await` the server's sends or raise the named setting, then recreate the channel |
 | `ChannelOverflowError` (`BroadcastChannel`) | More was published to its key while the client was offline than `bufferLimit`/`bufferLimitBinary` holds | Closed | Call its telefunction again to rejoin |
+| `ChannelOverflowError` (`publish()`) | With no Redis or other backend installed, a publish made from a listener, or as the event loop waits for its turn, found others of its kind (text or binary) waiting and would have passed `bufferLimit`/`bufferLimitBinary`, so it rejects. One message alone goes through, whatever its size | Open | `await` each publish, or raise the named setting |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 

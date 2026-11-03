@@ -2,6 +2,10 @@ export { MemoryPubSub }
 export type { MemoryAttemptOwner, Subscribers }
 
 import { Fifo } from '../../../utils/Fifo.js'
+import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
+import { getChannelLimits } from '../../../node/server/serverConfig.js'
+import { ChannelOverflowError } from '../../channel/channelErrors.js'
+import { HELD_SEND_OVERHEAD_BYTES } from '../../channel/server/ServerChannelBuffer.js'
 import { DriverAttempt, type BackendPayload, type BackendReceiver } from '../driver.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import { nextTurn } from '../../flowControl/macrotaskYield.js'
@@ -19,8 +23,8 @@ type MemorySubscription = {
   owner?: MemoryAttemptOwner
 }
 
-/** Deliveries one event-loop turn runs; the rest wait for the next, so a listener answering itself
- *  can't starve the loop. */
+/** Deliveries one event-loop turn runs; the rest wait for the next, so a listener answering itself, directly or after
+ *  an `await`, can't starve the loop. */
 const DELIVERIES_PER_TURN = 1024
 
 /** The queue's head while a publish delivers at once: it keeps what that delivery causes queued behind it. */
@@ -34,6 +38,9 @@ function copyBytes(bytes: Uint8Array): Uint8Array {
 class MemoryDeliveries {
   private readonly queue = new Fifo<() => void>()
   private deliveredThisTurn = 0
+  /** A publish ran in this synchronous run: code publishing in a loop holds the event loop itself, so one made while
+   *  this is set has no turn to wait for, and the run counts once. */
+  private inSyncRun = false
 
   get length(): number {
     return this.queue.length
@@ -44,22 +51,27 @@ class MemoryDeliveries {
     return this.queue.length >= DELIVERIES_PER_TURN
   }
 
-  deliversNow(): boolean {
-    return this.queue.length === 0 && this.deliveredThisTurn < DELIVERIES_PER_TURN
-  }
-
-  /** Runs a delivery while nothing is queued, holding the queue's head as `drain()` does. */
-  deliverNow(delivery: () => void): void {
-    if (this.deliveredThisTurn++ === 0) nextTurn(() => this.startTurn())
+  /** Runs a publish's delivery, holding the queue's head as `drain()` does, and returns its result; null if it has to
+   *  wait: one is queued or running, or a new synchronous run finds this turn's deliveries spent. */
+  publishNow<Result>(delivery: () => Result): Result | null {
+    const startsRun = !this.inSyncRun
+    // Below half a turn's deliveries, each counts: nothing waits soon, and a microtask per publish cost 11%.
+    if (startsRun && this.deliveredThisTurn >= DELIVERIES_PER_TURN / 2) {
+      this.inSyncRun = true
+      queueMicrotask(this.endSyncRun)
+    }
+    if (this.queue.length > 0 || (startsRun && this.deliveredThisTurn >= DELIVERIES_PER_TURN)) return null
+    if (startsRun) this.countDelivery()
     this.queue.push(DELIVERING_NOW)
-    delivery()
+    const result = delivery()
     this.queue.shift()
     this.drain()
+    return result
   }
 
   /** Runs `delivery` after those queued before it: now, unless one is running or this turn's deliveries ran out. */
   deliver(delivery: () => void): void {
-    const now = this.deliversNow()
+    const now = this.queue.length === 0 && this.deliveredThisTurn < DELIVERIES_PER_TURN
     this.queue.push(delivery)
     if (now) this.drain()
   }
@@ -67,10 +79,18 @@ class MemoryDeliveries {
   private drain(): void {
     for (let delivery = this.queue.peek(); delivery !== undefined; delivery = this.queue.peek()) {
       if (this.deliveredThisTurn === DELIVERIES_PER_TURN) return
-      if (this.deliveredThisTurn++ === 0) nextTurn(() => this.startTurn())
+      this.countDelivery()
       delivery()
       this.queue.shift()
     }
+  }
+
+  private countDelivery(): void {
+    if (this.deliveredThisTurn++ === 0) nextTurn(() => this.startTurn())
+  }
+
+  private readonly endSyncRun = (): void => {
+    this.inSyncRun = false
   }
 
   private startTurn(): void {
@@ -84,6 +104,8 @@ class MemoryPubSub {
   private readonly deliveries = new MemoryDeliveries()
   /** Deliveries a microtask is yet to queue. */
   private queuing = 0
+  /** What publishes hold waiting, of each kind. */
+  private readonly waitingBytes = { text: 0, binary: 0 }
 
   subscribe(subscription: MemorySubscription): DriverAttempt {
     const { subscribers, key, receiver } = subscription
@@ -106,25 +128,41 @@ class MemoryPubSub {
     owner?.released(key)
   }
 
-  /** Delivers `payload` to `targets` at once while nothing is queued; else queues it. */
+  /** Delivers `payload` to `targets` at once while nothing is queued; else queues it, or rejects past the buffer limit
+   *  of its kind. `takeOrdering` runs only for a publish that goes on. */
   publish(
     targets: readonly BackendReceiver[],
     payload: BackendPayload,
-    mark: OrderingInfo,
+    takeOrdering: () => OrderingInfo,
   ): OrderingInfo | Promise<OrderingInfo> {
-    const receipt = { seq: mark.seq, timestamp: mark.timestamp }
-    if (this.deliveries.deliversNow()) {
-      this.deliveries.deliverNow(() => {
-        for (const target of targets) target.deliver(payload, mark)
-      })
-      return receipt
+    const receiptOf = ({ seq, timestamp }: OrderingInfo): OrderingInfo => ({ seq, timestamp })
+    const delivered = this.deliveries.publishNow(() => {
+      const mark = takeOrdering()
+      for (const target of targets) target.deliver(payload, mark)
+      return receiptOf(mark)
+    })
+    if (delivered !== null) return delivered
+    const isText = typeof payload === 'string'
+    const kind = isText ? 'text' : 'binary'
+    const size = (isText ? utf8ByteLength(payload) : payload.byteLength) + HELD_SEND_OVERHEAD_BYTES
+    const setting = isText ? 'bufferLimit' : 'bufferLimitBinary'
+    // What is bounded is how much waits: one message alone goes through, whatever its size.
+    if (this.waitingBytes[kind] > 0 && this.waitingBytes[kind] + size > getChannelLimits()[setting]) {
+      return Promise.reject(
+        new ChannelOverflowError(
+          `Publish rejected: publishes waiting to be delivered exceeded config.channel.${setting}; await each publish or raise the setting`,
+        ),
+      )
     }
-    const held = typeof payload === 'string' ? payload : copyBytes(payload)
+    this.waitingBytes[kind] += size
+    const mark = takeOrdering()
+    const held = isText ? payload : copyBytes(payload)
     // A queued publish resolves as it is delivered, so a publisher awaiting each can't outrun its subscribers.
     return new Promise((resolve) => {
       this.deliveries.deliver(() => {
+        this.waitingBytes[kind] -= size
         for (const target of targets) target.deliver(held, mark)
-        resolve(receipt)
+        resolve(receiptOf(mark))
       })
     })
   }
