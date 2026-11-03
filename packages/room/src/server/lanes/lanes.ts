@@ -36,6 +36,7 @@ import type { RoomConfigRecord, RoomDemandPage, RoomIncarnation } from '../proto
 import { RoomError, participantGoneError, roomClosedError } from '../../shared/errors.js'
 import { assert } from '../../utils/assert.js'
 import { ROOM_HORIZON_MS } from '../constants.js'
+import { reportDeliveryLost } from '../config.js'
 import { memberIdOfCellKey } from '../store/cells.js'
 
 const roomTextEncoder = new TextEncoder()
@@ -125,7 +126,7 @@ function inboxOf(roomId: string, inc: string, member: string): CommitTarget {
   return { roomId, inc, lane: { kind: 'inbox', member } }
 }
 
-/** Why `delivery` was lost, logged, or null once handed off. Delivery is at-most-once: a handoff that rejects or never
+/** Why `delivery` was lost, reported, or null once handed off. Delivery is at-most-once: a handoff that rejects or never
  *  settles is lost and never retried, and no bug (an authority a deploy evicts rejects it). */
 async function handoffLost(roomId: string, delivery: Promise<void>): Promise<string | null> {
   const lost = await raceTimeout(
@@ -136,7 +137,7 @@ async function handoffLost(roomId: string, delivery: Promise<void>): Promise<str
     ROOM_HORIZON_MS,
     () => 'unconfirmed within the horizon',
   )
-  if (lost !== null) console.error(`Room delivery handoff of '${roomId}' lost: ${lost}`)
+  if (lost !== null) reportDeliveryLost(roomId, lost)
   return lost
 }
 

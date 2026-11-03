@@ -227,7 +227,7 @@ const { response } = await me.send(alice, { move: 'e4' }, { ack: true })
 console.log(response) // 'ok'
 ```
 
-> A private message is delivered at most once: when it can't be handed on to the recipient, `send()` rejects, and the message isn't sent again.
+> A private message is delivered at most once: when it can't be handed on to the recipient, `send()` rejects, and the message isn't sent again. Room tells your server of every message, join or leave it couldn't hand on through <Link href="/room-config">`roomConfig.onDeliveryLost`</Link>, which logs it by default.
 
 
 ## Send from the server

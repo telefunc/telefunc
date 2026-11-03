@@ -33,6 +33,7 @@ import { OPERATION_COMMIT_LANE } from '../backend/operation.js'
 import { ROOM_OPERATIONS, recordRequest, type RoomOperationRequest } from '../server/store/roomOperations.js'
 import { raceTimeout } from '../utils/raceTimeout.js'
 import { ROOM_HORIZON_MS } from '../server/constants.js'
+import { reportDeliveryLost } from '../server/config.js'
 import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../backend/laneKey.js'
 import { commitPreconditionHolds, isOpenIncarnation, publicHead } from '../backend/semantics.js'
 import { Fanout } from './Fanout.js'
@@ -203,8 +204,9 @@ class RoomAuthority {
     const delivery = this.fanout.send(inc, laneKeys, routes, payload, mark)
     const receipt: AcceptedCommitWire = { kind: 'accepted', seq: mark.seq, timestamp: mark.timestamp }
     if (lane.kind !== 'inbox' && lane.kind !== 'control') {
-      // No committer awaits a data or binary frame's handoff, so a lost one is logged.
-      delivery.catch((error: unknown) => console.error(error))
+      // No committer awaits a data or binary frame's handoff, so a lost one is reported here. A delivery that can be lost
+      // has a route, and each route is this room's.
+      delivery.catch((error: unknown) => reportDeliveryLost(routes[0]!.roomId, String(error)))
       return receipt
     }
     const lost = await lostReason(delivery)
