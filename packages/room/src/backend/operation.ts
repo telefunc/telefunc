@@ -4,7 +4,8 @@ export type { OperationReads, OperationWrites }
 import type { CellCount, CellMutation, ExpiringCell, LaneId, OperationTx, RoomOperation } from './contract.js'
 import { assert } from '../utils/assert.js'
 
-// An operation's plan runs once over what its executor reads; the executor then applies what it recorded at once.
+// An executor may run an operation's plan more than once, each run pure over the cells it read, and applies the writes
+// of the one run it validates, at once (`RoomDriver.runOperation()`).
 
 /** The lane an operation's commit lands on. */
 const OPERATION_COMMIT_LANE: LaneId = { kind: 'control' }

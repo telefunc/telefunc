@@ -216,15 +216,23 @@ type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
   compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult>
   readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead>
   readExpiringCells(roomId: string, inc: string, keys: readonly string[]): Promise<ExpiringCellsRead>
-  /** The cells under `prefix`, a bounded page at a time, each page read at once, in one order for the whole read that
-   *  keeps the keys sharing the prefix's next `:`-ended segment together (key order on Redis and Cloudflare). Each key
-   *  comes at most once: one present for the whole read comes, one written during it and kept that the order puts after
-   *  every key returned before the write comes, any other written or removed during it may or may not. A
-   *  `stale-incarnation` page is the last. */
+  /** The cells under `prefix`, a bounded page at a time, each page read at once:
+   *  - The whole read has one order, which keeps the keys sharing the prefix's next `:`-ended segment together (key
+   *    order on Redis and Cloudflare). No key comes twice.
+   *  - A key present for the whole read comes.
+   *  - A key written during the read, and kept, comes if the order puts it after every key returned before the write.
+   *    Any other key written or removed during the read may or may not come.
+   *  - A `stale-incarnation` page is the last. */
   readCellPages(roomId: string, inc: string, prefix: string): AsyncIterable<CellsRead>
   compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult>
-  /** Runs `operation`'s plan where the room's state lives, while `inc` is open, and applies every write it recorded at
-   *  once: none, if the plan throws. */
+  /** Runs `operation`'s plan while `inc` is open, and applies the writes of the run it validates:
+   *  - The plan may run more than once. Redis runs it in this process, again after a run read a cell it hadn't read
+   *    yet, and again from the start when a cell it read changed before the writes applied. Cloudflare and memory run
+   *    it once, where the room's state lives.
+   *  - In a run, a cell the executor hasn't read yet reads as absent.
+   *  - `tx.cell()` reads the state the operation found, never the run's own writes.
+   *  - Only the validated run's writes are applied, all at once; none if the plan throws.
+   *  - The commit's delivery comes after the writes, separately (`CommitAccepted.delivery`). */
   runOperation<Args, Value>(
     roomId: string,
     inc: string,
