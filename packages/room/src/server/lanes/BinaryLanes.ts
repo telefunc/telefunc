@@ -44,6 +44,9 @@ class BinaryLanes {
   private readonly everyTrack = new Map<string, LaneSubscription>()
   /** Each track's every-member lane. */
   private readonly everyMember = new Map<string, LaneSubscription>()
+  /** The tracks named of every member that the members' every-track lanes carry, since their every-member lane
+   *  retired for them, until it delivers again. */
+  private readonly fetchedByMember = new Set<string>()
   /** Every-track lanes not delivering yet, and the tracks whose every-member lanes stay open until they do. */
   private readonly establishingEveryTrack: Establishing = { lanes: new Set(), waiting: new Set(), replans: 'tracks' }
   /** Every-member lanes not delivering yet, and the members whose every-track lanes stay open until they do. */
@@ -85,13 +88,23 @@ class BinaryLanes {
     yield* this.everyTrack.keys()
   }
 
-  /** The tracks with an every-member lane. */
-  everyMemberTracks(): Iterable<string> {
-    return this.everyMember.keys()
+  /** The tracks with an every-member lane, then those fetched by member. */
+  *everyMemberTracks(): Generator<string> {
+    yield* this.everyMember.keys()
+    yield* this.fetchedByMember
   }
 
-  get hasEveryMember(): boolean {
-    return this.everyMember.size > 0
+  /** Whether a lane here serves a track of every member: its every-member lane, or every-track lanes fetching it. */
+  get servesTracks(): boolean {
+    return this.everyMember.size > 0 || this.fetchedByMember.size > 0
+  }
+
+  get fetchesByMember(): boolean {
+    return this.fetchedByMember.size > 0
+  }
+
+  isFetchedByMember(track: string): boolean {
+    return this.fetchedByMember.has(track)
   }
 
   hasEveryMemberOf(track: string): boolean {
@@ -147,6 +160,7 @@ class BinaryLanes {
     this.establishingEveryTrack.waiting.delete(track)
     const lane = this.everyMember.get(track) ?? this.openFanIn({ kind: 'binary-track', track }, this.everyMember, track)
     lane.resume()
+    if (lane.delivering) this.fetchedByMember.delete(track)
     return lane.delivering
   }
 
@@ -164,8 +178,9 @@ class BinaryLanes {
   }
 
   /** Stops the track's every-member lane, if any, once the named lanes and every-track lanes replacing it deliver;
-   *  until then, each replacing lane that becomes ready replans the track. Whether the lanes replacing it deliver. */
-  retireEveryMember(track: string): boolean {
+   *  until then, each replacing lane that becomes ready replans the track. Once they do, the track is fetched by
+   *  member if `fetched`. Whether they deliver. */
+  retireEveryMember(track: string, fetched: boolean): boolean {
     for (const member of this.namedByTrack.get(track) ?? []) {
       if (!this.named.get(namedKey(member, track))!.delivering) return false
     }
@@ -175,6 +190,7 @@ class BinaryLanes {
       this.everyMember.delete(track)
       this.stopFanIn(lane, this.establishingEveryMember)
     }
+    toggle(this.fetchedByMember, track, fetched)
     return true
   }
 

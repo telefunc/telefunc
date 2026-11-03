@@ -82,8 +82,6 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   /** Whether the tracks wanted of every member come on the members' every-track lanes instead: on once those tracks
    *  outnumber both `ROOM_MEMBER_NAMED_LANES_MAX` and the members, off once the members are twice as many. */
   private byMember = false
-  /** The tracks wanted of every member, told as demand while `byMember` has every-track lanes carry them. */
-  private readonly byMemberTracks = new Set<string>()
 
   /** Members left out of the demand told for a track wanted of every member. */
   private readonly excepted = new Set<string>()
@@ -351,9 +349,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
       plan.all ? this.excepted : [],
     )
     const tracks = () =>
-      plan.all
-        ? chain(this.lanes.everyMemberTracks(), this.byMemberTracks, this.wants.everyMemberTracks())
-        : plan.tracks
+      plan.all ? chain(this.lanes.everyMemberTracks(), this.wants.everyMemberTracks()) : plan.tracks
     // Every lane opens before any lane it replaces is released.
     await this.replanEach(
       slice,
@@ -435,7 +431,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     const all = this.lanes.everyTrackOf(member)
     const allDelivers = all?.delivering === true
     this.outgoingDemand.setMember(member, wantsAll && allDelivers)
-    this.outgoingDemand.setFetched(member, present && allDelivers && (this.byMember || this.byMemberTracks.size > 0))
+    this.outgoingDemand.setFetched(member, present && allDelivers && (this.byMember || this.lanes.fetchesByMember))
     for (const track of chain(this.lanes.namedTracksOf(member), this.outgoingDemand.localTracks(member))) {
       this.syncLane(member, track, servedByAll)
       yield
@@ -502,8 +498,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   private keepEveryMember(track: string): void {
     if (this.byMember || !this.namesEveryMember(track)) return
     const delivers = this.lanes.keepEveryMember(track)
-    if (delivers) this.byMemberTracks.delete(track)
-    const byMember = this.byMemberTracks.has(track)
+    const byMember = this.lanes.isFetchedByMember(track)
     this.outgoingDemand.setTrack(track, delivers || byMember, { byMember })
   }
 
@@ -514,9 +509,8 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   private releaseEveryMember(track: string): void {
     const named = this.namesEveryMember(track)
     if (named && !this.byMember) return
-    if (!this.lanes.hasEveryMemberOf(track) && named === this.byMemberTracks.has(track)) return
-    if (!this.lanes.retireEveryMember(track)) return
-    toggle(this.byMemberTracks, track, named)
+    if (!this.lanes.hasEveryMemberOf(track) && named === this.lanes.isFetchedByMember(track)) return
+    if (!this.lanes.retireEveryMember(track, named)) return
     if (named) this.outgoingDemand.setTrack(track, true, { byMember: true })
     else this.outgoingDemand.forgetTrack(track)
   }
@@ -529,7 +523,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
    *  holder's own member can be left out, since a holder suppresses its own member; so this reads only an owned member
    *  while some track has its every-member lane or is told by member, or a member left out before. */
   private syncExcept(member: string): void {
-    const served = this.lanes.hasEveryMember || this.byMemberTracks.size > 0
+    const served = this.lanes.servesTracks
     if (!this.excepted.has(member) && (!served || !this.roles.owned.has(member))) return
     const present = this.present(member)
     let excepted = false
