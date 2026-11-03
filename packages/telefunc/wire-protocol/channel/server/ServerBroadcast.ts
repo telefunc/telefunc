@@ -97,7 +97,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   override messages(options?: { signal?: AbortSignal }) {
-    return broadcastMessages<ChannelData<T>>(this, options)
+    return broadcastMessages<ChannelData<T>>(this, { text: this.bufferLimit, binary: this.bufferLimitBinary }, options)
   }
 
   subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {

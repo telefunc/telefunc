@@ -1,6 +1,6 @@
 export { testPublish }
 
-import type { ConsoleMessage } from 'playwright-chromium'
+import type { ConsoleMessage, WebSocket } from 'playwright-chromium'
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import {
   navigate,
@@ -39,6 +39,46 @@ type ServerBroadcastResult = {
 }
 
 function testPublish(isDev: boolean, inDocker = false) {
+  const transports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '["sse"]')
+  const transport = transports.at(-1)
+
+  test('broadcast: a messages() loop that falls 512 KiB behind a busy broadcast ends with ChannelOverflowError, on the page and on the server, and the page is sent nothing published after', async () => {
+    let wsBytes = 0
+    const onWebSocket = (ws: WebSocket) => {
+      if (ws.url().includes('/_telefunc')) ws.on('framereceived', ({ payload }) => (wsBytes += payload.length))
+    }
+    page.on('websocket', onWebSocket)
+    try {
+      await navigate(`${getServerUrl()}/publish`)
+      await page.click('#test-broadcast-slow-loop')
+      await autoRetry(
+        async () => {
+          const result = await getResult<any>('#publish-result')
+          expect(result.error).toBe('ChannelOverflowError')
+          expect(result.received).lessThan(1000)
+          expect(result.server.error).toBe('ChannelOverflowError')
+          expect(result.server.received).lessThan(1000)
+        },
+        { timeout: 30_000 },
+      )
+      const before = wsBytes
+      await page.click('#test-broadcast-after-overflow')
+      await autoRetry(async () => expect(await page.textContent('#publish-result')).toBe('flooded'))
+      // 800 KiB was published after the loop ended; Playwright sees an SSE stream's bytes only as it ends.
+      if (transport === 'ws') expect(wsBytes - before).lessThan(64 * 1024)
+    } finally {
+      page.off('websocket', onWebSocket)
+    }
+  })
+
+  test('broadcast: a messages() loop that keeps up gets every one of 600 awaited publishes of 2 KiB, in order', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-keeps-up')
+    await autoRetry(async () => {
+      expect(await getResult('#publish-result')).deep.equal({ received: 600, inOrder: true })
+    })
+  })
+
   test('broadcast: publish rejections stay silent whether caught or ignored', async () => {
     const reports: string[] = []
     const onConsole = (message: ConsoleMessage) => {

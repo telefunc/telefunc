@@ -1,6 +1,7 @@
 export {
   onTextBroadcast,
   onBroadcastApi,
+  onBroadcastBacklog,
   onBinaryBroadcastPair,
   onBinaryBroadcast,
   onBroadcastShieldClient,
@@ -363,5 +364,36 @@ async function onBroadcastApi() {
       return result
     },
     snapshot: () => ({ callbacks: probe.callbacks(), staticCalls }),
+  }
+}
+
+/** A busy key: `flood()` publishes 2 KiB messages without awaiting them. With `slow`, a server loop over the key's
+ *  messages takes 20 ms per message, as the page's slow loop does. */
+async function onBroadcastBacklog(slow: boolean) {
+  const room = new BroadcastChannel<string>({ key: `room:backlog:${crypto.randomUUID()}` })
+  const payload = 'x'.repeat(2048)
+  const serverLoop = slow ? readSlowly(room) : null
+  return {
+    room,
+    flood: async (count: number) => {
+      for (let i = 0; i < count; i++) void room.publish(`${i}:${payload}`)
+    },
+    publishAwaited: async (count: number) => {
+      for (let i = 0; i < count; i++) await room.publish(`${i}:${payload}`)
+    },
+    serverLoop: () => serverLoop,
+  }
+}
+
+async function readSlowly(room: BroadcastChannel<string>) {
+  let received = 0
+  try {
+    for await (const _ of room.messages()) {
+      received++
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    return { received, error: null }
+  } catch (err) {
+    return { received, error: (err as Error).name }
   }
 }

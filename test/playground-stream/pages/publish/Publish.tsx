@@ -6,6 +6,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import {
   onTextBroadcast,
   onBroadcastApi,
+  onBroadcastBacklog,
   onBinaryBroadcastPair,
   onBinaryBroadcast,
   onBroadcastShieldClient,
@@ -47,6 +48,7 @@ function Publish() {
   const reconnectRef = useRef<Awaited<ReturnType<typeof onBroadcastReconnect>> | null>(null)
   // A broadcast the page drops closes once garbage-collected.
   const listenedRef = useRef<unknown>(null)
+  const backlogRef = useRef<Awaited<ReturnType<typeof onBroadcastBacklog>> | null>(null)
 
   return (
     <div id={hydrated ? 'hydrated' : undefined}>
@@ -79,6 +81,80 @@ function Publish() {
         }}
       >
         Broadcast iteration and signals
+      </button>
+
+      <button
+        id="test-broadcast-slow-loop"
+        onClick={async () => {
+          try {
+            const remote = await onBroadcastBacklog(true)
+            backlogRef.current = remote
+            const { room } = remote
+            await room.opened
+            let received = 0
+            const loop = (async () => {
+              try {
+                for await (const _ of room.messages()) {
+                  received++
+                  await new Promise((resolve) => setTimeout(resolve, 20))
+                }
+                return null
+              } catch (err) {
+                return (err as Error).name
+              }
+            })()
+            // On the wire after the loop's subscribe, so the server has the subscription before the flood.
+            await room.publish('ready')
+            await remote.flood(1000)
+            const error = await loop
+            setResult(JSON.stringify({ error, received, server: await remote.serverLoop() }))
+          } catch (err) {
+            setResult(String(err))
+          }
+        }}
+      >
+        A slow loop over a busy broadcast
+      </button>
+      <button
+        id="test-broadcast-after-overflow"
+        onClick={async () => {
+          const remote = backlogRef.current!
+          // On the wire after the ended loop's unsubscribe, so the server has that before this flood.
+          await remote.room.publish('after')
+          await remote.flood(400)
+          await new Promise((resolve) => setTimeout(resolve, 1000))
+          close(remote)
+          setResult('flooded')
+        }}
+      >
+        Publish after the slow loop ended
+      </button>
+      <button
+        id="test-broadcast-keeps-up"
+        onClick={async () => {
+          try {
+            const remote = await onBroadcastBacklog(false)
+            const { room } = remote
+            await room.opened
+            const seen: number[] = []
+            const loop = (async () => {
+              for await (const message of room.messages()) {
+                if (message.type !== 'text' || message.data === 'ready') continue
+                seen.push(Number(message.data.split(':')[0]))
+                if (seen.length === 600) break
+              }
+            })()
+            await room.publish('ready')
+            await remote.publishAwaited(600)
+            await loop
+            close(remote)
+            setResult(JSON.stringify({ received: seen.length, inOrder: seen.every((n, i) => n === i) }))
+          } catch (err) {
+            setResult(String(err))
+          }
+        }}
+      >
+        A loop that keeps up with a broadcast
       </button>
 
       <button
