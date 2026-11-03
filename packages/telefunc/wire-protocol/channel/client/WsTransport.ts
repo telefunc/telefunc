@@ -41,8 +41,9 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   readonly carriesReconcileInOpen = false
   readonly batched = false
   heartbeat: Heartbeat | null = null
-  /** The probe's socket and pieces, kept as the transport adopts it: the server counts every frame the socket carries. */
-  private probed: { ws: WebSocket; pieces: WirePieces } | null = null
+  /** The probe its PONG proved, till the transport adopts it or it ends: the server counts every frame its socket
+   *  carries, so adoption keeps its pieces. */
+  private probed: PendingProbe | null = null
   private ws: WebSocket | null = null
   /** The wire the page left, still read until the next takes over; its headroom's timers may still send. */
   private abandoned: { ws: WebSocket; headroom: ClientHeadroom } | null = null
@@ -74,11 +75,10 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   /** A page that leaves for good says so in its sockets' close code; one kept in the back/forward cache keeps them. */
   private readonly onPageHide = (event: PageTransitionEvent): void => {
     if (event.persisted) return
-    for (const ws of [this.ws, this.probed?.ws]) {
-      try {
-        ws?.close(WS_CLOSE_PAGE_LEFT)
-      } catch {}
-    }
+    try {
+      this.ws?.close(WS_CLOSE_PAGE_LEFT)
+    } catch {}
+    this.probed?.pageLeft()
   }
 
   async probe(owner: ProbeOwner): Promise<ProbeWire | null> {
@@ -89,82 +89,24 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
       return null
     }
     ws.binaryType = 'arraybuffer'
-    const pieces = this.wirePieces(ws)
-    const { headroom, sender, receiver } = pieces
-
-    // Its first PONG proves the wire; from then on, till it ends, what it receives goes to `owner`.
-    let phase = 'proving' as 'proving' | 'reporting' | 'ended'
-    let settleProof: (alive: boolean) => void = () => {}
-    const proof = new Promise<boolean>((resolve) => (settleProof = resolve))
-    const timer = setTimeout(() => settleProof(false), WS_PROBE_TIMEOUT_MS)
-    // The one way it ends: its socket closed, its proof timed out, or the upgrade let it go.
-    const end = (): void => {
-      phase = 'ended'
-      clearTimeout(timer)
-      settleProof(false)
-      headroom.close()
-      if (this.probed?.ws === ws) this.probed = null
-      try {
-        ws.close()
-      } catch {}
-    }
-    const take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
-      if (frame.tag === TAG.PIECES_ACK) return headroom.acknowledged(frame)
-      if (frame.tag === TAG.PONG) {
-        sender.heartbeat(frame.took, at)
-        if (phase === 'reporting') owner.onProbePong()
-        else settleProof(true)
-      } else if (phase === 'reporting') owner.onProbeFrame(frame, byteLength)
-      return true
-    }
-    ws.onmessage = ({ data }: MessageEvent) => {
-      if (!receiveMessage(receiver, new Uint8Array(data as ArrayBuffer), performance.now(), take)) ws.close()
-    }
-    ws.onclose = () => {
-      const wasReporting = phase === 'reporting'
-      end()
-      if (wasReporting) owner.onProbeClosed()
-    }
-    ws.onerror = () => {}
-    ws.onopen = () => sender.send(encode.ping(), 0)
-
-    const alive = await proof
-    clearTimeout(timer)
-    // Its socket may have closed between the PONG and this line.
-    if (!alive || phase === 'ended') {
-      end()
-      return null
-    }
-
-    this.probed = { ws, pieces }
+    const probe = new PendingProbe(ws, this.wirePieces(ws), owner, (ended) => {
+      if (this.probed === ended) this.probed = null
+    })
+    if (!(await probe.proven())) return null
+    this.probed = probe
     // A RECONCILED may have come while it waited for the PONG.
-    sender.setPingInterval(this.pingInterval)
-    phase = 'reporting'
-    return {
-      ping: () => {
-        try {
-          sender.send(withTook(encode.ping(), receiver.took), 0)
-        } catch {}
-      },
-      send: (frame) => {
-        try {
-          sender.send(frame, 0)
-        } catch {
-          // Socket died between the open event and this send — `onProbeClosed` aborts the attempt.
-        }
-      },
-      close: end,
-      uplink: pieces.uplink,
-    }
+    probe.setPingInterval(this.pingInterval)
+    return probe
   }
 
   adoptProbe(): void {
     const probed = this.probed
     assert(probed !== null)
     this.probed = null
-    this.ws = probed.ws
+    const { ws, pieces } = probed.handOver()
+    this.ws = ws
     this.connecting = false
-    this.setupHandlers(probed.ws, probed.pieces)
+    this.setupHandlers(ws, pieces)
   }
 
   start(): void {
@@ -348,7 +290,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     assert(this.pieces) // a RECONCILED came on its wire
     this.pingInterval = ctrl.pingInterval
     this.pieces.sender.setPingInterval(this.pingInterval)
-    this.probed?.pieces.sender.setPingInterval(this.pingInterval)
+    this.probed?.setPingInterval(this.pingInterval)
     // The server sends nothing on a wire before the page's first frame arrived: that frame crossed by now.
     this.pieces.sender.answered(performance.now())
   }
@@ -363,18 +305,9 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     globalThis.removeEventListener?.('pagehide', this.onPageHide)
     this.connecting = false
     // A socket sends what it was handed before its close.
-    this.probed?.pieces.sender.flush()
-    this.probed?.pieces.headroom.close()
+    this.probed?.discard()
     if (this.ws) this.pieces?.sender.flush()
     if (this.ws) this.pieces?.headroom.close()
-    const wsProbed = this.probed?.ws
-    this.probed = null
-    if (wsProbed) {
-      wsProbed.onopen = wsProbed.onmessage = wsProbed.onerror = wsProbed.onclose = null
-      try {
-        wsProbed.close(WS_CLOSE_PAGE_LEFT)
-      } catch {}
-    }
     const ws = this.ws
     this.ws = null
     if (ws) {
@@ -385,6 +318,124 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     }
     this.closeAbandonedTransport()
     this.settleDrained()
+  }
+}
+
+/** A probed WebSocket and its pieces, the probe's own till the transport adopts them: its first PONG proves the wire,
+ *  and from then on, till it ends, what it receives goes to `owner`. */
+class PendingProbe implements ProbeWire {
+  private phase = 'proving' as 'proving' | 'reporting' | 'adopted' | 'ended'
+  private settleProof: (alive: boolean) => void = () => {}
+  private readonly proof = new Promise<boolean>((resolve) => (this.settleProof = resolve))
+  private readonly timer = setTimeout(() => this.settleProof(false), WS_PROBE_TIMEOUT_MS)
+  private readonly ws: WebSocket
+  private readonly pieces: WirePieces
+  private readonly owner: ProbeOwner
+  /** Told once it ends, proven or not. */
+  private readonly onEnded: (probe: PendingProbe) => void
+
+  constructor(ws: WebSocket, pieces: WirePieces, owner: ProbeOwner, onEnded: (probe: PendingProbe) => void) {
+    this.ws = ws
+    this.pieces = pieces
+    this.owner = owner
+    this.onEnded = onEnded
+    ws.onmessage = ({ data }: MessageEvent) => {
+      if (!receiveMessage(pieces.receiver, new Uint8Array(data as ArrayBuffer), performance.now(), this.take))
+        ws.close()
+    }
+    ws.onclose = () => {
+      const wasReporting = this.phase === 'reporting'
+      this.end()
+      if (wasReporting) owner.onProbeClosed()
+    }
+    ws.onerror = () => {}
+    ws.onopen = () => pieces.sender.send(encode.ping(), 0)
+  }
+
+  /** Whether its PONG came in time; from then on it reports to its owner. If not, it ended. */
+  async proven(): Promise<boolean> {
+    const alive = await this.proof
+    clearTimeout(this.timer)
+    // Its socket may have closed between the PONG and this line.
+    if (!alive || this.phase === 'ended') {
+      this.end()
+      return false
+    }
+    this.phase = 'reporting'
+    return true
+  }
+
+  /** The transport takes its socket and pieces: the probe owns nothing from here on. */
+  handOver(): { ws: WebSocket; pieces: WirePieces } {
+    assert(this.phase === 'reporting')
+    this.phase = 'adopted'
+    return { ws: this.ws, pieces: this.pieces }
+  }
+
+  ping(): void {
+    try {
+      this.pieces.sender.send(withTook(encode.ping(), this.pieces.receiver.took), 0)
+    } catch {}
+  }
+
+  send(frame: Uint8Array<ArrayBuffer>): void {
+    try {
+      this.pieces.sender.send(frame, 0)
+    } catch {
+      // Socket died between the open event and this send — `onProbeClosed` aborts the attempt.
+    }
+  }
+
+  close(): void {
+    if (this.phase !== 'adopted') this.end()
+  }
+
+  get uplink(): Uplink {
+    return this.pieces.uplink
+  }
+
+  setPingInterval(pingInterval: number): void {
+    this.pieces.sender.setPingInterval(pingInterval)
+  }
+
+  /** The page left for good: its socket says so, and its close ends it. */
+  pageLeft(): void {
+    try {
+      this.ws.close(WS_CLOSE_PAGE_LEFT)
+    } catch {}
+  }
+
+  /** The transport went: what its sender holds goes out, and it ends telling its owner nothing. */
+  discard(): void {
+    const { ws } = this
+    ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null
+    this.pieces.sender.flush()
+    this.pageLeft()
+    this.end()
+  }
+
+  private readonly take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
+    const { headroom, sender } = this.pieces
+    if (frame.tag === TAG.PIECES_ACK) return headroom.acknowledged(frame)
+    if (frame.tag === TAG.PONG) {
+      sender.heartbeat(frame.took, at)
+      if (this.phase === 'reporting') this.owner.onProbePong()
+      else this.settleProof(true)
+    } else if (this.phase === 'reporting') this.owner.onProbeFrame(frame, byteLength)
+    return true
+  }
+
+  /** The one way it ends: its socket closed, its proof failed, or the upgrade or the transport let it go. */
+  private end(): void {
+    if (this.phase === 'ended') return
+    this.phase = 'ended'
+    clearTimeout(this.timer)
+    this.settleProof(false)
+    this.pieces.headroom.close()
+    this.onEnded(this)
+    try {
+      this.ws.close()
+    } catch {}
   }
 }
 
