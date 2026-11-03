@@ -8,6 +8,7 @@ export type {
   BroadcastPayload,
   BroadcastRoute,
   PlaneKey,
+  PlaneOf,
   PlaneServer,
   PublishResult,
   SubscriptionDriver,
@@ -67,6 +68,7 @@ type BroadcastDriver = SubscriptionDriver<BroadcastRoute> & {
 }
 
 declare const planeTypes: unique symbol
+declare const servedPlane: unique symbol
 
 /** A plane's key: `Symbol.for(Name)`, typed by the kit a backend builds the plane's driver from and the driver it
  *  builds. The extension that defines the plane exports the type, so a backend checks against it without importing
@@ -75,18 +77,29 @@ type PlaneKey<Name extends string = string, Kit = never, Driver = unknown> = sym
   readonly [planeTypes]?: { name: Name; build(kit: Kit): Driver }
 }
 
-/** How a backend builds one plane's driver; `servePlane()` makes it. */
-type PlaneServer = { readonly key: PlaneKey; build(kit: never): unknown }
+/** What the plane `Key` names: the kit a backend builds its driver from, and that driver. */
+type PlaneOf<Key extends PlaneKey> = Key extends PlaneKey<string, infer Kit, infer Driver>
+  ? { kit: Kit; driver: Driver }
+  : never
+
+/** How a backend builds one plane's driver. Only `servePlane()` makes one, so an entry in `planes` was checked against
+ *  its key. */
+type PlaneServer = { readonly key: PlaneKey; build(kit: never): unknown; readonly [servedPlane]: true }
 
 /** The key `Key` types, by its name, which the compiler checks against `Key`. */
 function planeKey<Key extends PlaneKey>(name: Key extends PlaneKey<infer Name> ? Name : never): Key {
   return Symbol.for(name) as Key
 }
 
-/** A backend's entry in `planes`: `build` makes the driver of the plane `key` names. The key types its kit and the
- *  methods its driver has, but doesn't check that the driver has all of them. */
-function servePlane<Kit, Driver>(key: PlaneKey<string, Kit, Driver>, build: (kit: Kit) => Driver): PlaneServer {
-  return { key, build }
+/** A backend's entry in `planes`: `build` makes, from the plane's kit, the driver the plane `key` names. The key alone
+ *  types the entry, so a driver that lacks one of its methods doesn't compile. */
+function servePlane<Key extends PlaneKey>(
+  key: Key,
+  build: (kit: PlaneOf<Key>['kit']) => PlaneOf<Key>['driver'],
+): PlaneServer {
+  const entry: Omit<PlaneServer, typeof servedPlane> = { key, build }
+  // The brand is the type's only: it marks what this function checked
+  return entry as PlaneServer
 }
 
 /**

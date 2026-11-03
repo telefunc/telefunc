@@ -21,7 +21,15 @@ export type {
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { assertUsage } from '../../../utils/assert.js'
-import type { BackendReceiver, BroadcastPayload, BroadcastRoute, PlaneKey, PlaneServer } from '../../backend/driver.js'
+import { servePlane } from '../../backend/driver.js'
+import type {
+  BackendReceiver,
+  BroadcastPayload,
+  BroadcastRoute,
+  PlaneKey,
+  PlaneOf,
+  PlaneServer,
+} from '../../backend/driver.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import { currentCloudflareSession } from './session.js'
 import { DEFAULT_BROADCAST_BUCKETS } from './routing.js'
@@ -103,8 +111,15 @@ type CloudflareExtension = {
   planes?: readonly CloudflarePlane[]
 }
 
-/** How the Cloudflare backend builds one of an extension's planes, from Cloudflare's kit. */
-type CloudflarePlane = { readonly key: PlaneKey; build(kit: CloudflarePlaneKit): unknown }
+declare const servedCloudflarePlane: unique symbol
+
+/** How the Cloudflare backend builds one of an extension's planes, from Cloudflare's kit. Only `serveCloudflarePlane()`
+ *  makes one, so an entry in `planes` was checked against its key. */
+type CloudflarePlane = {
+  readonly key: PlaneKey
+  build(kit: CloudflarePlaneKit): unknown
+  readonly [servedCloudflarePlane]: true
+}
 
 const globalObject = getGlobalObject<{ extensions: Map<string, CloudflareExtension> }>('extensions.ts', () => ({
   extensions: new Map(),
@@ -115,13 +130,15 @@ function registerCloudflareExtension(extension: CloudflareExtension): void {
   globalObject.extensions.set(extension.name, extension)
 }
 
-/** An extension's entry in `planes`: `build` makes, from Cloudflare's kit, the driver of the plane `key` names. The key
- *  types the methods the driver has, but doesn't check that it has all of them. */
-function serveCloudflarePlane<Kit, Driver>(
-  key: PlaneKey<string, Kit, Driver>,
-  build: (kit: CloudflarePlaneKit) => Driver,
+/** An extension's entry in `planes`: `build` makes, from Cloudflare's kit, the driver the plane `key` names. The key
+ *  alone types the entry, so a driver that lacks one of its methods doesn't compile. */
+function serveCloudflarePlane<Key extends PlaneKey>(
+  key: Key,
+  build: (kit: CloudflarePlaneKit) => PlaneOf<Key>['driver'],
 ): CloudflarePlane {
-  return { key, build }
+  const entry: Omit<CloudflarePlane, typeof servedCloudflarePlane> = { key, build }
+  // The brand is the type's only: it marks what this function checked
+  return entry as CloudflarePlane
 }
 
 function getCloudflareExtension(name: string): CloudflareExtension | undefined {
@@ -147,6 +164,7 @@ function currentCloudflareHostKey(): string {
 
 function getCloudflareExtensionPlanes(kit: CloudflarePlaneKit): PlaneServer[] {
   return [...globalObject.extensions.values()].flatMap(({ planes = [] }) =>
-    planes.map(({ key, build }) => ({ key, build: () => build(kit) })),
+    // serveCloudflarePlane() checked each against its key
+    planes.map(({ key, build }) => servePlane(key, () => build(kit))),
   )
 }
