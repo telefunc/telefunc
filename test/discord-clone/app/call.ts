@@ -9,10 +9,8 @@ export { joinCall, leaveCall, toggleMute, toggleCamera, toggleScreenShare, regis
 //
 // Rounds 3–4: tracks are source-selective. An unwatched stream pauses its encoder:
 // `me.onDemand((track, wanted))` pauses it once the last viewer leaves and wakes it the moment one
-// returns (the publish ack's `receivers` count, which also paused it, left #436). That first-class
-// demand event replaced the hand-rolled
-// keyframe-probe loop this app used to poll with (`demandGate` below). Alone in a voice channel,
-// nothing is encoded or uploaded.
+// returns. That first-class demand event replaced the hand-rolled keyframe-probe loop this app used
+// to poll with (`demandGate` below). Alone in a voice channel, nothing is encoded or uploaded.
 //
 // Round 10: keyframes publish with `{ retain: true }`. The server keeps the last keyframe per track
 // and replays it to any *new* subscriber before live frames, so a viewer joining an already-active
