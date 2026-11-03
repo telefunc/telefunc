@@ -18,11 +18,19 @@ import { TelefuncStreamBeta } from '../../components'
 npm install @telefunc/room
 ```
 
-> There isn't any other setup: Telefunc finds `@telefunc/*` packages in your `package.json` and auto-loads them.
+Then load Room's client code before your client receives a room, for example in your client entry:
 
-> Without a Telefunc bundler plugin (Vite, webpack, Next.js, Babel), register it manually: `import '@telefunc/room/client'` in your client entry. The server needs no extra import: importing `Room` from `@telefunc/room` registers it.
+```js
+// Environment: client
 
-> On Cloudflare, use <Link href="/vite-plugin">Telefunc's Vite plugin</Link>.
+import '@telefunc/room/client'
+```
+
+> Telefunc's Vite, webpack, Next.js and Babel plugins add this import for you when `@telefunc/room` is in the `package.json` at your app's root. A dependency declared elsewhere, such as only in `deno.json`, isn't found: keep the import.
+
+> The server needs no extra import: importing `Room` from `@telefunc/room` loads it.
+
+> On Cloudflare, use <Link href="/vite-plugin">Telefunc's Vite plugin</Link>. When `@telefunc/room` isn't in your `package.json`, also add `import '@telefunc/room/server'` to your Worker's entry, as a Durable Object can get Room's calls before any of your telefunctions loaded `Room`.
 
 
 ## Create and join a room
