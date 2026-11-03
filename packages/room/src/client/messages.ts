@@ -30,8 +30,8 @@ function roomMessages(source: Source, bufferLimit: number, signal?: AbortSignal)
   let bytes = 0
   // A message keeps its sender as the listeners got it when it arrived (a live participant's meta changes, and the
   // participant outlives its membership): a snapshot of the id, the identity and the meta object the sender had then,
-  // which never changes. A sender's messages share one snapshot until its meta changes, and each snapshot is measured
-  // once, and counted once while any queued message holds it.
+  // frozen down to its plain objects and arrays, and read-only beyond them. A sender's messages share one snapshot
+  // until its meta changes, and each snapshot is measured once, and counted once while any queued message holds it.
   const snapshots = new WeakMap<Sender, Sender>()
   const senderBytes = new WeakMap<Sender, number>()
   let heldSenders = new Map<Sender, number>()
