@@ -201,6 +201,8 @@ type CrossInstanceRoomFixture = {
   /** `join:<name>`, `leave:<name>:<cause>` and `close` as this instance's view saw them, `demand:<track>:<wanted>`. */
   events: string[]
   unsubscribe(): void
+  /** Removes this instance's room listeners, or adds its event listeners again: its view stops or starts watching. */
+  listen(on: boolean): void
 }
 const crossInstanceRooms = new Map<string, CrossInstanceRoomFixture>()
 type CrossInstanceBroadcastFixture = {
@@ -224,9 +226,12 @@ app.post('/api/room-cross-instance/join', async (c) => {
     ...(departureTimeout ? { departureTimeout: Number(departureTimeout) } : {}),
   })
   const events: string[] = []
-  room.onJoin((member) => events.push(`join:${nameOf(member)}`))
-  room.onLeave((member, cause) => events.push(`leave:${nameOf(member)}:${cause.type}`))
-  room.onClose(() => events.push('close'))
+  const listeners = () => [
+    room.onJoin((member) => events.push(`join:${nameOf(member)}`)),
+    room.onLeave((member, cause) => events.push(`leave:${nameOf(member)}:${cause.type}`)),
+    room.onClose(() => events.push('close')),
+  ]
+  let removers = listeners()
   const participant = await room.join({ meta: { instance: INST, name: c.req.query('name') ?? INST } })
   participant.onDemand((track, wanted) => events.push(`demand:${track}:${wanted}`))
   const received: unknown[] = []
@@ -239,7 +244,12 @@ app.post('/api/room-cross-instance/join', async (c) => {
   // `subscribe()` becomes active asynchronously: once this instance's own publish arrives, other instances' publishes do too.
   await participant.publish(readiness)
   await subscribed
-  crossInstanceRooms.set(roomId, { room, participant, others: [], received, frames: [], events, unsubscribe })
+  removers.push(unsubscribe)
+  const listen = (on: boolean) => {
+    for (const remove of removers) remove()
+    removers = on ? listeners() : []
+  }
+  crossInstanceRooms.set(roomId, { room, participant, others: [], received, frames: [], events, unsubscribe, listen })
   return c.json({ ok: true, instance: INST })
 })
 
@@ -312,6 +322,15 @@ app.post('/api/room-cross-instance/member-leave', async (c) => {
   const fixture = roomId ? crossInstanceRooms.get(roomId) : undefined
   if (!fixture) return c.json({ ok: false, reason: 'room fixture not joined on this instance' }, 404)
   await fixture.participant.leave()
+  return c.json({ ok: true, instance: INST })
+})
+
+// `on=false`: this instance's view stops watching the room (its member left before); `on=true`: it watches again.
+app.post('/api/room-cross-instance/listen', (c) => {
+  const roomId = c.req.query('roomId')
+  const fixture = roomId ? crossInstanceRooms.get(roomId) : undefined
+  if (!fixture) return c.json({ ok: false, reason: 'room fixture not joined on this instance' }, 404)
+  fixture.listen(c.req.query('on') === 'true')
   return c.json({ ok: true, instance: INST })
 })
 
