@@ -866,8 +866,9 @@ async function onChannelAckOwnership() {
 
 async function onChannelBudgets() {
   const original = config.channel
-  config.channel = { ...original, maxPendingBytes: 8192, maxPendingAcks: 2 }
+  config.channel = { ...original, maxPendingBytes: 8192 }
   const bytes = new Channel<never, string>()
+  config.channel = { ...original, maxPendingAcks: 2 }
   const acks = new Channel<never, string>()
   config.channel = original
   const exercise = (ch: typeof bytes, ack: boolean) => {

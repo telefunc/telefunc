@@ -277,7 +277,7 @@ channel.send({ type: 'ping' }) // no await needed
 
 What happens to a server channel's sends, awaited or not:
 
-- While the client is connected, the server delivers sends within `maxPendingBytes` and `maxPendingAcks` (see <Link href="/channel-config" />). Exceeding either budget closes the channel with `ChannelOverflowError` naming the setting.
+- While the client is connected, the server delivers sends without a send-budget limit by default. If you set `maxPendingBytes` or `maxPendingAcks` (see <Link href="/channel-config" />), exceeding that cap closes the channel with `ChannelOverflowError` naming the setting.
 - While the client is offline, the server buffers them, up to `bufferLimit`/`bufferLimitBinary` (see <Link href="/channel-config" />). An awaited `send()` resolves once the client is back and the message went out.
 - Past that limit, the server drops the oldest buffered sends, and each dropped `send()` rejects with `ChannelOverflowError`. A single message larger than the limit is dropped even if you await it. Earlier buffered sends of the same kind (text or binary) are dropped too.
 
@@ -470,7 +470,7 @@ Channels and broadcasts signal failure through four errors:
 | `NetworkError` (`isChannel: true`) | Offline longer than `reconnectTimeout`, or missed more messages than the replay buffer holds | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
 | `ChannelOverflowError` | A server channel's sends overfilled `bufferLimit`/`bufferLimitBinary` while its client was offline; the dropped ones reject | **Open** | `await` your sends, and raise `bufferLimit`/`bufferLimitBinary` above your largest message |
-| `ChannelOverflowError` (send budget) | A connected channel exceeded `maxPendingBytes`/`maxPendingAcks` | Closed | `await` the server's sends or raise the named setting, then recreate the channel |
+| `ChannelOverflowError` (send budget) | An opt-in `maxPendingBytes`/`maxPendingAcks` cap, set to bound send backlogs, was exceeded | Closed | `await` the server's sends or raise or remove the named cap, then recreate the channel |
 | `ChannelOverflowError` (`BroadcastChannel`) | More was published to its key while the client was offline than `bufferLimit`/`bufferLimitBinary` holds | Closed | Call its telefunction again to rejoin |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).

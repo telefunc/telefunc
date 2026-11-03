@@ -1,9 +1,24 @@
 export { testRxjs }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, autoRetry, getServerUrl, expectLog } from '@brillout/test-e2e'
 import { navigate, getResult, resetCleanupState, getCleanupState } from '../../e2e-utils'
 
 function testRxjs(inDocker = false) {
+  test('rxjs: default caps deliver 300 MiB synchronous Observable and Subject bursts in full', async () => {
+    await navigate(`${getServerUrl()}/rxjs`)
+    await page.click('#test-rxjs-burst')
+    await autoRetry(
+      async () => {
+        expect(await getResult('#rxjs-result')).deep.equal([
+          { count: 300, inOrder: true, whole: true },
+          { count: 300, inOrder: true, whole: true },
+        ])
+        expectLog("A channel's `send()` calls put 64 MiB ahead of its client")
+      },
+      { timeout: 60_000 },
+    )
+  })
+
   // ── Observable: server → client ──────────────────────────────────────
 
   test('rxjs: observable — server emits 5 ticks then completes', async () => {

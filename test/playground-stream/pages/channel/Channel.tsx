@@ -1618,7 +1618,7 @@ function ChannelDemo() {
           >
             1 MB Download
           </button>
-          {[32, 200].map((count) => (
+          {[32, 300].map((count) => (
             <button
               key={count}
               id={`channel-test-unawaited-burst-${count}`}
@@ -1633,7 +1633,7 @@ function ChannelDemo() {
             [
               ['unawaited', 6000],
               ['awaited', 6000],
-              ['acks', 12800],
+              ['acks', 18000],
             ] as const
           ).map(([mode, count]) => (
             <button

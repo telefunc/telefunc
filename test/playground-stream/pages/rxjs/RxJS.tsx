@@ -3,6 +3,7 @@ export { RxJSDemo }
 import React, { useState, useEffect } from 'react'
 import {
   onObservable,
+  onRxjsBurst,
   onObservableComplete,
   onObservableError,
   onSubject,
@@ -31,6 +32,36 @@ function RxJSDemo() {
     <div className="max-w-3xl mx-auto px-8 py-10 space-y-4">
       <h1 className="text-2xl font-bold">RxJS Playground</h1>
       {hydrated && <span id="hydrated" />}
+
+      <button
+        id="test-rxjs-burst"
+        onClick={async () => {
+          setResult('')
+          const { observable, subject } = await onRxjsBurst()
+          const receive = (source: typeof observable) =>
+            new Promise((resolve) => {
+              let count = 0
+              let inOrder = true
+              let whole = true
+              source.subscribe({
+                next({ index, payload }) {
+                  inOrder &&= index === count
+                  count++
+                  whole &&= payload.length === 1024 * 1024
+                },
+                complete() {
+                  resolve({ count, inOrder, whole })
+                },
+                error(err) {
+                  resolve({ error: String(err) })
+                },
+              })
+            })
+          setResult(JSON.stringify(await Promise.all([receive(observable), receive(subject)])))
+        }}
+      >
+        Observable and Subject bursts
+      </button>
 
       {/* Observable: server emits 5 ticks then completes */}
       <button

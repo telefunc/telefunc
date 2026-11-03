@@ -986,13 +986,13 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
-  test('channel: a burst of 200 MiB the server sends without awaiting all reaches the page, with a warning', async () => {
+  test('channel: with default caps, a burst of 300 MiB the server sends without awaiting arrives in full, with one warning', async () => {
     await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-unawaited-burst-200')
+    await page.click('#channel-test-unawaited-burst-300')
     await autoRetry(
       async () => {
         const burst = (await getResult<ChannelState>('#channel-state')).unawaitedBurst!
-        expect(burst.received).toBe(200)
+        expect(burst.received).toBe(300)
         expect(burst.inOrder).toBe(true)
         expect(burst.closeErr).toBe(null)
         expectLog(sendsAheadWarning)
@@ -1031,17 +1031,17 @@ function testChannel(isDev: boolean, inDocker = false) {
     expect(() => expectLog(sendsAheadWarning)).throw()
   })
 
-  test('channel: 200 MiB of text messages the server sends in one loop with { ack: true }, awaiting the acks together, all reach the page and all resolve, with a warning', async () => {
+  test('channel: with default caps, 18,000 unawaited acknowledgement requests all arrive and resolve, with a warning', async () => {
     await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-text-burst-acks-12800')
+    await page.click('#channel-test-text-burst-acks-18000')
     await autoRetry(
       async () => {
         const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
-        expect(burst.received).toBe(12800)
+        expect(burst.received).toBe(18000)
         expect(burst.inOrder).toBe(true)
         expect(burst.closeErr).toBe(null)
         const ss = await getCleanupState()
-        expect(ss[`textBurst_${burst.channelId}_acked`]).toBe('12800')
+        expect(ss[`textBurst_${burst.channelId}_acked`]).toBe('18000')
         expectLog(sendsAheadWarning)
       },
       { timeout: 60_000 },
@@ -1301,7 +1301,7 @@ function testChannelApi() {
     })
   })
 
-  test('channel: unawaited sends close at finite byte and acknowledgement budgets', async () => {
+  test('channel: each opt-in byte or acknowledgement cap closes with the named error', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-budgets')
     await autoRetry(async () => {

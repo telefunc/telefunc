@@ -1,5 +1,6 @@
 export {
   onObservable,
+  onRxjsBurst,
   onObservableComplete,
   onObservableError,
   onSubject,
@@ -244,4 +245,18 @@ async function onSubjectNoHandler() {
   })
   setTimeout(() => subject.error(new Error('no-handler-error')), 600)
   return subject
+}
+
+async function onRxjsBurst() {
+  const payload = 'x'.repeat(1024 * 1024)
+  const observable = new Observable<{ index: number; payload: string }>((subscriber) => {
+    for (let index = 0; index < 300; index++) subscriber.next({ index, payload })
+    subscriber.complete()
+  })
+  const subject = new Subject<{ index: number; payload: string }>()
+  onceSubscribed(subject, () => {
+    for (let index = 0; index < 300; index++) subject.next({ index, payload })
+    subject.complete()
+  })
+  return { observable, subject }
 }
