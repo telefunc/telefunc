@@ -54,8 +54,11 @@ class AuthoritySync {
   /** The highest control seq delivered, and the first of the delivered run that ends at it. */
   private received = 0
   private runStart = 0
-  /** Settled at each control delivery, then replaced: what a wait for delivery to reach a seq awaits. */
-  private delivery = createDeferred()
+  /** The waits for delivery to reach a seq, each settled once it does or past Room's horizon. */
+  private readonly waiters = new Set<{ seq: number; reached: () => void }>()
+  /** The control lane's mark once its current subscription was ready: what it committed up to then never arrives on
+   *  it, so a roster read settles it. Null until read. */
+  private baseline: Promise<number> | null = null
 
   private readonly owner: AuthoritySyncOwner
   private readonly incarnation: RoomIncarnation
@@ -113,8 +116,7 @@ class AuthoritySync {
     if (seq <= this.received) this.onControlLaneRewound()
     if (seq !== this.received + 1) this.runStart = seq
     this.received = seq
-    this.delivery.resolve()
-    this.delivery = createDeferred()
+    for (const waiter of this.waiters) if (waiter.seq <= seq) waiter.reached()
     if (seq <= this.covered + 1) this.covered = Math.max(this.covered, seq)
     this.joinRun()
     if (this.covered < this.received) {
@@ -126,8 +128,16 @@ class AuthoritySync {
     }
   }
 
+  /** The control lane's subscription is ready, new or again after a loss. It delivers only what commits from here on,
+   *  so the mark it starts at is read now, before a roster read compares delivery with a later one. */
+  controlSubscribed(): void {
+    this.baseline = null
+    void this.subscriptionBaseline().catch(reportRoomError)
+  }
+
   /** The meta and roster cells share the control lane's slot, so a failover rewound them with it. */
   private onControlLaneRewound(): void {
+    this.baseline = null
     this.covered = 0
     this.received = 0
     this.runStart = 0
@@ -184,23 +194,33 @@ class AuthoritySync {
     return this.pendingRefresh
   }
 
-  /** Whether the control lane's delivery here is still behind what a roster read just covered, past Room's horizon.
-   *  A leave the read no longer lists may then be on its way, and only its event or its departing record ends that
-   *  member. Until delivery reaches the lane's order after the read, the read waits for it, and for the leave events
-   *  it brings. A view the lane doesn't deliver to, or a first roster, which narrates nothing, waits for nothing. */
+  /** Whether frames the current control subscription will deliver are still in flight past Room's horizon, behind
+   *  what a roster read just covered. A leave the read no longer lists may then be on its way, and only its event or
+   *  its departing record ends that member. Until delivery reaches the lane's order after the read, the read waits for
+   *  it, and for the leave events it brings. What the lane committed before the subscription is history, which never
+   *  arrives: the read settles it at once. A view the lane doesn't deliver to, or a first roster, which narrates
+   *  nothing, waits for nothing. */
   private async deliveryBehind(): Promise<boolean> {
     if (!this.model.rosterKnown || !this.lanePlan.observing || !this.lanePlan.controlEstablished) return false
-    const mark = await this.controlMark()
-    let waiting = true
-    const reached = (async () => {
-      while (waiting && this.received < mark && !this.model.closed) await this.delivery.promise
-      return this.received >= mark
-    })()
+    const [mark, baseline] = await Promise.all([this.controlMark(), this.subscriptionBaseline()])
+    if (mark <= Math.max(baseline, this.received)) return false
+    const reached = createDeferred<boolean>()
+    const waiter = { seq: mark, reached: () => reached.resolve(true) }
+    this.waiters.add(waiter)
     try {
-      return !(await raceTimeout(reached, ROOM_HORIZON_MS, () => false))
+      return !(await raceTimeout(reached.promise, ROOM_HORIZON_MS, () => false))
     } finally {
-      waiting = false
+      this.waiters.delete(waiter)
     }
+  }
+
+  /** The current subscription's baseline, read again after a failed read. */
+  private subscriptionBaseline(): Promise<number> {
+    const read = (this.baseline ??= this.controlMark())
+    read.catch(() => {
+      if (this.baseline === read) this.baseline = null
+    })
+    return read
   }
 
   /** The roster is known, and the control lane delivers every change since. */
@@ -241,6 +261,8 @@ class AuthoritySync {
         this.deliveryBehind(),
       ])
       if (this.model.closed || !(await this.roster.reconcile({ ...roster, departing, behind }, events))) return
+      // A view still behind is covered by the frames in flight, or else by the next heartbeat's read.
+      if (behind) return
     } finally {
       this.model.stopRecordingMembership()
     }

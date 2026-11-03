@@ -6,7 +6,7 @@ import { untether, getOrCreate } from 'telefunc/__internal'
 import { Slice } from './Slice.js'
 import { RoomMetaState } from './RoomMetaState.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
-import { ownLeaveCause, removedCause, senderSnapshot } from './arguments.js'
+import { ownLeaveCause, senderSnapshot, unknownLeaveCause } from './arguments.js'
 import type {
   MemberMetaUpdate,
   MemberSnapshot,
@@ -477,9 +477,9 @@ class RoomModel {
     for (const id of [...this.members.keys()]) {
       if (this.members.has(id) && !listed.has(id)) {
         // No leave event reached this model: its departing record says why it left. Without one, a model behind the
-        // read keeps the member for its event. One that isn't lost the event, and the record too: a leave older than
-        // the record, which this model didn't follow. Its cause is unknown then, and it's reported as removed.
-        const cause = departing.get(id) ?? (roster.behind === true ? undefined : removedCause(undefined))
+        // read keeps the member for its event. Any other missed the leave while it didn't follow the room, and the
+        // record expired since: its cause is `unknown`.
+        const cause = departing.get(id) ?? (roster.behind === true ? undefined : unknownLeaveCause())
         if (cause !== undefined) {
           this.applyLeave(id, cause)
           narratedDrift = true

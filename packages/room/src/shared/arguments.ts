@@ -8,6 +8,7 @@ export {
   normalizeJoinOptions,
   assertParticipantIdentity,
   removedCause,
+  unknownLeaveCause,
   senderSnapshot,
   ownMetaArgument,
   recipientId,
@@ -39,6 +40,10 @@ function ownLeaveCause(cause: LeaveCause): LeaveCause {
 /** A detached snapshot of a member, for guards and for senders a view doesn't know. */
 function senderSnapshot(id: string, meta: ParticipantMeta, identity: string | null): Sender {
   return Object.freeze({ id, meta, identity })
+}
+/** The cause of a leave a view didn't follow, once nothing records it. */
+function unknownLeaveCause(): LeaveCause {
+  return ownLeaveCause({ type: 'unknown' })
 }
 function removedCause(reason: unknown): LeaveCause {
   return ownLeaveCause(reason === undefined ? { type: 'removed' } : { type: 'removed', reason })

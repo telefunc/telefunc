@@ -96,7 +96,7 @@ type RoomMetaUpdate =
   | { __r: 'update'; seq: number; changes: (RoomMetaEntry | [key: string])[] }
 
 /** A `LeaveCause` on the wire: no `cause` means the member left on its own. */
-type WireLeaveCause = { cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
+type WireLeaveCause = { cause?: 'removed' | 'disconnected' | 'closed' | 'unknown'; reason?: unknown }
 /** The sender as its instance knew it at the send: its meta at `fromMetaSeq`, stamped by that instance, never the
  *  client. */
 type SenderStamp = { fromMeta: ParticipantMeta; fromMetaSeq: number; fromIdentity?: string; fromDisconnected?: true }

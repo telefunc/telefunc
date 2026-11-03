@@ -26,8 +26,9 @@ assertIsNotBrowser()
 type LaneDelivery = { kind: 'control' | 'semantic' | 'inbox'; text: string } | { kind: 'binary'; framed: Uint8Array }
 
 /** What the lanes ask of the view: its roster read again, a catch-up with the authority once a lane dropped
- *  deliveries (a closed room's lanes too), or a look at the heartbeat, as the lanes changed. */
-type LaneEvent = 'roster-needed' | 'deliveries-lost' | 'lanes-changed'
+ *  deliveries (a closed room's lanes too), a look at the heartbeat, as the lanes changed, or the mark a control
+ *  subscription, new or recovered, starts at. */
+type LaneEvent = 'roster-needed' | 'deliveries-lost' | 'lanes-changed' | 'control-subscribed'
 
 /** The replica the subscriptions serve: it aggregates every handle's holders, applies what the lanes carry, and
  *  answers what they ask. */
@@ -757,6 +758,10 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     const address = lane.address
     if (address.kind === 'demand') {
       if (!pending && lane.wanted) this.demandExchange.ask()
+      return
+    }
+    if (address.kind === 'control') {
+      if (!pending && lane.wanted) this.owner.laneEvent('control-subscribed')
       return
     }
     if (address.kind !== 'binary' && address.kind !== 'binary-all' && address.kind !== 'binary-track') return

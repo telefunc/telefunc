@@ -411,8 +411,8 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     }
   }
 
-  /** `LanePlanOwner`: the roster read again, a catch-up with the authority, which finds a close the lanes missed, or
-   *  the heartbeat, which runs while the lanes need it. */
+  /** `LanePlanOwner`: the roster read again, a catch-up with the authority, which finds a close the lanes missed, the
+   *  heartbeat, which runs while the lanes need it, or the mark a control subscription starts at. */
   laneEvent(event: LaneEvent): void {
     switch (event) {
       case 'roster-needed':
@@ -421,6 +421,8 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
         return void this.authority.reconcileAuthority().catch(reportRoomError)
       case 'lanes-changed':
         return this.heartbeat.update()
+      case 'control-subscribed':
+        return this.authority.controlSubscribed()
     }
   }
 

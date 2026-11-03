@@ -99,6 +99,8 @@ type LeaveCause =
   | { readonly type: 'removed'; readonly reason?: unknown }
   | { readonly type: 'closed' }
   | { readonly type: 'disconnected' }
+  /** It left while this side didn't follow the room, and its cause is no longer kept. */
+  | { readonly type: 'unknown' }
 
 /** One membership by id, or all memberships of an app identity. */
 type ParticipantRef = { id: string } | { identity: string }
