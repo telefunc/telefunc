@@ -116,7 +116,7 @@ useEffect(() => room.subscribe((message) => addMessage(message)), [room])
 
 ## Stop listening
 
-Pass `{ signal }` to a listener registration to remove it when you abort the signal, or use `messages()` to iterate messages. Each message is `{ type, data, info, from }`, with `type` `'text'` or `'binary'` and the `data`, `info` and `from` a `subscribe()` or `subscribeBinary()` listener receives:
+Pass `{ signal }` to a listener registration to remove it when you abort the signal, or use `messages()` to iterate messages. Each message is `{ type, data, info, from }`: `type` is `'text'` or `'binary'`, `data` and `info` are what a `subscribe()` or `subscribeBinary()` listener receives, and `from` is the sender's `id`, `meta` and `identity` as they were when the message arrived:
 
 ```js
 // chat.js
