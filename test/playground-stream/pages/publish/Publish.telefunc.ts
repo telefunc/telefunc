@@ -2,6 +2,7 @@ export {
   onTextBroadcast,
   onBroadcastApi,
   onBroadcastBacklog,
+  onInMemoryPublishes,
   onBroadcastBurstThenClose,
   onBinaryBroadcastPair,
   onBinaryBroadcast,
@@ -206,18 +207,24 @@ async function onBroadcastSeqAcrossSubscribers() {
   return seqs
 }
 
-/** Past the 1,024 in-memory deliveries of one turn, publishes queue. A key published while nobody subscribes, then
- *  another key, then a subscriber comes before the queue drains, and the key is published again. */
+/** A listener's in-memory publishes queue. It publishes a key nobody subscribes to, then another key, then a subscriber
+ *  comes before the queue drains, and the key is published again. */
 async function onBroadcastSeqWhileQueued() {
   const key = `room:seq-queued:${crypto.randomUUID()}`
-  for (let i = 0; i < 2_000; i++) void Broadcast.publish(`room:busy:${crypto.randomUUID()}`, i)
-  const first = Broadcast.publish(key, 'first')
-  void Broadcast.publish(`room:seq-other:${crypto.randomUUID()}`, 0)
+  const trigger = `room:seq-trigger:${crypto.randomUUID()}`
   const received: Array<[string, number]> = []
-  const off = Broadcast.subscribe<string>(key, (message, info) => received.push([message, info.seq]))
-  const second = Broadcast.publish(key, 'second')
-  const receipts = [(await first).seq, (await second).seq]
+  const sends: ReturnType<typeof Broadcast.publish>[] = []
+  let off = () => {}
+  const offTrigger = Broadcast.subscribe(trigger, () => {
+    sends.push(Broadcast.publish(key, 'first'))
+    void Broadcast.publish(`room:seq-other:${crypto.randomUUID()}`, 0)
+    off = Broadcast.subscribe<string>(key, (message, info) => received.push([message, info.seq]))
+    sends.push(Broadcast.publish(key, 'second'))
+  })
+  await Broadcast.publish(trigger, 'go')
+  const receipts = [(await sends[0]!).seq, (await sends[1]!).seq]
   off()
+  offTrigger()
   return { receipts, received }
 }
 
@@ -399,6 +406,55 @@ async function onBroadcastBurstThenClose() {
   for (let i = 0; i < 1000; i++) await room.publish(`${i}:${'x'.repeat(2048)}`)
   await room.close()
   return serverLoop
+}
+
+/** The in-memory adapter: a loop of publishes, a listener publishing a batch, and a listener answering its own key. */
+async function onInMemoryPublishes() {
+  const id = crypto.randomUUID()
+  const seen: number[] = []
+  const stopLoop = Broadcast.subscribe<number>(`loop:${id}`, (n) => void seen.push(n))
+  for (let i = 0; i < 3000; i++) void Broadcast.publish(`loop:${id}`, i)
+  const loop = { deliveredInLoop: seen.length, inOrder: seen.every((n, i) => n === i) }
+  stopLoop()
+
+  const batch: number[] = []
+  const stopBatch = Broadcast.subscribeBinary(`batch:${id}`, (data) => void batch.push(data[0]! * 256 + data[1]!))
+  const sends: unknown[] = []
+  const stopStart = Broadcast.subscribe(`start:${id}`, () => {
+    const bytes = new Uint8Array(64 * 1024)
+    for (let i = 0; i < 2000; i++) {
+      bytes[0] = i >> 8
+      bytes[1] = i & 255
+      sends.push(Broadcast.publishBinary(`batch:${id}`, bytes))
+    }
+  })
+  await Broadcast.publish(`start:${id}`, 'go')
+  const results = await Promise.allSettled(sends)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  const rejected = results.filter((r) => r.status === 'rejected')
+  const firstRejected = results.findIndex((r) => r.status === 'rejected')
+  const listenerBatch = {
+    delivered: batch.length,
+    rejected: rejected.length,
+    errors: [...new Set(rejected.map((r) => (r as PromiseRejectedResult).reason.name))],
+    admittedInOrder: firstRejected === batch.length && batch.every((n, i) => n === i),
+  }
+  stopBatch()
+  stopStart()
+
+  let answers = 0
+  let answersWhenTimerFired = -1
+  setTimeout(() => (answersWhenTimerFired = answers), 0)
+  const finished = new Promise<void>((resolve) => {
+    Broadcast.subscribe(`chain:${id}`, async () => {
+      await null
+      if (++answers === 20_000) resolve()
+      else void Broadcast.publish(`chain:${id}`, 'again')
+    })
+  })
+  void Broadcast.publish(`chain:${id}`, 'start')
+  await finished
+  return { loop, listenerBatch, timerFiredMidChain: answersWhenTimerFired >= 0 && answersWhenTimerFired < 20_000 }
 }
 
 async function readSlowly(room: BroadcastChannel<string>, kind: 'slow' | 'held') {

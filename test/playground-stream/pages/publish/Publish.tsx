@@ -7,6 +7,7 @@ import {
   onTextBroadcast,
   onBroadcastApi,
   onBroadcastBacklog,
+  onInMemoryPublishes,
   onBroadcastBurstThenClose,
   onBinaryBroadcastPair,
   onBinaryBroadcast,
@@ -164,6 +165,18 @@ function Publish() {
         }}
       >
         A server loop over a burst published and closed in one task
+      </button>
+      <button
+        id="test-in-memory-publishes"
+        onClick={async () => {
+          try {
+            setResult(JSON.stringify(await onInMemoryPublishes()))
+          } catch (err) {
+            setResult(String(err))
+          }
+        }}
+      >
+        In-memory publishes: a loop, a listener's batch, a chain of answers
       </button>
       <button
         id="test-broadcast-after-overflow"

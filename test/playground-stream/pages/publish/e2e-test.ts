@@ -105,6 +105,28 @@ function testPublish(isDev: boolean, inDocker = false) {
     })
   })
 
+  // The in-memory adapter: these lanes publish through Redis.
+  if (!inDocker && !process.env.REDIS_URL) {
+    test('broadcast: in memory, a loop of publishes delivers in it, a listener publishing 128 MiB holds at most bufferLimitBinary and rejects the rest, and answers that await let a timer fire', async () => {
+      await navigate(`${getServerUrl()}/publish`)
+      await page.click('#test-in-memory-publishes')
+      await autoRetry(
+        async () => {
+          const { loop, listenerBatch, timerFiredMidChain } = await getResult<any>('#publish-result')
+          expect(loop).deep.equal({ deliveredInLoop: 3000, inOrder: true })
+          // 2 MiB of 64 KiB messages.
+          expect(listenerBatch.delivered).greaterThan(20)
+          expect(listenerBatch.delivered).lessThan(40)
+          expect(listenerBatch.delivered + listenerBatch.rejected).toBe(2000)
+          expect(listenerBatch.errors).deep.equal(['ChannelOverflowError'])
+          expect(listenerBatch.admittedInOrder).toBe(true)
+          expect(timerFiredMidChain).toBe(true)
+        },
+        { timeout: 30_000 },
+      )
+    })
+  }
+
   test('broadcast: publish rejections stay silent whether caught or ignored', async () => {
     const reports: string[] = []
     const onConsole = (message: ConsoleMessage) => {

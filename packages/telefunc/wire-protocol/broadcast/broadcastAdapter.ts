@@ -11,9 +11,14 @@ export type {
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { Fifo } from '../../utils/Fifo.js'
+import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
+import { getServerConfig } from '../../node/server/serverConfig.js'
+import { ChannelOverflowError } from '../channel/channelErrors.js'
+import { HELD_SEND_OVERHEAD_BYTES } from '../channel/server/ServerChannelBuffer.js'
 import type { WirePublishInfo } from '../wire/publishInfo.js'
 
-/** Most in-memory deliveries that run before the event loop gets a turn, so listeners answering each other can't starve it. */
+/** Most in-memory deliveries that run before the event loop gets a turn, so listeners answering each other, directly or
+ *  after an `await`, can't starve it. */
 const IN_MEMORY_DELIVERY_BURST = 1024
 
 /** Transport-level publish result. */
@@ -73,8 +78,14 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   private highestSeq = 0
   /** In-memory publishes waiting for the ones before them, in publish order. */
   private readonly queued = new Fifo<() => void>()
+  /** What `queued` holds of each kind, within `bufferLimit` and `bufferLimitBinary`. */
+  private readonly queuedBytes = { text: 0, binary: 0 }
   private delivering = false
-  /** Reset by a macrotask scheduled once half the burst has run: one every turn made each publish 10% slower. */
+  /** A publish ran in this synchronous run: code publishing in a loop holds the event loop itself, so one made while
+   *  this is set has no turn to wait for. */
+  private inSyncRun = false
+  /** Deliveries since the last turn, a synchronous run of publishes past half the burst counting once. Reset by a
+   *  macrotask scheduled once half the burst has run: one every turn made each publish 10% slower. */
   private deliveredInBurst = 0
 
   constructor(transport?: BroadcastTransport) {
@@ -159,26 +170,23 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
 
   // ── In-memory ──
 
-  private publishInMemory<T>(
+  private publishInMemory<T extends string | Uint8Array>(
     subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>,
     key: string,
     data: T,
   ): BroadcastPublishResult | Promise<BroadcastPublishResult> {
     const timestamp = Date.now()
-    // A publish from a listener reaches subscribers after the message it answers; one past the burst, after the turn.
-    if (this.delivering || this.queued.length > 0 || this.deliveredInBurst >= IN_MEMORY_DELIVERY_BURST) {
-      // The caller may reuse or transfer its buffer once the publish returns.
-      const queuedData = data instanceof Uint8Array ? (new Uint8Array(data) as T) : data
-      return new Promise((resolve, reject) => {
-        this.queued.push(() => {
-          try {
-            resolve(this.deliverInMemory(subs, key, queuedData, timestamp))
-          } catch (err) {
-            reject(err)
-          }
-        })
-      })
+    const startsRun = !this.inSyncRun
+    // Below half the burst, each delivery counts: nothing waits soon, and a microtask per publish cost 11%.
+    if (startsRun && this.deliveredInBurst >= IN_MEMORY_DELIVERY_BURST / 2) {
+      this.inSyncRun = true
+      queueMicrotask(this.endSyncRun)
     }
+    // A publish from a listener reaches subscribers after the message it answers; one past the burst, after the turn.
+    if (this.delivering || this.queued.length > 0 || (startsRun && this.deliveredInBurst >= IN_MEMORY_DELIVERY_BURST)) {
+      return this.queueInMemory(subs, key, data, timestamp)
+    }
+    if (startsRun) this.countDelivery()
     this.delivering = true
     try {
       return this.deliverInMemory(subs, key, data, timestamp)
@@ -186,6 +194,55 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       this.delivering = false
       if (this.queued.length > 0) this.drainQueued()
     }
+  }
+
+  private readonly endSyncRun = (): void => {
+    this.inSyncRun = false
+  }
+
+  private countDelivery(): void {
+    if (++this.deliveredInBurst === IN_MEMORY_DELIVERY_BURST / 2) {
+      afterEventLoopTurn(() => {
+        this.deliveredInBurst = 0
+        this.drainQueued()
+      })
+    }
+  }
+
+  private queueInMemory<T extends string | Uint8Array>(
+    subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>,
+    key: string,
+    data: T,
+    timestamp: number,
+  ): Promise<BroadcastPublishResult> {
+    const isText = typeof data === 'string'
+    const kind = isText ? 'text' : 'binary'
+    const size = (isText ? utf8ByteLength(data) : data.byteLength) + HELD_SEND_OVERHEAD_BYTES
+    const { bufferLimit, bufferLimitBinary } = getServerConfig().channel
+    const limit = isText ? bufferLimit : bufferLimitBinary
+    // One message past the limit still goes: what is bounded is how many wait.
+    if (this.queuedBytes[kind] > 0 && this.queuedBytes[kind] + size > limit) {
+      const setting = isText ? 'bufferLimit' : 'bufferLimitBinary'
+      return Promise.reject(
+        new ChannelOverflowError(
+          `Publish rejected: publishes waiting to be delivered exceeded config.channel.${setting}; await each publish or raise the setting`,
+        ),
+      )
+    }
+    this.queuedBytes[kind] += size
+    // The caller may reuse or transfer its buffer once the publish returns.
+    const queuedData = isText ? data : (new Uint8Array(data as Uint8Array) as T)
+    return new Promise((resolve, reject) => {
+      this.queued.push(() => {
+        this.queuedBytes[kind] -= size
+        this.countDelivery()
+        try {
+          resolve(this.deliverInMemory(subs, key, queuedData, timestamp))
+        } catch (err) {
+          reject(err)
+        }
+      })
+    })
   }
 
   private deliverInMemory<T>(
@@ -197,12 +254,6 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     const seq = (this.keySeqs.get(key) ?? this.highestSeq) + 1
     if (seq > this.highestSeq) this.highestSeq = seq
     if (this.subscriptions.has(key) || this.binarySubscriptions.has(key)) this.keySeqs.set(key, seq)
-    if (++this.deliveredInBurst === IN_MEMORY_DELIVERY_BURST / 2) {
-      afterEventLoopTurn(() => {
-        this.deliveredInBurst = 0
-        this.drainQueued()
-      })
-    }
     const info = { seq, timestamp }
     let delivered = 0
     const set = subs.get(key)
