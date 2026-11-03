@@ -54,7 +54,9 @@ type SubscriptionDriver<Source> = {
  * non-negative safe integer (ms) that never goes back on a key.
  */
 type BroadcastDriver = SubscriptionDriver<BroadcastRoute> & {
-  /** Keeps `payload` past the call only as a copy: the caller reuses its bytes. */
+  /** Keeps `payload` past the call only as a copy: the caller reuses its bytes. A publish this host makes after
+   *  `subscribe()` returned reaches that subscription, so a driver whose publish can overtake its own subscribe (Redis,
+   *  on its two connections) holds the publish until the subscription is ready. */
   publish<Kind extends BroadcastKind>(
     route: BroadcastRoute<Kind>,
     payload: BroadcastPayload<Kind>,
