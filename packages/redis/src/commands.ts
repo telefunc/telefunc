@@ -691,8 +691,6 @@ type CommitReply =
 /** A commit as the driver hands it on: a missing required cell by its key. */
 type CommitOutcome = StaleCommit | Extract<CommitReply, { kind: 'accepted' }>
 
-/** What OPERATION applies: an operation's writes, the version each cell its plan read was at ('' while absent), each
- *  member it drops with the lanes its order hash had and the binary lanes it retained, and its commit. */
 /** OPERATION_LUA's ARGV[2], as JSON: what the plan read and wrote, in the order the script takes its KEYS and ARGV. */
 type OperationPacket = {
   /** Each cell the plan read, with its version as read ('' while absent): the script applies nothing once one moved. */
@@ -706,6 +704,7 @@ type OperationPacket = {
   prefixes: string[]
   /** Each cell write: its key, and its bytes' index in ARGV, 0 for a delete. */
   mutations: [key: string, argv: number][]
+  /** Each counter cell's change (`CellCount`). */
   counts: [key: string, delta: number, create: boolean][]
   /** The dropped members' retained binary lanes; three KEYS each, after the members'. */
   retained: string[]
@@ -717,6 +716,8 @@ type OperationPacket = {
   commit: number
 }
 
+/** What OPERATION applies: an operation's writes, the version each cell its plan read was at ('' while absent), each
+ *  member it drops with the lanes its order hash had and the binary lanes it retained, and its commit. */
 type OperationInput = RoomInc & {
   writes: OperationWrites
   reads: ReadonlyMap<string, string>
