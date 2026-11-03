@@ -13,6 +13,7 @@ export type {
   LeaveCause,
   BinaryFrameInfo,
   BinaryPublishOptions,
+  RoomMessage,
   RoomSnapshotView,
   ParticipantSnapshotView,
 } from './types.js'

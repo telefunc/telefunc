@@ -108,7 +108,7 @@ useEffect(() => room.subscribe((message) => addMessage(message)), [room])
 
 ## Stop listening
 
-Pass `{ signal }` to a listener registration to remove it when you abort the signal, or use `messages()` to iterate messages:
+Pass `{ signal }` to a listener registration to remove it when you abort the signal, or use `messages()` to iterate messages. Each message is `{ type, data, info, from }`, with `type` `'text'` or `'binary'` and the `data`, `info` and `from` a `subscribe()` or `subscribeBinary()` listener receives:
 
 ```js
 // chat.js
@@ -117,7 +117,8 @@ Pass `{ signal }` to a listener registration to remove it when you abort the sig
 const controller = new AbortController()
 room.onJoin((participant) => console.log(participant.id), { signal: controller.signal })
 for await (const message of room.messages({ signal: controller.signal })) {
-  console.log(message.data)
+  if (message.type === 'binary') showVideo(message.from.id, message.data, message.info.track)
+  else console.log(`${message.from.meta.name}: ${message.data.text}`)
   break
 }
 controller.abort()

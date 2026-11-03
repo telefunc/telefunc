@@ -1,6 +1,6 @@
 export { ClientRoom, ClientStandaloneParticipant }
 
-import { roomMessages, type RoomMessage } from './messages.js'
+import { roomMessages } from './messages.js'
 import { assert, assertUsage } from '../utils/assert.js'
 import { createDeferred, getOrCreate, markHandled } from 'telefunc/__internal'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
@@ -58,6 +58,7 @@ import type {
   PublishOptions,
   RemoteParticipant,
   Room,
+  RoomMessage,
   RoomSnapshotView,
   Sender,
 } from '../types.js'

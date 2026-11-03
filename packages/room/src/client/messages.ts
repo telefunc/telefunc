@@ -1,17 +1,21 @@
 export { roomMessages }
-export type { RoomMessage }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { ChannelOverflowError } from 'telefunc/client'
-import { untether, createDeferred } from 'telefunc/__internal'
+import { untether, createDeferred, type ChannelPublishInfo } from 'telefunc/__internal'
+import type { BinaryFrameInfo, RoomMessage, Sender } from '../types.js'
 import { Fifo } from '../utils/Fifo.js'
 import { utf8ByteLength } from '../utils/utf8ByteLength.js'
 
-type RoomMessage<T = unknown> = { type: 'text'; data: T } | { type: 'binary'; data: Uint8Array }
-
 type Source = {
-  subscribe(callback: (data: unknown) => void, options: { signal: AbortSignal }): () => void
-  subscribeBinary(callback: (data: Uint8Array) => void, options: { signal: AbortSignal }): () => void
+  subscribe(
+    callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => void,
+    options: { signal: AbortSignal },
+  ): () => void
+  subscribeBinary(
+    callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => void,
+    options: { signal: AbortSignal },
+  ): () => void
   onClose(callback: () => void, options: { signal: AbortSignal }): () => void
 }
 
@@ -34,8 +38,8 @@ function roomMessages(source: Source, bufferLimit: number, signal?: AbortSignal)
     changed.resolve()
   }
   const onAbort = () => finish(signal!.reason)
-  const receive = (data: RoomMessage) => {
-    const size = (data.type === 'binary' ? data.data.byteLength : utf8ByteLength(stringify(data.data))) + 64
+  const receive = (data: RoomMessage, payloadBytes: number) => {
+    const size = payloadBytes + 64
     if (bytes + size > bufferLimit) return finish(new ChannelOverflowError('Room message iterator buffer overflow'))
     bytes += size
     queue.push({ data, size })
@@ -46,10 +50,19 @@ function roomMessages(source: Source, bufferLimit: number, signal?: AbortSignal)
     if (signal?.aborted) return onAbort()
     signal?.addEventListener('abort', onAbort, { once: true })
     source.onClose(() => finish(), { signal: lifetime.signal })
-    source.subscribe((data) => receive({ type: 'text', data }), { signal: lifetime.signal })
-    source.subscribeBinary((data) => receive({ type: 'binary', data: new Uint8Array(data) }), {
-      signal: lifetime.signal,
-    })
+    source.subscribe(
+      (data, info, from) => receive({ type: 'text', data, info, from }, utf8ByteLength(stringify(data))),
+      { signal: lifetime.signal },
+    )
+    // The bytes are this listener's own copy.
+    source.subscribeBinary(
+      (data, info, from) =>
+        receive(
+          { type: 'binary', data, info, from },
+          data.byteLength + (info.meta ? utf8ByteLength(stringify(info.meta)) : 0),
+        ),
+      { signal: lifetime.signal },
+    )
   }
   const iterator: AsyncIterableIterator<RoomMessage> = {
     [Symbol.asyncIterator]() {

@@ -24,6 +24,7 @@ export type {
   ParticipantRef,
   BinaryFrameInfo,
   BinaryPublishOptions,
+  RoomMessage,
   RoomSnapshotView,
   ParticipantSnapshotView,
 }
@@ -189,6 +190,11 @@ type BinaryPublishOptions = {
   retain?: boolean
 }
 
+/** One message `messages()` yields: what a `subscribe()` or `subscribeBinary()` listener receives. */
+type RoomMessage<Pub = unknown, P extends ParticipantMeta = ParticipantMeta> =
+  | { type: 'text'; data: Pub; info: ChannelPublishInfo; from: Sender<P> }
+  | { type: 'binary'; data: Uint8Array; info: ChannelPublishInfo & BinaryFrameInfo; from: Sender<P> }
+
 type RoomBinaryListener<P extends ParticipantMeta = ParticipantMeta> = (
   data: Uint8Array,
   info: ChannelPublishInfo & BinaryFrameInfo,
@@ -263,9 +269,7 @@ type ClientRoom<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Parti
 > & {
   join(options?: ClientJoinOptions<P>): Promise<LocalParticipant<P, Pub>>
   /** Iterate participant messages until aborted, closed, or the loop ends. */
-  messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<
-    { type: 'text'; data: Pub } | { type: 'binary'; data: Uint8Array }
-  >
+  messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<RoomMessage<Pub, P>>
 }
 
 /** Your returnable participant handle, returned by `join()`. */

@@ -223,25 +223,38 @@ function Room() {
       {liveRoom && <LiveCount room={liveRoom} />}
 
       {scenario('signals', 'Subscriptions', 'Abort listeners and iterate messages', async () => {
-        const [, room] = await createRoom('signals')
+        const [roomId, room] = await createRoom('signals')
         const lobby = room as import('@telefunc/room/client').Room
         const lifetime = new AbortController()
         let calls = 0
         lobby.subscribe(() => calls++, { signal: lifetime.signal })
         lobby.onJoin(() => calls++, { signal: lifetime.signal })
-        const me = await lobby.join()
+        const me = await lobby.join({ meta: { name: 'Alice' } })
         const remote = (await lobby.getParticipant(me.id))!
         remote.subscribe(() => calls++, { signal: lifetime.signal })
         me.listen(() => calls++, { signal: lifetime.signal })
         lifetime.abort()
         const before = calls
+        const bobView = await onGetRoom(roomId)
+        const releaseBobView = keepReachable(bobView)
+        const bob = await bobView.join({ meta: { name: 'Bob' } })
         const stream = lobby.messages()
+        // The first `next()` subscribes.
         const pending = stream.next()
         await me.publish('hello')
-        const first = await pending
-        const next = stream.next()
-        await me.publishBinary(new Uint8Array([7]))
-        const binary = (await next).value
+        await bob.publish('hi')
+        await me.publishBinary(new Uint8Array([1]), { track: 'camera', meta: { frame: 1 } })
+        await me.publishBinary(new Uint8Array([2]), { track: 'screen' })
+        await bob.publishBinary(new Uint8Array([3]), { track: 'camera' })
+        const received: string[] = []
+        for (let next = pending; received.length < 5; next = stream.next()) {
+          const message = (await next).value!
+          received.push(
+            message.type === 'text'
+              ? `text ${message.from.meta.name}: ${message.data}`
+              : `binary ${message.from.meta.name} ${message.info.track}: ${message.data} ${JSON.stringify(message.info.meta)}`,
+          )
+        }
         await stream.return!()
         const stopped = (await stream.next()).done
         const aborted = lobby.messages({ signal: lifetime.signal })
@@ -251,11 +264,13 @@ function Room() {
         )
         await me.send(me.id, 'ignored')
         await me.leave()
+        await bob.leave()
+        releaseBobView()
         setResult(
           JSON.stringify({
             unchanged: calls === before,
-            first: first.value,
-            binary: binary?.type === 'binary' ? Array.from(binary.data) : null,
+            // Sorted: this checks what arrived and from whom, not the order.
+            received: received.sort(),
             stopped,
             abortedWithReason,
           }),

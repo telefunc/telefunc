@@ -194,15 +194,19 @@ async function openChat(chatId: string, name: string, how: 'join' | 'sign-in' | 
 function testRoom() {
   testRoomScenario<{
     unchanged: boolean
-    first: { type: string; data: string }
-    binary: number[]
+    received: string[]
     stopped: boolean
     abortedWithReason: boolean
-  }>('signals', 'room: abort removes registrations and messages can be iterated and stopped', (result) => {
+  }>('signals', 'room: abort removes registrations, and iterated messages keep their sender and track', (result) => {
     expect(result).deep.equal({
       unchanged: true,
-      first: { type: 'text', data: 'hello' },
-      binary: [7],
+      received: [
+        'binary Alice camera: 1 {"frame":1}',
+        'binary Alice screen: 2 null',
+        'binary Bob camera: 3 null',
+        'text Alice: hello',
+        'text Bob: hi',
+      ],
       stopped: true,
       abortedWithReason: true,
     })
