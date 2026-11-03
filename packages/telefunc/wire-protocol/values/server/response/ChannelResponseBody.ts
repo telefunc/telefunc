@@ -12,6 +12,7 @@ import { encodeErrorPayload } from './StreamingResponseBody.js'
 import { restoreContext } from '../../../../node/server/context/context.js'
 import type { Context } from '../../../../node/server/context/context.js'
 import type { RequestContext } from '../../../../node/server/context/requestContext.js'
+import { createDeferred } from '../../../../utils/createDeferred.js'
 
 const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
 const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
@@ -61,10 +62,8 @@ function pumpProducerToChannel(
   }
 
   let cancelled = false
-  let resolveCancelled!: (v: IteratorResult<Uint8Array<ArrayBuffer>>) => void
-  const cancelledPromise = new Promise<IteratorResult<Uint8Array<ArrayBuffer>>>((r) => {
-    resolveCancelled = r
-  })
+  const { promise: cancelledPromise, resolve: resolveCancelled } =
+    createDeferred<IteratorResult<Uint8Array<ArrayBuffer>>>()
   const doCancel = () => {
     if (cancelled) return
     cancelled = true
@@ -75,10 +74,7 @@ function pumpProducerToChannel(
   channel.onClose(doCancel)
   ;(async () => {
     try {
-      await new Promise<void>((resolve, reject) => {
-        channel.onOpen(resolve)
-        channel.onClose(() => reject(new ChannelClosedError()))
-      })
+      await channel.opened
       await restoreContext(runContext.context, async () => {
         const { responseAbort } = runContext.requestContext
         while (true) {

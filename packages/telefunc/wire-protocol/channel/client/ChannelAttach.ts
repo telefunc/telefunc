@@ -12,11 +12,11 @@ type ChannelAttachOptions = {
 }
 
 /** A page channel's credits as its connection drives them across wires: what the channel's RECONCILE entry carries,
- *  the replay buffers' caps, the acknowledgements, and a wire turning to batch POSTs or joining an upgrade. */
+ *  the replay buffers' caps, and a wire turning to batch POSTs or joining an upgrade. */
 class ChannelAttach {
   private readonly channel: { readonly isClosed: boolean }
   private readonly sendCredit: SendCredit
-  private readonly receiveCredit: ReceiveCredit
+  readonly receiveCredit: ReceiveCredit
   /** A broadcast's subscriptions, which its entry declares in place of a probe. */
   private subscriptions: { readonly text: boolean; readonly binary: boolean } | null = null
 
@@ -40,27 +40,11 @@ class ChannelAttach {
     this.subscriptions = subscriptions
   }
 
-  /** The RECONCILED answered the `probe` in the channel's RECONCILE entry. */
-  onProbeAnswered(probe: number): void {
-    this.receiveCredit.onProbeAnswered(probe)
-  }
-
   /** Caps the credit windows at what the replay buffers allow: `window` for what the page grants, `peerWindow` for
    *  what the server grants it. */
   fitReplays(window: number, peerWindow: number): void {
     this.receiveCredit.fitReplay(window)
     this.sendCredit.fitReplay(peerWindow)
-  }
-
-  /** Called on each heartbeat: a WINDOW for what arrived since the last one lets the server's replay buffer release it
-   *  while the channel is quiet (see `ReceiveCredit.acknowledge`). */
-  acknowledge(): void {
-    this.receiveCredit.acknowledge()
-  }
-
-  /** The channel answered the newest frame from the server, which acknowledges every earlier frame too. */
-  answered(): void {
-    this.receiveCredit.answered()
   }
 
   /** The wire's streaming upload failed after the channel opened, so its frames now go in batch POSTs. */

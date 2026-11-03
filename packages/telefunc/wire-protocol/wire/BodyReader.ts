@@ -2,6 +2,7 @@ export { BodyReader, OversizeFrameError, StreamTruncatedError }
 
 import type { Readable } from 'node:stream'
 import { assert, assertUsage, assertWarning } from '../../utils/assert.js'
+import { createDeferred } from '../../utils/createDeferred.js'
 import { concatAll, decodeU32 } from './envelope.js'
 
 /** Shared sentinel — avoids zero-length subarray views that pin large ArrayBuffers. */
@@ -81,10 +82,7 @@ class BodyReader {
   consumeFile(index: number, size: number): ReadableStream<Uint8Array<ArrayBuffer>> {
     const queuePrevious = this.queue
     let remaining = size
-    let resolveDone!: () => void
-    const done = new Promise<void>((r) => {
-      resolveDone = r
-    })
+    const { promise: done, resolve: resolveDone } = createDeferred()
     this.queue = done
 
     return new ReadableStream<Uint8Array<ArrayBuffer>>({

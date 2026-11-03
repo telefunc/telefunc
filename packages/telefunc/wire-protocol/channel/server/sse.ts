@@ -23,6 +23,7 @@ import { getChannelMux } from './ChannelMux.js'
 import type { ReconcileOutcome, ServerTransport } from './ChannelMux.js'
 import { encode } from '../../wire/frame.js'
 import { passesData } from '../../wire/tags.js'
+import { createDeferred } from '../../../utils/createDeferred.js'
 import { isProtocolViolationError, ProtocolViolationError } from '../../wire/protocolViolation.js'
 
 type SseChannelHttpResponse = {
@@ -190,10 +191,7 @@ class SseServerTransport {
     }
     const events = new EventStream({ useNodeStream, onCancel })
 
-    let resolveReady!: () => void
-    const ready = new Promise<void>((resolve) => {
-      resolveReady = resolve
-    })
+    const { promise: ready, resolve: resolveReady } = createDeferred()
     const wire: SseWire = {
       connId,
       events,
