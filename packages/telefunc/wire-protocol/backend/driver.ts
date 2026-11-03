@@ -83,7 +83,8 @@ function planeKey<Key extends PlaneKey>(name: Key extends PlaneKey<infer Name> ?
   return Symbol.for(name) as Key
 }
 
-/** A backend's entry in `planes`: `build` makes the driver of the plane `key` names, typed by the key. */
+/** A backend's entry in `planes`: `build` makes the driver of the plane `key` names. The key types its kit and the
+ *  methods its driver has, but doesn't check that the driver has all of them. */
 function servePlane<Kit, Driver>(key: PlaneKey<string, Kit, Driver>, build: (kit: Kit) => Driver): PlaneServer {
   return { key, build }
 }

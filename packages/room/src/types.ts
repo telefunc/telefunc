@@ -190,7 +190,8 @@ type BinaryPublishOptions = {
   retain?: boolean
 }
 
-/** One message `messages()` yields: what a `subscribe()` or `subscribeBinary()` listener receives. */
+/** One message `messages()` yields: what a `subscribe()` or `subscribeBinary()` listener receives, `from` being the
+ *  sender as it was when the message arrived. */
 type RoomMessage<Pub = unknown, P extends ParticipantMeta = ParticipantMeta> =
   | { type: 'text'; data: Pub; info: ChannelPublishInfo; from: Sender<P> }
   | { type: 'binary'; data: Uint8Array; info: ChannelPublishInfo & BinaryFrameInfo; from: Sender<P> }

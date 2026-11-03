@@ -115,8 +115,8 @@ function registerCloudflareExtension(extension: CloudflareExtension): void {
   globalObject.extensions.set(extension.name, extension)
 }
 
-/** An extension's entry in `planes`: `build` makes, from Cloudflare's kit, the driver of the plane `key` names, typed by
- *  the key. */
+/** An extension's entry in `planes`: `build` makes, from Cloudflare's kit, the driver of the plane `key` names. The key
+ *  types the methods the driver has, but doesn't check that it has all of them. */
 function serveCloudflarePlane<Kit, Driver>(
   key: PlaneKey<string, Kit, Driver>,
   build: (kit: CloudflarePlaneKit) => Driver,

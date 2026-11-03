@@ -96,9 +96,9 @@ The plan is three parts, each using only the one before it:
   (member, track), from the holders' wants, the membership and the two rules above.
 - **The switch** (`BinaryLanes`): the binary subscriptions of each shape. A subscription delivers only what is
   published after it confirms, so a pair whose shape changes keeps its old lane until the new one delivers, and a
-  fan-in lane also stays while one of the other kind is establishing (`Establishing`). No frame is lost. During the
-  overlap a frame comes on both lanes with one order, and the holder keeps it once (`ReplayGate.admitBinary()`, per
-  (member, track)).
+  fan-in lane also stays while one of the other kind is establishing (`Establishing`), so a switch loses no frame.
+  During the overlap a frame comes on both lanes with one order, and the holder keeps it once
+  (`ReplayGate.admitBinary()`, per (member, track)).
 - **The pass** (`LanePlan`): the changes queue, and one pass at a time plans them, in `ROOM_PLAN_SLICE_MS` slices, then
   tells the demand from the choice and from what delivers. `BinaryLanes` never calls the plan: each round starts by
   taking what the lanes' readiness and switches replanned (`takeReplans()`).
@@ -133,7 +133,7 @@ The `byMember` band holds: at 40 members the plan switches at 41 tracks and back
 inside the band switches nothing. `ROOM_MEMBER_NAMED_LANES_MAX` has no band: a member whose named tracks hover at the
 limit switches its lanes on every change.
 
-The same probe times a want change's pass until the lanes it opened are ready. One track of every member plans only that
-track's every-member lane: 0.2 ms at 1,000, 10,000 and 100,000 members. Every track of every member plans each member:
-about 10 ms at 1,000 members and 90 ms at 10,000, in slices, the longest the event loop waited being 12–15 ms against
-the 10 ms `ROOM_PLAN_SLICE_MS`.
+The same probe times a want change's pass until the lanes it opened are ready. The times below are one dev machine's,
+and depend on it; the probe prints yours. One track of every member plans only that track's every-member lane: 0.2 ms
+at 1,000, 10,000 and 100,000 members. Every track of every member plans each member: about 10 ms at 1,000 members and
+90 ms at 10,000, in slices, the longest the event loop waited being 12–15 ms against the 10 ms `ROOM_PLAN_SLICE_MS`.

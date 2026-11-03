@@ -183,8 +183,9 @@ type OperationTx = {
   dropMemberLanes(member: string): void
   /** Commits `payload` on the control lane; once per operation. */
   commit(payload: Uint8Array): void
-  /** Writes an expiring cell, which the backend deletes on its own `ttlMs` after this write, with or without a server
-   *  on the room. It is read only by `readExpiringCells()`: neither a plan nor a cell read sees it. */
+  /** Writes an expiring cell: once `ttlMs` has passed since this write, no read returns it and the backend deletes it,
+   *  with or without a server on the room. It is read only by `readExpiringCells()`: neither a plan nor a cell read
+   *  sees it. */
   writeExpiring(cell: ExpiringCell): void
 }
 
