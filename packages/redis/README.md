@@ -57,5 +57,3 @@ installRedis(redis)
 When you remove a Cluster node (`redis-cli --cluster del-node`), shut it down too: a removed node left running keeps the subscribers connected to it, and they receive nothing until it stops. Keep master clocks synchronized: room expiries use the masters' clocks.
 
 Room keeps its state (rooms, members, lane order) in keys that Redis must never evict: use `maxmemory-policy noeviction`. Any other policy can silently close a room.
-
-On Redis Cluster, publish receipts omit `receivers`.

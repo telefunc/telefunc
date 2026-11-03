@@ -1,5 +1,5 @@
 /// <reference types="@cloudflare/workers-types" />
-export { installRetained, readRetained, listRetained, deleteRetained }
+export { installRetained, readRetained, retainedOwner, listRetained, deleteRetained }
 
 import type { LaneId, RetainedFrame, RetainedOf } from '../backend/contract.js'
 import { binaryLaneKeyPrefix, decodeLaneKey, encodeLaneKey } from '../backend/laneKey.js'
@@ -11,8 +11,16 @@ const MAX_RETAINED_CHUNK_BYTES = 1_500_000
 
 type ManifestRow = { lane_key: string; size: number; seq: number; ts: number }
 
-/** Install retained state inside the acceptance `transactionSync`; partial chunk replacement rolls back. */
-function installRetained(sql: SqlStorage, inc: string, lane: LaneId, payload: Uint8Array, mark: OrderingInfo): void {
+/** Install retained state inside the acceptance `transactionSync`; partial chunk replacement rolls back. `owner` is the
+ *  member the frame is from. */
+function installRetained(
+  sql: SqlStorage,
+  inc: string,
+  lane: LaneId,
+  payload: Uint8Array,
+  mark: OrderingInfo,
+  owner: string | undefined,
+): void {
   const key = encodeLaneKey(lane)
   sql.exec('DELETE FROM rt_chunk WHERE inc = ? AND lane_key = ?', inc, key)
   const chunkCount = Math.max(1, Math.ceil(payload.byteLength / MAX_RETAINED_CHUNK_BYTES))
@@ -21,13 +29,14 @@ function installRetained(sql: SqlStorage, inc: string, lane: LaneId, payload: Ui
     sql.exec('INSERT INTO rt_chunk (inc, lane_key, i, bytes) VALUES (?, ?, ?, ?)', inc, key, i, slice)
   }
   sql.exec(
-    'INSERT OR REPLACE INTO rt_manifest (inc, lane_key, track, size, seq, ts) VALUES (?, ?, ?, ?, ?, ?)',
+    'INSERT OR REPLACE INTO rt_manifest (inc, lane_key, track, size, seq, ts, owner) VALUES (?, ?, ?, ?, ?, ?, ?)',
     inc,
     key,
     lane.kind === 'binary' ? lane.track : null,
     payload.byteLength,
     mark.seq,
     mark.timestamp,
+    owner ?? null,
   )
 }
 
@@ -50,6 +59,12 @@ function readRetained(sql: SqlStorage, inc: string, lane: LaneId): RetainedFrame
   return { payload, seq: manifest.seq, timestamp: manifest.ts }
 }
 
+/** The member `lane`'s retained frame is from, null for none or a frame no member sent. */
+function retainedOwner(sql: SqlStorage, inc: string, lane: LaneId): string | null {
+  const query = 'SELECT owner FROM rt_manifest WHERE inc = ? AND lane_key = ?'
+  return sql.exec<{ owner: string | null }>(query, inc, encodeLaneKey(lane)).toArray()[0]?.owner ?? null
+}
+
 /** A member's lanes are a primary-key range: their keys share its prefix. A track's are an rt_manifest_track range. */
 function listRetained(sql: SqlStorage, inc: string, of?: RetainedOf): LaneId[] {
   const query = 'SELECT lane_key FROM rt_manifest WHERE inc = ?'
@@ -63,14 +78,8 @@ function listRetained(sql: SqlStorage, inc: string, of?: RetainedOf): LaneId[] {
   return rows.toArray().map((row) => decodeLaneKey(row.lane_key))
 }
 
-function deleteRetained(sql: SqlStorage, inc: string, lane: LaneId, opts?: { ifSeq?: number }): void {
+function deleteRetained(sql: SqlStorage, inc: string, lane: LaneId): void {
   const key = encodeLaneKey(lane)
-  if (opts?.ifSeq !== undefined) {
-    const manifest = sql
-      .exec<Pick<ManifestRow, 'seq'>>('SELECT seq FROM rt_manifest WHERE inc = ? AND lane_key = ?', inc, key)
-      .toArray()[0]
-    if (manifest === undefined || manifest.seq !== opts.ifSeq) return
-  }
   sql.exec('DELETE FROM rt_manifest WHERE inc = ? AND lane_key = ?', inc, key)
   sql.exec('DELETE FROM rt_chunk WHERE inc = ? AND lane_key = ?', inc, key)
 }

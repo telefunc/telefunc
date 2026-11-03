@@ -9,10 +9,22 @@ class Deliveries {
   /** The bytes delivered up to and including each. */
   private readonly through = new Float64Array(KEPT)
   private count = 0
+  /** The number of the delivery that completed the frame the wire is handling. */
+  private handling = 0
 
   /** The number of the last delivery, -1 before the first. */
   get last(): number {
     return this.count - 1
+  }
+
+  /** The wire handles the frame delivery `n` completed: `beforeHandled` measures back from it. */
+  handle(n: number): void {
+    this.handling = n
+  }
+
+  /** Bytes in the `ms` before the delivery that completed the frame the wire is handling (see `before`). */
+  beforeHandled(ms: number): number {
+    return this.before(this.handling, ms)
   }
 
   note(at: number, bytes: number): void {
@@ -22,8 +34,8 @@ class Deliveries {
     this.count++
   }
 
-  /** Bytes in the `ms` before delivery `n`, at their rate beyond those kept; `Infinity` if the one before `n` isn't
-   *  kept or the kept ones span no time. */
+  /** Bytes in the `ms` before delivery `n`, at their rate beyond those kept; `Infinity`, which reads as a busy wire,
+   *  if the one before `n` isn't kept or the kept ones span no time. */
   before(n: number, ms: number): number {
     if (n === 0) return 0
     const oldest = Math.max(0, this.count - KEPT)

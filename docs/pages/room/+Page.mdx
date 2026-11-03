@@ -18,11 +18,19 @@ import { TelefuncStreamBeta } from '../../components'
 npm install @telefunc/room
 ```
 
-> There isn't any other setup: Telefunc finds `@telefunc/*` packages in your `package.json` and auto-loads them.
+Then load Room's client code before your client receives a room, for example in your client entry:
 
-> Without a Telefunc bundler plugin (Vite, webpack, Next.js, Babel), register it manually: `import '@telefunc/room/client'` in your client entry. The server needs no extra import: importing `Room` from `@telefunc/room` registers it.
+```js
+// Environment: client
 
-> On Cloudflare, use <Link href="/vite-plugin">Telefunc's Vite plugin</Link>.
+import '@telefunc/room/client'
+```
+
+> Telefunc's Vite, webpack, Next.js and Babel plugins add this import for you when `@telefunc/room` is in the `package.json` at your app's root. A dependency declared elsewhere, such as only in `deno.json`, isn't found: keep the import.
+
+> The server needs no extra import: importing `Room` from `@telefunc/room` loads it.
+
+> On Cloudflare, use <Link href="/vite-plugin">Telefunc's Vite plugin</Link>. When `@telefunc/room` isn't in your `package.json`, also add `import '@telefunc/room/server'` to your Worker's entry, as a Durable Object can get Room's calls before any of your telefunctions loaded `Room`.
 
 
 ## Create and join a room
@@ -36,7 +44,9 @@ A telefunction returns the room, and the client joins it:
 import { Room } from '@telefunc/room'
 
 export async function onGetLobby() {
-  return await Room.getOrCreate('lobby')
+  const room = await Room.getOrCreate('lobby')
+  Room.guard(room, { anyoneCanJoin: true })
+  return room
 }
 ```
 ```js
@@ -55,6 +65,8 @@ await me.publish({ text: 'hello' })
 ```
 
 `join()` returns your participant, `me`.
+
+A client joins only a room whose telefunction says who may: `anyoneCanJoin: true` lets anyone in, and an `onBeforeJoin()` hook decides per join (see <Link href="#control-who-can-join-and-post" />). Without either, `room.join()` on the client is refused.
 
 > `meta` is what a participant shows about itself, such as its name. A room has a `meta` too: set it with `Room.create('lobby', { meta: { topic: 'General' } })`, and read it on the client with `room.meta`.
 
@@ -102,6 +114,24 @@ Every listener (`onChange()`, `onJoin()`, `subscribe()`, `listen()`, …) return
 useEffect(() => room.subscribe((message) => addMessage(message)), [room])
 ```
 
+## Stop listening
+
+Pass `{ signal }` to a listener registration to remove it when you abort the signal, or use `messages()` to iterate messages. Each message is `{ type, data, info, from }`: `type` is `'text'` or `'binary'`, `data` and `info` are what a `subscribe()` or `subscribeBinary()` listener receives, and `from` is the sender's `id`, `meta` and `identity` as they were when the message arrived:
+
+```js
+// chat.js
+// Environment: client
+
+const controller = new AbortController()
+room.onJoin((participant) => console.log(participant.id), { signal: controller.signal })
+for await (const message of room.messages({ signal: controller.signal })) {
+  if (message.type === 'binary') showVideo(message.from.id, message.data, message.info.track)
+  else console.log(`${message.from.meta.name}: ${message.data.text}`)
+  break
+}
+controller.abort()
+```
+
 
 ## Update your name or status
 
@@ -112,7 +142,7 @@ await me.setAttributes({ status: 'away' })            // changes only `status`
 await me.setMeta({ name: 'Alice', status: 'online' }) // replaces all of your meta
 ```
 
-Everyone in the room sees the change.
+Everyone in the room sees the change. The `meta` you read is read-only, and freezing doesn't lock a `Map`, `Set` or `Date` inside it, so build a new value to change any of it, as above.
 
 
 ## Send a message to everyone
@@ -138,6 +168,8 @@ room.onJoin(follow)
 ```
 
 > You also receive your own messages. To not receive them, join with `room.join({ meta, selfDelivery: false })`.
+
+> Each participant's messages arrive in the order it sent them. `from` is that participant as the room knows it when the message arrives, so `from.meta` is its meta then, not when it sent the message. Joins, leaves and meta changes arrive in the same order everywhere, but two pages can see a message and someone else's join in a different order.
 
 For updates that change many times per second, such as a mouse cursor, pass `coalesce` with a name: on a slow connection, only the latest update with that name is sent, and the older ones are skipped.
 
@@ -195,6 +227,8 @@ const { response } = await me.send(alice, { move: 'e4' }, { ack: true })
 console.log(response) // 'ok'
 ```
 
+> A private message is delivered at most once: when it can't be handed on to the recipient, `send()` rejects, and the message isn't sent again. Room tells your server of every message, join or leave it couldn't hand on through <Link href="/room-config">`roomConfig.onDeliveryLost`</Link>, which logs it by default.
+
 
 ## Send from the server
 
@@ -233,11 +267,6 @@ export async function onJoinChat(roomId) {
   const { user } = getContext()
   const room = await Room.getOrCreate(roomId)
   Room.guard(room, {
-    onBeforeJoin: (member) => {
-      // Rejects a client calling room.join() itself (it has no identity): users join only below
-      if (member.identity !== user.id) throw Abort('join through onJoinChat()')
-      if (isBanned(user.id)) throw Abort('banned')
-    },
     onBeforePublish: (from, message) => {
       if (isSpam(message)) throw Abort('spam')
     },
@@ -245,6 +274,7 @@ export async function onJoinChat(roomId) {
       if (!(await areFriends(user.id, to.identity))) throw Abort('not friends')
     },
   })
+  if (isBanned(user.id)) throw Abort('banned')
   const me = await room.join({ meta: { name: user.name }, identity: user.id })
   return { room, me }
 }
@@ -263,13 +293,11 @@ try {
 }
 ```
 
-`identity` is your user id, set by the server at `join()`. Every message carries its sender's `identity` (`from.identity`), and a client can't change it.
+With no `onBeforeJoin()` and no `anyoneCanJoin`, the client can't call `room.join()` itself: users join only through `onJoinChat()`, as themselves. `identity` is your user id, set by the server at `join()`. Every message carries its sender's `identity` (`from.identity`), and a client can't change it.
 
 <Warning>Check permissions on `identity`, never on `meta`: a client can set its `meta` to anything.</Warning>
 
 The hooks run for the client this telefunction returns the room to, so `user` in them is that client's user.
-
-<Warning>Call `Room.guard()` once, with all its hooks, in every telefunction that returns the room: a client that gets the room from a telefunction without it skips the hooks.</Warning>
 
 To run code after a join or a message, such as saving the message, use `onAfterJoin()`, `onAfterPublish()` and `onAfterSend()` (see <Link href="#load-chat-history" />).
 
@@ -533,7 +561,7 @@ Server-side.
 | `Room.create(id, options?)` | Create a room. Throws if it exists. |
 | `Room.get(id, { tail? }?)` | Get a room. Throws if it doesn't exist. With `tail: true`, the client also gets the messages published after the history you load (see <Link href="#load-chat-history" />). |
 | `Room.getOrCreate(id, { ...options, tail? }?)` | Get a room, or create it. `tail` as for `Room.get()`. |
-| `Room.guard(room, hooks)` | Add `onBefore*()` and `onAfter*()` hooks to a room. |
+| `Room.guard(room, hooks)` | Add `onBefore*()` and `onAfter*()` hooks to a room, once, and say who may join it from the client. |
 | `Room.join(id, { meta?, selfDelivery?, identity?, hidden? }?)` | Join a room from the server, without getting the room first. |
 | `Room.list({ prefix? }?)` | List the open rooms. |
 | `Room.setMeta(id, meta)` / `Room.setAttributes(id, attributes)` | Replace / update the room's `meta`. |
@@ -571,7 +599,7 @@ Properties: `id`, `meta`, `count`.
 | `listen(cb)` | Receive private messages; return a value to reply. |
 | `setMeta(meta)` / `setAttributes(attributes)` | Replace / update your `meta`. |
 | `onDemand(cb)` | Whether anyone watches a track of yours. |
-| `leave()` / `onLeave(cb)` | Leave / you left, with `cause.type`: `'left'`, `'removed'`, `'closed'`, or `'disconnected'`. |
+| `leave()` / `onLeave(cb)` | Leave / you left, with `cause.type`: `'left'`, `'removed'`, `'closed'`, `'disconnected'`, or `'unknown'` (it left while nothing here listened to the room, too long ago to know why). |
 | `onDisconnect(cb)` / `onReconnect(cb)` | Your connection to the room dropped / is back. |
 
 Properties: `id`, `meta`, `identity`, `isConnected`.
@@ -590,6 +618,7 @@ Properties: `id`, `meta`, `identity`, `isConnected`.
 
 | Hook | Description |
 |---|---|
+| `anyoneCanJoin` | `true`: any client may join. Without it or `onBeforeJoin()`, a client's `room.join()` is refused. |
 | `onBeforeJoin(member)` | Before a join. Throw `Abort()` to reject it. |
 | `onBeforePublish(from, message)` | Before a message to everyone. Throw `Abort()` to reject it. |
 | `onBeforeSend(from, to, message)` | Before a private message. Throw `Abort()` to reject it. |

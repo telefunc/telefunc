@@ -3,10 +3,10 @@ export { Backlog }
 import React, { useEffect, useRef, useState } from 'react'
 import { onBacklog } from './Backlog.telefunc'
 
-type BacklogState = { channelId: string | null; received: number; outOfOrder: number; refused: string[] | null }
+type BacklogState = { channelId: string | null; received: number; outOfOrder: number; closeErr: string | null }
 
 function Backlog() {
-  const [state, setState] = useState<BacklogState>({ channelId: null, received: 0, outOfOrder: 0, refused: null })
+  const [state, setState] = useState<BacklogState>({ channelId: null, received: 0, outOfOrder: 0, closeErr: null })
   const channelRef = useRef<Awaited<ReturnType<typeof onBacklog>> | null>(null)
   const [hydrated, setHydrated] = useState(false)
   useEffect(() => {
@@ -24,13 +24,11 @@ function Backlog() {
       const inOrder = Number(message.trimEnd()) === expected++
       setState((s) => ({ ...s, received: s.received + 1, outOfOrder: s.outOfOrder + (inOrder ? 0 : 1) }))
     })
+    channel.onClose((err) => setState((s) => ({ ...s, closeErr: err?.name ?? 'none' })))
     setState((s) => ({ ...s, channelId: channel.id }))
   }
 
-  const run = async () => {
-    const refused = await channelRef.current!.send(6000, { ack: true })
-    setState((s) => ({ ...s, refused }))
-  }
+  const run = () => channelRef.current!.send(6000)
 
   return (
     <div id={hydrated ? 'hydrated' : undefined}>

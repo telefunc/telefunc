@@ -1,15 +1,25 @@
 // ioredis policy: a client's deployment, the connection the backend's commands run on, subscriber creation, and calls
 // to defined commands.
-export { createCommandClient, createSubscriberSocket, callDefinedCommand, isCluster, deploymentOf }
+export {
+  createCommandClient,
+  createSubscriberSocket,
+  callDefinedCommand,
+  isCluster,
+  deploymentOf,
+  addressOf,
+  isUnreachable,
+  isRefusal,
+}
 export type { RedisClient, SubscriberSocket }
 
 import { randomUUID } from 'node:crypto'
 import { Cluster, type Redis } from 'ioredis'
 import { assert } from './assert.js'
+import { getGlobalObject } from './getGlobalObject.js'
 
 type RedisClient = Redis | Cluster
 
-/** What the subscription driver needs of a subscriber connection. */
+/** What `RedisSubscriptions` needs of its connection. */
 type SubscriberSocket = {
   connect(): Promise<void>
   subscribe(...channels: string[]): Promise<unknown>
@@ -32,13 +42,42 @@ function deploymentOf(redis: RedisClient): string {
   return JSON.stringify({ path, host, port, db, sentinels, name })
 }
 
-/** A clone of the app's client for the backend's commands: it never resends a command (at-most-once), reads masters
- *  only (Room reads are strongly consistent), and ends when the app's client does. */
+/** Where a client connects, as a person reads it: its startup nodes, socket path, Sentinel master or host:port. */
+function addressOf(redis: RedisClient): string {
+  if (isCluster(redis)) {
+    const nodes = (redis as unknown as { startupNodes: Array<{ host?: string; port?: number } | string | number> })
+      .startupNodes
+    return nodes.map((node) => (typeof node === 'object' ? `${node.host}:${node.port}` : String(node))).join(', ')
+  }
+  const { path, host, port, sentinels, name } = redis.options
+  if (path) return path
+  return sentinels?.length ? `Sentinel master ${name}` : `${host}:${port}`
+}
+
+/** ioredis' errors for a command it couldn't send: with no retries, an unreachable Redis fails it at once. */
+function isUnreachable(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return (
+    error.name === 'MaxRetriesPerRequestError' ||
+    error.name === 'ClusterAllFailedError' ||
+    error.message === 'Connection is closed.' ||
+    error.message === 'None of startup nodes is available'
+  )
+}
+
+/** Redis answered the command with an error (`NOPERM`, `ERR …`), unlike a connection that dropped before it did. */
+function isRefusal(error: unknown): boolean {
+  return error instanceof Error && error.name === 'ReplyError'
+}
+
+/** A clone of the app's client for the backend's commands: it never resends a command (at-most-once) and reads masters
+ *  only (Room reads are strongly consistent). */
 function createCommandClient(redis: RedisClient): RedisClient {
   // A Cluster copies redisOptions.keyPrefix to its own options, so this reads either form.
   if (redis.options.keyPrefix) {
     throw new Error(
-      "installRedis(): ioredis keyPrefix isn't supported (it doesn't apply to Pub/Sub channels). Use installRedis(redis, { prefix }) instead",
+      "installRedis(): ioredis keyPrefix isn't supported (it doesn't apply to Pub/Sub channels). Use " +
+        'installRedis(redis, { prefix }) instead',
     )
   }
   const commands = isCluster(redis)
@@ -53,7 +92,6 @@ function createCommandClient(redis: RedisClient): RedisClient {
     : redis.duplicate({ maxRetriesPerRequest: 0, reconnectOnError: null })
   // A connection error reaches the backend as its command's rejection.
   commands.on('error', () => {})
-  redis.once('end', () => commands.disconnect())
   return commands
 }
 
@@ -84,11 +122,12 @@ async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSoc
   })
 }
 
-// The node each Cluster's subscriber was last duplicated from.
-const subscriberNodes = new WeakMap<Cluster, Redis>()
-
-// One wait per connecting Cluster, however often subscribers reopen during it.
-const clusterWaits = new WeakMap<Cluster, Promise<void>>()
+const { subscriberNodes, clusterWaits } = getGlobalObject('ioredis.ts', () => ({
+  /** The node each Cluster's subscriber was last duplicated from. */
+  subscriberNodes: new WeakMap<Cluster, Redis>(),
+  /** One wait per connecting Cluster, however often subscribers reopen during it. */
+  clusterWaits: new WeakMap<Cluster, Promise<void>>(),
+}))
 
 function clusterReady(cluster: Cluster): Promise<void> {
   let wait = clusterWaits.get(cluster)
@@ -119,6 +158,7 @@ function callDefinedCommand(
 ): Promise<unknown> {
   const fn = (redis as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>)[command]
   assert(typeof fn === 'function', `Redis command "${command}" was not registered via defineCommand`)
-  // One array argument, which ioredis flattens into the command: a generation's keys can outnumber a call's arguments.
+  // One array argument, which ioredis flattens into the command: an incarnation's keys can outnumber a call's
+  // arguments.
   return fn.call(redis, keysAndArgs)
 }

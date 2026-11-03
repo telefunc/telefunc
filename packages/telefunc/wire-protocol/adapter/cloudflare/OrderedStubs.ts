@@ -1,4 +1,4 @@
-export { OrderedStubs, reportLostDeliveries }
+export { OrderedStubs }
 
 import { createDeferred, type Deferred } from '../../../utils/createDeferred.js'
 
@@ -16,13 +16,13 @@ type Line<Stub> = {
  *  broken, so later calls get a fresh one, which waits until the failed stub's calls settle so it can't overtake
  *  them. */
 class OrderedStubs<Stub> {
-  readonly #lines = new Map<string, Line<Stub>>()
+  private readonly lines = new Map<string, Line<Stub>>()
 
   call<T>(target: string, open: () => Stub, invoke: (stub: Stub) => Promise<T>): Promise<T> {
-    let line = this.#lines.get(target)
+    let line = this.lines.get(target)
     if (line === undefined || line.failed) {
       line = { stub: open(), after: line?.idle.promise ?? null, idle: createDeferred(), calls: 0, failed: false }
-      this.#lines.set(target, line)
+      this.lines.set(target, line)
     }
     line.calls++
     const result =
@@ -30,26 +30,18 @@ class OrderedStubs<Stub> {
         ? new Promise<T>((resolve) => resolve(invoke(line.stub)))
         : line.after.then(() => invoke(line.stub))
     result.then(
-      () => this.#settle(target, line),
+      () => this.settle(target, line),
       () => {
         line.failed = true
-        this.#settle(target, line)
+        this.settle(target, line)
       },
     )
     return result
   }
 
-  #settle(target: string, line: Line<Stub>): void {
+  private settle(target: string, line: Line<Stub>): void {
     if (--line.calls > 0) return
     line.idle.resolve()
-    if (this.#lines.get(target) === line) this.#lines.delete(target)
-  }
-}
-
-/** Delivery is at-most-once: a Durable Object that fails to take a delivery loses it, and the sender goes on. */
-function reportLostDeliveries(delivery: string, outcomes: PromiseSettledResult<unknown>[]): void {
-  const failed = outcomes.filter((outcome) => outcome.status === 'rejected')
-  if (failed.length > 0) {
-    console.error(`${delivery} lost to ${failed.length}/${outcomes.length} Durable Objects: ${failed[0]!.reason}`)
+    if (this.lines.get(target) === line) this.lines.delete(target)
   }
 }

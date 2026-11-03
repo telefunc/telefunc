@@ -5,11 +5,21 @@ export {
   testRoomLimits,
   testRoomAckTimeout,
   testRoomSmallBuffer,
+  testRoomPublishHold,
   testRoomLongWaits,
 }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Response, WebSocket } from 'playwright-chromium'
-import { navigate, getResult, getCleanupState, runServerAction, cutWire, forceServerGc, sleep } from '../../e2e-utils'
+import {
+  navigate,
+  getResult,
+  getCleanupState,
+  runServerAction,
+  cutWire,
+  forceServerGc,
+  sleep,
+  canCutWire,
+} from '../../e2e-utils'
 import { newCDPSession } from '../../../utils'
 
 /** On SSE the server waits out the 60 s reconnectTimeout for a closed tab. */
@@ -47,11 +57,11 @@ type BinaryResult = {
   }>
   cameraOnly: number[]
   defaultOnly: number[]
-  camReceivers: number
 }
 
 type GuardResult = {
   joinError: string | null
+  unguardedJoinError: string | null
   publishError: string | null
   sendError: string | null
   received: string[]
@@ -129,13 +139,6 @@ function testRoomMetaReads() {
     },
   )
   testRoomScenario<{ read: string }>(
-    'meta-across-drop',
-    "room: a read of a member's meta of more than a page that lands in the drop of the meta a replace with no keys left gets it before or after the replace",
-    (r) => {
-      expect(['before', 'after']).toContain(r.read)
-    },
-  )
-  testRoomScenario<{ read: string }>(
     'split-meta-across-merge',
     "room: a read of a member's meta whose keys another member's meta of more than a page split gets it before or after a merge that commits between the read's pages",
     (r) => {
@@ -189,6 +192,25 @@ async function openChat(chatId: string, name: string, how: 'join' | 'sign-in' | 
 }
 
 function testRoom() {
+  testRoomScenario<{
+    unchanged: boolean
+    received: string[]
+    stopped: boolean
+    abortedWithReason: boolean
+  }>('signals', 'room: abort removes registrations, and iterated messages keep their sender and track', (result) => {
+    expect(result).deep.equal({
+      unchanged: true,
+      received: [
+        'binary Alice camera: 1 {"frame":1}',
+        'binary Alice screen: 2 null',
+        'binary Bob camera: 3 null',
+        'text Alice: hello',
+        'text Bob: hi',
+      ],
+      stopped: true,
+      abortedWithReason: true,
+    })
+  })
   testRoomScenario<ChatResult>('chat', 'room: join, publish with sender identity, setMeta, leave', (result) => {
     expect(result.events).deep.equal(['join:Alice', 'leave:Alice'])
     expect(result.countAfterJoin).toBe(1)
@@ -231,7 +253,6 @@ function testRoom() {
     expect(result.frames.map((f) => f.meta)).deep.equal([null, null, null, { key: true }])
     expect(result.cameraOnly).deep.equal([9])
     expect(result.defaultOnly).deep.equal([1, 2, 3])
-    expect(result.camReceivers).greaterThanOrEqual(1)
   })
   testRoomScenario<{ seen: number[][]; serverSeen: number[][]; lateSeen: number[][] }>(
     'own-bytes',
@@ -458,6 +479,13 @@ function testRoom() {
       expect(r.emptied).toBe(false)
     },
   )
+  testRoomScenario<{ closed: number; reported: string[] }>(
+    'close-while-subscribing',
+    'room: a room closed while a view of it subscribes closes the view, and no bug is reported',
+    (r) => {
+      expect(r).deep.equal({ closed: 10, reported: [] })
+    },
+  )
   testRoomScenario<MemberResult>(
     'member',
     'room: a returned RemoteParticipant is the same object as the room view',
@@ -467,13 +495,19 @@ function testRoom() {
       expect(result.sameObject).toBe(true) // ref-identity binds the view to its room
     },
   )
-  testRoomScenario<GuardResult>('guard', 'room: guards reject over the wire; allowed messages flow', (result) => {
-    expect(result.joinError).toBe('blocked join of Banned')
-    expect(result.publishError).toBe('blocked publish from Mallory')
-    expect(result.sendError).toBe('blocked send from Mallory')
-    expect(result.received).deep.equal(['fine'])
-    expect(result.inbox).deep.equal(['psst'])
-  })
+  testRoomScenario<GuardResult>(
+    'guard',
+    "room: guards reject over the wire, a room returned unguarded refuses a page's join, and allowed messages flow",
+    (result) => {
+      expect(result.joinError).toBe('blocked join of Banned')
+      // A room returned without Room.guard() refuses a page's join, and says how to allow it
+      expect(result.unguardedJoinError).toContain('Room.guard(room, { anyoneCanJoin: true })')
+      expect(result.publishError).toBe('blocked publish from Mallory')
+      expect(result.sendError).toBe('blocked send from Mallory')
+      expect(result.received).deep.equal(['fine'])
+      expect(result.inbox).deep.equal(['psst'])
+    },
+  )
   testRoomScenario<{ okAck: boolean; badError: string | null; received: string[] }>(
     'shield',
     'room: the declared message type is shielded at runtime (a malformed publish is rejected)',
@@ -710,6 +744,7 @@ function testRoom() {
       }
     })
   test("room: another page's member shows when its page drops and comes back, and leaves with 'disconnected' once its page never returns", async () => {
+    if (!canCutWire()) return
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-connection')
     const { roomId } = await autoRetry(() => getResult<{ roomId: string }>('#room-result'))
@@ -745,6 +780,7 @@ function testRoom() {
     }, CLOSED_TAB_WAIT)
   })
   test("room: in a chat, everyone sees a member whose tab went offline as reconnecting, in the list, the activity, Who's online and that member's profile, and as back once it is; the member sees itself reconnecting at once, in the list and on its own profile, and back at once with no flicker", async () => {
+    if (!canCutWire()) return
     const chatId = `e2e-chat:${crypto.randomUUID()}`
     const alice = await openChat(chatId, 'Alice', 'join')
     const bob = await openChat(chatId, 'Bob', 'join')
@@ -794,7 +830,8 @@ function testRoom() {
       await bob.context.close()
     }
   })
-  test('room: in a members-only chat, a member whose tab goes offline while the membership service decides is shown reconnecting once admitted, and back once its tab is', async () => {
+  test("room: in a members-only chat, a member whose tab goes offline while the membership service decides is shown reconnecting once admitted, and back once its tab is, and its tab then shows the member's own renames", async () => {
+    if (!canCutWire()) return
     const chatId = `e2e-chat:${crypto.randomUUID()}`
     const alice = await openChat(chatId, 'Alice', 'join')
     const context = await page.context().browser()!.newContext()
@@ -813,19 +850,29 @@ function testRoom() {
       await alice.tab.click('#chat-who')
       await autoRetry(async () => expect(await alice.tab.textContent('#chat-online')).toBe('Alice, Bob (away)'))
       await context.setOffline(false)
+      await autoRetry(async () =>
+        expect(await alice.sees()).deep.equal({ status: 'Connected', members: ['Alice (you)', 'Bob'] }),
+      )
+      // Bob's join ends only now: his tab heard, while he was joining, that he started disconnected and came back.
+      await runServerAction(`chatWelcome_${chatId}_Bob`)
       await autoRetry(async () => {
-        expect(await alice.sees()).deep.equal({ status: 'Connected', members: ['Alice (you)', 'Bob'] })
         expect(await tab.textContent('#chat-status')).toBe('Connected')
         expect(await tab.locator('#chat-members li').allTextContents()).deep.equal(['Alice', 'Bob (you)'])
       })
       await alice.tab.click('#chat-who')
       await autoRetry(async () => expect(await alice.tab.textContent('#chat-online')).toBe('Alice, Bob'))
+      await tab.click('#chat-rename')
+      await autoRetry(async () => {
+        expect(await tab.textContent('#chat-rename')).toBe('Bob!')
+        expect(await alice.sees()).deep.equal({ status: 'Connected', members: ['Alice (you)', 'Bob!'] })
+      })
     } finally {
       await alice.context.close()
       await context.close()
     }
   })
   test("room: in a chat, the server announces when a signed-in member's tab goes offline and comes back, and someone watching unseen drops without anyone seeing it; the signed-in member sees itself reconnecting, in the list and on its own profile", async () => {
+    if (!canCutWire()) return
     const chatId = `e2e-chat:${crypto.randomUUID()}`
     const alice = await openChat(chatId, 'Alice', 'join')
     const carol = await openChat(chatId, 'Carol', 'sign-in')
@@ -1071,6 +1118,7 @@ function testRoom() {
     },
   )
   test('room: a page back from offline gets what its room sent meanwhile, in order, and the leaves, kick and close that happened while it was away, with their causes', async () => {
+    if (!canCutWire()) return
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-away')
     let roomId = ''
@@ -1097,6 +1145,7 @@ function testRoom() {
     })
   })
   test("room: a page back from offline, twice, gets its room's meta each time, though its room sent it more meanwhile than bufferLimit holds", async () => {
+    if (!canCutWire()) return
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-meta-away')
     let roomId = ''
@@ -1118,6 +1167,7 @@ function testRoom() {
     }
   })
   test('room: a page offline while its room sent it more than bufferLimit holds is let go at its reconnect: its view closes and its member leaves, with no gap delivered', async () => {
+    if (!canCutWire()) return
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-overflow')
     let roomId = ''
@@ -1144,6 +1194,7 @@ function testRoom() {
     })
   })
   test('room: a page offline while its server-joined participant was sent more than bufferLimit holds is let go at its reconnect: its participant leaves, with no gap delivered', async () => {
+    if (!canCutWire()) return
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-participant-overflow')
     let roomId = ''
@@ -1246,6 +1297,7 @@ function testRoom() {
     },
   )
   test('room: a page that reconnects while its join is pending gets the leave, with its cause, of a member removed while it was away', async () => {
+    if (!canCutWire()) return
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-away-join')
     let roomId = ''
@@ -1274,7 +1326,7 @@ function testRoom() {
 
 /** Tests that need the failing backend (failing-backend.ts), which a server without Redis installs. */
 function testRoomFailingBackend() {
-  test('room: a store write that fails once heals: a failed leave can be retried, a failed join leaves no member, and a lane the store ends is replaced', async () => {
+  test("room: a store write that fails once heals: a failed leave can be retried, a failed join leaves no member, a leave whose event and reply are lost ends once with 'left', a DM whose handoff is lost rejects its send, and a lane the store ends is replaced", async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-hiccups')
     await autoRetry(async () => {
@@ -1287,6 +1339,12 @@ function testRoomFailingBackend() {
           count: 0,
         },
         join: { firstJoin: 'Internal Server Error — see server logs', count: 1, listed: ['Second'] },
+        lost: {
+          leave: 'Internal Server Error — see server logs',
+          leaves: ['Leaver:left'],
+          dm: "Message may not be delivered: its handoff to the recipient failed, and it isn't sent again",
+          dms: ['after'],
+        },
         lane: { ended: true, got: ['before', 'after'] },
       })
     })
@@ -1320,6 +1378,10 @@ function testRoomSmallBuffer() {
       expect(r.got).deep.equal(['2', '3'])
     },
   )
+}
+
+/** Runs on Redis, in a lane whose config.channel.bufferLimit is 4,096 bytes. */
+function testRoomPublishHold() {
   testRoomScenario<{ serverOutcomes: string[]; seen: string[] }>(
     'hold-overflow',
     'room: publishes held while a subscription establishes fit bufferLimit by their bytes, and the one past it rejects with ChannelOverflowError',

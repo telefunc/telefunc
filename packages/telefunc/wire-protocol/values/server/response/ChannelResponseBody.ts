@@ -2,11 +2,11 @@ export { pumpProducerToChannel }
 export type { ChannelPumpRunContext }
 
 import type { StreamingProducer } from '../../types.js'
-import { concat } from '../../../wire/frame.js'
+import { concat } from '../../../wire/envelope.js'
 import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_END, CHANNEL_PUMP_TAG_ERROR } from '../../../constants.js'
-import { ChannelClosedError, ServerChannel } from '../../../channel/server/channel.js'
+import { ChannelClosedError, ServerChannel } from '../../../channel/server/ServerChannel.js'
 import { reconnectWindow } from '../../../../node/server/serverConfig.js'
-import { getChannelMux } from '../../../channel/server/mux.js'
+import { getChannelMux } from '../../../channel/server/ChannelMux.js'
 import { isAbort } from '../../../../node/server/Abort.js'
 import { encodeErrorPayload } from './StreamingResponseBody.js'
 import { restoreContext } from '../../../../node/server/context/context.js'

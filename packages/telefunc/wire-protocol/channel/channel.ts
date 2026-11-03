@@ -1,4 +1,4 @@
-export { invokeChannelListener, makePublishInfo }
+export { invokeChannelListener }
 export type {
   ChannelBase,
   ChannelShield,
@@ -35,15 +35,7 @@ type ChannelPublishInfo = {
   /** Server timestamp, Unix epoch milliseconds. */
   timestamp: number
 }
-type ChannelPublishAck = ChannelPublishInfo & {
-  /** Who the message was handed to, when the backend can count it: subscribers in memory, server instances on
-   *  standalone Redis, session Durable Objects on Cloudflare; absent on Redis Cluster. Not a viewer count. */
-  receivers?: number
-}
-
-function makePublishInfo(key: string, seq: number, timestamp: number): ChannelPublishInfo {
-  return { key, seq, timestamp }
-}
+type ChannelPublishAck = ChannelPublishInfo
 
 /** Invoke a fire-and-forget listener while routing both thrown and rejected failures. Returns what `handleError`
  *  returned for a synchronous throw only, which a caller can use to stop iterating; a rejection can't stop it. */
@@ -62,7 +54,7 @@ function invokeChannelListener<Args extends unknown[]>(
 type ChannelListenReturn<T> = [T] extends [never]
   ? void
   : T extends (data: any) => infer R
-    ? Awaited<R> | Promise<Awaited<R>>
+    ? Awaited<R> | Promise<Awaited<R>> | void | Promise<void>
     : unknown | Promise<unknown> | void
 type ChannelListener<T> = (data: ChannelData<T>) => ChannelListenReturn<T>
 type ChannelBinaryListener = (data: Uint8Array) => unknown | Promise<unknown>
@@ -89,6 +81,11 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
   readonly isClosed: boolean
   /** True from open until close, except while the other side can't be reached. */
   readonly isConnected: boolean
+  readonly opened: Promise<void>
+  readonly closed: Promise<void>
+  messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<
+    { type: 'text'; data: ChannelData<TIn> } | { type: 'binary'; data: Uint8Array }
+  >
   /** Default send. Returns `Promise<ack>` when `TDefault = true`, otherwise `Promise<void>`. */
   send(data: ChannelData<TOut>): TDefault extends true ? Promise<ChannelAck<TOut>> : Promise<void>
   /** Per-send ack opt-in — always returns `Promise<ack>`. */
@@ -99,14 +96,14 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
   sendBinary(data: Uint8Array, opts: { ack: true }): Promise<unknown>
   sendBinary(data: Uint8Array, opts: { ack: false }): Promise<void>
   /** Receive messages. Return a value to ack the sender. Returns an unlisten function. */
-  listen(callback: ChannelListener<TIn>): () => void
-  listenBinary(callback: ChannelBinaryListener): () => void
-  onClose(callback: ChannelCloseCallback): void
-  onOpen(callback: () => void): void
+  listen(callback: ChannelListener<TIn>, options?: { signal?: AbortSignal }): () => void
+  listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): () => void
+  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): void
+  onOpen(callback: () => void, options?: { signal?: AbortSignal }): void
   /** The other side became unreachable: the channel stays open, and what it sends waits. */
-  onDisconnect(callback: () => void): void
+  onDisconnect(callback: () => void, options?: { signal?: AbortSignal }): void
   /** The other side is back, and what waited is sent. */
-  onReconnect(callback: () => void): void
+  onReconnect(callback: () => void, options?: { signal?: AbortSignal }): void
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>
   abort(): void
   abort(abortValue: unknown, message?: string): void

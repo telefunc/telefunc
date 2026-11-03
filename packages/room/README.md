@@ -24,7 +24,10 @@ type MemberMeta = { name: string }
 type Message = { text: string }
 
 export async function onGetLobby() {
-  return await Room.getOrCreate<RoomMeta, MemberMeta, Message>('lobby')
+  const room = await Room.getOrCreate<RoomMeta, MemberMeta, Message>('lobby')
+  // Anyone may join from the client: without it or an onBeforeJoin() guard, room.join() is refused
+  Room.guard(room, { anyoneCanJoin: true })
+  return room
 }
 ```
 

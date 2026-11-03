@@ -1,5 +1,5 @@
 import './server.js'
-export { config } from './server/config.js'
+export { roomConfig } from './server/config.js'
 export type { RoomConfig } from './server/config.js'
 // `Room` is both the statics object and the instance type: one export carries both meanings.
 export { Room } from './server/lazyRoom.js'
@@ -11,6 +11,7 @@ export type {
   JoinOptions,
   PublishOptions,
   ParticipantMeta,
+  ReadonlyMeta,
   LocalParticipant,
   RemoteParticipant,
   Sender,

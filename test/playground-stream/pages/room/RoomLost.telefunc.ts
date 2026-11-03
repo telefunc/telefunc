@@ -1,6 +1,7 @@
 export { onRoomToLoseFrom, onLoseLeave, onLoseMeta, onLoseClose }
 
 import { Room, type LocalParticipant } from '@telefunc/room'
+import { anyoneCanJoin } from '../../anyone-can-join'
 import { addBackendFault } from '../../failing-backend'
 
 // The server's members, kept until their room's test ends.
@@ -9,7 +10,7 @@ const members = new Map<string, LocalParticipant[]>()
 async function onRoomToLoseFrom(roomId: string) {
   await Room.create(roomId)
   members.set(roomId, [await Room.join(roomId, { meta: { name: 'Stays' } })])
-  return await Room.get(roomId)
+  return anyoneCanJoin(await Room.get(roomId))
 }
 
 /** The store drops the next message on the room's lanes. */

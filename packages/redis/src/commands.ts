@@ -1,22 +1,26 @@
-export { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH, LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrderMark }
-export type { RedisCommand }
+export { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH, LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrdering }
+export type { CommitInput, OperationOutcome, RedisCommand }
 
 // Every Lua script and the one command table that registers and invokes them.
 
-import { roomKit } from './roomKit.js'
 import type { BroadcastPayload, BroadcastRoute, OrderingInfo } from 'telefunc/__internal'
 import type {
   CellCounter,
   CellSelector,
-  CellsCx,
-  CxResult,
-  HeadCx,
-  HeadCxResult,
+  CellsExchange,
+  CellsExchangeResult,
+  HeadExchangeResult,
+  HeadExpectation,
   HeadNext,
   LaneId,
+  OperationWrites,
   RoomHead,
   RoomSubscriptionSource,
   CellsRead,
+  ExpiringCellsRead,
+  RoomPlaneKit,
+  StaleCommit,
+  StaleIncarnation,
 } from '@telefunc/room/backend'
 import { assert } from './assert.js'
 import {
@@ -28,24 +32,27 @@ import {
   directoryChecksKey,
   directoryIndexKey,
   directoryTagsKey,
-  generationInvalidationChannel,
-  generationKeysKey,
+  expiringCellKey,
+  incarnationInvalidationChannel,
+  incarnationKeysKey,
   headKey,
   memberOrderKey,
   orderKey,
   retainedKey,
   retainedLanesKey,
+  retainedOwnersKey,
   retainedOfKey,
   retainedOfTrackKey,
   revKey,
   trackLanesKey,
   type CommitChannels,
+  type FenceTokens,
 } from './keys.js'
 
 const REDIS_DELIVERY_FENCE_BYTE = 0xff
 /** A fence token is a UUID. */
 const REDIS_DELIVERY_FENCE_TOKEN_LENGTH = 36
-/** What a start read's, a leave's or a generation drop's page holds, as a SCAN count. */
+/** What a start read's, a leave's or an incarnation drop's page holds, as a SCAN count. */
 const LANE_PAGE_SIZE = 1024
 
 // Authority time in ms from Redis TIME's [sec, µs] pair, never from the caller.
@@ -68,7 +75,7 @@ local function tf_live_head(key, now)
 end
 `
 
-// The same bytes as telefunc's ordering frame (wire-protocol/ordering-frame.ts): four u32 big-endian words,
+// The same bytes as telefunc's ordering frame (wire-protocol/wire/orderingFrame.ts): four u32 big-endian words,
 // then the payload.
 const REDIS_ORDERING_FRAME_LUA = `
 local function tf_u64(n)
@@ -109,28 +116,61 @@ else
 end
 redis.call('SET', KEYS[1], seq_text .. ':' .. string.format('%.0f', ts) .. ':' .. last_text .. ':' .. last_binary)
 local frame = tf_u64(predecessor) .. tf_ordering_frame(seq, ts, ARGV[1])
-local receivers = redis.call('PUBLISH', KEYS[2], frame)
-return {seq, ts, receivers}
+redis.call('PUBLISH', KEYS[2], frame)
+return {seq, ts}
 `
 
-// HEAD CX: compares by form, then stores the next head.
-//   KEYS: [1]=head
-//   ARGV: [1]=HeadCx JSON {form,rev?,lease?} [2]=nextJson{state,inc?,config,lease?,ttlMs?}
-const HEAD_CX_LUA = `${HEAD_PRELUDE}
+// Writes a cell at `version`, or deletes it with no value; counts a counter cell, appending its key, value and
+// changedAt to `reply` (see CellCount).
+//   KEYS: [4]=cell-index [5]=values [6]=versions, as every script that uses them has them
+const CELL_WRITES_LUA = `
+local function tf_write(key, value, version)
+  if value then
+    redis.call('HSET', KEYS[5], key, value)
+    redis.call('HSET', KEYS[6], key, version)
+    redis.call('ZADD', KEYS[4], 0, key)
+  else
+    redis.call('HDEL', KEYS[5], key)
+    redis.call('HDEL', KEYS[6], key)
+    redis.call('ZREM', KEYS[4], key)
+  end
+end
+local function tf_count(key, delta, create, version, now, reply)
+  local raw = redis.call('HGET', KEYS[5], key)
+  local counter = raw and cjson.decode(raw)
+  if not counter and create then counter = { value = 0 } end
+  if not counter then return end
+  if delta ~= 0 or not raw then
+    counter.value = counter.value + delta
+    counter.changedAt = now
+    tf_write(key, string.format('{"value":%d,"changedAt":%d}', counter.value, counter.changedAt), version)
+  end
+  reply[#reply + 1] = key
+  reply[#reply + 1] = string.format('%d', counter.value)
+  reply[#reply + 1] = string.format('%d', counter.changedAt)
+end
+`
+
+// HEAD EXCHANGE: compares by form, then stores the next head, and counts a create's cells in its incarnation.
+//   KEYS: [1]=head, and with counts [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions of the next
+//         head's incarnation
+//   ARGV: [1]=HeadExpectation JSON {form,rev?,lease?} [2]=nextJson{state,inc?,config,lease?,ttlMs?} [3..]=per counted
+//         cell its key, delta and create ('1' or '')
+const HEAD_EXCHANGE_LUA = `${HEAD_PRELUDE}${CELL_WRITES_LUA}
 local head_key = KEYS[1]
 local now = tf_now()
-local cx = cjson.decode(ARGV[1])
+local expected = cjson.decode(ARGV[1])
 local nx = cjson.decode(ARGV[2])
 local cur = tf_live_head(head_key, now)
 
 local matches = false
-if cx.form == 'absent' then
+if expected.form == 'absent' then
   matches = (cur == nil)
-elseif cur ~= nil and cur.rev == cx.rev then
-  if cx.form == 'takeover' then
+elseif cur ~= nil and cur.rev == expected.rev then
+  if expected.form == 'takeover' then
     matches = (cur.state == 'closing' and cur.lease ~= nil and cur.lease['until'] < now)
-  elseif cx.form == 'finalize' then
-    matches = (cur.state == 'closing' and cur.lease ~= nil and cur.lease.id == cx.lease)
+  elseif expected.form == 'finalize' then
+    matches = (cur.state == 'closing' and cur.lease ~= nil and cur.lease.id == expected.lease)
   else
     matches = true
   end
@@ -149,6 +189,11 @@ if nx.ttlMs ~= nil then stored.exp = now + nx.ttlMs end
 local encoded = cjson.encode(stored)
 redis.call('SET', head_key, encoded)
 if stored.exp ~= nil then redis.call('PEXPIREAT', head_key, stored.exp) end
+if #KEYS > 1 then
+  local version = redis.call('INCR', KEYS[2])
+  for at = 3, #ARGV, 3 do tf_count(ARGV[at], tonumber(ARGV[at + 1]), ARGV[at + 2] == '1', version, now, {}) end
+  redis.call('SADD', KEYS[3], KEYS[2], KEYS[4], KEYS[5], KEYS[6])
+end
 return '{"tag":"head","head":' .. encoded .. '}'
 `
 
@@ -184,12 +229,29 @@ end
 const READ_CELLS_LUA = `${HEAD_PRELUDE}${CELLS_REPLY_LUA}
 local now = tf_now()
 local head = tf_live_head(KEYS[1], now)
-if not head or head.inc ~= ARGV[1] then return {'stale'} end
+if not head or head.inc ~= ARGV[1] then return {'stale-incarnation'} end
 local keys, first = ARGV, 3
 if ARGV[2] == 'prefix' then
   keys, first = redis.call('ZRANGEBYLEX', KEYS[2], '[' .. ARGV[3], '(' .. ARGV[3] .. '\\255'), 1
 end
 return tf_cells_reply({'cells', string.format('%.0f', now)}, keys, first)
+`
+
+// The expiring cells of the keys that Redis hasn't expired yet, after the head names the incarnation.
+//   KEYS: [1]=head, then per cell its expiring key
+//   ARGV: [1]=inc, then per cell its key
+const READ_EXPIRING_CELLS_LUA = `${HEAD_PRELUDE}
+local head = tf_live_head(KEYS[1], tf_now())
+if not head or head.inc ~= ARGV[1] then return {'stale-incarnation'} end
+local reply = {'cells'}
+for i = 2, #KEYS do
+  local bytes = redis.call('GET', KEYS[i])
+  if bytes then
+    reply[#reply + 1] = ARGV[i]
+    reply[#reply + 1] = bytes
+  end
+end
+return reply
 `
 
 // A prefix read's page: up to ARGV[4] cells of the index range from ARGV[2] ('[' then the prefix, or '(' then the
@@ -200,7 +262,7 @@ return tf_cells_reply({'cells', string.format('%.0f', now)}, keys, first)
 const READ_CELL_PAGE_LUA = `${HEAD_PRELUDE}${CELLS_REPLY_LUA}
 local now = tf_now()
 local head = tf_live_head(KEYS[1], now)
-if not head or head.inc ~= ARGV[1] then return {'stale'} end
+if not head or head.inc ~= ARGV[1] then return {'stale-incarnation'} end
 local limit = tonumber(ARGV[4])
 local keys = redis.call('ZRANGEBYLEX', KEYS[2], ARGV[2], '(' .. ARGV[3] .. '\\255', 'LIMIT', 0, limit)
 local time = string.format('%.0f', now)
@@ -210,7 +272,7 @@ return tf_cells_reply({'more', time, keys[#keys]}, keys, 1)
 
 // Read once SUBSCRIBE is acknowledged: a lane subscription is live only while its incarnation is the open head, so one
 // closed or dropped during establishment is never reported ready, and its frames start after its lane's last commit.
-//   KEYS: [1]=head [2]=order: an inbox or binary lane's member's order hash, or another lane's own key
+//   KEYS: [1]=head [2]=order: the order hash of an inbox or binary lane's member, or another lane's own key
 //   ARGV: [1]=inc [2]=an inbox or binary lane's key, or ''
 //   Reply: nil once the incarnation is not the open head, else the lane's 'seq:ts', '' before its first commit
 const LANE_START_LUA = `${HEAD_PRELUDE}
@@ -266,23 +328,23 @@ return mark
 // Drops the manifest once its keys are; incarnation ids are never reused, so a repeated drop deletes nothing.
 //   KEYS: [1]=invalidation-channel [2]=manifest
 //   ARGV: [1]=inc
-const DROP_GENERATION_LUA = `
+const DROP_INCARNATION_LUA = `
 redis.call('UNLINK', KEYS[2])
 redis.call('PUBLISH', KEYS[1], ARGV[1])
 `
 
-// CELLS CX: all mutations and counts or none, while each expected cell is at its version; success implies the head
-// precondition (open + inc) held at apply time. A commit's writes take the generation's next revision as version.
-//   KEYS: [1]=head [2]=rev [3]=generation-keys [4]=cell-index [5]=values [6]=versions
+// CELLS EXCHANGE: all mutations and counts or none, while each expected cell is at its version; success implies the
+// head precondition (open + inc) held at apply time. A commit's writes take the incarnation's next revision as version.
+//   KEYS: [1]=head [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions
 //   ARGV: [1]=inc [2..4]=how many mutated, expected and counted cells, then per mutated cell its key, op('set'|'del')
 //         and value, per expected cell its key and version ('' while absent), and per counted cell its key, delta and
 //         create ('1' or '')
-const CELLS_CX_LUA = `${HEAD_PRELUDE}
-local head_key, rev_key, generation_keys_key, cell_index_key, values_key, versions_key =
+const CELLS_EXCHANGE_LUA = `${HEAD_PRELUDE}${CELL_WRITES_LUA}
+local head_key, rev_key, incarnation_keys_key, cell_index_key, values_key, versions_key =
   KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6]
 local now = tf_now()
 local head = tf_live_head(head_key, now)
-if (not head) or head.inc ~= ARGV[1] or head.state ~= 'open' then return {'stale-inc'} end
+if (not head) or head.inc ~= ARGV[1] or head.state ~= 'open' then return {'stale-incarnation'} end
 local mutated, expected, counted = tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4])
 local first_expected = 5 + 3 * mutated
 local first_counted = first_expected + 2 * expected
@@ -290,79 +352,109 @@ for at = first_expected, first_counted - 1, 2 do
   if (redis.call('HGET', versions_key, ARGV[at]) or '') ~= ARGV[at + 1] then return {'conflict'} end
 end
 local version = redis.call('INCR', rev_key)
-local function write(key, value)
-  if value then
-    redis.call('HSET', values_key, key, value)
-    redis.call('HSET', versions_key, key, version)
-    redis.call('ZADD', cell_index_key, 0, key)
-  else
-    redis.call('HDEL', values_key, key)
-    redis.call('HDEL', versions_key, key)
-    redis.call('ZREM', cell_index_key, key)
-  end
-end
 for at = 5, first_expected - 1, 3 do
-  write(ARGV[at], ARGV[at + 1] == 'set' and ARGV[at + 2] or nil)
+  tf_write(ARGV[at], ARGV[at + 1] == 'set' and ARGV[at + 2] or nil, version)
 end
 local reply = {'committed'}
 for at = first_counted, first_counted + 3 * counted - 1, 3 do
-  local key, delta = ARGV[at], tonumber(ARGV[at + 1])
-  local raw = redis.call('HGET', values_key, key)
-  local counter = raw and cjson.decode(raw)
-  if not counter and ARGV[at + 2] == '1' then counter = { value = 0 } end
-  if counter then
-    if delta ~= 0 or not raw then
-      counter.value = counter.value + delta
-      counter.changedAt = now
-      write(key, string.format('{"value":%d,"changedAt":%d}', counter.value, counter.changedAt))
-    end
-    reply[#reply + 1] = key
-    reply[#reply + 1] = string.format('%d', counter.value)
-    reply[#reply + 1] = string.format('%d', counter.changedAt)
-  end
+  tf_count(ARGV[at], tonumber(ARGV[at + 1]), ARGV[at + 2] == '1', version, now, reply)
 end
-redis.call('SADD', generation_keys_key, rev_key, cell_index_key, values_key, versions_key)
+redis.call('SADD', incarnation_keys_key, rev_key, cell_index_key, values_key, versions_key)
 return reply
 `
 
 // COMMIT: while the room is closing, only the close's control commit under its lease lands. A binary commit is also
-// published on its member's every-track channel and its track's every-member channel, after its lane key's two-byte
-// length and the key, so a receiver orders it by its own lane; no lane key is long enough for that length's first byte
-// to read as the fence byte.
-//   KEYS: [1]=head [2]=order: an inbox or binary lane's member's order hash, which holds it under its lane key, or
-//         another lane's own key [3]=retained [4]=channel [5]=generation-keys [6]=cell values
-//         [7]=a binary lane's member's every-track channel (another lane repeats [4])
-//         [8]=a retained binary lane's member's retained lanes [9]=its track's retained lanes (another commit repeats
-//         [3] for both) [10]=a binary lane's track's every-member channel (another lane repeats [4]) [11]=a binary
-//         lane's track's lane set, which its first commit enters (another lane repeats [2]) [12]=the generation's
-//         retained lanes
-//   ARGV: [1]=inc [2]=laneKind [3]=closingLease('') [4]=retain('0'|'1') [5]=payload
-//         [6]=local delivery-fence token for [4] or '' [7]=the same for [7] or '' [8]=lane key [9]=the same as [6] for
-//         [10] or '' [10..]=required live cells
-const COMMIT_LUA = `${HEAD_PRELUDE}
-${REDIS_ORDERING_FRAME_LUA}
-local head_key, order_key, retained_key, channel_key, generation_keys_key =
-  KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5]
+// published on the every-track channel of its member and the every-member channel of its track, after its lane key's
+// two-byte length and the key, so a receiver orders it by its own lane; no lane key is long enough for that length's
+// first byte to read as the fence byte.
+
+/** COMMIT's KEYS, by index: the script reads each by its name, and `commit.invoke` writes each there. A key the lane
+ *  has none of repeats another: outside a binary lane, `everyTrackChannel` and `everyMemberChannel` repeat
+ *  `channel` and `trackLanes` repeats `order`; for an unindexed retain, `memberRetained` and `trackRetained` repeat
+ *  `retained`. */
+const COMMIT_KEYS = {
+  head: 0,
+  /** The order hash of an inbox or binary lane's member, which holds the lane under its lane key; for any other lane,
+   *  the lane's own key. */
+  order: 1,
+  retained: 2,
+  channel: 3,
+  incarnationKeys: 4,
+  cellValues: 5,
+  everyTrackChannel: 6,
+  /** A retained binary lane's member's retained lanes. */
+  memberRetained: 7,
+  /** A retained binary lane's track's retained lanes. */
+  trackRetained: 8,
+  everyMemberChannel: 9,
+  /** A binary lane's track's lane set, which its first commit enters. */
+  trackLanes: 10,
+  /** The incarnation's retained lanes. */
+  retainedLanes: 11,
+  /** The member each retained frame of a lane other than a binary one is from. */
+  retainedOwners: 12,
+} as const
+
+/** COMMIT's ARGV, by index; the required live cells follow the last. A fence token is the channel's local
+ *  delivery-fence token, or `''`. */
+const COMMIT_ARGS = {
+  inc: 0,
+  laneKind: 1,
+  /** `''` unless the close's control commit. */
+  closingLease: 2,
+  /** `'0'` or `'1'`. */
+  retain: 3,
+  payload: 4,
+  channelFence: 5,
+  everyTrackFence: 6,
+  laneKey: 7,
+  everyMemberFence: 8,
+  /** The member a retained frame is from, `''` for none. */
+  owner: 9,
+  requiredCells: 10,
+} as const
+
+/** Each name of `table` as the script reads it from the table `array` names: index 0 is `KEYS[1]` or `ARGV[1]`.
+ *  Built once, at module load. */
+function luaRefs<Name extends string>(array: string, table: Record<Name, number>): Record<Name, string> {
+  const refs = {} as Record<Name, string>
+  for (const name in table) refs[name] = `${array}[${table[name] + 1}]`
+  return refs
+}
+
+const COMMIT_KEY = luaRefs('KEYS', COMMIT_KEYS)
+const COMMIT_ARG = luaRefs('ARGV', COMMIT_ARGS)
+
+/** COMMIT's body, reading its keys from `K` and its args from `A`, a table `args` names. */
+function commitLua(
+  K: Record<keyof typeof COMMIT_KEYS, string>,
+  A: Record<keyof typeof COMMIT_ARGS, string>,
+  args: string,
+) {
+  return `local head_key, order_key, retained_key, channel_key, incarnation_keys_key =
+  ${K.head}, ${K.order}, ${K.retained}, ${K.channel}, ${K.incarnationKeys}
 local now = tf_now()
 local head = tf_live_head(head_key, now)
 local ok = false
-if head and head.inc == ARGV[1] then
-  if ARGV[3] == '' then
+if head and head.inc == ${A.inc} then
+  if ${A.closingLease} == '' then
     ok = (head.state == 'open')
   else
-    ok = (ARGV[2] == 'control' and head.state == 'closing' and head.lease ~= nil
-          and head.lease.id == ARGV[3] and now <= head.lease['until'])
+    ok = (${A.laneKind} == 'control' and head.state == 'closing' and head.lease ~= nil
+          and head.lease.id == ${A.closingLease} and now <= head.lease['until'])
   end
 end
-if not ok then return '{"stale":"incarnation"}' end
-for i = 10, #ARGV do
-  if redis.call('HEXISTS', KEYS[6], ARGV[i]) == 0 then return '{"stale":"cell","index":' .. (i - 10) .. '}' end
+if not ok then return '{"kind":"stale-incarnation"}' end
+for i = ${COMMIT_ARGS.requiredCells + 1}, #${args} do
+  if redis.call('HEXISTS', ${K.cellValues}, ${args}[i]) == 0 then
+    return '{"kind":"stale-cell","index":' .. (i - ${COMMIT_ARGS.requiredCells + 1}) .. '}'
+  end
 end
 
-local member_lane = ARGV[2] == 'inbox' or ARGV[2] == 'binary'
+local member_lane = ${A.laneKind} == 'inbox' or ${A.laneKind} == 'binary'
 local base_seq, base_ts = 0, 0
 local prev
-if member_lane then prev = redis.call('HGET', order_key, ARGV[8]) else prev = redis.call('GET', order_key) end
+if member_lane then prev = redis.call('HGET', order_key, ${A.laneKey}) else prev = redis.call('GET', order_key) end
 if prev then
   local pseq, pts = string.match(prev, '^(%d+):(%d+)$')
   if not pseq then return redis.error_reply('commitLane: invalid ordering watermark') end
@@ -376,82 +468,152 @@ if base_ts > ts then ts = base_ts end
 local seq_text = string.format('%.0f', seq)
 local ts_text = string.format('%.0f', ts)
 if member_lane then
-  redis.call('HSET', order_key, ARGV[8], seq_text .. ':' .. ts_text)
+  redis.call('HSET', order_key, ${A.laneKey}, seq_text .. ':' .. ts_text)
 else
   redis.call('SET', order_key, seq_text .. ':' .. ts_text)
 end
-redis.call('SADD', generation_keys_key, order_key)
-if not prev and ARGV[2] == 'binary' then
-  redis.call('SADD', KEYS[11], ARGV[8])
-  redis.call('SADD', generation_keys_key, KEYS[11])
+redis.call('SADD', incarnation_keys_key, order_key)
+if not prev and ${A.laneKind} == 'binary' then
+  redis.call('SADD', ${K.trackLanes}, ${A.laneKey})
+  redis.call('SADD', incarnation_keys_key, ${K.trackLanes})
 end
-local frame = tf_ordering_frame(seq, ts, ARGV[5])
-if ARGV[4] == '1' then
+local frame = tf_ordering_frame(seq, ts, ${A.payload})
+if ${A.retain} == '1' then
   -- A lane holding a retained frame is already indexed: its frame and index entries leave together.
   if redis.call('EXISTS', retained_key) == 0 then
-    redis.call('SADD', generation_keys_key, retained_key, KEYS[12])
-    redis.call('SADD', KEYS[12], ARGV[8])
-    if ARGV[2] == 'binary' then
-      redis.call('SADD', KEYS[8], ARGV[8])
-      redis.call('SADD', KEYS[9], ARGV[8])
-      redis.call('SADD', generation_keys_key, KEYS[8], KEYS[9])
+    redis.call('SADD', incarnation_keys_key, retained_key, ${K.retainedLanes})
+    redis.call('SADD', ${K.retainedLanes}, ${A.laneKey})
+    if ${A.laneKind} == 'binary' then
+      redis.call('SADD', ${K.memberRetained}, ${A.laneKey})
+      redis.call('SADD', ${K.trackRetained}, ${A.laneKey})
+      redis.call('SADD', incarnation_keys_key, ${K.memberRetained}, ${K.trackRetained})
     end
   end
   redis.call('SET', retained_key, frame)
+  if ${A.laneKind} ~= 'binary' then
+    if ${A.owner} == '' then
+      redis.call('HDEL', ${K.retainedOwners}, ${A.laneKey})
+    else
+      redis.call('HSET', ${K.retainedOwners}, ${A.laneKey}, ${A.owner})
+      redis.call('SADD', incarnation_keys_key, ${K.retainedOwners})
+    end
+  end
 end
--- A channel's local attempts awaiting the commit find their fence token ahead of its frame, after a byte no frame
+-- A channel's local subscriptions awaiting the commit find their fence token ahead of its frame, after a byte no frame
 -- starts with.
 local fence = string.char(${REDIS_DELIVERY_FENCE_BYTE})
 local lane_message = frame
-if ARGV[6] ~= '' then lane_message = fence .. ARGV[6] .. frame end
-local receivers = redis.call('PUBLISH', channel_key, lane_message)
-if ARGV[2] == 'binary' then
-  local fan_in = struct.pack('>I2', #ARGV[8]) .. ARGV[8] .. frame
+if ${A.channelFence} ~= '' then lane_message = fence .. ${A.channelFence} .. frame end
+redis.call('PUBLISH', channel_key, lane_message)
+if ${A.laneKind} == 'binary' then
+  local fan_in = struct.pack('>I2', #${A.laneKey}) .. ${A.laneKey} .. frame
   local every_track, every_member = fan_in, fan_in
-  if ARGV[7] ~= '' then every_track = fence .. ARGV[7] .. fan_in end
-  if ARGV[9] ~= '' then every_member = fence .. ARGV[9] .. fan_in end
-  receivers = receivers + redis.call('PUBLISH', KEYS[7], every_track) + redis.call('PUBLISH', KEYS[10], every_member)
+  if ${A.everyTrackFence} ~= '' then every_track = fence .. ${A.everyTrackFence} .. fan_in end
+  if ${A.everyMemberFence} ~= '' then every_member = fence .. ${A.everyMemberFence} .. fan_in end
+  redis.call('PUBLISH', ${K.everyTrackChannel}, every_track)
+  redis.call('PUBLISH', ${K.everyMemberChannel}, every_member)
 end
-return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',"receivers":' .. receivers .. '}'
+return '{"kind":"accepted","seq":' .. seq_text .. ',"timestamp":' .. ts_text .. '}'
 `
+}
 
-// Deletes one lane's retained frame, optionally only while it still holds seq ARGV[1].
-//   KEYS: [1]=generation-keys [2]=retained [3]=a binary lane's member's retained lanes [4]=its track's retained lanes
-//         (another lane repeats [2] for both) [5]=the generation's retained lanes
-//   ARGV: [1]=ifSeq or '' [2]=lane kind [3]=lane key
-const RETAINED_DELETE_LUA = `
-if ARGV[1] ~= '' then
-  local frame = redis.call('GET', KEYS[2])
-  if not frame then return 0 end
-  local seq_hi, seq_lo = struct.unpack('>I4I4', frame)
-  if seq_hi * 4294967296 + seq_lo ~= tonumber(ARGV[1]) then return 0 end
-end
-redis.call('SREM', KEYS[1], KEYS[2])
-redis.call('SREM', KEYS[5], ARGV[3])
-if ARGV[2] == 'binary' then
-  redis.call('SREM', KEYS[3], ARGV[3])
-  if redis.call('SCARD', KEYS[3]) == 0 then redis.call('SREM', KEYS[1], KEYS[3]) end
-  redis.call('SREM', KEYS[4], ARGV[3])
-  if redis.call('SCARD', KEYS[4]) == 0 then redis.call('SREM', KEYS[1], KEYS[4]) end
-end
-return redis.call('DEL', KEYS[2])
-`
+const COMMIT_LUA = `${HEAD_PRELUDE}
+${REDIS_ORDERING_FRAME_LUA}
+${commitLua(COMMIT_KEY, COMMIT_ARG, 'ARGV')}`
 
-// Takes a page of a leaving member's binary lanes out of their tracks' lane sets.
-//   KEYS: [1]=generation-keys [2..]=each lane's track's lane set
-//   ARGV: [1..]=the lane keys, in KEYS[2..]'s order
-const FORGET_TRACK_LANES_LUA = `
-for i = 2, #KEYS do
-  redis.call('SREM', KEYS[i], ARGV[i - 1])
-  if redis.call('SCARD', KEYS[i]) == 0 then redis.call('SREM', KEYS[1], KEYS[i]) end
+// Deletes one lane's retained frame. `member` and `track` are the retained lanes of a binary lane's member and its
+// track; another lane repeats `retained` for both, and its owner leaves `owners`.
+const RETAINED_DELETE_FN_LUA = `
+local function tf_retained_delete(incarnation_keys, all, owners, retained, member, track, kind, lane_key)
+  redis.call('SREM', incarnation_keys, retained)
+  redis.call('SREM', all, lane_key)
+  if kind == 'binary' then
+    redis.call('SREM', member, lane_key)
+    if redis.call('SCARD', member) == 0 then redis.call('SREM', incarnation_keys, member) end
+    redis.call('SREM', track, lane_key)
+    if redis.call('SCARD', track) == 0 then redis.call('SREM', incarnation_keys, track) end
+  else
+    redis.call('HDEL', owners, lane_key)
+  end
+  return redis.call('DEL', retained)
 end
 `
 
-// Forgets one member's lane order.
-//   KEYS: [1]=generation-keys [2]=the member's order hash
-const DROP_LANE_ORDERS_LUA = `
-redis.call('SREM', KEYS[1], KEYS[2])
-redis.call('UNLINK', KEYS[2])
+// OPERATION: an operation's writes, while the head names its incarnation open, every cell its plan read is still at
+// the version it read, and each member it drops has the lanes and retained binary frames the executor read: the prefix
+// drops, the mutations and counts at the incarnation's next revision, the members' lane orders, their retained binary
+// frames and the semantic frame of each that owns it as the script finds it, the track lane sets of the members'
+// binary lanes, then its commit, as COMMIT commits.
+//   KEYS: [1]=head [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions [7]=retained lanes
+//         [8]=the semantic lane's retained frame [9]=retained owners, then per dropped member its order hash and
+//         retained lanes, then per retained binary frame deleted its key and its member's and track's retained lanes,
+//         then per binary lane dropped its track's lane set, then per expiring cell its key, then COMMIT's KEYS
+//   ARGV: [1]=inc [2]=the plan, an `OperationPacket` as JSON (its type says what each field holds and where its KEYS
+//         and ARGV are), then the mutations' and the expiring cells' bytes, then COMMIT's ARGV
+const OPERATION_LUA = `${HEAD_PRELUDE}${REDIS_ORDERING_FRAME_LUA}${CELL_WRITES_LUA}${RETAINED_DELETE_FN_LUA}
+local function tf_commit(CK, CA)
+${commitLua(luaRefs('CK', COMMIT_KEYS), luaRefs('CA', COMMIT_ARGS), 'CA')}
+end
+local rev_key, incarnation_keys_key, cell_index_key, retained_lanes_key = KEYS[2], KEYS[3], KEYS[4], KEYS[7]
+local semantic_key, owners_key = KEYS[8], KEYS[9]
+local now = tf_now()
+local head = tf_live_head(KEYS[1], now)
+if (not head) or head.inc ~= ARGV[1] or head.state ~= 'open' then return '{"kind":"stale-incarnation"}' end
+local plan = cjson.decode(ARGV[2])
+for _, read in ipairs(plan.expect) do
+  if (redis.call('HGET', KEYS[6], read[1]) or '') ~= read[2] then return '{"kind":"conflict"}' end
+end
+local at = 10
+for _, member in ipairs(plan.members) do
+  if redis.call('HLEN', KEYS[at]) ~= member[2] or redis.call('SCARD', KEYS[at + 1]) ~= member[3] then
+    return '{"kind":"conflict"}'
+  end
+  at = at + 2
+end
+for _, prefix in ipairs(plan.prefixes) do
+  for _, key in ipairs(redis.call('ZRANGEBYLEX', cell_index_key, '[' .. prefix, '(' .. prefix .. '\\255')) do
+    tf_write(key, nil, nil)
+  end
+end
+local version = redis.call('INCR', rev_key)
+for _, mutation in ipairs(plan.mutations) do
+  tf_write(mutation[1], mutation[2] > 0 and ARGV[mutation[2]] or nil, version)
+end
+local counters = {}
+for _, count in ipairs(plan.counts) do tf_count(count[1], count[2], count[3], version, now, counters) end
+redis.call('SADD', incarnation_keys_key, rev_key, cell_index_key, KEYS[5], KEYS[6])
+at = 10
+for _, member in ipairs(plan.members) do
+  redis.call('SREM', incarnation_keys_key, KEYS[at])
+  redis.call('UNLINK', KEYS[at])
+  at = at + 2
+  if redis.call('HGET', owners_key, plan.semantic) == member[1] then
+    tf_retained_delete(incarnation_keys_key, retained_lanes_key, owners_key, semantic_key, semantic_key, semantic_key,
+      'semantic', plan.semantic)
+  end
+end
+for _, lane_key in ipairs(plan.retained) do
+  tf_retained_delete(incarnation_keys_key, retained_lanes_key, owners_key, KEYS[at], KEYS[at + 1], KEYS[at + 2],
+    'binary', lane_key)
+  at = at + 3
+end
+for _, lane_key in ipairs(plan.trackLanes) do
+  redis.call('SREM', KEYS[at], lane_key)
+  if redis.call('SCARD', KEYS[at]) == 0 then redis.call('SREM', incarnation_keys_key, KEYS[at]) end
+  at = at + 1
+end
+for _, cell in ipairs(plan.expiring) do
+  redis.call('SET', KEYS[at], ARGV[cell[1]], 'PX', cell[2])
+  at = at + 1
+end
+local commit = 'null'
+if plan.commit > 0 then
+  local CK, CA = {}, {}
+  for i = 1, ${Object.keys(COMMIT_KEYS).length} do CK[i] = KEYS[at + i - 1] end
+  for i = plan.commit, #ARGV do CA[#CA + 1] = ARGV[i] end
+  commit = tf_commit(CK, CA)
+end
+return {commit, unpack(counters)}
 `
 
 // Directory records use three co-slotted global keys. Put and compare-delete are each one atomic record,
@@ -514,16 +676,60 @@ type CommitInput = RoomInc & {
   channels: CommitChannels
   payload: Uint8Array
   retain: boolean
+  owner: string | undefined
   closingLease: string | undefined
   requiredCellKeys: readonly string[]
-  /** Each channel's fence token, `''` where no local attempt awaits the commit. */
-  fenceTokens: { lane: string; everyTrack: string; everyMember: string }
+  fenceTokens: FenceTokens
 }
 
+/** The commit script's JSON reply: a missing required cell by its index among them. */
 type CommitReply =
-  | { stale: 'incarnation' }
-  | { stale: 'cell'; index: number }
-  | { accepted: true; seq: number; timestamp: number; receivers: number }
+  | StaleIncarnation
+  | { kind: 'stale-cell'; index: number }
+  | { kind: 'accepted'; seq: number; timestamp: number }
+
+/** A commit as the driver hands it on: a missing required cell by its key. */
+type CommitOutcome = StaleCommit | Extract<CommitReply, { kind: 'accepted' }>
+
+/** OPERATION_LUA's ARGV[2], as JSON: what the plan read and wrote, in the order the script takes its KEYS and ARGV. */
+type OperationPacket = {
+  /** Each cell the plan read, with its version as read ('' while absent): the script applies nothing once one moved. */
+  expect: [key: string, version: string][]
+  /** Each member the plan drops, with its lane orders and retained lanes counted as read; two KEYS each, from
+   *  KEYS[10]. */
+  members: [member: string, lanes: number, retained: number][]
+  /** The semantic lane's key, whose retained frame goes with a dropped member that owns it. */
+  semantic: string
+  /** The cell prefixes the plan drops, before its mutations. */
+  prefixes: string[]
+  /** Each cell write: its key, and its bytes' index in ARGV, 0 for a delete. */
+  mutations: [key: string, argv: number][]
+  /** Each counter cell's change (`CellCount`). */
+  counts: [key: string, delta: number, create: boolean][]
+  /** The dropped members' retained binary lanes; three KEYS each, after the members'. */
+  retained: string[]
+  /** The dropped members' binary lanes, which leave their tracks' lane sets; a KEY each, after the retained lanes'. */
+  trackLanes: string[]
+  /** Each expiring cell: its bytes' index in ARGV, and its TTL; a KEY each, after the track lane sets. */
+  expiring: [argv: number, ttlMs: number][]
+  /** Where COMMIT's ARGV starts, 0 without a commit; COMMIT's KEYS come last. */
+  commit: number
+}
+
+/** What OPERATION applies: an operation's writes, the version each cell its plan read was at ('' while absent), each
+ *  member it drops with the lanes its order hash had and the binary lanes it retained, and its commit. */
+type OperationInput = RoomInc & {
+  writes: OperationWrites
+  reads: ReadonlyMap<string, string>
+  members: readonly { member: string; lanes: readonly string[]; retained: readonly string[] }[]
+  commit: CommitInput | null
+  kit: RoomPlaneKit
+}
+
+type OperationOutcome =
+  | StaleIncarnation
+  | { kind: 'conflict' }
+  | { kind: 'done'; counters: Map<string, CellCounter>; commit: CommitReply | null }
 
 const REDIS_COMMANDS = {
   publish: command({
@@ -538,25 +744,43 @@ const REDIS_COMMANDS = {
     parse: (reply) => {
       // A shared client with ioredis's `stringNumbers` returns integer replies as decimal strings.
       const values = Array.isArray(reply) ? reply.map(Number) : []
-      assert(values.length === 3 && values.every(Number.isSafeInteger), 'Publish script returned an unexpected reply')
-      const [seq, timestamp, receivers] = values as [number, number, number]
-      return { seq, timestamp, receivers }
+      assert(values.length === 2 && values.every(Number.isSafeInteger), 'Publish script returned an unexpected reply')
+      const [seq, timestamp] = values as [number, number]
+      return { seq, timestamp }
     },
   }),
-  headCx: command({
-    name: 'tfRoomHeadCx',
-    lua: HEAD_CX_LUA,
-    numberOfKeys: 1,
-    invoke: (prefix, { roomId, cx, next }: { roomId: string; cx: HeadCx; next: HeadNext }) => ({
-      keys: [headKey(prefix, roomId)],
-      argv: [JSON.stringify(cx), encodeNext(next)],
-    }),
-    parse: (reply): HeadCxResult => {
+  headExchange: command({
+    name: 'tfRoomHeadExchange',
+    lua: HEAD_EXCHANGE_LUA,
+    numberOfKeys: null,
+    invoke: (prefix, { roomId, expected, next }: { roomId: string; expected: HeadExpectation; next: HeadNext }) => {
+      const { counts = [] } = next
+      const inc = next.head.currentInc
+      const cells =
+        counts.length === 0 || inc === null
+          ? []
+          : [
+              revKey(prefix, roomId, inc),
+              incarnationKeysKey(prefix, roomId, inc),
+              cellIndexKey(prefix, roomId, inc),
+              cellValuesKey(prefix, roomId, inc),
+              cellVersionsKey(prefix, roomId, inc),
+            ]
+      return {
+        keys: [headKey(prefix, roomId), ...cells],
+        argv: [
+          JSON.stringify(expected),
+          encodeNext(next),
+          ...counts.flatMap(({ key, delta, create }) => [key, String(delta), create ? '1' : '']),
+        ],
+      }
+    },
+    parse: (reply): HeadExchangeResult => {
       const parsed = JSON.parse(reply as string) as
         | { tag: 'head'; head: ScriptHead }
         | { tag: 'conflict'; current: ScriptHead | null }
-      if (parsed.tag === 'head') return { head: toPublicHead(parsed.head) }
-      return { conflict: true, current: parsed.current === null ? null : toPublicHead(parsed.current) }
+      if (parsed.tag === 'head') return { kind: 'committed', head: toPublicHead(parsed.head) }
+      return { kind: 'conflict', current: parsed.current === null ? null : toPublicHead(parsed.current) }
     },
   }),
   readHead: command({
@@ -585,7 +809,24 @@ const REDIS_COMMANDS = {
     }),
     parse: (reply): CellsRead => {
       const [tag, now, ...found] = reply as Buffer[]
-      return tag!.toString() === 'stale' ? { staleInc: true } : parseCells(now!, found)
+      return tag!.toString() === 'stale-incarnation' ? { kind: 'stale-incarnation' } : parseCells(now!, found)
+    },
+  }),
+  readExpiringCells: command({
+    name: 'tfRoomReadExpiringCells',
+    lua: READ_EXPIRING_CELLS_LUA,
+    numberOfKeys: null,
+    binaryReply: true,
+    invoke: (prefix, { roomId, inc, keys }: RoomInc & { keys: readonly string[] }) => ({
+      keys: [headKey(prefix, roomId), ...keys.map((key) => expiringCellKey(prefix, roomId, inc, key))],
+      argv: [inc, ...keys],
+    }),
+    parse: (reply): ExpiringCellsRead => {
+      const [tag, ...found] = reply as Buffer[]
+      if (tag!.toString() === 'stale-incarnation') return { kind: 'stale-incarnation' }
+      const cells = new Map<string, Uint8Array>()
+      for (let i = 0; i < found.length; i += 2) cells.set(found[i]!.toString(), Uint8Array.from(found[i + 1]!))
+      return { kind: 'read', cells }
     },
   }),
   readCellPage: command({
@@ -593,18 +834,21 @@ const REDIS_COMMANDS = {
     lua: READ_CELL_PAGE_LUA,
     numberOfKeys: 4,
     binaryReply: true,
-    invoke: (prefix, { roomId, inc, cellPrefix, after }: RoomInc & { cellPrefix: string; after?: string }) => ({
+    invoke: (
+      prefix,
+      { roomId, inc, cellPrefix, after, pageSize }: RoomInc & { cellPrefix: string; after?: string; pageSize: number },
+    ) => ({
       keys: [
         headKey(prefix, roomId),
         cellIndexKey(prefix, roomId, inc),
         cellValuesKey(prefix, roomId, inc),
         cellVersionsKey(prefix, roomId, inc),
       ],
-      argv: [inc, after === undefined ? `[${cellPrefix}` : `(${after}`, cellPrefix, String(roomKit().CELL_PAGE_SIZE)],
+      argv: [inc, after === undefined ? `[${cellPrefix}` : `(${after}`, cellPrefix, String(pageSize)],
     }),
     parse: (reply): CellsRead & { after?: string } => {
       const [tag, now, ...found] = reply as Buffer[]
-      if (tag!.toString() === 'stale') return { staleInc: true }
+      if (tag!.toString() === 'stale-incarnation') return { kind: 'stale-incarnation' }
       if (tag!.toString() === 'cells') return parseCells(now!, found)
       return { ...parseCells(now!, found.slice(1)), after: found[0]!.toString() }
     },
@@ -613,8 +857,7 @@ const REDIS_COMMANDS = {
     name: 'tfRoomLaneStart',
     lua: LANE_START_LUA,
     numberOfKeys: 2,
-    invoke: (prefix, { roomId, inc, lane }: RoomSubscriptionSource) => {
-      const laneKey = roomKit().encodeLaneKey(lane)
+    invoke: (prefix, { roomId, inc, lane, laneKey }: RoomSubscriptionSource & { laneKey: string }) => {
       const memberLane = lane.kind === 'inbox' || lane.kind === 'binary'
       return {
         keys: [
@@ -626,7 +869,7 @@ const REDIS_COMMANDS = {
     },
     parse: (reply): Map<string, OrderingInfo> | null => {
       if (reply === null) return null
-      return reply === '' ? new Map() : new Map([['', parseOrderMark(reply as string)]])
+      return reply === '' ? new Map() : new Map([['', parseOrdering(reply as string)]])
     },
   }),
   memberLaneStarts: command({
@@ -641,7 +884,7 @@ const REDIS_COMMANDS = {
       if (reply === null) return null
       const [cursor, fields] = reply as [string, string[]]
       const starts: Array<[string, OrderingInfo]> = []
-      for (let i = 0; i < fields.length; i += 2) starts.push([fields[i]!, parseOrderMark(fields[i + 1]!)])
+      for (let i = 0; i < fields.length; i += 2) starts.push([fields[i]!, parseOrdering(fields[i + 1]!)])
       return { cursor, starts }
     },
   }),
@@ -663,159 +906,153 @@ const REDIS_COMMANDS = {
     name: 'tfRoomLaneMarks',
     lua: LANE_MARKS_LUA,
     numberOfKeys: null,
-    invoke: (prefix, { roomId, inc, lanes }: RoomInc & { lanes: readonly string[] }) => ({
-      keys: lanes.map((laneKey) => memberOrderKey(prefix, roomId, inc, binaryLaneOf(laneKey).member)),
+    invoke: (prefix, { roomId, inc, lanes, kit }: RoomInc & { lanes: readonly string[]; kit: RoomPlaneKit }) => ({
+      keys: lanes.map((laneKey) => memberOrderKey(prefix, roomId, inc, binaryLaneOf(kit, laneKey).member)),
       argv: lanes,
     }),
-    parse: (reply) => (reply as string[]).map((mark) => (mark === '' ? null : parseOrderMark(mark))),
+    parse: (reply) => (reply as string[]).map((mark) => (mark === '' ? null : parseOrdering(mark))),
   }),
   broadcastStart: command({
     name: 'tfBroadcastStart',
     lua: BROADCAST_START_LUA,
     numberOfKeys: 1,
     invoke: (prefix, route: BroadcastRoute) => ({ keys: [broadcastSequenceKey(prefix, route.key)], argv: [] }),
-    parse: (reply) => new Map([['', parseOrderMark(reply as string)]]),
+    parse: (reply) => new Map([['', parseOrdering(reply as string)]]),
   }),
-  dropGeneration: command({
-    name: 'tfRoomDropGeneration',
-    lua: DROP_GENERATION_LUA,
+  dropIncarnation: command({
+    name: 'tfRoomDropIncarnation',
+    lua: DROP_INCARNATION_LUA,
     numberOfKeys: 2,
     invoke: (prefix, { roomId, inc }: RoomInc) => ({
-      keys: [generationInvalidationChannel(prefix, roomId, inc), generationKeysKey(prefix, roomId, inc)],
+      keys: [incarnationInvalidationChannel(prefix, roomId, inc), incarnationKeysKey(prefix, roomId, inc)],
       argv: [inc],
     }),
     parse: () => {},
   }),
-  cellsCx: command({
-    name: 'tfRoomCellsCx',
-    lua: CELLS_CX_LUA,
+  cellsExchange: command({
+    name: 'tfRoomCellsExchange',
+    lua: CELLS_EXCHANGE_LUA,
     numberOfKeys: 6,
-    invoke: (prefix, { roomId, inc, cx }: RoomInc & { cx: CellsCx }) => {
-      const { counts = [] } = cx
+    invoke: (prefix, { roomId, inc, exchange }: RoomInc & { exchange: CellsExchange }) => {
+      const { counts = [] } = exchange
       return {
         keys: [
           headKey(prefix, roomId),
           revKey(prefix, roomId, inc),
-          generationKeysKey(prefix, roomId, inc),
+          incarnationKeysKey(prefix, roomId, inc),
           cellIndexKey(prefix, roomId, inc),
           cellValuesKey(prefix, roomId, inc),
           cellVersionsKey(prefix, roomId, inc),
         ],
         argv: [
           inc,
-          String(cx.mutations.length),
-          String(cx.expect.length),
+          String(exchange.mutations.length),
+          String(exchange.expect.length),
           String(counts.length),
-          ...cx.mutations.flatMap(({ key, bytes }) =>
+          ...exchange.mutations.flatMap(({ key, bytes }) =>
             bytes === null ? [key, 'del', ''] : [key, 'set', toBuffer(bytes)],
           ),
-          ...cx.expect.flatMap(({ key, version }) => [key, version ?? '']),
+          ...exchange.expect.flatMap(({ key, version }) => [key, version ?? '']),
           ...counts.flatMap(({ key, delta, create }) => [key, String(delta), create ? '1' : '']),
         ],
       }
     },
-    parse: (reply): CxResult => {
+    parse: (reply): CellsExchangeResult => {
       const [tag, ...counted] = reply as string[]
-      if (tag !== 'committed') return tag as 'conflict' | 'stale-inc'
+      if (tag !== 'committed') return { kind: tag as 'conflict' | 'stale-incarnation' }
       const counters = new Map<string, CellCounter>()
       for (let i = 0; i < counted.length; i += 3) {
         counters.set(counted[i]!, { value: Number(counted[i + 1]), changedAt: Number(counted[i + 2]) })
       }
-      return { committed: counters }
+      return { kind: 'committed', counters }
     },
   }),
   commit: command({
     name: 'tfRoomCommit',
     lua: COMMIT_LUA,
-    numberOfKeys: 12,
-    invoke: (prefix, input: CommitInput) => {
-      const { roomId, inc, lane, laneKey, channels } = input
-      const retained = retainedKey(prefix, roomId, inc, laneKey)
-      const indexed = lane.kind === 'binary' && input.retain
-      const order =
-        lane.kind === 'inbox' || lane.kind === 'binary'
-          ? memberOrderKey(prefix, roomId, inc, lane.member)
-          : orderKey(prefix, roomId, inc, laneKey)
-      return {
-        keys: [
-          headKey(prefix, roomId),
-          order,
-          retained,
-          channels.lane,
-          generationKeysKey(prefix, roomId, inc),
-          cellValuesKey(prefix, roomId, inc),
-          channels.everyTrack ?? channels.lane,
-          indexed ? retainedOfKey(prefix, roomId, inc, lane.member) : retained,
-          indexed ? retainedOfTrackKey(prefix, roomId, inc, lane.track) : retained,
-          channels.everyMember ?? channels.lane,
-          lane.kind === 'binary' ? trackLanesKey(prefix, roomId, inc, lane.track) : order,
-          retainedLanesKey(prefix, roomId, inc),
-        ],
-        argv: [
-          inc,
-          lane.kind,
-          input.closingLease ?? '',
-          input.retain ? '1' : '0',
-          toBuffer(input.payload),
-          input.fenceTokens.lane,
-          input.fenceTokens.everyTrack,
-          laneKey,
-          input.fenceTokens.everyMember,
-          ...input.requiredCellKeys,
-        ],
-      }
-    },
-    parse: (reply, { requiredCellKeys }) => {
+    numberOfKeys: Object.keys(COMMIT_KEYS).length,
+    invoke: commitInvocation,
+    parse: (reply, { requiredCellKeys }): CommitOutcome => {
       const parsed = JSON.parse(reply as string) as CommitReply
-      if (!('stale' in parsed) || parsed.stale === 'incarnation') return parsed
+      if (parsed.kind !== 'stale-cell') return parsed
       const key = requiredCellKeys[parsed.index]
       assert(key !== undefined)
-      return { stale: 'cell' as const, key }
+      return { kind: 'stale-cell', key }
     },
   }),
-  retainedDelete: command({
-    name: 'tfRoomRetainedDelete',
-    lua: RETAINED_DELETE_LUA,
-    numberOfKeys: 5,
-    invoke: (prefix, { roomId, inc, lane, ifSeq }: RoomInc & { lane: LaneId; ifSeq: number | undefined }) => {
-      const laneKey = roomKit().encodeLaneKey(lane)
-      const retained = retainedKey(prefix, roomId, inc, laneKey)
-      const binary = lane.kind === 'binary'
-      return {
-        keys: [
-          generationKeysKey(prefix, roomId, inc),
-          retained,
-          binary ? retainedOfKey(prefix, roomId, inc, lane.member) : retained,
-          binary ? retainedOfTrackKey(prefix, roomId, inc, lane.track) : retained,
-          retainedLanesKey(prefix, roomId, inc),
-        ],
-        argv: [ifSeq === undefined ? '' : String(ifSeq), lane.kind, laneKey],
-      }
-    },
-    parse: () => {},
-  }),
-  forgetTrackLanes: command({
-    name: 'tfRoomForgetTrackLanes',
-    lua: FORGET_TRACK_LANES_LUA,
+  operation: command({
+    name: 'tfRoomOperation',
+    lua: OPERATION_LUA,
     numberOfKeys: null,
-    invoke: (prefix, { roomId, inc, lanes }: RoomInc & { lanes: readonly string[] }) => ({
-      keys: [
-        generationKeysKey(prefix, roomId, inc),
-        ...lanes.map((laneKey) => trackLanesKey(prefix, roomId, inc, binaryLaneOf(laneKey).track)),
-      ],
-      argv: lanes,
-    }),
-    parse: () => {},
-  }),
-  dropLaneOrders: command({
-    name: 'tfRoomDropLaneOrders',
-    lua: DROP_LANE_ORDERS_LUA,
-    numberOfKeys: 2,
-    invoke: (prefix, { roomId, inc, member }: RoomInc & { member: string }) => ({
-      keys: [generationKeysKey(prefix, roomId, inc), memberOrderKey(prefix, roomId, inc, member)],
-      argv: [],
-    }),
-    parse: () => {},
+    invoke: (prefix, { roomId, inc, writes, reads, members, commit, kit }: OperationInput) => {
+      const semanticLaneKey = kit.encodeLaneKey({ kind: 'semantic' })
+      const keys = [
+        headKey(prefix, roomId),
+        revKey(prefix, roomId, inc),
+        incarnationKeysKey(prefix, roomId, inc),
+        cellIndexKey(prefix, roomId, inc),
+        cellValuesKey(prefix, roomId, inc),
+        cellVersionsKey(prefix, roomId, inc),
+        retainedLanesKey(prefix, roomId, inc),
+        retainedKey(prefix, roomId, inc, semanticLaneKey),
+        retainedOwnersKey(prefix, roomId, inc),
+      ]
+      const argv: (string | Buffer)[] = [inc, '']
+      const mutations = writes.mutations.map(({ key, bytes }): [string, number] => {
+        if (bytes === null) return [key, 0]
+        argv.push(toBuffer(bytes))
+        return [key, argv.length]
+      })
+      for (const { member } of members) {
+        keys.push(memberOrderKey(prefix, roomId, inc, member), retainedOfKey(prefix, roomId, inc, member))
+      }
+      const retained = members.flatMap(({ retained }) => retained)
+      for (const laneKey of retained) {
+        const { member, track } = binaryLaneOf(kit, laneKey)
+        keys.push(
+          retainedKey(prefix, roomId, inc, laneKey),
+          retainedOfKey(prefix, roomId, inc, member),
+          retainedOfTrackKey(prefix, roomId, inc, track),
+        )
+      }
+      const trackLanes = members.flatMap(({ lanes }) => lanes.filter((key) => kit.decodeLaneKey(key).kind === 'binary'))
+      for (const laneKey of trackLanes) keys.push(trackLanesKey(prefix, roomId, inc, binaryLaneOf(kit, laneKey).track))
+      const expiring = writes.expiring.map(({ key, bytes, ttlMs }): [number, number] => {
+        keys.push(expiringCellKey(prefix, roomId, inc, key))
+        argv.push(toBuffer(bytes))
+        return [argv.length, ttlMs]
+      })
+      let commitAt = 0
+      if (commit !== null) {
+        const invocation = commitInvocation(prefix, commit)
+        keys.push(...invocation.keys)
+        commitAt = argv.length + 1
+        argv.push(...invocation.argv)
+      }
+      const packet: OperationPacket = {
+        expect: [...reads],
+        members: members.map(({ member, lanes, retained }) => [member, lanes.length, retained.length]),
+        semantic: semanticLaneKey,
+        prefixes: writes.prefixes,
+        mutations,
+        counts: writes.counts.map(({ key, delta, create }) => [key, delta, create === true]),
+        retained,
+        trackLanes,
+        expiring,
+        commit: commitAt,
+      }
+      argv[1] = JSON.stringify(packet)
+      return { keys, argv }
+    },
+    parse: (reply): OperationOutcome => {
+      if (typeof reply === 'string') return JSON.parse(reply) as StaleIncarnation | { kind: 'conflict' }
+      const [commit, ...counted] = reply as string[]
+      const counters = new Map<string, CellCounter>()
+      for (let i = 0; i < counted.length; i += 3) {
+        counters.set(counted[i]!, { value: Number(counted[i + 1]), changedAt: Number(counted[i + 2]) })
+      }
+      return { kind: 'done', counters, commit: commit === 'null' ? null : (JSON.parse(commit!) as CommitReply) }
+    },
   }),
   directoryPut: command({
     name: 'tfRoomDirectoryPut',
@@ -887,10 +1124,7 @@ function encodeNext(next: HeadNext): string {
 }
 
 /** The read's time, then key, value and version triples. */
-function parseCells(
-  now: Buffer,
-  found: Buffer[],
-): { cells: Map<string, Uint8Array>; versions: Map<string, string>; now: number } {
+function parseCells(now: Buffer, found: Buffer[]): Extract<CellsRead, { kind: 'read' }> {
   const cells = new Map<string, Uint8Array>()
   const versions = new Map<string, string>()
   for (let i = 0; i < found.length; i += 3) {
@@ -898,7 +1132,7 @@ function parseCells(
     cells.set(key, Uint8Array.from(found[i + 1]!))
     versions.set(key, found[i + 2]!.toString())
   }
-  return { cells, versions, now: Number(now.toString()) }
+  return { kind: 'read', cells, versions, now: Number(now.toString()) }
 }
 
 /** A copy, as ioredis may hold a command past the call (connecting, auto-pipelining, a NOSCRIPT or TRYAGAIN retry). */
@@ -906,13 +1140,51 @@ function toBuffer(bytes: Uint8Array): Buffer {
   return Buffer.from(bytes)
 }
 
-function parseOrderMark(mark: string): OrderingInfo {
-  const [seq, timestamp] = mark.split(':').map(Number) as [number, number]
+function parseOrdering(reply: string): OrderingInfo {
+  const [seq, timestamp] = reply.split(':').map(Number) as [number, number]
   return { seq, timestamp }
 }
 
-function binaryLaneOf(laneKey: string): Extract<LaneId, { kind: 'binary' }> {
-  const lane = roomKit().decodeLaneKey(laneKey)
+function binaryLaneOf(kit: RoomPlaneKit, laneKey: string): Extract<LaneId, { kind: 'binary' }> {
+  const lane = kit.decodeLaneKey(laneKey)
   assert(lane.kind === 'binary')
   return lane
+}
+
+/** COMMIT's KEYS and ARGV, which OPERATION's commit takes too. */
+function commitInvocation(prefix: string, input: CommitInput): { keys: string[]; argv: (string | Buffer)[] } {
+  const { roomId, inc, lane, laneKey, channels, fenceTokens } = input
+  const retained = retainedKey(prefix, roomId, inc, laneKey)
+  const indexed = lane.kind === 'binary' && input.retain
+  const order =
+    lane.kind === 'inbox' || lane.kind === 'binary'
+      ? memberOrderKey(prefix, roomId, inc, lane.member)
+      : orderKey(prefix, roomId, inc, laneKey)
+  const keys: string[] = []
+  keys[COMMIT_KEYS.head] = headKey(prefix, roomId)
+  keys[COMMIT_KEYS.order] = order
+  keys[COMMIT_KEYS.retained] = retained
+  keys[COMMIT_KEYS.channel] = channels.lane
+  keys[COMMIT_KEYS.incarnationKeys] = incarnationKeysKey(prefix, roomId, inc)
+  keys[COMMIT_KEYS.cellValues] = cellValuesKey(prefix, roomId, inc)
+  keys[COMMIT_KEYS.everyTrackChannel] = channels.everyTrack ?? channels.lane
+  keys[COMMIT_KEYS.memberRetained] = indexed ? retainedOfKey(prefix, roomId, inc, lane.member) : retained
+  keys[COMMIT_KEYS.trackRetained] = indexed ? retainedOfTrackKey(prefix, roomId, inc, lane.track) : retained
+  keys[COMMIT_KEYS.everyMemberChannel] = channels.everyMember ?? channels.lane
+  keys[COMMIT_KEYS.trackLanes] = lane.kind === 'binary' ? trackLanesKey(prefix, roomId, inc, lane.track) : order
+  keys[COMMIT_KEYS.retainedLanes] = retainedLanesKey(prefix, roomId, inc)
+  keys[COMMIT_KEYS.retainedOwners] = retainedOwnersKey(prefix, roomId, inc)
+  const argv: (string | Buffer)[] = []
+  argv[COMMIT_ARGS.inc] = inc
+  argv[COMMIT_ARGS.laneKind] = lane.kind
+  argv[COMMIT_ARGS.closingLease] = input.closingLease ?? ''
+  argv[COMMIT_ARGS.retain] = input.retain ? '1' : '0'
+  argv[COMMIT_ARGS.payload] = toBuffer(input.payload)
+  argv[COMMIT_ARGS.channelFence] = fenceTokens.lane
+  argv[COMMIT_ARGS.everyTrackFence] = fenceTokens.everyTrack
+  argv[COMMIT_ARGS.laneKey] = laneKey
+  argv[COMMIT_ARGS.everyMemberFence] = fenceTokens.everyMember
+  argv[COMMIT_ARGS.owner] = input.owner ?? ''
+  for (const key of input.requiredCellKeys) argv.push(key)
+  return { keys, argv }
 }

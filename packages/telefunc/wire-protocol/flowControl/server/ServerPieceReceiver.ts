@@ -10,7 +10,7 @@ import { PieceReceiver, type FrameArrival, type PieceArrival } from '../pieces.j
 
 /** The server's `PieceReceiver`, which puts a WebSocket frame sent in pieces back together. Once it took
  *  `WIRE_SEND_ACK_MIN_BYTES` since it last acknowledged, headers and control frames included, it acknowledges them
- *  within `WIRE_SEND_ACK_MS` of a data frame, as the page's send budget waits on it, or in its next answer. */
+ *  within `WIRE_SEND_ACK_MS` of a data frame, as the page's headroom waits on it, or in its next answer. */
 class ServerPieceReceiver extends PieceReceiver {
   /** Its side answers: the answer carries the acknowledgement, so the page's next request doesn't wait on its timer. */
   answering(): void {

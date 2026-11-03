@@ -1,82 +1,84 @@
 export {
   installBackend,
   configureBroadcastTransport,
-  getBroadcastBackend,
+  getBroadcastPlane,
   followBroadcastPlane,
   unfollowBroadcastPlane,
   backendPlane,
   disposeBackend,
 }
-export type { BackendDriver }
-
+export type { PlaneDefinition }
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
-import type { BroadcastBackend, BroadcastDriver } from './broadcast/contract.js'
-import { superviseBroadcastDriver } from './broadcast/supervise.js'
-import { createBroadcastTransportDriver, type BroadcastTransport } from './broadcast/transport.js'
-import { MemoryBackend } from './memory/backend.js'
-import { SubscriptionManager, type PlaneSubscriptions } from './SubscriptionManager.js'
-import type { SubscriptionDriver } from './subscription.js'
+import type { BroadcastDriver, PlaneKey, SubscriptionDriver } from './driver.js'
+import { BroadcastPlane } from './broadcast/BroadcastPlane.js'
+import { TransportBroadcastDriver, type BroadcastTransport } from './broadcast/TransportBroadcastDriver.js'
+import { MemoryBackend } from './memory/MemoryBackend.js'
 import { assertUsage } from '../../utils/assert.js'
 import { getOrCreate } from '../../utils/getOrCreate.js'
 
-/** A backend: Broadcast's driver, and the driver of each other plane it serves. */
-type BackendDriver = BroadcastDriver & {
-  /** The planes this backend serves, by extension key; each is built on its first `backendPlane()` call, given the
-   *  `kit` the extension passes it. */
-  readonly planes?: { readonly [key: symbol]: (kit: never) => unknown }
-}
-
 type Installed = {
-  readonly driver: BackendDriver
+  readonly backend: BroadcastDriver
   readonly key: readonly unknown[]
   /** The memory backend a process falls back to when it installed none. */
   readonly fallback: boolean
   /** The planes built so far, by extension key. */
   readonly planes: Map<symbol, BackendPlane>
-  /** Built on first Broadcast use; `null` while a transport override owns the plane. */
-  broadcast: BroadcastBackend | null
 }
 
 /** An extension's supervised plane; `disposeBackend()` stops it. */
 type BackendPlane = { dispose(): Promise<void> }
 
-type BroadcastOverride = { transport: BroadcastTransport; backend?: BroadcastBackend }
+type PlaneDriver = SubscriptionDriver<never>
+
+/** An extension's plane, which `backendPlane()` builds once per installed backend. */
+type PlaneDefinition<Kit, Driver extends PlaneDriver, Plane extends BackendPlane> = {
+  /** The key a backend serves it under in `planes`. */
+  readonly key: PlaneKey<string, Kit, Driver>
+  /** What the extension gives a backend's `planes` entry to build its driver with. */
+  readonly kit: Kit
+  /** The driver of a process that installed no backend. */
+  memoryDriver(): Driver
+  /** The plane over `driver`. */
+  create(driver: Driver): Plane
+}
 
 /** A consumer of the Broadcast plane that moves to the plane a transport replaces it with. */
 type BroadcastPlaneFollower = { planeReplaced(): void }
 
 const state = getGlobalObject<{
   installed: Installed | null
-  broadcastOverride?: BroadcastOverride
+  /** The public broadcast-only override: Broadcast goes through it instead of the installed backend. */
+  transport?: BroadcastTransport
+  /** Built on first Broadcast use, from the transport or else the installed backend; `null` again once either
+   *  changes. */
+  broadcast: BroadcastPlane | null
   planeFollowers: Set<BroadcastPlaneFollower>
-}>('wire-protocol/backend/install.ts', () => ({ installed: null, planeFollowers: new Set() }))
+}>('wire-protocol/backend/install.ts', () => ({ installed: null, broadcast: null, planeFollowers: new Set() }))
 
 const FALLBACK_KEY = [Symbol.for('telefunc.memoryBackend')]
 
-/** Installs the process's one backend and returns its driver. Re-evaluating an entry with the same `key` returns the
- *  installed driver; the key names the factory's configuration, so that driver is the one the factory would build. */
-function installBackend<Driver extends BackendDriver>(factory: () => Driver, key: readonly unknown[]): Driver {
+/** Installs the process's one backend and returns it. Re-evaluating an entry with the same `key` returns the installed
+ *  one; the key names the factory's configuration, so that backend is the one the factory would build. */
+function installBackend<B extends BroadcastDriver>(factory: () => B, key: readonly unknown[]): B {
   const installed = state.installed
-  if (installed === null) return install(factory, key, false).driver as Driver
-  if (sameKey(installed.key, key)) return installed.driver as Driver
+  if (installed === null) return install(factory, key, false).backend as B
+  if (sameKey(installed.key, key)) return installed.backend as B
   assertUsage(
     !installed.fallback,
-    'Install the backend (for example with installRedis()) before its first use: an earlier use already started the in-memory backend',
+    'Install the backend (for example with installRedis()) before its first use: an earlier use already started ' +
+      'the in-memory backend',
   )
   assertUsage(false, 'Install one backend per process: a different backend is already installed')
 }
 
 /** Installs the public broadcast-only override without displacing the full backend's other planes. */
 function configureBroadcastTransport(transport: BroadcastTransport): void {
-  const previous = state.broadcastOverride
-  if (previous?.transport === transport) return
-  state.broadcastOverride = { transport }
-  const installed = state.installed
-  const retired = installed?.broadcast
-  if (installed) installed.broadcast = null
+  if (state.transport === transport) return
+  state.transport = transport
+  const retired = state.broadcast
+  state.broadcast = null
   // Live subscriptions move to the new plane before the retired ones stop.
   for (const follower of [...state.planeFollowers]) follower.planeReplaced()
-  void previous?.backend?.dispose()
   void retired?.dispose()
 }
 
@@ -89,78 +91,54 @@ function unfollowBroadcastPlane(follower: BroadcastPlaneFollower): void {
   state.planeFollowers.delete(follower)
 }
 
-function getBroadcastBackend(): BroadcastBackend {
-  const override = state.broadcastOverride
-  if (override) {
-    return (override.backend ??= superviseBroadcastDriver(createBroadcastTransportDriver(override.transport)))
-  }
-  const installed = currentBackend()
-  return (installed.broadcast ??= superviseBroadcastDriver(installed.driver))
+function getBroadcastPlane(): BroadcastPlane {
+  if (state.broadcast) return state.broadcast
+  const { transport } = state
+  const driver = transport ? new TransportBroadcastDriver({ transport }) : currentBackend().backend
+  return (state.broadcast = new BroadcastPlane({ driver }))
 }
 
-/** The plane `key` of the installed backend, built once per installed backend: `supervise` wraps the driver the
- *  backend serves, built with the extension's `kit`, or the in-memory one `fallback` builds when the process installed
- *  none, given the driver's subscriptions keyed by `sourceKey`, whose deliveries carry `payloadKind`. */
-function backendPlane<
-  Source,
-  Driver extends { readonly subscriptions: SubscriptionDriver<Source> },
-  Plane extends BackendPlane,
->(
-  key: symbol,
-  {
-    fallback,
-    supervise,
-    kit,
-    sourceKey,
-    payloadKind,
-  }: {
-    fallback: () => Driver
-    supervise: (driver: Driver, subscriptions: PlaneSubscriptions<Source>) => Plane
-    kit?: unknown
-    sourceKey: (source: Source) => string
-    payloadKind: (source: Source) => 'text' | 'binary'
-  },
+/** The installed backend's `plane`, built on first use. */
+function backendPlane<Kit, Driver extends PlaneDriver, Plane extends BackendPlane>(
+  plane: PlaneDefinition<Kit, Driver, Plane>,
 ): Plane {
   assertUsage(
-    !(state.broadcastOverride && (state.installed?.fallback ?? true)),
-    'config.broadcast.transport configures Broadcast only, and this call needs a full backend: install the Redis backend or use the Cloudflare adapter.',
+    !(state.transport && (state.installed?.fallback ?? true)),
+    'config.broadcast.transport configures Broadcast only, and this call needs a full backend: install the Redis ' +
+      'backend or use the Cloudflare adapter.',
   )
   const installed = currentBackend()
-  return getOrCreate(installed.planes, key, () => {
+  return getOrCreate(installed.planes, plane.key, () => {
     let driver: Driver
-    if (installed.fallback) driver = fallback()
+    if (installed.fallback) driver = plane.memoryDriver()
     else {
-      const build = installed.driver.planes?.[key]
-      assertUsage(build, `The installed backend doesn't serve ${String(key)}, which this call needs`)
-      driver = build(kit as never) as Driver
+      const server = installed.backend.planes?.find(({ key }) => key === plane.key)
+      assertUsage(server, `The installed backend doesn't serve ${String(plane.key)}, which this call needs`)
+      // servePlane() or serveCloudflarePlane() typed the entry by its key, which is plane.key
+      driver = (server.build as (kit: Kit) => Driver)(plane.kit)
     }
-    return supervise(driver, new SubscriptionManager({ driver: driver.subscriptions, sourceKey, payloadKind }))
+    return plane.create(driver)
   }) as Plane
 }
 
 /** For tests: forgets the backend, the transport override and the plane's followers, and stops their subscriptions. */
 async function disposeBackend(): Promise<void> {
   const installed = state.installed
-  const overridePlane = state.broadcastOverride?.backend
+  const broadcast = state.broadcast
   state.installed = null
-  delete state.broadcastOverride
+  state.broadcast = null
+  delete state.transport
   state.planeFollowers.clear()
   const planes = [...(installed?.planes.values() ?? [])]
-  await Promise.all([
-    overridePlane?.dispose(),
-    installed?.broadcast?.dispose(),
-    ...planes.map((plane) => plane.dispose()),
-  ])
+  await Promise.all([broadcast?.dispose(), ...planes.map((plane) => plane.dispose())])
 }
 
-function install(factory: () => BackendDriver, key: readonly unknown[], fallback: boolean): Installed {
-  const driver = factory()
+function install(factory: () => BroadcastDriver, key: readonly unknown[], fallback: boolean): Installed {
   const installed: Installed = {
-    driver,
+    backend: factory(),
     key,
     fallback,
     planes: new Map(),
-    broadcast: null,
   }
   state.installed = installed
   return installed

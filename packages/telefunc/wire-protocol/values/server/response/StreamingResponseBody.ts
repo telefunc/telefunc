@@ -3,7 +3,7 @@ export { buildInlineResponseBody, encodeErrorPayload }
 import type { Readable } from 'node:stream'
 import type { StreamingValueServer } from '../../types.js'
 import { stringify } from '@brillout/json-serializer/stringify'
-import { encodeU32, encodeIndexedFrame, textEncoder } from '../../../wire/frame.js'
+import { encodeU32, encodeIndexedFrame, textEncoder } from '../../../wire/envelope.js'
 import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../../constants.js'
 import type { StreamingErrorFrameAbort, StreamingErrorFrameBug } from '../../../constants.js'
 import { isAbort } from '../../../../node/server/Abort.js'
@@ -201,7 +201,7 @@ function buildInlineResponseBody(runContext: {
     }
   })()
 
-  return sink
+  return sink.readable
 }
 
 /** Serialize a streaming error as its on-wire payload string. Used by both the

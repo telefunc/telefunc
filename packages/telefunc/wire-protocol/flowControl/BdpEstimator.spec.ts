@@ -10,14 +10,14 @@ import {
   CREDIT_WINDOW_MAX_BYTES,
 } from '../constants.js'
 
-// `Date.now()` drives the min-interval throttle; fake time so tests can pin the
+// `performance.now()` drives the min-interval throttle; fake time so tests can pin the
 // "ping is allowed to fire" / "throttled" boundary deterministically.
 beforeEach(() => vi.useFakeTimers({ now: 1_000_000 }))
 afterEach(() => vi.useRealTimers())
 
 /** A sender's wire that held nothing as its credit ran out, and delivered right up to the ack. */
 const EMPTY = 0
-const upToAck = () => Infinity
+const upToAck = { deliveredBefore: () => Infinity }
 
 // Sample shape: `bytesAtPingSent` is snapshotted *after* the first `onReceive`
 // increments the byte counter, so the sample is the bytes that arrive
@@ -48,7 +48,7 @@ describe('BdpEstimator', () => {
   })
 
   // The "one ping in flight" invariant: subsequent receives during the same RTT
-  // window must NOT fire additional pings. Catches a missing `_pingInFlight` guard.
+  // window must NOT fire additional pings. Catches a missing `pingInFlight` guard.
   it('does not fire another ping while one is in flight', () => {
     const bdp = new BdpEstimator()
     bdp.onReceive(1024)
@@ -190,7 +190,6 @@ describe('BdpEstimator', () => {
   it('onPingAck without an outstanding ping returns no-grow for both axes', () => {
     const bdp = new BdpEstimator()
     expect(bdp.onPingAck({ probe: bdp.probe, backlog: EMPTY, pathRtt: Infinity }, upToAck)).toEqual({
-      acknowledged: false,
       bytes: 'sample-too-small',
       msgs: 'sample-too-small',
     })
@@ -214,7 +213,6 @@ describe('BdpEstimator', () => {
 
     expect(bdp.byteWindow).toBe(grown) // preserved
     expect(bdp.onPingAck({ probe: bdp.probe, backlog: EMPTY, pathRtt: Infinity }, upToAck)).toEqual({
-      acknowledged: false,
       bytes: 'sample-too-small',
       msgs: 'sample-too-small',
     }) // stale ack ignored
@@ -240,7 +238,7 @@ describe('BdpEstimator', () => {
     bdp.onReceive(1)
     bdp.onReceive(CREDIT_WINDOW_INITIAL_BYTES) // huge byte sample, msg sample = 2
     const dec = bdp.onPingAck({ probe: bdp.probe, backlog: EMPTY, pathRtt: Infinity }, upToAck)
-    expect(dec).toEqual({ acknowledged: true, bytes: 'grow', msgs: 'sample-too-small' })
+    expect(dec).toEqual({ bytes: 'grow', msgs: 'sample-too-small' })
   })
 
   // And the dual: many small frames saturate the msg sample but barely the byte

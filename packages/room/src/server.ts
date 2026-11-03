@@ -5,7 +5,7 @@ import {
   SERIALIZER_PREFIX_ROOM,
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   SERIALIZER_PREFIX_ROOM_REMOTE,
-} from './constants.js'
+} from './shared/constants.js'
 import './cloudflare/extension.js'
 
 /** Room's own replacer once Room's server code is loaded; until then no value is a room's. */

@@ -35,16 +35,14 @@ export default {
 // wrangler.jsonc
 {
   "compatibility_date": "2025-08-15", // or later
-  // Required: nodejs_als (nodejs_compat works too). With enable_request_signal, a Worker's request.signal aborts when its client disconnects.
+  // nodejs_als (or nodejs_compat): Broadcast and Room need it.
+  // enable_request_signal: a Worker's request.signal aborts when its client disconnects.
   "compatibility_flags": ["nodejs_als", "enable_request_signal"],
   "durable_objects": {
     "bindings": [
       { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
     ]
   },
-  "kv_namespaces": [
-    { "binding": "TelefuncKV", "id": "your-kv-namespace-id" }
-  ],
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["TelefuncDurableObject"] }
   ]
@@ -52,12 +50,9 @@ export default {
 ```
 {/* spellcheck-ignore:off */}
 
-> Fundamentally, channels are stateful: the server holds live state for each open channel. Cloudflare Workers, however, are stateless and ephemeral — any request can be served by any worker, and nothing is remembered between requests. The state therefore needs to live somewhere else — Durable Objects and KV are Cloudflare's primitives for exactly that:
+> Fundamentally, channels are stateful: the server holds live state for each open channel. Cloudflare Workers, however, are stateless and ephemeral — any request can be served by any worker, and nothing is remembered between requests. The state therefore needs to live somewhere else — Durable Objects are Cloudflare's primitive for exactly that: each channel lives on a Durable Object, which holds the connection and its state.
 >
-> - **Durable Objects** provide stateful compute: each channel lives on a Durable Object, which holds the connection and its state.
-> - **KV** provides shared storage: it's how stateless workers find the Durable Object that holds the state, no matter which worker a request lands on.
->
-> The Durable Object and KV bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel`, `Broadcast`, or `Room`, you can skip these bindings and use <Link href="/serve"><code>serve()</code></Link> instead.
+> The Durable Object binding is required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel`, `Broadcast`, or `Room`, you can skip this binding and use <Link href="/serve"><code>serve()</code></Link> instead.
 >
 > See <Link href="#architecture" /> for implementation details.
 
@@ -80,8 +75,6 @@ See: <Link href="/Telefunc" />.
 
 Telefunc uses [Durable Objects](https://developers.cloudflare.com/durable-objects/) for <Link href="/channel">channel</Link> state and <Link href="/channel#broadcast">broadcast</Link> fan-out. Channel state is in-memory JavaScript (closures, callbacks, local variables), so it must live on the same Durable Object that holds the WebSocket connection.
 
-[KV](https://developers.cloudflare.com/kv/) stores session tokens, which pin a browser to the same Durable Object across requests.
-
 ### Regions
 
 Telefunc maps each request to one of six geographic regions using Cloudflare's colocation data:
@@ -103,16 +96,22 @@ Every telefunction call and channel message from a client must reach the **same 
 
 The client sends a session token with every request, as the `session` query parameter. Telefunc routes all requests with the same token to the same Durable Object, in the region nearest to the client.
 
+That Durable Object names its region in its responses' `x-telefunc-home` header, and the client then sends it as the `home` query parameter, so its requests reach the same Durable Object from any region.
+
 <Warning>
 
-**CDN / reverse proxy** — make sure the `session` query parameter isn't stripped from requests. Without it, each request would be routed to a random Durable Object and channel state would be lost.
+**CDN / reverse proxy** — make sure the `session` and `home` query parameters aren't stripped from requests, nor the `x-telefunc-home` header from responses (a cross-origin server exposes it with `Access-Control-Expose-Headers`). Without the token, each request would be routed to a random Durable Object and channel state would be lost.
 
 </Warning>
 
 
 ### Rooms
 
-<Link href="/room">Room</Link> calls such as `Room.create()`, `Room.announce()` and `Room.close()` work anywhere in your Worker, including cron triggers and queue consumers. Server-side listeners (`subscribe()`, `onJoin()`, …) deliver to a Telefunc session, so install them inside a telefunction or a channel handler.
+<Link href="/room">Room</Link> calls such as `Room.create()`, `Room.announce()` and `Room.close()` work anywhere in your Worker, including cron triggers and queue consumers. A server-side listener (`subscribe()`, `onJoin()`, …) runs on the Durable Object of the client whose request installed it (see <Link href="#session-affinity" />), so install it inside a telefunction or a channel handler.
+
+A room's state lives in one Durable Object, in the region of the client that created the room (or in the <Link href="#configuration">`locationFallback`</Link> region, for a room created from a cron trigger or a queue consumer). A participant in another region waits two round trips to that region to join, and one to leave, change their participant metadata or send a message. Messages and join and leave events travel from that region to each participant, so a participant in another region receives them about half a round trip later than one in the room's region.
+
+The room's state is kept in its Durable Object's storage, so the room survives a deployment. A participant's connection doesn't: when the Durable Object holding the connection is evicted, the participant's `me.onLeave()` gets `cause.type: 'disconnected'`. Telefunc doesn't rejoin it for you: from `me.onLeave()`, call the telefunction that returned the room again (see <Link href="/room#create-and-join-a-room" />). The other participants see the old participant leave about two minutes later. That is the room's own timer, separate from the broadcast <Link href="#presence">presence</Link> TTL.
 
 ## Scaling
 
@@ -139,7 +138,7 @@ Only specified regions get Durable Objects. Requests from unspecified regions fa
 
 <Link href="/channel#broadcast">Broadcasts</Link> fan out across all regions automatically.
 
-`publish()` works anywhere in your Worker, including cron triggers and queue consumers. A server-side `subscribe()` delivers to a Telefunc session, so subscribe inside a telefunction or a channel handler.
+`publish()` works anywhere in your Worker, including cron triggers and queue consumers. A server-side `subscribe()` runs on the Durable Object of the client whose request installed it, so subscribe inside a telefunction or a channel handler.
 
 ### How it works
 
@@ -194,7 +193,7 @@ A Durable Object registers with the authority on its first subscription to a key
 | Guarantee | Details |
 |---|---|
 | Ordering | Every subscriber receives a key's publishes in `seq` order. |
-| Delivery | `publish()` resolves once the key's authority has handed the message to every Durable Object with subscribers. Delivery to clients then happens over the channel connection. |
+| Delivery | `publish()` resolves once the message has reached every Durable Object with subscribers. If a Durable Object can't take it, `publish()` rejects. That Durable Object's subscribers miss the message, while every other subscriber still gets it, so publishing it again delivers it twice to them. Delivery to clients then happens over the channel connection. |
 
 > Once a broadcast message reaches a Durable Object, it has the same buffering and replay guarantees as regular channel messages.
 
@@ -204,7 +203,6 @@ A Durable Object registers with the authority on its first subscription to a key
 ```js
 const telefunc = new Telefunc({
   bindingName: 'TelefuncDurableObject',  // DO binding name (default)
-  kvBindingName: 'TelefuncKV',           // KV binding name (default)
   instanceName: 'telefunc',              // Base name for DO instances (default)
   scale: 1,                              // DOs per region (default)
   locationFallback: 'weur',              // Fallback region (default)

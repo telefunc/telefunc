@@ -25,8 +25,7 @@ type Entry = {
  *
  * The scan timer runs **only while entries are tracked** — it starts on the first
  * `register()` and stops once the set empties. So a single shared instance keeps no
- * timer when idle: an isolate with nothing tracked (e.g. a Cloudflare Durable Object
- * with no open callback/stream channels) has no pending work and can hibernate.
+ * timer when idle.
  */
 class GcRegistry {
   private finalReg: FinalizationRegistry<Entry>

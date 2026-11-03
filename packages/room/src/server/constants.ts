@@ -1,7 +1,8 @@
 export {
   ROOM_CLOUDFLARE_EXTENSION,
+  ROOM_CLOUDFLARE_PREFIX,
   ROOM_HEARTBEAT_INTERVAL_MS,
-  ROOM_SESSION_TTL_MS,
+  ROOM_LEASE_TTL_MS,
   ROOM_TAIL_HOLD_MAX,
   ROOM_TAIL_HOLD_CODE_UNITS_MAX,
   ROOM_REPLAY_HOLD_BYTES_MAX,
@@ -19,13 +20,15 @@ export {
   ROOM_DEMAND_PAGE_ENTRIES,
   ROOM_META_REPAIR_MS,
   ROOM_TOMBSTONE_TTL_MS,
+  ROOM_DEPARTING_RECORD_MS,
   ROOM_CLOSE_LEASE_MS,
   ROOM_LAPSE_AFTER_CLOSE_MS,
+  ROOM_GUARD_USAGE,
 }
 
 const ROOM_HEARTBEAT_INTERVAL_MS = 30_000
-// Four heartbeats: a server's session in a room lapses only after several renewals in a row were missed.
-const ROOM_SESSION_TTL_MS = ROOM_HEARTBEAT_INTERVAL_MS * 4
+// Four heartbeats: a server's lease in a room lapses only after several renewals in a row were missed.
+const ROOM_LEASE_TTL_MS = ROOM_HEARTBEAT_INTERVAL_MS * 4
 // A tail is a bounded recent suffix, not history: enforce both entry count and serialized code units.
 const ROOM_TAIL_HOLD_MAX = 256
 const ROOM_TAIL_HOLD_CODE_UNITS_MAX = 1024 * 1024
@@ -58,8 +61,16 @@ const ROOM_DEMAND_PAGE_ENTRIES = 1024
 // exchange and its publish, or the lane lost it, so a whole read repairs it.
 const ROOM_META_REPAIR_MS = 1_000
 const ROOM_TOMBSTONE_TTL_MS = 60_000
+// How long a member's departing record outlives its leave: several heartbeats, each of which reads the roster of a view
+// behind the control lane, so a view that missed the leave event reads the record before the backend expires it.
+const ROOM_DEPARTING_RECORD_MS = ROOM_HEARTBEAT_INTERVAL_MS * 4
 const ROOM_CLOSE_LEASE_MS = 15_000
 /** How long past an unheld room's close its head lapses: the close that server's timer starts lands well before. */
 const ROOM_LAPSE_AFTER_CLOSE_MS = 5_000
-/** The name Room's Cloudflare extension registers its `durableObject` and session calls under. */
+/** The name Room's Cloudflare extension registers its `durableObject` under. */
 const ROOM_CLOUDFLARE_EXTENSION = 'room'
+/** Room shares the Telefunc Durable Object namespace with sessions and Broadcast, and Broadcast's routes with its keys,
+ *  so each of its Durable Object names and route keys starts with this. */
+const ROOM_CLOUDFLARE_PREFIX = '__telefunc_room__:'
+/** What `Room.guard()` says of a room Room's server code didn't make. */
+const ROOM_GUARD_USAGE = 'Room.guard() expects a room obtained from Room.get()/Room.create()'

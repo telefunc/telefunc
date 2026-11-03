@@ -3,12 +3,10 @@ export {
   DEFAULT_BROADCAST_BUCKETS,
   KNOWN_BROADCAST_BUCKETS,
   TELEFUNC_BROADCAST_BUCKET_HEADER,
-  TELEFUNC_SESSION_HEADER,
   TELEFUNC_SHARD_HEADER,
   assertLocationFallbackIsScaled,
-  getBucketCoordinatorShardIndices,
+  getBucketCoordinatorScale,
   getDeterministicKeyBucketIndex,
-  getScaleCountForBucket,
   readForwardedTarget,
   resolveCloudflareLocationHint,
   resolveSessionRoutingTarget,
@@ -35,8 +33,6 @@ const DEFAULT_BROADCAST_BUCKETS = [
 const TELEFUNC_BROADCAST_BUCKET_HEADER = 'x-telefunc-broadcast-bucket'
 /** The session Durable Object's name, which it writes into its KV pin. */
 const TELEFUNC_SHARD_HEADER = 'x-telefunc-shard'
-/** Internal: forwarded to the DO with the session token its client presented. */
-const TELEFUNC_SESSION_HEADER = 'x-telefunc-session'
 const KNOWN_BROADCAST_BUCKETS = new Set<string>(DEFAULT_BROADCAST_BUCKETS as readonly string[])
 
 type LocationBucket = DurableObjectLocationHint
@@ -45,7 +41,6 @@ type CloudflareRequest = Request & { cf?: { colo?: string; continent?: string } 
 type SessionRoutingTarget = {
   sessionInstanceName: string
   locationBucket: LocationBucket
-  shardOrdinal: number
 }
 
 // Fallback regions for continents without a direct DurableObject location hint:
@@ -58,22 +53,6 @@ const CLOUDFLARE_CONTINENT_LOCATION_HINT_MAP = {
   AN: 'oc',
 } as const satisfies Partial<Record<string, DurableObjectLocationHint>>
 
-/**
- * Maps one location bucket to its local coordinator-shard ordinals.
- * Buckets no longer share one global shard index space; each bucket owns ordinals `0..n-1` independently.
- */
-function getBucketCoordinatorShardIndices(
-  scale: CloudflareScale | undefined,
-  locationBucket: LocationBucket,
-): number[] {
-  const shardCount = getBucketCoordinatorScale(scale, locationBucket)
-  assert(
-    shardCount > 0,
-    `Cloudflare bucket coordinator scale does not define any shards for location bucket "${locationBucket}".`,
-  )
-  return Array.from({ length: shardCount }, (_, shardOrdinal) => shardOrdinal)
-}
-
 /** Builds the concrete session Durable Object name for one bucket-local shard ordinal. */
 function getSessionShardName(baseInstanceName: string, locationBucket: LocationBucket, shardOrdinal: number): string {
   assert(
@@ -84,7 +63,8 @@ function getSessionShardName(baseInstanceName: string, locationBucket: LocationB
 }
 
 /**
- * Derives a session shard target from the request's Cloudflare location metadata and the current scale.
+ * Derives a session shard target from the session's home, else the request's Cloudflare location metadata, and the
+ * current scale.
  */
 function resolveSessionRoutingTarget(
   baseInstanceName: string,
@@ -92,18 +72,23 @@ function resolveSessionRoutingTarget(
   request: Request,
   locationFallback: DurableObjectLocationHint,
   token: string,
+  home: string | null,
 ): SessionRoutingTarget {
-  let locationBucket = resolveCloudflareLocationHint(request, locationFallback)
+  // The region its session Durable Object named, from any region the page roams to.
+  let locationBucket =
+    home !== null && KNOWN_BROADCAST_BUCKETS.has(home)
+      ? (home as LocationBucket)
+      : resolveCloudflareLocationHint(request, locationFallback)
   // With a per-region `scale` map, a recognized region the user didn't list has no Durable Objects
   // of its own — route those requests to the `locationFallback` region instead of failing.
   if (getScaleCountForBucket(scale, locationBucket) === 0) {
     locationBucket = locationFallback
   }
-  // By the session's token, so its calls and channels in one region reach one shard without a KV pin.
+  // By the session's token, so its calls and channels reach one shard of its region.
   const shardOrdinal = getDeterministicKeyBucketIndex(token, getBucketScale(scale, locationBucket))
   const sessionInstanceName = getSessionShardName(baseInstanceName, locationBucket, shardOrdinal)
 
-  return { sessionInstanceName, locationBucket, shardOrdinal }
+  return { sessionInstanceName, locationBucket }
 }
 
 /** The session Durable Object and region the Worker forwarded `request` to, as its routing headers name them. */
@@ -205,5 +190,9 @@ function getScaleCountForBucket(scale: CloudflareScale | undefined, locationBuck
  */
 function getBucketCoordinatorScale(scale: CloudflareScale | undefined, locationBucket: LocationBucket): number {
   const sessionScale = getBucketScale(scale, locationBucket)
-  return sessionScale === 0 ? 0 : Math.ceil(sessionScale / 2)
+  assert(
+    sessionScale > 0,
+    `Cloudflare bucket coordinator scale does not define any shards for location bucket "${locationBucket}".`,
+  )
+  return Math.ceil(sessionScale / 2)
 }
