@@ -533,8 +533,8 @@ importers:
         specifier: ^19.2.3
         version: 19.2.3(@types/react@19.2.14)
       '@vikejs/hono':
-        specifier: ^0.2.0
-        version: 0.2.1(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)(vike@0.4.268(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(react-streaming@0.4.17(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(srvx@0.12.8)(vite@8.0.16(@types/node@22.20.5)(esbuild@0.27.3)(jiti@2.7.0)))
+        specifier: ^0.4.1
+        version: 0.4.1(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)(vike@0.4.268(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(react-streaming@0.4.17(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(srvx@0.12.8)(vite@8.0.16(@types/node@22.20.5)(esbuild@0.27.3)(jiti@2.7.0)))
       '@vitejs/plugin-react':
         specifier: ^6.0.2
         version: 6.0.2(vite@8.0.16(@types/node@22.20.5)(esbuild@0.27.3)(jiti@2.7.0))
@@ -557,7 +557,7 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
       vike:
-        specifier: ^0.4.259
+        specifier: ^0.4.268
         version: 0.4.268(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(react-streaming@0.4.17(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(srvx@0.12.8)(vite@8.0.16(@types/node@22.20.5)(esbuild@0.27.3)(jiti@2.7.0))
       vike-react:
         specifier: ^0.6.21
@@ -3697,9 +3697,6 @@ packages:
     resolution: {integrity: sha512-4P60NLwPQRZPDyEdUR10Gf8/LHQKOQxONdxFBu6beWW4i5Ek+WLP+X3bSi6FvW6P/mjyRdUQZr4i/K62Zn+bbQ==}
     engines: {node: '>=22'}
 
-  '@universal-middleware/hono@0.4.22':
-    resolution: {integrity: sha512-ojQXPb7QRsFrxyfN3nY44ZGa4Om/TmG9hcb4VLhTbwG6YFc7cxAi2nuOdiKozL6gV28CNLxCD7ob9I/TYMLDug==}
-
   '@universal-middleware/hono@0.6.1':
     resolution: {integrity: sha512-Zw74AwvjPxV0W6sHTTZKQZQU4xuz1U9Ffl43iJn74GrHRvozw5V1QcZVG9UkTw6qzFhzE+mVWU4QxZr5b65xHA==}
     engines: {node: '>=22'}
@@ -3720,12 +3717,6 @@ packages:
     peerDependencies:
       express: ^4.0.0 || ^5.0.0
       vike: ^0.4.268
-
-  '@vikejs/hono@0.2.1':
-    resolution: {integrity: sha512-p63PBM88spYeMe3nl8YKbgirsxlGptrBDrXb1SxqnOjXRsb7GWsmRbuGC8axDBguxHHLM8q8Zgi4pMSQPe3t2A==}
-    peerDependencies:
-      hono: ^4.0.0
-      vike: ^0.4.255
 
   '@vikejs/hono@0.4.1':
     resolution: {integrity: sha512-ggWMEj6+OPivPveC6A1wkpT210VWP5W+paEBv1JXYGQPZoY/027vLWIT0IyXWhDzz8mKBl76xL/LTqcgkoXAsA==}
@@ -9760,20 +9751,6 @@ snapshots:
       - hono
       - srvx
 
-  '@universal-middleware/hono@0.4.22(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)':
-    dependencies:
-      '@universal-middleware/core': 0.4.18(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)
-    transitivePeerDependencies:
-      - '@cloudflare/workers-types'
-      - '@hattip/core'
-      - '@types/express'
-      - '@webroute/route'
-      - elysia
-      - fastify
-      - h3
-      - hono
-      - srvx
-
   '@universal-middleware/hono@0.6.1(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)':
     dependencies:
       '@universal-middleware/core': 0.7.2(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)
@@ -9837,9 +9814,9 @@ snapshots:
       - hono
       - srvx
 
-  '@vikejs/hono@0.2.1(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)(vike@0.4.268(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(react-streaming@0.4.17(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(srvx@0.12.8)(vite@8.0.16(@types/node@22.20.5)(esbuild@0.27.3)(jiti@2.7.0)))':
+  '@vikejs/hono@0.4.1(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)(vike@0.4.268(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(react-streaming@0.4.17(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(srvx@0.12.8)(vite@8.0.16(@types/node@22.20.5)(esbuild@0.27.3)(jiti@2.7.0)))':
     dependencies:
-      '@universal-middleware/hono': 0.4.22(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)
+      '@universal-middleware/hono': 0.6.1(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)
       hono: 4.13.14
       vike: 0.4.268(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(react-streaming@0.4.17(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(srvx@0.12.8)(vite@8.0.16(@types/node@22.20.5)(esbuild@0.27.3)(jiti@2.7.0))
     transitivePeerDependencies:
