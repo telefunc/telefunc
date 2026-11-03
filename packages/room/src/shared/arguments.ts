@@ -19,6 +19,7 @@ import { isObject } from 'telefunc/__internal'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertUsage } from '../utils/assert.js'
 import { assignAttributes } from './MemberMeta.js'
+import { freezeMeta } from './freezeMeta.js'
 import type { JoinOptions, LeaveCause, ParticipantMeta, RoomMeta, Sender } from '../types.js'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -30,16 +31,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function ownMessage<T>(value: T): T {
   return parse(stringify(value)) as T
 }
-/** Take ownership of metadata at a state boundary and expose only the owned value, frozen at its top. */
+/** Take ownership of metadata at a state boundary and expose only the owned value, frozen. */
 function ownMetadata<T extends RoomMeta | ParticipantMeta>(meta: T): T {
-  return Object.freeze(ownMessage(meta))
+  return freezeMeta(ownMessage(meta))
 }
 function ownLeaveCause(cause: LeaveCause): LeaveCause {
   return Object.freeze({ ...cause })
 }
 /** A detached snapshot of a member, for guards and for senders a view doesn't know. */
 function senderSnapshot(id: string, meta: ParticipantMeta, identity: string | null): Sender {
-  return Object.freeze({ id, meta, identity })
+  return Object.freeze({ id, meta: freezeMeta(meta), identity })
 }
 /** The cause of a leave a view didn't follow, once nothing records it. */
 function unknownLeaveCause(): LeaveCause {
@@ -63,7 +64,7 @@ function recipientId(to: string | Sender): string {
 function mergeAttributes(meta: ParticipantMeta, attrs: ParticipantMeta): ParticipantMeta {
   const next: ParticipantMeta = { ...meta }
   assignAttributes(next, attrs)
-  return Object.freeze(next)
+  return freezeMeta(next)
 }
 function assertParticipantIdentity(identity: unknown, where: string): asserts identity is string {
   assertUsage(

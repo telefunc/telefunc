@@ -1,6 +1,7 @@
 export { MemberMeta, assignAttributes }
 export type { MetaRewinds }
 
+import { freezeMeta } from './freezeMeta.js'
 import type { MemberMetaUpdate } from './protocol.js'
 import type { ParticipantMeta } from '../types.js'
 
@@ -31,7 +32,7 @@ class MemberMeta {
 
   constructor({ meta, seq, rewinds = NEVER_REWOUND, connected = true }: MemberMetaOptions) {
     this._connected = connected
-    this._object = Object.freeze(meta)
+    this._object = freezeMeta(meta)
     this.keys = Object.keys(this._object).length
     this._seq = seq
     this.rewinds = rewinds
@@ -56,7 +57,7 @@ class MemberMeta {
     const next: ParticipantMeta = { ...this._object }
     let keys = this.keys
     for (const attrs of merges) keys += assignAttributes(next, attrs)
-    this._object = Object.freeze(next)
+    this._object = freezeMeta(next)
     this.keys = keys
     this.merges = null
     this.mergedKeys = 0
@@ -79,7 +80,7 @@ class MemberMeta {
     const seq = this.seq
     if (update.seq <= seq) return 'stale'
     if ('meta' in update) {
-      this._object = Object.freeze(update.meta)
+      this._object = freezeMeta(update.meta)
       this.keys = Object.keys(this._object).length
       this.merges = null
       this.mergedKeys = 0

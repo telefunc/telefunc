@@ -26,6 +26,7 @@ import { Slice } from '../../shared/Slice.js'
 import { participantGoneError, roomClosedError } from '../../shared/errors.js'
 import { compareMetaEntries, metaEntriesAt } from '../../shared/RoomMetaState.js'
 import { mergeAttributes } from '../../shared/arguments.js'
+import { freezeMeta } from '../../shared/freezeMeta.js'
 import type { MemberMetaUpdate, RoomCtrlEnvelope, RoomMetaEntry, RoomMetaUpdate } from '../../shared/protocol.js'
 import type { RoomConfigRecord, RoomMemberRecord, RoomIncarnation } from '../protocol.js'
 import type { ParticipantMeta, RoomMeta } from '../../types.js'
@@ -466,5 +467,5 @@ async function memberMetaOf(id: string, recordGen: number, cells: MemberMetaCell
     Object.defineProperty(meta, key, { value, enumerable: true, configurable: true, writable: true })
     if (i % CELL_PAGE_SIZE === 0 && slice.over) await slice.next()
   }
-  return Object.freeze(meta)
+  return freezeMeta(meta)
 }

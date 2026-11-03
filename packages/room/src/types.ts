@@ -38,9 +38,10 @@ type RoomShield<Pub> = {
   }
 }
 
-/** Room metadata (e.g. topic). Must be serializable. */
+/** Room metadata (e.g. topic). Must be serializable. What Room hands you is frozen, nested objects included. */
 type RoomMeta = Record<string, unknown>
-/** Participant metadata (e.g. name, score). Must be serializable. */
+/** Participant metadata (e.g. name, score). Must be serializable. What Room hands you is frozen, nested objects
+ *  included. */
 type ParticipantMeta = Record<string, unknown>
 
 /** A verified sender: a plain `{ id, meta, identity }`, or a live `RemoteParticipant`, which has the same fields. */

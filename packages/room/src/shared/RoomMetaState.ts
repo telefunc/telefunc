@@ -1,5 +1,6 @@
 export { RoomMetaState, compareMetaEntries, metaEntriesAt, metaObject }
 
+import { freezeMeta } from './freezeMeta.js'
 import type { RoomMetaEntry, RoomMetaUpdate } from './protocol.js'
 import type { RoomMeta } from '../types.js'
 
@@ -14,7 +15,7 @@ function metaEntriesAt(meta: RoomMeta, seq: number): RoomMetaEntry[] {
 }
 
 function metaObject(entries: Iterable<RoomMetaEntry>): RoomMeta {
-  return Object.freeze(Object.fromEntries(Array.from(entries, ([key, value]) => [key, value])))
+  return freezeMeta(Object.fromEntries(Array.from(entries, ([key, value]) => [key, value])))
 }
 
 type RoomMetaStateOptions = { entries: readonly RoomMetaEntry[]; seq: number }
