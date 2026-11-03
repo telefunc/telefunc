@@ -92,23 +92,6 @@ import { disposeBackend } from '../../backend/install.js'
 import type { BroadcastPublishRequest } from './broadcast.js'
 import type { BroadcastDelivery } from './extensions.js'
 
-function createMockKV(): KVNamespace {
-  const store = new Map<string, { value: string; expirationTtl?: number }>()
-  return {
-    async get(key: string, type?: string) {
-      const entry = store.get(key)
-      if (!entry) return null
-      return type === 'json' ? JSON.parse(entry.value) : entry.value
-    },
-    async put(key: string, value: string, options?: { expirationTtl?: number }) {
-      store.set(key, { value, expirationTtl: options?.expirationTtl })
-    },
-    async delete(key: string) {
-      store.delete(key)
-    },
-  } as unknown as KVNamespace
-}
-
 function createBinding() {
   const fetch = vi.fn(async (request: Request) => new Response(request.headers.get('x-telefunc-shard') ?? 'missing'))
   const get = vi.fn((id: { name: string }, options?: { locationHint: string }) => {
@@ -162,7 +145,7 @@ describe('cloudflare adapter entrypoint', () => {
 
     await tf.serve({
       request,
-      env: { TelefuncDurableObject: binding, TelefuncKV: createMockKV() } as unknown as Cloudflare.Env,
+      env: { TelefuncDurableObject: binding } as unknown as Cloudflare.Env,
     })
 
     expect(mocks.transportInstances).toHaveLength(1)
@@ -212,12 +195,11 @@ describe('cloudflare adapter entrypoint', () => {
 
   it('applies jurisdiction wrapping before binding lookups', async () => {
     const { binding, jurisdiction } = createBinding()
-    const kv = createMockKV()
     const tf = new Telefunc({ jurisdiction: 'eu' as DurableObjectJurisdiction })
 
     await tf.serve({
       request: new Request('https://telefunc.test/_telefunc'),
-      env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
+      env: { TelefuncDurableObject: binding } as unknown as Cloudflare.Env,
     })
 
     expect(jurisdiction).toHaveBeenCalledWith('eu')
