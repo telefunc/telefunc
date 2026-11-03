@@ -107,12 +107,12 @@ function testPublish(isDev: boolean, inDocker = false) {
 
   // The in-memory adapter: these lanes publish through Redis.
   if (!inDocker && !process.env.REDIS_URL) {
-    test('broadcast: in memory, a loop of publishes delivers in it, a listener publishing 128 MiB holds at most bufferLimitBinary and rejects the rest, and answers that await let a timer fire', async () => {
+    test('broadcast: in memory, a loop of publishes delivers in it, a listener publishing 125 MiB holds at most bufferLimitBinary and rejects the rest, one 8 MiB message alone goes through, and answers that await let a timer fire', async () => {
       await navigate(`${getServerUrl()}/publish`)
       await page.click('#test-in-memory-publishes')
       await autoRetry(
         async () => {
-          const { loop, listenerBatch, timerFiredMidChain } = await getResult<any>('#publish-result')
+          const { loop, listenerBatch, aloneBytes, timerFiredMidChain } = await getResult<any>('#publish-result')
           expect(loop).deep.equal({ deliveredInLoop: 3000, inOrder: true })
           // 2 MiB of 64 KiB messages.
           expect(listenerBatch.delivered).greaterThan(20)
@@ -120,6 +120,7 @@ function testPublish(isDev: boolean, inDocker = false) {
           expect(listenerBatch.delivered + listenerBatch.rejected).toBe(2000)
           expect(listenerBatch.errors).deep.equal(['ChannelOverflowError'])
           expect(listenerBatch.admittedInOrder).toBe(true)
+          expect(aloneBytes).toBe(8 * 1024 * 1024)
           expect(timerFiredMidChain).toBe(true)
         },
         { timeout: 30_000 },

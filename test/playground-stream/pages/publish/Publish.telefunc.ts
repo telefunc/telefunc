@@ -408,7 +408,8 @@ async function onBroadcastBurstThenClose() {
   return serverLoop
 }
 
-/** The in-memory adapter: a loop of publishes, a listener publishing a batch, and a listener answering its own key. */
+/** The in-memory adapter: a loop of publishes, a listener publishing a batch, then one big message, and a listener
+ *  answering its own key. */
 async function onInMemoryPublishes() {
   const id = crypto.randomUUID()
   const seen: number[] = []
@@ -442,6 +443,17 @@ async function onInMemoryPublishes() {
   stopBatch()
   stopStart()
 
+  let aloneBytes = 0
+  let alone: unknown
+  const stopAlone = Broadcast.subscribeBinary(`alone:${id}`, (data) => void (aloneBytes = data.byteLength))
+  const stopAloneStart = Broadcast.subscribe(`alone-start:${id}`, () => {
+    alone = Broadcast.publishBinary(`alone:${id}`, new Uint8Array(8 * 1024 * 1024))
+  })
+  await Broadcast.publish(`alone-start:${id}`, 'go')
+  await alone
+  stopAlone()
+  stopAloneStart()
+
   let answers = 0
   let answersWhenTimerFired = -1
   setTimeout(() => (answersWhenTimerFired = answers), 0)
@@ -454,7 +466,12 @@ async function onInMemoryPublishes() {
   })
   void Broadcast.publish(`chain:${id}`, 'start')
   await finished
-  return { loop, listenerBatch, timerFiredMidChain: answersWhenTimerFired >= 0 && answersWhenTimerFired < 20_000 }
+  return {
+    loop,
+    listenerBatch,
+    aloneBytes,
+    timerFiredMidChain: answersWhenTimerFired >= 0 && answersWhenTimerFired < 20_000,
+  }
 }
 
 async function readSlowly(room: BroadcastChannel<string>, kind: 'slow' | 'held') {
