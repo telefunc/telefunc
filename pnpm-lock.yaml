@@ -659,8 +659,8 @@ importers:
         specifier: ^19.2.3
         version: 19.2.3(@types/react@19.2.14)
       '@vikejs/hono':
-        specifier: ^0.2.0
-        version: 0.2.1(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)(vike@0.4.268(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(react-streaming@0.4.17(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(srvx@0.12.8)(vite@8.0.16(@types/node@22.20.5)(esbuild@0.27.3)(jiti@2.7.0)))
+        specifier: ^0.4.1
+        version: 0.4.1(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)(vike@0.4.268(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(react-streaming@0.4.17(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(srvx@0.12.8)(vite@8.0.16(@types/node@22.20.5)(esbuild@0.27.3)(jiti@2.7.0)))
       '@vitejs/plugin-react':
         specifier: ^6.0.2
         version: 6.0.2(vite@8.0.16(@types/node@22.20.5)(esbuild@0.27.3)(jiti@2.7.0))
@@ -686,7 +686,7 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
       vike:
-        specifier: ^0.4.259
+        specifier: ^0.4.268
         version: 0.4.268(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(react-streaming@0.4.17(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(srvx@0.12.8)(vite@8.0.16(@types/node@22.20.5)(esbuild@0.27.3)(jiti@2.7.0))
       vike-react:
         specifier: ^0.6.21
@@ -3707,9 +3707,6 @@ packages:
     resolution: {integrity: sha512-4P60NLwPQRZPDyEdUR10Gf8/LHQKOQxONdxFBu6beWW4i5Ek+WLP+X3bSi6FvW6P/mjyRdUQZr4i/K62Zn+bbQ==}
     engines: {node: '>=22'}
 
-  '@universal-middleware/hono@0.4.22':
-    resolution: {integrity: sha512-ojQXPb7QRsFrxyfN3nY44ZGa4Om/TmG9hcb4VLhTbwG6YFc7cxAi2nuOdiKozL6gV28CNLxCD7ob9I/TYMLDug==}
-
   '@universal-middleware/hono@0.6.1':
     resolution: {integrity: sha512-Zw74AwvjPxV0W6sHTTZKQZQU4xuz1U9Ffl43iJn74GrHRvozw5V1QcZVG9UkTw6qzFhzE+mVWU4QxZr5b65xHA==}
     engines: {node: '>=22'}
@@ -3730,12 +3727,6 @@ packages:
     peerDependencies:
       express: ^4.0.0 || ^5.0.0
       vike: ^0.4.268
-
-  '@vikejs/hono@0.2.1':
-    resolution: {integrity: sha512-p63PBM88spYeMe3nl8YKbgirsxlGptrBDrXb1SxqnOjXRsb7GWsmRbuGC8axDBguxHHLM8q8Zgi4pMSQPe3t2A==}
-    peerDependencies:
-      hono: ^4.0.0
-      vike: ^0.4.255
 
   '@vikejs/hono@0.4.1':
     resolution: {integrity: sha512-ggWMEj6+OPivPveC6A1wkpT210VWP5W+paEBv1JXYGQPZoY/027vLWIT0IyXWhDzz8mKBl76xL/LTqcgkoXAsA==}
@@ -8114,7 +8105,7 @@ snapshots:
     dependencies:
       '@simple-libs/child-process-utils': 1.0.1
       '@simple-libs/stream-utils': 1.1.0
-      semver: 7.7.4
+      semver: 7.8.5
     optionalDependencies:
       conventional-commits-filter: 5.0.0
       conventional-commits-parser: 6.2.0
@@ -8750,7 +8741,7 @@ snapshots:
       https-proxy-agent: 7.0.6
       node-fetch: 2.6.7(encoding@0.1.13)
       nopt: 8.1.0
-      semver: 7.7.4
+      semver: 7.8.5
       tar: 7.5.22
     transitivePeerDependencies:
       - encoding
@@ -8972,7 +8963,7 @@ snapshots:
     dependencies:
       '@types/estree': 1.0.8
       estree-walker: 2.0.2
-      picomatch: 4.0.4
+      picomatch: 4.0.7
     optionalDependencies:
       rollup: 4.44.0
 
@@ -9588,7 +9579,7 @@ snapshots:
       fast-glob: 3.3.3
       is-glob: 4.0.3
       minimatch: 9.0.5
-      semver: 7.7.4
+      semver: 7.8.5
       ts-api-utils: 2.0.1(typescript@6.0.3)
       typescript: 6.0.3
     transitivePeerDependencies:
@@ -9808,20 +9799,6 @@ snapshots:
       - hono
       - srvx
 
-  '@universal-middleware/hono@0.4.22(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)':
-    dependencies:
-      '@universal-middleware/core': 0.4.18(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)
-    transitivePeerDependencies:
-      - '@cloudflare/workers-types'
-      - '@hattip/core'
-      - '@types/express'
-      - '@webroute/route'
-      - elysia
-      - fastify
-      - h3
-      - hono
-      - srvx
-
   '@universal-middleware/hono@0.6.1(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)':
     dependencies:
       '@universal-middleware/core': 0.7.2(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)
@@ -9885,9 +9862,9 @@ snapshots:
       - hono
       - srvx
 
-  '@vikejs/hono@0.2.1(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)(vike@0.4.268(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(react-streaming@0.4.17(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(srvx@0.12.8)(vite@8.0.16(@types/node@22.20.5)(esbuild@0.27.3)(jiti@2.7.0)))':
+  '@vikejs/hono@0.4.1(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)(vike@0.4.268(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(react-streaming@0.4.17(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(srvx@0.12.8)(vite@8.0.16(@types/node@22.20.5)(esbuild@0.27.3)(jiti@2.7.0)))':
     dependencies:
-      '@universal-middleware/hono': 0.4.22(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)
+      '@universal-middleware/hono': 0.6.1(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(srvx@0.12.8)
       hono: 4.13.14
       vike: 0.4.268(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.13.14)(react-streaming@0.4.17(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(srvx@0.12.8)(vite@8.0.16(@types/node@22.20.5)(esbuild@0.27.3)(jiti@2.7.0))
     transitivePeerDependencies:
@@ -10430,7 +10407,7 @@ snapshots:
       conventional-commits-filter: 5.0.0
       handlebars: 4.7.7
       meow: 13.2.0
-      semver: 7.7.4
+      semver: 7.8.5
 
   conventional-changelog@7.0.2(conventional-commits-filter@5.0.0):
     dependencies:
@@ -11203,9 +11180,9 @@ snapshots:
     optionalDependencies:
       picomatch: 4.0.2
 
-  fdir@6.4.6(picomatch@4.0.4):
+  fdir@6.4.6(picomatch@4.0.7):
     optionalDependencies:
-      picomatch: 4.0.4
+      picomatch: 4.0.7
 
   fdir@6.5.0(picomatch@4.0.4):
     optionalDependencies:
@@ -11587,7 +11564,7 @@ snapshots:
 
   is-bun-module@1.3.0:
     dependencies:
-      semver: 7.7.4
+      semver: 7.8.5
 
   is-callable@1.2.7: {}
 
@@ -12473,7 +12450,7 @@ snapshots:
   normalize-package-data@7.0.0:
     dependencies:
       hosted-git-info: 8.1.0
-      semver: 7.7.4
+      semver: 7.8.5
       validate-npm-package-license: 3.0.4
 
   normalize-path@3.0.0: {}
@@ -13085,7 +13062,7 @@ snapshots:
     dependencies:
       color: 4.2.3
       detect-libc: 2.0.4
-      semver: 7.7.4
+      semver: 7.8.5
     optionalDependencies:
       '@img/sharp-darwin-arm64': 0.33.5
       '@img/sharp-darwin-x64': 0.33.5
@@ -13111,7 +13088,7 @@ snapshots:
     dependencies:
       color: 4.2.3
       detect-libc: 2.0.4
-      semver: 7.7.4
+      semver: 7.8.5
     optionalDependencies:
       '@img/sharp-darwin-arm64': 0.34.2
       '@img/sharp-darwin-x64': 0.34.2
@@ -13140,7 +13117,7 @@ snapshots:
     dependencies:
       '@img/colour': 1.1.0
       detect-libc: 2.1.2
-      semver: 7.7.4
+      semver: 7.8.5
     optionalDependencies:
       '@img/sharp-darwin-arm64': 0.34.5
       '@img/sharp-darwin-x64': 0.34.5
@@ -13427,8 +13404,8 @@ snapshots:
 
   tinyglobby@0.2.14:
     dependencies:
-      fdir: 6.4.6(picomatch@4.0.4)
-      picomatch: 4.0.4
+      fdir: 6.4.6(picomatch@4.0.7)
+      picomatch: 4.0.7
 
   tinyglobby@0.2.17:
     dependencies:

@@ -15,6 +15,8 @@ config.channel.reconnectTimeout = 15_000
 
 const tf = new Telefunc()
 const app = new Hono()
+// Vike's middlewares go before the app's routes, its handlers and pages after them.
+vike(app)
 
 installIdentityRoutes(app)
 
@@ -25,8 +27,6 @@ app.all('/_telefunc', async (c) => {
   const response = await tf.serve({ request: c.req.raw, context: { user } })
   return response ?? c.text('Not found', 404)
 })
-
-vike(app)
 
 export default {
   fetch: app.fetch,
