@@ -178,9 +178,16 @@ class Upgrade implements ProbeOwner {
     return this.state.tag === 'committing' || this.ready
   }
 
-  /** In a handoff, the channels its RECONCILED left out, which close unacknowledged once it ends; null outside one. */
-  get deferredOmitted(): number[] | null {
-    return this.committing?.deferredOmitted ?? null
+  /** From the barrier's emission until its join ends, or its attempt does before the flip. */
+  get handingOff(): boolean {
+    return this.committing !== null
+  }
+
+  /** Keeps the channels the handoff's RECONCILED left out, to close unacknowledged once its join ends. */
+  deferOmitted(ixes: number[]): void {
+    const u = this.committing
+    if (u === null) return
+    for (const ix of ixes) u.deferredOmitted.push(ix)
   }
 
   /** Whether `transport` is the wire a flipped handoff left. */
@@ -220,7 +227,7 @@ class Upgrade implements ProbeOwner {
 
   /** Tears down whichever upgrade phase is in flight. Returns the join's record when the flip had
    *  already happened — its buffered frames are then the caller's to drain — and null otherwise. */
-  teardown(): CommittingUpgrade | null {
+  private teardown(): CommittingUpgrade | null {
     const u = this.state
     if (u.tag === 'none') return null
     if (u.tag === 'committing' && u.flipped) {

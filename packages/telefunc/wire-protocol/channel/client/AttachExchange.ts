@@ -16,6 +16,8 @@ import { settledOrAborted } from '../../../utils/settledOrAborted.js'
 type ReconcileOutcome = {
   frames: OutboundFrame[]
   channelsToOpen: MuxChannel[]
+  /** With `deferOmitted`, the channels the RECONCILED left out, for the caller to close unacknowledged; else none. */
+  omitted: number[]
   reconcileComplete: boolean
 }
 
@@ -160,11 +162,11 @@ class AttachExchange {
     return { kind: 'reconcile', frame: encode.barrier({ sessionId, upgradeId, open }) }
   }
 
-  /** `deferredOmitted` collects, during an upgrade's handoff, the channels it leaves out; `upgradeReady`: an upgrade's
-   *  READY came, so its barrier, a RECONCILE too, goes next. */
+  /** `deferOmitted`: in an upgrade's handoff, the channels the RECONCILED left out close once its join ends, so they are
+   *  returned, not closed; `upgradeReady`: an upgrade's READY came, so its barrier, a RECONCILE too, goes next. */
   applyReconciled(
     ctrl: ReconciledPayload,
-    { deferredOmitted, upgradeReady }: { deferredOmitted: number[] | null; upgradeReady: boolean },
+    { deferOmitted, upgradeReady }: { deferOmitted: boolean; upgradeReady: boolean },
   ): ReconcileOutcome {
     this.reconciledWire = this.owner.wire
     this.session = ctrl.sessionId
@@ -173,7 +175,9 @@ class AttachExchange {
     const serverHas = this.settleAnswers(ctrl, inFlight)
     // Channels registered after this RECONCILE was built wait for the next one.
     const hasNewChannels = this.channels.hasUndeclared
-    const { frames, channelsToOpen } = this.attachNamed(inFlight, serverHas, deferredOmitted)
+    const { frames, channelsToOpen, omitted } = this.attachNamed(inFlight, serverHas)
+    // Before the drain: what their close sends queues behind the replays.
+    if (!deferOmitted) this.closeUnacknowledged(omitted)
 
     // What the server has: the channels this RECONCILE named that it attached, and those the ones before named.
     const attached = (ix: number): boolean => {
@@ -191,7 +195,7 @@ class AttachExchange {
       if (hasNewChannels) this.scheduleRegisterReconcile()
     }
 
-    return { frames, channelsToOpen, reconcileComplete: !hasNewChannels }
+    return { frames, channelsToOpen, omitted: deferOmitted ? omitted : [], reconcileComplete: !hasNewChannels }
   }
 
   /** Settles what `inFlight` asked with the RECONCILED that answers it: its probes, the ATTACH_RESULT frames that came
@@ -213,26 +217,31 @@ class AttachExchange {
     return serverHas
   }
 
-  /** Brings each channel `inFlight` named and the server attached to the server's state: the frames that replays, and
-   *  the channels that open on the wire. */
+  /** Brings each channel `inFlight` named and the server attached to the server's state: the frames that replays, the
+   *  channels that open on the wire, and those the server no longer has. */
   private attachNamed(
     { ixes, carriedFrom }: ReconcileInFlight,
     serverHas: Map<number, number>,
-    deferredOmitted: number[] | null,
-  ): { frames: OutboundFrame[]; channelsToOpen: MuxChannel[] } {
+  ): { frames: OutboundFrame[]; channelsToOpen: MuxChannel[]; omitted: number[] } {
     const frames: OutboundFrame[] = []
     const channelsToOpen: MuxChannel[] = []
+    const omitted: number[] = []
     for (const ix of ixes.keys()) {
       const record = this.channels.get(ix)
       if (record === undefined || record.awaited) continue
+      const lastSeq = serverHas.get(ix)
+      if (lastSeq === undefined) {
+        // One the server no longer has needs nothing more from the page, if closed; else it closes unacknowledged.
+        if (record.state.tag === 'closed') this.gate.release(record)
+        else omitted.push(ix)
+        continue
+      }
       // The replay stops before the first seq the wire carries behind the RECONCILE.
       const carriedSeq = carriedFrom.get(ix) ?? Infinity
-      const replay = this.attachRecord(record, serverHas.get(ix), carriedSeq - 1, deferredOmitted)
-      if (replay === null) continue
-      for (const frame of replay) frames.push(frame)
+      for (const frame of this.attachRecord(record, lastSeq, carriedSeq - 1)) frames.push(frame)
       if (record.state.tag !== 'closed') channelsToOpen.push(record.channel)
     }
-    return { frames, channelsToOpen }
+    return { frames, channelsToOpen, omitted }
   }
 
   /** An awaited channel's own RECONCILED entry: `lastSeq` if the server attached it, null if not. False where it
@@ -387,26 +396,9 @@ class AttachExchange {
 
   // ── The RECONCILED ──
 
-  /** What a channel the RECONCILE named replays to the server, its state brought to the server's; null if let go. */
-  private attachRecord(
-    record: ChannelRecord,
-    lastSeq: number | undefined,
-    throughSeq: number,
-    deferredOmitted: number[] | null,
-  ): OutboundFrame[] | null {
-    if (record.state.tag === 'closed') {
-      // One the server no longer has needs nothing more from the page.
-      if (lastSeq === undefined) {
-        this.gate.release(record)
-        return null
-      }
-      this.channels.serverHas(record, record.state, lastSeq)
-    }
-    if (lastSeq === undefined) {
-      if (deferredOmitted) deferredOmitted.push(record.ix)
-      else this.closeUnacknowledged([record.ix])
-      return null
-    }
+  /** What a channel the RECONCILE named and the server attached replays to it, its state brought to the server's. */
+  private attachRecord(record: ChannelRecord, lastSeq: number, throughSeq: number): OutboundFrame[] {
+    if (record.state.tag === 'closed') this.channels.serverHas(record, record.state, lastSeq)
     if (record.state.tag === 'pending') this.channels.open(record)
     return this.replayTo(record, lastSeq, throughSeq)
   }

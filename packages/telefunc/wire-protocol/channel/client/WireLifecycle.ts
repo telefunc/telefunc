@@ -369,9 +369,10 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.transport.applyReconciledSettings(ctrl)
     this.takeServerSettings(ctrl)
     const outcome = this.exchange.applyReconciled(ctrl, {
-      deferredOmitted: this.upgrade.deferredOmitted,
+      deferOmitted: this.upgrade.handingOff,
       upgradeReady: this.upgrade.ready,
     })
+    this.upgrade.deferOmitted(outcome.omitted)
     this.liveness.install(this.transport, ctrl.pingInterval)
     this.transport.closeAbandonedTransport()
     for (const frame of outcome.frames) this.transport.sendFrame(frame)
@@ -553,7 +554,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.exchange.cancelRegisterReconcile()
     // Tear down any in-flight phase before transitioning to `closed`.
     if (this.state.tag === 'reconnecting') clearTimeout(this.state.timer)
-    this.upgrade.teardown()
+    this.upgrade.abandon()
     this.enterClosed()
     this.transport.detachHeartbeat()
     this.transport.dispose()
