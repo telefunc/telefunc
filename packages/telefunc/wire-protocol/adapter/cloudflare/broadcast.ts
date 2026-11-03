@@ -112,17 +112,17 @@ class CloudflareBucketPublishBuffer {
     this.isFlushing = true
     try {
       while (this.head < this.entries.length) {
-        const entry = this.entries[this.head]!
+        // It leaves before its send: eviction and clear() are for what still waits, and its send holds its bytes.
+        const entry = this.entries[this.head++]!
+        this.totalBytes -= entry.bytes
+        this.compact()
         try {
           const ack = await entry.send()
           entry.pending.resolve(ack)
         } catch (err) {
           entry.pending.reject(err instanceof Error ? err : new Error(String(err)))
         }
-        this.totalBytes -= entry.bytes
-        this.head++
       }
-      this.compact()
     } finally {
       this.isFlushing = false
     }
