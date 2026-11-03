@@ -339,6 +339,46 @@ function testChannel(isDev: boolean, inDocker = false) {
   // The page's first wire is the WebSocket, whose RECONCILE names the channel. In `vike dev` the channel is the
   // telefunction's copy of telefunc, not the server's: the server tells the violation it raises by its brand.
   if (channelTransports[0] === 'ws') {
+    test('channel: a malformed acknowledgement rejects its send with the parse failure', async () => {
+      const context = await page.context().browser()!.newContext()
+      const routed = await context.newPage()
+      try {
+        let status = 0
+        let corrupted = 0
+        const failures: string[] = []
+        routed.on('pageerror', (err) => failures.push(err.name))
+        await routed.routeWebSocket(/\/_telefunc/, (ws) => {
+          const server = ws.connectToServer()
+          ws.onMessage((message) => server.send(message))
+          server.onMessage((message) => {
+            if (typeof message !== 'string') {
+              const payload = message.indexOf(Buffer.from('"ack:per-send-test"'))
+              if (payload !== -1) {
+                message = Buffer.from(message)
+                // Keep the ACK_RES envelope valid; corrupt its serialized value for OK and ABORT.
+                message[payload - 1] = status
+                message[payload] = '{'.charCodeAt(0)
+                corrupted++
+              }
+            }
+            ws.send(message)
+          })
+        })
+        for (status of [0, 2]) {
+          await navigate(`${getServerUrl()}/channel`, undefined, routed)
+          await routed.click('#channel-test-per-send-ack')
+          await autoRetry(async () => {
+            const state = JSON.parse((await routed.textContent('#channel-state'))!)
+            expect(state.perSendAck).toBe('SyntaxError')
+          })
+        }
+        expect(corrupted).toBe(2)
+        expect(failures).deep.equal(['SyntaxError', 'SyntaxError'])
+      } finally {
+        await context.close()
+      }
+    })
+
     test("channel: a text message the server can't parse, on a channel a telefunction returned, closes the page's WebSocket", async () => {
       // A page of its own: its WebSocket stays routed through the test for as long as the page lives.
       const context = await page.context().browser()!.newContext()

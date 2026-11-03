@@ -480,10 +480,15 @@ function ChannelDemo() {
     addLog('system', 'Starting per-send ack test...')
     const { channel } = await openChannel(onChannelPerSendAck)
     perSendChannelRef.current = channel
-    const ack = await channel.send('per-send-test', { ack: true })
-    addLog('system', `per-send ack: ${JSON.stringify(ack)}`)
-    setChannelState((s) => ({ ...s, perSendAck: ack as string }))
-    channel.close()
+    try {
+      const ack = await channel.send('per-send-test', { ack: true })
+      addLog('system', `per-send ack: ${JSON.stringify(ack)}`)
+      setChannelState((s) => ({ ...s, perSendAck: ack as string }))
+    } catch (err) {
+      setChannelState((s) => ({ ...s, perSendAck: (err as Error).name }))
+    } finally {
+      await channel.close()
+    }
   }, [addLog])
 
   const testHookInstrument = useCallback(async () => {

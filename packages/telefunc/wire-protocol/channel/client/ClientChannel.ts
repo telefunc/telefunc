@@ -380,19 +380,25 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected onPeerAckRes(ackedSeq: number, text: string, status: AckResultStatus): void {
     const pending = this.pendingAcks.get(ackedSeq)
     if (!pending) return
-    this.pendingAcks.delete(ackedSeq)
-    switch (status) {
-      case ACK_STATUS.OK:
-        pending.resolve(parse(text))
-        return
-      case ACK_STATUS.ABORT:
-        pending.reject(makeAbortError(parse(text)))
-        return
-      case ACK_STATUS.ERROR:
-        pending.reject(makeBugError(text || undefined))
-        return
-      case ACK_STATUS.SHIELD_ERROR:
-        pending.reject(new ShieldValidationError(text))
+    try {
+      switch (status) {
+        case ACK_STATUS.OK:
+          pending.resolve(parse(text))
+          return
+        case ACK_STATUS.ABORT:
+          pending.reject(makeAbortError(parse(text)))
+          return
+        case ACK_STATUS.ERROR:
+          pending.reject(makeBugError(text || undefined))
+          return
+        case ACK_STATUS.SHIELD_ERROR:
+          pending.reject(new ShieldValidationError(text))
+      }
+    } catch (err) {
+      pending.reject(err instanceof Error ? err : new Error(String(err)))
+      throw err
+    } finally {
+      this.pendingAcks.delete(ackedSeq)
     }
   }
 
