@@ -407,48 +407,38 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     void this.runUpgrade(this.transport as UpgradeSource, sessionId)
   }
 
-  /** One attempt: the probe staged, the RECONCILE in flight settled, the barrier emitted, then the flip. However it
-   *  ends, the RECONCILE a registration owes goes after it. */
+  /** One attempt, then what its end leaves to the connection. However it ends, the RECONCILE a registration owes goes
+   *  after it. */
   private async runUpgrade(from: UpgradeSource, sessionId: string): Promise<void> {
-    const attempt = this.upgrade.start()
     const to = new WsTransport({ telefuncUrl: this.telefuncUrl, owner: this })
-    let adopted = false
-    try {
-      const session = await this.upgrade.stage(to, sessionId, this.liveness.pingInterval, attempt)
-      if (session === 'no-probe') return
-      if (session === 'not-ready') {
+    const end = await this.upgrade.run(
+      from,
+      to,
+      { sessionId, pingInterval: this.liveness.pingInterval },
+      {
+        reconcileSettled: (signal) => this.exchange.reconcileSettled(signal),
+        barrier: (session) => this.exchange.buildBarrierFrame(session),
+        adopt: (target) => this.adoptTransport(target),
+      },
+    )
+    switch (end.tag) {
+      case 'not-ready':
         if (!this.exchange.reconcileOwed) this.drainBufferedFramesToWire()
-        return
-      }
-      // After the RECONCILED of the one in flight, which may name a channel the barrier lists.
-      await this.exchange.reconcileSettled(attempt.signal)
-      if (attempt.signal.aborted) return
-      this.upgrade.commit(from, to, session, attempt)
-      const emission = await from.emitBarrier(() => this.exchange.buildBarrierFrame(session), attempt.signal)
-      if (emission === 'not-emitted') {
-        attempt.abort()
+        break
+      case 'not-emitted':
         if (!this.exchange.reconcileOwed) this.drainBufferedFramesToWire()
         // An attempt that ended without its barrier goes again once the outbox drained.
         void from.drained().then(() => this.maybeUpgrade())
-        return
-      }
-      if (attempt.signal.aborted) {
+        break
+      case 'stranded':
         this.fallbackToSse(new NetworkError('Upgrade barrier attempt timed out', true))
-        return
-      }
-      this.adoptTransport(to)
-      adopted = true
-      for (const frame of this.upgrade.flip()) this.applyCompletionFrame(frame)
-      this.releaseJoin(this.upgrade.tryComplete())
-    } finally {
-      // A target it didn't adopt goes with it: its probe closes with the attempt, then its page listener.
-      if (!adopted) {
-        attempt.abort()
-        to.dispose()
-      }
-      this.upgrade.endAttempt(attempt)
-      this.onReconcileDue()
+        break
+      case 'flipped':
+        for (const frame of end.completion) this.applyCompletionFrame(frame)
+        this.releaseJoin(this.upgrade.tryComplete())
+        break
     }
+    this.onReconcileDue()
   }
 
   /** A completion frame of the join, applied once the connection flipped: FIN from the old wire, RECONCILED from the

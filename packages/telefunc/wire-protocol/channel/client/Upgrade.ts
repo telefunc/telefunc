@@ -1,5 +1,7 @@
 export { Upgrade }
 export type {
+  AttemptEnd,
+  AttemptHooks,
   BarrierEmission,
   HandoffFrame,
   JoinRelease,
@@ -58,6 +60,24 @@ type ProbeSession = {
 
 /** Kept apart, as recovery differs: `emitted` may have reached the server, `not-emitted` leaves the wire usable. */
 type BarrierEmission = 'emitted' | 'not-emitted'
+
+/** What an attempt asks of the connection between its steps. */
+type AttemptHooks = {
+  /** Settles once the RECONCILE in flight has its RECONCILED, which may name a channel the barrier lists. */
+  reconcileSettled: (signal: AbortSignal) => Promise<void>
+  /** The barrier's frame, built as the old wire sends it. */
+  barrier: (session: ProbeSession) => OutboundFrame
+  /** `to` becomes the connection's transport. */
+  adopt: (to: UpgradeTarget) => void
+}
+
+/** How an attempt ended: `'aborted'` before its barrier, its probe gone or never opened; `'not-ready'` without a
+ *  matching READY; `'not-emitted'` with its barrier never sent, so the old wire stays usable; `'stranded'` aborted
+ *  after its barrier went; `'flipped'` onto the new wire, with the completion frames the probe delivered before, in
+ *  order, for the connection to apply before it calls `tryComplete`. */
+type AttemptEnd =
+  | { tag: 'aborted' | 'not-ready' | 'not-emitted' | 'stranded' }
+  | { tag: 'flipped'; completion: DecodedFrame[] }
 
 /** The wire an upgrade moves FROM: it has to carry the barrier as its last frame. */
 type UpgradeSource = ClientChannelTransport & {
@@ -139,8 +159,7 @@ type UpgradeOptions = {
 }
 
 /** The SSE→WS upgrade: a WebSocket probe staged beside the SSE wire, the barrier that ends the old wire, and the join
- *  of both wires' frames once the connection flipped to the new one. The connection runs an attempt's steps in order:
- *  `start`, `stage`, `commit`, `flip`, then `endAttempt` however it ended. */
+ *  of both wires' frames once the connection flipped to the new one. The connection runs an attempt with `run`. */
 class Upgrade implements ProbeOwner {
   private readonly owner: UpgradeOwner
   /** Only while the connection is open: it goes with the open state it was in (see `forget`). */
@@ -357,7 +376,7 @@ class Upgrade implements ProbeOwner {
   }
 
   /** The attempt ended, however: its state goes, unless it flipped and its join is under way. */
-  endAttempt(attempt: AbortController): void {
+  private endAttempt(attempt: AbortController): void {
     const u = this.state
     if (u.tag === 'none' || u.attempt !== attempt) return
     if (u.tag === 'committing' && u.flipped) return
@@ -376,8 +395,42 @@ class Upgrade implements ProbeOwner {
 
   // ── The attempt ──
 
+  /** Runs one attempt from `from` to `to`, its steps in order: the probe staged, the RECONCILE in flight settled, the
+   *  barrier emitted, then the flip. A `to` it didn't hand to `adopt` it disposes. */
+  async run(
+    from: UpgradeSource,
+    to: UpgradeTarget,
+    { sessionId, pingInterval }: { sessionId: string; pingInterval: number },
+    hooks: AttemptHooks,
+  ): Promise<AttemptEnd> {
+    const attempt = this.start()
+    let adopted = false
+    try {
+      const session = await this.stage(to, sessionId, pingInterval, attempt)
+      if (session === 'no-probe') return { tag: 'aborted' }
+      if (session === 'not-ready') return { tag: 'not-ready' }
+      await hooks.reconcileSettled(attempt.signal)
+      if (attempt.signal.aborted) return { tag: 'aborted' }
+      // The barrier goes next, on `from`: from here sends wait for its COMMITTED.
+      this.enterCommitting(from, to, session, attempt)
+      const emission = await from.emitBarrier(() => hooks.barrier(session), attempt.signal)
+      if (emission === 'not-emitted') return { tag: 'not-emitted' }
+      if (attempt.signal.aborted) return { tag: 'stranded' }
+      hooks.adopt(to)
+      adopted = true
+      return { tag: 'flipped', completion: this.flip() }
+    } finally {
+      // A target it didn't adopt goes with it: its probe closes with the attempt, then its page listener.
+      if (!adopted) {
+        attempt.abort()
+        to.dispose()
+      }
+      this.endAttempt(attempt)
+    }
+  }
+
   /** Starts an attempt; its signal aborts on any failure of it. */
-  start(): AbortController {
+  private start(): AbortController {
     const attempt = new AbortController()
     this.enterStaging(attempt)
     return attempt
@@ -386,7 +439,7 @@ class Upgrade implements ProbeOwner {
   /** Opens `to`'s probe and exchanges PREPARE/READY on it: the session its barrier commits, or why not.
    *  `'no-probe'`: no probe opened, or the attempt aborted meanwhile; `'not-ready'`: no matching READY came, and the
    *  attempt is aborted. */
-  async stage(
+  private async stage(
     to: UpgradeTarget,
     sessionId: string,
     pingInterval: number,
@@ -439,17 +492,12 @@ class Upgrade implements ProbeOwner {
     return heartbeat
   }
 
-  /** The barrier goes next, on `from`: from here sends wait for its COMMITTED. */
-  commit(from: UpgradeSource, to: UpgradeTarget, session: ProbeSession, attempt: AbortController): void {
-    this.enterCommitting(from, to, session, attempt)
-  }
-
   // ── The join ──
 
   /** The barrier went and the connection adopted the new wire: the probe becomes it, and the join begins. Returns the
    *  completion frames the probe delivered before, in order, for the connection to apply; then it calls `tryComplete`.
    *  The buffer is made whole first, so a COMMITTED among them cannot complete a join over a partial one. */
-  flip(): DecodedFrame[] {
+  private flip(): DecodedFrame[] {
     const u = this.committing
     assert(u !== null)
     if (u.deadline) {
