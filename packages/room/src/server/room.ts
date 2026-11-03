@@ -151,7 +151,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     this.local = new LocalHolder({ state: this.state, suppressed: this.localSuppressed })
     this.writes = new RoomWrites({
       owner: this,
-      incarnation: replica.incarnation,
+      incarnation: this.incarnation,
       model: replica.model,
       state: this.state,
       replica,

@@ -51,7 +51,9 @@ type RoomWritesOptions = {
   incarnation: RoomIncarnation
   model: Pick<RoomModel, 'closed' | 'acceptedMeta'>
   state: Pick<RoomState, 'getRemote'>
-  replica: RoomReplica
+  /** The view the writes commit through: it applies a member's committed meta or connection event at once, and admits
+   *  a binary publish's track. */
+  replica: Pick<RoomReplica, 'applyControl' | 'admitTrack'>
   /** The view's in-flight ack DMs, which a leave of either end or the room's close settles too. */
   acks: PendingDmAcks
   /** The handle's local participants, whose stamps a view that holds no roster yet doesn't hold. */
@@ -72,7 +74,7 @@ class RoomWrites {
   private readonly incarnation: RoomIncarnation
   private readonly model: RoomWritesOptions['model']
   private readonly state: RoomWritesOptions['state']
-  private readonly replica: RoomReplica
+  private readonly replica: RoomWritesOptions['replica']
   private readonly acks: PendingDmAcks
   private readonly localParticipants: RoomWritesOptions['localParticipants']
 
