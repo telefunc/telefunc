@@ -142,7 +142,7 @@ await me.setAttributes({ status: 'away' })            // changes only `status`
 await me.setMeta({ name: 'Alice', status: 'online' }) // replaces all of your meta
 ```
 
-Everyone in the room sees the change. The `meta` you read is frozen, nested objects included: pass a new object, as above.
+Everyone in the room sees the change. The `meta` you read is read-only, and freezing doesn't lock a `Map`, `Set` or `Date` inside it, so build a new value to change any of it, as above.
 
 
 ## Send a message to everyone

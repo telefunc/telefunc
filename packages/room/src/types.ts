@@ -38,10 +38,11 @@ type RoomShield<Pub> = {
   }
 }
 
-/** Room metadata (e.g. topic). Must be serializable. What Room hands you is frozen, nested objects included. */
+/** Room metadata (e.g. topic). Must be serializable. Read-only: freezing doesn't lock a `Map`, `Set` or `Date` in it,
+ *  so build a new value to change any of it. */
 type RoomMeta = Record<string, unknown>
-/** Participant metadata (e.g. name, score). Must be serializable. What Room hands you is frozen, nested objects
- *  included. */
+/** Participant metadata (e.g. name, score). Must be serializable. Read-only: freezing doesn't lock a `Map`, `Set` or
+ *  `Date` in it, so build a new value to change any of it. */
 type ParticipantMeta = Record<string, unknown>
 
 /** A verified sender: a plain `{ id, meta, identity }`, or a live `RemoteParticipant`, which has the same fields. */
