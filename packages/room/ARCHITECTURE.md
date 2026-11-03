@@ -130,14 +130,14 @@ one semantic lane. A member's binary tracks come:
 The plan is three parts, each using only the one before it:
 - **The choice** (`shapeOf()`, `servesByAll()` and `nextByMember()` in `LanePlan.ts`): which lane shape serves each
   (member, track), from the holders' wants, the membership and the two rules above.
-- **The switch** (`BinaryLanes`): the binary subscriptions of each shape. A subscription delivers only what is
-  published after it confirms, so a pair whose shape changes keeps its old lane until the new one delivers, and a
-  fan-in lane also stays while one of the other kind is establishing (`Establishing`), so a switch loses no frame.
-  During the overlap a frame comes on both lanes with one order, and the holder keeps it once
-  (`ReplayGate.admitBinary()`, per (member, track)).
+- **The switch** (`BinaryLanes`): the binary subscriptions of each shape. A subscription delivers only what is published
+  after it confirms, so a pair whose shape changes keeps its old lane until the new one delivers, and a fan-in lane also
+  stays while one of the other kind is establishing (`Establishing`), so a switch loses no frame. Each switch returns
+  what then delivers the pair, member or track it switched. During the overlap a frame comes on both lanes with one
+  order, and the holder keeps it once (`ReplayGate.admitBinary()`, per (member, track)).
 - **The pass** (`LanePlan`): the changes queue, and one pass at a time plans them, in `ROOM_PLAN_SLICE_MS` slices, then
-  tells the demand from the choice and from what delivers. `BinaryLanes` never calls the plan: each round starts by
-  taking what the lanes' readiness and switches replanned (`takeReplans()`).
+  tells the demand from the choice and from what each switch returned. `BinaryLanes` never calls the plan: each round
+  starts by taking what the lanes' readiness and switches replanned (`takeReplans()`).
 
 **Why not one every-track lane per wanted member, filtered here.** Measured on the memory driver, 50 members each
 publishing 10 frames of 256 bytes on each of 4 tracks (2000 frames), with one handle here listening (the probe counts

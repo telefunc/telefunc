@@ -426,17 +426,15 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     const overflows = this.overflows(count)
     toggle(this.overflowing, member, overflows)
     const servedByAll = this.servesByAll(member, present, count)
-    if (servedByAll) this.lanes.keepEveryTrack(member)
-    const all = this.lanes.everyTrackOf(member)
-    const allDelivers = all?.delivering === true
-    this.outgoingDemand.setMember(member, wantsAll && allDelivers)
-    this.outgoingDemand.setFetched(member, present && allDelivers && (this.byMember || this.lanes.fetchesByMember))
+    const all = this.lanes.serveEveryTrack(member, servedByAll)
+    this.outgoingDemand.setMember(member, wantsAll && all.delivers)
+    this.outgoingDemand.setFetched(member, present && all.delivers && (this.byMember || all.fetching))
     for (const track of chain(this.lanes.namedTracksOf(member), this.outgoingDemand.localTracks(member))) {
       this.syncLane(member, track, servedByAll)
       yield
     }
     // An establishing every-track lane keeps the named lanes as they are.
-    for (const track of !servedByAll || allDelivers ? this.wants.memberTracksOf(member) : []) {
+    for (const track of !servedByAll || all.delivers ? this.wants.memberTracksOf(member) : []) {
       this.syncLane(member, track, servedByAll)
       yield
     }
@@ -490,12 +488,9 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     const present = this.present(member)
     const named = present && this.wants.wantsNamedPair(member, track)
     const everyMember = this.wants.namesEveryMember(track)
-    const allDelivers = this.lanes.everyTrackDelivers(member)
-    const trackDelivers = everyMember && this.lanes.everyMemberDelivers(track)
-    const lane = this.lanes.servePair(member, track, shapeOf(servedByAll, everyMember, named))
+    const coverage = this.lanes.servePair(member, track, shapeOf(servedByAll, everyMember, named), everyMember)
     if (everyMember) this.setExcept(track, member, present && !named)
-    const delivers = allDelivers || trackDelivers || lane?.delivering === true
-    this.outgoingDemand.setPair(member, track, (named || lane !== undefined) && delivers && !trackDelivers)
+    this.outgoingDemand.setPair(member, track, (named || coverage.named) && coverage.delivery === 'own')
   }
 
   /** Plans the every-member lane of `track`: the track has one while a holder here names it of every member, unless the
@@ -503,9 +498,8 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
    *  it replaces still deliver. */
   private keepEveryMember(track: string): void {
     if (this.byMember || !this.namesEveryMember(track)) return
-    const delivers = this.lanes.keepEveryMember(track)
-    const byMember = this.lanes.isFetchedByMember(track)
-    this.outgoingDemand.setTrack(track, delivers || byMember, { byMember })
+    const coverage = this.lanes.keepEveryMember(track)
+    this.outgoingDemand.setTrack(track, coverage !== null, { byMember: coverage === 'by-member' })
   }
 
   /** Stops an every-member lane that serves no holder here, once the lanes replacing it deliver. When no holder names
@@ -515,9 +509,9 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   private releaseEveryMember(track: string): void {
     const named = this.namesEveryMember(track)
     if (named && !this.byMember) return
-    if (!this.lanes.hasEveryMemberOf(track) && named === this.lanes.isFetchedByMember(track)) return
-    if (!this.lanes.retireEveryMember(track, named)) return
-    if (named) this.outgoingDemand.setTrack(track, true, { byMember: true })
+    const coverage = this.lanes.retireEveryMember(track, named)
+    if (coverage === undefined) return
+    if (coverage === 'by-member') this.outgoingDemand.setTrack(track, true, { byMember: true })
     else this.outgoingDemand.forgetTrack(track)
   }
 

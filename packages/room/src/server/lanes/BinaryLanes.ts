@@ -1,5 +1,5 @@
 export { BinaryLanes }
-export type { BinaryLanesOptions, PairShape, Replans }
+export type { BinaryLanesOptions, PairShape, PairCoverage, MemberCoverage, TrackCoverage, Replans }
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { encodeLaneKey } from '../../backend/laneKey.js'
@@ -13,6 +13,19 @@ assertIsNotBrowser()
 /** The lane that serves a (member, track) pair: its named lane, the member's every-track lane, the track's
  *  every-member lane, or none. */
 type PairShape = 'named' | 'every-track' | 'every-member' | null
+
+/** What delivers a (member, track) pair once `servePair` switched it: the track's every-member lane, which the track's
+ *  demand covers; a lane of the pair's own, its named lane or the member's every-track lane; or none. `named`: the
+ *  pair's named lane remains. */
+type PairCoverage = { delivery: 'track' | 'own' | null; named: boolean }
+
+/** What the member's every-track lane covers once `serveEveryTrack` switched it: whether it delivers, and whether
+ *  the tracks named of every member are fetched by member meanwhile. */
+type MemberCoverage = { delivers: boolean; fetching: boolean }
+
+/** What serves a track named of every member: its every-member lane, delivering; the members' every-track lanes,
+ *  which fetch it by member; or neither yet. */
+type TrackCoverage = 'every-member' | 'by-member' | null
 
 /** What the lanes' readiness and switches replan: members, tracks, and named pairs of members. */
 type Replans = { members: Set<string>; tracks: Set<string>; pairs: Map<string, Set<string>> }
@@ -104,69 +117,39 @@ class BinaryLanes {
     return this.everyMember.size > 0 || this.fetchedByMember.size > 0
   }
 
-  get fetchesByMember(): boolean {
-    return this.fetchedByMember.size > 0
-  }
-
-  isFetchedByMember(track: string): boolean {
-    return this.fetchedByMember.has(track)
-  }
-
-  hasEveryMemberOf(track: string): boolean {
-    return this.everyMember.has(track)
-  }
-
   /** The tracks of the member's named lanes, read live: a lane a switch stops meanwhile drops out. */
   namedTracksOf(member: string): Iterable<string> {
     return this.namedByMember.get(member) ?? []
   }
 
-  everyTrackOf(member: string): LaneSubscription | undefined {
-    return this.everyTrack.get(member)
-  }
-
-  everyTrackDelivers(member: string): boolean {
-    return this.everyTrack.get(member)?.delivering === true
-  }
-
-  everyMemberDelivers(track: string): boolean {
-    return this.everyMember.get(track)?.delivering === true
-  }
-
   /** Switches the pair's named lane to `shape`: it opens while the pair is named, and stays while another shape serves
-   *  the pair and that lane doesn't deliver yet. The named lane that remains, if any. */
-  servePair(member: string, track: string, shape: PairShape): LaneSubscription | undefined {
-    const key = namedKey(member, track)
-    const lane = this.named.get(key)
-    const taking = shape === 'every-track' ? this.everyTrack.get(member) : this.everyMember.get(track)
-    if (shape === 'named' || (lane !== undefined && shape !== null && taking?.delivering !== true)) {
-      const kept = lane ?? this.openNamed(member, track)
-      kept.resume()
-      return kept
+   *  the pair and that lane doesn't deliver yet. `byTrack`: the track is named of every member, so its every-member
+   *  lane covers the pair. */
+  servePair(member: string, track: string, shape: PairShape, byTrack: boolean): PairCoverage {
+    const kept = this.switchNamed(member, track, shape)
+    if (byTrack && this.everyMember.get(track)?.delivering === true) return { delivery: 'track', named: kept !== null }
+    const own = this.everyTrack.get(member)?.delivering === true || kept?.delivering === true
+    return { delivery: own ? 'own' : null, named: kept !== null }
+  }
+
+  /** While `served`, the member's every-track lane serves it: it opens, or is subscribed again if its recovery gave
+   *  up; `releaseEveryTrack` stops it. */
+  serveEveryTrack(member: string, served: boolean): MemberCoverage {
+    if (served) {
+      this.establishingEveryMember.waiting.delete(member)
+      const all = this.everyTrack.get(member) ?? this.openFanIn({ kind: 'binary-all', member }, this.everyTrack, member)
+      all.resume()
     }
-    if (lane === undefined) return undefined
-    lane.stop()
-    this.named.delete(key)
-    toggleEntry(this.namedByMember, member, track, false)
-    toggleEntry(this.namedByTrack, track, member, false)
-    if (this.everyMember.has(track)) this.replans.tracks.add(track)
-    return undefined
+    return { delivers: this.everyTrack.get(member)?.delivering === true, fetching: this.fetchedByMember.size > 0 }
   }
 
-  /** The member's every-track lane serves it: it opens, or is subscribed again if its recovery gave up. */
-  keepEveryTrack(member: string): void {
-    this.establishingEveryMember.waiting.delete(member)
-    const lane = this.everyTrack.get(member) ?? this.openFanIn({ kind: 'binary-all', member }, this.everyTrack, member)
-    lane.resume()
-  }
-
-  /** The track's every-member lane serves it. Whether it delivers. */
-  keepEveryMember(track: string): boolean {
+  /** The track's every-member lane serves it; until it delivers, the members' every-track lanes may still fetch it. */
+  keepEveryMember(track: string): TrackCoverage {
     this.establishingEveryTrack.waiting.delete(track)
     const lane = this.everyMember.get(track) ?? this.openFanIn({ kind: 'binary-track', track }, this.everyMember, track)
     lane.resume()
     if (lane.delivering) this.fetchedByMember.delete(track)
-    return lane.delivering
+    return lane.delivering ? 'every-member' : this.fetchedByMember.has(track) ? 'by-member' : null
   }
 
   /** Stops the member's every-track lane once the named lanes and every-member lanes replacing it deliver; until
@@ -185,19 +168,20 @@ class BinaryLanes {
 
   /** Stops the track's every-member lane, if any, once the named lanes and every-track lanes replacing it deliver;
    *  until then, each replacing lane that becomes ready replans the track. Once they do, the track is fetched by
-   *  member if `fetched`. Whether they deliver. */
-  retireEveryMember(track: string, fetched: boolean): boolean {
+   *  member if `fetched`. What serves the track then, or `undefined` while it is as it was. */
+  retireEveryMember(track: string, fetched: boolean): Exclude<TrackCoverage, 'every-member'> | undefined {
+    if (!this.everyMember.has(track) && fetched === this.fetchedByMember.has(track)) return undefined
     for (const member of this.namedByTrack.get(track) ?? []) {
-      if (!this.named.get(namedKey(member, track))!.delivering) return false
+      if (!this.named.get(namedKey(member, track))!.delivering) return undefined
     }
-    if (this.waitsFor(this.establishingEveryTrack, track)) return false
+    if (this.waitsFor(this.establishingEveryTrack, track)) return undefined
     const lane = this.everyMember.get(track)
     if (lane !== undefined) {
       this.everyMember.delete(track)
       this.stopFanIn(lane, this.establishingEveryMember)
     }
     toggle(this.fetchedByMember, track, fetched)
-    return true
+    return fetched ? 'by-member' : null
   }
 
   /** The lanes delivering the member's `track` (or `EVERY_TRACK`) are ready, so a retained read after this
@@ -253,6 +237,25 @@ class BinaryLanes {
         else this.replanPair(address.member, address.track)
         if (this.everyMember.has(address.track)) this.replans.tracks.add(address.track)
     }
+  }
+
+  /** The named lane that remains once the pair is switched to `shape`, or null. */
+  private switchNamed(member: string, track: string, shape: PairShape): LaneSubscription | null {
+    const key = namedKey(member, track)
+    const lane = this.named.get(key)
+    const taking = shape === 'every-track' ? this.everyTrack.get(member) : this.everyMember.get(track)
+    if (shape === 'named' || (lane !== undefined && shape !== null && taking?.delivering !== true)) {
+      const kept = lane ?? this.openNamed(member, track)
+      kept.resume()
+      return kept
+    }
+    if (lane === undefined) return null
+    lane.stop()
+    this.named.delete(key)
+    toggleEntry(this.namedByMember, member, track, false)
+    toggleEntry(this.namedByTrack, track, member, false)
+    if (this.everyMember.has(track)) this.replans.tracks.add(track)
+    return null
   }
 
   private openNamed(member: string, track: string): LaneSubscription {
