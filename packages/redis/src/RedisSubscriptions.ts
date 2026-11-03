@@ -8,7 +8,7 @@ import { DriverAttempt, decodeOrderingFrame } from 'telefunc/__internal'
 import { createDeferred, type Deferred } from './createDeferred.js'
 import type { CommitChannels, FenceTokens } from './keys.js'
 import { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH } from './commands.js'
-import type { SubscriberSocket } from './ioredis.js'
+import { isRefusal, type SubscriberSocket } from './ioredis.js'
 import type { RedisConnection } from './RedisConnection.js'
 
 type RedisSubscriptionSource = BroadcastRoute | RoomSubscriptionSource
@@ -76,6 +76,9 @@ class RedisSubscriptions {
   private readonly unconfirmed = new Set<RedisAttempt>()
   /** Attempts never ready yet, counted down a microtask after: at 0, no send waits for one. */
   private subscribingCount = 0
+  /** The channels whose last SUBSCRIBE Redis refused, with its error, until one succeeds or no attempt needs them. */
+  private readonly refusals = new Map<string, unknown>()
+  private readonly refusalListeners = new Set<() => void>()
   private socket: Connection = { phase: 'idle' }
   private nextId = 0
   private syncing: Promise<void> = Promise.resolve()
@@ -121,6 +124,18 @@ class RedisSubscriptions {
     return pending
   }
 
+  /** The error Redis refused a SUBSCRIBE of one of `channels` with, while it stands. */
+  refusalOn(channels: readonly string[]): { error: unknown } | null {
+    for (const channel of channels) if (this.refusals.has(channel)) return { error: this.refusals.get(channel) }
+    return null
+  }
+
+  /** Calls `listener` on each refused SUBSCRIBE; returns its removal. */
+  onRefusal(listener: () => void): () => void {
+    this.refusalListeners.add(listener)
+    return () => this.refusalListeners.delete(listener)
+  }
+
   /** Arms a delivery fence on the ready attempts of each channel the commit is published on: `delivery` settles
    *  once each saw the commit. */
   prepareFence(channels: CommitChannels): {
@@ -158,6 +173,7 @@ class RedisSubscriptions {
       attempts?.delete(attempt)
       if (attempts?.size !== 0) continue
       this.byChannel.delete(channel)
+      this.refusals.delete(channel)
       this.changedChannels.add(channel)
     }
     if (this.byChannel.size > 0) return this.syncChannels()
@@ -266,9 +282,17 @@ class RedisSubscriptions {
       await socket.unsubscribe(...stale)
     }
     if (missing.length > 0) {
-      await socket.subscribe(...missing)
+      try {
+        await socket.subscribe(...missing)
+      } catch (error) {
+        if (this.isCurrent(id) && isRefusal(error)) this.refuse(missing, error)
+        throw error
+      }
       if (!this.isCurrent(id)) return
-      for (const channel of missing) subscribed.add(channel)
+      for (const channel of missing) {
+        subscribed.add(channel)
+        this.refusals.delete(channel)
+      }
     }
     // An attempt made during the SUBSCRIBE above waits for the sync it queued.
     const covered: RedisAttempt[] = []
@@ -281,6 +305,13 @@ class RedisSubscriptions {
       }
     }
     await Promise.all(covered.map((attempt) => this.confirm(attempt, id)))
+  }
+
+  /** Redis refused to SUBSCRIBE `channels`: a send waiting for one of ours on them fails with `error` (the reconnect
+   *  tries them again). */
+  private refuse(channels: readonly string[], error: unknown): void {
+    for (const channel of channels) if (this.byChannel.has(channel)) this.refusals.set(channel, error)
+    for (const listener of [...this.refusalListeners]) listener()
   }
 
   /** Its channels are subscribed on a live connection: ready from where each lane stands now, unless its incarnation is

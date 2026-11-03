@@ -8,6 +8,7 @@ export {
   deploymentOf,
   addressOf,
   isUnreachable,
+  isRefusal,
 }
 export type { RedisClient, SubscriberSocket }
 
@@ -62,6 +63,11 @@ function isUnreachable(error: unknown): boolean {
     error.message === 'Connection is closed.' ||
     error.message === 'None of startup nodes is available'
   )
+}
+
+/** Redis answered the command with an error (`NOPERM`, `ERR …`), unlike a connection that dropped before it did. */
+function isRefusal(error: unknown): boolean {
+  return error instanceof Error && error.name === 'ReplyError'
 }
 
 /** A clone of the app's client for the backend's commands: it never resends a command (at-most-once) and reads masters
