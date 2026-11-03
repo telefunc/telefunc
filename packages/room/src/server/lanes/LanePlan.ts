@@ -204,7 +204,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     for (const member of affected) {
       const count = this.counts.get(member)
       if (count === undefined) {
-        if (this.counting?.member === member) this.counting.stale = true
+        this.forgetCount(member)
         continue
       }
       const [before, after] = this.wants.namedPairChange(holder, pair, member)
@@ -217,7 +217,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
 
   /** A member joined, or which holders suppress it changed: the next planning pass recounts it. */
   memberChanged(member: string): void {
-    this.dropCounts(member)
+    this.forgetCount(member)
     this.queued.members.add(member)
     this.schedulePlan()
     this.syncLanes()
@@ -283,12 +283,11 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   private *indexHolder(holder: LaneHolder, opts: { gone?: boolean; members?: Iterable<string> }): Generator<void> {
     for (const affected of this.wants.update(holder, opts)) {
       if (affected === 'all') {
-        this.counts.clear()
-        if (this.counting) this.counting.stale = true
+        this.forgetCounts()
         this.queued.all = true
       } else {
         for (const member of affected) {
-          this.dropCounts(member)
+          this.forgetCount(member)
           this.queued.members.add(member)
         }
       }
@@ -296,9 +295,15 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     }
   }
 
-  private dropCounts(member: string): void {
+  /** Forgets the member's count; one a pass is counting is stale. */
+  private forgetCount(member: string): void {
     this.counts.delete(member)
     if (this.counting?.member === member) this.counting.stale = true
+  }
+
+  private forgetCounts(): void {
+    this.counts.clear()
+    if (this.counting) this.counting.stale = true
   }
 
   private queuePair(member: string, track: string): void {
@@ -362,7 +367,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
       once((member) => {
         this.syncExcept(member)
         if (!this.unconcerned(member)) return this.planMember(member, plan)
-        this.counts.delete(member)
+        this.forgetCount(member)
       }),
     )
     await this.replanEach(
@@ -402,13 +407,8 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
 
   /** Whether `byMember` changed. */
   private syncByMember(): boolean {
-    const model = this.model
-    const tracks = this.wants.everyMemberTrackCount
-    const members = model.memberCount
-    const byMember =
-      model.rosterKnown &&
-      tracks > ROOM_MEMBER_NAMED_LANES_MAX &&
-      (this.byMember ? tracks * 2 > members : tracks > members)
+    const { memberCount, rosterKnown } = this.model
+    const byMember = nextByMember(this.byMember, this.wants.everyMemberTrackCount, memberCount, rosterKnown)
     if (byMember === this.byMember) return false
     this.byMember = byMember
     return true
@@ -421,12 +421,12 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
    *  a time: it plans from the counts and lanes it read first, and any change meanwhile queues the member again. */
   private *syncMemberBinary(member: string): Generator<void> {
     const present = this.present(member)
-    if (!present) this.counts.delete(member)
+    if (!present) this.forgetCount(member)
     const count = present ? (this.counts.get(member) ?? (yield* this.countNamed(member))) : undefined
     const wantsAll = present && this.wants.wantsEveryTrack(member)
     const overflows = this.overflows(count)
     toggle(this.overflowing, member, overflows)
-    const servedByAll = wantsAll || overflows || (present && this.byMember)
+    const servedByAll = this.servesByAll(member, present, count)
     if (servedByAll) this.lanes.keepEveryTrack(member)
     const all = this.lanes.everyTrackOf(member)
     const allDelivers = all?.delivering === true
@@ -442,10 +442,17 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
       yield
     }
     // Stopping a lane a change meanwhile wants again would only open it again.
-    const stillServed = present && (this.wants.wantsEveryTrack(member) || this.overflows(count) || this.byMember)
+    const stillServed = this.servesByAll(member, present, count)
     if (!servedByAll && !stillServed && this.lanes.releaseEveryTrack(member, all)) {
       this.outgoingDemand.setFetched(member, false)
     }
+  }
+
+  /** Whether the member's every-track lane serves all of its tracks: while it is `present` and a holder here wants
+   *  all of them, names more than `ROOM_MEMBER_NAMED_LANES_MAX` of them (`count`), or the tracks named of every member
+   *  are fetched by member. */
+  private servesByAll(member: string, present: boolean, count: number | undefined): boolean {
+    return present && (this.wants.wantsEveryTrack(member) || this.overflows(count) || this.byMember)
   }
 
   /** No want, lane or demand concerns the member, so its plan has nothing to do; the change that concerns it next
@@ -469,7 +476,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     }
     const overflows = this.overflows(count)
     if (overflows !== this.overflowing.has(member)) return yield* this.syncMemberBinary(member)
-    const servedByAll = count !== undefined && (this.wants.wantsEveryTrack(member) || overflows || this.byMember)
+    const servedByAll = this.servesByAll(member, count !== undefined, count)
     for (const track of plan.pairs.get(member) ?? []) {
       this.syncLane(member, track, servedByAll)
       yield
@@ -675,6 +682,12 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     // Catch up on what the outage dropped; a later end of the lane gets its own recovery.
     this.owner.laneEvent('deliveries-lost')
   }
+}
+
+/** The `byMember` band: on once the tracks named of every member outnumber both `ROOM_MEMBER_NAMED_LANES_MAX` and the
+ *  members, off once the members are twice as many; off until the roster is known. */
+function nextByMember(previous: boolean, tracks: number, members: number, rosterKnown: boolean): boolean {
+  return rosterKnown && tracks > ROOM_MEMBER_NAMED_LANES_MAX && (previous ? tracks * 2 > members : tracks > members)
 }
 
 /** The lane shape that serves a pair: the member's every-track lane while it serves all of the member's tracks;
