@@ -47,6 +47,7 @@ import {
   onChannelOpenAnswer,
   onChannelOpenHello,
   onChannelBudgets,
+  onChannelOfflineBudgets,
   onChannelCreditFailure,
   onChannelAckOwnership,
   onChannelApiProbe,
@@ -1151,6 +1152,17 @@ function ChannelDemo() {
     })
   }, [])
 
+  const testOfflineBudgets = useCallback(async () => {
+    const { bytes, acks } = await openChannel(onChannelOfflineBudgets)
+    for (const channel of [bytes, acks]) channel.listen(() => new Promise<void>((done) => setTimeout(done, 1000)))
+    const ends = await Promise.allSettled([bytes.closed, acks.closed])
+    document.querySelector('#channel-offline-budgets-result')!.textContent = JSON.stringify({
+      bytes: bytes.id,
+      acks: acks.id,
+      errors: ends.map((end) => (end.status === 'rejected' ? `${end.reason.name}: ${end.reason.message}` : 'clean')),
+    })
+  }, [])
+
   const testCreditFailure = useCallback(async () => {
     const { channel } = await openChannel(onChannelCreditFailure)
     const sends = Array.from({ length: 300 }, () => channel.send('x'))
@@ -1769,6 +1781,10 @@ function ChannelDemo() {
             Test send budgets
           </button>
           <output id="channel-budgets-result" />
+          <button id="channel-test-offline-budgets" onClick={testOfflineBudgets}>
+            Test send budgets on sends made before the page attaches
+          </button>
+          <output id="channel-offline-budgets-result" />
           <button id="channel-test-credit" onClick={testCreditFailure}>
             Test failed credit waits
           </button>

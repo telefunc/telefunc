@@ -16,6 +16,7 @@ import type { BroadcastKind, BroadcastSubscriptions } from '../../wire/payloads.
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { broadcastMessages } from '../channelMessages.js'
+import { CHANNEL_BUFFER_LIMIT_BINARY_BYTES, CHANNEL_BUFFER_LIMIT_BYTES } from '../../constants.js'
 import { ChannelClosedError, isExpectedChannelFailure } from '../channelErrors.js'
 import { classifyTelefuncError } from '../errorClassification.js'
 import { isPromise } from '../../../utils/isPromise.js'
@@ -71,8 +72,10 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return this.sendAckReq<ChannelPublishAck, string>(encode.publishAckReq, stringify(data))
   }
 
+  /** The page holds what its loop falls behind by within the server's default buffer limits. */
   override messages(options?: { signal?: AbortSignal }) {
-    return broadcastMessages<ChannelData<T>>(this, options)
+    const budget = { text: CHANNEL_BUFFER_LIMIT_BYTES, binary: CHANNEL_BUFFER_LIMIT_BINARY_BYTES }
+    return broadcastMessages<ChannelData<T>>(this, budget, options)
   }
 
   subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {

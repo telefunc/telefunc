@@ -288,7 +288,7 @@ channel.send({ type: 'ping' }) // no await needed
 What happens to a server channel's sends, awaited or not:
 
 - While the client is connected, the server delivers sends within `maxPendingBytes` and `maxPendingAcks` (see <Link href="/channel-config" />). Exceeding either budget closes the channel with `ChannelOverflowError` naming the setting.
-- While the client is offline, the server buffers them, up to `bufferLimit`/`bufferLimitBinary` (see <Link href="/channel-config" />). An awaited `send()` resolves once the client is back and the message went out.
+- While the client is offline, the server buffers them, up to `bufferLimit`/`bufferLimitBinary` (see <Link href="/channel-config" />). An awaited `send()` resolves once the client is back and the message went out. From then on, these sends count toward `maxPendingBytes` and `maxPendingAcks` like any other.
 - Past that limit, the server drops the oldest buffered sends, and each dropped `send()` rejects with `ChannelOverflowError`. A single message larger than the limit is dropped even if you await it. Earlier buffered sends of the same kind (text or binary) are dropped too.
 
 Telefunc logs a warning once per channel when the sends nobody awaits keep outrunning what the client takes, well before they exceed `maxPendingBytes`.
@@ -335,7 +335,7 @@ A rejected publish may still have reached some subscribers (on Cloudflare, every
 
 A failed `publish()` you neither `await` nor `.catch()` gives your code no error (see <Link href="#errors">errors</Link>). To see failures, `await` it or add `.catch()`.
 
-`publish()` can't be awaited per subscriber, so the <Link href="#backpressure">64 MiB warning</Link> doesn't apply to a `BroadcastChannel`. Instead, a client that falls far behind a broadcast has its connection cut and reconnects. Other channels on the connection also <Link href="#reconnection">reconnect</Link>. The `BroadcastChannel` gets what it missed after reconnecting. If it missed more than the server's buffers hold, it closes (see <Link href="#errors">errors</Link>).
+`publish()` can't be awaited per subscriber, so the <Link href="#backpressure">warning about sends that outrun their client</Link> doesn't apply to a `BroadcastChannel`. Instead, a client that falls far behind a broadcast has its connection cut and reconnects. Other channels on the connection also <Link href="#reconnection">reconnect</Link>. The `BroadcastChannel` gets what it missed after reconnecting. If it missed more than the server's buffers hold, it closes (see <Link href="#errors">errors</Link>).
 
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
 >
@@ -418,6 +418,8 @@ for await (const message of chat.messages({ signal: controller.signal })) {
 ```
 
 > `messages()` works on both server and client. Each message includes the same `info` as a subscription callback. The loop follows the <Link href="#receive-messages-in-a-loop">channel loop's cancellation and close behavior</Link>.
+
+> A publish doesn't wait for a slow loop, so the loop holds what it falls behind by: up to `config.channel.bufferLimit` of text and `bufferLimitBinary` of binary on the server, and their defaults (512 KB and 2 MB) on the client. A loop that falls further behind throws `ChannelOverflowError` and stops receiving.
 
 > `subscribe()`, `subscribeBinary()`, `onOpen()` and `onClose()` accept `{ signal }` after the callback. The static `Broadcast.subscribe()` and `Broadcast.subscribeBinary()` accept it too. Aborting removes that registration.
 

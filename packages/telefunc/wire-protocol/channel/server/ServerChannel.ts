@@ -294,18 +294,26 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** Ends the channel and throws where a send of `bytes` (its frame included) would pass `maxPendingAcks` or
    *  `maxPendingBytes`. */
   private checkPending(bytes: number, ack: boolean): void {
-    if (ack && this.pendingAcks.size >= this.maxPendingAcks) this.overflow('maxPendingAcks')
-    // Only a send that waits, for its answer or behind sends waiting for credit, is held with its promise.
-    const held = ack || this.sendCredit.waitingCount > 0 ? bytes + HELD_SEND_OVERHEAD_BYTES : 0
-    if (this.bytesAhead() + held > this.maxPendingBytes) this.overflow('maxPendingBytes')
+    const err = this.admitPending(bytes, ack)
+    if (err) throw err
   }
 
-  private overflow(setting: 'maxPendingAcks' | 'maxPendingBytes'): never {
+  /** Ends the channel, and returns why, where a send of `bytes` (its frame included) would pass `maxPendingAcks` or
+   *  `maxPendingBytes`. */
+  private admitPending(bytes: number, ack: boolean): ChannelOverflowError | null {
+    if (ack && this.pendingAcks.size >= this.maxPendingAcks) return this.overflow('maxPendingAcks')
+    // Only a send that waits, for its answer or behind sends waiting for credit, is held with its promise.
+    const held = ack || this.sendCredit.waitingCount > 0 ? bytes + HELD_SEND_OVERHEAD_BYTES : 0
+    if (this.bytesAhead() + held > this.maxPendingBytes) return this.overflow('maxPendingBytes')
+    return null
+  }
+
+  private overflow(setting: 'maxPendingAcks' | 'maxPendingBytes'): ChannelOverflowError {
     const err = new ChannelOverflowError(
       `Channel closed: config.channel.${setting} exceeded; await each send or raise the setting`,
     )
     this.endWithError(ERROR_REASON.AHEAD, err)
-    throw err
+    return err
   }
 
   /** What its sends put ahead of the page: past the page's credit, and the ack requests it hasn't answered. */
@@ -449,7 +457,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.reconnectTimer = null
     this.peer = peer
     this.receiveCredit.attach(peer.sender.sendWait())
-    this.offlineBuffer.flush(this, peer)
+    if (!this.offlineBuffer.flush(this, peer)) return
     this.sendPendingAckRes(peer)
     // After the swap, so what they send reaches this peer even if the previous one never detached.
     if (state?.broadcast) {
@@ -763,41 +771,47 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return (this.pendingEnd ??= { closeAck: false, closeRequest: false, abort: null, error: null })
   }
 
-  /** @internal `BufferedSender`: sends `peer` a frame buffered while no page was attached, as it would have gone then.
-   *  An ack request already rejected at shutdown has no callback left to answer. */
-  _sendBuffered(peer: IndexedPeer, tag: number, data: string | Uint8Array, callback: EntryCallback | null): void {
+  /** @internal `BufferedSender`: sends `peer` a frame buffered while no page was attached, as it would have gone then,
+   *  within the same pending limits; false where it ended the channel instead. An ack request already rejected at
+   *  shutdown has no callback left to answer. */
+  _sendBuffered(peer: IndexedPeer, tag: number, data: string | Uint8Array, callback: EntryCallback | null): boolean {
+    if (this._phase !== 'ended' && tag !== TAG.PUBLISH && tag !== TAG.PUBLISH_BINARY) {
+      const bytes = (typeof data === 'string' ? utf8ByteLength(data) : data.byteLength) + HEADER
+      if (this.admitPending(bytes, tag === TAG.TEXT_ACK_REQ || tag === TAG.BINARY_ACK_REQ)) return false
+    }
     switch (tag) {
       case TAG.TEXT:
         assert(typeof data === 'string' && callback)
         this.sendCredit.countSent(peer.sendSequenced(encode.text, data))
         callback.resolve()
-        return
+        break
       case TAG.TEXT_ACK_REQ:
         assert(typeof data === 'string')
         peer.sendSequenced(encode.textAckReq, data, (seq, bytes) => {
           if (callback) this.addPendingAck(seq, bytes, callback)
         })
-        return
+        break
       case TAG.PUBLISH:
         assert(typeof data === 'string')
         peer.sendSequenced(encode.publish, data)
-        return
+        break
       case TAG.BINARY:
         assert(data instanceof Uint8Array && callback)
         this.sendCredit.countSent(peer.sendSequenced(encode.binary, data))
         callback.resolve()
-        return
+        break
       case TAG.BINARY_ACK_REQ:
         assert(data instanceof Uint8Array)
         peer.sendSequenced(encode.binaryAckReq, data, (seq, bytes) => {
           if (callback) this.addPendingAck(seq, bytes, callback)
         })
-        return
+        break
       case TAG.PUBLISH_BINARY:
         assert(data instanceof Uint8Array)
         peer.sendSequenced(encode.publishBinary, data)
-        return
+        break
     }
+    return true
   }
 
   private sendPendingAckRes(peer: IndexedPeer): void {

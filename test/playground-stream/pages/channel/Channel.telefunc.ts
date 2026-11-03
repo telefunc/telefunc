@@ -41,6 +41,7 @@ export {
   onChannelOpenAnswer,
   onChannelOpenHello,
   onChannelBudgets,
+  onChannelOfflineBudgets,
   onChannelCreditFailure,
   onChannelAckOwnership,
   onChannelApiProbe,
@@ -927,6 +928,25 @@ async function onChannelBudgets() {
   }
   exercise(bytes, false)
   exercise(acks, true)
+  return { bytes: bytes.client, acks: acks.client }
+}
+
+async function onChannelOfflineBudgets() {
+  const original = config.channel
+  config.channel = { ...original, maxPendingBytes: 8192 }
+  const bytes = new Channel<never, string>()
+  config.channel = { ...original, maxPendingAcks: 2 }
+  const acks = new Channel<never, string>()
+  config.channel = original
+  for (const ch of [bytes, acks]) {
+    // Sent before the page attaches: they wait in the channel's buffer until it does.
+    const sends = Array.from({ length: 3 }, () => ch.send('x'.repeat(3 * 1024), { ack: true }))
+    void Promise.allSettled(sends).then((results) => {
+      cleanupState[`offline_budget_${ch.id}`] = JSON.stringify(
+        results.map((r) => (r.status === 'rejected' ? `${r.reason.name}: ${r.reason.message}` : 'answered')),
+      )
+    })
+  }
   return { bytes: bytes.client, acks: acks.client }
 }
 

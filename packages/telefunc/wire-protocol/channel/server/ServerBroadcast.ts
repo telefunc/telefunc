@@ -14,6 +14,7 @@ import type {
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
+import { getChannelLimits } from '../../../node/server/serverConfig.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { ServerBroadcastEnd, type BroadcastEndOwner } from './ServerBroadcastEnd.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
@@ -102,8 +103,10 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     return this._end.closed
   }
 
+  /** Holds what its loop falls behind by within the channel buffer limits a page's channel gets. */
   messages(options?: { signal?: AbortSignal }) {
-    return broadcastMessages<ChannelData<T>>(this, options)
+    const { bufferLimit, bufferLimitBinary } = getChannelLimits()
+    return broadcastMessages<ChannelData<T>>(this, { text: bufferLimit, binary: bufferLimitBinary }, options)
   }
 
   // Channel methods that don't apply to broadcast: throw at runtime.
