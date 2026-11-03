@@ -11,6 +11,7 @@ export type {
   JoinOptions,
   PublishOptions,
   ParticipantMeta,
+  ReadonlyMeta,
   LocalParticipant,
   RemoteParticipant,
   Sender,

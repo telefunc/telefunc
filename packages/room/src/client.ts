@@ -5,6 +5,7 @@ export type {
   ClientJoinOptions as JoinOptions,
   PublishOptions,
   ParticipantMeta,
+  ReadonlyMeta,
   LocalParticipant,
   RemoteParticipant,
   Sender,
