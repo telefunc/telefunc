@@ -334,7 +334,7 @@ shape**: `coalesce`/latest-only for `publishBinary`, or the datagram lane of #44
 | `room.join({ identity, hidden })` / `getParticipants({ hidden })` | ✔ | identity-stamped joins; the **hidden authority** (`join({ hidden: true })`) runs the sim, read off-presence and handed to the client by `onEnterMatch` — no `room.server` accessor (`telefunc/match.telefunc.ts`, `app/store.ts`) |
 | `room.snapshot()` / `snapshot({ by: 'identity' })` / `onChange` | ✔ | the Room→React lobby adapter; identity-grouped roster, named types (§9 adopted) |
 | `room.subscribe` / `publish` (typed `Pub`) | ✔ | all-chat (§8); `Room<MatchMeta, PlayerMeta, ChatMsg>` |
-| `authority.publishBinary({ track, keyFrame, retain })` + ack `receivers` | ✔ | **the core** — per-team fog-filtered delta frames from the hidden authority; keyframes `{ retain: true }` seed late subscribers (§1, §4, §5) |
+| `authority.publishBinary({ track, keyFrame, retain })` | ✔ | **the core** — per-team fog-filtered delta frames from the hidden authority; keyframes `{ retain: true }` seed late subscribers (§1, §4, §5) |
 | `member.subscribeBinary({ track })` | ✔ | each client takes only its team's fog track; the retained keyframe arrives first (§5, §6) |
 | `me.onDemand((track, count))` | ✔ | gate + force-keyframe for the **on-demand** spectator track only (§5); team tracks use retain, not `onDemand` |
 | `me.send(authority.id)` (receipt) / `authority.listen` | ✔ | the client→server command lane into the hidden authority (§2 adopted) |
