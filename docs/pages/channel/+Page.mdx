@@ -333,7 +333,7 @@ When `publish()` rejects depends on where Broadcast runs:
 
 A rejected publish may still have reached some subscribers (on Cloudflare, every subscriber the failed server doesn't hold), so publishing it again can deliver it twice to them.
 
-A failed `publish()` you neither `await` nor `.catch()` fails silently: your code gets no error, and Node.js reports no unhandled rejection. To see failures, `await` it or add `.catch()`.
+A failed `publish()` you neither `await` nor `.catch()` gives your code no error (see <Link href="#errors">errors</Link>). To see failures, `await` it or add `.catch()`.
 
 `publish()` can't be awaited per subscriber, so the <Link href="#backpressure">64 MiB warning</Link> doesn't apply to a `BroadcastChannel`. Instead, a client that falls far behind a broadcast has its connection cut and reconnects. Other channels on the connection also <Link href="#reconnection">reconnect</Link>. The `BroadcastChannel` gets what it missed after reconnecting. If it missed more than the server's buffers hold, it closes (see <Link href="#errors">errors</Link>).
 
@@ -502,7 +502,7 @@ Only the two ends of a channel can use it, while anything that knows a broadcast
 
 ## Errors
 
-Telefunc silently handles rejected promises from `send()`, `sendBinary()`, `publish()` and `publishBinary()`. To observe a failure, `await` the call or use `.catch()`.
+A rejected `send()`, `sendBinary()`, `publish()` or `publishBinary()` you neither `await` nor `.catch()` never becomes an unhandled rejection. An expected failure (one of the errors below, or data the server's validation refused) stays silent. In the browser, a `publish()` or `publishBinary()` that fails from a bug in Telefunc is logged to the console. To observe a failure, `await` the call or use `.catch()`.
 
 Channels and broadcasts signal failure through four errors:
 
