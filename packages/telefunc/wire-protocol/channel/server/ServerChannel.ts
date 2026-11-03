@@ -32,6 +32,7 @@ import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTele
 import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channelErrors.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { channelMessages } from '../channelMessages.js'
+import { forListener, listenerAnswer } from '../listenerAnswer.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES, SENDS_AHEAD_WARNING_BYTES } from '../../constants.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
@@ -596,7 +597,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const pending: Promise<unknown>[] = []
     for (const cb of listeners.list()) {
       try {
-        const result = cb(value instanceof Uint8Array ? (new Uint8Array(value) as T) : value)
+        const result = cb(forListener(value))
         if (isPromise(result)) {
           pending.push(result.catch((err: unknown) => this.lifecycle.handleCallbackError(err)))
         }
@@ -835,22 +836,16 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this.sendAckRes(seq, verdict, ACK_STATUS.SHIELD_ERROR)
       return
     }
-    let answer: string
+    let answer: string | null
     try {
-      let result: unknown
-      for (const cb of listeners.list()) {
-        const value = await cb(data instanceof Uint8Array ? (new Uint8Array(data) as T) : data)
-        if (value === undefined) continue
-        if (result !== undefined) {
-          this.sendAckRes(seq, 'Only one channel listener may return an acknowledgement value', ACK_STATUS.ERROR)
-          return
-        }
-        result = value
-      }
-      answer = stringify(result)
+      answer = await listenerAnswer(listeners.list(), data)
     } catch (err) {
       if (this.lifecycle.handleCallbackError(err)) return
       this.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+      return
+    }
+    if (answer === null) {
+      this.sendAckRes(seq, 'Only one channel listener may return an acknowledgement value', ACK_STATUS.ERROR)
       return
     }
     this.sendAckRes(seq, answer)

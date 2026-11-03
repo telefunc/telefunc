@@ -44,6 +44,7 @@ import type { Downlink } from '../../flowControl/client/Downlink.js'
 import type { MuxChannel, MuxConnection } from './ClientConnection.js'
 import { ChannelClosedError } from '../channelErrors.js'
 import { channelMessages } from '../channelMessages.js'
+import { forListener, listenerAnswer } from '../listenerAnswer.js'
 import { isPromise } from '../../../utils/isPromise.js'
 
 /** The connection a channel rides (see `ClientConnection.getOrCreate`). */
@@ -288,7 +289,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     const pending: Promise<unknown>[] = []
     for (const cb of listeners.list()) {
       try {
-        const result = cb(value instanceof Uint8Array ? (new Uint8Array(value) as T) : value)
+        const result = cb(forListener(value))
         if (isPromise(result)) {
           pending.push(result.catch((err: unknown) => this.lifecycle.handleCallbackError(err)))
         }
@@ -427,27 +428,21 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       this.connection.sendAckRes(this, seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
       return
     }
-    let answer: string
+    let answer: string | null
     try {
-      let result: unknown
-      for (const cb of listeners.list()) {
-        const value = await cb(data instanceof Uint8Array ? (new Uint8Array(data) as T) : data)
-        if (value === undefined) continue
-        if (result !== undefined) {
-          this.connection.sendAckRes(
-            this,
-            seq,
-            'Only one channel listener may return an acknowledgement value',
-            ACK_STATUS.ERROR,
-          )
-          return
-        }
-        result = value
-      }
-      answer = stringify(result)
+      answer = await listenerAnswer(listeners.list(), data)
     } catch (err) {
       if (this.lifecycle.handleCallbackError(err)) return
       this.connection.sendAckRes(this, seq, 'Internal client channel error — see client logs', ACK_STATUS.ERROR)
+      return
+    }
+    if (answer === null) {
+      this.connection.sendAckRes(
+        this,
+        seq,
+        'Only one channel listener may return an acknowledgement value',
+        ACK_STATUS.ERROR,
+      )
       return
     }
     this.connection.sendAckRes(this, seq, answer)
