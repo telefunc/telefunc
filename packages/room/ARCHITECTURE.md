@@ -39,9 +39,11 @@ this one too, applies the event to its model, and its views tell their listeners
   incarnation, and everything below is scoped to one.
 - **cell**: a versioned key-value entry of an incarnation: a member's record, its meta keys, the hold counters, a
   lease, a view. Read in pages, written by compare-exchange or by an operation.
-- **operation**: a whole write (join, leave, a member's meta write) as one pure plan that the driver runs atomically
-  where the state lives: inline on memory, one Lua script on Redis, one transaction in the authority on Cloudflare
-  (`backend/operation.ts`, `server/store/roomOperations.ts`).
+- **operation**: a whole write (join, leave, a member's meta write) as one pure plan whose writes the driver applies
+  atomically (`backend/operation.ts`, `server/store/roomOperations.ts`). Memory runs it inline, and Cloudflare in one
+  transaction in the authority. Redis plans it in the process, a round trip per step of cells it reads, then applies
+  it in one Lua script, which checks that the cells read are unchanged. If one changed, the operation is planned again
+  from the start (`RedisRoomDriver.runOperation()`).
 - **lane**: an ordered stream of an incarnation's commits, each with a seq: one semantic (messages), one control
   (membership, meta, close), one demand, one inbox per member (DMs), one binary per (member, track).
 - **retained**: a lane's last frame kept for late subscribers (`publish(…, { retain: true })`).

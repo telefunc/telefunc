@@ -115,8 +115,17 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
     return this.connection.run(REDIS_COMMANDS.cellsExchange, { roomId, inc, exchange })
   }
 
-  /** Plans over the cells it reads, then applies the plan in one script while they are as read; a cell that moved
-   *  meanwhile plans it again. */
+  /** This process plans the operation over the cells it reads, and one script applies the plan while those cells are
+   *  as read. A leave, for example:
+   *  1. The plan runs with no cell read yet. It asks for the member's record, which reads as absent, so this run
+   *     returns early, and its result is dropped.
+   *  2. One round trip reads the record, its version and the authority's time.
+   *  3. The plan runs again over them. It asks for no cell it hadn't read, so planning ends, with the record's deletes,
+   *     the hold counts, the departing record and the leave event recorded.
+   *  4. The plan drops the member's lanes, so one round trip reads its lane orders and retained frames.
+   *  5. One script checks that the record is still at the version read and the lanes as counted, then applies every
+   *     write and the commit (`OPERATION_LUA`). If one changed meanwhile, the operation starts again at 1.
+   *  So a leave takes three round trips. A plan whose reads depend on what it read takes one more per step. */
   async runOperation<Args, Value>(
     roomId: string,
     inc: string,
@@ -135,8 +144,8 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
     }
   }
 
-  /** Runs the pure plan until it read nothing it hadn't read yet: each run reads what the one before it missed, as
-   *  absent, at once. Null once the incarnation is not readable. */
+  /** Runs the plan until a run asks for no cell it hadn't read. In each run a cell not read yet reads as absent; the
+   *  cells a run missed are read together before the next. Null once the incarnation is not readable. */
   private async planOperation<Args, Value>(
     roomId: string,
     inc: string,

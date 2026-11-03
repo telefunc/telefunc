@@ -548,8 +548,8 @@ end
 //         [8]=the semantic lane's retained frame [9]=retained owners, then per dropped member its order hash and
 //         retained lanes, then per retained binary frame deleted its key and its member's and track's retained lanes,
 //         then per binary lane dropped its track's lane set, then per expiring cell its key, then COMMIT's KEYS
-//   ARGV: [1]=inc [2]=the plan's JSON (see `operation.invoke`), then the mutations' and the expiring cells' bytes,
-//         then COMMIT's ARGV
+//   ARGV: [1]=inc [2]=the plan, an `OperationPacket` as JSON (its type says what each field holds and where its KEYS
+//         and ARGV are), then the mutations' and the expiring cells' bytes, then COMMIT's ARGV
 const OPERATION_LUA = `${HEAD_PRELUDE}${REDIS_ORDERING_FRAME_LUA}${CELL_WRITES_LUA}${RETAINED_DELETE_FN_LUA}
 local function tf_commit(CK, CA)
 ${commitLua(luaRefs('CK', COMMIT_KEYS), luaRefs('CA', COMMIT_ARGS), 'CA')}
@@ -693,6 +693,30 @@ type CommitOutcome = StaleCommit | Extract<CommitReply, { kind: 'accepted' }>
 
 /** What OPERATION applies: an operation's writes, the version each cell its plan read was at ('' while absent), each
  *  member it drops with the lanes its order hash had and the binary lanes it retained, and its commit. */
+/** OPERATION_LUA's ARGV[2], as JSON: what the plan read and wrote, in the order the script takes its KEYS and ARGV. */
+type OperationPacket = {
+  /** Each cell the plan read, with its version as read ('' while absent): the script applies nothing once one moved. */
+  expect: [key: string, version: string][]
+  /** Each member the plan drops, with its lane orders and retained lanes counted as read; two KEYS each, from
+   *  KEYS[10]. */
+  members: [member: string, lanes: number, retained: number][]
+  /** The semantic lane's key, whose retained frame goes with a dropped member that owns it. */
+  semantic: string
+  /** The cell prefixes the plan drops, before its mutations. */
+  prefixes: string[]
+  /** Each cell write: its key, and its bytes' index in ARGV, 0 for a delete. */
+  mutations: [key: string, argv: number][]
+  counts: [key: string, delta: number, create: boolean][]
+  /** The dropped members' retained binary lanes; three KEYS each, after the members'. */
+  retained: string[]
+  /** The dropped members' binary lanes, which leave their tracks' lane sets; a KEY each, after the retained lanes'. */
+  trackLanes: string[]
+  /** Each expiring cell: its bytes' index in ARGV, and its TTL; a KEY each, after the track lane sets. */
+  expiring: [argv: number, ttlMs: number][]
+  /** Where COMMIT's ARGV starts, 0 without a commit; COMMIT's KEYS come last. */
+  commit: number
+}
+
 type OperationInput = RoomInc & {
   writes: OperationWrites
   reads: ReadonlyMap<string, string>
@@ -973,8 +997,7 @@ const REDIS_COMMANDS = {
         retainedOwnersKey(prefix, roomId, inc),
       ]
       const argv: (string | Buffer)[] = [inc, '']
-      // Each mutation's bytes by its index in ARGV, 0 for a delete.
-      const mutations = writes.mutations.map(({ key, bytes }) => {
+      const mutations = writes.mutations.map(({ key, bytes }): [string, number] => {
         if (bytes === null) return [key, 0]
         argv.push(toBuffer(bytes))
         return [key, argv.length]
@@ -993,8 +1016,7 @@ const REDIS_COMMANDS = {
       }
       const trackLanes = members.flatMap(({ lanes }) => lanes.filter((key) => kit.decodeLaneKey(key).kind === 'binary'))
       for (const laneKey of trackLanes) keys.push(trackLanesKey(prefix, roomId, inc, binaryLaneOf(kit, laneKey).track))
-      // Each expiring cell's bytes by its index in ARGV, and its TTL.
-      const expiring = writes.expiring.map(({ key, bytes, ttlMs }) => {
+      const expiring = writes.expiring.map(({ key, bytes, ttlMs }): [number, number] => {
         keys.push(expiringCellKey(prefix, roomId, inc, key))
         argv.push(toBuffer(bytes))
         return [argv.length, ttlMs]
@@ -1006,7 +1028,7 @@ const REDIS_COMMANDS = {
         commitAt = argv.length + 1
         argv.push(...invocation.argv)
       }
-      argv[1] = JSON.stringify({
+      const packet: OperationPacket = {
         expect: [...reads],
         members: members.map(({ member, lanes, retained }) => [member, lanes.length, retained.length]),
         semantic: semanticLaneKey,
@@ -1017,7 +1039,8 @@ const REDIS_COMMANDS = {
         trackLanes,
         expiring,
         commit: commitAt,
-      })
+      }
+      argv[1] = JSON.stringify(packet)
       return { keys, argv }
     },
     parse: (reply): OperationOutcome => {
