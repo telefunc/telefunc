@@ -105,6 +105,12 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
   readonly incarnation: RoomIncarnation
   /** What this process shares of the incarnation. */
   readonly replica: RoomReplica
+  // What the handle is to the room: its tail, its stubs, its listeners and the members it owns (`localParticipants`,
+  // `stubOf`). The replica derives the lanes' roles from them (`RoomReplica.reconsider()`), so each change is one
+  // transition: the handle changes the collection, then tells the replica in the same turn, through `own()`,
+  // `release()`, `attachStub()`, `detachStub()`, `tailChanged()` or `listenersChanged()`. A leave or a close the
+  // replica applies runs the other way: the replica disowns the member, the handle forgets it (`memberLeft()`,
+  // `teardown()`), and the replica reconsiders the handle.
   /** `Room.get({ tail: true })`'s hold until a stub attaches and takes it. */
   private tail: TailHold | null = null
   guards: RoomGuards | null = null

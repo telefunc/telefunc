@@ -183,7 +183,8 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.reconsider(handle)
   }
 
-  /** Keeps `served`, `receivers` and the roles the lane plan reads current with the handle. */
+  /** Keeps `served`, `receivers` and the roles the lane plan reads current with the handle. Every transition of a
+   *  handle runs it after the handle changed (the rule is beside `RoomHandle`'s collections). */
   private reconsider(handle: RoomHandle): void {
     const tailHeld = handle.holdsTail()
     toggle(this.served, handle, handle.isObserved() || tailHeld)
