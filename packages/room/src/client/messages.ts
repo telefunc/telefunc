@@ -8,9 +8,6 @@ import { senderSnapshot } from '../shared/arguments.js'
 import { Fifo } from '../utils/Fifo.js'
 import { utf8ByteLength } from '../utils/utf8ByteLength.js'
 
-/** A queued message, and its bytes besides its sender. */
-type Queued = { data: RoomMessage; size: number }
-
 type Source = {
   subscribe(
     callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => void,
@@ -25,66 +22,24 @@ type Source = {
 
 function roomMessages(source: Source, bufferLimit: number, signal?: AbortSignal): AsyncIterableIterator<RoomMessage> {
   const lifetime = new AbortController()
-  let queue = new Fifo<Queued>()
+  const queue = new MessageQueue(bufferLimit)
   let started = false
-  let bytes = 0
-  // A message keeps its sender as the listeners got it when it arrived (a live participant's meta changes, and the
-  // participant outlives its membership): a snapshot of the id, the identity and the meta object the sender had then,
-  // frozen down to its plain objects and arrays, and read-only beyond them. A sender's messages share one snapshot
-  // until its meta changes, and each snapshot is measured once, and counted once while any queued message holds it.
-  const snapshots = new WeakMap<Sender, Sender>()
-  const senderBytes = new WeakMap<Sender, number>()
-  let heldSenders = new Map<Sender, number>()
   let changed = createDeferred()
   let failure: unknown
+  // A normal end leaves what is queued to drain; a failure drops it.
   const finish = (error?: unknown) => {
     failure = error
     untether(iterator)
     lifetime.abort()
     signal?.removeEventListener('abort', onAbort)
-    if (error !== undefined) clear()
+    if (error !== undefined) queue.clear()
     changed.resolve()
-  }
-  const clear = () => {
-    queue = new Fifo()
-    heldSenders = new Map()
-    bytes = 0
-  }
-  const snapshotOf = (from: Sender) => {
-    const known = snapshots.get(from)
-    if (known?.meta === from.meta) return known
-    const snapshot = senderSnapshot(from.id, from.meta, from.identity)
-    snapshots.set(from, snapshot)
-    return snapshot
-  }
-  const sizeOfSender = (sender: Sender) => {
-    let size = senderBytes.get(sender)
-    if (size === undefined) {
-      size = utf8ByteLength(sender.id) + utf8ByteLength(sender.identity ?? '') + utf8ByteLength(stringify(sender.meta))
-      senderBytes.set(sender, size)
-    }
-    return size
   }
   const onAbort = () => finish(signal!.reason)
-  const receive = (data: RoomMessage, payloadBytes: number) => {
-    const size = payloadBytes + 64
-    const holders = heldSenders.get(data.from) ?? 0
-    const added = size + (holders === 0 ? sizeOfSender(data.from) : 0)
-    if (bytes + added > bufferLimit) return finish(new ChannelOverflowError('Room message iterator buffer overflow'))
-    bytes += added
-    heldSenders.set(data.from, holders + 1)
-    queue.push({ data, size })
+  const receive = (message: RoomMessage, payloadBytes: number) => {
+    if (!queue.push(message, payloadBytes))
+      return finish(new ChannelOverflowError('Room message iterator buffer overflow'))
     changed.resolve()
-  }
-  const release = ({ data, size }: Queued) => {
-    bytes -= size
-    const holders = heldSenders.get(data.from)! - 1
-    if (holders > 0) {
-      heldSenders.set(data.from, holders)
-    } else {
-      heldSenders.delete(data.from)
-      bytes -= sizeOfSender(data.from)
-    }
   }
   const start = () => {
     started = true
@@ -92,15 +47,16 @@ function roomMessages(source: Source, bufferLimit: number, signal?: AbortSignal)
     signal?.addEventListener('abort', onAbort, { once: true })
     source.onClose(() => finish(), { signal: lifetime.signal })
     source.subscribe(
-      (data, info, from) =>
-        receive({ type: 'text', data, info, from: snapshotOf(from) }, utf8ByteLength(stringify(data))),
-      { signal: lifetime.signal },
+      (data, info, from) => receive({ type: 'text', data, info, from }, utf8ByteLength(stringify(data))),
+      {
+        signal: lifetime.signal,
+      },
     )
     // The bytes are this listener's own copy.
     source.subscribeBinary(
       (data, info, from) =>
         receive(
-          { type: 'binary', data, info, from: snapshotOf(from) },
+          { type: 'binary', data, info, from },
           data.byteLength + (info.meta ? utf8ByteLength(stringify(info.meta)) : 0),
         ),
       { signal: lifetime.signal },
@@ -114,11 +70,8 @@ function roomMessages(source: Source, bufferLimit: number, signal?: AbortSignal)
       if (!started && !lifetime.signal.aborted) start()
       while (true) {
         if (failure !== undefined) throw failure
-        const entry = queue.shift()
-        if (entry) {
-          release(entry)
-          return { done: false, value: entry.data }
-        }
+        const message = queue.shift()
+        if (message) return { done: false, value: message }
         if (lifetime.signal.aborted) return { done: true, value: undefined }
         const pending = changed
         await pending.promise
@@ -127,7 +80,7 @@ function roomMessages(source: Source, bufferLimit: number, signal?: AbortSignal)
     },
     async return() {
       finish()
-      clear()
+      queue.clear()
       return { done: true, value: undefined }
     },
     async throw(error) {
@@ -136,4 +89,78 @@ function roomMessages(source: Source, bufferLimit: number, signal?: AbortSignal)
     },
   }
   return iterator
+}
+
+/**
+ * The messages `messages()` holds, within `bufferLimit` bytes. A message keeps its sender as the listeners got it when
+ * it arrived (a live participant's meta changes, and the participant outlives its membership): a snapshot of the id,
+ * the identity and the meta object the sender had then, frozen down to its plain objects and arrays, and read-only
+ * beyond them. A sender's messages share one snapshot until its meta changes. The bytes count each message's payload,
+ * and each snapshot once while any queued message holds it.
+ */
+class MessageQueue {
+  private readonly bufferLimit: number
+  /** Each queued message, with its bytes besides its sender. */
+  private queue = new Fifo<{ message: RoomMessage; size: number }>()
+  private bytes = 0
+  /** How many queued messages hold each snapshot. */
+  private holders = new Map<Sender, number>()
+  /** Each live sender's last snapshot, and each snapshot's bytes. */
+  private readonly snapshots = new WeakMap<Sender, Sender>()
+  private readonly snapshotBytes = new WeakMap<Sender, number>()
+
+  constructor(bufferLimit: number) {
+    this.bufferLimit = bufferLimit
+  }
+
+  /** Queues `message`, its sender as it is now, unless its bytes would pass the limit; then it queues nothing. */
+  push(message: RoomMessage, payloadBytes: number): boolean {
+    const from = this.snapshotOf(message.from)
+    const size = payloadBytes + 64
+    const holders = this.holders.get(from) ?? 0
+    const added = size + (holders === 0 ? this.sizeOf(from) : 0)
+    if (this.bytes + added > this.bufferLimit) return false
+    this.bytes += added
+    this.holders.set(from, holders + 1)
+    this.queue.push({ message: { ...message, from }, size })
+    return true
+  }
+
+  shift(): RoomMessage | undefined {
+    const entry = this.queue.shift()
+    if (entry === undefined) return undefined
+    const { message, size } = entry
+    this.bytes -= size
+    const holders = this.holders.get(message.from)! - 1
+    if (holders > 0) {
+      this.holders.set(message.from, holders)
+    } else {
+      this.holders.delete(message.from)
+      this.bytes -= this.sizeOf(message.from)
+    }
+    return message
+  }
+
+  clear(): void {
+    this.queue = new Fifo()
+    this.holders = new Map()
+    this.bytes = 0
+  }
+
+  private snapshotOf(from: Sender): Sender {
+    const known = this.snapshots.get(from)
+    if (known?.meta === from.meta) return known
+    const snapshot = senderSnapshot(from.id, from.meta, from.identity)
+    this.snapshots.set(from, snapshot)
+    return snapshot
+  }
+
+  private sizeOf(sender: Sender): number {
+    let size = this.snapshotBytes.get(sender)
+    if (size === undefined) {
+      size = utf8ByteLength(sender.id) + utf8ByteLength(sender.identity ?? '') + utf8ByteLength(stringify(sender.meta))
+      this.snapshotBytes.set(sender, size)
+    }
+    return size
+  }
 }
