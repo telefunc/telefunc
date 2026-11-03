@@ -3,12 +3,12 @@ export { roomMessages }
 import { stringify } from '@brillout/json-serializer/stringify'
 import { ChannelOverflowError } from 'telefunc/client'
 import { untether, createDeferred, type ChannelPublishInfo } from 'telefunc/__internal'
-import type { BinaryFrameInfo, ParticipantMeta, RoomMessage, Sender } from '../types.js'
+import type { BinaryFrameInfo, RoomMessage, Sender } from '../types.js'
 import { senderSnapshot } from '../shared/arguments.js'
 import { Fifo } from '../utils/Fifo.js'
 import { utf8ByteLength } from '../utils/utf8ByteLength.js'
 
-/** A queued message, and its bytes besides its sender's meta. */
+/** A queued message, and its bytes besides its sender. */
 type Queued = { data: RoomMessage; size: number }
 
 type Source = {
@@ -29,10 +29,12 @@ function roomMessages(source: Source, bufferLimit: number, signal?: AbortSignal)
   let started = false
   let bytes = 0
   // A message keeps its sender as the listeners got it when it arrived (a live participant's meta changes, and the
-  // participant outlives its membership): the id, the identity, and the meta object the sender had then, which never
-  // changes. So each meta object is measured once, and counted once while any queued message holds it.
-  const metaBytes = new WeakMap<ParticipantMeta, number>()
-  let heldMeta = new Map<ParticipantMeta, number>()
+  // participant outlives its membership): a snapshot of the id, the identity and the meta object the sender had then,
+  // which never changes. A sender's messages share one snapshot until its meta changes, and each snapshot is measured
+  // once, and counted once while any queued message holds it.
+  const snapshots = new WeakMap<Sender, Sender>()
+  const senderBytes = new WeakMap<Sender, number>()
+  let heldSenders = new Map<Sender, number>()
   let changed = createDeferred()
   let failure: unknown
   const finish = (error?: unknown) => {
@@ -45,35 +47,43 @@ function roomMessages(source: Source, bufferLimit: number, signal?: AbortSignal)
   }
   const clear = () => {
     queue = new Fifo()
-    heldMeta = new Map()
+    heldSenders = new Map()
     bytes = 0
   }
-  const sizeOfMeta = (meta: ParticipantMeta) => {
-    let size = metaBytes.get(meta)
-    if (size === undefined) metaBytes.set(meta, (size = utf8ByteLength(stringify(meta))))
+  const snapshotOf = (from: Sender) => {
+    const known = snapshots.get(from)
+    if (known?.meta === from.meta) return known
+    const snapshot = senderSnapshot(from.id, from.meta, from.identity)
+    snapshots.set(from, snapshot)
+    return snapshot
+  }
+  const sizeOfSender = (sender: Sender) => {
+    let size = senderBytes.get(sender)
+    if (size === undefined) {
+      size = utf8ByteLength(sender.id) + utf8ByteLength(sender.identity ?? '') + utf8ByteLength(stringify(sender.meta))
+      senderBytes.set(sender, size)
+    }
     return size
   }
   const onAbort = () => finish(signal!.reason)
   const receive = (data: RoomMessage, payloadBytes: number) => {
     const size = payloadBytes + 64
-    const { meta } = data.from
-    const holders = heldMeta.get(meta) ?? 0
-    const added = size + (holders === 0 ? sizeOfMeta(meta) : 0)
+    const holders = heldSenders.get(data.from) ?? 0
+    const added = size + (holders === 0 ? sizeOfSender(data.from) : 0)
     if (bytes + added > bufferLimit) return finish(new ChannelOverflowError('Room message iterator buffer overflow'))
     bytes += added
-    heldMeta.set(meta, holders + 1)
+    heldSenders.set(data.from, holders + 1)
     queue.push({ data, size })
     changed.resolve()
   }
   const release = ({ data, size }: Queued) => {
     bytes -= size
-    const { meta } = data.from
-    const holders = heldMeta.get(meta)! - 1
+    const holders = heldSenders.get(data.from)! - 1
     if (holders > 0) {
-      heldMeta.set(meta, holders)
+      heldSenders.set(data.from, holders)
     } else {
-      heldMeta.delete(meta)
-      bytes -= sizeOfMeta(meta)
+      heldSenders.delete(data.from)
+      bytes -= sizeOfSender(data.from)
     }
   }
   const start = () => {
@@ -83,17 +93,14 @@ function roomMessages(source: Source, bufferLimit: number, signal?: AbortSignal)
     source.onClose(() => finish(), { signal: lifetime.signal })
     source.subscribe(
       (data, info, from) =>
-        receive(
-          { type: 'text', data, info, from: senderSnapshot(from.id, from.meta, from.identity) },
-          utf8ByteLength(stringify(data)),
-        ),
+        receive({ type: 'text', data, info, from: snapshotOf(from) }, utf8ByteLength(stringify(data))),
       { signal: lifetime.signal },
     )
     // The bytes are this listener's own copy.
     source.subscribeBinary(
       (data, info, from) =>
         receive(
-          { type: 'binary', data, info, from: senderSnapshot(from.id, from.meta, from.identity) },
+          { type: 'binary', data, info, from: snapshotOf(from) },
           data.byteLength + (info.meta ? utf8ByteLength(stringify(info.meta)) : 0),
         ),
       { signal: lifetime.signal },
