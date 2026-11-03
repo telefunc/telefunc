@@ -645,14 +645,16 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     const lane = new LaneSubscription({ owner: this, address: { kind: 'binary-all', member } })
     this.establishingEveryTrack.lanes.add(lane)
     this.everyTrack.set(member, lane)
-    return this.subscribeBinary(lane)
+    lane.start()
+    return lane
   }
 
   private openEveryMember(track: string): LaneSubscription {
     const lane = new LaneSubscription({ owner: this, address: { kind: 'binary-track', track } })
     this.establishingEveryMember.lanes.add(lane)
     this.everyMember.set(track, lane)
-    return this.subscribeBinary(lane)
+    lane.start()
+    return lane
   }
 
   private openNamedLane(member: string, track: string): LaneSubscription {
@@ -661,11 +663,6 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     this.binary.set(encodeLaneKey(binary), lane)
     toggleEntry(this.binaryTracks, member, track, true)
     toggleEntry(this.trackMembers, track, member, true)
-    return this.subscribeBinary(lane)
-  }
-
-  /** Subscribes a binary lane the plan already holds, which its readiness replans by. */
-  private subscribeBinary(lane: LaneSubscription): LaneSubscription {
     lane.start()
     return lane
   }
