@@ -355,10 +355,10 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     holder.emitRetainedText(event, { seq: stored.seq, timestamp: stored.timestamp }, serialized, hold)
   }
 
-  /** Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per lane, so
-   *  a frame it already has is not delivered again. A want for one member's track reads that lane; any other lists the
-   *  retained lanes it covers. As with text, a frame replays only while its member is in the roster: a leave clears the
-   *  member's retained frames, and one read just before that is gone with it. */
+  /** Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per (member,
+   *  track), so a frame it already has is not delivered again. A want for one member's track reads that lane; any
+   *  other lists the retained lanes it covers. As with text, a frame replays only while its member is in the roster: a
+   *  leave clears the member's retained frames, and one read just before that is gone with it. */
   async replayBinary(holder: LaneHolder, change: BinaryWantChange): Promise<void> {
     // A live frame on a lane another want's subscription already delivers would otherwise beat its retained frame.
     const hold = holder.hold(change)

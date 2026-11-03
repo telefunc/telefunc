@@ -91,8 +91,17 @@ one semantic lane. A member's binary tracks come:
   `ROOM_MEMBER_NAMED_LANES_MAX` and the members, they come on the members' every-track lanes instead, until the members
   are twice as many as the tracks.
 
-A switch keeps the lanes it leaves until the lanes it takes deliver (`Establishing`), so a frame is neither lost nor
-delivered twice.
+The plan is three parts, each using only the one before it:
+- **The choice** (`shapeOf()`, `servesByAll()` and `nextByMember()` in `LanePlan.ts`): which lane shape serves each
+  (member, track), from the holders' wants, the membership and the two rules above.
+- **The switch** (`BinaryLanes`): the binary subscriptions of each shape. A subscription delivers only what is
+  published after it confirms, so a pair whose shape changes keeps its old lane until the new one delivers, and a
+  fan-in lane also stays while one of the other kind is establishing (`Establishing`). No frame is lost. During the
+  overlap a frame comes on both lanes with one order, and the holder keeps it once (`ReplayGate.admitBinary()`, per
+  (member, track)).
+- **The pass** (`LanePlan`): the changes queue, and one pass at a time plans them, in `ROOM_PLAN_SLICE_MS` slices, then
+  tells the demand from the choice and from what delivers. `BinaryLanes` never calls the plan: each round starts by
+  taking what the lanes' readiness and switches replanned (`takeReplans()`).
 
 **Why not one every-track lane per wanted member, filtered here.** Measured on the memory driver, 50 members each
 publishing 10 frames of 256 bytes on each of 4 tracks (2000 frames), with one handle here listening (the probe counts
@@ -107,3 +116,24 @@ the driver's subscriptions and the binary frames it delivers to this process):
 The simpler plan delivers every track of each member it covers, 4 times the frames here at 4 equal tracks, and more
 when the unwanted tracks are video. On Redis each frame is a Pub/Sub message to this process, and on Cloudflare a
 delivery to its session's Durable Object. It also opens 50 subscriptions where one does.
+
+**The thresholds, measured.** `probes/lane-plan.mjs` (memory driver; the members joined on another server's lease, so
+only the view's lanes are here; `node packages/room/probes/lane-plan.mjs` after a build) counts the binary
+subscriptions opened and closed:
+
+| what changes | where the plan switches | subscribes and unsubscribes |
+|---|---|---|
+| tracks named of every member, 10 members, rising to 60, then falling | every-track lanes at 17 tracks, back at 16 | 26, 26 |
+| the same, 20 members | at 21, back at 16 | 40, 36 |
+| the same, 40 members | at 41, back at 20 | 80, 60 |
+| 20 members, the tracks hovering between 20 and 21, ten times | once, at the first 21 | 40, then 0 per cycle |
+| one member's named tracks hovering between 16 and 17, ten times | each time: 16 named lanes, or its every-track lane | 34 per cycle |
+
+The `byMember` band holds: at 40 members the plan switches at 41 tracks and back only at 20, and a want set hovering
+inside the band switches nothing. `ROOM_MEMBER_NAMED_LANES_MAX` has no band: a member whose named tracks hover at the
+limit switches its lanes on every change.
+
+The same probe times a want change's pass until the lanes it opened are ready. One track of every member plans only that
+track's every-member lane: 0.2 ms at 1,000, 10,000 and 100,000 members. Every track of every member plans each member:
+about 10 ms at 1,000 members and 90 ms at 10,000, in slices, the longest the event loop waited being 12–15 ms against
+the 10 ms `ROOM_PLAN_SLICE_MS`.
