@@ -32,8 +32,8 @@ function testSlowLink(isDev: boolean) {
         { timeout: 50_000 },
       )
       if (upgrades) {
-        // The last send goes after the move: a page that starts on a WebSocket answers it in ~2 s.
-        expect(linkShare!.pingMs.at(-1)).lessThan(2700)
+        // The last send goes after the move: ~2 s where the window went back to a WebSocket's, ~7.5 s where it stayed.
+        expect(linkShare!.pingMs.at(-1)).lessThan(5500)
       } else {
         for (const ms of linkShare!.pingMs) expect(ms).lessThan(20_000)
         expect(connections!.stop()).toBe(1)
