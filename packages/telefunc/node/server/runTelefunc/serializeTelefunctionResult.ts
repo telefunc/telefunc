@@ -16,6 +16,7 @@ import {
   type ShieldLogConfig,
   type ShieldValidatorCtx,
 } from '../shield.js'
+import { isCloudflareWorkers } from '../../../utils/isCloudflareWorkers.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import { buildInlineResponseBody } from '../../../wire-protocol/values/server/response/StreamingResponseBody.js'
 import { pumpProducerToChannel } from '../../../wire-protocol/values/server/response/ChannelResponseBody.js'
@@ -83,6 +84,7 @@ function serializeTelefunctionResult(runContext: {
   const useChannelPump = runContext.streamTransport === STREAM_TRANSPORT.CHANNEL
   const streamingValues: StreamingValueServer[] = []
   let nextStreamingIndex = 0
+  let flowId: string | undefined
   const { valueShields } = runContext
   const shieldCtx = {
     telefunctionName: runContext.telefunctionName,
@@ -108,8 +110,10 @@ function serializeTelefunctionResult(runContext: {
     }
     const index = nextStreamingIndex++
     streamingValues.push({ createProducer, index })
+    // A lone stream's reader is the body itself. Off on Workers: waking one request from another isn't proven there.
+    if (index > 0 && !isCloudflareWorkers()) flowId ??= crypto.randomUUID()
     return {
-      metadata: { __index: index },
+      metadata: flowId ? { __index: index, flowId } : { __index: index },
       // Inline streaming lifecycle is managed by the HTTP body stream.
       close() {},
       abort() {},
@@ -193,6 +197,7 @@ function serializeTelefunctionResult(runContext: {
       onComplete: onStreamComplete,
       encodeFrame,
       useNodeStream: runContext.useNodeStream,
+      flowId,
     }),
     streamTransport: runContext.streamTransport,
   }

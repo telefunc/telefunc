@@ -13,6 +13,7 @@ import type { LazyResponseTypes } from '../../../../client/extensions.js'
 import { setCloseHandlers, addExtraCloseHandlers, type CloseHandler } from '../../../../client/close.js'
 import { makeAbortError, throwAbortError, throwBugError } from '../../../../client/remoteTelefunctionCall/errors.js'
 import { BaseStreamReader } from './BaseStreamReader.js'
+import { StreamFlowSender } from './StreamFlowSender.js'
 import { PendingValue, resolvePendingValues } from './PendingValue.js'
 import { StreamReader } from './StreamReader.js'
 import { SseStreamReader } from './SseStreamReader.js'
@@ -36,6 +37,9 @@ const globalObject = getGlobalObject('wire-protocol/values/client/response/parse
 type CallContext = {
   telefunctionName: string
   telefuncFilePath: string
+  telefuncUrl: string
+  headers: Record<string, string> | null
+  fetch: typeof globalThis.fetch | null
   abortController: AbortController
   requestCloseHandlers: CloseHandler[]
   extensionResponseTypes: ReviverType<TypeContract, ClientReviverContext>[]
@@ -128,8 +132,8 @@ async function reviveResponse(
         return ChannelStreamSource.create(channel, throwStreamError)
       }
       assert(bodyStreamReader, 'Unexpected receiveStream call in non-streaming response')
-      demuxer ??= new FrameDemuxer(bodyStreamReader)
-      return demuxer.create(metadata.__index)
+      demuxer ??= new FrameDemuxer(bodyStreamReader, callContext)
+      return demuxer.create(metadata.__index, metadata.flowId)
     },
   }
 
@@ -213,6 +217,8 @@ async function reviveResponse(
  *  The upstream reader is cancelled once every consumer is terminal and at least one cancelled. */
 class FrameDemuxer {
   private streamReader: BaseStreamReader
+  private callContext: CallContext
+  private flow: StreamFlowSender | null = null
   private pendingFrames = new Map<number, Fifo<Uint8Array<ArrayBuffer>>>()
   private indexWaiters = new Map<
     number,
@@ -225,8 +231,9 @@ class FrameDemuxer {
   private doneIndices = new Set<number>()
   private totalConsumers = 0
 
-  constructor(streamReader: BaseStreamReader) {
+  constructor(streamReader: BaseStreamReader, callContext: CallContext) {
     this.streamReader = streamReader
+    this.callContext = callContext
   }
 
   private registerConsumer() {
@@ -248,11 +255,13 @@ class FrameDemuxer {
       waiter.resolve(null)
     }
     this.cancelUpstreamIfAllTerminal()
+    this.flow?.onCancel(index)
   }
 
   private cancelUpstreamIfAllTerminal(): void {
     if (this.cancelledIndices.size > 0 && this.cancelledIndices.size + this.doneIndices.size >= this.totalConsumers) {
       this.streamReader.cancel()
+      this.flow?.stop()
     }
   }
 
@@ -261,7 +270,10 @@ class FrameDemuxer {
     if (this.streamError) throw this.streamError
 
     const buffered = this.pendingFrames.get(index)?.shift()
-    if (buffered) return buffered
+    if (buffered) {
+      this.flow?.onRead(index, buffered.length)
+      return buffered
+    }
     if (this.doneIndices.has(index)) return null
     if (this.ended) return null
 
@@ -276,8 +288,9 @@ class FrameDemuxer {
     return promise
   }
 
-  create(index: number): StreamSource {
+  create(index: number, flowId: string | undefined): StreamSource {
     this.registerConsumer()
+    if (flowId) this.flow ??= new StreamFlowSender(flowId, this.callContext)
     const readNextChunk = () => this.readNextChunkForIndex(index)
     const cancel = () => this.cancelIndex(index)
     const isCancelled = () => this.cancelledIndices.has(index)
@@ -307,6 +320,7 @@ class FrameDemuxer {
       }
     } catch (err) {
       this.streamError ??= err
+      this.flow?.stop()
       for (const [, w] of this.indexWaiters) w.reject(err)
       this.indexWaiters.clear()
     } finally {
@@ -317,6 +331,7 @@ class FrameDemuxer {
   /** The response ended: every waiting index ends too. */
   private endAll(): void {
     this.ended = true
+    this.flow?.stop()
     for (const [, w] of this.indexWaiters) w.resolve(null)
     this.indexWaiters.clear()
   }
@@ -346,5 +361,6 @@ class FrameDemuxer {
     let pending = this.pendingFrames.get(index)
     if (!pending) this.pendingFrames.set(index, (pending = new Fifo()))
     pending.push(payload)
+    this.flow?.onBuffered(index, payload.length)
   }
 }

@@ -1,6 +1,7 @@
 export {
   resetCleanupState,
   getCleanupState,
+  getStreamFlowCount,
   forceServerGc,
   serverHeapUsed,
   cutWire,
@@ -144,6 +145,12 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 async function resetCleanupState() {
   await fetch(`${getServerUrl()}/api/cleanup-state/reset`, { method: 'POST' })
+}
+
+/** How many responses on the page's server take stream-flow requests; through the page, for the sticky cookie. */
+async function getStreamFlowCount(): Promise<number> {
+  const { text } = await fetchFromPage(`${getServerUrl()}/api/stream-flows`, 'GET')
+  return JSON.parse(text).count
 }
 
 async function getCleanupState(): Promise<Record<string, string>> {

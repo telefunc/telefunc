@@ -53,6 +53,7 @@ const OVERRUN_COUNT = 16
 const END_BEFORE = 3
 const END_CLOSE_TIMEOUT = 500
 const LARGE_BYTES = 1_000_000
+const SLOW_LINK_LARGE_BYTES = 4_000_000
 /** Past the 4,096 channels a connection holds at once. */
 const MANY_CHANNELS = 4_200
 const RELEASE_COUNT = 3
@@ -234,8 +235,8 @@ function WireDemo() {
   }, [])
   const endAbort = useCallback(() => endChannel.current!.abort({ by: 'page' }), [])
 
-  const large = useCallback(async () => {
-    const { channel } = await onWireLarge(LARGE_BYTES)
+  const large = useCallback(async (bytes: number) => {
+    const { channel } = await onWireLarge(bytes)
     largeChannel.current = channel
     channel.listen((message) => setState((s) => ({ ...s, large: message.length })))
   }, [])
@@ -345,10 +346,18 @@ function WireDemo() {
         <button
           id="wire-large"
           type="button"
-          onClick={large}
+          onClick={() => large(LARGE_BYTES)}
           className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
         >
           Receive a {LARGE_BYTES} byte message as the channel opens
+        </button>
+        <button
+          id="wire-large-slow-link"
+          type="button"
+          onClick={() => large(SLOW_LINK_LARGE_BYTES)}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Receive a {SLOW_LINK_LARGE_BYTES} byte message as the channel opens
         </button>
         <button
           id="wire-many"
