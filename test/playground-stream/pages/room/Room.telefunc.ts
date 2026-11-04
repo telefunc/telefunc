@@ -78,6 +78,7 @@ export {
   onListWhileClosing,
   onRecreate,
   onJoinAnswering,
+  onJoinClosed,
   onThrowingReceiver,
   onSaveReply,
   onSeedAndChurn,
@@ -926,6 +927,32 @@ async function onThrowingReceiver(roomId: string) {
   await sleep(300)
   await Promise.all(attempts.map((attempt) => attempt.unsubscribe()))
   return { thrower, healthy }
+}
+
+/** Joins on closed rooms, through handles with no listeners, so none of them hears of the close. */
+async function onJoinClosed(roomId: string) {
+  const joinError = (room: Room) =>
+    room.join({ meta: { name: 'Late' } }).then(
+      () => null,
+      (error: Error) => error.message.replaceAll(roomId, '<id>'),
+    )
+  const unguardedId = `${roomId}:unguarded`
+  const unguarded = await Room.create(unguardedId)
+  await Room.close(unguardedId)
+  const unguardedError = await joinError(unguarded)
+
+  let guardRuns = 0
+  const guardedId = `${roomId}:guarded`
+  const guarded = await Room.create(guardedId)
+  Room.guard(guarded, { onBeforeJoin: () => void guardRuns++ })
+  await Room.close(guardedId)
+  const guardedError = await joinError(guarded)
+
+  const duringGuardId = `${roomId}:during-guard`
+  const duringGuard = await Room.create(duringGuardId)
+  Room.guard(duringGuard, { onBeforeJoin: () => Room.close(duringGuardId) })
+  const duringGuardError = await joinError(duringGuard)
+  return { unguardedError, guardedError, guardRuns, duringGuardError }
 }
 
 /** A store's save of a reply, finished by the test with `runServerAction()`. */

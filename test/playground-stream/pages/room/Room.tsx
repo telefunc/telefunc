@@ -83,6 +83,7 @@ import {
   onListWhileClosing,
   onRecreate,
   onJoinAnswering,
+  onJoinClosed,
   onThrowingReceiver,
   onSaveReply,
   onSeedAndChurn,
@@ -881,6 +882,10 @@ function Room() {
       {scenario('throwing-receiver', 'A throwing receiver', 'A store delivers past it', async () => {
         const roomId = await createRoomId('throwing-receiver')
         setResult(JSON.stringify(await onThrowingReceiver(roomId)))
+      })}
+
+      {scenario('join-closed', 'Joins on closed rooms', 'Handles that never heard of the close', async () => {
+        setResult(JSON.stringify(await onJoinClosed(await createRoomId('join-closed'))))
       })}
 
       {scenario('join-races', 'Join races', 'A closed tab during a slow join', async () => {

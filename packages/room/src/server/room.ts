@@ -54,7 +54,7 @@ import type { RosterStream } from './lifecycle/RosterStream.js'
 import type { PendingDmAcks } from './PendingDmAcks.js'
 import type { RoomHosting } from './lifecycle/RoomHosting.js'
 import { RoomWrites, runAfterHook, type RoomWritesOwner } from './RoomWrites.js'
-import { withinRoomHorizon } from './lanes/lanes.js'
+import { readOpenConfig, withinRoomHorizon } from './lanes/lanes.js'
 import { reportRoomError } from './reportRoomError.js'
 import { Admission } from './Admission.js'
 import { evictMember, joinMember } from './store/members.js'
@@ -83,7 +83,7 @@ type RoomHandleOptions = {
   view: ServerRoom
   replica: RoomReplica
   /** Where the handle's holders' wants replan. */
-  lanePlan: Pick<LanePlan, 'textChanged' | 'binaryChanged' | 'memberChanged'>
+  lanePlan: Pick<LanePlan, 'textChanged' | 'binaryChanged' | 'memberChanged' | 'observing'>
   authority: Pick<AuthoritySync, 'ensureRoster'>
   /** For the handle's stubs. */
   roster: Pick<RosterStream, 'settled'>
@@ -222,7 +222,11 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
   private async admit(admission: Admission, hold: () => void): Promise<void> {
     const { id, meta, identity, joinedAt, hidden } = admission
     const onBeforeJoin = this.guards?.onBeforeJoin
-    if (!hidden && onBeforeJoin) await onBeforeJoin({ id, meta, identity })
+    if (!hidden && onBeforeJoin) {
+      // With no control lane, this handle hears of no close, however old it is: a closed room doesn't get its guard run.
+      if (!this.lanePlan.observing && (await readOpenConfig(this.incarnation)) === null) throw roomClosedError(this.id)
+      await onBeforeJoin({ id, meta, identity })
+    }
     hold()
     await this.commitAdmission(admission)
     if (hidden) return // a hidden participant has no post-join hook

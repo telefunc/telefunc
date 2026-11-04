@@ -447,6 +447,21 @@ function testRoom() {
     },
   )
   testRoomScenario<{
+    unguardedError: string | null
+    guardedError: string | null
+    guardRuns: number
+    duringGuardError: string | null
+  }>(
+    'join-closed',
+    "room: a join through a handle that hasn't heard of its room's close fails as closed, without running the guard or logging anything; so does one whose guard closes the room",
+    (r) => {
+      expect(r.unguardedError).toBe('Room is closed: <id>:unguarded')
+      expect(r.guardedError).toBe('Room is closed: <id>:guarded')
+      expect(r.guardRuns).toBe(0)
+      expect(r.duringGuardError).toBe('Room is closed: <id>:during-guard')
+    },
+  )
+  testRoomScenario<{
     fromPage: unknown
     fromPageUnsendable: unknown
     fromServer: unknown

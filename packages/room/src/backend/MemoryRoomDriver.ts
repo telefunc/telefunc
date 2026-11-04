@@ -45,7 +45,7 @@ import {
 } from './semantics.js'
 import {
   type BackendReceiver,
-  type DriverAttempt,
+  DriverAttempt,
   type OrderingInfo,
   MemoryPubSub,
   type Subscribers,
@@ -251,6 +251,16 @@ function advanceOrder(order: Map<string, OrderingInfo>, domain: string, now: num
   const mark = nextOrdering(order.get(domain), now)
   order.set(domain, mark)
   return mark
+}
+
+/** A lane of an incarnation that isn't open: over at once and on purpose, as a dropped incarnation's is on every backend. */
+class EndedAttempt extends DriverAttempt {
+  constructor() {
+    super()
+    this.transition('closed')
+  }
+
+  async unsubscribe(): Promise<void> {}
 }
 
 class MemoryRoomDriver implements RoomDriver {
@@ -459,9 +469,7 @@ class MemoryRoomDriver implements RoomDriver {
 
   subscribe({ roomId, inc, lane }: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {
     const room = this.rooms.get(roomId)
-    if (room === undefined || !isOpenIncarnation(this.liveHead(room), inc)) {
-      throw new Error(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)
-    }
+    if (room === undefined || !isOpenIncarnation(this.liveHead(room), inc)) return new EndedAttempt()
     // Registration is durable before `ready` resolves: a commit accepted after this point must see it.
     const incarnation = this.incarnation(room, inc)
     let subscribers: Subscribers
