@@ -32,6 +32,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testResubscribe()
   testRefusedPresence()
   testColdPublish()
+  testPublishOrder()
 }
 
 function testCloudflareBindings() {
@@ -373,6 +374,28 @@ function testColdPublish() {
         expect(result).deep.equal({ first: 'resolved', received: ['a', 'b'] })
       },
       { timeout: 10_000 },
+    )
+  })
+}
+
+function testPublishOrder() {
+  test('Broadcast: an unawaited loop of publishes to one key gets its seq, and arrives, in call order', async () => {
+    await page.goto(getServerUrl() + '/publish-order')
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    await page.click('#publish-order')
+    await autoRetry(
+      async () => {
+        const result = JSON.parse((await page.textContent('#publish-order-result')) ?? 'null')
+        expect(result).deep.equal({
+          received: 200,
+          seqInCallOrder: true,
+          arrivedInSeqOrder: true,
+          arrivedInCallOrder: true,
+        })
+      },
+      { timeout: 30_000 },
     )
   })
 }
