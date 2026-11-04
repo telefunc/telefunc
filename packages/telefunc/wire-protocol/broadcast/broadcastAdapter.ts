@@ -86,7 +86,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
    *  this is set has no turn to wait for. */
   private inSyncRun = false
   /** Deliveries since the last turn, a synchronous run of publishes past half the burst counting once. Reset by a
-   *  macrotask scheduled once half the burst has run: one every turn made each publish 10% slower. */
+   *  macrotask scheduled once half the burst has run, so a server publishing once per turn schedules none. */
   private deliveredInBurst = 0
 
   constructor(transport?: BroadcastTransport) {
@@ -178,7 +178,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   ): BroadcastPublishResult | Promise<BroadcastPublishResult> {
     const timestamp = Date.now()
     const startsRun = !this.inSyncRun
-    // Below half the burst, each delivery counts: nothing waits soon, and a microtask per publish cost 11%.
+    // Below half the burst, each delivery counts: nothing waits soon, so a publish needs no microtask.
     if (startsRun && this.deliveredInBurst >= IN_MEMORY_DELIVERY_BURST / 2) {
       this.inSyncRun = true
       queueMicrotask(this.endSyncRun)
