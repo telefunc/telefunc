@@ -31,6 +31,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testUnsubscribeTwice()
   testResubscribe()
   testRefusedPresence()
+  testColdPublish()
 }
 
 function testCloudflareBindings() {
@@ -357,4 +358,21 @@ async function fullPageReload() {
   await page.goto(getServerUrl() + '/')
   await testCounter()
   await page.goto(getServerUrl() + '/todo')
+}
+
+function testColdPublish() {
+  test("Broadcast: publishes past the buffer's budget while the key's first presence is written all arrive", async () => {
+    await page.goto(getServerUrl() + '/cold-publish')
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    await page.click('#cold-publish')
+    await autoRetry(
+      async () => {
+        const result = JSON.parse((await page.textContent('#cold-publish-result')) ?? 'null')
+        expect(result).deep.equal({ first: 'resolved', received: ['a', 'b'] })
+      },
+      { timeout: 10_000 },
+    )
+  })
 }
