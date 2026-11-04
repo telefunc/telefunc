@@ -892,7 +892,7 @@ function ChannelDemo() {
     // ── A1/A2/B1/B2 — client sends, server validates incoming data ────────────
     {
       const { channel, getReceived } = await openChannel(onChannelShieldClient)
-      await new Promise<void>((resolve) => channel.onOpen(resolve))
+      await channel.opened
 
       // A1: valid no-ack — server listener should receive.
       await channel.send('hello')
@@ -961,7 +961,7 @@ function ChannelDemo() {
     channel.listen((msg) => {
       pageSeen.push(`other:${msg}`)
     })
-    await new Promise<void>((resolve) => channel.onOpen(resolve))
+    await channel.opened
     await channel.send('one')
     await channel.send('two')
     for (let poll = 0; poll < 50; poll++) {
