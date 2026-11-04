@@ -508,7 +508,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         void this.onPeerBinaryAckReqMessage(frame.data, frame.seq)
         return
       case TAG.ACK_RES:
-        this.onPageHas(frame.ackedSeq)
+        this._onPageHas(frame.ackedSeq)
         this.onPeerAckRes(frame.ackedSeq, frame.text, frame.status)
         return
       case TAG.PUBLISH_ACK_REQ:
@@ -542,7 +542,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.WINDOW:
         this.onDrained(this.sendCredit.onPeerByteWindow(frame.bytes))
-        this.onPageHas(seqThrough(frame.lastSeq, this._replayBuffer?.seq ?? 0))
+        this._onPageHas(seqThrough(frame.lastSeq, this._replayBuffer?.seq ?? 0))
         return
       case TAG.MSG_WINDOW:
         this.sendCredit.onPeerMessageWindow(frame.count)
@@ -689,7 +689,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected onPeerCloseAck(): void {
     if (this._phase === 'ended') return
     // The page sends CLOSE_ACK when the close request arrives, so it has received everything sent before it.
-    this.onPageHas(this.closeRequestSeq)
+    this._onPageHas(this.closeRequestSeq)
     this.lifecycle.closeAckReceived()
   }
 
@@ -737,20 +737,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.receiveCredit.acknowledge()
   }
 
-  /** @internal The page attaches, having received this channel's frames through `lastSeq`. */
-  _onPageAttach(lastSeq: number): void {
-    this.onPageHas(lastSeq)
-  }
-
   /** @internal The page closed its end after receiving this channel's frames through `lastSeq`, the low 32 bits a PING
    *  carries. */
   _onPageClosed(lastSeq: number): void {
     this.pageClosed = true
-    this.onPageHas(seqThrough(lastSeq, this._replayBuffer?.seq ?? 0))
+    this._onPageHas(seqThrough(lastSeq, this._replayBuffer?.seq ?? 0))
   }
 
-  /** The page received this channel's frames through `lastSeq`, so the replay buffer lets them go. */
-  private onPageHas(lastSeq: number): void {
+  /** @internal The page received this channel's frames through `lastSeq`, so the replay buffer lets them go. */
+  _onPageHas(lastSeq: number): void {
     if (lastSeq > this.pageLastSeq) this.pageLastSeq = lastSeq
     this._replayBuffer?.acknowledge(lastSeq)
   }

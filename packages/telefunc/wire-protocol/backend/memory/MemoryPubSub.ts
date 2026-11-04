@@ -27,10 +27,6 @@ type MemorySubscription = {
  *  an `await`, can't starve the loop. */
 const DELIVERIES_PER_TURN = 1024
 
-function copyBytes(bytes: Uint8Array): Uint8Array {
-  return new Uint8Array(bytes)
-}
-
 /** Deliveries in seq order: a publish made inside one is delivered after it. */
 class MemoryDeliveries {
   private readonly queue = new Fifo<() => void>()
@@ -167,7 +163,7 @@ class MemoryPubSub {
     }
     this.waitingBytes[kind] += size
     const mark = takeOrdering(key)
-    const held = isText ? payload : copyBytes(payload)
+    const held = isText ? payload : new Uint8Array(payload)
     // A queued publish resolves as it is delivered, so a publisher awaiting each can't outrun its subscribers.
     return new Promise((resolve) => {
       this.deliveries.deliver(() => {

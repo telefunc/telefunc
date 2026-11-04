@@ -140,7 +140,8 @@ class ClientRoom extends RoomStateView implements Room {
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
   private readonly end: ClientBroadcast
   private readonly model: RoomModel
-  protected readonly _state: RoomState
+  /** @internal */
+  readonly _state: RoomState
   private readonly localParticipants = new Map<string, ClientRoomParticipant>()
   /** Joins awaiting their ack, by request, and by the member `joined` named. The server relays to a member from its
    *  admission, before the ack registers it here, so events naming it wait for its ack. */
@@ -265,11 +266,6 @@ class ClientRoom extends RoomStateView implements Room {
     if (!this.model.rosterKnown) await this.roster.promise
   }
 
-  /** @internal Sync view read for sender resolution (delivery must not wait on I/O). */
-  _getRemote(id: string): RemoteParticipant | null {
-    return this._state.getRemote(id)
-  }
-
   /** Plain DM fires local listeners; ack DM returns their reply through the symmetric `dm-reply`/`dm-ack` path. */
   private deliverDm(participant: ClientRoomParticipant, msg: InboxMessage): void {
     if (msg.ackId === undefined) {
@@ -277,11 +273,6 @@ class ClientRoom extends RoomStateView implements Room {
       return
     }
     sendDmReply(this.end, msg.ackId, participant._deliverMessageAck(msg))
-  }
-
-  /** @internal Revival of a serialized `RemoteParticipant` (see `roomRemoteReviver`). */
-  _reviveRemote(snap: MemberSnapshot): RemoteParticipant {
-    return this._state.ensureRemoteFromSnapshot(snap)
   }
 
   snapshot(): RoomSnapshotView {
@@ -723,7 +714,8 @@ class ClientRoomParticipant extends ClientParticipantBase {
   }
 
   protected override _resolveSender(id: string): Sender | null {
-    return this.room._getRemote(id)
+    // A sync read: delivery must not wait on I/O.
+    return this.room._state.getRemote(id)
   }
 
   protected override _onOwnMetaWritten(accepted: MemberMetaUpdate): void {
@@ -804,7 +796,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
       case 'p-meta':
         return this._onOwnMetaWritten(msg)
       case 'rewound':
-        return this._forgetMetaSeq()
+        return this.memberMeta.forget()
       case 'demand':
         return this._onDemand(msg.track, msg.wanted)
       case 'demand-state':

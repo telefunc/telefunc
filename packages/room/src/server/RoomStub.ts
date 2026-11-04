@@ -191,7 +191,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   /** Hidden members this response handed the client: their events are relayed to it alone. */
   private readonly grantedHidden: Set<string>
   private readonly dmReplies = new PendingDmReplies()
-  private readonly replay = new ReplayGate()
+  readonly replay = new ReplayGate()
   private wantsText = false
   private readonly textMemberWants = new Set<string>()
   private announce = false
@@ -519,10 +519,6 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   endTail(): void {
     this.tail?.end()
     this.tail = null
-  }
-
-  endReplayHolds(): void {
-    this.replay.dropHolds()
   }
 }
 

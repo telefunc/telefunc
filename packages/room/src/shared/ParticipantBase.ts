@@ -45,7 +45,7 @@ abstract class ParticipantBase implements LocalParticipant {
   readonly id: string
   readonly identity: string | null
   readonly selfDelivery: boolean
-  private readonly memberMeta: MemberMeta
+  protected readonly memberMeta: MemberMeta
   private leftCause: LeaveCause | null = null
   // Each list is made when its first listener is added.
   private leaveListeners: Listeners<(cause: LeaveCause) => unknown> | null = null
@@ -89,11 +89,6 @@ abstract class ParticipantBase implements LocalParticipant {
    *  whole meta its holder's next attach or roster sends. */
   _acceptMeta(update: MemberMetaUpdate): boolean {
     return this.memberMeta.apply(update) === 'applied'
-  }
-
-  /** @internal A failover rewound the seq: the next whole meta applies, whatever its seq. */
-  _forgetMetaSeq(): void {
-    this.memberMeta.forget()
   }
 
   protected get _left(): boolean {
