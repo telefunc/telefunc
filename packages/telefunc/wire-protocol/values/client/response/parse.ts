@@ -344,7 +344,6 @@ class FrameDemuxer {
     // Empty payload = per-index "done" signal
     if (payload.length === 0) {
       this.doneIndices.add(index)
-      this.flow?.onDone(index)
       this.cancelUpstreamIfAllTerminal()
       if (waiter) {
         this.indexWaiters.delete(index)

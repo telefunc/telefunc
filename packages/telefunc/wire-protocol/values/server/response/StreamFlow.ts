@@ -2,18 +2,20 @@ export { StreamFlow, handleStreamFlowRequest }
 
 import { getGlobalObject } from '../../../../utils/getGlobalObject.js'
 import { createDeferred } from '../../../../utils/createDeferred.js'
-import { STREAM_FLOW_FOUND } from '../../../constants.js'
+import { unrefTimer } from '../../../../utils/unrefTimer.js'
+import { STREAM_FLOW_FOUND, STREAM_FLOW_LEASE_MS } from '../../../constants.js'
 
 const globalObject = getGlobalObject('wire-protocol/values/server/response/StreamFlow.ts', {
   flows: new Map<string, StreamFlow>(),
 })
 
 /** What the page asks of a response's streams, by index. Its id, known only to that response's page, is what lets a
- *  request reach it. Lives as long as the response. */
+ *  request reach it. Lives as long as the response; a pause lives only as long as the page renews it. */
 class StreamFlow {
   paused = new Set<number>()
   readonly cancelled = new Set<number>()
   private next = createDeferred<{ type: 'flowChanged' }>()
+  private lease: ReturnType<typeof setTimeout> | undefined
   private readonly id: string
   private readonly onCancel: (index: number) => void
 
@@ -29,10 +31,13 @@ class StreamFlow {
 
   close(): void {
     globalObject.flows.delete(this.id)
+    clearTimeout(this.lease)
   }
 
   apply(paused: number[], cancelled: number[]): void {
     this.paused = new Set(paused)
+    clearTimeout(this.lease)
+    if (paused.length > 0) this.lease = unrefTimer(setTimeout(() => this.apply([], []), STREAM_FLOW_LEASE_MS))
     for (const index of cancelled) {
       if (this.cancelled.has(index)) continue
       this.cancelled.add(index)

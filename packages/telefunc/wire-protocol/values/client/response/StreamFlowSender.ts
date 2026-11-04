@@ -2,10 +2,9 @@ export { StreamFlowSender }
 
 import { getSessionUrl } from '../../../channel/client/getSessionUrl.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../../wire/requestKind.js'
-import { STREAM_FLOW_FOUND, STREAM_FLOW_PAUSE_BYTES } from '../../../constants.js'
+import { STREAM_FLOW_FOUND, STREAM_FLOW_LEASE_MS, STREAM_FLOW_PAUSE_BYTES } from '../../../constants.js'
 
-const RETRY_MS = 1000
-const MAX_RETRIES = 60
+const RENEW_MS = STREAM_FLOW_LEASE_MS / 3
 
 type CallContext = {
   telefuncUrl: string
@@ -15,7 +14,7 @@ type CallContext = {
 }
 
 /** Tells the server which of a response's streams to pause or cancel: one request at a time, each with the whole state,
- *  so none can overtake another. */
+ *  so none can overtake another. The server drops a pause that isn't renewed, so no failure here can hold a stream. */
 class StreamFlowSender {
   private readonly unread = new Map<number, number>()
   private readonly paused = new Set<number>()
@@ -25,10 +24,7 @@ class StreamFlowSender {
   private sending = false
   private stopped = false
   private acknowledged = ''
-  /** The streams the server may hold paused. */
-  private mayBeHeld = new Set<number>()
-  private readonly done = new Set<number>()
-  private retry: { timer: ReturnType<typeof setTimeout>; resume: () => void } | null = null
+  private wake: (() => void) | null = null
 
   constructor(id: string, callContext: CallContext) {
     this.id = id
@@ -51,61 +47,48 @@ class StreamFlowSender {
     void this.send()
   }
 
-  /** Nothing waits for this stream any more, so no pause on it is left to undo. */
-  onDone(index: number): void {
-    this.done.add(index)
-    this.paused.delete(index)
-    this.mayBeHeld.delete(index)
-  }
-
   onCancel(index: number): void {
-    this.onDone(index)
+    this.paused.delete(index)
     this.cancelled.add(index)
     void this.send()
   }
 
-  /** The response ended: nothing is left to ask for. */
+  /** The response ended, or this instance doesn't hold it and the page buffers what comes: nothing is left to ask for. */
   stop(): void {
     this.stopped = true
-    if (!this.retry) return
-    clearTimeout(this.retry.timer)
-    this.retry.resume()
-    this.retry = null
+    this.wake?.()
+  }
+
+  private state(): string {
+    return JSON.stringify({ id: this.id, paused: [...this.paused], cancelled: [...this.cancelled] })
   }
 
   private async send(): Promise<void> {
+    this.wake?.()
     if (this.sending) return
     this.sending = true
-    let retries = 0
     while (!this.stopped) {
-      const paused = [...this.paused]
-      const state = JSON.stringify({ id: this.id, paused, cancelled: [...this.cancelled] })
-      if (state === this.acknowledged) break
+      const state = this.state()
+      if (state === this.acknowledged && this.paused.size === 0) break
       const found = await this.post(state)
-      const stillOpen = paused.filter((index) => !this.done.has(index))
-      if (found === null) for (const index of stillOpen) this.mayBeHeld.add(index)
-      if (found) {
-        this.acknowledged = state
-        this.mayBeHeld = new Set(stillOpen)
-        retries = 0
-      } else if (found === false && this.mayBeHeld.size === 0) {
-        // This instance doesn't hold the response and no pause waits to be undone: the page buffers what comes.
-        this.stop()
-      } else if (++retries > MAX_RETRIES) {
-        // A pause that may be held can't be undone, so a read fails rather than waits forever.
-        if (this.mayBeHeld.size > 0) this.callContext.abortController.abort()
-        this.stop()
-      } else {
-        // A pause may have reached the server, so its resume must too: the next request may land elsewhere.
-        await new Promise<void>((resume) => {
-          this.retry = { timer: setTimeout(resume, RETRY_MS), resume }
-        })
-      }
+      if (found) this.acknowledged = state
+      if (found === false) this.stop()
+      if (!this.stopped && state === this.state()) await this.untilRenewal()
     }
     this.sending = false
   }
 
-  /** Whether the server holds the response, or `null` when the request may have reached it without an answer. */
+  private untilRenewal(): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, RENEW_MS)
+      this.wake = () => {
+        clearTimeout(timer)
+        resolve()
+      }
+    })
+  }
+
+  /** Whether the server holds the response, or `null` for no answer. */
   private async post(body: string): Promise<boolean | null> {
     const { telefuncUrl, headers, abortController } = this.callContext
     const fetch = this.callContext.fetch ?? window.fetch
