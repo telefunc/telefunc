@@ -1,7 +1,7 @@
 export { NewSubscriptionWait }
 export type { WaitingSend, WaitRule }
 
-import { ChannelOverflowError, getChannelLimits } from 'telefunc/__internal'
+import { ChannelOverflowError, createDeferred, getChannelLimits } from 'telefunc/__internal'
 import type { RedisSubscriptions } from './RedisSubscriptions.js'
 
 /** How long a send waits for our own new subscriptions on its channels. */
@@ -94,19 +94,15 @@ class NewSubscriptionWait {
   /** A wait for our new subscriptions on `channels`, including ones made meanwhile, that fails on Redis's refusal of
    *  one; a refused wait leaves its queue at once, so the next send there doesn't join it. */
   private openWait(queue: string, channels: readonly string[]): Wait {
-    let timer!: ReturnType<typeof setTimeout>
-    const timeout = new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, SEND_WAIT_MS)
-      timer.unref()
+    const timeout = createDeferred()
+    const timer = setTimeout(timeout.resolve, SEND_WAIT_MS)
+    timer.unref()
+    const refused = createDeferred<never>()
+    const stopListening = this.subscriptions.onRefusal(() => {
+      const refusal = this.subscriptions.refusalOn(channels)
+      if (refusal !== null) refused.reject(refusal.error)
     })
-    let stopListening!: () => void
-    const refused = new Promise<never>((_, reject) => {
-      stopListening = this.subscriptions.onRefusal(() => {
-        const refusal = this.subscriptions.refusalOn(channels)
-        if (refusal !== null) reject(refusal.error)
-      })
-    })
-    const ready = Promise.race([this.readyOn(channels), timeout, refused]).finally(() => {
+    const ready = Promise.race([this.readyOn(channels), timeout.promise, refused.promise]).finally(() => {
       clearTimeout(timer)
       stopListening()
     })

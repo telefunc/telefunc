@@ -497,7 +497,7 @@ function Publish() {
         onClick={async () => {
           setResult('')
           const { key, chat } = await onChatLeaveOnClose()
-          await new Promise<void>((resolve) => chat.onOpen(resolve))
+          await chat.opened
           await chat.close()
           for (let poll = 0; poll < 50; poll++) {
             const received = await onGetChatWatched(key)
