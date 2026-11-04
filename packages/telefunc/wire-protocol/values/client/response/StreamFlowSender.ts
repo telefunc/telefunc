@@ -25,7 +25,9 @@ class StreamFlowSender {
   private sending = false
   private stopped = false
   private acknowledged = ''
-  private serverMayHoldPause = false
+  /** The streams the server may hold paused. */
+  private mayBeHeld = new Set<number>()
+  private readonly done = new Set<number>()
   private retry: { timer: ReturnType<typeof setTimeout>; resume: () => void } | null = null
 
   constructor(id: string, callContext: CallContext) {
@@ -49,8 +51,15 @@ class StreamFlowSender {
     void this.send()
   }
 
-  onCancel(index: number): void {
+  /** Nothing waits for this stream any more, so no pause on it is left to undo. */
+  onDone(index: number): void {
+    this.done.add(index)
     this.paused.delete(index)
+    this.mayBeHeld.delete(index)
+  }
+
+  onCancel(index: number): void {
+    this.onDone(index)
     this.cancelled.add(index)
     void this.send()
   }
@@ -69,21 +78,22 @@ class StreamFlowSender {
     this.sending = true
     let retries = 0
     while (!this.stopped) {
-      const state = JSON.stringify({ id: this.id, paused: [...this.paused], cancelled: [...this.cancelled] })
+      const paused = [...this.paused]
+      const state = JSON.stringify({ id: this.id, paused, cancelled: [...this.cancelled] })
       if (state === this.acknowledged) break
-      const pausing = this.paused.size > 0
       const found = await this.post(state)
-      if (found === null && pausing) this.serverMayHoldPause = true
+      const stillOpen = paused.filter((index) => !this.done.has(index))
+      if (found === null) for (const index of stillOpen) this.mayBeHeld.add(index)
       if (found) {
         this.acknowledged = state
-        this.serverMayHoldPause = pausing
+        this.mayBeHeld = new Set(stillOpen)
         retries = 0
-      } else if (found === false && !this.serverMayHoldPause) {
+      } else if (found === false && this.mayBeHeld.size === 0) {
         // This instance doesn't hold the response and no pause waits to be undone: the page buffers what comes.
         this.stop()
       } else if (++retries > MAX_RETRIES) {
         // A pause that may be held can't be undone, so a read fails rather than waits forever.
-        if (this.serverMayHoldPause) this.callContext.abortController.abort()
+        if (this.mayBeHeld.size > 0) this.callContext.abortController.abort()
         this.stop()
       } else {
         // A pause may have reached the server, so its resume must too: the next request may land elsewhere.
