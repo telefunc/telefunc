@@ -37,7 +37,8 @@ function copyBytes(bytes: Uint8Array): Uint8Array {
 /** Deliveries in seq order: the running one stays queued, so a publish made inside it is delivered after. */
 class MemoryDeliveries {
   private readonly queue = new Fifo<() => void>()
-  private deliveredThisTurn = 0
+  /** Deliveries since the last reset, a synchronous run of publishes past half of `DELIVERIES_PER_TURN` counting once. */
+  private deliveredSinceReset = 0
   /** A publish ran in this synchronous run: code publishing in a loop holds the event loop itself, so one made while
    *  this is set has no turn to wait for, and the run counts once. */
   private inSyncRun = false
@@ -55,12 +56,12 @@ class MemoryDeliveries {
    *  wait: one is queued or running, or a new synchronous run finds this turn's deliveries spent. */
   publishNow<Result>(delivery: () => Result): Result | null {
     const startsRun = !this.inSyncRun
-    // Below half a turn's deliveries, each counts: nothing waits soon, and a microtask per publish cost 11%.
-    if (startsRun && this.deliveredThisTurn >= DELIVERIES_PER_TURN / 2) {
+    // Below half a turn's deliveries, each counts: nothing waits soon, so a publish needs no microtask.
+    if (startsRun && this.deliveredSinceReset >= DELIVERIES_PER_TURN / 2) {
       this.inSyncRun = true
       queueMicrotask(this.endSyncRun)
     }
-    if (this.queue.length > 0 || (startsRun && this.deliveredThisTurn >= DELIVERIES_PER_TURN)) return null
+    if (this.queue.length > 0 || (startsRun && this.deliveredSinceReset >= DELIVERIES_PER_TURN)) return null
     if (startsRun) this.countDelivery()
     this.queue.push(DELIVERING_NOW)
     const result = delivery()
@@ -71,14 +72,14 @@ class MemoryDeliveries {
 
   /** Runs `delivery` after those queued before it: now, unless one is running or this turn's deliveries ran out. */
   deliver(delivery: () => void): void {
-    const now = this.queue.length === 0 && this.deliveredThisTurn < DELIVERIES_PER_TURN
+    const now = this.queue.length === 0 && this.deliveredSinceReset < DELIVERIES_PER_TURN
     this.queue.push(delivery)
     if (now) this.drain()
   }
 
   private drain(): void {
     for (let delivery = this.queue.peek(); delivery !== undefined; delivery = this.queue.peek()) {
-      if (this.deliveredThisTurn === DELIVERIES_PER_TURN) return
+      if (this.deliveredSinceReset === DELIVERIES_PER_TURN) return
       this.countDelivery()
       delivery()
       this.queue.shift()
@@ -86,7 +87,8 @@ class MemoryDeliveries {
   }
 
   private countDelivery(): void {
-    if (this.deliveredThisTurn++ === 0) nextTurn(() => this.startTurn())
+    // Only once half a turn's deliveries ran: a macrotask every turn slows a server that publishes once per turn.
+    if (++this.deliveredSinceReset === DELIVERIES_PER_TURN / 2) nextTurn(() => this.startTurn())
   }
 
   private readonly endSyncRun = (): void => {
@@ -94,7 +96,7 @@ class MemoryDeliveries {
   }
 
   private startTurn(): void {
-    this.deliveredThisTurn = 0
+    this.deliveredSinceReset = 0
     this.drain()
   }
 }
