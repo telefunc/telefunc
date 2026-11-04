@@ -450,7 +450,7 @@ await me.publishBinary(keyframe, { track: 'camera', meta: { isKeyframe: true }, 
 
 A late joiner gets the last retained message, and each participant's last retained frame on each track, as long as its publisher is in the room. For state that outlives the participants, such as a game phase, publish it from a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>.
 
-A room gets a retained message or frame once, on its first `subscribe()` or `subscribeBinary()` that covers it, so another listener on the same room doesn't get it. A second component that needs it calls a telefunction that returns `Room.get(id)` and subscribes on the result, without joining.
+Adding another listener while the same room is already listening to that publisher or track doesn't replay its retained message or frame. A second component that needs it calls a telefunction that returns `Room.get(id)` and subscribes on the result, without joining.
 
 
 ## Load chat history
