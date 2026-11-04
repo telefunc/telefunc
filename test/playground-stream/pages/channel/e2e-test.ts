@@ -1448,6 +1448,18 @@ function testChannelApi() {
     })
   })
 
+  test('channel: multi-byte text that fits maxPendingBytes to the byte is accepted, and one byte more closes the channel', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-at-limit')
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      for (const kind of ['twoBytes', 'threeBytes', 'fourBytes']) {
+        expect(state[`atLimit_${kind}_fits`]).toBe('accepted')
+        expect(state[`atLimit_${kind}_over`]).toContain('maxPendingBytes')
+      }
+    })
+  })
+
   test('channel: acknowledged sends made before the page attaches close it with ChannelOverflowError once they pass maxPendingAcks or maxPendingBytes', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-offline-budgets')

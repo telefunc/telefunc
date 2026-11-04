@@ -47,6 +47,7 @@ import {
   onChannelOpenAnswer,
   onChannelOpenHello,
   onChannelBudgets,
+  onChannelAtLimit,
   onChannelOfflineBudgets,
   onChannelCreditFailure,
   onChannelAckOwnership,
@@ -1181,6 +1182,12 @@ function ChannelDemo() {
     })
   }, [])
 
+  // A channel the page drops closes once garbage-collected.
+  const atLimitChannels = useRef<unknown>(null)
+  const testAtLimit = useCallback(async () => {
+    atLimitChannels.current = await openChannel(onChannelAtLimit)
+  }, [])
+
   const testOfflineBudgets = useCallback(async () => {
     const { bytes, acks } = await openChannel(onChannelOfflineBudgets)
     for (const channel of [bytes, acks]) channel.listen(() => new Promise<void>((done) => setTimeout(done, 1000)))
@@ -1788,6 +1795,9 @@ function ChannelDemo() {
             Test send budgets
           </button>
           <output id="channel-budgets-result" />
+          <button id="channel-test-at-limit" onClick={testAtLimit}>
+            Test a send of multi-byte text at the byte budget
+          </button>
           <button id="channel-test-offline-budgets" onClick={testOfflineBudgets}>
             Test send budgets on sends made before the page attaches
           </button>

@@ -81,6 +81,12 @@ type PendingEnd = { closeAck: boolean; closeRequest: boolean; abort: string | nu
 /** A `sendAck` awaiting the peer's ACK_RES; `bytes` is its payload's share of `pendingAckBytes`. */
 type PendingAck<T> = { resolve: (result: ChannelAck<T>) => void; reject: (err: Error) => void; bytes: number }
 
+/** Whether `data` takes at most `bytes`. A UTF-16 unit takes at most 3 UTF-8 bytes, so only text near the limit is counted. */
+function fitsIn(data: string | Uint8Array, bytes: number): boolean {
+  if (typeof data !== 'string') return data.byteLength <= bytes
+  return data.length * 3 <= bytes || utf8ByteLength(data) <= bytes
+}
+
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements Channel<ClientToServer, ServerToClient>, ChannelLifecycleOwner, BufferedSender
 {
@@ -239,7 +245,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this.offlineBuffer.pushText(serialized, resolve, reject)
       })
     }
-    this.checkPending(utf8ByteLength(serialized) + HEADER, needsAck)
+    this.checkPending(serialized, needsAck)
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
     // Promise already serializes the next send, so credit would add nothing.
     if (needsAck) {
@@ -285,7 +291,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this.offlineBuffer.pushBinary(data, resolve, reject)
       })
     }
-    this.checkPending(data.byteLength + HEADER, needsAck)
+    this.checkPending(data, needsAck)
     // Ack-bearing path bypasses credit; see `sendData` for rationale.
     if (needsAck) {
       return this.lifecycle.trackAck(
@@ -300,21 +306,20 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.sendCredit.decrement(this.peer.sendSequenced(encode.binary, data))
   }
 
-  /** Ends the channel and throws where a send of `bytes` (its frame included) would pass `maxPendingAcks` or
-   *  `maxPendingBytes`. */
-  private checkPending(bytes: number, ack: boolean): void {
-    const err = this.admitPending(bytes, ack)
+  /** Ends the channel and throws where a send of `data` would pass `maxPendingAcks` or `maxPendingBytes`. */
+  private checkPending(data: string | Uint8Array, ack: boolean): void {
+    const err = this.admitPending(data, ack)
     if (err) throw err
   }
 
-  /** Ends the channel, and returns why, where a send of `bytes` (its frame included) would pass `maxPendingAcks` or
-   *  `maxPendingBytes`. */
-  private admitPending(bytes: number, ack: boolean): ChannelOverflowError | null {
+  /** Ends the channel, and returns why, where a send of `data` would pass `maxPendingAcks` or `maxPendingBytes`. */
+  private admitPending(data: string | Uint8Array, ack: boolean): ChannelOverflowError | null {
     if (ack && this.pendingAcks.size >= this.maxPendingAcks) return this.overflow('maxPendingAcks')
+    const room = this.maxPendingBytes - this.bytesAhead()
     // Only a send that waits, for its answer or behind sends waiting for credit, is held with its promise.
-    const held = ack || this.sendCredit.waitingCount > 0 ? bytes + HELD_SEND_OVERHEAD_BYTES : 0
-    if (this.bytesAhead() + held > this.maxPendingBytes) return this.overflow('maxPendingBytes')
-    return null
+    const held = ack || this.sendCredit.waitingCount > 0
+    const fits = held ? fitsIn(data, room - HEADER - HELD_SEND_OVERHEAD_BYTES) : room >= 0
+    return fits ? null : this.overflow('maxPendingBytes')
   }
 
   private overflow(setting: 'maxPendingAcks' | 'maxPendingBytes'): ChannelOverflowError {
@@ -761,8 +766,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  shutdown has no callback left to answer. */
   _sendBuffered(peer: IndexedPeer, tag: number, data: string | Uint8Array, callback: EntryCallback | null): boolean {
     if (this._phase !== 'ended' && tag !== TAG.PUBLISH && tag !== TAG.PUBLISH_BINARY) {
-      const bytes = (typeof data === 'string' ? utf8ByteLength(data) : data.byteLength) + HEADER
-      if (this.admitPending(bytes, tag === TAG.TEXT_ACK_REQ || tag === TAG.BINARY_ACK_REQ)) return false
+      if (this.admitPending(data, tag === TAG.TEXT_ACK_REQ || tag === TAG.BINARY_ACK_REQ)) return false
     }
     switch (tag) {
       case TAG.TEXT:

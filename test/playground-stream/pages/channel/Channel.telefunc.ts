@@ -42,6 +42,7 @@ export {
   onChannelOpenHello,
   onChannelBudgets,
   onChannelOfflineBudgets,
+  onChannelAtLimit,
   onChannelCreditFailure,
   onChannelAckOwnership,
   onChannelApiProbe,
@@ -929,6 +930,37 @@ async function onChannelBudgets() {
   exercise(bytes, false)
   exercise(acks, true)
   return { bytes: bytes.client, acks: acks.client }
+}
+
+/** One channel per kind of text, each sending as its first send what fits `maxPendingBytes` to the byte, and one per
+ *  kind sending one byte more. cleanupState: atLimit_<kind>_<fits|over> = `accepted`, or why the send threw. */
+async function onChannelAtLimit() {
+  // 4,096 is these 3,575 UTF-8 bytes, the two quotes around them, a frame's 7 bytes and a held send's 512.
+  const texts = {
+    twoBytes: `${'é'.repeat(1787)}x`,
+    threeBytes: `${'€'.repeat(1191)}xx`,
+    fourBytes: `${'😀'.repeat(893)}xxx`,
+  }
+  const original = config.channel
+  config.channel = { ...original, maxPendingBytes: 4096 }
+  const open = (name: string, text: string) => {
+    const ch = new Channel<never, string>()
+    ch.onOpen(() => {
+      try {
+        void ch.send(text, { ack: true })
+        cleanupState[`atLimit_${name}`] = 'accepted'
+      } catch (err) {
+        cleanupState[`atLimit_${name}`] = (err as Error).message
+      }
+    })
+    return ch.client
+  }
+  const channels = Object.entries(texts).flatMap(([kind, text]) => [
+    open(`${kind}_fits`, text),
+    open(`${kind}_over`, `${text}x`),
+  ])
+  config.channel = original
+  return channels
 }
 
 async function onChannelOfflineBudgets() {
