@@ -170,8 +170,7 @@ async function onBroadcastAnswers() {
 async function onBroadcastAnsweringLoop() {
   const loop = new BroadcastChannel<number>({ key: `room:loop-test:${crypto.randomUUID()}` })
   let answering = true
-  loop.subscribe(async (n) => {
-    await Promise.resolve()
+  loop.subscribe((n) => {
     if (answering) void loop.publish(n + 1)
   })
   void loop.publish(0)
