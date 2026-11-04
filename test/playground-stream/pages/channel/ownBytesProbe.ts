@@ -1,4 +1,4 @@
-export { sendOwnBytes, listenOwnBytesAlone, listenOwnBytesBeside, OWN_BYTES_FRAMES }
+export { sendOwnBytes, listenOwnBytesAlone, listenOwnBytesBeside }
 
 type BytesChannel = {
   sendBinary(data: Uint8Array): unknown
