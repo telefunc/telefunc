@@ -15,6 +15,7 @@ import type {
 import {
   DEFAULT_CLIENT_CHANNEL_TRANSPORTS,
   DEFAULT_STREAM_TRANSPORT,
+  parseStreamConfig,
   type ChannelTransports,
   type StreamTransport,
 } from '../wire-protocol/constants.js'
@@ -95,7 +96,7 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
         },
         set(_t, subProp, val) {
           if (typeof subProp !== 'string') return true
-          applyStreamConfig({ ...configState.stream, [subProp]: val })
+          configState.stream = parseStreamConfig({ ...configState.stream, [subProp]: val })
           return true
         },
       })
@@ -168,7 +169,7 @@ function applyUserConfig(prop: string | symbol, val: unknown) {
     assertUsage(typeof val === 'function', '`config.fetch` should be a function')
     configState.fetch = val as typeof globalThis.fetch
   } else if (prop === 'stream') {
-    applyStreamConfig(val)
+    configState.stream = parseStreamConfig(val)
   } else if (prop === 'channel') {
     applyChannelConfig(val)
   } else if (prop === 'extensions') {
@@ -177,19 +178,6 @@ function applyUserConfig(prop: string | symbol, val: unknown) {
   } else {
     assertUsage(false, `Unknown config.${prop}`)
   }
-}
-
-function applyStreamConfig(val: unknown): void {
-  assertUsage(isObject(val), 'config.stream should be an object')
-  const next: StreamConfigUser = {}
-  for (const [key, value] of Object.entries(val)) {
-    if (key === 'transport') {
-      next.transport = validateStreamTransport(value, 'config.stream.transport')
-    } else {
-      assertUsage(false, `Unknown config.stream.${key}`)
-    }
-  }
-  configState.stream = next
 }
 
 function applyChannelConfig(val: unknown): void {
@@ -203,14 +191,6 @@ function applyChannelConfig(val: unknown): void {
     }
   }
   configState.channel = next
-}
-
-function validateStreamTransport(val: unknown, configPath: string): StreamTransport {
-  assertUsage(
-    val === 'binary-inline' || val === 'sse-inline' || val === 'channel',
-    `\`${configPath}\` should be 'binary-inline', 'sse-inline', or 'channel'`,
-  )
-  return val
 }
 
 function validateChannelTransports(val: unknown, configPath: string): ChannelTransports {

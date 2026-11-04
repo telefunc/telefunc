@@ -1,4 +1,5 @@
-import { assert } from '../utils/assert.js'
+import { assert, assertUsage } from '../utils/assert.js'
+import { isObject } from '../utils/isObject.js'
 
 export const SERIALIZER_PREFIX_FILE = '!TelefuncFile:'
 export const SERIALIZER_PREFIX_BLOB = '!TelefuncBlob:'
@@ -65,6 +66,21 @@ export const CHANNEL_TRANSPORT = {
 
 /** Transport for streamed values returned by telefunctions. */
 export type StreamTransport = (typeof STREAM_TRANSPORT)[keyof typeof STREAM_TRANSPORT]
+
+/** `config.stream` as the user set it, validated. */
+export function parseStreamConfig(val: unknown): { transport?: StreamTransport } {
+  assertUsage(isObject(val), 'config.stream should be an object')
+  const next: { transport?: StreamTransport } = {}
+  for (const [key, value] of Object.entries(val)) {
+    assertUsage(key === 'transport', `Unknown config.stream.${key}`)
+    assertUsage(
+      value === 'binary-inline' || value === 'sse-inline' || value === 'channel',
+      "`config.stream.transport` should be 'binary-inline', 'sse-inline', or 'channel'",
+    )
+    next.transport = value
+  }
+  return next
+}
 export const DEFAULT_STREAM_TRANSPORT: StreamTransport = STREAM_TRANSPORT.BINARY_INLINE
 
 /** Transport for persistent channels created with `new Channel()`. */
