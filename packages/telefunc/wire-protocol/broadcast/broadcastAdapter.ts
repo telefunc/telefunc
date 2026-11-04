@@ -17,10 +17,6 @@ import { ChannelOverflowError } from '../channel/channelErrors.js'
 import { HELD_SEND_OVERHEAD_BYTES } from '../channel/server/ServerChannelBuffer.js'
 import type { WirePublishInfo } from '../wire/publishInfo.js'
 
-/** Most in-memory publishes that deliver at once before the event loop gets a turn, so code answering them after an
- *  `await` can't starve it. */
-const IN_MEMORY_DELIVERY_BURST = 1024
-
 /** Transport-level publish result. */
 type BroadcastPublishResult = WirePublishInfo & { meta?: Record<string, unknown> }
 
@@ -82,12 +78,6 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
    *  `bufferLimit` or `bufferLimitBinary` rejects. */
   private readonly queuedBytes = { text: 0, binary: 0 }
   private delivering = false
-  /** A publish ran in this synchronous run: code publishing in a loop holds the event loop itself, so one made while
-   *  this is set has no turn to wait for. */
-  private inSyncRun = false
-  /** Deliveries at once since the last turn, a synchronous run of publishes past half the burst counting once. Reset by
-   *  a macrotask scheduled once half the burst has run, so a server publishing once per turn schedules none. */
-  private deliveredInBurst = 0
   private turnScheduled = false
 
   constructor(transport?: BroadcastTransport) {
@@ -178,17 +168,8 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     data: T,
   ): BroadcastPublishResult | Promise<BroadcastPublishResult> {
     const timestamp = Date.now()
-    const startsRun = !this.inSyncRun
-    // Below half the burst, each delivery counts: nothing waits soon, so a publish needs no microtask.
-    if (startsRun && this.deliveredInBurst >= IN_MEMORY_DELIVERY_BURST / 2) {
-      this.inSyncRun = true
-      queueMicrotask(this.endSyncRun)
-    }
-    // A publish from a listener reaches subscribers after the message it answers; one past the burst, after the turn.
-    if (this.delivering || this.queued.length > 0 || (startsRun && this.deliveredInBurst >= IN_MEMORY_DELIVERY_BURST)) {
-      return this.queueInMemory(subs, key, data, timestamp)
-    }
-    if (startsRun) this.countDelivery()
+    // A publish from a listener reaches subscribers after the message it answers.
+    if (this.delivering || this.queued.length > 0) return this.queueInMemory(subs, key, data, timestamp)
     this.delivering = true
     try {
       return this.deliverInMemory(subs, key, data, timestamp)
@@ -196,14 +177,6 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       this.delivering = false
       if (this.queued.length > 0) this.drainQueued()
     }
-  }
-
-  private readonly endSyncRun = (): void => {
-    this.inSyncRun = false
-  }
-
-  private countDelivery(): void {
-    if (++this.deliveredInBurst === IN_MEMORY_DELIVERY_BURST / 2) this.scheduleTurn()
   }
 
   private scheduleTurn(): void {
@@ -214,7 +187,6 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
 
   private readonly startTurn = (): void => {
     this.turnScheduled = false
-    this.deliveredInBurst = 0
     this.drainQueued()
   }
 

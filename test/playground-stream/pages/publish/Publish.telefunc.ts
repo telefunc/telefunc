@@ -470,7 +470,7 @@ async function onInMemoryPublishes() {
     rejected: producerRuns.filter((r) => r.status === 'rejected').length,
   }
 
-  // Each tick publishes 4 bursts' worth, unawaited, each in a run of its own: all of it arrives by the next tick.
+  // Each tick publishes 4,096 messages, unawaited, each in a run of its own: all of it arrives by the next tick.
   let timerDelivered = 0
   let timerSent = 0
   let peakWaiting = 0
@@ -494,32 +494,20 @@ async function onInMemoryPublishes() {
     aloneBytes,
     producers,
     timerProducer,
-    timerFiredMidChain: {
-      answeringAtOnce: await timerFiresMidChain(`chain:${id}`, false),
-      answeringAfterAwait: await timerFiresMidChain(`chain-await:${id}`, true),
-    },
+    timerFiredMidChain: await timerFiresMidChain(`chain:${id}`),
   }
 }
 
 /** A listener answers itself 20,000 times: whether a timer fired before it was done. */
-async function timerFiresMidChain(key: string, afterAwait: boolean): Promise<boolean> {
+async function timerFiresMidChain(key: string): Promise<boolean> {
   let answers = 0
   let answersWhenTimerFired = -1
   setTimeout(() => (answersWhenTimerFired = answers), 0)
   const finished = new Promise<void>((resolve) => {
-    const answer = () => {
+    Broadcast.subscribe(key, () => {
       if (++answers === 20_000) resolve()
       else void Broadcast.publish(key, 'again')
-    }
-    Broadcast.subscribe(
-      key,
-      afterAwait
-        ? async () => {
-            await null
-            answer()
-          }
-        : answer,
-    )
+    })
   })
   void Broadcast.publish(key, 'start')
   await finished
