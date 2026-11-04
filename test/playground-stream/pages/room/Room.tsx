@@ -1042,6 +1042,13 @@ function Room() {
         held.listen(() => 'pong')
         const heldThreaded = await onJoinAsServer(roomId, 'Held threaded')
         heldThreaded.listen(threadedReply)
+        const observed = await room.join({ meta: { name: 'Observed' } })
+        observed.listen(() => {})
+        observed.listen(() => 'ok')
+        observed.listen(() => {})
+        const competing = await room.join({ meta: { name: 'Competing' } })
+        competing.listen(() => 'one')
+        competing.listen(() => 'two')
         const unhandled: string[] = []
         const recordUnhandled = (event: PromiseRejectionEvent) => unhandled.push(String(event.reason))
         window.addEventListener('unhandledrejection', recordUnhandled)
@@ -1053,6 +1060,8 @@ function Room() {
               fromServer: await replyOf(me.send(serverMember, 'hi', { ack: true })),
               fromHeld: await replyOf(me.send(held.id, 'ping', { ack: true })),
               fromHeldUnsendable: await replyOf(me.send(heldThreaded.id, 'where?', { ack: true })),
+              fromObserved: await replyOf(me.send(observed.id, 'move', { ack: true })),
+              fromCompeting: await replyOf(me.send(competing.id, 'move', { ack: true })),
               refused: await replyOf(me.send(serverMember, 'refuse', { ack: true })),
               unhandled,
             }),

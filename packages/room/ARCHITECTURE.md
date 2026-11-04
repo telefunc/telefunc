@@ -109,12 +109,8 @@ already dropped, because a close, a create and the directory's due check can eac
 inbox or control commit's `delivery`, its handoff to the subscriptions, settles after the step, outside it.
 
 **Redis's operation packet.** `OPERATION_LUA` (`redis/src/commands.ts`) takes a number of KEYS and ARGV that depends on
-the operation. `operation.invoke()` in the same file lays them out, and the script walks them in the same order with a
-running index. The `OperationPacket` type writes down that layout: its fields say how many KEYS each part takes and
-which ARGV holds its bytes, in this order: the fixed KEYS, two per dropped member, three per retained binary frame, one
-per track lane set, one per expiring cell, then the lane commit's. Nothing checks it at runtime, and a mismatch reads,
-writes or deletes the wrong key without an error, so a change to the order on one side changes the other in the same
-commit. The lane commit's own KEYS and ARGV, which `commitLane()` and an operation share, can't drift: `COMMIT_KEYS`
+the operation. `operation.invoke()` in the same file alone lays them out past the script's fixed KEYS: the plan it sends
+(`OperationPacket`) gives the script the index of each entry's KEYS and ARGV. The lane commit's own KEYS and ARGV, which `commitLane()` and an operation share, can't drift: `COMMIT_KEYS`
 and `COMMIT_ARGS` name each slot once, and both its script and `commitInvocation()` are built from them.
 
 ## The lane plan

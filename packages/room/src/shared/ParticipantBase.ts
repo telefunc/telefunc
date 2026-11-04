@@ -8,6 +8,8 @@ import {
   type TELEFUNC_SHIELDS,
   Listeners,
   Fifo,
+  soleAnswer,
+  TWO_ANSWERS,
   utf8ByteLength,
 } from 'telefunc/__internal'
 import { makeDisposer, type ListenerOptions } from './disposer.js'
@@ -175,19 +177,16 @@ abstract class ParticipantBase implements LocalParticipant {
     for (const cb of this.messageListeners?.list() ?? []) this.invoke(cb, msg.data, sender)
   }
 
-  /** The last listener's return is the reply; a throw is the failure reply (see `toRoomFailure`: a bug is reported
-   *  here, the sender gets only that it failed). */
+  /** Channel's rule (`soleAnswer`) picks the reply; a throw is the failure reply (see `toRoomFailure`: a bug is
+   *  reported here, the sender gets only that it failed). */
   private async fireInboxAck(msg: InboxMessage): Promise<RoomResult> {
-    const sender = this.inboxSender(msg)
-    let result: unknown
-    for (const cb of this.messageListeners?.list() ?? []) {
-      try {
-        result = await cb(msg.data, sender)
-      } catch (err) {
-        return toRoomFailure(err, (e) => this._reportError(e), this._bugMessage)
-      }
+    let answer: unknown
+    try {
+      answer = await soleAnswer(this.messageListeners?.list() ?? [], msg.data, this.inboxSender(msg))
+    } catch (err) {
+      return toRoomFailure(err, (e) => this._reportError(e), this._bugMessage)
     }
-    return { ok: true, value: result }
+    return answer === TWO_ANSWERS ? DM_FAILURE.twoReplies : { ok: true, value: answer }
   }
 
   /** The live room-backed sender, when this flavor has a room view. */

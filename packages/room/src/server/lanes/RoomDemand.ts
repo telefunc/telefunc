@@ -9,22 +9,22 @@ import { hasEntry, runAll, toggle, toggleEntry } from '../../utils/sets.js'
 import { Slice } from '../../shared/Slice.js'
 import type { PublishedTracks } from './PublishedTracks.js'
 
-/** The reporters of an entry, each with the telling of everything (`Reporter.telling`) it last told the entry in. */
+/** The reporters of an entry, each with the generation (`Reporter.generation`) it last told the entry in. */
 type Leases = Map<string, number>
 /** A reporter's entry of one track of every member: the members it doesn't receive that track from, and whether it
  *  receives it only of the members it fetches by member. */
-type TrackLease = { instance: string; telling: number; except: Set<string>; byMember: boolean }
+type TrackLease = { instance: string; generation: number; except: Set<string>; byMember: boolean }
 type TrackLeases = Map<string, TrackLease>
 /** `undefined` where `instance` holds no lease. */
 type TrackLeaseChange = { instance: string; was: TrackLease | undefined; now: TrackLease | undefined }
 /** Another process that tells demand. `expiresAt`: its lease on all it told, which each of its pages renews, so a
  *  crashed process lapses. `page`: the number of its last page, so a page this process missed shows as a gap.
- *  `telling`: how many times it told everything again. `asked`: whether this process asked it to since. */
-type Reporter = { expiresAt: number; page: number; telling: number; asked: boolean }
-/** A reporter's entry as it told it: started or stopped (`on`), in its `telling`. */
-type Report = { instance: string; on: boolean; telling: number }
-/** Whether a reporter's lease, last told in `telling`, is dropped. */
-type LeaseDropped = (instance: string, telling: number) => boolean
+ *  `generation`: how many times it told everything again. `asked`: whether this process asked it to since. */
+type Reporter = { expiresAt: number; page: number; generation: number; asked: boolean }
+/** A reporter's entry as it told it: started or stopped (`on`), in its `generation`. */
+type Report = { instance: string; on: boolean; generation: number }
+/** Whether a reporter's lease, last told in `generation`, is dropped. */
+type LeaseDropped = (instance: string, generation: number) => boolean
 
 /** The handle that owns a member, which hears whether a track of it is wanted. */
 type MemberOwner = { deliverDemand(member: string, track: string, wanted: boolean): void }
@@ -68,7 +68,12 @@ class RoomDemand {
    *  before. */
   applyPage(page: RoomDemandPage): boolean {
     const { instance } = page
-    const reporter = getOrCreate(this.reporters, instance, () => ({ expiresAt: 0, page: 0, telling: 0, asked: false }))
+    const reporter = getOrCreate(this.reporters, instance, () => ({
+      expiresAt: 0,
+      page: 0,
+      generation: 0,
+      asked: false,
+    }))
     const continues = page.page === reporter.page + 1
     reporter.expiresAt = performance.now() + ROOM_DEMAND_TTL_MS
     reporter.page = page.page
@@ -78,11 +83,11 @@ class RoomDemand {
         this.take(instance, want, want.on)
       } else if (want.again) {
         tellsAgain = true
-        reporter.telling++
+        reporter.generation++
         reporter.asked = false
       } else {
-        const telling = reporter.telling
-        runAll(this.drop((from, told) => from === instance && told < telling))
+        const generation = reporter.generation
+        runAll(this.drop((from, told) => from === instance && told < generation))
         this.settle()
       }
     }
@@ -106,7 +111,7 @@ class RoomDemand {
   /** A reporter's entry starts or stops; one from another process lasts while it renews its lease. Only a member's
    *  owner keeps its pairs; ownership is fixed from before the member exists anywhere. */
   take(instance: string, entry: DemandEntry, on: boolean): void {
-    const report: Report = { instance, on, telling: this.reporters.get(instance)?.telling ?? 0 }
+    const report: Report = { instance, on, generation: this.reporters.get(instance)?.generation ?? 0 }
     if ('except' in entry) {
       this.takeTrack(entry, report)
     } else if (!this.ownedMembers.has(entry.member)) {
@@ -184,8 +189,8 @@ class RoomDemand {
 
   private *dropFetched(dropped: LeaseDropped): Generator<void> {
     for (const [member, leases] of this.fetched) {
-      for (const [instance, telling] of leases) {
-        if (dropped(instance, telling)) {
+      for (const [instance, generation] of leases) {
+        if (dropped(instance, generation)) {
           leases.delete(instance)
           this.queueFetched(instance, member)
         }
@@ -198,7 +203,7 @@ class RoomDemand {
   private *dropTracks(dropped: LeaseDropped): Generator<void> {
     for (const [track, leases] of this.tracks) {
       for (const [instance, held] of leases) {
-        if (dropped(instance, held.telling)) {
+        if (dropped(instance, held.generation)) {
           leases.delete(instance)
           this.queueLease(track, { instance, was: held, now: undefined })
         }
@@ -235,10 +240,10 @@ class RoomDemand {
     this.due.clear()
   }
 
-  private takeTrack(entry: Extract<DemandEntry, { except: unknown }>, { instance, on, telling }: Report): void {
+  private takeTrack(entry: Extract<DemandEntry, { except: unknown }>, { instance, on, generation }: Report): void {
     const leases = this.tracks.get(entry.track)
     const held = leases?.get(instance)
-    // A member's change follows its track's entry; a lease this process lost comes whole with the telling it asks.
+    // A member's change follows its track's entry; a lease this process lost comes whole with the generation it asks.
     if ('member' in entry) {
       if (held === undefined) return
       toggle(held.except, entry.member, on)
@@ -253,10 +258,10 @@ class RoomDemand {
       return this.queueLease(track, { instance, was: held, now: undefined })
     }
     if (held !== undefined && held.byMember === byMember && sameMembers(held.except, except)) {
-      held.telling = telling
+      held.generation = generation
       return
     }
-    const now = { instance, telling, except: new Set(except), byMember }
+    const now = { instance, generation, except: new Set(except), byMember }
     getOrCreate(this.tracks, track, () => new Map()).set(instance, now)
     this.queueLease(track, { instance, was: held, now })
   }
@@ -351,11 +356,11 @@ class RoomDemand {
 }
 
 /** Takes, renews or drops `instance`'s lease on `key`, and whether `key` went from held to not or back. */
-function lease<K>(leases: Map<K, Leases>, key: K, { instance, on, telling }: Report): boolean {
+function lease<K>(leases: Map<K, Leases>, key: K, { instance, on, generation }: Report): boolean {
   const held = leases.get(key)
   if (on) {
-    if (held) held.set(instance, telling)
-    else leases.set(key, new Map([[instance, telling]]))
+    if (held) held.set(instance, generation)
+    else leases.set(key, new Map([[instance, generation]]))
     return held === undefined
   }
   if (!held?.delete(instance) || held.size > 0) return false
@@ -365,7 +370,7 @@ function lease<K>(leases: Map<K, Leases>, key: K, { instance, on, telling }: Rep
 
 /** Drops the leases `dropped` names, and whether none is left. */
 function lapse(leases: Leases, dropped: LeaseDropped): boolean {
-  for (const [instance, telling] of leases) if (dropped(instance, telling)) leases.delete(instance)
+  for (const [instance, generation] of leases) if (dropped(instance, generation)) leases.delete(instance)
   return leases.size === 0
 }
 
