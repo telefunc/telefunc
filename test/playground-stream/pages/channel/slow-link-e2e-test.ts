@@ -49,6 +49,29 @@ function testSlowLink(isDev: boolean) {
   // slow link there.
   if (upgrades) return
 
+  // 32 s to cross, past the 10 s a page waits for an answer to its ping.
+  test('channel: on a 1 Mbit/s link, a 4 MB message from the server arrives on the connection it started on', async () => {
+    const proxy = await startBlackHoleProxy(getServerUrl())
+    try {
+      await navigate(`${proxy.url}/channel`)
+      proxy.pace({ downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 })
+      const connections = countConnections()
+      await page.click('#wire-large-slow-link')
+      await autoRetry(
+        async () => {
+          const { large } = await getResult<{ large: number | null }>('#wire-state')
+          expect(large).toBe(4_000_000)
+        },
+        { timeout: 55_000 },
+      )
+      expect(connections.stop()).toBe(1)
+    } finally {
+      // The page leaves before the proxy closes, which would cut its connections.
+      await page.goto('about:blank')
+      await proxy.close()
+    }
+  })
+
   test('channel: on a 125 kB/s uplink, a 2 MiB upload arrives and keeps the download coming on the connection it started on, and a channel opened meanwhile opens on it', async () => {
     const proxy = await startBlackHoleProxy(getServerUrl())
     try {
