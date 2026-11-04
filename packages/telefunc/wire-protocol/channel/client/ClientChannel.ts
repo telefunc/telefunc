@@ -45,6 +45,7 @@ import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
 import { channelMessages } from '../channelMessages.js'
 import { forListener, listenerAnswer } from '../listenerAnswer.js'
 import { isPromise } from '../../../utils/isPromise.js'
+import { createDeferred } from '../../../utils/createDeferred.js'
 
 /** The connection a channel rides (see `ClientConnection.getOrCreate`). */
 type ConnectionOptions = {
@@ -305,9 +306,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  that throws `Abort` stops the rest. */
   private callListeners<T>(listeners: Listeners<(value: T) => unknown>, value: T, bytes: number): void {
     const pending: Promise<unknown>[] = []
-    for (const cb of listeners.list()) {
+    const list = listeners.list()
+    for (const [i, cb] of list.entries()) {
       try {
-        const result = cb(forListener(value))
+        const result = cb(forListener(value, list, i))
         if (isPromise(result)) {
           pending.push(result.catch((err: unknown) => this.lifecycle.handleCallbackError(err)))
         }
@@ -471,10 +473,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** An ack-bearing send: what refuses it throws here, as it does for a send without an ack. */
   protected sendAckReq<T, D>(encodeFrame: SequencedEncoder<D>, data: D): Promise<T> {
-    let pending!: { resolve: (v: T) => void; reject: (err: Error) => void }
-    const ack = new Promise<T>((resolve, reject) => (pending = { resolve, reject }))
-    this.connection.sendSequenced(this, 'ack', encodeFrame, data, (seq) => this.pendingAcks.set(seq, pending))
-    return this.lifecycle.trackAck(ack)
+    const ack = createDeferred<T>()
+    this.connection.sendSequenced(this, 'ack', encodeFrame, data, (seq) => this.pendingAcks.set(seq, ack))
+    return this.lifecycle.trackAck(ack.promise)
   }
 
   /** @internal */

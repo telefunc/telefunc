@@ -4,9 +4,9 @@ export type { HoldDelta }
 // An unheld room closes on its own: the server whose write leaves it unheld closes it on a timer, and the head's lapse,
 // which every heartbeat on the room keeps ahead, removes it if no server is left to.
 
+import { unrefTimer } from 'telefunc/__internal'
 import { assert } from '../../utils/assert.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
-import { unrefTimer } from '../../utils/unrefTimer.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { getRoomPlane } from '../../backend/plane.js'
 import type { CellCount, CellCounter, HeadNext } from '../../backend/contract.js'

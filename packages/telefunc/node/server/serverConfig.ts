@@ -44,6 +44,8 @@ import {
   CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
   DEFAULT_SERVER_CHANNEL_TRANSPORTS,
   DEFAULT_STREAM_TRANSPORT,
+  parseStreamConfig,
+  validateChannelTransports,
   SSE_FLUSH_THROTTLE_MS,
   SSE_POST_IDLE_FLUSH_DELAY_MS,
   type ChannelTransports,
@@ -269,7 +271,7 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
         },
         set(_t, subProp, val) {
           if (typeof subProp !== 'string') return true
-          applyStreamConfig({ ...configState.stream, [subProp]: val })
+          configState.stream = parseStreamConfig({ ...configState.stream, [subProp]: val })
           return true
         },
       })
@@ -487,7 +489,7 @@ function applyUserConfig(prop: string | symbol, val: unknown) {
     }
     configState.log = val as ConfigUser['log']
   } else if (prop === 'stream') {
-    applyStreamConfig(val)
+    configState.stream = parseStreamConfig(val)
   } else if (prop === 'channel') {
     applyChannelConfig(val)
   } else if (prop === 'broadcast') {
@@ -500,19 +502,6 @@ function applyUserConfig(prop: string | symbol, val: unknown) {
   }
 }
 
-function applyStreamConfig(val: unknown): void {
-  assertUsage(isObject(val), 'config.stream should be an object')
-  const next: StreamConfigUser = {}
-  for (const [key, value] of Object.entries(val)) {
-    if (key === 'transport') {
-      next.transport = validateStreamTransport(value, 'config.stream.transport')
-    } else {
-      assertUsage(false, `Unknown config.stream.${key}`)
-    }
-  }
-  configState.stream = next
-}
-
 function applyChannelConfig(val: unknown): void {
   assertUsage(isObject(val), 'config.channel should be an object')
   const next: ChannelConfigUser = {}
@@ -520,7 +509,7 @@ function applyChannelConfig(val: unknown): void {
     const configPath = `config.channel.${key}`
     switch (key) {
       case 'transports':
-        next.transports = validateChannelTransports(value, configPath)
+        next.transports = validateChannelTransports(value, configPath, "['sse'] or ['ws']")
         break
       case 'pingInterval':
         assertDuration(
@@ -580,22 +569,6 @@ function applyBroadcastConfig(val: unknown): void {
   }
   configState.broadcast = next
   if (next.transport) configureBroadcastTransport(next.transport)
-}
-
-function validateStreamTransport(val: unknown, configPath: string): StreamTransport {
-  assertUsage(
-    val === 'binary-inline' || val === 'sse-inline' || val === 'channel',
-    `\`${configPath}\` should be 'binary-inline', 'sse-inline', or 'channel'`,
-  )
-  return val
-}
-
-function validateChannelTransports(val: unknown, configPath: string): ChannelTransports {
-  assertUsage(
-    Array.isArray(val) && val.length > 0 && val.every((v) => v === 'sse' || v === 'ws'),
-    `\`${configPath}\` should be an array of transports, e.g. ['sse'] or ['ws']`,
-  )
-  return val as ChannelTransports
 }
 
 let rootFromVite: string | null = null

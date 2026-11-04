@@ -312,8 +312,8 @@ async function runTelefunc_({
     if (parsed.isMalformedRequest) {
       return createHttpResponse({ ...malformedRequest })
     }
-    if (parsed.isSseRequest) {
-      return createHttpResponse(parsed.sseResponse)
+    if (parsed.wireResponse) {
+      return createHttpResponse(parsed.wireResponse)
     }
     const { telefunctionKey, telefuncFilePath, telefunctionName } = parsed
     objectAssign(runContext, {

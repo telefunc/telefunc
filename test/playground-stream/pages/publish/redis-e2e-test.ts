@@ -10,7 +10,7 @@ function testRedisReconnect() {
     await autoRetry(async () => {
       expect(await getResult('#redis-readiness-result')).deep.equal({ rejected: true, received: ['recovered'] })
     })
-    // The subscriber connection reports the outage the refusal starts, once.
+    // The subscriber connection reports the outage the refusal starts.
     expectLog('NOPERM', { filter: (log) => log.logSource === 'stderr' || log.logSource === 'stdout' })
   })
 

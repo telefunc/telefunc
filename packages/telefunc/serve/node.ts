@@ -141,7 +141,8 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
   return { installWebSocket, serve }
 }
 
-/** Sends `frame` in its socket's one write for the task: written alone, each frame costs a syscall while the socket has room. */
+/** Sends `frame` in one write with the task's other frames, up to the socket's mark: written alone, each frame costs a
+ *  syscall while the socket has room. Past the mark it goes at once, or the page would wait for the whole task. */
 function sendInTaskWrite(peer: Peer, frame: Uint8Array<ArrayBuffer>): void {
   const socket = peer.context.socket!
   if (!socket.writableCorked) {
@@ -149,4 +150,5 @@ function sendInTaskWrite(peer: Peer, frame: Uint8Array<ArrayBuffer>): void {
     process.nextTick(() => socket.uncork())
   }
   peer.send(frame)
+  if (socket.writableLength >= socket.writableHighWaterMark) socket.uncork()
 }

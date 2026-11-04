@@ -2,10 +2,15 @@ export { ParticipantBase }
 export type { ParticipantBaseOptions }
 
 import { stringify } from '@brillout/json-serializer/stringify'
-import { invokeChannelListener, type ChannelPublishAck, type TELEFUNC_SHIELDS, Listeners } from 'telefunc/__internal'
+import {
+  invokeChannelListener,
+  type ChannelPublishAck,
+  type TELEFUNC_SHIELDS,
+  Listeners,
+  Fifo,
+  utf8ByteLength,
+} from 'telefunc/__internal'
 import { makeDisposer, type ListenerOptions } from './disposer.js'
-import { Fifo } from '../utils/Fifo.js'
-import { utf8ByteLength } from '../utils/utf8ByteLength.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderSnapshot } from './arguments.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
@@ -40,7 +45,7 @@ abstract class ParticipantBase implements LocalParticipant {
   readonly id: string
   readonly identity: string | null
   readonly selfDelivery: boolean
-  private readonly memberMeta: MemberMeta
+  protected readonly memberMeta: MemberMeta
   private leftCause: LeaveCause | null = null
   // Each list is made when its first listener is added.
   private leaveListeners: Listeners<(cause: LeaveCause) => unknown> | null = null
@@ -84,11 +89,6 @@ abstract class ParticipantBase implements LocalParticipant {
    *  whole meta its holder's next attach or roster sends. */
   _acceptMeta(update: MemberMetaUpdate): boolean {
     return this.memberMeta.apply(update) === 'applied'
-  }
-
-  /** @internal A failover rewound the seq: the next whole meta applies, whatever its seq. */
-  _forgetMetaSeq(): void {
-    this.memberMeta.forget()
   }
 
   protected get _left(): boolean {

@@ -162,7 +162,7 @@ Publisher (Durable Object)
 
 ### Ordering
 
-<Link href="/channel#broadcast">Broadcast</Link> publishes for a given `key` go through a single authority, which assigns a <Link href="/channel#broadcast">monotonic `seq`</Link>. Every subscriber receives them in `seq` order.
+<Link href="/channel#broadcast">Broadcast</Link> publishes for a given `key` go through a single authority, which assigns a <Link href="/channel#broadcast">monotonic `seq`</Link>. Every subscriber receives them in `seq` order. The publishes of one Durable Object's telefunctions and channel handlers get their `seq` in call order. Any others get it in the order they reach the authority.
 
 ### Presence
 
@@ -192,7 +192,7 @@ A Durable Object registers with the authority on its first subscription to a key
 
 | Guarantee | Details |
 |---|---|
-| Ordering | Every subscriber receives a key's publishes in `seq` order. |
+| Ordering | Every subscriber receives a key's publishes in `seq` order, which is call order for the publishes of one Durable Object's telefunctions and channel handlers. |
 | Delivery | `publish()` resolves once the message has reached every Durable Object with subscribers. If a Durable Object can't take it, `publish()` rejects. That Durable Object's subscribers miss the message, while every other subscriber still gets it, so publishing it again delivers it twice to them. Delivery to clients then happens over the channel connection. |
 
 > Once a broadcast message reaches a Durable Object, it has the same buffering and replay guarantees as regular channel messages.

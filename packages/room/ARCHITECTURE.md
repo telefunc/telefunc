@@ -46,7 +46,8 @@ this one too, applies the event to its model, and its views tell their listeners
   from the start (`RedisRoomDriver.runOperation()`).
 - **lane**: an ordered stream of an incarnation's commits, each with a seq: one semantic (messages), one control
   (membership, meta, close), one demand, one inbox per member (DMs), one binary per (member, track).
-- **retained**: a lane's last frame kept for late subscribers (`publish(…, { retain: true })`).
+- **retained**: a lane's last frame, replayed to a holder when it starts wanting that lane
+  (`publish(…, { retain: true })`).
 - **directory**: the listing `Room.list()` pages through, and the due-check index that closes lapsed rooms.
 - **fence** (Redis): a token a commit carries so the committer knows when its own subscriptions saw it.
 

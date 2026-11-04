@@ -1,7 +1,7 @@
 export { RoomHeartbeat }
 
+import { unrefTimer } from 'telefunc/__internal'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
-import { unrefTimer } from '../../utils/unrefTimer.js'
 import type { RoomModel } from '../../shared/RoomModel.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS } from '../constants.js'
 import type { DemandReport } from '../lanes/DemandReport.js'

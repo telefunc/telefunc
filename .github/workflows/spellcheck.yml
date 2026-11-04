@@ -8,4 +8,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - run: pnpm install
-      - run: pnpm run spellcheck:check
+      - uses: crate-ci/typos@v1.33.1
+        with:
+          config: node_modules/@brillout/spellcheck/typos.toml

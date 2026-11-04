@@ -11,10 +11,10 @@ export {
 }
 export type { TrackKey, EveryMember, EveryTrack, BinaryWantChange, BinaryFrame }
 
+import { utf8ByteLength } from 'telefunc/__internal'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../utils/assert.js'
-import { utf8ByteLength } from '../utils/utf8ByteLength.js'
 import { assertKnownOptions, isRecord } from './arguments.js'
 import type { BinaryPublishOptions } from '../types.js'
 

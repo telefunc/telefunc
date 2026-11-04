@@ -50,7 +50,7 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
-    "@brillout/json-serializer": "^0.5.25"
+    "@brillout/json-serializer": "^0.5.27"
   },
   "peerDependencies": {
     "telefunc": ">=0.3.2 <0.4.0"

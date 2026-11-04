@@ -32,8 +32,8 @@ function testSlowLink(isDev: boolean) {
         { timeout: 50_000 },
       )
       if (upgrades) {
-        // The last send goes after the move: a page that starts on a WebSocket answers it in ~2 s.
-        expect(linkShare!.pingMs.at(-1)).lessThan(2700)
+        // The last send goes after the move: ~2 s where the window went back to a WebSocket's, ~7.5 s where it stayed.
+        expect(linkShare!.pingMs.at(-1)).lessThan(5500)
       } else {
         for (const ms of linkShare!.pingMs) expect(ms).lessThan(20_000)
         expect(connections!.stop()).toBe(1)
@@ -48,6 +48,29 @@ function testSlowLink(isDev: boolean) {
   // With two transports the page opens an SSE stream, then moves to a WebSocket: wire-e2e-test.ts covers the rest of a
   // slow link there.
   if (upgrades) return
+
+  // 32 s to cross, past the 10 s a page waits for an answer to its ping.
+  test('channel: on a 1 Mbit/s link, a 4 MB message from the server arrives on the connection it started on', async () => {
+    const proxy = await startBlackHoleProxy(getServerUrl())
+    try {
+      await navigate(`${proxy.url}/channel`)
+      proxy.pace({ downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 })
+      const connections = countConnections()
+      await page.click('#wire-large-slow-link')
+      await autoRetry(
+        async () => {
+          const { large } = await getResult<{ large: number | null }>('#wire-state')
+          expect(large).toBe(4_000_000)
+        },
+        { timeout: 55_000 },
+      )
+      expect(connections.stop()).toBe(1)
+    } finally {
+      // The page leaves before the proxy closes, which would cut its connections.
+      await page.goto('about:blank')
+      await proxy.close()
+    }
+  })
 
   test('channel: on a 125 kB/s uplink, a 2 MiB upload arrives and keeps the download coming on the connection it started on, and a channel opened meanwhile opens on it', async () => {
     const proxy = await startBlackHoleProxy(getServerUrl())

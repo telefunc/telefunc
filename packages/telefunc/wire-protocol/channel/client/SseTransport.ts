@@ -34,6 +34,7 @@ import type { OutboundFrame, OutboundFrameKind } from './ClientConnection.js'
 import type { TransportOwner } from './WireLifecycle.js'
 import type { BarrierEmission, UpgradeSource } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
+import { createDeferred } from '../../../utils/createDeferred.js'
 
 type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number; queuedAt: number }
 
@@ -266,11 +267,8 @@ class SseTransport implements UpgradeSource {
     )
     // Run the SSE loop concurrently with the handshake wait — frames (including the first
     // RECONCILED) can arrive while the open-ack is still in flight and must be dispatched.
-    let resolveHandshakeOk!: () => void
-    const handshakeOkP = new Promise<'ok'>((resolve) => {
-      resolveHandshakeOk = () => resolve('ok')
-    })
-    void this.readEvents(reader, abortController, resolveHandshakeOk)
+    const { promise: handshakeOkP, resolve: resolveHandshakeOk } = createDeferred<'ok'>()
+    void this.readEvents(reader, abortController, () => resolveHandshakeOk('ok'))
     if (upload && !(await this.settleUpload(upload, handshakeOkP, abortController))) return
 
     this.connecting = false

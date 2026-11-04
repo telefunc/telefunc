@@ -1,6 +1,7 @@
 export { ChannelDemo }
 
-import { prepareIteratorAck, sendIteratorAck } from './iteratorAckProbe'
+import { prepareIteratorAck, sendIteratorAck, type IteratorAckOptions } from './iteratorAckProbe'
+import { sendOwnBytes, listenOwnBytesAlone, listenOwnBytesBeside } from './ownBytesProbe'
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Abort as TelefuncAbort, abort, close, ConnectionError, withContext } from 'telefunc/client'
@@ -47,6 +48,8 @@ import {
   onChannelOpenAnswer,
   onChannelOpenHello,
   onChannelBudgets,
+  onChannelAtLimit,
+  onChannelOwnBytes,
   onChannelOfflineBudgets,
   onChannelCreditFailure,
   onChannelAckOwnership,
@@ -269,6 +272,35 @@ const initialState: ChannelState = {
   slowUplink: null,
   lateCallbacks: null,
   openAbort: null,
+}
+
+/** One case of a cancelled iterator: `direction` is the side whose iterator is cancelled. */
+async function runIteratorAck(iteratorCase: IteratorAckOptions & { direction: 'server' | 'client' }) {
+  const { direction, ...options } = iteratorCase
+  const { binary } = options
+  const remote = await onChannelIteratorAck()
+  const { channel } = remote
+  if (direction === 'server') await remote.prepare(options)
+  const receiver = direction === 'server' ? remote : prepareIteratorAck(channel, options)
+  const send = (prime: boolean) =>
+    direction === 'client' ? remote.send({ binary, prime }) : sendIteratorAck(channel, { binary, prime })
+  if (options.mode === 'return') {
+    await send(true)
+    await receiver.primed()
+  }
+  const pending = send(false)
+  await receiver.cancel()
+  const control = await send(false)
+  const result = {
+    ...iteratorCase,
+    ack: String(await pending),
+    control: String(control),
+    answers: await receiver.answers(),
+    open: !channel.isClosed,
+  }
+  await channel.close()
+  close(remote)
+  return result
 }
 
 function timestamp() {
@@ -863,7 +895,7 @@ function ChannelDemo() {
     // ── A1/A2/B1/B2 — client sends, server validates incoming data ────────────
     {
       const { channel, getReceived } = await openChannel(onChannelShieldClient)
-      await new Promise<void>((resolve) => channel.onOpen(resolve))
+      await channel.opened
 
       // A1: valid no-ack — server listener should receive.
       await channel.send('hello')
@@ -932,7 +964,7 @@ function ChannelDemo() {
     channel.listen((msg) => {
       pageSeen.push(`other:${msg}`)
     })
-    await new Promise<void>((resolve) => channel.onOpen(resolve))
+    await channel.opened
     await channel.send('one')
     await channel.send('two')
     for (let poll = 0; poll < 50; poll++) {
@@ -1152,6 +1184,23 @@ function ChannelDemo() {
     })
   }, [])
 
+  // A channel the page drops closes once garbage-collected.
+  const atLimitChannels = useRef<unknown>(null)
+  const testAtLimit = useCallback(async () => {
+    atLimitChannels.current = await openChannel(onChannelAtLimit)
+  }, [])
+
+  const testOwnBytes = useCallback(async () => {
+    const { alone, beside } = await openChannel(onChannelOwnBytes)
+    const report = (notOwn: Record<string, number>) => {
+      const output = document.querySelector('#channel-own-bytes-result')!
+      output.textContent = JSON.stringify({ ...JSON.parse(output.textContent || '{}'), ...notOwn })
+    }
+    listenOwnBytesAlone(alone, (notOwn) => report({ alone: notOwn }))
+    listenOwnBytesBeside(beside, (notOwn) => report({ beside: notOwn }))
+    await Promise.all([sendOwnBytes(alone), sendOwnBytes(beside)])
+  }, [])
+
   const testOfflineBudgets = useCallback(async () => {
     const { bytes, acks } = await openChannel(onChannelOfflineBudgets)
     for (const channel of [bytes, acks]) channel.listen(() => new Promise<void>((done) => setTimeout(done, 1000)))
@@ -1192,29 +1241,7 @@ function ChannelDemo() {
       for (const direction of ['server', 'client'] as const) {
         for (const binary of [false, true]) {
           for (const mode of ['abort', 'return'] as const) {
-            for (const answer of [false, true]) {
-              const remote = await onChannelIteratorAck()
-              const { channel } = remote
-              if (direction === 'server') await remote.prepare({ binary, mode, answer })
-              const receiver = direction === 'server' ? remote : prepareIteratorAck(channel, { binary, mode, answer })
-              const send = (prime: boolean) =>
-                direction === 'client' ? remote.send({ binary, prime }) : sendIteratorAck(channel, { binary, prime })
-              if (mode === 'return') {
-                await send(true)
-                await receiver.primed()
-              }
-              const pending = send(false)
-              await receiver.cancel()
-              const control = await send(false)
-              results.push({
-                ack: String(await pending),
-                control: String(control),
-                answers: await receiver.answers(),
-                open: !channel.isClosed,
-              })
-              await channel.close()
-              close(remote)
-            }
+            for (const answer of [false, true]) results.push(await runIteratorAck({ direction, binary, mode, answer }))
           }
         }
       }
@@ -1781,6 +1808,13 @@ function ChannelDemo() {
             Test send budgets
           </button>
           <output id="channel-budgets-result" />
+          <button id="channel-test-at-limit" onClick={testAtLimit}>
+            Test a send of multi-byte text at the byte budget
+          </button>
+          <button id="channel-test-own-bytes" onClick={testOwnBytes}>
+            Test that each binary listener gets bytes of its own
+          </button>
+          <output id="channel-own-bytes-result" />
           <button id="channel-test-offline-budgets" onClick={testOfflineBudgets}>
             Test send budgets on sends made before the page attaches
           </button>

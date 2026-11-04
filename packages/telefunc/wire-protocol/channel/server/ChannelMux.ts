@@ -820,7 +820,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
   ): ChannelHandle | null {
     const buffer = channel._replayBuffer
     if (buffer === null) return null
-    channel._onPageAttach(open.lastSeq)
+    channel._onPageHas(open.lastSeq)
     const peer = new IndexedPeer({ sender, index: open.ix, replay: buffer })
     const missed = replay ? buffer.getAfter(open.lastSeq) : []
     if (missed === null) {

@@ -1,12 +1,10 @@
 export { raceTimeout }
 
-import { unrefTimer } from './unrefTimer.js'
+import { createDeferred, unrefTimer } from 'telefunc/__internal'
 
 /** Settles like `promise`, or like `onTimeout()` once `ms` pass first. */
 function raceTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => T): Promise<T> {
-  let timer!: ReturnType<typeof setTimeout>
-  const timeout = new Promise<T>((resolve) => {
-    timer = unrefTimer(setTimeout(() => resolve(Promise.resolve().then(onTimeout)), ms))
-  })
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
+  const timeout = createDeferred<T>()
+  const timer = unrefTimer(setTimeout(() => timeout.resolve(Promise.resolve().then(onTimeout)), ms))
+  return Promise.race([promise, timeout.promise]).finally(() => clearTimeout(timer))
 }
