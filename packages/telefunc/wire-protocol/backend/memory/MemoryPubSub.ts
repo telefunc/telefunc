@@ -52,22 +52,24 @@ class MemoryDeliveries {
     return this.queue.length >= DELIVERIES_PER_TURN
   }
 
-  /** Runs a publish's delivery, holding the queue's head as `drain()` does, and returns its result; null if it has to
-   *  wait: one is queued or running, or a new synchronous run finds this turn's deliveries spent. */
-  publishNow<Result>(delivery: () => Result): Result | null {
+  /** Whether a publish delivers now, holding the queue's head as `drain()` does until `leavePublish()`. It waits if one
+   *  is queued or running, or if a new synchronous run finds this turn's deliveries spent. */
+  enterPublish(): boolean {
     const startsRun = !this.inSyncRun
     // Below half a turn's deliveries, each counts: nothing waits soon, so a publish needs no microtask.
     if (startsRun && this.deliveredSinceReset >= DELIVERIES_PER_TURN / 2) {
       this.inSyncRun = true
       queueMicrotask(this.endSyncRun)
     }
-    if (this.queue.length > 0 || (startsRun && this.deliveredSinceReset >= DELIVERIES_PER_TURN)) return null
+    if (this.queue.length > 0 || (startsRun && this.deliveredSinceReset >= DELIVERIES_PER_TURN)) return false
     if (startsRun) this.countDelivery()
     this.queue.push(DELIVERING_NOW)
-    const result = delivery()
+    return true
+  }
+
+  leavePublish(): void {
     this.queue.shift()
     this.drain()
-    return result
   }
 
   /** Runs `delivery` after those queued before it: now, unless one is running or this turn's deliveries ran out. */
@@ -135,15 +137,15 @@ class MemoryPubSub {
   publish(
     targets: readonly BackendReceiver[],
     payload: BackendPayload,
-    takeOrdering: () => OrderingInfo,
+    key: string,
+    takeOrdering: (key: string) => OrderingInfo,
   ): OrderingInfo | Promise<OrderingInfo> {
-    const receiptOf = ({ seq, timestamp }: OrderingInfo): OrderingInfo => ({ seq, timestamp })
-    const delivered = this.deliveries.publishNow(() => {
-      const mark = takeOrdering()
+    if (this.deliveries.enterPublish()) {
+      const mark = takeOrdering(key)
       for (const target of targets) target.deliver(payload, mark)
-      return receiptOf(mark)
-    })
-    if (delivered !== null) return delivered
+      this.deliveries.leavePublish()
+      return mark
+    }
     const isText = typeof payload === 'string'
     const kind = isText ? 'text' : 'binary'
     const size = (isText ? utf8ByteLength(payload) : payload.byteLength) + HELD_SEND_OVERHEAD_BYTES
@@ -157,14 +159,14 @@ class MemoryPubSub {
       )
     }
     this.waitingBytes[kind] += size
-    const mark = takeOrdering()
+    const mark = takeOrdering(key)
     const held = isText ? payload : copyBytes(payload)
     // A queued publish resolves as it is delivered, so a publisher awaiting each can't outrun its subscribers.
     return new Promise((resolve) => {
       this.deliveries.deliver(() => {
         this.waitingBytes[kind] -= size
         for (const target of targets) target.deliver(held, mark)
-        resolve(receiptOf(mark))
+        resolve(mark)
       })
     })
   }

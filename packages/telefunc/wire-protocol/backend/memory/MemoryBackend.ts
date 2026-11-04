@@ -24,10 +24,10 @@ class MemoryBackend implements BroadcastDriver, MemoryAttemptOwner {
 
   publish(route: BroadcastRoute, payload: BroadcastPayload): PublishResult | Promise<PublishResult> {
     const targets = this.broadcastSubs[route.kind].get(route.key) ?? []
-    return this.pubSub.publish(targets, payload, () => this.takeOrdering(route.key))
+    return this.pubSub.publish(targets, payload, route.key, this.takeOrdering)
   }
 
-  private takeOrdering(key: string): OrderingInfo {
+  private readonly takeOrdering = (key: string): OrderingInfo => {
     const order = this.broadcastOrder.get(key)
     const mark = nextOrdering(order ?? this.broadcastHighest, Date.now())
     // Only a subscribed key has an order.
