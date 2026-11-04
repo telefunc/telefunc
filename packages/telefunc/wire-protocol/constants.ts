@@ -87,6 +87,16 @@ export const DEFAULT_STREAM_TRANSPORT: StreamTransport = STREAM_TRANSPORT.BINARY
 export type ChannelTransport = (typeof CHANNEL_TRANSPORT)[keyof typeof CHANNEL_TRANSPORT]
 /** Ordered list of transports to use for channels. `['sse', 'ws']` starts on SSE and upgrades to WebSocket. */
 export type ChannelTransports = ChannelTransport[]
+
+/** `configPath`'s value as the transports it lists, validated; `example` is what its message suggests. */
+export function validateChannelTransports(val: unknown, configPath: string, example: string): ChannelTransports {
+  assertUsage(
+    Array.isArray(val) && val.length > 0 && val.every((v) => v === 'sse' || v === 'ws'),
+    `\`${configPath}\` should be an array of transports, e.g. ${example}`,
+  )
+  return val as ChannelTransports
+}
+
 /** Default transports the client tries, in order. Starts on SSE and upgrades to WS if available. */
 export const DEFAULT_CLIENT_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRANSPORT.SSE, CHANNEL_TRANSPORT.WS]
 /** Default transports enabled on the server. SSE only until a WS adapter calls enableChannelTransports. */

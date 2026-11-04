@@ -16,6 +16,7 @@ import {
   DEFAULT_CLIENT_CHANNEL_TRANSPORTS,
   DEFAULT_STREAM_TRANSPORT,
   parseStreamConfig,
+  validateChannelTransports,
   type ChannelTransports,
   type StreamTransport,
 } from '../wire-protocol/constants.js'
@@ -185,20 +186,12 @@ function applyChannelConfig(val: unknown): void {
   const next: ChannelConfigUser = {}
   for (const [key, value] of Object.entries(val)) {
     if (key === 'transports') {
-      next.transports = validateChannelTransports(value, 'config.channel.transports')
+      next.transports = validateChannelTransports(value, 'config.channel.transports', "['sse'] or ['sse', 'ws']")
     } else {
       assertUsage(false, `Unknown config.channel.${key}`)
     }
   }
   configState.channel = next
-}
-
-function validateChannelTransports(val: unknown, configPath: string): ChannelTransports {
-  assertUsage(
-    Array.isArray(val) && val.length > 0 && val.every((v) => v === 'sse' || v === 'ws'),
-    `\`${configPath}\` should be an array of transports, e.g. ['sse'] or ['sse', 'ws']`,
-  )
-  return val as ChannelTransports
 }
 
 export type {

@@ -78,7 +78,6 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
    *  `bufferLimit` or `bufferLimitBinary` rejects. */
   private readonly queuedBytes = { text: 0, binary: 0 }
   private delivering = false
-  private turnScheduled = false
 
   constructor(transport?: BroadcastTransport) {
     this.transport = transport ?? null
@@ -179,17 +178,6 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     }
   }
 
-  private scheduleTurn(): void {
-    if (this.turnScheduled) return
-    this.turnScheduled = true
-    afterEventLoopTurn(this.startTurn)
-  }
-
-  private readonly startTurn = (): void => {
-    this.turnScheduled = false
-    this.drainQueued()
-  }
-
   private queueInMemory<T extends string | Uint8Array>(
     subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>,
     key: string,
@@ -250,14 +238,14 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
 
   /** Delivers what waits now, whatever its size. What its listeners publish waits for the next turn, so a listener
    *  answering itself can't starve the event loop. */
-  private drainQueued(): void {
+  private readonly drainQueued = (): void => {
     for (let waiting = this.queued.length; waiting > 0; waiting--) {
       const deliver = this.queued.shift()!
       this.delivering = true
       deliver()
       this.delivering = false
     }
-    if (this.queued.length > 0) this.scheduleTurn()
+    if (this.queued.length > 0) afterEventLoopTurn(this.drainQueued)
   }
 
   // ── Shared ──

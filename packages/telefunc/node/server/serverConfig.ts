@@ -47,6 +47,7 @@ import {
   DEFAULT_SERVER_CHANNEL_TRANSPORTS,
   DEFAULT_STREAM_TRANSPORT,
   parseStreamConfig,
+  validateChannelTransports,
   SSE_FLUSH_THROTTLE_MS,
   SSE_POST_IDLE_FLUSH_DELAY_MS,
   type ChannelTransports,
@@ -501,7 +502,7 @@ function applyChannelConfig(val: unknown): void {
     const configPath = `config.channel.${key}`
     switch (key) {
       case 'transports':
-        next.transports = validateChannelTransports(value, configPath)
+        next.transports = validateChannelTransports(value, configPath, "['sse'] or ['ws']")
         break
       case 'pingInterval':
         assertDuration(
@@ -555,14 +556,6 @@ function applyBroadcastConfig(val: unknown): void {
       assertUsage(false, `Unknown config.broadcast.${key}`)
     }
   }
-}
-
-function validateChannelTransports(val: unknown, configPath: string): ChannelTransports {
-  assertUsage(
-    Array.isArray(val) && val.length > 0 && val.every((v) => v === 'sse' || v === 'ws'),
-    `\`${configPath}\` should be an array of transports, e.g. ['sse'] or ['ws']`,
-  )
-  return val as ChannelTransports
 }
 
 let rootFromVite: string | null = null
