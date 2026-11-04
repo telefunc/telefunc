@@ -392,6 +392,7 @@ room.subscribe((state, info, from) => {
 await me.send(host, { type: 'move', to: 'e4' })
 ```
 
+> In memory, an awaited `publish()` doesn't give the event loop a turn, so a producer that runs forever on resolved promises (a `for (;;) await room.publish()` loop, or a listener that answers itself after an `await`) must yield itself, for example with a timer.
 
 ## Stream audio or video
 

@@ -721,9 +721,11 @@ async function onInMemoryPublishes() {
   const id = crypto.randomUUID()
   const seen: number[] = []
   const stopLoop = Broadcast.subscribe<number>(`loop:${id}`, (n) => void seen.push(n))
+  const stopAnswer = Broadcast.subscribe(`loop:${id}`, () => void Broadcast.publish(`answers:${id}`, 'seen'))
   for (let i = 0; i < 3000; i++) void Broadcast.publish(`loop:${id}`, i)
   const loop = { deliveredInLoop: seen.length, inOrder: seen.every((n, i) => n === i) }
   stopLoop()
+  stopAnswer()
 
   const batch: number[] = []
   const stopBatch = Broadcast.subscribeBinary(`batch:${id}`, (data) => void batch.push(data[0]! * 256 + data[1]!))
@@ -775,25 +777,48 @@ async function onInMemoryPublishes() {
     rejected: producerRuns.filter((r) => r.status === 'rejected').length,
   }
 
-  let answers = 0
-  let answersWhenTimerFired = -1
-  setTimeout(() => (answersWhenTimerFired = answers), 0)
-  const finished = new Promise<void>((resolve) => {
-    Broadcast.subscribe(`chain:${id}`, async () => {
+  // Each tick publishes 4,096 messages, unawaited, each in a run of its own: all of it arrives by the next tick.
+  let timerDelivered = 0
+  let timerSent = 0
+  let peakWaiting = 0
+  const stopTimerProducer = Broadcast.subscribe(`timer:${id}`, () => void timerDelivered++)
+  for (let tick = 0; tick < 30; tick++) {
+    await new Promise((resolve) => setTimeout(resolve, 1))
+    peakWaiting = Math.max(peakWaiting, timerSent - timerDelivered)
+    for (let i = 0; i < 4096; i++) {
       await null
-      if (++answers === 20_000) resolve()
-      else void Broadcast.publish(`chain:${id}`, 'again')
-    })
-  })
-  void Broadcast.publish(`chain:${id}`, 'start')
-  await finished
+      void Broadcast.publish(`timer:${id}`, i)
+      timerSent++
+    }
+  }
+  await new Promise((resolve) => setTimeout(resolve, 1))
+  stopTimerProducer()
+  const timerProducer = { sent: timerSent, peakWaiting, delivered: timerDelivered }
+
   return {
     loop,
     listenerBatch,
     aloneBytes,
     producers,
-    timerFiredMidChain: answersWhenTimerFired >= 0 && answersWhenTimerFired < 20_000,
+    timerProducer,
+    timerFiredMidChain: await timerFiresMidChain(`chain:${id}`),
   }
+}
+
+/** A listener answers itself 20,000 times: whether a timer fired before it was done. */
+async function timerFiresMidChain(key: string): Promise<boolean> {
+  let answers = 0
+  let answersWhenTimerFired = -1
+  setTimeout(() => (answersWhenTimerFired = answers), 0)
+  const finished = new Promise<void>((resolve) => {
+    Broadcast.subscribe(key, () => {
+      if (++answers === 20_000) resolve()
+      else void Broadcast.publish(key, 'again')
+    })
+  })
+  void Broadcast.publish(key, 'start')
+  await finished
+  return answersWhenTimerFired >= 0 && answersWhenTimerFired < 20_000
 }
 
 async function readSlowly(room: BroadcastChannel<string>, kind: 'slow' | 'held') {

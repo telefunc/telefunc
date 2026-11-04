@@ -23,19 +23,14 @@ type MemorySubscription = {
   owner?: MemoryAttemptOwner
 }
 
-/** Deliveries one event-loop turn runs; the rest wait for the next, so a listener answering itself, directly or after
- *  an `await`, can't starve the loop. */
-const DELIVERIES_PER_TURN = 1024
+/** Queued deliveries from which a Room commit waits for the next turn, as for a network write, so it can't outrun them. */
+const QUEUED_DELIVERIES_MAX = 1024
 
 /** Deliveries in seq order: a publish made inside one is delivered after it. */
 class MemoryDeliveries {
   private readonly queue = new Fifo<() => void>()
   private delivering = false
-  /** Deliveries since the last reset, a synchronous run of publishes past half of `DELIVERIES_PER_TURN` counting once. */
-  private deliveredSinceReset = 0
-  /** A publish ran in this synchronous run: code publishing in a loop holds the event loop itself, so one made while
-   *  this is set has no turn to wait for, and the run counts once. */
-  private inSyncRun = false
+  private turnScheduled = false
 
   /** A listener is running. */
   get isDelivering(): boolean {
@@ -47,22 +42,13 @@ class MemoryDeliveries {
     return !this.delivering && this.queue.length === 0
   }
 
-  /** A turn's worth of deliveries is queued. */
   get isFull(): boolean {
-    return this.queue.length >= DELIVERIES_PER_TURN
+    return this.queue.length >= QUEUED_DELIVERIES_MAX
   }
 
-  /** Whether a publish delivers now, until `leavePublish()`. It waits if one is queued or running, or if a new
-   *  synchronous run finds this turn's deliveries spent. */
+  /** Whether a publish delivers now, until `leavePublish()`: it waits if one is queued or running. */
   enterPublish(): boolean {
-    const startsRun = !this.inSyncRun
-    // Below half a turn's deliveries, each counts: nothing waits soon, so a publish needs no microtask.
-    if (startsRun && this.deliveredSinceReset >= DELIVERIES_PER_TURN / 2) {
-      this.inSyncRun = true
-      queueMicrotask(this.endSyncRun)
-    }
-    if (!this.isIdle || (startsRun && this.deliveredSinceReset >= DELIVERIES_PER_TURN)) return false
-    if (startsRun) this.countDelivery()
+    if (!this.isIdle) return false
     this.delivering = true
     return true
   }
@@ -72,34 +58,33 @@ class MemoryDeliveries {
     this.drain()
   }
 
-  /** Runs `delivery` after those queued before it: now, unless one is running or this turn's deliveries ran out. */
+  /** Runs `delivery` after those queued before it: now, unless one is running or queued. */
   deliver(delivery: () => void): void {
-    const now = this.isIdle && this.deliveredSinceReset < DELIVERIES_PER_TURN
+    const now = this.isIdle
     this.queue.push(delivery)
     if (now) this.drain()
   }
 
+  /** Delivers what waits now. What its listeners publish waits for the next turn, so a listener answering itself can't
+   *  starve the event loop. */
   private drain(): void {
-    while (this.queue.length > 0 && this.deliveredSinceReset < DELIVERIES_PER_TURN) {
-      this.countDelivery()
+    for (let waiting = this.queue.length; waiting > 0; waiting--) {
       const delivery = this.queue.shift()!
       this.delivering = true
       delivery()
       this.delivering = false
     }
+    if (this.queue.length > 0) this.scheduleTurn()
   }
 
-  private countDelivery(): void {
-    // Only once half a turn's deliveries ran: a macrotask every turn slows a server that publishes once per turn.
-    if (++this.deliveredSinceReset === DELIVERIES_PER_TURN / 2) nextTurn(() => this.startTurn())
+  private scheduleTurn(): void {
+    if (this.turnScheduled) return
+    this.turnScheduled = true
+    nextTurn(this.startTurn)
   }
 
-  private readonly endSyncRun = (): void => {
-    this.inSyncRun = false
-  }
-
-  private startTurn(): void {
-    this.deliveredSinceReset = 0
+  private readonly startTurn = (): void => {
+    this.turnScheduled = false
     this.drain()
   }
 }
@@ -174,8 +159,8 @@ class MemoryPubSub {
     })
   }
 
-  /** Queues `delivery` from a microtask, so a subscription made meanwhile is ready after it. Past a turn's deliveries,
-   *  returns the next turn, which the caller waits for as for a network write, so it can't outrun them. */
+  /** Queues `delivery` from a microtask, so a subscription made meanwhile is ready after it. With the queue full, returns
+   *  the next turn, which the caller waits for. */
   deliverSoon(delivery: () => void): Promise<void> | null {
     this.queuing++
     queueMicrotask(() => {
