@@ -54,7 +54,7 @@ import type { RosterStream } from './lifecycle/RosterStream.js'
 import type { PendingDmAcks } from './PendingDmAcks.js'
 import type { RoomHosting } from './lifecycle/RoomHosting.js'
 import { RoomWrites, runAfterHook, type RoomWritesOwner } from './RoomWrites.js'
-import { readOpenConfig, withinRoomHorizon } from './lanes/lanes.js'
+import { withinRoomHorizon } from './lanes/lanes.js'
 import { reportRoomError } from './reportRoomError.js'
 import { Admission } from './Admission.js'
 import { evictMember, joinMember } from './store/members.js'
@@ -184,12 +184,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
   }
 
   async join(options?: JoinOptions): Promise<LocalParticipant> {
-    await this.assertOpen()
-    return await this.joinOpen(options)
-  }
-
-  /** A join to a room the caller found open just now, as `Room.join(id)` does by reading its head. */
-  async joinOpen(options?: JoinOptions): Promise<LocalParticipant> {
+    this.assertNotKnownClosed()
     const { meta, selfDelivery, identity, hidden } = normalizeJoinOptions(options)
     const admission = new Admission({ meta, identity, hidden })
     const participant = new ServerLocalParticipant({
@@ -223,7 +218,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     return this.model.snapshot()
   }
 
-  /** Both join paths, in a room found open: the guard passes, the holder takes the member, then the member commits. */
+  /** Both join paths: the guard passes, the holder takes the member, then the member commits. */
   private async admit(admission: Admission, hold: () => void): Promise<void> {
     const { id, meta, identity, joinedAt, hidden } = admission
     const onBeforeJoin = this.guards?.onBeforeJoin
@@ -294,8 +289,9 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     }
   }
 
-  private async assertOpen(): Promise<void> {
-    if (this.model.closed || (await readOpenConfig(this.incarnation)) === null) throw roomClosedError(this.id)
+  /** A room whose close hasn't reached this process fails at its join operation, with the same error. */
+  private assertNotKnownClosed(): void {
+    if (this.model.closed) throw roomClosedError(this.id)
   }
 
   /** What the lane carried for this handle's own listeners, or for its tail while no stub took it. */
@@ -443,7 +439,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
       )
     }
     const admission = new Admission({ meta: ownMetadata(req.meta), identity: null, hidden: false })
-    await this.assertOpen()
+    this.assertNotKnownClosed()
     await this.admit(admission, () => {
       stub.addMember(req.reqId, admission.id, req.selfDelivery)
       if (this.stubs.has(stub)) {

@@ -218,7 +218,7 @@ async function joinRoom(id: string, options?: JoinOptions): Promise<LocalPartici
   // A view made for a join alone counts no member until a handle reads its roster.
   const replica =
     RoomReplica.of(config.inc) ?? RoomReplica.seeded(id, config, await requireRoomMeta(id, config), { count: 0 })
-  return await handleOf(replica.handle()).joinOpen(options)
+  return await handleOf(replica.handle()).join(options)
 }
 
 async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
