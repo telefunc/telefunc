@@ -18,6 +18,7 @@ import { restoreContext } from '../../../../node/server/context/context.js'
 import type { Context } from '../../../../node/server/context/context.js'
 import { createPushReadable } from '../../../../utils/pushReadable.js'
 import { createPushReadableStream } from '../../../../utils/pushReadableStream.js'
+import { createDeferred } from '../../../../utils/createDeferred.js'
 
 const EMPTY = new Uint8Array(0)
 
@@ -75,10 +76,9 @@ function buildInlineResponseBody(runContext: {
   const producers = streamingValues.map((sv) => ({ producer: sv.createProducer(), index: sv.index }))
 
   let cancelled = false
-  let resolveCancelled!: (value: { type: 'cancelled' }) => void
   // Async-generator return() queues behind a pending next(). Race cancellation
   // separately so the merge loop can release its lifecycle hold in finally.
-  const cancelledPromise = new Promise<{ type: 'cancelled' }>((resolve) => (resolveCancelled = resolve))
+  const { promise: cancelledPromise, resolve: resolveCancelled } = createDeferred<{ type: 'cancelled' }>()
   let drainResolve: (() => void) | null = null
 
   const wakeDrain = () => {

@@ -6,6 +6,7 @@ import { ChannelClosedError } from '../../../channel/channelErrors.js'
 import { ClientChannel, type ConnectionOptions } from '../../../channel/client/ClientChannel.js'
 import type { StreamingProducer } from '../../types.js'
 import { randomUuid } from '../../../../utils/randomUuid.js'
+import { createDeferred } from '../../../../utils/createDeferred.js'
 
 const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
 const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
@@ -31,10 +32,8 @@ function pumpClientProducerToChannel(createProducer: () => StreamingProducer, co
   const producer = createProducer()
 
   let cancelled = false
-  let resolveCancelled!: (v: IteratorResult<Uint8Array<ArrayBuffer>>) => void
-  const cancelledPromise = new Promise<IteratorResult<Uint8Array<ArrayBuffer>>>((r) => {
-    resolveCancelled = r
-  })
+  const { promise: cancelledPromise, resolve: resolveCancelled } =
+    createDeferred<IteratorResult<Uint8Array<ArrayBuffer>>>()
   const doCancel = (err?: Error) => {
     if (cancelled) return
     cancelled = true
@@ -46,14 +45,11 @@ function pumpClientProducerToChannel(createProducer: () => StreamingProducer, co
 
   void (async () => {
     try {
-      await new Promise<void>((resolve, reject) => {
-        channel.onOpen(resolve)
-        channel.onClose(() => reject(new ChannelClosedError()))
-      })
+      await channel.opened
       await sendChunks(channel, producer, cancelledPromise, () => cancelled)
     } catch (err) {
-      // ChannelClosedError — either from onOpen rejection (closed before connect)
-      // or from sendBinary (closed mid-send, e.g. by abort(res)).
+      // A channel that ended has nothing to report: `opened` rejects with what ended it, before it opened, and
+      // sendBinary with ChannelClosedError, mid-send (e.g. by abort(res)).
       // Abort semantics propagate through doCancel(err) → producer.cancel(err) →
       // reader.cancel(err), not through this catch.
       // Anything else is the source failing: the server's stream errors rather than end as if complete. No detail of the

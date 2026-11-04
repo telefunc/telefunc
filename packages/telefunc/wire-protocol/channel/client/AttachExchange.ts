@@ -207,7 +207,7 @@ class AttachExchange {
   ): Map<number, number> {
     const serverHas = new Map<number, number>()
     for (const channel of ctrl.open) serverHas.set(channel.ix, channel.lastSeq)
-    for (const [ix, probe] of probes) this.channels.get(ix)?.channel._attach.onProbeAnswered(probe)
+    for (const [ix, probe] of probes) this.channels.get(ix)?.channel._attach.receiveCredit.onProbeAnswered(probe)
     for (const [ix, lastSeq] of attachResults) if (lastSeq !== null && !serverHas.has(ix)) serverHas.set(ix, lastSeq)
     // An initial channel left out is one the server awaits, until its ATTACH_RESULT.
     for (const [ix, initial] of ixes) {
