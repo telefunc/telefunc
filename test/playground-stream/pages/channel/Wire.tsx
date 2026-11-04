@@ -309,7 +309,7 @@ function WireDemo() {
         if (++received === RELEASE_COUNT) resolve()
       }),
     )
-    await (when === 'arrived' ? arrived : new Promise<void>((resolve) => channel.onOpen(resolve)))
+    await (when === 'arrived' ? arrived : channel.opened)
     const close = String(await channel.close())
     setState((s) => ({ ...s, release: { channelId, close } }))
   }, [])

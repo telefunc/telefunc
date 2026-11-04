@@ -410,7 +410,7 @@ function Publish() {
         id="test-broadcast-shield"
         onClick={async () => {
           const { room, getReceived } = await onBroadcastShieldClient()
-          await new Promise<void>((resolve) => room.onOpen(resolve))
+          await room.opened
 
           // Valid publish: matches `{ text: string }` — server validates, fans out, resolves with receipt.
           const validAck = await room.publish({ text: 'hi' })
@@ -569,7 +569,7 @@ function Publish() {
           const { room, getReceived } = await onBroadcastServerListener()
           const off = room.subscribe(() => {})
           const offBinary = room.subscribeBinary(() => {})
-          await new Promise<void>((resolve) => room.onOpen(resolve))
+          await room.opened
           off()
           offBinary()
           await room.publish('after')
@@ -677,7 +677,7 @@ function Publish() {
             messages.push(message)
             setResult(JSON.stringify({ messages }))
           })
-          await new Promise<void>((resolve) => room.onOpen(resolve))
+          await room.opened
           await room.publish('hello')
           await room.publish('how are you?')
         }}
@@ -735,7 +735,7 @@ function Publish() {
           room.subscribe((msg) => {
             pageSeen.push(`other:${msg}`)
           })
-          await new Promise<void>((resolve) => room.onOpen(resolve))
+          await room.opened
           await publish()
           for (let poll = 0; poll < 50; poll++) {
             const serverSeen = await getServerSeen()

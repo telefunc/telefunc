@@ -15,6 +15,8 @@ import type {
 import {
   DEFAULT_CLIENT_CHANNEL_TRANSPORTS,
   DEFAULT_STREAM_TRANSPORT,
+  parseStreamConfig,
+  validateChannelTransports,
   type ChannelTransports,
   type StreamTransport,
 } from '../wire-protocol/constants.js'
@@ -96,7 +98,7 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
         },
         set(_t, subProp, val) {
           if (typeof subProp !== 'string') return true
-          applyStreamConfig({ ...configState.stream, [subProp]: val })
+          configState.stream = parseStreamConfig({ ...configState.stream, [subProp]: val })
           return true
         },
       })
@@ -170,7 +172,7 @@ function applyUserConfig(prop: string | symbol, val: unknown) {
     assertUsage(typeof val === 'function', '`config.fetch` should be a function')
     configState.fetch = val as typeof globalThis.fetch
   } else if (prop === 'stream') {
-    applyStreamConfig(val)
+    configState.stream = parseStreamConfig(val)
   } else if (prop === 'channel') {
     applyChannelConfig(val)
   } else if (prop === 'extensions') {
@@ -181,46 +183,17 @@ function applyUserConfig(prop: string | symbol, val: unknown) {
   }
 }
 
-function applyStreamConfig(val: unknown): void {
-  assertUsage(isObject(val), 'config.stream should be an object')
-  const next: StreamConfigUser = {}
-  for (const [key, value] of Object.entries(val)) {
-    if (key === 'transport') {
-      next.transport = validateStreamTransport(value, 'config.stream.transport')
-    } else {
-      assertUsage(false, `Unknown config.stream.${key}`)
-    }
-  }
-  configState.stream = next
-}
-
 function applyChannelConfig(val: unknown): void {
   assertUsage(isObject(val), 'config.channel should be an object')
   const next: ChannelConfigUser = {}
   for (const [key, value] of Object.entries(val)) {
     if (key === 'transports') {
-      next.transports = validateChannelTransports(value, 'config.channel.transports')
+      next.transports = validateChannelTransports(value, 'config.channel.transports', "['sse'] or ['sse', 'ws']")
     } else {
       assertUsage(false, `Unknown config.channel.${key}`)
     }
   }
   configState.channel = next
-}
-
-function validateStreamTransport(val: unknown, configPath: string): StreamTransport {
-  assertUsage(
-    val === 'binary-inline' || val === 'sse-inline' || val === 'channel',
-    `\`${configPath}\` should be 'binary-inline', 'sse-inline', or 'channel'`,
-  )
-  return val
-}
-
-function validateChannelTransports(val: unknown, configPath: string): ChannelTransports {
-  assertUsage(
-    Array.isArray(val) && val.length > 0 && val.every((v) => v === 'sse' || v === 'ws'),
-    `\`${configPath}\` should be an array of transports, e.g. ['sse'] or ['sse', 'ws']`,
-  )
-  return val as ChannelTransports
 }
 
 export type {

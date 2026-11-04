@@ -30,7 +30,6 @@ const QUEUED_DELIVERIES_MAX = 1024
 class MemoryDeliveries {
   private readonly queue = new Fifo<() => void>()
   private delivering = false
-  private turnScheduled = false
 
   /** A listener is running. */
   get isDelivering(): boolean {
@@ -67,25 +66,14 @@ class MemoryDeliveries {
 
   /** Delivers what waits now. What its listeners publish waits for the next turn, so a listener answering itself can't
    *  starve the event loop. */
-  private drain(): void {
+  private readonly drain = (): void => {
     for (let waiting = this.queue.length; waiting > 0; waiting--) {
       const delivery = this.queue.shift()!
       this.delivering = true
       delivery()
       this.delivering = false
     }
-    if (this.queue.length > 0) this.scheduleTurn()
-  }
-
-  private scheduleTurn(): void {
-    if (this.turnScheduled) return
-    this.turnScheduled = true
-    nextTurn(this.startTurn)
-  }
-
-  private readonly startTurn = (): void => {
-    this.turnScheduled = false
-    this.drain()
+    if (this.queue.length > 0) nextTurn(this.drain)
   }
 }
 

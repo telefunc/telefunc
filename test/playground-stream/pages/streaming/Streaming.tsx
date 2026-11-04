@@ -649,7 +649,7 @@ function Streaming() {
               }
             })(),
             (async () => {
-              await new Promise<void>((resolve) => res.channel.onOpen(resolve))
+              await res.channel.opened
               try {
                 await res.channel.send('trigger', { ack: true })
               } catch (e: any) {
