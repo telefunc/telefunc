@@ -545,11 +545,9 @@ end
 // frames and the semantic frame of each that owns it as the script finds it, the track lane sets of the members'
 // binary lanes, then its commit, as COMMIT commits.
 //   KEYS: [1]=head [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions [7]=retained lanes
-//         [8]=the semantic lane's retained frame [9]=retained owners, then per dropped member its order hash and
-//         retained lanes, then per retained binary frame deleted its key and its member's and track's retained lanes,
-//         then per binary lane dropped its track's lane set, then per expiring cell its key, then COMMIT's KEYS
+//         [8]=the semantic lane's retained frame [9]=retained owners, then the keys the plan gives the index of
 //   ARGV: [1]=inc [2]=the plan, an `OperationPacket` as JSON (its type says what each field holds and where its KEYS
-//         and ARGV are), then the mutations' and the expiring cells' bytes, then COMMIT's ARGV
+//         and ARGV are), then the bytes and COMMIT's ARGV the plan gives the index of
 const OPERATION_LUA = `${HEAD_PRELUDE}${REDIS_ORDERING_FRAME_LUA}${CELL_WRITES_LUA}${RETAINED_DELETE_FN_LUA}
 local function tf_commit(CK, CA)
 ${commitLua(luaRefs('CK', COMMIT_KEYS), luaRefs('CA', COMMIT_ARGS), 'CA')}
@@ -563,12 +561,10 @@ local plan = cjson.decode(ARGV[2])
 for _, read in ipairs(plan.expect) do
   if (redis.call('HGET', KEYS[6], read[1]) or '') ~= read[2] then return '{"kind":"conflict"}' end
 end
-local at = 10
 for _, member in ipairs(plan.members) do
-  if redis.call('HLEN', KEYS[at]) ~= member[2] or redis.call('SCARD', KEYS[at + 1]) ~= member[3] then
+  if redis.call('HLEN', KEYS[member[4]]) ~= member[2] or redis.call('SCARD', KEYS[member[4] + 1]) ~= member[3] then
     return '{"kind":"conflict"}'
   end
-  at = at + 2
 end
 for _, prefix in ipairs(plan.prefixes) do
   for _, key in ipairs(redis.call('ZRANGEBYLEX', cell_index_key, '[' .. prefix, '(' .. prefix .. '\\255')) do
@@ -582,35 +578,29 @@ end
 local counters = {}
 for _, count in ipairs(plan.counts) do tf_count(count[1], count[2], count[3], version, now, counters) end
 redis.call('SADD', incarnation_keys_key, rev_key, cell_index_key, KEYS[5], KEYS[6])
-at = 10
 for _, member in ipairs(plan.members) do
-  redis.call('SREM', incarnation_keys_key, KEYS[at])
-  redis.call('UNLINK', KEYS[at])
-  at = at + 2
+  redis.call('SREM', incarnation_keys_key, KEYS[member[4]])
+  redis.call('UNLINK', KEYS[member[4]])
   if redis.call('HGET', owners_key, plan.semantic) == member[1] then
     tf_retained_delete(incarnation_keys_key, retained_lanes_key, owners_key, semantic_key, semantic_key, semantic_key,
       'semantic', plan.semantic)
   end
 end
-for _, lane_key in ipairs(plan.retained) do
+for _, lane in ipairs(plan.retained) do
+  local at = lane[2]
   tf_retained_delete(incarnation_keys_key, retained_lanes_key, owners_key, KEYS[at], KEYS[at + 1], KEYS[at + 2],
-    'binary', lane_key)
-  at = at + 3
+    'binary', lane[1])
 end
-for _, lane_key in ipairs(plan.trackLanes) do
-  redis.call('SREM', KEYS[at], lane_key)
-  if redis.call('SCARD', KEYS[at]) == 0 then redis.call('SREM', incarnation_keys_key, KEYS[at]) end
-  at = at + 1
+for _, lane in ipairs(plan.trackLanes) do
+  redis.call('SREM', KEYS[lane[2]], lane[1])
+  if redis.call('SCARD', KEYS[lane[2]]) == 0 then redis.call('SREM', incarnation_keys_key, KEYS[lane[2]]) end
 end
-for _, cell in ipairs(plan.expiring) do
-  redis.call('SET', KEYS[at], ARGV[cell[1]], 'PX', cell[2])
-  at = at + 1
-end
+for _, cell in ipairs(plan.expiring) do redis.call('SET', KEYS[cell[3]], ARGV[cell[1]], 'PX', cell[2]) end
 local commit = 'null'
-if plan.commit > 0 then
+if plan.commit[1] then
   local CK, CA = {}, {}
-  for i = 1, ${Object.keys(COMMIT_KEYS).length} do CK[i] = KEYS[at + i - 1] end
-  for i = plan.commit, #ARGV do CA[#CA + 1] = ARGV[i] end
+  for i = 1, ${Object.keys(COMMIT_KEYS).length} do CK[i] = KEYS[plan.commit[1] + i - 1] end
+  for i = plan.commit[2], #ARGV do CA[#CA + 1] = ARGV[i] end
   commit = tf_commit(CK, CA)
 end
 return {commit, unpack(counters)}
@@ -691,13 +681,14 @@ type CommitReply =
 /** A commit as the driver hands it on: a missing required cell by its key. */
 type CommitOutcome = StaleCommit | Extract<CommitReply, { kind: 'accepted' }>
 
-/** OPERATION_LUA's ARGV[2], as JSON: what the plan read and wrote, in the order the script takes its KEYS and ARGV. */
+/** OPERATION_LUA's ARGV[2], as JSON: what the plan read and wrote. A `keys` number is where the entry's KEYS start, and
+ *  `invoke` alone decides the order of the KEYS past the script's fixed ones. */
 type OperationPacket = {
   /** Each cell the plan read, with its version as read ('' while absent): the script applies nothing once one moved. */
   expect: [key: string, version: string][]
-  /** Each member the plan drops, with its lane orders and retained lanes counted as read; two KEYS each, from
-   *  KEYS[10]. */
-  members: [member: string, lanes: number, retained: number][]
+  /** Each member the plan drops, with its lane orders and retained lanes counted as read; its order hash and retained
+   *  lanes are its KEYS. */
+  members: [member: string, lanes: number, retained: number, keys: number][]
   /** The semantic lane's key, whose retained frame goes with a dropped member that owns it. */
   semantic: string
   /** The cell prefixes the plan drops, before its mutations. */
@@ -706,14 +697,15 @@ type OperationPacket = {
   mutations: [key: string, argv: number][]
   /** Each counter cell's change (`CellCount`). */
   counts: [key: string, delta: number, create: boolean][]
-  /** The dropped members' retained binary lanes; three KEYS each, after the members'. */
-  retained: string[]
-  /** The dropped members' binary lanes, which leave their tracks' lane sets; a KEY each, after the retained lanes'. */
-  trackLanes: string[]
-  /** Each expiring cell: its bytes' index in ARGV, and its TTL; a KEY each, after the track lane sets. */
-  expiring: [argv: number, ttlMs: number][]
-  /** Where COMMIT's ARGV starts, 0 without a commit; COMMIT's KEYS come last. */
-  commit: number
+  /** The dropped members' retained binary lanes; a frame's key and its member's and track's retained lanes are its
+   *  KEYS. */
+  retained: [lane: string, keys: number][]
+  /** The dropped members' binary lanes, which leave their tracks' lane sets, their KEY. */
+  trackLanes: [lane: string, keys: number][]
+  /** Each expiring cell: its bytes' index in ARGV, its TTL, and its KEY. */
+  expiring: [argv: number, ttlMs: number, keys: number][]
+  /** Where COMMIT's KEYS and ARGV start; empty without a commit. */
+  commit: [keys: number, argv: number] | []
 }
 
 /** What OPERATION applies: an operation's writes, the version each cell its plan read was at ('' while absent), each
@@ -997,41 +989,48 @@ const REDIS_COMMANDS = {
         retainedKey(prefix, roomId, inc, semanticLaneKey),
         retainedOwnersKey(prefix, roomId, inc),
       ]
+      const keysAt = (...added: string[]) => keys.push(...added) - added.length + 1
       const argv: (string | Buffer)[] = [inc, '']
       const mutations = writes.mutations.map(({ key, bytes }): [string, number] => {
         if (bytes === null) return [key, 0]
         argv.push(toBuffer(bytes))
         return [key, argv.length]
       })
-      for (const { member } of members) {
-        keys.push(memberOrderKey(prefix, roomId, inc, member), retainedOfKey(prefix, roomId, inc, member))
-      }
-      const retained = members.flatMap(({ retained }) => retained)
-      for (const laneKey of retained) {
-        const { member, track } = binaryLaneOf(kit, laneKey)
-        keys.push(
-          retainedKey(prefix, roomId, inc, laneKey),
-          retainedOfKey(prefix, roomId, inc, member),
-          retainedOfTrackKey(prefix, roomId, inc, track),
-        )
-      }
-      const trackLanes = members.flatMap(({ lanes }) => lanes.filter((key) => kit.decodeLaneKey(key).kind === 'binary'))
-      for (const laneKey of trackLanes) keys.push(trackLanesKey(prefix, roomId, inc, binaryLaneOf(kit, laneKey).track))
-      const expiring = writes.expiring.map(({ key, bytes, ttlMs }): [number, number] => {
-        keys.push(expiringCellKey(prefix, roomId, inc, key))
+      const retained = members
+        .flatMap(({ retained }) => retained)
+        .map((laneKey): [string, number] => {
+          const { member, track } = binaryLaneOf(kit, laneKey)
+          const at = keysAt(
+            retainedKey(prefix, roomId, inc, laneKey),
+            retainedOfKey(prefix, roomId, inc, member),
+            retainedOfTrackKey(prefix, roomId, inc, track),
+          )
+          return [laneKey, at]
+        })
+      const trackLanes = members
+        .flatMap(({ lanes }) => lanes.filter((key) => kit.decodeLaneKey(key).kind === 'binary'))
+        .map((laneKey): [string, number] => [
+          laneKey,
+          keysAt(trackLanesKey(prefix, roomId, inc, binaryLaneOf(kit, laneKey).track)),
+        ])
+      const expiring = writes.expiring.map(({ key, bytes, ttlMs }): [number, number, number] => {
         argv.push(toBuffer(bytes))
-        return [argv.length, ttlMs]
+        return [argv.length, ttlMs, keysAt(expiringCellKey(prefix, roomId, inc, key))]
       })
-      let commitAt = 0
+      let commitAt: OperationPacket['commit'] = []
       if (commit !== null) {
         const invocation = commitInvocation(prefix, commit)
-        keys.push(...invocation.keys)
-        commitAt = argv.length + 1
+        commitAt = [keysAt(...invocation.keys), argv.length + 1]
         argv.push(...invocation.argv)
       }
       const packet: OperationPacket = {
         expect: [...reads],
-        members: members.map(({ member, lanes, retained }) => [member, lanes.length, retained.length]),
+        members: members.map(({ member, lanes, retained }) => [
+          member,
+          lanes.length,
+          retained.length,
+          keysAt(memberOrderKey(prefix, roomId, inc, member), retainedOfKey(prefix, roomId, inc, member)),
+        ]),
         semantic: semanticLaneKey,
         prefixes: writes.prefixes,
         mutations,

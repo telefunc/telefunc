@@ -897,6 +897,7 @@ async function onJoinAnswering(roomId: string) {
     if (data === 'refuse') throw Abort('refused')
     return { echo: data }
   })
+  me.listen(() => {}) // only observes: the reply stays the listener's above
   return me.id
 }
 
