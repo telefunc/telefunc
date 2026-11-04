@@ -11,6 +11,7 @@ export { MAX_CHANNELS_PER_CONNECTION } from '../../wire-protocol/constants.js'
 // Utilities the add-ons share with core.
 export { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 export { Fifo } from '../../utils/Fifo.js'
+export { soleAnswer, TWO_ANSWERS } from '../../wire-protocol/channel/listenerAnswer.js'
 export { getOrCreate } from '../../utils/getOrCreate.js'
 export { isObject } from '../../utils/isObject.js'
 export { Listeners } from '../../utils/Listeners.js'

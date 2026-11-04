@@ -89,7 +89,7 @@ async function roomResultValue<T = unknown>(answer: Promise<unknown>): Promise<T
   return result.value as T
 }
 
-/** The replies an `{ ack: true }` sender gets when no handler of the recipient answered. */
+/** The replies an `{ ack: true }` sender gets when no one handler of the recipient answered. */
 const DM_FAILURE = {
   left: { ok: false, kind: 'error', message: PARTICIPANT_LEFT },
   noListener: { ok: false, kind: 'error', message: 'No participant inbox listener is attached' },
@@ -100,4 +100,5 @@ const DM_FAILURE = {
     message: 'send({ ack: true }) timed out: the recipient never handled the message',
   },
   roomClosed: { ok: false, kind: 'error', message: 'Room is closed' },
+  twoReplies: { ok: false, kind: 'error', message: 'Only one listen() callback may return a reply' },
 } as const satisfies Record<string, RoomFailure>

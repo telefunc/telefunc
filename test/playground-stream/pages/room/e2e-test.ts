@@ -444,6 +444,8 @@ function testRoom() {
     fromServer: unknown
     fromHeld: unknown
     fromHeldUnsendable: unknown
+    fromObserved: unknown
+    fromCompeting: unknown
     refused: unknown
     unhandled: string[]
   }>(
@@ -455,6 +457,8 @@ function testRoom() {
       expect(r.fromServer).deep.equal({ echo: 'hi' })
       expect(r.fromHeld).toBe('pong')
       expect(r.fromHeldUnsendable).toBe("Internal client room error — see the recipient's client logs")
+      expect(r.fromObserved).toBe('ok')
+      expect(r.fromCompeting).toBe('Only one listen() callback may return a reply')
       expect(r.refused).toBe('refused')
       expect(r.unhandled).deep.equal([])
     },
