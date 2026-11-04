@@ -2,7 +2,7 @@ export { testRun }
 export { testCloudflareBindings }
 
 import { autoRetry, expect, getServerUrl, page, test } from '@brillout/test-e2e'
-import type { WebSocket } from 'playwright-chromium'
+import type { Page, WebSocket } from 'playwright-chromium'
 import { testCounter, testRunClassic, withNetworkConditions } from '../../test/utils'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
@@ -392,23 +392,23 @@ function testRefusedDelivery() {
   test('Broadcast: a publish a session Durable Object refuses to take rejects, the other session still gets it, and the next publish reaches both', async () => {
     const key = `refused-delivery:${Math.random()}`
     const browser = page.context().browser()!
+    const pages: Page[] = []
     // Two regions, so each session takes its deliveries in a Durable Object of its own (LAX is wnam, FRA is weur).
-    const pages = await Promise.all(
-      Object.entries({ p1: 'LAX', p2: 'FRA' }).map(async ([name, colo]) => {
-        const context = await browser.newContext()
-        await context.addCookies([{ name: 'test-colo', value: colo, url: getServerUrl() }])
-        const session = await context.newPage()
-        await session.goto(`${getServerUrl()}/refused-delivery?key=${key}&page=${name}`)
-        await autoRetry(async () => {
-          expect(await session.locator('#hydrated').count()).toBe(1)
-        })
-        await session.click('#subscribe')
-        await autoRetry(async () => {
-          expect(JSON.parse((await session.textContent('#refused-delivery-state'))!).subscribed).toBe(true)
-        })
-        return session
-      }),
-    )
+    // One after the other: in `vite dev`, a second first request to a page can get its half-evaluated entry and fail.
+    for (const [name, colo] of Object.entries({ p1: 'LAX', p2: 'FRA' })) {
+      const context = await browser.newContext()
+      await context.addCookies([{ name: 'test-colo', value: colo, url: getServerUrl() }])
+      const session = await context.newPage()
+      await session.goto(`${getServerUrl()}/refused-delivery?key=${key}&page=${name}`)
+      await autoRetry(async () => {
+        expect(await session.locator('#hydrated').count()).toBe(1)
+      })
+      await session.click('#subscribe')
+      await autoRetry(async () => {
+        expect(JSON.parse((await session.textContent('#refused-delivery-state'))!).subscribed).toBe(true)
+      })
+      pages.push(session)
+    }
     const publish = async (message: string) => {
       const query = new URLSearchParams({ key, message })
       const response = await fetch(`${getServerUrl()}/__refused-delivery-publish?${query}`)
