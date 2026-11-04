@@ -11,6 +11,7 @@ export type {
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { Fifo } from '../../utils/Fifo.js'
+import { afterEventLoopTurn } from '../../utils/afterEventLoopTurn.js'
 import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { ChannelOverflowError } from '../channel/channelErrors.js'
@@ -273,12 +274,6 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     map.delete(key)
     unsub()
   }
-}
-
-// setImmediate runs after pending I/O, where it exists.
-function afterEventLoopTurn(fn: () => void): void {
-  if (typeof setImmediate === 'function') setImmediate(fn)
-  else setTimeout(fn, 0)
 }
 
 // ---------------------------------------------------------------------------

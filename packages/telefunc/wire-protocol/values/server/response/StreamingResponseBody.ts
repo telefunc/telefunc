@@ -4,7 +4,7 @@ import type { Readable } from 'node:stream'
 import type { StreamingValueServer } from '../../types.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { encodeU32, encodeIndexedFrame, textEncoder } from '../../../wire/envelope.js'
-import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../../constants.js'
+import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE, STREAM_FLOW_PAUSE_BYTES } from '../../../constants.js'
 import type { StreamingErrorFrameAbort, StreamingErrorFrameBug } from '../../../constants.js'
 import { isAbort } from '../../../../node/server/Abort.js'
 import type { AbortError } from '../../../../shared/Abort.js'
@@ -18,7 +18,9 @@ import { restoreContext } from '../../../../node/server/context/context.js'
 import type { Context } from '../../../../node/server/context/context.js'
 import { createPushReadable } from '../../../../utils/pushReadable.js'
 import { createPushReadableStream } from '../../../../utils/pushReadableStream.js'
+import { afterEventLoopTurn } from '../../../../utils/afterEventLoopTurn.js'
 import { createDeferred } from '../../../../utils/createDeferred.js'
+import { StreamFlow } from './StreamFlow.js'
 
 const EMPTY = new Uint8Array(0)
 
@@ -57,6 +59,7 @@ function buildInlineResponseBody(runContext: {
   onComplete: () => void
   encodeFrame: (frame: Uint8Array<ArrayBuffer>) => Uint8Array<ArrayBuffer>
   useNodeStream: boolean
+  flowId: string | undefined
 }): Readable | ReadableStream<Uint8Array<ArrayBuffer>> {
   const {
     metadataSerialized,
@@ -68,12 +71,16 @@ function buildInlineResponseBody(runContext: {
     onComplete,
     encodeFrame,
     useNodeStream,
+    flowId,
   } = runContext
 
   // Producers are constructed eagerly so the abort listener can cancel them
   // even before the loop starts. Cancelling interrupts any suspended
   // `reader.read()` inside a producer — `iter.return()` alone can't.
   const producers = streamingValues.map((sv) => ({ producer: sv.createProducer(), index: sv.index }))
+  const flow = flowId
+    ? new StreamFlow(flowId, (index) => producers.find((p) => p.index === index)?.producer.cancel())
+    : null
 
   let cancelled = false
   // Async-generator return() queues behind a pending next(). Race cancellation
@@ -92,7 +99,7 @@ function buildInlineResponseBody(runContext: {
   const cancelProducers = () => {
     if (producersStopped) return
     producersStopped = true
-    for (const { producer } of producers) producer.cancel()
+    for (const { producer, index } of producers) if (!flow?.cancelled.has(index)) producer.cancel()
     // Unblock any emit awaiting drain so the IIFE can progress to its catch/finally.
     wakeDrain()
   }
@@ -119,6 +126,8 @@ function buildInlineResponseBody(runContext: {
   }
   const advance = (entry: RaceEntry) => {
     entry.pending = entry.iter.next().then((result) => ({ type: 'chunk', entry, result }))
+    // While paused nothing races it, so its failure waits for the resume without counting as unhandled.
+    if (flow) entry.pending.catch(() => {})
   }
 
   void (async () => {
@@ -152,17 +161,24 @@ function buildInlineResponseBody(runContext: {
         // whichever resolves first. Winner is rotated to the end of `active` so
         // a fast producer at index 0 doesn't starve others (race resolves in
         // array order on ties).
+        let bytesSinceTurn = 0
         while (active.length > 0) {
           // `responseAbort.errorPromise` rejects on a response-wide abort; it
           // wins the race and routes us into the catch below.
+          const racing = flow?.paused.size ? active.filter((e) => !flow.paused.has(e.index)) : active
           const winner = await Promise.race([
             cancelledPromise,
             responseAbort.errorPromise,
-            ...active.map((e) => e.pending),
+            ...(flow ? [flow.changed] : []),
+            ...racing.map((e) => e.pending),
           ])
           // Consumer is gone: bail before emitting a "this producer is done" frame
           // — would also be misleading for cancelled producers returning done.
           if (winner.type === 'cancelled' || cancelled) return
+          if (winner.type === 'flowChanged') {
+            active.splice(0, active.length, ...active.filter((e) => !flow!.cancelled.has(e.index)))
+            continue
+          }
           const { entry, result } = winner
           if (result.done) {
             // Empty-payload frame so the client knows this index is done
@@ -171,6 +187,11 @@ function buildInlineResponseBody(runContext: {
             active.splice(active.indexOf(entry), 1)
           } else {
             await emit(encodeFrame(encodeIndexedFrame(entry.index, result.value as Uint8Array<ArrayBuffer>)))
+            // A socket that keeps up takes writes with no turn of the event loop, and the page's request needs one.
+            if (flow && (bytesSinceTurn += result.value!.length) >= STREAM_FLOW_PAUSE_BYTES) {
+              bytesSinceTurn = 0
+              await new Promise<void>(afterEventLoopTurn)
+            }
             advance(entry)
             active.splice(active.indexOf(entry), 1)
             active.push(entry)
@@ -195,6 +216,7 @@ function buildInlineResponseBody(runContext: {
       await emit(encodeFrame(encodeU32(errorBytes.byteLength)))
       await emit(encodeFrame(errorBytes))
     } finally {
+      flow?.close()
       abortSignal.removeEventListener('abort', onConsumerGone)
       sink.close()
       onComplete()
