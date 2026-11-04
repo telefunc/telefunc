@@ -258,6 +258,8 @@ export default {
       // to reach the Node primitives when `TELEFUNC_NATIVE=1`.
       const httpServer = server?.node?.server
       if (!httpServer) return
+      // Compose's servers behind Caddy: Node's 5 s idle timer destroyed sockets Caddy then wrote to, which is a 502.
+      if (process.env.INSTANCE_ID) httpServer.keepAliveTimeout = 60_000
       // Registered first: a socket it destroys is one Telefunc's upgrade listener then leaves alone.
       httpServer.on('upgrade', (req, socket) => {
         if (!req.url?.startsWith('/_telefunc')) return
