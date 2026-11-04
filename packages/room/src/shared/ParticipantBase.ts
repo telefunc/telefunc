@@ -2,10 +2,15 @@ export { ParticipantBase }
 export type { ParticipantBaseOptions }
 
 import { stringify } from '@brillout/json-serializer/stringify'
-import { invokeChannelListener, type ChannelPublishAck, type TELEFUNC_SHIELDS, Listeners } from 'telefunc/__internal'
+import {
+  invokeChannelListener,
+  type ChannelPublishAck,
+  type TELEFUNC_SHIELDS,
+  Listeners,
+  Fifo,
+  utf8ByteLength,
+} from 'telefunc/__internal'
 import { makeDisposer, type ListenerOptions } from './disposer.js'
-import { Fifo } from '../utils/Fifo.js'
-import { utf8ByteLength } from '../utils/utf8ByteLength.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderSnapshot } from './arguments.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'

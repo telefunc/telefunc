@@ -1,8 +1,8 @@
 export { TailHold }
 export type { TailEntry, TailHoldOwner }
 
+import { unrefTimer } from 'telefunc/__internal'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
-import { unrefTimer } from '../../utils/unrefTimer.js'
 import { ROOM_TAIL_ATTACH_TIMEOUT_MS, ROOM_TAIL_HOLD_CODE_UNITS_MAX, ROOM_TAIL_HOLD_MAX } from '../constants.js'
 import type { OrderingInfo } from 'telefunc/__internal'
 assertIsNotBrowser()

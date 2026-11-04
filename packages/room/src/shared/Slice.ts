@@ -1,8 +1,7 @@
 export { Slice }
 
-import { Fifo } from '../utils/Fifo.js'
+import { Fifo, nextTurn } from 'telefunc/__internal'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
-import { nextTurn } from '../utils/nextTurn.js'
 import { ROOM_PLAN_SLICE_MS } from './constants.js'
 
 /** The slices waiting in the process, and how many turns resumed one. */
@@ -34,7 +33,7 @@ class Slice {
  *  tick a runtime drops stalls nothing past the next wait. */
 async function tick(): Promise<void> {
   const resumed = waiting.resumed
-  await nextTurn()
+  await new Promise<void>(nextTurn)
   if (waiting.resumed !== resumed) return
   waiting.resumed++
   const resume = waiting.slices.shift()

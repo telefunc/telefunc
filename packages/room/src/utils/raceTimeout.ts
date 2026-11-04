@@ -1,7 +1,6 @@
 export { raceTimeout }
 
-import { createDeferred } from 'telefunc/__internal'
-import { unrefTimer } from './unrefTimer.js'
+import { createDeferred, unrefTimer } from 'telefunc/__internal'
 
 /** Settles like `promise`, or like `onTimeout()` once `ms` pass first. */
 function raceTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => T): Promise<T> {

@@ -2,10 +2,9 @@ export { RoomWrites, runAfterHook }
 export type { RoomWritesOptions, RoomWritesOwner }
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
-import { unrefTimer } from '../utils/unrefTimer.js'
 import type { CommitAccepted } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
-import { type ChannelPublishAck, handleCallbackBug, createDeferred } from 'telefunc/__internal'
+import { type ChannelPublishAck, handleCallbackBug, createDeferred, unrefTimer } from 'telefunc/__internal'
 import type { BinaryFrame } from '../shared/binary.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import {
