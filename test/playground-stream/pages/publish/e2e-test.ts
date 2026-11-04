@@ -107,12 +107,12 @@ function testPublish(isDev: boolean, inDocker = false) {
 
   // The in-memory adapter: these lanes publish through Redis.
   if (!inDocker && !process.env.REDIS_URL) {
-    test('broadcast: in memory, a loop of publishes delivers in it, a listener publishing 125 MiB holds at most bufferLimitBinary and rejects the rest, one 8 MiB message alone goes through, four producers awaiting each publish deliver all of theirs, and answers that await let a timer fire', async () => {
+    test('broadcast: in memory, a loop of publishes a listener answers delivers in it, a listener publishing 125 MiB holds at most bufferLimitBinary and rejects the rest, one 8 MiB message alone goes through, four producers awaiting each publish deliver all of theirs, a timer publishing four bursts a tick leaves none waiting at the next, and a listener answering itself, at once or after an await, lets a timer fire', async () => {
       await navigate(`${getServerUrl()}/publish`)
       await page.click('#test-in-memory-publishes')
       await autoRetry(
         async () => {
-          const { loop, listenerBatch, aloneBytes, producers, timerFiredMidChain } =
+          const { loop, listenerBatch, aloneBytes, producers, timerProducer, timerFiredMidChain } =
             await getResult<any>('#publish-result')
           expect(loop).deep.equal({ deliveredInLoop: 3000, inOrder: true })
           // 2 MiB of 64 KiB messages.
@@ -123,7 +123,8 @@ function testPublish(isDev: boolean, inDocker = false) {
           expect(listenerBatch.admittedInOrder).toBe(true)
           expect(aloneBytes).toBe(8 * 1024 * 1024)
           expect(producers).deep.equal({ received: 8000, rejected: 0 })
-          expect(timerFiredMidChain).toBe(true)
+          expect(timerProducer).deep.equal({ sent: 30 * 4096, peakWaiting: 0, delivered: 30 * 4096 })
+          expect(timerFiredMidChain).deep.equal({ answeringAtOnce: true, answeringAfterAwait: true })
         },
         { timeout: 30_000 },
       )

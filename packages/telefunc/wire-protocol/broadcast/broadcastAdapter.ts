@@ -17,8 +17,8 @@ import { ChannelOverflowError } from '../channel/channelErrors.js'
 import { HELD_SEND_OVERHEAD_BYTES } from '../channel/server/ServerChannelBuffer.js'
 import type { WirePublishInfo } from '../wire/publishInfo.js'
 
-/** Most in-memory deliveries that run before the event loop gets a turn, so listeners answering each other, directly or
- *  after an `await`, can't starve it. */
+/** Most in-memory publishes that deliver at once before the event loop gets a turn, so code answering them after an
+ *  `await` can't starve it. */
 const IN_MEMORY_DELIVERY_BURST = 1024
 
 /** Transport-level publish result. */
@@ -85,9 +85,10 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   /** A publish ran in this synchronous run: code publishing in a loop holds the event loop itself, so one made while
    *  this is set has no turn to wait for. */
   private inSyncRun = false
-  /** Deliveries since the last turn, a synchronous run of publishes past half the burst counting once. Reset by a
-   *  macrotask scheduled once half the burst has run, so a server publishing once per turn schedules none. */
+  /** Deliveries at once since the last turn, a synchronous run of publishes past half the burst counting once. Reset by
+   *  a macrotask scheduled once half the burst has run, so a server publishing once per turn schedules none. */
   private deliveredInBurst = 0
+  private turnScheduled = false
 
   constructor(transport?: BroadcastTransport) {
     this.transport = transport ?? null
@@ -202,12 +203,19 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   }
 
   private countDelivery(): void {
-    if (++this.deliveredInBurst === IN_MEMORY_DELIVERY_BURST / 2) {
-      afterEventLoopTurn(() => {
-        this.deliveredInBurst = 0
-        this.drainQueued()
-      })
-    }
+    if (++this.deliveredInBurst === IN_MEMORY_DELIVERY_BURST / 2) this.scheduleTurn()
+  }
+
+  private scheduleTurn(): void {
+    if (this.turnScheduled) return
+    this.turnScheduled = true
+    afterEventLoopTurn(this.startTurn)
+  }
+
+  private readonly startTurn = (): void => {
+    this.turnScheduled = false
+    this.deliveredInBurst = 0
+    this.drainQueued()
   }
 
   private queueInMemory<T extends string | Uint8Array>(
@@ -238,7 +246,6 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     return new Promise((resolve, reject) => {
       this.queued.push(() => {
         this.queuedBytes[kind] -= size
-        this.countDelivery()
         try {
           resolve(this.deliverInMemory(subs, key, queuedData, timestamp))
         } catch (err) {
@@ -269,13 +276,16 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     return { seq, timestamp, meta: { delivered, transport: 'in-memory' } }
   }
 
+  /** Delivers what waits now, whatever its size. What its listeners publish waits for the next turn, so a listener
+   *  answering itself can't starve the event loop. */
   private drainQueued(): void {
-    while (this.queued.length > 0 && this.deliveredInBurst < IN_MEMORY_DELIVERY_BURST) {
+    for (let waiting = this.queued.length; waiting > 0; waiting--) {
       const deliver = this.queued.shift()!
       this.delivering = true
       deliver()
       this.delivering = false
     }
+    if (this.queued.length > 0) this.scheduleTurn()
   }
 
   // ── Shared ──
