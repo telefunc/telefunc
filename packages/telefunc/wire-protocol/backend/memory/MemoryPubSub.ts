@@ -70,7 +70,12 @@ class MemoryDeliveries {
     for (let waiting = this.queue.length; waiting > 0; waiting--) {
       const delivery = this.queue.shift()!
       this.delivering = true
-      delivery()
+      // What throws here is a bug, reported: it stops neither the queue behind it nor the publishes waiting on it.
+      try {
+        delivery()
+      } catch (error) {
+        console.error(error)
+      }
       this.delivering = false
     }
     if (this.queue.length > 0) nextTurn(this.drain)
@@ -116,7 +121,7 @@ class MemoryPubSub {
   ): OrderingInfo | Promise<OrderingInfo> {
     if (this.deliveries.enterPublish()) {
       const mark = takeOrdering(key)
-      for (const target of targets) target.deliver(payload, mark)
+      this.deliverTo(targets, payload, mark)
       this.deliveries.leavePublish()
       return mark
     }
@@ -141,10 +146,21 @@ class MemoryPubSub {
     return new Promise((resolve) => {
       this.deliveries.deliver(() => {
         this.waitingBytes[kind] -= size
-        for (const target of targets) target.deliver(held, mark)
+        this.deliverTo(targets, held, mark)
         resolve(mark)
       })
     })
+  }
+
+  /** Hands a message to each of `targets`: one that throws is reported, and the others still get it. */
+  deliverTo(targets: readonly BackendReceiver[], payload: BackendPayload, ordering: OrderingInfo): void {
+    for (const target of targets) {
+      try {
+        target.deliver(payload, ordering)
+      } catch (error) {
+        console.error(error)
+      }
+    }
   }
 
   /** Queues `delivery` from a microtask, so a subscription made meanwhile is ready after it. With the queue full, returns

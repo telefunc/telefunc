@@ -425,9 +425,9 @@ class MemoryRoomDriver implements RoomDriver {
     const nextTurn = this.pubSub.deliverSoon(() => {
       // A subscriber may write into the bytes it is given, which a retained frame must not share.
       const shared = retain ? copyBytes(frame) : frame
-      for (const target of targets) target.deliver(shared, mark)
-      for (const target of everyTrack) target.deliver(shared, mark)
-      for (const target of everyMember) target.deliver(shared, mark)
+      this.pubSub.deliverTo(targets, shared, mark)
+      this.pubSub.deliverTo(everyTrack, shared, mark)
+      this.pubSub.deliverTo(everyMember, shared, mark)
       delivered?.resolve()
     })
     if (nextTurn !== null) await nextTurn

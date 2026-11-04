@@ -28,6 +28,8 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
         (log.logText.includes('Broken pipe') || log.logText.includes('Connection reset by peer'))) ||
       // testRefusedPresence()'s authority refuses a presence, and the subscription it ended is reported.
       log.logText.includes('Backend subscription closed: text:refused-presence') ||
+      // testRoomStorage()'s receiver throws, as a test of what a store does then.
+      log.logText.includes('Test: a receiver throws') ||
       // testRefusedDelivery()'s session refuses a delivery, which its coordinator reports.
       log.logText.includes('Test: the session refused the delivery'),
   })
@@ -572,6 +574,11 @@ function testRoomStorage() {
     await clickRoomCard(closer!, 'close-held')
     expect(await clickRoomCard(holder!, 'subscribe-held')).deep.equal([])
     for (const page of [holder!, closer!]) await page.context().close()
+  })
+
+  test("Room: a store's receiver that throws is reported, its writes still commit and its next frame still arrives", async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'throwing-receiver')).deep.equal({ writes: ['written', 'written'], calls: 2 })
   })
 
   test('Room: its meta keeps the key order its writes gave it', async () => {

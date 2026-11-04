@@ -8,7 +8,7 @@ export {
   testRoomPublishHold,
   testRoomLongWaits,
 }
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Response, WebSocket } from 'playwright-chromium'
 import {
   navigate,
@@ -436,6 +436,14 @@ function testRoom() {
       expect(r.whileClosing.after).deep.equal([])
       expect(r.recreated).deep.equal({ meta: { incarnation: 2 }, count: 0 })
       expect(r.recreatedOpen).toBe(false)
+    },
+  )
+  testRoomScenario<{ thrower: number; healthy: number }>(
+    'throwing-receiver',
+    "room: a store's receiver that throws is reported, and the receiver beside it and the frames after it still arrive",
+    (r) => {
+      expect(r).deep.equal({ thrower: 2, healthy: 2 })
+      expectLog('Test: a receiver throws')
     },
   )
   testRoomScenario<{

@@ -83,6 +83,7 @@ import {
   onListWhileClosing,
   onRecreate,
   onJoinAnswering,
+  onThrowingReceiver,
   onSaveReply,
   onSeedAndChurn,
   onStopChurn,
@@ -875,6 +876,11 @@ function Room() {
             onPage: read.map((value) => (value instanceof Uint8Array ? Array.from(value) : value)),
           }),
         )
+      })}
+
+      {scenario('throwing-receiver', 'A throwing receiver', 'A store delivers past it', async () => {
+        const roomId = await createRoomId('throwing-receiver')
+        setResult(JSON.stringify(await onThrowingReceiver(roomId)))
       })}
 
       {scenario('join-races', 'Join races', 'A closed tab during a slow join', async () => {

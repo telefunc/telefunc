@@ -268,7 +268,12 @@ class CloudflareBroadcastMember {
     for (const route of routes) {
       const routeKey = broadcastRouteKey(route)
       const receiver = this.routes.get(routeKey)?.attempt?.receiver ?? this.localReceivers.get(routeKey)
-      receiver?.deliver(payload, info)
+      // A receiver's bug is no lost delivery, and the routes after it still get theirs.
+      try {
+        receiver?.deliver(payload, info)
+      } catch (error) {
+        console.error(error)
+      }
     }
   }
 

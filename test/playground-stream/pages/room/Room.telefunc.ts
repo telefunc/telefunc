@@ -78,6 +78,7 @@ export {
   onListWhileClosing,
   onRecreate,
   onJoinAnswering,
+  onThrowingReceiver,
   onSaveReply,
   onSeedAndChurn,
   onStopChurn,
@@ -87,7 +88,9 @@ export {
 import { Buffer } from 'node:buffer'
 import { Abort, onBug } from 'telefunc'
 import { Room, type LeaveCause, type LocalParticipant } from '@telefunc/room'
+import { getRoomPlane } from '@telefunc/room/backend'
 import { anyoneCanJoin } from '../../anyone-can-join'
+import { sleep } from '../../sleep'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
 import {
@@ -899,6 +902,30 @@ async function onJoinAnswering(roomId: string) {
   })
   me.listen(() => {}) // only observes: the reply stays the listener's above
   return me.id
+}
+
+/** A store handing a frame to a receiver that throws, ahead of a healthy one: both get every frame. */
+async function onThrowingReceiver(roomId: string) {
+  const { driver } = getRoomPlane()
+  const inc = (await driver.readHead(roomId))!.currentInc!
+  const source = { roomId, inc, lane: { kind: 'semantic' } } as const
+  let thrower = 0
+  let healthy = 0
+  const attempts = [
+    driver.subscribe(source, {
+      deliver() {
+        thrower++
+        throw new Error('Test: a receiver throws')
+      },
+    }),
+    driver.subscribe(source, { deliver: () => void healthy++ }),
+  ]
+  while (attempts.some((attempt) => attempt.state() !== 'ready')) await sleep(10)
+  await Room.announce(roomId, 'first')
+  await Room.announce(roomId, 'second')
+  await sleep(300)
+  await Promise.all(attempts.map((attempt) => attempt.unsubscribe()))
+  return { thrower, healthy }
 }
 
 /** A store's save of a reply, finished by the test with `runServerAction()`. */

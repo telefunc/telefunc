@@ -576,6 +576,9 @@ class RedisAttempt extends DriverAttempt {
   private deliver(payload: Uint8Array, info: OrderingInfo, token: string | null): void {
     try {
       this.receiver.deliver(this.text ? textDecoder.decode(payload) : Uint8Array.from(payload), info)
+    } catch (error) {
+      // Thrown back into the socket's read, it would reach neither the attempts beside this one nor anyone's handler.
+      console.error(error)
     } finally {
       this.settle(token)
     }
