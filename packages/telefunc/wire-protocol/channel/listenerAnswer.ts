@@ -1,11 +1,15 @@
 export { listenerAnswer, forListener }
 
 import { stringify } from '@brillout/json-serializer/stringify'
+import { HEADER } from '../wire/header.js'
 
-/** What one listener gets of `value`: bytes of its own, which it may keep or transfer without touching another
- *  listener's. */
-function forListener<T>(value: T): T {
-  return value instanceof Uint8Array ? (new Uint8Array(value) as T) : value
+/** What `listeners[i]` gets of `value`: bytes of its own, which it may keep or transfer without touching another
+ *  listener's. The last takes the frame itself where its buffer holds nothing else: a frame on Node can be a view of a
+ *  socket read. */
+function forListener<T>(value: T, listeners: readonly unknown[], i: number): T {
+  if (!(value instanceof Uint8Array)) return value
+  const ownsBuffer = i === listeners.length - 1 && value.buffer.byteLength === value.byteLength + HEADER
+  return ownsBuffer ? value : (new Uint8Array(value) as T)
 }
 
 /** Calls each of `listeners` with `data` in turn, awaiting each, and returns the serialized value of the one that
@@ -13,8 +17,8 @@ function forListener<T>(value: T): T {
  *  answers. Null once two listeners answered. What a listener throws, or `stringify` of the answer, propagates. */
 async function listenerAnswer<T>(listeners: readonly ((data: T) => unknown)[], data: T): Promise<string | null> {
   let answer: unknown
-  for (const cb of listeners) {
-    const value = await cb(forListener(data))
+  for (const [i, cb] of listeners.entries()) {
+    const value = await cb(forListener(data, listeners, i))
     if (value === undefined) continue
     if (answer !== undefined) return null
     answer = value

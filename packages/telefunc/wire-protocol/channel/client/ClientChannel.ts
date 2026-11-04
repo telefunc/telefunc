@@ -288,9 +288,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  that throws `Abort` stops the rest. */
   private callListeners<T>(listeners: Listeners<(value: T) => unknown>, value: T, bytes: number): void {
     const pending: Promise<unknown>[] = []
-    for (const cb of listeners.list()) {
+    const list = listeners.list()
+    for (const [i, cb] of list.entries()) {
       try {
-        const result = cb(forListener(value))
+        const result = cb(forListener(value, list, i))
         if (isPromise(result)) {
           pending.push(result.catch((err: unknown) => this.lifecycle.handleCallbackError(err)))
         }

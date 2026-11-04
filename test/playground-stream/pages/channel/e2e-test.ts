@@ -1448,6 +1448,20 @@ function testChannelApi() {
     })
   })
 
+  test("channel: a binary listener can't see or change another frame's or another listener's bytes, alone or beside others", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-own-bytes')
+    await autoRetry(async () => {
+      expect(JSON.parse((await page.textContent('#channel-own-bytes-result')) || '{}')).deep.equal({
+        alone: 0,
+        beside: 0,
+      })
+      const state = await getCleanupState()
+      expect(state.ownBytes_alone).toBe('0')
+      expect(state.ownBytes_beside).toBe('0')
+    })
+  })
+
   test('channel: multi-byte text that fits maxPendingBytes to the byte is accepted, and one byte more closes the channel', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-at-limit')
