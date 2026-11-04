@@ -6,7 +6,6 @@ declare namespace Cloudflare {
     durableNamespaces: 'TelefuncDurableObject'
   }
   interface Env {
-    TelefuncKV: KVNamespace
     TelefuncDurableObject: DurableObjectNamespace<import('./worker').TelefuncDurableObject>
   }
 }
