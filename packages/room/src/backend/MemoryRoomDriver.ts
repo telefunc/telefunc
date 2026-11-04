@@ -51,9 +51,9 @@ import {
   type Subscribers,
   createDeferred,
   getOrCreate,
+  unrefTimer,
 } from 'telefunc/__internal'
 import { SortedIds, compareCodePoints } from '../utils/SortedIds.js'
-import { unrefTimer } from '../utils/unrefTimer.js'
 
 type Expiring = { expiresAt: number | null }
 type StoredCell = { bytes: Uint8Array; version: string }

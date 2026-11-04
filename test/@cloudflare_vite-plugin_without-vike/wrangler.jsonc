@@ -10,6 +10,5 @@
       { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
     ]
   },
-  "kv_namespaces": [{ "binding": "TelefuncKV", "id": "telefunc-kv" }],
   "migrations": [{ "tag": "v1", "new_classes": ["TelefuncDurableObject"] }]
 }

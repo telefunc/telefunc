@@ -1,4 +1,5 @@
-import { assert } from '../utils/assert.js'
+import { assert, assertUsage } from '../utils/assert.js'
+import { isObject } from '../utils/isObject.js'
 
 export const SERIALIZER_PREFIX_FILE = '!TelefuncFile:'
 export const SERIALIZER_PREFIX_BLOB = '!TelefuncBlob:'
@@ -65,12 +66,44 @@ export const CHANNEL_TRANSPORT = {
 
 /** Transport for streamed values returned by telefunctions. */
 export type StreamTransport = (typeof STREAM_TRANSPORT)[keyof typeof STREAM_TRANSPORT]
+
+/** `config.stream` as the user set it, validated. */
+export function parseStreamConfig(val: unknown): { transport?: StreamTransport } {
+  assertUsage(isObject(val), 'config.stream should be an object')
+  const next: { transport?: StreamTransport } = {}
+  for (const [key, value] of Object.entries(val)) {
+    assertUsage(key === 'transport', `Unknown config.stream.${key}`)
+    assertUsage(
+      value === 'binary-inline' || value === 'sse-inline' || value === 'channel',
+      "`config.stream.transport` should be 'binary-inline', 'sse-inline', or 'channel'",
+    )
+    next.transport = value
+  }
+  return next
+}
 export const DEFAULT_STREAM_TRANSPORT: StreamTransport = STREAM_TRANSPORT.BINARY_INLINE
+
+/** The unread bytes of one inline stream at which the page asks the server to pause it, and half of it to resume. */
+export const STREAM_FLOW_PAUSE_BYTES = 1024 * 1024
+/** How long the server holds a pause the page hasn't renewed. */
+export const STREAM_FLOW_LEASE_MS = 60 * 1000
+/** The body of the server's answer when a stream-flow request names a live response. */
+export const STREAM_FLOW_FOUND = 'ok'
 
 /** Transport for persistent channels created with `new Channel()`. */
 export type ChannelTransport = (typeof CHANNEL_TRANSPORT)[keyof typeof CHANNEL_TRANSPORT]
 /** Ordered list of transports to use for channels. `['sse', 'ws']` starts on SSE and upgrades to WebSocket. */
 export type ChannelTransports = ChannelTransport[]
+
+/** `configPath`'s value as the transports it lists, validated; `example` is what its message suggests. */
+export function validateChannelTransports(val: unknown, configPath: string, example: string): ChannelTransports {
+  assertUsage(
+    Array.isArray(val) && val.length > 0 && val.every((v) => v === 'sse' || v === 'ws'),
+    `\`${configPath}\` should be an array of transports, e.g. ${example}`,
+  )
+  return val as ChannelTransports
+}
+
 /** Default transports the client tries, in order. Starts on SSE and upgrades to WS if available. */
 export const DEFAULT_CLIENT_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRANSPORT.SSE, CHANNEL_TRANSPORT.WS]
 /** Default transports enabled on the server. SSE only until a WS adapter calls enableChannelTransports. */

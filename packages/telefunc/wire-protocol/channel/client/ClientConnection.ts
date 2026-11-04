@@ -224,7 +224,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
       frame = encode.ackRes(ix, seq, ackedSeq, error, ACK_STATUS.ERROR)
     }
     this.gate.send(record, seq, frame, 'ack')
-    if (ackedSeq === record.lastSeq) channel._attach.answered()
+    if (ackedSeq === record.lastSeq) channel._attach.receiveCredit.answered()
   }
 
   /** The largest frame the server accepts from `channel`; on a WebSocket, a runtime's lower limit wins. */

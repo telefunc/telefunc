@@ -334,8 +334,8 @@ importers:
   packages/room:
     dependencies:
       '@brillout/json-serializer':
-        specifier: ^0.5.25
-        version: 0.5.25
+        specifier: ^0.5.27
+        version: 0.5.27
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^4.20260305.1
@@ -380,8 +380,8 @@ importers:
         specifier: ^0.2.6
         version: 0.2.6
       '@brillout/json-serializer':
-        specifier: ^0.5.25
-        version: 0.5.25
+        specifier: ^0.5.27
+        version: 0.5.27
       '@brillout/picocolors':
         specifier: ^1.0.28
         version: 1.0.28
@@ -1461,9 +1461,6 @@ packages:
 
   '@brillout/json-serializer@0.5.22':
     resolution: {integrity: sha512-jzcOqcbysKICCeZNlwa755tffF+HfMj8G+ZSuvHe06aCpp4xQiU2D91RHFUeJpF0/RNyfa5uWZ0pRuvFoeoqow==}
-
-  '@brillout/json-serializer@0.5.25':
-    resolution: {integrity: sha512-/Ahv1XIHAYyROWfyOQZxbxmkvM3ef3aMPPzEC0EfkyZUFb88y/nFFwCFvYUjE20MGoF8/9Z1jIy7ihkpkE+maw==}
 
   '@brillout/json-serializer@0.5.27':
     resolution: {integrity: sha512-D+Pc40tS6mme3dtlQzOD+nqP+yAWHQ+KX7gcJJ3DRs02pbqBh/6FBk/OWkLuNyaI0rgedh4KYla/xCSg0jArEw==}
@@ -7928,8 +7925,6 @@ snapshots:
   '@brillout/import@0.2.6': {}
 
   '@brillout/json-serializer@0.5.22': {}
-
-  '@brillout/json-serializer@0.5.25': {}
 
   '@brillout/json-serializer@0.5.27': {}
 

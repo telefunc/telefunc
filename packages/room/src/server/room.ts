@@ -412,7 +412,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
   detachStub(stub: RoomStub): void {
     this.stubs.delete(stub)
     stub.endTail()
-    stub.endReplayHolds()
+    stub.replay.dropHolds()
     this.replica.detachStub(this, stub)
     for (const id of stub.heldMembers()) {
       this.stubOf.delete(id)

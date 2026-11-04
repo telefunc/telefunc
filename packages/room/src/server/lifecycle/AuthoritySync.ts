@@ -3,8 +3,7 @@ export type { AuthorityChange, AuthoritySyncOptions, AuthoritySyncOwner }
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { raceTimeout } from '../../utils/raceTimeout.js'
-import { unrefTimer } from '../../utils/unrefTimer.js'
-import { createDeferred } from 'telefunc/__internal'
+import { createDeferred, unrefTimer } from 'telefunc/__internal'
 import { getRoomPlane } from '../../backend/plane.js'
 import { ROOM_HORIZON_MS, ROOM_META_REPAIR_MS } from '../constants.js'
 import type { RoomIncarnation } from '../protocol.js'

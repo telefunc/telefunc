@@ -1,6 +1,6 @@
 export { GossipOutbox }
 
-import { Fifo } from '../utils/Fifo.js'
+import { Fifo } from 'telefunc/__internal'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getRoomPlane } from '../backend/plane.js'
 import { ROOM_DEMAND_PAGE_ENTRIES, ROOM_GOSSIP_IN_FLIGHT_MAX } from './constants.js'

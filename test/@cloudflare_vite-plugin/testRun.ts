@@ -41,6 +41,8 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testResubscribe()
   testRefusedPresence()
   testRefusedDelivery()
+  testColdPublish()
+  testPublishOrder()
   testRoom()
   // Under `vite dev`, @cloudflare/vite-plugin awaits each Durable Object call apart, so one stub's calls can run out of order.
   if (!isDev) testRoomOrderAcrossSessions()
@@ -633,4 +635,43 @@ async function fullPageReload() {
   await page.goto(getServerUrl() + '/')
   await testCounter()
   await page.goto(getServerUrl() + '/todo')
+}
+
+function testColdPublish() {
+  test("Broadcast: publishes past the buffer's budget while the key's first presence is written all arrive", async () => {
+    await page.goto(getServerUrl() + '/cold-publish')
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    await page.click('#cold-publish')
+    await autoRetry(
+      async () => {
+        const result = JSON.parse((await page.textContent('#cold-publish-result')) ?? 'null')
+        expect(result).deep.equal({ first: 'resolved', received: ['a', 'b'] })
+      },
+      { timeout: 10_000 },
+    )
+  })
+}
+
+function testPublishOrder() {
+  test('Broadcast: an unawaited loop of publishes to one key gets its seq, and arrives, in call order', async () => {
+    await page.goto(getServerUrl() + '/publish-order')
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    await page.click('#publish-order')
+    await autoRetry(
+      async () => {
+        const result = JSON.parse((await page.textContent('#publish-order-result')) ?? 'null')
+        expect(result).deep.equal({
+          received: 200,
+          seqInCallOrder: true,
+          arrivedInSeqOrder: true,
+          arrivedInCallOrder: true,
+        })
+      },
+      { timeout: 30_000 },
+    )
+  })
 }

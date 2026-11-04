@@ -23,7 +23,8 @@ import { testSlowLink } from './pages/channel/slow-link-e2e-test'
 /** `additionalTimeout`: how much longer than test-e2e's default a test of the lane may take. */
 function runPlayground(
   cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm preview:deno' | 'pnpm preview:redis',
-  // A room test waits out a 60 s timeout: the acknowledgement timeout, or the reconnectTimeout a closed tab gets on SSE.
+  // A test waits out a 60 s timeout: a room's acknowledgement timeout, the reconnectTimeout a closed tab gets on SSE, or
+  // a stream's pause lapsing.
   additionalTimeout = 40_000,
 ) {
   setServerRuntime(cmd === 'pnpm preview:bun' ? 'bun' : cmd === 'pnpm preview:deno' ? 'deno' : 'node')

@@ -57,6 +57,8 @@ Controls how streaming values are delivered over HTTP.
 - **Switch to `'sse-inline'`** if a proxy or CDN buffers binary HTTP responses but passes SSE events through without buffering.
 - **Use `'channel'`** when you want streamed values to reconnect automatically after a dropped connection (just as <Link href="/channel">Telefunc channels</Link> do).
 
+> With `'binary-inline'` and `'sse-inline'`, a stream the page isn't reading is paused by a request from the page, which has to reach the server holding the response (<Link href="/stream/scale#sticky-sessions">sticky sessions</Link>). Where it can't, and on Cloudflare Workers, the page instead buffers that stream's chunks until it reads them. A pause lasts only while the page keeps renewing it: if the page loses that server, the stream flows again within a minute and the page buffers it.
+
 
 ## Channel transport
 

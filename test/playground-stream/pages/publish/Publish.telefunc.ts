@@ -2,6 +2,8 @@ export {
   onTextBroadcast,
   onBroadcastApi,
   onBroadcastBacklog,
+  onInMemoryPublishes,
+  onBroadcastBurstThenClose,
   onBinaryBroadcastPair,
   onBinaryBroadcast,
   onBroadcastShieldClient,
@@ -168,8 +170,7 @@ async function onBroadcastAnswers() {
 async function onBroadcastAnsweringLoop() {
   const loop = new BroadcastChannel<number>({ key: `room:loop-test:${crypto.randomUUID()}` })
   let answering = true
-  loop.subscribe(async (n) => {
-    await Promise.resolve()
+  loop.subscribe((n) => {
     if (answering) void loop.publish(n + 1)
   })
   void loop.publish(0)
@@ -501,22 +502,28 @@ async function onBroadcastSeqAcrossSubscribers() {
   return seqs
 }
 
-/** A text subscriber holds a key. Past the 1,024 in-memory deliveries of one turn, so they queue, the key gets text,
- *  binary and text; a second subscriber then subscribes to both kinds, and the key gets text once more. What it got. */
+/** A text subscriber holds a key. A listener's in-memory publishes queue: it gives the key text, binary and text, a second
+ *  subscriber then subscribes to both kinds, and the key gets text once more. What it got. */
 async function onBroadcastJoinWhileQueued() {
   const key = `room:join-queued:${crypto.randomUUID()}`
+  const trigger = `room:join-trigger:${crypto.randomUUID()}`
   const offs = [Broadcast.subscribe(key, () => {})]
   // Resolves once the subscription is established, so the readiness gate holds none of the publishes below.
   await Broadcast.publish(key, 't0')
-  for (let i = 0; i < 1_100; i++) void Broadcast.publish(`room:busy:${crypto.randomUUID()}`, i)
-  const queued = [
-    Broadcast.publish(key, 't1'),
-    Broadcast.publishBinary(key, new Uint8Array([2])),
-    Broadcast.publish(key, 't3'),
-  ]
   const received: Array<string | number> = []
-  offs.push(Broadcast.subscribe<string>(key, (message) => received.push(message)))
-  offs.push(Broadcast.subscribeBinary(key, (data) => received.push(data[0]!)))
+  const queued: Array<ReturnType<typeof Broadcast.publish>> = []
+  offs.push(
+    Broadcast.subscribe(trigger, () => {
+      queued.push(
+        Broadcast.publish(key, 't1'),
+        Broadcast.publishBinary(key, new Uint8Array([2])),
+        Broadcast.publish(key, 't3'),
+      )
+      offs.push(Broadcast.subscribe<string>(key, (message) => received.push(message)))
+      offs.push(Broadcast.subscribeBinary(key, (data) => received.push(data[0]!)))
+    }),
+  )
+  await Broadcast.publish(trigger, 'go')
   await Promise.all(queued)
   await Broadcast.publish(key, 't4')
   for (const off of offs) off()
@@ -674,12 +681,13 @@ async function onBroadcastApi() {
   }
 }
 
-/** A busy key: `flood()` publishes 2 KiB messages without awaiting them. With `slow`, a server loop over the key's
- *  messages takes 20 ms per message, as the page's slow loop does. */
-async function onBroadcastBacklog(slow: boolean) {
+/** A busy key: `flood()` publishes 2 KiB messages without awaiting them. A `'slow'` server loop over the key's
+ *  messages takes 20 ms per message, as the page's slow loop does; a `'held'` one holds its first message until the
+ *  key's channel closes. */
+async function onBroadcastBacklog(serverLoopKind: 'slow' | 'held' | null) {
   const room = new BroadcastChannel<string>({ key: `room:backlog:${crypto.randomUUID()}` })
   const payload = 'x'.repeat(2048)
-  const serverLoop = slow ? readSlowly(room) : null
+  const serverLoop = serverLoopKind === null ? null : readSlowly(room, serverLoopKind)
   return {
     room,
     flood: async (count: number) => {
@@ -689,15 +697,136 @@ async function onBroadcastBacklog(slow: boolean) {
       for (let i = 0; i < count; i++) await room.publish(`${i}:${payload}`)
     },
     serverLoop: () => serverLoop,
+    close: async () => {
+      await room.close()
+    },
   }
 }
 
-async function readSlowly(room: BroadcastChannel<string>) {
+/** A job publishes a burst and closes its broadcast in one task, while a server loop over it takes 20 ms per message. */
+async function onBroadcastBurstThenClose() {
+  const room = new BroadcastChannel<string>({ key: `room:burst:${crypto.randomUUID()}` })
+  const serverLoop = readSlowly(room, 'slow')
+  await room.publish('start')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  for (let i = 0; i < 1000; i++) await room.publish(`${i}:${'x'.repeat(2048)}`)
+  await room.close()
+  return serverLoop
+}
+
+/** The in-memory adapter: a loop of publishes, a listener publishing a batch, then one big message, producers awaiting
+ *  each publish to one key, and a listener answering its own key. */
+async function onInMemoryPublishes() {
+  const id = crypto.randomUUID()
+  const seen: number[] = []
+  const stopLoop = Broadcast.subscribe<number>(`loop:${id}`, (n) => void seen.push(n))
+  const stopAnswer = Broadcast.subscribe(`loop:${id}`, () => void Broadcast.publish(`answers:${id}`, 'seen'))
+  for (let i = 0; i < 3000; i++) void Broadcast.publish(`loop:${id}`, i)
+  const loop = { deliveredInLoop: seen.length, inOrder: seen.every((n, i) => n === i) }
+  stopLoop()
+  stopAnswer()
+
+  const batch: number[] = []
+  const stopBatch = Broadcast.subscribeBinary(`batch:${id}`, (data) => void batch.push(data[0]! * 256 + data[1]!))
+  const sends: unknown[] = []
+  const stopStart = Broadcast.subscribe(`start:${id}`, () => {
+    const bytes = new Uint8Array(64 * 1024)
+    for (let i = 0; i < 2000; i++) {
+      bytes[0] = i >> 8
+      bytes[1] = i & 255
+      sends.push(Broadcast.publishBinary(`batch:${id}`, bytes))
+    }
+  })
+  await Broadcast.publish(`start:${id}`, 'go')
+  const results = await Promise.allSettled(sends)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  const rejected = results.filter((r) => r.status === 'rejected')
+  const firstRejected = results.findIndex((r) => r.status === 'rejected')
+  const listenerBatch = {
+    delivered: batch.length,
+    rejected: rejected.length,
+    errors: [...new Set(rejected.map((r) => (r as PromiseRejectedResult).reason.name))],
+    admittedInOrder: firstRejected === batch.length && batch.every((n, i) => n === i),
+  }
+  stopBatch()
+  stopStart()
+
+  let aloneBytes = 0
+  let alone: unknown
+  const stopAlone = Broadcast.subscribeBinary(`alone:${id}`, (data) => void (aloneBytes = data.byteLength))
+  const stopAloneStart = Broadcast.subscribe(`alone-start:${id}`, () => {
+    alone = Broadcast.publishBinary(`alone:${id}`, new Uint8Array(8 * 1024 * 1024))
+  })
+  await Broadcast.publish(`alone-start:${id}`, 'go')
+  await alone
+  stopAlone()
+  stopAloneStart()
+
+  let producerMessages = 0
+  const stopProducers = Broadcast.subscribe(`producers:${id}`, () => void producerMessages++)
+  const payload = 'x'.repeat(400 * 1024)
+  const producerRuns = await Promise.allSettled(
+    Array.from({ length: 4 }, async () => {
+      for (let i = 0; i < 2000; i++) await Broadcast.publish(`producers:${id}`, payload)
+    }),
+  )
+  stopProducers()
+  const producers = {
+    received: producerMessages,
+    rejected: producerRuns.filter((r) => r.status === 'rejected').length,
+  }
+
+  // Each tick publishes 4,096 messages, unawaited, each in a run of its own: all of it arrives by the next tick.
+  let timerDelivered = 0
+  let timerSent = 0
+  let peakWaiting = 0
+  const stopTimerProducer = Broadcast.subscribe(`timer:${id}`, () => void timerDelivered++)
+  for (let tick = 0; tick < 30; tick++) {
+    await new Promise((resolve) => setTimeout(resolve, 1))
+    peakWaiting = Math.max(peakWaiting, timerSent - timerDelivered)
+    for (let i = 0; i < 4096; i++) {
+      await null
+      void Broadcast.publish(`timer:${id}`, i)
+      timerSent++
+    }
+  }
+  await new Promise((resolve) => setTimeout(resolve, 1))
+  stopTimerProducer()
+  const timerProducer = { sent: timerSent, peakWaiting, delivered: timerDelivered }
+
+  return {
+    loop,
+    listenerBatch,
+    aloneBytes,
+    producers,
+    timerProducer,
+    timerFiredMidChain: await timerFiresMidChain(`chain:${id}`),
+  }
+}
+
+/** A listener answers itself 20,000 times: whether a timer fired before it was done. */
+async function timerFiresMidChain(key: string): Promise<boolean> {
+  let answers = 0
+  let answersWhenTimerFired = -1
+  setTimeout(() => (answersWhenTimerFired = answers), 0)
+  const finished = new Promise<void>((resolve) => {
+    Broadcast.subscribe(key, () => {
+      if (++answers === 20_000) resolve()
+      else void Broadcast.publish(key, 'again')
+    })
+  })
+  void Broadcast.publish(key, 'start')
+  await finished
+  return answersWhenTimerFired >= 0 && answersWhenTimerFired < 20_000
+}
+
+async function readSlowly(room: BroadcastChannel<string>, kind: 'slow' | 'held') {
   let received = 0
   try {
     for await (const _ of room.messages()) {
       received++
-      await new Promise((resolve) => setTimeout(resolve, 20))
+      if (kind === 'slow') await new Promise((resolve) => setTimeout(resolve, 20))
+      else if (received === 1) await room.closed.catch(() => {})
     }
     return { received, error: null }
   } catch (err) {

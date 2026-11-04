@@ -10,10 +10,14 @@ export { MAX_CHANNELS_PER_CONNECTION } from '../../wire-protocol/constants.js'
 
 // Utilities the add-ons share with core.
 export { createDeferred, type Deferred } from '../../utils/createDeferred.js'
+export { Fifo } from '../../utils/Fifo.js'
 export { getOrCreate } from '../../utils/getOrCreate.js'
 export { isObject } from '../../utils/isObject.js'
 export { Listeners } from '../../utils/Listeners.js'
 export { markHandled } from '../../utils/markHandled.js'
+export { nextTurn } from '../../wire-protocol/flowControl/macrotaskYield.js'
+export { unrefTimer } from '../../utils/unrefTimer.js'
+export { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 
 // An add-on that drives a page's channel ends: Room's stubs and its client.
 export type { ServerBroadcastEnd, ClientBroadcast }

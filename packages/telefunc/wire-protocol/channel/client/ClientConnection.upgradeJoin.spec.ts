@@ -38,10 +38,8 @@ function createChannel(dispatched: DecodedFrame[]) {
     _onEnded() {},
     _attach: {
       state: () => ({}),
-      onProbeAnswered() {},
+      receiveCredit: { onProbeAnswered() {}, acknowledge() {}, answered() {} },
       fitReplays() {},
-      acknowledge() {},
-      answered() {},
       onBatched() {},
       onUpgradeJoined() {},
     },

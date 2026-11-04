@@ -2,11 +2,9 @@ export { roomMessages }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { ChannelOverflowError } from 'telefunc/client'
-import { untether, createDeferred, type ChannelPublishInfo } from 'telefunc/__internal'
+import { untether, createDeferred, type ChannelPublishInfo, Fifo, utf8ByteLength } from 'telefunc/__internal'
 import type { BinaryFrameInfo, RoomMessage, Sender } from '../types.js'
 import { senderSnapshot } from '../shared/arguments.js'
-import { Fifo } from '../utils/Fifo.js'
-import { utf8ByteLength } from '../utils/utf8ByteLength.js'
 
 type Source = {
   subscribe(

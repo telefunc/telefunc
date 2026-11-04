@@ -1375,9 +1375,20 @@ function testChannelApi() {
     await autoRetry(async () => {
       const results = JSON.parse((await page.textContent('#channel-iterator-ack-result'))!)
       expect(results.length).toBe(16)
-      for (let i = 0; i < 16; i += 2) {
-        expect(results[i]).deep.equal({ ack: 'undefined', control: 'undefined', answers: 0, open: true })
-        expect(results[i + 1]).deep.equal({ ack: 'answer', control: 'undefined', answers: 1, open: true })
+      const cases = results.map(({ direction, binary, mode, answer }: any) => [direction, binary, mode, answer].join())
+      expect(new Set(cases).size).toBe(16)
+      for (const result of results) {
+        const { direction, binary, mode, answer } = result
+        expect(result).deep.equal({
+          direction,
+          binary,
+          mode,
+          answer,
+          ack: answer ? 'answer' : 'undefined',
+          control: 'undefined',
+          answers: answer ? 1 : 0,
+          open: true,
+        })
       }
     })
   })
@@ -1433,6 +1444,32 @@ function testChannelApi() {
         expect(error).toContain('ChannelOverflowError')
         expect(error).toContain('maxPendingBytes')
         expect(error).toContain('maxPendingAcks')
+      }
+    })
+  })
+
+  test("channel: a binary listener can't see or change another frame's or another listener's bytes, alone or beside others", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-own-bytes')
+    await autoRetry(async () => {
+      expect(JSON.parse((await page.textContent('#channel-own-bytes-result')) || '{}')).deep.equal({
+        alone: 0,
+        beside: 0,
+      })
+      const state = await getCleanupState()
+      expect(state.ownBytes_alone).toBe('0')
+      expect(state.ownBytes_beside).toBe('0')
+    })
+  })
+
+  test('channel: multi-byte text that fits maxPendingBytes to the byte is accepted, and one byte more closes the channel', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-at-limit')
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      for (const kind of ['twoBytes', 'threeBytes', 'fourBytes']) {
+        expect(state[`atLimit_${kind}_fits`]).toBe('accepted')
+        expect(state[`atLimit_${kind}_over`]).toContain('maxPendingBytes')
       }
     })
   })
