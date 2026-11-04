@@ -445,14 +445,18 @@ function testStreaming() {
 
   if (isInline) {
     /** The page's next stream-flow requests are counted, and the picked ones answered as a load balancer's other instance would. */
-    const answerFlowRequests = (lost: 'second' | 'all') =>
+    const answerFlowRequests = (lost: 'second' | 'all' | 'first answer, second') =>
       page.evaluate((lost) => {
         const { fetch } = window
         const w = window as any
         w.__flowRequests = 0
         window.fetch = (url, init) => {
           if (!String(url).includes('_telefunc=flow')) return fetch(url, init)
-          const isLost = ++w.__flowRequests === 2 || lost === 'all'
+          const request = ++w.__flowRequests
+          if (request === 1 && lost === 'first answer, second') {
+            return fetch(url, init).then(() => Promise.reject(new TypeError('Failed to fetch')))
+          }
+          const isLost = request === 2 || lost === 'all'
           return isLost ? Promise.resolve(new Response('not found')) : fetch(url, init)
         }
       }, lost)
@@ -469,6 +473,20 @@ function testStreaming() {
         timeout: 60_000,
       })
       expect(await flowRequests()).greaterThanOrEqual(3)
+      await page.click('#test-two-endless-abort')
+    })
+
+    test('streaming: a pause whose answer is lost, before another instance answers, still lets the stream go on', async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await answerFlowRequests('first answer, second')
+      await startTwoEndless()
+      await autoRetry(async () => expect(await flowRequests()).greaterThanOrEqual(2), { timeout: 60_000 })
+      const { key } = await twoEndlessProgress()
+      const stopped = Number((await getCleanupState())[`second_${key}`])
+      await page.click('#test-two-endless-read-second')
+      await autoRetry(async () => expect((await twoEndlessProgress()).second).greaterThanOrEqual(stopped + 8 * 16), {
+        timeout: 30_000,
+      })
       await page.click('#test-two-endless-abort')
     })
 

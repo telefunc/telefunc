@@ -25,7 +25,7 @@ class StreamFlowSender {
   private sending = false
   private stopped = false
   private acknowledged = ''
-  private serverHoldsPause = false
+  private serverMayHoldPause = false
   private retry: { timer: ReturnType<typeof setTimeout>; resume: () => void } | null = null
 
   constructor(id: string, callContext: CallContext) {
@@ -73,15 +73,20 @@ class StreamFlowSender {
       if (state === this.acknowledged) break
       const pausing = this.paused.size > 0
       const found = await this.post(state)
+      if (found === null && pausing) this.serverMayHoldPause = true
       if (found) {
         this.acknowledged = state
-        this.serverHoldsPause = pausing
+        this.serverMayHoldPause = pausing
         retries = 0
-      } else if ((found === false && !this.serverHoldsPause) || ++retries > MAX_RETRIES) {
+      } else if (found === false && !this.serverMayHoldPause) {
         // This instance doesn't hold the response and no pause waits to be undone: the page buffers what comes.
         this.stop()
+      } else if (++retries > MAX_RETRIES) {
+        // A pause that may be held can't be undone, so a read fails rather than waits forever.
+        if (this.serverMayHoldPause) this.callContext.abortController.abort()
+        this.stop()
       } else {
-        // A pause reached the server, so its resume must too: a load balancer may send the next request elsewhere.
+        // A pause may have reached the server, so its resume must too: the next request may land elsewhere.
         await new Promise<void>((resume) => {
           this.retry = { timer: setTimeout(resume, RETRY_MS), resume }
         })
