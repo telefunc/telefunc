@@ -43,6 +43,7 @@ export {
   onChannelBudgets,
   onChannelOfflineBudgets,
   onChannelAtLimit,
+  onChannelOwnBytes,
   onChannelCreditFailure,
   onChannelAckOwnership,
   onChannelApiProbe,
@@ -53,6 +54,7 @@ export {
 }
 
 import { prepareIteratorAck, sendIteratorAck, type IteratorAckOptions } from './iteratorAckProbe'
+import { sendOwnBytes, listenOwnBytesAlone, listenOwnBytesBeside } from './ownBytesProbe'
 
 import { Channel, Abort, BroadcastChannel, config } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
@@ -961,6 +963,16 @@ async function onChannelAtLimit() {
   ])
   config.channel = original
   return channels
+}
+
+/** cleanupState: ownBytes_<alone|beside> = how many frames from the page weren't its listeners' own. */
+async function onChannelOwnBytes() {
+  const alone = new Channel<never, never>()
+  const beside = new Channel<never, never>()
+  listenOwnBytesAlone(alone, (notOwn) => void (cleanupState.ownBytes_alone = String(notOwn)))
+  listenOwnBytesBeside(beside, (notOwn) => void (cleanupState.ownBytes_beside = String(notOwn)))
+  for (const ch of [alone, beside]) ch.onOpen(() => void sendOwnBytes(ch))
+  return { alone: alone.client, beside: beside.client }
 }
 
 async function onChannelOfflineBudgets() {

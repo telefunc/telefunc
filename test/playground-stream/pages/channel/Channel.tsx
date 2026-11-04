@@ -1,6 +1,7 @@
 export { ChannelDemo }
 
 import { prepareIteratorAck, sendIteratorAck, type IteratorAckOptions } from './iteratorAckProbe'
+import { sendOwnBytes, listenOwnBytesAlone, listenOwnBytesBeside } from './ownBytesProbe'
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Abort as TelefuncAbort, abort, close, ConnectionError, withContext } from 'telefunc/client'
@@ -48,6 +49,7 @@ import {
   onChannelOpenHello,
   onChannelBudgets,
   onChannelAtLimit,
+  onChannelOwnBytes,
   onChannelOfflineBudgets,
   onChannelCreditFailure,
   onChannelAckOwnership,
@@ -1188,6 +1190,17 @@ function ChannelDemo() {
     atLimitChannels.current = await openChannel(onChannelAtLimit)
   }, [])
 
+  const testOwnBytes = useCallback(async () => {
+    const { alone, beside } = await openChannel(onChannelOwnBytes)
+    const report = (notOwn: Record<string, number>) => {
+      const output = document.querySelector('#channel-own-bytes-result')!
+      output.textContent = JSON.stringify({ ...JSON.parse(output.textContent || '{}'), ...notOwn })
+    }
+    listenOwnBytesAlone(alone, (notOwn) => report({ alone: notOwn }))
+    listenOwnBytesBeside(beside, (notOwn) => report({ beside: notOwn }))
+    await Promise.all([sendOwnBytes(alone), sendOwnBytes(beside)])
+  }, [])
+
   const testOfflineBudgets = useCallback(async () => {
     const { bytes, acks } = await openChannel(onChannelOfflineBudgets)
     for (const channel of [bytes, acks]) channel.listen(() => new Promise<void>((done) => setTimeout(done, 1000)))
@@ -1798,6 +1811,10 @@ function ChannelDemo() {
           <button id="channel-test-at-limit" onClick={testAtLimit}>
             Test a send of multi-byte text at the byte budget
           </button>
+          <button id="channel-test-own-bytes" onClick={testOwnBytes}>
+            Test that each binary listener gets bytes of its own
+          </button>
+          <output id="channel-own-bytes-result" />
           <button id="channel-test-offline-budgets" onClick={testOfflineBudgets}>
             Test send budgets on sends made before the page attaches
           </button>
