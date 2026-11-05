@@ -1,7 +1,8 @@
 export { Features }
 
 import React from 'react'
-import { Emoji } from '@brillout/docpress'
+import iconShield from './shield.svg'
+import iconTypescript from './typescript.svg'
 import './Features.css'
 
 function Features() {
@@ -11,16 +12,14 @@ function Features() {
       style={{
         display: 'grid',
         gridGap: 30,
-        paddingLeft: 'var(--main-view-padding)',
-        paddingRight: 'var(--main-view-padding)',
+        paddingLeft: 20,
+        paddingRight: 20,
         margin: 'auto',
         maxWidth: 1000,
       }}
     >
       <div>
-        <h2>
-          <Emoji name="dizzy" /> Simple
-        </h2>
+        <h2>💫 Simple</h2>
         <>
           <p>
             With Telefunc, you get a <b>simple frontend-backend relationship</b>: it's just a set of remote functions.
@@ -32,7 +31,7 @@ function Features() {
       </div>
       <div>
         <h2>
-          <Emoji name="shield" /> Permissions
+          <EmojiImg src={iconShield} /> Permissions
         </h2>
         <>
           <p>
@@ -42,9 +41,7 @@ function Features() {
         </>
       </div>
       <div>
-        <h2>
-          <Emoji name="plug" /> Any Stack
-        </h2>
+        <h2>🔌 Any Stack</h2>
         <>
           <p>
             Telefunc supports <b>Next.js</b>, <b>Nuxt</b>, <b>Vite</b>, <b>Vike</b>, <b>React Native</b>,{' '}
@@ -53,9 +50,7 @@ function Features() {
         </>
       </div>
       <div>
-        <h2>
-          <Emoji name="high-voltage" /> Performance
-        </h2>
+        <h2>⚡ Performance</h2>
         <>
           <p>
             The frontend can directly tap into the <b>full power of the server</b>. Use tailored SQL/ORM queries for
@@ -64,9 +59,7 @@ function Features() {
         </>
       </div>
       <div>
-        <h2>
-          <Emoji name="red-circle" /> Real-time &amp; streaming
-        </h2>
+        <h2>⭕ Real-time &amp; streaming</h2>
         <>
           <p>
             Telefunctions can <b>stream values</b> — AI tokens, progress, file uploads &amp; downloads — and power{' '}
@@ -76,7 +69,7 @@ function Features() {
       </div>
       <div>
         <h2>
-          <Emoji name="typescript" /> TypeScript
+          <EmojiImg src={iconTypescript} /> TypeScript
         </h2>
         <>
           <p>
@@ -89,9 +82,7 @@ function Features() {
         </>
       </div>
       <div>
-        <h2>
-          <Emoji name="gem-stone" /> Rock-solid
-        </h2>
+        <h2>💎 Rock-solid</h2>
         <>
           <p>
             The source code of Telefunc has <b>no known bug</b> (bugs are fixed swiftly) and every release is assailed
@@ -101,4 +92,9 @@ function Features() {
       </div>
     </div>
   )
+}
+
+// Emojis that render poorly as text
+function EmojiImg({ src }: { src: string }) {
+  return <img src={src} alt="" style={{ verticalAlign: 'text-top', width: '1.15em' }} />
 }
