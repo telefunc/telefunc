@@ -6,7 +6,7 @@ import type {
   TypeContract,
   ServerReplacerContext,
   ServerReviverContext,
-} from '../../wire-protocol/types.js'
+} from '../../wire-protocol/values/types.js'
 
 type TelefuncServerExtension = {
   name: string

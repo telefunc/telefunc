@@ -1,7 +1,7 @@
 export { testRun, runPlayground }
 
 import { page, test, expect, run, getServerUrl, autoRetry } from '@brillout/test-e2e'
-import { navigate } from './e2e-utils'
+import { navigate, setServerRuntime } from './e2e-utils'
 import { testCounter } from '../utils'
 import { testFileUpload } from './pages/file-upload/e2e-test'
 import { testFileDownload } from './pages/file-download/e2e-test'
@@ -14,11 +14,17 @@ import { testStreamToServer } from './pages/stream-to-server/e2e-test'
 import { testLiveQuery } from './pages/live-query/e2e-test'
 import { testRxjs } from './pages/rxjs/e2e-test'
 import { testPublish } from './pages/publish/e2e-test'
+import { testRedisReconnect } from './pages/publish/redis-e2e-test'
 import { testRefIdentity } from './pages/ref-identity/e2e-test'
 import { testUpgrade } from './pages/channel/upgrade-e2e-test'
+import { testWire } from './pages/channel/wire-e2e-test'
+import { testSlowLink } from './pages/channel/slow-link-e2e-test'
 
-function runPlayground(cmd: 'pnpm dev' | 'pnpm preview') {
+function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm preview:deno') {
+  setServerRuntime(cmd === 'pnpm preview:bun' ? 'bun' : cmd === 'pnpm preview:deno' ? 'deno' : 'node')
   run(cmd, {
+    // A stream-flow pause takes 60 s to lapse, past the 60 s a test gets outside CI.
+    additionalTimeout: 30_000,
     // `pnpm preview` runs srvx (prints `Listening on:`); `pnpm dev` is `vike dev` on vite
     // (prints `Local:` + `http://localhost:3000`). Neither matches test-e2e's default
     // "Server running at" / "Accepting connections at" matcher, so the framework times
@@ -35,6 +41,9 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview') {
         log.logText.includes('the server responded with a status of 422') ||
         log.logText.includes('[telefunc:channel-error]') ||
         log.logText.includes('Error: server-listener-bug') ||
+        log.logText.includes('TypeError: Converting circular structure to JSON') ||
+        // Bun's wording of the same error.
+        log.logText.includes('TypeError: JSON.stringify cannot serialize cyclic structures') ||
         log.logText.includes('Unexpected generator error') ||
         log.logText.includes('[telefunc:rxjs]') ||
         log.logText.includes('Unhandled rxjs error') ||
@@ -47,14 +56,18 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview') {
         log.logText.includes('Telefunc call cancelled') ||
         log.logText.includes('ERR_INTERNET_DISCONNECTED') ||
         log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
+        // A test dropped an SSE stream's connection (wire-sockets.ts).
+        log.logText.includes('ERR_INCOMPLETE_CHUNKED_ENCODING') ||
         log.logText.includes('Failed to load resource: the server responded with a status of 403') ||
+        // A test's page change ends its SSE wire, and the server refuses a POST still in flight for it.
+        log.logText.includes('Failed to load resource: the server responded with a status of 400') ||
         (log.logText.includes('WebSocket connection to') && log.logText.includes('failed'))
       )
     },
   })
 }
 
-function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
+function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm preview:deno') {
   runPlayground(cmd)
   const isDev = cmd === 'pnpm dev'
 
@@ -81,19 +94,24 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
 
   testChannel(isDev)
 
+  testWire(isDev)
+
+  testSlowLink(isDev)
+
   // Runs in every variant: asserts exactly-once commit where the env upgrades (['sse','ws']),
   // and zero commits everywhere else — each non-upgrading variant doubles as the control.
   testUpgrade()
 
-  testFunction()
+  testFunction(isDev)
 
-  testStreamToServer()
+  testStreamToServer(isDev)
 
   testLiveQuery()
 
   testRxjs()
 
-  testPublish()
+  testPublish(isDev)
+  if (process.env.REDIS_URL) testRedisReconnect()
 
   testRefIdentity()
 }

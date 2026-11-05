@@ -68,12 +68,24 @@ async function onSharedSubject() {
   return sharedSubject
 }
 
+// Runs `emit` once the client's subscription reached the server: a Subject drops what it emits with no subscriber.
+function onceSubscribed<T>(subject: Subject<T>, emit: () => void) {
+  const waiting = setInterval(() => {
+    if (!subject.observed) return
+    clearInterval(waiting)
+    emit()
+  }, 10)
+  const { onClose } = getContext()
+  onClose(() => clearInterval(waiting))
+}
+
 // Server-initiated complete
 async function onSubjectServerComplete() {
   const subject = new Subject<string>()
-  // Emit after the wire is established (client needs time to subscribe)
-  setTimeout(() => subject.next('before-complete'), 200)
-  setTimeout(() => subject.complete(), 700)
+  onceSubscribed(subject, () => {
+    subject.next('before-complete')
+    setTimeout(() => subject.complete(), 500)
+  })
   return subject
 }
 
@@ -115,15 +127,14 @@ async function onSubjectEcho() {
 
 async function onSubjectMultiSubscribe() {
   const subject = new Subject<number>()
-  // Delay start so the wire's MSG.SUBSCRIBE roundtrip completes first
-  setTimeout(() => {
+  onceSubscribed(subject, () => {
     interval(300)
       .pipe(take(3))
       .subscribe({
         next: (i) => subject.next(i + 1),
         complete: () => subject.complete(),
       })
-  }, 200)
+  })
   return subject
 }
 
@@ -145,8 +156,10 @@ async function onObservableServerError() {
 // Server returns a Subject, emits one value, then errors it.
 async function onSubjectServerError() {
   const subject = new Subject<string>()
-  setTimeout(() => subject.next('before-error'), 200)
-  setTimeout(() => subject.error(new Error('server-side-error')), 500)
+  onceSubscribed(subject, () => {
+    subject.next('before-error')
+    setTimeout(() => subject.error(new Error('server-side-error')), 300)
+  })
   return subject
 }
 

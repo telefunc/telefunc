@@ -1,14 +1,18 @@
 export { onBug }
 export { callBugListeners }
 
-const bugListeners: ((err: unknown) => void)[] = []
+import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+
+const globalObject = getGlobalObject<{ bugListeners: ((err: unknown) => void)[] }>('onBug.ts', {
+  bugListeners: [],
+})
 
 function onBug(listener: (err: unknown) => void) {
-  bugListeners.push(listener)
+  globalObject.bugListeners.push(listener)
 }
 
 function callBugListeners(err: unknown) {
-  bugListeners.forEach((listener) => {
+  globalObject.bugListeners.forEach((listener) => {
     listener(err)
   })
 }

@@ -1,13 +1,16 @@
 export { testFileDownload }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult } from '../../e2e-utils'
+import { navigate, getResult, serverRuntime } from '../../e2e-utils'
 
 const TEXT = 'Hello, file download!'
 const TEXT_BYTES = TEXT.length // ASCII — 1 byte per char
 const FIXED_LAST_MODIFIED = 1700000000000
 
 function testFileDownload() {
+  // Bun gives a File or Blob made with type 'text/plain' the type 'text/plain;charset=utf-8'.
+  const nativeType = serverRuntime() === 'bun' ? 'text/plain;charset=utf-8' : 'text/plain'
+
   test('file download: native File auto-materializes on client', async () => {
     await navigate(`${getServerUrl()}/file-download`)
 
@@ -18,7 +21,7 @@ function testFileDownload() {
         isFile: true,
         name: 'eager.txt',
         size: TEXT_BYTES,
-        type: 'text/plain',
+        type: nativeType,
         lastModified: FIXED_LAST_MODIFIED,
         content: TEXT,
       })
@@ -33,13 +36,14 @@ function testFileDownload() {
         isBlob: true,
         isFile: false,
         size: TEXT_BYTES,
-        type: 'text/plain',
+        type: nativeType,
         content: TEXT,
       })
     })
   })
 
   test('file download: nested native File/Blob materialize on client', async () => {
+    await navigate(`${getServerUrl()}/file-download`)
     await page.click('#test-eager-nested')
     await autoRetry(async () => {
       const result = await getResult('#download-result')
@@ -136,13 +140,13 @@ function testFileDownload() {
         isFile: true,
         name: 'wrapped.txt',
         size: TEXT_BYTES,
-        type: 'text/plain',
+        type: nativeType,
         lastModified: FIXED_LAST_MODIFIED,
         content: TEXT,
         // download(File) inherits all metadata from the wrapped native File — must match.
         dl: {
           name: 'wrapped.txt',
-          type: 'text/plain',
+          type: nativeType,
           size: TEXT_BYTES,
           lastModified: FIXED_LAST_MODIFIED,
         },
@@ -157,9 +161,9 @@ function testFileDownload() {
       expect(result).deep.equal({
         isBlob: true,
         size: TEXT_BYTES,
-        type: 'text/plain',
+        type: nativeType,
         content: TEXT,
-        dl: { type: 'text/plain', size: TEXT_BYTES },
+        dl: { type: nativeType, size: TEXT_BYTES },
       })
     })
   })

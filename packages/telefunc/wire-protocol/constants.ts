@@ -1,4 +1,5 @@
-import { assert } from '../utils/assert.js'
+import { assert, assertUsage } from '../utils/assert.js'
+import { isObject } from '../utils/isObject.js'
 
 export const SERIALIZER_PREFIX_FILE = '!TelefuncFile:'
 export const SERIALIZER_PREFIX_BLOB = '!TelefuncBlob:'
@@ -21,6 +22,8 @@ export const FN_SHIELD_ERROR_KEY = '__telefunc_fn_shield_error'
 /** 1-byte tag prefixed to every binary send in per-channel streaming pumps. */
 export const CHANNEL_PUMP_TAG_DATA = 0x00
 export const CHANNEL_PUMP_TAG_ERROR = 0x01
+/** The producer's end, before its close: a stream whose channel closes without it was cut short. */
+export const CHANNEL_PUMP_TAG_END = 0x02
 
 // ===== Streaming error frames =====
 
@@ -63,12 +66,44 @@ export const CHANNEL_TRANSPORT = {
 
 /** Transport for streamed values returned by telefunctions. */
 export type StreamTransport = (typeof STREAM_TRANSPORT)[keyof typeof STREAM_TRANSPORT]
+
+/** `config.stream` as the user set it, validated. */
+export function parseStreamConfig(val: unknown): { transport?: StreamTransport } {
+  assertUsage(isObject(val), 'config.stream should be an object')
+  const next: { transport?: StreamTransport } = {}
+  for (const [key, value] of Object.entries(val)) {
+    assertUsage(key === 'transport', `Unknown config.stream.${key}`)
+    assertUsage(
+      value === 'binary-inline' || value === 'sse-inline' || value === 'channel',
+      "`config.stream.transport` should be 'binary-inline', 'sse-inline', or 'channel'",
+    )
+    next.transport = value
+  }
+  return next
+}
 export const DEFAULT_STREAM_TRANSPORT: StreamTransport = STREAM_TRANSPORT.BINARY_INLINE
+
+/** The unread bytes of one inline stream at which the page asks the server to pause it, and half of it to resume. */
+export const STREAM_FLOW_PAUSE_BYTES = 1024 * 1024
+/** How long the server holds a pause the page hasn't renewed. */
+export const STREAM_FLOW_LEASE_MS = 60 * 1000
+/** The body of the server's answer when a stream-flow request names a live response. */
+export const STREAM_FLOW_FOUND = 'ok'
 
 /** Transport for persistent channels created with `new Channel()`. */
 export type ChannelTransport = (typeof CHANNEL_TRANSPORT)[keyof typeof CHANNEL_TRANSPORT]
 /** Ordered list of transports to use for channels. `['sse', 'ws']` starts on SSE and upgrades to WebSocket. */
 export type ChannelTransports = ChannelTransport[]
+
+/** `configPath`'s value as the transports it lists, validated; `example` is what its message suggests. */
+export function validateChannelTransports(val: unknown, configPath: string, example: string): ChannelTransports {
+  assertUsage(
+    Array.isArray(val) && val.length > 0 && val.every((v) => v === 'sse' || v === 'ws'),
+    `\`${configPath}\` should be an array of transports, e.g. ${example}`,
+  )
+  return val as ChannelTransports
+}
+
 /** Default transports the client tries, in order. Starts on SSE and upgrades to WS if available. */
 export const DEFAULT_CLIENT_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRANSPORT.SSE, CHANNEL_TRANSPORT.WS]
 /** Default transports enabled on the server. SSE only until a WS adapter calls enableChannelTransports. */
@@ -77,24 +112,38 @@ export const DEFAULT_SERVER_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRA
 /** How long to wait for a WebSocket probe ping/pong before giving up on the upgrade. */
 export const WS_PROBE_TIMEOUT_MS = 3_000
 
+/** The close code of a WebSocket its page closes for good. Not 1000 or 1001: a proxy that restarts closes its sockets
+ *  with 1001, as a browser does for a page that unloads, and the page will come back. */
+export const WS_CLOSE_PAGE_LEFT = 4000
+
+/** The version of the channel wire, which each channel request names in its URL. A server on another version refuses
+ *  the page's channels with `WS_CLOSE_WIRE_VERSION` or `STATUS_CODE_WIRE_VERSION`, which the page reports as a page to
+ *  reload: those two never change. */
+export const WIRE_VERSION = 1
+export const WS_CLOSE_WIRE_VERSION = 4001
+export const STATUS_CODE_WIRE_VERSION = 409
+
+/** A response header naming where the page's session lives (Cloudflare: its Durable Object's region). The page then
+ *  names it in its session URL, so its requests reach that session from wherever they come. */
+export const SESSION_HOME_HEADER = 'x-telefunc-home'
+
 /** How long to wait for the stream-request POST handshake ack on the SSE downstream
  *  before declaring the upstream wire dead and falling back to outbox+batch POSTs. */
 export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
 
 // ===== SSE -> WS upgrade =====
 
-/** Batch mode only: how long the barrier waits for a natural outbox drain before flushing it
- *  itself. On a duplex upstream the barrier is just the last frame pushed onto the open body. */
+/** Batch mode: the barrier's wait for an outbox drain, before it flushes it or, with a POST out, defers the upgrade. */
 export const UPGRADE_DRAIN_TIMEOUT_MS = 2_000
 
-/** Post-flip wait for both join limbs — FIN on the old wire, RECONCILED on the new one. */
+/** Post-flip wait: FIN on the old wire from the flip or its last delivery if later, RECONCILED on the new one. */
 export const UPGRADE_HANDOFF_JOIN_TIMEOUT_MS = 2_000
 
 /** Past either bound the upgrade is abandoned rather than letting a stalled join buffer forever. */
 export const UPGRADE_HANDOFF_BUFFER_BYTES = 8 * 1024 * 1024
 export const UPGRADE_HANDOFF_BUFFER_FRAMES = 4_096
 
-/** Wall-clock bound on one attempt, PREPARE to COMMITTED (see the assertion below). */
+/** Wall-clock bound on one attempt, PREPARE to flip (see the assertion below). */
 export const UPGRADE_ATTEMPT_TIMEOUT_MS = 10_000
 
 /** How long a staged, uncommitted upgrade may hold its session before the probe is dropped. */
@@ -103,9 +152,8 @@ export const UPGRADE_STAGE_TTL_MS = 10_000
 /** Longest channel id the wire will carry. */
 export const UPGRADE_MAX_ID_BYTES = 256
 
-/** Worst case for one open entry beyond its id: the key names, `"ix":65535`,
- *  `"lastSeq":4294967295`, `"initial":true` and the separator. */
-const RECONCILE_ENTRY_ENVELOPE_BYTES = 96
+/** Worst case for one open entry beyond its id: its other keys at their largest values, and the separator. */
+const RECONCILE_ENTRY_ENVELOPE_BYTES = 124
 
 /** Bounds what unauthenticated PREPARE frames can pin in memory before any of them commits. */
 export const UPGRADE_MAX_STAGED_RECORDS = 1_024
@@ -116,31 +164,28 @@ export const UPGRADE_MAX_STAGED_BYTES = 64 * 1024 * 1024
 /** Largest data-plane frame. Generous because it carries user payloads. */
 export const WIRE_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
 
-/** The single channels-per-connection limit: the client refuses to open past it, a barrier may
- *  list no more, and the control-frame byte cap below is derived from it. Every reconcile lists
- *  every channel, so this is also what a peer can make the server parse. (The wire could address
+/** The single channels-per-connection limit: the client refuses to open past it, a RECONCILE or barrier may
+ *  list no more, and the control-frame byte cap below is derived from it. (The wire could address
  *  65 536 — a u16 index — but that is exhaustion, not a working limit.) */
 export const MAX_CHANNELS_PER_CONNECTION = 4_096
 
-/** Largest control frame the server will decode, checked on the raw bytes. Derived, never picked:
+/** Largest wire control frame the server will decode, checked on the raw bytes. Derived, never picked:
  *  the biggest legitimate one lists every channel at the id cap, and a cap that refuses a legal
  *  frame is worse than no cap. */
-export const WIRE_MAX_CONN_CTRL_FRAME_BYTES =
+export const WIRE_MAX_CTRL_FRAME_BYTES =
   MAX_CHANNELS_PER_CONNECTION * (UPGRADE_MAX_ID_BYTES + RECONCILE_ENTRY_ENVELOPE_BYTES) + 1_024
 
-/** Per-connection ceiling on accepted-but-unprocessed frames: a peer that outruns its recv chain
- *  is terminated rather than allowed to queue without bound. */
-export const WIRE_MAX_RECV_BACKLOG_BYTES = 64 * 1024 * 1024
-export const WIRE_MAX_RECV_BACKLOG_FRAMES = 50_000
+/** A peer past its wire's allowance of unprocessed frames is terminated: this base, plus a window per channel. */
+export const WIRE_RECV_BACKLOG_BASE_BYTES = 64 * 1024 * 1024
+export const WIRE_RECV_BACKLOG_BASE_FRAMES = 50_000
+
+/** A server wire holding more for its peer than this base, plus each channel's allowance, is terminated as a loss. */
+export const WIRE_SEND_BACKLOG_BASE_BYTES = WIRE_MAX_RAW_FRAME_BYTES
 
 /** Largest SSE request metadata header the server will read off a POST body. */
 export const SSE_METADATA_MAX_BYTES = 64 * 1024
 
-/** How long the client waits for RECONCILED after sending a RECONCILE before declaring the
- *  wire dead and reconnecting. A downstream that stalls without erroring (bytes stop, no FIN)
- *  otherwise wedges the connection: the upstream keeps sending pings but `handlePongTimeout`
- *  is suppressed while reconciling, so nothing notices the dead wire and every call buffered
- *  behind the un-acked RECONCILE hangs. */
+/** How long a RECONCILE waits for RECONCILED, and the wire for any frame where tracked, before the page reconnects. */
 export const RECONCILE_TIMEOUT_MS = 10_000
 
 // An attempt outliving the reconcile watchdog would let the watchdog drop the wire mid-commit.
@@ -154,6 +199,15 @@ export const SSE_POST_IDLE_FLUSH_DELAY_MS = 50
 /** Idle window used to decide whether the next upstream SSE batch is post-idle. */
 export const SSE_FLUSH_THROTTLE_MS = 300
 
+/** A POST out past this plus its bytes at `SSE_POST_MIN_BYTES_PER_S` is lost; generous, as a proxy may hold bodies. */
+export const SSE_POST_FLOOR_MS = 30_000
+export const SSE_POST_MIN_BYTES_PER_S = 16 * 1024
+
+/** A batch POST is sized to take about this long, so what waits behind it, a window refresh or a RECONCILE, waits as long. */
+export const SSE_POST_TARGET_MS = 1500
+/** The smallest a batch POST's allowance gets, however slow the uplink. */
+export const SSE_POST_MIN_BYTES = 64 * 1024
+
 /** Latest-send deadline for SSE reconcile batches so immediate channel activity can coalesce into one POST. */
 export const SSE_RECONCILE_DEADLINE_MS = 10
 
@@ -164,14 +218,44 @@ export const CHANNEL_IDLE_TIMEOUT_MS = 60_000
 export const CHANNEL_PING_INTERVAL_MS = 5_000
 export const CHANNEL_PING_INTERVAL_MIN_MS = 1_000
 export const CHANNEL_CLOSE_TIMEOUT_MS = 5_000
-/** Per-channel replay buffer for text frames kept on the server for reconnect recovery. */
-export const CHANNEL_SERVER_REPLAY_BUFFER_BYTES = 256 * 1024
-/** Per-channel replay buffer for binary frames kept on the server for reconnect recovery. */
-export const CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES = 2 * 1024 * 1024
-/** Per-channel replay buffer for text frames advertised to the client for reconnect replay. */
-export const CHANNEL_CLIENT_REPLAY_BUFFER_BYTES = 1024 * 1024
-/** Per-channel replay buffer for binary frames advertised to the client for reconnect replay. */
-export const CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES = 2 * 1024 * 1024
+/** The longest delay a timer takes: past it, setTimeout fires at once. Bounds every duration a channel waits out. */
+export const TIMER_DELAY_MAX_MS = 2 ** 31 - 1
+
+// ===== WebSocket frames in pieces (see `pieces.ts`) =====
+
+/** A receiver acknowledges a frame over this size, or, where its peer holds data back, this many bytes of any frames. */
+export const WIRE_PIECES_ACK_BYTES = 16 * 1024
+/** The second of a frame's first two pieces with no rate measured: their arrivals' gap measures the rate. */
+export const WIRE_PROBE_PAIR_BYTES = 2 * 1024
+/** The most a WebSocket's first announced message carries: what a ping deadline carries on any link a PING crosses. */
+export const WIRE_PROBE_FIRST_BYTES = 64
+/** The least time a probe's measure takes: the coarsest clock a browser gives a page. */
+export const WIRE_PROBE_CLOCK_MS = 1
+/** A frame goes whole only if it would cross within a ping interval at the fastest measured rate divided by this. */
+export const WIRE_PIECE_RATE_MARGIN = 8
+/** The most bytes of the small frames one task sends that go in one message, which holds at most one data frame on a
+ *  page. A frame this size or larger goes alone. */
+export const WIRE_GATHER_BYTES = 16 * 1024
+/** An announced message may carry twice the one before it, or this many bytes whatever that carried. */
+export const WIRE_ANNOUNCED_MIN_BYTES = 8 * 1024
+/** A receiver waits this many times as long for the next announced message as it takes at the last one's rate. */
+export const WIRE_ANNOUNCED_WAIT_MARGIN = 2
+/** How long a measured rate stands after it last rose: past it, the next measure replaces it, lower or not. */
+export const WIRE_PIECE_RATE_WINDOW_MS = 60_000
+/** A receiver sends at most one PIECES_ACK this often, covering every frame it took since the last. */
+export const WIRE_PIECES_ACK_GAP_MS = 50
+/** The same where its peer holds data back by what it acknowledges (see `flowControl/client/ClientHeadroom.ts`). */
+export const WIRE_SEND_ACK_GAP_MS = 10
+/** Where its peer holds data back, a receiver acks data this soon once `WIRE_SEND_ACK_MIN_BYTES` wait, not 16 KiB. */
+export const WIRE_SEND_ACK_MS = 25
+/** What such an acknowledgement covers at least: its own bytes stay under 1% of it. */
+export const WIRE_SEND_ACK_MIN_BYTES = 2 * 1024
+/** The least data the sender on a WebSocket, page or server, hands its socket ahead of its peer's acknowledgements. */
+export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024
+/** A server hands its socket data while its path holds less than the page takes in this many least round trips. */
+export const WIRE_SEND_AHEAD_ROUND_TRIPS = 4
+/** How long a page's data frame may wait in its wire's queues, as acknowledgements measure it, before it holds back. */
+export const WIRE_QUEUE_DELAY_MS = 300
 /**
  * Maximum bytes buffered per channel for text messages sent before a peer connects.
  * When the budget is exceeded the oldest entries are evicted (FIFO) so the
@@ -180,10 +264,14 @@ export const CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES = 2 * 1024 * 1024
 export const CHANNEL_BUFFER_LIMIT_BYTES = 512 * 1024
 /** Maximum bytes buffered per channel for binary messages sent before a peer connects. */
 export const CHANNEL_BUFFER_LIMIT_BINARY_BYTES = 2 * 1024 * 1024
+/** The most a server channel holds for its page past the page's credit and in unanswered ack requests: a sender that
+ *  awaits each send holds one, so only sends nobody awaits reach it. */
+export const CHANNEL_MAX_PENDING_BYTES = 256 * 1024 * 1024
+/** The most ack requests a server channel holds unanswered. */
+export const CHANNEL_MAX_PENDING_ACKS = 16_384
 
-/** How long a channel waits for a peer to connect after the server→client
- *  HTTP response carrying `channel.client` has been serialized. */
-export const CHANNEL_CONNECT_TTL_MS = 5_000
+/** How long a channel waits for its peer to connect: it outlasts a page's noticing its wire died, and a reconnect. */
+export const CHANNEL_CONNECT_TTL_MS = 15_000
 
 // Client-side channel reconnect defaults
 export const CHANNEL_RECONNECT_INITIAL_DELAY_MS = 500
@@ -195,10 +283,10 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 // it must wait one round-trip for the receiver's credit refresh. Sizing `W` to the
 // link's BDP is the only way to avoid this stall (no algorithm beats W/RTT). Rather
 // than picking a single fixed `W`, the receiver maintains a gRPC-style BDP estimator
-// (see `bdp-estimator.ts`) that probes the in-flight byte count once per RTT and
-// doubles `W` whenever the sample saturates ≥ 2/3 of the current window. Idle channels
-// stay at the small initial cost; fat-pipe channels climb to the cap within a handful
-// of RTTs.
+// (see `flowControl/BdpEstimator.ts`) that probes the in-flight byte count once per RTT and
+// doubles `W` whenever the sample saturates ≥ 2/3 of the current window, unless a queue
+// the probe's ack waited behind accounts for it. Idle channels stay at the small initial
+// cost; fat-pipe channels climb to the cap within a handful of RTTs.
 //
 // Scope — which frames credit governs:
 //
@@ -209,7 +297,7 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 //                             ack arrival AND credit refresh, which is confusing for
 //                             users. `await` is already the natural backpressure
 //                             signal here. Revisit if real workloads need it.
-//                             Also NOT tracked via `FlowControl.onConsumed` on
+//                             Also NOT tracked via `ReceiveCredit.onConsumed` on
 //                             receive — those bytes were never in the sender's
 //                             credit budget, so counting them would advertise
 //                             free buffer the receiver doesn't actually have.
@@ -217,13 +305,15 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 //                             deadlocks (server with depleted credit could otherwise
 //                             never reply to a client that's waiting for that reply
 //                             to free credit).
-//   PUBLISH, PUBLISH_BINARY   broadcast fan-out, separate flow control entirely.
+//   PUBLISH, PUBLISH_BINARY   broadcast fan-out: nothing waits on them, so the server
+//                             counts no credit for them. The page counts them in bytes
+//                             only, taking no message credit and starting no BDP probe,
+//                             against the largest byte window from the start.
+//                             Nothing waits on them.
 //
-// Window semantics — `WINDOW` frame advertises an absolute value (not additive like
-// HTTP/2). Sender resets `_peerWindow` to `CREDIT_WINDOW_INITIAL_BYTES` on transport
-// reattach; receiver preserves its grown `W` across reconnect (BDP is a property of
-// the path, not of any single wire instance — slight divergence from gRPC's
-// per-connection reset, acceptable for typical transport hiccups).
+// Window semantics: `WINDOW` and `MSG_WINDOW` advertise cumulative limits, as QUIC's MAX_DATA does.
+//
+// Replay: each end keeps what it sent on a channel until a `WINDOW` acknowledges it, to replay after a reconnect.
 
 /** Initial credit window — sized so a typical ~MB-scale burst doesn't stall on
  *  the BDP ramp-up. Grows further via the estimator up to `CREDIT_WINDOW_MAX_BYTES`. */
@@ -237,6 +327,20 @@ export const CREDIT_WINDOW_INITIAL_BYTES_BATCH = 8 * 1024 * 1024
  *  Covers ~5 Gbit/s × 100 ms RTT or ~500 Mbit/s × 1 s RTT. */
 export const CREDIT_WINDOW_MAX_BYTES = 64 * 1024 * 1024
 
+/** A server channel's sends outrun its page once, each time the page takes some for this long, more is ahead of it than
+ *  when that began, and more than the page takes in this long: a few round trips of Slow 3G's 400 ms. */
+export const SENDS_OUTRUN_MS = 1_000
+
+/** The most a batch POST is sized to carry (see `SSE_POST_TARGET_MS`). */
+export const SSE_POST_MAX_BYTES = CREDIT_WINDOW_MAX_BYTES / 2
+
+/** Each queue of a server channel's replay buffer: all that its sends may get ahead of the page, so a lost wire loses none. */
+export const CHANNEL_SERVER_REPLAY_BUFFER_BYTES = CHANNEL_MAX_PENDING_BYTES + CREDIT_WINDOW_MAX_BYTES
+export const CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES = CHANNEL_MAX_PENDING_BYTES + CREDIT_WINDOW_MAX_BYTES
+/** Each queue of a page's replay buffer: twice `CREDIT_WINDOW_MAX_BYTES` (see `replayWindow`). */
+export const CHANNEL_CLIENT_REPLAY_BUFFER_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
+export const CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
+
 /** Initial per-channel message-count credit. Independent of the byte budget:
  *  many tiny frames within a normal byte window can still bury the receive loop
  *  in dispatch work. Grows alongside the byte window from the same BDP probe —
@@ -245,7 +349,7 @@ export const CREDIT_WINDOW_MAX_BYTES = 64 * 1024 * 1024
 export const CREDIT_MSG_WINDOW_INITIAL = 100
 
 /** Hard cap on the adaptive message-count window. The self-utilisation gate in
- *  `FlowControl.onPingAck` stops growth long before this on hosts that can't
+ *  `ReceiveCredit.onPingAck` stops growth long before this on hosts that can't
  *  sustain the dispatch rate. */
 export const CREDIT_MSG_WINDOW_MAX = 50_000
 
@@ -258,10 +362,13 @@ export const BDP_PING_MIN_INTERVAL_MS = 50
  *  rare without ever freezing them, so a rate change is rediscovered within this. */
 export const BDP_PING_MAX_INTERVAL_MS = 10_000
 
-/** Rolling window over which `FlowControl` measures its own contribution to the
+/** Rolling window over which `SelfTime` measures telefunc's own contribution to the
  *  event loop (telefunc-side self-time vs wall-clock). 1 s captures recent
  *  pressure without lingering on stale history. */
 export const FC_SELF_TIME_WINDOW_MS = 1000
+
+/** How much a page's channel sends between macrotask yields, so its browser keeps the wire fed (see `SendCredit`). */
+export const FC_PAGE_YIELD_BYTES = 64 * 1024
 
 /** Self-utilisation threshold above which the flow-control sender yields a
  *  macrotask before its next send, and above which the receiver-side BDP gate
@@ -272,8 +379,3 @@ export const FC_SELF_TIME_WINDOW_MS = 1000
  *  hogging the loop doesn't affect this value, so we don't falsely throttle
  *  telefunc when the choke is elsewhere. */
 export const FC_SELF_UTIL_THRESHOLD = 0.5
-
-// ===== Session routing =====
-
-/** User-facing header for sticky session routing (opaque token). */
-export const TELEFUNC_SESSION_HEADER = 'x-telefunc-session'

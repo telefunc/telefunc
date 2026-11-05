@@ -7,20 +7,21 @@ import { getTelefunctionKey } from '../../../utils/getTelefunctionKey.js'
 import { getUrlPathname } from '../../../utils/getUrlPathname.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
-import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/server/request/registry.js'
-import { StreamReader } from '../../../wire-protocol/server/request/StreamReader.js'
-import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire-protocol/request-kind.js'
+import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/values/server/request/registry.js'
+import { BodyReader } from '../../../wire-protocol/wire/BodyReader.js'
+import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire-protocol/wire/requestKind.js'
 import type { RequestContext } from '../context/requestContext.js'
-import { ServerChannel } from '../../../wire-protocol/server/channel.js'
-import { getChannelMux } from '../../../wire-protocol/server/mux.js'
-import { ChannelStreamSource } from '../../../wire-protocol/ChannelStreamSource.js'
-import { GcRegistry } from '../../../wire-protocol/gcRegistry.js'
-import { wrapProxy } from '../../../wire-protocol/wrapProxy.js'
+import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
+import { getChannelMux } from '../../../wire-protocol/channel/server/ChannelMux.js'
+import { ChannelStreamSource } from '../../../wire-protocol/values/ChannelStreamSource.js'
+import { GcRegistry } from '../../../utils/GcRegistry.js'
+import { wrapProxy } from '../../../utils/wrapProxy.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
-import type { ServerReviverContext } from '../../../wire-protocol/types.js'
+import type { ServerReviverContext } from '../../../wire-protocol/values/types.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
-import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/server/sse.js'
+import { handleStreamFlowRequest } from '../../../wire-protocol/values/server/response/StreamFlow.js'
+import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/channel/server/sse.js'
 import { buildShieldValidators, getArgumentShields, type ShieldLogConfig } from '../shield.js'
 import { toPathKey } from '../../../utils/pathKey.js'
 import type { Telefunction } from '../types.js'
@@ -65,10 +66,10 @@ type ParseResult =
       telefunctionName: string
       telefunctionKey: string
       resolveRequest: (telefunction: Telefunction) => ResolvedRequest
-      isSseRequest: false
+      wireResponse?: undefined
       isMalformedRequest: false
     }
-  | { isMalformedRequest: false; isSseRequest: true; sseResponse: SseChannelHttpResponse }
+  | { isMalformedRequest: false; wireResponse: SseChannelHttpResponse }
   | { isMalformedRequest: true }
 
 async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
@@ -87,7 +88,11 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   }
   if (requestKind === REQUEST_KIND.SSE) {
     const sseResponse = await handleSseChannelRequest(request, readable)
-    return sseResponse ? { isMalformedRequest: false, isSseRequest: true, sseResponse } : { isMalformedRequest: true }
+    return { isMalformedRequest: false, wireResponse: sseResponse }
+  }
+  if (requestKind === REQUEST_KIND.FLOW) {
+    const { text } = await readBody(request, readable, REQUEST_KIND.TEXT)
+    return { isMalformedRequest: false, wireResponse: handleStreamFlowRequest(text) }
   }
 
   // Body + base reviver context (file handling differs between binary and text; channels are the same).
@@ -116,7 +121,6 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     telefuncFilePath: envelope.telefuncFilePath,
     telefunctionName: envelope.telefunctionName,
     telefunctionKey: envelope.telefunctionKey,
-    isSseRequest: false,
     isMalformedRequest: false,
     resolveRequest(telefunction) {
       const { requestTypes } = getServerExtensionTypes()
@@ -138,24 +142,16 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
           ...baseContext,
           validators: buildShieldValidators(shields[toPathKey(segments)] ?? {}, shieldCtx),
         }),
-        (revived) => {
-          {
-            // Destructure into locals so nothing here closes over `revived` — a closure over it
-            // would pin `revived.value` (the wrapper) and defeat the GC-close. Same discipline as
-            // the client response path.
-            const { value, close } = revived
-            assert(isObjectOrFunction(value))
-            // Holder side: the telefunction gets a GC-anchor wrapper; once it drops it, the
-            // underlying channel/stream closes and the client releases the original.
-            const wrapper = wrapProxy(value)
-            globalObject.gcRegistry.register(wrapper, close)
-            revived.value = wrapper
-          }
-          {
-            const { close, abort } = revived
-            requestContext.onTopLevelError(close)
-            requestContext.responseAbort.onAbort(abort)
-          }
+        ({ value, close, abort }) => {
+          assert(isObjectOrFunction(value))
+          // Holder side: the telefunction gets a GC-anchor wrapper; once it drops it, the
+          // underlying channel/stream closes and the client releases the original.
+          const wrapper = wrapProxy(value)
+          // Forgotten once the call's channels have closed, so the scan doesn't wait for a collection to stop.
+          requestContext.onClose(globalObject.gcRegistry.register(wrapper, close))
+          requestContext.onTopLevelError(close)
+          requestContext.responseAbort.onAbort(abort)
+          return wrapper
         },
       )
       return {
@@ -182,7 +178,7 @@ async function readBody(
   if (requestKind === REQUEST_KIND.BINARY) {
     const source = readable ?? request.body
     assert(source)
-    const reader = new StreamReader(source)
+    const reader = new BodyReader(source)
     return {
       text: await reader.readMetadata(Number.POSITIVE_INFINITY),
       registerFile: (i, s) => reader.registerFile(i, s),

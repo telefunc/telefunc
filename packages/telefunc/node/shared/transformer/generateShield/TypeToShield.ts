@@ -238,7 +238,7 @@ export type TypeToShield<T> = T extends (...args: any) => any
   : // export isn't a function => do nothing
     'NON_FUNCTION_EXPORT'
 
-import type { TELEFUNC_SHIELDS } from './shield-key.js'
+import type { TELEFUNC_SHIELDS } from './shieldKey.js'
 
 /** Pull a named field out of a type's `[TELEFUNC_SHIELDS]` slot. Identity-matches on the
  *  symbol so unrelated symbol-keyed members can't accidentally satisfy the extraction. */
