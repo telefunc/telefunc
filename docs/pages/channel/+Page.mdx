@@ -343,7 +343,7 @@ A failed `publish()` you neither `await` nor `.catch()` gives your code no error
 
 `publish()` can't be awaited per subscriber, so the <Link href="#backpressure">warning about sends that outrun their client</Link> doesn't apply to a `BroadcastChannel`. Instead, a client that falls far behind a broadcast has its connection cut and reconnects. Other channels on the connection also <Link href="#reconnection">reconnect</Link>. The `BroadcastChannel` gets what it missed after reconnecting. If it missed more than the server's buffers hold, it closes (see <Link href="#errors">errors</Link>).
 
-A listener's `async` work isn't awaited: the next message arrives whether or not your `subscribe()` callback is done. So if your callback can fall behind, what piles up on the page is yours to bound.
+A listener's `async` work isn't awaited: the next message arrives whether or not your `subscribe()` callback is done. So if your callback can fall behind, unfinished calls pile up on the page, and Telefunc doesn't limit them: your code has to.
 For example, a callback that does an `await fetch()` for each message should queue them, and drop or merge what it can't keep up with.
 
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
@@ -525,7 +525,7 @@ Channels and broadcasts signal failure through four errors:
 | `ChannelOverflowError` | A server channel's sends overfilled `bufferLimit`/`bufferLimitBinary` while its client was offline; the dropped ones reject | **Open** | `await` your sends, and raise `bufferLimit`/`bufferLimitBinary` above your largest message |
 | `ChannelOverflowError` (send budget) | A connected channel exceeded `maxPendingBytes`/`maxPendingAcks` | Closed | `await` the server's sends or raise the named setting, then recreate the channel |
 | `ChannelOverflowError` (`BroadcastChannel`) | More was published to its key while the client was offline than `bufferLimit`/`bufferLimitBinary` holds | Closed | Call its telefunction again to rejoin |
-| `ChannelOverflowError` (`publish()`) | With no Redis or other backend installed, published messages can wait in memory to be delivered. A `subscribe()` callback, before its first `await`, publishes one that would take those waiting past `maxPendingBytes`. With none waiting, a message goes through whatever its size. A publish outside a `subscribe()` callback never gets this error | Open | Publish less from the callback, or raise the named setting |
+| `ChannelOverflowError` (`publish()`) | With no Redis or other backend installed, published messages can wait in memory to be delivered. A `subscribe()` callback gets this error when it publishes, before its first `await`, a message that would bring the waiting messages over `maxPendingBytes`. With none waiting, a message goes through whatever its size. A publish outside a `subscribe()` callback never gets this error | Open | Publish less from the callback, or raise the named setting |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 

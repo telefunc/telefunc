@@ -87,6 +87,7 @@ type ChannelState = {
   binaryBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
   paced: { channelId: string; receivedBytes: number; closeErr: string | null; ended: boolean } | null
   textBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
+  awaitedFromOffline: { channelId: string; received: number; closeErr: string | null } | null
   openBurstReceived: number | null
   freshBinaryEchoed: number | null
   helloBesideBurst: boolean
@@ -1491,6 +1492,20 @@ function testChannelApi() {
       }
       for (const error of ids.errors) expect(error).toContain('ChannelOverflowError')
     })
+  })
+
+  test('channel: a sender awaiting messages larger than maxPendingBytes, the first made before the page attaches, reaches the page without closing the channel', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-awaited-from-offline')
+    await autoRetry(
+      async () => {
+        const result = (await getResult<ChannelState>('#channel-state')).awaitedFromOffline!
+        expect(result.closeErr).toBe(null)
+        expect(result.received).toBe(3)
+        expect((await getCleanupState())[`awaitedFromOffline_${result.channelId}`]).toBe('done')
+      },
+      { timeout: 30_000 },
+    )
   })
 
   test('channel: late onOpen Abort terminates the channel', async () => {

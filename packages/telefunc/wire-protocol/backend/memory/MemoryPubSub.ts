@@ -107,7 +107,8 @@ class MemoryPubSub {
   private operationsSinceTurn = 0
   /** Deliveries a microtask is yet to queue. */
   private queuing = 0
-  /** What waits to be delivered, which stays within `maxPendingBytes`. */
+  /** What waits to be delivered: at most `maxPendingBytes` and one message, since a publish outside a listener is never
+   *  refused. */
   private waitingBytes = 0
 
   constructor({ operationsBetweenTurns }: MemoryPubSubOptions) {

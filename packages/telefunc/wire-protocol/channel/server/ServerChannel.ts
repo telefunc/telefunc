@@ -772,6 +772,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return (this.pendingEnd ??= { closeAck: false, closeRequest: false, abort: null, error: null })
   }
 
+  /** As for a send made now, its `await` throttles the sender by the page's credit. */
+  private settleBuffered(bytes: number, callback: EntryCallback): void {
+    const wait = this.sendCredit.decrement(bytes)
+    if (wait) wait.then(callback.resolve, callback.reject)
+    else callback.resolve()
+  }
+
   /** @internal `BufferedSender`: sends `peer` a frame buffered while no page was attached, as it would have gone then,
    *  within the same pending limits; false where it ended the channel instead. An ack request already rejected at
    *  shutdown has no callback left to answer. */
@@ -782,8 +789,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     switch (tag) {
       case TAG.TEXT:
         assert(typeof data === 'string' && callback)
-        this.sendCredit.countSent(peer.sendSequenced(encode.text, data))
-        callback.resolve()
+        this.settleBuffered(peer.sendSequenced(encode.text, data), callback)
         break
       case TAG.TEXT_ACK_REQ:
         assert(typeof data === 'string')
@@ -797,8 +803,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         break
       case TAG.BINARY:
         assert(data instanceof Uint8Array && callback)
-        this.sendCredit.countSent(peer.sendSequenced(encode.binary, data))
-        callback.resolve()
+        this.settleBuffered(peer.sendSequenced(encode.binary, data), callback)
         break
       case TAG.BINARY_ACK_REQ:
         assert(data instanceof Uint8Array)
