@@ -305,11 +305,11 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 //                             deadlocks (server with depleted credit could otherwise
 //                             never reply to a client that's waiting for that reply
 //                             to free credit).
-//   PUBLISH, PUBLISH_BINARY   broadcast fan-out: nothing waits on them, so the server
-//                             counts no credit for them. The page counts them in bytes
-//                             only, taking no message credit and starting no BDP probe,
-//                             against the largest byte window from the start.
-//                             Nothing waits on them.
+//   PUBLISH, PUBLISH_BINARY   a BroadcastChannel's or an extension's fan-out: nothing waits
+//                             on them, so the server counts no credit for them. The page
+//                             counts them in bytes only, taking no message credit and
+//                             starting no BDP probe, against the largest byte window from
+//                             the start.
 //
 // Window semantics: `WINDOW` and `MSG_WINDOW` advertise cumulative limits, as QUIC's MAX_DATA does.
 //

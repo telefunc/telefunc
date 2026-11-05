@@ -1,11 +1,18 @@
 export { RedisReconnect }
 
 import React, { useRef, useState } from 'react'
-import { onBinaryBroadcastAcrossReconnect, onRedisSubscribeFailure } from './RedisReconnect.telefunc'
+import {
+  onBinaryBroadcastAcrossReconnect,
+  onBroadcastSubscriberDropped,
+  onRedisChannelDenied,
+  onRedisSubscribeFailure,
+} from './RedisReconnect.telefunc'
 
 function RedisReconnect() {
   const [readiness, setReadiness] = useState<unknown>(null)
+  const [channelDenied, setChannelDenied] = useState<unknown>(null)
   const [firstBytes, setFirstBytes] = useState<number[]>([])
+  const [dropped, setDropped] = useState<unknown>(null)
   // A broadcast the page drops closes once garbage-collected.
   const roomRef = useRef<Awaited<ReturnType<typeof onBinaryBroadcastAcrossReconnect>> | null>(null)
 
@@ -18,6 +25,28 @@ function RedisReconnect() {
         onClick={async () => setReadiness(await onRedisSubscribeFailure())}
       >
         Fail and restore Redis subscriptions
+      </button>
+      <pre id="redis-channel-denied-result">{JSON.stringify(channelDenied)}</pre>
+      <button
+        type="button"
+        id="test-redis-channel-denied"
+        onClick={async () => setChannelDenied(await onRedisChannelDenied())}
+      >
+        Redis denies one channel next to allowed ones
+      </button>
+      <h2>Publishes Across a Dropped Subscriber</h2>
+      <pre id="redis-subscriber-dropped-result">{JSON.stringify(dropped)}</pre>
+      <button
+        type="button"
+        id="test-redis-subscriber-dropped"
+        onClick={async () => {
+          const result = onBroadcastSubscriberDropped()
+          await new Promise((resolve) => setTimeout(resolve, 200))
+          await fetch('/api/redis/drop-connections', { method: 'POST' })
+          setDropped(await result)
+        }}
+      >
+        Drop the server's Redis connections during publishes
       </button>
       <h2>Binary Publish Across a Redis Reconnect</h2>
       <pre id="redis-reconnect-result">{JSON.stringify(firstBytes)}</pre>

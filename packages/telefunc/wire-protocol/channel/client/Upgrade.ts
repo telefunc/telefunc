@@ -220,11 +220,6 @@ class Upgrade implements ProbeOwner {
     return this.ingestDuringHandoff(frame, source === this.committing!.from ? 'old' : 'new', byteLength)
   }
 
-  /** The connection left its open state, and the upgrade in it. */
-  forget(): void {
-    this.state = { tag: 'none' }
-  }
-
   /** No attempt is in flight, and none gave the upgrade up for good. */
   get canStart(): boolean {
     return !this.disabled && this.state.tag === 'none'
@@ -391,6 +386,11 @@ class Upgrade implements ProbeOwner {
     if (u.joinTimer) clearTimeout(u.joinTimer)
     this.state = { tag: 'none' }
     return u
+  }
+
+  /** The connection left its open state, and the upgrade in it. */
+  forget(): void {
+    this.state = { tag: 'none' }
   }
 
   // ── The attempt ──

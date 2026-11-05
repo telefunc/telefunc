@@ -6,7 +6,7 @@ import { SERIALIZER_PREFIX_BROADCAST } from '../../../constants.js'
 const broadcastReviver: ReviverType<BroadcastContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_BROADCAST,
   revive(metadata, context) {
-    const channel = context.createBroadcast({
+    const channel = context.createBroadcastChannel({
       channelId: metadata.channelId,
       key: metadata.key,
       maxFrameBytes: metadata.maxFrameBytes,

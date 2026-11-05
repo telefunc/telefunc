@@ -21,7 +21,6 @@ import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generate
 import type { IndexedPeer } from './IndexedPeer.js'
 import type { ChannelMux } from './ChannelMux.js'
 import { stringify } from '@brillout/json-serializer/stringify'
-import { parse } from '@brillout/json-serializer/parse'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
@@ -57,7 +56,7 @@ import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/f
 import { HEADER } from '../../wire/header.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
 import { seqNear, seqThrough } from '../../wire/seq.js'
-import { ProtocolViolationError, assertProtocol } from '../../wire/protocolViolation.js'
+import { ProtocolViolationError, assertProtocol, parsePeerText } from '../../wire/protocolViolation.js'
 import type {
   AckResultStatus,
   ChannelCtrlFrame,
@@ -65,16 +64,7 @@ import type {
   ChannelFrame,
   ErrorReason,
 } from '../../wire/frame.js'
-import type { AttachState } from '../../wire/payloads.js'
-
-/** Peer-authored JSON: a parse failure is the peer's, so it surfaces as a protocol violation. */
-function parsePeerText(text: string): unknown {
-  try {
-    return parse(text)
-  } catch {
-    throw new ProtocolViolationError('peer payload is not parsable')
-  }
-}
+import type { AttachState, BroadcastKind } from '../../wire/payloads.js'
 
 /** Closing frames the channel produced while no page was attached; the next attach sends them. */
 type PendingEnd = { closeAck: boolean; closeRequest: boolean; abort: string | null; error: ErrorReason | null }
@@ -112,8 +102,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _phase: 'open' | 'closing' | 'ended' = 'open'
   private didRegister = false
   protected peer: IndexedPeer | null = null
-  /** The request that opened the wire the page last attached on. */
-  protected wireRequest: Request | undefined = undefined
   private readonly listeners = new Listeners<ChannelListener<ClientToServer>>()
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
   protected offlineBuffer: ServerChannelBuffer<ChannelAck<ServerToClient>>
@@ -205,10 +193,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return channelMessages<ChannelData<ClientToServer>>(this, options)
   }
 
+  get isConnected(): boolean {
+    return this.lifecycle.connected
+  }
+
   get isClosed(): boolean {
     return this._phase !== 'open'
   }
-
   send(data: ChannelData<ServerToClient>): Promise<void>
   send(data: ChannelData<ServerToClient>, opts: { ack: true }): Promise<ChannelAck<ServerToClient>>
   send(data: ChannelData<ServerToClient>, opts: { ack: false }): Promise<void>
@@ -391,6 +382,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.lifecycle.onOpen(callback, options)
   }
 
+  onDisconnect(callback: () => void, options?: { signal?: AbortSignal }): void {
+    this.lifecycle.onDisconnect(callback, options)
+  }
+
+  onReconnect(callback: () => void, options?: { signal?: AbortSignal }): void {
+    this.lifecycle.onReconnect(callback, options)
+  }
+
   _setResponseAbort(abortResponse: (abortValue?: unknown) => void): void {
     this.responseAbort = abortResponse
   }
@@ -465,12 +464,16 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.receiveCredit.attach(peer.sender.sendWait())
     if (!this.offlineBuffer.flush(this, peer)) return
     this.sendPendingAckRes(peer)
+    // After the swap, so what they send reaches this peer even if the previous one never detached.
     if (state?.broadcast) {
-      this.onPeerSubscription({ binary: false, subscribed: state.broadcast.text })
-      this.onPeerSubscription({ binary: true, subscribed: state.broadcast.binary })
+      this.onPeerSubscription('text', state.broadcast.text)
+      this.onPeerSubscription('binary', state.broadcast.binary)
     }
     this.sendPendingEnd(peer)
-    if (this._phase === 'closing') return
+    if (this._phase === 'closing') {
+      this.lifecycle.fireReconnect()
+      return
+    }
     this.lifecycle.fireOpen()
   }
 
@@ -494,8 +497,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.dispatchDataFrame(data)
   }
 
-  /** @internal — Tag-keyed data-frame switch. Subclasses (`ServerBroadcast`) override
-   *  to handle their extra tags and fall back to `super` for the common cases. */
+  /** @internal Tag-keyed data-frame switch. */
   protected dispatchDataFrame(frame: ChannelDataFrame): void {
     switch (frame.tag) {
       case TAG.TEXT:
@@ -511,8 +513,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         void this.onPeerBinaryAckReqMessage(frame.data, frame.seq)
         return
       case TAG.ACK_RES:
-        this.onPageHas(frame.ackedSeq)
+        this._onPageHas(frame.ackedSeq)
         this.onPeerAckRes(frame.ackedSeq, frame.text, frame.status)
+        return
+      case TAG.PUBLISH_ACK_REQ:
+        void this._onPeerPublishAckReqMessage(frame.text, frame.seq)
+        return
+      case TAG.PUBLISH_BINARY_ACK_REQ:
+        void this._onPeerPublishBinaryAckReqMessage(frame.data, frame.seq)
         return
       case TAG.PUBLISH:
       case TAG.PUBLISH_BINARY:
@@ -539,7 +547,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.WINDOW:
         this.onDrained(this.sendCredit.onPeerByteWindow(frame.bytes))
-        this.onPageHas(seqThrough(frame.lastSeq, this._replayBuffer?.seq ?? 0))
+        this._onPageHas(seqThrough(frame.lastSeq, this._replayBuffer?.seq ?? 0))
         return
       case TAG.MSG_WINDOW:
         this.sendCredit.onPeerMessageWindow(frame.count)
@@ -553,12 +561,20 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.BROADCAST_SUB:
       case TAG.BROADCAST_UNSUB:
-        this.onPeerSubscription({ binary: frame.binary, subscribed: frame.tag === TAG.BROADCAST_SUB })
+        this.onPeerSubscription(frame.binary ? 'binary' : 'text', frame.tag === TAG.BROADCAST_SUB)
     }
   }
 
-  /** `ServerBroadcast` overrides it; a plain channel ignores subscriptions. */
-  protected onPeerSubscription(_subscription: { binary: boolean; subscribed: boolean }): void {}
+  // Only a page's ClientBroadcast publishes and subscribes, and its server end is a ServerBroadcastEnd.
+  _onPeerPublishAckReqMessage(_text: string, _seq: number): Promise<void> {
+    throw new ProtocolViolationError('PUBLISH_ACK_REQ on a channel that is no broadcast')
+  }
+  _onPeerPublishBinaryAckReqMessage(_data: Uint8Array, _seq: number): Promise<void> {
+    throw new ProtocolViolationError('PUBLISH_BINARY_ACK_REQ on a channel that is no broadcast')
+  }
+  protected onPeerSubscription(_kind: BroadcastKind, _on: boolean): void {
+    throw new ProtocolViolationError('BROADCAST_SUB on a channel that is no broadcast')
+  }
 
   protected onPeerMessage(text: string, bytes: number): void {
     const t0 = performance.now()
@@ -679,7 +695,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected onPeerCloseAck(): void {
     if (this._phase === 'ended') return
     // The page sends CLOSE_ACK when the close request arrives, so it has received everything sent before it.
-    this.onPageHas(this.closeRequestSeq)
+    this._onPageHas(this.closeRequestSeq)
     this.lifecycle.closeAckReceived()
   }
 
@@ -696,6 +712,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         })
       }, reconnectTimeout),
     )
+    this.lifecycle.fireDisconnect()
   }
 
   /** @internal The page reattached but never acknowledged this channel: it ends. */
@@ -726,22 +743,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.receiveCredit.acknowledge()
   }
 
-  /** @internal The page attaches on the wire `request` opened, having received this channel's frames through
-   *  `lastSeq`. */
-  _onPageAttach(lastSeq: number, request: Request | undefined): void {
-    this.onPageHas(lastSeq)
-    this.wireRequest = request
-  }
-
   /** @internal The page closed its end after receiving this channel's frames through `lastSeq`, the low 32 bits a PING
    *  carries. */
   _onPageClosed(lastSeq: number): void {
     this.pageClosed = true
-    this.onPageHas(seqThrough(lastSeq, this._replayBuffer?.seq ?? 0))
+    this._onPageHas(seqThrough(lastSeq, this._replayBuffer?.seq ?? 0))
   }
 
-  /** The page received this channel's frames through `lastSeq`, so the replay buffer lets them go. */
-  private onPageHas(lastSeq: number): void {
+  /** @internal The page received this channel's frames through `lastSeq`, so the replay buffer lets them go. */
+  _onPageHas(lastSeq: number): void {
     if (lastSeq > this.pageLastSeq) this.pageLastSeq = lastSeq
     this._replayBuffer?.acknowledge(lastSeq)
   }
@@ -843,7 +853,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  private async answerAckReq<T>(
+  private answerAckReq<T>(
     listeners: Listeners<(data: T) => unknown>,
     data: T,
     seq: number,
@@ -851,21 +861,25 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   ): Promise<void> {
     if (listeners.size === 0) {
       this.sendAckRes(seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
-      return
+      return Promise.resolve()
     }
     const verdict = validate ? validate(data) : true
     // `shield-error` status lets the client reject its `send()` promise with a branded
     // ShieldValidationError — same identity every other shield-fail surface produces.
     if (verdict !== true) {
       this.sendAckRes(seq, verdict, ACK_STATUS.SHIELD_ERROR)
-      return
+      return Promise.resolve()
     }
+    return this.answerRequest(seq, listeners.list(), data)
+  }
+
+  /** Answers request `seq` with the answer of the one listener that returned one, or with its failure. */
+  protected async answerRequest<T>(seq: number, listeners: readonly ((data: T) => unknown)[], data: T): Promise<void> {
     let answer: string | null
     try {
-      answer = await listenerAnswer(listeners.list(), data)
+      answer = await listenerAnswer(listeners, data)
     } catch (err) {
-      if (this.lifecycle.handleCallbackError(err)) return
-      this.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+      this.sendRequestFailure(seq, err)
       return
     }
     if (answer === null) {
@@ -873,6 +887,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       return
     }
     this.sendAckRes(seq, answer)
+  }
+
+  protected sendRequestFailure(seq: number, err: unknown): void {
+    if (this.lifecycle.handleCallbackError(err)) return
+    this.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
   }
 
   /** @internal */

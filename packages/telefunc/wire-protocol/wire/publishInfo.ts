@@ -1,7 +1,9 @@
-export { encodePublishText, decodePublishText, encodePublishBinary, decodePublishBinary }
+export { encodePublish, decodePublishText, decodePublishBinary }
 export type { WirePublishInfo }
 
 import { assertProtocol } from './protocolViolation.js'
+import { decodeOrderingFrame, encodeOrderingFrame } from './orderingFrame.js'
+import { assert } from '../../utils/assert.js'
 
 /** Ordering metadata embedded in PUBLISH frames on the wire. */
 type WirePublishInfo = { seq: number; timestamp: number }
@@ -10,8 +12,16 @@ type WirePublishInfo = { seq: number; timestamp: number }
 // Format: seq,timestamp\n{serialized text}
 // JSON.stringify never produces bare \n, so the first \n reliably splits info from payload.
 
-function encodePublishText(text: string, info: WirePublishInfo): string {
-  return info.seq + ',' + info.timestamp + '\n' + text
+/** A publish frame at `info`; a text one with no ordering (null) carries seq 0 and the current time. */
+function encodePublish(text: string, info: WirePublishInfo | null): string
+function encodePublish(data: Uint8Array, info: WirePublishInfo): Uint8Array
+function encodePublish(payload: string | Uint8Array, info: WirePublishInfo | null): string | Uint8Array {
+  if (typeof payload === 'string') {
+    const { seq, timestamp } = info ?? { seq: 0, timestamp: Date.now() }
+    return seq + ',' + timestamp + '\n' + payload
+  }
+  assert(info !== null)
+  return encodeOrderingFrame(payload, info)
 }
 
 function decodePublishText(wire: string): { text: string; info: WirePublishInfo } {
@@ -25,24 +35,7 @@ function decodePublishText(wire: string): { text: string; info: WirePublishInfo 
   return { text: wire.slice(nl + 1), info: { seq, timestamp } }
 }
 
-// Binary publish info: [seq as f64 LE, as a text publish's decimal][timestamp as f64 LE][binary data]
-
-const PUBLISH_BINARY_HEADER = 16
-
-function encodePublishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Array {
-  const result = new Uint8Array(PUBLISH_BINARY_HEADER + data.byteLength)
-  const view = new DataView(result.buffer)
-  view.setFloat64(0, info.seq, true)
-  view.setFloat64(8, info.timestamp, true)
-  result.set(data, PUBLISH_BINARY_HEADER)
-  return result
-}
-
 function decodePublishBinary(wire: Uint8Array): { data: Uint8Array; info: WirePublishInfo } {
-  assertProtocol(wire.byteLength >= PUBLISH_BINARY_HEADER, 'PUBLISH_BINARY frame too short for info header')
-  const view = new DataView(wire.buffer, wire.byteOffset, wire.byteLength)
-  const seq = view.getFloat64(0, true)
-  const timestamp = view.getFloat64(8, true)
-  assertProtocol(Number.isFinite(seq) && Number.isFinite(timestamp), 'PUBLISH_BINARY frame info must be finite numbers')
-  return { data: wire.subarray(PUBLISH_BINARY_HEADER), info: { seq, timestamp } }
+  const { payload, info } = decodeOrderingFrame(wire)
+  return { data: payload, info }
 }

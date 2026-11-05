@@ -1,4 +1,5 @@
 export { WireSender }
+export type { WireSenderOwner }
 
 import { WIRE_SEND_BACKLOG_BASE_BYTES } from '../../constants.js'
 import { encode } from '../../wire/frame.js'
@@ -14,7 +15,13 @@ import { ServerPieceReceiver } from '../../flowControl/server/ServerPieceReceive
 import type { PieceReceiverOwner } from '../../flowControl/pieces.js'
 import { TransportSocket } from './TransportSocket.js'
 
+/** The mux, which ends a wire. */
+interface WireSenderOwner {
+  /** Ends the wire for good, as a frame that breaks the protocol does. */
+  terminateWire(wire: Wire): void
+}
 type WireSenderOptions = {
+  owner: WireSenderOwner
   wire: Wire
   transport: ServerTransport<unknown>
   /** The wire's ping interval, which sizes the frames its headroom sends whole. */
@@ -33,6 +40,7 @@ type WirePieces = { headroom: ServerHeadroom; receiver: ServerPieceReceiver }
 /** Sends a wire's frames in call order, and terminates the wire once its backlog passes what its channels allow; the
  *  peers of its channels send through it, and once the wire closed it drops what they send. */
 class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
+  private readonly owner: WireSenderOwner
   private readonly wire: Wire
   private readonly transport: ServerTransport<unknown>
   /** Null on a wire that doesn't take pieces (SSE). */
@@ -53,7 +61,8 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   /** The RECONCILE's probes its RECONCILED hasn't answered: a frame ahead of it goes behind their BDP_PING_ACKs. */
   private probed: { ix: number; probe: number }[] = []
 
-  constructor({ wire, transport, pingInterval, deliveries, sessions, attaching }: WireSenderOptions) {
+  constructor({ owner, wire, transport, pingInterval, deliveries, sessions, attaching }: WireSenderOptions) {
+    this.owner = owner
     this.wire = wire
     this.transport = transport
     this.pieces = transport.wholeMessages
@@ -107,6 +116,10 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
 
   deliveredBefore(ms: number): number {
     return this.closed ? 0 : this.deliveries.beforeHandled(ms)
+  }
+
+  terminate(): void {
+    this.owner.terminateWire(this.wire)
   }
 
   /** The wire closed: drops what is sent from now on, and stops its headroom. */

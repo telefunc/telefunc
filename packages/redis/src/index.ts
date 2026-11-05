@@ -1,214 +1,25 @@
-export { installRedis, RedisTransport }
-export type { InstallRedisOptions, RedisBroadcastOptions }
+export { installRedis }
+export type { InstallRedisOptions }
 
-import type { Cluster, Redis } from 'ioredis'
-import { config, type BroadcastTransport } from 'telefunc'
-import { assert } from './assert.js'
-import { callDefinedCommand } from './callDefinedCommand.js'
+import { deploymentOf, type RedisClient } from './ioredis.js'
+import { installBackend } from 'telefunc/__internal'
+import { RedisBackend } from './RedisBackend.js'
+import { RedisConnection } from './RedisConnection.js'
+import { DEFAULT_PREFIX } from './keys.js'
 
-/** Wires Redis-backed fan-out into the telefunc broadcast transport so
- *  `Broadcast.publish()`/`subscribe()` cross instances. Pair with sticky-session routing
+/** Installs the Redis backend, so Broadcast and Room work across instances. Pair with sticky-session routing
  *  at the load balancer so each client's channel traffic stays on one instance. */
-function installRedis(redis: Redis | Cluster, options: InstallRedisOptions = {}): void {
-  config.broadcast.transport = new RedisTransport({ redis, prefix: options.prefix })
+function installRedis(redis: RedisClient, options: InstallRedisOptions = {}): void {
+  const prefix = options.prefix ?? DEFAULT_PREFIX
+  // A module evaluated again (a dev server, HMR) builds a new client for the same deployment, which keeps the backend.
+  const backend = installBackend(
+    () => new RedisBackend({ connection: new RedisConnection({ redis, prefix }) }),
+    ['redis', deploymentOf(redis), prefix],
+  )
+  backend.connection.holdFor(redis)
 }
 
 type InstallRedisOptions = {
   /** Default: `tf:`. */
   prefix?: string
 }
-
-type RedisBroadcastOptions = {
-  /** ioredis client (Redis or Cluster). `duplicate()`-d for the subscriber connection. */
-  redis: Redis | Cluster
-  /** Default: `tf:`. */
-  prefix?: string
-}
-
-// Wire frame: [u32 BE seq_hi][u32 BE seq_lo][u32 BE ts_hi][u32 BE ts_lo][payload bytes]. `seq` and `ts` each split
-// into two u32s, so the seq doesn't wrap past 2^32 publishes on a key and ms-Unix stays accurate beyond ~50 days.
-// `INCR` + `PUBLISH` happen in one Lua call; `TIME` from the single Redis clock orders concurrent publishers across
-// instances.
-
-const DEFAULT_PREFIX = 'tf:'
-const HEADER_BYTES = 16
-const U32_RANGE = 0x1_0000_0000
-
-/** KEYS[1]=seq counter, KEYS[2]=broadcast channel, ARGV[1]=payload bytes; returns [seq,ts]. */
-const PUBLISH_LUA = `
-local seq = redis.call('INCR', KEYS[1])
-local t = redis.call('TIME')
-local ts = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
-local seq_hi = math.floor(seq / 4294967296)
-local seq_lo = seq - seq_hi * 4294967296
-local ts_hi = math.floor(ts / 4294967296)
-local ts_lo = ts - ts_hi * 4294967296
-local header = struct.pack('>I4I4I4I4', seq_hi, seq_lo, ts_hi, ts_lo)
-redis.call('PUBLISH', KEYS[2], header .. ARGV[1])
-return {seq, ts}
-`.trim()
-
-const PUBLISH_CMD = 'tfPublish'
-
-class RedisTransport implements BroadcastTransport {
-  private readonly publisher: Redis | Cluster
-  private readonly subscriber: Redis | Cluster
-  private readonly prefix: string
-  private readonly textCallbacks = new Map<string, TextOnMessage>()
-  private readonly binaryCallbacks = new Map<string, BinaryOnMessage>()
-  /** Each listener's SUBSCRIBE until Redis acknowledges it, in the order they were sent. */
-  private readonly subscribing = new Map<string, { ack: Promise<unknown>; order: number }>()
-  private subscribesSent = 0
-  /** A failed SUBSCRIBE fails publishes while its listener remains registered. */
-  private readonly failedSubscribes = new Map<string, unknown>()
-  /** Publishes waiting for the SUBSCRIBEs sent before them, oldest first. */
-  private readonly waiters: { upTo: number; resolve: () => void; reject: (err: unknown) => void }[] = []
-  /** Publishes waiting or about to resume, so a later one keeps its place behind them. */
-  private waiting = 0
-
-  constructor(options: RedisBroadcastOptions) {
-    this.publisher = options.redis
-    this.subscriber = options.redis.duplicate()
-    this.prefix = options.prefix ?? DEFAULT_PREFIX
-    this.publisher.defineCommand(PUBLISH_CMD, { numberOfKeys: 2, lua: PUBLISH_LUA })
-    this.subscriber.on('messageBuffer', this.onMessage)
-  }
-
-  async send(key: string, payload: string): Promise<{ seq: number; timestamp: number }> {
-    return this.publish(this.channelKey(key, 't'), this.seqKey(key), textEncoder.encode(payload))
-  }
-
-  async sendBinary(key: string, payload: Uint8Array): Promise<{ seq: number; timestamp: number }> {
-    return this.publish(this.channelKey(key, 'b'), this.seqKey(key), payload)
-  }
-
-  listen(key: string, onMessage: TextOnMessage): () => void {
-    const channel = this.channelKey(key, 't')
-    assert(!this.textCallbacks.has(channel), `Duplicate text listener for key "${key}"`)
-    this.textCallbacks.set(channel, onMessage)
-    this.subscribe(channel)
-    return () => {
-      this.textCallbacks.delete(channel)
-      this.unsubscribe(channel)
-    }
-  }
-
-  listenBinary(key: string, onMessage: BinaryOnMessage): () => void {
-    const channel = this.channelKey(key, 'b')
-    assert(!this.binaryCallbacks.has(channel), `Duplicate binary listener for key "${key}"`)
-    this.binaryCallbacks.set(channel, onMessage)
-    this.subscribe(channel)
-    return () => {
-      this.binaryCallbacks.delete(channel)
-      this.unsubscribe(channel)
-    }
-  }
-
-  private subscribe(channel: string): void {
-    const ack = this.subscriber.subscribe(channel)
-    this.subscribing.set(channel, { ack, order: ++this.subscribesSent })
-    void this.settleSubscribe(channel, ack)
-  }
-
-  private async settleSubscribe(channel: string, ack: Promise<unknown>): Promise<void> {
-    let failure: { err: unknown } | null = null
-    try {
-      await ack
-    } catch (err) {
-      failure = { err }
-    }
-    const subscription = this.subscribing.get(channel)
-    // Its listener was removed meanwhile, or removed and added again with a SUBSCRIBE of its own.
-    if (subscription?.ack !== ack) return
-    this.subscribing.delete(channel)
-    if (failure) {
-      this.failedSubscribes.set(channel, failure.err)
-      // The publishes sent after it waited for it: they fail with it.
-      while (this.waiters.length > 0 && this.waiters.at(-1)!.upTo >= subscription.order) {
-        this.waiters.pop()!.reject(failure.err)
-      }
-    }
-    this.releaseWaiters()
-  }
-
-  private unsubscribe(channel: string): void {
-    this.subscribing.delete(channel)
-    this.failedSubscribes.delete(channel)
-    this.releaseWaiters()
-    void this.subscriber.unsubscribe(channel).catch(() => {})
-  }
-
-  /** Lets each publish go, in order, once every SUBSCRIBE sent before it is acknowledged. */
-  private releaseWaiters(): void {
-    const oldest = this.subscribing.values().next().value?.order ?? Number.POSITIVE_INFINITY
-    while (this.waiters.length > 0 && this.waiters[0]!.upTo < oldest) this.waiters.shift()!.resolve()
-  }
-
-  private readonly onMessage = (channelBytes: Uint8Array, frame: Uint8Array): void => {
-    assert(frame.byteLength >= HEADER_BYTES, 'Malformed publish frame: header too short')
-    const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
-    const seq = view.getUint32(0, false) * U32_RANGE + view.getUint32(4, false)
-    const timestamp = view.getUint32(8, false) * U32_RANGE + view.getUint32(12, false)
-    const payload = frame.subarray(HEADER_BYTES)
-    const channel = utf8.decode(channelBytes)
-    const text = this.textCallbacks.get(channel)
-    if (text) {
-      text(utf8.decode(payload), { seq, timestamp })
-      return
-    }
-    const binary = this.binaryCallbacks.get(channel)
-    if (binary) binary(payload, { seq, timestamp })
-  }
-
-  // ── Publish (private) ─────────────────────────────────────────────────
-
-  private async publish(
-    channelKey: string,
-    seqKey: string,
-    payload: Uint8Array,
-  ): Promise<{ seq: number; timestamp: number }> {
-    // ioredis 5.x checks `arg instanceof Buffer` to pick its binary path; a raw
-    // `Uint8Array` falls into `String(arg)` and gets serialised as a comma-joined
-    // string of byte values, corrupting the bytes. A copy, as ioredis may hold the
-    // command past the call (connecting, auto-pipelining, a NOSCRIPT retry).
-    const buf = Buffer.from(payload)
-    if (this.failedSubscribes.size > 0) throw this.failedSubscribes.values().next().value
-    // Publishes keep their order: one waits while an earlier one does.
-    if (this.subscribing.size > 0 || this.waiting > 0) {
-      this.waiting++
-      try {
-        await new Promise<void>((resolve, reject) => {
-          this.waiters.push({ upTo: this.subscribesSent, resolve, reject })
-          this.releaseWaiters()
-        })
-      } finally {
-        this.waiting--
-      }
-    }
-    const reply = await callDefinedCommand(this.publisher, PUBLISH_CMD, [seqKey, channelKey, buf])
-    assert(Array.isArray(reply) && reply.length === 2, 'Publish script returned an unexpected shape')
-    const [seq, timestamp] = reply
-    assert(typeof seq === 'number' && typeof timestamp === 'number', 'Publish script returned non-numeric seq/ts')
-    return { seq, timestamp }
-  }
-
-  // ── Key naming (private) ──────────────────────────────────────────────
-  //
-  // `{<key>}` braces force seq counter and broadcast channel onto the same Redis
-  // Cluster hash slot, so the publish Lua script can touch both keys atomically.
-
-  private seqKey(key: string): string {
-    return `${this.prefix}seq:{${key}}`
-  }
-
-  private channelKey(key: string, kind: 't' | 'b'): string {
-    return `${this.prefix}${kind}:{${key}}`
-  }
-}
-
-type TextOnMessage = (payload: string, info: { seq: number; timestamp: number }) => void
-type BinaryOnMessage = (payload: Uint8Array, info: { seq: number; timestamp: number }) => void
-
-/** Module-level codec — allocating one per call would burn measurable CPU on hot paths. */
-const utf8 = new TextDecoder('utf-8')
-const textEncoder = new TextEncoder()

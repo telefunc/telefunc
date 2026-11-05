@@ -5,6 +5,7 @@ import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import { parseResponse } from '../../wire-protocol/values/client/response/parse.js'
 import type { ReviverType, TypeContract, ClientReviverContext } from '../../wire-protocol/values/types.js'
+import type { LazyResponseTypes } from '../extensions.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire-protocol/wire/requestKind.js'
 import { throwAbortError, throwBugError } from './errors.js'
 import { getConnectionOptions } from './getConnectionOptions.js'
@@ -37,6 +38,7 @@ async function makeHttpRequest(callContext: {
   channel: { transports: ChannelTransports }
   requestCloseHandlers: CloseHandler[]
   extensionResponseTypes: ReviverType<TypeContract, ClientReviverContext>[]
+  extensionLazyResponseTypes: LazyResponseTypes[]
   connectionKey?: string
   channelIdleTimeout?: number
 }): Promise<unknown> {

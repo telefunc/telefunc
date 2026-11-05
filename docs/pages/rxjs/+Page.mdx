@@ -78,7 +78,7 @@ edits.subscribe(edit => applyEdit(edit))
 edits.next({ userId: 'alice', text: 'Hello' })
 ```
 
-> **Single server.** A module-level `Subject` lives in one server process. These multicast examples — the editor above and *Live cursors* below — work as-is on a single instance. Across multiple instances, each server process has its own `Subject`, so route shared state through a broadcast transport instead — see <Link href="/stream/scale" />.
+> **Single server.** A module-level `Subject` lives in one server process. These multicast examples — the editor above and *Live cursors* below — work as-is on a single instance. Across multiple instances, each server process has its own `Subject`, so route shared state through a cross-instance backend instead — see <Link href="/stream/scale" />.
 
 
 

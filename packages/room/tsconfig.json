@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "outDir": "./dist/",
+    "rootDir": "./src/",
+    "target": "ES2019",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "skipLibCheck": true,
+    "declaration": true,
+    "strict": true,
+    "noUnusedParameters": true,
+    "esModuleInterop": true,
+    "noUncheckedIndexedAccess": true,
+    "lib": ["DOM", "ESNext"],
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"]
+}

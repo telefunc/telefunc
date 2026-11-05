@@ -5,6 +5,8 @@ import { cloudflare } from '@cloudflare/vite-plugin'
 import { telefunc } from 'telefunc/vite'
 
 export default defineConfig({
+  // Pre-bundles telefunc in the Worker, as Vite does for an app that installs it from npm.
+  environments: { ssr: { optimizeDeps: { include: ['telefunc/cloudflare'] } } },
   plugins: [
     telefunc(),
     react(),

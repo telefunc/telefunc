@@ -31,7 +31,7 @@ const DEFAULT_BROADCAST_BUCKETS = [
   'oc',
 ] as const satisfies readonly DurableObjectLocationHint[]
 const TELEFUNC_BROADCAST_BUCKET_HEADER = 'x-telefunc-broadcast-bucket'
-/** Internal: forwarded to the DO so it knows its own instance name. */
+/** The session Durable Object's name. */
 const TELEFUNC_SHARD_HEADER = 'x-telefunc-shard'
 const KNOWN_BROADCAST_BUCKETS = new Set<string>(DEFAULT_BROADCAST_BUCKETS as readonly string[])
 

@@ -21,13 +21,16 @@ type ChannelLifecycleOptions = {
   reportError: (err: unknown) => void
 }
 
-/** A channel end's open and close callbacks, and its close handshake: the onClose callbacks run once its CLOSE is
- *  acknowledged and no ack is in flight, and it ends once they settled, or at the deadline. */
+/** A channel end's open, disconnect, reconnect and close callbacks, and its close handshake: the onClose callbacks run
+ *  once its CLOSE is acknowledged and no ack is in flight, and it ends once they settled, or at the deadline. */
 class ChannelLifecycle {
   private readonly owner: ChannelLifecycleOwner
   private readonly reportError: (err: unknown) => void
   private openListeners = new Listeners<() => void>()
   private didFireOpen = false
+  private disconnectListeners = new Listeners<() => void>()
+  private reconnectListeners = new Listeners<() => void>()
+  private isConnected = false
   private closeListeners = new Listeners<ChannelCloseCallback>()
   private didFireClose = false
   private runningCloseListeners = 0
@@ -85,6 +88,11 @@ class ChannelLifecycle {
     this.reportError = reportError
   }
 
+  /** It opened, and its peer hasn't gone away since, nor has it closed. */
+  get connected(): boolean {
+    return this.isConnected
+  }
+
   get ended(): boolean {
     return this.didEnd
   }
@@ -110,23 +118,55 @@ class ChannelLifecycle {
   onOpen(callback: () => void, options?: { signal?: AbortSignal }): void {
     if (options?.signal?.aborted) return
     if (this.didFireOpen) {
-      this.invokeOpenCallback(callback)
+      this.invokeCallback(callback)
       return
     }
     this.openListeners.add(callback, options)
   }
 
+  onDisconnect(callback: () => void, options?: { signal?: AbortSignal }): void {
+    if (!this.didFireClose) this.disconnectListeners.add(callback, options)
+  }
+
+  onReconnect(callback: () => void, options?: { signal?: AbortSignal }): void {
+    if (!this.didFireClose) this.reconnectListeners.add(callback, options)
+  }
+
+  /** Its peer attached: the onOpen callbacks run the first time, the onReconnect ones after a disconnect. */
   fireOpen(): void {
-    if (this.didFireOpen) return
-    this.didFireOpen = true
-    this.resolveOpened?.()
-    for (const cb of this.openListeners.list()) {
-      if (this.invokeOpenCallback(cb)) break
+    if (this.didFireOpen) {
+      this.fireReconnect()
+      return
     }
+    this.didFireOpen = true
+    this.isConnected = true
+    this.resolveOpened?.()
+    this.invokeAll(this.openListeners)
     this.openListeners.clear()
   }
 
-  private invokeOpenCallback(callback: () => void): boolean {
+  /** Its peer attached again, also while closing: the onReconnect callbacks run if it was disconnected. */
+  fireReconnect(): void {
+    if (!this.didFireOpen || this.isConnected || this.didFireClose) return
+    this.isConnected = true
+    this.invokeAll(this.reconnectListeners)
+  }
+
+  /** Its peer went away, and may come back. */
+  fireDisconnect(): void {
+    if (!this.isConnected) return
+    this.isConnected = false
+    this.invokeAll(this.disconnectListeners)
+  }
+
+  /** Calls each of `listeners`, until one throws `Abort`. */
+  private invokeAll(listeners: Listeners<() => void>): void {
+    for (const cb of listeners.list()) {
+      if (this.invokeCallback(cb)) return
+    }
+  }
+
+  private invokeCallback(callback: () => void): boolean {
     try {
       const result = callback()
       if (isPromise(result)) result.catch((err: unknown) => this.handleCallbackError(err))
@@ -227,12 +267,15 @@ class ChannelLifecycle {
   private fireClose(err?: Error): void {
     if (this.didFireClose) return
     this.didFireClose = true
+    this.isConnected = false
     for (const callback of this.closeListeners.list()) {
       const pending = this.invokeCloseCallback(callback, err)
       if (pending !== undefined) void this.trackCloseListener(pending)
     }
     this.closeListeners.clear()
     this.openListeners.clear()
+    this.disconnectListeners.clear()
+    this.reconnectListeners.clear()
     this.notifyProgress()
   }
 

@@ -20,7 +20,7 @@ import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { parseSseRequestMetadata, textEncoder, type SseRequestMetadata } from '../../wire/envelope.js'
 import { OversizeFrameError, BodyReader, StreamTruncatedError } from '../../wire/BodyReader.js'
 import { getChannelMux } from './ChannelMux.js'
-import type { ReconcileOutcome, ServerTransport } from './ChannelMux.js'
+import type { ChannelMux, ReconcileOutcome, ServerTransport } from './ChannelMux.js'
 import { encode } from '../../wire/frame.js'
 import { passesData } from '../../wire/tags.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
@@ -117,7 +117,10 @@ class SseServerTransport {
   /** When each wire closed and the session it had, for `connectTtl`: a page never reuses a connId, so a POST for one is
    *  refused. */
   private readonly closedWires = new Map<string, { at: number; sessionId: string | null }>()
-  private readonly mux = getChannelMux()
+  /** Per use: a Cloudflare session DO hosts its own channels, and this transport serves every one in the isolate. */
+  private get mux(): ChannelMux {
+    return getChannelMux()
+  }
   private readonly transport: ServerTransport<SseWire> = {
     getSessionId: (wire) => wire.sessionId ?? undefined,
     setSessionId: (wire, sessionId) => {
@@ -153,7 +156,7 @@ class SseServerTransport {
       connId = metadata.connId
       switch (metadata.kind) {
         case 'streamResponse':
-          return await this.handleStreamResponsePost(connId, reader, useNodeStream, request)
+          return await this.handleStreamResponsePost(connId, reader, useNodeStream)
         case 'streamRequest':
           return await this.handleStreamRequestPost(connId, reader)
         case 'close':
@@ -180,7 +183,6 @@ class SseServerTransport {
     connId: string,
     reader: BodyReader,
     useNodeStream: boolean,
-    request: Request,
   ): Promise<SseChannelHttpResponse> {
     const existing = this.mux.getWireByConnId<SseWire>(connId)
     if (existing) this.closeWire(existing, { permanent: false })
@@ -201,7 +203,7 @@ class SseServerTransport {
       resolveReady,
       pendingDispatches: new Set(),
     }
-    this.mux.onWireOpen(wire, this.transport, request)
+    this.mux.onWireOpen(wire, this.transport)
     this.resolvePendingWires(connId, wire)
     void this.runStreamResponse(wire, reader)
 

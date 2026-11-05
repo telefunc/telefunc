@@ -1,4 +1,4 @@
-export type { TelefuncClientExtension }
+export type { TelefuncClientExtension, LazyResponseTypes }
 
 import type {
   ReplacerType,
@@ -14,4 +14,11 @@ type TelefuncClientExtension = {
   responseTypes?: ReviverType<TypeContract, ClientReviverContext>[]
   /** Custom replacer types for client→server serialization (appended after built-in types). */
   requestTypes?: ReplacerType<TypeContract, ClientReplacerContext>[]
+  /** Reviver types used only by a response whose body contains `stem`; that response waits for `load()`. */
+  lazyResponseTypes?: LazyResponseTypes
+}
+
+type LazyResponseTypes = {
+  stem: string
+  load: () => Promise<ReviverType<TypeContract, ClientReviverContext>[]>
 }

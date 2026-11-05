@@ -1,4 +1,4 @@
-export { macrotaskYield }
+export { macrotaskYield, nextTurn }
 
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { assertUsage } from '../../utils/assert.js'
@@ -61,3 +61,9 @@ class MacrotaskYield {
 const macrotaskYield = getGlobalObject<{ instance: MacrotaskYield }>('flowControl/macrotaskYield.ts', () => ({
   instance: new MacrotaskYield(),
 })).instance
+
+/** A later macrotask; setImmediate keeps the process alive for it, where the runtime has one. */
+function nextTurn(callback: () => void): void {
+  if (typeof setImmediate === 'function') setImmediate(callback)
+  else void macrotaskYield.yield().then(callback)
+}

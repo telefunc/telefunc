@@ -167,27 +167,28 @@ export default {
 
 > On Cloudflare the `context` is set in a separate function from the request handler. (Because the `context` function runs in a Durable Object, whereas the request handler doesn't.)
 
-> On Cloudflare `new Telefunc` also takes `bindingName`, `kvBindingName`, `scale`, `locationFallback`, `jurisdiction`, and more — see <Link href="/stream/cloudflare#configuration" />.
+> On Cloudflare `new Telefunc` also takes `bindingName`, `scale`, `locationFallback`, `jurisdiction`, and more — see <Link href="/stream/cloudflare#configuration" />.
 
 Add to your `wrangler.jsonc`:
 
+{/* spellcheck-ignore:on */}
 ```jsonc
 {
   "compatibility_date": "2025-08-15", // or later
-  "compatibility_flags": ["enable_request_signal"], // a Worker's request.signal aborts when its client disconnects
+  // nodejs_als (or nodejs_compat): Broadcast and Room need it.
+  // enable_request_signal: a Worker's request.signal aborts when its client disconnects.
+  "compatibility_flags": ["nodejs_als", "enable_request_signal"],
   "durable_objects": {
     "bindings": [
       { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
     ]
   },
-  "kv_namespaces": [
-    { "binding": "TelefuncKV", "id": "your-kv-namespace-id" }
-  ],
   "migrations": [
-    { "tag": "v1", "new_classes": ["TelefuncDurableObject"] }
+    { "tag": "v1", "new_sqlite_classes": ["TelefuncDurableObject"] }
   ]
 }
 ```
+{/* spellcheck-ignore:off */}
 
 > See <Link href="/stream/cloudflare" /> for scaling, distributed broadcast, delivery guarantees, and Durable Object configuration.
 

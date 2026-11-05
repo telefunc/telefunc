@@ -11,6 +11,8 @@ The following low-level **primitives** enable all kinds of <Link href="/stream">
 - <Link href="#broadcast"><code>Broadcast</code></Link> — a keyed pub/sub bus (`publish()`/`subscribe()`), server-side.
 - <Link href="#new-broadcastchannel"><code>new BroadcastChannel()</code></Link> — broadcast also on the client-side.
 
+> Building on these, <Link href="/room">`Room`</Link> adds multi-party rooms with presence, participant metadata, private messages, and admin controls.
+
 > You can use them for one-way streams (aka streaming) as well as two-way streams (aka real-time):
 > - Chat rooms
 > - Live feeds (sports scores, stock tickers)
@@ -109,6 +111,8 @@ channel.send('Hello!')
 | `messages({ signal })` | Iterate `{ type: 'text' \| 'binary', data }` messages; abort to stop. |
 | `onOpen(cb)` | Called when the channel opens. |
 | `onClose(cb)` | Called when the channel closes. |
+| `onDisconnect(cb)` / `onReconnect(cb)` | Called when the other side becomes unreachable / is back. See <Link href="#reconnection" />. |
+| `isConnected` | `true` from `onOpen` until `onClose`, except while the other side is unreachable. |
 | `close()` | Close gracefully. |
 | `abort(value?)` | Terminate immediately. |
 
@@ -302,7 +306,7 @@ The static methods run purely on the server — no client, no handle, no lifecyc
 import { Broadcast } from 'telefunc'
 
 // Publish to every subscriber of the key
-Broadcast.publish('room:lobby', { text: 'Hello!' })
+await Broadcast.publish('room:lobby', { text: 'Hello!' })
 
 // Subscribe on the server
 const unsub = Broadcast.subscribe('room:lobby', (msg, info) => {
@@ -310,7 +314,7 @@ const unsub = Broadcast.subscribe('room:lobby', (msg, info) => {
 })
 ```
 
-`publish()` returns a receipt and `subscribe()` receives the same `info`:
+`subscribe()` receives this `info`, and `publish()` resolves to the same fields:
 
 ```js
 info.key        // 'room:lobby' — the broadcast key
@@ -318,7 +322,24 @@ info.seq        // monotonic sequence number for this key
 info.timestamp  // server timestamp (Unix epoch ms)
 ```
 
-`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted.
+`seq` is monotonic per `key`, which is useful for ordering and gap detection.
+
+### Delivery
+
+When `publish()` rejects depends on where Broadcast runs:
+
+- In memory (the default), with `ChannelOverflowError`, when a `subscribe()` callback, before its first `await`, publishes a message that would take those waiting past `maxPendingBytes` (see <Link href="/channel-config" />). With none waiting, a message goes through whatever its size. A publish from anywhere else never gets this error.
+- With <Link href="/redis">`@telefunc/redis`</Link>, when Redis can't run the publish, for example while the connection is down. It also rejects with `ChannelOverflowError` when a publish to a key this server has only just subscribed to would take the publishes waiting on that subscription past `bufferLimit`/`bufferLimitBinary` (see <Link href="/channel-config" />). With none waiting, a message goes through whatever its size.
+- With a <Link href="/broadcast-config">`BroadcastTransport`</Link>, when its `send()` or `sendBinary()` throws or rejects, with that error.
+- On Cloudflare, when a server <Link href="/stream/cloudflare#delivery-guarantees">couldn't take it</Link>.
+
+A rejected publish may still have reached some subscribers (on Cloudflare, every subscriber the failed server doesn't hold), so publishing it again can deliver it twice to them.
+
+`publish()` is at most once: with <Link href="/redis">`@telefunc/redis`</Link>, a server whose connection to Redis drops never gets what is published before it reconnects, though `publish()` resolved. That server's <Link href="/broadcast-config">`config.broadcast.onDeliveryLost`</Link> is called with how many it missed, and logs them by default.
+
+> A Redis failover or flush can hide the count: that server may report fewer than it missed, or that it doesn't know how many. If the Redis that takes over holds exactly what that server last got, `onDeliveryLost` isn't called.
+
+A failed `publish()` you neither `await` nor `.catch()` gives your code no error (see <Link href="#errors">errors</Link>). To see failures, `await` it or add `.catch()`.
 
 `publish()` can't be awaited per subscriber, so the <Link href="#backpressure">warning about sends that outrun their client</Link> doesn't apply to a `BroadcastChannel`. Instead, a client that falls far behind a broadcast has its connection cut and reconnects. Other channels on the connection also <Link href="#reconnection">reconnect</Link>. The `BroadcastChannel` gets what it missed after reconnecting. If it missed more than the server's buffers hold, it closes (see <Link href="#errors">errors</Link>).
 
@@ -453,6 +474,8 @@ broadcast.subscribe((n) => showToast(n))
 | `subscribeBinary(cb, { signal }?)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function. |
 | `onOpen(cb)` | Called when the channel opens. |
 | `onClose(cb)` | Called when the channel closes. |
+| `onDisconnect(cb)` / `onReconnect(cb)` | Called when the other side becomes unreachable / is back. See <Link href="#reconnection" />. |
+| `isConnected` | `true` from `onOpen` until `onClose`, except while the other side is unreachable. |
 | `close()` | Close gracefully. |
 | `abort(abortValue?)` | Terminate immediately. |
 
@@ -485,12 +508,12 @@ Only the two ends of a channel can use it, while anything that knows a broadcast
 | Message type | Asymmetric:<ul><li>Two different types: `Channel<ClientMessageType, ServerMessageType>`</li><li>The server uses the `new Channel()` instance, and returns `channel.client` to the client</li></ul> | Symmetric:<ul><li>Same type for every member: `BroadcastChannel<MessageType>`</li><li>The server uses and returns the same `BroadcastChannel` instance</li></ul> |
 | Message return | The other end's reply (if `{ ack: true }`) | A receipt: `{ key, seq, timestamp }` |
 | `close()` | Closes the channel for both ends | Detaches this member; the group lives on |
-| Multi-server | <Link href="/stream/scale#sticky-sessions">Sticky sessions</Link> | <Link href="/stream/scale#broadcast">Broadcast transport</Link> |
+| Multi-server | <Link href="/stream/scale#sticky-sessions">Sticky sessions</Link> | <Link href="/stream/scale#broadcast">Cross-instance backend</Link> |
 
 
 ## Errors
 
-Telefunc silently handles rejected promises from `send()`, `sendBinary()`, `publish()` and `publishBinary()`. To observe a failure, `await` the call or use `.catch()`.
+A rejected `send()`, `sendBinary()`, `publish()` or `publishBinary()` you neither `await` nor `.catch()` never becomes an unhandled rejection. An expected failure (one of the errors below, or data the server's validation refused) stays silent. In the browser, a `publish()` or `publishBinary()` that fails from a bug in Telefunc is logged to the console. To observe a failure, `await` the call or use `.catch()`.
 
 Channels and broadcasts signal failure through four errors:
 
@@ -502,7 +525,7 @@ Channels and broadcasts signal failure through four errors:
 | `ChannelOverflowError` | A server channel's sends overfilled `bufferLimit`/`bufferLimitBinary` while its client was offline; the dropped ones reject | **Open** | `await` your sends, and raise `bufferLimit`/`bufferLimitBinary` above your largest message |
 | `ChannelOverflowError` (send budget) | A connected channel exceeded `maxPendingBytes`/`maxPendingAcks` | Closed | `await` the server's sends or raise the named setting, then recreate the channel |
 | `ChannelOverflowError` (`BroadcastChannel`) | More was published to its key while the client was offline than `bufferLimit`/`bufferLimitBinary` holds | Closed | Call its telefunction again to rejoin |
-| `ChannelOverflowError` (`publish()`) | With no Redis or other transport installed, a `subscribe()` callback published more than `maxPendingBytes` before its first `await` | Open | Publish less from the callback, or raise the named setting |
+| `ChannelOverflowError` (`publish()`) | With no Redis or other backend installed, a `subscribe()` callback published more than `maxPendingBytes` before its first `await` | Open | Publish less from the callback, or raise the named setting |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 
@@ -519,8 +542,9 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 - Messages lost in the disconnect are resent after reconnect, if the client is back within `reconnectTimeout` and the replay buffer still holds them.
 - Otherwise, the channel closes with `NetworkError`. When the replay buffer dropped them, the error message names the setting to raise (see <Link href="/channel-config" />).
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.
+- `onDisconnect()` fires on both ends when the connection drops, and `onReconnect()` once it's back; `isConnected` is `false` in between. If it doesn't come back within `reconnectTimeout`, `onClose(err)` fires with a `NetworkError` instead of `onReconnect()`.
 
-> Reconnection is automatic — you don't need to handle it in your application code.
+> Reconnection is automatic — you don't need to handle it in your application code. Use `onDisconnect()` and `onReconnect()` to show it, for example a "reconnecting…" badge, or to act on it, for example saving whether a member is online.
 
 
 ## See also

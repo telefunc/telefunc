@@ -1,0 +1,67 @@
+export { listRoom, repairRoomIndex, sweepLapsedRoomsSoon }
+
+// Each listed room is due once its head may have lapsed: a sweep then drops what a lapsed incarnation left, as
+// `Room.list()` does, so no lapsed room's data waits for a list call.
+
+import { getRoomPlane } from '../../backend/plane.js'
+import type { RoomHead } from '../../backend/contract.js'
+import type { RoomPlane } from '../../backend/RoomPlane.js'
+import { Slice } from '../../shared/Slice.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_LEASE_TTL_MS } from '../constants.js'
+import type { RoomIncarnation } from '../protocol.js'
+import { configFromHead, openConfig } from '../lanes/lanes.js'
+import { reportRoomError } from '../reportRoomError.js'
+import { eachInFlight } from './cellStore.js'
+import { getGlobalObject } from '../../utils/getGlobalObject.js'
+
+/** Lists the room, to be looked at again once its head lapses, and a heartbeat from now at the earliest. A room
+ *  without hold timeouts never lapses; one with them but no lapse yet gets one once held, so it is looked at again a
+ *  lease from now. */
+async function listRoom(
+  plane: RoomPlane,
+  { id, inc, hold }: RoomIncarnation,
+  expiresAt: number | undefined,
+): Promise<void> {
+  if (hold === null) return await plane.driver.directoryPut(id, inc, Infinity, 0)
+  if (expiresAt === undefined) return await plane.driver.directoryPut(id, inc, 0, ROOM_LEASE_TTL_MS)
+  await plane.driver.directoryPut(id, inc, expiresAt, ROOM_HEARTBEAT_INTERVAL_MS)
+}
+
+/** A listed incarnation no head names as current has no owner left (its close finished, or was interrupted and its
+ *  tombstone lapsed), so it is dropped with its listing. */
+async function repairRoomIndex(plane: RoomPlane, id: string, listedInc: string, head: RoomHead | null): Promise<void> {
+  if (head?.currentInc === listedInc) return
+  await plane.driver.dropIncarnation(id, listedInc)
+  const live = openConfig(head)
+  if (live) await listRoom(plane, { id, inc: live.inc, hold: live.hold }, head!.expiresAt)
+  else await plane.driver.directoryDelete(id, listedInc)
+}
+
+const globalObject = getGlobalObject('server/store/directory.ts', {
+  /** When this process may sweep again: once a heartbeat interval at most, as a room is created or a heartbeat
+   *  ticks. */
+  nextSweepAt: 0,
+})
+
+function sweepLapsedRoomsSoon(): void {
+  const now = performance.now()
+  if (now < globalObject.nextSweepAt) return
+  globalObject.nextSweepAt = now + ROOM_HEARTBEAT_INTERVAL_MS
+  void sweepLapsedRooms(getRoomPlane()).catch(reportRoomError)
+}
+
+/** Each due room leaves the due ones: due again under the head that still names it, or repaired. A page and a
+ *  `ROOM_PLAN_SLICE_MS` slice at a time. */
+async function sweepLapsedRooms(plane: RoomPlane): Promise<void> {
+  const slice = new Slice()
+  for (let due = await plane.driver.directoryDue(); due.length > 0; due = await plane.driver.directoryDue()) {
+    await eachInFlight(due, (entry) => sweepDueRoom(plane, entry))
+    if (slice.over) await slice.next()
+  }
+}
+
+async function sweepDueRoom(plane: RoomPlane, { roomId, incTag }: { roomId: string; incTag: string }): Promise<void> {
+  const head = await plane.driver.readHead(roomId)
+  if (head?.currentInc !== incTag) await repairRoomIndex(plane, roomId, incTag, head)
+  else await listRoom(plane, { id: roomId, inc: incTag, hold: configFromHead(head).hold }, head.expiresAt)
+}

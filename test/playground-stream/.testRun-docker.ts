@@ -1,8 +1,8 @@
-export { testRunDocker }
+export { setupDockerRun, testRunDocker }
 
 import { page, test, expect, run, skip, isCI, getServerUrl, autoRetry } from '@brillout/test-e2e'
 import { execSync } from 'node:child_process'
-import { navigate } from './e2e-utils'
+import { navigate, sleep } from './e2e-utils'
 import { testCounter } from '../utils'
 import { testFileUpload } from './pages/file-upload/e2e-test'
 import { testFileDownload } from './pages/file-download/e2e-test'
@@ -22,17 +22,19 @@ import { testRefIdentity } from './pages/ref-identity/e2e-test'
 ;(globalThis as { process?: { env: Record<string, string | undefined> } }).process!.env.NODE_TLS_REJECT_UNAUTHORIZED =
   '0'
 
-function testRunDocker() {
+/** `additionalTimeout`: how much longer than test-e2e's default the stack may take to serve. */
+function setupDockerRun(command = 'pnpm test:docker', additionalTimeout = 0): boolean {
   // Skip locally when Docker is unavailable. On CI a missing Docker should fail loudly,
   // not silently shrink coverage.
   if (!isCI() && !isDockerAvailable()) {
     skip('SKIPPED: Docker is not available (`docker info` failed).')
-    return
+    return false
   }
 
-  run('pnpm test:docker', {
+  run(command, {
     serverUrl: 'https://localhost:8443',
     serverIsReadyMessage: 'serving initial configuration',
+    additionalTimeout,
     tolerateExitCode: [130],
     tolerateError(log) {
       const t = log.logText
@@ -56,13 +58,14 @@ function testRunDocker() {
         t.includes('The user aborted a request') ||
         t.includes('Telefunc call cancelled') ||
         t.includes('ERR_INTERNET_DISCONNECTED') ||
-        t.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
         // Expected during the docker reconnect test — `restartProxy()` deliberately kills
         // Caddy at the TCP layer; the browser sees these while it retries reconnecting.
         t.includes('ERR_CONNECTION_CLOSED') ||
         t.includes('ERR_CONNECTION_RESET') ||
         t.includes('ERR_CONNECTION_REFUSED') ||
         t.includes('ERR_NETWORK_CHANGED') ||
+        // The page call `ERR_NETWORK_CHANGED` failed, which `retryOnNetworkChange()` makes again.
+        t.includes('ConnectionError: No Server Connection') ||
         t.includes('ERR_SSL_PROTOCOL_ERROR') ||
         // Chromium-in-Docker `NetworkChangeNotifier` aborts in-flight asset fetches on the
         // bridge interface state shift; the dynamic-import wrapper then reports this. The
@@ -73,6 +76,30 @@ function testRunDocker() {
       )
     },
   })
+
+  // First, so no test has a request in flight when the stack's network settles.
+  test("the stack's network settles", networkSettled)
+
+  return true
+}
+
+/**
+ * Waits, at most `NETWORK_SETTLE_MAX_MS`, until no IPv6 address on the host is tentative. A new interface's address stays
+ * tentative for a second or two after its container is up, and Chromium then treats it settling as a network change and
+ * fails what is in flight with `ERR_NETWORK_CHANGED`. Without `ip`, as on macOS, whose browser doesn't see Docker's
+ * interfaces, there is nothing to wait for.
+ */
+async function networkSettled() {
+  const deadline = Date.now() + NETWORK_SETTLE_MAX_MS
+  while (Date.now() < deadline && execSync('ip -6 addr show tentative 2>/dev/null || true').length > 0) {
+    await sleep(NETWORK_SETTLE_POLL_MS)
+  }
+}
+const NETWORK_SETTLE_MAX_MS = 10_000
+const NETWORK_SETTLE_POLL_MS = 50
+
+function testRunDocker() {
+  if (!setupDockerRun()) return
 
   test('home page', async () => {
     await navigate(`${getServerUrl()}/`, { waitUntil: 'load' })

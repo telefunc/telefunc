@@ -7,6 +7,7 @@ export { getAdapterMaxFrameBytes }
 export { setRootFromVite }
 export { pingDeadlineOf }
 export { reconnectWindow }
+export { getChannelLimits }
 export type {
   ConfigUser,
   ConfigResolved,
@@ -25,11 +26,8 @@ import type { TelefuncServerExtension } from './extensions.js'
 import { registerShieldType } from './shield.js'
 import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
 import { toPosixPath, pathIsAbsolute, assertPosixPath } from '../../utils/path.js'
-import {
-  installBroadcastAdapter,
-  DefaultBroadcastAdapter,
-  type BroadcastTransport,
-} from '../../wire-protocol/broadcast/broadcastAdapter.js'
+import { configureBroadcastTransport } from '../../wire-protocol/backend/install.js'
+import type { BroadcastTransport } from '../../wire-protocol/backend/broadcast/TransportBroadcastDriver.js'
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
   CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
@@ -70,6 +68,13 @@ type StreamConfigUser = {
 type BroadcastConfigUser = {
   /** Transport for cross-node `Broadcast` delivery. */
   transport?: BroadcastTransport
+  /**
+   * Called when messages published to a key never reached a server subscribed to it, though `publish()` resolved. They
+   * aren't sent again.
+   *
+   * @default ({ key, reason }) => console.error(`Broadcast delivery of '${key}' lost: ${reason}`)
+   */
+  onDeliveryLost?: (lost: { key: string; reason: string }) => void
 }
 
 type ChannelConfigUser = {
@@ -382,9 +387,18 @@ function pingDeadlineOf({ pingInterval }: Pick<ChannelConfigResolved, 'pingInter
 }
 
 /** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
-function reconnectWindow(): number {
-  const c = getServerConfig().channel
+function reconnectWindow(c = getServerConfig().channel): number {
   return Math.min(TIMER_DELAY_MAX_MS, pingDeadlineOf(c) + c.reconnectTimeout)
+}
+
+/** What a channel to a page may hold, and how long it waits for its page to come back. */
+function getChannelLimits(): { bufferLimit: number; bufferLimitBinary: number; reconnectWindow: number } {
+  const { channel } = getServerConfig()
+  return {
+    bufferLimit: channel.bufferLimit,
+    bufferLimitBinary: channel.bufferLimitBinary,
+    reconnectWindow: reconnectWindow(channel),
+  }
 }
 
 /** Extension wire types are consumed after user modules may have registered more extensions.
@@ -544,18 +558,27 @@ function applyChannelConfig(val: unknown): void {
 
 function applyBroadcastConfig(val: unknown): void {
   assertUsage(isObject(val), 'config.broadcast should be an object')
+  const next: BroadcastConfigUser = {}
   for (const [key, value] of Object.entries(val)) {
     if (key === 'transport') {
       assertUsage(
-        isObject(value) && typeof (value as any).send === 'function' && typeof (value as any).listen === 'function',
-        'config.broadcast.transport must be a BroadcastTransport with send() and listen() methods',
+        isObject(value) &&
+          (['send', 'listen', 'sendBinary', 'listenBinary'] as const).every(
+            (method) => typeof value[method] === 'function',
+          ),
+        'config.broadcast.transport must be a BroadcastTransport with send(), listen(), sendBinary() and ' +
+          'listenBinary() methods',
       )
-      configState.broadcast.transport = value as BroadcastTransport
-      installBroadcastAdapter(() => new DefaultBroadcastAdapter(value as BroadcastTransport))
+      next.transport = value as BroadcastTransport
+    } else if (key === 'onDeliveryLost') {
+      assertUsage(typeof value === 'function', 'config.broadcast.onDeliveryLost should be a function')
+      next.onDeliveryLost = value as BroadcastConfigUser['onDeliveryLost']
     } else {
       assertUsage(false, `Unknown config.broadcast.${key}`)
     }
   }
+  configState.broadcast = next
+  if (next.transport) configureBroadcastTransport(next.transport)
 }
 
 let rootFromVite: string | null = null

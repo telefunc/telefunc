@@ -11,19 +11,20 @@ class Listeners<T> {
     return this.byRegistration?.size ?? 0
   }
 
-  /** Returns the function that removes this registration. */
-  add(listener: T, { signal, onRemove }: { signal?: AbortSignal; onRemove?: () => void } = {}): () => void {
-    if (signal?.aborted) return () => {}
+  /** Returns the registration's removal, which reports whether it was still registered. */
+  add(listener: T, { signal, onRemove }: { signal?: AbortSignal; onRemove?: () => void } = {}): () => boolean {
+    if (signal?.aborted) return () => false
     const byRegistration = (this.byRegistration ??= new Map())
     const registration = {}
     byRegistration.set(registration, listener)
     this.snapshot = undefined
     const remove = () => {
-      if (!byRegistration.delete(registration)) return
+      if (!byRegistration.delete(registration)) return false
       this.snapshot = undefined
       signal?.removeEventListener('abort', remove)
       this.removers?.delete(registration)
       onRemove?.()
+      return true
     }
     if (signal) {
       signal.addEventListener('abort', remove, { once: true })
