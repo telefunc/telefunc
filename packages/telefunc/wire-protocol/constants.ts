@@ -143,7 +143,7 @@ export const UPGRADE_HANDOFF_JOIN_TIMEOUT_MS = 2_000
 export const UPGRADE_HANDOFF_BUFFER_BYTES = 8 * 1024 * 1024
 export const UPGRADE_HANDOFF_BUFFER_FRAMES = 4_096
 
-/** Wall-clock bound on one attempt, PREPARE to COMMITTED (see the assertion below). */
+/** Wall-clock bound on one attempt, PREPARE to flip (see the assertion below). */
 export const UPGRADE_ATTEMPT_TIMEOUT_MS = 10_000
 
 /** How long a staged, uncommitted upgrade may hold its session before the probe is dropped. */
