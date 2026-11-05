@@ -500,7 +500,33 @@ async function onInMemoryPublishes() {
     producers,
     timerProducer,
     timerFiredMidChain: await timerFiresMidChain(`chain:${id}`),
+    awaitedLoopEnded: await timerEndsAwaitedLoop(`awaited-loop:${id}`),
+    answeringListenerEnded: await timerEndsAnsweringListener(`answering:${id}`),
   }
+}
+
+/** A loop that only awaits publishes: true once the timer that stops it has fired. */
+async function timerEndsAwaitedLoop(key: string): Promise<boolean> {
+  let stop = false
+  setTimeout(() => (stop = true), 50)
+  while (!stop) await Broadcast.publish(key, 'again')
+  return true
+}
+
+/** A listener that answers itself after an `await`: true once the timer that stops it has fired. */
+function timerEndsAnsweringListener(key: string): Promise<boolean> {
+  let stop = false
+  setTimeout(() => (stop = true), 50)
+  return new Promise((resolve) => {
+    const unsubscribe = Broadcast.subscribe(key, async () => {
+      await null
+      if (stop) {
+        unsubscribe()
+        resolve(true)
+      } else void Broadcast.publish(key, 'again')
+    })
+    void Broadcast.publish(key, 'start')
+  })
 }
 
 /** A listener answers itself 20,000 times: whether a timer fired before it was done. */

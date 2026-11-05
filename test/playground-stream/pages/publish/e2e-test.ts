@@ -107,13 +107,22 @@ function testPublish(isDev: boolean, inDocker = false) {
 
   // The in-memory adapter: these lanes publish through Redis.
   if (!inDocker && !process.env.REDIS_URL) {
-    test('broadcast: in memory, a loop of publishes a listener answers delivers in it, a listener publishing 125 MiB delivers it all, one publishing 312 MiB holds at most maxPendingBytes and rejects the rest, one 8 MiB message alone goes through, four producers awaiting each publish deliver all of theirs, a timer publishing 4,096 a tick leaves none waiting at the next, and a listener answering itself at once lets a timer fire', async () => {
+    test('broadcast: in memory, a loop of publishes a listener answers delivers in it, a listener publishing 125 MiB delivers it all, one publishing 312 MiB holds at most maxPendingBytes and rejects the rest, one 8 MiB message alone goes through, four producers awaiting each publish deliver all of theirs, a timer publishing 4,096 a tick leaves none waiting at the next, a listener answering itself at once lets a timer fire, and a timer ends a loop awaiting publishes and a listener answering itself after an `await`', async () => {
       await navigate(`${getServerUrl()}/publish`)
       await page.click('#test-in-memory-publishes')
       await autoRetry(
         async () => {
-          const { loop, listenerBatch, pastTheBound, aloneBytes, producers, timerProducer, timerFiredMidChain } =
-            await getResult<any>('#publish-result')
+          const {
+            loop,
+            listenerBatch,
+            pastTheBound,
+            aloneBytes,
+            producers,
+            timerProducer,
+            timerFiredMidChain,
+            awaitedLoopEnded,
+            answeringListenerEnded,
+          } = await getResult<any>('#publish-result')
           expect(loop).deep.equal({ deliveredInLoop: 3000, inOrder: true })
           expect(listenerBatch).deep.equal({ delivered: 2000, rejected: 0, errors: [], admittedInOrder: true })
           // 256 MiB of 64 KiB messages.
@@ -126,6 +135,8 @@ function testPublish(isDev: boolean, inDocker = false) {
           expect(producers).deep.equal({ received: 8000, rejected: 0 })
           expect(timerProducer).deep.equal({ sent: 30 * 4096, peakWaiting: 0, delivered: 30 * 4096 })
           expect(timerFiredMidChain).toBe(true)
+          expect(awaitedLoopEnded).toBe(true)
+          expect(answeringListenerEnded).toBe(true)
         },
         { timeout: 30_000 },
       )

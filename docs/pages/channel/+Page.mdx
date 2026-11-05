@@ -325,8 +325,6 @@ info.timestamp  // server timestamp (Unix epoch ms)
 A listener's `async` work isn't awaited: the next message arrives whether or not your `subscribe()` callback is done. So if your callback can fall behind, what piles up on the page is yours to bound.
 For example, a callback that does an `await fetch()` for each message should queue them, and drop or merge what it can't keep up with.
 
-In memory, an awaited `publish()` doesn't give the event loop a turn, so a producer that runs forever on resolved promises (a `for (;;) await publish()` loop, or a listener that answers itself after an `await`) must yield itself, for example with a timer.
-
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
 >
 > For <Link href="/stream/scale">scaling horizontally</Link>, you must configure `Broadcast` to publish across all server instances — see <Link href="/stream/scale#broadcast" />

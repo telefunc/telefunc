@@ -59,6 +59,9 @@ type BroadcastTransport = {
   ): () => void
 }
 
+/** The most in-memory publishes delivered at once in one turn of the event loop. */
+const MAX_PUBLISHES_PER_TURN = 16_384
+
 // ---------------------------------------------------------------------------
 // Default adapter — subscriber multiplexer + in-memory fallback
 // ---------------------------------------------------------------------------
@@ -78,6 +81,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   /** What listeners' publishes in `queued` hold: one that finds some waiting and would pass `maxPendingBytes` rejects. */
   private queuedBytes = 0
   private delivering = false
+  private publishesThisTurn = 0
 
   constructor(transport?: BroadcastTransport) {
     this.transport = transport ?? null
@@ -169,6 +173,13 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     const timestamp = Date.now()
     // A publish from a listener reaches subscribers after the message it answers.
     if (this.delivering || this.queued.length > 0) return this.queueInMemory(subs, key, data, timestamp)
+    if (this.publishesThisTurn++ === 0) afterEventLoopTurn(this.startTurn)
+    // Delivered at once and awaited, a publish resumes its caller on a microtask, which a loop of them would never leave.
+    if (this.publishesThisTurn > MAX_PUBLISHES_PER_TURN) {
+      const queued = this.queueInMemory(subs, key, data, timestamp)
+      afterEventLoopTurn(this.drainQueued)
+      return queued
+    }
     this.delivering = true
     try {
       return this.deliverInMemory(subs, key, data, timestamp)
@@ -231,6 +242,10 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       }
     }
     return { seq, timestamp, meta: { delivered, transport: 'in-memory' } }
+  }
+
+  private readonly startTurn = (): void => {
+    this.publishesThisTurn = 0
   }
 
   /** Delivers what waits now, whatever its size. What its listeners publish waits for the next turn, so a listener
