@@ -918,7 +918,7 @@ async function onSubscriberDropped(roomId: string) {
   room.subscribe(() => received++)
   const me = await room.join({ meta: { name: 'Publisher' } })
   let reported = 0
-  roomConfig.onDeliveryLost = ({ reason }) => (reported += Number.parseInt(reason))
+  reportOf(roomId, (reason) => (reported += Number.parseInt(reason)))
   const published: Promise<unknown>[] = []
   for (let i = 0; i < 600; i++) {
     published.push(me.publish(i))
@@ -932,6 +932,14 @@ async function onSubscriberDropped(roomId: string) {
   return { published: published.length, received, reported, rejected }
 }
 
+/** What a drop reports of this room: `onDeliveryLost` hears every room on the server, and another test's room may commit
+ *  its heartbeat's demand page while the connections are down, which is a true report of that room. */
+function reportOf(roomId: string, report: (reason: string) => void) {
+  roomConfig.onDeliveryLost = ({ roomId: lost, reason }) => {
+    if (lost === roomId) report(reason)
+  }
+}
+
 const atRest = new Map<string, { reported: string[]; arrived: () => number; send: () => Promise<void> }>()
 
 /** A subscription of each kind this server makes, and a commit on each lane, before the page drops its connections to
@@ -942,7 +950,7 @@ async function onBusyLanes(roomId: string) {
   const bob = await room.join({ meta: { name: 'Bob' } })
   const view = await Room.get(roomId)
   const reported: string[] = []
-  roomConfig.onDeliveryLost = ({ reason }) => reported.push(reason)
+  reportOf(roomId, (reason) => reported.push(reason))
   config.broadcast.onDeliveryLost = ({ reason }) => reported.push(reason)
   let arrived = 0
   const arrives = () => arrived++
@@ -992,7 +1000,7 @@ async function onLanesBeforeRewind(roomId: string) {
   const room = anyoneCanJoin(await Room.get(roomId))
   const alice = await room.join({ meta: { name: 'Alice' } })
   const reported: string[] = []
-  roomConfig.onDeliveryLost = ({ reason }) => reported.push(reason)
+  reportOf(roomId, (reason) => reported.push(reason))
   config.broadcast.onDeliveryLost = ({ reason }) => reported.push(reason)
   let arrived = 0
   const arrives = () => arrived++
