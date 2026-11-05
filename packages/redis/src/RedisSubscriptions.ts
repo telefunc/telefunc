@@ -266,11 +266,13 @@ class RedisSubscriptions {
       if (wanted && !subscribed.has(channel)) missing.push(channel)
       else if (!wanted && subscribed.has(channel)) stale.push(channel)
     }
-    if (stale.length > 0) {
-      for (const channel of stale) subscribed.delete(channel)
-      await socket.unsubscribe(...stale)
-    }
-    if (missing.length > 0) await this.subscribeMissing(connection, missing)
+    for (const channel of stale) subscribed.delete(channel)
+    await Promise.all([
+      // With no channels, `unsubscribe()` drops them all.
+      stale.length > 0 && socket.unsubscribe(...stale),
+      missing.length > 0 && this.subscribeMissing(connection, missing),
+    ])
+    // After the SUBSCRIBE's acknowledgment: a confirmation reads where each lane starts, and must see what it may miss.
     if (this.isCurrent(id)) await this.confirmCovered(id, subscribed)
   }
 
