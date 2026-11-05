@@ -334,9 +334,10 @@ export const SENDS_OUTRUN_MS = 1_000
 /** The most a batch POST is sized to carry (see `SSE_POST_TARGET_MS`). */
 export const SSE_POST_MAX_BYTES = CREDIT_WINDOW_MAX_BYTES / 2
 
-/** Each queue of a channel's replay buffer, on both ends: twice `CREDIT_WINDOW_MAX_BYTES` (see `replayWindow`). */
-export const CHANNEL_SERVER_REPLAY_BUFFER_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
-export const CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
+/** Each queue of a server channel's replay buffer: all that its sends may get ahead of the page, so a lost wire loses none. */
+export const CHANNEL_SERVER_REPLAY_BUFFER_BYTES = CHANNEL_MAX_PENDING_BYTES + CREDIT_WINDOW_MAX_BYTES
+export const CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES = CHANNEL_MAX_PENDING_BYTES + CREDIT_WINDOW_MAX_BYTES
+/** Each queue of a page's replay buffer: twice `CREDIT_WINDOW_MAX_BYTES` (see `replayWindow`). */
 export const CHANNEL_CLIENT_REPLAY_BUFFER_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
 export const CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
 

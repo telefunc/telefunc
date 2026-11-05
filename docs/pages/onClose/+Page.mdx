@@ -114,6 +114,17 @@ export async function onLoad() {
 }
 ```
 
+On Cloudflare Workers, a client that disconnects before the telefunction answers aborts `signal` only with the `enable_request_signal` [compatibility flag](https://developers.cloudflare.com/workers/configuration/compatibility-flags/):
+
+```jsonc
+// wrangler.jsonc
+{
+  "compatibility_flags": ["enable_request_signal"]
+}
+```
+
+> Without the flag, `signal` doesn't abort and `onClose()` doesn't run: your Worker's code just stops, and Telefunc logs a warning about it. The flag is on by default from the `compatibility_date` `2026-11-17`.
+
 
 ## See also
 

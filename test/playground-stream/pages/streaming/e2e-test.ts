@@ -445,7 +445,7 @@ function testStreaming() {
 
   if (isInline) {
     /** The page's next stream-flow requests are counted, and answered as a load balancer's other instance would. */
-    const answerFlowRequests = (lost: 'all' | 'first answer, second') =>
+    const answerFlowRequests = (lost: 'all' | 'first answer, second' | 'first, to a proxy') =>
       page.evaluate((lost) => {
         const { fetch } = window
         const w = window as any
@@ -453,6 +453,9 @@ function testStreaming() {
         window.fetch = (url, init) => {
           if (!String(url).includes('_telefunc=flow')) return fetch(url, init)
           const request = ++w.__flowRequests
+          if (lost === 'first, to a proxy') {
+            return request === 1 ? Promise.resolve(new Response('Bad Gateway', { status: 502 })) : fetch(url, init)
+          }
           if (request === 1 && lost === 'first answer, second') {
             return fetch(url, init).then(() => Promise.reject(new TypeError('Failed to fetch')))
           }
@@ -476,6 +479,22 @@ function testStreaming() {
       })
       expect((await twoEndlessProgress()).errors).deep.equal([])
       expect(await flowRequests()).toBe(2)
+      await page.click('#test-two-endless-abort')
+    })
+
+    test("streaming: a proxy's error answer doesn't end the stream flow requests", async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await startTwoEndless()
+      const { key } = await twoEndlessProgress()
+      const stopped = Number((await getCleanupState())[`second_${key}`])
+      await answerFlowRequests('first, to a proxy')
+      await page.click('#test-two-endless-read-second')
+      // The page asks again a renewal later at the latest, well before the 60 s lease would let the stream go.
+      await autoRetry(async () => expect((await twoEndlessProgress()).second).greaterThanOrEqual(stopped + 8 * 16), {
+        timeout: 30_000,
+      })
+      expect(await flowRequests()).greaterThanOrEqual(2)
+      expect((await twoEndlessProgress()).errors).deep.equal([])
       await page.click('#test-two-endless-abort')
     })
 

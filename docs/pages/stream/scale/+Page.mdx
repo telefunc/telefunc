@@ -17,9 +17,11 @@ A <Link href="/channel">`Channel`</Link> is a stateful connection. Its server-si
 
 > This is the same constraint Socket.IO documents under [Using multiple nodes](https://socket.io/docs/v4/using-multiple-nodes/). The same load-balancer feature solves the problem for Telefunc: a sticky session, usually backed by a cookie or by the client IP.
 
+> Behind a reverse proxy, set Node.js's [`server.keepAliveTimeout`](https://nodejs.org/api/http.html#serverkeepalivetimeout) (5 seconds by default) above how long your proxy keeps an idle connection. Otherwise the proxy can reuse a connection Node.js just closed and answer 502, which the page recovers from by reconnecting.
+
 > Without sticky sessions, a reconnect that lands on a different instance sees no matching channel state, the recovery handshake fails, and the client's `Channel` ends.
 
-> Sanity check: after deploying behind a sticky load balancer, open the browser network tab, refresh once, and confirm every request to `/_telefunc` carries the same sticky cookie. If two consecutive requests carry different sticky values, the load balancer isn't configured for sticky sessions.
+> Sanity check: after deploying behind a sticky load balancer, open the browser network tab and refresh once. With a cookie (HAProxy below), confirm every request to `/_telefunc` carries the same sticky cookie. If two consecutive requests carry different sticky values, the load balancer isn't configured for sticky sessions. With `ip_hash` there's no cookie to read, so add `add_header X-Upstream $upstream_addr;` to your Nginx `location` and confirm every `/_telefunc` response shows the same address.
 
 
 ### Nginx — `ip_hash`
