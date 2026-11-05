@@ -82,6 +82,8 @@ export {
   onThrowingReceiver,
   onPublishLoop,
   onSubscriberDropped,
+  onBusyLanes,
+  onLanesAfterDrop,
   onSaveReply,
   onSeedAndChurn,
   onStopChurn,
@@ -89,7 +91,7 @@ export {
 }
 
 import { Buffer } from 'node:buffer'
-import { Abort, onBug } from 'telefunc'
+import { Abort, Broadcast, config, onBug } from 'telefunc'
 import { Room, roomConfig, type LeaveCause, type LocalParticipant } from '@telefunc/room'
 import { getRoomPlane } from '@telefunc/room/backend'
 import { anyoneCanJoin } from '../../anyone-can-join'
@@ -926,6 +928,56 @@ async function onSubscriberDropped(roomId: string) {
   roomConfig.onDeliveryLost = ({ roomId, reason }) =>
     console.error(`Room delivery handoff of '${roomId}' lost: ${reason}`)
   return { published: published.length, received, reported, rejected }
+}
+
+const atRest = new Map<string, { reported: string[]; arrived: () => number; send: () => Promise<void> }>()
+
+/** A subscription of each kind this server makes, and a commit on each lane, before the page drops its connections to
+ *  Redis. */
+async function onBusyLanes(roomId: string) {
+  const room = anyoneCanJoin(await Room.get(roomId))
+  const alice = await room.join({ meta: { name: 'Alice' } })
+  const bob = await room.join({ meta: { name: 'Bob' } })
+  const view = await Room.get(roomId)
+  const reported: string[] = []
+  roomConfig.onDeliveryLost = ({ reason }) => reported.push(reason)
+  config.broadcast.onDeliveryLost = ({ reason }) => reported.push(reason)
+  let arrived = 0
+  const arrives = () => arrived++
+  room.subscribe(arrives)
+  room.subscribeBinary(arrives, { track: 'shared' })
+  ;(await view.getParticipant(alice.id))!.subscribeBinary(arrives)
+  ;(await view.getParticipant(bob.id))!.subscribeBinary(arrives, { track: 'named' })
+  alice.listen(() => 'read')
+  const key = `room:at-rest:${roomId}`
+  Broadcast.subscribe(key, arrives)
+  Broadcast.subscribeBinary(key, arrives)
+  const bytes = new Uint8Array(1)
+  const send = async () => {
+    await alice.publish('text')
+    await alice.publishBinary(bytes, { track: 'own' })
+    await bob.publishBinary(bytes, { track: 'named' })
+    await bob.publishBinary(bytes, { track: 'shared' })
+    await bob.send(alice.id, 'private', { ack: true })
+    await Broadcast.publish(key, 'text')
+    await Broadcast.publishBinary(key, bytes)
+  }
+  await send()
+  atRest.set(roomId, { reported, arrived: () => arrived, send })
+}
+
+/** Nothing was published while the connections were down, so nothing is reported, and the lanes deliver again. */
+async function onLanesAfterDrop(roomId: string) {
+  const { reported, arrived, send } = atRest.get(roomId)!
+  // Long enough to reconnect and read each lane's start.
+  await sleep(1_000)
+  const before = arrived()
+  await send()
+  await sleep(200)
+  roomConfig.onDeliveryLost = ({ roomId, reason }) =>
+    console.error(`Room delivery handoff of '${roomId}' lost: ${reason}`)
+  config.broadcast.onDeliveryLost = ({ key, reason }) => console.error(`Broadcast delivery of '${key}' lost: ${reason}`)
+  return { reported, arrivedAfter: arrived() - before }
 }
 
 /** A loop of awaited publishes: other work still gets its turns. */

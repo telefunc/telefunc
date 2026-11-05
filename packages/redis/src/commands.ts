@@ -284,7 +284,8 @@ if ARGV[2] == '' then mark = redis.call('GET', KEYS[2]) else mark = redis.call('
 return mark or ''
 `
 
-// A page of a member's lanes' last commits, read as LANE_START_LUA reads one lane's, for its every-track subscription.
+// A page of a member's lanes' last commits, inbox included, read as LANE_START_LUA reads one lane's, for its every-track
+// subscription.
 //   KEYS: [1]=head [2]=the member's order hash
 //   ARGV: [1]=inc [2]=HSCAN cursor
 //   Reply: nil once the incarnation is not the open head, else {next cursor, {lane key, 'seq:ts', ...}}

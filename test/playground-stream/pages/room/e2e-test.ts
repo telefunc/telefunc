@@ -1453,6 +1453,16 @@ function testRoomRedisSubscriberDropped() {
       expectLog('Redis subscriber connection closed')
     },
   )
+  testRoomScenario<{ reported: string[]; arrivedAfter: number }>(
+    'dropped-at-rest',
+    "room and broadcast: Redis drops a server's subscriber connection with nothing published meanwhile: no lane reports a loss",
+    (r) => {
+      expect(r.reported).deep.equal([])
+      // The room's message, three binary frames, and the key's message of each kind.
+      expect(r.arrivedAfter).toBe(6)
+      expectLog('Redis subscriber connection closed')
+    },
+  )
 }
 
 function testRoomLongWaits() {

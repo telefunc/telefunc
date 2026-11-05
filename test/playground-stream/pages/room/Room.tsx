@@ -87,6 +87,8 @@ import {
   onThrowingReceiver,
   onPublishLoop,
   onSubscriberDropped,
+  onBusyLanes,
+  onLanesAfterDrop,
   onSaveReply,
   onSeedAndChurn,
   onStopChurn,
@@ -887,6 +889,13 @@ function Room() {
         await new Promise((resolve) => setTimeout(resolve, 200))
         await fetch('/api/redis/drop-connections', { method: 'POST' })
         setResult(JSON.stringify(await result))
+      })}
+
+      {scenario('dropped-at-rest', 'A dropped subscriber at rest', 'Reports nothing', async () => {
+        const roomId = await createRoomId('dropped-at-rest')
+        await onBusyLanes(roomId)
+        await fetch('/api/redis/drop-connections', { method: 'POST' })
+        setResult(JSON.stringify(await onLanesAfterDrop(roomId)))
       })}
 
       {scenario('publish-loop', 'A publish loop', 'Other work runs during it', async () => {
