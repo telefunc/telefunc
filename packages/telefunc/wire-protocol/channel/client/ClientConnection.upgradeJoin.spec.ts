@@ -47,6 +47,7 @@ function createChannel(dispatched: DecodedFrame[]) {
 }
 
 class FakeWebSocket {
+  static OPEN = 1
   static last: FakeWebSocket | null = null
   onopen: (() => void) | null = null
   onclose: (() => void) | null = null
