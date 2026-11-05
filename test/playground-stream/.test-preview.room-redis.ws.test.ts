@@ -1,4 +1,5 @@
 import { runPlayground } from './.testRun'
+import { testBroadcastRedisSubscriberDropped } from './pages/publish/redis-e2e-test'
 import { testRoom, testRoomRedisSubscriberDropped } from './pages/room/e2e-test'
 
 process.env.PUBLIC_ENV__STREAM_TRANSPORT = 'channel'
@@ -10,3 +11,4 @@ process.env.NO_HTTPS = 'true'
 runPlayground('pnpm preview:redis')
 testRoom()
 testRoomRedisSubscriberDropped()
+testBroadcastRedisSubscriberDropped()

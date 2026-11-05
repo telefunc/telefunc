@@ -1447,7 +1447,9 @@ function testRoomRedisSubscriberDropped() {
     (r) => {
       expect(r.published).toBe(600)
       expect(r.reported > 0).toBe(true)
-      expect(r.received + r.reported + r.rejected).toBe(r.published)
+      // A rejected publish may have run: the drop can cut its reply and not the commit.
+      expect(r.received + r.reported <= r.published).toBe(true)
+      expect(r.received + r.reported + r.rejected >= r.published).toBe(true)
       expectLog('Redis subscriber connection closed')
     },
   )

@@ -333,6 +333,8 @@ When `publish()` rejects depends on where Broadcast runs:
 
 A rejected publish may still have reached some subscribers (on Cloudflare, every subscriber the failed server doesn't hold), so publishing it again can deliver it twice to them.
 
+`publish()` is at most once: with <Link href="/redis">`@telefunc/redis`</Link>, a server whose connection to Redis drops never gets what is published before it reconnects, though `publish()` resolved. That server's <Link href="/broadcast-config">`config.broadcast.onDeliveryLost`</Link> is called with how many it missed, and logs them by default.
+
 A failed `publish()` you neither `await` nor `.catch()` gives your code no error (see <Link href="#errors">errors</Link>). To see failures, `await` it or add `.catch()`.
 
 `publish()` can't be awaited per subscriber, so the <Link href="#backpressure">warning about sends that outrun their client</Link> doesn't apply to a `BroadcastChannel`. Instead, a client that falls far behind a broadcast has its connection cut and reconnects. Other channels on the connection also <Link href="#reconnection">reconnect</Link>. The `BroadcastChannel` gets what it missed after reconnecting. If it missed more than the server's buffers hold, it closes (see <Link href="#errors">errors</Link>).

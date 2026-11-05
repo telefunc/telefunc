@@ -12,6 +12,7 @@ import { config } from 'telefunc'
 
 config.broadcast = {
   transport: myTransport, // A BroadcastTransport that carries Broadcast across servers
+  onDeliveryLost: (lost) => monitor.report(lost), // { key, reason } of messages a subscribed server never got; by default logged
 }
 ```
 
@@ -35,6 +36,8 @@ type BroadcastTransport = {
 > When its connection drops, the transport reconnects on its own and keeps calling the `onMessage` it was given.
 
 > A transport that sends `sendBinary()`'s `payload` after `sendBinary()` returns (after an `await`, or from a queue) must send a copy: the publisher may reuse its buffer once <Link href="/channel#broadcast">`publishBinary()`</Link> returns.
+
+> `onDeliveryLost` is called on the server (on Cloudflare, in the Durable Object) that missed the messages, and they aren't sent again. With `@telefunc/redis`, `reason` says how many it missed; on Cloudflare, that it may have missed some. Telefunc doesn't call it for a `BroadcastTransport`, as only the transport knows what it lost: have your transport report that itself.
 
 <ConfigWhereServer />
 

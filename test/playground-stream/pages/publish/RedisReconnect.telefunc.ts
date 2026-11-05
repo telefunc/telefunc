@@ -1,7 +1,7 @@
-export { onBinaryBroadcastAcrossReconnect, onRedisSubscribeFailure }
+export { onBinaryBroadcastAcrossReconnect, onBroadcastSubscriberDropped, onRedisSubscribeFailure }
 
 import type { Redis } from 'ioredis'
-import { BroadcastChannel } from 'telefunc'
+import { Broadcast, BroadcastChannel, config } from 'telefunc'
 import type { BroadcastPayload, BroadcastRoute, DriverAttempt } from 'telefunc/__internal'
 // Only `installRedis()` is public, and it takes one backend per process.
 import { RedisBackend } from '../../../../packages/redis/dist/RedisBackend.js'
@@ -19,6 +19,35 @@ async function onBinaryBroadcastAcrossReconnect() {
     for (let i = 1; i <= 3; i++) void room.publishBinary(bytes.fill(i))
   })
   return room
+}
+
+/** The page drops this server's connections to Redis during these publishes of both kinds to one key: each publish of a
+ *  kind arrives, is reported or rejects. */
+async function onBroadcastSubscriberDropped() {
+  const key = `room:subscriber-dropped:${crypto.randomUUID()}`
+  const text = { published: 0, received: 0, reported: 0, rejected: 0 }
+  const binary = { published: 0, received: 0, reported: 0, rejected: 0 }
+  const unsubscribeText = Broadcast.subscribe(key, () => text.received++)
+  const unsubscribeBinary = Broadcast.subscribeBinary(key, () => binary.received++)
+  config.broadcast.onDeliveryLost = ({ reason }) => {
+    const kind = reason.includes('binary') ? binary : text
+    kind.reported += Number.parseInt(reason)
+  }
+  const published: Promise<unknown>[] = []
+  for (let i = 0; i < 600; i++) {
+    const kind = i % 2 === 0 ? text : binary
+    kind.published++
+    const publish = kind === text ? Broadcast.publish(key, i) : Broadcast.publishBinary(key, new Uint8Array(1))
+    published.push(Promise.resolve(publish).catch(() => kind.rejected++))
+    await sleep(1)
+  }
+  await Promise.all(published)
+  // Long enough to reconnect and read where the key starts.
+  await sleep(1_000)
+  config.broadcast.onDeliveryLost = ({ key, reason }) => console.error(`Broadcast delivery of '${key}' lost: ${reason}`)
+  unsubscribeText()
+  unsubscribeBinary()
+  return { text, binary }
 }
 
 /** Redis refuses a user's SUBSCRIBEs while its backend publishes on a new subscription; then the command is granted

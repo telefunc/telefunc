@@ -87,35 +87,36 @@ local function tf_ordering_frame(seq, ts, payload)
 end
 `
 
-// Broadcast publish: next per-key seq, authority time that never goes back on the key, one PUBLISH of the seq of the
-// key's previous publish of this kind (two u32 big-endian words, 0 if none) and the ordering frame.
-//   KEYS: [1]=order ('seq:ts:last text seq:last binary seq') [2]=channel
+// Broadcast publish: next per-key seq, authority time that never goes back on the key, one PUBLISH of this publish's
+// place among the key's publishes of its kind (two u32 big-endian words, from 1) and the ordering frame.
+//   KEYS: [1]=order ('seq:ts:text publishes:binary publishes') [2]=channel
 //   ARGV: [1]=payload [2]=kind ('text'|'binary')
 const PUBLISH_LUA = `${NOW_LUA}${REDIS_ORDERING_FRAME_LUA}
 local prev = redis.call('GET', KEYS[1])
 local ts = tf_now()
 local seq
-local last_text, last_binary = '0', '0'
+local text, binary = 0, 0
 if prev then
   local pseq, pts, ptext, pbinary = string.match(prev, '^(%d+):(%d+):(%d+):(%d+)$')
   if not pseq then return redis.error_reply('publish: invalid ordering watermark') end
   seq = tonumber(pseq) + 1
   if tonumber(pts) > ts then ts = tonumber(pts) end
-  last_text, last_binary = ptext, pbinary
+  text, binary = tonumber(ptext), tonumber(pbinary)
 else
   -- A missing order (new, evicted or flushed) starts at authority time in microseconds, above every seq it issued.
   local t = redis.call('TIME')
   seq = tonumber(t[1]) * 1000000 + tonumber(t[2]) + 1
 end
-local seq_text = string.format('%.0f', seq)
-local predecessor
+local place
 if ARGV[2] == 'text' then
-  predecessor, last_text = tonumber(last_text), seq_text
+  text = text + 1
+  place = text
 else
-  predecessor, last_binary = tonumber(last_binary), seq_text
+  binary = binary + 1
+  place = binary
 end
-redis.call('SET', KEYS[1], seq_text .. ':' .. string.format('%.0f', ts) .. ':' .. last_text .. ':' .. last_binary)
-local frame = tf_u64(predecessor) .. tf_ordering_frame(seq, ts, ARGV[1])
+redis.call('SET', KEYS[1], string.format('%.0f:%.0f:%.0f:%.0f', seq, ts, text, binary))
+local frame = tf_u64(place) .. tf_ordering_frame(seq, ts, ARGV[1])
 redis.call('PUBLISH', KEYS[2], frame)
 return {seq, ts}
 `
@@ -315,7 +316,7 @@ return marks
 
 // Read once SUBSCRIBE is acknowledged: a key's frames start after its last publish. A key with none starts at authority
 // time in microseconds, as PUBLISH_LUA would start it, so its first publish follows.
-//   KEYS: [1]=order ('seq:ts:last text seq:last binary seq')
+//   KEYS: [1]=order ('seq:ts:text publishes:binary publishes')
 const BROADCAST_START_LUA = `
 local mark = redis.call('GET', KEYS[1])
 if mark then return mark end
@@ -925,7 +926,11 @@ const REDIS_COMMANDS = {
     lua: BROADCAST_START_LUA,
     numberOfKeys: 1,
     invoke: (prefix, route: BroadcastRoute) => ({ keys: [broadcastSequenceKey(prefix, route.key)], argv: [] }),
-    parse: (reply) => new Map([['', parseOrdering(reply as string)]]),
+    // The lane of a route counts its kind's publishes, in which a hole is a lost message.
+    parse: (reply, { kind }): Map<string, OrderingInfo> => {
+      const [, timestamp, text, binary] = (reply as string).split(':').map(Number) as [number, number, number, number]
+      return new Map([['', { seq: kind === 'text' ? text : binary, timestamp }]])
+    },
   }),
   dropIncarnation: command({
     name: 'tfRoomDropIncarnation',
