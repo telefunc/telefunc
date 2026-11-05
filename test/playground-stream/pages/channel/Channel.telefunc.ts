@@ -662,11 +662,14 @@ async function onChannelHeldBinary() {
   return { channel: ch.client }
 }
 
-/** Sends 100,000 empty messages of each kind to a channel no page attaches to, and counts the rejected ones by error name. */
+/** With 1 KiB buffers, sends 100,000 empty messages of each kind to an unattached channel; counts rejections by error. */
 async function onChannelUnattachedFlood() {
   const rejected: Record<'text' | 'binary', Record<string, number>> = { text: {}, binary: {} }
   for (const kind of ['text', 'binary'] as const) {
+    const original = config.channel
+    config.channel = { ...original, bufferLimit: 1024, bufferLimitBinary: 1024 }
     const ch = new Channel<never, string>()
+    config.channel = original
     const counts: Record<string, number> = {}
     for (let i = 0; i < 100_000; i++) {
       const send = kind === 'text' ? ch.send('') : ch.sendBinary(new Uint8Array(0))

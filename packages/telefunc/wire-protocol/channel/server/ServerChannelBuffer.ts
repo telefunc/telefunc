@@ -9,8 +9,6 @@ import type { IndexedPeer } from './IndexedPeer.js'
 /** What a send held in memory (buffered, or awaiting its answer or credit) takes beyond its payload: its callbacks and
  *  promise, about 480 B. */
 const HELD_SEND_OVERHEAD_BYTES = 512
-/** The least an entry counts as, whatever its payload: what holds it isn't free, so a flood of empty sends stays bounded. */
-const MIN_ENTRY_BYTES = 64
 
 /** Callback pair for buffered entries — resolve on flush, reject on eviction. */
 type EntryCallback = {
@@ -211,7 +209,8 @@ class BufferQueue {
 
   /** The bytes the entry counts as, or `null` once the queue is cleared for an entry larger than it. */
   private admit(bytes: number, callback: EntryCallback | null): number | null {
-    const counted = Math.max(bytes, MIN_ENTRY_BYTES)
+    // An empty entry counts as 1 B, so a flood of them stays bounded.
+    const counted = Math.max(bytes, 1)
     if (counted <= this.maxBytes) return counted
     const overflowErr = new ChannelOverflowError()
     this.clear(overflowErr)
