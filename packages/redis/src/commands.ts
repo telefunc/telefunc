@@ -544,22 +544,37 @@ end
 // drops, the mutations and counts at the incarnation's next revision, the members' lane orders, their retained binary
 // frames and the semantic frame of each that owns it as the script finds it, the track lane sets of the members'
 // binary lanes, then its commit, as COMMIT commits.
-//   KEYS: [1]=head [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions [7]=retained lanes
-//         [8]=the semantic lane's retained frame [9]=retained owners, then the keys the plan gives the index of
+//   KEYS: `OPERATION_KEYS`, then the keys the plan gives the index of
 //   ARGV: [1]=inc [2]=the plan, an `OperationPacket` as JSON (its type says what each field holds and where its KEYS
 //         and ARGV are), then the bytes and COMMIT's ARGV the plan gives the index of
+const OPERATION_KEYS = {
+  head: 0,
+  rev: 1,
+  incarnationKeys: 2,
+  // Where `CELL_WRITES_LUA` reads them.
+  cellIndex: 3,
+  cellValues: 4,
+  cellVersions: 5,
+  retainedLanes: 6,
+  /** The semantic lane's retained frame. */
+  semanticRetained: 7,
+  retainedOwners: 8,
+} as const
+const OPERATION_KEY = luaRefs('KEYS', OPERATION_KEYS)
+
 const OPERATION_LUA = `${HEAD_PRELUDE}${REDIS_ORDERING_FRAME_LUA}${CELL_WRITES_LUA}${RETAINED_DELETE_FN_LUA}
 local function tf_commit(CK, CA)
 ${commitLua(luaRefs('CK', COMMIT_KEYS), luaRefs('CA', COMMIT_ARGS), 'CA')}
 end
-local rev_key, incarnation_keys_key, cell_index_key, retained_lanes_key = KEYS[2], KEYS[3], KEYS[4], KEYS[7]
-local semantic_key, owners_key = KEYS[8], KEYS[9]
+local rev_key, incarnation_keys_key = ${OPERATION_KEY.rev}, ${OPERATION_KEY.incarnationKeys}
+local cell_index_key, retained_lanes_key = ${OPERATION_KEY.cellIndex}, ${OPERATION_KEY.retainedLanes}
+local semantic_key, owners_key = ${OPERATION_KEY.semanticRetained}, ${OPERATION_KEY.retainedOwners}
 local now = tf_now()
-local head = tf_live_head(KEYS[1], now)
+local head = tf_live_head(${OPERATION_KEY.head}, now)
 if (not head) or head.inc ~= ARGV[1] or head.state ~= 'open' then return '{"kind":"stale-incarnation"}' end
 local plan = cjson.decode(ARGV[2])
 for _, read in ipairs(plan.expect) do
-  if (redis.call('HGET', KEYS[6], read[1]) or '') ~= read[2] then return '{"kind":"conflict"}' end
+  if (redis.call('HGET', ${OPERATION_KEY.cellVersions}, read[1]) or '') ~= read[2] then return '{"kind":"conflict"}' end
 end
 for _, member in ipairs(plan.members) do
   if redis.call('HLEN', KEYS[member[4]]) ~= member[2] or redis.call('SCARD', KEYS[member[4] + 1]) ~= member[3] then
@@ -577,7 +592,8 @@ for _, mutation in ipairs(plan.mutations) do
 end
 local counters = {}
 for _, count in ipairs(plan.counts) do tf_count(count[1], count[2], count[3], version, now, counters) end
-redis.call('SADD', incarnation_keys_key, rev_key, cell_index_key, KEYS[5], KEYS[6])
+redis.call('SADD', incarnation_keys_key, rev_key, cell_index_key, ${OPERATION_KEY.cellValues},
+  ${OPERATION_KEY.cellVersions})
 for _, member in ipairs(plan.members) do
   redis.call('SREM', incarnation_keys_key, KEYS[member[4]])
   redis.call('UNLINK', KEYS[member[4]])
@@ -978,17 +994,16 @@ const REDIS_COMMANDS = {
     numberOfKeys: null,
     invoke: (prefix, { roomId, inc, writes, reads, members, commit, kit }: OperationInput) => {
       const semanticLaneKey = kit.encodeLaneKey({ kind: 'semantic' })
-      const keys = [
-        headKey(prefix, roomId),
-        revKey(prefix, roomId, inc),
-        incarnationKeysKey(prefix, roomId, inc),
-        cellIndexKey(prefix, roomId, inc),
-        cellValuesKey(prefix, roomId, inc),
-        cellVersionsKey(prefix, roomId, inc),
-        retainedLanesKey(prefix, roomId, inc),
-        retainedKey(prefix, roomId, inc, semanticLaneKey),
-        retainedOwnersKey(prefix, roomId, inc),
-      ]
+      const keys: string[] = []
+      keys[OPERATION_KEYS.head] = headKey(prefix, roomId)
+      keys[OPERATION_KEYS.rev] = revKey(prefix, roomId, inc)
+      keys[OPERATION_KEYS.incarnationKeys] = incarnationKeysKey(prefix, roomId, inc)
+      keys[OPERATION_KEYS.cellIndex] = cellIndexKey(prefix, roomId, inc)
+      keys[OPERATION_KEYS.cellValues] = cellValuesKey(prefix, roomId, inc)
+      keys[OPERATION_KEYS.cellVersions] = cellVersionsKey(prefix, roomId, inc)
+      keys[OPERATION_KEYS.retainedLanes] = retainedLanesKey(prefix, roomId, inc)
+      keys[OPERATION_KEYS.semanticRetained] = retainedKey(prefix, roomId, inc, semanticLaneKey)
+      keys[OPERATION_KEYS.retainedOwners] = retainedOwnersKey(prefix, roomId, inc)
       const keysAt = (...added: string[]) => keys.push(...added) - added.length + 1
       const argv: (string | Buffer)[] = [inc, '']
       const mutations = writes.mutations.map(({ key, bytes }): [string, number] => {
