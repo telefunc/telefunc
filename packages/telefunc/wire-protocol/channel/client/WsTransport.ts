@@ -168,7 +168,15 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     const uplink = new Uplink()
     const downlink = new Downlink(uplink)
     const headroom = new ClientHeadroom({
-      socket: ws,
+      socket: {
+        // A closing socket would discard the message with a console error: the replay resends what the page sent.
+        send: (message) => {
+          if (ws.readyState <= WebSocket.OPEN) ws.send(message)
+        },
+        get bufferedAmount() {
+          return ws.bufferedAmount
+        },
+      },
       pingInterval: this.pingInterval,
       uplink,
       downlink,
