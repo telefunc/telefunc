@@ -3,6 +3,7 @@ export { RoomHosting }
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import type { RoomIncarnation } from '../protocol.js'
 import { reportRoomError } from '../reportRoomError.js'
+import { eachInFlight } from '../store/cellStore.js'
 import { holdViews, removeView, renewLease, RoomLease } from '../store/lease.js'
 import { evictMember } from '../store/members.js'
 import type { RoomStub } from '../RoomStub.js'
@@ -53,10 +54,7 @@ class RoomHosting {
    *  stub's view again in one write, after each one's earlier write. */
   async maintain(): Promise<void> {
     if (!(await renewLease(this.incarnation, this.lease))) this.viewsLost = true
-    for (const id of this.unevicted) {
-      await evictMember(this.incarnation, id, { type: 'disconnected' })
-      this.unevicted.delete(id)
-    }
+    await eachInFlight(this.unevicted, (id) => this.evictAgain(id))
     if (!this.viewsLost) return
     this.viewsLost = false
     const stubs = [...this.views.keys()]
@@ -70,6 +68,11 @@ class RoomHosting {
       ),
     )
     await keys
+  }
+
+  private async evictAgain(id: string): Promise<void> {
+    await evictMember(this.incarnation, id, { type: 'disconnected' })
+    this.unevicted.delete(id)
   }
 
   /** The stubs' views' keys, in order; each null and the views lost if the write failed. */
