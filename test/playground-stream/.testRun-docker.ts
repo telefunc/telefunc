@@ -2,7 +2,7 @@ export { setupDockerRun, testRunDocker }
 
 import { page, test, expect, run, skip, isCI, getServerUrl, autoRetry } from '@brillout/test-e2e'
 import { execSync } from 'node:child_process'
-import { navigate } from './e2e-utils'
+import { navigate, sleep } from './e2e-utils'
 import { testCounter } from '../utils'
 import { testFileUpload } from './pages/file-upload/e2e-test'
 import { testFileDownload } from './pages/file-download/e2e-test'
@@ -77,8 +77,26 @@ function setupDockerRun(command = 'pnpm test:docker', additionalTimeout = 0): bo
     },
   })
 
+  // First, so no test has a request in flight when the stack's network settles.
+  test("the stack's network settles", networkSettled)
+
   return true
 }
+
+/**
+ * Waits, at most `NETWORK_SETTLE_MAX_MS`, until no IPv6 address on the host is tentative. A new interface's address stays
+ * tentative for a second or two after its container is up, and Chromium then treats it settling as a network change and
+ * fails what is in flight with `ERR_NETWORK_CHANGED`. Without `ip`, as on macOS, whose browser doesn't see Docker's
+ * interfaces, there is nothing to wait for.
+ */
+async function networkSettled() {
+  const deadline = Date.now() + NETWORK_SETTLE_MAX_MS
+  while (Date.now() < deadline && execSync('ip -6 addr show tentative 2>/dev/null || true').length > 0) {
+    await sleep(NETWORK_SETTLE_POLL_MS)
+  }
+}
+const NETWORK_SETTLE_MAX_MS = 10_000
+const NETWORK_SETTLE_POLL_MS = 50
 
 function testRunDocker() {
   if (!setupDockerRun()) return
