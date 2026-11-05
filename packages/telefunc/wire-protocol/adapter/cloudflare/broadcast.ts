@@ -20,6 +20,7 @@ import {
   type PublishResult,
 } from '../../backend/driver.js'
 import { broadcastRouteKey } from '../../backend/broadcast/routeKey.js'
+import { reportBroadcastDeliveryLost } from '../../backend/broadcast/reportBroadcastDeliveryLost.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
@@ -54,7 +55,8 @@ type TelefuncBroadcastStub = {
   /** Resolves to how many of the member DOs it names failed to take the delivery. */
   telefuncBroadcastForward(request: BroadcastForwardRequest): Promise<number>
   telefuncBroadcastDeliver(delivery: BroadcastDelivery): Promise<void>
-  telefuncBroadcastPresence(request: BroadcastPresenceRequest): Promise<void>
+  /** Resolves to whether the member DO had no live record, so that fan-out was skipping it. */
+  telefuncBroadcastPresence(request: BroadcastPresenceRequest): Promise<boolean>
 }
 
 /** One DO's outgoing Broadcast calls. */
@@ -93,10 +95,16 @@ class MemberRoute {
     this.attempt?.presence('lost')
   }
 
-  startRefresh(refresh: () => Promise<void>): void {
+  startRefresh(refresh: () => Promise<boolean>): void {
     this.refreshTimer = setInterval(() => {
       void refresh().then(
-        () => this.presenceRecorded(),
+        (lapsed) => {
+          if (lapsed) {
+            const reason = `this Durable Object's presence lapsed, so what was published since didn't reach it`
+            reportBroadcastDeliveryLost(this.route.key, reason)
+          }
+          this.presenceRecorded()
+        },
         (error: unknown) => this.presenceLost(error),
       )
     }, PRESENCE_REFRESH_INTERVAL_MS)
@@ -164,19 +172,29 @@ class CloudflareBroadcastAuthorityState {
     })
   }
 
-  /** Records or withdraws a member DO, dropping the route's lapsed entries; the RPC reply waits for the write. */
-  setPresence({ key, kind, member, bucket }: BroadcastPresenceRequest): void {
+  /** Records or withdraws a member DO, dropping the route's lapsed entries; the RPC reply waits for the write. Returns
+   *  whether it had no live record. */
+  setPresence({ key, kind, member, bucket }: BroadcastPresenceRequest): boolean {
     const sql = this.sql()
     const routeKey = broadcastRouteKey({ key, kind })
     const now = Date.now()
-    this.storage.transactionSync(() => {
+    return this.storage.transactionSync(() => {
+      const lapsed =
+        sql
+          .exec(
+            'SELECT 1 FROM broadcast_presence WHERE route_key = ? AND member = ? AND expires_at > ?',
+            routeKey,
+            member,
+            now,
+          )
+          .toArray().length === 0
       sql.exec(
         'DELETE FROM broadcast_presence WHERE route_key = ? AND (member = ? OR expires_at <= ?)',
         routeKey,
         member,
         now,
       )
-      if (bucket === null) return
+      if (bucket === null) return lapsed
       sql.exec(
         'INSERT INTO broadcast_presence (route_key, member, bucket, expires_at) VALUES (?, ?, ?, ?)',
         routeKey,
@@ -184,6 +202,7 @@ class CloudflareBroadcastAuthorityState {
         bucket,
         now + PRESENCE_TTL_MS,
       )
+      return lapsed
     })
   }
 
@@ -303,13 +322,13 @@ class CloudflareBroadcastMember {
   }
 
   /** Through the DO's ordered stubs, so one route's writes reach its authority in the order they were made. */
-  private recordPresence(route: BroadcastRoute): Promise<void> {
+  private recordPresence(route: BroadcastRoute): Promise<boolean> {
     assert(this.locatedBucket, 'A Broadcast member registers from a session that knows its bucket')
     const request = { key: route.key, kind: route.kind, member: this.id, bucket: this.locatedBucket }
     return this.broadcast.sendPresence(this.calls, request)
   }
 
-  private withdrawPresence(route: BroadcastRoute): Promise<void> {
+  private withdrawPresence(route: BroadcastRoute): Promise<boolean> {
     const request = { key: route.key, kind: route.kind, member: this.id, bucket: null }
     return this.broadcast.sendPresence(this.calls, request)
   }
@@ -357,7 +376,7 @@ class CloudflareBroadcast {
     return this.callByName(member.calls, name, member.bucket, send)
   }
 
-  sendPresence(calls: BroadcastCalls, request: BroadcastPresenceRequest): Promise<void> {
+  sendPresence(calls: BroadcastCalls, request: BroadcastPresenceRequest): Promise<boolean> {
     return this.callByName(calls, this.authorityName(request.key), request.bucket, (authority) =>
       authority.telefuncBroadcastPresence(request),
     )

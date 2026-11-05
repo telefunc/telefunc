@@ -173,7 +173,7 @@ Each key's authority records which Durable Objects have subscribers, in its own 
 | TTL | 90 seconds |
 | Refresh | every 30 seconds |
 
-A Durable Object registers with the authority on its first subscription to a key and withdraws on its last unsubscribe. If a Durable Object is evicted (e.g. during a deployment), its record lapses after 90 seconds and fan-out skips it.
+A Durable Object registers with the authority on its first subscription to a key and withdraws on its last unsubscribe. If a Durable Object is evicted (e.g. during a deployment), its record lapses after 90 seconds and fan-out skips it. A Durable Object that can't refresh for that long misses what is published until a refresh succeeds, and then <Link href="/broadcast-config">`config.broadcast.onDeliveryLost`</Link> is called.
 
 
 ## Delivery guarantees
