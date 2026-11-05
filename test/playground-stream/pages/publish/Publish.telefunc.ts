@@ -817,6 +817,8 @@ async function onInMemoryPublishes() {
   const stopBehind = Broadcast.subscribeBinary(`behind:${id}`, () => void behindDelivered++)
   const stopFirst = Broadcast.subscribe(`answer-1:${id}`, () => void Broadcast.publish(`answer-2:${id}`, 'seen'))
   const stopSecond = Broadcast.subscribe(`answer-2:${id}`, () => void Broadcast.publish(`answer-3:${id}`, 'seen'))
+  // So an answer still waits when the loop passes 256 MiB, whether or not the long loops' hold is on as this starts.
+  const stopThird = Broadcast.subscribe(`answer-3:${id}`, () => void Broadcast.publish(`answer-4:${id}`, 'seen'))
   void Broadcast.publish(`answer-1:${id}`, 'go')
   for (let i = 0; i < 5000; i++) void Broadcast.publishBinary(`behind:${id}`, reused)
   const behindInLoop = behindDelivered
@@ -825,6 +827,7 @@ async function onInMemoryPublishes() {
   stopBehind()
   stopFirst()
   stopSecond()
+  stopThird()
 
   return {
     longLoopsInLoop,
