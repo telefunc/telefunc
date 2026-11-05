@@ -492,7 +492,37 @@ async function onInMemoryPublishes() {
   stopTimerProducer()
   const timerProducer = { sent: timerSent, peakWaiting, delivered: timerDelivered }
 
+  // Two turns, each with 20,000 of 64 KiB in one run of code, all delivering in it on a reused buffer nothing has to copy.
+  const reused = new Uint8Array(64 * 1024)
+  const longLoopsInLoop: number[] = []
+  let longLoopDelivered = 0
+  const stopLongLoop = Broadcast.subscribeBinary(`long-loop:${id}`, () => void longLoopDelivered++)
+  for (let turn = 0; turn < 2; turn++) {
+    await new Promise((resolve) => setImmediate(resolve))
+    longLoopDelivered = 0
+    for (let i = 0; i < 20_000; i++) void Broadcast.publishBinary(`long-loop:${id}`, reused)
+    longLoopsInLoop.push(longLoopDelivered)
+  }
+  stopLongLoop()
+
+  // A listener's answer waits for the next turn, as a loop publishes 5,000 of 64 KiB: past 256 MiB, what waits goes.
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  let behindDelivered = 0
+  const stopBehind = Broadcast.subscribeBinary(`behind:${id}`, () => void behindDelivered++)
+  const stopFirst = Broadcast.subscribe(`answer-1:${id}`, () => void Broadcast.publish(`answer-2:${id}`, 'seen'))
+  const stopSecond = Broadcast.subscribe(`answer-2:${id}`, () => void Broadcast.publish(`answer-3:${id}`, 'seen'))
+  void Broadcast.publish(`answer-1:${id}`, 'go')
+  for (let i = 0; i < 5000; i++) void Broadcast.publishBinary(`behind:${id}`, reused)
+  const behindInLoop = behindDelivered
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  const behindAnAnswer = { inLoop: behindInLoop, delivered: behindDelivered }
+  stopBehind()
+  stopFirst()
+  stopSecond()
+
   return {
+    longLoopsInLoop,
+    behindAnAnswer,
     loop,
     listenerBatch,
     pastTheBound,

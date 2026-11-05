@@ -59,8 +59,8 @@ type BroadcastTransport = {
   ): () => void
 }
 
-/** The most in-memory publishes delivered at once in one turn of the event loop. */
-const MAX_PUBLISHES_PER_TURN = 16_384
+/** After this many in-memory publishes delivered at once, those from the next microtask on wait for the next turn. */
+const PUBLISHES_BETWEEN_TURNS = 16_384
 
 // ---------------------------------------------------------------------------
 // Default adapter — subscriber multiplexer + in-memory fallback
@@ -78,10 +78,11 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   private highestSeq = 0
   /** In-memory publishes waiting for the ones before them, in publish order. */
   private readonly queued = new Fifo<() => void>()
-  /** What listeners' publishes in `queued` hold: one that finds some waiting and would pass `maxPendingBytes` rejects. */
+  /** What `queued` holds, which stays within `maxPendingBytes`. */
   private queuedBytes = 0
   private delivering = false
-  private publishesThisTurn = 0
+  private publishesSinceTurn = 0
+  private holdingPublishes = false
 
   constructor(transport?: BroadcastTransport) {
     this.transport = transport ?? null
@@ -172,13 +173,14 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   ): BroadcastPublishResult | Promise<BroadcastPublishResult> {
     const timestamp = Date.now()
     // A publish from a listener reaches subscribers after the message it answers.
-    if (this.delivering || this.queued.length > 0) return this.queueInMemory(subs, key, data, timestamp)
-    if (this.publishesThisTurn++ === 0) afterEventLoopTurn(this.startTurn)
-    // Delivered at once and awaited, a publish resumes its caller on a microtask, which a loop of them would never leave.
-    if (this.publishesThisTurn > MAX_PUBLISHES_PER_TURN) {
-      const queued = this.queueInMemory(subs, key, data, timestamp)
+    if (this.delivering || this.holdingPublishes || this.queued.length > 0) {
+      return this.queueInMemory(subs, key, data, timestamp)
+    }
+    // A loop delivered at once holds nothing, and only a publish left waiting ends a chain of microtasks.
+    if (++this.publishesSinceTurn === PUBLISHES_BETWEEN_TURNS) {
+      queueMicrotask(this.holdPublishes)
+      // Now: a producer's next turn, which it schedules once its loop ends, finds the hold over.
       afterEventLoopTurn(this.drainQueued)
-      return queued
     }
     this.delivering = true
     try {
@@ -196,17 +198,18 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     timestamp: number,
   ): Promise<BroadcastPublishResult> {
     const isText = typeof data === 'string'
-    // What is bounded is what listeners pile up, one message alone going through whatever its size. A publish from
-    // outside a listener waits its turn.
-    const fromListener = this.delivering
-    const size = fromListener ? (isText ? utf8ByteLength(data) : data.byteLength) + HELD_SEND_OVERHEAD_BYTES : 0
-    const { maxPendingBytes } = getServerConfig().channel
-    if (fromListener && this.queuedBytes > 0 && this.queuedBytes + size > maxPendingBytes) {
-      return Promise.reject(
-        new ChannelOverflowError(
-          'Publish rejected: publishes made from a listener, waiting to be delivered, exceeded config.channel.maxPendingBytes; raise the setting or publish less from the listener',
-        ),
-      )
+    const size = (isText ? utf8ByteLength(data) : data.byteLength) + HELD_SEND_OVERHEAD_BYTES
+    // One message alone goes through whatever its size.
+    if (this.queuedBytes > 0 && this.queuedBytes + size > getServerConfig().channel.maxPendingBytes) {
+      if (this.delivering) {
+        return Promise.reject(
+          new ChannelOverflowError(
+            'Publish rejected: publishes waiting to be delivered exceeded config.channel.maxPendingBytes; raise the setting or publish less from the listener',
+          ),
+        )
+      }
+      // Outside a listener nothing rejects: what waits goes now.
+      this.drainQueued()
     }
     this.queuedBytes += size
     // The caller may reuse or transfer its buffer once the publish returns.
@@ -244,13 +247,15 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     return { seq, timestamp, meta: { delivered, transport: 'in-memory' } }
   }
 
-  private readonly startTurn = (): void => {
-    this.publishesThisTurn = 0
+  private readonly holdPublishes = (): void => {
+    this.holdingPublishes = true
+    this.publishesSinceTurn = 0
   }
 
   /** Delivers what waits now, whatever its size. What its listeners publish waits for the next turn, so a listener
    *  answering itself can't starve the event loop. */
   private readonly drainQueued = (): void => {
+    this.holdingPublishes = false
     for (let waiting = this.queued.length; waiting > 0; waiting--) {
       const deliver = this.queued.shift()!
       this.delivering = true

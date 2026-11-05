@@ -113,6 +113,8 @@ function testPublish(isDev: boolean, inDocker = false) {
       await autoRetry(
         async () => {
           const {
+            longLoopsInLoop,
+            behindAnAnswer,
             loop,
             listenerBatch,
             pastTheBound,
@@ -123,6 +125,10 @@ function testPublish(isDev: boolean, inDocker = false) {
             awaitedLoopEnded,
             answeringListenerEnded,
           } = await getResult<any>('#publish-result')
+          expect(longLoopsInLoop).deep.equal([20_000, 20_000])
+          expect(behindAnAnswer.inLoop).greaterThan(3900)
+          expect(behindAnAnswer.inLoop).lessThan(4097)
+          expect(behindAnAnswer.delivered).toBe(5000)
           expect(loop).deep.equal({ deliveredInLoop: 3000, inOrder: true })
           expect(listenerBatch).deep.equal({ delivered: 2000, rejected: 0, errors: [], admittedInOrder: true })
           // 256 MiB of 64 KiB messages.
