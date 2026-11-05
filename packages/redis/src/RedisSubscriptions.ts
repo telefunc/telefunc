@@ -1,33 +1,36 @@
 export { RedisSubscriptions }
-export type { RedisDriver, RedisSubscriptionSource }
 
 import { randomUUID } from 'node:crypto'
-import type { BackendReceiver, BroadcastRoute, OrderingInfo } from 'telefunc/__internal'
-import type { RoomSubscriptionSource } from '@telefunc/room/backend'
+import type { BackendReceiver, OrderingInfo } from 'telefunc/__internal'
 import { DriverAttempt, createDeferred, decodeOrderingFrame, type Deferred } from 'telefunc/__internal'
 import type { CommitChannels, FenceTokens } from './keys.js'
 import { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH } from './commands.js'
 import { isRefusal, type SubscriberSocket } from './ioredis.js'
 import type { RedisConnection } from './RedisConnection.js'
 
-type RedisSubscriptionSource = BroadcastRoute | RoomSubscriptionSource
-
 type RedisSubscriptionsOptions = { connection: RedisConnection }
 
-/** The driver an attempt's source belongs to. */
-interface RedisDriver {
-  /** Each of the source's lanes' last commit, by the lane key its frames carry on a fan-in channel and `''` on
-   *  another; null once a Room source's incarnation is not the open head. */
-  readStarts(source: RedisSubscriptionSource): Promise<Map<string, OrderingInfo> | null>
+/** What a driver's frames carry, and how long its lanes' order lasts. */
+type FrameShape = {
+  /** The channel carries many binary lanes: each frame leads with its lane key. */
+  fanIn: boolean
+  /** The source's kinds share one seq: each frame leads with its place among its kind's publishes. */
+  placed: boolean
+  /** Its deliveries are strings. */
+  text: boolean
+  /** A member's lanes' order goes when the member leaves; any other lane's lasts as long as its room or key. */
+  lanesEndWithMembers: boolean
 }
 
-/** Where an attempt's frames arrive, which driver it belongs to, and whom it delivers to. */
+/** Where an attempt's frames arrive, what they carry, where its lanes start, and whom it delivers to. */
 type RedisAttemptOptions = {
-  source: RedisSubscriptionSource
   channel: string
   /** A Room lane's incarnation channel: a message on it means the incarnation was dropped. */
   invalidationChannel: string | null
-  driver: RedisDriver
+  frames: FrameShape
+  /** Each of its lanes' last commit, by the lane key its frames carry on a fan-in channel and `''` on another; null once
+   *  a Room source's incarnation is not the open head. */
+  readStarts: () => Promise<Map<string, OrderingInfo> | null>
   receiver: BackendReceiver
   /** Pub/sub keeps no log, so what a drop or the reorder wait passed by is gone. `null`: how many isn't known. */
   reportMissed: (count: number | null) => void
@@ -314,7 +317,7 @@ class RedisSubscriptions {
   private async confirm(attempt: RedisAttempt, id: number): Promise<void> {
     let starts: Map<string, OrderingInfo> | null
     try {
-      starts = await attempt.driver.readStarts(attempt.source)
+      starts = await attempt.readStarts()
     } catch (error) {
       // A failed read (a command-connection error) fails this attempt, not the shared subscriber connection.
       if (this.isCurrent(id)) attempt.fail(error)
@@ -340,10 +343,9 @@ class RedisSubscriptions {
 
 /** One source on the shared connection: delivers its lanes in seq order to core's `receiver`. */
 class RedisAttempt extends DriverAttempt {
-  readonly source: RedisSubscriptionSource
   readonly channel: string
   readonly invalidationChannel: string | null
-  readonly driver: RedisDriver
+  readonly readStarts: RedisAttemptOptions['readStarts']
   readonly channels: readonly string[]
   private readonly owner: RedisSubscriptions
   private readonly receiver: BackendReceiver
@@ -357,44 +359,28 @@ class RedisAttempt extends DriverAttempt {
   private readonly firstReadiness = createDeferred()
   /** Settles on its first ready or its end. Rejects if it fails before either, for the sends waiting on it. */
   readonly firstReady: Promise<void> = this.firstReadiness.promise
-  private readonly fanIn: boolean
-  private readonly broadcast: boolean
-  /** A Broadcast text source's deliveries are strings. */
-  private readonly text: boolean
-  /** A Room member's lanes' order goes when the member leaves; any other lane's lasts as long as its room or key. */
-  private readonly lanesEndWithMembers: boolean
+  private readonly frames: FrameShape
 
   constructor({
     owner,
-    source,
     channel,
     invalidationChannel,
-    driver,
+    frames,
+    readStarts,
     receiver,
     reportMissed,
   }: RedisAttemptOptions & { owner: RedisSubscriptions }) {
     super()
     this.owner = owner
-    this.source = source
     this.channel = channel
     this.invalidationChannel = invalidationChannel
-    this.driver = driver
+    this.frames = frames
+    this.readStarts = readStarts
     this.receiver = receiver
     this.reportMissed = reportMissed
     this.channels = invalidationChannel === null ? [channel] : [channel, invalidationChannel]
     // Its first state change ends its establishment: ready, or closed.
     this.onStateChange(() => this.firstReadiness.resolve())
-    if ('roomId' in source) {
-      this.fanIn = source.lane.kind === 'binary-all' || source.lane.kind === 'binary-track'
-      this.broadcast = false
-      this.text = false
-      this.lanesEndWithMembers = this.fanIn || source.lane.kind === 'inbox' || source.lane.kind === 'binary'
-    } else {
-      this.fanIn = false
-      this.broadcast = true
-      this.text = source.kind === 'text'
-      this.lanesEndWithMembers = false
-    }
   }
 
   /** It has never been ready, and hasn't ended. */
@@ -450,7 +436,7 @@ class RedisAttempt extends DriverAttempt {
   /** What its lost connection passed by, or null once a lane's order is behind what it delivered: a failover's rewind or
    *  a flush took the count with it. */
   private missedBefore(starts: Map<string, OrderingInfo>): number | null {
-    if (!this.lanesEndWithMembers && this.orders.size > starts.size) return null
+    if (!this.frames.lanesEndWithMembers && this.orders.size > starts.size) return null
     let missed = 0
     for (const [lane, start] of starts) {
       const last = this.orders.get(lane)?.last ?? 0
@@ -496,20 +482,21 @@ class RedisAttempt extends DriverAttempt {
     this.owner.detach(this)
   }
 
-  /** A frame on the wire: its commit's fence token, if armed; its lane key, on a fan-in channel; its place, on Broadcast,
-   *  as a key's kinds share one seq; then the ordering frame. */
+  /** A frame on the wire: its commit's fence token, if armed; its lane key and its place, if its shape has them; then
+   *  the ordering frame. */
   private decodeLaneFrame(message: Buffer): LaneFrame {
     const fenced = message[0] === REDIS_DELIVERY_FENCE_BYTE
     const token = fenced ? message.toString('latin1', 1, 1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH) : null
     let frame = fenced ? message.subarray(1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH) : message
     let lane = ''
-    if (this.fanIn) {
+    const { fanIn, placed } = this.frames
+    if (fanIn) {
       const end = 2 + frame.readUInt16BE(0)
       lane = frame.toString('latin1', 2, end)
       frame = frame.subarray(end)
     }
-    const { payload, info } = decodeOrderingFrame(this.broadcast ? frame.subarray(8) : frame)
-    const place = this.broadcast ? Number(frame.readBigUInt64BE(0)) : info.seq
+    const { payload, info } = decodeOrderingFrame(placed ? frame.subarray(8) : frame)
+    const place = placed ? Number(frame.readBigUInt64BE(0)) : info.seq
     return { lane, place, payload, info, token }
   }
 
@@ -593,7 +580,7 @@ class RedisAttempt extends DriverAttempt {
 
   private deliver(payload: Uint8Array, info: OrderingInfo, token: string | null): void {
     try {
-      this.receiver.deliver(this.text ? textDecoder.decode(payload) : Uint8Array.from(payload), info)
+      this.receiver.deliver(this.frames.text ? textDecoder.decode(payload) : Uint8Array.from(payload), info)
     } catch (error) {
       // Thrown back into the socket's read, it would reach neither the attempts beside this one nor anyone's handler.
       console.error(error)

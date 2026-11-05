@@ -6,7 +6,6 @@ import type {
   BroadcastPayload,
   BroadcastRoute,
   DriverAttempt,
-  OrderingInfo,
   PublishResult,
 } from 'telefunc/__internal'
 import { planeKey, reportBroadcastDeliveryLost, servePlane } from 'telefunc/__internal'
@@ -15,13 +14,12 @@ import { REDIS_COMMANDS } from './commands.js'
 import { broadcastChannel } from './keys.js'
 import type { RedisConnection } from './RedisConnection.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
-import type { RedisDriver } from './RedisSubscriptions.js'
 import type { WaitingSend, WaitRule } from './NewSubscriptionWait.js'
 
 type RedisBackendOptions = { connection: RedisConnection }
 
 /** The installed backend: Broadcast on `connection`, and Room's driver, built on the same connection. */
-class RedisBackend implements BroadcastDriver, RedisDriver {
+class RedisBackend implements BroadcastDriver {
   readonly connection: RedisConnection
   readonly planes = [
     servePlane(
@@ -45,10 +43,10 @@ class RedisBackend implements BroadcastDriver, RedisDriver {
   subscribe(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
     const channel = broadcastChannel(this.connection.prefix, route)
     return this.connection.subscriptions.subscribe({
-      source: route,
       channel,
       invalidationChannel: null,
-      driver: this,
+      frames: { fanIn: false, placed: true, text: route.kind === 'text', lanesEndWithMembers: false },
+      readStarts: () => this.connection.run(REDIS_COMMANDS.broadcastStart, route),
       receiver,
       reportMissed: (count) =>
         reportBroadcastDeliveryLost(
@@ -66,11 +64,6 @@ class RedisBackend implements BroadcastDriver, RedisDriver {
     } finally {
       waiting.sent()
     }
-  }
-
-  /** The route's last publish, read once its SUBSCRIBE is acknowledged. */
-  readStarts(route: BroadcastRoute): Promise<Map<string, OrderingInfo>> {
-    return this.connection.run(REDIS_COMMANDS.broadcastStart, route)
   }
 }
 

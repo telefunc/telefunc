@@ -49,7 +49,6 @@ import {
 import { LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrdering, type CommitInput } from './commands.js'
 import { assert } from './assert.js'
 import type { RedisConnection } from './RedisConnection.js'
-import type { RedisDriver } from './RedisSubscriptions.js'
 import type { WaitingSend, WaitRule } from './NewSubscriptionWait.js'
 
 const NO_FENCE_TOKENS: FenceTokens = { lane: '', everyTrack: '', everyMember: '' }
@@ -68,7 +67,7 @@ type PlannedOperation<Value> = {
 type RedisRoomDriverOptions = { connection: RedisConnection; kit: RoomPlaneKit }
 
 /** Room's driver on a Redis backend: its store and lanes on `connection`, keyed and paged by Room's `kit`. */
-class RedisRoomDriver implements RoomDriver, RedisDriver {
+class RedisRoomDriver implements RoomDriver {
   private readonly connection: RedisConnection
   private readonly kit: RoomPlaneKit
   /** A Cluster's last commit per lane. */
@@ -264,11 +263,18 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
 
   subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {
     const { prefix } = this.connection
+    const { kind } = source.lane
+    const fanIn = kind === 'binary-all' || kind === 'binary-track'
     return this.connection.subscriptions.subscribe({
-      source,
       channel: channelKey(prefix, source.roomId, source.inc, this.kit.encodeLaneKey(source.lane)),
       invalidationChannel: incarnationInvalidationChannel(prefix, source.roomId, source.inc),
-      driver: this,
+      frames: {
+        fanIn,
+        placed: false,
+        text: false,
+        lanesEndWithMembers: fanIn || kind === 'inbox' || kind === 'binary',
+      },
+      readStarts: () => this.readStarts(source),
       receiver,
       reportMissed: (count) =>
         this.kit.reportDeliveryLost(
@@ -280,7 +286,7 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
 
   /** Each of the source's lanes' last commit, read once its SUBSCRIBE is acknowledged, by the lane key its frames carry
    *  on a fan-in channel and `''` on another; null once the source's incarnation is not the open head. */
-  async readStarts(source: RoomSubscriptionSource): Promise<Map<string, OrderingInfo> | null> {
+  private async readStarts(source: RoomSubscriptionSource): Promise<Map<string, OrderingInfo> | null> {
     const { roomId, inc, lane } = source
     if (lane.kind === 'binary-all') return await this.memberLaneStarts(roomId, inc, lane.member)
     if (lane.kind === 'binary-track') return await this.trackLaneStarts(roomId, inc, lane.track)
