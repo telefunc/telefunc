@@ -399,13 +399,17 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
     // No head names the incarnation any more, so no commit adds to its manifest while it is paged.
     const manifest = incarnationKeysKey(this.connection.prefix, roomId, inc)
     let cursor = '0'
+    let unlinking: Promise<unknown> | undefined
     do {
-      const [next, keys] = await this.connection.send((client) =>
-        client.sscan(manifest, cursor, 'COUNT', LANE_PAGE_SIZE),
-      )
+      // A page's scan needs the last one's cursor, not its unlink, which the manifest doesn't see.
+      const [[next, keys]] = await Promise.all([
+        this.connection.send((client) => client.sscan(manifest, cursor, 'COUNT', LANE_PAGE_SIZE)),
+        unlinking,
+      ])
       cursor = next
-      if (keys.length > 0) await this.connection.send((client) => client.unlink(...keys))
+      unlinking = keys.length > 0 ? this.connection.send((client) => client.unlink(...keys)) : undefined
     } while (cursor !== '0')
+    await unlinking
     await this.connection.run(REDIS_COMMANDS.dropIncarnation, { roomId, inc })
   }
 
