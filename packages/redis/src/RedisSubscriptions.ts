@@ -403,8 +403,10 @@ class RedisAttempt extends DriverAttempt {
     return fence.promise
   }
 
-  /** Resolves the fence: its token arrived, the commit that armed it was refused, or no receiver is left. */
-  settleFence(token: string): void {
+  /** Resolves the fence, if the frame carried one: its token arrived, the commit that armed it was refused, or no
+   *  receiver is left. */
+  settleFence(token: string | null): void {
+    if (token === null) return
     this.fences.get(token)?.resolve()
     this.fences.delete(token)
   }
@@ -516,7 +518,7 @@ class RedisAttempt extends DriverAttempt {
     }
     if (frame.place > order.last) return this.park(order, frame)
     // A commit never sets its lane's time back, so a later time on a place at or below the last is a failover's rewind.
-    if (frame.info.timestamp <= order.lastTimestamp) return this.settle(frame.token)
+    if (frame.info.timestamp <= order.lastTimestamp) return this.settleFence(frame.token)
     if (order.parked !== null) this.release(order)
     this.advance(order, frame)
   }
@@ -529,7 +531,7 @@ class RedisAttempt extends DriverAttempt {
 
   private park(order: LaneOrder, frame: LaneFrame): void {
     const predecessor = frame.place - 1
-    if (order.parked?.has(predecessor)) return this.settle(frame.token)
+    if (order.parked?.has(predecessor)) return this.settleFence(frame.token)
     order.parked ??= new Map()
     order.parked.set(predecessor, frame)
     if (order.release !== null) return
@@ -589,12 +591,8 @@ class RedisAttempt extends DriverAttempt {
       // Thrown back into the socket's read, it would reach neither the attempts beside this one nor anyone's handler.
       console.error(error)
     } finally {
-      this.settle(token)
+      this.settleFence(token)
     }
-  }
-
-  private settle(token: string | null): void {
-    if (token !== null) this.settleFence(token)
   }
 
   private rejectFences(error: unknown): void {
