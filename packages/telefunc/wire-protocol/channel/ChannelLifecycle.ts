@@ -229,16 +229,21 @@ class ChannelLifecycle {
     this.didFireClose = true
     for (const callback of this.closeListeners.list()) {
       const pending = this.invokeCloseCallback(callback, err)
-      if (pending === undefined) continue
-      this.runningCloseListeners++
-      void pending.finally(() => {
-        this.runningCloseListeners--
-        this.notifyProgress()
-      })
+      if (pending !== undefined) void this.trackCloseListener(pending)
     }
     this.closeListeners.clear()
     this.openListeners.clear()
     this.notifyProgress()
+  }
+
+  private async trackCloseListener(pending: Promise<void>): Promise<void> {
+    this.runningCloseListeners++
+    try {
+      await pending
+    } finally {
+      this.runningCloseListeners--
+      this.notifyProgress()
+    }
   }
 
   private async runUntilEnded(): Promise<ChannelCloseResult> {
