@@ -187,27 +187,27 @@ async function onBroadcastAnsweringLoop() {
   return { timerFired: true, deliveredAtLastReceipt, delivered }
 }
 
-/** An instance subscribes and publishes three 1,500-byte messages in the same turn, past the 4,096-byte bufferLimit of
- *  the lane that runs it: Redis's SUBSCRIBE round trip keeps the new subscription short of ready, so the Redis driver
- *  holds the three publishes until it is. It returns once its listener saw two, or 10 s pass. */
-async function onBroadcastWhileEstablishing() {
+/** An instance subscribes and publishes `count` messages of `bytes` bytes in the same turn, the last past the 4,096-byte
+ *  bufferLimit of the lane that runs it: Redis's SUBSCRIBE round trip keeps the new subscription short of ready, so the
+ *  Redis driver holds the publishes until it is. It returns once its listener saw the others, or 10 s pass. */
+async function onBroadcastWhileEstablishing(count: number, bytes: number) {
   const room = new BroadcastChannel<string>({ key: `room:held-test:${crypto.randomUUID()}` })
   const seen: string[] = []
   // publish() resolves once the message is accepted: a store like Redis delivers it to local subscribers after that.
-  const sawBoth = Promise.withResolvers<void>()
+  const sawOthers = Promise.withResolvers<void>()
   room.subscribe((data) => {
     seen.push(data[0]!)
-    if (seen.length === 2) sawBoth.resolve()
+    if (seen.length === count - 1) sawOthers.resolve()
   })
   const outcomes = await Promise.all(
-    ['1', '2', '3'].map((n) =>
-      room.publish(n.padEnd(1500, '.')).then(
+    Array.from({ length: count }, (_, i) =>
+      room.publish(`${i + 1}`.padEnd(bytes, '.')).then(
         () => 'sent',
         (err: Error) => err.name,
       ),
     ),
   )
-  await within10s(sawBoth.promise)
+  await within10s(sawOthers.promise)
   await room.close()
   return { outcomes, seen }
 }

@@ -1437,6 +1437,14 @@ function testRoomPublishHold() {
       expect(r.seen).deep.equal(['1', '2'])
     },
   )
+  testRoomScenario<{ serverOutcomes: string[]; seen: string[] }>(
+    'hold-alone',
+    'room: a publish held alone goes through past bufferLimit, and a second one rejects with ChannelOverflowError',
+    (r) => {
+      expect(r.serverOutcomes).deep.equal(['sent', 'ChannelOverflowError'])
+      expect(r.seen).deep.equal(['1'])
+    },
+  )
 }
 
 /** Tests that wait out Room's fixed timeouts, run in one lane. */
