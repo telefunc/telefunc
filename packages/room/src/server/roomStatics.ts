@@ -250,15 +250,19 @@ async function listedRoom(plane: RoomPlane, roomId: string, incTag: string): Pro
   await repairRoomIndex(plane, roomId, incTag, head)
   const config = openConfig(head)
   if (config === null) return null
-  // A room that began closing after its head read is no longer listed.
-  const count = await reapAndCountPresence({ id: roomId, ...config }).catch(async (error: unknown) => {
+  const [count, stored] = await Promise.all([countListedRoom(plane, roomId, config), readRoomMeta(roomId, config)])
+  if (count === null || stored === null) return null
+  return { id: roomId, meta: metaObject(stored.entries), count, isEmpty: count === 0 }
+}
+
+/** Null once the room began closing after its head read, as it is then no longer listed. */
+async function countListedRoom(plane: RoomPlane, roomId: string, config: RoomConfigRecord): Promise<number | null> {
+  try {
+    return await reapAndCountPresence({ id: roomId, ...config })
+  } catch (error) {
     if (isRoomError(error) && openConfig(await plane.driver.readHead(roomId), config.inc) === null) return null
     throw error
-  })
-  if (count === null) return null
-  const stored = await readRoomMeta(roomId, config)
-  if (stored === null) return null
-  return { id: roomId, meta: metaObject(stored.entries), count, isEmpty: count === 0 }
+  }
 }
 
 async function setRoomMeta(id: string, meta: RoomMeta): Promise<void> {
