@@ -47,7 +47,7 @@ import {
   roomMetaGenPrefix,
 } from './cells.js'
 import { EXCHANGE_CONFLICT, retryCompareExchange } from './retryCompareExchange.js'
-import { deleteCells, eachInFlight, readOpenCells } from './cellStore.js'
+import { deleteCells, readOpenCells } from './cellStore.js'
 import { runOperation } from './operations.js'
 import { acceptedOrThrow, commitLane, controlLane, decodeRoomRecord, encodeRoomRecord } from '../lanes/lanes.js'
 
@@ -391,10 +391,10 @@ async function readMembersMetaCells(
     room,
     id === undefined ? MEMBER_META_CELL_PREFIX : memberMetaCellPrefix(id),
   )
-  await eachInFlight(cut, async (member) => {
+  for (const member of cut) {
     const seq = metaSeqOf(records.get(memberCellKey(member)))
     byMember.set(member, await settleMemberMetaCells(room, member, seq, byMember.get(member)!))
-  })
+  }
   return byMember
 }
 
