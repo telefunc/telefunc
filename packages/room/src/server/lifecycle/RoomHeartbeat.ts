@@ -80,10 +80,12 @@ class RoomHeartbeat {
     this.ticking = true
     try {
       await this.demandExchange.renew()
-      const renewalFailure = await this.hosting.maintain().then(
-        () => null,
-        (error: unknown) => ({ error }),
-      )
+      let renewalFailure: { error: unknown } | null = null
+      try {
+        await this.hosting.maintain()
+      } catch (error) {
+        renewalFailure = { error }
+      }
       this.lanePlan.resumeDropped()
       if (!this.model.closed && (await this.authority.reconcileMeta())) {
         const incarnation = this.incarnation

@@ -631,19 +631,26 @@ abstract class ClientParticipantBase extends ParticipantBase {
   private drainCoalesce(key: string): void {
     const slot = this.coalescers.get(key)
     if (!slot || slot.sending || !slot.pending) return
-    const { data, retain, waiters } = slot.pending
+    const pending = slot.pending
     slot.pending = null
     slot.sending = true
-    this._sendPublish(data, retain)
-      .then(
-        (ack) => waiters.forEach((w) => w.resolve(ack)),
-        (err) => waiters.forEach((w) => w.reject(err)),
-      )
-      .finally(() => {
-        slot.sending = false
-        if (slot.pending) this.drainCoalesce(key)
-        else this.coalescers.delete(key)
-      })
+    void this.sendCoalesced(key, slot, pending)
+  }
+
+  private async sendCoalesced(
+    key: string,
+    slot: CoalesceSlot,
+    { data, retain, waiters }: NonNullable<CoalesceSlot['pending']>,
+  ): Promise<void> {
+    try {
+      const ack = await this._sendPublish(data, retain)
+      for (const waiter of waiters) waiter.resolve(ack)
+    } catch (err) {
+      for (const waiter of waiters) waiter.reject(err)
+    }
+    slot.sending = false
+    if (slot.pending) this.drainCoalesce(key)
+    else this.coalescers.delete(key)
   }
 
   protected _reportError(err: unknown): void {

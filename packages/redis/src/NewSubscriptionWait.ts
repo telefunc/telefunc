@@ -72,14 +72,18 @@ class NewSubscriptionWait {
     this.waitingBytes.set(budget, waiting + bytes)
     const owned = (typeof payload === 'string' ? payload : new Uint8Array(payload)) as Payload
     const sent = () => this.endWait(queue, wait, budget, bytes)
-    const turn = wait.ready.then(
-      () => owned,
-      (error: unknown) => {
-        sent()
-        throw error
-      },
-    )
-    return { turn, sent }
+    return { turn: this.turnOf(wait, owned, sent), sent }
+  }
+
+  /** The payload, once `wait` is over; a refused wait's send counts as gone. */
+  private async turnOf<Payload>(wait: Wait, owned: Payload, sent: () => void): Promise<Payload> {
+    try {
+      await wait.ready
+    } catch (error) {
+      sent()
+      throw error
+    }
+    return owned
   }
 
   /** A waiting send went out: the last of its wait's sends unmaps it, so a send made before then still queues behind
@@ -94,6 +98,20 @@ class NewSubscriptionWait {
   /** A wait for our new subscriptions on `channels`, including ones made meanwhile, that fails on Redis's refusal of
    *  one; a refused wait leaves its queue at once, so the next send there doesn't join it. */
   private openWait(queue: string, channels: readonly string[]): Wait {
+    const wait: Wait = { ready: this.whenReady(channels), sends: 0 }
+    void this.leaveOnRefusal(queue, wait)
+    return wait
+  }
+
+  private async leaveOnRefusal(queue: string, wait: Wait): Promise<void> {
+    try {
+      await wait.ready
+    } catch {
+      if (this.waits.get(queue) === wait) this.waits.delete(queue)
+    }
+  }
+
+  private async whenReady(channels: readonly string[]): Promise<void> {
     const timeout = createDeferred()
     const timer = setTimeout(timeout.resolve, SEND_WAIT_MS)
     timer.unref()
@@ -102,15 +120,12 @@ class NewSubscriptionWait {
       const refusal = this.subscriptions.refusalOn(channels)
       if (refusal !== null) refused.reject(refusal.error)
     })
-    const ready = Promise.race([this.readyOn(channels), timeout.promise, refused.promise]).finally(() => {
+    try {
+      await Promise.race([this.readyOn(channels), timeout.promise, refused.promise])
+    } finally {
       clearTimeout(timer)
       stopListening()
-    })
-    const wait: Wait = { ready, sends: 0 }
-    ready.catch(() => {
-      if (this.waits.get(queue) === wait) this.waits.delete(queue)
-    })
-    return wait
+    }
   }
 
   private async readyOn(channels: readonly string[]): Promise<void> {

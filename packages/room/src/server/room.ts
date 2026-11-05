@@ -262,12 +262,18 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
       // In an open room only a detach of the holder, or a removal that already evicted the member, abandons it.
       const lost = admission.abandoned && !this.model.closed
       const cause: LeaveCause = { type: lost ? 'disconnected' : 'left' }
-      await evictMember(this.incarnation, id, cause).catch((error: unknown) => {
-        reportRoomError(error)
-        this.hosting.evictLater(id)
-      })
+      await this.evictOrLater(id, cause)
       this.abandonAdmission(id, cause)
       throw error
+    }
+  }
+
+  private async evictOrLater(id: string, cause: LeaveCause): Promise<void> {
+    try {
+      await evictMember(this.incarnation, id, cause)
+    } catch (error) {
+      reportRoomError(error)
+      this.hosting.evictLater(id)
     }
   }
 

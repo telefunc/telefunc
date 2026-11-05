@@ -3,6 +3,7 @@ export { RoomHosting }
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import type { RoomIncarnation } from '../protocol.js'
 import { reportRoomError } from '../reportRoomError.js'
+import { eachInFlight } from '../store/cellStore.js'
 import { holdViews, removeView, renewLease, RoomLease } from '../store/lease.js'
 import { evictMember } from '../store/members.js'
 import type { RoomStub } from '../RoomStub.js'
@@ -34,14 +35,15 @@ class RoomHosting {
   }
 
   /** The stub's page detached: its view is removed, after its write. */
-  dropView(stub: RoomStub): void {
+  async dropView(stub: RoomStub): Promise<void> {
     const view = this.views.get(stub)
     this.views.delete(stub)
-    void view
-      ?.then(async (key) => {
-        if (key !== null) await removeView(this.incarnation, key)
-      })
-      .catch(reportRoomError)
+    try {
+      const key = await view
+      if (key) await removeView(this.incarnation, key)
+    } catch (error) {
+      reportRoomError(error)
+    }
   }
 
   /** `maintain()` evicts the member again, as `disconnected`. */
@@ -52,11 +54,7 @@ class RoomHosting {
   /** Renews the lease and evicts again whom it failed to; once the lease was lost, or a view write failed, writes every
    *  stub's view again in one write, after each one's earlier write. */
   async maintain(): Promise<void> {
-    if (!(await renewLease(this.incarnation, this.lease))) this.viewsLost = true
-    for (const id of this.unevicted) {
-      await evictMember(this.incarnation, id, { type: 'disconnected' })
-      this.unevicted.delete(id)
-    }
+    await Promise.all([this.renewOrMarkViewsLost(), eachInFlight(this.unevicted, (id) => this.evictAgain(id))])
     if (!this.viewsLost) return
     this.viewsLost = false
     const stubs = [...this.views.keys()]
@@ -70,6 +68,15 @@ class RoomHosting {
       ),
     )
     await keys
+  }
+
+  private async renewOrMarkViewsLost(): Promise<void> {
+    if (!(await renewLease(this.incarnation, this.lease))) this.viewsLost = true
+  }
+
+  private async evictAgain(id: string): Promise<void> {
+    await evictMember(this.incarnation, id, { type: 'disconnected' })
+    this.unevicted.delete(id)
   }
 
   /** The stubs' views' keys, in order; each null and the views lost if the write failed. */

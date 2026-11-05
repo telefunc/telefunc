@@ -96,18 +96,21 @@ class MemberRoute {
   }
 
   startRefresh(refresh: () => Promise<boolean>): void {
-    this.refreshTimer = setInterval(() => {
-      void refresh().then(
-        (lapsed) => {
-          if (lapsed) {
-            const reason = `this Durable Object's presence lapsed, so what was published since didn't reach it`
-            reportBroadcastDeliveryLost(this.route.key, reason)
-          }
-          this.presenceRecorded()
-        },
-        (error: unknown) => this.presenceLost(error),
-      )
-    }, PRESENCE_REFRESH_INTERVAL_MS)
+    this.refreshTimer = setInterval(() => void this.refreshPresence(refresh), PRESENCE_REFRESH_INTERVAL_MS)
+  }
+
+  private async refreshPresence(refresh: () => Promise<boolean>): Promise<void> {
+    let lapsed: boolean
+    try {
+      lapsed = await refresh()
+    } catch (error) {
+      return this.presenceLost(error)
+    }
+    if (lapsed) {
+      const reason = `this Durable Object's presence lapsed, so what was published since didn't reach it`
+      reportBroadcastDeliveryLost(this.route.key, reason)
+    }
+    this.presenceRecorded()
   }
 
   stopRefresh(): void {
@@ -414,21 +417,18 @@ class CloudflareBroadcast {
     }
     let lost = 0
     let reason: unknown
-    await Promise.all(
-      Array.from(membersByBucket, ([bucket, members]) =>
-        this.callByName(calls, this.coordinatorName(key, bucket), bucket, (coordinator) =>
+    const forwardThrough = async ([bucket, members]: [LocationBucket, string[]]) => {
+      try {
+        const lostThere = await this.callByName(calls, this.coordinatorName(key, bucket), bucket, (coordinator) =>
           coordinator.telefuncBroadcastForward({ ...delivery, members }),
-        ).then(
-          (lostThere) => {
-            lost += lostThere
-          },
-          (error: unknown) => {
-            lost += members.length
-            reason ??= error
-          },
-        ),
-      ),
-    )
+        )
+        lost += lostThere
+      } catch (error) {
+        lost += members.length
+        reason ??= error
+      }
+    }
+    await Promise.all(Array.from(membersByBucket, forwardThrough))
     if (lost === 0) return
     throw new Error(`Cloudflare Broadcast delivery of '${key}' lost to ${lost}/${total} Durable Objects`, {
       cause: reason,
