@@ -68,6 +68,13 @@ type StreamConfigUser = {
 type BroadcastConfigUser = {
   /** Transport for cross-node `Broadcast` delivery. */
   transport?: BroadcastTransport
+  /**
+   * Called when messages published to a key never reached a server subscribed to it, though `publish()` resolved. They
+   * aren't sent again.
+   *
+   * @default ({ key, reason }) => console.error(`Broadcast delivery of '${key}' lost: ${reason}`)
+   */
+  onDeliveryLost?: (lost: { key: string; reason: string }) => void
 }
 
 type ChannelConfigUser = {
@@ -563,6 +570,9 @@ function applyBroadcastConfig(val: unknown): void {
           'listenBinary() methods',
       )
       next.transport = value as BroadcastTransport
+    } else if (key === 'onDeliveryLost') {
+      assertUsage(typeof value === 'function', 'config.broadcast.onDeliveryLost should be a function')
+      next.onDeliveryLost = value as BroadcastConfigUser['onDeliveryLost']
     } else {
       assertUsage(false, `Unknown config.broadcast.${key}`)
     }

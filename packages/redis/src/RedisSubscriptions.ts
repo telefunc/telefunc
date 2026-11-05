@@ -29,6 +29,8 @@ type RedisAttemptOptions = {
   invalidationChannel: string | null
   driver: RedisDriver
   receiver: BackendReceiver
+  /** Pub/sub keeps no log, so what a drop or the reorder wait passed by is gone. `null`: how many isn't known. */
+  reportMissed: (count: number | null) => void
 }
 
 /** The subscriber connection; `id` tells work that awaited across a drop that it is stale. */
@@ -40,16 +42,16 @@ type Connection =
 
 type Connected = Extract<Connection, { phase: 'connected' }>
 
-/** A lane's last frame delivered, and the frames parked past a missing one, by their predecessor's seq,
- *  until it arrives or the wait ends. */
+/** A lane's last place delivered, and the frames parked past a missing one, by their predecessor's place, until it
+ *  arrives or the wait ends. */
 type LaneOrder = {
   last: number
   lastTimestamp: number
-  parked: Map<number, ParkedFrame> | null
+  parked: Map<number, LaneFrame> | null
   release: ReturnType<typeof setTimeout> | null
 }
 
-type ParkedFrame = { payload: Uint8Array; info: OrderingInfo; token: string | null }
+type LaneFrame = { place: number; payload: Uint8Array; info: OrderingInfo; token: string | null }
 
 const textDecoder = new TextDecoder()
 
@@ -293,7 +295,11 @@ class RedisSubscriptions {
         this.refusals.delete(channel)
       }
     }
-    // An attempt made during the SUBSCRIBE above waits for the sync it queued.
+    await this.confirmCovered(id, subscribed)
+  }
+
+  /** Confirms the attempts `subscribed` covers. An attempt made during a SUBSCRIBE waits for the sync it queued. */
+  private async confirmCovered(id: Connected['id'], subscribed: Connected['subscribed']): Promise<void> {
     const covered: RedisAttempt[] = []
     for (const attempt of this.unconfirmed) {
       if (!attempt.awaitsConfirmation()) {
@@ -351,6 +357,7 @@ class RedisAttempt extends DriverAttempt {
   readonly channels: readonly string[]
   private readonly owner: RedisSubscriptions
   private readonly receiver: BackendReceiver
+  private readonly reportMissed: RedisAttemptOptions['reportMissed']
   private readonly fences = new Map<string, Deferred<void>>()
   /** Each lane's order: an every-track or every-member channel carries many binary lanes, keyed by lane key; any other
    *  channel one lane, keyed `''`. */
@@ -364,6 +371,8 @@ class RedisAttempt extends DriverAttempt {
   private readonly broadcast: boolean
   /** A Broadcast text source's deliveries are strings. */
   private readonly text: boolean
+  /** A Room member's lanes' order goes when the member leaves; any other lane's lasts as long as its room or key. */
+  private readonly lanesEndWithMembers: boolean
 
   constructor({
     owner,
@@ -372,6 +381,7 @@ class RedisAttempt extends DriverAttempt {
     invalidationChannel,
     driver,
     receiver,
+    reportMissed,
   }: RedisAttemptOptions & { owner: RedisSubscriptions }) {
     super()
     this.owner = owner
@@ -380,6 +390,7 @@ class RedisAttempt extends DriverAttempt {
     this.invalidationChannel = invalidationChannel
     this.driver = driver
     this.receiver = receiver
+    this.reportMissed = reportMissed
     this.channels = invalidationChannel === null ? [channel] : [channel, invalidationChannel]
     // Its first state change ends its establishment: ready, or closed.
     this.onStateChange(() => this.firstReadiness.resolve())
@@ -387,10 +398,12 @@ class RedisAttempt extends DriverAttempt {
       this.fanIn = source.lane.kind === 'binary-all' || source.lane.kind === 'binary-track'
       this.broadcast = false
       this.text = false
+      this.lanesEndWithMembers = this.fanIn || source.lane.kind === 'inbox' || source.lane.kind === 'binary'
     } else {
       this.fanIn = false
       this.broadcast = true
       this.text = source.kind === 'text'
+      this.lanesEndWithMembers = false
     }
   }
 
@@ -428,6 +441,7 @@ class RedisAttempt extends DriverAttempt {
   /** A lane missing from `starts` has no commit yet. */
   markReady(starts: Map<string, OrderingInfo>): void {
     if (!this.awaitsConfirmation()) return
+    const missed = this.state() === 'lost' ? this.missedBefore(starts) : 0
     this.orders = new Map()
     for (const [lane, start] of starts) {
       this.orders.set(lane, { last: start.seq, lastTimestamp: start.timestamp, parked: null, release: null })
@@ -435,11 +449,25 @@ class RedisAttempt extends DriverAttempt {
     const early = this.early
     this.early = []
     this.transition('ready')
+    if (missed !== 0) this.reportMissed(missed)
     for (const message of early) {
       // A consumer may close the lane.
       if (this.state() !== 'ready') return
       this.receiveFrame(message)
     }
+  }
+
+  /** What its lost connection passed by, or null once a lane's order is behind what it delivered: a failover's rewind or
+   *  a flush took the count with it. */
+  private missedBefore(starts: Map<string, OrderingInfo>): number | null {
+    if (!this.lanesEndWithMembers && this.orders.size > starts.size) return null
+    let missed = 0
+    for (const [lane, start] of starts) {
+      const last = this.orders.get(lane)?.last ?? 0
+      if (start.seq < last) return null
+      missed += start.seq - last
+    }
+    return missed
   }
 
   fail(error: unknown): void {
@@ -483,9 +511,8 @@ class RedisAttempt extends DriverAttempt {
     this.order(message.subarray(1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH), token)
   }
 
-  /** Delivers each lane in seq order: a frame whose predecessor is past the last delivered waits `REORDER_WAIT_MS` for
-   *  it, and one at or below the last delivered is dropped. Its commit's fence settles once it is delivered or
-   *  dropped. */
+  /** Delivers each lane in order: a frame whose predecessor is past the last delivered waits `REORDER_WAIT_MS` for it,
+   *  and one at or below the last delivered is dropped. Its commit's fence settles once it is delivered or dropped. */
   private order(frame: Buffer, token: string | null): void {
     let lane = ''
     if (this.fanIn) {
@@ -493,43 +520,39 @@ class RedisAttempt extends DriverAttempt {
       lane = frame.toString('latin1', 2, end)
       frame = frame.subarray(end)
     }
-    // A Broadcast key's kinds share one sequence, so its frame leads with the seq of the previous publish of its kind.
+    // A Broadcast key's kinds share one seq, so its frame leads with its place among its kind's publishes.
     const { payload, info } = decodeOrderingFrame(this.broadcast ? frame.subarray(8) : frame)
-    const predecessor = this.broadcast ? Number(frame.readBigUInt64BE(0)) : info.seq - 1
+    const place = this.broadcast ? Number(frame.readBigUInt64BE(0)) : info.seq
     let order = this.orders.get(lane)
     if (order === undefined) {
       // A lane with no commit when the attempt went live: every one of its commits is after.
       order = { last: 0, lastTimestamp: 0, parked: null, release: null }
       this.orders.set(lane, order)
     }
-    if (predecessor <= order.last && info.seq > order.last) {
-      this.advance(order, payload, info, token)
+    const laneFrame = { place, payload, info, token }
+    if (place === order.last + 1) {
+      this.advance(order, laneFrame)
       if (order.parked !== null) this.drain(order)
       return
     }
-    if (predecessor > order.last) return this.park(order, predecessor, payload, info, token)
-    // A commit never sets its lane's time back, so a later time on a seq at or below the last is a failover's rewind.
+    if (place > order.last) return this.park(order, laneFrame)
+    // A commit never sets its lane's time back, so a later time on a place at or below the last is a failover's rewind.
     if (info.timestamp <= order.lastTimestamp) return this.settle(token)
     if (order.parked !== null) this.release(order)
-    this.advance(order, payload, info, token)
+    this.advance(order, laneFrame)
   }
 
-  private advance(order: LaneOrder, payload: Uint8Array, info: OrderingInfo, token: string | null): void {
-    order.last = info.seq
+  private advance(order: LaneOrder, { place, payload, info, token }: LaneFrame): void {
+    order.last = place
     order.lastTimestamp = info.timestamp
     this.deliver(payload, info, token)
   }
 
-  private park(
-    order: LaneOrder,
-    predecessor: number,
-    payload: Uint8Array,
-    info: OrderingInfo,
-    token: string | null,
-  ): void {
-    if (order.parked?.has(predecessor)) return this.settle(token)
+  private park(order: LaneOrder, frame: LaneFrame): void {
+    const predecessor = frame.place - 1
+    if (order.parked?.has(predecessor)) return this.settle(frame.token)
     order.parked ??= new Map()
-    order.parked.set(predecessor, { payload, info, token })
+    order.parked.set(predecessor, frame)
     if (order.release !== null) return
     order.release = setTimeout(() => {
       this.transition('lost')
@@ -547,7 +570,7 @@ class RedisAttempt extends DriverAttempt {
       // A consumer may close the lane.
       if (this.state() !== 'ready') return
       parked.delete(order.last)
-      this.advance(order, next.payload, next.info, next.token)
+      this.advance(order, next)
     }
     if (parked.size > 0) return
     clearTimeout(order.release!)
@@ -558,13 +581,16 @@ class RedisAttempt extends DriverAttempt {
   /** The wait ended: every parked frame goes out in seq order, past what never arrived. */
   private release(order: LaneOrder): void {
     clearTimeout(order.release!)
-    const parked = [...order.parked!.values()].sort((a, b) => a.info.seq - b.info.seq)
+    const parked = [...order.parked!.values()].sort((a, b) => a.place - b.place)
     order.parked = null
     order.release = null
+    let missed = 0
     for (const frame of parked) {
-      if (this.state() !== 'ready') return
-      this.advance(order, frame.payload, frame.info, frame.token)
+      if (this.state() !== 'ready') break
+      missed += frame.place - order.last - 1
+      this.advance(order, frame)
     }
+    if (missed > 0) this.reportMissed(missed)
   }
 
   private dropParked(): void {
@@ -576,6 +602,9 @@ class RedisAttempt extends DriverAttempt {
   private deliver(payload: Uint8Array, info: OrderingInfo, token: string | null): void {
     try {
       this.receiver.deliver(this.text ? textDecoder.decode(payload) : Uint8Array.from(payload), info)
+    } catch (error) {
+      // Thrown back into the socket's read, it would reach neither the attempts beside this one nor anyone's handler.
+      console.error(error)
     } finally {
       this.settle(token)
     }

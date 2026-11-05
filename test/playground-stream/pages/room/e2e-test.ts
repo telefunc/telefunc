@@ -7,8 +7,9 @@ export {
   testRoomSmallBuffer,
   testRoomPublishHold,
   testRoomLongWaits,
+  testRoomRedisSubscriberDropped,
 }
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Response, WebSocket } from 'playwright-chromium'
 import {
   navigate,
@@ -436,6 +437,36 @@ function testRoom() {
       expect(r.whileClosing.after).deep.equal([])
       expect(r.recreated).deep.equal({ meta: { incarnation: 2 }, count: 0 })
       expect(r.recreatedOpen).toBe(false)
+    },
+  )
+  testRoomScenario<{ otherWorkRan: boolean }>(
+    'publish-loop',
+    'room: a loop of awaited publishes leaves the event loop its turns',
+    (r) => {
+      expect(r.otherWorkRan).toBe(true)
+    },
+  )
+  testRoomScenario<{ thrower: number; healthy: number }>(
+    'throwing-receiver',
+    "room: a store's receiver that throws is reported, and the receiver beside it and the frames after it still arrive",
+    (r) => {
+      expect(r).deep.equal({ thrower: 2, healthy: 2 })
+      expectLog('Test: a receiver throws')
+    },
+  )
+  testRoomScenario<{
+    unguardedError: string | null
+    guardedError: string | null
+    guardRuns: number
+    duringGuardError: string | null
+  }>(
+    'join-closed',
+    "room: a join through a handle that hasn't heard of its room's close fails as closed, without running the guard or logging anything; so does one whose guard closes the room",
+    (r) => {
+      expect(r.unguardedError).toBe('Room is closed: <id>:unguarded')
+      expect(r.guardedError).toBe('Room is closed: <id>:guarded')
+      expect(r.guardRuns).toBe(0)
+      expect(r.duringGuardError).toBe('Room is closed: <id>:during-guard')
     },
   )
   testRoomScenario<{
@@ -1409,6 +1440,42 @@ function testRoomPublishHold() {
 }
 
 /** Tests that wait out Room's fixed timeouts, run in one lane. */
+function testRoomRedisSubscriberDropped() {
+  testRoomScenario<{ published: number; received: number; reported: number; rejected: number }>(
+    'subscriber-dropped',
+    "room: Redis drops a server's subscriber connection during publishes: what didn't arrive is reported, count for count",
+    (r) => {
+      expect(r.published).toBe(600)
+      expect(r.reported > 0).toBe(true)
+      // A rejected publish may have run: the drop can cut its reply and not the commit.
+      expect(r.received + r.reported <= r.published).toBe(true)
+      expect(r.received + r.reported + r.rejected >= r.published).toBe(true)
+      expectLog('Redis subscriber connection closed')
+    },
+  )
+  testRoomScenario<{ reported: string[]; arrivedAfter: number }>(
+    'dropped-at-rest',
+    "room and broadcast: Redis drops a server's subscriber connection with nothing published meanwhile: no lane reports a loss",
+    (r) => {
+      expect(r.reported).deep.equal([])
+      // The room's message, three binary frames, and the key's message of each kind.
+      expect(r.arrivedAfter).toBe(6)
+      expectLog('Redis subscriber connection closed')
+    },
+  )
+  testRoomScenario<{ reported: string[]; arrivedAfter: number }>(
+    'rewound',
+    "room and broadcast: a failover rewinds Redis across a server's dropped subscriber connection: each lane that delivered past it reports a loss it can't count",
+    (r) => {
+      const commits = "An unknown number of commits never reached this server's Redis subscription"
+      const messages = "An unknown number of text messages never reached this server's Redis subscription"
+      expect(r.reported.sort()).deep.equal([commits, commits, messages, messages])
+      expect(r.arrivedAfter).toBe(3)
+      expectLog('Redis subscriber connection closed')
+    },
+  )
+}
+
 function testRoomLongWaits() {
   test('room: a tail nobody subscribes to within 60 seconds drops what it held', async () => {
     await navigate(`${getServerUrl()}/room`)

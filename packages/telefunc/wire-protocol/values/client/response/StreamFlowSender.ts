@@ -88,7 +88,7 @@ class StreamFlowSender {
     })
   }
 
-  /** Whether the server holds the response, or `null` for no answer. */
+  /** Whether the server holds the response, or `null` for no answer. The server always answers 200: another status is a proxy's. */
   private async post(body: string): Promise<boolean | null> {
     const { telefuncUrl, headers, abortController } = this.callContext
     const fetch = this.callContext.fetch ?? window.fetch
@@ -100,7 +100,7 @@ class StreamFlowSender {
         headers: { 'Content-Type': 'text/plain', [REQUEST_KIND_HEADER]: REQUEST_KIND.FLOW, ...headers },
         signal: abortController.signal,
       })
-      return response.ok && (await response.text()) === STREAM_FLOW_FOUND
+      return response.ok ? (await response.text()) === STREAM_FLOW_FOUND : null
     } catch {
       return null
     }

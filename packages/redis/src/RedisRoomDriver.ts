@@ -270,6 +270,11 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
       invalidationChannel: incarnationInvalidationChannel(prefix, source.roomId, source.inc),
       driver: this,
       receiver,
+      reportMissed: (count) =>
+        this.kit.reportDeliveryLost(
+          source.roomId,
+          `${count ?? 'An unknown number of'} commits never reached this server's Redis subscription`,
+        ),
     })
   }
 
@@ -458,7 +463,10 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
       const page = await this.connection.run(REDIS_COMMANDS.memberLaneStarts, { roomId, inc, member, cursor })
       if (page === null) return null
       cursor = page.cursor
-      for (const [laneKey, start] of page.starts) starts.set(laneKey, start)
+      // Its member's order hash also holds its inbox lane, which an every-track channel doesn't carry.
+      for (const [laneKey, start] of page.starts) {
+        if (this.kit.decodeLaneKey(laneKey).kind === 'binary') starts.set(laneKey, start)
+      }
     } while (cursor !== '0')
     return starts
   }

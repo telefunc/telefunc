@@ -13,11 +13,11 @@ export type { PushReadableStream }
  * Consumers (fetch upstream, `pipeTo`) drain the queue natively — no async
  * generator, no `await` per chunk, no `new ReadableStream({ pull })` adapter.
  *
+ * `push` returns the consumer's `desiredSize > 0` (false = queue full).
  * Backpressure is opt-in via `onPull`:
- *   - omit it (SSE upstream, client→server stream-request): `push` always
- *     returns `true`; channel-level credit bounds the producer.
- *   - wire it (inline streaming response): `push` returns the consumer's
- *     `desiredSize > 0` (false = queue full); producer awaits a deferred
+ *   - omit it (SSE upstream, client→server stream-request): the producer
+ *     ignores that result; channel-level credit bounds it.
+ *   - wire it (inline streaming response): the producer awaits a deferred
  *     between `push`-returns-false and the next `onPull`.
  *
  * `onCancel` fires once when the consumer cancels the stream (fetch

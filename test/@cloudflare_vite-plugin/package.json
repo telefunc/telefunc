@@ -17,13 +17,13 @@
     "vike-react": "^0.6.21"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.30.3",
+    "@cloudflare/vite-plugin": "^1.67.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
     "typescript": "^7.0.2",
     "vite": "^8.0.16",
-    "wrangler": "^4.79.0"
+    "wrangler": "^4.157.0"
   },
   "type": "module"
 }

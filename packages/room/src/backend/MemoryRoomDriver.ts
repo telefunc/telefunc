@@ -45,7 +45,7 @@ import {
 } from './semantics.js'
 import {
   type BackendReceiver,
-  type DriverAttempt,
+  DriverAttempt,
   type OrderingInfo,
   MemoryPubSub,
   type Subscribers,
@@ -89,6 +89,8 @@ type DirectoryEntry = { incTag: string; checkAt: number }
 /** A directory entry's check, current while its entry is still due at `at`. */
 type DirectoryCheck = { at: number; roomId: string }
 
+/** About 10 ms of commits, as `MemoryBackend`'s count is of publishes. */
+const COMMITS_BETWEEN_TURNS = 1024
 const NO_TARGETS = [] as const
 const SEMANTIC_LANE: LaneId = { kind: 'semantic' }
 const SEMANTIC_LANE_KEY = encodeLaneKey(SEMANTIC_LANE)
@@ -253,6 +255,16 @@ function advanceOrder(order: Map<string, OrderingInfo>, domain: string, now: num
   return mark
 }
 
+/** A lane of an incarnation that isn't open: over at once and on purpose, as a dropped incarnation's is on every backend. */
+class EndedAttempt extends DriverAttempt {
+  constructor() {
+    super()
+    this.transition('closed')
+  }
+
+  async unsubscribe(): Promise<void> {}
+}
+
 class MemoryRoomDriver implements RoomDriver {
   private readonly rooms = new Map<string, RoomRecord>()
   private readonly directory = new Map<string, DirectoryEntry>()
@@ -262,7 +274,7 @@ class MemoryRoomDriver implements RoomDriver {
   /** A min-heap by `at` of the checks each put scheduled; a check its entry no longer has is dropped when reached. */
   private readonly directoryChecks: DirectoryCheck[] = []
   private revSeq = 0
-  private readonly pubSub = new MemoryPubSub()
+  private readonly pubSub = new MemoryPubSub({ operationsBetweenTurns: COMMITS_BETWEEN_TURNS })
 
   async readHead(roomId: string): Promise<RoomHead | null> {
     const head = this.liveHead(this.rooms.get(roomId))
@@ -425,9 +437,9 @@ class MemoryRoomDriver implements RoomDriver {
     const nextTurn = this.pubSub.deliverSoon(() => {
       // A subscriber may write into the bytes it is given, which a retained frame must not share.
       const shared = retain ? copyBytes(frame) : frame
-      for (const target of targets) target.deliver(shared, mark)
-      for (const target of everyTrack) target.deliver(shared, mark)
-      for (const target of everyMember) target.deliver(shared, mark)
+      this.pubSub.deliverTo(targets, shared, mark)
+      this.pubSub.deliverTo(everyTrack, shared, mark)
+      this.pubSub.deliverTo(everyMember, shared, mark)
       delivered?.resolve()
     })
     if (nextTurn !== null) await nextTurn
@@ -459,9 +471,7 @@ class MemoryRoomDriver implements RoomDriver {
 
   subscribe({ roomId, inc, lane }: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {
     const room = this.rooms.get(roomId)
-    if (room === undefined || !isOpenIncarnation(this.liveHead(room), inc)) {
-      throw new Error(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)
-    }
+    if (room === undefined || !isOpenIncarnation(this.liveHead(room), inc)) return new EndedAttempt()
     // Registration is durable before `ready` resolves: a commit accepted after this point must see it.
     const incarnation = this.incarnation(room, inc)
     let subscribers: Subscribers

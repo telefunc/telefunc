@@ -122,8 +122,9 @@ function testRedisOutages() {
           expect(members.Bob!.score).toBe(2)
         }
       })
-      // Each server reports the outage of its subscriber connection.
+      // Each server reports the outage of its subscriber connection, and b that it can't count what 'lost' took with it.
       expectServerLog('Redis subscriber connection closed')
+      expectServerLog('An unknown number of commits')
     } finally {
       await leaveRoom(['a', 'b', 'c', 'd'], roomId)
     }

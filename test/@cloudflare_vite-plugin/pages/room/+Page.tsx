@@ -17,6 +17,7 @@ import {
   onCloseHeld,
   onSubscribeHeld,
   onMetaKeyOrder,
+  onThrowingReceiver,
 } from './Room.telefunc'
 
 type Channels = Awaited<ReturnType<typeof onOrderChannels>>
@@ -87,6 +88,7 @@ function Page() {
       {card('close-held', () => onCloseHeld(query().get('id')!))}
       {card('subscribe-held', () => onSubscribeHeld(query().get('id')!))}
       {card('meta-key-order', () => onMetaKeyOrder())}
+      {card('throwing-receiver', () => onThrowingReceiver())}
     </div>
   )
 }

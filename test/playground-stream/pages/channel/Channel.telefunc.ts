@@ -41,6 +41,7 @@ export {
   onChannelOpenAnswer,
   onChannelOpenHello,
   onChannelBudgets,
+  onChannelAwaitedFromOffline,
   onChannelOfflineBudgets,
   onChannelAtLimit,
   onChannelOwnBytes,
@@ -932,6 +933,26 @@ async function onChannelBudgets() {
   exercise(bytes, false)
   exercise(acks, true)
   return { bytes: bytes.client, acks: acks.client }
+}
+
+/**
+ * With a `maxPendingBytes` below its messages, sends 3 of 5 MiB, awaiting each, the first before the page attaches.
+ * cleanupState: awaitedFromOffline_<id> = `done`, or what the send that closed the channel threw
+ */
+async function onChannelAwaitedFromOffline() {
+  const original = config.channel
+  config.channel = { ...original, maxPendingBytes: 1024 * 1024, bufferLimitBinary: 8 * 1024 * 1024 }
+  const ch = new Channel<never, string>()
+  config.channel = original
+  void (async () => {
+    try {
+      for (let i = 0; i < 3; i++) await ch.sendBinary(new Uint8Array(5 * 1024 * 1024))
+      cleanupState[`awaitedFromOffline_${ch.id}`] = 'done'
+    } catch (err) {
+      cleanupState[`awaitedFromOffline_${ch.id}`] = (err as Error).message
+    }
+  })()
+  return { channel: ch.client, channelId: ch.id }
 }
 
 /** One channel per kind of text, each sending as its first send what fits `maxPendingBytes` to the byte, and one per

@@ -48,6 +48,7 @@ import {
   onChannelOpenAnswer,
   onChannelOpenHello,
   onChannelBudgets,
+  onChannelAwaitedFromOffline,
   onChannelAtLimit,
   onChannelOwnBytes,
   onChannelOfflineBudgets,
@@ -184,6 +185,7 @@ type ChannelState = {
   binaryBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
   paced: { channelId: string; receivedBytes: number; closeErr: string | null; ended: boolean } | null
   textBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
+  awaitedFromOffline: { channelId: string; received: number; closeErr: string | null } | null
   openBurstReceived: number | null
   freshBinaryEchoed: number | null
   helloBesideBurst: boolean
@@ -263,6 +265,7 @@ const initialState: ChannelState = {
   binaryBurst: null,
   paced: null,
   textBurst: null,
+  awaitedFromOffline: null,
   openBurstReceived: null,
   freshBinaryEchoed: null,
   helloBesideBurst: false,
@@ -1084,6 +1087,7 @@ function ChannelDemo() {
     const ended = new Promise<string | null>((resolve) => {
       channel.listenBinary((data) => {
         received.push(new DataView(data.buffer, data.byteOffset).getUint32(0))
+        ;(window as unknown as { __burstReceived: number }).__burstReceived = received.length
         if (received.length === count) resolve(null)
       })
       channel.onClose((err) => resolve(err?.name ?? 'none'))
@@ -1129,6 +1133,20 @@ function ChannelDemo() {
     const closeErr = await ended
     const inOrder = received.every((index, i) => index === i)
     setChannelState((s) => ({ ...s, textBurst: { channelId, received: received.length, inOrder, closeErr } }))
+    channel.close()
+  }, [])
+
+  const testAwaitedFromOffline = useCallback(async () => {
+    setChannelState((s) => ({ ...s, awaitedFromOffline: null }))
+    const { channel, channelId } = await openChannel(onChannelAwaitedFromOffline)
+    let received = 0
+    const closeErr = await new Promise<string | null>((resolve) => {
+      channel.listenBinary(() => {
+        if (++received === 3) resolve(null)
+      })
+      channel.onClose((err) => resolve(err?.name ?? 'none'))
+    })
+    setChannelState((s) => ({ ...s, awaitedFromOffline: { channelId, received, closeErr } }))
     channel.close()
   }, [])
 
@@ -1729,6 +1747,7 @@ function ChannelDemo() {
           {(
             [
               ['unawaited', 32],
+              ['unawaited', 200],
               ['unawaited', 300],
               ['awaited', 300],
             ] as const
@@ -1743,6 +1762,14 @@ function ChannelDemo() {
               Server Bursts {count} MiB ({mode})
             </button>
           ))}
+          <button
+            id="channel-test-awaited-from-offline"
+            type="button"
+            onClick={testAwaitedFromOffline}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Server Awaits 3 Large Messages From Before The Page Attaches
+          </button>
           {(
             [
               ['outrun', { burst: 0, tick: 1024 * 1024, everyMs: 50, ticks: 1000 }],

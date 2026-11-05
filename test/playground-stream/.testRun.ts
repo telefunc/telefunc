@@ -41,6 +41,8 @@ function runPlayground(
     tolerateError(log) {
       return (
         log.logText.includes('File arguments are being consumed out of order') ||
+        // A test drops every connection to Redis, and an earlier test's room may read Redis in that moment.
+        log.logText.includes("Telefunc's Redis backend can't reach Redis") ||
         log.logText.includes('multiple streaming values') ||
         log.logText.includes('the server responded with a status of 500') ||
         log.logText.includes('the server responded with a status of 422') ||

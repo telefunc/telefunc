@@ -14,8 +14,8 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testRoomRoleFromWorker()
   testCloudflareBindings()
   testRunClassic(cmd, {
-    // testResubscribe() waits out a presence's TTL.
-    additionalTimeout: 60_000,
+    // testResubscribe() waits out a presence's TTL, and testLapsedPresence() the refresh after it too.
+    additionalTimeout: 110_000,
     tolerateError: (log) =>
       log.logText.includes('Detected multiple renderers concurrently rendering') ||
       // The Channel/Chat streaming (SSE) connection surfaces a benign
@@ -28,6 +28,10 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
         (log.logText.includes('Broken pipe') || log.logText.includes('Connection reset by peer'))) ||
       // testRefusedPresence()'s authority refuses a presence, and the subscription it ended is reported.
       log.logText.includes('Backend subscription closed: text:refused-presence') ||
+      // testLapsedPresence()'s authority refuses its refreshes, and the route reports it lost.
+      log.logText.includes("Cloudflare Broadcast presence for 'lapsed-presence:") ||
+      // testRoomStorage()'s receiver throws, as a test of what a store does then.
+      log.logText.includes('Test: a receiver throws') ||
       // testRefusedDelivery()'s session refuses a delivery, which its coordinator reports.
       log.logText.includes('Test: the session refused the delivery'),
   })
@@ -41,6 +45,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testResubscribe()
   testRefusedPresence()
   testRefusedDelivery()
+  if (!isDev) testLapsedPresence()
   testColdPublish()
   testPublishOrder()
   testRoom()
@@ -388,6 +393,38 @@ function testRefusedPresence() {
   })
 }
 
+function testLapsedPresence() {
+  test("Broadcast: a session whose presence lapsed misses what is published, is told, and gets what follows once it's recorded again", async () => {
+    await page.goto(getServerUrl() + '/lapsed-presence')
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    const state = async () => JSON.parse((await page.textContent('#lapsed-presence-state'))!)
+    await page.click('#subscribe')
+    await autoRetry(async () => {
+      expect((await state()).received).deep.equal(['before'])
+    })
+    // A presence lasts 90 s unless refreshed, and the authority takes no refresh until 100 s in.
+    await page.waitForTimeout(95_000)
+    await page.click('#publish-during')
+    await autoRetry(async () => {
+      expect((await state()).published).toBe('during')
+    })
+    expect((await state()).reported).deep.equal([])
+    // The next refresh comes within 30 s. Each try publishes again, until the refreshed presence gets it.
+    await autoRetry(
+      async () => {
+        await page.click('#publish-after')
+        const { received, reported } = await state()
+        expect(received).toContain('after')
+        expect(received).not.toContain('during')
+        expect(reported.length).toBe(1)
+      },
+      { timeout: 35_000 },
+    )
+  })
+}
+
 function testRefusedDelivery() {
   test('Broadcast: a publish a session Durable Object refuses to take rejects, the other session still gets it, and the next publish reaches both', async () => {
     const key = `refused-delivery:${Math.random()}`
@@ -572,6 +609,11 @@ function testRoomStorage() {
     await clickRoomCard(closer!, 'close-held')
     expect(await clickRoomCard(holder!, 'subscribe-held')).deep.equal([])
     for (const page of [holder!, closer!]) await page.context().close()
+  })
+
+  test("Room: a store's receiver that throws is reported, its writes still commit and its next frame still arrives", async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'throwing-receiver')).deep.equal({ writes: ['written', 'written'], calls: 2 })
   })
 
   test('Room: its meta keeps the key order its writes gave it', async () => {

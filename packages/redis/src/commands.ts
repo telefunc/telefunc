@@ -87,35 +87,36 @@ local function tf_ordering_frame(seq, ts, payload)
 end
 `
 
-// Broadcast publish: next per-key seq, authority time that never goes back on the key, one PUBLISH of the seq of the
-// key's previous publish of this kind (two u32 big-endian words, 0 if none) and the ordering frame.
-//   KEYS: [1]=order ('seq:ts:last text seq:last binary seq') [2]=channel
+// Broadcast publish: next per-key seq, authority time that never goes back on the key, one PUBLISH of this publish's
+// place among the key's publishes of its kind (two u32 big-endian words, from 1) and the ordering frame.
+//   KEYS: [1]=order ('seq:ts:text publishes:binary publishes') [2]=channel
 //   ARGV: [1]=payload [2]=kind ('text'|'binary')
 const PUBLISH_LUA = `${NOW_LUA}${REDIS_ORDERING_FRAME_LUA}
 local prev = redis.call('GET', KEYS[1])
 local ts = tf_now()
 local seq
-local last_text, last_binary = '0', '0'
+local text, binary = 0, 0
 if prev then
   local pseq, pts, ptext, pbinary = string.match(prev, '^(%d+):(%d+):(%d+):(%d+)$')
   if not pseq then return redis.error_reply('publish: invalid ordering watermark') end
   seq = tonumber(pseq) + 1
   if tonumber(pts) > ts then ts = tonumber(pts) end
-  last_text, last_binary = ptext, pbinary
+  text, binary = tonumber(ptext), tonumber(pbinary)
 else
   -- A missing order (new, evicted or flushed) starts at authority time in microseconds, above every seq it issued.
   local t = redis.call('TIME')
   seq = tonumber(t[1]) * 1000000 + tonumber(t[2]) + 1
 end
-local seq_text = string.format('%.0f', seq)
-local predecessor
+local place
 if ARGV[2] == 'text' then
-  predecessor, last_text = tonumber(last_text), seq_text
+  text = text + 1
+  place = text
 else
-  predecessor, last_binary = tonumber(last_binary), seq_text
+  binary = binary + 1
+  place = binary
 end
-redis.call('SET', KEYS[1], seq_text .. ':' .. string.format('%.0f', ts) .. ':' .. last_text .. ':' .. last_binary)
-local frame = tf_u64(predecessor) .. tf_ordering_frame(seq, ts, ARGV[1])
+redis.call('SET', KEYS[1], string.format('%.0f:%.0f:%.0f:%.0f', seq, ts, text, binary))
+local frame = tf_u64(place) .. tf_ordering_frame(seq, ts, ARGV[1])
 redis.call('PUBLISH', KEYS[2], frame)
 return {seq, ts}
 `
@@ -283,7 +284,8 @@ if ARGV[2] == '' then mark = redis.call('GET', KEYS[2]) else mark = redis.call('
 return mark or ''
 `
 
-// A page of a member's lanes' last commits, read as LANE_START_LUA reads one lane's, for its every-track subscription.
+// A page of a member's lanes' last commits, inbox included, read as LANE_START_LUA reads one lane's, for its every-track
+// subscription.
 //   KEYS: [1]=head [2]=the member's order hash
 //   ARGV: [1]=inc [2]=HSCAN cursor
 //   Reply: nil once the incarnation is not the open head, else {next cursor, {lane key, 'seq:ts', ...}}
@@ -315,7 +317,7 @@ return marks
 
 // Read once SUBSCRIBE is acknowledged: a key's frames start after its last publish. A key with none starts at authority
 // time in microseconds, as PUBLISH_LUA would start it, so its first publish follows.
-//   KEYS: [1]=order ('seq:ts:last text seq:last binary seq')
+//   KEYS: [1]=order ('seq:ts:text publishes:binary publishes')
 const BROADCAST_START_LUA = `
 local mark = redis.call('GET', KEYS[1])
 if mark then return mark end
@@ -544,22 +546,37 @@ end
 // drops, the mutations and counts at the incarnation's next revision, the members' lane orders, their retained binary
 // frames and the semantic frame of each that owns it as the script finds it, the track lane sets of the members'
 // binary lanes, then its commit, as COMMIT commits.
-//   KEYS: [1]=head [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions [7]=retained lanes
-//         [8]=the semantic lane's retained frame [9]=retained owners, then the keys the plan gives the index of
+//   KEYS: `OPERATION_KEYS`, then the keys the plan gives the index of
 //   ARGV: [1]=inc [2]=the plan, an `OperationPacket` as JSON (its type says what each field holds and where its KEYS
 //         and ARGV are), then the bytes and COMMIT's ARGV the plan gives the index of
+const OPERATION_KEYS = {
+  head: 0,
+  rev: 1,
+  incarnationKeys: 2,
+  // Where `CELL_WRITES_LUA` reads them.
+  cellIndex: 3,
+  cellValues: 4,
+  cellVersions: 5,
+  retainedLanes: 6,
+  /** The semantic lane's retained frame. */
+  semanticRetained: 7,
+  retainedOwners: 8,
+} as const
+const OPERATION_KEY = luaRefs('KEYS', OPERATION_KEYS)
+
 const OPERATION_LUA = `${HEAD_PRELUDE}${REDIS_ORDERING_FRAME_LUA}${CELL_WRITES_LUA}${RETAINED_DELETE_FN_LUA}
 local function tf_commit(CK, CA)
 ${commitLua(luaRefs('CK', COMMIT_KEYS), luaRefs('CA', COMMIT_ARGS), 'CA')}
 end
-local rev_key, incarnation_keys_key, cell_index_key, retained_lanes_key = KEYS[2], KEYS[3], KEYS[4], KEYS[7]
-local semantic_key, owners_key = KEYS[8], KEYS[9]
+local rev_key, incarnation_keys_key = ${OPERATION_KEY.rev}, ${OPERATION_KEY.incarnationKeys}
+local cell_index_key, retained_lanes_key = ${OPERATION_KEY.cellIndex}, ${OPERATION_KEY.retainedLanes}
+local semantic_key, owners_key = ${OPERATION_KEY.semanticRetained}, ${OPERATION_KEY.retainedOwners}
 local now = tf_now()
-local head = tf_live_head(KEYS[1], now)
+local head = tf_live_head(${OPERATION_KEY.head}, now)
 if (not head) or head.inc ~= ARGV[1] or head.state ~= 'open' then return '{"kind":"stale-incarnation"}' end
 local plan = cjson.decode(ARGV[2])
 for _, read in ipairs(plan.expect) do
-  if (redis.call('HGET', KEYS[6], read[1]) or '') ~= read[2] then return '{"kind":"conflict"}' end
+  if (redis.call('HGET', ${OPERATION_KEY.cellVersions}, read[1]) or '') ~= read[2] then return '{"kind":"conflict"}' end
 end
 for _, member in ipairs(plan.members) do
   if redis.call('HLEN', KEYS[member[4]]) ~= member[2] or redis.call('SCARD', KEYS[member[4] + 1]) ~= member[3] then
@@ -577,7 +594,8 @@ for _, mutation in ipairs(plan.mutations) do
 end
 local counters = {}
 for _, count in ipairs(plan.counts) do tf_count(count[1], count[2], count[3], version, now, counters) end
-redis.call('SADD', incarnation_keys_key, rev_key, cell_index_key, KEYS[5], KEYS[6])
+redis.call('SADD', incarnation_keys_key, rev_key, cell_index_key, ${OPERATION_KEY.cellValues},
+  ${OPERATION_KEY.cellVersions})
 for _, member in ipairs(plan.members) do
   redis.call('SREM', incarnation_keys_key, KEYS[member[4]])
   redis.call('UNLINK', KEYS[member[4]])
@@ -909,7 +927,11 @@ const REDIS_COMMANDS = {
     lua: BROADCAST_START_LUA,
     numberOfKeys: 1,
     invoke: (prefix, route: BroadcastRoute) => ({ keys: [broadcastSequenceKey(prefix, route.key)], argv: [] }),
-    parse: (reply) => new Map([['', parseOrdering(reply as string)]]),
+    // The lane of a route counts its kind's publishes, in which a hole is a lost message.
+    parse: (reply, { kind }): Map<string, OrderingInfo> => {
+      const [, timestamp, text, binary] = (reply as string).split(':').map(Number) as [number, number, number, number]
+      return new Map([['', { seq: kind === 'text' ? text : binary, timestamp }]])
+    },
   }),
   dropIncarnation: command({
     name: 'tfRoomDropIncarnation',
@@ -978,17 +1000,16 @@ const REDIS_COMMANDS = {
     numberOfKeys: null,
     invoke: (prefix, { roomId, inc, writes, reads, members, commit, kit }: OperationInput) => {
       const semanticLaneKey = kit.encodeLaneKey({ kind: 'semantic' })
-      const keys = [
-        headKey(prefix, roomId),
-        revKey(prefix, roomId, inc),
-        incarnationKeysKey(prefix, roomId, inc),
-        cellIndexKey(prefix, roomId, inc),
-        cellValuesKey(prefix, roomId, inc),
-        cellVersionsKey(prefix, roomId, inc),
-        retainedLanesKey(prefix, roomId, inc),
-        retainedKey(prefix, roomId, inc, semanticLaneKey),
-        retainedOwnersKey(prefix, roomId, inc),
-      ]
+      const keys: string[] = []
+      keys[OPERATION_KEYS.head] = headKey(prefix, roomId)
+      keys[OPERATION_KEYS.rev] = revKey(prefix, roomId, inc)
+      keys[OPERATION_KEYS.incarnationKeys] = incarnationKeysKey(prefix, roomId, inc)
+      keys[OPERATION_KEYS.cellIndex] = cellIndexKey(prefix, roomId, inc)
+      keys[OPERATION_KEYS.cellValues] = cellValuesKey(prefix, roomId, inc)
+      keys[OPERATION_KEYS.cellVersions] = cellVersionsKey(prefix, roomId, inc)
+      keys[OPERATION_KEYS.retainedLanes] = retainedLanesKey(prefix, roomId, inc)
+      keys[OPERATION_KEYS.semanticRetained] = retainedKey(prefix, roomId, inc, semanticLaneKey)
+      keys[OPERATION_KEYS.retainedOwners] = retainedOwnersKey(prefix, roomId, inc)
       const keysAt = (...added: string[]) => keys.push(...added) - added.length + 1
       const argv: (string | Buffer)[] = [inc, '']
       const mutations = writes.mutations.map(({ key, bytes }): [string, number] => {
