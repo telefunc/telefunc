@@ -75,9 +75,8 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   private highestSeq = 0
   /** In-memory publishes waiting for the ones before them, in publish order. */
   private readonly queued = new Fifo<() => void>()
-  /** What listeners' publishes in `queued` hold of each kind: one that finds some of its kind waiting and would pass
-   *  `bufferLimit` or `bufferLimitBinary` rejects. */
-  private readonly queuedBytes = { text: 0, binary: 0 }
+  /** What listeners' publishes in `queued` hold: one that finds some waiting and would pass `maxPendingBytes` rejects. */
+  private queuedBytes = 0
   private delivering = false
 
   constructor(transport?: BroadcastTransport) {
@@ -186,27 +185,24 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     timestamp: number,
   ): Promise<BroadcastPublishResult> {
     const isText = typeof data === 'string'
-    const kind = isText ? 'text' : 'binary'
     // What is bounded is what listeners pile up, one message alone going through whatever its size. A publish from
     // outside a listener waits its turn.
     const fromListener = this.delivering
     const size = fromListener ? (isText ? utf8ByteLength(data) : data.byteLength) + HELD_SEND_OVERHEAD_BYTES : 0
-    const { bufferLimit, bufferLimitBinary } = getServerConfig().channel
-    const limit = isText ? bufferLimit : bufferLimitBinary
-    if (fromListener && this.queuedBytes[kind] > 0 && this.queuedBytes[kind] + size > limit) {
-      const setting = isText ? 'bufferLimit' : 'bufferLimitBinary'
+    const { maxPendingBytes } = getServerConfig().channel
+    if (fromListener && this.queuedBytes > 0 && this.queuedBytes + size > maxPendingBytes) {
       return Promise.reject(
         new ChannelOverflowError(
-          `Publish rejected: publishes made from a listener, waiting to be delivered, exceeded config.channel.${setting}; raise the setting or publish less from the listener`,
+          'Publish rejected: publishes made from a listener, waiting to be delivered, exceeded config.channel.maxPendingBytes; raise the setting or publish less from the listener',
         ),
       )
     }
-    this.queuedBytes[kind] += size
+    this.queuedBytes += size
     // The caller may reuse or transfer its buffer once the publish returns.
     const queuedData = isText ? data : (new Uint8Array(data as Uint8Array) as T)
     return new Promise((resolve, reject) => {
       this.queued.push(() => {
-        this.queuedBytes[kind] -= size
+        this.queuedBytes -= size
         try {
           resolve(this.deliverInMemory(subs, key, queuedData, timestamp))
         } catch (err) {

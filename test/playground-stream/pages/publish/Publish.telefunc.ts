@@ -420,30 +420,34 @@ async function onInMemoryPublishes() {
   stopLoop()
   stopAnswer()
 
-  const batch: number[] = []
-  const stopBatch = Broadcast.subscribeBinary(`batch:${id}`, (data) => void batch.push(data[0]! * 256 + data[1]!))
-  const sends: unknown[] = []
-  const stopStart = Broadcast.subscribe(`start:${id}`, () => {
-    const bytes = new Uint8Array(64 * 1024)
-    for (let i = 0; i < 2000; i++) {
-      bytes[0] = i >> 8
-      bytes[1] = i & 255
-      sends.push(Broadcast.publishBinary(`batch:${id}`, bytes))
+  const listenerPublishes = async (count: number) => {
+    const batch: number[] = []
+    const stopBatch = Broadcast.subscribeBinary(`batch:${id}`, (data) => void batch.push(data[0]! * 256 + data[1]!))
+    const sends: unknown[] = []
+    const stopStart = Broadcast.subscribe(`start:${id}`, () => {
+      const bytes = new Uint8Array(64 * 1024)
+      for (let i = 0; i < count; i++) {
+        bytes[0] = i >> 8
+        bytes[1] = i & 255
+        sends.push(Broadcast.publishBinary(`batch:${id}`, bytes))
+      }
+    })
+    await Broadcast.publish(`start:${id}`, 'go')
+    const results = await Promise.allSettled(sends)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const rejected = results.filter((r) => r.status === 'rejected')
+    const firstRejected = results.findIndex((r) => r.status === 'rejected')
+    stopBatch()
+    stopStart()
+    return {
+      delivered: batch.length,
+      rejected: rejected.length,
+      errors: [...new Set(rejected.map((r) => (r as PromiseRejectedResult).reason.name))],
+      admittedInOrder: (firstRejected === -1 || firstRejected === batch.length) && batch.every((n, i) => n === i),
     }
-  })
-  await Broadcast.publish(`start:${id}`, 'go')
-  const results = await Promise.allSettled(sends)
-  await new Promise((resolve) => setTimeout(resolve, 50))
-  const rejected = results.filter((r) => r.status === 'rejected')
-  const firstRejected = results.findIndex((r) => r.status === 'rejected')
-  const listenerBatch = {
-    delivered: batch.length,
-    rejected: rejected.length,
-    errors: [...new Set(rejected.map((r) => (r as PromiseRejectedResult).reason.name))],
-    admittedInOrder: firstRejected === batch.length && batch.every((n, i) => n === i),
   }
-  stopBatch()
-  stopStart()
+  const listenerBatch = await listenerPublishes(2000)
+  const pastTheBound = await listenerPublishes(5000)
 
   let aloneBytes = 0
   let alone: unknown
@@ -491,6 +495,7 @@ async function onInMemoryPublishes() {
   return {
     loop,
     listenerBatch,
+    pastTheBound,
     aloneBytes,
     producers,
     timerProducer,
