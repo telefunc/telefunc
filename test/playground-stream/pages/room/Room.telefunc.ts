@@ -1124,10 +1124,10 @@ async function onStopChurn(roomId: string) {
   return await churning.get(roomId)!()
 }
 
-/** A view subscribes and a member publishes three 1,500-byte messages in the same turn, past the 4,096-byte
- *  bufferLimit of the lane that runs it: Redis's SUBSCRIBE round trip keeps the view's new subscription short of ready,
- *  so the three commits wait until it is. */
-async function onPublishWhileEstablishing(roomId: string) {
+/** A view subscribes and a member publishes `count` messages of `bytes` bytes in the same turn, the last past the
+ *  4,096-byte bufferLimit of the lane that runs it: Redis's SUBSCRIBE round trip keeps the view's new subscription short
+ *  of ready, so the commits wait until it is. */
+async function onPublishWhileEstablishing(roomId: string, count: number, bytes: number) {
   const me = await Room.join(roomId, { meta: { name: 'Me' } })
   const room = await Room.get(roomId)
   const seen: string[] = []
@@ -1136,8 +1136,8 @@ async function onPublishWhileEstablishing(roomId: string) {
   room.subscribe((data, _info, from) => {
     if (from.id === me.id) seen.push((data as string)[0]!)
   })
-  const publishes = ['1', '2', '3'].map((n) =>
-    me.publish(n.padEnd(1500, '.')).then(
+  const publishes = Array.from({ length: count }, (_, i) =>
+    me.publish(`${i + 1}`.padEnd(bytes, '.')).then(
       () => 'sent',
       (err: Error) => err.name,
     ),

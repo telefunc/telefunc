@@ -1259,10 +1259,19 @@ function Room() {
 
       {scenario('hold-overflow', null, 'Publishes held past bufferLimit', async () => {
         const roomId = await createRoomId('hold-overflow')
-        const serverOutcomes = await onPublishWhileEstablishing(roomId)
+        const serverOutcomes = await onPublishWhileEstablishing(roomId, 3, 1500)
         await pollUntil(async () => {
           const seen = await onGetWatched(roomId)
           return { result: { serverOutcomes, seen }, done: seen.length >= 2 }
+        })
+      })}
+
+      {scenario('hold-alone', null, 'One publish held, itself past bufferLimit', async () => {
+        const roomId = await createRoomId('hold-alone')
+        const serverOutcomes = await onPublishWhileEstablishing(roomId, 2, 5000)
+        await pollUntil(async () => {
+          const seen = await onGetWatched(roomId)
+          return { result: { serverOutcomes, seen }, done: seen.length >= 1 }
         })
       })}
 
