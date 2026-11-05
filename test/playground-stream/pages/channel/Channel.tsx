@@ -1426,7 +1426,7 @@ function ChannelDemo() {
   // ── Render ───────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex flex-col h-full">
+    <div>
       {hydrated && <span id="hydrated" />}
       <pre id="channel-state">{JSON.stringify(channelState)}</pre>
 
@@ -1945,7 +1945,7 @@ function ChannelDemo() {
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto p-4 font-mono text-xs">
+      <div className="h-64 overflow-y-auto p-4 font-mono text-xs">
         {logs.map((log) => (
           <div key={log.id} className="mb-1 flex gap-2">
             <span className="text-zinc-400 shrink-0">{log.time}</span>
