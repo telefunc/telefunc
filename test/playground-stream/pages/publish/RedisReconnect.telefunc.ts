@@ -107,7 +107,7 @@ async function onRedisSubscribeFailure() {
  *  user is this test's own, as in `onRedisSubscribeFailure`. */
 async function onRedisChannelDenied() {
   const user = `channel-test-${crypto.randomUUID()}`
-  await redis!.acl('SETUSER', user, 'on', '>test', '~*', 'resetchannels', '&*:allowed*', '+@all')
+  await redis!.acl('SETUSER', user, 'on', '>test', '~*', 'resetchannels', '&*allowed*', '+@all')
   const client = redis!.duplicate({ username: user, password: 'test', retryStrategy: () => null })
   client.on('error', () => {})
   const backend = new RedisBackend({ connection: new RedisConnection({ redis: client, prefix: 'tf:' }) })
@@ -135,7 +135,7 @@ async function onRedisChannelDenied() {
     return {
       deniedListenerTold: String(deniedReasons).includes('NOPERM'),
       deniedPublishTold: deniedPublish.status === 'rejected' && String(deniedPublish.reason).includes('NOPERM'),
-      upChanges,
+      upChanges: [...upChanges],
       received: received.sort(),
     }
   } finally {
