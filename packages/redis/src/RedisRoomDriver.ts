@@ -271,7 +271,10 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
       driver: this,
       receiver,
       reportMissed: (count) =>
-        this.kit.reportDeliveryLost(source.roomId, `${count} commits never reached this server's Redis subscription`),
+        this.kit.reportDeliveryLost(
+          source.roomId,
+          `${count ?? 'An unknown number of'} commits never reached this server's Redis subscription`,
+        ),
     })
   }
 

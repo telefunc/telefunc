@@ -84,6 +84,8 @@ export {
   onSubscriberDropped,
   onBusyLanes,
   onLanesAfterDrop,
+  onLanesBeforeRewind,
+  onLanesPastRewind,
   onSaveReply,
   onSeedAndChurn,
   onStopChurn,
@@ -963,6 +965,10 @@ async function onBusyLanes(roomId: string) {
     await Broadcast.publishBinary(key, bytes)
   }
   await send()
+  // Its lane on the track has no start once it left.
+  const carol = await room.join({ meta: { name: 'Carol' } })
+  await carol.publishBinary(bytes, { track: 'shared' })
+  await carol.leave()
   atRest.set(roomId, { reported, arrived: () => arrived, send })
 }
 
@@ -978,6 +984,43 @@ async function onLanesAfterDrop(roomId: string) {
     console.error(`Room delivery handoff of '${roomId}' lost: ${reason}`)
   config.broadcast.onDeliveryLost = ({ key, reason }) => console.error(`Broadcast delivery of '${key}' lost: ${reason}`)
   return { reported, arrivedAfter: arrived() - before }
+}
+
+/** Lanes the page then rewinds Redis under, as a failover onto a replica that missed the latest writes does: a track and
+ *  a key that have a commit on the replica, and the room's lane and a key that don't. */
+async function onLanesBeforeRewind(roomId: string) {
+  const room = anyoneCanJoin(await Room.get(roomId))
+  const alice = await room.join({ meta: { name: 'Alice' } })
+  const reported: string[] = []
+  roomConfig.onDeliveryLost = ({ reason }) => reported.push(reason)
+  config.broadcast.onDeliveryLost = ({ reason }) => reported.push(reason)
+  let arrived = 0
+  const arrives = () => arrived++
+  room.subscribe(arrives)
+  room.subscribeBinary(arrives, { track: 'shared' })
+  const key = `room:rewound:${roomId}`
+  Broadcast.subscribe(key, arrives)
+  const bytes = new Uint8Array(1)
+  await alice.publishBinary(bytes, { track: 'shared' })
+  await Broadcast.publish(key, 'on the replica')
+  // Long enough to arrive, so the store holds what the snapshot takes.
+  await sleep(200)
+  const send = async () => {
+    await alice.publish('text')
+    await alice.publishBinary(bytes, { track: 'shared' })
+    await Broadcast.publish(key, 'text')
+  }
+  atRest.set(roomId, { reported, arrived: () => arrived, send })
+}
+
+/** This server delivers past what the page's snapshot holds. */
+async function onLanesPastRewind(roomId: string) {
+  const entry = atRest.get(roomId)!
+  const onlyHere = `room:flushed:${roomId}`
+  Broadcast.subscribe(onlyHere, () => {})
+  await Broadcast.publish(onlyHere, 'not on the replica')
+  await entry.send()
+  await sleep(200)
 }
 
 /** A loop of awaited publishes: other work still gets its turns. */

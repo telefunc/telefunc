@@ -89,6 +89,8 @@ import {
   onSubscriberDropped,
   onBusyLanes,
   onLanesAfterDrop,
+  onLanesBeforeRewind,
+  onLanesPastRewind,
   onSaveReply,
   onSeedAndChurn,
   onStopChurn,
@@ -894,6 +896,20 @@ function Room() {
       {scenario('dropped-at-rest', 'A dropped subscriber at rest', 'Reports nothing', async () => {
         const roomId = await createRoomId('dropped-at-rest')
         await onBusyLanes(roomId)
+        await fetch('/api/redis/drop-connections', { method: 'POST' })
+        setResult(JSON.stringify(await onLanesAfterDrop(roomId)))
+      })}
+
+      {scenario('rewound', 'A failover across a dropped subscriber', 'Reports what it cannot count', async () => {
+        const roomId = await createRoomId('rewound')
+        await onLanesBeforeRewind(roomId)
+        const { snapshot } = await (await fetch('/api/redis/snapshot')).json()
+        await onLanesPastRewind(roomId)
+        await fetch('/api/redis/restore', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ snapshot }),
+        })
         await fetch('/api/redis/drop-connections', { method: 'POST' })
         setResult(JSON.stringify(await onLanesAfterDrop(roomId)))
       })}

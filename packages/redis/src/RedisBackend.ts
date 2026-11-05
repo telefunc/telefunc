@@ -53,7 +53,7 @@ class RedisBackend implements BroadcastDriver, RedisDriver {
       reportMissed: (count) =>
         reportBroadcastDeliveryLost(
           route.key,
-          `${count} ${route.kind} messages never reached this server's Redis subscription`,
+          `${count ?? 'An unknown number of'} ${route.kind} messages never reached this server's Redis subscription`,
         ),
     })
   }

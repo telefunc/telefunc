@@ -29,8 +29,8 @@ type RedisAttemptOptions = {
   invalidationChannel: string | null
   driver: RedisDriver
   receiver: BackendReceiver
-  /** Pub/sub keeps no log, so what a drop or the reorder wait passed by is gone. */
-  reportMissed: (count: number) => void
+  /** Pub/sub keeps no log, so what a drop or the reorder wait passed by is gone. `null`: how many isn't known. */
+  reportMissed: (count: number | null) => void
 }
 
 /** The subscriber connection; `id` tells work that awaited across a drop that it is stale. */
@@ -371,6 +371,8 @@ class RedisAttempt extends DriverAttempt {
   private readonly broadcast: boolean
   /** A Broadcast text source's deliveries are strings. */
   private readonly text: boolean
+  /** A Room member's lanes' order goes when the member leaves; any other lane's lasts as long as its room or key. */
+  private readonly lanesEndWithMembers: boolean
 
   constructor({
     owner,
@@ -396,10 +398,12 @@ class RedisAttempt extends DriverAttempt {
       this.fanIn = source.lane.kind === 'binary-all' || source.lane.kind === 'binary-track'
       this.broadcast = false
       this.text = false
+      this.lanesEndWithMembers = this.fanIn || source.lane.kind === 'inbox' || source.lane.kind === 'binary'
     } else {
       this.fanIn = false
       this.broadcast = true
       this.text = source.kind === 'text'
+      this.lanesEndWithMembers = false
     }
   }
 
@@ -437,10 +441,7 @@ class RedisAttempt extends DriverAttempt {
   /** A lane missing from `starts` has no commit yet. */
   markReady(starts: Map<string, OrderingInfo>): void {
     if (!this.awaitsConfirmation()) return
-    let missed = 0
-    if (this.state() === 'lost') {
-      for (const [lane, start] of starts) missed += Math.max(0, start.seq - (this.orders.get(lane)?.last ?? 0))
-    }
+    const missed = this.state() === 'lost' ? this.missedBefore(starts) : 0
     this.orders = new Map()
     for (const [lane, start] of starts) {
       this.orders.set(lane, { last: start.seq, lastTimestamp: start.timestamp, parked: null, release: null })
@@ -448,12 +449,25 @@ class RedisAttempt extends DriverAttempt {
     const early = this.early
     this.early = []
     this.transition('ready')
-    if (missed > 0) this.reportMissed(missed)
+    if (missed !== 0) this.reportMissed(missed)
     for (const message of early) {
       // A consumer may close the lane.
       if (this.state() !== 'ready') return
       this.receiveFrame(message)
     }
+  }
+
+  /** What its lost connection passed by, or null once a lane's order is behind what it delivered: a failover's rewind or
+   *  a flush took the count with it. */
+  private missedBefore(starts: Map<string, OrderingInfo>): number | null {
+    if (!this.lanesEndWithMembers && this.orders.size > starts.size) return null
+    let missed = 0
+    for (const [lane, start] of starts) {
+      const last = this.orders.get(lane)?.last ?? 0
+      if (start.seq < last) return null
+      missed += start.seq - last
+    }
+    return missed
   }
 
   fail(error: unknown): void {

@@ -1463,6 +1463,17 @@ function testRoomRedisSubscriberDropped() {
       expectLog('Redis subscriber connection closed')
     },
   )
+  testRoomScenario<{ reported: string[]; arrivedAfter: number }>(
+    'rewound',
+    "room and broadcast: a failover rewinds Redis across a server's dropped subscriber connection: each lane that delivered past it reports a loss it can't count",
+    (r) => {
+      const commits = "An unknown number of commits never reached this server's Redis subscription"
+      const messages = "An unknown number of text messages never reached this server's Redis subscription"
+      expect(r.reported.sort()).deep.equal([commits, commits, messages, messages])
+      expect(r.arrivedAfter).toBe(3)
+      expectLog('Redis subscriber connection closed')
+    },
+  )
 }
 
 function testRoomLongWaits() {
