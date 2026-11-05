@@ -38,6 +38,7 @@ import type {
 } from '../types.js'
 import { memberCellKey } from './store/cells.js'
 import { tryCreateRoom } from './lifecycle/create.js'
+import { eachInFlight } from './store/cellStore.js'
 import { evictMember } from './store/members.js'
 import {
   reapAndCountPresence,
@@ -310,7 +311,7 @@ async function removeParticipant(id: string, target: ParticipantRef & { reason?:
   }
   const members = await resolveParticipantRef(incarnation, target)
   const cause = removedCause(target.reason)
-  for (const member of members) await evictMember(incarnation, member.id, cause)
+  await eachInFlight(members, (member) => evictMember(incarnation, member.id, cause))
 }
 
 async function getRoomParticipants(id: string, target?: { identity: string }): Promise<ParticipantSnapshotView[]> {
@@ -346,15 +347,14 @@ async function sendToParticipant(id: string, target: ParticipantRef, data: unkno
   const incarnation = await requireRoom(id)
   const members = await resolveParticipantRef(incarnation, target)
   const exact = 'id' in target
-  let lost = false
-  for (const member of members) {
-    const envelope = { __r: 'dm', to: member.id, from: '', fromMeta: null, data: message } as const
-    const requiredCellKeys = [memberCellKey(member.id)]
-    const inbox = inboxOf(id, incarnation.inc, member.id)
-    const receipt = await commitLane(inbox, encodeRoomRecord(envelope), { requiredCellKeys })
-    if (receipt.kind === 'stale-incarnation') throw roomClosedError(id)
-    if (receipt.kind === 'gone' && exact) throw participantGoneError(member.id)
-    if (receipt.kind === 'accepted' && receipt.lost !== undefined) lost = true
-  }
-  if (lost) throw messageLostError()
+  await eachInFlight(members, (member) => sendDm(id, incarnation.inc, member.id, message, exact))
+}
+
+async function sendDm(id: string, inc: string, member: string, message: unknown, exact: boolean): Promise<void> {
+  const envelope = { __r: 'dm', to: member, from: '', fromMeta: null, data: message } as const
+  const requiredCellKeys = [memberCellKey(member)]
+  const receipt = await commitLane(inboxOf(id, inc, member), encodeRoomRecord(envelope), { requiredCellKeys })
+  if (receipt.kind === 'stale-incarnation') throw roomClosedError(id)
+  if (receipt.kind === 'gone' && exact) throw participantGoneError(member)
+  if (receipt.kind === 'accepted' && receipt.lost !== undefined) throw messageLostError()
 }
