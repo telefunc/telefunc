@@ -55,9 +55,24 @@ type HttpRequest =
  */
 async function serve(httpRequest: HttpRequest): Promise<HttpResponse> {
   assertHttpRequest(httpRequest, arguments.length)
+  assertRequestSignalFlag()
   const httpRequestResolved = await resolveHttpRequest(httpRequest)
-  const httpResponse = await runTelefunc(httpRequestResolved)
-  return httpResponse
+  try {
+    return await runTelefunc(httpRequestResolved)
+  } finally {
+    // Past this, `httpResponse.pipe(res)` ends a streaming response's body once the client is gone.
+    httpRequestResolved.unwatch?.()
+  }
+}
+
+/** Without the flag a Worker's `request.signal` never aborts, and nothing else tells a telefunction that hasn't answered. */
+function assertRequestSignalFlag(): void {
+  const { Cloudflare } = globalThis as { Cloudflare?: { compatibilityFlags?: Record<string, boolean> } }
+  assertWarning(
+    Cloudflare?.compatibilityFlags?.enable_request_signal !== false,
+    'Add `enable_request_signal` to `compatibility_flags` in your Wrangler configuration: without it, `context.signal` and `onClose()` miss a client that disconnects before its telefunction answers. See https://telefunc.com/onClose#context-signal',
+    { onlyOnce: true },
+  )
 }
 
 /** `serve()` for adapters holding the Node.js `res`, so that a client disconnect aborts `request.signal`. */
@@ -80,21 +95,24 @@ async function telefunc(httpRequest: HttpRequest): Promise<HttpResponse> {
   return serve(httpRequest)
 }
 
-async function resolveHttpRequest(httpRequest: HttpRequest, response?: Writable): Promise<HttpRequestResolved> {
+async function resolveHttpRequest(
+  httpRequest: HttpRequest,
+  response?: Writable,
+): Promise<HttpRequestResolved & { unwatch?: () => void }> {
   if ('request' in httpRequest) {
     return { request: httpRequest.request, context: httpRequest.context }
   }
   // `url` is either the full URL (e.g. `request.url`) or only its pathname (e.g. `req.originalUrl`)
   const url = new URL(httpRequest.url, 'http://localhost').href
   if ('readable' in httpRequest) {
-    const request = await nodeReadableToWebRequest(
+    const { request, unwatch } = await nodeReadableToWebRequest(
       httpRequest.readable,
       url,
       httpRequest.method,
       httpRequest.headers,
       response,
     )
-    return { request, readable: httpRequest.readable, context: httpRequest.context }
+    return { request, readable: httpRequest.readable, context: httpRequest.context, unwatch }
   }
   // Backward compat: construct a Request from primitives
   const request = new Request(url, {

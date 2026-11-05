@@ -1,7 +1,7 @@
 export { testStreaming }
 
 import { page, test, expect, autoRetry, getServerUrl, skip } from '@brillout/test-e2e'
-import { resetCleanupState, getCleanupState, navigate, getResult } from '../../e2e-utils'
+import { resetCleanupState, getCleanupState, getStreamFlowCount, navigate, getResult } from '../../e2e-utils'
 
 const channelTransports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
 const channelTransport = channelTransports[channelTransports.length - 1]!
@@ -331,6 +331,265 @@ function testStreaming() {
         expect(lastMs - firstMs).lessThan(last.duration)
       })
     })
+
+  test("streaming: reading one returned stream to its end, then the other, doesn't hang on the other's unread bytes", async () => {
+    await navigate(`${getServerUrl()}/streaming`)
+    await page.click('#test-two-large-streams-in-turn')
+    await autoRetry(async () => {
+      const result = await getResult('#streaming-result')
+      expect(result).deep.equal({ firstBytes: 2 * 1024 * 1024, secondBytes: 2 * 1024 * 1024 })
+    })
+  })
+
+  for (const [firstKind, secondKind] of [
+    ['stream', 'stream'],
+    ['generator', 'generator'],
+    ['download', 'generator'],
+  ]) {
+    test(`streaming: each returned stream has its own backpressure (${firstKind}, ${secondKind})`, async () => {
+      const chunkMiB = 16 // chunks in 1 MiB
+      const progress = () => page.evaluate(() => (window as any).__twoEndless)
+      const produced = (state: Record<string, string>, name: string, key: string) =>
+        Number(state[`${name}_${key}`] ?? 0)
+      await navigate(`${getServerUrl()}/streaming`)
+
+      // The page reads only the first: it keeps flowing, and the unread one's producer stops.
+      await page.click(`#test-two-endless-${firstKind}-${secondKind}`)
+      await autoRetry(async () => expect((await progress())?.first).greaterThanOrEqual(64 * chunkMiB), {
+        timeout: 60_000,
+      })
+      const { key } = await progress()
+      // Its count stays put while the first stream gets another 64 MiB read, once the page's request has arrived.
+      let stopped = 0
+      await autoRetry(
+        async () => {
+          stopped = produced(await getCleanupState(), 'second', key)
+          const firstThen = (await progress()).first
+          while ((await progress()).first < firstThen + 64 * chunkMiB) await page.waitForTimeout(50)
+          expect(produced(await getCleanupState(), 'second', key)).toBe(stopped)
+        },
+        { timeout: 60_000 },
+      )
+      // What was on its way when the page asked comes on top of the 1 MiB: tens of MiB through local sockets and a proxy.
+      expect(stopped).lessThanOrEqual(256 * chunkMiB)
+
+      // Then the page reads it: it continues from where it stopped, intact and in order.
+      await page.click('#test-two-endless-read-second')
+      await autoRetry(async () => expect((await progress()).second).greaterThanOrEqual(stopped + 8 * chunkMiB), {
+        timeout: 60_000,
+      })
+
+      // Cancelling it stops its producer, and the other continues.
+      await page.click('#test-two-endless-cancel-second')
+      await autoRetry(async () => expect((await getCleanupState())[`second_${key}_end`]).toBe('cancelled'))
+      const firstAtCancel = (await progress()).first
+      await autoRetry(async () => expect((await progress()).first).greaterThanOrEqual(firstAtCancel + 8 * chunkMiB), {
+        timeout: 60_000,
+      })
+
+      await page.click('#test-two-endless-cancel-first')
+      await autoRetry(async () => expect((await getCleanupState())[`first_${key}_end`]).toBe('cancelled'))
+      expect((await progress()).errors).deep.equal([])
+      await autoRetry(async () => expect(await getStreamFlowCount()).toBe(0))
+    })
+  }
+
+  const isInline = process.env.PUBLIC_ENV__STREAM_TRANSPORT !== 'channel'
+  const startTwoEndless = async () => {
+    await page.click('#test-two-endless-stream-stream')
+    await autoRetry(async () => expect((await twoEndlessProgress())?.first).greaterThanOrEqual(16 * 16), {
+      timeout: 60_000,
+    })
+    if (isInline) expect(await getStreamFlowCount()).greaterThanOrEqual(1)
+  }
+  const twoEndlessProgress = () => page.evaluate(() => (window as any).__twoEndless)
+  const postFlow = (id: string) =>
+    page.evaluate(async (id) => {
+      const body = JSON.stringify({ id, paused: [0], cancelled: [0, 1] })
+      const headers = { 'x-telefunc-request': 'flow', 'Content-Type': 'text/plain' }
+      const response = await fetch('/_telefunc?_telefunc=flow', { method: 'POST', headers, body })
+      return { status: response.status, text: await response.text() }
+    }, id)
+
+  test('streaming: a request naming a made-up response changes nothing, and answers as one naming an ended response', async () => {
+    const realIds: string[] = []
+    const recordFlowId = (request: { url(): string; postData(): string | null }) => {
+      if (request.url().includes('_telefunc=flow')) realIds.push(JSON.parse(request.postData()!).id)
+    }
+    page.on('request', recordFlowId)
+    await navigate(`${getServerUrl()}/streaming`)
+    await startTwoEndless()
+    const { key } = await twoEndlessProgress()
+
+    const madeUp = await postFlow(crypto.randomUUID())
+    expect(madeUp).deep.equal({ status: 200, text: 'not found' })
+    const firstThen = (await twoEndlessProgress()).first
+    await autoRetry(async () => expect((await twoEndlessProgress()).first).greaterThanOrEqual(firstThen + 8 * 16), {
+      timeout: 60_000,
+    })
+    const state = await getCleanupState()
+    expect(state[`first_${key}_end`]).toBe(undefined)
+    expect(state[`second_${key}_end`]).toBe(undefined)
+
+    // Cancelling it while it is unread is the only thing asked of the server.
+    await page.click('#test-two-endless-cancel-second')
+    await autoRetry(async () => expect((await getCleanupState())[`second_${key}_end`]).toBe('cancelled'))
+    await page.click('#test-two-endless-cancel-first')
+    await autoRetry(async () => expect(await getStreamFlowCount()).toBe(0))
+    page.off('request', recordFlowId)
+    if (isInline) {
+      expect(realIds.length).greaterThanOrEqual(1)
+      expect(await postFlow(realIds[0]!)).deep.equal(madeUp)
+    }
+  })
+
+  if (isInline) {
+    /** The page's next stream-flow requests are counted, and answered as a load balancer's other instance would. */
+    const answerFlowRequests = (lost: 'all' | 'first answer, second' | 'first, to a proxy') =>
+      page.evaluate((lost) => {
+        const { fetch } = window
+        const w = window as any
+        w.__flowRequests = 0
+        window.fetch = (url, init) => {
+          if (!String(url).includes('_telefunc=flow')) return fetch(url, init)
+          const request = ++w.__flowRequests
+          if (lost === 'first, to a proxy') {
+            return request === 1 ? Promise.resolve(new Response('Bad Gateway', { status: 502 })) : fetch(url, init)
+          }
+          if (request === 1 && lost === 'first answer, second') {
+            return fetch(url, init).then(() => Promise.reject(new TypeError('Failed to fetch')))
+          }
+          return Promise.resolve(new Response('not found'))
+        }
+      }, lost)
+    const flowRequests = () => page.evaluate(() => (window as any).__flowRequests as number)
+
+    test('streaming: a pause the page can no longer renew lapses, and the stream goes on', async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await answerFlowRequests('first answer, second')
+      await startTwoEndless()
+      const { key } = await twoEndlessProgress()
+      const stopped = Number((await getCleanupState())[`second_${key}`])
+      // The cancel is what gets lost. The page drops what still comes of that stream, so nothing piles up during the wait.
+      await page.click('#test-two-endless-cancel-first')
+      await autoRetry(async () => expect(await flowRequests()).toBe(2), { timeout: 30_000 })
+      await page.click('#test-two-endless-read-second')
+      await autoRetry(async () => expect((await twoEndlessProgress()).second).greaterThanOrEqual(stopped + 8 * 16), {
+        timeout: 70_000,
+      })
+      expect((await twoEndlessProgress()).errors).deep.equal([])
+      expect(await flowRequests()).toBe(2)
+      await page.click('#test-two-endless-abort')
+    })
+
+    test("streaming: a proxy's error answer doesn't end the stream flow requests", async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await startTwoEndless()
+      const { key } = await twoEndlessProgress()
+      const stopped = Number((await getCleanupState())[`second_${key}`])
+      await answerFlowRequests('first, to a proxy')
+      await page.click('#test-two-endless-read-second')
+      // The page asks again a renewal later at the latest, well before the 60 s lease would let the stream go.
+      await autoRetry(async () => expect((await twoEndlessProgress()).second).greaterThanOrEqual(stopped + 8 * 16), {
+        timeout: 30_000,
+      })
+      expect(await flowRequests()).greaterThanOrEqual(2)
+      expect((await twoEndlessProgress()).errors).deep.equal([])
+      await page.click('#test-two-endless-abort')
+    })
+
+    test('streaming: with no request reaching the instance, the page buffers after asking once', async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await answerFlowRequests('all')
+      await startTwoEndless()
+      await page.click('#test-two-endless-read-second')
+      await autoRetry(async () => expect((await twoEndlessProgress()).second).greaterThanOrEqual(64 * 16), {
+        timeout: 60_000,
+      })
+      expect((await twoEndlessProgress()).errors).deep.equal([])
+      expect(await flowRequests()).toBe(1)
+      await page.click('#test-two-endless-abort')
+    })
+  }
+
+  test('streaming: no stream-flow entry stays after a response reads to its end', async () => {
+    await navigate(`${getServerUrl()}/streaming`)
+    await page.click('#test-two-large-streams-in-turn')
+    await autoRetry(async () => expect((await getResult('#streaming-result')).secondBytes).toBe(2 * 1024 * 1024))
+    await autoRetry(async () => expect(await getStreamFlowCount()).toBe(0))
+  })
+
+  test('streaming: no stream-flow entry stays after the call is aborted', async () => {
+    await navigate(`${getServerUrl()}/streaming`)
+    await startTwoEndless()
+    await page.click('#test-two-endless-abort')
+    await autoRetry(async () => expect(await getStreamFlowCount()).toBe(0))
+  })
+
+  test("streaming: no stream-flow entry stays after one stream's producer fails", async () => {
+    await navigate(`${getServerUrl()}/streaming`)
+    await page.click('#test-abort-one-of-many-streaming-values')
+    await autoRetry(async () => expect(await getResult('#streaming-result')).not.toBe(null))
+    await autoRetry(async () => expect(await getStreamFlowCount()).toBe(0))
+  })
+
+  test('streaming: no stream-flow entry stays after the page leaves', async () => {
+    await navigate(`${getServerUrl()}/streaming`)
+    await startTwoEndless()
+    await navigate(`${getServerUrl()}/streaming`)
+    await autoRetry(async () => expect(await getStreamFlowCount()).toBe(0))
+  })
+
+  test("streaming: transferring one returned stream's chunks to a Web Worker leaves the other stream's chunks intact", async () => {
+    await navigate(`${getServerUrl()}/streaming`)
+    await page.click('#test-two-streams-to-worker')
+    await autoRetry(async () => {
+      const result = await getResult('#streaming-result')
+      expect(result).deep.equal({ sums: { first: 8 * 1024, second: 2 * 8 * 1024 } })
+    })
+  })
+
+  if (process.env.PUBLIC_ENV__STREAM_TRANSPORT !== 'channel') {
+    test('streaming: a returned stream of one 256 MiB chunk reaches the page within 8 s', async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await page.click('#test-one-large-returned-chunk')
+      let result: { bytes: number; ms: number } | undefined
+      await autoRetry(
+        async () => {
+          result = await getResult('#streaming-result')
+        },
+        { timeout: 50_000 },
+      )
+      expect(result!.bytes).toBe(256 * 1024 * 1024)
+      expect(result!.ms).lessThan(8000)
+    })
+  }
+
+  for (const order of ['finish-first', 'cancel-first'] as const) {
+    test(`streaming: the server stops producing a returned stream the page cancels while it reads another to its end (${order})`, async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await page.click(`#test-finished-and-cancelled-streams-${order}`)
+      let key: string | null = null
+      await autoRetry(async () => {
+        key = (await getResult('#streaming-result')).key
+      })
+      await autoRetry(async () => {
+        const state = await getCleanupState()
+        expect(state[`endless_${key}`]).toBe('cancelled')
+      })
+    })
+  }
+
+  test('streaming: cancelling a returned stream that failed, or a generator whose finally throws, leaves the server answering', async () => {
+    await navigate(`${getServerUrl()}/streaming`)
+    await page.click('#test-cancel-failed-streams')
+    await autoRetry(async () => {
+      const result = await getResult('#streaming-result')
+      expect(result.errors).to.have.length(2)
+      expect(result.errors).not.to.include('none')
+      expect(result.nextCall).deep.equal([1, 2, 3, 4, 5])
+    })
+  })
 }
 
 function parseChannelTransports(value: string | undefined): Array<'sse' | 'ws'> {

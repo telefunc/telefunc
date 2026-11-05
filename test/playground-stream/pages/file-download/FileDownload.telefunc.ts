@@ -14,6 +14,8 @@ export {
   // Progress / cancel exercise.
   onDownloadProgressKnownSize,
   onDownloadProgressUnknownSize,
+  onDownloadNobodyReads,
+  onDownloadFailsWhenTold,
   // Edge cases.
   onDownloadFileBinary,
   onDownloadFileLarge,
@@ -22,6 +24,8 @@ export {
 }
 
 import { download } from 'telefunc'
+import { cleanupState } from '../../cleanup-state'
+import { onServerAction } from '../../server-actions'
 
 const TEXT = 'Hello, file download!'
 const TEXT_BYTES = new TextEncoder().encode(TEXT)
@@ -120,6 +124,37 @@ const onDownloadProgressKnownSize = async () => {
     size: TOTAL,
     type: 'application/octet-stream',
   })
+}
+
+/** A download the page never reads, so the server soon waits for the page to take more. */
+const onDownloadNobodyReads = async () => {
+  const id = crypto.randomUUID()
+  let sent = 0
+  const stream = new ReadableStream<Uint8Array<ArrayBuffer>>({
+    pull(controller) {
+      controller.enqueue(new Uint8Array(1024 * 1024))
+      cleanupState[`downloadNobodyReads_${id}_sent`] = String(++sent)
+    },
+    cancel() {
+      cleanupState[`downloadNobodyReads_${id}_cancelled`] = 'true'
+    },
+  })
+  return { id, dl: download(stream, { name: 'nobody-reads.bin', type: 'application/octet-stream' }) }
+}
+
+/** A download whose source fails when a test tells it to. */
+const onDownloadFailsWhenTold = async () => {
+  const id = crypto.randomUUID()
+  let pulls = 0
+  const stream = new ReadableStream<Uint8Array<ArrayBuffer>>({
+    pull(controller) {
+      if (++pulls === 1) return controller.enqueue(new Uint8Array(1))
+      cleanupState[`downloadFailsWhenTold_${id}_reading`] = 'true'
+      onServerAction(`downloadFailsWhenTold_${id}`, () => controller.error(new Error('Unexpected generator error')))
+      return new Promise<void>(() => {})
+    },
+  })
+  return { id, dl: download(stream, { name: 'fails.bin', type: 'application/octet-stream' }) }
 }
 
 const onDownloadProgressUnknownSize = async () => {

@@ -109,7 +109,6 @@ function getProject(telefuncFilePath: string, telefuncFileCode: string, appRootD
   objectAssign(project, { tsConfigFilePath })
 
   if (!tsConfigFilePath) {
-    assert(!project.getSourceFile(telefuncFilePath))
     project.createSourceFile(
       telefuncFilePath,
       telefuncFileCode,

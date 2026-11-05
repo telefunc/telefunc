@@ -19,9 +19,16 @@ export {
   onAbortOneOfManyStreamingValues,
   onChannelAbortAbortsSiblingStreamingValues,
   onUploadWithProgress,
+  onReturnTwoLargeStreams,
+  onReturnTwoStreamsOfSmallChunks,
+  onReturnOneLargeChunk,
+  onReturnFinishedAndEndlessStreams,
+  onReturnTwoEndless,
+  onReturnFailingStream,
+  onGeneratorFinallyThrows,
 }
 
-import { Abort, Channel, getContext } from 'telefunc'
+import { Abort, Channel, download, getContext } from 'telefunc'
 import { Subject, interval } from 'rxjs'
 import { map, take } from 'rxjs/operators'
 import { cleanupState } from '../../cleanup-state'
@@ -369,4 +376,118 @@ async function* onUploadWithProgress(
   }
   const t1 = Date.now()
   yield { bytesRead, totalSize, timestamp: t1, duration: t1 - t0 }
+}
+
+// ── Streams read one after the other, cancelled, or failing ──────────
+
+function byteStream(chunks: number) {
+  let i = 0
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (i++ >= chunks) return controller.close()
+      controller.enqueue(new Uint8Array(64 * 1024))
+    },
+  })
+}
+
+/** 2 MiB each, more than the page buffers for a stream it isn't reading. */
+const onReturnTwoLargeStreams = async () => {
+  return { first: byteStream(32), second: byteStream(32) }
+}
+
+function filledStream(byte: number) {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (let i = 0; i < 8; i++) controller.enqueue(new Uint8Array(1024).fill(byte))
+      controller.close()
+    },
+  })
+}
+
+/** Small enough that several chunks arrive in one read of the response. */
+const onReturnTwoStreamsOfSmallChunks = async () => {
+  return { first: filledStream(1), second: filledStream(2) }
+}
+
+const onReturnOneLargeChunk = async () => {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(256 * 1024 * 1024))
+      controller.close()
+    },
+  })
+}
+
+const onReturnFinishedAndEndlessStreams = async () => {
+  const key = crypto.randomUUID()
+  cleanupState[`endless_${key}`] = 'running'
+  const finished = byteStream(1)
+  const endless = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      await sleep(50)
+      controller.enqueue(new Uint8Array(1024))
+    },
+    cancel() {
+      cleanupState[`endless_${key}`] = 'cancelled'
+    },
+  })
+  return { key, finished, endless }
+}
+
+type EndlessKind = 'stream' | 'generator' | 'download'
+
+/** Endless, each chunk carrying its number, and `cleanupState[name]` says how many chunks its producer made. */
+function endlessValue(kind: EndlessKind, name: string) {
+  let made = 0
+  const end = () => {
+    cleanupState[`${name}_end`] = 'cancelled'
+  }
+  if (kind === 'generator') {
+    return (async function* () {
+      try {
+        while (true) {
+          cleanupState[name] = String(made + 1)
+          yield { n: made++, pad: 'x'.repeat(64 * 1024) }
+        }
+      } finally {
+        end()
+      }
+    })()
+  }
+  const stream = new ReadableStream<Uint8Array<ArrayBuffer>>({
+    pull(controller) {
+      const chunk = new Uint8Array(64 * 1024)
+      new DataView(chunk.buffer).setUint32(0, made++)
+      cleanupState[name] = String(made)
+      controller.enqueue(chunk)
+    },
+    cancel: end,
+  })
+  return kind === 'download' ? download(stream, { name: 'endless.bin' }) : stream
+}
+
+const onReturnTwoEndless = async (firstKind: EndlessKind, secondKind: EndlessKind) => {
+  const key = crypto.randomUUID()
+  return { key, first: endlessValue(firstKind, `first_${key}`), second: endlessValue(secondKind, `second_${key}`) }
+}
+
+const onReturnFailingStream = async (chunksBeforeFailure: number) => {
+  let i = 0
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (i++ >= chunksBeforeFailure) throw Abort({ reason: 'stream-source-failure' })
+      controller.enqueue(new Uint8Array([i]))
+    },
+  })
+}
+
+async function* onGeneratorFinallyThrows(): AsyncGenerator<string> {
+  try {
+    while (true) {
+      yield 'tick'
+      await sleep(50)
+    }
+  } finally {
+    throw Abort({ reason: 'generator-finally-failure' })
+  }
 }

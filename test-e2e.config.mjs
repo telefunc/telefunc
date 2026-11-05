@@ -15,11 +15,16 @@ export default {
 function getCiJobs() {
   const ubuntu = {
     os: 'ubuntu-latest',
-    node_version: '23',
+    node_version: '26',
   }
   const win = {
     os: 'windows-latest',
-    node_version: '23',
+    node_version: '26',
+  }
+  // The oldest Node.js Telefunc supports.
+  const ubuntuOldest = {
+    os: 'ubuntu-latest',
+    node_version: '22',
   }
   const setups = [ubuntu, win]
   const setupModern = [ubuntu]
@@ -29,7 +34,7 @@ function getCiJobs() {
     {
       name: 'Vitest',
       command: 'pnpm run test:units',
-      setups: [ubuntu],
+      setups: [ubuntu, ubuntuOldest],
     },
 
     // TypeScript
@@ -93,6 +98,9 @@ function tolerateError({ logSource, logText }) {
       // [18:54:59.547][/docs/.test-preview.test.ts][pnpm run preview][stderr] warnings when minifying css:
       // Warning: G] Transforming this CSS nesting syntax is not supported in the configured target environment ("chrome87", "edge88", "es2020", "firefox78", "safari14") [unsupported-css-nesting]
       'CSS nesting syntax is not supported in the configured target environment',
+
+      // [05:16:40.038][/examples/next][pnpm run dev][stderr] (node:2650) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+      'localStorage is not available because --localstorage-file was not provided',
 
       // [11:03:16.814][/docs/.test-dev.test.ts][pnpm run dev][stderr] Cannot optimize dependency: @brillout/docpress/renderer/onRenderClient, present in 'optimizeDeps.include'
       'Cannot optimize dependency: @brillout/docpress/renderer/onRenderClient',
