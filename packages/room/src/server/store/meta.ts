@@ -47,7 +47,7 @@ import {
   roomMetaGenPrefix,
 } from './cells.js'
 import { EXCHANGE_CONFLICT, retryCompareExchange } from './retryCompareExchange.js'
-import { deleteCells, readOpenCells } from './cellStore.js'
+import { deleteCells, eachInFlight, readOpenCells } from './cellStore.js'
 import { runOperation } from './operations.js'
 import { acceptedOrThrow, commitLane, controlLane, decodeRoomRecord, encodeRoomRecord } from '../lanes/lanes.js'
 
@@ -391,11 +391,18 @@ async function readMembersMetaCells(
     room,
     id === undefined ? MEMBER_META_CELL_PREFIX : memberMetaCellPrefix(id),
   )
-  for (const member of cut) {
-    const seq = metaSeqOf(records.get(memberCellKey(member)))
-    byMember.set(member, await settleMemberMetaCells(room, member, seq, byMember.get(member)!))
-  }
+  await eachInFlight(cut, (member) => settleCutMember(room, records, byMember, member))
   return byMember
+}
+
+async function settleCutMember(
+  room: RoomIncarnation,
+  records: ReadonlyMap<string, Uint8Array>,
+  byMember: Map<string, MemberMetaCells>,
+  member: string,
+): Promise<void> {
+  const seq = metaSeqOf(records.get(memberCellKey(member)))
+  byMember.set(member, await settleMemberMetaCells(room, member, seq, byMember.get(member)!))
 }
 
 /** The meta cells under `prefix` by member, a page and a `ROOM_PLAN_SLICE_MS` slice at a time, and the members that
