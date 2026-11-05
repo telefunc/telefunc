@@ -31,8 +31,6 @@ class SendCredit {
   private peerByteWindowCap: number = CREDIT_WINDOW_MAX_BYTES
   /** A `WINDOW` raised the byte limit past the one this side assumed the peer starts with. */
   private limitRaised = false
-  /** `sentBytes` after the last frame sent while the byte limit was ahead of it. */
-  private sentWithCredit = 0
   /** Senders waiting on credit, oldest first, from the first that waited on. */
   private waiters: Fifo<{ resolve: () => void; reject: (err: Error) => void }> | null = null
   /** A waiter was handed the credit and no send was counted since. */
@@ -68,9 +66,9 @@ class SendCredit {
     if (!this.limitRaised) this.limitBytes = Math.min(CREDIT_WINDOW_INITIAL_BYTES, this.peerByteWindowCap)
   }
 
-  /** Bytes sent past the byte limit and still past it, but the one frame that crossed it with credit. */
+  /** Bytes sent past the byte limit and still past it. */
   get bytesSentPastCredit(): number {
-    return Math.max(0, this.sentBytes - Math.max(this.limitBytes, this.sentWithCredit))
+    return Math.max(0, this.sentBytes - this.limitBytes)
   }
 
   /** Counts a frame of `bytes` against credit; a Promise where the sender waits for credit or yields. The frame already
@@ -92,9 +90,7 @@ class SendCredit {
 
   /** Count a frame that went out without a credit gate, one buffered while no peer was attached. */
   countSent(bytes: number): void {
-    const hadCredit = this.limitBytes > this.sentBytes
     this.sentBytes += bytes
-    if (hadCredit) this.sentWithCredit = this.sentBytes
     this.sentMessages += 1
   }
 

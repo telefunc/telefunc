@@ -25,6 +25,7 @@ type Tally = { text: number; binary: number; inOrder: boolean }
 type WireState = {
   resume: { channelId: string; received: Tally } | null
   overrun: { channelId: string; received: Tally; onClose: string | null } | null
+  burst: { channelId: string; received: number[]; onClose: string | null } | null
   end: { channelId: string; received: string[]; close: string | null } | null
   large: number | null
   many: { closed: number; next: string } | null
@@ -72,6 +73,50 @@ function testWire(isDev: boolean) {
         { timeout: 60_000 },
       )
     })
+
+  for (const kind of canCutWire() ? (['text', 'binary'] as const) : []) {
+    const burstWhileOffline = async (sends: number) => {
+      await navigate(`${getServerUrl()}/channel`)
+      await page.click(`#wire-burst-open-${kind}-${sends}`)
+      let channelId = ''
+      await autoRetry(async () => {
+        const { burst } = await getResult<WireState>('#wire-state')
+        expect(burst).not.toBe(null)
+        channelId = burst!.channelId
+        expect((await getCleanupState())[`wireBurst_${channelId}_onOpen`]).toBe('true')
+      })
+      await page.context().setOffline(true)
+      await runServerAction(`wireBurst_${channelId}`)
+      await page.context().setOffline(false)
+      return channelId
+    }
+
+    test(`channel: all that maxPendingBytes lets through of a ${kind} burst nobody awaits, 5 messages of up to 64 MiB, arrives once the page is back from being offline`, async () => {
+      const channelId = await burstWhileOffline(5)
+      await autoRetry(
+        async () => {
+          const { burst } = await getResult<WireState>('#wire-state')
+          expect(burst!.received).deep.equal([0, 1, 2, 3, 4])
+          expect(burst!.onClose).toBe(null)
+        },
+        { timeout: 60_000 },
+      )
+      expect((await getCleanupState())[`wireBurst_${channelId}`]).toBe(undefined)
+    })
+
+    test(`channel: a 6th ${kind} message of up to 64 MiB nobody awaits passes maxPendingBytes and closes the channel with ChannelOverflowError, not a lost replay's NetworkError`, async () => {
+      const channelId = await burstWhileOffline(6)
+      await autoRetry(
+        async () => {
+          const { burst } = await getResult<WireState>('#wire-state')
+          expect(burst!.onClose).toBe('ChannelOverflowError')
+          expect(burst!.received).deep.equal([0, 1, 2, 3, 4])
+        },
+        { timeout: 60_000 },
+      )
+      expect((await getCleanupState())[`wireBurst_${channelId}`]).toContain('config.channel.maxPendingBytes')
+    })
+  }
 
   const ends = [
     { by: 'server', dropped: 'after' },

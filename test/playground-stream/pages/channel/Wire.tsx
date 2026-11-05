@@ -5,6 +5,7 @@ import { Abort, withContext } from 'telefunc/client'
 import {
   onWireResume,
   onWireOverrun,
+  onWireBurst,
   onWireEnd,
   onWireLarge,
   onWireOpen,
@@ -17,6 +18,7 @@ import { Tally, textMessage, binaryMessage, type TallyState } from './wire-messa
 type WireState = {
   resume: { channelId: string; received: TallyState } | null
   overrun: { channelId: string; received: TallyState; onClose: string | null } | null
+  burst: { channelId: string; received: number[]; onClose: string | null } | null
   /** received: the messages, then 'onClose:' and 'none', 'abort:<value as JSON>' or the error's name; close: what close() resolved to. */
   end: { channelId: string; received: string[]; close: string | null } | null
   /** The length of the large message, once it arrived. */
@@ -46,6 +48,7 @@ function WireDemo() {
   const [state, setState] = useState<WireState>({
     resume: null,
     overrun: null,
+    burst: null,
     end: null,
     large: null,
     many: null,
@@ -55,6 +58,7 @@ function WireDemo() {
   })
   const endChannel = useRef<Awaited<ReturnType<typeof onWireEnd>>['channel'] | null>(null)
   const overrunChannel = useRef<Awaited<ReturnType<typeof onWireOverrun>>['channel'] | null>(null)
+  const burstChannel = useRef<Awaited<ReturnType<typeof onWireBurst>>['channel'] | null>(null)
   // A channel the page drops closes once garbage-collected.
   const largeChannel = useRef<Awaited<ReturnType<typeof onWireLarge>>['channel'] | null>(null)
   const resumeChannel = useRef<Awaited<ReturnType<typeof onWireResume>>['channel'] | null>(null)
@@ -94,6 +98,24 @@ function WireDemo() {
       show()
     })
     overrunChannel.current = channel
+  }, [])
+  const burstOpen = useCallback(async (sends: number, kind: 'text' | 'binary') => {
+    const { channel, channelId } = await onWireBurst(sends, kind)
+    const received: number[] = []
+    let onClose: string | null = null
+    const show = () => setState((s) => ({ ...s, burst: { channelId, received: [...received], onClose } }))
+    show()
+    channel.onClose((err) => {
+      onClose = err ? err.name : 'none'
+      show()
+    })
+    const onMessage = (index: number) => {
+      received.push(index)
+      show()
+    }
+    channel.listen((message) => onMessage(Number.parseInt(message)))
+    channel.listenBinary((data) => onMessage(new DataView(data.buffer, data.byteOffset).getUint32(0)))
+    burstChannel.current = channel
   }, [])
   const overrunSend = useCallback(() => {
     for (let n = 0; n < OVERRUN_COUNT; n++) void overrunChannel.current!.send(textMessage(n))
@@ -228,6 +250,19 @@ function WireDemo() {
         >
           Send {OVERRUN_COUNT} messages unawaited
         </button>
+        {(['text', 'binary'] as const).map((kind) =>
+          [5, 6].map((sends) => (
+            <button
+              key={`${kind}-${sends}`}
+              id={`wire-burst-open-${kind}-${sends}`}
+              type="button"
+              onClick={() => burstOpen(sends, kind)}
+              className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+            >
+              Open {kind} burst channel, {sends} large messages
+            </button>
+          )),
+        )}
         <button
           id="wire-large"
           type="button"
