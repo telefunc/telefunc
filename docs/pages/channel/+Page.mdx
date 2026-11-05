@@ -322,6 +322,9 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 `publish()` can't be awaited per subscriber, so the <Link href="#backpressure">warning about sends that outrun their client</Link> doesn't apply to a `BroadcastChannel`. Instead, a client that falls far behind a broadcast has its connection cut and reconnects. Other channels on the connection also <Link href="#reconnection">reconnect</Link>. The `BroadcastChannel` gets what it missed after reconnecting. If it missed more than the server's buffers hold, it closes (see <Link href="#errors">errors</Link>).
 
+A listener's `async` work isn't awaited: the next message arrives whether or not your `subscribe()` callback is done. So if your callback can fall behind, what piles up on the page is yours to bound.
+For example, a callback that does an `await fetch()` for each message should queue them, and drop or merge what it can't keep up with.
+
 In memory, an awaited `publish()` doesn't give the event loop a turn, so a producer that runs forever on resolved promises (a `for (;;) await publish()` loop, or a listener that answers itself after an `await`) must yield itself, for example with a timer.
 
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
