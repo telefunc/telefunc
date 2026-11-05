@@ -1493,6 +1493,20 @@ function testChannelApi() {
     })
   })
 
+  test('channel: a sender awaiting messages larger than maxPendingBytes, the first made before the page attaches, reaches the page without closing the channel', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-awaited-from-offline')
+    await autoRetry(
+      async () => {
+        const result = (await getResult<ChannelState>('#channel-state')).awaitedFromOffline!
+        expect(result.closeErr).toBe(null)
+        expect(result.received).toBe(3)
+        expect((await getCleanupState())[`awaitedFromOffline_${result.channelId}`]).toBe('done')
+      },
+      { timeout: 30_000 },
+    )
+  })
+
   test('channel: late onOpen Abort terminates the channel', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-late-open-abort')
