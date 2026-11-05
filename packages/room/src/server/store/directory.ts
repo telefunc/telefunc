@@ -11,6 +11,7 @@ import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_LEASE_TTL_MS } from '../constants.js'
 import type { RoomIncarnation } from '../protocol.js'
 import { configFromHead, openConfig } from '../lanes/lanes.js'
 import { reportRoomError } from '../reportRoomError.js'
+import { eachInFlight } from './cellStore.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 
 /** Lists the room, to be looked at again once its head lapses, and a heartbeat from now at the earliest. A room
@@ -54,11 +55,13 @@ function sweepLapsedRoomsSoon(): void {
 async function sweepLapsedRooms(plane: RoomPlane): Promise<void> {
   const slice = new Slice()
   for (let due = await plane.driver.directoryDue(); due.length > 0; due = await plane.driver.directoryDue()) {
-    for (const { roomId, incTag } of due) {
-      const head = await plane.driver.readHead(roomId)
-      if (head?.currentInc !== incTag) await repairRoomIndex(plane, roomId, incTag, head)
-      else await listRoom(plane, { id: roomId, inc: incTag, hold: configFromHead(head).hold }, head.expiresAt)
-    }
+    await eachInFlight(due, (entry) => sweepDueRoom(plane, entry))
     if (slice.over) await slice.next()
   }
+}
+
+async function sweepDueRoom(plane: RoomPlane, { roomId, incTag }: { roomId: string; incTag: string }): Promise<void> {
+  const head = await plane.driver.readHead(roomId)
+  if (head?.currentInc !== incTag) await repairRoomIndex(plane, roomId, incTag, head)
+  else await listRoom(plane, { id: roomId, inc: incTag, hold: configFromHead(head).hold }, head.expiresAt)
 }
