@@ -20,12 +20,12 @@ config.channel = {
   maxPendingAcks: 16_384,                 // Unanswered acknowledgement requests (count)
 
   // Text buffers
-  serverReplayBuffer: 134_217_728,        // Server replay buffer for text messages (bytes)
+  serverReplayBuffer: 335_544_320,        // Server replay buffer for text messages (bytes)
   clientReplayBuffer: 134_217_728,        // Client replay buffer for text messages (bytes)
   bufferLimit: 524_288,                   // Per-peer buffer for text messages (bytes)
 
   // Binary buffers — separate budget so binary can never evict text
-  serverReplayBufferBinary: 134_217_728,  // Server replay buffer for binary messages (bytes)
+  serverReplayBufferBinary: 335_544_320,  // Server replay buffer for binary messages (bytes)
   clientReplayBufferBinary: 134_217_728,  // Client replay buffer for binary messages (bytes)
   bufferLimitBinary: 2_097_152,           // Per-peer buffer for binary messages (bytes)
 }

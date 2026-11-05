@@ -56,6 +56,23 @@ function testWire(isDev: boolean) {
       })
     })
 
+  if (canCutWire())
+    test('channel: a burst of 200 MiB the server sends without awaiting all arrives in order though the connection drops early in it', async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await page.click('#channel-test-binary-burst-unawaited-200')
+      await autoRetry(async () => {
+        expect(await page.evaluate(() => (window as any).__burstReceived)).greaterThanOrEqual(1)
+      })
+      await cutWire()
+      await autoRetry(
+        async () => {
+          const { binaryBurst } = await getResult<{ binaryBurst: unknown }>('#channel-state')
+          expect(binaryBurst).deep.include({ received: 200, inOrder: true, closeErr: null })
+        },
+        { timeout: 60_000 },
+      )
+    })
+
   const ends = [
     { by: 'server', dropped: 'after' },
     { by: 'server', dropped: 'before' },

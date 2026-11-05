@@ -1084,6 +1084,7 @@ function ChannelDemo() {
     const ended = new Promise<string | null>((resolve) => {
       channel.listenBinary((data) => {
         received.push(new DataView(data.buffer, data.byteOffset).getUint32(0))
+        ;(window as unknown as { __burstReceived: number }).__burstReceived = received.length
         if (received.length === count) resolve(null)
       })
       channel.onClose((err) => resolve(err?.name ?? 'none'))
@@ -1729,6 +1730,7 @@ function ChannelDemo() {
           {(
             [
               ['unawaited', 32],
+              ['unawaited', 200],
               ['unawaited', 300],
               ['awaited', 300],
             ] as const
