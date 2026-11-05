@@ -79,7 +79,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   private highestSeq = 0
   /** In-memory publishes waiting for the ones before them, in publish order. */
   private readonly queued = new Fifo<() => void>()
-  /** What `queued` holds, which stays within `maxPendingBytes`. */
+  /** What `queued` holds: at most `maxPendingBytes` and one message, since a publish outside a listener is never refused. */
   private queuedBytes = 0
   private delivering = false
   private publishesSinceTurn = 0
