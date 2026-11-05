@@ -51,7 +51,7 @@ type LaneOrder = {
   release: ReturnType<typeof setTimeout> | null
 }
 
-type LaneFrame = { place: number; payload: Uint8Array; info: OrderingInfo; token: string | null }
+type LaneFrame = { lane: string; place: number; payload: Uint8Array; info: OrderingInfo; token: string | null }
 
 const textDecoder = new TextDecoder()
 
@@ -443,7 +443,7 @@ class RedisAttempt extends DriverAttempt {
     for (const message of early) {
       // A consumer may close the lane.
       if (this.state() !== 'ready') return
-      this.receiveFrame(message)
+      this.order(this.decodeLaneFrame(message))
     }
   }
 
@@ -478,7 +478,7 @@ class RedisAttempt extends DriverAttempt {
 
   receive(channel: string, message: Buffer): void {
     if (channel === this.invalidationChannel) return this.end()
-    if (this.state() === 'ready') return this.receiveFrame(message)
+    if (this.state() === 'ready') return this.order(this.decodeLaneFrame(message))
     if (this.awaitsConfirmation()) this.early.push(message)
   }
 
@@ -496,41 +496,42 @@ class RedisAttempt extends DriverAttempt {
     this.owner.detach(this)
   }
 
-  private receiveFrame(message: Buffer): void {
-    if (message[0] !== REDIS_DELIVERY_FENCE_BYTE) return this.order(message, null)
-    const token = message.toString('latin1', 1, 1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH)
-    this.order(message.subarray(1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH), token)
-  }
-
-  /** Delivers each lane in order: a frame whose predecessor is past the last delivered waits `REORDER_WAIT_MS` for it,
-   *  and one at or below the last delivered is dropped. Its commit's fence settles once it is delivered or dropped. */
-  private order(frame: Buffer, token: string | null): void {
+  /** A frame on the wire: its commit's fence token, if armed; its lane key, on a fan-in channel; its place, on Broadcast,
+   *  as a key's kinds share one seq; then the ordering frame. */
+  private decodeLaneFrame(message: Buffer): LaneFrame {
+    const fenced = message[0] === REDIS_DELIVERY_FENCE_BYTE
+    const token = fenced ? message.toString('latin1', 1, 1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH) : null
+    let frame = fenced ? message.subarray(1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH) : message
     let lane = ''
     if (this.fanIn) {
       const end = 2 + frame.readUInt16BE(0)
       lane = frame.toString('latin1', 2, end)
       frame = frame.subarray(end)
     }
-    // A Broadcast key's kinds share one seq, so its frame leads with its place among its kind's publishes.
     const { payload, info } = decodeOrderingFrame(this.broadcast ? frame.subarray(8) : frame)
     const place = this.broadcast ? Number(frame.readBigUInt64BE(0)) : info.seq
-    let order = this.orders.get(lane)
+    return { lane, place, payload, info, token }
+  }
+
+  /** Delivers each lane in order: a frame whose predecessor is past the last delivered waits `REORDER_WAIT_MS` for it,
+   *  and one at or below the last delivered is dropped. Its commit's fence settles once it is delivered or dropped. */
+  private order(frame: LaneFrame): void {
+    let order = this.orders.get(frame.lane)
     if (order === undefined) {
       // A lane with no commit when the attempt went live: every one of its commits is after.
       order = { last: 0, lastTimestamp: 0, parked: null, release: null }
-      this.orders.set(lane, order)
+      this.orders.set(frame.lane, order)
     }
-    const laneFrame = { place, payload, info, token }
-    if (place === order.last + 1) {
-      this.advance(order, laneFrame)
+    if (frame.place === order.last + 1) {
+      this.advance(order, frame)
       if (order.parked !== null) this.drain(order)
       return
     }
-    if (place > order.last) return this.park(order, laneFrame)
+    if (frame.place > order.last) return this.park(order, frame)
     // A commit never sets its lane's time back, so a later time on a place at or below the last is a failover's rewind.
-    if (info.timestamp <= order.lastTimestamp) return this.settle(token)
+    if (frame.info.timestamp <= order.lastTimestamp) return this.settle(frame.token)
     if (order.parked !== null) this.release(order)
-    this.advance(order, laneFrame)
+    this.advance(order, frame)
   }
 
   private advance(order: LaneOrder, { place, payload, info, token }: LaneFrame): void {
