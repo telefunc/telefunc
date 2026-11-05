@@ -35,14 +35,15 @@ class RoomHosting {
   }
 
   /** The stub's page detached: its view is removed, after its write. */
-  dropView(stub: RoomStub): void {
+  async dropView(stub: RoomStub): Promise<void> {
     const view = this.views.get(stub)
     this.views.delete(stub)
-    void view
-      ?.then(async (key) => {
-        if (key !== null) await removeView(this.incarnation, key)
-      })
-      .catch(reportRoomError)
+    try {
+      const key = await view
+      if (key) await removeView(this.incarnation, key)
+    } catch (error) {
+      reportRoomError(error)
+    }
   }
 
   /** `maintain()` evicts the member again, as `disconnected`. */

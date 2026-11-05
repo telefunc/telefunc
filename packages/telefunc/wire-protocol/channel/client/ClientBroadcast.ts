@@ -42,16 +42,17 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   /** @internal Sends what `reply` resolves to, also while closing: a graceful close waits for it, as for an ack's
    *  answer. A reply it can't send is reported, and `failure` goes instead. */
   _sendReply(reply: Promise<unknown>, failure: unknown): void {
-    void this.lifecycle.trackAck(
-      reply.then((data) => {
-        try {
-          this.sendReplyData(data)
-        } catch (err) {
-          this.lifecycle.handleCallbackError(err)
-          this.sendReplyData(failure)
-        }
-      }),
-    )
+    void this.lifecycle.trackAck(this.sendSettledReply(reply, failure))
+  }
+
+  private async sendSettledReply(reply: Promise<unknown>, failure: unknown): Promise<void> {
+    const data = await reply
+    try {
+      this.sendReplyData(data)
+    } catch (err) {
+      this.lifecycle.handleCallbackError(err)
+      this.sendReplyData(failure)
+    }
   }
 
   /** @internal Declare what it asks the server for; a reconnect carries it in the RECONCILE entry. */
@@ -167,8 +168,14 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
 /** Reports a publish rejection that is a bug; the caller still sees every rejection. */
 function reportingUnexpected(publish: Promise<ChannelPublishAck>): Promise<ChannelPublishAck> {
-  publish.catch((err) => {
-    if (classifyTelefuncError(err, isExpectedChannelFailure).kind === 'bug') reportChannelError(err)
-  })
+  void reportIfBug(publish)
   return publish
+}
+
+async function reportIfBug(publish: Promise<ChannelPublishAck>): Promise<void> {
+  try {
+    await publish
+  } catch (err) {
+    if (classifyTelefuncError(err, isExpectedChannelFailure).kind === 'bug') reportChannelError(err)
+  }
 }

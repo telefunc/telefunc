@@ -72,13 +72,13 @@ async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<un
   const slice = new Slice()
   let turn: Promise<void> | null = null
   let failure = null as { error: unknown } | null
+  const nextTurn = async () => {
+    await slice.next()
+    turn = null
+  }
   const worker = async () => {
     for (let next = pending.next(); next.done !== true; next = pending.next()) {
-      if (slice.over) {
-        await (turn ??= slice.next().then(() => {
-          turn = null
-        }))
-      }
+      if (slice.over) await (turn ??= nextTurn())
       try {
         await task(next.value)
       } catch (error) {

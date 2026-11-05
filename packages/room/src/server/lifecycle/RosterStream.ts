@@ -67,17 +67,16 @@ class RosterStream {
 
   /** An attached stub's first roster, once `known`, the view's roster read, settles; a failed read owes it the next
    *  one. */
-  sendTo(stub: RoomStub, known: Promise<void>): void {
-    void known
-      .then(() => {
-        if (this.stubs.has(stub) && !this.model.closed) return this.stream([stub])
-      })
-      .catch((error) => {
-        reportRoomError(error)
-        if (!this.stubs.has(stub) || this.model.closed) return
-        stub.relayEvent({ __r: 'roster-error' })
-        this.owed.add(stub)
-      })
+  async sendTo(stub: RoomStub, known: Promise<void>): Promise<void> {
+    try {
+      await known
+      if (this.stubs.has(stub) && !this.model.closed) await this.stream([stub])
+    } catch (error) {
+      reportRoomError(error)
+      if (!this.stubs.has(stub) || this.model.closed) return
+      stub.relayEvent({ __r: 'roster-error' })
+      this.owed.add(stub)
+    }
   }
 
   forget(stub: RoomStub): void {

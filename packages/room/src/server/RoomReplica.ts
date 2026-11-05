@@ -233,7 +233,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
 
   /** The stub's client attached: it gets the roster, the room's meta and the demand for the members it holds. */
   onStubAttached(stub: RoomStub): void {
-    this.roster.sendTo(stub, this.authority.ensureRoster())
+    void this.roster.sendTo(stub, this.authority.ensureRoster())
     stub.relayEvent({ __r: 'update', seq: this.model.metaSeq, meta: this.model.metaEntries() })
     for (const member of stub.heldMembers()) {
       stub.relayEvent({ __r: 'demand-state', member, tracks: this.incomingDemand.wanted(member) })
@@ -244,7 +244,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   detachStub(handle: RoomHandle, stub: RoomStub): void {
     this.reconsider(handle)
     this.stubs.delete(stub)
-    this.hosting.dropView(stub)
+    void this.hosting.dropView(stub)
     this.roster.forget(stub)
     this.lanePlan.holderGone(stub)
   }
@@ -477,9 +477,16 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     if (last === undefined) return
     this.inboxSeqs.set(member, seq)
     if (seq <= last + 1 || !this.acks.waitsOn(member)) return
-    void takeDmReplies(this.id, this.incarnation.inc, member).then((replies) => {
+    void this.settleStoredReplies(member)
+  }
+
+  private async settleStoredReplies(member: string): Promise<void> {
+    try {
+      const replies = await takeDmReplies(this.id, this.incarnation.inc, member)
       for (const [ackId, reply] of replies) this.acks.settle(ackId, reply)
-    }, reportRoomError)
+    } catch (error) {
+      reportRoomError(error)
+    }
   }
 
   private dmAcked(envelope: RoomDmAckEnvelope): void {

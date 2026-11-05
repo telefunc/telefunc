@@ -76,12 +76,18 @@ class SharedSubscriptions<Source> {
   /** Unsubscribes `attempt`, tracked for `dispose()`. */
   releaseAttempt(attempt: DriverAttempt): Promise<void> {
     // Called now, not deferred: a subscribe in the same tick starts the source's next attempt after this one let go.
-    const cleanup = new Promise<void>((resolve) => resolve(attempt.unsubscribe())).catch((error) =>
-      console.error(error),
-    )
+    const cleanup = this.unsubscribeAttempt(attempt)
     this.cleanups.add(cleanup)
     void cleanup.finally(() => this.cleanups.delete(cleanup))
     return cleanup
+  }
+
+  private async unsubscribeAttempt(attempt: DriverAttempt): Promise<void> {
+    try {
+      await attempt.unsubscribe()
+    } catch (error) {
+      console.error(error)
+    }
   }
 }
 

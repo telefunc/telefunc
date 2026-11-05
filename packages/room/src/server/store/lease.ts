@@ -71,10 +71,16 @@ class RoomLease {
   /** Runs `write`, the exchange writing the cell, unless one already runs: the writes waiting to host something await
    *  the same one. */
   createOnce(write: () => Promise<void>): Promise<void> {
-    this.creating ??= write().finally(() => {
-      this.creating = null
-    })
+    this.creating ??= this.runCreate(write)
     return this.creating
+  }
+
+  private async runCreate(write: () => Promise<void>): Promise<void> {
+    try {
+      await write()
+    } finally {
+      this.creating = null
+    }
   }
 
   hosted(id: string): void {
