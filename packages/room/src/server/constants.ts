@@ -51,7 +51,7 @@ const ROOM_DEPARTURE_TIMEOUT_MS = 20_000
 const ROOM_MEMBER_NAMED_LANES_MAX = 16
 // Demand pages an instance keeps in flight; the rest wait as entries.
 const ROOM_GOSSIP_IN_FLIGHT_MAX = 64
-// Member and view writes, and member meta and retained frame reads, kept in flight: a pass costs a round trip per 64.
+// Backend calls a pass over members, leases, rooms or retained frames keeps in flight: it costs a round trip per 64.
 const ROOM_BACKEND_CALLS_IN_FLIGHT_MAX = 64
 // The members in one frame of a roster, so neither end stringifies or parses a whole room in one turn.
 const ROOM_ROSTER_PART_MEMBERS = 1024
