@@ -37,7 +37,7 @@ type BroadcastTransport = {
 
 > A transport that sends `sendBinary()`'s `payload` after `sendBinary()` returns (after an `await`, or from a queue) must send a copy: the publisher may reuse its buffer once <Link href="/channel#broadcast">`publishBinary()`</Link> returns.
 
-> `onDeliveryLost` is called on the server (on Cloudflare, in the Durable Object) that missed the messages, and they aren't sent again. With `@telefunc/redis`, `reason` says how many it missed; on Cloudflare, that it may have missed some. Telefunc doesn't call it for a `BroadcastTransport`, as only the transport knows what it lost: have your transport report that itself.
+> `onDeliveryLost` is called on the server (on Cloudflare, in the Durable Object) that missed the messages, and they aren't sent again. With `@telefunc/redis`, `reason` says how many it missed, or that it doesn't know how many (see <Link href="/channel#delivery">Delivery</Link>); on Cloudflare, that it may have missed some. Telefunc doesn't call it for a `BroadcastTransport`, as only the transport knows what it lost: have your transport report that itself.
 
 <ConfigWhereServer />
 

@@ -229,7 +229,7 @@ console.log(response) // 'ok'
 
 A callback that returns `undefined` only observes, so it can stand beside the one that replies. If two callbacks return a value, `send()` rejects.
 
-> A private message is delivered at most once: when it can't be handed on to the recipient, `send()` rejects, and the message isn't sent again. `publish()` is at most once too: a server whose connection to Redis drops never gets what is published before it reconnects, though `publish()` resolved. Room tells your server of every message, join or leave it couldn't hand on through <Link href="/room-config">`roomConfig.onDeliveryLost`</Link>, which logs it by default.
+> A private message is delivered at most once: when it can't be handed on to the recipient, `send()` rejects, and the message isn't sent again. `publish()` is at most once too, <Link href="/channel#delivery">like Broadcast's</Link>. Room tells your server of a message, join or leave it knows it couldn't hand on, through <Link href="/room-config">`roomConfig.onDeliveryLost`</Link>, which logs it by default.
 
 
 ## Send from the server

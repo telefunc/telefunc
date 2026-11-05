@@ -324,6 +324,8 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 `seq` is monotonic per `key`, which is useful for ordering and gap detection.
 
+### Delivery
+
 When `publish()` rejects depends on where Broadcast runs:
 
 - In memory (the default), with `ChannelOverflowError`, when a `subscribe()` callback, before its first `await`, publishes a message that would take those waiting past `maxPendingBytes` (see <Link href="/channel-config" />). With none waiting, a message goes through whatever its size. A publish from anywhere else never gets this error.
@@ -334,6 +336,8 @@ When `publish()` rejects depends on where Broadcast runs:
 A rejected publish may still have reached some subscribers (on Cloudflare, every subscriber the failed server doesn't hold), so publishing it again can deliver it twice to them.
 
 `publish()` is at most once: with <Link href="/redis">`@telefunc/redis`</Link>, a server whose connection to Redis drops never gets what is published before it reconnects, though `publish()` resolved. That server's <Link href="/broadcast-config">`config.broadcast.onDeliveryLost`</Link> is called with how many it missed, and logs them by default.
+
+> A Redis failover or flush can hide the count: that server may report fewer than it missed, or that it doesn't know how many. If the Redis that takes over holds exactly what that server last got, `onDeliveryLost` isn't called.
 
 A failed `publish()` you neither `await` nor `.catch()` gives your code no error (see <Link href="#errors">errors</Link>). To see failures, `await` it or add `.catch()`.
 
