@@ -14,10 +14,12 @@ export {
   onCloseHeld,
   onSubscribeHeld,
   onMetaKeyOrder,
+  onThrowingReceiver,
 }
 
 import { Broadcast, BroadcastChannel, onBug } from 'telefunc'
 import { Room } from '@telefunc/room'
+import { getRoomPlane } from '@telefunc/room/backend'
 
 async function onRoomRoundTrip() {
   const id = `telefunction-${crypto.randomUUID()}`
@@ -161,4 +163,32 @@ async function onMetaKeyOrder() {
   const replaced = (await Room.get(id)).meta
   await Room.close(id)
   return { merged: Object.entries(merged), replaced: Object.entries(replaced) }
+}
+
+/** A store handing a control frame to a receiver that throws: no write sees its delivery lost, and the next frame still
+ *  reaches it. */
+async function onThrowingReceiver() {
+  const id = `throwing-receiver:${crypto.randomUUID()}`
+  await Room.create(id)
+  const { driver } = getRoomPlane()
+  const inc = (await driver.readHead(id))!.currentInc!
+  let calls = 0
+  const attempt = driver.subscribe(
+    { roomId: id, inc, lane: { kind: 'control' } },
+    {
+      deliver() {
+        calls++
+        throw new Error('Test: a receiver throws')
+      },
+    },
+  )
+  while (attempt.state() !== 'ready') await new Promise((resolve) => setTimeout(resolve, 10))
+  const write = (n: number) =>
+    Room.setMeta(id, { n }).then(
+      () => 'written',
+      (error: Error) => error.message,
+    )
+  const writes = [await write(1), await write(2)]
+  await attempt.unsubscribe()
+  return { writes, calls }
 }

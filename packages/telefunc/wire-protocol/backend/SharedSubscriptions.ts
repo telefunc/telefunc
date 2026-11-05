@@ -112,9 +112,9 @@ class SubscriptionSlot<Source> implements BackendReceiver {
   private latestReadiness: Deferred<void> = createReadiness()
   private attempt: DriverAttempt | null = null
   private unobserve: (() => void) | null = null
-  /** What the attempt delivered before its first `ready`; null from then on, as a message after a loss goes out as it
-   *  arrives. Empty, not null, once finished: a message then goes to `keepEarly()`, which drops it, so `deliver()`
-   *  checks this one field. */
+  /** What the attempt delivered before its first `ready`, as a consumer sees `ready` before any message, so a driver
+   *  needn't order its acknowledgment before what it delivers. Null from then on: a message after a loss goes out as it
+   *  arrives. */
   private early: EarlyMessage[] | null = []
   /** It stopped or closed: what the attempt says from here on is ignored. */
   private finished = false
@@ -161,8 +161,11 @@ class SubscriptionSlot<Source> implements BackendReceiver {
   }
 
   deliver(payload: BackendPayload, ordering: OrderingInfo): void {
-    if (this.early !== null) return this.keepEarly(payload, ordering)
-    if (!this.checked(payload, ordering)) return
+    if (this.finished || !this.checked(payload, ordering)) return
+    if (this.early !== null) {
+      this.early.push({ payload, ordering, targets: this.targets() })
+      return
+    }
     // The listener is called here, not through a method of the consumer: one call less on every message.
     for (const consumer of this.targets()) {
       // Consumers are isolated from each other: one that throws is reported.
@@ -233,14 +236,6 @@ class SubscriptionSlot<Source> implements BackendReceiver {
     if (reason !== undefined) void this.latestReadiness.promise.catch(handleCallbackBug)
   }
 
-  /** A consumer sees `ready` before any message, so a driver needn't order its acknowledgment before what it delivers:
-   *  until then a message waits, with the consumers it would have reached. Once finished, it is dropped. */
-  private keepEarly(payload: BackendPayload, ordering: OrderingInfo): void {
-    if (!this.finished && this.checked(payload, ordering)) {
-      this.early!.push({ payload, ordering, targets: this.targets() })
-    }
-  }
-
   /** Checked once for all consumers; one that fails is reported and dropped. */
   private checked(payload: BackendPayload, ordering: OrderingInfo): boolean {
     try {
@@ -256,7 +251,7 @@ class SubscriptionSlot<Source> implements BackendReceiver {
   /** Stops listening first: the attempt's own `closed` on its unsubscribe is no end. */
   private finish(): void {
     this.finished = true
-    this.early = []
+    this.early = null
     this.unobserve?.()
     this.unobserve = null
     this.attempt = null

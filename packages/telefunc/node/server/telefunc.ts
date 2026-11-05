@@ -55,6 +55,7 @@ type HttpRequest =
  */
 async function serve(httpRequest: HttpRequest): Promise<HttpResponse> {
   assertHttpRequest(httpRequest, arguments.length)
+  assertRequestSignalFlag()
   const httpRequestResolved = await resolveHttpRequest(httpRequest)
   try {
     return await runTelefunc(httpRequestResolved)
@@ -62,6 +63,16 @@ async function serve(httpRequest: HttpRequest): Promise<HttpResponse> {
     // Past this, `httpResponse.pipe(res)` ends a streaming response's body once the client is gone.
     httpRequestResolved.unwatch?.()
   }
+}
+
+/** Without the flag a Worker's `request.signal` never aborts, and nothing else tells a telefunction that hasn't answered. */
+function assertRequestSignalFlag(): void {
+  const { Cloudflare } = globalThis as { Cloudflare?: { compatibilityFlags?: Record<string, boolean> } }
+  assertWarning(
+    Cloudflare?.compatibilityFlags?.enable_request_signal !== false,
+    'Add `enable_request_signal` to `compatibility_flags` in your Wrangler configuration: without it, `context.signal` and `onClose()` miss a client that disconnects before its telefunction answers. See https://telefunc.com/onClose#context-signal',
+    { onlyOnce: true },
+  )
 }
 
 /** `serve()` for adapters holding the Node.js `res`, so that a client disconnect aborts `request.signal`. */

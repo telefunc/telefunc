@@ -78,6 +78,14 @@ export {
   onListWhileClosing,
   onRecreate,
   onJoinAnswering,
+  onJoinClosed,
+  onThrowingReceiver,
+  onPublishLoop,
+  onSubscriberDropped,
+  onBusyLanes,
+  onLanesAfterDrop,
+  onLanesBeforeRewind,
+  onLanesPastRewind,
   onSaveReply,
   onSeedAndChurn,
   onStopChurn,
@@ -85,9 +93,11 @@ export {
 }
 
 import { Buffer } from 'node:buffer'
-import { Abort, onBug } from 'telefunc'
-import { Room, type LeaveCause, type LocalParticipant } from '@telefunc/room'
+import { Abort, Broadcast, config, onBug } from 'telefunc'
+import { Room, roomConfig, type LeaveCause, type LocalParticipant } from '@telefunc/room'
+import { getRoomPlane } from '@telefunc/room/backend'
 import { anyoneCanJoin } from '../../anyone-can-join'
+import { sleep } from '../../sleep'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
 import {
@@ -899,6 +909,178 @@ async function onJoinAnswering(roomId: string) {
   })
   me.listen(() => {}) // only observes: the reply stays the listener's above
   return me.id
+}
+
+/** The page drops this server's connections to Redis during these publishes: each arrives, is reported or rejects. */
+async function onSubscriberDropped(roomId: string) {
+  const room = anyoneCanJoin(await Room.get(roomId))
+  let received = 0
+  room.subscribe(() => received++)
+  const me = await room.join({ meta: { name: 'Publisher' } })
+  let reported = 0
+  roomConfig.onDeliveryLost = ({ reason }) => (reported += Number.parseInt(reason))
+  const published: Promise<unknown>[] = []
+  for (let i = 0; i < 600; i++) {
+    published.push(me.publish(i))
+    await sleep(1)
+  }
+  const rejected = (await Promise.allSettled(published)).filter(({ status }) => status === 'rejected').length
+  // Long enough to reconnect and read each lane's start.
+  await sleep(1_000)
+  roomConfig.onDeliveryLost = ({ roomId, reason }) =>
+    console.error(`Room delivery handoff of '${roomId}' lost: ${reason}`)
+  return { published: published.length, received, reported, rejected }
+}
+
+const atRest = new Map<string, { reported: string[]; arrived: () => number; send: () => Promise<void> }>()
+
+/** A subscription of each kind this server makes, and a commit on each lane, before the page drops its connections to
+ *  Redis. */
+async function onBusyLanes(roomId: string) {
+  const room = anyoneCanJoin(await Room.get(roomId))
+  const alice = await room.join({ meta: { name: 'Alice' } })
+  const bob = await room.join({ meta: { name: 'Bob' } })
+  const view = await Room.get(roomId)
+  const reported: string[] = []
+  roomConfig.onDeliveryLost = ({ reason }) => reported.push(reason)
+  config.broadcast.onDeliveryLost = ({ reason }) => reported.push(reason)
+  let arrived = 0
+  const arrives = () => arrived++
+  room.subscribe(arrives)
+  room.subscribeBinary(arrives, { track: 'shared' })
+  ;(await view.getParticipant(alice.id))!.subscribeBinary(arrives)
+  ;(await view.getParticipant(bob.id))!.subscribeBinary(arrives, { track: 'named' })
+  alice.listen(() => 'read')
+  const key = `room:at-rest:${roomId}`
+  Broadcast.subscribe(key, arrives)
+  Broadcast.subscribeBinary(key, arrives)
+  const bytes = new Uint8Array(1)
+  const send = async () => {
+    await alice.publish('text')
+    await alice.publishBinary(bytes, { track: 'own' })
+    await bob.publishBinary(bytes, { track: 'named' })
+    await bob.publishBinary(bytes, { track: 'shared' })
+    await bob.send(alice.id, 'private', { ack: true })
+    await Broadcast.publish(key, 'text')
+    await Broadcast.publishBinary(key, bytes)
+  }
+  await send()
+  // Its lane on the track has no start once it left.
+  const carol = await room.join({ meta: { name: 'Carol' } })
+  await carol.publishBinary(bytes, { track: 'shared' })
+  await carol.leave()
+  atRest.set(roomId, { reported, arrived: () => arrived, send })
+}
+
+/** Nothing was published while the connections were down, so nothing is reported, and the lanes deliver again. */
+async function onLanesAfterDrop(roomId: string) {
+  const { reported, arrived, send } = atRest.get(roomId)!
+  // Long enough to reconnect and read each lane's start.
+  await sleep(1_000)
+  const before = arrived()
+  await send()
+  await sleep(200)
+  roomConfig.onDeliveryLost = ({ roomId, reason }) =>
+    console.error(`Room delivery handoff of '${roomId}' lost: ${reason}`)
+  config.broadcast.onDeliveryLost = ({ key, reason }) => console.error(`Broadcast delivery of '${key}' lost: ${reason}`)
+  return { reported, arrivedAfter: arrived() - before }
+}
+
+/** Lanes the page then rewinds Redis under, as a failover onto a replica that missed the latest writes does: a track and
+ *  a key that have a commit on the replica, and the room's lane and a key that don't. */
+async function onLanesBeforeRewind(roomId: string) {
+  const room = anyoneCanJoin(await Room.get(roomId))
+  const alice = await room.join({ meta: { name: 'Alice' } })
+  const reported: string[] = []
+  roomConfig.onDeliveryLost = ({ reason }) => reported.push(reason)
+  config.broadcast.onDeliveryLost = ({ reason }) => reported.push(reason)
+  let arrived = 0
+  const arrives = () => arrived++
+  room.subscribe(arrives)
+  room.subscribeBinary(arrives, { track: 'shared' })
+  const key = `room:rewound:${roomId}`
+  Broadcast.subscribe(key, arrives)
+  const bytes = new Uint8Array(1)
+  await alice.publishBinary(bytes, { track: 'shared' })
+  await Broadcast.publish(key, 'on the replica')
+  // Long enough to arrive, so the store holds what the snapshot takes.
+  await sleep(200)
+  const send = async () => {
+    await alice.publish('text')
+    await alice.publishBinary(bytes, { track: 'shared' })
+    await Broadcast.publish(key, 'text')
+  }
+  atRest.set(roomId, { reported, arrived: () => arrived, send })
+}
+
+/** This server delivers past what the page's snapshot holds. */
+async function onLanesPastRewind(roomId: string) {
+  const entry = atRest.get(roomId)!
+  const onlyHere = `room:flushed:${roomId}`
+  Broadcast.subscribe(onlyHere, () => {})
+  await Broadcast.publish(onlyHere, 'not on the replica')
+  await entry.send()
+  await sleep(200)
+}
+
+/** A loop of awaited publishes: other work still gets its turns. */
+async function onPublishLoop(roomId: string) {
+  const me = await anyoneCanJoin(await Room.get(roomId)).join({ meta: { name: 'Loop' } })
+  let turns = 0
+  const timer = setInterval(() => turns++, 0)
+  for (let i = 0; i < 5_000; i++) await me.publish('loop')
+  clearInterval(timer)
+  return { otherWorkRan: turns > 0 }
+}
+
+/** A store handing a frame to a receiver that throws, ahead of a healthy one: both get every frame. */
+async function onThrowingReceiver(roomId: string) {
+  const { driver } = getRoomPlane()
+  const inc = (await driver.readHead(roomId))!.currentInc!
+  const source = { roomId, inc, lane: { kind: 'semantic' } } as const
+  let thrower = 0
+  let healthy = 0
+  const attempts = [
+    driver.subscribe(source, {
+      deliver() {
+        thrower++
+        throw new Error('Test: a receiver throws')
+      },
+    }),
+    driver.subscribe(source, { deliver: () => void healthy++ }),
+  ]
+  while (attempts.some((attempt) => attempt.state() !== 'ready')) await sleep(10)
+  await Room.announce(roomId, 'first')
+  await Room.announce(roomId, 'second')
+  await sleep(300)
+  await Promise.all(attempts.map((attempt) => attempt.unsubscribe()))
+  return { thrower, healthy }
+}
+
+/** Joins on closed rooms, through handles with no listeners, so none of them hears of the close. */
+async function onJoinClosed(roomId: string) {
+  const joinError = (room: Room) =>
+    room.join({ meta: { name: 'Late' } }).then(
+      () => null,
+      (error: Error) => error.message.replaceAll(roomId, '<id>'),
+    )
+  const unguardedId = `${roomId}:unguarded`
+  const unguarded = await Room.create(unguardedId)
+  await Room.close(unguardedId)
+  const unguardedError = await joinError(unguarded)
+
+  let guardRuns = 0
+  const guardedId = `${roomId}:guarded`
+  const guarded = await Room.create(guardedId)
+  Room.guard(guarded, { onBeforeJoin: () => void guardRuns++ })
+  await Room.close(guardedId)
+  const guardedError = await joinError(guarded)
+
+  const duringGuardId = `${roomId}:during-guard`
+  const duringGuard = await Room.create(duringGuardId)
+  Room.guard(duringGuard, { onBeforeJoin: () => Room.close(duringGuardId) })
+  const duringGuardError = await joinError(duringGuard)
+  return { unguardedError, guardedError, guardRuns, duringGuardError }
 }
 
 /** A store's save of a reply, finished by the test with `runServerAction()`. */

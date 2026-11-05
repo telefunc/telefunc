@@ -50,9 +50,11 @@ export default {
 ```
 {/* spellcheck-ignore:off */}
 
+> `enable_request_signal` is what lets <Link href="/onClose#context-signal">`context.signal` and `onClose()`</Link> see a client that disconnects before its telefunction answers.
+
 > Fundamentally, channels are stateful: the server holds live state for each open channel. Cloudflare Workers, however, are stateless and ephemeral — any request can be served by any worker, and nothing is remembered between requests. The state therefore needs to live somewhere else — Durable Objects are Cloudflare's primitive for exactly that: each channel lives on a Durable Object, which holds the connection and its state.
 >
-> The Durable Object binding is required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel`, `Broadcast`, or `Room`, you can skip this binding and use <Link href="/serve"><code>serve()</code></Link> instead.
+> The Durable Object binding is required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel`, `Broadcast`, or `Room`, you can skip this binding and use <Link href="/serve"><code>serve()</code></Link> instead, keeping `enable_request_signal`.
 >
 > See <Link href="#architecture" /> for implementation details.
 
@@ -109,7 +111,11 @@ That Durable Object names its region in its responses' `x-telefunc-home` header,
 
 <Link href="/room">Room</Link> calls such as `Room.create()`, `Room.announce()` and `Room.close()` work anywhere in your Worker, including cron triggers and queue consumers. A server-side listener (`subscribe()`, `onJoin()`, …) runs on the Durable Object of the client whose request installed it (see <Link href="#session-affinity" />), so install it inside a telefunction or a channel handler.
 
-A room's state lives in one Durable Object, in the region of the client that created the room (or in the <Link href="#configuration">`locationFallback`</Link> region, for a room created from a cron trigger or a queue consumer). A participant in another region waits two round trips to that region for `room.join()`, and one to leave, change their participant metadata or send a message. A join, a leave, a metadata change and a private message also wait until the Durable Object of each participant they reach has them, which adds the round trip from the room's region to the furthest of them. `Room.join(id)` reads the room first. Messages and join and leave events travel from that region to each participant, so a participant in another region receives them about half a round trip later than one in the room's region.
+A room's state lives in one Durable Object, in the room's region: the region of the client that created the room (or the <Link href="#configuration">`locationFallback`</Link> region, for a room created from a cron trigger or a queue consumer).
+
+A participant outside the room's region waits two round trips to the room's region for `room.join()`. `Room.join(id)` reads the room first. Leaving, changing their participant metadata or sending a message takes that participant one round trip to the room's region.
+
+A join, a leave, a metadata change and a private message also wait until they have reached the Durable Object of each participant concerned, which adds the round trip from the room's region to the furthest of those Durable Objects. Messages and join and leave events travel from the room's region to each participant, so a participant outside the room's region receives them about half a round trip later than one in it.
 
 The room's state is kept in its Durable Object's storage, so the room survives a deployment. A participant's connection doesn't: when the Durable Object holding the connection is evicted, the participant's `me.onLeave()` gets `cause.type: 'disconnected'`. Telefunc doesn't rejoin it for you: from `me.onLeave()`, call the telefunction that returned the room again (see <Link href="/room#create-and-join-a-room" />). The other participants see the old participant leave about two minutes later. That is the room's own timer, separate from the broadcast <Link href="#presence">presence</Link> TTL.
 
@@ -173,7 +179,7 @@ Each key's authority records which Durable Objects have subscribers, in its own 
 | TTL | 90 seconds |
 | Refresh | every 30 seconds |
 
-A Durable Object registers with the authority on its first subscription to a key and withdraws on its last unsubscribe. If a Durable Object is evicted (e.g. during a deployment), its record lapses after 90 seconds and fan-out skips it.
+A Durable Object registers with the authority on its first subscription to a key and withdraws on its last unsubscribe. If a Durable Object is evicted (e.g. during a deployment), its record lapses after 90 seconds and fan-out skips it. A Durable Object that can't refresh for that long misses what is published until a refresh succeeds, and then <Link href="/broadcast-config">`config.broadcast.onDeliveryLost`</Link> is called.
 
 
 ## Delivery guarantees
@@ -230,6 +236,14 @@ config.channel = {
   pingInterval: 2_000
 }
 ```
+
+## Workers Free
+
+Cloudflare [lists](https://developers.cloudflare.com/workers/platform/limits/#cpu-time) 10 ms of CPU time per HTTP request on Workers Free. It states: "Each isolate has some built-in flexibility to allow for cases where your Worker infrequently runs over the configured limit. If your Worker starts hitting the limit consistently, its execution will be terminated according to the limit configured." The client then gets Error 1102.
+
+> In one test of about 8 minutes of light traffic on Workers Free, 16 of 305 invocations ran past 10 ms of CPU and none was stopped. The highest was 55 ms, rendering a page with Vike, and a request to `/_telefunc` reached 34 ms.
+>
+> Sustained use on Workers Free wasn't measured, so this doesn't show that an app stays within the limit.
 
 
 ## See also

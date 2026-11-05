@@ -18,6 +18,8 @@ import { TelefuncStreamBeta } from '../../components'
 npm install @telefunc/room
 ```
 
+> Room runs on Telefunc, so your app also needs `telefunc` installed, and one of its plugins for the client code below to import a `.telefunc.js` file: see <Link href="/vite-plugin" /> or <Link href="/install" />.
+
 Then load Room's client code before your client receives a room, for example in your client entry:
 
 ```js
@@ -229,7 +231,7 @@ console.log(response) // 'ok'
 
 A callback that returns `undefined` only observes, so it can stand beside the one that replies. If two callbacks return a value, `send()` rejects.
 
-> A private message is delivered at most once: when it can't be handed on to the recipient, `send()` rejects, and the message isn't sent again. Room tells your server of every message, join or leave it couldn't hand on through <Link href="/room-config">`roomConfig.onDeliveryLost`</Link>, which logs it by default.
+> A private message is delivered at most once: when it can't be handed on to the recipient, `send()` rejects, and the message isn't sent again. `publish()` is at most once too, <Link href="/channel#delivery">like Broadcast's</Link>. Room tells your server of a message, join or leave it knows it couldn't hand on, through <Link href="/room-config">`roomConfig.onDeliveryLost`</Link>, which logs it by default.
 
 
 ## Send from the server
@@ -393,8 +395,6 @@ room.subscribe((state, info, from) => {
 })
 await me.send(host, { type: 'move', to: 'e4' })
 ```
-
-> In memory, an awaited `publish()` doesn't give the event loop a turn, so a producer that runs forever on resolved promises (a `for (;;) await room.publish()` loop, or a listener that answers itself after an `await`) must yield itself, for example with a timer.
 
 ## Stream audio or video
 

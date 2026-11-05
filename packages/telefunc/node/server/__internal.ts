@@ -52,6 +52,7 @@ export { installBackend, backendPlane, type PlaneDefinition } from '../../wire-p
 export type { BackendSubscription, SourceRules } from '../../wire-protocol/backend/SharedSubscriptions.js'
 export { SharedSubscriptions } from '../../wire-protocol/backend/SharedSubscriptions.js'
 export { assertDriverOrdering } from '../../wire-protocol/backend/driverOrdering.js'
+export { reportBroadcastDeliveryLost } from '../../wire-protocol/backend/broadcast/reportBroadcastDeliveryLost.js'
 export { decodeOrderingFrame } from '../../wire-protocol/wire/orderingFrame.js'
 export { MemoryBackend } from '../../wire-protocol/backend/memory/MemoryBackend.js'
 export { MemoryPubSub, type Subscribers } from '../../wire-protocol/backend/memory/MemoryPubSub.js'

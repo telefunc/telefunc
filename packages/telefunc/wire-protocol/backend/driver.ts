@@ -107,7 +107,7 @@ function servePlane<Key extends PlaneKey>(
 /**
  * Core's end of one attempt. Deliver each source's messages in `seq` order, as they arrive: one that comes before the
  * attempt's first `ready` is kept by core and reaches the consumers right after it, and one after a loss goes out as
- * it arrives.
+ * it arrives. What a receiver throws is a bug the driver reports: it goes on with its other receivers and messages.
  */
 type BackendReceiver = {
   deliver(payload: BackendPayload, ordering: OrderingInfo): void

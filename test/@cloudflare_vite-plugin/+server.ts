@@ -22,6 +22,12 @@ export class TelefuncDurableObject extends (tf.TelefuncDurableObject as Telefunc
       refusedPresences.add(request.key)
       throw new Error('Test: the authority refused the presence')
     }
+    // Test-only: the key's authority refuses a `lapsed-presence:` key's refreshes for 100 s, past its record's 90 s.
+    if (request.key.startsWith('lapsed-presence:') && request.bucket !== null) {
+      const recordedAt = lapsedPresences.get(request.key)
+      if (recordedAt === undefined) lapsedPresences.set(request.key, Date.now())
+      else if (Date.now() - recordedAt < 100_000) throw new Error('Test: the authority refused the refresh')
+    }
     return super.telefuncBroadcastPresence(request)
   }
 
@@ -63,12 +69,13 @@ type TelefuncDurableObjectWithPresence = new (
   env: Env,
 ) => InstanceType<typeof tf.TelefuncDurableObject> & {
   fetch(request: Request): Promise<Response>
-  telefuncBroadcastPresence(request: PresenceRequest): Promise<void>
+  telefuncBroadcastPresence(request: PresenceRequest): Promise<boolean>
   telefuncBroadcastForward(request: DeliveryRequest & { members: string[] }): Promise<void>
   telefuncBroadcastDeliver(request: DeliveryRequest): Promise<void>
   telefuncDurableObjectCall(name: string, method: string, args: unknown[]): Promise<unknown>
 }
 const refusedPresences = new Set<string>()
+const lapsedPresences = new Map<string, number>()
 const refusedDeliveries = new Set<string>()
 let roomCalls: { object: string | null; method: string; room: unknown }[] | null = null
 

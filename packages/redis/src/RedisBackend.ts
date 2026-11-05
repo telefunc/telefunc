@@ -9,7 +9,7 @@ import type {
   OrderingInfo,
   PublishResult,
 } from 'telefunc/__internal'
-import { planeKey, servePlane } from 'telefunc/__internal'
+import { planeKey, reportBroadcastDeliveryLost, servePlane } from 'telefunc/__internal'
 import type { RoomPlaneKey } from '@telefunc/room/backend'
 import { REDIS_COMMANDS } from './commands.js'
 import { broadcastChannel } from './keys.js'
@@ -50,6 +50,11 @@ class RedisBackend implements BroadcastDriver, RedisDriver {
       invalidationChannel: null,
       driver: this,
       receiver,
+      reportMissed: (count) =>
+        reportBroadcastDeliveryLost(
+          route.key,
+          `${count ?? 'An unknown number of'} ${route.kind} messages never reached this server's Redis subscription`,
+        ),
     })
   }
 

@@ -83,6 +83,14 @@ import {
   onListWhileClosing,
   onRecreate,
   onJoinAnswering,
+  onJoinClosed,
+  onThrowingReceiver,
+  onPublishLoop,
+  onSubscriberDropped,
+  onBusyLanes,
+  onLanesAfterDrop,
+  onLanesBeforeRewind,
+  onLanesPastRewind,
   onSaveReply,
   onSeedAndChurn,
   onStopChurn,
@@ -875,6 +883,49 @@ function Room() {
             onPage: read.map((value) => (value instanceof Uint8Array ? Array.from(value) : value)),
           }),
         )
+      })}
+
+      {scenario('subscriber-dropped', 'A dropped subscriber', 'Publish across it', async () => {
+        const roomId = await createRoomId('subscriber-dropped')
+        const result = onSubscriberDropped(roomId)
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        await fetch('/api/redis/drop-connections', { method: 'POST' })
+        setResult(JSON.stringify(await result))
+      })}
+
+      {scenario('dropped-at-rest', 'A dropped subscriber at rest', 'Reports nothing', async () => {
+        const roomId = await createRoomId('dropped-at-rest')
+        await onBusyLanes(roomId)
+        await fetch('/api/redis/drop-connections', { method: 'POST' })
+        setResult(JSON.stringify(await onLanesAfterDrop(roomId)))
+      })}
+
+      {scenario('rewound', 'A failover across a dropped subscriber', 'Reports what it cannot count', async () => {
+        const roomId = await createRoomId('rewound')
+        await onLanesBeforeRewind(roomId)
+        const { snapshot } = await (await fetch('/api/redis/snapshot')).json()
+        await onLanesPastRewind(roomId)
+        await fetch('/api/redis/restore', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ snapshot }),
+        })
+        await fetch('/api/redis/drop-connections', { method: 'POST' })
+        setResult(JSON.stringify(await onLanesAfterDrop(roomId)))
+      })}
+
+      {scenario('publish-loop', 'A publish loop', 'Other work runs during it', async () => {
+        const roomId = await createRoomId('publish-loop')
+        setResult(JSON.stringify(await onPublishLoop(roomId)))
+      })}
+
+      {scenario('throwing-receiver', 'A throwing receiver', 'A store delivers past it', async () => {
+        const roomId = await createRoomId('throwing-receiver')
+        setResult(JSON.stringify(await onThrowingReceiver(roomId)))
+      })}
+
+      {scenario('join-closed', 'Joins on closed rooms', 'Handles that never heard of the close', async () => {
+        setResult(JSON.stringify(await onJoinClosed(await createRoomId('join-closed'))))
       })}
 
       {scenario('join-races', 'Join races', 'A closed tab during a slow join', async () => {

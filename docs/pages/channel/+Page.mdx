@@ -324,20 +324,27 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 `seq` is monotonic per `key`, which is useful for ordering and gap detection.
 
+### Delivery
+
 When `publish()` rejects depends on where Broadcast runs:
 
-- In memory (the default), with `ChannelOverflowError`, when a listener published before its first `await`, found others of its kind (text or binary) that listeners published waiting, and would have passed `bufferLimit`/`bufferLimitBinary`. A publish from anywhere else waits its turn.
+- In memory (the default), with `ChannelOverflowError`, when a `subscribe()` callback, before its first `await`, publishes a message that would take those waiting past `maxPendingBytes` (see <Link href="/channel-config" />). With none waiting, a message goes through whatever its size. A publish from anywhere else never gets this error.
 - With <Link href="/redis">`@telefunc/redis`</Link>, when Redis can't run the publish, for example while the connection is down. It also rejects with `ChannelOverflowError` when you publish more than `bufferLimit`/`bufferLimitBinary` (see <Link href="/channel-config" />) to a key this server has only just subscribed to.
 - With a <Link href="/broadcast-config">`BroadcastTransport`</Link>, when its `send()` or `sendBinary()` throws or rejects, with that error.
 - On Cloudflare, when a server <Link href="/stream/cloudflare#delivery-guarantees">couldn't take it</Link>.
 
 A rejected publish may still have reached some subscribers (on Cloudflare, every subscriber the failed server doesn't hold), so publishing it again can deliver it twice to them.
 
+`publish()` is at most once: with <Link href="/redis">`@telefunc/redis`</Link>, a server whose connection to Redis drops never gets what is published before it reconnects, though `publish()` resolved. That server's <Link href="/broadcast-config">`config.broadcast.onDeliveryLost`</Link> is called with how many it missed, and logs them by default.
+
+> A Redis failover or flush can hide the count: that server may report fewer than it missed, or that it doesn't know how many. If the Redis that takes over holds exactly what that server last got, `onDeliveryLost` isn't called.
+
 A failed `publish()` you neither `await` nor `.catch()` gives your code no error (see <Link href="#errors">errors</Link>). To see failures, `await` it or add `.catch()`.
 
 `publish()` can't be awaited per subscriber, so the <Link href="#backpressure">warning about sends that outrun their client</Link> doesn't apply to a `BroadcastChannel`. Instead, a client that falls far behind a broadcast has its connection cut and reconnects. Other channels on the connection also <Link href="#reconnection">reconnect</Link>. The `BroadcastChannel` gets what it missed after reconnecting. If it missed more than the server's buffers hold, it closes (see <Link href="#errors">errors</Link>).
 
-In memory, an awaited `publish()` doesn't give the event loop a turn, so a producer that runs forever on resolved promises (a `for (;;) await publish()` loop, or a listener that answers itself after an `await`) must yield itself, for example with a timer.
+A listener's `async` work isn't awaited: the next message arrives whether or not your `subscribe()` callback is done. So if your callback can fall behind, unfinished calls pile up on the page, and Telefunc doesn't limit them: your code has to.
+For example, a callback that does an `await fetch()` for each message should queue them, and drop or merge what it can't keep up with.
 
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
 >
@@ -518,7 +525,7 @@ Channels and broadcasts signal failure through four errors:
 | `ChannelOverflowError` | A server channel's sends overfilled `bufferLimit`/`bufferLimitBinary` while its client was offline; the dropped ones reject | **Open** | `await` your sends, and raise `bufferLimit`/`bufferLimitBinary` above your largest message |
 | `ChannelOverflowError` (send budget) | A connected channel exceeded `maxPendingBytes`/`maxPendingAcks` | Closed | `await` the server's sends or raise the named setting, then recreate the channel |
 | `ChannelOverflowError` (`BroadcastChannel`) | More was published to its key while the client was offline than `bufferLimit`/`bufferLimitBinary` holds | Closed | Call its telefunction again to rejoin |
-| `ChannelOverflowError` (`publish()`) | With no Redis or other backend installed, a listener published before its first `await`, found others of its kind (text or binary) that listeners published waiting, and would have passed `bufferLimit`/`bufferLimitBinary`, so it rejects. One message alone goes through, whatever its size, and a publish from anywhere else waits its turn | Open | Publish less from the listener, or raise the named setting |
+| `ChannelOverflowError` (`publish()`) | With no Redis or other backend installed, published messages can wait in memory to be delivered. A `subscribe()` callback gets this error when it publishes, before its first `await`, a message that would bring the waiting messages over `maxPendingBytes`. With none waiting, a message goes through whatever its size. A publish outside a `subscribe()` callback never gets this error | Open | Publish less from the callback, or raise the named setting |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 
