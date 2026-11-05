@@ -9,8 +9,8 @@ import type { IndexedPeer } from './IndexedPeer.js'
 /** What a send held in memory (buffered, or awaiting its answer or credit) takes beyond its payload: its callbacks and
  *  promise, about 480 B. */
 const HELD_SEND_OVERHEAD_BYTES = 512
-/** What a buffered publish takes beyond its payload: its slots, about 52 B. */
-const HELD_PUBLISH_OVERHEAD_BYTES = 64
+/** The least an entry counts as, whatever its payload: what holds it isn't free, so a flood of empty sends stays bounded. */
+const MIN_ENTRY_BYTES = 64
 
 /** Callback pair for buffered entries — resolve on flush, reject on eviction. */
 type EntryCallback = {
@@ -173,14 +173,14 @@ class BufferQueue {
   }
 
   push(tag: number, data: string | Uint8Array, bytes: number, callback: EntryCallback | null, order: number): void {
-    const held = this.admit(bytes, callback)
-    if (held !== null) this.append(tag, data, held, callback, order)
+    const counted = this.admit(bytes, callback)
+    if (counted !== null) this.append(tag, data, counted, callback, order)
   }
 
   /** Holds a copy of `data`, made only once the queue admits it. */
   pushCopy(tag: number, data: Uint8Array, callback: EntryCallback, order: number): void {
-    const held = this.admit(data.byteLength, callback)
-    if (held !== null) this.append(tag, new Uint8Array(data), held, callback, order)
+    const counted = this.admit(data.byteLength, callback)
+    if (counted !== null) this.append(tag, new Uint8Array(data), counted, callback, order)
   }
 
   clear(err?: Error): void {
@@ -209,10 +209,10 @@ class BufferQueue {
 
   // ── Private ──
 
-  /** The bytes holding the entry takes, or `null` once the queue is cleared for an entry larger than it. */
+  /** The bytes the entry counts as, or `null` once the queue is cleared for an entry larger than it. */
   private admit(bytes: number, callback: EntryCallback | null): number | null {
-    const held = bytes + (callback === null ? HELD_PUBLISH_OVERHEAD_BYTES : HELD_SEND_OVERHEAD_BYTES)
-    if (held <= this.maxBytes) return held
+    const counted = Math.max(bytes, MIN_ENTRY_BYTES)
+    if (counted <= this.maxBytes) return counted
     const overflowErr = new ChannelOverflowError()
     this.clear(overflowErr)
     this.dropped = true
