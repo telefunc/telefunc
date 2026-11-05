@@ -89,6 +89,8 @@ type DirectoryEntry = { incTag: string; checkAt: number }
 /** A directory entry's check, current while its entry is still due at `at`. */
 type DirectoryCheck = { at: number; roomId: string }
 
+/** About 10 ms of commits, as `MemoryBackend`'s count is of publishes. */
+const COMMITS_BETWEEN_TURNS = 1024
 const NO_TARGETS = [] as const
 const SEMANTIC_LANE: LaneId = { kind: 'semantic' }
 const SEMANTIC_LANE_KEY = encodeLaneKey(SEMANTIC_LANE)
@@ -272,7 +274,7 @@ class MemoryRoomDriver implements RoomDriver {
   /** A min-heap by `at` of the checks each put scheduled; a check its entry no longer has is dropped when reached. */
   private readonly directoryChecks: DirectoryCheck[] = []
   private revSeq = 0
-  private readonly pubSub = new MemoryPubSub()
+  private readonly pubSub = new MemoryPubSub({ operationsBetweenTurns: COMMITS_BETWEEN_TURNS })
 
   async readHead(roomId: string): Promise<RoomHead | null> {
     const head = this.liveHead(this.rooms.get(roomId))

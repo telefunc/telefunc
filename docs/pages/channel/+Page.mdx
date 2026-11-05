@@ -326,7 +326,7 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 When `publish()` rejects depends on where Broadcast runs:
 
-- In memory (the default), with `ChannelOverflowError`, when a listener published before its first `await`, found others of its kind (text or binary) that listeners published waiting, and would have passed `bufferLimit`/`bufferLimitBinary`. A publish from anywhere else waits its turn.
+- In memory (the default), with `ChannelOverflowError`, when a `subscribe()` callback, before its first `await`, publishes a message that would take those waiting past `maxPendingBytes` (see <Link href="/channel-config" />). With none waiting, a message goes through whatever its size. A publish from anywhere else never gets this error.
 - With <Link href="/redis">`@telefunc/redis`</Link>, when Redis can't run the publish, for example while the connection is down. It also rejects with `ChannelOverflowError` when you publish more than `bufferLimit`/`bufferLimitBinary` (see <Link href="/channel-config" />) to a key this server has only just subscribed to.
 - With a <Link href="/broadcast-config">`BroadcastTransport`</Link>, when its `send()` or `sendBinary()` throws or rejects, with that error.
 - On Cloudflare, when a server <Link href="/stream/cloudflare#delivery-guarantees">couldn't take it</Link>.

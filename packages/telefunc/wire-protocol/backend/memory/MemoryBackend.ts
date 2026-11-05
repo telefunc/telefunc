@@ -14,13 +14,16 @@ import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import type { BroadcastKind } from '../../wire/payloads.js'
 import { MemoryPubSub, type MemoryAttemptOwner, type Subscribers } from './MemoryPubSub.js'
 
+/** About 10 ms of publishes, as `MemoryRoomDriver`'s count is of commits. */
+const PUBLISHES_BETWEEN_TURNS = 16_384
+
 class MemoryBackend implements BroadcastDriver, MemoryAttemptOwner {
   /** The order of each key subscribed here; an unsubscribed key's next publish starts above `broadcastHighest`. */
   private readonly broadcastOrder = new Map<string, OrderingInfo>()
   /** The highest `seq` and `timestamp` a Broadcast publish was given. */
   private readonly broadcastHighest: OrderingInfo = { seq: 0, timestamp: 0 }
   private readonly broadcastSubs: Record<BroadcastKind, Subscribers> = { text: new Map(), binary: new Map() }
-  private readonly pubSub = new MemoryPubSub()
+  private readonly pubSub = new MemoryPubSub({ operationsBetweenTurns: PUBLISHES_BETWEEN_TURNS })
 
   publish(route: BroadcastRoute, payload: BroadcastPayload): PublishResult | Promise<PublishResult> {
     const targets = this.broadcastSubs[route.kind].get(route.key) ?? []
