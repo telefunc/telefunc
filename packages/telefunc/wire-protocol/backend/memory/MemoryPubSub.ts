@@ -146,11 +146,14 @@ class MemoryPubSub {
     takeOrdering: (key: string) => OrderingInfo,
   ): OrderingInfo | Promise<OrderingInfo> {
     if (this.deliveries.enterPublish()) {
-      this.countOperation()
-      const mark = takeOrdering(key)
-      this.deliverTo(targets, payload, mark)
-      this.deliveries.leavePublish()
-      return mark
+      try {
+        this.countOperation()
+        const mark = takeOrdering(key)
+        this.deliverTo(targets, payload, mark)
+        return mark
+      } finally {
+        this.deliveries.leavePublish()
+      }
     }
     const isText = typeof payload === 'string'
     const size = (isText ? utf8ByteLength(payload) : payload.byteLength) + HELD_SEND_OVERHEAD_BYTES
