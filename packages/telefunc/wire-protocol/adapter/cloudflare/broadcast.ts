@@ -523,11 +523,13 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       return { seq: info.seq, timestamp: info.timestamp }
     }
 
-    const { authorityBucket, seq, presenceByBucket } = await authorityState.runInAuthorityChain(async () => ({
-      authorityBucket: await authorityState.getOrInitAuthorityBucket(key, locationBucket),
-      seq: await authorityState.getNextKeySeq(key),
-      presenceByBucket: await this.listPresenceByBucket(key),
-    }))
+    const [authorityBucket, seq, presenceByBucket] = await authorityState.runInAuthorityChain(() =>
+      Promise.all([
+        authorityState.getOrInitAuthorityBucket(key, locationBucket),
+        authorityState.getNextKeySeq(key),
+        this.listPresenceByBucket(key),
+      ]),
+    )
 
     const timestamp = Date.now()
     const info = { seq, timestamp }
