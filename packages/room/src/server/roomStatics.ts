@@ -148,8 +148,8 @@ async function openRoom(id: string): Promise<ServerRoom> {
   const incarnation = await requireRoom(id)
   const held = RoomReplica.of(incarnation.inc)
   if (held !== undefined) return await held.sharedHandle()
-  const count = await reapAndCountPresence(incarnation)
-  const replica = RoomReplica.seeded(id, incarnation, await requireRoomMeta(id, incarnation), { count })
+  const [count, stored] = await Promise.all([reapAndCountPresence(incarnation), requireRoomMeta(id, incarnation)])
+  const replica = RoomReplica.seeded(id, incarnation, stored, { count })
   return replica.handle()
 }
 
