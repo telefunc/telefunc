@@ -13,6 +13,7 @@ import type { RoomPlaneKey } from '@telefunc/room/backend'
 import { REDIS_COMMANDS } from './commands.js'
 import { broadcastChannel } from './keys.js'
 import type { RedisConnection } from './RedisConnection.js'
+import { neverReachedSubscription } from './RedisSubscriptions.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
 import type { WaitingSend, WaitRule } from './NewSubscriptionWait.js'
 
@@ -49,10 +50,7 @@ class RedisBackend implements BroadcastDriver {
       readStarts: () => this.connection.run(REDIS_COMMANDS.broadcastStart, route),
       receiver,
       reportMissed: (count) =>
-        reportBroadcastDeliveryLost(
-          route.key,
-          `${count ?? 'An unknown number of'} ${route.kind} messages never reached this server's Redis subscription`,
-        ),
+        reportBroadcastDeliveryLost(route.key, neverReachedSubscription(count, `${route.kind} message`)),
     })
   }
 

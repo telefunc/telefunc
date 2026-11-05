@@ -49,6 +49,7 @@ import {
 import { LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrdering, type CommitInput } from './commands.js'
 import { assert } from './assert.js'
 import type { RedisConnection } from './RedisConnection.js'
+import { neverReachedSubscription } from './RedisSubscriptions.js'
 import type { WaitingSend, WaitRule } from './NewSubscriptionWait.js'
 
 const NO_FENCE_TOKENS: FenceTokens = { lane: '', everyTrack: '', everyMember: '' }
@@ -276,11 +277,7 @@ class RedisRoomDriver implements RoomDriver {
       },
       readStarts: () => this.readStarts(source),
       receiver,
-      reportMissed: (count) =>
-        this.kit.reportDeliveryLost(
-          source.roomId,
-          `${count ?? 'An unknown number of'} commits never reached this server's Redis subscription`,
-        ),
+      reportMissed: (count) => this.kit.reportDeliveryLost(source.roomId, neverReachedSubscription(count, 'commit')),
     })
   }
 

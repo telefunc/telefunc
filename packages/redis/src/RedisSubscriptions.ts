@@ -1,4 +1,4 @@
-export { RedisSubscriptions }
+export { RedisSubscriptions, neverReachedSubscription }
 
 import { randomUUID } from 'node:crypto'
 import type { BackendReceiver, OrderingInfo } from 'telefunc/__internal'
@@ -57,6 +57,12 @@ type LaneOrder = {
 type LaneFrame = { lane: string; place: number; payload: Uint8Array; info: OrderingInfo; token: string | null }
 
 const textDecoder = new TextDecoder()
+
+/** What a driver reports its attempt passed by: `1 commit`, `3 commits` or `An unknown number of commits` never reached. */
+function neverReachedSubscription(count: number | null, noun: string): string {
+  const missed = count === 1 ? `1 ${noun}` : `${count ?? 'An unknown number of'} ${noun}s`
+  return `${missed} never reached this server's Redis subscription`
+}
 
 const RECONNECT_DELAY_MIN_MS = 50
 const RECONNECT_DELAY_MAX_MS = 2_000
