@@ -1,4 +1,4 @@
-import { Link, Warning } from '@brillout/docpress'
+import { Link, RepoLink, Warning } from '@brillout/docpress'
 import { TelefuncStreamBeta } from '../../components'
 
 **Environment**: server & client.
@@ -66,7 +66,7 @@ const me = await room.join({ meta: { name: 'Alice' } })
 await me.publish({ text: 'hello' })
 ```
 
-`join()` returns your participant, `me`.
+`join()` returns your participant, `me`. For all of this as an app that runs as is, see <RepoLink path="/examples/room" />.
 
 A client joins only a room whose telefunction says who may: `anyoneCanJoin: true` lets anyone in, and an `onBeforeJoin()` hook decides per join (see <Link href="#control-who-can-join-and-post" />). Without either, `room.join()` on the client is refused.
 
