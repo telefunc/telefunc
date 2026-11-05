@@ -80,6 +80,7 @@ export {
   onJoinAnswering,
   onJoinClosed,
   onThrowingReceiver,
+  onPublishLoop,
   onSaveReply,
   onSeedAndChurn,
   onStopChurn,
@@ -903,6 +904,16 @@ async function onJoinAnswering(roomId: string) {
   })
   me.listen(() => {}) // only observes: the reply stays the listener's above
   return me.id
+}
+
+/** A loop of awaited publishes: other work still gets its turns. */
+async function onPublishLoop(roomId: string) {
+  const me = await anyoneCanJoin(await Room.get(roomId)).join({ meta: { name: 'Loop' } })
+  let turns = 0
+  const timer = setInterval(() => turns++, 0)
+  for (let i = 0; i < 5_000; i++) await me.publish('loop')
+  clearInterval(timer)
+  return { otherWorkRan: turns > 0 }
 }
 
 /** A store handing a frame to a receiver that throws, ahead of a healthy one: both get every frame. */

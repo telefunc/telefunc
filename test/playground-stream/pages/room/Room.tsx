@@ -85,6 +85,7 @@ import {
   onJoinAnswering,
   onJoinClosed,
   onThrowingReceiver,
+  onPublishLoop,
   onSaveReply,
   onSeedAndChurn,
   onStopChurn,
@@ -877,6 +878,11 @@ function Room() {
             onPage: read.map((value) => (value instanceof Uint8Array ? Array.from(value) : value)),
           }),
         )
+      })}
+
+      {scenario('publish-loop', 'A publish loop', 'Other work runs during it', async () => {
+        const roomId = await createRoomId('publish-loop')
+        setResult(JSON.stringify(await onPublishLoop(roomId)))
       })}
 
       {scenario('throwing-receiver', 'A throwing receiver', 'A store delivers past it', async () => {

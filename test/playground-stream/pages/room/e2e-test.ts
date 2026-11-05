@@ -438,6 +438,13 @@ function testRoom() {
       expect(r.recreatedOpen).toBe(false)
     },
   )
+  testRoomScenario<{ otherWorkRan: boolean }>(
+    'publish-loop',
+    'room: a loop of awaited publishes leaves the event loop its turns',
+    (r) => {
+      expect(r.otherWorkRan).toBe(true)
+    },
+  )
   testRoomScenario<{ thrower: number; healthy: number }>(
     'throwing-receiver',
     "room: a store's receiver that throws is reported, and the receiver beside it and the frames after it still arrive",

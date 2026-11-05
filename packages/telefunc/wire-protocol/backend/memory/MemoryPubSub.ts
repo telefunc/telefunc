@@ -23,8 +23,9 @@ type MemorySubscription = {
   owner?: MemoryAttemptOwner
 }
 
-/** Queued deliveries from which a Room commit waits for the next turn, as for a network write, so it can't outrun them. */
-const QUEUED_DELIVERIES_MAX = 1024
+/** Room commits per turn given back, as a network write gives one: awaiting each resolves without a turn, so a loop of
+ *  them would otherwise starve the event loop. */
+const COMMITS_PER_TURN = 1024
 
 /** Deliveries in seq order: a publish made inside one is delivered after it. */
 class MemoryDeliveries {
@@ -39,10 +40,6 @@ class MemoryDeliveries {
   /** Nothing runs or waits. */
   get isIdle(): boolean {
     return !this.delivering && this.queue.length === 0
-  }
-
-  get isFull(): boolean {
-    return this.queue.length >= QUEUED_DELIVERIES_MAX
   }
 
   /** Whether a publish delivers now, until `leavePublish()`: it waits if one is queued or running. */
@@ -87,6 +84,7 @@ class MemoryPubSub {
   private readonly deliveries = new MemoryDeliveries()
   /** Deliveries a microtask is yet to queue. */
   private queuing = 0
+  private commitsSinceTurn = 0
   /** What listeners' publishes hold waiting, of each kind. */
   private readonly waitingBytes = { text: 0, binary: 0 }
 
@@ -163,15 +161,17 @@ class MemoryPubSub {
     }
   }
 
-  /** Queues `delivery` from a microtask, so a subscription made meanwhile is ready after it. With the queue full, returns
-   *  the next turn, which the caller waits for. */
+  /** Queues `delivery` from a microtask, so a subscription made meanwhile is ready after it. Returns the turn the caller
+   *  waits for, if one is due. */
   deliverSoon(delivery: () => void): Promise<void> | null {
     this.queuing++
     queueMicrotask(() => {
       this.queuing--
       this.deliveries.deliver(delivery)
     })
-    return this.deliveries.isFull ? new Promise<void>(nextTurn) : null
+    if (++this.commitsSinceTurn < COMMITS_PER_TURN) return null
+    this.commitsSinceTurn = 0
+    return new Promise<void>(nextTurn)
   }
 }
 
