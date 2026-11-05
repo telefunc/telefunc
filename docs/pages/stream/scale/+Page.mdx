@@ -21,7 +21,7 @@ A <Link href="/channel">`Channel`</Link> is a stateful connection. Its server-si
 
 > Without sticky sessions, a reconnect that lands on a different instance sees no matching channel state, the recovery handshake fails, and the client's `Channel` ends.
 
-> Sanity check: after deploying behind a sticky load balancer, open the browser network tab, refresh once, and confirm every request to `/_telefunc` carries the same sticky cookie. If two consecutive requests carry different sticky values, the load balancer isn't configured for sticky sessions.
+> Sanity check: after deploying behind a sticky load balancer, open the browser network tab and refresh once. With a cookie (HAProxy below), confirm every request to `/_telefunc` carries the same sticky cookie. If two consecutive requests carry different sticky values, the load balancer isn't configured for sticky sessions. With `ip_hash` there's no cookie to read, so add `add_header X-Upstream $upstream_addr;` to your Nginx `location` and confirm every `/_telefunc` response shows the same address.
 
 
 ### Nginx — `ip_hash`
