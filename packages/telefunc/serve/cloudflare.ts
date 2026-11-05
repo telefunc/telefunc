@@ -5,33 +5,32 @@ export type { CloudflareOptions }
 
 import { DurableObject } from 'cloudflare:workers'
 import crossws from 'crossws/adapters/cloudflare'
-import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
-import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
+import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
+import { getServerConfig, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
-import { installBroadcastAdapter } from '../wire-protocol/server/broadcast.js'
+import { installBroadcastAdapter } from '../wire-protocol/broadcast/broadcastAdapter.js'
 import {
   CloudflareBroadcastAuthorityState,
   CloudflareBroadcastTransport,
-} from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
-import type {
-  BroadcastDeliverRequest,
-  BroadcastPublishRequest,
-} from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
+} from '../wire-protocol/adapter/cloudflare/broadcast.js'
+import type { BroadcastDeliverRequest, BroadcastPublishRequest } from '../wire-protocol/adapter/cloudflare/broadcast.js'
 import {
   TELEFUNC_BROADCAST_BUCKET_HEADER,
-  TELEFUNC_SESSION_HEADER,
   TELEFUNC_SHARD_HEADER,
   assertLocationFallbackIsScaled,
+  readForwardedTarget,
   resolveSessionRoutingTarget,
-} from '../wire-protocol/server/adapter/cloudflare/routing.js'
+} from '../wire-protocol/adapter/cloudflare/routing.js'
 import { assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
-import type { CloudflareScale, LocationBucket } from '../wire-protocol/server/adapter/cloudflare/routing.js'
-import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
-import { REQUEST_KIND, getRequestKind } from '../wire-protocol/request-kind.js'
+import type { CloudflareScale } from '../wire-protocol/adapter/cloudflare/routing.js'
+import { CHANNEL_TRANSPORT, SESSION_HOME_HEADER, STATUS_CODE_WIRE_VERSION } from '../wire-protocol/constants.js'
+import { isTelefuncRequest } from './shared.js'
+import { REQUEST_KIND, getRequestKind, namesWireVersion } from '../wire-protocol/wire/requestKind.js'
 import { STATUS_BODY_MALFORMED_REQUEST, STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
 
-const SHARD_TOKEN_TTL_SECONDS = 86400
+/** A Durable Object takes a WebSocket message of 32 MiB at most. */
+const DURABLE_OBJECT_MAX_RECEIVED_MESSAGE_BYTES = 32 * 1024 * 1024
 
 type CloudflareOptions = {
   bindingName?: string
@@ -43,15 +42,9 @@ type CloudflareOptions = {
   jurisdiction?: DurableObjectJurisdiction
 }
 
-type StoredShardToken = {
-  s: string
-  b: LocationBucket
-}
-
 type ServeInput = {
   request: Request
   env: Cloudflare.Env
-  ctx: ExecutionContext
 }
 
 interface TelefuncServe {
@@ -67,7 +60,7 @@ class Telefunc {
 }
 
 function telefunc(options?: CloudflareOptions): TelefuncServe {
-  enableChannelTransports([CHANNEL_TRANSPORT.WS])
+  setAdapterMaxFrameBytes(DURABLE_OBJECT_MAX_RECEIVED_MESSAGE_BYTES)
   const bindingName = options?.bindingName ?? 'TelefuncDurableObject'
   const kvBindingName = options?.kvBindingName ?? 'TelefuncKV'
   const baseInstanceName = options?.instanceName ?? 'telefunc'
@@ -76,11 +69,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   assertLocationFallbackIsScaled(scale, locationFallback)
   const jurisdiction = options?.jurisdiction
 
-  const crosswsAdapter = crossws({
-    bindingName,
-    instanceName: baseInstanceName,
-    hooks: getTelefuncChannelHooks(),
-  })
+  const hooks = getTelefuncChannelHooks()
+  const crosswsAdapter = crossws({ bindingName, instanceName: baseInstanceName, hooks })
   // Factory runs only on first install. Bundler quirks can evaluate the user's entry twice in the same isolate;
   // we want every evaluation to share one transport instance.
   const broadcast = installBroadcastAdapter(() => new CloudflareBroadcastTransport({ baseInstanceName, scale }))
@@ -98,9 +88,13 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
   const TelefuncDurableObject = class extends DurableObject {
     private readonly authorityState: CloudflareBroadcastAuthorityState
+    private readonly instanceName: string
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env)
+      const { name } = ctx.id
+      assertUsage(name, 'Telefunc needs `ctx.id.name` in its Durable Objects: update wrangler.')
+      this.instanceName = name
       const binding = getBinding(env)
       assertUsage(binding, `Missing Cloudflare Durable Object binding "${bindingName}" in Durable Object constructor.`)
       broadcast.attachBinding(binding, bindingName)
@@ -111,20 +105,20 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     async fetch(request: Request) {
-      const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
-      const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
-      if (shard && bucket) {
-        broadcast.attachIsolateInfo(shard, bucket)
-      }
+      broadcast.attachRequest(request, this.instanceName)
+      const target = readForwardedTarget(request)
+      if (target) broadcast.attachIsolateInfo(target.sessionInstanceName, target.locationBucket)
       if (request.headers.get('upgrade') === 'websocket') {
+        // crossws accepts it for hibernation, yet this object never hibernates while one is open, and is billed for
+        // that time: its channels live in memory, and each wire's ping deadline is a timer (`armPingDeadline`).
         return crosswsAdapter.handleDurableUpgrade(this, request)
       }
       const context = getContext ? await getContext(request, this.env as Cloudflare.Env) : undefined
       const httpResponse = await serveTelefunc(context ? { request, context } : { request })
-      return new Response(httpResponse.getReadableWebStream(), {
-        status: httpResponse.statusCode,
-        headers: httpResponse.headers,
-      })
+      const headers = new Headers(httpResponse.headers)
+      // The page names it from then on, so it reaches this Durable Object from any region.
+      if (target) headers.set(SESSION_HOME_HEADER, target.locationBucket)
+      return new Response(httpResponse.getReadableWebStream(), { status: httpResponse.statusCode, headers })
     }
 
     webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
@@ -132,7 +126,16 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
+      // Before compatibility date 2026-04-07 a client's close waits for this answer; close() refuses 1005 and 1006.
+      if (code === 1005) ws.close()
+      else if (wasClean) ws.close(code, reason)
       return crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean)
+    }
+
+    // TODO: remove once Telefunc's own WebSocket adapter replaces crossws.
+    /** crossws has no handler for a socket's error, so its wire ends here. */
+    webSocketError(ws: WebSocket) {
+      return crosswsAdapter.handleDurableClose(this, ws, 1006, 'error', false)
     }
 
     telefuncBroadcastPublish(request: BroadcastPublishRequest) {
@@ -145,9 +148,9 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   }
 
   return {
-    async serve({ request, env, ctx }: ServeInput): Promise<Response | undefined> {
+    async serve({ request, env }: ServeInput): Promise<Response | undefined> {
+      if (!isTelefuncRequest(request)) return undefined
       const config = getServerConfig()
-      if (!new URL(request.url).pathname.startsWith(config.telefuncUrl)) return undefined
 
       const binding = getBinding(env)
       assertUsage(binding, `Missing Cloudflare Durable Object binding "${bindingName}". Add it to your wrangler.jsonc.`)
@@ -157,55 +160,39 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         return new Response(null, { status: 400 })
       }
       // Reject before forwarding: a Durable Object that answers without reading the forwarded body fails the request.
-      if (!isWebSocketRequest && getRequestKind(request, config.telefuncUrl) === REQUEST_KIND.INVALID) {
+      const requestKind = isWebSocketRequest ? null : getRequestKind(request, config.telefuncUrl)
+      if (requestKind === REQUEST_KIND.INVALID) {
         return new Response(STATUS_BODY_MALFORMED_REQUEST, {
           status: STATUS_CODE_MALFORMED_REQUEST,
           headers: { 'Content-Type': 'text/plain' },
         })
       }
+      if (requestKind === REQUEST_KIND.SSE && !namesWireVersion(request)) {
+        return new Response('reload the page', { status: STATUS_CODE_WIRE_VERSION })
+      }
 
       const kv = getKVBinding(env)
       assertUsage(kv, `Missing Cloudflare KV namespace binding "${kvBindingName}". Add it to your wrangler.jsonc.`)
-      const sessionToken =
-        request.headers.get(TELEFUNC_SESSION_HEADER) || new URL(request.url).searchParams.get('session')
-
-      let sessionInstanceName: string | undefined
-      let locationBucket: LocationBucket | undefined
-      let token = sessionToken
-
-      if (token) {
-        const stored = await kv.get<StoredShardToken>(`session:${token}`, 'json')
-        if (stored) {
-          sessionInstanceName = stored.s
-          locationBucket = stored.b
-        }
-      }
-
-      if (!sessionInstanceName || !locationBucket) {
-        const target = resolveSessionRoutingTarget(baseInstanceName, scale, request, locationFallback)
-        sessionInstanceName = target.sessionInstanceName
-        locationBucket = target.locationBucket
-        token = `${sessionInstanceName}:${crypto.randomUUID()}`
-        const value: StoredShardToken = { s: sessionInstanceName, b: locationBucket }
-        ctx.waitUntil(kv.put(`session:${token}`, JSON.stringify(value), { expirationTtl: SHARD_TOKEN_TTL_SECONDS }))
-      }
+      const { searchParams } = new URL(request.url)
+      const token = searchParams.get('session') || crypto.randomUUID()
+      // No lookup and nothing shared: each request names the home its session's responses gave its page.
+      const { sessionInstanceName, locationBucket } = resolveSessionRoutingTarget(
+        baseInstanceName,
+        scale,
+        request,
+        locationFallback,
+        token,
+        searchParams.get('home'),
+      )
 
       const forwardedHeaders = new Headers(request.headers as Headers)
       forwardedHeaders.set(TELEFUNC_SHARD_HEADER, sessionInstanceName)
       forwardedHeaders.set(TELEFUNC_BROADCAST_BUCKET_HEADER, locationBucket)
       const forwardedRequest = new Request(request, { headers: forwardedHeaders })
 
-      const doResponse = await binding
+      return binding
         .get(binding.idFromName(sessionInstanceName), { locationHint: locationBucket })
         .fetch(forwardedRequest)
-
-      if (!isWebSocketRequest && token) {
-        const headers = new Headers(doResponse.headers)
-        headers.set(TELEFUNC_SESSION_HEADER, token)
-        return new Response(doResponse.body, { status: doResponse.status, headers })
-      }
-
-      return doResponse
     },
     TelefuncDurableObject,
   }

@@ -1,7 +1,7 @@
 export { testFileUpload }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult } from '../../e2e-utils'
+import { navigate, getResult, serverRuntime } from '../../e2e-utils'
 
 function testFileUpload() {
   test('file upload: single file + text arg', async () => {
@@ -99,7 +99,8 @@ function testFileUpload() {
         expect(result.chunkCount).greaterThan(0)
         // No single chunk should be near the full file size.
         // Observed empirically: 64 KB (one TCP frame). 128 KB gives 2× headroom.
-        expect(result.maxChunkKB).lessThan(128)
+        // Not on Bun: Bun.serve hands request body chunks of up to 256 KB.
+        if (serverRuntime() !== 'bun') expect(result.maxChunkKB).lessThan(128)
         // RSS growth during the 3 s sleep must be well below the 100 MB file size.
         // If the client blasted everything into server buffers, RSS would spike here.
         expect(result.rssGrowthMB).lessThan(5)

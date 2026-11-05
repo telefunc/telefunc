@@ -5,9 +5,9 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
-import { createStreamingReplacer } from '../../../wire-protocol/server/response/registry.js'
-import { ServerChannel } from '../../../wire-protocol/server/channel.js'
-import { getChannelMux } from '../../../wire-protocol/server/mux.js'
+import { createStreamingReplacer } from '../../../wire-protocol/values/server/response/registry.js'
+import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
+import { getChannelMux } from '../../../wire-protocol/channel/server/ChannelMux.js'
 import {
   buildShieldValidators,
   type ShieldValidators,
@@ -15,13 +15,14 @@ import {
   type ShieldLogConfig,
   type ShieldValidatorCtx,
 } from '../shield.js'
+import { isCloudflareWorkers } from '../../../utils/isCloudflareWorkers.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
-import { buildInlineResponseBody } from '../../../wire-protocol/server/response/StreamingResponseBody.js'
-import { pumpProducerToChannel } from '../../../wire-protocol/server/response/ChannelResponseBody.js'
+import { buildInlineResponseBody } from '../../../wire-protocol/values/server/response/StreamingResponseBody.js'
+import { pumpProducerToChannel } from '../../../wire-protocol/values/server/response/ChannelResponseBody.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
-import { textEncoder } from '../../../wire-protocol/frame.js'
-import { uint8ArrayToBase64url } from '../../../wire-protocol/base64url.js'
-import type { StreamingProducer, StreamingValueServer } from '../../../wire-protocol/types.js'
+import { textEncoder } from '../../../wire-protocol/wire/envelope.js'
+import { uint8ArrayToBase64url } from '../../../wire-protocol/wire/base64url.js'
+import type { StreamingProducer, StreamingValueServer } from '../../../wire-protocol/values/types.js'
 import { type RequestContext } from '../context/requestContext.js'
 import type { Context } from '../context/context.js'
 import type { Readable } from 'node:stream'
@@ -78,6 +79,7 @@ function serializeTelefunctionResult(runContext: {
   const useChannelPump = runContext.streamTransport === STREAM_TRANSPORT.CHANNEL
   const streamingValues: StreamingValueServer[] = []
   let nextStreamingIndex = 0
+  let flowId: string | undefined
   const { valueShields } = runContext
   const shieldCtx = {
     telefunctionName: runContext.telefunctionName,
@@ -103,8 +105,10 @@ function serializeTelefunctionResult(runContext: {
     }
     const index = nextStreamingIndex++
     streamingValues.push({ createProducer, index })
+    // A lone stream's reader is the body itself. Off on Workers: waking one request from another isn't proven there.
+    if (index > 0 && !isCloudflareWorkers()) flowId ??= crypto.randomUUID()
     return {
-      metadata: { __index: index },
+      metadata: flowId ? { __index: index, flowId } : { __index: index },
       // Inline streaming lifecycle is managed by the HTTP body stream.
       close() {},
       abort() {},
@@ -175,6 +179,7 @@ function serializeTelefunctionResult(runContext: {
       onComplete: onStreamComplete,
       encodeFrame,
       useNodeStream: runContext.useNodeStream,
+      flowId,
     }),
     streamTransport: runContext.streamTransport,
   }

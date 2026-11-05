@@ -13,6 +13,8 @@ import {
   onDownloadWrapBlob,
   onDownloadProgressKnownSize,
   onDownloadProgressUnknownSize,
+  onDownloadNobodyReads,
+  onDownloadFailsWhenTold,
   onDownloadFileBinary,
   onDownloadFileLarge,
   onDownloadFileEmpty,
@@ -308,6 +310,24 @@ function FileDownload() {
       >
         download → onProgress (no size)
       </button>
+
+      {/* downloads the page holds without reading */}
+      {[
+        { id: 'test-nobody-reads', start: onDownloadNobodyReads },
+        { id: 'test-fails-when-told', start: onDownloadFailsWhenTold },
+      ].map(({ id, start }) => (
+        <button
+          key={id}
+          id={id}
+          onClick={async () => {
+            const held = await start()
+            ;(window as any).heldDownload = held.dl
+            setResult(JSON.stringify({ id: held.id }))
+          }}
+        >
+          {id}
+        </button>
+      ))}
 
       {/* cancel mid-download — result updates live, then settles with rejection */}
       <button

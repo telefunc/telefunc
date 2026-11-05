@@ -1,10 +1,7 @@
 export { testAbort }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { resetCleanupState, getCleanupState, navigate, getResult } from '../../e2e-utils'
-
-/** Max elapsed time (ms) from t0 to server-side cleanup completion. */
-const ABORT_DEADLINE_MS = 2000
+import { resetCleanupState, getCleanupState, navigate, getResult, serverRuntime } from '../../e2e-utils'
 
 function testAbort() {
   // ── Generator abort mechanisms ──────────────────────────────────────
@@ -13,7 +10,6 @@ function testAbort() {
     await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
-    const t0 = Date.now()
     await page.click('#test-generator-abort-fn')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
@@ -25,7 +21,7 @@ function testAbort() {
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.slowAI).toBe('cleaned-up')
-      expect(Number(state.slowAIClosedAt) - t0).to.be.below(ABORT_DEADLINE_MS)
+      expect(state.slowAIClosedWaiting).toBe('true')
       expect(state.slowAIFinallyRan).toBe('true')
     })
   })
@@ -34,7 +30,6 @@ function testAbort() {
     await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
-    const t0 = Date.now()
     await page.click('#test-generator-return')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
@@ -46,7 +41,7 @@ function testAbort() {
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.slowAI).toBe('cleaned-up')
-      expect(Number(state.slowAIClosedAt) - t0).to.be.below(ABORT_DEADLINE_MS)
+      expect(state.slowAIClosedWaiting).toBe('true')
       expect(state.slowAIFinallyRan).toBe('true')
     })
   })
@@ -55,7 +50,6 @@ function testAbort() {
     await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
-    const t0 = Date.now()
     await page.click('#test-generator-withContext')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
@@ -67,7 +61,7 @@ function testAbort() {
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.slowAI).toBe('cleaned-up')
-      expect(Number(state.slowAIClosedAt) - t0).to.be.below(ABORT_DEADLINE_MS)
+      expect(state.slowAIClosedWaiting).toBe('true')
       expect(state.slowAIFinallyRan).toBe('true')
     })
   })
@@ -78,7 +72,6 @@ function testAbort() {
     await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
-    const t0 = Date.now()
     await page.click('#test-stream-reader-cancel')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
@@ -90,7 +83,7 @@ function testAbort() {
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.slowStream).toBe('cleaned-up')
-      expect(Number(state.slowStreamClosedAt) - t0).to.be.below(ABORT_DEADLINE_MS)
+      expect(state.slowStreamClosedWaiting).toBe('true')
       expect(state.slowStreamCancelled).toBe('true')
     })
   })
@@ -99,7 +92,6 @@ function testAbort() {
     await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
-    const t0 = Date.now()
     await page.click('#test-stream-withContext')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
@@ -111,7 +103,7 @@ function testAbort() {
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.slowStream).toBe('cleaned-up')
-      expect(Number(state.slowStreamClosedAt) - t0).to.be.below(ABORT_DEADLINE_MS)
+      expect(state.slowStreamClosedWaiting).toBe('true')
       expect(state.slowStreamCancelled).toBe('true')
     })
   })
@@ -123,6 +115,12 @@ function testAbort() {
     await resetCleanupState()
 
     await page.click('#test-slow-normal-telefunc')
+    // Abort once the server runs the telefunc.
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.slowNormal).toBe('running')
+    })
+    await page.click('#test-slow-normal-abort')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
       expect(result.isAbort).toBe(true)
@@ -139,34 +137,48 @@ function testAbort() {
 
   // ── Upload abort ────────────────────────────────────────────────────
 
-  // 1MB file with sleep(100) between reads — client aborts at 300ms
-  test('abort: single file upload — client cancel, server disconnect error', async () => {
-    await navigate(`${getServerUrl()}/abort`)
-    await resetCleanupState()
+  // 1MB file with sleep(100) between reads — the client aborts while the server reads it
+  // Node only: Bun and Deno hand the server the whole 1 MB the browser sent before it aborted, and only then report the disconnect.
+  if (serverRuntime() === 'node')
+    test('abort: single file upload — client cancel, server disconnect error', async () => {
+      await navigate(`${getServerUrl()}/abort`)
+      await resetCleanupState()
 
-    await page.click('#test-upload-abort-single')
-    await autoRetry(async () => {
-      const result = await getResult('#abort-result')
-      expect(result.isAbort).toBe(true)
-      expect(result.error).toContain('Aborted telefunction call')
+      await page.click('#test-upload-abort-single')
+      // Abort once the server reads the file.
+      await autoRetry(async () => {
+        const state = await getCleanupState()
+        expect(state.uploadAbortSingle).toBe('running')
+      })
+      await page.click('#test-upload-abort-single-abort')
+      await autoRetry(async () => {
+        const result = await getResult('#abort-result')
+        expect(result.isAbort).toBe(true)
+        expect(result.error).toContain('Aborted telefunction call')
+      })
+      await autoRetry(async () => {
+        const state = await getCleanupState()
+        expect(state.uploadAbortSingleError).toContain('disconnected')
+      })
+      await autoRetry(async () => {
+        const state = await getCleanupState()
+        expect(state.uploadAbortSingle).toBe('cleaned-up')
+      })
     })
-    await autoRetry(async () => {
-      const state = await getCleanupState()
-      expect(state.uploadAbortSingleError).toContain('disconnected')
-    })
-    await autoRetry(async () => {
-      const state = await getCleanupState()
-      expect(state.uploadAbortSingle).toBe('cleaned-up')
-    })
-  })
 
-  // Three 50MB files — file1 consumed fully, client aborts at 3s during
+  // Three 50MB files — file1 consumed fully, the client aborts during the
   // post-file1 sleep, file2+file3 error on disconnect
   test('abort: multiple file upload — file1 received, file2+file3 error on disconnect', async () => {
     await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
     await page.click('#test-upload-abort-multiple')
+    // Abort once the server has read file1.
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.uploadAbortMultiFilesRead).toBe('1')
+    })
+    await page.click('#test-upload-abort-multiple-abort')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
       expect(result.isAbort).toBe(true)

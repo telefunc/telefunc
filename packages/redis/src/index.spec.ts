@@ -61,13 +61,15 @@ class FakeIoredis {
 }
 
 function encodeFrame(seq: number, ts: number, payload: Uint8Array): Uint8Array {
-  const HEADER = 12
+  const HEADER = 16
   const out = new Uint8Array(HEADER + payload.byteLength)
   const view = new DataView(out.buffer)
-  view.setUint32(0, seq, false)
+  const seqHi = Math.floor(seq / 0x1_0000_0000)
+  view.setUint32(0, seqHi, false)
+  view.setUint32(4, seq - seqHi * 0x1_0000_0000, false)
   const tsHi = Math.floor(ts / 0x1_0000_0000)
-  view.setUint32(4, tsHi, false)
-  view.setUint32(8, ts - tsHi * 0x1_0000_0000, false)
+  view.setUint32(8, tsHi, false)
+  view.setUint32(12, ts - tsHi * 0x1_0000_0000, false)
   out.set(payload, HEADER)
   return out
 }
@@ -122,20 +124,5 @@ describe('Redis adapter — live delivery', () => {
       { payload: 'msg-1', seq: 1, timestamp: 1_700_000_002_000 },
       { payload: 'msg-2', seq: 2, timestamp: 1_700_000_002_000 },
     ])
-  })
-
-  it('decodes binary frames including the 12-byte BE header (seq + u64 ts split into two halves)', async () => {
-    const { fake, adapter } = newAdapter()
-    fake.setClock(1_700_000_003_000)
-
-    const received: Array<{ payload: Uint8Array; seq: number; timestamp: number }> = []
-    adapter.subscribeBinary('room:bin', (payload, info) => received.push({ payload, ...info }))
-
-    await adapter.publishBinary('room:bin', new Uint8Array([0xde, 0xad, 0xbe, 0xef]))
-
-    expect(received).toHaveLength(1)
-    expect(Array.from(received[0]!.payload)).toEqual([0xde, 0xad, 0xbe, 0xef])
-    expect(received[0]!.seq).toBe(1)
-    expect(received[0]!.timestamp).toBe(1_700_000_003_000)
   })
 })

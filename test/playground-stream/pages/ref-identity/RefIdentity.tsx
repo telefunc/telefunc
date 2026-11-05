@@ -1,6 +1,6 @@
 export { RefIdentity }
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { onRefIdentity } from './RefIdentity.telefunc'
 
 type State = {
@@ -19,6 +19,8 @@ function RefIdentity() {
   const [state, setState] = useState<State>({ identity: null, chunks: [], received: [], pongs: [] })
   const [hydrated, setHydrated] = useState(false)
   useEffect(() => setHydrated(true), [])
+  // A channel or broadcast the page drops closes once garbage-collected.
+  const resultRef = useRef<Awaited<ReturnType<typeof onRefIdentity>> | null>(null)
 
   return (
     <div id={hydrated ? 'hydrated' : undefined}>
@@ -28,6 +30,7 @@ function RefIdentity() {
         id="test-ref-identity"
         onClick={async () => {
           const result = await onRefIdentity()
+          resultRef.current = result
           const { room, roomDupe, list, ch, chDupe, gen, genDupe } = result
 
           const identity = {
