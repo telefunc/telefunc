@@ -58,7 +58,6 @@ function setupDockerRun(command = 'pnpm test:docker', additionalTimeout = 0): bo
         t.includes('The user aborted a request') ||
         t.includes('Telefunc call cancelled') ||
         t.includes('ERR_INTERNET_DISCONNECTED') ||
-        t.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
         // Expected during the docker reconnect test — `restartProxy()` deliberately kills
         // Caddy at the TCP layer; the browser sees these while it retries reconnecting.
         t.includes('ERR_CONNECTION_CLOSED') ||
