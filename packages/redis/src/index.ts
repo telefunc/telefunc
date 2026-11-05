@@ -107,13 +107,16 @@ class RedisTransport implements BroadcastTransport {
   private subscribe(channel: string): void {
     const ack = this.subscriber.subscribe(channel)
     this.subscribing.set(channel, { ack, order: ++this.subscribesSent })
-    ack.then(
-      () => this.onSubscribeSettled(channel, ack, null),
-      (err: unknown) => this.onSubscribeSettled(channel, ack, { err }),
-    )
+    void this.settleSubscribe(channel, ack)
   }
 
-  private onSubscribeSettled(channel: string, ack: Promise<unknown>, failure: { err: unknown } | null): void {
+  private async settleSubscribe(channel: string, ack: Promise<unknown>): Promise<void> {
+    let failure: { err: unknown } | null = null
+    try {
+      await ack
+    } catch (err) {
+      failure = { err }
+    }
     const subscription = this.subscribing.get(channel)
     // Its listener was removed meanwhile, or removed and added again with a SUBSCRIBE of its own.
     if (subscription?.ack !== ack) return
