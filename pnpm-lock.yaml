@@ -515,6 +515,19 @@ importers:
         specifier: ^4.157.0
         version: 4.157.0(@cloudflare/workers-types@4.20260615.1)(@types/node@24.0.10)
 
+  test/cloudflare-serve:
+    dependencies:
+      '@telefunc/room':
+        specifier: workspace:*
+        version: link:../../packages/room
+      telefunc:
+        specifier: link:../../packages/telefunc
+        version: link:../../packages/telefunc
+    devDependencies:
+      wrangler:
+        specifier: ^4.157.0
+        version: 4.157.0(@cloudflare/workers-types@4.20260615.1)(@types/node@24.0.10)
+
   test/playground:
     dependencies:
       '@types/react':

@@ -2,6 +2,7 @@ export { MemoryPubSub }
 export type { MemoryAttemptOwner, Subscribers }
 
 import { Fifo } from '../../../utils/Fifo.js'
+import { isCloudflareWorkers } from '../../../utils/isCloudflareWorkers.js'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 import { ChannelOverflowError } from '../../channel/channelErrors.js'
@@ -22,6 +23,10 @@ type MemorySubscription = {
   receiver: BackendReceiver
   owner?: MemoryAttemptOwner
 }
+
+/** A Worker's timers die with the request that set them, so what waits for a turn would wait for good. There deliveries
+ *  go on, and the runtime's own limits are what end a listener that never stops answering. */
+const TURNS_OUTLIVE_REQUESTS = !isCloudflareWorkers()
 
 /** Deliveries in seq order: a publish made inside one is delivered after it. */
 class MemoryDeliveries {
@@ -71,7 +76,11 @@ class MemoryDeliveries {
    *  starve the event loop. */
   readonly drain = (): void => {
     this.holding = false
-    for (let waiting = this.queue.length; waiting > 0; waiting--) {
+    for (
+      let waiting = TURNS_OUTLIVE_REQUESTS ? this.queue.length : Infinity;
+      waiting > 0 && this.queue.length > 0;
+      waiting--
+    ) {
       const delivery = this.queue.shift()!
       this.delivering = true
       // What throws here is a bug, reported: it stops neither the queue behind it nor the publishes waiting on it.
@@ -102,7 +111,7 @@ class MemoryPubSub {
   private waitingBytes = 0
 
   constructor({ operationsBetweenTurns }: MemoryPubSubOptions) {
-    this.operationsBetweenTurns = operationsBetweenTurns
+    this.operationsBetweenTurns = TURNS_OUTLIVE_REQUESTS ? operationsBetweenTurns : Infinity
   }
 
   subscribe(subscription: MemorySubscription): DriverAttempt {
