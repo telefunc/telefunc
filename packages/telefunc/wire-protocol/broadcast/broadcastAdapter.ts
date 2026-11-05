@@ -12,6 +12,7 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { afterEventLoopTurn } from '../../utils/afterEventLoopTurn.js'
+import { isCloudflareWorkers } from '../../utils/isCloudflareWorkers.js'
 import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { ChannelOverflowError } from '../channel/channelErrors.js'
@@ -176,8 +177,9 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     if (this.delivering || this.holdingPublishes || this.queued.length > 0) {
       return this.queueInMemory(subs, key, data, timestamp)
     }
-    // A loop delivered at once holds nothing, and only a publish left waiting ends a chain of microtasks.
-    if (++this.publishesSinceTurn === PUBLISHES_BETWEEN_TURNS) {
+    // A loop delivered at once holds nothing, and only a publish left waiting ends a chain of microtasks. A Worker has
+    // no process to starve, its CPU limit ending the request, and its timer would die with that request.
+    if (++this.publishesSinceTurn === PUBLISHES_BETWEEN_TURNS && !isCloudflareWorkers()) {
       queueMicrotask(this.holdPublishes)
       // Now: a producer's next turn, which it schedules once its loop ends, finds the hold over.
       afterEventLoopTurn(this.drainQueued)
@@ -253,15 +255,17 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   }
 
   /** Delivers what waits now, whatever its size. What its listeners publish waits for the next turn, so a listener
-   *  answering itself can't starve the event loop. */
+   *  answering itself can't starve the event loop; on a Worker, whose timer would die with its request, it goes now. */
   private readonly drainQueued = (): void => {
     this.holdingPublishes = false
-    for (let waiting = this.queued.length; waiting > 0; waiting--) {
-      const deliver = this.queued.shift()!
-      this.delivering = true
-      deliver()
-      this.delivering = false
-    }
+    do {
+      for (let waiting = this.queued.length; waiting > 0; waiting--) {
+        const deliver = this.queued.shift()!
+        this.delivering = true
+        deliver()
+        this.delivering = false
+      }
+    } while (this.queued.length > 0 && isCloudflareWorkers())
     if (this.queued.length > 0) afterEventLoopTurn(this.drainQueued)
   }
 
