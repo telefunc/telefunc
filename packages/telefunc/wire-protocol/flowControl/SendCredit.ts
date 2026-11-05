@@ -156,11 +156,14 @@ class SendCredit {
     const release = ++this.releases
     waiter.resolve()
     if (waiters.length === 0) return
-    void macrotaskYield.yield().then(() => {
-      if (!this.released || this.releases !== release) return
-      this.released = false
-      this.tryWakeCreditWaiters()
-    })
+    void this.passTurnOn(release)
+  }
+
+  private async passTurnOn(release: number): Promise<void> {
+    await macrotaskYield.yield()
+    if (!this.released || this.releases !== release) return
+    this.released = false
+    this.tryWakeCreditWaiters()
   }
 
   private waitForCredit(): Promise<void> {
