@@ -8,8 +8,6 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   run(cmd, {
     serverIsReadyMessage: (log) => log.includes('Local:') && log.includes(port),
     serverUrl,
-    // On HTTP/1.1, the SSE transport's streaming upload is refused, and it falls back to plain requests.
-    tolerateError: (log) => log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED'),
   })
 
   test('Two tabs join the room, see each other and exchange a message', async () => {

@@ -67,7 +67,6 @@ function runPlayground(
         log.logText.includes('The user aborted a request') ||
         log.logText.includes('Telefunc call cancelled') ||
         log.logText.includes('ERR_INTERNET_DISCONNECTED') ||
-        log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
         // A test dropped an SSE stream's connection (wire-sockets.ts).
         log.logText.includes('ERR_INCOMPLETE_CHUNKED_ENCODING') ||
         log.logText.includes('Failed to load resource: the server responded with a status of 403') ||
