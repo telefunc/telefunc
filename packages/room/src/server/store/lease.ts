@@ -201,26 +201,33 @@ async function reapLapsedLeases(room: RoomIncarnation): Promise<void> {
 
 /** False once none of the leases read had lapsed. */
 async function reapLeases(room: RoomIncarnation, { cells, now }: CellsAt): Promise<boolean> {
+  const lapsed = Array.from(cells.keys()).filter((key) => decodeLeaseRecord(cells.get(key)!).until < now)
   const cleaner = crypto.randomUUID()
-  let lapsed = false
-  for (const [key, raw] of cells) {
-    if (decodeLeaseRecord(raw).until >= now) continue
-    lapsed = true
-    const { value: claimed } = await mutateCells(room.id, room.inc, [key], (current, at) => {
-      const latest = current.get(key)
-      if (latest === undefined || decodeLeaseRecord(latest).until >= at) return { value: false, mutations: [] }
-      return { value: true, mutations: [{ key, bytes: leaseRecordBytes(at, cleaner) }] }
-    })
-    if (claimed) await cleanLease(room, key.slice(LEASE_CELL_PREFIX.length), cleaner)
-  }
-  return lapsed
+  await eachInFlight(lapsed, (key) => reapLease(room, key, cleaner))
+  return lapsed.length > 0
+}
+
+async function reapLease(room: RoomIncarnation, key: string, cleaner: string): Promise<void> {
+  const { value: claimed } = await mutateCells(room.id, room.inc, [key], (current, at) => {
+    const latest = current.get(key)
+    if (latest === undefined || decodeLeaseRecord(latest).until >= at) return { value: false, mutations: [] }
+    return { value: true, mutations: [{ key, bytes: leaseRecordBytes(at, cleaner) }] }
+  })
+  if (claimed) await cleanLease(room, key.slice(LEASE_CELL_PREFIX.length), cleaner)
+}
+
+async function evictLeaseMembers(room: RoomIncarnation, lease: string): Promise<void> {
+  const marks = await readPrefix(room.id, room.inc, leaseMemberCellPrefix(lease))
+  await eachInFlight(marks.keys(), (key) => evictMember(room, memberIdOfLeaseMemberKey(key), { type: 'disconnected' }))
+}
+
+async function removeLeaseViews(room: RoomIncarnation, lease: string): Promise<void> {
+  const views = await readPrefix(room.id, room.inc, leaseViewCellPrefix(lease))
+  await eachInFlight(views.keys(), (key) => removeView(room, key))
 }
 
 async function cleanLease(room: RoomIncarnation, lease: string, cleaner: string): Promise<void> {
-  const marks = await readPrefix(room.id, room.inc, leaseMemberCellPrefix(lease))
-  await eachInFlight(marks.keys(), (key) => evictMember(room, memberIdOfLeaseMemberKey(key), { type: 'disconnected' }))
-  const views = await readPrefix(room.id, room.inc, leaseViewCellPrefix(lease))
-  await eachInFlight(views.keys(), (key) => removeView(room, key))
+  await Promise.all([evictLeaseMembers(room, lease), removeLeaseViews(room, lease)])
   const key = leaseCellKey(lease)
   await mutateCells(room.id, room.inc, [key], (cells) => {
     const raw = cells.get(key)
