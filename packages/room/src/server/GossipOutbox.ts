@@ -74,10 +74,7 @@ class GossipOutbox {
     while (this.inFlight < ROOM_GOSSIP_IN_FLIGHT_MAX && (this.waiting.length > 0 || this.renewing)) {
       if (slice.over) {
         this.yielding = true
-        void slice.next().then(() => {
-          this.yielding = false
-          this.send()
-        })
+        void this.sendNextTurn(slice)
         return
       }
       this.renewing = false
@@ -85,15 +82,26 @@ class GossipOutbox {
       while (wants.length < ROOM_DEMAND_PAGE_ENTRIES && this.waiting.length > 0) wants.push(this.waiting.shift()!)
       const page: RoomDemandPage = { __r: 'demand', instance: this.instance, page: ++this.pages, wants }
       this.inFlight++
-      // A stale commit is a closed room's: its gossip has no reader.
-      void getRoomPlane()
-        .commitLane({ roomId: this.room.id, inc: this.room.inc, lane: DEMAND_LANE }, encodeDemandPage(page))
-        .catch(reportRoomError)
-        .finally(() => {
-          this.inFlight--
-          this.send()
-        })
+      void this.sendPage(page)
     }
     if (this.inFlight === 0) this.slice = null
+  }
+
+  private async sendNextTurn(slice: Slice): Promise<void> {
+    await slice.next()
+    this.yielding = false
+    this.send()
+  }
+
+  private async sendPage(page: RoomDemandPage): Promise<void> {
+    const lane = { roomId: this.room.id, inc: this.room.inc, lane: DEMAND_LANE }
+    try {
+      // A stale commit is a closed room's: its gossip has no reader.
+      await getRoomPlane().commitLane(lane, encodeDemandPage(page))
+    } catch (error) {
+      reportRoomError(error)
+    }
+    this.inFlight--
+    this.send()
   }
 }

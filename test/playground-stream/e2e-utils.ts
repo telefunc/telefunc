@@ -29,6 +29,7 @@ export {
   snapshotRedis,
   rewindRedis,
   moveRedisSlot,
+  retryOnNetworkChange,
   countConnections,
   serverRuntime,
   setServerRuntime,
@@ -36,7 +37,7 @@ export {
 }
 
 import { page, getServerUrl } from '@brillout/test-e2e'
-import type { Response, WebSocket } from 'playwright-chromium'
+import type { Request, Response, WebSocket } from 'playwright-chromium'
 import type { BackendFault } from './failing-backend'
 import { execSync } from 'node:child_process'
 import { dirname } from 'node:path'
@@ -281,6 +282,30 @@ async function navigate(url: string, options?: Parameters<typeof page.goto>[1], 
 const NAVIGATE_ATTEMPTS = 4
 const HYDRATION_TIMEOUT = 5_000
 const NAVIGATE_RETRY_DELAY = 500
+
+/**
+ * Runs `attempt` again, as `navigate()` does a navigation, if the runner's network changes under one of the page's
+ * requests. Docker's last interfaces settle about two seconds after the stack starts, and Chromium then fails what is in
+ * flight with `ERR_NETWORK_CHANGED`, so a page call made at that moment never answers. `attempt` stops waiting for its
+ * answer once `cut()` is true.
+ */
+async function retryOnNetworkChange(attempt: (cut: () => boolean) => Promise<void>) {
+  for (let left = NAVIGATE_ATTEMPTS; left > 0; left--) {
+    let cut = false
+    const onFailed = (request: Request) => {
+      if (request.failure()?.errorText === 'net::ERR_NETWORK_CHANGED') cut = true
+    }
+    page.on('requestfailed', onFailed)
+    try {
+      await attempt(() => cut)
+    } finally {
+      page.off('requestfailed', onFailed)
+    }
+    if (!cut) return
+    await sleep(NAVIGATE_RETRY_DELAY)
+  }
+  throw new Error(`The network changed under each of ${NAVIGATE_ATTEMPTS} attempts`)
+}
 
 // Transient errors Chromium-in-Docker surfaces when the bridge interface state shifts. Mirrors
 // the connection-family errors `.testRun-docker.ts`'s `tolerateError()` already allows in logs.

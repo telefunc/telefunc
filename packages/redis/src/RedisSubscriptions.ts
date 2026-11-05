@@ -251,21 +251,23 @@ class RedisSubscriptions {
   private syncChannels(): void {
     if (this.syncQueued) return
     this.syncQueued = true
-    this.syncing = this.syncing.then(async () => {
-      this.syncQueued = false
-      const connection = this.socket
-      if (connection.phase !== 'connected') return
-      try {
-        await this.syncChannelsOnce(connection)
-      } catch (error) {
-        // A failed (UN)SUBSCRIBE leaves the channel set unknown: start over on a fresh connection.
-        return this.lost(connection.id, error)
-      }
-      // Recovered once the channels are subscribed, not when the socket connects:
-      // a refused SUBSCRIBE keeps backing off.
-      this.reconnectDelay = RECONNECT_DELAY_MIN_MS
-      this.outageReported = false
-    })
+    this.syncing = this.syncing.then(() => this.syncQueuedChannels())
+  }
+
+  private async syncQueuedChannels(): Promise<void> {
+    this.syncQueued = false
+    const connection = this.socket
+    if (connection.phase !== 'connected') return
+    try {
+      await this.syncChannelsOnce(connection)
+    } catch (error) {
+      // A failed (UN)SUBSCRIBE leaves the channel set unknown: start over on a fresh connection.
+      return this.lost(connection.id, error)
+    }
+    // Recovered once the channels are subscribed, not when the socket connects:
+    // a refused SUBSCRIBE keeps backing off.
+    this.reconnectDelay = RECONNECT_DELAY_MIN_MS
+    this.outageReported = false
   }
 
   private async syncChannelsOnce({ id, socket, subscribed }: Connected): Promise<void> {

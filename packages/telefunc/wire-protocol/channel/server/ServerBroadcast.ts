@@ -422,16 +422,19 @@ class RouteSubscription<Kind extends BroadcastKind> {
     let wasReady = subscription.state() === 'ready'
     // Only a terminal end rejects `ready`, after the shared subscriptions retired and reported the subscription; an
     // unsubscribe resolves it.
-    const ended = () =>
-      void subscription.ready.catch(() => {
+    const ended = async () => {
+      try {
+        await subscription.ready
+      } catch {
         if (this.current !== subscription) return
         this.current = null
         if (!replacing || wasReady) this.subscribe(true)
-      })
-    if (subscription.state() === 'closed') return ended()
+      }
+    }
+    if (subscription.state() === 'closed') return void ended()
     subscription.onStateChange((state) => {
       if (state === 'ready') wasReady = true
-      else if (state === 'closed') ended()
+      else if (state === 'closed') void ended()
     })
   }
 }

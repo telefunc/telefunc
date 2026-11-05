@@ -90,15 +90,18 @@ class LaneSubscription {
     let wasReady = subscription.state() === 'ready'
     if (wasReady) this.settleReady()
     let lostAfterReady = false
-    void subscription.ready.then(
-      () => {
-        if (this.subscription === subscription && subscription.state() === 'ready') {
-          wasReady = true
-          this.settleReady()
-        }
-      },
-      () => {}, // an end is handled once, on `closed`
-    )
+    const settleOnReady = async () => {
+      try {
+        await subscription.ready
+      } catch {
+        return // an end is handled once, on `closed`
+      }
+      if (this.subscription === subscription && subscription.state() === 'ready') {
+        wasReady = true
+        this.settleReady()
+      }
+    }
+    void settleOnReady()
     // Every reassignment of `subscription` unobserves first, so this listener only hears the current one.
     this.unobserve = subscription.onStateChange((state) => {
       if (state === 'lost') {

@@ -187,10 +187,16 @@ class AuthoritySync {
 
   /** One roster refresh at a time; concurrent callers join it. */
   refreshMembers(): Promise<void> {
-    this.pendingRefresh ??= this.runMemberRefresh().finally(() => {
-      this.pendingRefresh = null
-    })
+    this.pendingRefresh ??= this.refreshOnce()
     return this.pendingRefresh
+  }
+
+  private async refreshOnce(): Promise<void> {
+    try {
+      await this.runMemberRefresh()
+    } finally {
+      this.pendingRefresh = null
+    }
   }
 
   /** Whether frames the current control subscription will deliver are still in flight past Room's horizon, behind

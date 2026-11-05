@@ -532,12 +532,13 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     if (!this.connected || this.ttl || !this.gate.idle || !this.channels.idle) {
       return
     }
-    const ttl = setTimeout(() => {
-      void this.transport.drained().then(() => {
-        if (this.ttl === ttl && this.channels.idle) this.dispose()
-      })
-    }, this.idleTimeoutMs)
+    const ttl = setTimeout(() => void this.disposeOnceDrained(ttl), this.idleTimeoutMs)
     this.ttl = ttl
+  }
+
+  private async disposeOnceDrained(ttl: ReturnType<typeof setTimeout>): Promise<void> {
+    await this.transport.drained()
+    if (this.ttl === ttl && this.channels.idle) this.dispose()
   }
 
   private dispose(): void {

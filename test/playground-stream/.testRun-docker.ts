@@ -65,6 +65,8 @@ function setupDockerRun(command = 'pnpm test:docker', additionalTimeout = 0): bo
         t.includes('ERR_CONNECTION_RESET') ||
         t.includes('ERR_CONNECTION_REFUSED') ||
         t.includes('ERR_NETWORK_CHANGED') ||
+        // The page call `ERR_NETWORK_CHANGED` failed, which `retryOnNetworkChange()` makes again.
+        t.includes('ConnectionError: No Server Connection') ||
         t.includes('ERR_SSL_PROTOCOL_ERROR') ||
         // Chromium-in-Docker `NetworkChangeNotifier` aborts in-flight asset fetches on the
         // bridge interface state shift; the dynamic-import wrapper then reports this. The

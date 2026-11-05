@@ -150,11 +150,12 @@ class PendingDmReplies {
   }
 }
 
-function roomResult(work: Promise<unknown>): Promise<RoomResult> {
-  return work.then(
-    (value): RoomResult => ({ ok: true, value }),
-    (err: unknown) => toRoomFailure(err, reportRoomError, ROOM_BUG_MESSAGE),
-  )
+async function roomResult(work: Promise<unknown>): Promise<RoomResult> {
+  try {
+    return { ok: true, value: await work }
+  } catch (err) {
+    return toRoomFailure(err, reportRoomError, ROOM_BUG_MESSAGE)
+  }
 }
 
 /** Runs a stub's handling of what its page sent: a malformed message ends the page's wire and fails its request. */
@@ -483,11 +484,12 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
 
   /** A closing stub's close waits for the reply, as for the replies a participant stub forwards. */
   private awaitDmReply(ackId: string, sender: string): void {
-    void this.end
-      .trackAck(
-        this.dmReplies.await(ackId).then((reply) => reply && this.room.writes.publishDmAck(sender, ackId, reply)),
-      )
-      .catch(reportRoomError)
+    void this.end.trackAck(this.publishDmReply(ackId, sender)).catch(reportRoomError)
+  }
+
+  private async publishDmReply(ackId: string, sender: string): Promise<void> {
+    const reply = await this.dmReplies.await(ackId)
+    if (reply) await this.room.writes.publishDmAck(sender, ackId, reply)
   }
 
   // Tail

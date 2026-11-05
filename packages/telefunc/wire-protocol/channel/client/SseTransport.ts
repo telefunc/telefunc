@@ -345,12 +345,15 @@ class SseTransport implements UpgradeSource {
   }
 
   /** The server acknowledged the upload: what it was written is confirmed. */
-  private confirmUpload({ body, ended }: StreamUpload, abortController: AbortController): void {
+  private confirmUpload(upload: StreamUpload, abortController: AbortController): void {
     if (this.streamRequest.tag === 'active') this.streamRequest.unconfirmed = null
-    // Ended while its body is still ours: nothing written to it reaches the server any more, so this wire ends.
-    void ended.then(() => {
-      if (this.streamRequest.tag === 'active' && this.streamRequest.body === body) abortController.abort()
-    })
+    void this.endWireWithUpload(upload, abortController)
+  }
+
+  /** Ended while its body is still ours: nothing written to it reaches the server any more, so this wire ends. */
+  private async endWireWithUpload({ body, ended }: StreamUpload, abortController: AbortController): Promise<void> {
+    await ended
+    if (this.streamRequest.tag === 'active' && this.streamRequest.body === body) abortController.abort()
   }
 
   /** The upload went unacknowledged: frames go in batch POSTs from now on. */

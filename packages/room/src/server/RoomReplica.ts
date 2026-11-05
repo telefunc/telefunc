@@ -233,7 +233,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
 
   /** The stub's client attached: it gets the roster, the room's meta and the demand for the members it holds. */
   onStubAttached(stub: RoomStub): void {
-    this.roster.sendTo(stub, this.authority.ensureRoster())
+    void this.roster.sendTo(stub, this.authority.ensureRoster())
     stub.relayEvent({ __r: 'update', seq: this.model.metaSeq, meta: this.model.metaEntries() })
     for (const member of stub.heldMembers()) {
       stub.relayEvent({ __r: 'demand-state', member, tracks: this.incomingDemand.wanted(member) })
@@ -244,7 +244,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   detachStub(handle: RoomHandle, stub: RoomStub): void {
     this.reconsider(handle)
     this.stubs.delete(stub)
-    this.hosting.dropView(stub)
+    void this.hosting.dropView(stub)
     this.roster.forget(stub)
     this.lanePlan.holderGone(stub)
   }
@@ -385,17 +385,19 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
             member !== EVERY_MEMBER ? { member } : track !== EVERY_TRACK ? { track } : undefined,
           )
     // A frame is admitted by its member and track, so the reads may end in any order.
-    await eachInFlight(lanes, async (lane) => {
-      if (lane.kind !== 'binary' || !holder.wantsBinary(lane.member, lane.track)) return
-      const stored = await plane.readRetained(this.id, this.incarnation.inc, lane)
-      // An unsubscribe during the read leaves nothing to deliver to, and no receipt to keep.
-      if (stored === null || !holder.wantsBinary(lane.member, lane.track)) return
-      if (!this.model.hasMember(lane.member)) return
-      const framed = stored.payload
-      const frame = decodeBinaryFrame(framed)
-      assert(frame)
-      holder.emitRetainedBinary(frame, { seq: stored.seq, timestamp: stored.timestamp }, framed, hold)
-    })
+    await eachInFlight(lanes, (lane) => this.replayRetainedLane(lane, holder, hold))
+  }
+
+  private async replayRetainedLane(lane: LaneId, holder: LaneHolder, hold: ReplayHold): Promise<void> {
+    if (lane.kind !== 'binary' || !holder.wantsBinary(lane.member, lane.track)) return
+    const stored = await getRoomPlane().readRetained(this.id, this.incarnation.inc, lane)
+    // An unsubscribe during the read leaves nothing to deliver to, and no receipt to keep.
+    if (stored === null || !holder.wantsBinary(lane.member, lane.track)) return
+    if (!this.model.hasMember(lane.member)) return
+    const framed = stored.payload
+    const frame = decodeBinaryFrame(framed)
+    assert(frame)
+    holder.emitRetainedBinary(frame, { seq: stored.seq, timestamp: stored.timestamp }, framed, hold)
   }
 
   // What the replica's parts ask of it
@@ -475,9 +477,16 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     if (last === undefined) return
     this.inboxSeqs.set(member, seq)
     if (seq <= last + 1 || !this.acks.waitsOn(member)) return
-    void takeDmReplies(this.id, this.incarnation.inc, member).then((replies) => {
+    void this.settleStoredReplies(member)
+  }
+
+  private async settleStoredReplies(member: string): Promise<void> {
+    try {
+      const replies = await takeDmReplies(this.id, this.incarnation.inc, member)
       for (const [ackId, reply] of replies) this.acks.settle(ackId, reply)
-    }, reportRoomError)
+    } catch (error) {
+      reportRoomError(error)
+    }
   }
 
   private dmAcked(envelope: RoomDmAckEnvelope): void {
