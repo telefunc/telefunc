@@ -30,9 +30,8 @@ type NewSubscriptionWaitOptions = { subscriptions: RedisSubscriptions }
  * connection sent just before it, and our own new subscription would miss it. So a send waits, at most SEND_WAIT_MS,
  * until our subscriptions on its channels were ready once, and a later send of its queue waits behind it. Each budget's
  * waiting payload bytes are bounded by `bufferLimit` (`bufferLimitBinary` for bytes), though one send alone waits
- * whatever its size. While Redis refuses the SUBSCRIBE of one of its channels, a send fails with that refusal rather
- * than go out unseen by our own subscription; a SUBSCRIBE that succeeds, on the reconnect or by a new subscription,
- * ends it.
+ * whatever its size. When a subscription it waits for fails, as Redis refused its SUBSCRIBE, a send fails with that
+ * reason rather than go out unseen by our own subscription; a send made after it has no subscription of ours to miss.
  */
 class NewSubscriptionWait {
   private readonly subscriptions: RedisSubscriptions
@@ -52,14 +51,11 @@ class NewSubscriptionWait {
 
   /** A send's turn, with its own copy of `payload`: the caller reuses its bytes. Null when it has nothing to wait for.
    *  Throws `ChannelOverflowError` when its bytes would take those waiting past its buffer limit; the config is read
-   *  only with others waiting, as resolving it is costly. Throws Redis's refusal while it refuses one of its
-   *  channels. */
+   *  only with others waiting, as resolving it is costly. */
   waitTurn<Payload extends string | Uint8Array>(rule: WaitRule, payload: Payload): WaitingSend<Payload> | null {
     const { queue, channels, budget, bufferLimit } = rule
     let wait = this.waits.get(queue)
     if (wait === undefined && this.subscriptions.subscribingOn(channels).length === 0) return null
-    const refusal = this.subscriptions.refusalOn(channels)
-    if (refusal !== null) throw refusal.error
     // An empty send counts as 1 B, so a flood of them stays bounded.
     const bytes = Math.max(typeof payload === 'string' ? Buffer.byteLength(payload) : payload.byteLength, 1)
     const waiting = this.waitingBytes.get(budget) ?? 0
@@ -75,7 +71,7 @@ class NewSubscriptionWait {
     return { turn: this.turnOf(wait, owned, sent), sent }
   }
 
-  /** The payload, once `wait` is over; a refused wait's send counts as gone. */
+  /** The payload, once `wait` is over; a failed wait's send counts as gone. */
   private async turnOf<Payload>(wait: Wait, owned: Payload, sent: () => void): Promise<Payload> {
     try {
       await wait.ready
@@ -95,15 +91,15 @@ class NewSubscriptionWait {
     else this.waitingBytes.set(budget, left)
   }
 
-  /** A wait for our new subscriptions on `channels`, including ones made meanwhile, that fails on Redis's refusal of
-   *  one; a refused wait leaves its queue at once, so the next send there doesn't join it. */
+  /** A wait for our new subscriptions on `channels`, including ones made meanwhile, that fails when one does; a failed
+   *  wait leaves its queue at once, so the next send there doesn't join it. */
   private openWait(queue: string, channels: readonly string[]): Wait {
     const wait: Wait = { ready: this.whenReady(channels), sends: 0 }
-    void this.leaveOnRefusal(queue, wait)
+    void this.leaveOnFailure(queue, wait)
     return wait
   }
 
-  private async leaveOnRefusal(queue: string, wait: Wait): Promise<void> {
+  private async leaveOnFailure(queue: string, wait: Wait): Promise<void> {
     try {
       await wait.ready
     } catch {
@@ -115,16 +111,10 @@ class NewSubscriptionWait {
     const timeout = createDeferred()
     const timer = setTimeout(timeout.resolve, SEND_WAIT_MS)
     timer.unref()
-    const refused = createDeferred<never>()
-    const stopListening = this.subscriptions.onRefusal(() => {
-      const refusal = this.subscriptions.refusalOn(channels)
-      if (refusal !== null) refused.reject(refusal.error)
-    })
     try {
-      await Promise.race([this.readyOn(channels), timeout.promise, refused.promise])
+      await Promise.race([this.readyOn(channels), timeout.promise])
     } finally {
       clearTimeout(timer)
-      stopListening()
     }
   }
 

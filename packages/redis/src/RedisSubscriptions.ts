@@ -77,9 +77,6 @@ class RedisSubscriptions {
   private readonly unconfirmed = new Set<RedisAttempt>()
   /** Attempts never ready yet, counted down a microtask after: at 0, no send waits for one. */
   private subscribingCount = 0
-  /** The channels whose last SUBSCRIBE Redis refused, with its error, until one succeeds or no attempt needs them. */
-  private readonly refusals = new Map<string, unknown>()
-  private readonly refusalListeners = new Set<() => void>()
   private socket: Connection = { phase: 'idle' }
   private nextId = 0
   private syncing: Promise<void> = Promise.resolve()
@@ -95,7 +92,8 @@ class RedisSubscriptions {
   subscribe(options: RedisAttemptOptions): DriverAttempt {
     const attempt = new RedisAttempt({ ...options, owner: this })
     this.subscribingCount++
-    void attempt.firstReady.then(() => this.subscribingCount--)
+    const settled = () => this.subscribingCount--
+    void attempt.firstReady.then(settled, settled)
     for (const channel of attempt.channels) {
       const attempts = this.byChannel.get(channel)
       if (attempts !== undefined) {
@@ -116,25 +114,13 @@ class RedisSubscriptions {
     return this.subscribingCount > 0
   }
 
-  /** When each of ours on `channels` that was never ready yet is first ready, or ends. */
+  /** When each of ours on `channels` that was never ready yet is first ready, ends or fails. */
   subscribingOn(channels: readonly string[]): Promise<void>[] {
     const pending: Promise<void>[] = []
     for (const channel of channels) {
       for (const attempt of this.byChannel.get(channel) ?? []) if (attempt.subscribing) pending.push(attempt.firstReady)
     }
     return pending
-  }
-
-  /** The error Redis refused a SUBSCRIBE of one of `channels` with, while it stands. */
-  refusalOn(channels: readonly string[]): { error: unknown } | null {
-    for (const channel of channels) if (this.refusals.has(channel)) return { error: this.refusals.get(channel) }
-    return null
-  }
-
-  /** Calls `listener` on each refused SUBSCRIBE; returns its removal. */
-  onRefusal(listener: () => void): () => void {
-    this.refusalListeners.add(listener)
-    return () => this.refusalListeners.delete(listener)
   }
 
   /** Arms a delivery fence on the ready attempts of each channel the commit is published on: `delivery` settles
@@ -174,7 +160,6 @@ class RedisSubscriptions {
       attempts?.delete(attempt)
       if (attempts?.size !== 0) continue
       this.byChannel.delete(channel)
-      this.refusals.delete(channel)
       this.changedChannels.add(channel)
     }
     if (this.byChannel.size > 0) return this.syncChannels()
@@ -261,16 +246,17 @@ class RedisSubscriptions {
     try {
       await this.syncChannelsOnce(connection)
     } catch (error) {
-      // A failed (UN)SUBSCRIBE leaves the channel set unknown: start over on a fresh connection.
+      // The connection dropped, or Redis can't serve it now (`BUSY`, `LOADING`): start over on a fresh one.
       return this.lost(connection.id, error)
     }
-    // Recovered once the channels are subscribed, not when the socket connects:
-    // a refused SUBSCRIBE keeps backing off.
+    // Recovered once the channels are subscribed, not when the socket connects: a SUBSCRIBE Redis can't serve keeps
+    // backing off.
     this.reconnectDelay = RECONNECT_DELAY_MIN_MS
     this.outageReported = false
   }
 
-  private async syncChannelsOnce({ id, socket, subscribed }: Connected): Promise<void> {
+  private async syncChannelsOnce(connection: Connected): Promise<void> {
+    const { id, socket, subscribed } = connection
     const changed = this.changedChannels
     this.changedChannels = new Set()
     const stale: string[] = []
@@ -284,20 +270,27 @@ class RedisSubscriptions {
       for (const channel of stale) subscribed.delete(channel)
       await socket.unsubscribe(...stale)
     }
-    if (missing.length > 0) {
-      try {
-        await socket.subscribe(...missing)
-      } catch (error) {
-        if (this.isCurrent(id) && isRefusal(error)) this.refuse(missing, error)
-        throw error
-      }
+    if (missing.length > 0) await this.subscribeMissing(connection, missing)
+    if (this.isCurrent(id)) await this.confirmCovered(id, subscribed)
+  }
+
+  /** Redis refuses a whole SUBSCRIBE over one channel it denies, leaving the connection as it was: each channel then
+   *  goes alone, so only a denied one's attempts fail. */
+  private async subscribeMissing(connection: Connected, channels: string[]): Promise<void> {
+    const { id, socket, subscribed } = connection
+    try {
+      await socket.subscribe(...channels)
+    } catch (error) {
+      if (!isRefusal(error)) throw error
       if (!this.isCurrent(id)) return
-      for (const channel of missing) {
-        subscribed.add(channel)
-        this.refusals.delete(channel)
+      if (channels.length > 1) {
+        await Promise.all(channels.map((channel) => this.subscribeMissing(connection, [channel])))
+      } else {
+        for (const attempt of [...(this.byChannel.get(channels[0]!) ?? [])]) attempt.fail(error)
       }
+      return
     }
-    await this.confirmCovered(id, subscribed)
+    if (this.isCurrent(id)) for (const channel of channels) subscribed.add(channel)
   }
 
   /** Confirms the attempts `subscribed` covers. An attempt made during a SUBSCRIBE waits for the sync it queued. */
@@ -312,13 +305,6 @@ class RedisSubscriptions {
       }
     }
     await Promise.all(covered.map((attempt) => this.confirm(attempt, id)))
-  }
-
-  /** Redis refused to SUBSCRIBE `channels`: a send waiting for one of ours on them fails with `error` (the reconnect
-   *  tries them again). */
-  private refuse(channels: readonly string[], error: unknown): void {
-    for (const channel of channels) if (this.byChannel.has(channel)) this.refusals.set(channel, error)
-    for (const listener of [...this.refusalListeners]) listener()
   }
 
   /** Its channels are subscribed on a live connection: ready from where each lane stands now, unless its incarnation is
@@ -367,7 +353,7 @@ class RedisAttempt extends DriverAttempt {
   /** The frames that arrived while it awaited confirmation, ordered once it knows where each lane starts. */
   private early: Buffer[] = []
   private readonly firstReadiness = createDeferred()
-  /** Settles on its first ready or its end; never rejects. */
+  /** Settles on its first ready or its end. Rejects if it fails before either, for the sends waiting on it. */
   readonly firstReady: Promise<void> = this.firstReadiness.promise
   private readonly fanIn: boolean
   private readonly broadcast: boolean
@@ -474,6 +460,7 @@ class RedisAttempt extends DriverAttempt {
 
   fail(error: unknown): void {
     if (this.state() === 'closed') return
+    this.firstReadiness.reject(error)
     this.close(error)
     this.transition('closed', error)
   }

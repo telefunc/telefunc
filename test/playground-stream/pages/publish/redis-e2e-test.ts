@@ -10,8 +10,19 @@ function testRedisReconnect() {
     await autoRetry(async () => {
       expect(await getResult('#redis-readiness-result')).deep.equal({ rejected: true, received: ['recovered'] })
     })
-    // The subscriber connection reports the outage the refusal starts.
-    expectLog('NOPERM', { filter: (log) => log.logSource === 'stderr' || log.logSource === 'stdout' })
+  })
+
+  test('broadcast: Redis denies one channel: its listener and publish get the reason, the channels next to it keep delivering', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-redis-channel-denied')
+    await autoRetry(async () => {
+      expect(await getResult('#redis-channel-denied-result')).deep.equal({
+        deniedListenerTold: true,
+        deniedPublishTold: true,
+        upChanges: [],
+        received: ['allowed-fresh: next to it', 'allowed-up: after', 'allowed-up: first'],
+      })
+    })
   })
 
   test('broadcast: binary frames published from one reused buffer while Redis reconnects arrive as published', async () => {

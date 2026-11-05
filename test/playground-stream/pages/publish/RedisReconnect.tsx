@@ -4,11 +4,13 @@ import React, { useRef, useState } from 'react'
 import {
   onBinaryBroadcastAcrossReconnect,
   onBroadcastSubscriberDropped,
+  onRedisChannelDenied,
   onRedisSubscribeFailure,
 } from './RedisReconnect.telefunc'
 
 function RedisReconnect() {
   const [readiness, setReadiness] = useState<unknown>(null)
+  const [channelDenied, setChannelDenied] = useState<unknown>(null)
   const [firstBytes, setFirstBytes] = useState<number[]>([])
   const [dropped, setDropped] = useState<unknown>(null)
   // A broadcast the page drops closes once garbage-collected.
@@ -23,6 +25,14 @@ function RedisReconnect() {
         onClick={async () => setReadiness(await onRedisSubscribeFailure())}
       >
         Fail and restore Redis subscriptions
+      </button>
+      <pre id="redis-channel-denied-result">{JSON.stringify(channelDenied)}</pre>
+      <button
+        type="button"
+        id="test-redis-channel-denied"
+        onClick={async () => setChannelDenied(await onRedisChannelDenied())}
+      >
+        Redis denies one channel next to allowed ones
       </button>
       <h2>Publishes Across a Dropped Subscriber</h2>
       <pre id="redis-subscriber-dropped-result">{JSON.stringify(dropped)}</pre>

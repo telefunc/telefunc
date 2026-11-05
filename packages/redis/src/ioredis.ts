@@ -65,9 +65,9 @@ function isUnreachable(error: unknown): boolean {
   )
 }
 
-/** Redis answered the command with an error (`NOPERM`, `ERR …`), unlike a connection that dropped before it did. */
-function isRefusal(error: unknown): boolean {
-  return error instanceof Error && error.name === 'ReplyError'
+/** Redis denied the command, which stands until an operator changes its ACL; `BUSY`, `LOADING` and the like pass. */
+function isRefusal(error: unknown): error is Error {
+  return error instanceof Error && error.name === 'ReplyError' && error.message.startsWith('NOPERM')
 }
 
 /** A clone of the app's client for the backend's commands: it never resends a command (at-most-once) and reads masters
