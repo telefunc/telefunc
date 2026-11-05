@@ -5,7 +5,7 @@ import { getRoomPlane } from '../../backend/plane.js'
 import type { CellCount, CellCounter, CellMutation, CellsRead } from '../../backend/contract.js'
 import { Slice } from '../../shared/Slice.js'
 import { roomClosedError } from '../../shared/errors.js'
-import { ROOM_MEMBER_WRITES_IN_FLIGHT_MAX } from '../constants.js'
+import { ROOM_BACKEND_CALLS_IN_FLIGHT_MAX } from '../constants.js'
 import { EXCHANGE_CONFLICT, retryCompareExchange } from './retryCompareExchange.js'
 
 // A room's cells, read and written by the incarnation's server code: a read that throws once the incarnation closed, a
@@ -65,7 +65,7 @@ async function readOpenCells(
   return read
 }
 
-/** Runs `task` on each item in turn, `ROOM_MEMBER_WRITES_IN_FLIGHT_MAX` at a time and a `ROOM_PLAN_SLICE_MS` slice per
+/** Runs `task` on each item in turn, `ROOM_BACKEND_CALLS_IN_FLIGHT_MAX` at a time and a `ROOM_PLAN_SLICE_MS` slice per
  *  turn; throws the first failure once every task ran. */
 async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<unknown>): Promise<void> {
   const pending = items[Symbol.iterator]()
@@ -86,7 +86,7 @@ async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<un
       }
     }
   }
-  await Promise.all(Array.from({ length: ROOM_MEMBER_WRITES_IN_FLIGHT_MAX }, worker))
+  await Promise.all(Array.from({ length: ROOM_BACKEND_CALLS_IN_FLIGHT_MAX }, worker))
   if (failure) throw failure.error
 }
 
