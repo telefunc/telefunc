@@ -54,8 +54,7 @@ class RoomHosting {
   /** Renews the lease and evicts again whom it failed to; once the lease was lost, or a view write failed, writes every
    *  stub's view again in one write, after each one's earlier write. */
   async maintain(): Promise<void> {
-    if (!(await renewLease(this.incarnation, this.lease))) this.viewsLost = true
-    await eachInFlight(this.unevicted, (id) => this.evictAgain(id))
+    await Promise.all([this.renewOrMarkViewsLost(), eachInFlight(this.unevicted, (id) => this.evictAgain(id))])
     if (!this.viewsLost) return
     this.viewsLost = false
     const stubs = [...this.views.keys()]
@@ -69,6 +68,10 @@ class RoomHosting {
       ),
     )
     await keys
+  }
+
+  private async renewOrMarkViewsLost(): Promise<void> {
+    if (!(await renewLease(this.incarnation, this.lease))) this.viewsLost = true
   }
 
   private async evictAgain(id: string): Promise<void> {
