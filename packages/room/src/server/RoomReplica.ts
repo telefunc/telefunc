@@ -30,6 +30,7 @@ import { AuthoritySync, type AuthorityChange, type AuthoritySyncOwner } from './
 import { PendingDmAcks } from './PendingDmAcks.js'
 import { reportRoomError } from './reportRoomError.js'
 import { SEMANTIC_LANE, decodeLaneEnvelope, decodeRoomText, withinRoomHorizon } from './lanes/lanes.js'
+import { eachInFlight } from './store/cellStore.js'
 import { dropDmReply, takeDmReplies } from './store/dmReplies.js'
 import { RoomHosting } from './lifecycle/RoomHosting.js'
 import type { StoredRoomMeta } from './store/meta.js'
@@ -383,17 +384,18 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
             this.incarnation.inc,
             member !== EVERY_MEMBER ? { member } : track !== EVERY_TRACK ? { track } : undefined,
           )
-    for (const lane of lanes) {
-      if (lane.kind !== 'binary' || !holder.wantsBinary(lane.member, lane.track)) continue
+    // A frame is admitted by its member and track, so the reads may end in any order.
+    await eachInFlight(lanes, async (lane) => {
+      if (lane.kind !== 'binary' || !holder.wantsBinary(lane.member, lane.track)) return
       const stored = await plane.readRetained(this.id, this.incarnation.inc, lane)
       // An unsubscribe during the read leaves nothing to deliver to, and no receipt to keep.
-      if (stored === null || !holder.wantsBinary(lane.member, lane.track)) continue
-      if (!this.model.hasMember(lane.member)) continue
+      if (stored === null || !holder.wantsBinary(lane.member, lane.track)) return
+      if (!this.model.hasMember(lane.member)) return
       const framed = stored.payload
       const frame = decodeBinaryFrame(framed)
       assert(frame)
       holder.emitRetainedBinary(frame, { seq: stored.seq, timestamp: stored.timestamp }, framed, hold)
-    }
+    })
   }
 
   // What the replica's parts ask of it

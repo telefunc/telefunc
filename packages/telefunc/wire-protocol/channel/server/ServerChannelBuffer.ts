@@ -9,8 +9,6 @@ import type { IndexedPeer } from './IndexedPeer.js'
 /** What a send held in memory (buffered, or awaiting its answer or credit) takes beyond its payload: its callbacks and
  *  promise, about 480 B. */
 const HELD_SEND_OVERHEAD_BYTES = 512
-/** What a buffered publish takes beyond its payload: its slots, about 52 B. */
-const HELD_PUBLISH_OVERHEAD_BYTES = 64
 
 /** Callback pair for buffered entries — resolve on flush, reject on eviction. */
 type EntryCallback = {
@@ -184,14 +182,14 @@ class BufferQueue {
     order: number,
     gap: boolean,
   ): void {
-    const held = this.admit(bytes, callback, gap)
-    if (held !== null) this.append(tag, data, held, callback, order, gap)
+    const counted = this.admit(bytes, callback, gap)
+    if (counted !== null) this.append(tag, data, counted, callback, order, gap)
   }
 
   /** Holds a copy of `data`, made only once the queue admits it. */
   pushCopy(tag: number, data: Uint8Array, callback: EntryCallback, order: number, gap: boolean): void {
-    const held = this.admit(data.byteLength, callback, gap)
-    if (held !== null) this.append(tag, new Uint8Array(data), held, callback, order, gap)
+    const counted = this.admit(data.byteLength, callback, gap)
+    if (counted !== null) this.append(tag, new Uint8Array(data), counted, callback, order, gap)
   }
 
   clear(err?: Error): void {
@@ -221,10 +219,11 @@ class BufferQueue {
 
   // ── Private ──
 
-  /** The bytes holding the entry takes, or `null` once the queue is cleared for an entry larger than it. */
+  /** The bytes the entry counts as, or `null` once the queue is cleared for an entry larger than it. */
   private admit(bytes: number, callback: EntryCallback | null, gap: boolean): number | null {
-    const held = bytes + (callback === null ? HELD_PUBLISH_OVERHEAD_BYTES : HELD_SEND_OVERHEAD_BYTES)
-    if (held <= this.maxBytes) return held
+    // An empty entry counts as 1 B, so a flood of them stays bounded.
+    const counted = Math.max(bytes, 1)
+    if (counted <= this.maxBytes) return counted
     const overflowErr = new ChannelOverflowError()
     const dropsGap = gap || this.gaps.includes(true, this.head)
     this.clear(overflowErr)

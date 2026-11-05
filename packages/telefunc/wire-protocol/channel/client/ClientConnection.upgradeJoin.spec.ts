@@ -239,7 +239,7 @@ afterEach(() => {
 })
 
 describe('SSE→WS handoff join', () => {
-  test('COMMITTED then FIN: held frames replay old wire first, in order', async () => {
+  test('RECONCILED then FIN: held frames replay old wire first, in order', async () => {
     const h = await upgradeToBarrier()
     const { upgradeId } = await h.barrierSent
 
@@ -258,14 +258,14 @@ describe('SSE→WS handoff join', () => {
     expect(h.dispatched.map((f) => (f as { text: string }).text)).toEqual(['"old-1"', '"new-1"'])
   })
 
-  test('FIN then COMMITTED: the reordered completion frames still complete the join', async () => {
+  test('FIN then RECONCILED: the reordered completion frames still complete the join', async () => {
     const h = await upgradeToBarrier()
     const { upgradeId } = await h.barrierSent
 
     h.pushOld(encode.text(h.ix, '"old-1"', 1))
     h.pushOld(encode.fin())
     await settle()
-    expect(h.dispatched, 'FIN alone must not end the join — COMMITTED is still outstanding').toEqual([])
+    expect(h.dispatched, 'FIN alone must not end the join — RECONCILED is still outstanding').toEqual([])
 
     h.probe.deliver(encode.text(h.ix, '"new-1"', 2))
     h.probe.deliver(reconciled({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId }))
@@ -281,6 +281,6 @@ describe('SSE→WS handoff join', () => {
     h.pushOld(encode.fin())
     h.probe.deliver(encode.text(h.ix, '"new-1"', 1))
     await settle()
-    expect(h.dispatched, 'the join must still be waiting for its own COMMITTED').toEqual([])
+    expect(h.dispatched, 'the join must still be waiting for its own RECONCILED').toEqual([])
   })
 })

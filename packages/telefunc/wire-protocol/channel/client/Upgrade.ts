@@ -181,7 +181,7 @@ class Upgrade implements ProbeOwner {
     return this.committing?.flipped === true
   }
 
-  /** Sends are gated from the barrier's emission until its COMMITTED lands. */
+  /** Sends are gated from the barrier's emission until its RECONCILED lands. */
   get gatesSends(): boolean {
     const u = this.committing
     return u !== null && !u.committed
@@ -411,7 +411,7 @@ class Upgrade implements ProbeOwner {
       if (session === 'not-ready') return { tag: 'not-ready' }
       await hooks.reconcileSettled(attempt.signal)
       if (attempt.signal.aborted) return { tag: 'aborted' }
-      // The barrier goes next, on `from`: from here sends wait for its COMMITTED.
+      // The barrier goes next, on `from`: from here sends wait for its RECONCILED.
       this.enterCommitting(from, to, session, attempt)
       const emission = await from.emitBarrier(() => hooks.barrier(session), attempt.signal)
       if (emission === 'not-emitted') return { tag: 'not-emitted' }
@@ -496,7 +496,7 @@ class Upgrade implements ProbeOwner {
 
   /** The barrier went and the connection adopted the new wire: the probe becomes it, and the join begins. Returns the
    *  completion frames the probe delivered before, in order, for the connection to apply; then it calls `tryComplete`.
-   *  The buffer is made whole first, so a COMMITTED among them cannot complete a join over a partial one. */
+   *  The buffer is made whole first, so a RECONCILED among them cannot complete a join over a partial one. */
   private flip(): DecodedFrame[] {
     const u = this.committing
     assert(u !== null)
