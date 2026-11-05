@@ -533,13 +533,17 @@ class RedisAttempt extends DriverAttempt {
     order.parked ??= new Map()
     order.parked.set(predecessor, frame)
     if (order.release !== null) return
-    order.release = setTimeout(() => {
-      this.transition('lost')
-      if (this.state() !== 'lost') return
-      this.transition('ready')
-      this.release(order)
-    }, REORDER_WAIT_MS)
+    order.release = setTimeout(() => this.gapTimedOut(order), REORDER_WAIT_MS)
     order.release.unref()
+  }
+
+  /** What the lane waited for isn't coming. `lost` says it may have missed messages, which is what makes Room catch up
+   *  (`deliveries-lost`), and it goes on from the parked frames. */
+  private gapTimedOut(order: LaneOrder): void {
+    this.transition('lost')
+    if (this.state() !== 'lost') return
+    this.transition('ready')
+    this.release(order)
   }
 
   /** The parked frames that now follow in order. */
