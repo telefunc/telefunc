@@ -46,7 +46,7 @@ class NewSubscriptionWait {
 
   /** False on the fast path, read before a send builds anything: none of ours is new and no send waits. */
   get sendsMayWait(): boolean {
-    return this.subscriptions.subscribing || this.waits.size > 0
+    return this.subscriptions.establishing || this.waits.size > 0
   }
 
   /** A send's turn, with its own copy of `payload`: the caller reuses its bytes. Null when it has nothing to wait for.
@@ -55,7 +55,7 @@ class NewSubscriptionWait {
   waitTurn<Payload extends string | Uint8Array>(rule: WaitRule, payload: Payload): WaitingSend<Payload> | null {
     const { queue, channels, budget, bufferLimit } = rule
     let wait = this.waits.get(queue)
-    if (wait === undefined && this.subscriptions.subscribingOn(channels).length === 0) return null
+    if (wait === undefined && this.subscriptions.establishingOn(channels).length === 0) return null
     // An empty send counts as 1 B, so a flood of them stays bounded.
     const bytes = Math.max(typeof payload === 'string' ? Buffer.byteLength(payload) : payload.byteLength, 1)
     const waiting = this.waitingBytes.get(budget) ?? 0
@@ -119,9 +119,9 @@ class NewSubscriptionWait {
   }
 
   private async readyOn(channels: readonly string[]): Promise<void> {
-    for (let left = this.subscriptions.subscribingOn(channels); left.length > 0; ) {
+    for (let left = this.subscriptions.establishingOn(channels); left.length > 0; ) {
       await Promise.all(left)
-      left = this.subscriptions.subscribingOn(channels)
+      left = this.subscriptions.establishingOn(channels)
     }
   }
 }

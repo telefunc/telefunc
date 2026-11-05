@@ -28,8 +28,8 @@ type RedisAttemptOptions = {
   /** A Room lane's incarnation channel: a message on it means the incarnation was dropped. */
   invalidationChannel: string | null
   frames: FrameShape
-  /** Each of its lanes' last commit, by the lane key its frames carry on a fan-in channel and `''` on another; null once
-   *  a Room source's incarnation is not the open head. */
+  /** Each of its lanes' last commit, by the lane key its frames carry on a fan-in channel and `''` on another; null
+   *  once a Room source's incarnation is not the open head. */
   readStarts: () => Promise<Map<string, OrderingInfo> | null>
   receiver: BackendReceiver
   /** Pub/sub keeps no log, so what a drop or the reorder wait passed by is gone. `null`: how many isn't known. */
@@ -37,13 +37,13 @@ type RedisAttemptOptions = {
 }
 
 /** The subscriber connection; `id` tells work that awaited across a drop that it is stale. */
-type Connection =
+type SocketState =
   | { phase: 'idle' }
   | { phase: 'waiting'; timer: ReturnType<typeof setTimeout> }
   | { phase: 'connecting'; id: number; socket: SubscriberSocket | null }
   | { phase: 'connected'; id: number; socket: SubscriberSocket; subscribed: Set<string> }
 
-type Connected = Extract<Connection, { phase: 'connected' }>
+type ConnectedSocket = Extract<SocketState, { phase: 'connected' }>
 
 /** A lane's last place delivered, and the frames parked past a missing one, by their predecessor's place, until it
  *  arrives or the wait ends. */
@@ -51,7 +51,7 @@ type LaneOrder = {
   last: number
   lastTimestamp: number
   parked: Map<number, LaneFrame> | null
-  release: ReturnType<typeof setTimeout> | null
+  releaseTimer: ReturnType<typeof setTimeout> | null
 }
 
 type LaneFrame = { lane: string; place: number; payload: Uint8Array; info: OrderingInfo; token: string | null }
@@ -79,8 +79,8 @@ class RedisSubscriptions {
   /** The attempts that may await confirmation; a sync confirms those its connection covers. */
   private readonly unconfirmed = new Set<RedisAttempt>()
   /** Attempts never ready yet, counted down a microtask after: at 0, no send waits for one. */
-  private subscribingCount = 0
-  private socket: Connection = { phase: 'idle' }
+  private establishingCount = 0
+  private socket: SocketState = { phase: 'idle' }
   private nextId = 0
   private syncing: Promise<void> = Promise.resolve()
   private syncQueued = false
@@ -94,8 +94,8 @@ class RedisSubscriptions {
 
   subscribe(options: RedisAttemptOptions): DriverAttempt {
     const attempt = new RedisAttempt({ ...options, owner: this })
-    this.subscribingCount++
-    const settled = () => this.subscribingCount--
+    this.establishingCount++
+    const settled = () => this.establishingCount--
     void attempt.firstReady.then(settled, settled)
     for (const channel of attempt.channels) {
       const attempts = this.byChannel.get(channel)
@@ -113,15 +113,16 @@ class RedisSubscriptions {
   }
 
   /** Whether one of ours was never ready yet. */
-  get subscribing(): boolean {
-    return this.subscribingCount > 0
+  get establishing(): boolean {
+    return this.establishingCount > 0
   }
 
   /** When each of ours on `channels` that was never ready yet is first ready, ends or fails. */
-  subscribingOn(channels: readonly string[]): Promise<void>[] {
+  establishingOn(channels: readonly string[]): Promise<void>[] {
     const pending: Promise<void>[] = []
     for (const channel of channels) {
-      for (const attempt of this.byChannel.get(channel) ?? []) if (attempt.subscribing) pending.push(attempt.firstReady)
+      for (const attempt of this.byChannel.get(channel) ?? [])
+        if (attempt.establishing) pending.push(attempt.firstReady)
     }
     return pending
   }
@@ -174,7 +175,7 @@ class RedisSubscriptions {
 
   private async connect(): Promise<void> {
     const id = ++this.nextId
-    const connecting: Extract<Connection, { phase: 'connecting' }> = { phase: 'connecting', id, socket: null }
+    const connecting: Extract<SocketState, { phase: 'connecting' }> = { phase: 'connecting', id, socket: null }
     this.socket = connecting
     let socket: SubscriberSocket
     try {
@@ -258,7 +259,7 @@ class RedisSubscriptions {
     this.outageReported = false
   }
 
-  private async syncChannelsOnce(connection: Connected): Promise<void> {
+  private async syncChannelsOnce(connection: ConnectedSocket): Promise<void> {
     const { id, socket, subscribed } = connection
     const changed = this.changedChannels
     this.changedChannels = new Set()
@@ -275,13 +276,13 @@ class RedisSubscriptions {
       stale.length > 0 && socket.unsubscribe(...stale),
       missing.length > 0 && this.subscribeMissing(connection, missing),
     ])
-    // After the SUBSCRIBE's acknowledgment: a confirmation reads where each lane starts, and must see what it may miss.
+    // After the SUBSCRIBE's acknowledgment: a lane's start read before it would miss a publish between the two.
     if (this.isCurrent(id)) await this.confirmCovered(id, subscribed)
   }
 
   /** Redis refuses a whole SUBSCRIBE over one channel it denies, leaving the connection as it was: each channel then
    *  goes alone, so only a denied one's attempts fail. */
-  private async subscribeMissing(connection: Connected, channels: string[]): Promise<void> {
+  private async subscribeMissing(connection: ConnectedSocket, channels: string[]): Promise<void> {
     const { id, socket, subscribed } = connection
     try {
       await socket.subscribe(...channels)
@@ -299,7 +300,7 @@ class RedisSubscriptions {
   }
 
   /** Confirms the attempts `subscribed` covers. An attempt made during a SUBSCRIBE waits for the sync it queued. */
-  private async confirmCovered(id: Connected['id'], subscribed: Connected['subscribed']): Promise<void> {
+  private async confirmCovered(id: ConnectedSocket['id'], subscribed: ConnectedSocket['subscribed']): Promise<void> {
     const covered: RedisAttempt[] = []
     for (const attempt of this.unconfirmed) {
       if (!attempt.awaitsConfirmation()) {
@@ -326,7 +327,7 @@ class RedisSubscriptions {
     if (!this.isCurrent(id)) return
     if (starts !== null) return attempt.markReady(starts)
     // Closed on purpose since the caller read it open; gone after a loss, it may have gone with Redis's data.
-    if (attempt.subscribing) return attempt.end()
+    if (attempt.establishing) return attempt.end()
     attempt.fail(new Error(`subscribeLane: the incarnation of '${attempt.channel}' is not open`))
   }
 
@@ -341,7 +342,7 @@ class RedisSubscriptions {
   }
 }
 
-/** One source on the shared connection: delivers its lanes in seq order to core's `receiver`. */
+/** One source on the shared connection: delivers its lanes in place order to core's `receiver`. */
 class RedisAttempt extends DriverAttempt {
   readonly channel: string
   readonly invalidationChannel: string | null
@@ -384,14 +385,14 @@ class RedisAttempt extends DriverAttempt {
   }
 
   /** It has never been ready, and hasn't ended. */
-  get subscribing(): boolean {
+  get establishing(): boolean {
     return this.state() === 'establishing'
   }
 
   async unsubscribe(): Promise<void> {
     if (this.state() === 'closed') return
     this.transition('closed')
-    this.dropParked()
+    this.forgetFrames()
     for (const token of this.fences.keys()) this.settleFence(token)
     this.owner.detach(this)
   }
@@ -422,7 +423,7 @@ class RedisAttempt extends DriverAttempt {
     const missed = this.state() === 'lost' ? this.missedBefore(starts) : 0
     this.orders = new Map()
     for (const [lane, start] of starts) {
-      this.orders.set(lane, { last: start.seq, lastTimestamp: start.timestamp, parked: null, release: null })
+      this.orders.set(lane, { last: start.seq, lastTimestamp: start.timestamp, parked: null, releaseTimer: null })
     }
     const early = this.early
     this.early = []
@@ -479,7 +480,7 @@ class RedisAttempt extends DriverAttempt {
 
   /** Over for good: the commits awaiting its fences see `reason`. Its consumers are told after, by `closed`. */
   private close(reason: unknown): void {
-    this.dropParked()
+    this.forgetFrames()
     this.rejectFences(reason)
     this.owner.detach(this)
   }
@@ -508,7 +509,7 @@ class RedisAttempt extends DriverAttempt {
     let order = this.orders.get(frame.lane)
     if (order === undefined) {
       // A lane with no commit when the attempt went live: every one of its commits is after.
-      order = { last: 0, lastTimestamp: 0, parked: null, release: null }
+      order = { last: 0, lastTimestamp: 0, parked: null, releaseTimer: null }
       this.orders.set(frame.lane, order)
     }
     if (frame.place === order.last + 1) {
@@ -534,9 +535,9 @@ class RedisAttempt extends DriverAttempt {
     if (order.parked?.has(predecessor)) return this.settleFence(frame.token)
     order.parked ??= new Map()
     order.parked.set(predecessor, frame)
-    if (order.release !== null) return
-    order.release = setTimeout(() => this.gapTimedOut(order), REORDER_WAIT_MS)
-    order.release.unref()
+    if (order.releaseTimer !== null) return
+    order.releaseTimer = setTimeout(() => this.gapTimedOut(order), REORDER_WAIT_MS)
+    order.releaseTimer.unref()
   }
 
   /** What the lane waited for isn't coming. `lost` says it may have missed messages, which is what makes Room catch up
@@ -558,17 +559,17 @@ class RedisAttempt extends DriverAttempt {
       this.advance(order, next)
     }
     if (parked.size > 0) return
-    clearTimeout(order.release!)
+    clearTimeout(order.releaseTimer!)
     order.parked = null
-    order.release = null
+    order.releaseTimer = null
   }
 
-  /** The wait ended: every parked frame goes out in seq order, past what never arrived. */
+  /** The wait ended: every parked frame goes out in place order, past what never arrived. */
   private release(order: LaneOrder): void {
-    clearTimeout(order.release!)
+    clearTimeout(order.releaseTimer!)
     const parked = [...order.parked!.values()].sort((a, b) => a.place - b.place)
     order.parked = null
-    order.release = null
+    order.releaseTimer = null
     let missed = 0
     for (const frame of parked) {
       if (this.state() !== 'ready') break
@@ -578,8 +579,8 @@ class RedisAttempt extends DriverAttempt {
     if (missed > 0) this.reportMissed(missed)
   }
 
-  private dropParked(): void {
-    for (const order of this.orders.values()) if (order.release !== null) clearTimeout(order.release)
+  private forgetFrames(): void {
+    for (const order of this.orders.values()) if (order.releaseTimer !== null) clearTimeout(order.releaseTimer)
     this.orders.clear()
     this.early = []
   }
