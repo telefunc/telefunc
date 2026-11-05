@@ -293,7 +293,11 @@ class RedisSubscriptions {
         this.refusals.delete(channel)
       }
     }
-    // An attempt made during the SUBSCRIBE above waits for the sync it queued.
+    await this.confirmCovered(id, subscribed)
+  }
+
+  /** Confirms the attempts `subscribed` covers. An attempt made during a SUBSCRIBE waits for the sync it queued. */
+  private async confirmCovered(id: Connected['id'], subscribed: Connected['subscribed']): Promise<void> {
     const covered: RedisAttempt[] = []
     for (const attempt of this.unconfirmed) {
       if (!attempt.awaitsConfirmation()) {
