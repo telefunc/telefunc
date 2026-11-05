@@ -25,18 +25,20 @@ class OrderedStubs<Stub> {
       this.lines.set(target, line)
     }
     line.calls++
-    const result =
-      line.after === null
-        ? new Promise<T>((resolve) => resolve(invoke(line.stub)))
-        : line.after.then(() => invoke(line.stub))
-    result.then(
-      () => this.settle(target, line),
-      () => {
-        line.failed = true
-        this.settle(target, line)
-      },
-    )
-    return result
+    return this.run(target, line, invoke)
+  }
+
+  /** With nothing ahead, it invokes in this turn: a stub's calls keep their call order. */
+  private async run<T>(target: string, line: Line<Stub>, invoke: (stub: Stub) => Promise<T>): Promise<T> {
+    try {
+      if (line.after !== null) await line.after
+      return await invoke(line.stub)
+    } catch (err) {
+      line.failed = true
+      throw err
+    } finally {
+      this.settle(target, line)
+    }
   }
 
   private settle(target: string, line: Line<Stub>): void {
