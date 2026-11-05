@@ -270,6 +270,8 @@ class RedisRoomDriver implements RoomDriver, RedisDriver {
       invalidationChannel: incarnationInvalidationChannel(prefix, source.roomId, source.inc),
       driver: this,
       receiver,
+      reportMissed: (count) =>
+        this.kit.reportDeliveryLost(source.roomId, `${count} commits never reached this server's Redis subscription`),
     })
   }
 

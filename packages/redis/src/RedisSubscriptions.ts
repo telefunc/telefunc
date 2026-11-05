@@ -29,6 +29,8 @@ type RedisAttemptOptions = {
   invalidationChannel: string | null
   driver: RedisDriver
   receiver: BackendReceiver
+  /** A Room lane's: pub/sub keeps no log, so commits that a drop or the reorder wait passed by are gone. */
+  reportMissed?: (count: number) => void
 }
 
 /** The subscriber connection; `id` tells work that awaited across a drop that it is stale. */
@@ -355,6 +357,7 @@ class RedisAttempt extends DriverAttempt {
   readonly channels: readonly string[]
   private readonly owner: RedisSubscriptions
   private readonly receiver: BackendReceiver
+  private readonly reportMissed: RedisAttemptOptions['reportMissed']
   private readonly fences = new Map<string, Deferred<void>>()
   /** Each lane's order: an every-track or every-member channel carries many binary lanes, keyed by lane key; any other
    *  channel one lane, keyed `''`. */
@@ -376,6 +379,7 @@ class RedisAttempt extends DriverAttempt {
     invalidationChannel,
     driver,
     receiver,
+    reportMissed,
   }: RedisAttemptOptions & { owner: RedisSubscriptions }) {
     super()
     this.owner = owner
@@ -384,6 +388,7 @@ class RedisAttempt extends DriverAttempt {
     this.invalidationChannel = invalidationChannel
     this.driver = driver
     this.receiver = receiver
+    this.reportMissed = reportMissed
     this.channels = invalidationChannel === null ? [channel] : [channel, invalidationChannel]
     // Its first state change ends its establishment: ready, or closed.
     this.onStateChange(() => this.firstReadiness.resolve())
@@ -432,6 +437,10 @@ class RedisAttempt extends DriverAttempt {
   /** A lane missing from `starts` has no commit yet. */
   markReady(starts: Map<string, OrderingInfo>): void {
     if (!this.awaitsConfirmation()) return
+    let missed = 0
+    if (this.state() === 'lost') {
+      for (const [lane, start] of starts) missed += Math.max(0, start.seq - (this.orders.get(lane)?.last ?? 0))
+    }
     this.orders = new Map()
     for (const [lane, start] of starts) {
       this.orders.set(lane, { last: start.seq, lastTimestamp: start.timestamp, parked: null, release: null })
@@ -439,6 +448,7 @@ class RedisAttempt extends DriverAttempt {
     const early = this.early
     this.early = []
     this.transition('ready')
+    if (missed > 0) this.reportMissed?.(missed)
     for (const message of early) {
       // A consumer may close the lane.
       if (this.state() !== 'ready') return
@@ -565,10 +575,13 @@ class RedisAttempt extends DriverAttempt {
     const parked = [...order.parked!.values()].sort((a, b) => a.info.seq - b.info.seq)
     order.parked = null
     order.release = null
+    let missed = 0
     for (const frame of parked) {
-      if (this.state() !== 'ready') return
+      if (this.state() !== 'ready') break
+      missed += frame.info.seq - order.last - 1
       this.advance(order, frame.payload, frame.info, frame.token)
     }
+    if (missed > 0) this.reportMissed?.(missed)
   }
 
   private dropParked(): void {

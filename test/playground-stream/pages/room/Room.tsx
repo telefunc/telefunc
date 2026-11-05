@@ -86,6 +86,7 @@ import {
   onJoinClosed,
   onThrowingReceiver,
   onPublishLoop,
+  onSubscriberDropped,
   onSaveReply,
   onSeedAndChurn,
   onStopChurn,
@@ -878,6 +879,14 @@ function Room() {
             onPage: read.map((value) => (value instanceof Uint8Array ? Array.from(value) : value)),
           }),
         )
+      })}
+
+      {scenario('subscriber-dropped', 'A dropped subscriber', 'Publish across it', async () => {
+        const roomId = await createRoomId('subscriber-dropped')
+        const result = onSubscriberDropped(roomId)
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        await fetch('/api/redis/drop-connections', { method: 'POST' })
+        setResult(JSON.stringify(await result))
       })}
 
       {scenario('publish-loop', 'A publish loop', 'Other work runs during it', async () => {

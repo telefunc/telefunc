@@ -81,6 +81,7 @@ export {
   onJoinClosed,
   onThrowingReceiver,
   onPublishLoop,
+  onSubscriberDropped,
   onSaveReply,
   onSeedAndChurn,
   onStopChurn,
@@ -89,7 +90,7 @@ export {
 
 import { Buffer } from 'node:buffer'
 import { Abort, onBug } from 'telefunc'
-import { Room, type LeaveCause, type LocalParticipant } from '@telefunc/room'
+import { Room, roomConfig, type LeaveCause, type LocalParticipant } from '@telefunc/room'
 import { getRoomPlane } from '@telefunc/room/backend'
 import { anyoneCanJoin } from '../../anyone-can-join'
 import { sleep } from '../../sleep'
@@ -904,6 +905,27 @@ async function onJoinAnswering(roomId: string) {
   })
   me.listen(() => {}) // only observes: the reply stays the listener's above
   return me.id
+}
+
+/** The page drops this server's connections to Redis during these publishes: each arrives, is reported or rejects. */
+async function onSubscriberDropped(roomId: string) {
+  const room = anyoneCanJoin(await Room.get(roomId))
+  let received = 0
+  room.subscribe(() => received++)
+  const me = await room.join({ meta: { name: 'Publisher' } })
+  let reported = 0
+  roomConfig.onDeliveryLost = ({ reason }) => (reported += Number.parseInt(reason))
+  const published: Promise<unknown>[] = []
+  for (let i = 0; i < 600; i++) {
+    published.push(me.publish(i))
+    await sleep(1)
+  }
+  const rejected = (await Promise.allSettled(published)).filter(({ status }) => status === 'rejected').length
+  // Long enough to reconnect and read each lane's start.
+  await sleep(1_000)
+  roomConfig.onDeliveryLost = ({ roomId, reason }) =>
+    console.error(`Room delivery handoff of '${roomId}' lost: ${reason}`)
+  return { published: published.length, received, reported, rejected }
 }
 
 /** A loop of awaited publishes: other work still gets its turns. */

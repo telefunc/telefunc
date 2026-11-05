@@ -7,6 +7,7 @@ export {
   testRoomSmallBuffer,
   testRoomPublishHold,
   testRoomLongWaits,
+  testRoomRedisSubscriberDropped,
 }
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Response, WebSocket } from 'playwright-chromium'
@@ -1439,6 +1440,19 @@ function testRoomPublishHold() {
 }
 
 /** Tests that wait out Room's fixed timeouts, run in one lane. */
+function testRoomRedisSubscriberDropped() {
+  testRoomScenario<{ published: number; received: number; reported: number; rejected: number }>(
+    'subscriber-dropped',
+    "room: Redis drops a server's subscriber connection during publishes: what didn't arrive is reported, count for count",
+    (r) => {
+      expect(r.published).toBe(600)
+      expect(r.reported > 0).toBe(true)
+      expect(r.received + r.reported + r.rejected).toBe(r.published)
+      expectLog('Redis subscriber connection closed')
+    },
+  )
+}
+
 function testRoomLongWaits() {
   test('room: a tail nobody subscribes to within 60 seconds drops what it held', async () => {
     await navigate(`${getServerUrl()}/room`)
