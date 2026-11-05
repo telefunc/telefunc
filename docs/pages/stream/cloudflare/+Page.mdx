@@ -231,6 +231,14 @@ config.channel = {
 }
 ```
 
+## Workers Free
+
+Cloudflare [lists](https://developers.cloudflare.com/workers/platform/limits/#cpu-time) 10 ms of CPU time per HTTP request on Workers Free. It states: "Each isolate has some built-in flexibility to allow for cases where your Worker infrequently runs over the configured limit. If your Worker starts hitting the limit consistently, its execution will be terminated according to the limit configured." The client then gets Error 1102.
+
+> In one test of about 8 minutes of light traffic on Workers Free, 16 of 305 invocations ran past 10 ms of CPU and none was stopped. The highest was 55 ms, rendering a page with Vike, and a request to `/_telefunc` reached 34 ms.
+>
+> Sustained use on Workers Free wasn't measured, so this doesn't show that an app stays within the limit.
+
 
 ## See also
 
