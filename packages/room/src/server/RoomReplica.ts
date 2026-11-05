@@ -385,17 +385,19 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
             member !== EVERY_MEMBER ? { member } : track !== EVERY_TRACK ? { track } : undefined,
           )
     // A frame is admitted by its member and track, so the reads may end in any order.
-    await eachInFlight(lanes, async (lane) => {
-      if (lane.kind !== 'binary' || !holder.wantsBinary(lane.member, lane.track)) return
-      const stored = await plane.readRetained(this.id, this.incarnation.inc, lane)
-      // An unsubscribe during the read leaves nothing to deliver to, and no receipt to keep.
-      if (stored === null || !holder.wantsBinary(lane.member, lane.track)) return
-      if (!this.model.hasMember(lane.member)) return
-      const framed = stored.payload
-      const frame = decodeBinaryFrame(framed)
-      assert(frame)
-      holder.emitRetainedBinary(frame, { seq: stored.seq, timestamp: stored.timestamp }, framed, hold)
-    })
+    await eachInFlight(lanes, (lane) => this.replayRetainedLane(lane, holder, hold))
+  }
+
+  private async replayRetainedLane(lane: LaneId, holder: LaneHolder, hold: ReplayHold): Promise<void> {
+    if (lane.kind !== 'binary' || !holder.wantsBinary(lane.member, lane.track)) return
+    const stored = await getRoomPlane().readRetained(this.id, this.incarnation.inc, lane)
+    // An unsubscribe during the read leaves nothing to deliver to, and no receipt to keep.
+    if (stored === null || !holder.wantsBinary(lane.member, lane.track)) return
+    if (!this.model.hasMember(lane.member)) return
+    const framed = stored.payload
+    const frame = decodeBinaryFrame(framed)
+    assert(frame)
+    holder.emitRetainedBinary(frame, { seq: stored.seq, timestamp: stored.timestamp }, framed, hold)
   }
 
   // What the replica's parts ask of it
