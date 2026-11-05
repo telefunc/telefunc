@@ -65,7 +65,6 @@ async function serve(httpRequest: HttpRequest): Promise<HttpResponse> {
   }
 }
 
-/** `serve()` for adapters holding the Node.js `res`, so that a client disconnect aborts `request.signal`. */
 /** Without the flag a Worker's `request.signal` never aborts, and nothing else tells a telefunction that hasn't answered. */
 function assertRequestSignalFlag(): void {
   const { Cloudflare } = globalThis as { Cloudflare?: { compatibilityFlags?: Record<string, boolean> } }
@@ -76,6 +75,7 @@ function assertRequestSignalFlag(): void {
   )
 }
 
+/** `serve()` for adapters holding the Node.js `res`, so that a client disconnect aborts `request.signal`. */
 async function serveNode(
   httpRequest: Extract<HttpRequest, { readable: Readable }>,
   response: Writable,
