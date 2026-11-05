@@ -398,10 +398,19 @@ function Publish() {
         id="test-broadcast-hold-overflow"
         onClick={async () => {
           setResult('')
-          setResult(JSON.stringify(await onBroadcastWhileEstablishing()))
+          setResult(JSON.stringify(await onBroadcastWhileEstablishing(3, 1500)))
         }}
       >
         Publishes held past bufferLimit
+      </button>
+      <button
+        id="test-broadcast-hold-alone"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onBroadcastWhileEstablishing(2, 5000)))
+        }}
+      >
+        One publish held, itself past bufferLimit
       </button>
 
       <h2>Broadcast Shield Validation</h2>

@@ -634,4 +634,11 @@ function testPublishSmallBuffer() {
       })
     })
   })
+  test('broadcast: a publish held alone goes through past bufferLimit, and a second one rejects with ChannelOverflowError', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-hold-alone')
+    await autoRetry(async () => {
+      expect(await getResult('#publish-result')).deep.equal({ outcomes: ['sent', 'ChannelOverflowError'], seen: ['1'] })
+    })
+  })
 }
