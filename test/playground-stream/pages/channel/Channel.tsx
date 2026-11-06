@@ -1193,12 +1193,8 @@ function ChannelDemo() {
   }, [])
 
   const testBudgets = useCallback(async () => {
-    const { bytes, acks } = await openChannel(onChannelBudgets)
-    acks.listen(() => new Promise<void>(() => {}))
-    document.querySelector('#channel-budgets-result')!.textContent = JSON.stringify({
-      bytes: bytes.id,
-      acks: acks.id,
-    })
+    const { bytes } = await openChannel(onChannelBudgets)
+    document.querySelector('#channel-budgets-result')!.textContent = JSON.stringify({ bytes: bytes.id })
   }, [])
 
   // A channel the page drops closes once garbage-collected.
@@ -1219,12 +1215,9 @@ function ChannelDemo() {
   }, [])
 
   const testOfflineBudgets = useCallback(async () => {
-    const { bytes, acks } = await openChannel(onChannelOfflineBudgets)
-    for (const channel of [bytes, acks]) channel.listen(() => new Promise<void>((done) => setTimeout(done, 1000)))
-    document.querySelector('#channel-offline-budgets-result')!.textContent = JSON.stringify({
-      bytes: bytes.id,
-      acks: acks.id,
-    })
+    const { channel } = await openChannel(onChannelOfflineBudgets)
+    channel.listen(() => new Promise<void>((done) => setTimeout(done, 1000)))
+    document.querySelector('#channel-offline-budgets-result')!.textContent = JSON.stringify({ id: channel.id })
   }, [])
 
   const testCreditFailure = useCallback(async () => {

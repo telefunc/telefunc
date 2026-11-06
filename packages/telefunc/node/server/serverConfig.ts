@@ -35,7 +35,6 @@ import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_CONNECT_TTL_MS,
   CHANNEL_IDLE_TIMEOUT_MS,
-  CHANNEL_MAX_PENDING_ACKS,
   CHANNEL_MAX_PENDING_BYTES,
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
@@ -116,8 +115,6 @@ type ChannelConfigUser = {
   connectTtl?: number
   /** Maximum bytes queued beyond credit or awaiting acknowledgements. @default 268435456 */
   maxPendingBytes?: number
-  /** Maximum simultaneous acknowledgement requests. @default 16384 */
-  maxPendingAcks?: number
   /**
    * When using SSE channels, upstream client-to-server frames are batched for at
    * most this many milliseconds before Telefunc sends a POST.
@@ -147,7 +144,6 @@ type ChannelConfigResolved = {
   clientReplayBufferBinary: number
   connectTtl: number
   maxPendingBytes: number
-  maxPendingAcks: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
 }
@@ -358,7 +354,6 @@ function getServerConfig(): ConfigResolved {
         configState.channel.clientReplayBufferBinary ?? CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
       connectTtl: configState.channel.connectTtl ?? CHANNEL_CONNECT_TTL_MS,
       maxPendingBytes: configState.channel.maxPendingBytes ?? CHANNEL_MAX_PENDING_BYTES,
-      maxPendingAcks: configState.channel.maxPendingAcks ?? CHANNEL_MAX_PENDING_ACKS,
       sseFlushThrottle: configState.channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
       ssePostIdleFlushDelay: configState.channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
     },
@@ -516,7 +511,6 @@ function applyChannelConfig(val: unknown): void {
       case 'clientReplayBuffer':
       case 'clientReplayBufferBinary':
       case 'maxPendingBytes':
-      case 'maxPendingAcks':
         assertUsage(
           typeof value === 'number' && Number.isSafeInteger(value) && value >= 0,
           `\`${configPath}\` should be a non-negative safe integer`,

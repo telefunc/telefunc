@@ -777,7 +777,7 @@ async function onChannelTextBurst() {
   ch.listen(async ({ count, mode }) => {
     const sends: Promise<unknown>[] = []
     for (let i = 0; i < count; i++) {
-      const message = String(i).padEnd(mode === 'acks' ? 1024 : 16 * 1024)
+      const message = String(i).padEnd(mode === 'acks' ? 64 * 1024 : 16 * 1024)
       if (mode === 'acks') sends.push(ch.send(message, { ack: true }))
       else if (mode === 'awaited') await ch.send(message)
       else void ch.send(message)
@@ -928,21 +928,15 @@ async function onChannelBudgets() {
   const original = config.channel
   config.channel = { ...original, maxPendingBytes: 8192 }
   const bytes = new Channel<never, string>()
-  config.channel = { ...original, maxPendingAcks: 2 }
-  const acks = new Channel<never, string>()
   config.channel = original
-  const exercise = (ch: typeof bytes, ack: boolean) => {
-    const refused = (err: Error) => {
-      cleanupState[`budget_${ch.id}`] ??= err.message
-    }
-    ch.onOpen(() => {
-      if (!ack) void ch.send('x'.repeat(16 * 1024)).then(() => (cleanupState[`budget_${ch.id}_credit`] = 'accepted'))
-      for (let i = 0; i < 1000; i++) void ch.send('x'.repeat(1024), { ack: ack as false }).catch(refused)
-    })
+  const refused = (err: Error) => {
+    cleanupState[`budget_${bytes.id}`] ??= err.message
   }
-  exercise(bytes, false)
-  exercise(acks, true)
-  return { bytes: bytes.client, acks: acks.client }
+  bytes.onOpen(() => {
+    void bytes.send('x'.repeat(4 * 1024)).then(() => (cleanupState[`budget_${bytes.id}_credit`] = 'accepted'))
+    for (let i = 0; i < 1000; i++) void bytes.send('x'.repeat(1024)).catch(refused)
+  })
+  return { bytes: bytes.client }
 }
 
 /**
@@ -1012,20 +1006,16 @@ async function onChannelOwnBytes() {
 async function onChannelOfflineBudgets() {
   const original = config.channel
   config.channel = { ...original, maxPendingBytes: 8192 }
-  const bytes = new Channel<never, string>()
-  config.channel = { ...original, maxPendingAcks: 2 }
-  const acks = new Channel<never, string>()
+  const ch = new Channel<never, string>()
   config.channel = original
-  for (const ch of [bytes, acks]) {
-    // Sent before the page attaches: they wait in the channel's buffer until it does.
-    const sends = Array.from({ length: 3 }, () => ch.send('x'.repeat(3 * 1024), { ack: true }))
-    void Promise.allSettled(sends).then((results) => {
-      cleanupState[`offline_budget_${ch.id}`] = JSON.stringify(
-        results.map((r) => (r.status === 'rejected' ? `${r.reason.name}: ${r.reason.message}` : 'answered')),
-      )
-    })
-  }
-  return { bytes: bytes.client, acks: acks.client }
+  // Sent before the page attaches: they wait in the channel's buffer until it does.
+  const sends = Array.from({ length: 3 }, () => ch.send('x'.repeat(3 * 1024), { ack: true }))
+  void Promise.allSettled(sends).then((results) => {
+    cleanupState[`offline_budget_${ch.id}`] = JSON.stringify(
+      results.map((r) => (r.status === 'rejected' ? `${r.reason.name}: ${r.reason.message}` : 'answered')),
+    )
+  })
+  return { channel: ch.client }
 }
 
 async function onChannelCreditFailure() {

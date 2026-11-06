@@ -121,7 +121,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** Payload bytes of the ack requests in `pendingAcks`. */
   private pendingAckBytes = 0
   private readonly maxPendingBytes: number
-  private readonly maxPendingAcks: number
   protected readonly lifecycle = new ChannelLifecycle({ owner: this, reportError: handleCallbackBug })
   private ttlTimer: ReturnType<typeof setTimeout> | null = null
   protected selfTime = new SelfTime()
@@ -176,7 +175,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.receiveCredit.fitReplay(replayWindow(c.clientReplayBuffer, c.clientReplayBufferBinary))
     this.sendCredit.fitReplay(replayWindow(c.serverReplayBuffer, c.serverReplayBufferBinary))
     this.maxPendingBytes = c.maxPendingBytes
-    this.maxPendingAcks = c.maxPendingAcks
   }
 
   get opened(): Promise<void> {
@@ -294,28 +292,26 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.sendCredit.decrement(this.peer.sendSequenced(encode.binary, data))
   }
 
-  /** Why a send of `data` can't go, where it would pass `maxPendingAcks` or `maxPendingBytes`. It holds nothing and takes
+  /** Why a send of `data` can't go, where it would pass `maxPendingBytes`. It holds nothing and takes
    *  no seq, so the page sees no gap on the wire, and later sends that fit go through. */
   private pendingRefusal(data: string | Uint8Array, ack: boolean): ChannelOverflowError | null {
-    if (ack && this.pendingAcks.size >= this.maxPendingAcks) return this.refuseSend('maxPendingAcks')
     const room = this.maxPendingBytes - this.bytesAhead()
     // Only a send that waits, for its page, its answer or behind sends waiting for credit, is held with its promise.
     const held = ack || !this.peer || this.sendCredit.waitingCount > 0
-    const fits = fitsIn(data, room - HEADER - (held ? HELD_SEND_OVERHEAD_BYTES : 0))
-    return fits ? null : this.refuseSend('maxPendingBytes')
+    return fitsIn(data, room - HEADER - (held ? HELD_SEND_OVERHEAD_BYTES : 0)) ? null : this.refuseSend()
   }
 
-  private refuseSend(setting: 'maxPendingAcks' | 'maxPendingBytes'): ChannelOverflowError {
+  private refuseSend(): ChannelOverflowError {
     if (!this.refusalWarned) {
       this.refusalWarned = true
       assertWarning(
         false,
-        `A channel refused a \`send()\`: config.channel.${setting} (${this[setting]}) is exceeded, so that message isn't delivered and its promise rejects with \`ChannelOverflowError\`. Later sends that fit still go. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next, or raise the setting.`,
+        `A channel refused a \`send()\`: config.channel.maxPendingBytes (${this.maxPendingBytes}) is exceeded, so that message isn't delivered and its promise rejects with \`ChannelOverflowError\`. Later sends that fit still go. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next, or raise the setting.`,
         { onlyOnce: false },
       )
     }
     return new ChannelOverflowError(
-      `Send refused: config.channel.${setting} exceeded; await each send or raise the setting`,
+      'Send refused: config.channel.maxPendingBytes exceeded; await each send or raise the setting',
     )
   }
 
@@ -340,7 +336,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.outrun = null
     assertWarning(
       false,
-      `A channel's \`send()\` calls outrun its client: ${(ahead / 2 ** 20).toFixed(1)} MiB wait for it and keep growing, while it takes ${mibPerS.toFixed(1)} MiB/s. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next, or send slower: past \`config.channel.maxPendingBytes\` (${(this.maxPendingBytes / 2 ** 20).toFixed(0)} MiB) or \`maxPendingAcks\` (${this.maxPendingAcks}), sends are refused with \`ChannelOverflowError\`.`,
+      `A channel's \`send()\` calls outrun its client: ${(ahead / 2 ** 20).toFixed(1)} MiB wait for it and keep growing, while it takes ${mibPerS.toFixed(1)} MiB/s. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next, or send slower: past \`config.channel.maxPendingBytes\` (${(this.maxPendingBytes / 2 ** 20).toFixed(0)} MiB), sends are refused with \`ChannelOverflowError\`.`,
       { onlyOnce: false },
     )
   }

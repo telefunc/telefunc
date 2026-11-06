@@ -1135,18 +1135,19 @@ function testChannel(isDev: boolean, inDocker = false) {
     expect(() => expectLog(sendsOutrunWarning)).throw()
   })
 
-  test('channel: of 18,000 acknowledgement requests the server sends in one loop, those past maxPendingAcks are refused and the channel stays open', async () => {
+  test('channel: of 18,000 acknowledgement requests of 64 KiB the server sends in one loop, those past maxPendingBytes are refused and the channel stays open', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-text-burst-acks-18000')
     await autoRetry(
       async () => {
         const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
         expect(burst.closeErr).toBe(null)
-        expect(burst.received).toBe(16384)
+        expect(burst.received).greaterThan(3000)
+        expect(burst.received).lessThan(18000)
         expect(burst.inOrder).toBe(true)
         const ss = await getCleanupState()
-        expect(ss[`textBurst_${burst.channelId}_error`]).toContain('config.channel.maxPendingAcks')
-        expect(ss[`textBurst_${burst.channelId}_acked`]).toBe('16384')
+        expect(ss[`textBurst_${burst.channelId}_error`]).toContain('config.channel.maxPendingBytes')
+        expect(ss[`textBurst_${burst.channelId}_acked`]).toBe(String(burst.received))
       },
       { timeout: 60_000 },
     )
@@ -1430,7 +1431,7 @@ function testChannelApi() {
     })
   })
 
-  test('channel: each opt-in byte or acknowledgement cap refuses the send with the named error', async () => {
+  test('channel: the byte cap refuses the send with the named error', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-budgets')
     await autoRetry(async () => {
@@ -1438,7 +1439,6 @@ function testChannelApi() {
       const state = await getCleanupState()
       expect(state[`budget_${ids.bytes}_credit`]).toBe('accepted')
       expect(state[`budget_${ids.bytes}`]).toContain('maxPendingBytes')
-      expect(state[`budget_${ids.acks}`]).toContain('maxPendingAcks')
     })
     expectLog(sendRefusedWarning)
   })
@@ -1470,20 +1470,14 @@ function testChannelApi() {
     expectLog(sendRefusedWarning)
   })
 
-  test('channel: acknowledged sends made before the page attaches are refused once they pass maxPendingAcks or maxPendingBytes, and the rest are answered', async () => {
+  test('channel: acknowledged sends made before the page attaches are refused once they pass maxPendingBytes, and the rest are answered', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-offline-budgets')
     await autoRetry(async () => {
-      const ids = JSON.parse((await page.textContent('#channel-offline-budgets-result'))!)
-      const state = await getCleanupState()
-      for (const [id, setting] of [
-        [ids.bytes, 'maxPendingBytes'],
-        [ids.acks, 'maxPendingAcks'],
-      ]) {
-        const sends: string[] = JSON.parse(state[`offline_budget_${id}`] ?? '[]')
-        expect(sends.slice(0, 2)).deep.equal(['answered', 'answered'])
-        expect(sends[2]).toContain(`ChannelOverflowError: Send refused: config.channel.${setting}`)
-      }
+      const { id } = JSON.parse((await page.textContent('#channel-offline-budgets-result'))!)
+      const sends: string[] = JSON.parse((await getCleanupState())[`offline_budget_${id}`] ?? '[]')
+      expect(sends.slice(0, 2)).deep.equal(['answered', 'answered'])
+      expect(sends[2]).toContain('ChannelOverflowError: Send refused: config.channel.maxPendingBytes')
     })
     expectLog(sendRefusedWarning)
   })
