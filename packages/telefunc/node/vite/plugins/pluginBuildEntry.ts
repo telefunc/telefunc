@@ -4,7 +4,7 @@ import { serverProductionEntryPlugin } from '@brillout/vite-plugin-server-entry/
 import type { Plugin } from 'vite'
 import { projectInfo } from '../../../utils/projectInfo.js'
 import { VIRTUAL_FILE_ENTRY_ID } from './pluginVirtualFileEntry/VIRTUAL_FILE_ENTRY_ID.js'
-import { config } from '../../server/serverConfig.js'
+import { getManifestConfig } from '../../server/serverConfig.js'
 import { assertManifest, type Manifest } from '../../server/runTelefunc/loadTelefuncFilesUsingVite/assertManifest.js'
 
 function pluginBuildEntry(): Plugin[] {
@@ -36,7 +36,7 @@ function getServerProductionEntryCode() {
 function getTelefuncManifest(): Manifest {
   const manifest = {
     version: projectInfo.projectVersion,
-    config,
+    config: getManifestConfig(),
   }
   assertManifest(manifest)
   return manifest
