@@ -56,7 +56,7 @@ type EventStreamOptions = {
 /** The event stream to the page: data waits for it to ask for more, and the frames that go at once pass that data. */
 class EventStream {
   readonly stream: PushReadable | PushReadableStream<Uint8Array<ArrayBuffer>>
-  private readonly waiting = new Fifo<Uint8Array<ArrayBuffer>>()
+  private waiting = new Fifo<Uint8Array<ArrayBuffer>>()
   private waitingBytes = 0
   /** Whether the stream asks for more. */
   private takes: boolean
@@ -89,8 +89,11 @@ class EventStream {
     this.waitingBytes += event.byteLength
   }
 
-  close(): void {
-    while (this.waiting.length > 0) this.stream.push(this.waiting.shift()!)
+  /** Past a wire only lost, what waits is dropped: the page's reconnect gets it from its channels' replay, and it could
+   *  wait here for as long as the socket stays open taking nothing. */
+  close({ permanent }: { permanent: boolean }): void {
+    if (permanent) while (this.waiting.length > 0) this.stream.push(this.waiting.shift()!)
+    this.waiting = new Fifo()
     this.waitingBytes = 0
     this.stream.close()
   }
@@ -407,7 +410,7 @@ class SseServerTransport {
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed wire and bails.
     wire.resolveReady()
     this.mux.onWireClosed(wire, { permanent })
-    wire.events.close()
+    wire.events.close({ permanent })
   }
 
   private terminateWire(wire: SseWire): void {

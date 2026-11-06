@@ -84,6 +84,7 @@ app.post('/api/gc', async (c) => {
 })
 
 app.get('/api/heap-used', (c) => c.json({ heapUsed: process.memoryUsage().heapUsed }))
+app.get('/api/array-buffers', (c) => c.json({ arrayBuffers: process.memoryUsage().arrayBuffers }))
 
 app.post('/api/server-close-trigger', async (c) => {
   const channelId = c.req.query('channelId')
