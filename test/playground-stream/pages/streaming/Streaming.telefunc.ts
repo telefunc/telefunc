@@ -52,7 +52,8 @@ async function* onReturnDelayedGenerator(): AsyncGenerator<string> {
 
 const onReturnReadableStream = async (): Promise<ReadableStream<Uint8Array>> => {
   const encoder = new TextEncoder()
-  const chunks = ['hello', ' ', 'stream']
+  // An empty chunk says nothing about the stream's end.
+  const chunks = ['', 'hello', ' ', 'stream']
   let i = 0
   return new ReadableStream({
     pull(controller) {
