@@ -57,7 +57,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   private paceTimer: ReturnType<typeof setTimeout> | null = null
   /** The copies handed and not covered by an acknowledgement: where each ends, of all the sender handed. */
   private readonly copied = new Fifo<{ end: number; bytes: number }>()
-  /** Waits for an acknowledgement or for room for copies, which it looks for on its own timer. */
+  /** Waits for an acknowledgement, a heartbeat, or room for copies, which it looks for on its own timer. */
   private awaitsCopyRoom = false
 
   constructor({ socket, pingInterval }: ServerHeadroomOptions) {
@@ -137,6 +137,8 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   heartbeat(bytes: number, at: number): boolean {
     if (!this.sender.heartbeat(bytes, at)) return false
     this.releaseCopies(this.sender.heartbeatBytes)
+    // Small frames are never acknowledged: for their wire, this is what shows its page reads.
+    if (this.awaitsCopyRoom) this.sendWaiting()
     return true
   }
 
