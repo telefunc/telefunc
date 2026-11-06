@@ -57,7 +57,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   private paceTimer: ReturnType<typeof setTimeout> | null = null
   /** The copies handed and not covered by an acknowledgement: where each ends, of all the sender handed. */
   private readonly copied = new Fifo<{ end: number; bytes: number }>()
-  /** Waits for room for copies, which it looks for on its timer once a page has acknowledged, or for an acknowledgement. */
+  /** Waits for an acknowledgement or for room for copies, which it looks for on its own timer. */
   private awaitsCopyRoom = false
 
   constructor({ socket, pingInterval }: ServerHeadroomOptions) {
