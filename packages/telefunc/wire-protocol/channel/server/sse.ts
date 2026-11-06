@@ -80,7 +80,8 @@ class EventStream implements WireQueue {
   private tookAt: number | null = null
 
   constructor({ useNodeStream, onCancel }: EventStreamOptions) {
-    const onTake = () => this.handWaiting()
+    // A Web stream asks from inside `enqueue`: an ask waits, so that no push runs inside another.
+    const onTake = () => queueMicrotask(() => this.handWaiting())
     this.stream = useNodeStream
       ? createPushReadable(onCancel, onTake)
       : createPushReadableStream<Uint8Array<ArrayBuffer>>(onCancel, onTake)
