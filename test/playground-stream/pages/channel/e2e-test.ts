@@ -690,6 +690,25 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
+  test("channel: a message whose listener throws Abort isn't held once the channel ended", async () => {
+    await page.click('#channel-test-listener-abort-holds')
+    await autoRetry(async () => {
+      expect((await getResult<ChannelState>('#channel-state')).heldBytes).toBe(0)
+    })
+  })
+
+  test("channel: an answer that comes after its page left isn't held", async () => {
+    await page.click('#channel-test-late-answer-holds')
+    await autoRetry(async () => {
+      expect((await getResult<ChannelState>('#channel-state')).lateAnswerAsked).toBe(true)
+    })
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-read-held-bytes')
+    await autoRetry(async () => {
+      expect((await getResult<ChannelState>('#channel-state')).heldBytes).toBe(0)
+    })
+  })
+
   test('channel: ack listener bug — send({ ack: true }) rejects but channel stays open for a follow-up ack', async () => {
     await page.click('#channel-test-ack-listener-bug')
 

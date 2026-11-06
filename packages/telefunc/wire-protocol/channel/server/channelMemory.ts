@@ -1,4 +1,15 @@
-export { addWireCopies, admit, admitPublish, dropWireCopies, hasCopyRoom, hold, holdsEnough, letGo, queueMemory }
+export {
+  addWireCopies,
+  admit,
+  admitPublish,
+  dropWireCopies,
+  hasCopyRoom,
+  hold,
+  holdsEnough,
+  letGo,
+  queueMemory,
+  releaseHolder,
+}
 export type { MemoryHolder }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
@@ -14,6 +25,8 @@ const HELD_PUBLISH_OVERHEAD_BYTES = 200
  *  One without it refuses instead. `newestUnhanded` is its newest publish, where no wire has that yet. */
 interface MemoryHolder {
   heldBytes: number
+  /** Its owner ended, so nothing is held for it any more (see `releaseHolder`). */
+  released?: boolean
   shed?(toBytes: number): void
   readonly newestUnhanded?: PublishBody | undefined
 }
@@ -71,6 +84,7 @@ function newestsThatEndingFrees(): [PublishBody, MemoryHolder[]][] {
 
 /** Only counts: never reclaims, so whoever's mid-mutation finishes first. */
 function hold(holder: MemoryHolder, held: number | PublishBody): void {
+  if (holder.released) return
   if (holder.heldBytes === 0) memory.holders.add(holder)
   if (typeof held === 'number') {
     holder.heldBytes += held
@@ -82,6 +96,7 @@ function hold(holder: MemoryHolder, held: number | PublishBody): void {
 }
 
 function letGo(holder: MemoryHolder, held: number | PublishBody): void {
+  if (holder.released) return
   if (typeof held === 'number') {
     holder.heldBytes -= held
     memory.total -= held
@@ -90,6 +105,15 @@ function letGo(holder: MemoryHolder, held: number | PublishBody): void {
     memory.total -= HELD_PUBLISH_OVERHEAD_BYTES + (--held.refs === 0 ? held.frame.byteLength : 0)
   }
   if (holder.heldBytes === 0) memory.holders.delete(holder)
+}
+
+/** Every byte held has an owner, and when that owner ends all it holds goes, wherever it was charged: what still runs
+ *  for it, like a listener, lets go of nothing after this. Publish bodies have to go first, as others share them. */
+function releaseHolder(holder: MemoryHolder): void {
+  memory.total -= holder.heldBytes
+  holder.heldBytes = 0
+  holder.released = true
+  memory.holders.delete(holder)
 }
 
 /** Whether a wire may hand more copies: what a replay shares, a wire's socket can't. The top eighth is theirs, so the

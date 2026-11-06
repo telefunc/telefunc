@@ -23,7 +23,7 @@ import type { ChannelMux } from './ChannelMux.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
-import { admit, hold, holdsEnough, letGo, type MemoryHolder } from './channelMemory.js'
+import { admit, hold, holdsEnough, letGo, releaseHolder, type MemoryHolder } from './channelMemory.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { ShieldValidator, ShieldValidators } from '../../../node/server/shield.js'
@@ -129,6 +129,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected offlineBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(this)
   /** What it holds for its page. */
   heldBytes = 0
+  released = false
   protected pendingAcks = new Map<number, PendingAck<ServerToClient>>()
   /** Payload bytes of the ack requests in `pendingAcks`. */
   private pendingAckBytes = 0
@@ -551,20 +552,16 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected onPeerMessage(text: string, bytes: number): void {
     const t0 = performance.now()
     try {
-      this.received(bytes)
-      const data = parsePeerText(text) as ChannelData<ClientToServer>
-      const validateData = this._validators.get('data')
-      // Shield fail on a no-ack message: silent drop (validator auto-logs). The client doesn't
-      // await a response, so there's no `ShieldValidationError` to surface — listeners simply
-      // never see the bad value. Ack-bearing sends go through `answerAckReq` and *do*
-      // reject the sender's promise via the `shield-error` wire status.
-      // Dropping still consumes: window refreshes are consumption-driven, so skipping
-      // `onConsumed` would leak receive credit and eventually stall the client's sends.
-      if (validateData && validateData(data) !== true) {
-        this.consumed(bytes)
-        return
-      }
-      this.callListeners(this.listeners, data, bytes)
+      this.holdWhile(bytes, () => {
+        const data = parsePeerText(text) as ChannelData<ClientToServer>
+        const validateData = this._validators.get('data')
+        // Shield fail on a no-ack message: silent drop (validator auto-logs). The client doesn't
+        // await a response, so there's no `ShieldValidationError` to surface — listeners simply
+        // never see the bad value. Ack-bearing sends go through `answerAckReq` and *do*
+        // reject the sender's promise via the `shield-error` wire status.
+        if (validateData && validateData(data) !== true) return undefined
+        return this.callListeners(this.listeners, data)
+      })
     } finally {
       this.selfTime.recordSince(t0)
     }
@@ -584,16 +581,28 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected onPeerBinaryMessage(data: Uint8Array, bytes: number): void {
     const t0 = performance.now()
     try {
-      this.received(bytes)
-      this.callListeners(this.binaryListeners, data, bytes)
+      this.holdWhile(bytes, () => this.callListeners(this.binaryListeners, data))
     } finally {
       this.selfTime.recordSince(t0)
     }
   }
 
-  /** Calls each of `listeners` with `value`; its `bytes` are consumed once the promises they return settle. A listener
-   *  that throws `Abort` stops the rest. */
-  private callListeners<T>(listeners: Listeners<(value: T) => unknown>, value: T, bytes: number): void {
+  /** Holds a frame of `bytes` for `deliver` and what it returns to wait for: consumed on every way out, as window
+   *  refreshes are consumption-driven and a page's sends would stall. */
+  private holdWhile(bytes: number, deliver: () => Promise<unknown> | undefined): void {
+    this.received(bytes)
+    let pending: Promise<unknown> | undefined
+    try {
+      pending = deliver()
+    } finally {
+      if (pending) void pending.finally(() => this.consumed(bytes))
+      else this.consumed(bytes)
+    }
+  }
+
+  /** Calls each of `listeners` with `value`, and returns what to wait for of those they return. A listener that throws
+   *  `Abort` stops the rest. */
+  private callListeners<T>(listeners: Listeners<(value: T) => unknown>, value: T): Promise<unknown> | undefined {
     const pending: Promise<unknown>[] = []
     const list = listeners.list()
     for (const [i, cb] of list.entries()) {
@@ -603,14 +612,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
           pending.push(result.catch((err: unknown) => this.lifecycle.handleCallbackError(err)))
         }
       } catch (err) {
-        if (this.lifecycle.handleCallbackError(err)) return
+        if (this.lifecycle.handleCallbackError(err)) break
       }
     }
-    if (pending.length > 0) {
-      Promise.all(pending).finally(() => this.consumed(bytes))
-    } else {
-      this.consumed(bytes)
-    }
+    return pending.length > 0 ? Promise.all(pending) : undefined
   }
 
   /** Data within the credit granted arrived: nobody can refuse it, so it's charged, and it lowers what's granted next. */
@@ -827,8 +832,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** Send an ack response, buffering it if the peer is currently disconnected. An answer that isn't admitted becomes an
-   *  error for the page's `send`, and where not even that is, the channel ends: the page has to learn. */
+   *  error for the page's `send`, and where not even that is, the channel ends: the page has to learn. Past the channel's
+   *  release no page can get it, so it isn't held. */
   protected sendAckRes(ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
+    if (this.released) return
     if (!admit(this, heldAnswerBytes(result))) {
       if (!admit(this, heldAnswerBytes(NOT_ADMITTED_TEXT))) {
         this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(NOT_ADMITTED_TEXT))
@@ -950,6 +957,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.dropPending(
       this.offlineBuffer.size === 0 ? undefined : (this.lifecycle.closeError ?? new ChannelClosedError()),
     )
+    if (this.didRegister) releaseHolder(this)
   }
 
   /** Drops all buffered while no page was attached; buffered sends reject with `err` when it is given. */

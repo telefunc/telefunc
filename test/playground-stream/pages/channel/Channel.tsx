@@ -14,6 +14,9 @@ import {
   onChannelClientAbortInstrument,
   onChannelMulti,
   onChannelAckListenerAbort,
+  onChannelListenerAbortHolds,
+  onChannelLateAnswerHolds,
+  onChannelHeldBytes,
   onChannelAckListenerBug,
   onChannelClientAckListenerBug,
   onChannelServerPendingAckAbort,
@@ -135,6 +138,8 @@ type ChannelState = {
   clientAbortServerOnOpenFired: boolean | null
   earlyCloseChannelId: string | null
   ackListenerAbortErr: { isAbort: boolean; abortValue: unknown } | null
+  heldBytes: number | null
+  lateAnswerAsked: boolean
   ackListenerBugErr: string | null
   ackListenerBugRecoveryAck: string | null
   clientAckListenerBugChannelId: string | null
@@ -230,6 +235,8 @@ const initialState: ChannelState = {
   clientAbortServerOnOpenFired: null,
   earlyCloseChannelId: null,
   ackListenerAbortErr: null,
+  heldBytes: null,
+  lateAnswerAsked: false,
   ackListenerBugErr: null,
   ackListenerBugRecoveryAck: null,
   clientAckListenerBugChannelId: null,
@@ -677,6 +684,26 @@ function ChannelDemo() {
       ackListenerAbortChannelRef.current = null
     }
   }, [addLog])
+
+  const readHeldBytes = useCallback(async () => {
+    const heldBytes = await onChannelHeldBytes()
+    setChannelState((s) => ({ ...s, heldBytes }))
+  }, [])
+
+  const testListenerAbortHolds = useCallback(async () => {
+    const { channel } = await openChannel(onChannelListenerAbortHolds)
+    const closed = new Promise((resolve) => channel.onClose(resolve))
+    void channel.send('stop')
+    await closed
+    await readHeldBytes()
+  }, [readHeldBytes])
+
+  const testLateAnswerHolds = useCallback(async () => {
+    const { channel } = await openChannel(onChannelLateAnswerHolds)
+    channel.send('late', { ack: true }).catch(() => {})
+    await channel.send('arrived', { ack: true })
+    setChannelState((s) => ({ ...s, lateAnswerAsked: true }))
+  }, [])
 
   const testAckListenerBug = useCallback(async () => {
     addLog('system', 'Starting ack-listener-bug test...')
@@ -1574,6 +1601,15 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-fuchsia-600 text-white hover:bg-fuchsia-700"
           >
             Test Ack Listener Abort
+          </button>
+          <button id="channel-test-listener-abort-holds" type="button" onClick={testListenerAbortHolds}>
+            Test Listener Abort Holds
+          </button>
+          <button id="channel-test-late-answer-holds" type="button" onClick={testLateAnswerHolds}>
+            Test Late Answer Holds
+          </button>
+          <button id="channel-read-held-bytes" type="button" onClick={readHeldBytes}>
+            Read Held Bytes
           </button>
           <button
             id="channel-test-ack-listener-bug"

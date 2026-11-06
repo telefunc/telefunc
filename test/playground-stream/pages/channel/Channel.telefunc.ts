@@ -7,6 +7,9 @@ export {
   onChannelClientAbortInstrument,
   onChannelMulti,
   onChannelAckListenerAbort,
+  onChannelListenerAbortHolds,
+  onChannelLateAnswerHolds,
+  onChannelHeldBytes,
   onChannelAckListenerBug,
   onChannelClientAckListenerBug,
   onChannelServerPendingAckAbort,
@@ -234,6 +237,43 @@ async function onChannelAckListenerAbort() {
     throw Abort({ reason: 'listener-abort', code: 7 })
   })
   return { channel: ch.client }
+}
+
+/** The channel `onChannelHeldBytes` reads what it holds of, once a listener's late answer went. */
+let heldChannel: { heldBytes?: number } | undefined
+let lateAnswer = Promise.resolve()
+
+/** A listener's `Abort` ends the channel from inside the delivery of the message it got. */
+async function onChannelListenerAbortHolds() {
+  const ch = new Channel<(msg: string) => void, never>()
+  ch.listen(() => {
+    throw Abort('stop')
+  })
+  heldChannel = ch
+  return { channel: ch.client }
+}
+
+/** A listener that answers `late` once its page left. */
+async function onChannelLateAnswerHolds() {
+  const ch = new Channel<(msg: string) => string, never>()
+  const closed = new Promise<void>((resolve) => ch.onClose(() => resolve()))
+  let markAnswered!: () => void
+  lateAnswer = new Promise((resolve) => {
+    markAnswered = resolve
+  })
+  ch.listen(async (msg) => {
+    if (msg !== 'late') return msg
+    await closed
+    setTimeout(markAnswered)
+    return msg
+  })
+  heldChannel = ch
+  return { channel: ch.client }
+}
+
+async function onChannelHeldBytes() {
+  await lateAnswer
+  return heldChannel!.heldBytes!
 }
 
 async function onChannelAckListenerBug() {
