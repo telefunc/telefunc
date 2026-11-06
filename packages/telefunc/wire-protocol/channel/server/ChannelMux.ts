@@ -82,8 +82,6 @@ type MuxServerOptions = {
   pingInterval: number
   pingDeadline: number
   creditWindow: number
-  sseFlushThrottle: number
-  ssePostIdleFlushDelay: number
   transports: ChannelTransports
 }
 
@@ -238,8 +236,6 @@ class ChannelMux implements UpgradeStagesOwner {
         pingInterval: this.options.pingInterval,
         maxFrameBytes: getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES,
         creditWindow: this.options.creditWindow,
-        sseFlushThrottle: this.options.sseFlushThrottle,
-        ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
         transports: this.options.transports,
       }),
     )
@@ -896,8 +892,6 @@ function resolveMuxServerOptions(): MuxServerOptions {
     pingInterval,
     pingDeadline: pingDeadlineOf(c),
     creditWindow: creditWindowOf(c.maxPendingBytes),
-    sseFlushThrottle: c.sseFlushThrottle,
-    ssePostIdleFlushDelay: c.ssePostIdleFlushDelay,
     transports: c.transports,
   }
 }

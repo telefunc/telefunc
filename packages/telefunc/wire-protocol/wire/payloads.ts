@@ -67,8 +67,6 @@ type ReconciledPayload = {
   maxFrameBytes: number
   /** The largest credit window, each way. */
   creditWindow: number
-  sseFlushThrottle: number
-  ssePostIdleFlushDelay: number
   transports: ChannelTransports
   upgradeId?: string
 }

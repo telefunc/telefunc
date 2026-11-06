@@ -39,8 +39,6 @@ import {
   DEFAULT_STREAM_TRANSPORT,
   parseStreamConfig,
   validateChannelTransports,
-  SSE_FLUSH_THROTTLE_MS,
-  SSE_POST_IDLE_FLUSH_DELAY_MS,
   type ChannelTransports,
   type StreamTransport,
   TIMER_DELAY_MAX_MS,
@@ -87,22 +85,6 @@ type ChannelConfigUser = {
   pingInterval?: number
   /** Maximum bytes queued beyond credit or awaiting acknowledgements. @default 268435456 */
   maxPendingBytes?: number
-  /**
-   * When using SSE channels, upstream client-to-server frames are batched for at
-   * most this many milliseconds before Telefunc sends a POST.
-   *
-   * This value also defines the idle window used to detect the first POST after
-   * an idle period.
-   */
-  sseFlushThrottle?: number
-  /**
-   * When using SSE channels, the first upstream batch POST after an idle period
-   * waits at most this many milliseconds before Telefunc flushes it.
-   *
-   * Idle means no upstream SSE batch POST has started within the current
-   * `sseFlushThrottle` window.
-   */
-  ssePostIdleFlushDelay?: number
 }
 
 type ChannelConfigResolved = {
@@ -110,8 +92,6 @@ type ChannelConfigResolved = {
   reconnectTimeout: number
   pingInterval: number
   maxPendingBytes: number
-  sseFlushThrottle: number
-  ssePostIdleFlushDelay: number
 }
 
 /** Telefunc Server Configuration */
@@ -312,8 +292,6 @@ function getServerConfig(): ConfigResolved {
       reconnectTimeout: configState.channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
       pingInterval: configState.channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
       maxPendingBytes: configState.channel.maxPendingBytes ?? CHANNEL_MAX_PENDING_BYTES,
-      sseFlushThrottle: configState.channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
-      ssePostIdleFlushDelay: configState.channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
     },
     extensions: configState.extensions,
   }
@@ -457,8 +435,6 @@ function applyChannelConfig(val: unknown): void {
         next[key] = value
         break
       case 'reconnectTimeout':
-      case 'sseFlushThrottle':
-      case 'ssePostIdleFlushDelay':
         assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
         next[key] = value
         break
