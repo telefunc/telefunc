@@ -113,7 +113,7 @@ function testFunction(isDev: boolean, inDocker = false) {
     await autoRetry(async () => {
       const search = await getResult<{ result: string; ms: number }>('#search-result')
       expect(search.result).toBe('<b>ab</b>')
-      // Not held for the server's connectTtl, which waits for the aborted call's callback.
+      // Not held for the server's wait for a channel to connect, which waits for the aborted call's callback.
       expect(search.ms).lessThan(3000)
     })
   })

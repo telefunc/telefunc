@@ -259,12 +259,12 @@ export const CHANNEL_MAX_PENDING_BYTES = 256 * 1024 * 1024
  *  Cloudflare) and under the smallest `maxPendingBytes`. */
 export const STREAM_CHUNK_PART_BYTES = 1024 * 1024
 
-/** How long a channel waits for its peer to connect: it outlasts a page's noticing its wire died, and a reconnect. */
-export const CHANNEL_CONNECT_TTL_MS = 15_000
-
 // Client-side channel reconnect defaults
 export const CHANNEL_RECONNECT_INITIAL_DELAY_MS = 500
 export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
+
+/** How long a channel waits for its peer to connect: it outlasts a page's noticing its wire died, and a reconnect. */
+export const CHANNEL_CONNECT_TTL_MS = RECONCILE_TIMEOUT_MS + CHANNEL_RECONNECT_MAX_DELAY_MS
 
 // ===== Credit-based flow control =====
 //
