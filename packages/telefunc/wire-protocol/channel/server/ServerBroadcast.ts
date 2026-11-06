@@ -33,12 +33,9 @@ import { TAG } from '../../wire/tags.js'
 import type { ChannelDataFrame } from '../../wire/frame.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { PublishBody } from './PublishBody.js'
-import {
-  CHANNEL_HOLD_MAX_BYTES,
-  CHANNEL_RECONNECT_TIMEOUT_MS,
-  CREDIT_WINDOW_MAX_BYTES,
-  PUBLISH_HOLD_BYTES,
-} from '../../constants.js'
+import { CHANNEL_HOLD_MAX_BYTES, CHANNEL_RECONNECT_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
+import type { IndexedPeer } from './IndexedPeer.js'
+import type { AttachState } from '../../wire/payloads.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { isAbort } from '../../../node/server/Abort.js'
@@ -72,6 +69,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   /** Its page is told what it missed by `info.seq`, and the server's log by this once. */
   private missedWarned = false
+  /** The page's channel on the wire it last attached on: a publish while the page is away joins the replay through it,
+   *  as one a silently dead wire lost does. */
+  private lastPeer: IndexedPeer | null = null
 
   static isServerBroadcast(value: unknown): value is ServerBroadcast {
     return value !== null && typeof value === 'object' && SERVER_BROADCAST_BRAND in value
@@ -188,16 +188,11 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.forwardPublish(bodyOf(encode.publishBinary, data, rawInfo))
   }
 
-  /** A publish to the page, buffered while it is away. */
+  /** A publish to the page. A subscription is the page's, so it has attached before. */
   private forwardPublish(body: PublishBody): void {
-    if (this.peer) {
-      this.peer.sendPublish(body)
-      const share = this.share()
-      if (this.heldBytes > share) this.shed(share)
-      return
-    }
-    this.offlineBuffer.pushPublish(body)
-    this.closeIfHoldExceeded()
+    this.lastPeer!.sendPublish(body)
+    const share = this.share()
+    if (this.heldBytes > share) this.shed(share)
   }
 
   /** What it may hold: 60 s of what its page takes, within what any channel may. */
@@ -246,17 +241,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     )
   }
 
-  /** A publish it couldn't hold for an offline page would leave it a gap: it gets the end at its next attach instead. */
-  private closeIfHoldExceeded(): void {
-    if (this.offlineBuffer.publishBytes <= PUBLISH_HOLD_BYTES) return
-    this.endWithError(
-      ERROR_REASON.OVERFLOW,
-      new ChannelOverflowError(
-        `Broadcast closed: over ${PUBLISH_HOLD_BYTES} bytes were published while its client was away`,
-      ),
-    )
-  }
-
   protected override onPeerSubscription({ binary, subscribed }: { binary: boolean; subscribed: boolean }): void {
     if (binary) this.peerSubscribedBinary = subscribed
     else this.peerSubscribedText = subscribed
@@ -280,7 +264,13 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     }
   }
 
+  override _attachPeer(peer: IndexedPeer, state?: AttachState): void {
+    this.lastPeer = peer
+    super._attachPeer(peer, state)
+  }
+
   protected override shutdown(err?: Error, options?: { pageGone?: boolean }): void {
+    this.lastPeer = null
     this.unsubBroadcast?.()
     this.unsubBroadcast = null
     this.unsubBinaryBroadcast?.()

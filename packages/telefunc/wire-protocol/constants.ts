@@ -250,8 +250,8 @@ export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024
 export const WIRE_SEND_AHEAD_ROUND_TRIPS = 4
 /** How long a page's data frame may wait in its wire's queues, as acknowledgements measure it, before it holds back. */
 export const WIRE_QUEUE_DELAY_MS = 300
-/** The most held for one subscriber that isn't taking what's published: while its page is away, and behind a
- *  `messages()` loop. Publishes can't be awaited, so this is what each of a broadcast's subscribers can pin. */
+/** The most a broadcast's `messages()` loop holds behind, and a Cloudflare bucket for a Durable Object starting up:
+ *  publishes can't be awaited. */
 export const PUBLISH_HOLD_BYTES = 2 * 1024 * 1024
 /** The most one server channel holds for its page, however large `config.channel.maxMemory`: a sender that awaits each
  *  send holds one, so only sends nobody awaits reach it. */

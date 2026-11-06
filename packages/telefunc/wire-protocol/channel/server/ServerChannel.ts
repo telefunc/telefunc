@@ -52,7 +52,6 @@ import {
   type EntryData,
 } from './ServerChannelBuffer.js'
 import { ServerReplay } from './ServerReplay.js'
-import { PublishBody } from './PublishBody.js'
 import { getChannelConfig } from '../../../node/server/serverConfig.js'
 import { assert, assertWarning } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
@@ -782,10 +781,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         peer.sendSequenced(encode.textAckReq, data, (seq, bytes) => {
           if (callback) this.addPendingAck(seq, bytes, callback)
         })
-        break
-      case TAG.PUBLISH:
-        assert(data instanceof PublishBody)
-        peer.sendPublish(data)
         break
       case TAG.BINARY:
         assert(data instanceof Uint8Array && callback)

@@ -303,9 +303,6 @@ async function onBroadcastReconnect() {
 async function onBroadcastWhileOffline(count: number) {
   const key = `room:while-offline:${crypto.randomUUID()}`
   const room = new BroadcastChannel<string>({ key })
-  room.onClose((err) => {
-    cleanupState[`whileOffline_${key}_serverClose`] = err?.name ?? 'none'
-  })
   onServerAction(`publish_${key}`, () => {
     for (let n = 0; n < count; n++) void Broadcast.publish(key, String(n).padEnd(128 * 1024))
   })

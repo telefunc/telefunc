@@ -465,12 +465,9 @@ function testPublish(isDev: boolean, inDocker = false) {
       })
     })
 
-    for (const { count, received, closed } of [
-      { count: 2, received: ['before', '0', '1'], closed: null },
-      { count: 32, received: ['before'], closed: 'ChannelOverflowError' },
-    ]) {
+    for (const count of [2, 32]) {
       if (canCutWire())
-        test(`broadcast: a page offline while ${count * 128} KiB is published ${closed ? 'leaves with ChannelOverflowError on both ends' : 'gets all of it once back'}`, async () => {
+        test(`broadcast: a page offline while ${count * 128} KiB is published gets all of it once back`, async () => {
           await navigate(`${getServerUrl()}/publish`)
           await page.click(`#test-broadcast-while-offline-${count}`)
           let key: string | null = null
@@ -487,9 +484,8 @@ function testPublish(isDev: boolean, inDocker = false) {
 
           await autoRetry(async () => {
             const result = await getResult<{ received: string[]; closed: string | null }>('#publish-result')
-            expect(result.received).deep.equal(received)
-            expect(result.closed).toBe(closed)
-            if (closed) expect((await getCleanupState())[`whileOffline_${key}_serverClose`]).toBe(closed)
+            expect(result.received).deep.equal(['before', ...Array.from({ length: count }, (_, n) => String(n))])
+            expect(result.closed).toBe(null)
           })
         })
     }

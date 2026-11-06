@@ -5,7 +5,6 @@ import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import { TAG } from '../../wire/tags.js'
 import { HEADER } from '../../wire/header.js'
 import type { IndexedPeer } from './IndexedPeer.js'
-import type { PublishBody } from './PublishBody.js'
 
 /** What a send held in memory (buffered, or awaiting its answer or credit) takes beyond its payload: its callbacks and
  *  promise, about 480 B. */
@@ -26,21 +25,18 @@ interface BufferedSender {
   _sendBuffered(peer: IndexedPeer, tag: number, data: EntryData, callback: EntryCallback | null): void
 }
 
-type EntryData = string | Uint8Array | PublishBody
+type EntryData = string | Uint8Array
 type Entry = { tag: number; data: EntryData; callback: EntryCallback | null }
 
 /**
- * Holds what a channel sends while no peer is attached (text, binary, publishes, ack requests), for `flush` to send in
- * order. It takes all it is given, and counts it: the channel admits each send first, and a broadcast ends past
- * `PUBLISH_HOLD_BYTES`.
+ * Holds what a channel sends while no peer is attached (text, binary, ack requests), for `flush` to send in order. It
+ * takes all it is given, and counts it: the channel admits each send first.
  */
 class ServerChannelBuffer<TAck = never> {
   private entries: Entry[] = []
   private readonly owner: BufferedSender
   /** What the held sends count as on the channel's ledger. */
   sendBytes = 0
-  /** What the held publishes count as against `PUBLISH_HOLD_BYTES`. */
-  publishBytes = 0
 
   constructor(owner: BufferedSender) {
     this.owner = owner
@@ -67,11 +63,6 @@ class ServerChannelBuffer<TAck = never> {
     this.pushSend(TAG.BINARY_ACK_REQ, new Uint8Array(data), data.byteLength, { resolve, reject })
   }
 
-  pushPublish(body: PublishBody): void {
-    this.entries.push({ tag: TAG.PUBLISH, data: body, callback: null })
-    this.publishBytes += body.frame.byteLength
-  }
-
   /** Sends every entry to its channel in the order it came, then empties the buffer. */
   flush(peer: IndexedPeer): void {
     this.letGoSends()
@@ -83,7 +74,6 @@ class ServerChannelBuffer<TAck = never> {
     if (err) for (const { callback } of this.entries) callback?.reject(err)
     this.entries = []
     this.letGoSends()
-    this.publishBytes = 0
   }
 
   /** Rejects the ack requests, whose answers can't be taken, and keeps them to flush with the rest. */
