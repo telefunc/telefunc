@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 
-import { ReplayBuffer } from '../../wire-protocol/channel/ReplayBuffer.js'
+import { ServerReplay } from '../../wire-protocol/channel/server/ServerReplay.js'
 import { ACK_STATUS, decode, encode, type AckResultStatus, type ChannelFrame } from '../../wire-protocol/wire/frame.js'
 import { TAG } from '../../wire-protocol/wire/tags.js'
 import { ProtocolViolationError } from '../../wire-protocol/wire/protocolViolation.js'
@@ -19,7 +19,7 @@ function createPeer(frames: Uint8Array[]) {
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
     },
     index: 7,
-    replay: new ReplayBuffer(1024 * 1024),
+    replay: new ServerReplay(1024 * 1024),
   })
 }
 

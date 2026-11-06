@@ -39,7 +39,14 @@ import {
   type ReconcilePayload,
   type ReconciledPayload,
 } from './payloads.js'
-import { decodePublishBinary, decodePublishText, type WirePublishInfo } from './publishInfo.js'
+import {
+  PUBLISH_BINARY_HEADER,
+  decodePublishBinary,
+  decodePublishText,
+  encodePublishText,
+  writePublishBinaryInfo,
+  type WirePublishInfo,
+} from './publishInfo.js'
 import { ProtocolViolationError, assertProtocol } from './protocolViolation.js'
 import { textDecoder, textEncoder } from './envelope.js'
 
@@ -96,6 +103,7 @@ type ChannelDataFrame = { index: number; seq: number; bytes: number } & (
   | { tag: typeof TAG.PUBLISH_ACK_REQ; text: string }
   | { tag: typeof TAG.PUBLISH_BINARY; data: Uint8Array; info: WirePublishInfo }
   | { tag: typeof TAG.PUBLISH_BINARY_ACK_REQ; data: Uint8Array }
+  | { tag: typeof TAG.PUBLISH_TO }
 )
 
 type ChannelCtrlFrame =
@@ -182,13 +190,21 @@ type SequencedEncoder<T> = (index: number, data: T, seq: number) => Uint8Array<A
 
 const encode = {
   text: (index: number, text: string, seq: number) => encodeTextFrame(TAG.TEXT, index, text, seq),
-  publish: (index: number, text: string, seq: number) => encodeTextFrame(TAG.PUBLISH, index, text, seq),
+  /** A publish's body, which names no channel: `publishTo` goes ahead of it on each subscriber's wire. */
+  publish: (text: string, info: WirePublishInfo) => encodeTextFrame(TAG.PUBLISH, 0, encodePublishText(text, info), 0),
   publishAckReq: (index: number, text: string, seq: number) => encodeTextFrame(TAG.PUBLISH_ACK_REQ, index, text, seq),
   textAckReq: (index: number, text: string, seq: number) => encodeTextFrame(TAG.TEXT_ACK_REQ, index, text, seq),
 
   binary: (index: number, data: Uint8Array, seq: number) => encodeBinaryFrame(TAG.BINARY, index, data, seq),
-  publishBinary: (index: number, data: Uint8Array, seq: number) =>
-    encodeBinaryFrame(TAG.PUBLISH_BINARY, index, data, seq),
+  /** A binary publish's body, as `publish`. */
+  publishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + PUBLISH_BINARY_HEADER + data.byteLength)
+    writeHeader(frame, TAG.PUBLISH_BINARY, 0, 0)
+    writePublishBinaryInfo(frame, HEADER, info)
+    frame.set(data, HEADER + PUBLISH_BINARY_HEADER)
+    return frame
+  },
+  publishTo: (index: number, seq: number) => encodeBareFrame(TAG.PUBLISH_TO, index, seq),
   publishBinaryAckReq: (index: number, data: Uint8Array, seq: number) =>
     encodeBinaryFrame(TAG.PUBLISH_BINARY_ACK_REQ, index, data, seq),
   binaryAckReq: (index: number, data: Uint8Array, seq: number) =>
@@ -369,6 +385,7 @@ function fixedBytes(tag: number): number {
 
 const FIXED_BYTES: Partial<Record<number, number>> = {
   [TAG.FIN]: encode.fin().byteLength,
+  [TAG.PUBLISH_TO]: encode.publishTo(0, 0).byteLength,
   [TAG.STREAM_REQUEST_OPEN_ACK]: encode.streamRequestOpenAck().byteLength,
   [TAG.PIECES_ACK]: encode.piecesAck(0, 0, 0).byteLength,
   [TAG.ANNOUNCE]: encode.announce(0, 0).byteLength,
@@ -451,6 +468,8 @@ function decode(frame: Uint8Array): DecodedFrame {
     }
     case TAG.PUBLISH_BINARY_ACK_REQ:
       return { tag: TAG.PUBLISH_BINARY_ACK_REQ, index, seq, bytes, data: payload }
+    case TAG.PUBLISH_TO:
+      return { tag: TAG.PUBLISH_TO, index, seq, bytes }
     case TAG.ACK_RES: {
       assertProtocol(payload.length >= ACK_RES_PREFIX, 'ACK_RES payload too short')
       const ackedSeq = readU64(payload, 0)

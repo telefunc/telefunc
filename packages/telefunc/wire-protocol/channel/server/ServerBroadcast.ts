@@ -29,9 +29,9 @@ import { Listeners } from '../../../utils/Listeners.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
 import { ACK_STATUS, ERROR_REASON, encode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
-import { encodePublishText, encodePublishBinary } from '../../wire/publishInfo.js'
 import type { ChannelDataFrame } from '../../wire/frame.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
+import { PublishBody } from './PublishBody.js'
 import { PUBLISH_HOLD_BYTES } from '../../constants.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
@@ -167,7 +167,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       }
     }
     if (!this.peerSubscribedText) return
-    this.forwardPublish(encodePublishText(serialized, rawInfo))
+    this.forwardPublish(bodyOf(encode.publish, serialized, rawInfo))
   }
 
   private deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
@@ -182,21 +182,17 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       }
     }
     if (!this.peerSubscribedBinary) return
-    this.forwardPublish(encodePublishBinary(data, rawInfo))
+    this.forwardPublish(bodyOf(encode.publishBinary, data, rawInfo))
   }
 
-  /** A text (`string`) or binary publish to the page, buffered while it is away. */
-  private forwardPublish(wire: string | Uint8Array): void {
-    const binary = typeof wire !== 'string'
-    const peer = this.peer
-    if (!peer) {
-      if (binary) this.offlineBuffer.pushPublishBinary(wire)
-      else this.offlineBuffer.pushPublish(wire)
-      this.closeIfHoldExceeded()
+  /** A publish to the page, buffered while it is away. */
+  private forwardPublish(body: PublishBody): void {
+    if (this.peer) {
+      this.peer.sendPublish(body)
       return
     }
-    if (binary) peer.sendSequenced(encode.publishBinary, wire)
-    else peer.sendSequenced(encode.publish, wire)
+    this.offlineBuffer.pushPublish(body)
+    this.closeIfHoldExceeded()
   }
 
   /** A publish it couldn't hold for an offline page would leave it a gap: it gets the end at its next attach instead. */
@@ -342,6 +338,22 @@ type BroadcastChannel<T = unknown> = {
 
 const BroadcastChannel = ServerBroadcast as {
   new <T = unknown>(opts: { key: string }): BroadcastChannel<T>
+}
+
+/** One delivery hands every subscriber on this server the same `info`, so they share the body the first one makes. */
+const publishBodies = new WeakMap<WirePublishInfo, PublishBody>()
+
+function bodyOf<T>(
+  encodeBody: (data: T, info: WirePublishInfo) => Uint8Array<ArrayBuffer>,
+  data: T,
+  info: WirePublishInfo,
+): PublishBody {
+  let body = publishBodies.get(info)
+  if (!body) {
+    body = new PublishBody(encodeBody(data, info))
+    publishBodies.set(info, body)
+  }
+  return body
 }
 
 /** The adapter's receipt as the public one, carrying its key like a subscriber's `info`. */

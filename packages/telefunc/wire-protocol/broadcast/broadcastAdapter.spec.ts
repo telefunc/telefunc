@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { Broadcast, ServerBroadcast } from '../channel/server/ServerBroadcast.js'
-import { ReplayBuffer } from '../channel/ReplayBuffer.js'
+import { ServerReplay } from '../channel/server/ServerReplay.js'
 import { ACK_STATUS, decode, encode, type ChannelFrame } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
 import { IndexedPeer } from '../channel/server/IndexedPeer.js'
@@ -169,12 +169,12 @@ describe('keyed in-process broadcast', () => {
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
         },
         index: 7,
-        replay: new ReplayBuffer(1024 * 1024),
+        replay: new ServerReplay(1024 * 1024),
       }),
     )
 
-    // One publish made before attach → exactly one frame replayed on attach.
-    expect(frames.length).toBe(1)
+    // One publish made before attach → its head and its body replayed on attach.
+    expect(frames.map((frame) => frame[0])).toEqual([TAG.PUBLISH_TO, TAG.PUBLISH])
   })
 
   it('buffers keyed publishes that arrive before a sibling has registered yet', () => {
@@ -298,7 +298,7 @@ describe('Broadcast shield validation', () => {
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
         },
         index: 7,
-        replay: new ReplayBuffer(1024 * 1024),
+        replay: new ServerReplay(1024 * 1024),
       }),
     )
 
@@ -334,7 +334,7 @@ describe('Broadcast shield validation', () => {
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
         },
         index: 7,
-        replay: new ReplayBuffer(1024 * 1024),
+        replay: new ServerReplay(1024 * 1024),
       }),
     )
     void sender._onPeerPublishAckReqMessage(JSON.stringify({ text: 'malicious' }), 1)

@@ -53,8 +53,10 @@ import {
   HELD_SEND_OVERHEAD_BYTES,
   type BufferedSender,
   type EntryCallback,
+  type EntryData,
 } from './ServerChannelBuffer.js'
-import { ReplayBuffer } from '../ReplayBuffer.js'
+import { ServerReplay } from './ServerReplay.js'
+import { PublishBody } from './PublishBody.js'
 import { getChannelConfig } from '../../../node/server/serverConfig.js'
 import { assert, assertWarning } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
@@ -151,7 +153,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   // ── Wire state — channel-owned, kept across the page's attaches ────
   /** @internal Buffer of outgoing wire frames, used to replay missed frames on reconnect. Allocated in
    *  `_registerChannel` and disposed in `_release`: null before registration, when no peer can attach, and after. */
-  _replayBuffer: ReplayBuffer | null = null
+  _replayBuffer: ServerReplay | null = null
   /** @internal Highest client→server seq the channel has received and dispatched. Used for frame deduplication and
    *  reported back to the client in `ReconciledPayload.open[].lastSeq`. */
   _lastClientSeq = 0
@@ -424,7 +426,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // returns.
     const c = getChannelConfig()
     // All that its sends may get ahead of the page and what's in flight, so a lost wire loses none.
-    this._replayBuffer = new ReplayBuffer(c.maxPendingBytes + creditWindowOf(c.maxPendingBytes))
+    this._replayBuffer = new ServerReplay(c.maxPendingBytes + creditWindowOf(c.maxPendingBytes))
     if (this._phase === 'ended') return // the mux lets an ended channel go
     if (this.ttlTimer) clearTimeout(this.ttlTimer)
     this.ttlTimer = unrefTimer(
@@ -506,6 +508,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.PUBLISH:
       case TAG.PUBLISH_BINARY:
+      case TAG.PUBLISH_TO:
         assert(false, `Server received unexpected ${frame.tag} frame from peer`)
     }
   }
@@ -761,7 +764,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal `BufferedSender`: sends `peer` a frame buffered while no page was attached, as it would have gone then.
    *  An ack request already rejected at shutdown has no callback left to answer. */
-  _sendBuffered(peer: IndexedPeer, tag: number, data: string | Uint8Array, callback: EntryCallback | null): void {
+  _sendBuffered(peer: IndexedPeer, tag: number, data: EntryData, callback: EntryCallback | null): void {
     switch (tag) {
       case TAG.TEXT:
         assert(typeof data === 'string' && callback)
@@ -774,8 +777,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         })
         break
       case TAG.PUBLISH:
-        assert(typeof data === 'string')
-        peer.sendSequenced(encode.publish, data)
+        assert(data instanceof PublishBody)
+        peer.sendPublish(data)
         break
       case TAG.BINARY:
         assert(data instanceof Uint8Array && callback)
@@ -786,10 +789,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         peer.sendSequenced(encode.binaryAckReq, data, (seq, bytes) => {
           if (callback) this.addPendingAck(seq, bytes, callback)
         })
-        break
-      case TAG.PUBLISH_BINARY:
-        assert(data instanceof Uint8Array)
-        peer.sendSequenced(encode.publishBinary, data)
         break
     }
   }

@@ -147,8 +147,9 @@ describe('decodeClientFrame — direction', () => {
     ['FIN', encode.fin()],
     ['READY', encode.ready({ upgradeId: 'u' })],
     ['STREAM_REQUEST_OPEN_ACK', encode.streamRequestOpenAck()],
-    ['PUBLISH', encode.publish(0, `9,1700000000000\n${JSON.stringify(1)}`, 1)],
-    ['PUBLISH_BINARY', encode.publishBinary(0, new Uint8Array(14), 1)],
+    ['PUBLISH', encode.publish(JSON.stringify(1), { seq: 9, timestamp: 1700000000000 })],
+    ['PUBLISH_BINARY', encode.publishBinary(new Uint8Array(14), { seq: 9, timestamp: 1700000000000 })],
+    ['PUBLISH_TO', encode.publishTo(0, 1)],
     ['RECONCILED', encode.reconciled(reconciled())],
   ]
   test.each(serverOnly)('a client-sent %s is refused', (_name, frame) => {

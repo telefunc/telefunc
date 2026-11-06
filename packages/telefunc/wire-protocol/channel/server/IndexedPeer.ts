@@ -3,7 +3,8 @@ export type { PeerSender }
 
 import { ACK_STATUS, encode } from '../../wire/frame.js'
 import type { AckResultStatus, ErrorReason, SequencedEncoder } from '../../wire/frame.js'
-import { ReplayBuffer } from '../ReplayBuffer.js'
+import type { PublishBody } from './PublishBody.js'
+import type { ServerReplay } from './ServerReplay.js'
 import type { SendWait } from '../../flowControl/SendWaits.js'
 import type { Urgency } from '../../flowControl/credit.js'
 
@@ -22,14 +23,14 @@ interface PeerSender {
 type IndexedPeerOptions = {
   sender: PeerSender
   index: number
-  replay: ReplayBuffer
+  replay: ServerReplay
 }
 
 /** Encodes a channel's frames with its index; a sequenced one joins the replay buffer as it goes to the wire. */
 class IndexedPeer {
   readonly sender: PeerSender
   private index: number
-  private replay: ReplayBuffer
+  private replay: ServerReplay
 
   constructor({ sender, index, replay }: IndexedPeerOptions) {
     this.sender = sender
@@ -45,6 +46,15 @@ class IndexedPeer {
     onQueued?.(seq, frame.byteLength)
     this.commit(seq, frame)
     return frame.byteLength
+  }
+
+  /** Sends `body` behind a head naming this channel and its next seq; both join the replay and the wire in one call. */
+  sendPublish(body: PublishBody): void {
+    const seq = this.replay.nextSeq()
+    const head = encode.publishTo(this.index, seq)
+    this.replay.pushPublish(seq, head, body)
+    this.sender.send(head)
+    this.sender.send(body.frame)
   }
 
   /** Send an acknowledgement response for a message the client sent.

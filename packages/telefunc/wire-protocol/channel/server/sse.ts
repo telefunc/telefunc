@@ -23,7 +23,7 @@ import { OversizeFrameError, BodyReader, StreamTruncatedError } from '../../wire
 import { getChannelMux } from './ChannelMux.js'
 import type { ReconcileOutcome, ServerTransport } from './ChannelMux.js'
 import { encode } from '../../wire/frame.js'
-import { passesData } from '../../wire/tags.js'
+import { TAG, passesData } from '../../wire/tags.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { isProtocolViolationError, ProtocolViolationError } from '../../wire/protocolViolation.js'
 
@@ -109,8 +109,22 @@ class EventStream {
   }
 }
 
+/** The event of the publish body being delivered in this task: its subscribers hand their streams the one event. */
+const sharedEvent: { frame: Uint8Array | null; event: Uint8Array<ArrayBuffer> | null } = { frame: null, event: null }
+
 function eventOf(frame: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
-  return textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`)
+  if (sharedEvent.frame === frame) return sharedEvent.event!
+  const event = textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`)
+  if (frame[0] !== TAG.PUBLISH && frame[0] !== TAG.PUBLISH_BINARY) return event
+  if (sharedEvent.frame === null) queueMicrotask(forgetSharedEvent)
+  sharedEvent.frame = frame
+  sharedEvent.event = event
+  return event
+}
+
+function forgetSharedEvent(): void {
+  sharedEvent.frame = null
+  sharedEvent.event = null
 }
 
 /** What `eventOf` takes for `frame`: its base64url, unpadded, and the 8 bytes around it. */

@@ -15,6 +15,7 @@ import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
 import { decode, encode, isOneFrame, messageFrames, withTook, type DecodedFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
+import { pairPublishes } from './pairPublishes.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import type { OutboundFrame } from './ClientConnection.js'
 import type { TransportOwner } from './WireLifecycle.js'
@@ -194,6 +195,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   private setupHandlers(ws: WebSocket, pieces: WirePieces): void {
     const { downlink, headroom, sender, receiver } = pieces
     this.pieces = pieces
+    const pair = pairPublishes()
     const take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
       if (frame.tag === TAG.PIECES_ACK) {
         if (!headroom.acknowledged(frame)) return false
@@ -202,7 +204,10 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
         sender.heartbeat(frame.took, at)
         this.heartbeat?.resetPong()
         this.owner.onTransportPong(frame.ended)
-      } else this.owner.onTransportFrame(frame, this, byteLength, ws === this.abandoned?.ws)
+      } else {
+        const paired = pair(frame)
+        if (paired) this.owner.onTransportFrame(paired, this, byteLength, ws === this.abandoned?.ws)
+      }
       return true
     }
     ws.onmessage = ({ data }: MessageEvent) => {

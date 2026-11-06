@@ -24,6 +24,7 @@ import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wi
 import { getWireUrl } from './getSessionUrl.js'
 import { decode } from '../../wire/frame.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
+import { pairPublishes } from './pairPublishes.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import { DeadlineScheduler } from './DeadlineScheduler.js'
 import { SseEvents } from './SseEvents.js'
@@ -382,6 +383,7 @@ class SseTransport implements UpgradeSource {
 
   /** Dispatches the downstream's events until it ends; `onOpenAck` runs as the upload's acknowledgement arrives. */
   private async readEvents(reader: SseEventStreamReader, abortController: AbortController, onOpenAck: () => void) {
+    const pair = pairPublishes()
     try {
       while (true) {
         const raw = await reader.readNextEntry()
@@ -396,7 +398,10 @@ class SseTransport implements UpgradeSource {
           this.owner.onTransportPong(frame.ended)
           continue
         }
-        this.owner.onTransportFrame(frame, this, raw.byteLength, this.abandonedControllers.has(abortController))
+        const paired = pair(frame)
+        if (paired) {
+          this.owner.onTransportFrame(paired, this, raw.byteLength, this.abandonedControllers.has(abortController))
+        }
       }
     } catch {
       if (abortController.signal.aborted) return

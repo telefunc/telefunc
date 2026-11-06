@@ -112,7 +112,7 @@ export const WS_CLOSE_PAGE_LEFT = 4000
 /** The version of the channel wire, which each channel request names in its URL. A server on another version refuses
  *  the page's channels with `WS_CLOSE_WIRE_VERSION` or `STATUS_CODE_WIRE_VERSION`, which the page reports as a page to
  *  reload: those two never change. */
-export const WIRE_VERSION = 1
+export const WIRE_VERSION = 2
 export const WS_CLOSE_WIRE_VERSION = 4001
 export const STATUS_CODE_WIRE_VERSION = 409
 

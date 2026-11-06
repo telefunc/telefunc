@@ -1,10 +1,11 @@
 export { ServerChannelBuffer, HELD_SEND_OVERHEAD_BYTES }
-export type { BufferedSender, EntryCallback }
+export type { BufferedSender, EntryCallback, EntryData }
 
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import { TAG } from '../../wire/tags.js'
 import { HEADER } from '../../wire/header.js'
 import type { IndexedPeer } from './IndexedPeer.js'
+import type { PublishBody } from './PublishBody.js'
 
 /** What a send held in memory (buffered, or awaiting its answer or credit) takes beyond its payload: its callbacks and
  *  promise, about 480 B. */
@@ -18,10 +19,11 @@ type EntryCallback = {
 
 /** The channel `flush` hands each held entry to, with the entry's tag, data and callbacks (null once rejected). */
 interface BufferedSender {
-  _sendBuffered(peer: IndexedPeer, tag: number, data: string | Uint8Array, callback: EntryCallback | null): void
+  _sendBuffered(peer: IndexedPeer, tag: number, data: EntryData, callback: EntryCallback | null): void
 }
 
-type Entry = { tag: number; data: string | Uint8Array; callback: EntryCallback | null }
+type EntryData = string | Uint8Array | PublishBody
+type Entry = { tag: number; data: EntryData; callback: EntryCallback | null }
 
 /**
  * Holds what a channel sends while no peer is attached (text, binary, publishes, ack requests), for `flush` to send in
@@ -32,7 +34,7 @@ class ServerChannelBuffer<TAck = never> {
   private entries: Entry[] = []
   /** What the held sends count as against `maxPendingBytes`. */
   sendBytes = 0
-  /** What the held publishes count as against `PUBLISH_HOLD_BYTES`; an empty one counts as 1 B, so a flood stays bounded. */
+  /** What the held publishes count as against `PUBLISH_HOLD_BYTES`. */
   publishBytes = 0
 
   get size(): number {
@@ -56,14 +58,9 @@ class ServerChannelBuffer<TAck = never> {
     this.pushSend(TAG.BINARY_ACK_REQ, new Uint8Array(data), data.byteLength, { resolve, reject })
   }
 
-  pushPublish(data: string): void {
-    this.entries.push({ tag: TAG.PUBLISH, data, callback: null })
-    this.publishBytes += Math.max(utf8ByteLength(data), 1)
-  }
-
-  pushPublishBinary(data: Uint8Array): void {
-    this.entries.push({ tag: TAG.PUBLISH_BINARY, data, callback: null })
-    this.publishBytes += Math.max(data.byteLength, 1)
+  pushPublish(body: PublishBody): void {
+    this.entries.push({ tag: TAG.PUBLISH, data: body, callback: null })
+    this.publishBytes += body.frame.byteLength
   }
 
   /** Sends every entry to `sender` in the order it came, then empties the buffer. */
@@ -88,7 +85,7 @@ class ServerChannelBuffer<TAck = never> {
     }
   }
 
-  private pushSend(tag: number, data: string | Uint8Array, bytes: number, callback: EntryCallback): void {
+  private pushSend(tag: number, data: EntryData, bytes: number, callback: EntryCallback): void {
     this.entries.push({ tag, data, callback })
     this.sendBytes += bytes + HEADER + HELD_SEND_OVERHEAD_BYTES
   }
