@@ -62,7 +62,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   private paceTimer: ReturnType<typeof setTimeout> | null = null
   /** The copies handed and not covered by an acknowledgement: where each ends, of all the sender handed. */
   private readonly copied = new Fifo<{ end: number; bytes: number }>()
-  /** Waits for room for copies, which wakes it. */
+  /** Waits for room for copies or for an acknowledgement, either of which wakes it. */
   private awaitsCopyRoom = false
 
   constructor({ socket, pingInterval }: ServerHeadroomOptions) {
@@ -123,13 +123,17 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     if (acknowledges(bytes)) this.sent.push({ end, at: now })
   }
 
-  /** `PieceSenderOwner`: within what copies may hold, or on a wire that proved its rate and holds nothing: a stalled wire
-   *  holds its part till its ping deadline, which mustn't hold up one that delivers. */
-  mayCopy(): boolean {
-    if (hasCopyRoom() || (this.drainRate() > 0 && this.pathHolds(performance.now()) === 0)) return true
+  /** `PieceSenderOwner`: past what copies may hold, stalled wires hold that till their ping deadline, so each wire keeps
+   *  the least any sender sends ahead, which is how it shows it reads. One that never did waits for that to arrive: room
+   *  freed by a stalled wire's close would otherwise go to the next stalled wire. */
+  copyRoom(): number {
+    if (hasCopyRoom()) return Number.POSITIVE_INFINITY
+    const { transmittedBytes, acknowledgedBytes } = this.sender
+    const room = WIRE_SEND_AHEAD_MIN_BYTES - (transmittedBytes - acknowledgedBytes)
+    if (room >= WIRE_PIECES_ACK_BYTES) return room
     this.awaitsCopyRoom = true
-    awaitCopyRoom(this.sendWaiting)
-    return false
+    if (acknowledgedBytes > 0) awaitCopyRoom(this.sendWaiting)
+    return 0
   }
 
   /** Takes a heartbeat (see `PieceSender.heartbeat`), which an acknowledgement's lost tail waits for. */
@@ -188,7 +192,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     this.awaitsCopyRoom = false
     if (this.sender.dataWaits) {
       this.releasing = true
-      this.sender.sendWaiting(this.headroom(performance.now()))
+      this.sender.sendWaiting(Math.min(this.headroom(performance.now()), this.copyRoom()))
       this.releasing = false
     }
     this.pace()

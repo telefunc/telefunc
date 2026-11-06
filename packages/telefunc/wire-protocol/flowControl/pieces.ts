@@ -48,8 +48,8 @@ const ANNOUNCE_BYTES = encode.announce(0, 0).byteLength
 interface PieceSenderOwner {
   /** The sender handed the socket `bytes`, or carried them into its next message; `data` says whether they are data. */
   handed(bytes: number, data: boolean, copied: boolean): void
-  /** Whether a frame it would copy may go now. If not, the owner has it sent once it may. */
-  mayCopy?(): boolean
+  /** The bytes of data the socket may copy now. What goes past them waits, and the owner has it sent. */
+  copyRoom?(): number
 }
 
 /** The socket a piece sender hands its messages to: a page's `WebSocket`, a server wire's `TransportSocket`. */
@@ -208,8 +208,13 @@ class PieceSender {
 
   /** Sends `frame`, which nothing waits ahead of. */
   private start(frame: Uint8Array<ArrayBuffer>): void {
-    if (isSequencedTag(frame[0]!) && this.copies(frame) && this.owner.mayCopy?.() === false) {
-      return this.wait(frame, 0)
+    if (isSequencedTag(frame[0]!) && this.copies(frame)) {
+      const room = this.owner.copyRoom?.() ?? Number.POSITIVE_INFINITY
+      if (room < frame.byteLength) {
+        // An open announcement names whole frames.
+        this.headroom = this.open === null ? room : 0
+        return this.cut(frame, 0)
+      }
     }
     if (this.open === null && !this.announces(frame)) return this.pass(frame)
     if (this.open === null && this.goesWhole(frame)) return this.sendWhole(frame)
