@@ -12,6 +12,7 @@ import {
   CHANNEL_TRANSPORT,
   SSE_METADATA_MAX_BYTES,
   STATUS_CODE_WIRE_VERSION,
+  WIRE_GATHER_BYTES,
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../../constants.js'
 import { namesWireVersion } from '../../wire/requestKind.js'
@@ -25,7 +26,12 @@ import type { ReconcileOutcome, ServerTransport } from './ChannelMux.js'
 import { encode } from '../../wire/frame.js'
 import { TAG, passesData } from '../../wire/tags.js'
 import { DrainRate } from '../../flowControl/DrainRate.js'
-import { countWaitingPublishes, droppingPublishes, type WireQueue } from '../../flowControl/server/waitingPublishes.js'
+import {
+  countWaitingPublishes,
+  droppingPublishes,
+  overtakes,
+  type WireQueue,
+} from '../../flowControl/server/waitingPublishes.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { isProtocolViolationError, ProtocolViolationError } from '../../wire/protocolViolation.js'
 
@@ -84,9 +90,13 @@ class EventStream implements WireQueue {
   }
 
   /** Data waits for the stream to ask for it, as the frame the replay also holds: it's encoded when it's handed. A frame
-   *  that goes at once is behind no more than the stream holds. */
+   *  that goes at once is behind no more than the stream holds: an event, unlike a WebSocket's pieces, goes whole. */
   send(frame: Uint8Array<ArrayBuffer>): void {
-    if (passesData(frame[0]!) || (this.takes && this.waiting.length === 0)) {
+    if (
+      passesData(frame[0]!) ||
+      (this.takes && this.waiting.length === 0) ||
+      (frame.byteLength <= WIRE_GATHER_BYTES && overtakes(frame, this.waiting))
+    ) {
       this.takes = this.stream.push(eventOf(frame))
       return
     }
