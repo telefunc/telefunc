@@ -306,8 +306,6 @@ A publish waits for no subscriber, so a `BroadcastChannel` has limits of its own
 | A `BroadcastChannel`'s publishes | Server | See above, within `maxMemory` | As the client confirms them, in batches, once its `subscribe()` callbacks have returned. Their promises aren't awaited |
 | A `BroadcastChannel`'s `messages()` loop | Where the loop runs | 2 MiB past its next message | As the loop reaches each message |
 
-> `maxMemory` counts only what a server holds. On the client, a `messages()` loop has its 2 MiB limit and nothing else.
-
 ## `Broadcast`
 
 `Broadcast` is a keyed pub/sub **bus**: a message published to a `key` reaches every subscriber of that `key` — server-side subscribers (via `Broadcast.subscribe()`) and clients bridged into the `key` (via <Link href="#new-broadcastchannel">`new BroadcastChannel()`</Link>). Publishers and subscribers are decoupled; all they share is the `key` string.
@@ -348,11 +346,11 @@ Broadcast.subscribe('room:lobby', (msg, info) => {
 
 > A subscriber sees only its kind of message: to check `seq` on a key that mixes text and binary, count `subscribe()` and `subscribeBinary()` together.
 
-| Broadcast transport | Where the counter lives | Across server instances | After a restart |
-|---|---|---|---|
-| In-memory (default) | The server's memory | Each server has its own | Starts over when the server restarts |
-| `@telefunc/redis` | One Redis key per `key`, with no expiry | One counter, so a message has the same `seq` on every instance | Continues across server restarts. Starts over at 1 if Redis loses its data |
-| Cloudflare | Durable Object storage | One counter, so a message has the same `seq` everywhere | Continues |
+| Broadcast transport | Across server instances | After a restart |
+|---|---|---|
+| In-memory (default) | Each server has its own | Starts over when the server restarts |
+| `@telefunc/redis` | One counter, so a message has the same `seq` on every instance | Continues across server restarts. Starts over at 1 if Redis loses its data |
+| Cloudflare | One counter, so a message has the same `seq` everywhere | Continues |
 
 > In memory, a key's counter lasts while the key has a subscriber on that server. After that, the key's next publish takes a number above every `seq` the server has issued.
 
