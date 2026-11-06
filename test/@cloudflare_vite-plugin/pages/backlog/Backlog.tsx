@@ -38,8 +38,8 @@ function Backlog() {
       <button type="button" id="backlog-run-1500" onClick={() => channelRef.current!.send(1500)}>
         Send 24 MiB, unawaited
       </button>
-      <button type="button" id="backlog-run-3000" onClick={() => channelRef.current!.send(3000)}>
-        Send 48 MiB, unawaited
+      <button type="button" id="backlog-run-6000" onClick={() => channelRef.current!.send(6000)}>
+        Send 96 MiB, unawaited
       </button>
     </div>
   )

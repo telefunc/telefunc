@@ -169,7 +169,7 @@ describe('keyed in-process broadcast', () => {
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
         },
         index: 7,
-        replay: new ServerReplay(1024 * 1024),
+        replay: new ServerReplay({ heldBytes: 0 }),
       }),
     )
 
@@ -298,7 +298,7 @@ describe('Broadcast shield validation', () => {
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
         },
         index: 7,
-        replay: new ServerReplay(1024 * 1024),
+        replay: new ServerReplay({ heldBytes: 0 }),
       }),
     )
 
@@ -334,7 +334,7 @@ describe('Broadcast shield validation', () => {
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
         },
         index: 7,
-        replay: new ServerReplay(1024 * 1024),
+        replay: new ServerReplay({ heldBytes: 0 }),
       }),
     )
     void sender._onPeerPublishAckReqMessage(JSON.stringify({ text: 'malicious' }), 1)

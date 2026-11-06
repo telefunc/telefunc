@@ -90,7 +90,7 @@ function testWire(isDev: boolean) {
       return channelId
     }
 
-    test(`channel: all that maxPendingBytes lets through of a ${kind} burst nobody awaits, 5 messages of up to 64 MiB, arrives once the page is back from being offline`, async () => {
+    test(`channel: all that maxMemory lets through of a ${kind} burst nobody awaits, 5 messages of up to 64 MiB, arrives once the page is back from being offline`, async () => {
       const channelId = await burstWhileOffline(5)
       await autoRetry(
         async () => {
@@ -103,7 +103,7 @@ function testWire(isDev: boolean) {
       expect((await getCleanupState())[`wireBurst_${channelId}`]).toBe(undefined)
     })
 
-    test(`channel: a 6th ${kind} message of up to 64 MiB nobody awaits passes maxPendingBytes: it is refused, and the channel stays open`, async () => {
+    test(`channel: a 6th ${kind} message of up to 64 MiB nobody awaits passes maxMemory: it is refused, and the channel stays open`, async () => {
       const channelId = await burstWhileOffline(6)
       await autoRetry(
         async () => {
@@ -113,7 +113,7 @@ function testWire(isDev: boolean) {
         },
         { timeout: 60_000 },
       )
-      expect((await getCleanupState())[`wireBurst_${channelId}`]).toContain('config.channel.maxPendingBytes')
+      expect((await getCleanupState())[`wireBurst_${channelId}`]).toContain('config.channel.maxMemory')
       expectLog(sendRefusedWarning)
     })
   }

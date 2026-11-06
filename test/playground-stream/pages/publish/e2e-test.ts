@@ -107,7 +107,7 @@ function testPublish(isDev: boolean, inDocker = false) {
 
   // The in-memory adapter: these lanes publish through Redis.
   if (!inDocker && !process.env.REDIS_URL) {
-    test('broadcast: in memory, a loop of publishes a listener answers delivers in it, a listener publishing 125 MiB delivers it all, one publishing 312 MiB holds at most maxPendingBytes and rejects the rest, one 8 MiB message alone goes through, four producers awaiting each publish deliver all of theirs, a timer publishing 4,096 a tick leaves none waiting at the next, a listener answering itself at once lets a timer fire, and a timer ends a loop awaiting publishes and a listener answering itself after an `await`', async () => {
+    test('broadcast: in memory, a loop of publishes a listener answers delivers in it, a listener publishing 125 MiB delivers it all, one publishing 375 MiB holds at most 320 MiB and rejects the rest, one 8 MiB message alone goes through, four producers awaiting each publish deliver all of theirs, a timer publishing 4,096 a tick leaves none waiting at the next, a listener answering itself at once lets a timer fire, and a timer ends a loop awaiting publishes and a listener answering itself after an `await`', async () => {
       await navigate(`${getServerUrl()}/publish`)
       await page.click('#test-in-memory-publishes')
       await autoRetry(
@@ -131,10 +131,10 @@ function testPublish(isDev: boolean, inDocker = false) {
           expect(behindAnAnswer.delivered).toBe(5000)
           expect(loop).deep.equal({ deliveredInLoop: 3000, inOrder: true })
           expect(listenerBatch).deep.equal({ delivered: 2000, rejected: 0, errors: [], admittedInOrder: true })
-          // 256 MiB of 64 KiB messages.
-          expect(pastTheBound.delivered).greaterThan(3900)
-          expect(pastTheBound.delivered).lessThan(4097)
-          expect(pastTheBound.delivered + pastTheBound.rejected).toBe(5000)
+          // 320 MiB of 64 KiB messages.
+          expect(pastTheBound.delivered).greaterThan(4900)
+          expect(pastTheBound.delivered).lessThan(5121)
+          expect(pastTheBound.delivered + pastTheBound.rejected).toBe(6000)
           expect(pastTheBound.errors).deep.equal(['ChannelOverflowError'])
           expect(pastTheBound.admittedInOrder).toBe(true)
           expect(aloneBytes).toBe(8 * 1024 * 1024)

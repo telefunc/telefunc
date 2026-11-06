@@ -36,7 +36,7 @@ const mocks = vi.hoisted(() => {
     crosswsAdapter,
     crosswsFactory: vi.fn(() => crosswsAdapter),
     setAdapterMaxFrameBytes: vi.fn(),
-    setAdapterMaxPendingBytes: vi.fn(),
+    setAdapterMaxMemory: vi.fn(),
     getServerConfig: vi.fn(() => ({ telefuncUrl: '/_telefunc', channel: { transports: ['WS'] } })),
     telefuncMock: vi.fn(async () => ({
       statusCode: 200,
@@ -76,7 +76,7 @@ vi.mock('../../channel/server/ws.js', () => ({
 vi.mock('../../../node/server/serverConfig.js', () => ({
   getServerConfig: mocks.getServerConfig,
   setAdapterMaxFrameBytes: mocks.setAdapterMaxFrameBytes,
-  setAdapterMaxPendingBytes: mocks.setAdapterMaxPendingBytes,
+  setAdapterMaxMemory: mocks.setAdapterMaxMemory,
 }))
 
 vi.mock('../../../node/server/telefunc.js', () => ({

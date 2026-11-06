@@ -253,11 +253,11 @@ export const WIRE_QUEUE_DELAY_MS = 300
 /** The most held for one subscriber that isn't taking what's published: while its page is away, and behind a
  *  `messages()` loop. Publishes can't be awaited, so this is what each of a broadcast's subscribers can pin. */
 export const PUBLISH_HOLD_BYTES = 2 * 1024 * 1024
-/** The most a server channel holds for its page past the page's credit and in unanswered ack requests: a sender that
- *  awaits each send holds one, so only sends nobody awaits reach it. */
-export const CHANNEL_MAX_PENDING_BYTES = 256 * 1024 * 1024
+/** The most one server channel holds for its page, however large `config.channel.maxMemory`: a sender that awaits each
+ *  send holds one, so only sends nobody awaits reach it. */
+export const CHANNEL_HOLD_MAX_BYTES = 320 * 1024 * 1024
 /** A stream's chunk larger than this goes in parts, each a message under every channel's frame limit (32 MiB on
- *  Cloudflare) and under the smallest `maxPendingBytes`. */
+ *  Cloudflare) and under the smallest `maxMemory`. */
 export const STREAM_CHUNK_PART_BYTES = 1024 * 1024
 
 // Client-side channel reconnect defaults

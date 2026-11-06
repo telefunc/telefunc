@@ -6,7 +6,7 @@ export type { CloudflareOptions }
 import { DurableObject } from 'cloudflare:workers'
 import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
-import { getServerConfig, setAdapterMaxFrameBytes, setAdapterMaxPendingBytes } from '../node/server/serverConfig.js'
+import { getServerConfig, setAdapterMaxFrameBytes, setAdapterMaxMemory } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import { installBroadcastAdapter } from '../wire-protocol/broadcast/broadcastAdapter.js'
 import {
@@ -33,7 +33,7 @@ import { STATUS_BODY_MALFORMED_REQUEST, STATUS_CODE_MALFORMED_REQUEST } from '..
 const DURABLE_OBJECT_MAX_RECEIVED_MESSAGE_BYTES = 32 * 1024 * 1024
 /** An isolate has 128 MB, heap included, and is replaced past it, with the channels it holds. A channel holds this and its
  *  credit window, as much again: half an isolate at most, where the usual default would pass it with one channel. */
-const DURABLE_OBJECT_MAX_PENDING_BYTES = 32 * 1024 * 1024
+const DURABLE_OBJECT_MAX_MEMORY = 64 * 1024 * 1024
 
 type CloudflareOptions = {
   bindingName?: string
@@ -64,7 +64,7 @@ class Telefunc {
 
 function telefunc(options?: CloudflareOptions): TelefuncServe {
   setAdapterMaxFrameBytes(DURABLE_OBJECT_MAX_RECEIVED_MESSAGE_BYTES)
-  setAdapterMaxPendingBytes(DURABLE_OBJECT_MAX_PENDING_BYTES)
+  setAdapterMaxMemory(DURABLE_OBJECT_MAX_MEMORY)
   const bindingName = options?.bindingName ?? 'TelefuncDurableObject'
   const kvBindingName = options?.kvBindingName ?? 'TelefuncKV'
   const baseInstanceName = options?.instanceName ?? 'telefunc'

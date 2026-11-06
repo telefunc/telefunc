@@ -23,6 +23,7 @@ import type { ChannelMux } from './ChannelMux.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
+import { admit, hold, letGo, type MemoryHolder } from './channelMemory.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { ShieldValidator, ShieldValidators } from '../../../node/server/shield.js'
@@ -37,6 +38,7 @@ import { isPromise } from '../../../utils/isPromise.js'
 import {
   CHANNEL_CONNECT_TTL_MS,
   TIMER_DELAY_MAX_MS,
+  CHANNEL_HOLD_MAX_BYTES,
   CREDIT_WINDOW_MAX_BYTES,
   PUBLISH_HOLD_BYTES,
 } from '../../constants.js'
@@ -88,14 +90,8 @@ type PendingEnd = { closeAck: boolean; closeRequest: boolean; abort: string | nu
 /** A `sendAck` awaiting the peer's ACK_RES; `bytes` is its payload's share of `pendingAckBytes`. */
 type PendingAck<T> = { resolve: (result: ChannelAck<T>) => void; reject: (err: Error) => void; bytes: number }
 
-/** Whether `data` takes at most `bytes`. A UTF-16 unit takes at most 3 UTF-8 bytes, so only text near the limit is counted. */
-function fitsIn(data: string | Uint8Array, bytes: number): boolean {
-  if (typeof data !== 'string') return data.byteLength <= bytes
-  return data.length * 3 <= bytes || utf8ByteLength(data) <= bytes
-}
-
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
-  implements Channel<ClientToServer, ServerToClient>, ChannelLifecycleOwner, BufferedSender
+  implements Channel<ClientToServer, ServerToClient>, ChannelLifecycleOwner, BufferedSender, MemoryHolder
 {
   readonly [SERVER_CHANNEL_BRAND] = true
   /** @see ChannelShield in ../channel.ts — `data` checks what the page sends, `ack` the page's answers to this
@@ -123,11 +119,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected wireRequest: Request | undefined = undefined
   private readonly listeners = new Listeners<ChannelListener<ClientToServer>>()
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
-  protected offlineBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>()
+  protected offlineBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(this)
+  /** What it holds for its page. */
+  heldBytes = 0
   protected pendingAcks = new Map<number, PendingAck<ServerToClient>>()
   /** Payload bytes of the ack requests in `pendingAcks`. */
   private pendingAckBytes = 0
-  private readonly maxPendingBytes: number
   protected readonly lifecycle = new ChannelLifecycle({ owner: this, reportError: handleCallbackBug })
   private ttlTimer: ReturnType<typeof setTimeout> | null = null
   protected selfTime = new SelfTime()
@@ -179,9 +176,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.sendCredit = new SendCredit({ owner, selfTime: this.selfTime })
     this.receiveCredit = new ReceiveCredit({ owner, selfTime: this.selfTime })
     const c = getChannelConfig()
-    this.receiveCredit.capWindow(creditWindowOf(c.maxPendingBytes))
-    this.sendCredit.capWindow(creditWindowOf(c.maxPendingBytes))
-    this.maxPendingBytes = c.maxPendingBytes
+    this.receiveCredit.capWindow(creditWindowOf(c.maxMemory))
+    this.sendCredit.capWindow(creditWindowOf(c.maxMemory))
   }
 
   get opened(): Promise<void> {
@@ -224,7 +220,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._phase !== 'open') throw new ChannelClosedError()
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ack === true)
     const serialized = stringify(data)
-    const refusal = this.pendingRefusal(serialized, needsAck)
+    const refusal = this.pendingRefusal(serialized)
     if (refusal) return Promise.reject<void>(refusal)
     if (!this.peer) {
       if (needsAck) {
@@ -271,7 +267,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _sendBinary(data: Uint8Array, opts?: { ack?: boolean }): void | Promise<unknown> | Promise<void> {
     if (this._phase !== 'open') throw new ChannelClosedError()
     const needsAck = opts?.ack === true
-    const refusal = this.pendingRefusal(data, needsAck)
+    const refusal = this.pendingRefusal(data)
     if (refusal) return Promise.reject<void>(refusal)
     if (!this.peer) {
       if (needsAck) {
@@ -299,13 +295,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.sendCredit.decrement(this.peer.sendSequenced(encode.binary, data))
   }
 
-  /** Why a send of `data` can't go, where it would pass `maxPendingBytes`. It holds nothing and takes
-   *  no seq, so the page sees no gap on the wire, and later sends that fit go through. */
-  private pendingRefusal(data: string | Uint8Array, ack: boolean): ChannelOverflowError | null {
-    const room = this.maxPendingBytes - this.bytesAhead()
-    // Only a send that waits, for its page, its answer or behind sends waiting for credit, is held with its promise.
-    const held = ack || !this.peer || this.sendCredit.waitingCount > 0
-    return fitsIn(data, room - HEADER - (held ? HELD_SEND_OVERHEAD_BYTES : 0)) ? null : this.refuseSend()
+  /** Why a send of `data` can't go, where it isn't admitted. It holds nothing and takes no seq, so the page sees no gap
+   *  on the wire, and later sends that fit go through. */
+  private pendingRefusal(data: string | Uint8Array): ChannelOverflowError | null {
+    const overhead = HEADER + HELD_SEND_OVERHEAD_BYTES
+    // A UTF-16 unit takes at most 3 UTF-8 bytes, so only text near the limit is counted.
+    if (admit(this, (typeof data === 'string' ? data.length * 3 : data.byteLength) + overhead)) return null
+    if (typeof data === 'string' && admit(this, utf8ByteLength(data) + overhead)) return null
+    return this.refuseSend()
   }
 
   private refuseSend(): ChannelOverflowError {
@@ -313,12 +310,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this.refusalWarned = true
       assertWarning(
         false,
-        `A channel refused a \`send()\`: config.channel.maxPendingBytes (${this.maxPendingBytes}) is exceeded, so that message isn't delivered and its promise rejects with \`ChannelOverflowError\`. Later sends that fit still go. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next, or raise the setting.`,
+        `A channel refused a \`send()\`: it holds ${CHANNEL_HOLD_MAX_BYTES} bytes, the most for one channel, or this server's channels hold \`config.channel.maxMemory\`, so that message isn't delivered and its promise rejects with \`ChannelOverflowError\`. Later sends that fit still go. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next.`,
         { onlyOnce: false },
       )
     }
     return new ChannelOverflowError(
-      'Send refused: config.channel.maxPendingBytes exceeded; await each send or raise the setting',
+      'Send refused: the most for one channel, or config.channel.maxMemory, is held; await each send',
     )
   }
 
@@ -343,7 +340,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.outrun = null
     assertWarning(
       false,
-      `A channel's \`send()\` calls outrun its client: ${(ahead / 2 ** 20).toFixed(1)} MiB wait for it and keep growing, while it takes ${mibPerS.toFixed(1)} MiB/s. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next, or send slower: past \`config.channel.maxPendingBytes\` (${(this.maxPendingBytes / 2 ** 20).toFixed(0)} MiB), sends are refused with \`ChannelOverflowError\`.`,
+      `A channel's \`send()\` calls outrun its client: ${(ahead / 2 ** 20).toFixed(1)} MiB wait for it and keep growing, while it takes ${mibPerS.toFixed(1)} MiB/s. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next, or send slower: past ${(CHANNEL_HOLD_MAX_BYTES / 2 ** 20).toFixed(0)} MiB, or \`config.channel.maxMemory\` on this server, sends are refused with \`ChannelOverflowError\`.`,
       { onlyOnce: false },
     )
   }
@@ -357,7 +354,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** What the wire cap lets a page hold past its credit: the largest window a page grants, and all that this channel's
    *  sends put ahead of the page, which only the server code's `await` holds back. */
   protected pastCreditAllowance(): number {
-    return CREDIT_WINDOW_MAX_BYTES + Math.min(this.maxPendingBytes, this.bytesAhead())
+    return CREDIT_WINDOW_MAX_BYTES + Math.min(CHANNEL_HOLD_MAX_BYTES, this.bytesAhead())
   }
 
   private addPendingAck(
@@ -420,13 +417,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _registerChannel(mux?: ChannelMux): void {
     this.mux = mux ?? null
     if (this.peer || this.didRegister) return
+    // Off the ledger until now: a channel whose telefunction threw never gets here, and just goes.
     this.didRegister = true
     // Allocate the replay buffer up-front: registration is the moment the channel
     // becomes addressable on the wire, so a peer can attach immediately after this
     // returns.
-    const c = getChannelConfig()
-    // All that its sends may get ahead of the page and what's in flight, so a lost wire loses none.
-    this._replayBuffer = new ServerReplay(c.maxPendingBytes + creditWindowOf(c.maxPendingBytes))
+    this._replayBuffer = new ServerReplay(this)
+    const heldBefore = this.heldBytes
+    this.heldBytes = 0
+    if (heldBefore > 0) hold(this, heldBefore)
     if (this._phase === 'ended') return // the mux lets an ended channel go
     if (this.ttlTimer) clearTimeout(this.ttlTimer)
     this.ttlTimer = unrefTimer(
@@ -444,7 +443,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  an open one applies the RECONCILE's broadcast subscriptions before `onOpen` fires. */
   _attachPeer(peer: IndexedPeer, state?: AttachState): void {
     if (this._phase === 'ended') {
-      this.offlineBuffer.flush(this, peer)
+      this.offlineBuffer.flush(peer)
       this.sendPendingAckRes(peer)
       this.sendPendingEnd(peer)
       return
@@ -455,7 +454,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.reconnectTimer = null
     this.peer = peer
     this.receiveCredit.attach(peer.sender.sendWait())
-    this.offlineBuffer.flush(this, peer)
+    this.offlineBuffer.flush(peer)
     this.sendPendingAckRes(peer)
     if (state?.broadcast) {
       this.onPeerSubscription({ binary: false, subscribed: state.broadcast.text })
@@ -760,6 +759,18 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const wait = this.sendCredit.decrement(bytes)
     if (wait) wait.then(callback.resolve, callback.reject)
     else callback.resolve()
+  }
+
+  /** @internal `BufferedSender`. */
+  _holdOffline(bytes: number): void {
+    if (this.didRegister) hold(this, bytes)
+    else this.heldBytes += bytes
+  }
+
+  /** @internal `BufferedSender`. */
+  _letGoOffline(bytes: number): void {
+    if (this.didRegister) letGo(this, bytes)
+    else this.heldBytes -= bytes
   }
 
   /** @internal `BufferedSender`: sends `peer` a frame buffered while no page was attached, as it would have gone then.

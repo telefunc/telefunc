@@ -13,7 +13,7 @@ import { isPromise } from '../../utils/isPromise.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { isCloudflareWorkers } from '../../utils/isCloudflareWorkers.js'
 import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
-import { getChannelConfig } from '../../node/server/serverConfig.js'
+import { CHANNEL_HOLD_MAX_BYTES } from '../constants.js'
 import { ChannelOverflowError } from '../channel/channelErrors.js'
 import { HELD_SEND_OVERHEAD_BYTES } from '../channel/server/ServerChannelBuffer.js'
 import type { WirePublishInfo } from '../wire/publishInfo.js'
@@ -78,7 +78,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   private highestSeq = 0
   /** In-memory publishes waiting for the ones before them, in publish order. */
   private readonly queued = new Fifo<() => void>()
-  /** What `queued` holds: at most `maxPendingBytes` and one message, since a publish outside a listener is never refused. */
+  /** What `queued` holds: at most `CHANNEL_HOLD_MAX_BYTES` and one message, since a publish outside a listener is never refused. */
   private queuedBytes = 0
   private delivering = false
   private publishesSinceTurn = 0
@@ -201,11 +201,11 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     const isText = typeof data === 'string'
     const size = (isText ? utf8ByteLength(data) : data.byteLength) + HELD_SEND_OVERHEAD_BYTES
     // One message alone goes through whatever its size.
-    if (this.queuedBytes > 0 && this.queuedBytes + size > getChannelConfig().maxPendingBytes) {
+    if (this.queuedBytes > 0 && this.queuedBytes + size > CHANNEL_HOLD_MAX_BYTES) {
       if (this.delivering) {
         return Promise.reject(
           new ChannelOverflowError(
-            'Publish rejected: publishes waiting to be delivered exceeded config.channel.maxPendingBytes; raise the setting or publish less from the listener',
+            `Publish rejected: publishes waiting to be delivered exceeded ${CHANNEL_HOLD_MAX_BYTES} bytes; publish less from the listener`,
           ),
         )
       }

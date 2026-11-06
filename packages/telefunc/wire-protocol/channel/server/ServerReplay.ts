@@ -1,7 +1,9 @@
 export { ServerReplay }
 
-import { replayKindOf } from '../../wire/tags.js'
+import { CHANNEL_HOLD_MAX_BYTES } from '../../constants.js'
 import { assert } from '../../../utils/assert.js'
+import { hold, letGo, type MemoryHolder } from './channelMemory.js'
+import { HELD_SEND_OVERHEAD_BYTES } from './ServerChannelBuffer.js'
 import type { PublishBody } from './PublishBody.js'
 
 /** What a channel sent and its page hasn't confirmed, oldest first, for a reconnect to send again. A publish holds its
@@ -15,13 +17,12 @@ class ServerReplay {
   /** Where the live entries start, and how many are dropped past that. */
   private first = 0
   private dropped = 0
-  private heldBytes = 0
-  private readonly maxBytes: number
+  private readonly holder: MemoryHolder
   private issuedSeq = 0
   private pushedSeq = 0
 
-  constructor(maxBytes: number) {
-    this.maxBytes = maxBytes
+  constructor(holder: MemoryHolder) {
+    this.holder = holder
   }
 
   /** The last seq handed out (see `nextSeq`). */
@@ -35,13 +36,12 @@ class ServerReplay {
 
   push(seq: number, frame: Uint8Array<ArrayBuffer>): void {
     this.add(seq, frame, null)
-    this.heldBytes += frame.byteLength
-    this.trim()
+    hold(this.holder, frame.byteLength + HELD_SEND_OVERHEAD_BYTES)
   }
 
   pushPublish(seq: number, head: Uint8Array<ArrayBuffer>, body: PublishBody): void {
     this.add(seq, head, body)
-    this.heldBytes += head.byteLength + body.frame.byteLength
+    hold(this.holder, body)
     this.trim()
   }
 
@@ -67,12 +67,12 @@ class ServerReplay {
   }
 
   dispose(): void {
+    for (let i = this.first; i < this.seqs.length; i++) this.drop(i)
     this.seqs = []
     this.frames = []
     this.bodies = []
     this.first = 0
     this.dropped = 0
-    this.heldBytes = 0
     this.issuedSeq = 0
     this.pushedSeq = 0
   }
@@ -85,12 +85,11 @@ class ServerReplay {
     this.bodies.push(body)
   }
 
-  /** The oldest go past the budget, but for the frame that ends a channel. */
+  /** The oldest publishes go past what one channel may hold. */
   private trim(): void {
-    if (this.heldBytes <= this.maxBytes) return
-    for (let i = this.first; i < this.seqs.length && this.heldBytes > this.maxBytes; i++) {
-      const frame = this.frames[i]
-      if (frame && replayKindOf(frame[0]!) !== 'closing') this.drop(i)
+    if (this.holder.heldBytes <= CHANNEL_HOLD_MAX_BYTES) return
+    for (let i = this.first; i < this.seqs.length && this.holder.heldBytes > CHANNEL_HOLD_MAX_BYTES; i++) {
+      if (this.bodies[i]) this.drop(i)
     }
     this.compact()
   }
@@ -98,7 +97,9 @@ class ServerReplay {
   private drop(i: number): void {
     const frame = this.frames[i]
     if (!frame) return
-    this.heldBytes -= frame.byteLength + (this.bodies[i]?.frame.byteLength ?? 0)
+    const body = this.bodies[i]
+    if (body) letGo(this.holder, body)
+    else letGo(this.holder, frame.byteLength + HELD_SEND_OVERHEAD_BYTES)
     this.frames[i] = null
     this.bodies[i] = null
     this.dropped++

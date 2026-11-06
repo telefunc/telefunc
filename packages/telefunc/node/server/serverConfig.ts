@@ -3,7 +3,7 @@ export { getServerConfig }
 export { getServerExtensionTypes }
 export { enableChannelTransports }
 export { setAdapterMaxFrameBytes }
-export { setAdapterMaxPendingBytes }
+export { setAdapterMaxMemory }
 export { getAdapterMaxFrameBytes }
 export { setRootFromVite }
 export { getChannelConfig }
@@ -33,7 +33,6 @@ import {
   type BroadcastTransport,
 } from '../../wire-protocol/broadcast/broadcastAdapter.js'
 import {
-  CHANNEL_MAX_PENDING_BYTES,
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_TIMEOUT_MIN_MS,
@@ -87,15 +86,18 @@ type ChannelConfigUser = {
    * checks. The server considers the client dead after 2x this interval.
    */
   pingInterval?: number
-  /** Maximum bytes queued beyond credit or awaiting acknowledgements. @default 268435456 */
-  maxPendingBytes?: number
+  /**
+   * The most all channels on this server hold for their clients, in bytes or as `'4g'`, `'512m'`. It's a ceiling: nothing
+   * is set aside, and one channel holds at most 320 MiB of it. @default a quarter of the memory the process may use
+   */
+  maxMemory?: number | string
 }
 
 type ChannelConfigResolved = {
   transports: ChannelTransports
   reconnectTimeout: number
   pingInterval: number
-  maxPendingBytes: number
+  maxMemory: number
 }
 
 /** Telefunc Server Configuration */
@@ -174,8 +176,8 @@ const globalObject = getGlobalObject('serverConfig.ts', {
   adapterChannelTransports: new Set<ChannelTransports[number]>(),
   /** The largest frame the adapter's runtime takes, where that is less than the server reads. */
   adapterMaxFrameBytes: undefined as number | undefined,
-  /** The default of `maxPendingBytes` where the adapter's runtime has less memory than the usual default assumes. */
-  adapterMaxPendingBytes: undefined as number | undefined,
+  /** The default of `maxMemory` where the adapter's runtime can't tell what the process may use. */
+  adapterMaxMemory: undefined as number | undefined,
   /** A channel read `config.channel`, whose values each of its parts then relies on staying as they are. */
   channelConfigInUse: false,
 })
@@ -302,8 +304,18 @@ function resolveChannelConfig(channel: ChannelConfigUser): ChannelConfigResolved
     transports: channel.transports ?? [...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...globalObject.adapterChannelTransports],
     reconnectTimeout: channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
     pingInterval: channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
-    maxPendingBytes: channel.maxPendingBytes ?? globalObject.adapterMaxPendingBytes ?? CHANNEL_MAX_PENDING_BYTES,
+    maxMemory: (channel.maxMemory as number | undefined) ?? globalObject.adapterMaxMemory ?? defaultMaxMemory(),
   }
+}
+
+/** What a process may use where the runtime can't tell. */
+const DEFAULT_PROCESS_MEMORY_BYTES = 4 * 1024 * 1024 * 1024
+
+/** A quarter of what the process may use: channels hold bytes outside the JS heap, which the rest of the process needs too. */
+function defaultMaxMemory(): number {
+  const process = globalThis.process
+  const total = process?.getBuiltinModule?.('node:os')?.totalmem() ?? DEFAULT_PROCESS_MEMORY_BYTES
+  return Math.floor(Math.min(process?.constrainedMemory?.() || total, total) / 4)
 }
 
 /** How long a wire may deliver nothing before it is taken for dead: two ping intervals, each of at least a second. */
@@ -343,8 +355,8 @@ function setAdapterMaxFrameBytes(bytes: number | undefined): void {
 }
 
 /** @internal */
-function setAdapterMaxPendingBytes(bytes: number): void {
-  globalObject.adapterMaxPendingBytes = bytes
+function setAdapterMaxMemory(bytes: number): void {
+  globalObject.adapterMaxMemory = bytes
 }
 
 function getAdapterMaxFrameBytes(): number | undefined {
@@ -466,13 +478,15 @@ function applyChannelConfig(val: unknown): void {
         )
         next[key] = value
         break
-      case 'maxPendingBytes':
+      case 'maxMemory': {
+        const bytes = parseMemorySize(value)
         assertUsage(
-          typeof value === 'number' && Number.isSafeInteger(value) && value >= CREDIT_WINDOW_INITIAL_BYTES,
-          `\`${configPath}\` should be an integer of at least ${CREDIT_WINDOW_INITIAL_BYTES}: a channel's credit window starts at that`,
+          bytes !== null && bytes >= CREDIT_WINDOW_INITIAL_BYTES,
+          `\`${configPath}\` should be a number of bytes, or a size such as '4g' or '512m', of at least ${CREDIT_WINDOW_INITIAL_BYTES}: a channel's credit window starts at that`,
         )
-        next[key] = value
+        next[key] = bytes
         break
+      }
       default:
         assertUsage(false, `Unknown ${configPath}`)
     }
@@ -483,6 +497,14 @@ function applyChannelConfig(val: unknown): void {
     "`config.channel` can't change once a channel exists, as those already open would keep the old values: set it before the server handles a request",
   )
   configState.channel = next
+}
+
+/** `value` in bytes: a whole number, or a size such as `'4g'`; null where it is neither. */
+function parseMemorySize(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isSafeInteger(value) ? value : null
+  const match = typeof value === 'string' ? /^(\d+(?:\.\d+)?)([kmg])$/i.exec(value) : null
+  if (!match) return null
+  return Math.floor(Number(match[1]) * 1024 ** ('kmg'.indexOf(match[2]!.toLowerCase()) + 1))
 }
 
 function applyBroadcastConfig(val: unknown): void {

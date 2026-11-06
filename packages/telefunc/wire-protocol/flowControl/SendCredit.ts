@@ -60,7 +60,7 @@ class SendCredit {
     return this.peerByteWindowCap
   }
 
-  /** Keeps what it lets be in flight within what the server's `maxPendingBytes` allows. */
+  /** Keeps what it lets be in flight within what the server's `maxMemory` allows. */
   capWindow(peerWindow: number): void {
     this.peerByteWindowCap = Math.min(CREDIT_WINDOW_MAX_BYTES, peerWindow)
     if (!this.limitRaised) this.limitBytes = Math.min(CREDIT_WINDOW_INITIAL_BYTES, this.peerByteWindowCap)

@@ -937,7 +937,7 @@ async function onChannelConfigChecks() {
     changed: assign({ reconnectTimeout: 61_000 }),
     reconnectTimeout: assign({ reconnectTimeout: 999 }),
     pingInterval: assign({ pingInterval: 999 }),
-    maxPendingBytes: assign({ maxPendingBytes: 2 * 1024 * 1024 - 1 }),
+    maxMemory: assign({ maxMemory: 2 * 1024 * 1024 - 1 }),
     removed: assign({ bufferLimit: 1 }),
   }
 }
@@ -955,7 +955,7 @@ async function onChannelBudgets() {
 }
 
 /**
- * With a `maxPendingBytes` of 2 MiB, awaits a send of 1 KiB before the page attaches, one of 5 MiB, and one of 1 KiB.
+ * With a `maxMemory` of 2 MiB, awaits a send of 1 KiB before the page attaches, one of 5 MiB, and one of 1 KiB.
  * cleanupState: awaitedFromOffline_<id> = for each send, `sent` or why it was refused
  */
 async function onChannelAwaitedFromOffline() {
@@ -975,7 +975,7 @@ async function onChannelAwaitedFromOffline() {
   return { channel: ch.client, channelId: ch.id }
 }
 
-/** One channel per kind of text, each sending as its first send what fits `maxPendingBytes` to the byte, and one per
+/** One channel per kind of text, each sending as its first send what fits `maxMemory` to the byte, and one per
  *  kind sending one byte more. cleanupState: atLimit_<kind>_<fits|over> = `accepted`, or why the send was refused. */
 async function onChannelAtLimit() {
   // 2 MiB is these 2,096,631 UTF-8 bytes, the two quotes around them, a frame's 7 bytes and a held send's 512.

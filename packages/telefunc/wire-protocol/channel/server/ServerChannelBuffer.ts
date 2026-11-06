@@ -19,6 +19,10 @@ type EntryCallback = {
 
 /** The channel `flush` hands each held entry to, with the entry's tag, data and callbacks (null once rejected). */
 interface BufferedSender {
+  /** The buffer holds `bytes` more for its page. */
+  _holdOffline(bytes: number): void
+  /** The buffer let `bytes` go. */
+  _letGoOffline(bytes: number): void
   _sendBuffered(peer: IndexedPeer, tag: number, data: EntryData, callback: EntryCallback | null): void
 }
 
@@ -27,15 +31,20 @@ type Entry = { tag: number; data: EntryData; callback: EntryCallback | null }
 
 /**
  * Holds what a channel sends while no peer is attached (text, binary, publishes, ack requests), for `flush` to send in
- * order. It takes all it is given, and counts it: the channel refuses a send past `maxPendingBytes`, and a broadcast ends
- * past `PUBLISH_HOLD_BYTES`.
+ * order. It takes all it is given, and counts it: the channel admits each send first, and a broadcast ends past
+ * `PUBLISH_HOLD_BYTES`.
  */
 class ServerChannelBuffer<TAck = never> {
   private entries: Entry[] = []
-  /** What the held sends count as against `maxPendingBytes`. */
+  private readonly owner: BufferedSender
+  /** What the held sends count as on the channel's ledger. */
   sendBytes = 0
   /** What the held publishes count as against `PUBLISH_HOLD_BYTES`. */
   publishBytes = 0
+
+  constructor(owner: BufferedSender) {
+    this.owner = owner
+  }
 
   get size(): number {
     return this.entries.length
@@ -63,16 +72,17 @@ class ServerChannelBuffer<TAck = never> {
     this.publishBytes += body.frame.byteLength
   }
 
-  /** Sends every entry to `sender` in the order it came, then empties the buffer. */
-  flush(sender: BufferedSender, peer: IndexedPeer): void {
-    for (const { tag, data, callback } of this.entries) sender._sendBuffered(peer, tag, data, callback)
+  /** Sends every entry to its channel in the order it came, then empties the buffer. */
+  flush(peer: IndexedPeer): void {
+    this.letGoSends()
+    for (const { tag, data, callback } of this.entries) this.owner._sendBuffered(peer, tag, data, callback)
     this.clear()
   }
 
   clear(err?: Error): void {
     if (err) for (const { callback } of this.entries) callback?.reject(err)
     this.entries = []
-    this.sendBytes = 0
+    this.letGoSends()
     this.publishBytes = 0
   }
 
@@ -87,6 +97,13 @@ class ServerChannelBuffer<TAck = never> {
 
   private pushSend(tag: number, data: EntryData, bytes: number, callback: EntryCallback): void {
     this.entries.push({ tag, data, callback })
-    this.sendBytes += bytes + HEADER + HELD_SEND_OVERHEAD_BYTES
+    const held = bytes + HEADER + HELD_SEND_OVERHEAD_BYTES
+    this.sendBytes += held
+    this.owner._holdOffline(held)
+  }
+
+  private letGoSends(): void {
+    if (this.sendBytes > 0) this.owner._letGoOffline(this.sendBytes)
+    this.sendBytes = 0
   }
 }

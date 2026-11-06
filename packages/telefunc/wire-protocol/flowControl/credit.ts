@@ -18,7 +18,7 @@ interface CreditOwner {
   deliveredBefore(ms: number): number
 }
 
-/** The largest credit window, each way, of a server with this `maxPendingBytes`: what a small host holds is small. */
-function creditWindowOf(maxPendingBytes: number): number {
-  return Math.min(CREDIT_WINDOW_MAX_BYTES, maxPendingBytes)
+/** The largest credit window, each way, of a server with this `maxMemory`: what a small host holds is small. */
+function creditWindowOf(maxMemory: number): number {
+  return Math.min(CREDIT_WINDOW_MAX_BYTES, maxMemory / 2)
 }

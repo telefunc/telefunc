@@ -1739,7 +1739,7 @@ function ChannelDemo() {
             [
               ['unawaited', 32],
               ['unawaited', 200],
-              ['unawaited', 300],
+              ['unawaited', 400],
               ['awaited', 300],
             ] as const
           ).map(([mode, count]) => (

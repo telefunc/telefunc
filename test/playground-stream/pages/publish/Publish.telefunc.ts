@@ -447,7 +447,7 @@ async function onInMemoryPublishes() {
     }
   }
   const listenerBatch = await listenerPublishes(2000)
-  const pastTheBound = await listenerPublishes(5000)
+  const pastTheBound = await listenerPublishes(6000)
 
   let aloneBytes = 0
   let alone: unknown

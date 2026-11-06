@@ -71,7 +71,7 @@ class ReceiveCredit {
     return this.roundTrips?.pathRtt ?? Infinity
   }
 
-  /** Keeps what it lets be in flight within what the server's `maxPendingBytes` allows. */
+  /** Keeps what it lets be in flight within what the server's `maxMemory` allows. */
   capWindow(window: number): void {
     this.fitted = true
     this.bdp.capByteWindow(window)

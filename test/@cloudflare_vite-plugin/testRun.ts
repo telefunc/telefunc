@@ -211,13 +211,13 @@ function testBacklog() {
     expect(await sendToStalledPage(1500)).toBe(0)
   })
 
-  test("Backlog: of 48 MiB the same way, those past Cloudflare's default maxPendingBytes of 32 MiB are refused, and the rest arrive in order, the channel open", async () => {
-    expect(await sendToStalledPage(3000)).greaterThan(0)
+  test("Backlog: of 96 MiB the same way, those past Cloudflare's default maxMemory of 64 MiB are refused, and the rest arrive in order, the channel open", async () => {
+    expect(await sendToStalledPage(6000)).greaterThan(0)
     expectLog(sendRefusedWarning)
   })
 
   /** Returns how many were refused. */
-  async function sendToStalledPage(count: 1500 | 3000) {
+  async function sendToStalledPage(count: 1500 | 6000) {
     await page.goto(getServerUrl() + '/backlog')
     await autoRetry(async () => {
       expect(await page.locator('#hydrated').count()).toBe(1)

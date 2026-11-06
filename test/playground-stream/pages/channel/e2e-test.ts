@@ -1015,16 +1015,16 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
-  test('channel: a burst of 300 MiB the server sends without awaiting: sends past maxPendingBytes are refused, the channel stays open, and a later send that fits goes through', async () => {
+  test('channel: a burst of 400 MiB the server sends without awaiting: sends past the most for one channel are refused, the channel stays open, and a later send that fits goes through', async () => {
     await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-binary-burst-unawaited-300')
+    await page.click('#channel-test-binary-burst-unawaited-400')
     await autoRetry(
       async () => {
         const burst = (await getResult<ChannelState>('#channel-state')).binaryBurst!
         expect(burst.closeErr).toBe(null)
-        expect(burst.received).lessThan(300)
+        expect(burst.received).lessThan(400)
         expect(burst.inOrder).toBe(true)
-        expect((await getCleanupState())[`binaryBurst_${burst.channelId}`]).toContain('config.channel.maxPendingBytes')
+        expect((await getCleanupState())[`binaryBurst_${burst.channelId}`]).toContain('config.channel.maxMemory')
       },
       { timeout: 60_000 },
     )
@@ -1046,7 +1046,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     expect(() => expectLog(sendsOutrunWarning)).throw()
   })
 
-  test('channel: sends nobody awaits that keep outrunning a 1 MB/s page warn once, then are refused at maxPendingBytes with the channel open', async () => {
+  test('channel: sends nobody awaits that keep outrunning a 1 MB/s page warn once, then are refused at maxMemory with the channel open', async () => {
     await navigate(`${getServerUrl()}/channel`)
     // 1 MiB every 50 ms to a page that takes 1 MB/s.
     await withNetworkConditions({ downloadThroughput: 1_000_000, uploadThroughput: -1 }, async () => {
@@ -1054,7 +1054,7 @@ function testChannel(isDev: boolean, inDocker = false) {
       await autoRetry(
         async () => {
           const { channelId } = (await getResult<ChannelState>('#channel-state')).paced!
-          expect((await getCleanupState())[`paced_${channelId}`]).toContain('config.channel.maxPendingBytes')
+          expect((await getCleanupState())[`paced_${channelId}`]).toContain('config.channel.maxMemory')
         },
         { timeout: 60_000 },
       )
@@ -1122,7 +1122,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     expect(() => expectLog(sendsOutrunWarning)).throw()
   })
 
-  test('channel: of 18,000 acknowledgement requests of 64 KiB the server sends in one loop, those past maxPendingBytes are refused and the channel stays open', async () => {
+  test('channel: of 18,000 acknowledgement requests of 64 KiB the server sends in one loop, those past maxMemory are refused and the channel stays open', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-text-burst-acks-18000')
     await autoRetry(
@@ -1133,7 +1133,7 @@ function testChannel(isDev: boolean, inDocker = false) {
         expect(burst.received).lessThan(18000)
         expect(burst.inOrder).toBe(true)
         const ss = await getCleanupState()
-        expect(ss[`textBurst_${burst.channelId}_error`]).toContain('config.channel.maxPendingBytes')
+        expect(ss[`textBurst_${burst.channelId}_error`]).toContain('config.channel.maxMemory')
         expect(ss[`textBurst_${burst.channelId}_acked`]).toBe(String(burst.received))
       },
       { timeout: 60_000 },
@@ -1427,8 +1427,8 @@ function testChannelApi() {
       expect(checks.changed).toContain("can't change once a channel exists")
       expect(checks.reconnectTimeout).toContain('`config.channel.reconnectTimeout` should be at least 1000')
       expect(checks.pingInterval).toContain('`config.channel.pingInterval` should be at least 1000')
-      expect(checks.maxPendingBytes).toContain(
-        '`config.channel.maxPendingBytes` should be an integer of at least 2097152',
+      expect(checks.maxMemory).toContain(
+        "`config.channel.maxMemory` should be a number of bytes, or a size such as '4g' or '512m', of at least 2097152",
       )
       expect(checks.removed).toContain('Unknown config.channel.bufferLimit')
     })

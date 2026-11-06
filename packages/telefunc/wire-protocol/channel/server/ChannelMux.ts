@@ -889,7 +889,7 @@ function resolveMuxServerOptions(): MuxServerOptions {
     idleTimeout: Math.min(c.reconnectTimeout, CHANNEL_IDLE_TIMEOUT_MS),
     pingInterval: c.pingInterval,
     pingDeadline: pingDeadlineOf(c),
-    creditWindow: creditWindowOf(c.maxPendingBytes),
+    creditWindow: creditWindowOf(c.maxMemory),
     transports: c.transports,
   }
 }

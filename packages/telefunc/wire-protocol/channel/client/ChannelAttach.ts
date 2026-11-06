@@ -40,7 +40,7 @@ class ChannelAttach {
     this.subscriptions = subscriptions
   }
 
-  /** Caps both credit windows at what the server's `maxPendingBytes` allows. */
+  /** Caps both credit windows at what the server's `maxMemory` allows. */
   capWindows(window: number): void {
     this.receiveCredit.capWindow(window)
     this.sendCredit.capWindow(window)
