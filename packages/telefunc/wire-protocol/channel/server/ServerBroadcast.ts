@@ -188,8 +188,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.forwardPublish(bodyOf(encode.publishBinary, data, rawInfo))
   }
 
-  /** A publish to the page. A subscription is the page's, so it has attached before. */
+  /** A publish to the page. A subscription is the page's, so it has attached before, but it may have ended since: this
+   *  delivery's own listeners or admitting its body can end the channel, and the subscribers after it still get theirs. */
   private forwardPublish(body: PublishBody): void {
+    if (this._phase === 'ended') return
     this.lastPeer!.sendPublish(body)
     const share = this.share()
     if (this.heldBytes > share) this.shed(share)

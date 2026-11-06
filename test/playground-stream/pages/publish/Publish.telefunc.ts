@@ -10,6 +10,7 @@ export {
   onBroadcastServerListener,
   onBroadcastOwnBytes,
   onBroadcastOnOpenPublish,
+  onBroadcastSubscriberAborts,
   onBroadcastAnswerOrder,
   onBroadcastSelfAnswer,
   onStaticPublishReceipts,
@@ -128,6 +129,16 @@ async function onBroadcastOnOpenPublish() {
     void room.publish('from-onOpen')
   })
   return room
+}
+
+/** The first subscriber of a key aborts its channel on a message, whose delivery goes on to the second. */
+async function onBroadcastSubscriberAborts() {
+  const key = `room:subscriber-aborts:${crypto.randomUUID()}`
+  const aborting = new BroadcastChannel<string>({ key })
+  aborting.subscribe((msg) => {
+    if (msg === 'abort') aborting.abort()
+  })
+  return { aborting, room: new BroadcastChannel<string>({ key }) }
 }
 
 /** The first of two subscribers answers message 1 with message 2; both listen until the second sees it, or 10 s pass. */

@@ -15,6 +15,7 @@ import {
   onBroadcastServerListener,
   onBroadcastOwnBytes,
   onBroadcastOnOpenPublish,
+  onBroadcastSubscriberAborts,
   onBroadcastAnswerOrder,
   onBroadcastSelfAnswer,
   onStaticPublishReceipts,
@@ -430,6 +431,24 @@ function Publish() {
         }}
       >
         onOpen publishes
+      </button>
+
+      <h2>Subscriber Ends</h2>
+
+      <button
+        id="test-broadcast-subscriber-aborts"
+        onClick={async () => {
+          setResult('')
+          const { aborting, room } = await onBroadcastSubscriberAborts()
+          listenedRef.current = room
+          aborting.subscribe(() => {})
+          const received: string[] = []
+          room.subscribe((msg) => received.push(msg))
+          const { seq } = await room.publish('abort')
+          setResult(JSON.stringify({ seq, received }))
+        }}
+      >
+        A subscriber aborts its channel
       </button>
 
       <h2>Listener Answers</h2>

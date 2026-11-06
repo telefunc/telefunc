@@ -297,6 +297,15 @@ function testPublish(isDev: boolean, inDocker = false) {
     })
   })
 
+  test('broadcast: a subscriber that aborts its channel in its callback leaves the publish to reach the rest', async () => {
+    await page.click('#test-broadcast-subscriber-aborts')
+    await autoRetry(async () => {
+      const result = await getResult<{ seq: number; received: string[] }>('#publish-result')
+      expect(result.seq).toBeGreaterThan(0)
+      expect(result.received).deep.equal(['abort'])
+    })
+  })
+
   test("broadcast: a listener's answer reaches every subscriber after the message it answers", async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-answer-order')
