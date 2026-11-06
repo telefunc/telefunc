@@ -26,7 +26,7 @@ type ChannelPublishMeta = Record<string, unknown>
 /** Metadata delivered to broadcast subscribers alongside each message. */
 type ChannelPublishInfo = {
   key: string
-  /** Strict per-key counter (1, 2, 3…). Resets if the authority restarts. Use for gap detection. */
+  /** Per-key counter: 1 more per publish while the key has a subscriber. A jump means missed messages. */
   seq: number
   /** Server timestamp, Unix epoch milliseconds. */
   timestamp: number
