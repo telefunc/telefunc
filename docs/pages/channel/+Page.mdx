@@ -292,6 +292,9 @@ To fix it, `await` each `send()` before the next, as in the clock example above,
 
 A publish can't be awaited or refused, so a `BroadcastChannel` holds what its client hasn't taken differently: up to a minute of what that client reads (at least 64 MiB, at most 320 MiB), and 320 MiB while it's away. Past that, the client misses its oldest messages (see <Link href="#broadcast" />).
 
+> On a slow uplink, a large message a client is sending holds up its other channels until it has gone: a 4 MiB `sendBinary()` at 1 MiB/s delays them by about 3 s. To keep them quick, split it into smaller sends.
+
+> Over SSE a message goes whole, so on a slow link what a channel sends waits for the message on its way: 8 MiB at 1 MiB/s takes about 11 s. A server's `close()` waits for it too, past its default 5 s, so give it a longer `close({ timeout })`.
 
 ## `Broadcast`
 
