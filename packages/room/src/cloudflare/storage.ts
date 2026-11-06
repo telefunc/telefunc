@@ -296,15 +296,19 @@ function readCells(sql: SqlStorage, inc: string, sel: CellSelector, now: number)
   return cellPage(selectCellRows(sql, inc, sel), now)
 }
 
-/** The expiring cells of `keys` that haven't expired; the expired ones it finds go. */
+/** The expiring cells of `keys` that haven't expired; the alarm deletes the others. */
 function readExpiringCells(sql: SqlStorage, inc: string, keys: readonly string[], now: number): ExpiringCellsRead {
   const head = readLiveHead(sql, now)
   if (head === null || head.currentInc !== inc) return { kind: 'stale-incarnation' }
   const cells = new Map<string, Uint8Array>()
   for (const key of keys) {
-    sql.exec('DELETE FROM expiring_cell WHERE inc = ? AND key = ? AND expires_at <= ?', inc, key, now)
     const row = sql
-      .exec<{ bytes: ArrayBuffer }>('SELECT bytes FROM expiring_cell WHERE inc = ? AND key = ?', inc, key)
+      .exec<{ bytes: ArrayBuffer }>(
+        'SELECT bytes FROM expiring_cell WHERE inc = ? AND key = ? AND expires_at > ?',
+        inc,
+        key,
+        now,
+      )
       .toArray()[0]
     if (row !== undefined) cells.set(key, new Uint8Array(row.bytes))
   }

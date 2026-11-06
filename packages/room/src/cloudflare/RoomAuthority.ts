@@ -133,7 +133,7 @@ class RoomAuthority {
   }
 
   async readExpiringCells(inc: string, keys: readonly string[]): Promise<ExpiringCellsRead> {
-    return this.transaction((sql) => readExpiringCells(sql, inc, keys, Date.now()))
+    return readExpiringCells(this.sql(), inc, keys, Date.now())
   }
 
   async readCellPage(inc: string, prefix: string, cursor?: string): Promise<CellPage> {
