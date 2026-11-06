@@ -24,6 +24,7 @@ import type {
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
+import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { admitPublish, queueMemory, type MemoryHolder } from './channelMemory.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { Listeners } from '../../../utils/Listeners.js'
@@ -383,19 +384,21 @@ const BroadcastChannel = ServerBroadcast as {
   new <T = unknown>(opts: { key: string }): BroadcastChannel<T>
 }
 
-/** One delivery hands every subscriber on this server the same `info`, so they share the body the first one makes. */
-const publishBodies = new WeakMap<WirePublishInfo, PublishBody>()
+const globalObject = getGlobalObject('wire-protocol/channel/server/ServerBroadcast.ts', {
+  /** One delivery hands every subscriber on this server the same `info`, so they share the body the first one makes. */
+  publishBodies: new WeakMap<WirePublishInfo, PublishBody>(),
+})
 
 function bodyOf<T>(
   encodeBody: (data: T, info: WirePublishInfo) => Uint8Array<ArrayBuffer>,
   data: T,
   info: WirePublishInfo,
 ): PublishBody {
-  let body = publishBodies.get(info)
+  let body = globalObject.publishBodies.get(info)
   if (!body) {
     body = new PublishBody(encodeBody(data, info))
     admitPublish(body)
-    publishBodies.set(info, body)
+    globalObject.publishBodies.set(info, body)
   }
   return body
 }
