@@ -79,8 +79,6 @@ const ERROR_REASON = {
   OVERFLOW: 0x01 as const,
   /** A reconnect needed frames its sender's replay buffer had dropped to stay within its size. */
   LOST: 0x02 as const,
-  /** Its sends got further ahead of its page than `maxPendingBytes` or `maxPendingAcks` lets the server hold. */
-  AHEAD: 0x03 as const,
 }
 
 type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON]

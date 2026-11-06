@@ -56,7 +56,7 @@ async function onWireResume(count: number) {
  * At server action wireBurst_<id>, `sends` messages without awaiting them, each starting with its index: nearly all of the
  * page's first credit, then nearly 64 MiB each. The server drops the page's connections right after.
  *
- * cleanupState: wireBurst_<id>_onOpen = 'true' once it opens; wireBurst_<id> = what the send that closed the channel threw.
+ * cleanupState: wireBurst_<id>_onOpen = 'true' once it opens; wireBurst_<id> = why a send was refused, if one was
  */
 async function onWireBurst(sends: number, kind: 'text' | 'binary') {
   const ch = new Channel<never, string>()
@@ -64,18 +64,17 @@ async function onWireBurst(sends: number, kind: 'text' | 'binary') {
     cleanupState[`wireBurst_${ch.id}_onOpen`] = 'true'
   })
   onServerAction(`wireBurst_${ch.id}`, () => {
-    try {
-      for (let n = 0; n < sends; n++) {
-        const bytes = (n === 0 ? 2 : 64) * 1024 * 1024 - 1024
-        if (kind === 'text') void ch.send(String(n).padEnd(bytes))
-        else {
-          const message = new Uint8Array(bytes)
-          new DataView(message.buffer).setUint32(0, n)
-          void ch.sendBinary(message)
-        }
+    const refused = (err: Error) => {
+      cleanupState[`wireBurst_${ch.id}`] = err.message
+    }
+    for (let n = 0; n < sends; n++) {
+      const bytes = (n === 0 ? 2 : 64) * 1024 * 1024 - 1024
+      if (kind === 'text') void ch.send(String(n).padEnd(bytes)).catch(refused)
+      else {
+        const message = new Uint8Array(bytes)
+        new DataView(message.buffer).setUint32(0, n)
+        void ch.sendBinary(message).catch(refused)
       }
-    } catch (err) {
-      cleanupState[`wireBurst_${ch.id}`] = (err as Error).message
     }
     cutWireSockets()
   })

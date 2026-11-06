@@ -11,7 +11,7 @@ import {
   startProxy,
   countConnections,
 } from '../../e2e-utils'
-import { newCDPSession, sendsOutrunWarning, withNetworkConditions } from '../../../utils'
+import { newCDPSession, sendsOutrunWarning, sendRefusedWarning, withNetworkConditions } from '../../../utils'
 
 type ChannelState = {
   connected: boolean
@@ -1028,19 +1028,20 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
-  test('channel: a burst of 300 MiB the server sends without awaiting passes maxPendingBytes and closes the channel with ChannelOverflowError', async () => {
+  test('channel: a burst of 300 MiB the server sends without awaiting: sends past maxPendingBytes are refused, the channel stays open, and a later send that fits goes through', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-binary-burst-unawaited-300')
     await autoRetry(
       async () => {
         const burst = (await getResult<ChannelState>('#channel-state')).binaryBurst!
-        expect(burst.closeErr).toBe('ChannelOverflowError')
+        expect(burst.closeErr).toBe(null)
         expect(burst.received).lessThan(300)
         expect(burst.inOrder).toBe(true)
         expect((await getCleanupState())[`binaryBurst_${burst.channelId}`]).toContain('config.channel.maxPendingBytes')
       },
       { timeout: 60_000 },
     )
+    expectLog(sendRefusedWarning)
   })
 
   test('channel: 300 MiB the server sends awaiting each send all reach the page, with no warning', async () => {
@@ -1058,7 +1059,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     expect(() => expectLog(sendsOutrunWarning)).throw()
   })
 
-  test('channel: sends nobody awaits that keep outrunning a 1 MB/s page warn once, then close the channel at maxPendingBytes', async () => {
+  test('channel: sends nobody awaits that keep outrunning a 1 MB/s page warn once, then are refused at maxPendingBytes with the channel open', async () => {
     await navigate(`${getServerUrl()}/channel`)
     // 1 MiB every 50 ms to a page that takes 1 MB/s.
     await withNetworkConditions({ downloadThroughput: 1_000_000, uploadThroughput: -1 }, async () => {
@@ -1072,14 +1073,9 @@ function testChannel(isDev: boolean, inDocker = false) {
       )
     })
     expectLog(sendsOutrunWarning)
-    await autoRetry(
-      async () => {
-        const paced = (await getResult<ChannelState>('#channel-state')).paced!
-        expect(paced.ended).toBe(true)
-        expect(paced.closeErr).toBe('ChannelOverflowError')
-      },
-      { timeout: 60_000 },
-    )
+    expectLog(sendRefusedWarning)
+    const paced = (await getResult<ChannelState>('#channel-state')).paced!
+    expect(paced.ended).toBe(false)
   })
 
   test('channel: an 8 MiB burst nobody awaits, then small sends while a 1 MB/s page takes it, all reach the page with no warning', async () => {
@@ -1139,20 +1135,22 @@ function testChannel(isDev: boolean, inDocker = false) {
     expect(() => expectLog(sendsOutrunWarning)).throw()
   })
 
-  test('channel: 18,000 acknowledgement requests the server sends in one loop pass maxPendingAcks and close the channel with ChannelOverflowError', async () => {
+  test('channel: of 18,000 acknowledgement requests the server sends in one loop, those past maxPendingAcks are refused and the channel stays open', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-text-burst-acks-18000')
     await autoRetry(
       async () => {
         const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
-        expect(burst.closeErr).toBe('ChannelOverflowError')
+        expect(burst.closeErr).toBe(null)
         expect(burst.received).toBe(16384)
         expect(burst.inOrder).toBe(true)
         const ss = await getCleanupState()
         expect(ss[`textBurst_${burst.channelId}_error`]).toContain('config.channel.maxPendingAcks')
+        expect(ss[`textBurst_${burst.channelId}_acked`]).toBe('16384')
       },
       { timeout: 60_000 },
     )
+    expectLog(sendRefusedWarning)
   })
 
   if (channelTransport === 'ws') {
@@ -1432,7 +1430,7 @@ function testChannelApi() {
     })
   })
 
-  test('channel: each opt-in byte or acknowledgement cap closes with the named error', async () => {
+  test('channel: each opt-in byte or acknowledgement cap refuses the send with the named error', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-budgets')
     await autoRetry(async () => {
@@ -1441,12 +1439,8 @@ function testChannelApi() {
       expect(state[`budget_${ids.bytes}_credit`]).toBe('accepted')
       expect(state[`budget_${ids.bytes}`]).toContain('maxPendingBytes')
       expect(state[`budget_${ids.acks}`]).toContain('maxPendingAcks')
-      for (const error of ids.errors) {
-        expect(error).toContain('ChannelOverflowError')
-        expect(error).toContain('maxPendingBytes')
-        expect(error).toContain('maxPendingAcks')
-      }
     })
+    expectLog(sendRefusedWarning)
   })
 
   test("channel: a binary listener can't see or change another frame's or another listener's bytes, alone or beside others", async () => {
@@ -1463,7 +1457,7 @@ function testChannelApi() {
     })
   })
 
-  test('channel: multi-byte text that fits maxPendingBytes to the byte is accepted, and one byte more closes the channel', async () => {
+  test('channel: multi-byte text that fits maxPendingBytes to the byte is accepted, and one byte more is refused', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-at-limit')
     await autoRetry(async () => {
@@ -1473,9 +1467,10 @@ function testChannelApi() {
         expect(state[`atLimit_${kind}_over`]).toContain('maxPendingBytes')
       }
     })
+    expectLog(sendRefusedWarning)
   })
 
-  test('channel: acknowledged sends made before the page attaches close it with ChannelOverflowError once they pass maxPendingAcks or maxPendingBytes', async () => {
+  test('channel: acknowledged sends made before the page attaches are refused once they pass maxPendingAcks or maxPendingBytes, and the rest are answered', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-offline-budgets')
     await autoRetry(async () => {
@@ -1486,12 +1481,11 @@ function testChannelApi() {
         [ids.acks, 'maxPendingAcks'],
       ]) {
         const sends: string[] = JSON.parse(state[`offline_budget_${id}`] ?? '[]')
-        expect(sends.length).toBe(3)
-        for (const send of sends)
-          expect(send).toContain(`ChannelOverflowError: Channel closed: config.channel.${setting}`)
+        expect(sends.slice(0, 2)).deep.equal(['answered', 'answered'])
+        expect(sends[2]).toContain(`ChannelOverflowError: Send refused: config.channel.${setting}`)
       }
-      for (const error of ids.errors) expect(error).toContain('ChannelOverflowError')
     })
+    expectLog(sendRefusedWarning)
   })
 
   test('channel: a sender awaiting messages larger than maxPendingBytes, the first made before the page attaches, reaches the page without closing the channel', async () => {

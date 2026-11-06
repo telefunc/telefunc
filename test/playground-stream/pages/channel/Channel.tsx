@@ -1088,8 +1088,8 @@ function ChannelDemo() {
       channel.listenBinary((data) => {
         received.push(new DataView(data.buffer, data.byteOffset).getUint32(0))
         ;(window as unknown as { __burstReceived: number }).__burstReceived = received.length
-        if (received.length === count) resolve(null)
       })
+      channel.listen(() => resolve(null))
       channel.onClose((err) => resolve(err?.name ?? 'none'))
     })
     void channel.send({ count, awaited })
@@ -1124,6 +1124,7 @@ function ChannelDemo() {
     const received: number[] = []
     const ended = new Promise<string | null>((resolve) => {
       channel.listen((message) => {
+        if (message === 'end') return resolve(null)
         received.push(Number.parseInt(message))
         if (received.length === count) resolve(null)
       })
@@ -1194,11 +1195,9 @@ function ChannelDemo() {
   const testBudgets = useCallback(async () => {
     const { bytes, acks } = await openChannel(onChannelBudgets)
     acks.listen(() => new Promise<void>(() => {}))
-    const ends = await Promise.allSettled([bytes.closed, acks.closed])
     document.querySelector('#channel-budgets-result')!.textContent = JSON.stringify({
       bytes: bytes.id,
       acks: acks.id,
-      errors: ends.map((end) => (end.status === 'rejected' ? `${end.reason.name}: ${end.reason.message}` : 'clean')),
     })
   }, [])
 
@@ -1222,11 +1221,9 @@ function ChannelDemo() {
   const testOfflineBudgets = useCallback(async () => {
     const { bytes, acks } = await openChannel(onChannelOfflineBudgets)
     for (const channel of [bytes, acks]) channel.listen(() => new Promise<void>((done) => setTimeout(done, 1000)))
-    const ends = await Promise.allSettled([bytes.closed, acks.closed])
     document.querySelector('#channel-offline-budgets-result')!.textContent = JSON.stringify({
       bytes: bytes.id,
       acks: acks.id,
-      errors: ends.map((end) => (end.status === 'rejected' ? `${end.reason.name}: ${end.reason.message}` : 'clean')),
     })
   }, [])
 

@@ -1,6 +1,6 @@
 export { testWire, testWireSmallReplay, testWireSlowPing, testWireShortReconnect }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { startBlackHoleProxy } from '../../black-hole-proxy'
 import type { Response, WebSocket } from 'playwright-chromium'
 import {
@@ -19,7 +19,7 @@ import {
   refuseNextSsePost,
   releaseHeldSsePosts,
 } from '../../e2e-utils'
-import { withNetworkConditions } from '../../../utils'
+import { sendRefusedWarning, withNetworkConditions } from '../../../utils'
 
 type Tally = { text: number; binary: number; inOrder: boolean }
 type WireState = {
@@ -104,17 +104,18 @@ function testWire(isDev: boolean) {
       expect((await getCleanupState())[`wireBurst_${channelId}`]).toBe(undefined)
     })
 
-    test(`channel: a 6th ${kind} message of up to 64 MiB nobody awaits passes maxPendingBytes and closes the channel with ChannelOverflowError, not a lost replay's NetworkError`, async () => {
+    test(`channel: a 6th ${kind} message of up to 64 MiB nobody awaits passes maxPendingBytes: it is refused, and the channel stays open`, async () => {
       const channelId = await burstWhileOffline(6)
       await autoRetry(
         async () => {
           const { burst } = await getResult<WireState>('#wire-state')
-          expect(burst!.onClose).toBe('ChannelOverflowError')
+          expect(burst!.onClose).toBe(null)
           expect(burst!.received).deep.equal([0, 1, 2, 3, 4])
         },
         { timeout: 60_000 },
       )
       expect((await getCleanupState())[`wireBurst_${channelId}`]).toContain('config.channel.maxPendingBytes')
+      expectLog(sendRefusedWarning)
     })
   }
 
