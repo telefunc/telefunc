@@ -9,6 +9,7 @@ export {
 
 import type { Redis } from 'ioredis'
 import { Broadcast, BroadcastChannel, config } from 'telefunc'
+import { roomConfig } from '@telefunc/room'
 import type { DriverAttempt } from 'telefunc/__internal'
 // Only `installRedis()` is public, and it takes one backend per process.
 import { REDIS_COMMANDS } from '../../../../packages/redis/dist/commands.js'
@@ -42,6 +43,8 @@ async function onBroadcastSubscriberDropped() {
     const kind = reason.includes('binary') ? binary : text
     kind.reported += Number.parseInt(reason)
   }
+  // The drop reaches every room on the server, and another test's room may commit its heartbeat's page meanwhile.
+  roomConfig.onDeliveryLost = () => {}
   const published: unknown[] = []
   for (let i = 0; i < 600; i++) {
     if (i === 100) {
@@ -57,6 +60,8 @@ async function onBroadcastSubscriberDropped() {
   // Long enough to reconnect and read where the key starts.
   await sleep(1_000)
   config.broadcast.onDeliveryLost = ({ key, reason }) => console.error(`Broadcast delivery of '${key}' lost: ${reason}`)
+  roomConfig.onDeliveryLost = ({ roomId, reason }) =>
+    console.error(`Room delivery handoff of '${roomId}' lost: ${reason}`)
   unsubscribeText()
   unsubscribeBinary()
   return { text, binary }
