@@ -63,7 +63,8 @@ type PieceSenderOptions = {
   pingInterval: number
   /** The wire's rate record, where the rates this sender measures go. */
   pieceRate: PieceRate
-  /** `cut`: data is cut to the headroom; `whole`: data goes whole while headroom is left, and waits whole if none. */
+  /** `cut`: data is cut to the headroom; `whole`: a frame that crosses within a ping interval goes whole while headroom is
+   *  left, and waits whole if none, so that the socket holds the frame itself and not a copy per piece. */
   cuts: 'cut' | 'whole'
   owner: PieceSenderOwner
 }
@@ -292,8 +293,9 @@ class PieceSender {
     const bytes = frame.byteLength
     const now = performance.now()
     const headroom = Math.max(0, Math.floor(this.headroom))
-    const end = isSequencedTag(frame[0]!) && this.cutsData ? Math.min(bytes, offset + headroom) : bytes
-    if (end === offset) return this.wait(frame, offset)
+    const end = isSequencedTag(frame[0]!) ? Math.min(bytes, offset + headroom) : bytes
+    // A piece smaller than what the receiver acknowledges at once would cost more than the wait for headroom.
+    if (end - offset < Math.min(bytes - offset, WIRE_PIECES_ACK_BYTES)) return this.wait(frame, offset)
     // An empty first piece makes the receiver acknowledge the next two at once. A frame cut only for headroom isn't
     // used to measure the rate.
     if (offset === 0 && bytes > this.wholeUpTo) this.sendEmptyPiece(bytes)
@@ -529,7 +531,7 @@ class PieceSender {
     this.rest = null
     this.waitingBytes -= frame.byteLength - offset
     // A sender that doesn't cut data held the whole frame, so it goes as if sent now.
-    if (this.cutsData) this.cut(frame, offset)
+    if (this.cutsData || offset > 0) this.cut(frame, offset)
     else this.pass(frame)
     while (this.rest === null && this.waiting.length > 0) {
       const next = this.waiting.shift()!

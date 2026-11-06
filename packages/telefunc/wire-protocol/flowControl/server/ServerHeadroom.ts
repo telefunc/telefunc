@@ -1,6 +1,6 @@
 export { ServerHeadroom }
 
-import { WIRE_SEND_AHEAD_MIN_BYTES, WIRE_SEND_AHEAD_ROUND_TRIPS } from '../../constants.js'
+import { WIRE_PIECES_ACK_BYTES, WIRE_SEND_AHEAD_MIN_BYTES, WIRE_SEND_AHEAD_ROUND_TRIPS } from '../../constants.js'
 import { DrainRate } from '../DrainRate.js'
 import { PieceRate } from '../PieceRate.js'
 import {
@@ -17,7 +17,7 @@ import { unrefTimer } from '../../../utils/unrefTimer.js'
 
 type ServerHeadroomOptions = Pick<PieceSenderOptions, 'socket' | 'pingInterval'>
 
-/** The path to the page holds what `headroom` allows; the rest waits whole in its sender. */
+/** The path to the page holds what `headroom` allows; the rest waits in its sender. */
 class ServerHeadroom implements PieceSenderOwner {
   /** Sends every frame the WebSocket carries. */
   readonly sender: PieceSender
@@ -134,10 +134,10 @@ class ServerHeadroom implements PieceSenderOwner {
     return Math.max(0, this.inPath - this.drain.rate * (now - this.inPathAt))
   }
 
-  /** While data waits for headroom, looks again once the rate drained what the path holds past it. */
+  /** While data waits for headroom, looks again once the rate freed what a piece takes (see `PieceSender.cut`). */
   private pace(): void {
     if (this.paceTimer !== null || this.sender.waitingBytes === 0) return
-    const ms = Math.max(1, -this.headroom(performance.now()) / this.drain.rate)
+    const ms = Math.max(1, (WIRE_PIECES_ACK_BYTES - this.headroom(performance.now())) / this.drain.rate)
     this.paceTimer = unrefTimer(setTimeout(this.lookAgain, ms))
   }
 
