@@ -1,4 +1,4 @@
-export { admit, admitPublish, hold, letGo, queueMemory }
+export { admit, admitPublish, hold, holdsEnough, letGo, queueMemory }
 export type { MemoryHolder }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
@@ -88,6 +88,11 @@ function letGo(holder: MemoryHolder, held: number | PublishBody): void {
     memory.total -= HELD_PUBLISH_OVERHEAD_BYTES + (--held.refs === 0 ? held.frame.byteLength : 0)
   }
   if (holder.heldBytes === 0) memory.holders.delete(holder)
+}
+
+/** Whether the server holds enough that it grants its pages no more credit. */
+function holdsEnough(): boolean {
+  return memory.total > shedTarget(maxMemoryOf())
 }
 
 /** What a `messages()` loop's queue holds, on the ledger as a holder of its own: nothing else can lower it. */

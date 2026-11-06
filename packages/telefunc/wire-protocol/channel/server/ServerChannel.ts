@@ -23,7 +23,7 @@ import type { ChannelMux } from './ChannelMux.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
-import { admit, hold, letGo, type MemoryHolder } from './channelMemory.js'
+import { admit, hold, holdsEnough, letGo, type MemoryHolder } from './channelMemory.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { ShieldValidator, ShieldValidators } from '../../../node/server/shield.js'
@@ -179,6 +179,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       sendBdpPing: (probe) => this.peer?.sendBdpPing(probe),
       backlogBytes: () => this.peer?.sender.bufferedAmount(),
       deliveredBefore: (ms) => this.peer?.sender.deliveredBefore(ms) ?? 0,
+      holdsEnough,
     }
     this.sendCredit = new SendCredit({ owner, selfTime: this.selfTime })
     this.receiveCredit = new ReceiveCredit({ owner, selfTime: this.selfTime })
@@ -550,7 +551,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected onPeerMessage(text: string, bytes: number): void {
     const t0 = performance.now()
     try {
-      this.receiveCredit.onReceived(bytes)
+      this.received(bytes)
       const data = parsePeerText(text) as ChannelData<ClientToServer>
       const validateData = this._validators.get('data')
       // Shield fail on a no-ack message: silent drop (validator auto-logs). The client doesn't
@@ -560,7 +561,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       // Dropping still consumes: window refreshes are consumption-driven, so skipping
       // `onConsumed` would leak receive credit and eventually stall the client's sends.
       if (validateData && validateData(data) !== true) {
-        this.receiveCredit.onConsumed(bytes)
+        this.consumed(bytes)
         return
       }
       this.callListeners(this.listeners, data, bytes)
@@ -583,7 +584,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected onPeerBinaryMessage(data: Uint8Array, bytes: number): void {
     const t0 = performance.now()
     try {
-      this.receiveCredit.onReceived(bytes)
+      this.received(bytes)
       this.callListeners(this.binaryListeners, data, bytes)
     } finally {
       this.selfTime.recordSince(t0)
@@ -606,10 +607,21 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       }
     }
     if (pending.length > 0) {
-      Promise.all(pending).finally(() => this.receiveCredit.onConsumed(bytes))
+      Promise.all(pending).finally(() => this.consumed(bytes))
     } else {
-      this.receiveCredit.onConsumed(bytes)
+      this.consumed(bytes)
     }
+  }
+
+  /** Data within the credit granted arrived: nobody can refuse it, so it's charged, and it lowers what's granted next. */
+  private received(bytes: number): void {
+    hold(this, bytes)
+    this.receiveCredit.onReceived(bytes)
+  }
+
+  private consumed(bytes: number): void {
+    letGo(this, bytes)
+    this.receiveCredit.onConsumed(bytes)
   }
 
   protected onPeerAckRes(ackedSeq: number, resultText: string, status: AckResultStatus = ACK_STATUS.OK): void {

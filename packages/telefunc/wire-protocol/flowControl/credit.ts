@@ -16,6 +16,8 @@ interface CreditOwner {
   backlogBytes(): number | undefined
   /** The bytes the channel's wire delivered in the `ms` before the frame being handled arrived. */
   deliveredBefore(ms: number): number
+  /** On a server: whether it holds enough that this side grants no more credit. */
+  holdsEnough?(): boolean
 }
 
 /** The largest credit window, each way, of a server with this `maxMemory`: what a small host holds is small. */
