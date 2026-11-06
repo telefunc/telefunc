@@ -100,7 +100,7 @@ function buildInlineResponseBody(runContext: {
     if (producersStopped) return
     producersStopped = true
     for (const { producer } of producers) producer.cancel()
-    // Unblock any emit awaiting drain so the IIFE can progress to its catch/finally.
+    // Unblock any emit awaiting drain so `runInlineResponse` can progress to its catch/finally.
     wakeDrain()
   }
   const onConsumerGone = () => {
@@ -131,7 +131,53 @@ function buildInlineResponseBody(runContext: {
     }
   }
 
-  void (async () => {
+  async function mergeProducers() {
+    // The producers' first `.next()` must run inside the synchronous
+    // stretch of the restored context: in sync mode the context global is
+    // cleared on the next macrotask, and the header `emit` below can
+    // suspend until the consumer's first read (the Web sink applies
+    // backpressure from the first push). So start the pulls before
+    // emitting the header.
+    for (const entry of producers) void pullNext(entry)
+
+    // ── Header: [u32 metadata_len][metadata_bytes] — atomic on the wire,
+    // so don't break between the length and its payload.
+    const metadataBytes = textEncoder.encode(metadataSerialized)
+    await emit(encodeFrame(encodeU32(metadataBytes.length)))
+    await emit(encodeFrame(metadataBytes))
+
+    // ── Multiplexed merge loop ──
+    // Each producer keeps one in-flight `.next()`, and gets the next one once its frame went out, so a fast
+    // producer doesn't starve the others.
+    let open = producers.length
+    while (open > 0) {
+      if (settled.length === 0 && !cancelled) await new Promise<void>((resolve) => (wakeMerge = resolve))
+      // Consumer is gone: bail before emitting a "this producer is done" frame
+      // — would also be misleading for cancelled producers returning done.
+      if (cancelled) return
+      const next = settled.shift()!
+      if ('err' in next) throw next.err
+      const { entry, result } = next
+      if (result.done) {
+        // Empty-payload frame so the client knows this index is done
+        // without waiting for the global terminator.
+        await emit(encodeFrame(encodeIndexedFrame(entry.index, EMPTY)))
+        open--
+        continue
+      }
+      // An empty frame means this index is done, and an empty chunk has no bytes to send.
+      if (result.value.byteLength > 0) {
+        await emit(encodeFrame(encodeIndexedFrame(entry.index, result.value as Uint8Array<ArrayBuffer>)))
+      }
+      void pullNext(entry)
+    }
+    // `emit` is already a no-op if `cancelled` — but we'd rather not allocate
+    // the terminator frame at all when there's no one to receive it.
+    if (cancelled) return
+    await emit(encodeFrame(encodeU32(0)))
+  }
+
+  async function runInlineResponse() {
     abortSignal.addEventListener('abort', onConsumerGone, { once: true })
     // A response-wide abort takes its turn after what settled before it, and routes us into the catch below.
     responseAbort.errorPromise.catch((err: unknown) => settle({ err }))
@@ -139,51 +185,7 @@ function buildInlineResponseBody(runContext: {
       // The telefunc context is restored around the whole merge loop, like the
       // channel pump (ChannelResponseBody.ts) does, so `getContext()` works
       // inside producer bodies (generator code runs lazily, on `.next()`).
-      await restoreContext(context, async () => {
-        // The producers' first `.next()` must run inside the synchronous
-        // stretch of the restored context: in sync mode the context global is
-        // cleared on the next macrotask, and the header `emit` below can
-        // suspend until the consumer's first read (the Web sink applies
-        // backpressure from the first push). So start the pulls before
-        // emitting the header.
-        for (const entry of producers) void pullNext(entry)
-
-        // ── Header: [u32 metadata_len][metadata_bytes] — atomic on the wire,
-        // so don't break between the length and its payload.
-        const metadataBytes = textEncoder.encode(metadataSerialized)
-        await emit(encodeFrame(encodeU32(metadataBytes.length)))
-        await emit(encodeFrame(metadataBytes))
-
-        // ── Multiplexed merge loop ──
-        // Each producer keeps one in-flight `.next()`, and gets the next one once its frame went out, so a fast
-        // producer doesn't starve the others.
-        let open = producers.length
-        while (open > 0) {
-          if (settled.length === 0 && !cancelled) await new Promise<void>((resolve) => (wakeMerge = resolve))
-          // Consumer is gone: bail before emitting a "this producer is done" frame
-          // — would also be misleading for cancelled producers returning done.
-          if (cancelled) return
-          const next = settled.shift()!
-          if ('err' in next) throw next.err
-          const { entry, result } = next
-          if (result.done) {
-            // Empty-payload frame so the client knows this index is done
-            // without waiting for the global terminator.
-            await emit(encodeFrame(encodeIndexedFrame(entry.index, EMPTY)))
-            open--
-          } else {
-            // An empty frame means this index is done, and an empty chunk has no bytes to send.
-            if (result.value.byteLength > 0) {
-              await emit(encodeFrame(encodeIndexedFrame(entry.index, result.value as Uint8Array<ArrayBuffer>)))
-            }
-            void pullNext(entry)
-          }
-        }
-        // `emit` is already a no-op if `cancelled` — but we'd rather not allocate
-        // the terminator frame at all when there's no one to receive it.
-        if (cancelled) return
-        await emit(encodeFrame(encodeU32(0)))
-      })
+      await restoreContext(context, mergeProducers)
     } catch (err) {
       // Cancel producers immediately so peer producers stop emitting work
       // that would never reach the consumer while we emit the error frames.
@@ -202,7 +204,9 @@ function buildInlineResponseBody(runContext: {
       sink.close()
       onComplete()
     }
-  })()
+  }
+
+  void runInlineResponse()
 
   return sink.readable
 }

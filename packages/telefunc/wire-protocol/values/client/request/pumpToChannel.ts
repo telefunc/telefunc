@@ -47,7 +47,7 @@ function pumpClientProducerToChannel(createProducer: () => StreamingProducer, co
 
   channel.onClose(doCancel)
 
-  void (async () => {
+  async function runUploadPump() {
     try {
       await channel.opened
       await sendChunks(channel, producer, cancelledPromise, () => cancelled)
@@ -66,7 +66,9 @@ function pumpClientProducerToChannel(createProducer: () => StreamingProducer, co
       // A server that is away gets the upload's end once back, as an open channel waits for it.
       channel.close({ timeout: channel._connection.reconnectWindow() })
     }
-  })()
+  }
+
+  void runUploadPump()
 
   return {
     metadata: { channelId: channel.id },

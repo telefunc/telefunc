@@ -78,38 +78,36 @@ function pumpProducerToChannel(
   }
 
   channel.onClose(doCancel)
-  ;(async () => {
+
+  async function sendChunks() {
+    const { responseAbort } = runContext.requestContext
+    const race = createStopRace(Promise.race([responseAbort.errorPromise, cancelledPromise]))
+    while (true) {
+      const { done, value } = await race(producer.chunks.next())
+      if (cancelled) return
+      if (done) {
+        channel.sendBinary(TAG_END)
+        return
+      }
+      for (let at = 0; at < value.byteLength; at += STREAM_CHUNK_PART_BYTES) {
+        const pending = channel._sendBinary(concat(TAG_DATA, value.subarray(at, at + STREAM_CHUNK_PART_BYTES)))
+        if (pending) await pending
+      }
+    }
+  }
+
+  async function runChannelPump() {
     try {
       await channel.opened
-      await restoreContext(runContext.context, async () => {
-        const { responseAbort } = runContext.requestContext
-        const race = createStopRace(Promise.race([responseAbort.errorPromise, cancelledPromise]))
-        while (true) {
-          const { done, value } = await race(producer.chunks.next())
-          if (cancelled) break
-          if (done) {
-            channel.sendBinary(TAG_END)
-            break
-          }
-          for (let at = 0; at < value.byteLength; at += STREAM_CHUNK_PART_BYTES) {
-            const pending = channel._sendBinary(concat(TAG_DATA, value.subarray(at, at + STREAM_CHUNK_PART_BYTES)))
-            if (pending) await pending
-          }
-        }
-      })
+      await restoreContext(runContext.context, sendChunks)
     } catch (err) {
-      if (!(err instanceof ChannelClosedError)) {
-        if (isAbort(err)) {
-          runContext.requestContext.responseAbort.abort(err.abortValue)
-        }
-        if (!channel.isClosed) {
-          const errorFrame = concat(TAG_ERROR, encodeErrorPayload(err, telefuncId))
-          try {
-            await channel._sendBinary(errorFrame)
-          } catch {
-            // The channel ended before the frame went out: no page is left to tell.
-          }
-        }
+      if (err instanceof ChannelClosedError) return
+      if (isAbort(err)) runContext.requestContext.responseAbort.abort(err.abortValue)
+      if (channel.isClosed) return
+      try {
+        await channel._sendBinary(concat(TAG_ERROR, encodeErrorPayload(err, telefuncId)))
+      } catch {
+        // The channel ended before the frame went out: no page is left to tell.
       }
     } finally {
       doCancel()
@@ -117,7 +115,9 @@ function pumpProducerToChannel(
       channel.close({ timeout: reconnectWindow() })
       onComplete?.()
     }
-  })()
+  }
+
+  void runChannelPump()
 
   return channel.id
 }
