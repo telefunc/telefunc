@@ -79,23 +79,20 @@ class RoomHeartbeat {
     if (this.ticking) return
     this.ticking = true
     try {
-      await this.demandExchange.renew()
-      let renewalFailure: { error: unknown } | null = null
-      try {
-        await this.hosting.maintain()
-      } catch (error) {
-        renewalFailure = { error }
-      }
       this.lanePlan.resumeDropped()
-      if (!this.model.closed && (await this.authority.reconcileMeta())) {
-        const incarnation = this.incarnation
-        await dropReplacedMetaGenerations(incarnation.id, incarnation.inc)
-        await reapLapsedLeases(incarnation)
-        await this.authority.checkCoverage()
+      const [renewal, reconciled] = await Promise.allSettled([
+        Promise.all([this.demandExchange.renew(), this.hosting.maintain()]),
+        this.model.closed ? null : this.authority.reconcileMeta(),
+      ])
+      const head = reconciled.status === 'fulfilled' ? reconciled.value : null
+      if (head !== null) {
+        const { id, inc } = this.incarnation
+        await Promise.all([dropReplacedMetaGenerations(id, inc), reapLapsedLeases(this.incarnation)])
+        // Each reads what the reap left.
+        await Promise.all([this.authority.checkCoverage(), maintainHold(this.incarnation, head)])
       }
-      if (!this.model.closed) await maintainHold(this.incarnation)
       sweepLapsedRoomsSoon()
-      if (renewalFailure) throw renewalFailure.error
+      for (const result of [renewal, reconciled]) if (result.status === 'rejected') throw result.reason
     } finally {
       this.ticking = false
     }

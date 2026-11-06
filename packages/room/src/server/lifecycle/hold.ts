@@ -9,7 +9,7 @@ import { assert } from '../../utils/assert.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { getRoomPlane } from '../../backend/plane.js'
-import type { CellCount, CellCounter, HeadNext } from '../../backend/contract.js'
+import type { CellCount, CellCounter, HeadNext, RoomHead } from '../../backend/contract.js'
 import { decodeCellCounter, isOpenIncarnation } from '../../backend/semantics.js'
 import { TIMER_DELAY_MAX_MS } from '../../shared/constants.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_LAPSE_AFTER_CLOSE_MS, ROOM_LEASE_TTL_MS } from '../constants.js'
@@ -106,28 +106,30 @@ function scheduleNewRoomClose(room: RoomIncarnation): void {
 }
 
 /** Each heartbeat, after it reaped lapsed leases: keeps a held room's lapse ahead, or arms the close of
- *  an unheld one, whose timer's server may be gone. */
-async function maintainHold(room: RoomIncarnation): Promise<void> {
+ *  an unheld one, whose timer's server may be gone. `head` is the head the heartbeat read. */
+async function maintainHold(room: RoomIncarnation, head: RoomHead): Promise<void> {
   const record = await readHoldRecord(room)
   if (record === null) return
   if (record.closesIn !== undefined) scheduleClose(room, record.closesIn)
-  else await extendLapse(room, record)
+  else await extendLapse(room, record, { head })
 }
 
 /** A held room's head lapses once its holders' leases would have lapsed and its timeout passed, plus a heartbeat. Each
  *  heartbeat pushes it out when less than that is left. A first hold always writes: the head lapses as a new
- *  room's until then. */
+ *  room's until then. A `head` already read saves the first read; if it changed since, the exchange reads it again. */
 async function extendLapse(
   { id, inc }: RoomIncarnation,
   record: HoldRecord,
-  opts?: { firstHold?: boolean },
+  opts?: { firstHold?: boolean; head?: RoomHead },
 ): Promise<void> {
   const firstHold = opts?.firstHold === true
+  let known = opts?.head
   const timeout = unheldTimeout(record)
   const ttlMs = timeout === Infinity ? undefined : ROOM_LEASE_TTL_MS + timeout + 2 * ROOM_HEARTBEAT_INTERVAL_MS
   const plane = getRoomPlane()
   await retryCompareExchange(async () => {
-    const head = await plane.driver.readHead(id)
+    const head = known ?? (await plane.driver.readHead(id))
+    known = undefined
     if (!isOpenIncarnation(head, inc)) return
     const { expiresAt } = head
     if (!firstHold && ttlMs === undefined && expiresAt === undefined) return
