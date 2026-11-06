@@ -113,7 +113,7 @@ That Durable Object names its region in its responses' `x-telefunc-home` header,
 
 A room's state lives in one Durable Object, in the room's region: the region of the client that created the room (or the <Link href="#configuration">`locationFallback`</Link> region, for a room created from a cron trigger or a queue consumer).
 
-A participant outside the room's region waits two round trips to the room's region for `room.join()`. `Room.join(id)` reads the room first. Leaving, changing their participant metadata or sending a message takes that participant one round trip to the room's region.
+A participant outside the room's region waits one round trip to the room's region for `room.join()`, leaving, changing their participant metadata or sending a message. `Room.join(id)` reads the room first.
 
 A join, a leave, a metadata change and a private message also wait until they have reached the Durable Object of each participant concerned, which adds the round trip from the room's region to the furthest of those Durable Objects. Messages and join and leave events travel from the room's region to each participant, so a participant outside the room's region receives them about half a round trip later than one in it.
 

@@ -58,7 +58,8 @@ class RoomSessionSubscriptions {
     const laneKey = encodeLaneKey(lane)
     const route = { roomId, inc, laneKey, sessionDoId: this.id, leaseId: crypto.randomUUID(), bucket }
     const stopDeliveries = this.member.subscribeLocal(laneRoute(inc, laneKey), receiver)
-    const attempt = new CloudflareRoomAttempt({ owner: this, route, stopDeliveries })
+    const readyWhenSent = lane.kind === 'inbox'
+    const attempt = new CloudflareRoomAttempt({ owner: this, route, stopDeliveries, readyWhenSent })
     void attempt.register()
     return attempt
   }
@@ -75,27 +76,34 @@ type CloudflareRoomAttemptOptions = {
   route: RouteInstallation
   /** Stops the lane's frames reaching its receiver. */
   stopDeliveries: () => void
+  /** What this session commits next to the room follows the registration on the same ordered stub, so a member's join
+   *  needn't wait for the reply: no private message can target it before the route is stored. */
+  readyWhenSent: boolean
 }
 
-/** Ready once the authority has durably registered this attempt's exact route; Room owns retry and
- *  replacement. */
+/** Ready once the authority has durably registered this attempt's exact route, or for an inbox once the registration
+ *  went out; Room owns retry and replacement. */
 class CloudflareRoomAttempt extends DriverAttempt {
   readonly route: RouteInstallation
   private readonly owner: RoomSessionSubscriptions
   private readonly stopDeliveries: () => void
   private renewalTimer: ReturnType<typeof setTimeout> | undefined
+  private readonly readyWhenSent: boolean
 
-  constructor({ owner, route, stopDeliveries }: CloudflareRoomAttemptOptions) {
+  constructor({ owner, route, stopDeliveries, readyWhenSent }: CloudflareRoomAttemptOptions) {
     super()
     this.owner = owner
     this.route = route
     this.stopDeliveries = stopDeliveries
+    this.readyWhenSent = readyWhenSent
   }
 
   async register(): Promise<void> {
+    const registering = this.callAuthority((authority) => authority.registerRoute(this.route))
+    if (this.readyWhenSent) this.transition('ready')
     let registration: RegisterWire
     try {
-      registration = await this.callAuthority((authority) => authority.registerRoute(this.route))
+      registration = await registering
     } catch (error) {
       return this.fail(error)
     }

@@ -1,6 +1,7 @@
 export {
   onRoomRoundTrip,
   onOrderChannels,
+  onJoinRoom,
   onSubscribeThenPublish,
   onListen,
   onPublishFrom,
@@ -40,6 +41,12 @@ async function onOrderChannels(id: string) {
   const room = await Room.getOrCreate<Record<string, never>, { name: string }, Numbered>(`order:${id}`)
   Room.guard(room, { anyoneCanJoin: true })
   return { channel: new BroadcastChannel<Numbered>({ key: `order:${id}` }), room }
+}
+
+async function onJoinRoom(id: string) {
+  const room = await Room.getOrCreate(`join:${id}`)
+  await room.join()
+  return 'joined'
 }
 
 /** Subscribes, then publishes at once. */

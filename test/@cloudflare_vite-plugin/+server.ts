@@ -53,10 +53,18 @@ export class TelefuncDurableObject extends (tf.TelefuncDurableObject as Telefunc
   }
 
   // Test-only: the Room Durable Objects called while `/__room-calls` traces, by name, with the room a listing call names.
+  // An inbox's registration replies slowly, so what waits for that reply comes after it in the trace.
   override async telefuncDurableObjectCall(name: string, method: string, args: unknown[]) {
     const room = /^(directory|listIn|unlistIn)/.test(method) ? args[0] : null
-    roomCalls?.push({ object: this.ctx.id.name ?? null, method, room })
-    return super.telefuncDurableObjectCall(name, method, args)
+    const object = this.ctx.id.name ?? null
+    const inbox = method === 'registerRoute' && (args[0] as { laneKey: string }).laneKey.startsWith('inbox:')
+    roomCalls?.push({ object, method: inbox ? 'registerRoute(inbox)' : method, room })
+    const result = await super.telefuncDurableObjectCall(name, method, args)
+    if (inbox && roomCalls !== null) {
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      roomCalls?.push({ object, method: 'registerRoute(inbox) replied', room })
+    }
+    return result
   }
 }
 export { TodoListDurableObject } from './database/todoItems'
@@ -145,11 +153,11 @@ app.all('/__region-trace', (c) => {
   }
   return c.json(regionTrace)
 })
-// Test-only: a PUT starts tracing Room's Durable Object calls; a GET returns them and stops.
+// Test-only: a PUT starts tracing Room's Durable Object calls; a GET returns them, and a DELETE stops as well.
 app.all('/__room-calls', (c) => {
   if (c.req.method === 'PUT') roomCalls = []
   const calls = roomCalls
-  if (c.req.method === 'GET') roomCalls = null
+  if (c.req.method === 'DELETE') roomCalls = null
   return c.json(calls)
 })
 // Telefunc answers its requests and WebSocket upgrades; Vike renders the rest.

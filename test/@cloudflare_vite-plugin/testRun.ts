@@ -47,6 +47,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testRoom()
   // Under `vite dev`, @cloudflare/vite-plugin awaits each Durable Object call apart, so one stub's calls can run out of order.
   if (!isDev) testRoomOrderAcrossSessions()
+  if (!isDev) testRoomJoinRoundTrip()
   testRoomAcrossSessions()
   testRoomAcrossRegions()
   testRoomCreatedInRegion()
@@ -507,6 +508,29 @@ function testRoomOrderAcrossSessions() {
   })
 }
 
+function testRoomJoinRoundTrip() {
+  test("Room: a join reaches the room's authority right after its inbox's registration, without waiting for its reply", async () => {
+    const id = crypto.randomUUID()
+    const [session] = await openSessions(id, ['p1'])
+    await fetch(`${getServerUrl()}/__room-calls`, { method: 'PUT' })
+    expect(await clickRoomCard(session!, 'join')).toBe('joined')
+    await autoRetry(async () => {
+      const calls = (await (await fetch(`${getServerUrl()}/__room-calls`)).json()) as {
+        object: string
+        method: string
+      }[]
+      const methods = calls.filter((call) => call.object === `__telefunc_room__:join:${id}`).map((call) => call.method)
+      const registered = methods.indexOf('registerRoute(inbox)')
+      const joined = methods.indexOf('runOperation')
+      expect(registered).greaterThan(-1)
+      expect(joined).greaterThan(registered)
+      expect(methods.indexOf('registerRoute(inbox) replied')).greaterThan(joined)
+    })
+    await fetch(`${getServerUrl()}/__room-calls`, { method: 'DELETE' })
+    await session!.context().close()
+  })
+}
+
 function testRoomAcrossSessions() {
   test('Room and Broadcast: two sessions listening in one isolate each get a message once, on their own listeners', async () => {
     const id = crypto.randomUUID()
@@ -566,7 +590,7 @@ function testRoomCreatedInRegion() {
     ] as const) {
       await fetch(`${getServerUrl()}/__room-calls`, { method: 'PUT' })
       expect(await clickRoomCard(page, 'create')).toBe('created')
-      const calls = (await (await fetch(`${getServerUrl()}/__room-calls`)).json()) as {
+      const calls = (await (await fetch(`${getServerUrl()}/__room-calls`, { method: 'DELETE' })).json()) as {
         object: string
         room: unknown
       }[]
