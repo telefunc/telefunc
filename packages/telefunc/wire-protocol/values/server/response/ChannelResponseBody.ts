@@ -3,7 +3,12 @@ export type { ChannelPumpRunContext }
 
 import type { StreamingProducer } from '../../types.js'
 import { concat } from '../../../wire/envelope.js'
-import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_END, CHANNEL_PUMP_TAG_ERROR } from '../../../constants.js'
+import {
+  CHANNEL_PUMP_TAG_DATA,
+  CHANNEL_PUMP_TAG_END,
+  CHANNEL_PUMP_TAG_ERROR,
+  STREAM_CHUNK_PART_BYTES,
+} from '../../../constants.js'
 import { ChannelClosedError, ServerChannel } from '../../../channel/server/ServerChannel.js'
 import { reconnectWindow } from '../../../../node/server/serverConfig.js'
 import { getChannelMux } from '../../../channel/server/ChannelMux.js'
@@ -13,6 +18,7 @@ import { restoreContext } from '../../../../node/server/context/context.js'
 import type { Context } from '../../../../node/server/context/context.js'
 import type { RequestContext } from '../../../../node/server/context/requestContext.js'
 import { createDeferred } from '../../../../utils/createDeferred.js'
+import { createStopRace } from '../../../../utils/createStopRace.js'
 
 const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
 const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
@@ -77,19 +83,18 @@ function pumpProducerToChannel(
       await channel.opened
       await restoreContext(runContext.context, async () => {
         const { responseAbort } = runContext.requestContext
+        const race = createStopRace(Promise.race([responseAbort.errorPromise, cancelledPromise]))
         while (true) {
-          const { done, value } = await Promise.race([
-            responseAbort.errorPromise,
-            cancelledPromise,
-            producer.chunks.next(),
-          ])
+          const { done, value } = await race(producer.chunks.next())
           if (cancelled) break
           if (done) {
             channel.sendBinary(TAG_END)
             break
           }
-          const pending = channel._sendBinary(concat(TAG_DATA, value))
-          if (pending) await pending
+          for (let at = 0; at < value.byteLength; at += STREAM_CHUNK_PART_BYTES) {
+            const pending = channel._sendBinary(concat(TAG_DATA, value.subarray(at, at + STREAM_CHUNK_PART_BYTES)))
+            if (pending) await pending
+          }
         }
       })
     } catch (err) {

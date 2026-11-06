@@ -1,18 +1,22 @@
 export { pumpClientProducerToChannel }
 
-import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_END, CHANNEL_PUMP_TAG_ERROR } from '../../../constants.js'
+import {
+  CHANNEL_PUMP_TAG_DATA,
+  CHANNEL_PUMP_TAG_END,
+  CHANNEL_PUMP_TAG_ERROR,
+  STREAM_CHUNK_PART_BYTES,
+} from '../../../constants.js'
 import { concat, textEncoder } from '../../../wire/envelope.js'
 import { ChannelClosedError } from '../../../channel/channelErrors.js'
 import { ClientChannel, type ConnectionOptions } from '../../../channel/client/ClientChannel.js'
 import type { StreamingProducer } from '../../types.js'
 import { randomUuid } from '../../../../utils/randomUuid.js'
 import { createDeferred } from '../../../../utils/createDeferred.js'
+import { createStopRace } from '../../../../utils/createStopRace.js'
 
 const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
 const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
 const TAG_END = new Uint8Array([CHANNEL_PUMP_TAG_END])
-// A larger chunk goes in parts, each a message under every channel's frame limit (32 MiB on Cloudflare).
-const CHUNK_PART_BYTES = 8 * 1024 * 1024
 
 /**
  * Pump a single producer's chunks to the server through a dedicated ClientChannel.
@@ -82,15 +86,16 @@ async function sendChunks(
   cancelledPromise: Promise<IteratorResult<Uint8Array<ArrayBuffer>>>,
   isCancelled: () => boolean,
 ): Promise<void> {
+  const race = createStopRace(cancelledPromise)
   while (true) {
-    const { done, value } = await Promise.race([cancelledPromise, producer.chunks.next()])
+    const { done, value } = await race(producer.chunks.next())
     if (isCancelled()) return
     if (done) {
       channel.sendBinary(TAG_END)
       return
     }
-    for (let at = 0; at < value.byteLength; at += CHUNK_PART_BYTES) {
-      const pending = channel._sendBinary(concat(TAG_DATA, value.subarray(at, at + CHUNK_PART_BYTES)))
+    for (let at = 0; at < value.byteLength; at += STREAM_CHUNK_PART_BYTES) {
+      const pending = channel._sendBinary(concat(TAG_DATA, value.subarray(at, at + STREAM_CHUNK_PART_BYTES)))
       if (pending) await pending
     }
   }

@@ -42,7 +42,7 @@ function testPublish(isDev: boolean, inDocker = false) {
   const transports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '["sse"]')
   const transport = transports.at(-1)
 
-  test('broadcast: a messages() loop that falls 512 KiB behind a busy broadcast ends with ChannelOverflowError, on the page and on the server, and the page is sent nothing published after', async () => {
+  test('broadcast: a messages() loop that falls 2 MiB behind a busy broadcast ends with ChannelOverflowError, on the page and on the server, and the page is sent nothing published after', async () => {
     let wsBytes = 0
     const onWebSocket = (ws: WebSocket) => {
       if (ws.url().includes('/_telefunc')) ws.on('framereceived', ({ payload }) => (wsBytes += payload.length))
@@ -467,7 +467,7 @@ function testPublish(isDev: boolean, inDocker = false) {
 
     for (const { count, received, closed } of [
       { count: 2, received: ['before', '0', '1'], closed: null },
-      { count: 8, received: ['before'], closed: 'ChannelOverflowError' },
+      { count: 32, received: ['before'], closed: 'ChannelOverflowError' },
     ]) {
       if (canCutWire())
         test(`broadcast: a page offline while ${count * 128} KiB is published ${closed ? 'leaves with ChannelOverflowError on both ends' : 'gets all of it once back'}`, async () => {

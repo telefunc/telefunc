@@ -1,7 +1,7 @@
-export { replayWindow }
+export { creditWindowOf }
 export type { CreditOwner, Urgency }
 
-import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES } from '../wire/frame.js'
+import { CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
 
 /** How soon a credit frame goes (`urgent-flow-control` at once, an `acknowledgement` rides); also its page frame kind. */
 type Urgency = 'urgent-flow-control' | 'acknowledgement' | 'flow-control'
@@ -18,7 +18,7 @@ interface CreditOwner {
   deliveredBefore(ms: number): number
 }
 
-/** The largest window a sender whose replay queues hold `text` and `binary` bytes gets: what it holds in flight fits. */
-function replayWindow(text: number, binary: number): number {
-  return Math.max(1, Math.floor(Math.min(text, binary) / 2) - MESSAGE_FRAME_OVERHEAD_MAX_BYTES)
+/** The largest credit window, each way, of a server with this `maxPendingBytes`: what a small host holds is small. */
+function creditWindowOf(maxPendingBytes: number): number {
+  return Math.min(CREDIT_WINDOW_MAX_BYTES, maxPendingBytes)
 }

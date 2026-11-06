@@ -3,8 +3,10 @@ export { getServerConfig }
 export { getServerExtensionTypes }
 export { enableChannelTransports }
 export { setAdapterMaxFrameBytes }
+export { setAdapterMaxPendingBytes }
 export { getAdapterMaxFrameBytes }
 export { setRootFromVite }
+export { getChannelConfig }
 export { pingDeadlineOf }
 export { reconnectWindow }
 export type {
@@ -31,25 +33,16 @@ import {
   type BroadcastTransport,
 } from '../../wire-protocol/broadcast/broadcastAdapter.js'
 import {
-  CHANNEL_BUFFER_LIMIT_BYTES,
-  CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
-  CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
-  CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
-  CHANNEL_CONNECT_TTL_MS,
-  CHANNEL_IDLE_TIMEOUT_MS,
-  CHANNEL_MAX_PENDING_ACKS,
   CHANNEL_MAX_PENDING_BYTES,
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
+  CHANNEL_RECONNECT_TIMEOUT_MIN_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
-  CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
-  CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
+  CREDIT_WINDOW_INITIAL_BYTES,
   DEFAULT_SERVER_CHANNEL_TRANSPORTS,
   DEFAULT_STREAM_TRANSPORT,
   parseStreamConfig,
   validateChannelTransports,
-  SSE_FLUSH_THROTTLE_MS,
-  SSE_POST_IDLE_FLUSH_DELAY_MS,
   type ChannelTransports,
   type StreamTransport,
   TIMER_DELAY_MAX_MS,
@@ -90,74 +83,19 @@ type ChannelConfigUser = {
    */
   reconnectTimeout?: number
   /**
-   * How long, in milliseconds, to keep the shared channel connection alive
-   * after the last channel closes.
-   */
-  idleTimeout?: number
-  /**
    * How often, in milliseconds, the client sends a ping for channel health
    * checks. The server considers the client dead after 2x this interval.
    */
   pingInterval?: number
-  /**
-   * The most bytes of text messages the server keeps per channel, of those it sent that the client hasn't acknowledged,
-   * to replay after a reconnect. If you `await` your sends, a reconnect loses nothing, as long as each message is at
-   * most half its replay buffer: 64 MiB with the defaults.
-   */
-  serverReplayBuffer?: number
-  /** As `serverReplayBuffer`, for binary messages. */
-  serverReplayBufferBinary?: number
-  /** As `serverReplayBuffer`, for what the client sends: the client keeps that replay, sized as the server tells it. */
-  clientReplayBuffer?: number
-  /** As `clientReplayBuffer`, for binary messages. */
-  clientReplayBufferBinary?: number
-  /**
-   * How long, in milliseconds, a newly created channel waits for the client to
-   * connect before it is closed automatically.
-   */
-  connectTtl?: number
   /** Maximum bytes queued beyond credit or awaiting acknowledgements. @default 268435456 */
   maxPendingBytes?: number
-  /** Maximum simultaneous acknowledgement requests. @default 16384 */
-  maxPendingAcks?: number
-  /** Maximum text bytes buffered per channel while no client is attached. */
-  bufferLimit?: number
-  /** Maximum number of bytes buffered per channel for binary messages while no client peer is attached. */
-  bufferLimitBinary?: number
-  /**
-   * When using SSE channels, upstream client-to-server frames are batched for at
-   * most this many milliseconds before Telefunc sends a POST.
-   *
-   * This value also defines the idle window used to detect the first POST after
-   * an idle period.
-   */
-  sseFlushThrottle?: number
-  /**
-   * When using SSE channels, the first upstream batch POST after an idle period
-   * waits at most this many milliseconds before Telefunc flushes it.
-   *
-   * Idle means no upstream SSE batch POST has started within the current
-   * `sseFlushThrottle` window.
-   */
-  ssePostIdleFlushDelay?: number
 }
 
 type ChannelConfigResolved = {
   transports: ChannelTransports
   reconnectTimeout: number
-  idleTimeout: number
   pingInterval: number
-  serverReplayBuffer: number
-  serverReplayBufferBinary: number
-  clientReplayBuffer: number
-  clientReplayBufferBinary: number
-  connectTtl: number
   maxPendingBytes: number
-  maxPendingAcks: number
-  bufferLimit: number
-  bufferLimitBinary: number
-  sseFlushThrottle: number
-  ssePostIdleFlushDelay: number
 }
 
 /** Telefunc Server Configuration */
@@ -236,6 +174,10 @@ const globalObject = getGlobalObject('serverConfig.ts', {
   adapterChannelTransports: new Set<ChannelTransports[number]>(),
   /** The largest frame the adapter's runtime takes, where that is less than the server reads. */
   adapterMaxFrameBytes: undefined as number | undefined,
+  /** The default of `maxPendingBytes` where the adapter's runtime has less memory than the usual default assumes. */
+  adapterMaxPendingBytes: undefined as number | undefined,
+  /** A channel read `config.channel`, whose values each of its parts then relies on staying as they are. */
+  channelConfigInUse: false,
 })
 const configState = globalObject.config
 
@@ -350,40 +292,34 @@ function getServerConfig(): ConfigResolved {
     stream: {
       transport: configState.stream.transport || DEFAULT_STREAM_TRANSPORT,
     },
-    channel: {
-      transports: configState.channel.transports ?? [
-        ...DEFAULT_SERVER_CHANNEL_TRANSPORTS,
-        ...globalObject.adapterChannelTransports,
-      ],
-      reconnectTimeout: configState.channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
-      idleTimeout: configState.channel.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS,
-      pingInterval: configState.channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
-      serverReplayBuffer: configState.channel.serverReplayBuffer ?? CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
-      serverReplayBufferBinary:
-        configState.channel.serverReplayBufferBinary ?? CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
-      clientReplayBuffer: configState.channel.clientReplayBuffer ?? CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
-      clientReplayBufferBinary:
-        configState.channel.clientReplayBufferBinary ?? CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
-      connectTtl: configState.channel.connectTtl ?? CHANNEL_CONNECT_TTL_MS,
-      maxPendingBytes: configState.channel.maxPendingBytes ?? CHANNEL_MAX_PENDING_BYTES,
-      maxPendingAcks: configState.channel.maxPendingAcks ?? CHANNEL_MAX_PENDING_ACKS,
-      bufferLimit: configState.channel.bufferLimit ?? CHANNEL_BUFFER_LIMIT_BYTES,
-      bufferLimitBinary: configState.channel.bufferLimitBinary ?? CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
-      sseFlushThrottle: configState.channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
-      ssePostIdleFlushDelay: configState.channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
-    },
+    channel: resolveChannelConfig(configState.channel),
     extensions: configState.extensions,
+  }
+}
+
+function resolveChannelConfig(channel: ChannelConfigUser): ChannelConfigResolved {
+  return {
+    transports: channel.transports ?? [...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...globalObject.adapterChannelTransports],
+    reconnectTimeout: channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
+    pingInterval: channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
+    maxPendingBytes: channel.maxPendingBytes ?? globalObject.adapterMaxPendingBytes ?? CHANNEL_MAX_PENDING_BYTES,
   }
 }
 
 /** How long a wire may deliver nothing before it is taken for dead: two ping intervals, each of at least a second. */
 function pingDeadlineOf({ pingInterval }: Pick<ChannelConfigResolved, 'pingInterval'>): number {
-  return pingDeadline(Math.max(pingInterval, CHANNEL_PING_INTERVAL_MIN_MS))
+  return pingDeadline(pingInterval)
+}
+
+/** The settings a channel runs by, which can't change from here on. */
+function getChannelConfig(): ChannelConfigResolved {
+  globalObject.channelConfigInUse = true
+  return getServerConfig().channel
 }
 
 /** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
 function reconnectWindow(): number {
-  const c = getServerConfig().channel
+  const c = getChannelConfig()
   return Math.min(TIMER_DELAY_MAX_MS, pingDeadlineOf(c) + c.reconnectTimeout)
 }
 
@@ -404,6 +340,11 @@ function enableChannelTransports(transports: ChannelTransports): void {
 /** @internal The runtime ends a WebSocket on a larger message: the page refuses one, told by each channel the server makes and by each RECONCILED. */
 function setAdapterMaxFrameBytes(bytes: number | undefined): void {
   globalObject.adapterMaxFrameBytes = bytes
+}
+
+/** @internal */
+function setAdapterMaxPendingBytes(bytes: number): void {
+  globalObject.adapterMaxPendingBytes = bytes
 }
 
 function getAdapterMaxFrameBytes(): number | undefined {
@@ -511,34 +452,36 @@ function applyChannelConfig(val: unknown): void {
           Math.floor(TIMER_DELAY_MAX_MS / 2),
           'as its deadline, twice it, is at most the longest a timer waits',
         )
+        assertUsage(
+          value >= CHANNEL_PING_INTERVAL_MIN_MS,
+          `\`${configPath}\` should be at least ${CHANNEL_PING_INTERVAL_MIN_MS}: more pings than that flood the wire`,
+        )
         next[key] = value
         break
       case 'reconnectTimeout':
-      case 'idleTimeout':
-      case 'connectTtl':
-      case 'sseFlushThrottle':
-      case 'ssePostIdleFlushDelay':
         assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
+        assertUsage(
+          value >= CHANNEL_RECONNECT_TIMEOUT_MIN_MS,
+          `\`${configPath}\` should be at least ${CHANNEL_RECONNECT_TIMEOUT_MIN_MS}: in less, no client can reconnect`,
+        )
         next[key] = value
         break
-      case 'serverReplayBuffer':
-      case 'serverReplayBufferBinary':
-      case 'clientReplayBuffer':
-      case 'clientReplayBufferBinary':
       case 'maxPendingBytes':
-      case 'maxPendingAcks':
-      case 'bufferLimit':
-      case 'bufferLimitBinary':
         assertUsage(
-          typeof value === 'number' && Number.isSafeInteger(value) && value >= 0,
-          `\`${configPath}\` should be a non-negative safe integer`,
+          typeof value === 'number' && Number.isSafeInteger(value) && value >= CREDIT_WINDOW_INITIAL_BYTES,
+          `\`${configPath}\` should be an integer of at least ${CREDIT_WINDOW_INITIAL_BYTES}: a channel's credit window starts at that`,
         )
-        ;(next as Record<string, unknown>)[key] = value
+        next[key] = value
         break
       default:
         assertUsage(false, `Unknown ${configPath}`)
     }
   }
+  assertUsage(
+    !globalObject.channelConfigInUse ||
+      JSON.stringify(resolveChannelConfig(next)) === JSON.stringify(resolveChannelConfig(configState.channel)),
+    "`config.channel` can't change once a channel exists, as those already open would keep the old values: set it before the server handles a request",
+  )
   configState.channel = next
 }
 

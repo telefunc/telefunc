@@ -1,8 +1,9 @@
 export { testSlowLink }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult, countConnections } from '../../e2e-utils'
+import { navigate, getResult, countConnections, serverArrayBuffers, sleep } from '../../e2e-utils'
 import { startBlackHoleProxy } from '../../black-hole-proxy'
+import { withNetworkConditions } from '../../../utils'
 
 type SlowLinkState = {
   linkShare: { pingMs: number[]; downloaded: number } | null
@@ -48,6 +49,28 @@ function testSlowLink(isDev: boolean) {
   // With two transports the page opens an SSE stream, then moves to a WebSocket: wire-e2e-test.ts covers the rest of a
   // slow link there.
   if (upgrades) return
+
+  if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === '["sse"]')
+    test('channel: SSE wires the page gave up on hold nothing of the 32 MiB waiting for it, and all of it arrives', async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      const before = await serverArrayBuffers()
+      await withNetworkConditions({ downloadThroughput: 1000, uploadThroughput: -1 }, async () => {
+        await page.click('#channel-test-binary-burst-unawaited-32')
+        // Time for the page to give up on a few wires, each with what waited on it.
+        await sleep(15_000)
+        // The replay of 32 MiB and, in base64, what waits on the current wire: 75 MiB.
+        expect((await serverArrayBuffers()) - before).lessThan(96 * 1024 * 1024)
+      })
+      await autoRetry(
+        async () => {
+          const { binaryBurst } = await getResult<{
+            binaryBurst: { received: number; inOrder: boolean; closeErr: string | null } | null
+          }>('#channel-state')
+          expect(binaryBurst).deep.equal({ ...binaryBurst, received: 32, inOrder: true, closeErr: null })
+        },
+        { timeout: 30_000 },
+      )
+    })
 
   // 32 s to cross, past the 10 s a page waits for an answer to its ping.
   test('channel: on a 1 Mbit/s link, a 4 MB message from the server arrives on the connection it started on', async () => {

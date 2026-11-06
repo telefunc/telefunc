@@ -40,11 +40,10 @@ class ChannelAttach {
     this.subscriptions = subscriptions
   }
 
-  /** Caps the credit windows at what the replay buffers allow: `window` for what the page grants, `peerWindow` for
-   *  what the server grants it. */
-  fitReplays(window: number, peerWindow: number): void {
-    this.receiveCredit.fitReplay(window)
-    this.sendCredit.fitReplay(peerWindow)
+  /** Caps both credit windows at what the server's `maxPendingBytes` allows. */
+  capWindows(window: number): void {
+    this.receiveCredit.capWindow(window)
+    this.sendCredit.capWindow(window)
   }
 
   /** The wire's streaming upload failed after the channel opened, so its frames now go in batch POSTs. */

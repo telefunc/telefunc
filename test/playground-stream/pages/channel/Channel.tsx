@@ -47,6 +47,7 @@ import {
   onChannelSlowUplink,
   onChannelOpenAnswer,
   onChannelOpenHello,
+  onChannelConfigChecks,
   onChannelBudgets,
   onChannelAwaitedFromOffline,
   onChannelAtLimit,
@@ -1088,8 +1089,8 @@ function ChannelDemo() {
       channel.listenBinary((data) => {
         received.push(new DataView(data.buffer, data.byteOffset).getUint32(0))
         ;(window as unknown as { __burstReceived: number }).__burstReceived = received.length
-        if (received.length === count) resolve(null)
       })
+      channel.listen(() => resolve(null))
       channel.onClose((err) => resolve(err?.name ?? 'none'))
     })
     void channel.send({ count, awaited })
@@ -1124,6 +1125,7 @@ function ChannelDemo() {
     const received: number[] = []
     const ended = new Promise<string | null>((resolve) => {
       channel.listen((message) => {
+        if (message === 'end') return resolve(null)
         received.push(Number.parseInt(message))
         if (received.length === count) resolve(null)
       })
@@ -1142,7 +1144,7 @@ function ChannelDemo() {
     let received = 0
     const closeErr = await new Promise<string | null>((resolve) => {
       channel.listenBinary(() => {
-        if (++received === 3) resolve(null)
+        if (++received === 2) resolve(null)
       })
       channel.onClose((err) => resolve(err?.name ?? 'none'))
     })
@@ -1192,14 +1194,8 @@ function ChannelDemo() {
   }, [])
 
   const testBudgets = useCallback(async () => {
-    const { bytes, acks } = await openChannel(onChannelBudgets)
-    acks.listen(() => new Promise<void>(() => {}))
-    const ends = await Promise.allSettled([bytes.closed, acks.closed])
-    document.querySelector('#channel-budgets-result')!.textContent = JSON.stringify({
-      bytes: bytes.id,
-      acks: acks.id,
-      errors: ends.map((end) => (end.status === 'rejected' ? `${end.reason.name}: ${end.reason.message}` : 'clean')),
-    })
+    const { bytes } = await openChannel(onChannelBudgets)
+    document.querySelector('#channel-budgets-result')!.textContent = JSON.stringify({ bytes: bytes.id })
   }, [])
 
   // A channel the page drops closes once garbage-collected.
@@ -1220,14 +1216,9 @@ function ChannelDemo() {
   }, [])
 
   const testOfflineBudgets = useCallback(async () => {
-    const { bytes, acks } = await openChannel(onChannelOfflineBudgets)
-    for (const channel of [bytes, acks]) channel.listen(() => new Promise<void>((done) => setTimeout(done, 1000)))
-    const ends = await Promise.allSettled([bytes.closed, acks.closed])
-    document.querySelector('#channel-offline-budgets-result')!.textContent = JSON.stringify({
-      bytes: bytes.id,
-      acks: acks.id,
-      errors: ends.map((end) => (end.status === 'rejected' ? `${end.reason.name}: ${end.reason.message}` : 'clean')),
-    })
+    const { channel } = await openChannel(onChannelOfflineBudgets)
+    channel.listen(() => new Promise<void>((done) => setTimeout(done, 1000)))
+    document.querySelector('#channel-offline-budgets-result')!.textContent = JSON.stringify({ id: channel.id })
   }, [])
 
   const testCreditFailure = useCallback(async () => {
@@ -1831,6 +1822,16 @@ function ChannelDemo() {
             Test acknowledgement ownership
           </button>
           <output id="channel-ack-ownership-result" />
+          <button
+            id="channel-test-config-checks"
+            onClick={async () => {
+              const checks = await onChannelConfigChecks()
+              document.querySelector('#channel-config-checks-result')!.textContent = JSON.stringify(checks)
+            }}
+          >
+            Test what config.channel refuses
+          </button>
+          <output id="channel-config-checks-result" />
           <button id="channel-test-budgets" onClick={testBudgets}>
             Test send budgets
           </button>

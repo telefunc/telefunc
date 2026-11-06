@@ -81,7 +81,8 @@ const TAG = {
   /** Flow-control message-count limit. Parallel to `WINDOW` but counted in messages, not bytes,
    *  to bound receiver dispatch CPU regardless of message size. */
   MSG_WINDOW: 0x39 as const,
-  /** Server → client: an initial channel a RECONCILED left out, attached at `lastSeq` or not within `connectTtl`. */
+  /** Server → client: an initial channel a RECONCILED left out, attached at `lastSeq` or not within
+   *  `CHANNEL_CONNECT_TTL_MS`. */
   ATTACH_RESULT: 0x3b as const,
 }
 

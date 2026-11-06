@@ -21,12 +21,7 @@ const reconciled = (extra: Partial<ReconciledPayload> = {}): ReconciledPayload =
   idleTimeout: 2,
   pingInterval: 3,
   maxFrameBytes: 10,
-  serverReplayBuffer: 8,
-  serverReplayBufferBinary: 9,
-  clientReplayBuffer: 4,
-  clientReplayBufferBinary: 5,
-  sseFlushThrottle: 6,
-  ssePostIdleFlushDelay: 7,
+  creditWindow: 8,
   transports: [CHANNEL_TRANSPORT.SSE, CHANNEL_TRANSPORT.WS],
   ...extra,
 })

@@ -23,8 +23,6 @@ import { testSlowLink } from './pages/channel/slow-link-e2e-test'
 function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm preview:deno') {
   setServerRuntime(cmd === 'pnpm preview:bun' ? 'bun' : cmd === 'pnpm preview:deno' ? 'deno' : 'node')
   run(cmd, {
-    // A stream-flow pause takes 60 s to lapse, past the 60 s a test gets outside CI.
-    additionalTimeout: 30_000,
     // `pnpm preview` runs srvx (prints `Listening on:`); `pnpm dev` is `vike dev` on vite
     // (prints `Local:` + `http://localhost:3000`). Neither matches test-e2e's default
     // "Server running at" / "Accepting connections at" matcher, so the framework times

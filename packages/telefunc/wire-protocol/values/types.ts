@@ -200,7 +200,7 @@ type ClientReplacerContext = {
 
 // ===== Metadata =====
 
-type StreamingMetadata = { channelId: string } | { __index: number; flowId?: string }
+type StreamingMetadata = { channelId: string } | { __index: number }
 
 /** Request-direction (client→server): bytes are framed back-to-back in the request body,
  *  so the reader needs an explicit `index` and `size` to know where this file starts and ends. */

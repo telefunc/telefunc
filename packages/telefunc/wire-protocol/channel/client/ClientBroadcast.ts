@@ -9,7 +9,6 @@ import { TAG } from '../../wire/tags.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { broadcastMessages } from '../channelMessages.js'
-import { CHANNEL_BUFFER_LIMIT_BINARY_BYTES, CHANNEL_BUFFER_LIMIT_BYTES } from '../../constants.js'
 import { ChannelClosedError } from '../channelErrors.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { ClientChannel, type ClientChannelOptions } from './ClientChannel.js'
@@ -35,10 +34,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return ret
   }
 
-  /** The page holds what its loop falls behind by within the server's default buffer limits. */
   override messages(options?: { signal?: AbortSignal }) {
-    const budget = { text: CHANNEL_BUFFER_LIMIT_BYTES, binary: CHANNEL_BUFFER_LIMIT_BINARY_BYTES }
-    return broadcastMessages<ChannelData<T>>(this, budget, options)
+    return broadcastMessages<ChannelData<T>>(this, options)
   }
 
   subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {

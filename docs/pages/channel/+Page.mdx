@@ -281,15 +281,16 @@ Fire-and-forget is also fine — a send goes out as soon as the connection has r
 channel.send({ type: 'ping' }) // no await needed
 ```
 
-What happens to a server channel's sends, awaited or not:
+What the server does with a channel's `send()`s is the same whether its client is connected, offline, or hasn't opened the channel yet:
 
-- While the client is connected, the server delivers sends within `maxPendingBytes` and `maxPendingAcks` (see <Link href="/channel-config" />). Exceeding either budget closes the channel with `ChannelOverflowError` naming the setting.
-- While the client is offline, the server buffers them, up to `bufferLimit`/`bufferLimitBinary` (see <Link href="/channel-config" />). An awaited `send()` resolves once the client is back and the message went out. From then on, these sends count toward `maxPendingBytes` and `maxPendingAcks` like any other.
-- Past that limit, the server drops the oldest buffered sends, and each dropped `send()` rejects with `ChannelOverflowError`. A single message larger than the limit is dropped even if you await it. Earlier buffered sends of the same kind (text or binary) are dropped too.
+- It holds what the client hasn't taken, up to <Link href="/channel-config">`maxPendingBytes`</Link>, 256 MiB per channel. An awaited `send()` resolves once the client has room, so a sender that awaits builds no backlog.
+- A `send()` past that rejects with `ChannelOverflowError`, and that message isn't delivered. The channel stays open, and later sends that fit go through.
 
-Telefunc logs a warning once per channel when the sends nobody awaits keep outrunning what the client takes, well before they exceed `maxPendingBytes`.
+So fire-and-forget can leave a gap in what the client receives, once you send more than it takes. Telefunc logs a warning once per channel when your sends keep outrunning the client, well before they reach `maxPendingBytes`, and another at the first refused `send()`.
 
 To fix it, `await` each `send()` before the next, as in the clock example above, or send slower.
+
+A publish can't be awaited, so a `BroadcastChannel` holds less for each subscriber: 2 MiB while its client is away, and 2 MiB behind a `messages()` loop, on either side. Past that, see <Link href="#errors" />.
 
 
 ## `Broadcast`
@@ -322,7 +323,7 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 `publish()` can't be awaited per subscriber, so the <Link href="#backpressure">warning about sends that outrun their client</Link> doesn't apply to a `BroadcastChannel`. Instead, a client that falls far behind a broadcast has its connection cut and reconnects. Other channels on the connection also <Link href="#reconnection">reconnect</Link>. The `BroadcastChannel` gets what it missed after reconnecting. If it missed more than the server's buffers hold, it closes (see <Link href="#errors">errors</Link>).
 
-A listener's `async` work isn't awaited: the next message arrives whether or not your `subscribe()` callback is done. So if your callback can fall behind, unfinished calls pile up on the page, and Telefunc doesn't limit them: your code has to.
+A `subscribe()` callback's `async` work isn't awaited, on the page or on the server: the next message arrives whether or not your callback is done. So if your callback can fall behind, unfinished calls pile up where it runs, and Telefunc doesn't limit them: your code has to.
 For example, a callback that does an `await fetch()` for each message should queue them, and drop or merge what it can't keep up with.
 
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
@@ -407,7 +408,7 @@ for await (const message of chat.messages({ signal: controller.signal })) {
 
 > `messages()` works on both server and client. Each message includes the same `info` as a subscription callback. The loop follows the <Link href="#receive-messages-in-a-loop">channel loop's cancellation and close behavior</Link>.
 
-> A publish doesn't wait for a slow loop, so the loop holds what it falls behind by: up to `config.channel.bufferLimit` of text and `bufferLimitBinary` of binary on the server, and their defaults (512 KB and 2 MB) on the client. A loop that falls further behind throws `ChannelOverflowError` and stops receiving.
+> A publish doesn't wait for a slow loop, so the loop holds what it falls behind by, up to 2 MiB. Past that, the loop ends with `ChannelOverflowError`, on the server and on the client.
 
 > `subscribe()`, `subscribeBinary()`, `onOpen()` and `onClose()` accept `{ signal }` after the callback. The static `Broadcast.subscribe()` and `Broadcast.subscribeBinary()` accept it too. Aborting removes that registration.
 
@@ -471,10 +472,6 @@ A broadcast is an announcement, like a radio frequency: whoever tunes in to the 
 
 Only the two ends of a channel can use it, while anything that knows a broadcast's `key` can join it. A channel ends when either side closes it, while a broadcast outlives any single member.
 
-### Technically
-
-`new BroadcastChannel()` is essentially `new Channel()` combined with the static `Broadcast.publish()` / `Broadcast.subscribe()`: the server holds a private channel to the one client that received it, then bridges that client into the keyed broadcast group.
-
 ### Comparison
 
 | | `new Channel()` | `new BroadcastChannel()` |
@@ -492,17 +489,19 @@ Only the two ends of a channel can use it, while anything that knows a broadcast
 
 Telefunc silently handles rejected promises from `send()`, `sendBinary()`, `publish()` and `publishBinary()`. To observe a failure, `await` the call or use `.catch()`.
 
+A channel closes when one of its ends closes or aborts it, and when its client stays gone longer than `reconnectTimeout`. A slow client doesn't close it, and neither does a refused `send()`.
+
 Channels and broadcasts signal failure through four errors:
 
 | Error | When | Channel state | Recovery |
 |---|---|---|---|
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
-| `NetworkError` (`isChannel: true`) | Offline longer than `reconnectTimeout`, or missed more messages than the replay buffer holds | Closed | Auto-closed — recreate if needed |
+| `NetworkError` (`isChannel: true`) | The client stayed gone longer than `reconnectTimeout` | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
-| `ChannelOverflowError` | A server channel's sends overfilled `bufferLimit`/`bufferLimitBinary` while its client was offline; the dropped ones reject | **Open** | `await` your sends, and raise `bufferLimit`/`bufferLimitBinary` above your largest message |
-| `ChannelOverflowError` (send budget) | A connected channel exceeded `maxPendingBytes`/`maxPendingAcks` | Closed | `await` the server's sends or raise the named setting, then recreate the channel |
-| `ChannelOverflowError` (`BroadcastChannel`) | More was published to its key while the client was offline than `bufferLimit`/`bufferLimitBinary` holds | Closed | Call its telefunction again to rejoin |
-| `ChannelOverflowError` (`publish()`) | With no Redis or other transport installed, a `subscribe()` callback published more than `maxPendingBytes` before its first `await` | Open | Publish less from the callback, or raise the named setting |
+| `ChannelOverflowError` (`send()`) | The message would pass `maxPendingBytes` | **Open**; only that message is lost | `await` each `send()` before the next, or raise `maxPendingBytes`. A single message larger than it is refused even if you await it: split it, or raise `maxPendingBytes` |
+| `ChannelOverflowError` (`BroadcastChannel`) | Over 2 MiB was published to its key while the client was away | Closed | Call its telefunction again to rejoin |
+| `ChannelOverflowError` (`messages()`) | Its loop fell over 2 MiB behind the publishes | The loop ends, the broadcast stays open | Handle each message faster, or use `subscribe()` |
+| `ChannelOverflowError` (`publish()`) | With no Redis or other transport installed, a `subscribe()` callback published more than `maxPendingBytes` before its first `await` | Open | Publish less from the callback, or raise `maxPendingBytes` |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 
@@ -515,9 +514,10 @@ See also:
 
 If the connection drops, Telefunc reconnects automatically and resumes existing channels and broadcasts:
 
-- Messages sent while offline are buffered and delivered in order on reconnect.
-- Messages lost in the disconnect are resent after reconnect, if the client is back within `reconnectTimeout` and the replay buffer still holds them.
-- Otherwise, the channel closes with `NetworkError`. When the replay buffer dropped them, the error message names the setting to raise (see <Link href="/channel-config" />).
+- Messages sent while offline are held and delivered in order on reconnect, up to <Link href="/channel-config">`maxPendingBytes`</Link>.
+- Messages lost in the disconnect are resent after reconnect, if the client is back within `reconnectTimeout`.
+- Otherwise, the channel closes with `NetworkError`.
+- A `BroadcastChannel` holds only 2 MiB of what's published while its client is away, not `maxPendingBytes`. Past that, it closes with `ChannelOverflowError` even within `reconnectTimeout`, and its client calls its telefunction again to rejoin.
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.
 
 > Reconnection is automatic — you don't need to handle it in your application code.

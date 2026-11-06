@@ -3,12 +3,13 @@ export type { WireEntry, ReconcileOutcome, ServerTransport, Wire }
 
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import { getAdapterMaxFrameBytes, getServerConfig, pingDeadlineOf } from '../../../node/server/serverConfig.js'
+import { getAdapterMaxFrameBytes, getChannelConfig, pingDeadlineOf } from '../../../node/server/serverConfig.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
-  CHANNEL_PING_INTERVAL_MIN_MS,
   CREDIT_MSG_WINDOW_MAX,
+  CHANNEL_CONNECT_TTL_MS,
+  CHANNEL_IDLE_TIMEOUT_MS,
   CREDIT_WINDOW_MAX_BYTES,
   MAX_CHANNELS_PER_CONNECTION,
   TIMER_DELAY_MAX_MS,
@@ -27,6 +28,7 @@ import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type { BarrierPayload, PreparePayload, ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
+import { creditWindowOf } from '../../flowControl/credit.js'
 import { WireSender } from './WireSender.js'
 import { EndedChannels } from './EndedChannels.js'
 import { UpgradeStages, type UpgradeStagesOwner } from './UpgradeStages.js'
@@ -78,13 +80,7 @@ type MuxServerOptions = {
   idleTimeout: number
   pingInterval: number
   pingDeadline: number
-  serverReplayBuffer: number
-  serverReplayBufferBinary: number
-  clientReplayBuffer: number
-  clientReplayBufferBinary: number
-  connectTtl: number
-  sseFlushThrottle: number
-  ssePostIdleFlushDelay: number
+  creditWindow: number
   transports: ChannelTransports
 }
 
@@ -152,11 +148,6 @@ class ChannelMux implements UpgradeStagesOwner {
 
   private get options(): MuxServerOptions {
     return (this.resolvedOptions ??= resolveMuxServerOptions())
-  }
-
-  /** Exposed for transport-level race timers (SSE's `waitForWire`). */
-  get connectTtl(): number {
-    return this.options.connectTtl
   }
 
   // ── ServerChannel registry ──────────────────────────────────────────
@@ -243,12 +234,7 @@ class ChannelMux implements UpgradeStagesOwner {
         idleTimeout: this.options.idleTimeout,
         pingInterval: this.options.pingInterval,
         maxFrameBytes: getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES,
-        serverReplayBuffer: this.options.serverReplayBuffer,
-        serverReplayBufferBinary: this.options.serverReplayBufferBinary,
-        clientReplayBuffer: this.options.clientReplayBuffer,
-        clientReplayBufferBinary: this.options.clientReplayBufferBinary,
-        sseFlushThrottle: this.options.sseFlushThrottle,
-        ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
+        creditWindow: this.options.creditWindow,
         transports: this.options.transports,
       }),
     )
@@ -729,7 +715,7 @@ class ChannelMux implements UpgradeStagesOwner {
       phase: 'waiting',
       ttl: null,
     }
-    this.registrationWaits.wait(awaited, this.options.connectTtl)
+    this.registrationWaits.wait(awaited, CHANNEL_CONNECT_TTL_MS)
     entry.state.awaited.add(awaited)
   }
 
@@ -897,20 +883,13 @@ class ChannelMux implements UpgradeStagesOwner {
 }
 
 function resolveMuxServerOptions(): MuxServerOptions {
-  const c = getServerConfig().channel
-  const pingInterval = Math.max(c.pingInterval, CHANNEL_PING_INTERVAL_MIN_MS)
+  const c = getChannelConfig()
   return {
     reconnectTimeout: c.reconnectTimeout,
-    idleTimeout: c.idleTimeout,
-    pingInterval,
+    idleTimeout: Math.min(c.reconnectTimeout, CHANNEL_IDLE_TIMEOUT_MS),
+    pingInterval: c.pingInterval,
     pingDeadline: pingDeadlineOf(c),
-    serverReplayBuffer: c.serverReplayBuffer,
-    serverReplayBufferBinary: c.serverReplayBufferBinary,
-    clientReplayBuffer: c.clientReplayBuffer,
-    clientReplayBufferBinary: c.clientReplayBufferBinary,
-    connectTtl: c.connectTtl,
-    sseFlushThrottle: c.sseFlushThrottle,
-    ssePostIdleFlushDelay: c.ssePostIdleFlushDelay,
+    creditWindow: creditWindowOf(c.maxPendingBytes),
     transports: c.transports,
   }
 }

@@ -3,11 +3,6 @@ export { ReplayBuffer }
 import { replayKindOf, type ReplayKind } from '../wire/tags.js'
 import { assert } from '../../utils/assert.js'
 
-type ReplayBufferOptions = {
-  maxBytes: number
-  binaryMaxBytes: number
-}
-
 /** Sent sequenced frames till their peer acks them, in queues by tag; a data queue evicts its oldest past its budget. */
 class ReplayBuffer {
   /** Each kind's queue, made at its first frame. */
@@ -18,28 +13,15 @@ class ReplayBuffer {
   private pushedSeq = 0
   /** The highest seq the peer acknowledged. */
   private acknowledgedSeq = 0
-  /** Lower budgets than the queues', which apply once the peer acknowledged every seq through `throughSeq`. */
-  private lowered: { budgets: Record<ReplayKind, number>; throughSeq: number } | null = null
 
   /** The last seq handed out (see `nextSeq`). */
   get seq(): number {
     return this.issuedSeq
   }
 
-  constructor({ maxBytes, binaryMaxBytes }: ReplayBufferOptions) {
-    this.budgets = queueBudgets(maxBytes, binaryMaxBytes)
-  }
-
-  /** A lower budget waits till the peer acks every seq issued so far, so no frame a reconnect needs is trimmed. */
-  setLimits(maxBytes: number, binaryMaxBytes: number): void {
-    const budgets = queueBudgets(maxBytes, binaryMaxBytes)
-    const unacknowledged = this.acknowledgedSeq < this.issuedSeq
-    let lowered = false
-    for (const kind of REPLAY_KINDS) {
-      if (unacknowledged && budgets[kind] < this.budgets[kind]) lowered = true
-      this.setBudget(kind, unacknowledged ? Math.max(budgets[kind], this.budgets[kind]) : budgets[kind])
-    }
-    this.lowered = lowered ? { budgets, throughSeq: this.lowered?.throughSeq ?? this.issuedSeq } : null
+  constructor(maxBytes: number) {
+    // The frame that ends a channel is small, and none is dropped for size.
+    this.budgets = { text: maxBytes, binary: maxBytes, closing: Infinity }
   }
 
   /** Hands out the next seq. */
@@ -59,14 +41,10 @@ class ReplayBuffer {
 
   /** The peer has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
   acknowledge(lastSeq: number): void {
-    // Nothing new: its queues dropped through it, and a lowered budget waits for a later seq.
+    // Nothing new: its queues dropped through it.
     if (lastSeq <= this.acknowledgedSeq) return
     this.acknowledgedSeq = lastSeq
     for (const kind of REPLAY_KINDS) this.queues[kind]?.acknowledge(lastSeq)
-    if (this.lowered === null || lastSeq < this.lowered.throughSeq) return
-    const { budgets } = this.lowered
-    this.lowered = null
-    for (const kind of REPLAY_KINDS) this.setBudget(kind, budgets[kind])
   }
 
   /** The frames with afterSeq < seq <= throughSeq, by seq, or null if it dropped one of them. */
@@ -97,21 +75,10 @@ class ReplayBuffer {
     this.issuedSeq = 0
     this.pushedSeq = 0
     this.acknowledgedSeq = 0
-    this.lowered = null
-  }
-
-  private setBudget(kind: ReplayKind, budget: number): void {
-    this.budgets[kind] = budget
-    this.queues[kind]?.setBudget(budget)
   }
 }
 
 const REPLAY_KINDS: readonly ReplayKind[] = ['text', 'binary', 'closing']
-
-/** A queue's byte budget by kind: the frame that ends a channel is small, and none is dropped for size. */
-function queueBudgets(maxBytes: number, binaryMaxBytes: number): Record<ReplayKind, number> {
-  return { text: maxBytes, binary: binaryMaxBytes, closing: Infinity }
-}
 
 type Run = { seqs: number[]; frames: Uint8Array<ArrayBuffer>[] }
 
@@ -144,7 +111,7 @@ class ReplayQueue {
   private frames: Uint8Array<ArrayBuffer>[] = []
   private head = 0
   private totalBytes = 0
-  private maxBytes: number
+  private readonly maxBytes: number
 
   constructor(maxBytes: number) {
     this.maxBytes = maxBytes
@@ -171,11 +138,6 @@ class ReplayQueue {
   acknowledge(lastSeq: number): void {
     while (this.head < this.frames.length && this.seqs[this.head]! <= lastSeq) this.dropHead()
     this.compact()
-  }
-
-  setBudget(maxBytes: number): void {
-    this.maxBytes = maxBytes
-    this.trim()
   }
 
   /** The stored frames with afterSeq < seq <= throughSeq. */

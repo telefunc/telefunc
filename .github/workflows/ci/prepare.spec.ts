@@ -227,7 +227,7 @@ describe('prepare()', () => {
                   "job": "Playground Stream",
                 },
               },
-              "testFilePath": "test/playground-stream/.test-preview.channel-small-replay.sse.test.ts",
+              "testFilePath": "test/playground-stream/.test-preview.channel-small-pending.sse.test.ts",
             },
             {
               "localConfig": {
@@ -235,23 +235,7 @@ describe('prepare()', () => {
                   "job": "Playground Stream",
                 },
               },
-              "testFilePath": "test/playground-stream/.test-preview.channel-small-replay.ws.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-preview.channel-zero-settings.sse.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-preview.channel-zero-settings.ws.test.ts",
+              "testFilePath": "test/playground-stream/.test-preview.channel-small-pending.ws.test.ts",
             },
             {
               "localConfig": {

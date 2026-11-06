@@ -40,6 +40,7 @@ export {
   onChannelSlowUplink,
   onChannelOpenAnswer,
   onChannelOpenHello,
+  onChannelConfigChecks,
   onChannelBudgets,
   onChannelAwaitedFromOffline,
   onChannelOfflineBudgets,
@@ -662,14 +663,11 @@ async function onChannelHeldBinary() {
   return { channel: ch.client }
 }
 
-/** With 1 KiB buffers, sends 100,000 empty messages of each kind to an unattached channel; counts rejections by error. */
+/** Sends 100,000 empty messages of each kind to an unattached channel; counts rejections by error. */
 async function onChannelUnattachedFlood() {
   const rejected: Record<'text' | 'binary', Record<string, number>> = { text: {}, binary: {} }
   for (const kind of ['text', 'binary'] as const) {
-    const original = config.channel
-    config.channel = { ...original, bufferLimit: 1024, bufferLimitBinary: 1024 }
     const ch = new Channel<never, string>()
-    config.channel = original
     const counts: Record<string, number> = {}
     for (let i = 0; i < 100_000; i++) {
       const send = kind === 'text' ? ch.send('') : ch.sendBinary(new Uint8Array(0))
@@ -710,44 +708,54 @@ async function onChannelSlowLink() {
  * At the page's message, sends that many 1 MiB messages, each with its index in its first 4 bytes, in one loop:
  * awaiting each, or not.
  * cleanupState keys:
- *   binaryBurst_<id> = what the send that closed the channel threw, if one did
+ *   binaryBurst_<id> = why the first refused send was refused, if one was
+ * Then sends `end`, once one fits.
  */
 async function onChannelBinaryBurst() {
-  const ch = new Channel<(run: { count: number; awaited: boolean }) => void, never>()
+  const ch = new Channel<(run: { count: number; awaited: boolean }) => void, string>()
+  const refused = (err: Error) => {
+    cleanupState[`binaryBurst_${ch.id}`] ??= err.message
+  }
   ch.listen(async ({ count, awaited }) => {
-    try {
-      for (let i = 0; i < count; i++) {
-        const message = new Uint8Array(1024 * 1024)
-        new DataView(message.buffer).setUint32(0, i)
-        if (awaited) await ch.sendBinary(message)
-        else void ch.sendBinary(message)
-      }
-    } catch (err) {
-      cleanupState[`binaryBurst_${ch.id}`] = (err as Error).message
+    for (let i = 0; i < count; i++) {
+      const message = new Uint8Array(1024 * 1024)
+      new DataView(message.buffer).setUint32(0, i)
+      if (awaited) await ch.sendBinary(message).catch(refused)
+      else void ch.sendBinary(message).catch(refused)
     }
+    while (!(await sendFitted(ch, 'end'))) await new Promise((resolve) => setTimeout(resolve, 100))
   })
   return { channel: ch.client, channelId: ch.id }
 }
 
+async function sendFitted(ch: Channel<any, string>, message: string): Promise<boolean> {
+  try {
+    await ch.send(message)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /**
  * At the page's message, sends `burst` 1 MiB messages at once, then a message of `tick` bytes every `everyMs` ms,
- * `ticks` times, none of them awaited.
+ * `ticks` times, none of them awaited, until one is refused.
  * cleanupState keys:
- *   paced_<id> = what the send that closed the channel threw, or `done`
+ *   paced_<id> = why that send was refused, or `done`
  */
 async function onChannelPaced() {
   const ch = new Channel<(run: { burst: number; tick: number; everyMs: number; ticks: number }) => void, never>()
   ch.listen(async ({ burst, tick, everyMs, ticks }) => {
-    try {
-      for (let i = 0; i < burst; i++) void ch.sendBinary(new Uint8Array(1024 * 1024))
-      for (let i = 0; i < ticks; i++) {
-        await new Promise((resolve) => setTimeout(resolve, everyMs))
-        void ch.sendBinary(new Uint8Array(tick))
-      }
-      cleanupState[`paced_${ch.id}`] = 'done'
-    } catch (err) {
-      cleanupState[`paced_${ch.id}`] = (err as Error).message
+    let refusal: string | undefined
+    const refused = (err: Error) => {
+      refusal ??= err.message
     }
+    for (let i = 0; i < burst; i++) void ch.sendBinary(new Uint8Array(1024 * 1024)).catch(refused)
+    for (let i = 0; i < ticks && refusal === undefined; i++) {
+      await new Promise((resolve) => setTimeout(resolve, everyMs))
+      void ch.sendBinary(new Uint8Array(tick)).catch(refused)
+    }
+    cleanupState[`paced_${ch.id}`] = refusal ?? 'done'
   })
   return { channel: ch.client, channelId: ch.id }
 }
@@ -756,27 +764,27 @@ async function onChannelPaced() {
  * At the page's message, sends that many text messages, each starting with its index, in one loop: of 16 KiB, without
  * awaiting them or awaiting each, or of 1 KiB with `{ ack: true }`, awaiting the acks together.
  * cleanupState keys:
- *   textBurst_<id>_error = what the send that closed the channel threw, if one did
+ *   textBurst_<id>_error = why the first refused send was refused, if one was
  *   textBurst_<id>_acked = how many of the ack-requesting sends resolved
+ * After the acks settle, sends `end`.
  */
 async function onChannelTextBurst() {
   const ch = new Channel<(run: { count: number; mode: 'unawaited' | 'awaited' | 'acks' }) => void, string>()
   const id = ch.id
   ch.listen(async ({ count, mode }) => {
     const sends: Promise<unknown>[] = []
-    try {
-      for (let i = 0; i < count; i++) {
-        const message = String(i).padEnd(mode === 'acks' ? 1024 : 16 * 1024)
-        if (mode === 'acks') sends.push(ch.send(message, { ack: true }))
-        else if (mode === 'awaited') await ch.send(message)
-        else void ch.send(message)
-      }
-    } catch (err) {
-      cleanupState[`textBurst_${id}_error`] = (err as Error).message
+    for (let i = 0; i < count; i++) {
+      const message = String(i).padEnd(mode === 'acks' ? 64 * 1024 : 16 * 1024)
+      if (mode === 'acks') sends.push(ch.send(message, { ack: true }))
+      else if (mode === 'awaited') await ch.send(message)
+      else void ch.send(message)
     }
     if (mode !== 'acks') return
     const results = await Promise.allSettled(sends)
+    const firstRefused = results.find((r) => r.status === 'rejected')
+    if (firstRefused) cleanupState[`textBurst_${id}_error`] = firstRefused.reason.message
     cleanupState[`textBurst_${id}_acked`] = String(results.filter((r) => r.status === 'fulfilled').length)
+    void ch.send('end')
   })
   return { channel: ch.client, channelId: id }
 }
@@ -913,71 +921,77 @@ async function onChannelAckOwnership() {
   return { channel: ch.client }
 }
 
-async function onChannelBudgets() {
-  const original = config.channel
-  config.channel = { ...original, maxPendingBytes: 8192 }
-  const bytes = new Channel<never, string>()
-  config.channel = { ...original, maxPendingAcks: 2 }
-  const acks = new Channel<never, string>()
-  config.channel = original
-  const exercise = (ch: typeof bytes, ack: boolean) => {
-    ch.onOpen(() => {
-      try {
-        if (!ack) {
-          void ch.send('x'.repeat(16 * 1024))
-          cleanupState[`budget_${ch.id}_credit`] = 'accepted'
-        }
-        for (let i = 0; i < 1000; i++) void ch.send('x'.repeat(1024), { ack: ack as false })
-      } catch (err) {
-        cleanupState[`budget_${ch.id}`] = (err as Error).message
-      }
-    })
+/** What each assignment `config.channel` refuses says, now that a channel ran; `null` for one it accepts. */
+async function onChannelConfigChecks() {
+  new Channel<never, never>().abort()
+  const assign = (channel: object) => {
+    try {
+      config.channel = { pingInterval: 1000, ...channel }
+      return null
+    } catch (err) {
+      return (err as Error).message
+    }
   }
-  exercise(bytes, false)
-  exercise(acks, true)
-  return { bytes: bytes.client, acks: acks.client }
+  return {
+    same: assign({}),
+    changed: assign({ reconnectTimeout: 61_000 }),
+    reconnectTimeout: assign({ reconnectTimeout: 999 }),
+    pingInterval: assign({ pingInterval: 999 }),
+    maxPendingBytes: assign({ maxPendingBytes: 2 * 1024 * 1024 - 1 }),
+    removed: assign({ bufferLimit: 1 }),
+  }
+}
+
+async function onChannelBudgets() {
+  const bytes = new Channel<never, string>()
+  const refused = (err: Error) => {
+    cleanupState[`budget_${bytes.id}`] ??= err.message
+  }
+  bytes.onOpen(() => {
+    void bytes.send('x'.repeat(4 * 1024)).then(() => (cleanupState[`budget_${bytes.id}_credit`] = 'accepted'))
+    for (let i = 0; i < 6000; i++) void bytes.send('x'.repeat(1024)).catch(refused)
+  })
+  return { bytes: bytes.client }
 }
 
 /**
- * With a `maxPendingBytes` below its messages, sends 3 of 5 MiB, awaiting each, the first before the page attaches.
- * cleanupState: awaitedFromOffline_<id> = `done`, or what the send that closed the channel threw
+ * With a `maxPendingBytes` of 2 MiB, awaits a send of 1 KiB before the page attaches, one of 5 MiB, and one of 1 KiB.
+ * cleanupState: awaitedFromOffline_<id> = for each send, `sent` or why it was refused
  */
 async function onChannelAwaitedFromOffline() {
-  const original = config.channel
-  config.channel = { ...original, maxPendingBytes: 1024 * 1024, bufferLimitBinary: 8 * 1024 * 1024 }
   const ch = new Channel<never, string>()
-  config.channel = original
   void (async () => {
-    try {
-      for (let i = 0; i < 3; i++) await ch.sendBinary(new Uint8Array(5 * 1024 * 1024))
-      cleanupState[`awaitedFromOffline_${ch.id}`] = 'done'
-    } catch (err) {
-      cleanupState[`awaitedFromOffline_${ch.id}`] = (err as Error).message
+    const sends: string[] = []
+    for (const bytes of [1024, 5 * 1024 * 1024, 1024]) {
+      try {
+        await ch.sendBinary(new Uint8Array(bytes))
+        sends.push('sent')
+      } catch (err) {
+        sends.push((err as Error).message)
+      }
     }
+    cleanupState[`awaitedFromOffline_${ch.id}`] = JSON.stringify(sends)
   })()
   return { channel: ch.client, channelId: ch.id }
 }
 
 /** One channel per kind of text, each sending as its first send what fits `maxPendingBytes` to the byte, and one per
- *  kind sending one byte more. cleanupState: atLimit_<kind>_<fits|over> = `accepted`, or why the send threw. */
+ *  kind sending one byte more. cleanupState: atLimit_<kind>_<fits|over> = `accepted`, or why the send was refused. */
 async function onChannelAtLimit() {
-  // 4,096 is these 3,575 UTF-8 bytes, the two quotes around them, a frame's 7 bytes and a held send's 512.
+  // 2 MiB is these 2,096,631 UTF-8 bytes, the two quotes around them, a frame's 7 bytes and a held send's 512.
   const texts = {
-    twoBytes: `${'é'.repeat(1787)}x`,
-    threeBytes: `${'€'.repeat(1191)}xx`,
-    fourBytes: `${'😀'.repeat(893)}xxx`,
+    twoBytes: `${'é'.repeat(1_048_315)}x`,
+    threeBytes: '€'.repeat(698_877),
+    fourBytes: `${'😀'.repeat(524_157)}xxx`,
   }
-  const original = config.channel
-  config.channel = { ...original, maxPendingBytes: 4096 }
   const open = (name: string, text: string) => {
     const ch = new Channel<never, string>()
     ch.onOpen(() => {
-      try {
-        void ch.send(text, { ack: true })
-        cleanupState[`atLimit_${name}`] = 'accepted'
-      } catch (err) {
-        cleanupState[`atLimit_${name}`] = (err as Error).message
-      }
+      cleanupState[`atLimit_${name}`] = 'accepted'
+      ch.send(text, { ack: true }).catch((err: Error) => {
+        // The page has no listener to answer the send that went.
+        if (err.name === 'ChannelOverflowError') cleanupState[`atLimit_${name}`] = err.message
+      })
     })
     return ch.client
   }
@@ -985,7 +999,6 @@ async function onChannelAtLimit() {
     open(`${kind}_fits`, text),
     open(`${kind}_over`, `${text}x`),
   ])
-  config.channel = original
   return channels
 }
 
@@ -1000,22 +1013,15 @@ async function onChannelOwnBytes() {
 }
 
 async function onChannelOfflineBudgets() {
-  const original = config.channel
-  config.channel = { ...original, maxPendingBytes: 8192 }
-  const bytes = new Channel<never, string>()
-  config.channel = { ...original, maxPendingAcks: 2 }
-  const acks = new Channel<never, string>()
-  config.channel = original
-  for (const ch of [bytes, acks]) {
-    // Sent before the page attaches: they wait in the channel's buffer until it does.
-    const sends = Array.from({ length: 3 }, () => ch.send('x'.repeat(3 * 1024), { ack: true }))
-    void Promise.allSettled(sends).then((results) => {
-      cleanupState[`offline_budget_${ch.id}`] = JSON.stringify(
-        results.map((r) => (r.status === 'rejected' ? `${r.reason.name}: ${r.reason.message}` : 'answered')),
-      )
-    })
-  }
-  return { bytes: bytes.client, acks: acks.client }
+  const ch = new Channel<never, string>()
+  // Sent before the page attaches: they wait in the channel's buffer until it does.
+  const sends = Array.from({ length: 3 }, () => ch.send('x'.repeat(800 * 1024), { ack: true }))
+  void Promise.allSettled(sends).then((results) => {
+    cleanupState[`offline_budget_${ch.id}`] = JSON.stringify(
+      results.map((r) => (r.status === 'rejected' ? `${r.reason.name}: ${r.reason.message}` : 'answered')),
+    )
+  })
+  return { channel: ch.client }
 }
 
 async function onChannelCreditFailure() {
