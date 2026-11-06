@@ -48,7 +48,7 @@ class ReplayBuffer {
   }
 
   /** The frames with afterSeq < seq <= throughSeq, by seq, or null if it dropped one of them. */
-  getAfter(afterSeq: number, throughSeq = Infinity): Uint8Array<ArrayBuffer>[] | null {
+  getAfter(afterSeq: number, throughSeq: number): Uint8Array<ArrayBuffer>[] | null {
     let run: Run = { seqs: [], frames: [] }
     for (const kind of REPLAY_KINDS) {
       const queue = this.queues[kind]
