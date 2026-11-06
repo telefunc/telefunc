@@ -2,6 +2,7 @@ export { ServerHeadroom }
 
 import {
   WIRE_PIECES_ACK_BYTES,
+  WIRE_PIECES_ACK_GAP_MS,
   WIRE_QUEUE_DELAY_MS,
   WIRE_SEND_AHEAD_MIN_BYTES,
   WIRE_SEND_AHEAD_ROUND_TRIPS,
@@ -99,7 +100,9 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     const rate = this.drainRate()
     if (rate === 0) return Number.POSITIVE_INFINITY
     // On a slow link the least round trip still spans a whole frame's arrival, and what goes ahead is copied pieces.
-    const ahead = Math.min(WIRE_SEND_AHEAD_ROUND_TRIPS * this.leastRtt, WIRE_QUEUE_DELAY_MS)
+    // The rate's rise waits for acknowledgements, which go a gap apart however short the round trip.
+    const toAck = WIRE_SEND_AHEAD_ROUND_TRIPS * this.leastRtt + 2 * WIRE_PIECES_ACK_GAP_MS
+    const ahead = Math.min(toAck, WIRE_QUEUE_DELAY_MS)
     return Math.max(WIRE_SEND_AHEAD_MIN_BYTES, rate * ahead) - this.pathHolds(at)
   }
 

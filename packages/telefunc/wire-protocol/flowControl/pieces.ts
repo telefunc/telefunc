@@ -14,6 +14,7 @@ import {
   WIRE_ANNOUNCED_WAIT_MARGIN,
   WIRE_GATHER_BYTES,
   WIRE_PIECES_ACK_BYTES,
+  WIRE_PIECES_ACK_GAP_MS,
   WIRE_PIECE_RATE_MARGIN,
   WIRE_PROBE_CLOCK_MS,
   WIRE_PROBE_FIRST_BYTES,
@@ -826,6 +827,8 @@ abstract class PieceReceiver implements AckScheduleOwner {
   acknowledgeWithNext(): void {
     if (!this.ack.carry()) return
     this.owner.carryAck(() => (this.ack.carried ? this.takeAcknowledgement() : null))
+    // A subscriber may send nothing for a while, and what its peer holds back waits for this.
+    this.ack.aloneBy(performance.now() + WIRE_PIECES_ACK_GAP_MS)
   }
 
   private takeAcknowledgement(): Uint8Array<ArrayBuffer> {
