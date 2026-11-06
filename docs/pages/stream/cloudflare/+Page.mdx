@@ -179,7 +179,7 @@ A KV record is created on subscribe and deleted on unsubscribe. If a Durable Obj
 | Guarantee | Details |
 |---|---|
 | Ordering | Messages are delivered in order. |
-| Buffering | The server holds messages while the client is disconnected, up to <Link href="/channel-config">`config.channel.maxMemory`</Link> (default on Cloudflare: 64 MiB, as a Durable Object's memory is limited to 128 MB). |
+| Buffering | The server holds messages while the client is disconnected, up to <Link href="/channel-config">`config.channel.maxMemory`</Link> (default on Cloudflare: 64 MiB, as a Durable Object's memory is limited to 128 MB). A message clears once the client confirms it. |
 | Replay | On reconnect, missing messages are resent and duplicates are ignored. |
 | Acknowledgements | `send(data, { ack: true })` resolves when the other side processes the message. |
 | Loss | If the disconnection lasts longer than `config.channel.reconnectTimeout`, the channel closes with <Link href="/channel#errors">`NetworkError`</Link>. |
