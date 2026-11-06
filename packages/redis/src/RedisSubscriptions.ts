@@ -41,7 +41,15 @@ type SocketState =
   | { phase: 'idle' }
   | { phase: 'waiting'; timer: ReturnType<typeof setTimeout> }
   | { phase: 'connecting'; id: number; socket: SubscriberSocket | null }
-  | { phase: 'connected'; id: number; socket: SubscriberSocket; subscribed: Set<string> }
+  | {
+      phase: 'connected'
+      id: number
+      socket: SubscriberSocket
+      subscribed: Set<string>
+      pings: ReturnType<typeof setInterval>
+      /** A ping is on its way, unanswered. */
+      awaitingPong: boolean
+    }
 
 type ConnectedSocket = Extract<SocketState, { phase: 'connected' }>
 
@@ -69,6 +77,8 @@ const RECONNECT_DELAY_MAX_MS = 2_000
 // Redis Cluster forwards a channel's frames from the old and the new slot owner over separate bus links during a
 // reshard or a failover, so the old owner's last frame can arrive after the new owner's first.
 const REORDER_WAIT_MS = 1_000
+// A partition closes no socket, and pub/sub is silent while nothing is published, so only a ping can tell.
+const SUBSCRIBER_PING_MS = 10_000
 
 /**
  * Redis's only backend-specific subscription edge: one subscriber connection, its channels refcounted across
@@ -205,9 +215,33 @@ class RedisSubscriptions {
       return this.lost(id, error)
     }
     if (!this.isCurrent(id)) return
-    this.socket = { phase: 'connected', id, socket, subscribed: new Set() }
+    const connected: ConnectedSocket = {
+      phase: 'connected',
+      id,
+      socket,
+      subscribed: new Set(),
+      pings: setInterval(() => this.ping(connected), SUBSCRIBER_PING_MS).unref(),
+      awaitingPong: false,
+    }
+    this.socket = connected
     this.changedChannels = new Set(this.byChannel.keys())
     this.syncChannels()
+  }
+
+  /** A ping still unanswered at the next one means the connection went silent. */
+  private ping(connection: ConnectedSocket): void {
+    if (connection.awaitingPong) return this.lost(connection.id, new Error('Redis subscriber connection went silent'))
+    void this.awaitPong(connection)
+  }
+
+  private async awaitPong(connection: ConnectedSocket): Promise<void> {
+    connection.awaitingPong = true
+    try {
+      await connection.socket.ping()
+    } catch {
+      // A refusal is an answer, and a closed connection reports itself through `close`.
+    }
+    connection.awaitingPong = false
   }
 
   private lost(id: number, error: unknown): void {
@@ -234,6 +268,7 @@ class RedisSubscriptions {
     this.socket = { phase: 'idle' }
     if (connection.phase === 'waiting') clearTimeout(connection.timer)
     else if (connection.phase !== 'idle') connection.socket?.disconnect()
+    if (connection.phase === 'connected') clearInterval(connection.pings)
   }
 
   private isCurrent(id: number): boolean {

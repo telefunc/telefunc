@@ -3,10 +3,12 @@ export {
   onBroadcastOverRedisLimit,
   onBroadcastPublishedDuringResume,
   onBroadcastSubscriberDropped,
+  onBroadcastSubscriberSilent,
   onRedisChannelDenied,
   onRedisSubscribeFailure,
 }
 
+import type { Socket } from 'node:net'
 import type { Redis } from 'ioredis'
 import { Broadcast, BroadcastChannel, config } from 'telefunc'
 import type { DriverAttempt } from 'telefunc/__internal'
@@ -60,6 +62,44 @@ async function onBroadcastSubscriberDropped() {
   unsubscribeText()
   unsubscribeBinary()
   return { text, binary }
+}
+
+/** Redis's replies stop reaching a subscriber connection, as in a partition, which closes no socket: the server notices,
+ *  reports what passed it by, and delivers again. */
+async function onBroadcastSubscriberSilent() {
+  const route = { key: `room:subscriber-silent:${crypto.randomUUID()}`, kind: 'text' } as const
+  const connection = new RedisConnection({ redis: redis!.duplicate(), prefix: 'tf:' })
+  const backend = new RedisBackend({ connection })
+  const sockets: SubscriberSocket[] = []
+  const open = connection.openSubscriberSocket.bind(connection)
+  connection.openSubscriberSocket = async () => {
+    const socket = await open()
+    sockets.push(socket)
+    return socket
+  }
+  const reported: string[] = []
+  config.broadcast.onDeliveryLost = ({ key, reason }) => {
+    if (key === route.key) reported.push(reason)
+  }
+  const received: string[] = []
+  const attempt = backend.subscribe(route, { deliver: (value) => received.push(value as string) })
+  try {
+    await backend.publish(route, 'before')
+    await receivedCount(received, 1)
+    // Two pings at rest: an answered one keeps the connection.
+    await sleep(21_000)
+    ;(sockets[0] as unknown as { stream: Socket }).stream.pause()
+    await backend.publish(route, 'missed')
+    for (let tries = 1; reported.length === 0 && tries <= 300; tries++) await sleep(100)
+    await backend.publish(route, 'after')
+    await receivedCount(received, 2)
+    return { received, reported, connections: sockets.length }
+  } finally {
+    config.broadcast.onDeliveryLost = ({ key, reason }) =>
+      console.error(`Broadcast delivery of '${key}' lost: ${reason}`)
+    await attempt.unsubscribe()
+    connection.client.disconnect()
+  }
 }
 
 /** This server's subscriber connection drops, and once it subscribed again a publish lands just before the key's start

@@ -6,6 +6,7 @@ import {
   onBroadcastOverRedisLimit,
   onBroadcastPublishedDuringResume,
   onBroadcastSubscriberDropped,
+  onBroadcastSubscriberSilent,
   onRedisChannelDenied,
   onRedisSubscribeFailure,
 } from './RedisReconnect.telefunc'
@@ -16,6 +17,7 @@ function RedisReconnect() {
   const [firstBytes, setFirstBytes] = useState<number[]>([])
   const [dropped, setDropped] = useState<unknown>(null)
   const [duringResume, setDuringResume] = useState<unknown>(null)
+  const [silent, setSilent] = useState<unknown>(null)
   const [overLimit, setOverLimit] = useState<unknown>(null)
   // A broadcast the page drops closes once garbage-collected.
   const roomRef = useRef<Awaited<ReturnType<typeof onBinaryBroadcastAcrossReconnect>> | null>(null)
@@ -64,6 +66,11 @@ function RedisReconnect() {
         onClick={async () => setDuringResume(await onBroadcastPublishedDuringResume())}
       >
         Publish while the start is read back
+      </button>
+      <h2>A Silent Subscriber Connection</h2>
+      <pre id="redis-silent-result">{JSON.stringify(silent)}</pre>
+      <button type="button" id="test-redis-silent" onClick={async () => setSilent(await onBroadcastSubscriberSilent())}>
+        Stop Redis's replies reaching a subscriber connection
       </button>
       <h2>Binary Publish Across a Redis Reconnect</h2>
       <pre id="redis-reconnect-result">{JSON.stringify(firstBytes)}</pre>

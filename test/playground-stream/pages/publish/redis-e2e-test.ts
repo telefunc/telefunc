@@ -74,6 +74,22 @@ function testBroadcastRedisSubscriberDropped() {
     expectLog('Redis subscriber connection closed')
   })
 
+  test("broadcast: a subscriber connection goes silent, its socket still open: it's taken for lost, what it missed is reported, and later publishes arrive", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-redis-silent')
+    await autoRetry(
+      async () => {
+        expect(await getResult('#redis-silent-result')).deep.equal({
+          received: ['before', 'after'],
+          reported: ["1 text message never reached this server's Redis subscription"],
+          connections: 2,
+        })
+      },
+      { timeout: 50_000 },
+    )
+    expectLog('Redis subscriber connection went silent')
+  })
+
   test('broadcast: a publish lands while a reconnected subscription reads where its key starts: it arrives, and nothing is reported', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-redis-during-resume')
