@@ -9,7 +9,7 @@ import type { RoomIncarnation } from '../protocol.js'
 /** Runs `operation` where the room's state lives, in one atomic step; a closed incarnation throws, and the commit's
  *  handoff is awaited as a control commit's is. */
 async function runOperation<Args, Value>(
-  room: RoomIncarnation,
+  room: Pick<RoomIncarnation, 'id' | 'inc'>,
   operation: RoomOperation<Args, Value>,
   args: Args,
 ): Promise<{ value: Value; counters: Map<string, CellCounter> }> {

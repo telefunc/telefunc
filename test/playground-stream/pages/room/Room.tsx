@@ -2154,7 +2154,7 @@ function Room() {
         // The room closes then unless the heartbeat restored its view's hold; 5 s for that close to land.
         const closedUnlessHealedAt = performance.now() + 40_000
         // The write of this page's view, which holds the room.
-        await onFailBackend({ op: 'compareExchangeCells', roomId: viewRoomId, key: 'v:' })
+        await onFailBackend({ op: 'runOperation', roomId: viewRoomId, key: 'holdViews' })
         const view = await onGetRoom(viewRoomId)
 
         const [joinRoomId, joinView] = await createRoom('hiccup-join')

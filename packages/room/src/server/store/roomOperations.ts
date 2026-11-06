@@ -4,6 +4,8 @@ export type { RoomOperationRequest }
 import type { RoomOperation } from '../../backend/contract.js'
 import { recordOperation, type OperationReads, type OperationWrites } from '../../backend/operation.js'
 import { assert } from '../../utils/assert.js'
+import { STORE_DM_REPLY } from './dmReplies.js'
+import { CLAIM_LEASE, HOLD_VIEWS, REMOVE_LEASE, REMOVE_VIEW, RENEW_LEASE } from './lease.js'
 import { JOIN, LEAVE } from './members.js'
 import { SET_MEMBER_CONNECTION, SET_MEMBER_META } from './meta.js'
 
@@ -12,6 +14,12 @@ const OPERATIONS = {
   leave: LEAVE,
   setMemberMeta: SET_MEMBER_META,
   setMemberConnection: SET_MEMBER_CONNECTION,
+  holdViews: HOLD_VIEWS,
+  removeView: REMOVE_VIEW,
+  renewLease: RENEW_LEASE,
+  claimLease: CLAIM_LEASE,
+  removeLease: REMOVE_LEASE,
+  storeDmReply: STORE_DM_REPLY,
 }
 
 type OperationArgs = { [Name in keyof typeof OPERATIONS]: Parameters<(typeof OPERATIONS)[Name]['plan']>[1] }

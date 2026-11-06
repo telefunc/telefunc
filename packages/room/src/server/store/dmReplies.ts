@@ -1,16 +1,27 @@
-export { storeDmReply, takeDmReply, takeDmReplies, dropDmReply }
+export { STORE_DM_REPLY, storeDmReply, takeDmReply, takeDmReplies, dropDmReply }
 
 import { getRoomPlane } from '../../backend/plane.js'
+import type { RoomOperation } from '../../backend/contract.js'
 import { Slice } from '../../shared/Slice.js'
 import { roomClosedError } from '../../shared/errors.js'
 import type { RoomResult } from '../../shared/protocol.js'
-import { deleteCells, mutateCells, readOpenCells } from './cellStore.js'
+import { deleteCells, readOpenCells } from './cellStore.js'
+import { runOperation } from './operations.js'
 import { decodeRoomRecord, encodeRoomRecord } from '../lanes/lanes.js'
 import { ackIdOfDmReplyCellKey, dmReplyCellKey, dmReplyCellPrefix, memberCellKey } from './cells.js'
 
 // A DM's reply, stored for its sender to take until the sender leaves.
 
+type StoreDmReplyArgs = { sender: string; ackId: string; reply: Uint8Array }
+
 /** Kept only while its sender is a member, whose leave drops what it never settled. */
+const STORE_DM_REPLY: RoomOperation<StoreDmReplyArgs, void> = {
+  name: 'storeDmReply',
+  plan(tx, { sender, ackId, reply }) {
+    if (tx.cell(memberCellKey(sender)) !== undefined) tx.write({ key: dmReplyCellKey(sender, ackId), bytes: reply })
+  },
+}
+
 async function storeDmReply(
   roomId: string,
   inc: string,
@@ -18,11 +29,7 @@ async function storeDmReply(
   ackId: string,
   reply: RoomResult,
 ): Promise<void> {
-  const member = memberCellKey(sender)
-  await mutateCells(roomId, inc, [member], (cells) => ({
-    value: undefined,
-    mutations: cells.has(member) ? [{ key: dmReplyCellKey(sender, ackId), bytes: encodeRoomRecord(reply) }] : [],
-  }))
+  await runOperation({ id: roomId, inc }, STORE_DM_REPLY, { sender, ackId, reply: encodeRoomRecord(reply) })
 }
 
 /** The reply stored for `ackId`, deleted as it is read, or null if none is. */
