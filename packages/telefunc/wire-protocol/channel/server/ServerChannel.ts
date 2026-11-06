@@ -62,7 +62,13 @@ import { PublishBody } from './PublishBody.js'
 import { getChannelConfig } from '../../../node/server/serverConfig.js'
 import { assert, assertWarning } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
-import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/frame.js'
+import {
+  ACK_STATUS,
+  ERROR_REASON,
+  MESSAGE_FRAME_OVERHEAD_MAX_BYTES,
+  encode,
+  isSequencedFrame,
+} from '../../wire/frame.js'
 import { HEADER } from '../../wire/header.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
 import { seqNear, seqThrough } from '../../wire/seq.js'
@@ -83,6 +89,14 @@ function parsePeerText(text: string): unknown {
   } catch {
     throw new ProtocolViolationError('peer payload is not parsable')
   }
+}
+
+/** What a page's ack request gets where the server can't hold it or its answer. */
+const NOT_ADMITTED_TEXT = 'The server holds all it may for this channel; try again later'
+
+/** What an answer of `result` holds in a replay, or while its page is away. */
+function heldAnswerBytes(result: string): number {
+  return utf8ByteLength(result) + MESSAGE_FRAME_OVERHEAD_MAX_BYTES + HELD_SEND_OVERHEAD_BYTES
 }
 
 /** Closing frames the channel produced while no page was attached; the next attach sends them. */
@@ -493,13 +507,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this.onPeerMessage(frame.text, frame.bytes)
         return
       case TAG.TEXT_ACK_REQ:
-        void this.onPeerAckReqMessage(frame.text, frame.seq)
+        void this.onPeerAckReqMessage(frame.text, frame.seq, frame.bytes)
         return
       case TAG.BINARY:
         this.onPeerBinaryMessage(frame.data, frame.bytes)
         return
       case TAG.BINARY_ACK_REQ:
-        void this.onPeerBinaryAckReqMessage(frame.data, frame.seq)
+        void this.onPeerBinaryAckReqMessage(frame.data, frame.seq, frame.bytes)
         return
       case TAG.ACK_RES:
         this.onPageHas(frame.ackedSeq)
@@ -574,15 +588,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  protected onPeerAckReqMessage(text: string, seq: number): Promise<void> {
+  protected onPeerAckReqMessage(text: string, seq: number, bytes: number): Promise<void> {
     // Parsed here rather than inside the async dispatch so a malformed payload throws in the recv
     // turn, where the violation still names the wire that sent it.
     const data = parsePeerText(text) as ChannelData<ClientToServer>
-    return this.lifecycle.trackAck(this.answerAckReq(this.listeners, data, seq, this._validators.get('data')))
+    return this.lifecycle.trackAck(this.answerAdmitted(this.listeners, data, seq, bytes, this._validators.get('data')))
   }
 
-  protected onPeerBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
-    return this.lifecycle.trackAck(this.answerAckReq(this.binaryListeners, data, seq))
+  protected onPeerBinaryAckReqMessage(data: Uint8Array, seq: number, bytes: number): Promise<void> {
+    return this.lifecycle.trackAck(this.answerAdmitted(this.binaryListeners, data, seq, bytes))
   }
 
   protected onPeerBinaryMessage(data: Uint8Array, bytes: number): void {
@@ -805,8 +819,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private sendPendingAckRes(peer: IndexedPeer): void {
-    for (const ack of this.pendingAckRes) peer.sendAckRes(ack.ackedSeq, ack.result, ack.status)
-    this.pendingAckRes.length = 0
+    const answers = this.pendingAckRes
+    this.pendingAckRes = []
+    for (const ack of answers) {
+      letGo(this, heldAnswerBytes(ack.result))
+      peer.sendAckRes(ack.ackedSeq, ack.result, ack.status)
+    }
   }
 
   private sendPendingEnd(peer: IndexedPeer): void {
@@ -828,13 +846,43 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.shutdown(err)
   }
 
-  /** Send an ack response, buffering it if the peer is currently disconnected. */
+  /** Send an ack response, buffering it if the peer is currently disconnected. An answer that isn't admitted becomes an
+   *  error for the page's `send`, and where not even that is, the channel ends: the page has to learn. */
   protected sendAckRes(ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
+    if (!admit(this, heldAnswerBytes(result))) {
+      if (!admit(this, heldAnswerBytes(NOT_ADMITTED_TEXT))) {
+        this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(NOT_ADMITTED_TEXT))
+        return
+      }
+      result = NOT_ADMITTED_TEXT
+      status = ACK_STATUS.ERROR
+    }
     if (this.peer) {
       this.peer.sendAckRes(ackedSeq, result, status)
       if (ackedSeq === this._lastClientSeq) this.receiveCredit.answered()
     } else {
+      hold(this, heldAnswerBytes(result))
       this.pendingAckRes.push({ ackedSeq, result, status })
+    }
+  }
+
+  /** Answers an ack request of `bytes`, held until it's answered; one that isn't admitted runs no listener. */
+  private async answerAdmitted<T>(
+    listeners: Listeners<(data: T) => unknown>,
+    data: T,
+    seq: number,
+    bytes: number,
+    validate?: ShieldValidator,
+  ): Promise<void> {
+    if (!admit(this, bytes)) {
+      this.sendAckRes(seq, NOT_ADMITTED_TEXT, ACK_STATUS.ERROR)
+      return
+    }
+    hold(this, bytes)
+    try {
+      await this.answerAckReq(listeners, data, seq, validate)
+    } finally {
+      letGo(this, bytes)
     }
   }
 
@@ -927,7 +975,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** Drops all buffered while no page was attached; buffered sends reject with `err` when it is given. */
   private dropPending(err?: Error): void {
     this.offlineBuffer.clear(err)
-    this.pendingAckRes.length = 0
+    for (const { result } of this.pendingAckRes) letGo(this, heldAnswerBytes(result))
+    this.pendingAckRes = []
     this.pendingEnd = null
   }
 }
