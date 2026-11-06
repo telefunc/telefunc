@@ -6,6 +6,7 @@ import {
   DriverAttempt,
   OrderedStubs,
   currentCloudflareMember,
+  getOrCreate,
   hostLocal,
 } from 'telefunc/__internal'
 import type { RoomSubscriptionSource } from '../backend/contract.js'
@@ -35,11 +36,16 @@ function currentRoomSessionSubscriptions(driver: CloudflareRoomDriver): RoomSess
   return (session.subscriptions ??= new RoomSessionSubscriptions({ sessionId: session.id, member, driver }))
 }
 
+/** The attempts a room's next renewal renews, once its timer fires. */
+type RoomRenewal = { attempts: Set<CloudflareRoomAttempt>; timer: ReturnType<typeof setTimeout> }
+
 type RoomSessionSubscriptionsOptions = { sessionId: string; member: CloudflareMember; driver: CloudflareRoomDriver }
 
 /** A session DO's Room subscriptions, and its calls to room authorities. */
 class RoomSessionSubscriptions {
   private readonly authorityCalls = new OrderedStubs<CloudflareRoomAuthorityStub>()
+  /** By room: a session's lanes of a room renew in one call, which the first of them to register times. */
+  private readonly renewals = new Map<string, RoomRenewal>()
   private readonly id: string
   private readonly member: CloudflareMember
   private readonly driver: CloudflareRoomDriver
@@ -69,6 +75,36 @@ class RoomSessionSubscriptions {
   callAuthority<T>(roomId: string, invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>): Promise<T> {
     return this.authorityCalls.call(roomId, () => this.driver.stub(roomId), invoke)
   }
+
+  renewWithRoom(attempt: CloudflareRoomAttempt): void {
+    const { roomId } = attempt.route
+    const renewal = getOrCreate(this.renewals, roomId, () => ({
+      attempts: new Set<CloudflareRoomAttempt>(),
+      timer: setTimeout(() => void this.renewRoutes(roomId), ROUTE_RENEW_EVERY_MS),
+    }))
+    renewal.attempts.add(attempt)
+  }
+
+  stopRenewing(attempt: CloudflareRoomAttempt): void {
+    const { roomId } = attempt.route
+    const renewal = this.renewals.get(roomId)
+    if (renewal === undefined || !renewal.attempts.delete(attempt) || renewal.attempts.size > 0) return
+    clearTimeout(renewal.timer)
+    this.renewals.delete(roomId)
+  }
+
+  private async renewRoutes(roomId: string): Promise<void> {
+    const attempts = [...this.renewals.get(roomId)!.attempts]
+    this.renewals.delete(roomId)
+    let results: RenewWire[]
+    try {
+      results = await this.callAuthority(roomId, (authority) => authority.renewRoutes(attempts.map((a) => a.route)))
+    } catch (error) {
+      for (const attempt of attempts) attempt.fail(error)
+      return
+    }
+    attempts.forEach((attempt, index) => attempt.onRenewal(results[index]!))
+  }
 }
 
 type CloudflareRoomAttemptOptions = {
@@ -87,7 +123,6 @@ class CloudflareRoomAttempt extends DriverAttempt {
   readonly route: RouteInstallation
   private readonly owner: RoomSessionSubscriptions
   private readonly stopDeliveries: () => void
-  private renewalTimer: ReturnType<typeof setTimeout> | undefined
   private readonly readyWhenSent: boolean
 
   constructor({ owner, route, stopDeliveries, readyWhenSent }: CloudflareRoomAttemptOptions) {
@@ -111,7 +146,7 @@ class CloudflareRoomAttempt extends DriverAttempt {
     if (this.state() === 'closed') return
     if (registration === 'dropped') return this.end()
     this.transition('ready')
-    this.scheduleRenewal()
+    this.owner.renewWithRoom(this)
   }
 
   async unsubscribe(): Promise<void> {
@@ -120,19 +155,9 @@ class CloudflareRoomAttempt extends DriverAttempt {
     await this.callAuthority((authority) => authority.unsubscribeRoute(this.route))
   }
 
-  private scheduleRenewal(): void {
-    this.renewalTimer = setTimeout(() => void this.renew(), ROUTE_RENEW_EVERY_MS)
-  }
-
-  private async renew(): Promise<void> {
-    let renewal: RenewWire
-    try {
-      renewal = await this.callAuthority((authority) => authority.renewRoute(this.route))
-    } catch (error) {
-      return this.fail(error)
-    }
+  onRenewal(renewal: RenewWire): void {
     if (this.state() === 'closed') return
-    if (renewal === 'renewed') return this.scheduleRenewal()
+    if (renewal === 'renewed') return this.owner.renewWithRoom(this)
     // A route that went with its dropped incarnation ends on purpose; a lapsed one is a failure.
     if (renewal === 'dropped') this.end()
     else this.fail(new Error(`Cloudflare route '${this.route.laneKey}' lapsed`))
@@ -144,14 +169,14 @@ class CloudflareRoomAttempt extends DriverAttempt {
     this.transition('closed')
   }
 
-  private fail(error: unknown): void {
+  fail(error: unknown): void {
     if (this.state() === 'closed') return
     this.stop()
     this.transition('closed', error)
   }
 
   private stop(): void {
-    clearTimeout(this.renewalTimer)
+    this.owner.stopRenewing(this)
     this.stopDeliveries()
   }
 

@@ -27,7 +27,7 @@ const ROOM_AUTHORITY_METHODS = [
   'readRetained',
   'listRetained',
   'registerRoute',
-  'renewRoute',
+  'renewRoutes',
   'unsubscribeRoute',
   'dropIncarnation',
   'directoryPut',

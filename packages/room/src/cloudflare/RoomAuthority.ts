@@ -236,16 +236,18 @@ class RoomAuthority {
     return registration
   }
 
-  /** Renews the route, or says it lapsed or went with its dropped incarnation; the session then ends its
+  /** Renews each route, or says it lapsed or went with its dropped incarnation; its session then ends its
    *  subscription. */
-  async renewRoute(route: RouteInstallation): Promise<RenewWire> {
+  async renewRoutes(routes: RouteInstallation[]): Promise<RenewWire[]> {
     const now = Date.now()
-    const renewal = this.transaction((sql): RenewWire => {
-      if (renewRoute(sql, route, now)) return 'renewed'
-      return hasIncarnation(sql, route.inc) ? 'lapsed' : 'dropped'
-    })
+    const renewals = this.transaction((sql) =>
+      routes.map((route): RenewWire => {
+        if (renewRoute(sql, route, now)) return 'renewed'
+        return hasIncarnation(sql, route.inc) ? 'lapsed' : 'dropped'
+      }),
+    )
     await this.scheduleMaintenanceIfNeeded()
-    return renewal
+    return renewals
   }
 
   async unsubscribeRoute(route: RouteInstallation): Promise<void> {
