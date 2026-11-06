@@ -28,8 +28,6 @@ function Backlog() {
     setState((s) => ({ ...s, channelId: channel.id }))
   }
 
-  const run = () => channelRef.current!.send(6000)
-
   return (
     <div id={hydrated ? 'hydrated' : undefined}>
       <h1>Backlog</h1>
@@ -37,7 +35,10 @@ function Backlog() {
       <button type="button" id="backlog-open" onClick={open}>
         Open
       </button>
-      <button type="button" id="backlog-run" onClick={run}>
+      <button type="button" id="backlog-run-1500" onClick={() => channelRef.current!.send(1500)}>
+        Send 24 MiB, unawaited
+      </button>
+      <button type="button" id="backlog-run-6000" onClick={() => channelRef.current!.send(6000)}>
         Send 96 MiB, unawaited
       </button>
     </div>

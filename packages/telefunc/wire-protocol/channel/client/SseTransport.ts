@@ -24,6 +24,7 @@ import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wi
 import { getWireUrl } from './getSessionUrl.js'
 import { decode } from '../../wire/frame.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
+import { pairPublishes } from './pairPublishes.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import { DeadlineScheduler } from './DeadlineScheduler.js'
 import { SseEvents } from './SseEvents.js'
@@ -108,8 +109,6 @@ class SseTransport implements UpgradeSource {
   private outboxBytes = 0
   /** The batch POST out is lost if this passes. */
   private postWatch: ReturnType<typeof setTimeout> | null = null
-  private flushThrottleMs = SSE_FLUSH_THROTTLE_MS
-  private postIdleFlushDelayMs = SSE_POST_IDLE_FLUSH_DELAY_MS
   private heartbeatFlushDelayMs = Math.floor(CHANNEL_PING_INTERVAL_MS / 2)
   private drainCallbacks: Array<() => void> = []
   /** The streaming upload POST. Once `unavailable`, it stays so, and frames go in batch POSTs from the outbox. */
@@ -388,6 +387,7 @@ class SseTransport implements UpgradeSource {
 
   /** Dispatches the downstream's events until it ends; `onOpenAck` runs as the upload's acknowledgement arrives. */
   private async readEvents(reader: SseEventStreamReader, abortController: AbortController, onOpenAck: () => void) {
+    const pair = pairPublishes()
     try {
       while (true) {
         const raw = await reader.readNextEntry()
@@ -402,7 +402,10 @@ class SseTransport implements UpgradeSource {
           this.owner.onTransportPong(frame.ended)
           continue
         }
-        this.owner.onTransportFrame(frame, this, raw.byteLength, this.abandonedControllers.has(abortController))
+        const paired = pair(frame)
+        if (paired) {
+          this.owner.onTransportFrame(paired, this, raw.byteLength, this.abandonedControllers.has(abortController))
+        }
       }
     } catch {
       if (abortController.signal.aborted) return
@@ -617,7 +620,7 @@ class SseTransport implements UpgradeSource {
       case 'ack':
       case 'data':
         // From the last POST's start: a frame coming as that POST's credit returns would hold the next one longer.
-        return Math.max(now + this.postIdleFlushDelayMs, this.lastPostStartedAt + this.flushThrottleMs)
+        return Math.max(now + SSE_POST_IDLE_FLUSH_DELAY_MS, this.lastPostStartedAt + SSE_FLUSH_THROTTLE_MS)
     }
   }
 
@@ -640,11 +643,6 @@ class SseTransport implements UpgradeSource {
     if (!abortController) return
     this.abandonedStream = null
     abortController.abort()
-  }
-
-  applyReconciledSettings(ctrl: ReconciledPayload): void {
-    this.flushThrottleMs = ctrl.sseFlushThrottle
-    this.postIdleFlushDelayMs = ctrl.ssePostIdleFlushDelay
   }
 
   sendPing(frame: Uint8Array<ArrayBuffer>): void {

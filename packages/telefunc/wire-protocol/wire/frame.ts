@@ -39,7 +39,8 @@ import {
   type ReconcilePayload,
   type ReconciledPayload,
 } from './payloads.js'
-import { decodePublishBinary, decodePublishText, type WirePublishInfo } from './publishInfo.js'
+import { decodePublishBinary, decodePublishText, encodePublishText, type WirePublishInfo } from './publishInfo.js'
+import { ORDERING_FRAME_HEADER_BYTES, writeOrdering } from './orderingFrame.js'
 import { ProtocolViolationError, assertProtocol } from './protocolViolation.js'
 import { textDecoder, textEncoder } from './envelope.js'
 
@@ -78,12 +79,10 @@ type AckResultStatus = (typeof ACK_STATUS)[keyof typeof ACK_STATUS]
 const ERROR_REASON = {
   /** An unhandled server error. */
   BUG: 0x00 as const,
-  /** More was published to its channel while its page was offline than the server holds for it. */
+  /** Its page fell behind what the server holds for it. */
   OVERFLOW: 0x01 as const,
   /** A reconnect needed frames its sender's replay buffer had dropped to stay within its size. */
   LOST: 0x02 as const,
-  /** Its sends got further ahead of its page than `maxPendingBytes` or `maxPendingAcks` lets the server hold. */
-  AHEAD: 0x03 as const,
 }
 
 type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON]
@@ -101,6 +100,7 @@ type ChannelDataFrame = { index: number; seq: number; bytes: number } & (
   | { tag: typeof TAG.PUBLISH_ACK_REQ; text: string }
   | { tag: typeof TAG.PUBLISH_BINARY; data: Uint8Array; info: WirePublishInfo }
   | { tag: typeof TAG.PUBLISH_BINARY_ACK_REQ; data: Uint8Array }
+  | { tag: typeof TAG.PUBLISH_TO }
 )
 
 type ChannelCtrlFrame =
@@ -187,13 +187,21 @@ type SequencedEncoder<T> = (index: number, data: T, seq: number) => Uint8Array<A
 
 const encode = {
   text: (index: number, text: string, seq: number) => encodeTextFrame(TAG.TEXT, index, text, seq),
-  publish: (index: number, text: string, seq: number) => encodeTextFrame(TAG.PUBLISH, index, text, seq),
+  /** A publish's body, which names no channel: `publishTo` goes ahead of it on each subscriber's wire. */
+  publish: (text: string, info: WirePublishInfo) => encodeTextFrame(TAG.PUBLISH, 0, encodePublishText(text, info), 0),
   publishAckReq: (index: number, text: string, seq: number) => encodeTextFrame(TAG.PUBLISH_ACK_REQ, index, text, seq),
   textAckReq: (index: number, text: string, seq: number) => encodeTextFrame(TAG.TEXT_ACK_REQ, index, text, seq),
 
   binary: (index: number, data: Uint8Array, seq: number) => encodeBinaryFrame(TAG.BINARY, index, data, seq),
-  publishBinary: (index: number, data: Uint8Array, seq: number) =>
-    encodeBinaryFrame(TAG.PUBLISH_BINARY, index, data, seq),
+  /** A binary publish's body, as `publish`. */
+  publishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + ORDERING_FRAME_HEADER_BYTES + data.byteLength)
+    writeHeader(frame, TAG.PUBLISH_BINARY, 0, 0)
+    writeOrdering(frame, HEADER, info)
+    frame.set(data, HEADER + ORDERING_FRAME_HEADER_BYTES)
+    return frame
+  },
+  publishTo: (index: number, seq: number) => encodeBareFrame(TAG.PUBLISH_TO, index, seq),
   publishBinaryAckReq: (index: number, data: Uint8Array, seq: number) =>
     encodeBinaryFrame(TAG.PUBLISH_BINARY_ACK_REQ, index, data, seq),
   binaryAckReq: (index: number, data: Uint8Array, seq: number) =>
@@ -374,6 +382,7 @@ function fixedBytes(tag: number): number {
 
 const FIXED_BYTES: Partial<Record<number, number>> = {
   [TAG.FIN]: encode.fin().byteLength,
+  [TAG.PUBLISH_TO]: encode.publishTo(0, 0).byteLength,
   [TAG.STREAM_REQUEST_OPEN_ACK]: encode.streamRequestOpenAck().byteLength,
   [TAG.PIECES_ACK]: encode.piecesAck(0, 0, 0).byteLength,
   [TAG.ANNOUNCE]: encode.announce(0, 0).byteLength,
@@ -456,6 +465,8 @@ function decode(frame: Uint8Array): DecodedFrame {
     }
     case TAG.PUBLISH_BINARY_ACK_REQ:
       return { tag: TAG.PUBLISH_BINARY_ACK_REQ, index, seq, bytes, data: payload }
+    case TAG.PUBLISH_TO:
+      return { tag: TAG.PUBLISH_TO, index, seq, bytes }
     case TAG.ACK_RES: {
       assertProtocol(payload.length >= ACK_RES_PREFIX, 'ACK_RES payload too short')
       const ackedSeq = readU64(payload, 0)

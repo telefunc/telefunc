@@ -8,6 +8,7 @@ import {
   type TELEFUNC_SHIELDS,
   Listeners,
   Fifo,
+  PUBLISH_HOLD_BYTES,
   soleAnswer,
   TWO_ANSWERS,
   utf8ByteLength,
@@ -110,7 +111,6 @@ abstract class ParticipantBase implements LocalParticipant {
   /** An ack DM's reply to a bug in a `listen()` handler, naming where `_reportError` logged it. */
   protected abstract readonly _bugMessage: string
   /** The bytes of DMs held before the first `listen()`, past which the oldest is dropped. */
-  protected abstract _inboxBufferLimit(): number
 
   listen(callback: (data: unknown, from: Sender | null) => unknown, options?: ListenerOptions): () => void {
     if (options?.signal?.aborted) return makeDisposer()
@@ -155,8 +155,7 @@ abstract class ParticipantBase implements LocalParticipant {
     const bytes = utf8ByteLength(stringify(msg)) + PENDING_INBOX_OVERHEAD_BYTES
     pending.push({ msg, bytes, ackResolve })
     this.pendingInboxBytes += bytes
-    const limit = this._inboxBufferLimit()
-    while (this.pendingInboxBytes > limit) {
+    while (this.pendingInboxBytes > PUBLISH_HOLD_BYTES) {
       const dropped = pending.shift()!
       this.pendingInboxBytes -= dropped.bytes
       dropped.ackResolve?.(DM_FAILURE.overflow)

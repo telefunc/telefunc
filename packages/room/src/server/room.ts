@@ -4,7 +4,7 @@ export type { MetaMirror }
 import {
   type TELEFUNC_SHIELDS,
   type ChannelPublishAck,
-  getChannelLimits,
+  reconnectWindow,
   handleCallbackBug,
   type OrderingInfo,
   markHandled,
@@ -37,7 +37,7 @@ import type { RoomModel } from '../shared/RoomModel.js'
 import { RoomState, RoomStateView, type RoomStateOwner } from '../shared/state.js'
 import { ParticipantBase, type ParticipantBaseOptions } from '../shared/ParticipantBase.js'
 import {
-  MemberMessageTexts,
+  MemberMessageBodies,
   RoomParticipantStub,
   RoomStub,
   type RoomParticipantStubOptions,
@@ -335,7 +335,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     this.localSuppressed.clear()
     for (const admission of this.admissions.values()) admission.abandon()
     // A client back while its channel still holds it gets `closed`.
-    const timeout = getChannelLimits().reconnectWindow
+    const timeout = reconnectWindow()
     for (const stub of this.stubs) void stub.end.close({ timeout }).catch(() => {})
   }
 
@@ -347,8 +347,8 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
       if (envelope.fromMetaSeq !== undefined) {
         this.replica.applyStamp(envelope.from, envelope as RoomDmEnvelope & SenderStamp)
       }
-      const texts = new MemberMessageTexts(serialized, info, envelope)
-      return holder.relayDm(texts, envelope)
+      const bodies = new MemberMessageBodies(serialized, info, envelope)
+      return holder.relayDm(bodies, envelope)
     }
     if (holder === undefined) return
     const msg = inboxMessageFromWire(envelope)
@@ -392,7 +392,6 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
       meta: this.model.metaEntries(),
       closed: this.model.closed,
       metaSeq: this.model.metaSeq,
-      bufferLimit: getChannelLimits().bufferLimit,
       count: this.model.count,
     }
   }
@@ -652,7 +651,6 @@ class ServerLocalParticipant extends ParticipantBase {
       meta: this.meta,
       selfDelivery: this.selfDelivery,
       identity: this.identity,
-      bufferLimit: getChannelLimits().bufferLimit,
     }
   }
 
@@ -737,10 +735,6 @@ class ServerLocalParticipant extends ParticipantBase {
 
   protected _reportError(err: unknown): void {
     handleCallbackBug(err)
-  }
-
-  protected _inboxBufferLimit(): number {
-    return getChannelLimits().bufferLimit
   }
 }
 

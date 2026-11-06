@@ -1,9 +1,9 @@
 export {
   resetCleanupState,
   getCleanupState,
-  getStreamFlowCount,
   forceServerGc,
   serverHeapUsed,
+  serverArrayBuffers,
   cutWire,
   dropNextWebSocket,
   runServerAction,
@@ -148,12 +148,6 @@ async function resetCleanupState() {
   await fetch(`${getServerUrl()}/api/cleanup-state/reset`, { method: 'POST' })
 }
 
-/** How many responses on the page's server take stream-flow requests; through the page, for the sticky cookie. */
-async function getStreamFlowCount(): Promise<number> {
-  const { text } = await fetchFromPage(`${getServerUrl()}/api/stream-flows`, 'GET')
-  return JSON.parse(text).count
-}
-
 async function getCleanupState(): Promise<Record<string, string>> {
   const resp = await fetch(`${getServerUrl()}/api/cleanup-state`)
   return resp.json()
@@ -172,6 +166,13 @@ async function forceServerGc() {
 async function serverHeapUsed(): Promise<number> {
   const resp = await fetchFromPage(`${getServerUrl()}/api/heap-used`, 'GET')
   return (JSON.parse(resp.text) as { heapUsed: number }).heapUsed
+}
+
+/** The server's `arrayBuffers` after a GC, in bytes, asked for from here, as the page's link may be what's being tested. */
+async function serverArrayBuffers(): Promise<number> {
+  await fetch(`${getServerUrl()}/api/gc`, { method: 'POST' })
+  const resp = await fetch(`${getServerUrl()}/api/array-buffers`)
+  return ((await resp.json()) as { arrayBuffers: number }).arrayBuffers
 }
 
 function fetchFromPage(url: string, method: 'GET' | 'POST'): Promise<{ ok: boolean; text: string }> {

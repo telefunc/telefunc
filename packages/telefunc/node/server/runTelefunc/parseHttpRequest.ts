@@ -18,7 +18,6 @@ import { wrapProxy } from '../../../utils/wrapProxy.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import type { ServerReviverContext } from '../../../wire-protocol/values/types.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
-import { handleStreamFlowRequest } from '../../../wire-protocol/values/server/response/StreamFlow.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/channel/server/sse.js'
 import { buildShieldValidators, getArgumentShields, type ShieldLogConfig } from '../shield.js'
 import { toPathKey } from '../../../utils/pathKey.js'
@@ -55,10 +54,10 @@ type ParseResult =
       telefunctionName: string
       telefunctionKey: string
       resolveRequest: (telefunction: Telefunction) => ResolvedRequest
-      wireResponse?: undefined
+      isSseRequest: false
       isMalformedRequest: false
     }
-  | { isMalformedRequest: false; wireResponse: SseChannelHttpResponse }
+  | { isMalformedRequest: false; isSseRequest: true; sseResponse: SseChannelHttpResponse }
   | { isMalformedRequest: true }
 
 async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
@@ -77,11 +76,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   }
   if (requestKind === REQUEST_KIND.SSE) {
     const sseResponse = await handleSseChannelRequest(request, readable)
-    return { isMalformedRequest: false, wireResponse: sseResponse }
-  }
-  if (requestKind === REQUEST_KIND.FLOW) {
-    const { text } = await readBody(request, readable, REQUEST_KIND.TEXT)
-    return { isMalformedRequest: false, wireResponse: handleStreamFlowRequest(text) }
+    return { isMalformedRequest: false, isSseRequest: true, sseResponse }
   }
 
   // Body + base reviver context (file handling differs between binary and text; channels are the same).
@@ -110,6 +105,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     telefuncFilePath: envelope.telefuncFilePath,
     telefunctionName: envelope.telefunctionName,
     telefunctionKey: envelope.telefunctionKey,
+    isSseRequest: false,
     isMalformedRequest: false,
     resolveRequest(telefunction) {
       const { requestTypes } = getServerExtensionTypes()

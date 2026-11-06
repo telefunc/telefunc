@@ -27,7 +27,7 @@ class SendCredit {
   private sentMessages = 0
   private limitBytes: number = CREDIT_WINDOW_INITIAL_BYTES
   private limitMessages: number = CREDIT_MSG_WINDOW_INITIAL
-  /** The largest window the peer grants: what this side's replay holds (see `fitReplay`). */
+  /** The largest window the peer grants (see `capWindow`). */
   private peerByteWindowCap: number = CREDIT_WINDOW_MAX_BYTES
   /** A `WINDOW` raised the byte limit past the one this side assumed the peer starts with. */
   private limitRaised = false
@@ -60,8 +60,8 @@ class SendCredit {
     return this.peerByteWindowCap
   }
 
-  /** Keeps what it lets be in flight within the replay buffer that holds what it sends (see `replayWindow`). */
-  fitReplay(peerWindow: number): void {
+  /** Keeps what it lets be in flight within what the server's `maxMemory` allows. */
+  capWindow(peerWindow: number): void {
     this.peerByteWindowCap = Math.min(CREDIT_WINDOW_MAX_BYTES, peerWindow)
     if (!this.limitRaised) this.limitBytes = Math.min(CREDIT_WINDOW_INITIAL_BYTES, this.peerByteWindowCap)
   }

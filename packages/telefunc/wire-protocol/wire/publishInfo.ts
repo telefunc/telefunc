@@ -1,9 +1,8 @@
-export { encodePublish, decodePublishText, decodePublishBinary }
+export { encodePublishText, decodePublishText, decodePublishBinary }
 export type { WirePublishInfo }
 
 import { assertProtocol } from './protocolViolation.js'
-import { decodeOrderingFrame, encodeOrderingFrame } from './orderingFrame.js'
-import { assert } from '../../utils/assert.js'
+import { decodeOrderingFrame } from './orderingFrame.js'
 
 /** Ordering metadata embedded in PUBLISH frames on the wire. */
 type WirePublishInfo = { seq: number; timestamp: number }
@@ -12,16 +11,8 @@ type WirePublishInfo = { seq: number; timestamp: number }
 // Format: seq,timestamp\n{serialized text}
 // JSON.stringify never produces bare \n, so the first \n reliably splits info from payload.
 
-/** A publish frame at `info`; a text one with no ordering (null) carries seq 0 and the current time. */
-function encodePublish(text: string, info: WirePublishInfo | null): string
-function encodePublish(data: Uint8Array, info: WirePublishInfo): Uint8Array
-function encodePublish(payload: string | Uint8Array, info: WirePublishInfo | null): string | Uint8Array {
-  if (typeof payload === 'string') {
-    const { seq, timestamp } = info ?? { seq: 0, timestamp: Date.now() }
-    return seq + ',' + timestamp + '\n' + payload
-  }
-  assert(info !== null)
-  return encodeOrderingFrame(payload, info)
+function encodePublishText(text: string, info: WirePublishInfo): string {
+  return info.seq + ',' + info.timestamp + '\n' + text
 }
 
 function decodePublishText(wire: string): { text: string; info: WirePublishInfo } {

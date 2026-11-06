@@ -28,9 +28,9 @@ type ChannelAck<T> = [T] extends [never] ? never : T extends (data: any) => infe
 /** Metadata delivered to broadcast subscribers alongside each message. */
 type ChannelPublishInfo = {
   key: string
-  /** Per-key counter, one more than the key's previous publish. It starts at 1 (in memory, again after a restart); on
-   *  Redis a key starts at the Redis clock in microseconds, so a lost counter never goes backwards. Use for gap
-   *  detection. */
+  /** Per-key counter: 1 more per publish while the key has a subscriber. A jump means missed messages. It starts at 1 (in
+   *  memory, again after a restart); on Redis a key starts at the Redis clock in microseconds, so a lost counter never
+   *  goes backwards. */
   seq: number
   /** Server timestamp, Unix epoch milliseconds. */
   timestamp: number

@@ -5,8 +5,8 @@ export { untether } from '../../utils/wrapProxy.js'
 export { invokeChannelListener } from '../../wire-protocol/channel/channel.js'
 export { handleCallbackBug } from './runTelefunc/validateTelefunctionError.js'
 export { hostLocal } from '../../wire-protocol/channel/server/ChannelMux.js'
-export { getChannelLimits } from './serverConfig.js'
-export { MAX_CHANNELS_PER_CONNECTION } from '../../wire-protocol/constants.js'
+export { reconnectWindow } from './serverConfig.js'
+export { MAX_CHANNELS_PER_CONNECTION, PUBLISH_HOLD_BYTES } from '../../wire-protocol/constants.js'
 
 // Utilities the add-ons share with core.
 export { createDeferred, type Deferred } from '../../utils/createDeferred.js'
@@ -25,7 +25,7 @@ export type { ServerBroadcastEnd, ClientBroadcast }
 export type { BroadcastEndOwner } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 export type { BroadcastKind } from '../../wire-protocol/wire/payloads.js'
 export type { ChannelPublishAck, ChannelPublishInfo } from '../../wire-protocol/channel/channel.js'
-export { encodePublish } from '../../wire-protocol/wire/publishInfo.js'
+export { publishBody, type PublishBody } from '../../wire-protocol/channel/server/PublishBody.js'
 export { isChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
 export {
   ProtocolViolationError,
@@ -90,7 +90,6 @@ type ServerBroadcastEnd = Pick<
   | 'isClosed'
   | 'isConnected'
   | 'deliver'
-  | 'deliverBinary'
   | 'listen'
   | 'onClose'
   | 'onDisconnect'

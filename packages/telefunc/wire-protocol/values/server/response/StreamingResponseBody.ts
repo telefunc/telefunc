@@ -1,10 +1,10 @@
 export { buildInlineResponseBody, encodeErrorPayload }
 
 import type { Readable } from 'node:stream'
-import type { StreamingValueServer } from '../../types.js'
+import type { StreamingProducer, StreamingValueServer } from '../../types.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { encodeU32, encodeIndexedFrame, textEncoder } from '../../../wire/envelope.js'
-import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE, STREAM_FLOW_PAUSE_BYTES } from '../../../constants.js'
+import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../../constants.js'
 import type { StreamingErrorFrameAbort, StreamingErrorFrameBug } from '../../../constants.js'
 import { isAbort } from '../../../../node/server/Abort.js'
 import type { AbortError } from '../../../../shared/Abort.js'
@@ -18,11 +18,12 @@ import { restoreContext } from '../../../../node/server/context/context.js'
 import type { Context } from '../../../../node/server/context/context.js'
 import { createPushReadable } from '../../../../utils/pushReadable.js'
 import { createPushReadableStream } from '../../../../utils/pushReadableStream.js'
-import { nextTurn } from '../../../flowControl/macrotaskYield.js'
-import { createDeferred } from '../../../../utils/createDeferred.js'
-import { StreamFlow } from './StreamFlow.js'
+import { Fifo } from '../../../../utils/Fifo.js'
 
 const EMPTY = new Uint8Array(0)
+
+type Entry = { producer: StreamingProducer; index: number }
+type Settled = { entry: Entry; result: IteratorResult<Uint8Array<ArrayBuffer>> } | { err: unknown }
 
 /**
  * Stream the inline response body: framed metadata + multiplexed streaming values.
@@ -59,7 +60,6 @@ function buildInlineResponseBody(runContext: {
   onComplete: () => void
   encodeFrame: (frame: Uint8Array<ArrayBuffer>) => Uint8Array<ArrayBuffer>
   useNodeStream: boolean
-  flowId: string | undefined
 }): Readable | ReadableStream<Uint8Array<ArrayBuffer>> {
   const {
     metadataSerialized,
@@ -71,21 +71,21 @@ function buildInlineResponseBody(runContext: {
     onComplete,
     encodeFrame,
     useNodeStream,
-    flowId,
   } = runContext
 
   // Producers are constructed eagerly so the abort listener can cancel them
   // even before the loop starts. Cancelling interrupts any suspended
   // `reader.read()` inside a producer — `iter.return()` alone can't.
   const producers = streamingValues.map((sv) => ({ producer: sv.createProducer(), index: sv.index }))
-  const flow = flowId
-    ? new StreamFlow(flowId, (index) => producers.find((p) => p.index === index)?.producer.cancel())
-    : null
 
   let cancelled = false
-  // Async-generator return() queues behind a pending next(). Race cancellation
-  // separately so the merge loop can release its lifecycle hold in finally.
-  const { promise: cancelledPromise, resolve: resolveCancelled } = createDeferred<{ type: 'cancelled' }>()
+  // What the merge loop takes next, in the order it settled. A `Promise.race()` per frame would leave a reaction on
+  // each promise it's given until that one settles, so the abort's promise and an idle producer's `.next()` would
+  // grow the heap with every frame of a long-lived stream.
+  const settled = new Fifo<Settled>()
+  // Async-generator return() queues behind a pending next(). Waking on cancellation
+  // separately lets the merge loop release its lifecycle hold in finally.
+  let wakeMerge = () => {}
   let drainResolve: (() => void) | null = null
 
   const wakeDrain = () => {
@@ -99,14 +99,14 @@ function buildInlineResponseBody(runContext: {
   const cancelProducers = () => {
     if (producersStopped) return
     producersStopped = true
-    for (const { producer, index } of producers) if (!flow?.cancelled.has(index)) producer.cancel()
-    // Unblock any emit awaiting drain so the IIFE can progress to its catch/finally.
+    for (const { producer } of producers) producer.cancel()
+    // Unblock any emit awaiting drain so `runInlineResponse` can progress to its catch/finally.
     wakeDrain()
   }
   const onConsumerGone = () => {
     if (cancelled) return
     cancelled = true
-    resolveCancelled({ type: 'cancelled' })
+    wakeMerge()
     cancelProducers()
   }
 
@@ -119,89 +119,73 @@ function buildInlineResponseBody(runContext: {
     if (!sink.push(frame)) await new Promise<void>((resolve) => (drainResolve = resolve))
   }
 
-  type RaceEntry = {
-    index: number
-    iter: AsyncIterator<Uint8Array<ArrayBuffer>>
-    pending: Promise<{ type: 'chunk'; entry: RaceEntry; result: IteratorResult<Uint8Array<ArrayBuffer>> }>
+  const settle = (item: Settled) => {
+    settled.push(item)
+    wakeMerge()
   }
-  const advance = (entry: RaceEntry) => {
-    entry.pending = entry.iter.next().then((result) => ({ type: 'chunk', entry, result }))
-    // While paused nothing races it, so its failure waits for the resume without counting as unhandled.
-    if (flow) entry.pending.catch(() => {})
+  const pullNext = async (entry: Entry) => {
+    try {
+      settle({ entry, result: await entry.producer.chunks.next() })
+    } catch (err) {
+      settle({ err })
+    }
   }
 
-  void (async () => {
+  async function mergeProducers() {
+    // The producers' first `.next()` must run inside the synchronous
+    // stretch of the restored context: in sync mode the context global is
+    // cleared on the next macrotask, and the header `emit` below can
+    // suspend until the consumer's first read (the Web sink applies
+    // backpressure from the first push). So start the pulls before
+    // emitting the header.
+    for (const entry of producers) void pullNext(entry)
+
+    // ── Header: [u32 metadata_len][metadata_bytes] — atomic on the wire,
+    // so don't break between the length and its payload.
+    const metadataBytes = textEncoder.encode(metadataSerialized)
+    await emit(encodeFrame(encodeU32(metadataBytes.length)))
+    await emit(encodeFrame(metadataBytes))
+
+    // ── Multiplexed merge loop ──
+    // Each producer keeps one in-flight `.next()`, and gets the next one once its frame went out, so a fast
+    // producer doesn't starve the others.
+    let open = producers.length
+    while (open > 0) {
+      if (settled.length === 0 && !cancelled) await new Promise<void>((resolve) => (wakeMerge = resolve))
+      // Consumer is gone: bail before emitting a "this producer is done" frame
+      // — would also be misleading for cancelled producers returning done.
+      if (cancelled) return
+      const next = settled.shift()!
+      if ('err' in next) throw next.err
+      const { entry, result } = next
+      if (result.done) {
+        // Empty-payload frame so the client knows this index is done
+        // without waiting for the global terminator.
+        await emit(encodeFrame(encodeIndexedFrame(entry.index, EMPTY)))
+        open--
+        continue
+      }
+      // An empty frame means this index is done, and an empty chunk has no bytes to send.
+      if (result.value.byteLength > 0) {
+        await emit(encodeFrame(encodeIndexedFrame(entry.index, result.value as Uint8Array<ArrayBuffer>)))
+      }
+      void pullNext(entry)
+    }
+    // `emit` is already a no-op if `cancelled` — but we'd rather not allocate
+    // the terminator frame at all when there's no one to receive it.
+    if (cancelled) return
+    await emit(encodeFrame(encodeU32(0)))
+  }
+
+  async function runInlineResponse() {
     abortSignal.addEventListener('abort', onConsumerGone, { once: true })
+    // A response-wide abort takes its turn after what settled before it, and routes us into the catch below.
+    responseAbort.errorPromise.catch((err: unknown) => settle({ err }))
     try {
       // The telefunc context is restored around the whole merge loop, like the
       // channel pump (ChannelResponseBody.ts) does, so `getContext()` works
       // inside producer bodies (generator code runs lazily, on `.next()`).
-      await restoreContext(context, async () => {
-        // The producers' first `.next()` must run inside the synchronous
-        // stretch of the restored context: in sync mode the context global is
-        // cleared on the next macrotask, and the header `emit` below can
-        // suspend until the consumer's first read (the Web sink applies
-        // backpressure from the first push). So start the pulls before
-        // emitting the header.
-        const active: RaceEntry[] = []
-        for (const { producer, index } of producers) {
-          const entry: RaceEntry = { index, iter: producer.chunks, pending: null! }
-          advance(entry)
-          active.push(entry)
-        }
-
-        // ── Header: [u32 metadata_len][metadata_bytes] — atomic on the wire,
-        // so don't break between the length and its payload.
-        const metadataBytes = textEncoder.encode(metadataSerialized)
-        await emit(encodeFrame(encodeU32(metadataBytes.length)))
-        await emit(encodeFrame(metadataBytes))
-
-        // ── Multiplexed merge loop ──
-        // Each producer keeps one in-flight `.next()`; `Promise.race` picks
-        // whichever resolves first. Winner is rotated to the end of `active` so
-        // a fast producer at index 0 doesn't starve others (race resolves in
-        // array order on ties).
-        let bytesSinceTurn = 0
-        while (active.length > 0) {
-          // `responseAbort.errorPromise` rejects on a response-wide abort; it
-          // wins the race and routes us into the catch below.
-          const racing = flow?.paused.size ? active.filter((e) => !flow.paused.has(e.index)) : active
-          const winner = await Promise.race([
-            cancelledPromise,
-            responseAbort.errorPromise,
-            ...(flow ? [flow.changed] : []),
-            ...racing.map((e) => e.pending),
-          ])
-          // Consumer is gone: bail before emitting a "this producer is done" frame
-          // — would also be misleading for cancelled producers returning done.
-          if (winner.type === 'cancelled' || cancelled) return
-          if (winner.type === 'flowChanged') {
-            active.splice(0, active.length, ...active.filter((e) => !flow!.cancelled.has(e.index)))
-            continue
-          }
-          const { entry, result } = winner
-          if (result.done) {
-            // Empty-payload frame so the client knows this index is done
-            // without waiting for the global terminator.
-            await emit(encodeFrame(encodeIndexedFrame(entry.index, EMPTY)))
-            active.splice(active.indexOf(entry), 1)
-          } else {
-            await emit(encodeFrame(encodeIndexedFrame(entry.index, result.value as Uint8Array<ArrayBuffer>)))
-            // A socket that keeps up takes writes with no turn of the event loop, and the page's request needs one.
-            if (flow && (bytesSinceTurn += result.value!.length) >= STREAM_FLOW_PAUSE_BYTES) {
-              bytesSinceTurn = 0
-              await new Promise<void>(nextTurn)
-            }
-            advance(entry)
-            active.splice(active.indexOf(entry), 1)
-            active.push(entry)
-          }
-        }
-        // `emit` is already a no-op if `cancelled` — but we'd rather not allocate
-        // the terminator frame at all when there's no one to receive it.
-        if (cancelled) return
-        await emit(encodeFrame(encodeU32(0)))
-      })
+      await restoreContext(context, mergeProducers)
     } catch (err) {
       // Cancel producers immediately so peer producers stop emitting work
       // that would never reach the consumer while we emit the error frames.
@@ -216,12 +200,13 @@ function buildInlineResponseBody(runContext: {
       await emit(encodeFrame(encodeU32(errorBytes.byteLength)))
       await emit(encodeFrame(errorBytes))
     } finally {
-      flow?.close()
       abortSignal.removeEventListener('abort', onConsumerGone)
       sink.close()
       onComplete()
     }
-  })()
+  }
+
+  void runInlineResponse()
 
   return sink.readable
 }

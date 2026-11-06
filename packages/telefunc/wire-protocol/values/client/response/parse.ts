@@ -2,10 +2,11 @@ export { parseResponse }
 export { BaseStreamReader } from './BaseStreamReader.js'
 
 import { parse } from '@brillout/json-serializer/parse'
-import { assert } from '../../../../utils/assert.js'
+import { assert, assertWarning } from '../../../../utils/assert.js'
 import { isObject } from '../../../../utils/isObject.js'
 import { isObjectOrFunction } from '../../../../utils/isObjectOrFunction.js'
 import { Fifo } from '../../../../utils/Fifo.js'
+import { unrefTimer } from '../../../../utils/unrefTimer.js'
 import { createStreamingReviver } from './registry.js'
 import type { StreamSource, ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
 import { setAbortController } from '../../../../client/abort.js'
@@ -13,7 +14,6 @@ import type { LazyResponseTypes } from '../../../../client/extensions.js'
 import { setCloseHandlers, addExtraCloseHandlers, type CloseHandler } from '../../../../client/close.js'
 import { makeAbortError, throwAbortError, throwBugError } from '../../../../client/remoteTelefunctionCall/errors.js'
 import { BaseStreamReader } from './BaseStreamReader.js'
-import { StreamFlowSender } from './StreamFlowSender.js'
 import { PendingValue, resolvePendingValues } from './PendingValue.js'
 import { StreamReader } from './StreamReader.js'
 import { SseStreamReader } from './SseStreamReader.js'
@@ -37,9 +37,6 @@ const globalObject = getGlobalObject('wire-protocol/values/client/response/parse
 type CallContext = {
   telefunctionName: string
   telefuncFilePath: string
-  telefuncUrl: string
-  headers: Record<string, string> | null
-  fetch: typeof globalThis.fetch | null
   abortController: AbortController
   requestCloseHandlers: CloseHandler[]
   extensionResponseTypes: ReviverType<TypeContract, ClientReviverContext>[]
@@ -132,8 +129,8 @@ async function reviveResponse(
         return ChannelStreamSource.create(channel, throwStreamError)
       }
       assert(bodyStreamReader, 'Unexpected receiveStream call in non-streaming response')
-      demuxer ??= new FrameDemuxer(bodyStreamReader, callContext)
-      return demuxer.create(metadata.__index, metadata.flowId)
+      demuxer ??= new FrameDemuxer(bodyStreamReader, callContext.telefunctionName)
+      return demuxer.create(metadata.__index)
     },
   }
 
@@ -188,6 +185,7 @@ async function reviveResponse(
     if (pendingValues.length > 0) {
       parsed = await resolvePendingValues(parsed, pendingValues, (value) => closeHandlers.has(value))
     }
+    demuxer?.valuesHandedOut()
   } catch (err) {
     for (const close of allCloseHandlers) close()
     throw err
@@ -206,20 +204,31 @@ async function reviveResponse(
 
 // ===== Frame demultiplexer =====
 
+/** How long code may wait behind another stream's full buffer before the page warns. Handling a chunk takes far less, and
+ *  the wait only counts while nothing is being read, so a slow network doesn't count. */
+const STALL_WARNING_MS = 5_000
+
 /** Demultiplexes indexed frames from a single HTTP stream to multiple consumers.
  *
- *  Reads only while a consumer waits. Waiting consumers receive frames via direct dispatch; frames for a consumer that
- *  isn't reading are buffered until it reads, as a `.tee()` branch's are: a waiting consumer's next frame can be behind
- *  them on the wire.
+ *  Best-effort backpressure: stops reading when an idle consumer's buffer hits
+ *  MAX_BUFFER_BYTES_PER_INDEX, resumes when drained. Active consumers (registered as
+ *  waiters) receive frames via direct dispatch — zero buffering, zero delay.
+ *
+ *  Note: an index's buffer may briefly exceed MAX_BUFFER_BYTES_PER_INDEX. This happens when
+ *  another consumer's drain restarts the read loop, and the next frame on the wire
+ *  is for the already-full index. Each restart adds at most 1 frame of overshoot.
+ *  This is the unavoidable cost of multiplexing over a single stream — we can't
+ *  peek at the next frame's index without reading it.
  *
  *  Cancellation follows .tee() semantics: cancelling one consumer marks its index
  *  as cancelled and drops future frames for it. Other consumers continue normally.
  *  The upstream reader is cancelled once every consumer is terminal and at least one cancelled. */
 class FrameDemuxer {
+  private static readonly MAX_BUFFER_BYTES_PER_INDEX = 1024 * 1024 // 1 MB
   private streamReader: BaseStreamReader
-  private callContext: CallContext
-  private flow: StreamFlowSender | null = null
+  private telefunctionName: string
   private pendingFrames = new Map<number, Fifo<Uint8Array<ArrayBuffer>>>()
+  private pendingBytes = new Map<number, number>()
   private indexWaiters = new Map<
     number,
     { resolve: (v: Uint8Array<ArrayBuffer> | null) => void; reject: (e: unknown) => void }
@@ -230,10 +239,18 @@ class FrameDemuxer {
   private cancelledIndices = new Set<number>()
   private doneIndices = new Set<number>()
   private totalConsumers = 0
+  /** Until the page has what the call returned, it can't read a stream to make way for a file the call waits for. */
+  private canStopReading = false
+  private stallTimer: ReturnType<typeof setTimeout> | undefined
+  private stallWarned = false
 
-  constructor(streamReader: BaseStreamReader, callContext: CallContext) {
+  constructor(streamReader: BaseStreamReader, telefunctionName: string) {
     this.streamReader = streamReader
-    this.callContext = callContext
+    this.telefunctionName = telefunctionName
+  }
+
+  valuesHandedOut(): void {
+    this.canStopReading = true
   }
 
   private registerConsumer() {
@@ -255,13 +272,13 @@ class FrameDemuxer {
       waiter.resolve(null)
     }
     this.cancelUpstreamIfAllTerminal()
-    this.flow?.onCancel(index)
+    // Reading may have stopped on this index's buffer, with another consumer waiting behind it.
+    this.ensureReading()
   }
 
   private cancelUpstreamIfAllTerminal(): void {
     if (this.cancelledIndices.size > 0 && this.cancelledIndices.size + this.doneIndices.size >= this.totalConsumers) {
       this.streamReader.cancel()
-      this.flow?.stop()
     }
   }
 
@@ -271,7 +288,8 @@ class FrameDemuxer {
 
     const buffered = this.pendingFrames.get(index)?.shift()
     if (buffered) {
-      this.flow?.onRead(index, buffered.length)
+      this.pendingBytes.set(index, (this.pendingBytes.get(index) ?? 0) - buffered.byteLength)
+      this.ensureReading()
       return buffered
     }
     if (this.doneIndices.has(index)) return null
@@ -288,9 +306,8 @@ class FrameDemuxer {
     return promise
   }
 
-  create(index: number, flowId: string | undefined): StreamSource {
+  create(index: number): StreamSource {
     this.registerConsumer()
-    if (flowId) this.flow ??= new StreamFlowSender(flowId, this.callContext)
     const readNextChunk = () => this.readNextChunkForIndex(index)
     const cancel = () => this.cancelIndex(index)
     const isCancelled = () => this.cancelledIndices.has(index)
@@ -304,63 +321,88 @@ class FrameDemuxer {
       stream: (opts) =>
         createReadableChunkStream({ readNextChunk: readOwnedChunk, cancel, isCancelled, readOptions: opts }),
       cancel,
-      // Inline streams abort via HTTP body reader cancellation, not per-index.
-      abort() {},
+      // Inline streams abort via HTTP body reader cancellation, which reading that has stopped doesn't see.
+      abort: (abortError) => this.failWaiters(abortError),
     }
   }
 
   private async ensureReading() {
     if (this.reading) return
     this.reading = true
+    clearTimeout(this.stallTimer)
     try {
       while (this.indexWaiters.size > 0) {
         const frame = await this.streamReader.readNextFrame()
-        if (frame === null) return this.endAll()
-        this.dispatch(frame.index, frame.payload)
+        if (frame === null) {
+          this.ended = true
+          for (const [, w] of this.indexWaiters) w.resolve(null)
+          this.indexWaiters.clear()
+          return
+        }
+
+        // Drop frames for cancelled indices
+        if (this.cancelledIndices.has(frame.index)) continue
+
+        const waiter = this.indexWaiters.get(frame.index)
+
+        // Empty payload = per-index "done" signal
+        if (frame.payload.length === 0) {
+          this.doneIndices.add(frame.index)
+          this.cancelUpstreamIfAllTerminal()
+          if (waiter) {
+            this.indexWaiters.delete(frame.index)
+            waiter.resolve(null)
+          }
+          continue
+        }
+
+        // Direct dispatch — no buffering, no delay
+        if (waiter) {
+          this.indexWaiters.delete(frame.index)
+          waiter.resolve(frame.payload)
+          continue
+        }
+
+        // No consumer waiting — buffer it
+        let pending = this.pendingFrames.get(frame.index)
+        if (!pending) this.pendingFrames.set(frame.index, (pending = new Fifo()))
+        pending.push(frame.payload)
+        const newBytes = (this.pendingBytes.get(frame.index) ?? 0) + frame.payload.byteLength
+        this.pendingBytes.set(frame.index, newBytes)
+
+        // Per-index backpressure: stop reading when this index's buffer exceeds 1 MB.
+        // The loop restarts when the consumer drains via readNextChunkForIndex().
+        if (this.canStopReading && newBytes >= FrameDemuxer.MAX_BUFFER_BYTES_PER_INDEX) {
+          this.warnIfStillStalledLater()
+          break
+        }
       }
     } catch (err) {
-      this.streamError ??= err
-      this.flow?.stop()
-      for (const [, w] of this.indexWaiters) w.reject(err)
-      this.indexWaiters.clear()
+      this.failWaiters(err)
     } finally {
       this.reading = false
     }
   }
 
-  /** The response ended: every waiting index ends too. */
-  private endAll(): void {
-    this.ended = true
-    this.flow?.stop()
-    for (const [, w] of this.indexWaiters) w.resolve(null)
+  private failWaiters(err: unknown): void {
+    clearTimeout(this.stallTimer)
+    this.streamError ??= err
+    for (const [, w] of this.indexWaiters) w.reject(err)
     this.indexWaiters.clear()
   }
 
-  /** Hands one frame to its index's waiter, or buffers it; an empty payload is the index's "done" signal. */
-  private dispatch(index: number, payload: Uint8Array<ArrayBuffer>): void {
-    // Drop frames for cancelled indices
-    if (this.cancelledIndices.has(index)) return
-    const waiter = this.indexWaiters.get(index)
-    // Empty payload = per-index "done" signal
-    if (payload.length === 0) {
-      this.doneIndices.add(index)
-      this.cancelUpstreamIfAllTerminal()
-      if (waiter) {
-        this.indexWaiters.delete(index)
-        waiter.resolve(null)
-      }
-      return
-    }
-    // Direct dispatch — no buffering, no delay
-    if (waiter) {
-      this.indexWaiters.delete(index)
-      waiter.resolve(payload)
-      return
-    }
-    // No consumer waiting — buffer it
-    let pending = this.pendingFrames.get(index)
-    if (!pending) this.pendingFrames.set(index, (pending = new Fifo()))
-    pending.push(payload)
-    this.flow?.onBuffered(index, payload.length)
+  /** Reading stopped with a consumer waiting: the next read restarts it, which clears this. */
+  private warnIfStillStalledLater(): void {
+    if (this.stallWarned || this.indexWaiters.size === 0) return
+    this.stallTimer = unrefTimer(setTimeout(() => this.warnStalled(), STALL_WARNING_MS))
+  }
+
+  private warnStalled(): void {
+    this.stallWarned = true
+    assertWarning(
+      false,
+      `Reading what ${this.telefunctionName}() returned is waiting for a stream of it with 1 MiB unread: read all of the streams a call returned concurrently, or cancel the ones you don't want.`,
+      { onlyOnce: false },
+    )
   }
 }

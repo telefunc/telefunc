@@ -25,7 +25,7 @@ type AwaitedChannel = {
   ttl: ReturnType<typeof setTimeout> | null
 }
 
-/** The awaited channel didn't register within `connectTtl`, or shut down as it registered: its wire gets an
+/** The awaited channel didn't register within `CHANNEL_CONNECT_TTL_MS`, or shut down as it registered: its wire gets an
  *  ATTACH_RESULT null. */
 function expireAwaited(awaited: AwaitedChannel): void {
   awaited.entry.state.awaited.expire(awaited)

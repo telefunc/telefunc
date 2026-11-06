@@ -20,7 +20,7 @@ function createChannel(id = crypto.randomUUID()) {
     _attach: {
       state: () => ({}),
       receiveCredit: { onProbeAnswered() {}, acknowledge() {}, answered() {} },
-      fitReplays() {},
+      capWindows() {},
       onBatched() {},
       onUpgradeJoined() {},
     },

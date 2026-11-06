@@ -156,16 +156,14 @@ class ClientRoom extends RoomStateView implements Room {
   /** @internal */
   _rosterStream: RosterStream | null = null
   /** @internal */
-  readonly _bufferLimit: number
 
   messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<RoomMessage> {
-    return roomMessages(this, this._bufferLimit, options?.signal)
+    return roomMessages(this, options?.signal)
   }
 
   constructor({ end, snapshot }: ClientRoomOptions) {
     super()
     this.end = end
-    this._bufferLimit = snapshot.bufferLimit
     const owner = new ClientRoomOwner({ room: this })
     this.model = new RoomModel({
       roomId: snapshot.roomId,
@@ -508,7 +506,7 @@ class ClientRoom extends RoomStateView implements Room {
 }
 
 type ClientParticipantBaseOptions = {
-  participant: Pick<ParticipantStubMetadata, 'id' | 'meta' | 'selfDelivery' | 'identity' | 'bufferLimit'>
+  participant: Pick<ParticipantStubMetadata, 'id' | 'meta' | 'selfDelivery' | 'identity'>
   rewinds: MetaRewinds
 }
 
@@ -516,7 +514,6 @@ abstract class ClientParticipantBase extends ParticipantBase {
   /** `publish(data, { coalesce })`'s conflation, by key. */
   private readonly coalescers = new Map<string, CoalesceSlot>()
   private readonly wantedTracks = new Set<TrackKey>()
-  private readonly bufferLimit: number
   protected readonly _bugMessage = CLIENT_ROOM_BUG_MESSAGE
 
   /** @internal The page holds this member from now on, until it leaves. */
@@ -542,7 +539,6 @@ abstract class ClientParticipantBase extends ParticipantBase {
 
   constructor({ participant, rewinds }: ClientParticipantBaseOptions) {
     super({ participant, rewinds })
-    this.bufferLimit = participant.bufferLimit
   }
 
   get _demandedTracks(): TrackKey[] {
@@ -656,10 +652,6 @@ abstract class ClientParticipantBase extends ParticipantBase {
   protected _reportError(err: unknown): void {
     reportClientCallbackError(err)
   }
-
-  protected _inboxBufferLimit(): number {
-    return this.bufferLimit
-  }
 }
 
 type ClientRoomOwnerOptions = { room: ClientRoom }
@@ -710,7 +702,7 @@ class ClientRoomParticipant extends ClientParticipantBase {
   constructor({ clientRoom, id, meta, selfDelivery, rewinds }: ClientRoomParticipantOptions) {
     super({
       // Client-side joins carry no identity: it's server-assigned (see JoinOptions.identity).
-      participant: { id, meta, selfDelivery, identity: null, bufferLimit: clientRoom._bufferLimit },
+      participant: { id, meta, selfDelivery, identity: null },
       rewinds,
     })
     this.room = clientRoom

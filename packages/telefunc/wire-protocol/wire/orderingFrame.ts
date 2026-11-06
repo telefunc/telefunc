@@ -1,4 +1,4 @@
-export { encodeOrderingFrame, decodeOrderingFrame, isOrdering }
+export { encodeOrderingFrame, decodeOrderingFrame, writeOrdering, isOrdering, ORDERING_FRAME_HEADER_BYTES }
 export type { OrderingInfo }
 
 import { assert } from '../../utils/assert.js'
@@ -15,15 +15,19 @@ function isOrdering({ seq, timestamp }: OrderingInfo): boolean {
 }
 
 function encodeOrderingFrame(payload: Uint8Array, info: OrderingInfo): Uint8Array {
-  assert(isOrdering(info))
   const frame = new Uint8Array(ORDERING_FRAME_HEADER_BYTES + payload.byteLength)
-  const view = new DataView(frame.buffer)
+  writeOrdering(frame, 0, info)
+  frame.set(payload, ORDERING_FRAME_HEADER_BYTES)
+  return frame
+}
+
+function writeOrdering(frame: Uint8Array, at: number, info: OrderingInfo): void {
+  assert(isOrdering(info))
+  const view = new DataView(frame.buffer, frame.byteOffset + at, ORDERING_FRAME_HEADER_BYTES)
   view.setUint32(0, Math.floor(info.seq / WORD_RANGE))
   view.setUint32(4, info.seq % WORD_RANGE)
   view.setUint32(8, Math.floor(info.timestamp / WORD_RANGE))
   view.setUint32(12, info.timestamp % WORD_RANGE)
-  frame.set(payload, ORDERING_FRAME_HEADER_BYTES)
-  return frame
 }
 
 function decodeOrderingFrame(frame: Uint8Array): { payload: Uint8Array; info: OrderingInfo } {

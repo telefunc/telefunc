@@ -4,14 +4,15 @@ export type { WireEntry, ReconcileOutcome, ServerTransport, Wire }
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { getRawContext } from '../../../node/server/context/context.js'
-import { getAdapterMaxFrameBytes, getServerConfig, pingDeadlineOf } from '../../../node/server/serverConfig.js'
+import { getAdapterMaxFrameBytes, getChannelConfig, pingDeadlineOf } from '../../../node/server/serverConfig.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { GcRegistry } from '../../../utils/GcRegistry.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
-  CHANNEL_PING_INTERVAL_MIN_MS,
   CREDIT_MSG_WINDOW_MAX,
+  CHANNEL_CONNECT_TTL_MS,
+  CHANNEL_IDLE_TIMEOUT_MS,
   CREDIT_WINDOW_MAX_BYTES,
   MAX_CHANNELS_PER_CONNECTION,
   TIMER_DELAY_MAX_MS,
@@ -29,7 +30,9 @@ import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type { BarrierPayload, PreparePayload, ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
 import { IndexedPeer } from './IndexedPeer.js'
+import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
+import { creditWindowOf } from '../../flowControl/credit.js'
 import { WireSender, type WireSenderOwner } from './WireSender.js'
 import { EndedChannels } from './EndedChannels.js'
 import { UpgradeStages, type UpgradeStagesOwner } from './UpgradeStages.js'
@@ -51,11 +54,15 @@ type ServerTransport<TWire> = {
   sendNow(wire: TWire, frame: Uint8Array<ArrayBuffer>): void
   /** True if the peer gets a message only once all of it has arrived, as on a WebSocket (see `pieces.ts`). */
   wholeMessages: boolean
+  /** True if the runtime keeps a copy of each message it's handed, as Bun, Deno and workerd do: Node keeps the bytes. */
+  copiesOnSend?: boolean
   /** Bytes of sent frames still in the wire, never undercounted; `undefined` if the runtime can't tell. */
   bufferedAmount(wire: TWire): number | undefined
   /** The part of `bufferedAmount` a frame sent now waits behind, where it can pass the rest (SSE). Without this
    *  method, a frame waits behind all of `bufferedAmount`. */
   queuedAhead?(wire: TWire): number | undefined
+  /** What the wire holds back for its page, on a transport that isn't `wholeMessages`. */
+  queueOf?(wire: TWire): WireQueue
   terminateWire(wire: TWire): void
 }
 
@@ -81,13 +88,7 @@ type MuxServerOptions = {
   idleTimeout: number
   pingInterval: number
   pingDeadline: number
-  serverReplayBuffer: number
-  serverReplayBufferBinary: number
-  clientReplayBuffer: number
-  clientReplayBufferBinary: number
-  connectTtl: number
-  sseFlushThrottle: number
-  ssePostIdleFlushDelay: number
+  creditWindow: number
   transports: ChannelTransports
 }
 
@@ -176,11 +177,6 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
     return (this.resolvedOptions ??= resolveMuxServerOptions())
   }
 
-  /** Exposed for transport-level race timers (SSE's `waitForWire`). */
-  get connectTtl(): number {
-    return this.options.connectTtl
-  }
-
   // ── ServerChannel registry ──────────────────────────────────────────
 
   /** Callers must not invoke `channel._registerChannel()` directly. */
@@ -265,12 +261,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
         idleTimeout: this.options.idleTimeout,
         pingInterval: this.options.pingInterval,
         maxFrameBytes: getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES,
-        serverReplayBuffer: this.options.serverReplayBuffer,
-        serverReplayBufferBinary: this.options.serverReplayBufferBinary,
-        clientReplayBuffer: this.options.clientReplayBuffer,
-        clientReplayBufferBinary: this.options.clientReplayBufferBinary,
-        sseFlushThrottle: this.options.sseFlushThrottle,
-        ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
+        creditWindow: this.options.creditWindow,
         transports: this.options.transports,
       }),
     )
@@ -482,8 +473,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.PING) {
       const pieces = entry.sender.pieces
-      if (pieces)
-        assertProtocol(pieces.headroom.sender.heartbeat(frame.took, performance.now()), 'PING took more than sent')
+      if (pieces) assertProtocol(pieces.headroom.heartbeat(frame.took, performance.now()), 'PING took more than sent')
       this.resetPingTimer(entry)
       this.acknowledgeArrivals(entry)
       this.pong(entry, this.answerPing(entry, frame.ended))
@@ -751,7 +741,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
       phase: 'waiting',
       ttl: null,
     }
-    this.registrationWaits.wait(awaited, this.options.connectTtl)
+    this.registrationWaits.wait(awaited, CHANNEL_CONNECT_TTL_MS)
     entry.state.awaited.add(awaited)
   }
 
@@ -810,8 +800,8 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
     }
   }
 
-  /** Attaches `channel` to the wire. With `replay`, first sends what the page missed, or ends the channel if the
-   *  replay lost it. Null once the channel keeps nothing for a page (its replay was released). */
+  /** Attaches `channel` to the wire. With `replay`, first sends what the page missed. Null once the channel keeps
+   *  nothing for a page (its replay was released). */
   private attachChannel(
     channel: ServerChannel,
     open: ReconcileOpenEntry,
@@ -822,13 +812,8 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
     if (buffer === null) return null
     channel._onPageHas(open.lastSeq)
     const peer = new IndexedPeer({ sender, index: open.ix, replay: buffer })
-    const missed = replay ? buffer.getAfter(open.lastSeq) : []
-    if (missed === null) {
-      channel._onReplayLost(peer)
-    } else {
-      for (const frame of missed) sender.send(frame)
-      channel._attachPeer(peer, open)
-    }
+    if (replay) for (const frame of buffer.getAfter(open.lastSeq)) sender.send(frame)
+    channel._attachPeer(peer, open)
     if (this.ended.has(channel)) this.ended.keep(channel, null)
     return { channel, ix: open.ix, peer }
   }
@@ -919,20 +904,13 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
 }
 
 function resolveMuxServerOptions(): MuxServerOptions {
-  const c = getServerConfig().channel
-  const pingInterval = Math.max(c.pingInterval, CHANNEL_PING_INTERVAL_MIN_MS)
+  const c = getChannelConfig()
   return {
     reconnectTimeout: c.reconnectTimeout,
-    idleTimeout: c.idleTimeout,
-    pingInterval,
+    idleTimeout: Math.min(c.reconnectTimeout, CHANNEL_IDLE_TIMEOUT_MS),
+    pingInterval: c.pingInterval,
     pingDeadline: pingDeadlineOf(c),
-    serverReplayBuffer: c.serverReplayBuffer,
-    serverReplayBufferBinary: c.serverReplayBufferBinary,
-    clientReplayBuffer: c.clientReplayBuffer,
-    clientReplayBufferBinary: c.clientReplayBufferBinary,
-    connectTtl: c.connectTtl,
-    sseFlushThrottle: c.sseFlushThrottle,
-    ssePostIdleFlushDelay: c.ssePostIdleFlushDelay,
+    creditWindow: creditWindowOf(c.maxMemory),
     transports: c.transports,
   }
 }

@@ -41,6 +41,7 @@ import {
   onParticipantOverflow,
   onGetRoomOverflow,
   onRoomBurst,
+  onRoomFlood,
   onGetWatchedCount,
   onRoomRelease,
   onFailBackend,
@@ -1244,9 +1245,9 @@ function Room() {
         const [, room] = await createRoom('dm-overflow')
         const late = await room.join({ meta: { name: 'Late' } })
         const sender = await room.join({ meta: { name: 'Sender' } })
-        // Three 1,500-byte DMs: two fit the 4,096-byte bufferLimit of the lane that runs this, three don't.
+        // Three 900,000-byte DMs: two fit the 2 MiB a participant holds, three don't.
         const sends = ['1', '2', '3'].map((n) =>
-          sender.send(late.id, n.padEnd(1500, '.'), { ack: true }).then(
+          sender.send(late.id, n.padEnd(900_000, '.'), { ack: true }).then(
             () => 'answered',
             () => 'rejected',
           ),
@@ -1260,18 +1261,18 @@ function Room() {
         setResult(JSON.stringify({ first, outcomes: await Promise.all(sends), got }))
       })}
 
-      {scenario('hold-overflow', null, 'Publishes held past bufferLimit', async () => {
+      {scenario('hold-overflow', null, 'Publishes held past 2 MiB', async () => {
         const roomId = await createRoomId('hold-overflow')
-        const serverOutcomes = await onPublishWhileEstablishing(roomId, 3, 1500)
+        const serverOutcomes = await onPublishWhileEstablishing(roomId, 3, 900_000)
         await pollUntil(async () => {
           const seen = await onGetWatched(roomId)
           return { result: { serverOutcomes, seen }, done: seen.length >= 2 }
         })
       })}
 
-      {scenario('hold-alone', null, 'One publish held, itself past bufferLimit', async () => {
+      {scenario('hold-alone', null, 'One publish held, itself past 2 MiB', async () => {
         const roomId = await createRoomId('hold-alone')
-        const serverOutcomes = await onPublishWhileEstablishing(roomId, 2, 5000)
+        const serverOutcomes = await onPublishWhileEstablishing(roomId, 2, 2_300_000)
         await pollUntil(async () => {
           const seen = await onGetWatched(roomId)
           return { result: { serverOutcomes, seen }, done: seen.length >= 1 }
@@ -1986,7 +1987,7 @@ function Room() {
         view.onChange(update)
       })}
 
-      {scenario('overflow', 'Offline past bufferLimit', 'Let go with ChannelOverflowError', async () => {
+      {scenario('overflow', 'Offline past maxMemory', 'Let go with ChannelOverflowError', async () => {
         const [roomId, view] = await createRoom('overflow')
         const seen: string[] = []
         view.subscribe((data) => seen.push((data as string).trim()))
@@ -2003,7 +2004,7 @@ function Room() {
         setResult(JSON.stringify({ roomId, seen, myCause, closed, isClosed: view.isClosed, leaves }))
       })}
 
-      {scenario('participant-overflow', null, 'A server-joined participant offline past bufferLimit', async () => {
+      {scenario('participant-overflow', null, 'A server-joined participant offline past maxMemory', async () => {
         const [roomId] = await createRoom('participant-overflow')
         const me = await onJoinAsServer(roomId, 'Bob')
         const got: string[] = []
@@ -2015,6 +2016,18 @@ function Room() {
         setResult(JSON.stringify({ roomId }))
         await pollUntil(() => ({ done: myCause !== null }), 150)
         setResult(JSON.stringify({ roomId, got, myCause }))
+      })}
+
+      {scenario('behind', null, 'Connected, behind what the server holds', async () => {
+        const [roomId, view] = await createRoom('behind')
+        const seen: number[] = []
+        view.subscribe((data) => seen.push(Number.parseInt(data as string)))
+        let closed = false
+        view.onClose(() => (closed = true))
+        await view.join({ meta: { name: 'Me' } })
+        await onRoomFlood(roomId, 16, 256 * 1024)
+        await pollUntil(() => ({ done: closed }), 150)
+        setResult(JSON.stringify({ seen, closed }))
       })}
 
       {scenario('slow-link', 'Slow link', '640 KB each way', async () => {

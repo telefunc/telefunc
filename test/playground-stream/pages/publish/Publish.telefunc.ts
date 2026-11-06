@@ -23,6 +23,8 @@ export {
   onBroadcastServerListener,
   onBroadcastOwnBytes,
   onBroadcastOnOpenPublish,
+  onBroadcastSubscriberAborts,
+  onBroadcastLoopLeftBehind,
   onBroadcastAnswerOrder,
   onBroadcastSelfAnswer,
   onStaticPublishReceipts,
@@ -187,9 +189,9 @@ async function onBroadcastAnsweringLoop() {
   return { timerFired: true, deliveredAtLastReceipt, delivered }
 }
 
-/** An instance subscribes and publishes `count` messages of `bytes` bytes in the same turn, the last past the 4,096-byte
- *  bufferLimit of the lane that runs it: Redis's SUBSCRIBE round trip keeps the new subscription short of ready, so the
- *  Redis driver holds the publishes until it is. It returns once its listener saw the others, or 10 s pass. */
+/** An instance subscribes and publishes `count` messages of `bytes` bytes in the same turn, the last past the 2 MiB a new
+ *  subscription holds: Redis's SUBSCRIBE round trip keeps the new subscription short of ready, so the Redis driver holds
+ *  the publishes until it is. It returns once its listener saw the others, or 10 s pass. */
 async function onBroadcastWhileEstablishing(count: number, bytes: number) {
   const room = new BroadcastChannel<string>({ key: `room:held-test:${crypto.randomUUID()}` })
   const seen: string[] = []
@@ -425,6 +427,38 @@ async function onBroadcastOnOpenPublish() {
   return room
 }
 
+/** The first subscriber of a key aborts its channel on a message, whose delivery goes on to the second. */
+async function onBroadcastSubscriberAborts() {
+  const key = `room:subscriber-aborts:${crypto.randomUUID()}`
+  const aborting = new BroadcastChannel<string>({ key })
+  aborting.subscribe((msg) => {
+    if (msg === 'abort') aborting.abort()
+  })
+  return { aborting, room: new BroadcastChannel<string>({ key }) }
+}
+
+/** A loop that read one message and stopped, with the next one queued for it, when its channel closes. */
+async function onBroadcastLoopLeftBehind() {
+  const room = new BroadcastChannel<string>({ key: `room:left-behind:${crypto.randomUUID()}` })
+  const { _telefunc } = globalThis as unknown as Ledger
+  const { holders } = _telefunc['channelMemory.ts']
+  const before = new Set(holders)
+  const first = room.messages().next()
+  const queued = Promise.withResolvers<void>()
+  room.subscribe((msg) => {
+    if (msg === 'left behind') queued.resolve()
+  })
+  await room.publish('read')
+  await first
+  await room.publish('left behind')
+  await queued.promise
+  const loop = [...holders].find((holder) => !before.has(holder))
+  const held = loop?.heldBytes
+  await room.close()
+  return { held, heldOnceClosed: loop?.heldBytes }
+}
+type Ledger = { _telefunc: { 'channelMemory.ts': { holders: Set<{ heldBytes: number }> } } }
+
 /** The first of two subscribers answers message 1 with message 2; both listen until the second sees it, or 10 s pass. */
 async function onBroadcastAnswerOrder() {
   const key = `room:answer-order:${crypto.randomUUID()}`
@@ -609,9 +643,6 @@ async function onBroadcastReconnect() {
 async function onBroadcastWhileOffline(count: number) {
   const key = `room:while-offline:${crypto.randomUUID()}`
   const room = new BroadcastChannel<string>({ key })
-  room.onClose((err) => {
-    cleanupState[`whileOffline_${key}_serverClose`] = err?.name ?? 'none'
-  })
   onServerAction(`publish_${key}`, () => {
     for (let n = 0; n < count; n++) void Broadcast.publish(key, String(n).padEnd(128 * 1024))
   })
@@ -709,7 +740,7 @@ async function onBroadcastBurstThenClose() {
   const serverLoop = readSlowly(room, 'slow')
   await room.publish('start')
   await new Promise((resolve) => setTimeout(resolve, 0))
-  for (let i = 0; i < 1000; i++) await room.publish(`${i}:${'x'.repeat(2048)}`)
+  for (let i = 0; i < 2000; i++) await room.publish(`${i}:${'x'.repeat(2048)}`)
   await room.close()
   return serverLoop
 }
@@ -753,7 +784,7 @@ async function onInMemoryPublishes() {
     }
   }
   const listenerBatch = await listenerPublishes(2000)
-  const pastTheBound = await listenerPublishes(5000)
+  const pastTheBound = await listenerPublishes(6000)
 
   let aloneBytes = 0
   let alone: unknown
@@ -811,7 +842,7 @@ async function onInMemoryPublishes() {
   }
   stopLongLoop()
 
-  // A listener's answer waits for the next turn, as a loop publishes 5,000 of 64 KiB: past 256 MiB, what waits goes.
+  // A listener's answer waits for the next turn, as a loop publishes 6,000 of 64 KiB: past 320 MiB, what waits goes.
   await new Promise((resolve) => setTimeout(resolve, 0))
   let behindDelivered = 0
   const stopBehind = Broadcast.subscribeBinary(`behind:${id}`, () => void behindDelivered++)
@@ -820,7 +851,7 @@ async function onInMemoryPublishes() {
   // So an answer still waits when the loop passes 256 MiB, whether or not the long loops' hold is on as this starts.
   const stopThird = Broadcast.subscribe(`answer-3:${id}`, () => void Broadcast.publish(`answer-4:${id}`, 'seen'))
   void Broadcast.publish(`answer-1:${id}`, 'go')
-  for (let i = 0; i < 5000; i++) void Broadcast.publishBinary(`behind:${id}`, reused)
+  for (let i = 0; i < 6000; i++) void Broadcast.publishBinary(`behind:${id}`, reused)
   const behindInLoop = behindDelivered
   await new Promise((resolve) => setTimeout(resolve, 50))
   const behindAnAnswer = { inLoop: behindInLoop, delivered: behindDelivered }

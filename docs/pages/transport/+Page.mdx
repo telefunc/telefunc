@@ -24,7 +24,7 @@ config.channel.transports = ['sse', 'ws'] // default
 ```
 
 > These are **client-side** configs — separate from the following **server-side** settings:
-> - <Link href="/channel-config">`config.channel`</Link>: reconnect/idle timeouts and per-peer buffer limits
+> - <Link href="/channel-config">`config.channel`</Link>: how long a client may be gone, and what a channel may hold for it
 > - <Link href="/broadcast-config">`config.broadcast.transport`</Link>: cross-instance broadcast for multi-server deployments
 
 <ConfigWhereClient />
@@ -56,8 +56,6 @@ Controls how streaming values are delivered over HTTP.
 - **Start with `'binary-inline'`** — it's the fastest and works in most setups.
 - **Switch to `'sse-inline'`** if a proxy or CDN buffers binary HTTP responses but passes SSE events through without buffering.
 - **Use `'channel'`** when you want streamed values to reconnect automatically after a dropped connection (just as <Link href="/channel">Telefunc channels</Link> do).
-
-> With `'binary-inline'` and `'sse-inline'`, a stream the page isn't reading is paused by a request from the page, which has to reach the server holding the response (<Link href="/stream/scale#sticky-sessions">sticky sessions</Link>). Where it can't, and on Cloudflare Workers, the page instead buffers that stream's chunks until it reads them. A pause lasts only while the page keeps renewing it: if the page loses that server, the stream flows again within a minute and the page buffers it.
 
 
 ## Channel transport

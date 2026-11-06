@@ -29,6 +29,8 @@ import {
   onBroadcastServerListener,
   onBroadcastOwnBytes,
   onBroadcastOnOpenPublish,
+  onBroadcastSubscriberAborts,
+  onBroadcastLoopLeftBehind,
   onBroadcastAnswerOrder,
   onBroadcastSelfAnswer,
   onStaticPublishReceipts,
@@ -121,7 +123,7 @@ function Publish() {
             })()
             // On the wire after the loop's subscribe, so the server has the subscription before the flood.
             await room.publish('ready')
-            await remote.flood(1000)
+            await remote.flood(2000)
             const error = await loop
             setResult(JSON.stringify({ error, received, server: await remote.serverLoop() }))
           } catch (err) {
@@ -156,7 +158,7 @@ function Publish() {
               }
             })()
             await room.publish('ready')
-            await remote.flood(1000)
+            await remote.flood(2000)
             await new Promise((resolve) => setTimeout(resolve, 1000))
             await remote.close()
             const error = await loop
@@ -392,25 +394,25 @@ function Publish() {
         Listeners that answer
       </button>
 
-      <h2>Held Past bufferLimit</h2>
+      <h2>Held Past 2 MiB</h2>
 
       <button
         id="test-broadcast-hold-overflow"
         onClick={async () => {
           setResult('')
-          setResult(JSON.stringify(await onBroadcastWhileEstablishing(3, 1500)))
+          setResult(JSON.stringify(await onBroadcastWhileEstablishing(3, 900_000)))
         }}
       >
-        Publishes held past bufferLimit
+        Publishes held past 2 MiB
       </button>
       <button
         id="test-broadcast-hold-alone"
         onClick={async () => {
           setResult('')
-          setResult(JSON.stringify(await onBroadcastWhileEstablishing(2, 5000)))
+          setResult(JSON.stringify(await onBroadcastWhileEstablishing(2, 2_300_000)))
         }}
       >
-        One publish held, itself past bufferLimit
+        One publish held, itself past 2 MiB
       </button>
 
       <h2>Broadcast Shield Validation</h2>
@@ -612,6 +614,34 @@ function Publish() {
         onOpen publishes
       </button>
 
+      <h2>Subscriber Ends</h2>
+
+      <button
+        id="test-broadcast-subscriber-aborts"
+        onClick={async () => {
+          setResult('')
+          const { aborting, room } = await onBroadcastSubscriberAborts()
+          listenedRef.current = room
+          aborting.subscribe(() => {})
+          const received: string[] = []
+          room.subscribe((msg) => received.push(msg))
+          const { seq } = await room.publish('abort')
+          setResult(JSON.stringify({ seq, received }))
+        }}
+      >
+        A subscriber aborts its channel
+      </button>
+
+      <button
+        id="test-broadcast-loop-left-behind"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onBroadcastLoopLeftBehind()))
+        }}
+      >
+        A loop stops reading before its channel closes
+      </button>
+
       <h2>Listener Answers</h2>
 
       <button
@@ -788,7 +818,7 @@ function Publish() {
 
       <h2>Published While Offline</h2>
 
-      {[2, 8].map((count) => (
+      {[2, 32].map((count) => (
         <button
           key={count}
           id={`test-broadcast-while-offline-${count}`}

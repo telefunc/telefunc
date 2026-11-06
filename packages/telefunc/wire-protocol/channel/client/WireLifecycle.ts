@@ -4,11 +4,10 @@ export type { TransportOwner, WireLifecycleOwner }
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
-import { ChannelOverflowError, replayLossError } from '../channelErrors.js'
+import { ChannelOverflowError } from '../channelErrors.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
-  CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   CHANNEL_RECONNECT_MAX_DELAY_MS,
@@ -19,10 +18,9 @@ import {
   TIMER_DELAY_MAX_MS,
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../../constants.js'
-import { replayWindow } from '../../flowControl/credit.js'
-import { ReplayBuffer } from '../ReplayBuffer.js'
+import { ReplayBuffer } from './ReplayBuffer.js'
 import { ERROR_REASON, isSequencedFrame } from '../../wire/frame.js'
-import { TAG } from '../../wire/tags.js'
+import { TAG, isClosingTag } from '../../wire/tags.js'
 import { seqNear } from '../../wire/seq.js'
 import type { ChannelFrame, DecodedFrame, PongEntry } from '../../wire/frame.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
@@ -117,10 +115,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private serverTransports: ReconciledPayload['transports'] | null = null
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
   private idleTimeoutMs: number
-  private clientReplayBufferBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BYTES
-  private clientReplayBufferBinaryBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES
-  /** The credit windows the replay buffers allow, the page's and the server's, from the last RECONCILED. */
-  private replayWindows: { window: number; peerWindow: number } | null = null
+  /** The largest credit window, each way, from the last RECONCILED. */
+  private creditWindow: number | null = null
   /** The largest frame the server accepts on a WebSocket, from the last RECONCILED. */
   maxFrameBytes = WIRE_MAX_RAW_FRAME_BYTES
   constructor({ owner, telefuncUrl, options }: WireLifecycleOptions) {
@@ -192,25 +188,14 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       clearTimeout(this.ttl)
       this.ttl = null
     }
-    const replay = new ReplayBuffer({
-      maxBytes: this.clientReplayBufferBytes,
-      binaryMaxBytes: this.clientReplayBufferBinaryBytes,
-    })
-    this.channels.add(this.nextIndex++, channel, replay)
-    this.fitReplays(channel)
+    this.channels.add(this.nextIndex++, channel, new ReplayBuffer(CHANNEL_CLIENT_REPLAY_BUFFER_BYTES))
+    if (this.creditWindow !== null) channel._attach.capWindows(this.creditWindow)
 
     if (!this.transport.hasWire() && !this.transport.isConnecting()) {
       this.transport.start()
       return
     }
     this.exchange.scheduleRegisterReconcile()
-  }
-
-  /** Fits the channel's credit windows to the replay buffers once a RECONCILED gave their sizes. Until then the
-   *  default initial window fits any replay buffer. */
-  private fitReplays(channel: MuxChannel): void {
-    if (this.replayWindows === null) return
-    channel._attach.fitReplays(this.replayWindows.window, this.replayWindows.peerWindow)
   }
 
   onTransportHeadroom(transport: ClientChannelTransport): void {
@@ -275,7 +260,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private dispatchFrame(frame: DecodedFrame): void {
     // Track seq for ALL sequenced frames, ACK_RES and the closing ones too; otherwise reconciles under-report lastSeq.
     if (isSequencedFrame(frame)) {
-      const seq = this.trackSeq(frame.index, frame.seq)
+      const seq = this.trackSeq(frame)
       if (seq === null) return
       frame.seq = seq
     }
@@ -366,7 +351,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   private handleReconciled(ctrl: ReconciledPayload): void {
     if (!this.upgrade.onReconciled(ctrl)) return
-    this.transport.applyReconciledSettings(ctrl)
+    this.transport.applyReconciledSettings?.(ctrl)
     this.takeServerSettings(ctrl)
     const outcome = this.exchange.applyReconciled(ctrl, {
       deferOmitted: this.upgrade.handingOff,
@@ -564,29 +549,16 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     return this.exchange.stageInitialReconcileBatch()
   }
 
-  /** Takes the timeouts, replay sizes and frame limit the server sets, and fits each replay buffer to them. */
+  /** Takes the timeouts, credit window and frame limit the server sets. Until the first RECONCILED, a channel's
+   *  initial window fits any server's. */
   private takeServerSettings(ctrl: ReconciledPayload): void {
     this.reconnectTimeoutMs = ctrl.reconnectTimeout
     this.maxFrameBytes = ctrl.maxFrameBytes
     // A per-call `idleTimeout` (withContext) is kept over the server's.
     if (this.connectionOptions.idleTimeout === undefined) this.idleTimeoutMs = ctrl.idleTimeout
-    const window = replayWindow(ctrl.serverReplayBuffer, ctrl.serverReplayBufferBinary)
-    // Unchanged sizes: every replay already fits them, since `register` sizes and fits each new channel with them.
-    if (
-      this.replayWindows?.window === window &&
-      this.clientReplayBufferBytes === ctrl.clientReplayBuffer &&
-      this.clientReplayBufferBinaryBytes === ctrl.clientReplayBufferBinary
-    ) {
-      return
-    }
-    this.clientReplayBufferBytes = ctrl.clientReplayBuffer
-    this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
-    this.replayWindows = { window, peerWindow: replayWindow(ctrl.clientReplayBuffer, ctrl.clientReplayBufferBinary) }
-    // Resized before this reconcile stores anything: channels registered before the first RECONCILED used the defaults.
-    for (const { replay } of this.channels.values()) {
-      replay.setLimits(this.clientReplayBufferBytes, this.clientReplayBufferBinaryBytes)
-    }
-    for (const { channel } of this.channels.values()) this.fitReplays(channel)
+    if (this.creditWindow === ctrl.creditWindow) return
+    this.creditWindow = ctrl.creditWindow
+    for (const { channel } of this.channels.values()) channel._attach.capWindows(ctrl.creditWindow)
   }
 
   /** The server ended channel `ix`, so it needs nothing more of what the page sent on it. */
@@ -606,14 +578,17 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.dispose()
   }
 
-  /** Widens a frame's seq on channel `ix` from its low bits `bits`; null drops a duplicate or a released channel's. */
-  private trackSeq(ix: number, bits: number): number | null {
-    const record = this.channels.get(ix)
+  /** Widens a sequenced frame's seq from its low bits; null drops a duplicate or a released channel's. */
+  private trackSeq({ tag, index, seq: bits }: { tag: number; index: number; seq: number }): number | null {
+    const record = this.channels.get(index)
     if (record === undefined) return null
     const prev = record.lastSeq
     const seq = seqNear(bits, prev + 1)
     if (seq <= prev) return null
     record.lastSeq = seq
+    // The channel's frames share one seq, so a jump is exactly the frames this page never got, bar those a closing frame
+    // passed on purpose.
+    if (seq > prev + 1 && !isClosingTag(tag)) record.channel._onFramesMissed?.()
     return seq
   }
 }
@@ -632,18 +607,8 @@ const TRANSPORT_REGISTRY: Record<
 
 /** What a channel the server ended with an ERROR of `reason` closes with. */
 function channelErrorFor(reason: number): Error {
-  switch (reason) {
-    case ERROR_REASON.OVERFLOW:
-      return new ChannelOverflowError(
-        'Channel closed: more was published while this client was offline than the server holds for a client',
-      )
-    case ERROR_REASON.LOST:
-      return replayLossError('server')
-    case ERROR_REASON.AHEAD:
-      return new ChannelOverflowError(
-        "Channel closed: the server's sends got further ahead of this client than config.channel.maxPendingBytes or maxPendingAcks lets the server hold",
-      )
-    default:
-      return makeBugError()
+  if (reason === ERROR_REASON.OVERFLOW) {
+    return new ChannelOverflowError('Closed: this client fell behind what the server can hold for it')
   }
+  return makeBugError()
 }

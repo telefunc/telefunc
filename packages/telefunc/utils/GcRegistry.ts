@@ -33,7 +33,10 @@ class GcRegistry {
   private scanTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(private readonly periodicScanMs = 5000) {
-    this.finalReg = new FinalizationRegistry<Entry>((entry) => this.fireCleanup(entry))
+    this.finalReg = new FinalizationRegistry<Entry>((entry) => {
+      // Chromium may still run this once its page navigated away, when its timer calls reach the next page's timers.
+      if (typeof document === 'undefined' || document.defaultView !== null) this.fireCleanup(entry)
+    })
   }
 
   /** Returns what forgets `target` without closing it, once nothing is left for `close` to do. */

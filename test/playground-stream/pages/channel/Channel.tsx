@@ -14,6 +14,9 @@ import {
   onChannelClientAbortInstrument,
   onChannelMulti,
   onChannelAckListenerAbort,
+  onChannelListenerAbortHolds,
+  onChannelLateAnswerHolds,
+  onChannelHeldBytes,
   onChannelAckListenerBug,
   onChannelClientAckListenerBug,
   onChannelServerPendingAckAbort,
@@ -45,8 +48,10 @@ import {
   onChannelManyListeners,
   onChannelLinkShare,
   onChannelSlowUplink,
+  onChannelPublishesBehind,
   onChannelOpenAnswer,
   onChannelOpenHello,
+  onChannelConfigChecks,
   onChannelBudgets,
   onChannelAwaitedFromOffline,
   onChannelAtLimit,
@@ -133,6 +138,9 @@ type ChannelState = {
   clientAbortServerOnOpenFired: boolean | null
   earlyCloseChannelId: string | null
   ackListenerAbortErr: { isAbort: boolean; abortValue: unknown } | null
+  heldBytes: number | null
+  lateAnswerAsked: boolean
+  listenerAborted: boolean
   ackListenerBugErr: string | null
   ackListenerBugRecoveryAck: string | null
   clientAckListenerBugChannelId: string | null
@@ -169,6 +177,7 @@ type ChannelState = {
   shieldServerAckInvalid: { ok: boolean; value?: string; error?: string } | null
   selfRemovingListener: { pageSeen: string[]; serverSeen: string[] } | null
   unserializableAnswer: { channelId: string; pageSend: string; pageFollowUp: string; isClosed: boolean } | null
+  leftOpen: boolean
   oversize: {
     channelId: string
     thrown: string[]
@@ -193,6 +202,9 @@ type ChannelState = {
   manyListenersMs: { page: number; server: number | null } | null
   linkShare: { pingMs: number[]; downloaded: number } | null
   slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
+  publishesBehind: { pingMs: number; closed: string; closeMs: number } | null
+  broadcastOverflow: { received: number; closeErr: string } | null
+  broadcastBehind: { seqsAhead: number[]; isClosed: boolean } | null
   lateCallbacks: { channelId: string; onOpen: boolean; onCloseAbortValue: unknown } | null
   openAbort: { channelId: string; abortValue: unknown } | null
 }
@@ -226,6 +238,9 @@ const initialState: ChannelState = {
   clientAbortServerOnOpenFired: null,
   earlyCloseChannelId: null,
   ackListenerAbortErr: null,
+  heldBytes: null,
+  lateAnswerAsked: false,
+  listenerAborted: false,
   ackListenerBugErr: null,
   ackListenerBugRecoveryAck: null,
   clientAckListenerBugChannelId: null,
@@ -256,6 +271,7 @@ const initialState: ChannelState = {
   selfRemovingListener: null,
   unserializableAnswer: null,
   oversize: null,
+  leftOpen: false,
   heldBinary: null,
   unattachedFlood: null,
   durationLimits: null,
@@ -273,6 +289,9 @@ const initialState: ChannelState = {
   manyListenersMs: null,
   linkShare: null,
   slowUplink: null,
+  publishesBehind: null,
+  broadcastOverflow: null,
+  broadcastBehind: null,
   lateCallbacks: null,
   openAbort: null,
 }
@@ -672,6 +691,26 @@ function ChannelDemo() {
     }
   }, [addLog])
 
+  const readHeldBytes = useCallback(async () => {
+    const heldBytes = await onChannelHeldBytes()
+    setChannelState((s) => ({ ...s, heldBytes }))
+  }, [])
+
+  const testListenerAbortHolds = useCallback(async () => {
+    const { channel } = await openChannel(onChannelListenerAbortHolds)
+    const closed = new Promise((resolve) => channel.onClose(resolve))
+    void channel.send('stop')
+    await closed
+    setChannelState((s) => ({ ...s, listenerAborted: true }))
+  }, [])
+
+  const testLateAnswerHolds = useCallback(async () => {
+    const { channel } = await openChannel(onChannelLateAnswerHolds)
+    channel.send('late', { ack: true }).catch(() => {})
+    await channel.send('arrived', { ack: true })
+    setChannelState((s) => ({ ...s, lateAnswerAsked: true }))
+  }, [])
+
   const testAckListenerBug = useCallback(async () => {
     addLog('system', 'Starting ack-listener-bug test...')
     const { channel } = await openChannel(onChannelAckListenerBug)
@@ -1022,6 +1061,12 @@ function ChannelDemo() {
     setChannelState((s) => ({ ...s, oversize }))
   }, [])
 
+  const testLeftOpen = useCallback(async () => {
+    const { channel } = await openChannel(onChannelInit)
+    await channel.opened
+    setChannelState((s) => ({ ...s, leftOpen: true }))
+  }, [])
+
   const testHeldBinary = useCallback(async () => {
     const { channel } = await openChannel(onChannelHeldBinary)
     const received: number[][] = []
@@ -1088,8 +1133,8 @@ function ChannelDemo() {
       channel.listenBinary((data) => {
         received.push(new DataView(data.buffer, data.byteOffset).getUint32(0))
         ;(window as unknown as { __burstReceived: number }).__burstReceived = received.length
-        if (received.length === count) resolve(null)
       })
+      channel.listen(() => resolve(null))
       channel.onClose((err) => resolve(err?.name ?? 'none'))
     })
     void channel.send({ count, awaited })
@@ -1124,6 +1169,7 @@ function ChannelDemo() {
     const received: number[] = []
     const ended = new Promise<string | null>((resolve) => {
       channel.listen((message) => {
+        if (message === 'end') return resolve(null)
         received.push(Number.parseInt(message))
         if (received.length === count) resolve(null)
       })
@@ -1142,7 +1188,7 @@ function ChannelDemo() {
     let received = 0
     const closeErr = await new Promise<string | null>((resolve) => {
       channel.listenBinary(() => {
-        if (++received === 3) resolve(null)
+        if (++received === 2) resolve(null)
       })
       channel.onClose((err) => resolve(err?.name ?? 'none'))
     })
@@ -1192,20 +1238,17 @@ function ChannelDemo() {
   }, [])
 
   const testBudgets = useCallback(async () => {
-    const { bytes, acks } = await openChannel(onChannelBudgets)
-    acks.listen(() => new Promise<void>(() => {}))
-    const ends = await Promise.allSettled([bytes.closed, acks.closed])
-    document.querySelector('#channel-budgets-result')!.textContent = JSON.stringify({
-      bytes: bytes.id,
-      acks: acks.id,
-      errors: ends.map((end) => (end.status === 'rejected' ? `${end.reason.name}: ${end.reason.message}` : 'clean')),
-    })
+    const { bytes } = await openChannel(onChannelBudgets)
+    document.querySelector('#channel-budgets-result')!.textContent = JSON.stringify({ bytes: bytes.id })
   }, [])
 
-  // A channel the page drops closes once garbage-collected.
-  const atLimitChannels = useRef<unknown>(null)
   const testAtLimit = useCallback(async () => {
-    atLimitChannels.current = await openChannel(onChannelAtLimit)
+    for (const kind of ['twoBytes', 'threeBytes', 'fourBytes'] as const) {
+      for (const over of [false, true]) {
+        const { channel } = await openChannel(() => onChannelAtLimit(kind, over))
+        await channel.closed
+      }
+    }
   }, [])
 
   const testOwnBytes = useCallback(async () => {
@@ -1220,14 +1263,9 @@ function ChannelDemo() {
   }, [])
 
   const testOfflineBudgets = useCallback(async () => {
-    const { bytes, acks } = await openChannel(onChannelOfflineBudgets)
-    for (const channel of [bytes, acks]) channel.listen(() => new Promise<void>((done) => setTimeout(done, 1000)))
-    const ends = await Promise.allSettled([bytes.closed, acks.closed])
-    document.querySelector('#channel-offline-budgets-result')!.textContent = JSON.stringify({
-      bytes: bytes.id,
-      acks: acks.id,
-      errors: ends.map((end) => (end.status === 'rejected' ? `${end.reason.name}: ${end.reason.message}` : 'clean')),
-    })
+    const { channel } = await openChannel(onChannelOfflineBudgets)
+    channel.listen(() => new Promise<void>((done) => setTimeout(done, 1000)))
+    document.querySelector('#channel-offline-budgets-result')!.textContent = JSON.stringify({ id: channel.id })
   }, [])
 
   const testCreditFailure = useCallback(async () => {
@@ -1390,6 +1428,64 @@ function ChannelDemo() {
     ping.close()
   }, [])
 
+  const testPublishesBehind = useCallback(async () => {
+    setChannelState((s) => ({ ...s, publishesBehind: null }))
+    const { broadcast, control } = await openChannel(onChannelPublishesBehind)
+    let firstSeq = 0
+    let bodies = 0
+    let resolveSecond!: () => void
+    const second = new Promise<void>((resolve) => (resolveSecond = resolve))
+    broadcast.subscribeBinary((_, info) => {
+      firstSeq ||= info.seq
+      if (++bodies === 2) resolveSecond()
+    })
+    void control.send(1)
+    // Its answer meets that body on the wire, with its head gone and no later head of this channel ahead.
+    const { seq: ownSeq } = await broadcast.publish('answered behind the body')
+    void control.send(4)
+    await second
+    const pinged = performance.now()
+    await control.send('ping', { ack: true })
+    const pingMs = Math.round(performance.now() - pinged)
+    const closing = performance.now()
+    const closed = await control.send('close', { ack: true })
+    const closeMs = Math.round(performance.now() - closing)
+    const publishesBehind = { pingMs, publishesAhead: ownSeq - firstSeq, closed, closeMs }
+    setChannelState((s) => ({ ...s, publishesBehind }))
+    control.close()
+  }, [])
+
+  const testBroadcastOverflow = useCallback(async () => {
+    setChannelState((s) => ({ ...s, broadcastOverflow: null }))
+    const { broadcast, control } = await openChannel(onChannelPublishesBehind)
+    let received = 0
+    broadcast.subscribeBinary(() => {
+      received++
+    })
+    const closing = new Promise<string>((resolve) => broadcast.onClose((err) => resolve(err?.name ?? 'none')))
+    void control.send(3)
+    const closeErr = await closing
+    setChannelState((s) => ({ ...s, broadcastOverflow: { received, closeErr } }))
+    control.close()
+  }, [])
+
+  const testBroadcastBehind = useCallback(async () => {
+    setChannelState((s) => ({ ...s, broadcastBehind: null }))
+    const { broadcast, control } = await openChannel(() => onChannelPublishesBehind(256 * 1024))
+    const { seq: before } = await broadcast.publish('before the burst')
+    const seqsAhead: number[] = []
+    const newest = new Promise<void>((resolve) => {
+      broadcast.subscribeBinary((_, info) => {
+        seqsAhead.push(info.seq - before)
+        if (info.seq === before + 16) resolve()
+      })
+    })
+    void control.send(16)
+    await newest
+    setChannelState((s) => ({ ...s, broadcastBehind: { seqsAhead, isClosed: broadcast.isClosed } }))
+    control.close()
+  }, [])
+
   const testSlowUplink = useCallback(async () => {
     setChannelState((s) => ({ ...s, slowUplink: null }))
     const { upload, ticks } = await openChannel(onChannelSlowUplink)
@@ -1544,6 +1640,15 @@ function ChannelDemo() {
           >
             Test Ack Listener Abort
           </button>
+          <button id="channel-test-listener-abort-holds" type="button" onClick={testListenerAbortHolds}>
+            Test Listener Abort Holds
+          </button>
+          <button id="channel-test-late-answer-holds" type="button" onClick={testLateAnswerHolds}>
+            Test Late Answer Holds
+          </button>
+          <button id="channel-read-held-bytes" type="button" onClick={readHeldBytes}>
+            Read Held Bytes
+          </button>
           <button
             id="channel-test-ack-listener-bug"
             type="button"
@@ -1697,6 +1802,14 @@ function ChannelDemo() {
             Unserializable Ack Answer
           </button>
           <button
+            id="channel-test-left-open"
+            type="button"
+            onClick={testLeftOpen}
+            className="px-3 py-1.5 text-sm rounded bg-cyan-800 text-white hover:bg-cyan-900"
+          >
+            Open a Channel, Keep No Reference
+          </button>
+          <button
             id="channel-test-oversize"
             type="button"
             onClick={testOversize}
@@ -1748,7 +1861,7 @@ function ChannelDemo() {
             [
               ['unawaited', 32],
               ['unawaited', 200],
-              ['unawaited', 300],
+              ['unawaited', 400],
               ['awaited', 300],
             ] as const
           ).map(([mode, count]) => (
@@ -1762,6 +1875,22 @@ function ChannelDemo() {
               Server Bursts {count} MiB ({mode})
             </button>
           ))}
+          <button
+            id="channel-test-broadcast-overflow"
+            type="button"
+            onClick={testBroadcastOverflow}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Broadcast Publishes More Than The Server Can Hold
+          </button>
+          <button
+            id="channel-test-broadcast-behind"
+            type="button"
+            onClick={testBroadcastBehind}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Broadcast Publishes More Than The Client Keeps Up With
+          </button>
           <button
             id="channel-test-awaited-from-offline"
             type="button"
@@ -1831,6 +1960,16 @@ function ChannelDemo() {
             Test acknowledgement ownership
           </button>
           <output id="channel-ack-ownership-result" />
+          <button
+            id="channel-test-config-checks"
+            onClick={async () => {
+              const checks = await onChannelConfigChecks()
+              document.querySelector('#channel-config-checks-result')!.textContent = JSON.stringify(checks)
+            }}
+          >
+            Test what config.channel refuses
+          </button>
+          <output id="channel-config-checks-result" />
           <button id="channel-test-budgets" onClick={testBudgets}>
             Test send budgets
           </button>
@@ -1893,6 +2032,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             Ping Beside a Download
+          </button>
+          <button
+            id="channel-test-publishes-behind"
+            type="button"
+            onClick={testPublishesBehind}
+            className="px-3 py-1.5 text-sm rounded bg-cyan-800 text-white hover:bg-cyan-900"
+          >
+            Publishes Falling Behind
           </button>
           <button
             id="channel-test-slow-uplink"

@@ -16,16 +16,17 @@ import type { BroadcastKind, BroadcastSubscriptions } from '../../wire/payloads.
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { broadcastMessages } from '../channelMessages.js'
-import { CHANNEL_BUFFER_LIMIT_BINARY_BYTES, CHANNEL_BUFFER_LIMIT_BYTES } from '../../constants.js'
 import { ChannelClosedError, isExpectedChannelFailure } from '../channelErrors.js'
 import { classifyTelefuncError } from '../errorClassification.js'
 import { isPromise } from '../../../utils/isPromise.js'
+import { assertWarning } from '../../../utils/assert.js'
 import { ClientChannel, reportChannelError, type ClientChannelOptions } from './ClientChannel.js'
 
 class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
   /** The subscriptions this page asks the server for. */
   private readonly subscribed: BroadcastSubscriptions = { text: false, binary: false }
+  private missedWarned = false
 
   constructor(options: ClientChannelOptions) {
     super(options)
@@ -73,10 +74,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return this.sendAckReq<ChannelPublishAck, string>(encode.publishAckReq, stringify(data))
   }
 
-  /** The page holds what its loop falls behind by within the server's default buffer limits. */
   override messages(options?: { signal?: AbortSignal }) {
-    const budget = { text: CHANNEL_BUFFER_LIMIT_BYTES, binary: CHANNEL_BUFFER_LIMIT_BINARY_BYTES }
-    return broadcastMessages<ChannelData<T>>(this, budget, options)
+    return broadcastMessages<ChannelData<T>>(this, options)
   }
 
   subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {
@@ -122,6 +121,18 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private sendReplyData(data: unknown): void {
     this.sendCredit.countSent(this.connection.sendSequenced(this, 'data', encode.text, stringify(data)))
   }
+
+  /** @internal The server let its oldest messages go: this page fell behind what it holds. */
+  _onFramesMissed(): void {
+    if (this.missedWarned) return
+    this.missedWarned = true
+    assertWarning(
+      false,
+      `A \`BroadcastChannel\` on key "${this.key}" missed messages, as this client fell behind what the server holds for it: \`info.seq\` shows the gap.`,
+      { onlyOnce: false },
+    )
+  }
+
   protected override dispatchDataFrame(frame: ChannelDataFrame): void {
     if (frame.tag === TAG.PUBLISH) {
       this.onPeerPublish(frame.text, frame.info, frame.bytes)

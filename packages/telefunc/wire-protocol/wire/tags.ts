@@ -1,4 +1,4 @@
-export { TAG, isWireCtrlTag, isChannelCtrlTag, isSequencedTag, passesData, replayKindOf, countsCredit }
+export { TAG, isWireCtrlTag, isChannelCtrlTag, isClosingTag, isSequencedTag, passesData, replayKindOf, countsCredit }
 export type { ReplayKind }
 
 import { assert } from '../../utils/assert.js'
@@ -59,6 +59,9 @@ const TAG = {
   PUBLISH_BINARY: 0x17 as const,
   /** Replayable keyed binary publish frame that requests an acknowledgement receipt. */
   PUBLISH_BINARY_ACK_REQ: 0x18 as const,
+  /** Names the channel and seq of the PUBLISH or PUBLISH_BINARY that follows it on its wire, a body all of a publish's
+   *  subscribers share, its own index and seq 0. */
+  PUBLISH_TO: 0x19 as const,
 
   // ─── Per-channel control (carries ix) ───
   /** A close request. Sequenced, so it replays like data. */
@@ -81,7 +84,8 @@ const TAG = {
   /** Flow-control message-count limit. Parallel to `WINDOW` but counted in messages, not bytes,
    *  to bound receiver dispatch CPU regardless of message size. */
   MSG_WINDOW: 0x39 as const,
-  /** Server → client: an initial channel a RECONCILED left out, attached at `lastSeq` or not within `connectTtl`. */
+  /** Server → client: an initial channel a RECONCILED left out, attached at `lastSeq` or not within
+   *  `CHANNEL_CONNECT_TTL_MS`. */
   ATTACH_RESULT: 0x3b as const,
 }
 

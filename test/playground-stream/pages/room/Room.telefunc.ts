@@ -36,6 +36,7 @@ export {
   onParticipantOverflow,
   onGetRoomOverflow,
   onRoomBurst,
+  onRoomFlood,
   onGetWatchedCount,
   onRoomRelease,
   onFailBackend,
@@ -416,7 +417,7 @@ async function onRoomWhileAway(roomId: string, memberId: string) {
 }
 
 /** Run by the test with `runServerAction()` while the page is away, once per absence: the room's meta changes, then a
- *  member's meta changes past the page's 512 KiB bufferLimit for text, which drops the room's change from its buffer. */
+ *  member's meta changes. */
 async function onRoomMetaWhileAway(roomId: string) {
   const srv = await (await Room.get(roomId)).join({ meta: { name: 'Srv' } })
   awayMembers.set(roomId, [srv])
@@ -441,8 +442,8 @@ async function onRoomLeaveWhileJoining(roomId: string) {
 
 const overflows = new Map<string, { leaves: string[]; refs: unknown[] }>()
 
-/** A speaker says 'before', then, run by the test while the page is offline, 1 MiB: more than the page's 512 KiB
- *  bufferLimit for text holds. */
+/** A speaker says 'before', then, run by the test while the page is offline, 2 MiB: more than its lane's `maxMemory` lets
+ *  the server hold. */
 async function onRoomOverflow(roomId: string) {
   const room = await Room.get(roomId)
   const speaker = await room.join({ meta: { name: 'Speaker' } })
@@ -450,21 +451,21 @@ async function onRoomOverflow(roomId: string) {
   room.onLeave((member, cause) => leaves.push(`${member.meta.name}:${cause.type}`))
   overflows.set(roomId, { leaves, refs: [room, speaker] })
   onServerAction(`roomOverflow_${roomId}`, async () => {
-    for (let n = 0; n < 8; n++) await speaker.publish(String(n).padEnd(128 * 1024))
+    for (let n = 0; n < 16; n++) await speaker.publish(String(n).padEnd(128 * 1024))
     cleanupState[`roomOverflow_${roomId}`] = 'done'
   })
   await speaker.publish('before')
 }
 
 /** A sender DMs 'before' to the page's server-joined participant `memberId`, then, run by the test while the page is
- *  offline, 1 MiB: more than the page's 512 KiB bufferLimit for text holds. */
+ *  offline, 2 MiB: more than its lane's `maxMemory` lets the server hold. */
 async function onParticipantOverflow(roomId: string, memberId: string) {
   const sender = await (await Room.get(roomId)).join({ meta: { name: 'Sender' } })
   awayMembers.set(roomId, [sender])
   onServerAction(`participantOverflow_${roomId}`, async () => {
-    // Sent at once: the DMs after the one its page's buffer drops reach the participant before it leaves.
+    // Sent at once: the DMs after the one that closes its channel reach the participant before it leaves.
     await Promise.all(
-      Array.from({ length: 8 }, (_, n) => sender.send(memberId, String(n).padEnd(128 * 1024)).catch(() => {})),
+      Array.from({ length: 16 }, (_, n) => sender.send(memberId, String(n).padEnd(128 * 1024)).catch(() => {})),
     )
     cleanupState[`participantOverflow_${roomId}`] = 'done'
   })
@@ -473,6 +474,13 @@ async function onParticipantOverflow(roomId: string, memberId: string) {
 
 async function onGetRoomOverflow(roomId: string) {
   return overflows.get(roomId)!.leaves
+}
+
+/** A speaker publishes `count` numbered messages of `size` bytes in one go, faster than a wire takes them. */
+async function onRoomFlood(roomId: string, count: number, size: number) {
+  const speaker = await (await Room.get(roomId)).join({ meta: { name: 'Speaker' } })
+  awayMembers.set(roomId, [speaker])
+  await Promise.all(Array.from({ length: count }, (_, n) => speaker.publish(String(n).padEnd(size))))
 }
 
 /** A server member publishes `count` messages of `size` bytes, each awaited. */
@@ -1144,9 +1152,9 @@ async function onStopChurn(roomId: string) {
   return await churning.get(roomId)!()
 }
 
-/** A view subscribes and a member publishes `count` messages of `bytes` bytes in the same turn, the last past the
- *  4,096-byte bufferLimit of the lane that runs it: Redis's SUBSCRIBE round trip keeps the view's new subscription short
- *  of ready, so the commits wait until it is. */
+/** A view subscribes and a member publishes `count` messages of `bytes` bytes in the same turn, the last past the 2 MiB a
+ *  new subscription holds: Redis's SUBSCRIBE round trip keeps the view's new subscription short of ready, so the commits
+ *  wait until it is. */
 async function onPublishWhileEstablishing(roomId: string, count: number, bytes: number) {
   const me = await Room.join(roomId, { meta: { name: 'Me' } })
   const room = await Room.get(roomId)

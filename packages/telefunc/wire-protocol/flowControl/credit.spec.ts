@@ -57,8 +57,8 @@ function makeFlow() {
     receive: new ReceiveCredit({ owner: emit, selfTime }),
   }
   // Fitted to the default replay buffers, which allow the largest window either way.
-  flow.send.fitReplay(CREDIT_WINDOW_MAX_BYTES)
-  flow.receive.fitReplay(CREDIT_WINDOW_MAX_BYTES)
+  flow.send.capWindow(CREDIT_WINDOW_MAX_BYTES)
+  flow.receive.capWindow(CREDIT_WINDOW_MAX_BYTES)
   return { emit, flow }
 }
 /** A channel's credit, both ways. */

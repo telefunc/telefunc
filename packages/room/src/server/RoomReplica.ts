@@ -7,7 +7,7 @@ import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { getRoomPlane } from '../backend/plane.js'
 import type { LaneId } from '../backend/contract.js'
-import { encodePublish, hostLocal, type OrderingInfo } from 'telefunc/__internal'
+import { publishBody, hostLocal, type OrderingInfo, type PublishBody } from 'telefunc/__internal'
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { ROOM_MEMBER_TRACKS_MAX } from '../shared/constants.js'
 import { DemandExchange } from './lanes/DemandExchange.js'
@@ -38,7 +38,7 @@ import type { LaneHolder, ReplayHold, TextWantsChange } from './lifecycle/replay
 import { type MetaMirror, type RoomHandle, ServerRoom } from './room.js'
 import { RosterStream } from './lifecycle/RosterStream.js'
 import { toggle } from '../utils/sets.js'
-import { MemberMessageTexts, type RoomStub, unorderedEventText } from './RoomStub.js'
+import { MemberMessageBodies, type RoomStub, unorderedEventBody } from './RoomStub.js'
 import { LanePlan, type LaneDelivery, type LaneEvent, type LanePlanOwner } from './lanes/LanePlan.js'
 import { RoomHeartbeat } from './lifecycle/RoomHeartbeat.js'
 assertIsNotBrowser()
@@ -283,14 +283,14 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
    *  `carried` is given, else as applied. A leave reaches them from `onMemberLeft`, whatever applied it, and an update
    *  as each one it let apply, in seq order. A failover's rewind of the control lane, and of the meta cells, which
    *  share its slot, makes the view forget its meta seqs. */
-  applyControl(event: PresenceEvent | AuthorityChange, carried?: () => string): void {
+  applyControl(event: PresenceEvent | AuthorityChange, carried?: () => PublishBody): void {
     if (event.__r === 'rewound') {
       this.model.forgetMetaSeqs()
       for (const mirror of this.metaMirrors) mirror.rewound()
       for (const stub of this.stubs) stub.relayEvent({ __r: 'rewound' })
       return
     }
-    const relay = () => this.relayControl(event, carried ?? (() => unorderedEventText(event)))
+    const relay = () => this.relayControl(event, carried ?? (() => unorderedEventBody(event)))
     switch (event.__r) {
       case 'join':
         if (!this.model.applyJoin(joinedMember(event))) return
@@ -305,7 +305,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
         return
       case 'update':
         for (const applied of this.model.applyRoomUpdate(event)) {
-          this.relayControl(applied, () => unorderedEventText(applied))
+          this.relayControl(applied, () => unorderedEventBody(applied))
         }
         // An update ahead of one before it waits for it, which a read repairs if it never arrives.
         if (this.model.metaWaiting) this.authority.metaWaiting()
@@ -435,22 +435,22 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.authority.controlDelivered(info.seq)
     const ctrl = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
     if (ctrl.__r === 'demand-ask') return this.demandExchange.onAsk(ctrl)
-    this.applyControl(ctrl, () => encodePublish(serialized, info))
+    this.applyControl(ctrl, () => publishBody(serialized, info))
   }
 
   private onTextData(serialized: string, info: OrderingInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope | Extract<RoomEnvelope, { __r: 'announce' }>
     if (envelope.__r === 'announce') {
       for (const handle of this.receivers) handle.local.relayAnnouncement(envelope.data, info)
-      const wireText = encodePublish(serialized, info)
-      for (const stub of this.stubs) stub.relayAnnouncement(wireText, info)
+      const body = publishBody(serialized, info)
+      for (const stub of this.stubs) stub.relayAnnouncement(body, info)
       return
     }
     this.applyStamp(envelope.from, envelope)
     for (const handle of this.receivers) handle.relayData(serialized, envelope, info)
     if (this.stubs.size === 0) return
-    const texts = new MemberMessageTexts(serialized, info, envelope)
-    for (const stub of this.stubs) stub.relayText(serialized, texts, envelope.from, info)
+    const bodies = new MemberMessageBodies(serialized, info, envelope)
+    for (const stub of this.stubs) stub.relayText(serialized, bodies, envelope.from, info)
   }
 
   private onBinary(framed: Uint8Array, info: OrderingInfo): void {
@@ -458,8 +458,8 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     assert(unframed)
     for (const handle of this.receivers) handle.local.relayBinary(unframed, info)
     if (this.stubs.size === 0) return
-    const wireData = encodePublish(framed, info)
-    for (const stub of this.stubs) stub.relayBinary(wireData, unframed.from, unframed.track, info)
+    const body = publishBody(framed, info)
+    for (const stub of this.stubs) stub.relayBinary(body, unframed.from, unframed.track, info)
   }
 
   /** A DM for a member a handle here owns, routed to that handle. */
@@ -494,13 +494,13 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     void dropDmReply(this.id, this.incarnation.inc, envelope.to, envelope.ackId).catch(reportRoomError)
   }
 
-  private relayControl(event: PresenceEvent, wireText: () => string): void {
+  private relayControl(event: PresenceEvent, carried: () => PublishBody): void {
     if (this.stubs.size === 0) return
-    const text = wireText()
+    const body = carried()
     const hiddenMember = hiddenMemberOf(event)
     // Each attach sends the roster and the room's meta again, which carry every event but the close.
     const opts = { resentOnAttach: event.__r !== 'closed' }
-    for (const stub of this.stubs) stub.relayControl(text, hiddenMember, opts)
+    for (const stub of this.stubs) stub.relayControl(body, hiddenMember, opts)
   }
 
   /** A local participant takes each update its member's meta takes here. */
@@ -526,7 +526,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     if (hidden !== null) {
       const leave: Extract<PresenceEvent, { __r: 'leave' }> = { __r: 'leave', id, ...leaveCauseToWire(cause) }
       if (hidden) leave.hidden = true
-      this.relayControl(leave, () => unorderedEventText(leave))
+      this.relayControl(leave, () => unorderedEventBody(leave))
     }
     for (const stub of this.stubs) {
       stub.forgetMember(id)

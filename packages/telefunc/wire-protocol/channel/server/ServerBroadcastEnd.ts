@@ -4,9 +4,12 @@ export type { BroadcastEndOwner }
 import { ServerChannel } from './ServerChannel.js'
 import { assert } from '../../../utils/assert.js'
 import type { IndexedPeer } from './IndexedPeer.js'
+import type { MemoryHolder } from './channelMemory.js'
+import type { PublishBody } from './PublishBody.js'
+import { CHANNEL_HOLD_MAX_BYTES, CHANNEL_RECONNECT_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
 import { ChannelOverflowError, isChannelOverflowError } from '../channelErrors.js'
 import { isShieldValidationError } from '../../../shared/ShieldValidationError.js'
-import { ACK_STATUS, ERROR_REASON, encode } from '../../wire/frame.js'
+import { ACK_STATUS, ERROR_REASON } from '../../wire/frame.js'
 import type { BroadcastKind, AttachState } from '../../wire/payloads.js'
 
 /** What a page's publishes, subscriptions and attaches go to. */
@@ -18,12 +21,18 @@ type BroadcastEndOwner = {
   _onPageSubscription?(kind: BroadcastKind, on: boolean): void
   /** Each attach of the page while the channel is open, after the page's subscriptions applied. */
   _onPageAttach?(): void
+  /** Its page fell behind and misses its oldest publishes. An owner without this keeps its page whole instead: past what
+   *  the server holds for it, its channel closes. */
+  _onPublishesMissed?(): void
 }
 
 /** The server end of a page's `ClientBroadcast`: a channel to that page, which also takes the page's publishes and
  *  subscriptions, and delivers publishes to it. */
-class ServerBroadcastEnd extends ServerChannel {
+class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   private owner: BroadcastEndOwner | null = null
+  /** The page's channel on the wire it last attached on: a publish while the page is away joins the replay through it,
+   *  as one a silently dead wire lost does. */
+  private lastPeer: IndexedPeer | null = null
 
   setOwner(owner: BroadcastEndOwner): void {
     this.owner = owner
@@ -48,51 +57,68 @@ class ServerBroadcastEnd extends ServerChannel {
     return this.lifecycle.handleCallbackError(err)
   }
 
-  /** A PUBLISH frame to its page, never refused. One `resentOnAttach`, which the owner sends again at each attach, may
-   *  be dropped while the page is away without leaving it a gap. */
-  deliver(frame: string, opts?: { resentOnAttach?: boolean }): void {
-    this.deliverOrHold(frame, opts?.resentOnAttach !== true)
+  /** A publish to its page, never refused. One `resentOnAttach`, which the owner sends again at each attach, isn't held
+   *  while the page is away. Its listeners or admitting its body can have ended the channel by now. */
+  deliver(body: PublishBody, opts?: { resentOnAttach?: boolean }): void {
+    if (this._phase === 'ended' || (this.peer === null && opts?.resentOnAttach)) return
+    if (this.lastPeer) this.lastPeer.sendPublish(body)
+    else this.offlineBuffer.pushPublish(body.frame)
+    const share = this.share()
+    if (this.heldBytes > share) this.shed(share)
   }
 
-  deliverBinary(frame: Uint8Array): void {
-    this.deliverOrHold(frame, true)
+  /** What it may hold: 60 s of what its page takes, within what any channel may. */
+  private share(): number {
+    const perMs = this.peer?.sender.queue.drainRate() ?? 0
+    if (perMs === 0) return CHANNEL_HOLD_MAX_BYTES
+    return Math.min(CHANNEL_HOLD_MAX_BYTES, Math.max(CREDIT_WINDOW_MAX_BYTES, perMs * CHANNEL_RECONNECT_TIMEOUT_MS))
   }
 
-  /** Buffered while its page is away, where dropping a `gap` frame, which its page doesn't get again as it attaches,
-   *  lets the page go. */
-  private deliverOrHold(frame: string | Uint8Array, gap: boolean): void {
-    const binary = typeof frame !== 'string'
-    const peer = this.peer
-    if (peer === null) {
-      if (binary) this.offlineBuffer.pushPublishBinary(frame, gap)
-      else this.offlineBuffer.pushPublish(frame, gap)
-      if (this.offlineBuffer.droppedGap) {
-        const limit = binary ? 'bufferLimitBinary' : 'bufferLimit'
-        this.endWithError(
-          ERROR_REASON.OVERFLOW,
-          new ChannelOverflowError(
-            `Channel closed: more was sent to its client while it was offline than config.channel.${limit} lets ` +
-              `the server hold`,
-          ),
-        )
-      }
-      return
+  /** How many of its newest publishes no wire has: all of them while it has no wire. */
+  private unhanded(): number {
+    const { peer } = this
+    return peer ? peer.sender.queue.waitingPublishes(peer.index) : Number.POSITIVE_INFINITY
+  }
+
+  /** Its newest publish, where no wire has that yet. */
+  get newestUnhanded(): PublishBody | undefined {
+    if (this._phase === 'ended' || !this._replayBuffer || this.unhanded() === 0) return undefined
+    return this._replayBuffer.newestPublish()
+  }
+
+  /** `MemoryHolder`: its oldest publishes no wire has go, down to `toBytes`, and its page sees the jump in `info.seq`. Above
+   *  0 the newest stays, and at 0, where not even that fits, the channel ends: no later message would show the page. Where
+   *  the page can't take a jump, the owner has no `_onPublishesMissed`, and the channel ends at once: what the page got
+   *  has no hole. */
+  shed(toBytes: number): void {
+    const replay = this._replayBuffer
+    if (this._phase === 'ended' || !replay) return
+    assert(this.owner)
+    const level = this.owner._onPublishesMissed ? toBytes : 0
+    const dropped = replay.dropOldestPublishes(level, this.unhanded())
+    if (dropped > 0) {
+      this.peer?.sender.queue.dropWaitingPublishes(this.peer.index, dropped)
+      this.owner._onPublishesMissed?.()
     }
-    if (binary) peer.sendSequenced(encode.publishBinary, frame)
-    else peer.sendSequenced(encode.publish, frame)
-  }
-
-  /** A publish can't be awaited per page, so a broadcast's page gets a quarter of the largest window past credit, not
-   *  what was published to it: a page that stops reading has its wire cut, and reconnects. */
-  protected override pastCreditAllowance(): number {
-    return this.sendCredit.peerByteWindowMax / 4
+    if (level === 0) {
+      this.endWithError(
+        ERROR_REASON.OVERFLOW,
+        new ChannelOverflowError('Closed: its client fell behind what the server can hold for it'),
+      )
+    }
   }
 
   override _attachPeer(peer: IndexedPeer, state?: AttachState): void {
+    this.lastPeer = peer
     super._attachPeer(peer, state)
     if (this.peer !== peer || this.isClosed) return
     assert(this.owner)
     this.owner._onPageAttach?.()
+  }
+
+  protected override shutdown(err?: Error, options?: { pageGone?: boolean }): void {
+    this.lastPeer = null
+    super.shutdown(err, options)
   }
 
   override _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {

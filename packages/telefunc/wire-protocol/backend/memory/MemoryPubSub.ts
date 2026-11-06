@@ -4,7 +4,7 @@ export type { MemoryAttemptOwner, Subscribers }
 import { Fifo } from '../../../utils/Fifo.js'
 import { isCloudflareWorkers } from '../../../utils/isCloudflareWorkers.js'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
-import { getServerConfig } from '../../../node/server/serverConfig.js'
+import { CHANNEL_HOLD_MAX_BYTES } from '../../constants.js'
 import { ChannelOverflowError } from '../../channel/channelErrors.js'
 import { HELD_SEND_OVERHEAD_BYTES } from '../../channel/server/ServerChannelBuffer.js'
 import { DriverAttempt, type BackendPayload, type BackendReceiver } from '../driver.js'
@@ -107,8 +107,8 @@ class MemoryPubSub {
   private operationsSinceTurn = 0
   /** Deliveries a microtask is yet to queue. */
   private queuing = 0
-  /** What waits to be delivered: at most `maxPendingBytes` and one message, since a publish outside a listener is never
-   *  refused. */
+  /** What waits to be delivered: at most `CHANNEL_HOLD_MAX_BYTES` and one message, since a publish outside a listener is
+   *  never refused. */
   private waitingBytes = 0
 
   constructor({ operationsBetweenTurns }: MemoryPubSubOptions) {
@@ -136,9 +136,9 @@ class MemoryPubSub {
     owner?.released(key)
   }
 
-  /** Delivers `payload` to `targets` at once while nothing is queued; else queues it, or, past `maxPendingBytes`,
-   *  rejects it from a listener and delivers what waits from elsewhere. `takeOrdering` runs only for a publish that goes
-   *  on. */
+  /** Delivers `payload` to `targets` at once while nothing is queued; else queues it, or, past
+   *  `CHANNEL_HOLD_MAX_BYTES`, rejects it from a listener and delivers what waits from elsewhere. `takeOrdering` runs only
+   *  for a publish that goes on. */
   publish(
     targets: readonly BackendReceiver[],
     payload: BackendPayload,
@@ -158,11 +158,11 @@ class MemoryPubSub {
     const isText = typeof payload === 'string'
     const size = (isText ? utf8ByteLength(payload) : payload.byteLength) + HELD_SEND_OVERHEAD_BYTES
     // One message alone goes through whatever its size.
-    if (this.waitingBytes > 0 && this.waitingBytes + size > getServerConfig().channel.maxPendingBytes) {
+    if (this.waitingBytes > 0 && this.waitingBytes + size > CHANNEL_HOLD_MAX_BYTES) {
       if (this.deliveries.isDelivering) {
         return Promise.reject(
           new ChannelOverflowError(
-            'Publish rejected: publishes waiting to be delivered exceeded config.channel.maxPendingBytes; raise the setting or publish less from the listener',
+            `Publish rejected: publishes waiting to be delivered exceeded ${CHANNEL_HOLD_MAX_BYTES} bytes; publish less from the listener`,
           ),
         )
       }

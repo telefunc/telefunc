@@ -340,6 +340,8 @@ me.onLeave((cause) => {
 })
 ```
 
+A page that falls behind what the server can hold for it gets `'disconnected'` too: it gets everything up to that point in order, so it never sees a room with messages or members missing.
+
 
 ## Run a game loop or a bot on the server
 

@@ -53,9 +53,6 @@ type RoomSnapshotMetadata = {
   count: number
   /** How many meta writes `meta` reflects, which orders later updates. */
   metaSeq: number
-  /** The server's `config.channel.bufferLimit`, which bounds the DMs a participant holds before its first
-   *  `listen()`. */
-  bufferLimit: number
   maxFrameBytes?: number
 }
 
@@ -70,8 +67,6 @@ type ParticipantStubMetadata = {
   meta: ParticipantMeta
   selfDelivery: boolean
   identity: string | null
-  /** As `RoomSnapshotMetadata.bufferLimit`. */
-  bufferLimit: number
   maxFrameBytes?: number
 }
 

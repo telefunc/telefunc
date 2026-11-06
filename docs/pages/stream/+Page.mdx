@@ -67,7 +67,7 @@ import { TelefuncStreamBeta } from '../../components'
 
 1. <Link href="#room"><code>Room</code></Link>: multi-party rooms with presence — who's connected, join/leave events, per-member streams.
 
-> A single telefunction can [mix primitives](https://gist.github.com/brillout/155c8eb4cbaa043bc52e96c0c2ed7086) (generators, channels, promises, ...) side by side, each resolving independently.
+> A single telefunction can [mix primitives](https://gist.github.com/brillout/155c8eb4cbaa043bc52e96c0c2ed7086) (generators, channels, promises, ...) side by side.
 
 #### Integrations
 
@@ -80,7 +80,7 @@ import { TelefuncStreamBeta } from '../../components'
 
 ✅ **Runtime type validation** — automatically validates every value sent from the client to the server <Link href="/shield#typescript-automatic">against your TypeScript types</Link> (no need for Zod).  
 ✅ **Transport** — automatically picks the most performant available <Link href="/transport">transport (HTTP, SSE, WebSocket)</Link>.  
-✅ **Backpressure** — <Link href="/channel#backpressure">automatic backpressure</Link> when the network is the bottleneck, and for each returned stream on its own <Link href="/transport">where the page can reach the server holding it</Link>: one the page isn't reading stops its producer while the others keep flowing.  
+✅ **Backpressure** — <Link href="/channel#backpressure">automatic backpressure</Link> when the network is the bottleneck.  
 ✅ **Reconnection** — <Link href="/channel#reconnection">automatic recovery</Link> from network issues.  
 
 
@@ -303,7 +303,15 @@ while (true) {
 
 > You can also return a `File` or `Blob` instead, see: <Link href="/file-download" />.
 
-> If a call returns several streams, the client holds the data of a stream your code isn't reading until your code reads or cancels that stream.
+> If a call returns several streams, what one does to the others depends on the <Link href="/transport">stream transport</Link>.
+>
+> By default (`'binary-inline'`, on Node and on Cloudflare alike), and with `'sse-inline'`, the streams share one HTTP response:
+> - Read them concurrently: a stream left unread past 1 MiB stops the others until your code reads or cancels it.
+> - Cancelling one stops it on the client only: on the server it keeps producing, and its `cancel()` doesn't run, until the call's other streams are finished or cancelled too.
+>
+> With `config.stream.transport = 'channel'`, each stream flows on its own:
+> - A stream left unread stops only itself, and the others keep going.
+> - Cancelling one stops it on the server too: it stops producing and its `cancel()` runs right away, while the others keep going. <Link href="/onClose">`context.onClose()`</Link> still waits for all of them.
 
 
 #### Client → server

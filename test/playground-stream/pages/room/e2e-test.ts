@@ -4,7 +4,7 @@ export {
   testRoomMetaReads,
   testRoomLimits,
   testRoomAckTimeout,
-  testRoomSmallBuffer,
+  testRoomSmallMemory,
   testRoomPublishHold,
   testRoomLongWaits,
   testRoomRedisSubscriberDropped,
@@ -199,6 +199,15 @@ async function openChat(chatId: string, name: string, how: 'join' | 'sign-in' | 
 }
 
 function testRoom() {
+  testRoomScenario<{ first: string; outcomes: string[]; got: string[] }>(
+    'dm-overflow',
+    'room: DMs to a page before its first listen() are held within 2 MiB and delivered on listen(); past it the oldest is dropped and its acknowledged send rejects',
+    (r) => {
+      expect(r.first).toBe('rejected')
+      expect(r.outcomes).deep.equal(['rejected', 'answered', 'answered'])
+      expect(r.got).deep.equal(['2', '3'])
+    },
+  )
   testRoomScenario<{
     unchanged: boolean
     received: string[]
@@ -1197,7 +1206,7 @@ function testRoom() {
       })
     })
   })
-  test("room: a page back from offline, twice, gets its room's meta each time, though its room sent it more meanwhile than bufferLimit holds", async () => {
+  test("room: a page back from offline, twice, gets its room's meta each time, as an attach sends it again", async () => {
     if (!canCutWire()) return
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-meta-away')
@@ -1218,53 +1227,6 @@ function testRoom() {
         expect(await getResult('#room-result')).deep.equal({ roomId, topic: `away-${absence}`, filler: `${absence}` })
       })
     }
-  })
-  test('room: a page offline while its room sent it more than bufferLimit holds is let go at its reconnect: its view closes and its member leaves, with no gap delivered', async () => {
-    if (!canCutWire()) return
-    await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-overflow')
-    let roomId = ''
-    await autoRetry(async () => {
-      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
-      expect(roomId).match(/^e2e-overflow:/)
-    })
-    await page.context().setOffline(true)
-    await cutWire()
-    await runServerAction(`roomOverflow_${roomId}`)
-    await autoRetry(async () => {
-      expect((await getCleanupState())[`roomOverflow_${roomId}`]).toBe('done')
-    })
-    await page.context().setOffline(false)
-    await autoRetry(async () => {
-      expect(await getResult('#room-result')).deep.equal({
-        roomId,
-        seen: ['before'],
-        myCause: { type: 'disconnected' },
-        closed: true,
-        isClosed: true,
-        leaves: ['Me:disconnected'],
-      })
-    })
-  })
-  test('room: a page offline while its server-joined participant was sent more than bufferLimit holds is let go at its reconnect: its participant leaves, with no gap delivered', async () => {
-    if (!canCutWire()) return
-    await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-participant-overflow')
-    let roomId = ''
-    await autoRetry(async () => {
-      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
-      expect(roomId).match(/^e2e-participant-overflow:/)
-    })
-    await page.context().setOffline(true)
-    await cutWire()
-    await runServerAction(`participantOverflow_${roomId}`)
-    await autoRetry(async () => {
-      expect((await getCleanupState())[`participantOverflow_${roomId}`]).toBe('done')
-    })
-    await page.context().setOffline(false)
-    await autoRetry(async () => {
-      expect(await getResult('#room-result')).deep.equal({ roomId, got: ['before'], myCause: { type: 'disconnected' } })
-    })
   })
   test("room: on a 1 Mbit/s link, a page gets 640 KB of its room's messages and publishes 640 KB without reconnecting", async () => {
     await navigate(`${getServerUrl()}/room`)
@@ -1420,24 +1382,71 @@ function testRoomAckTimeout() {
   })
 }
 
-/** Runs in a lane whose config.channel.bufferLimit is 4,096 bytes. */
-function testRoomSmallBuffer() {
-  testRoomScenario<{ first: string; outcomes: string[]; got: string[] }>(
-    'dm-overflow',
-    'room: DMs to a page before its first listen() are held within bufferLimit and delivered on listen(); past it the oldest is dropped and its acknowledged send rejects',
+/** Runs in a lane whose server has the smallest `maxMemory`, 2 MiB. */
+function testRoomSmallMemory() {
+  test('room: a page offline while its room sent it more than maxMemory holds is let go at its reconnect: its view closes and its member leaves, with no gap delivered', async () => {
+    if (!canCutWire()) return
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-overflow')
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-overflow:/)
+    })
+    await page.context().setOffline(true)
+    await cutWire()
+    await runServerAction(`roomOverflow_${roomId}`)
+    await autoRetry(async () => {
+      expect((await getCleanupState())[`roomOverflow_${roomId}`]).toBe('done')
+    })
+    await page.context().setOffline(false)
+    await autoRetry(async () => {
+      expect(await getResult('#room-result')).deep.equal({
+        roomId,
+        seen: ['before'],
+        myCause: { type: 'disconnected' },
+        closed: true,
+        isClosed: true,
+        leaves: ['Me:disconnected'],
+      })
+    })
+  })
+  test('room: a page offline while its server-joined participant was sent more than maxMemory holds is let go at its reconnect: its participant leaves, with no gap delivered', async () => {
+    if (!canCutWire()) return
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-participant-overflow')
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-participant-overflow:/)
+    })
+    await page.context().setOffline(true)
+    await cutWire()
+    await runServerAction(`participantOverflow_${roomId}`)
+    await autoRetry(async () => {
+      expect((await getCleanupState())[`participantOverflow_${roomId}`]).toBe('done')
+    })
+    await page.context().setOffline(false)
+    await autoRetry(async () => {
+      expect(await getResult('#room-result')).deep.equal({ roomId, got: ['before'], myCause: { type: 'disconnected' } })
+    })
+  })
+  testRoomScenario<{ seen: number[]; closed: boolean }>(
+    'behind',
+    'room: a connected page that falls behind what the server holds is let go, with no gap in what it got',
     (r) => {
-      expect(r.first).toBe('rejected')
-      expect(r.outcomes).deep.equal(['rejected', 'answered', 'answered'])
-      expect(r.got).deep.equal(['2', '3'])
+      expect(r.closed).toBe(true)
+      expect(r.seen.length).lessThan(16)
+      expect(r.seen).deep.equal(r.seen.map((_, n) => n))
     },
   )
 }
 
-/** Runs on Redis, in a lane whose config.channel.bufferLimit is 4,096 bytes. */
+/** Runs on Redis. */
 function testRoomPublishHold() {
   testRoomScenario<{ serverOutcomes: string[]; seen: string[] }>(
     'hold-overflow',
-    'room: publishes held while a subscription establishes fit bufferLimit by their bytes, and the one past it rejects with ChannelOverflowError',
+    'room: publishes held while a subscription establishes fit 2 MiB by their bytes, and the one past it rejects with ChannelOverflowError',
     (r) => {
       expect(r.serverOutcomes).deep.equal(['sent', 'sent', 'ChannelOverflowError'])
       expect(r.seen).deep.equal(['1', '2'])
@@ -1445,7 +1454,7 @@ function testRoomPublishHold() {
   )
   testRoomScenario<{ serverOutcomes: string[]; seen: string[] }>(
     'hold-alone',
-    'room: a publish held alone goes through past bufferLimit, and a second one rejects with ChannelOverflowError',
+    'room: a publish held alone goes through past 2 MiB, and a second one rejects with ChannelOverflowError',
     (r) => {
       expect(r.serverOutcomes).deep.equal(['sent', 'ChannelOverflowError'])
       expect(r.seen).deep.equal(['1'])

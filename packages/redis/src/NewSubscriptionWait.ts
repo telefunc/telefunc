@@ -1,19 +1,18 @@
 export { NewSubscriptionWait }
 export type { WaitingSend, WaitRule }
 
-import { ChannelOverflowError, createDeferred, getChannelLimits } from 'telefunc/__internal'
+import { ChannelOverflowError, createDeferred, PUBLISH_HOLD_BYTES } from 'telefunc/__internal'
 import type { RedisSubscriptions } from './RedisSubscriptions.js'
 
 /** How long a send waits for our own new subscriptions on its channels. */
 const SEND_WAIT_MS = 60_000
 
 /** A send waits while one of our subscriptions on `channels` is new, behind the waiting sends of its `queue` (what one
- *  seq counts). Its bytes count against `budget`'s `bufferLimit`. */
+ *  seq counts). Its bytes count against `budget`, within `PUBLISH_HOLD_BYTES`. */
 type WaitRule = {
   queue: string
   channels: readonly string[]
   budget: string
-  bufferLimit: 'bufferLimit' | 'bufferLimitBinary'
 }
 
 /** The sends of one queue, waiting for our new subscriptions on their channels. */
@@ -29,7 +28,7 @@ type NewSubscriptionWaitOptions = { subscriptions: RedisSubscriptions }
  * Our PUBLISH and COMMIT go out on the command connection, so one can reach Redis before the SUBSCRIBE our subscriber
  * connection sent just before it, and our own new subscription would miss it. So a send waits, at most SEND_WAIT_MS,
  * until our subscriptions on its channels were ready once, and a later send of its queue waits behind it. Each budget's
- * waiting payload bytes are bounded by `bufferLimit` (`bufferLimitBinary` for bytes), though one send alone waits
+ * waiting payload bytes are bounded by `PUBLISH_HOLD_BYTES`, though one send alone waits
  * whatever its size. When a subscription it waits for fails, as Redis refused its SUBSCRIBE, a send fails with that
  * reason rather than go out unseen by our own subscription; a send made after it has no subscription of ours to miss.
  */
@@ -50,17 +49,16 @@ class NewSubscriptionWait {
   }
 
   /** A send's turn, with its own copy of `payload`: the caller reuses its bytes. Null when it has nothing to wait for.
-   *  Throws `ChannelOverflowError` when its bytes would take those waiting past its buffer limit; the config is read
-   *  only with others waiting, as resolving it is costly. */
+   *  Throws `ChannelOverflowError` when its bytes would take those waiting past `PUBLISH_HOLD_BYTES`. */
   waitTurn<Payload extends string | Uint8Array>(rule: WaitRule, payload: Payload): WaitingSend<Payload> | null {
-    const { queue, channels, budget, bufferLimit } = rule
+    const { queue, channels, budget } = rule
     let wait = this.waits.get(queue)
     if (wait === undefined && this.subscriptions.establishingOn(channels).length === 0) return null
     // An empty send counts as 1 B, so a flood of them stays bounded.
     const bytes = Math.max(typeof payload === 'string' ? Buffer.byteLength(payload) : payload.byteLength, 1)
     const waiting = this.waitingBytes.get(budget) ?? 0
-    if (waiting > 0 && waiting + bytes > getChannelLimits()[bufferLimit]) {
-      throw new ChannelOverflowError(`Redis send waiting for a new subscription, past ${bufferLimit}`)
+    if (waiting > 0 && waiting + bytes > PUBLISH_HOLD_BYTES) {
+      throw new ChannelOverflowError(`Redis send waiting for a new subscription, past ${PUBLISH_HOLD_BYTES} bytes`)
     }
     wait ??= this.openWait(queue, channels)
     this.waits.set(queue, wait)

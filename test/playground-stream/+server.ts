@@ -18,7 +18,7 @@ import { installFailingBackend, addBackendFault } from './failing-backend'
 
 config.channel.pingInterval = 1000
 config.shield = true
-// A lane reaching a channel limit sets it low, e.g. `{"serverReplayBuffer":65536}`.
+// A lane reaching a channel limit sets it low, e.g. `{"maxMemory":2097152}`.
 if (process.env.CHANNEL_CONFIG) Object.assign(config.channel, JSON.parse(process.env.CHANNEL_CONFIG))
 
 const INST = process.env.INSTANCE_ID ?? '?'
@@ -84,10 +84,6 @@ console.log(
 )
 
 app.get('/api/cleanup-state', async (c) => c.json(await getCleanupStateSnapshot()))
-app.get('/api/stream-flows', (c) => {
-  const objects = (globalThis as Record<string, any>)._telefunc
-  return c.json({ count: objects?.['wire-protocol/values/server/response/StreamFlow.ts']?.flows.size ?? 0 })
-})
 app.post('/api/cleanup-state/reset', async (c) => {
   await resetCleanupState()
   return c.json({ ok: true })
@@ -467,6 +463,7 @@ app.post('/api/gc', async (c) => {
 })
 
 app.get('/api/heap-used', (c) => c.json({ heapUsed: process.memoryUsage().heapUsed }))
+app.get('/api/array-buffers', (c) => c.json({ arrayBuffers: process.memoryUsage().arrayBuffers }))
 
 app.post('/api/server-close-trigger', async (c) => {
   const channelId = c.req.query('channelId')

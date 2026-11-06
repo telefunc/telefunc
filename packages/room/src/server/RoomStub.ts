@@ -1,4 +1,4 @@
-export { RoomStub, RoomParticipantStub, ResponseRoomGrants, MemberMessageTexts, unorderedEventText }
+export { RoomStub, RoomParticipantStub, ResponseRoomGrants, MemberMessageBodies, unorderedEventBody }
 export type { RoomStubOptions, RoomParticipantStubOptions }
 
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -10,8 +10,9 @@ import {
   isProtocolViolationError,
   parsePeerText,
   ProtocolViolationError,
-  encodePublish,
-  getChannelLimits,
+  publishBody,
+  reconnectWindow,
+  type PublishBody,
   type BroadcastEndOwner,
   type BroadcastKind,
   type ServerBroadcastEnd,
@@ -87,16 +88,16 @@ class ResponseRoomGrants {
 }
 
 /** An event an instance originates, outside any lane's order. */
-function unorderedEventText(
+function unorderedEventBody(
   event: RoomCtrlEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent | ParticipantStubNotice,
-): string {
-  return encodePublish(stringify(event), null)
+): PublishBody {
+  return publishBody(stringify(event), { seq: 0, timestamp: Date.now() })
 }
 
 /** A member's message as its lane carried it, stamped, and without the stamp, each made once for every client. */
-class MemberMessageTexts {
-  private _stamped: string | null = null
-  private _unstamped: string | null = null
+class MemberMessageBodies {
+  private _stamped: PublishBody | null = null
+  private _unstamped: PublishBody | null = null
 
   private readonly serialized: string
   private readonly info: OrderingInfo
@@ -110,14 +111,14 @@ class MemberMessageTexts {
     this.envelope = envelope
   }
 
-  stamped(): string {
-    return (this._stamped ??= encodePublish(this.serialized, this.info))
+  stamped(): PublishBody {
+    return (this._stamped ??= publishBody(this.serialized, this.info))
   }
 
-  unstamped(): string {
+  unstamped(): PublishBody {
     if (this._unstamped !== null) return this._unstamped
     const { fromMeta, fromMetaSeq, fromIdentity, fromDisconnected, ...unstamped } = this.envelope
-    return (this._unstamped = encodePublish(stringify(unstamped), this.info))
+    return (this._unstamped = publishBody(stringify(unstamped), this.info))
   }
 }
 
@@ -352,7 +353,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     }
     this.members.add(id)
     if (!selfDelivery) this.selfSuppressed.add(id)
-    this.end.deliver(unorderedEventText({ __r: 'joined', reqId, id }))
+    this.end.deliver(unorderedEventBody({ __r: 'joined', reqId, id }))
   }
 
   forgetMember(id: string): void {
@@ -399,12 +400,12 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
 
   /** An event this instance originates for this client alone: state each attach sends again. */
   relayEvent(event: RoomRosterEvent | RoomDemandEvent | Extract<RoomCtrlEnvelope, { __r: 'update' }>): void {
-    this.end.deliver(unorderedEventText(event), { resentOnAttach: true })
+    this.end.deliver(unorderedEventBody(event), { resentOnAttach: true })
   }
 
-  /** `relayEvent` with the event's text already made, so one text can go to many clients. */
-  relayEventText(text: string): void {
-    this.end.deliver(text, { resentOnAttach: true })
+  /** `relayEvent` with the event's body already made, so one body can go to many clients. */
+  relayEventBody(body: PublishBody): void {
+    this.end.deliver(body, { resentOnAttach: true })
   }
 
   /** A roster part's members this client gets: `visible` itself unless the part holds a hidden member this client was
@@ -416,46 +417,46 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   }
 
   /** A hidden member's events reach only the clients that were handed it. */
-  relayControl(wireText: string, hiddenMember: string | null, opts: { resentOnAttach: boolean }): void {
-    if (hiddenMember === null || this.grantedHidden.has(hiddenMember)) this.end.deliver(wireText, opts)
+  relayControl(body: PublishBody, hiddenMember: string | null, opts: { resentOnAttach: boolean }): void {
+    if (hiddenMember === null || this.grantedHidden.has(hiddenMember)) this.end.deliver(body, opts)
   }
 
-  relayAnnouncement(wireText: string, ord: OrderingInfo): void {
-    if (this.announce) this.relayTextLive(ANNOUNCE_KEY, wireText, ord)
+  relayAnnouncement(body: PublishBody, ord: OrderingInfo): void {
+    if (this.announce) this.relayTextLive(ANNOUNCE_KEY, body, ord)
   }
 
-  relayText(serialized: string, texts: MemberMessageTexts, from: string, ord: OrderingInfo): void {
+  relayText(serialized: string, bodies: MemberMessageBodies, from: string, ord: OrderingInfo): void {
     if (this.tail !== null) {
       this.tail.push({ serialized, ord, from })
     } else if (this.wantsTextFrom(from)) {
       const replay = this.replay
       if (replay.holding) {
-        const relay = () => this.relayText(serialized, texts, from, ord)
+        const relay = () => this.relayText(serialized, bodies, from, ord)
         if (replay.held(from, null, heldTextWeight(serialized), relay)) return
       }
-      this.relayTextLive(from, this.namesSender(from) ? texts.unstamped() : texts.stamped(), ord)
+      this.relayTextLive(from, this.namesSender(from) ? bodies.unstamped() : bodies.stamped(), ord)
     }
   }
 
-  relayBinary(wireData: Uint8Array, from: string, track: string, info: OrderingInfo): void {
+  relayBinary(body: PublishBody, from: string, track: string, info: OrderingInfo): void {
     if (!this.wantsBinary(from, track)) return
     const replay = this.replay
     if (
       replay.holding &&
-      replay.held(from, track, heldWeight(wireData), () => this.relayBinary(wireData, from, track, info))
+      replay.held(from, track, heldWeight(body.frame), () => this.relayBinary(body, from, track, info))
     ) {
       return
     }
-    if (replay.admitBinary(from, track, info)) this.end.deliverBinary(wireData)
+    if (replay.admitBinary(from, track, info)) this.end.deliver(body)
   }
 
   hold(change: BinaryWantChange | null): ReplayHold {
     return this.replay.hold(change)
   }
 
-  relayDm(texts: MemberMessageTexts, { from, fromMetaSeq, ackId }: RoomDmEnvelope): void {
+  relayDm(bodies: MemberMessageBodies, { from, fromMetaSeq, ackId }: RoomDmEnvelope): void {
     if (ackId) this.awaitDmReply(ackId, from)
-    this.end.deliver(fromMetaSeq !== undefined && this.namesSender(from) ? texts.unstamped() : texts.stamped())
+    this.end.deliver(fromMetaSeq !== undefined && this.namesSender(from) ? bodies.unstamped() : bodies.stamped())
   }
 
   /** Whether this client names `member` as this view does: it got the whole roster since it attached, and every event
@@ -467,17 +468,17 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   }
 
   emitRetainedText(event: RoomDataEnvelope, info: OrderingInfo, serialized: string, hold: ReplayHold): void {
-    if (this.replay.admitRetained(hold, event.from, null, info)) this.end.deliver(encodePublish(serialized, info))
+    if (this.replay.admitRetained(hold, event.from, null, info)) this.end.deliver(publishBody(serialized, info))
   }
 
   emitRetainedBinary(frame: BinaryFrame, info: OrderingInfo, framed: Uint8Array, hold: ReplayHold): void {
     if (this.replay.admitRetained(hold, frame.from, frame.track, info)) {
-      this.end.deliverBinary(encodePublish(framed, info))
+      this.end.deliver(publishBody(framed, info))
     }
   }
 
-  private relayTextLive(key: string, wireText: string, ord: OrderingInfo): void {
-    if (this.replay.admit(key, ord)) this.end.deliver(wireText)
+  private relayTextLive(key: string, body: PublishBody, ord: OrderingInfo): void {
+    if (this.replay.admit(key, ord)) this.end.deliver(body)
   }
 
   // Ack-DM correlations
@@ -514,7 +515,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     this.tail = null
     for (const { serialized, ord, from } of held) {
       if (!this.wantsTextFrom(from)) continue
-      this.relayTextLive(from, encodePublish(serialized, ord), ord)
+      this.relayTextLive(from, publishBody(serialized, ord), ord)
     }
   }
 
@@ -608,7 +609,7 @@ class RoomParticipantStub implements BroadcastEndOwner {
       left = true
       this.notify({ __r: 'left', ...leaveCauseToWire(cause) })
       // A client back while its channel still holds it gets its leave.
-      void this.end.close({ timeout: getChannelLimits().reconnectWindow }).catch(() => {})
+      void this.end.close({ timeout: reconnectWindow() }).catch(() => {})
     })
 
     this.end.onDisconnect(() => participant._setHolderConnected(false))
@@ -646,7 +647,7 @@ class RoomParticipantStub implements BroadcastEndOwner {
     if (this.end.isClosed) return
     // Each attach sends the meta and the demand again.
     const resentOnAttach = notice.__r === 'p-meta' || notice.__r === 'demand' || notice.__r === 'demand-state'
-    this.end.deliver(unorderedEventText(notice), { resentOnAttach })
+    this.end.deliver(unorderedEventBody(notice), { resentOnAttach })
   }
 }
 

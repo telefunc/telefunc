@@ -14,7 +14,6 @@ import type {
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
-import { getChannelLimits } from '../../../node/server/serverConfig.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { ServerBroadcastEnd, type BroadcastEndOwner } from './ServerBroadcastEnd.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
@@ -25,11 +24,14 @@ import { followBroadcastPlane, getBroadcastPlane, unfollowBroadcastPlane } from 
 import type { BackendSubscription } from '../../backend/SharedSubscriptions.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
-import { assertUsage } from '../../../utils/assert.js'
+import { assertUsage, assertWarning } from '../../../utils/assert.js'
+import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+import { queueMemory } from './channelMemory.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { markHandled } from '../../../utils/markHandled.js'
 import { Listeners } from '../../../utils/Listeners.js'
-import { encodePublish, type WirePublishInfo } from '../../wire/publishInfo.js'
+import type { WirePublishInfo } from '../../wire/publishInfo.js'
+import { publishBody, type PublishBody } from './PublishBody.js'
 import type { BroadcastKind } from '../../wire/payloads.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { isAbort } from '../../../node/server/Abort.js'
@@ -56,6 +58,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
   private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
   private readonly routes: { [Kind in BroadcastKind]: RouteSubscription<Kind> }
   private readonly peerSubscriptions: Record<BroadcastKind, boolean> = { text: false, binary: false }
+  private missedWarned = false
 
   constructor(opts: { key: string }) {
     assertBroadcastKey(opts.key)
@@ -103,10 +106,8 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     return this._end.closed
   }
 
-  /** Holds what its loop falls behind by within the channel buffer limits a page's channel gets. */
   messages(options?: { signal?: AbortSignal }) {
-    const { bufferLimit, bufferLimitBinary } = getChannelLimits()
-    return broadcastMessages<ChannelData<T>>(this, { text: bufferLimit, binary: bufferLimitBinary }, options)
+    return broadcastMessages<ChannelData<T>>(this, options, queueMemory())
   }
 
   // Channel methods that don't apply to broadcast: throw at runtime.
@@ -179,7 +180,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
       }
     }
     if (!this.peerSubscriptions.text) return
-    this._end.deliver(encodePublish(serialized, rawInfo))
+    this._end.deliver(bodyOf(serialized, rawInfo))
   }
 
   private deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
@@ -194,7 +195,18 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
       }
     }
     if (!this.peerSubscriptions.binary) return
-    this._end.deliverBinary(encodePublish(data, rawInfo))
+    this._end.deliver(bodyOf(data, rawInfo))
+  }
+
+  /** @internal `BroadcastEndOwner`: its page is told by `info.seq`, and the server's log by this once. */
+  _onPublishesMissed(): void {
+    if (this.missedWarned) return
+    this.missedWarned = true
+    assertWarning(
+      false,
+      `A \`BroadcastChannel\` on key "${this.key}" fell behind what the server holds for its client, which misses its oldest messages: \`info.seq\` shows the gap on the client.`,
+      { onlyOnce: false },
+    )
   }
 
   // --- Internal broadcast helpers ---
@@ -295,6 +307,20 @@ function publishOnPlane<Kind extends BroadcastKind>(
 
 const BroadcastChannel = ServerBroadcast as {
   new <T = unknown>(opts: { key: string }): BroadcastChannel<T>
+}
+
+const globalObject = getGlobalObject('wire-protocol/channel/server/ServerBroadcast.ts', {
+  /** One delivery hands every subscriber on this server the same `info`, so they share the body the first one makes. */
+  publishBodies: new WeakMap<WirePublishInfo, PublishBody>(),
+})
+
+function bodyOf(payload: string | Uint8Array, info: WirePublishInfo): PublishBody {
+  let body = globalObject.publishBodies.get(info)
+  if (!body) {
+    body = publishBody(payload, info)
+    globalObject.publishBodies.set(info, body)
+  }
+  return body
 }
 
 const Broadcast = {
