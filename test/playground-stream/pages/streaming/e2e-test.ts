@@ -409,10 +409,15 @@ function testStreaming() {
     await autoRetry(async () => expect((await getResult('#streaming-result')).chunks).toBe(200_000), {
       timeout: 60_000,
     })
-    await forceServerGc()
-    const grown = (await serverHeapUsed()) - before
+    // What the page hasn't acknowledged yet stays held, a moment over SSE, so what counts is where it settles.
+    await autoRetry(
+      async () => {
+        await forceServerGc()
+        expect((await serverHeapUsed()) - before).lessThan(16 * 1024 * 1024)
+      },
+      { timeout: 10_000 },
+    )
     await page.click('#test-many-tiny-chunks-cancel')
-    expect(grown).lessThan(16 * 1024 * 1024)
   })
 
   test("streaming: transferring one returned stream's chunks to a Web Worker leaves the other stream's chunks intact", async () => {
