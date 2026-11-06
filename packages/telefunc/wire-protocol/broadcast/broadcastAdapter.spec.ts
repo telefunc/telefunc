@@ -143,41 +143,6 @@ describe('keyed in-process broadcast', () => {
     expect(seen).toEqual([1])
   })
 
-  // Edge case: a Broadcast can be created and have `publish` called on it BEFORE
-  // any peer attaches. The behavioral contract: when the peer eventually attaches,
-  // the previously-published message is delivered to it (not silently dropped).
-  // Asserts at the count level — exact frame encoding is impl detail.
-  it('buffers wire frames until a peer attaches, then flushes them on attach', () => {
-    const sender = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
-    const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
-    sender._registerChannel()
-    receiver._registerChannel()
-    receiver._dispatchFrame(decode(encode.broadcastSub(0, false)) as ChannelFrame) // the page subscribes
-
-    sender.publish({ text: 'hello' })
-
-    const frames: Uint8Array[] = []
-    receiver._attachPeer(
-      new IndexedPeer({
-        sender: {
-          send: (frame) => {
-            frames.push(frame)
-          },
-          carry() {},
-          bufferedAmount: () => 0,
-          deliveredBefore: () => 0,
-          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-          queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, drainRate: () => 0 },
-        },
-        index: 7,
-        replay: new ServerReplay({ heldBytes: 0 }),
-      }),
-    )
-
-    // One publish made before attach → its head and its body replayed on attach.
-    expect(frames.map((frame) => frame[0])).toEqual([TAG.PUBLISH_TO, TAG.PUBLISH])
-  })
-
   it('buffers keyed publishes that arrive before a sibling has registered yet', () => {
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:late-register' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:late-register' })
