@@ -87,6 +87,7 @@ import {
   onThrowingReceiver,
   onPublishLoop,
   onSubscriberDropped,
+  onPublishOverRedisLimit,
   onBusyLanes,
   onLanesAfterDrop,
   onLanesBeforeRewind,
@@ -888,6 +889,11 @@ function Room() {
       {scenario('subscriber-dropped', 'A dropped subscriber', 'Publish across it', async () => {
         const roomId = await createRoomId('subscriber-dropped')
         setResult(JSON.stringify(await onSubscriberDropped(roomId)))
+      })}
+
+      {scenario('over-redis-limit', 'A publish over Redis limit', 'Publish it', async () => {
+        const roomId = await createRoomId('over-redis-limit')
+        setResult(JSON.stringify(await onPublishOverRedisLimit(roomId)))
       })}
 
       {scenario('dropped-at-rest', 'A dropped subscriber at rest', 'Reports nothing', async () => {

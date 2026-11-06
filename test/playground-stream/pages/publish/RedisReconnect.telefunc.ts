@@ -1,5 +1,6 @@
 export {
   onBinaryBroadcastAcrossReconnect,
+  onBroadcastOverRedisLimit,
   onBroadcastPublishedDuringResume,
   onBroadcastSubscriberDropped,
   onRedisChannelDenied,
@@ -106,8 +107,26 @@ async function onBroadcastPublishedDuringResume() {
   }
 }
 
+/** The largest message Redis delivers, and past it by a byte, in bytes and in the bytes of a shorter text. */
+async function onBroadcastOverRedisLimit() {
+  const key = `room:over-limit:${crypto.randomUUID()}`
+  const largest = 28 * 1024 * 1024
+  const received: number[] = []
+  const unsubscribe = Broadcast.subscribeBinary(key, (bytes) => received.push(bytes.byteLength))
+  const refusal = (error: Error) => error.name
+  await Broadcast.publishBinary(key, new Uint8Array(largest))
+  const refused = await Promise.all([
+    Promise.resolve(Broadcast.publishBinary(key, new Uint8Array(largest + 1))).catch(refusal),
+    Promise.resolve(Broadcast.publish(key, 'é'.repeat(largest / 2))).catch(refusal),
+  ])
+  await Broadcast.publishBinary(key, new Uint8Array(1))
+  await receivedCount(received, 2)
+  unsubscribe()
+  return { refused, received }
+}
+
 /** Settles once `received` holds `count`, or a moment after it plainly won't. */
-async function receivedCount(received: string[], count: number) {
+async function receivedCount(received: unknown[], count: number) {
   for (let tries = 1; received.length < count && tries <= 40; tries++) await sleep(50)
 }
 

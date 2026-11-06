@@ -8,6 +8,7 @@ export {
   testRoomPublishHold,
   testRoomLongWaits,
   testRoomRedisSubscriberDropped,
+  testRoomRedisPublishLimit,
 }
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Response, WebSocket } from 'playwright-chromium'
@@ -1483,6 +1484,16 @@ function testRoomRedisSubscriberDropped() {
       expect(r.reported.sort()).deep.equal([commits, commits, messages, messages])
       expect(r.arrivedAfter).toBe(3)
       expectLog('Redis subscriber connection closed')
+    },
+  )
+}
+
+function testRoomRedisPublishLimit() {
+  testRoomScenario<{ refused: string }>(
+    'over-redis-limit',
+    'room: a publish larger than Redis delivers rejects',
+    (r) => {
+      expect(r).deep.equal({ refused: 'ChannelOverflowError' })
     },
   )
 }

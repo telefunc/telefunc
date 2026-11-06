@@ -1,4 +1,4 @@
-export { testRedisReconnect, testBroadcastRedisSubscriberDropped }
+export { testRedisReconnect, testBroadcastRedisSubscriberDropped, testBroadcastRedisPublishLimit }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult } from '../../e2e-utils'
@@ -31,6 +31,22 @@ function testRedisReconnect() {
     await autoRetry(
       async () => {
         expect(await getResult<number[]>('#redis-reconnect-result')).deep.equal([1, 2, 3])
+      },
+      { timeout: 10_000 },
+    )
+  })
+}
+
+function testBroadcastRedisPublishLimit() {
+  test('broadcast: a publish larger than Redis delivers rejects, by its bytes, and the largest one and the next arrive', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-redis-over-limit')
+    await autoRetry(
+      async () => {
+        expect(await getResult('#redis-over-limit-result')).deep.equal({
+          refused: ['ChannelOverflowError', 'ChannelOverflowError'],
+          received: [28 * 1024 * 1024, 1],
+        })
       },
       { timeout: 10_000 },
     )

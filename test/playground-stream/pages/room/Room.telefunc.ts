@@ -82,6 +82,7 @@ export {
   onThrowingReceiver,
   onPublishLoop,
   onSubscriberDropped,
+  onPublishOverRedisLimit,
   onBusyLanes,
   onLanesAfterDrop,
   onLanesBeforeRewind,
@@ -935,6 +936,12 @@ async function onSubscriberDropped(roomId: string) {
   roomConfig.onDeliveryLost = ({ roomId, reason }) =>
     console.error(`Room delivery handoff of '${roomId}' lost: ${reason}`)
   return { published: published.length, received, reported }
+}
+
+/** One byte more than the largest message Redis delivers. */
+async function onPublishOverRedisLimit(roomId: string) {
+  const me = await anyoneCanJoin(await Room.get(roomId)).join({ meta: { name: 'Publisher' } })
+  return { refused: await me.publishBinary(new Uint8Array(28 * 1024 * 1024 + 1)).catch((error: Error) => error.name) }
 }
 
 /** What a drop reports of this room: `onDeliveryLost` hears every room on the server, and another test's room may commit

@@ -49,6 +49,8 @@ To prefix Telefunc's Redis keys, pass `installRedis(redis, { prefix })`.
 
 Room keeps its state in Redis: use `maxmemory-policy noeviction`, as any other policy can close a room.
 
+A `publish()` or `publishBinary()` over 28 MiB rejects with `ChannelOverflowError`: at its default [output buffer limits](https://redis.io/docs/latest/develop/reference/clients/#output-buffer-limits), Redis closes the connection of a server it sends a larger message.
+
 ## Channels
 
 `Channel` is per-instance. Reconnects must land on the instance holding the channel's state, so multi-instance deployments need sticky sessions at the load balancer. See <Link href="/stream/scale" />.

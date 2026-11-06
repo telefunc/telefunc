@@ -3,6 +3,7 @@ export { RedisReconnect }
 import React, { useRef, useState } from 'react'
 import {
   onBinaryBroadcastAcrossReconnect,
+  onBroadcastOverRedisLimit,
   onBroadcastPublishedDuringResume,
   onBroadcastSubscriberDropped,
   onRedisChannelDenied,
@@ -15,6 +16,7 @@ function RedisReconnect() {
   const [firstBytes, setFirstBytes] = useState<number[]>([])
   const [dropped, setDropped] = useState<unknown>(null)
   const [duringResume, setDuringResume] = useState<unknown>(null)
+  const [overLimit, setOverLimit] = useState<unknown>(null)
   // A broadcast the page drops closes once garbage-collected.
   const roomRef = useRef<Awaited<ReturnType<typeof onBinaryBroadcastAcrossReconnect>> | null>(null)
 
@@ -44,6 +46,15 @@ function RedisReconnect() {
         onClick={async () => setDropped(await onBroadcastSubscriberDropped())}
       >
         Drop the server's Redis subscriber connection during publishes
+      </button>
+      <h2>A Publish Over Redis's Limit</h2>
+      <pre id="redis-over-limit-result">{JSON.stringify(overLimit)}</pre>
+      <button
+        type="button"
+        id="test-redis-over-limit"
+        onClick={async () => setOverLimit(await onBroadcastOverRedisLimit())}
+      >
+        Publish past the limit
       </button>
       <h2>A Publish While a Reconnected Subscription Reads Its Start</h2>
       <pre id="redis-during-resume-result">{JSON.stringify(duringResume)}</pre>
