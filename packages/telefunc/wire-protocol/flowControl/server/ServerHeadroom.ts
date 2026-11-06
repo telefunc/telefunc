@@ -1,6 +1,11 @@
 export { ServerHeadroom }
 
-import { WIRE_PIECES_ACK_BYTES, WIRE_SEND_AHEAD_MIN_BYTES, WIRE_SEND_AHEAD_ROUND_TRIPS } from '../../constants.js'
+import {
+  WIRE_PIECES_ACK_BYTES,
+  WIRE_QUEUE_DELAY_MS,
+  WIRE_SEND_AHEAD_MIN_BYTES,
+  WIRE_SEND_AHEAD_ROUND_TRIPS,
+} from '../../constants.js'
 import { DrainRate } from '../DrainRate.js'
 import { PieceRate } from '../PieceRate.js'
 import {
@@ -82,8 +87,9 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   headroom(at: number): number {
     const rate = this.drainRate()
     if (rate === 0) return Number.POSITIVE_INFINITY
-    const roundTrips = this.leastRtt === Number.POSITIVE_INFINITY ? 0 : WIRE_SEND_AHEAD_ROUND_TRIPS * this.leastRtt
-    return Math.max(WIRE_SEND_AHEAD_MIN_BYTES, rate * roundTrips) - this.pathHolds(at)
+    // On a slow link the least round trip still spans a whole frame's arrival, and what goes ahead is copied pieces.
+    const ahead = Math.min(WIRE_SEND_AHEAD_ROUND_TRIPS * this.leastRtt, WIRE_QUEUE_DELAY_MS)
+    return Math.max(WIRE_SEND_AHEAD_MIN_BYTES, rate * ahead) - this.pathHolds(at)
   }
 
   /** `PieceSenderOwner`: the path holds `bytes`; each dated part is dated apart, so a burst's first part measures the path. */

@@ -248,7 +248,7 @@ export const WIRE_SEND_ACK_MIN_BYTES = 2 * 1024
 export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024
 /** A server hands its socket data while its path holds less than the page takes in this many least round trips. */
 export const WIRE_SEND_AHEAD_ROUND_TRIPS = 4
-/** How long a page's data frame may wait in its wire's queues, as acknowledgements measure it, before it holds back. */
+/** How long a data frame may wait in its wire's queues, as acknowledgements measure it, before its sender holds back. */
 export const WIRE_QUEUE_DELAY_MS = 300
 /** The most a broadcast's `messages()` loop holds behind, and a Cloudflare bucket for a Durable Object starting up:
  *  publishes can't be awaited. */
