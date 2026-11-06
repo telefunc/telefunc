@@ -40,6 +40,7 @@ export {
   onChannelSlowUplink,
   onChannelOpenAnswer,
   onChannelOpenHello,
+  onChannelConfigChecks,
   onChannelBudgets,
   onChannelAwaitedFromOffline,
   onChannelOfflineBudgets,
@@ -662,15 +663,11 @@ async function onChannelHeldBinary() {
   return { channel: ch.client }
 }
 
-/** With a `maxPendingBytes` of 8 KiB, sends 100,000 empty messages of each kind to an unattached channel; counts
- *  rejections by error. */
+/** Sends 100,000 empty messages of each kind to an unattached channel; counts rejections by error. */
 async function onChannelUnattachedFlood() {
   const rejected: Record<'text' | 'binary', Record<string, number>> = { text: {}, binary: {} }
   for (const kind of ['text', 'binary'] as const) {
-    const original = config.channel
-    config.channel = { ...original, maxPendingBytes: 8192 }
     const ch = new Channel<never, string>()
-    config.channel = original
     const counts: Record<string, number> = {}
     for (let i = 0; i < 100_000; i++) {
       const send = kind === 'text' ? ch.send('') : ch.sendBinary(new Uint8Array(0))
@@ -924,30 +921,45 @@ async function onChannelAckOwnership() {
   return { channel: ch.client }
 }
 
+/** What each assignment `config.channel` refuses says, now that a channel ran; `null` for one it accepts. */
+async function onChannelConfigChecks() {
+  new Channel<never, never>().abort()
+  const assign = (channel: object) => {
+    try {
+      config.channel = { pingInterval: 1000, ...channel }
+      return null
+    } catch (err) {
+      return (err as Error).message
+    }
+  }
+  return {
+    same: assign({}),
+    changed: assign({ reconnectTimeout: 61_000 }),
+    reconnectTimeout: assign({ reconnectTimeout: 999 }),
+    pingInterval: assign({ pingInterval: 999 }),
+    maxPendingBytes: assign({ maxPendingBytes: 2 * 1024 * 1024 - 1 }),
+    removed: assign({ bufferLimit: 1 }),
+  }
+}
+
 async function onChannelBudgets() {
-  const original = config.channel
-  config.channel = { ...original, maxPendingBytes: 8192 }
   const bytes = new Channel<never, string>()
-  config.channel = original
   const refused = (err: Error) => {
     cleanupState[`budget_${bytes.id}`] ??= err.message
   }
   bytes.onOpen(() => {
     void bytes.send('x'.repeat(4 * 1024)).then(() => (cleanupState[`budget_${bytes.id}_credit`] = 'accepted'))
-    for (let i = 0; i < 1000; i++) void bytes.send('x'.repeat(1024)).catch(refused)
+    for (let i = 0; i < 6000; i++) void bytes.send('x'.repeat(1024)).catch(refused)
   })
   return { bytes: bytes.client }
 }
 
 /**
- * With a `maxPendingBytes` of 1 MiB, awaits a send of 1 KiB before the page attaches, one of 5 MiB, and one of 1 KiB.
+ * With a `maxPendingBytes` of 2 MiB, awaits a send of 1 KiB before the page attaches, one of 5 MiB, and one of 1 KiB.
  * cleanupState: awaitedFromOffline_<id> = for each send, `sent` or why it was refused
  */
 async function onChannelAwaitedFromOffline() {
-  const original = config.channel
-  config.channel = { ...original, maxPendingBytes: 1024 * 1024 }
   const ch = new Channel<never, string>()
-  config.channel = original
   void (async () => {
     const sends: string[] = []
     for (const bytes of [1024, 5 * 1024 * 1024, 1024]) {
@@ -966,14 +978,12 @@ async function onChannelAwaitedFromOffline() {
 /** One channel per kind of text, each sending as its first send what fits `maxPendingBytes` to the byte, and one per
  *  kind sending one byte more. cleanupState: atLimit_<kind>_<fits|over> = `accepted`, or why the send was refused. */
 async function onChannelAtLimit() {
-  // 4,096 is these 3,575 UTF-8 bytes, the two quotes around them, a frame's 7 bytes and a held send's 512.
+  // 2 MiB is these 2,096,631 UTF-8 bytes, the two quotes around them, a frame's 7 bytes and a held send's 512.
   const texts = {
-    twoBytes: `${'é'.repeat(1787)}x`,
-    threeBytes: `${'€'.repeat(1191)}xx`,
-    fourBytes: `${'😀'.repeat(893)}xxx`,
+    twoBytes: `${'é'.repeat(1_048_315)}x`,
+    threeBytes: '€'.repeat(698_877),
+    fourBytes: `${'😀'.repeat(524_157)}xxx`,
   }
-  const original = config.channel
-  config.channel = { ...original, maxPendingBytes: 4096 }
   const open = (name: string, text: string) => {
     const ch = new Channel<never, string>()
     ch.onOpen(() => {
@@ -989,7 +999,6 @@ async function onChannelAtLimit() {
     open(`${kind}_fits`, text),
     open(`${kind}_over`, `${text}x`),
   ])
-  config.channel = original
   return channels
 }
 
@@ -1004,12 +1013,9 @@ async function onChannelOwnBytes() {
 }
 
 async function onChannelOfflineBudgets() {
-  const original = config.channel
-  config.channel = { ...original, maxPendingBytes: 8192 }
   const ch = new Channel<never, string>()
-  config.channel = original
   // Sent before the page attaches: they wait in the channel's buffer until it does.
-  const sends = Array.from({ length: 3 }, () => ch.send('x'.repeat(3 * 1024), { ack: true }))
+  const sends = Array.from({ length: 3 }, () => ch.send('x'.repeat(800 * 1024), { ack: true }))
   void Promise.allSettled(sends).then((results) => {
     cleanupState[`offline_budget_${ch.id}`] = JSON.stringify(
       results.map((r) => (r.status === 'rejected' ? `${r.reason.name}: ${r.reason.message}` : 'answered')),

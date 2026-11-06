@@ -47,6 +47,7 @@ import {
   onChannelSlowUplink,
   onChannelOpenAnswer,
   onChannelOpenHello,
+  onChannelConfigChecks,
   onChannelBudgets,
   onChannelAwaitedFromOffline,
   onChannelAtLimit,
@@ -1821,6 +1822,16 @@ function ChannelDemo() {
             Test acknowledgement ownership
           </button>
           <output id="channel-ack-ownership-result" />
+          <button
+            id="channel-test-config-checks"
+            onClick={async () => {
+              const checks = await onChannelConfigChecks()
+              document.querySelector('#channel-config-checks-result')!.textContent = JSON.stringify(checks)
+            }}
+          >
+            Test what config.channel refuses
+          </button>
+          <output id="channel-config-checks-result" />
           <button id="channel-test-budgets" onClick={testBudgets}>
             Test send budgets
           </button>

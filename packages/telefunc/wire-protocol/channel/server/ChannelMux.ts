@@ -3,11 +3,10 @@ export type { WireEntry, ReconcileOutcome, ServerTransport, Wire }
 
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import { getAdapterMaxFrameBytes, getServerConfig, pingDeadlineOf } from '../../../node/server/serverConfig.js'
+import { getAdapterMaxFrameBytes, getChannelConfig, pingDeadlineOf } from '../../../node/server/serverConfig.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
-  CHANNEL_PING_INTERVAL_MIN_MS,
   CREDIT_MSG_WINDOW_MAX,
   CHANNEL_CONNECT_TTL_MS,
   CHANNEL_IDLE_TIMEOUT_MS,
@@ -884,12 +883,11 @@ class ChannelMux implements UpgradeStagesOwner {
 }
 
 function resolveMuxServerOptions(): MuxServerOptions {
-  const c = getServerConfig().channel
-  const pingInterval = Math.max(c.pingInterval, CHANNEL_PING_INTERVAL_MIN_MS)
+  const c = getChannelConfig()
   return {
     reconnectTimeout: c.reconnectTimeout,
     idleTimeout: Math.min(c.reconnectTimeout, CHANNEL_IDLE_TIMEOUT_MS),
-    pingInterval,
+    pingInterval: c.pingInterval,
     pingDeadline: pingDeadlineOf(c),
     creditWindow: creditWindowOf(c.maxPendingBytes),
     transports: c.transports,

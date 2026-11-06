@@ -207,6 +207,8 @@ export const SSE_RECONCILE_DEADLINE_MS = 10
 // ===== Channel transport defaults =====
 
 export const CHANNEL_RECONNECT_TIMEOUT_MS = 60_000
+/** Past the first retry, `CHANNEL_RECONNECT_INITIAL_DELAY_MS`, and a handshake. */
+export const CHANNEL_RECONNECT_TIMEOUT_MIN_MS = 1_000
 export const CHANNEL_IDLE_TIMEOUT_MS = 60_000
 export const CHANNEL_PING_INTERVAL_MS = 5_000
 export const CHANNEL_PING_INTERVAL_MIN_MS = 1_000

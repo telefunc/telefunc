@@ -13,7 +13,7 @@ import { isPromise } from '../../utils/isPromise.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { isCloudflareWorkers } from '../../utils/isCloudflareWorkers.js'
 import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
-import { getServerConfig } from '../../node/server/serverConfig.js'
+import { getChannelConfig } from '../../node/server/serverConfig.js'
 import { ChannelOverflowError } from '../channel/channelErrors.js'
 import { HELD_SEND_OVERHEAD_BYTES } from '../channel/server/ServerChannelBuffer.js'
 import type { WirePublishInfo } from '../wire/publishInfo.js'
@@ -201,7 +201,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     const isText = typeof data === 'string'
     const size = (isText ? utf8ByteLength(data) : data.byteLength) + HELD_SEND_OVERHEAD_BYTES
     // One message alone goes through whatever its size.
-    if (this.queuedBytes > 0 && this.queuedBytes + size > getServerConfig().channel.maxPendingBytes) {
+    if (this.queuedBytes > 0 && this.queuedBytes + size > getChannelConfig().maxPendingBytes) {
       if (this.delivering) {
         return Promise.reject(
           new ChannelOverflowError(

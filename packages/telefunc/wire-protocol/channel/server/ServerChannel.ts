@@ -55,7 +55,7 @@ import {
   type EntryCallback,
 } from './ServerChannelBuffer.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
-import { getServerConfig } from '../../../node/server/serverConfig.js'
+import { getChannelConfig } from '../../../node/server/serverConfig.js'
 import { assert, assertWarning } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/frame.js'
@@ -176,7 +176,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     this.sendCredit = new SendCredit({ owner, selfTime: this.selfTime })
     this.receiveCredit = new ReceiveCredit({ owner, selfTime: this.selfTime })
-    const c = getServerConfig().channel
+    const c = getChannelConfig()
     this.receiveCredit.capWindow(creditWindowOf(c.maxPendingBytes))
     this.sendCredit.capWindow(creditWindowOf(c.maxPendingBytes))
     this.maxPendingBytes = c.maxPendingBytes
@@ -422,7 +422,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // Allocate the replay buffer up-front: registration is the moment the channel
     // becomes addressable on the wire, so a peer can attach immediately after this
     // returns.
-    const c = getServerConfig().channel
+    const c = getChannelConfig()
     // All that its sends may get ahead of the page and what's in flight, so a lost wire loses none.
     this._replayBuffer = new ReplayBuffer(c.maxPendingBytes + creditWindowOf(c.maxPendingBytes))
     if (this._phase === 'ended') return // the mux lets an ended channel go

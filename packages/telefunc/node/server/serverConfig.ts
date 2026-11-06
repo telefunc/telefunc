@@ -5,6 +5,7 @@ export { enableChannelTransports }
 export { setAdapterMaxFrameBytes }
 export { getAdapterMaxFrameBytes }
 export { setRootFromVite }
+export { getChannelConfig }
 export { pingDeadlineOf }
 export { reconnectWindow }
 export type {
@@ -34,7 +35,9 @@ import {
   CHANNEL_MAX_PENDING_BYTES,
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
+  CHANNEL_RECONNECT_TIMEOUT_MIN_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
+  CREDIT_WINDOW_INITIAL_BYTES,
   DEFAULT_SERVER_CHANNEL_TRANSPORTS,
   DEFAULT_STREAM_TRANSPORT,
   parseStreamConfig,
@@ -170,6 +173,8 @@ const globalObject = getGlobalObject('serverConfig.ts', {
   adapterChannelTransports: new Set<ChannelTransports[number]>(),
   /** The largest frame the adapter's runtime takes, where that is less than the server reads. */
   adapterMaxFrameBytes: undefined as number | undefined,
+  /** A channel read `config.channel`, whose values each of its parts then relies on staying as they are. */
+  channelConfigInUse: false,
 })
 const configState = globalObject.config
 
@@ -284,27 +289,34 @@ function getServerConfig(): ConfigResolved {
     stream: {
       transport: configState.stream.transport || DEFAULT_STREAM_TRANSPORT,
     },
-    channel: {
-      transports: configState.channel.transports ?? [
-        ...DEFAULT_SERVER_CHANNEL_TRANSPORTS,
-        ...globalObject.adapterChannelTransports,
-      ],
-      reconnectTimeout: configState.channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
-      pingInterval: configState.channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
-      maxPendingBytes: configState.channel.maxPendingBytes ?? CHANNEL_MAX_PENDING_BYTES,
-    },
+    channel: resolveChannelConfig(configState.channel),
     extensions: configState.extensions,
+  }
+}
+
+function resolveChannelConfig(channel: ChannelConfigUser): ChannelConfigResolved {
+  return {
+    transports: channel.transports ?? [...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...globalObject.adapterChannelTransports],
+    reconnectTimeout: channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
+    pingInterval: channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
+    maxPendingBytes: channel.maxPendingBytes ?? CHANNEL_MAX_PENDING_BYTES,
   }
 }
 
 /** How long a wire may deliver nothing before it is taken for dead: two ping intervals, each of at least a second. */
 function pingDeadlineOf({ pingInterval }: Pick<ChannelConfigResolved, 'pingInterval'>): number {
-  return pingDeadline(Math.max(pingInterval, CHANNEL_PING_INTERVAL_MIN_MS))
+  return pingDeadline(pingInterval)
+}
+
+/** The settings a channel runs by, which can't change from here on. */
+function getChannelConfig(): ChannelConfigResolved {
+  globalObject.channelConfigInUse = true
+  return getServerConfig().channel
 }
 
 /** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
 function reconnectWindow(): number {
-  const c = getServerConfig().channel
+  const c = getChannelConfig()
   return Math.min(TIMER_DELAY_MAX_MS, pingDeadlineOf(c) + c.reconnectTimeout)
 }
 
@@ -432,23 +444,36 @@ function applyChannelConfig(val: unknown): void {
           Math.floor(TIMER_DELAY_MAX_MS / 2),
           'as its deadline, twice it, is at most the longest a timer waits',
         )
+        assertUsage(
+          value >= CHANNEL_PING_INTERVAL_MIN_MS,
+          `\`${configPath}\` should be at least ${CHANNEL_PING_INTERVAL_MIN_MS}: more pings than that flood the wire`,
+        )
         next[key] = value
         break
       case 'reconnectTimeout':
         assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
+        assertUsage(
+          value >= CHANNEL_RECONNECT_TIMEOUT_MIN_MS,
+          `\`${configPath}\` should be at least ${CHANNEL_RECONNECT_TIMEOUT_MIN_MS}: in less, no client can reconnect`,
+        )
         next[key] = value
         break
       case 'maxPendingBytes':
         assertUsage(
-          typeof value === 'number' && Number.isSafeInteger(value) && value >= 0,
-          `\`${configPath}\` should be a non-negative safe integer`,
+          typeof value === 'number' && Number.isSafeInteger(value) && value >= CREDIT_WINDOW_INITIAL_BYTES,
+          `\`${configPath}\` should be an integer of at least ${CREDIT_WINDOW_INITIAL_BYTES}: a channel's credit window starts at that`,
         )
-        ;(next as Record<string, unknown>)[key] = value
+        next[key] = value
         break
       default:
         assertUsage(false, `Unknown ${configPath}`)
     }
   }
+  assertUsage(
+    !globalObject.channelConfigInUse ||
+      JSON.stringify(resolveChannelConfig(next)) === JSON.stringify(resolveChannelConfig(configState.channel)),
+    "`config.channel` can't change once a channel exists, as those already open would keep the old values: set it before the server handles a request",
+  )
   configState.channel = next
 }
 

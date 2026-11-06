@@ -79,7 +79,6 @@ type ChannelState = {
     broadcastIsClosed: boolean
   } | null
   heldBinary: number[][] | null
-  unattachedFlood: Record<'text' | 'binary', Record<string, number>> | null
   durationLimits: { withContext: string; close: string; ack: string } | null
   endedValuesReady: boolean
   endedValuesCollected: boolean[] | null
@@ -87,7 +86,6 @@ type ChannelState = {
   binaryBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
   paced: { channelId: string; receivedBytes: number; closeErr: string | null; ended: boolean } | null
   textBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
-  awaitedFromOffline: { channelId: string; received: number; closeErr: string | null } | null
   openBurstReceived: number | null
   freshBinaryEchoed: number | null
   helloBesideBurst: boolean
@@ -944,17 +942,6 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
-  test('channel: a flood of empty sends to a channel no page attached to refuses those past maxPendingBytes with ChannelOverflowError', async () => {
-    await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-unattached-flood')
-
-    await autoRetry(async () => {
-      const state = await getResult<ChannelState>('#channel-state')
-      expect(state.unattachedFlood?.text.ChannelOverflowError).greaterThan(0)
-      expect(state.unattachedFlood?.binary.ChannelOverflowError).greaterThan(0)
-    })
-  })
-
   test('channel: a per-call idleTimeout or a close() timeout longer than a timer waits is refused, and the channel stays open', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-duration-limits')
@@ -1431,16 +1418,20 @@ function testChannelApi() {
     })
   })
 
-  test('channel: the byte cap refuses the send with the named error', async () => {
+  test('channel: config.channel refuses what would break it, and any change once a channel exists', async () => {
     await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-budgets')
+    await page.click('#channel-test-config-checks')
     await autoRetry(async () => {
-      const ids = JSON.parse((await page.textContent('#channel-budgets-result'))!)
-      const state = await getCleanupState()
-      expect(state[`budget_${ids.bytes}_credit`]).toBe('accepted')
-      expect(state[`budget_${ids.bytes}`]).toContain('maxPendingBytes')
+      const checks = JSON.parse((await page.textContent('#channel-config-checks-result'))!)
+      expect(checks.same).toBe(null)
+      expect(checks.changed).toContain("can't change once a channel exists")
+      expect(checks.reconnectTimeout).toContain('`config.channel.reconnectTimeout` should be at least 1000')
+      expect(checks.pingInterval).toContain('`config.channel.pingInterval` should be at least 1000')
+      expect(checks.maxPendingBytes).toContain(
+        '`config.channel.maxPendingBytes` should be an integer of at least 2097152',
+      )
+      expect(checks.removed).toContain('Unknown config.channel.bufferLimit')
     })
-    expectLog(sendRefusedWarning)
   })
 
   test("channel: a binary listener can't see or change another frame's or another listener's bytes, alone or beside others", async () => {
@@ -1455,49 +1446,6 @@ function testChannelApi() {
       expect(state.ownBytes_alone).toBe('0')
       expect(state.ownBytes_beside).toBe('0')
     })
-  })
-
-  test('channel: multi-byte text that fits maxPendingBytes to the byte is accepted, and one byte more is refused', async () => {
-    await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-at-limit')
-    await autoRetry(async () => {
-      const state = await getCleanupState()
-      for (const kind of ['twoBytes', 'threeBytes', 'fourBytes']) {
-        expect(state[`atLimit_${kind}_fits`]).toBe('accepted')
-        expect(state[`atLimit_${kind}_over`]).toContain('maxPendingBytes')
-      }
-    })
-    expectLog(sendRefusedWarning)
-  })
-
-  test('channel: acknowledged sends made before the page attaches are refused once they pass maxPendingBytes, and the rest are answered', async () => {
-    await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-offline-budgets')
-    await autoRetry(async () => {
-      const { id } = JSON.parse((await page.textContent('#channel-offline-budgets-result'))!)
-      const sends: string[] = JSON.parse((await getCleanupState())[`offline_budget_${id}`] ?? '[]')
-      expect(sends.slice(0, 2)).deep.equal(['answered', 'answered'])
-      expect(sends[2]).toContain('ChannelOverflowError: Send refused: config.channel.maxPendingBytes')
-    })
-    expectLog(sendRefusedWarning)
-  })
-
-  test('channel: an awaited message larger than maxPendingBytes is refused, the channel stays open, and the next message reaches the page', async () => {
-    await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-awaited-from-offline')
-    await autoRetry(
-      async () => {
-        const result = (await getResult<ChannelState>('#channel-state')).awaitedFromOffline!
-        expect(result.closeErr).toBe(null)
-        expect(result.received).toBe(2)
-        const sends: string[] = JSON.parse((await getCleanupState())[`awaitedFromOffline_${result.channelId}`] ?? '[]')
-        expect(sends[0]).toBe('sent')
-        expect(sends[1]).toContain('config.channel.maxPendingBytes')
-        expect(sends[2]).toBe('sent')
-      },
-      { timeout: 30_000 },
-    )
-    expectLog(sendRefusedWarning)
   })
 
   test('channel: late onOpen Abort terminates the channel', async () => {
