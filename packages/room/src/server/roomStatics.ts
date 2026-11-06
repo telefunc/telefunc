@@ -46,7 +46,15 @@ import {
   reapAndReadRoster,
   reapAndResolveIdentity,
 } from './store/roster.js'
-import { SEMANTIC_LANE, acceptedOrThrow, commitLane, inboxOf, openConfig, encodeRoomRecord } from './lanes/lanes.js'
+import {
+  SEMANTIC_LANE,
+  acceptedOrThrow,
+  commitLane,
+  configFromHead,
+  inboxOf,
+  openConfig,
+  encodeRoomRecord,
+} from './lanes/lanes.js'
 import { ServerRoom, handleOf } from './room.js'
 import { RoomReplica } from './RoomReplica.js'
 import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './store/meta.js'
@@ -138,15 +146,15 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
 
 async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
   assertKnownOptions(options, ['tail'], 'Room.get()')
-  const room = await openRoom(id)
+  const room = await openRoom(await requireRoom(id))
   if (options?.tail === true) await handleOf(room).startTail()
   return room
 }
 
 /** A handle on this process's view of the room: a held view catches up unless it is current; a new one reads the member
  *  count and the meta. */
-async function openRoom(id: string): Promise<ServerRoom> {
-  const incarnation = await requireRoom(id)
+async function openRoom(incarnation: RoomIncarnation & RoomConfigRecord): Promise<ServerRoom> {
+  const { id } = incarnation
   const held = RoomReplica.of(incarnation.inc)
   if (held !== undefined) return await held.sharedHandle()
   const [count, meta] = await Promise.all([reapAndCountPresence(incarnation), requireRoomMeta(id, incarnation)])
@@ -165,7 +173,7 @@ async function getOrCreateRoom(id: string, options?: RoomOptions & RoomGetOption
   const { tail, ...roomOptions } = options ?? {}
   const result = await tryCreateRoom(id, roomOptions)
   if (result.kind === 'closing') throw new RoomError(`Room is closing: ${id}`)
-  const room = result.kind === 'created' ? result.room : await openRoom(id)
+  const room = result.kind === 'created' ? result.room : await openRoom({ id, ...configFromHead(result.head) })
   if (tail === true) await handleOf(room).startTail()
   return room
 }

@@ -21,8 +21,9 @@ import { assertRoomTimeout, getRoomConfig } from '../config.js'
 // incarnation's holds and sets its lapse; a head that changed under the exchange sends it back to the read. Then it
 // lists the room. They run in one async attempt.
 
-type TryCreateRoomResult = { kind: 'created'; room: ServerRoom } | { kind: 'exists' } | { kind: 'closing' }
-type Refusal = { kind: 'exists' } | { kind: 'closing' }
+type TryCreateRoomResult = { kind: 'created'; room: ServerRoom } | Refusal
+/** `head`: the open head it found. */
+type Refusal = { kind: 'exists'; head: RoomHead } | { kind: 'closing' }
 
 async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<TryCreateRoomResult> {
   const { meta, emptyTimeout, departureTimeout } = normalizeRoomOptions(options)
@@ -35,7 +36,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
       current = await plane.driver.readHead(id)
     }
     if (current?.state === 'closed') await cleanupFinalizedIncarnation(plane, id, current)
-    if (current !== null && current.state !== 'closed') return { kind: 'exists' }
+    if (current !== null && current.state !== 'closed') return refusalOrRetry(current)
     const incarnation: RoomIncarnation = {
       id,
       inc: crypto.randomUUID(),
@@ -70,7 +71,7 @@ function openHead(created: RoomConfigRecord): HeadNext['head'] {
 /** A head that went away (a lapsed tombstone) or closed meanwhile still allows the create: try again. */
 function refusalOrRetry(conflicting: RoomHead | null): Refusal | typeof EXCHANGE_CONFLICT {
   if (conflicting === null || conflicting.state === 'closed') return EXCHANGE_CONFLICT
-  return conflicting.state === 'closing' ? { kind: 'closing' } : { kind: 'exists' }
+  return conflicting.state === 'closing' ? { kind: 'closing' } : { kind: 'exists', head: conflicting }
 }
 
 /** This process's view of the new incarnation: its meta at seq 0, no members. */
