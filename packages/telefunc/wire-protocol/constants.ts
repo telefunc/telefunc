@@ -176,6 +176,8 @@ export const WIRE_SEND_BACKLOG_BASE_BYTES = WIRE_MAX_RAW_FRAME_BYTES
 
 /** Largest SSE request metadata header the server will read off a POST body. */
 export const SSE_METADATA_MAX_BYTES = 64 * 1024
+/** An event goes to its stream in chunks of this many bytes, so the stream holds no event past the one in progress. */
+export const SSE_EVENT_CHUNK_BYTES = 64 * 1024
 
 /** How long a RECONCILE waits for RECONCILED, and the wire for any frame where tracked, before the page reconnects. */
 export const RECONCILE_TIMEOUT_MS = 10_000

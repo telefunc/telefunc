@@ -10,6 +10,7 @@ import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validate
 import {
   CHANNEL_CONNECT_TTL_MS,
   CHANNEL_TRANSPORT,
+  SSE_EVENT_CHUNK_BYTES,
   SSE_METADATA_MAX_BYTES,
   STATUS_CODE_WIRE_VERSION,
   WIRE_GATHER_BYTES,
@@ -61,11 +62,17 @@ type EventStreamOptions = {
   onCancel: () => void
 }
 
-/** The event stream to the page: data waits for it to ask for more, and the frames that go at once pass that data. */
+/** The event stream to the page: data waits for it to ask for more, and the frames that go at once pass that data. An
+ *  event goes in chunks, as the stream asks, and nothing passes it once it started. */
 class EventStream implements WireQueue {
   readonly stream: PushReadable | PushReadableStream<Uint8Array<ArrayBuffer>>
   private waiting = new Fifo<Uint8Array<ArrayBuffer>>()
+  /** The frames that go at once, waiting for the event going to the stream to end. */
+  private passing = new Fifo<Uint8Array<ArrayBuffer>>()
+  /** The encoded bytes of `waiting` and `passing`. */
   private waitingBytes = 0
+  /** The event going to the stream, and how far it went. */
+  private current: { event: Uint8Array<ArrayBuffer>; offset: number } | null = null
   /** Whether the stream asks for more. */
   private takes: boolean
   /** The rate the page takes what waits, and when it last took some; null while nothing waits. */
@@ -82,22 +89,25 @@ class EventStream implements WireQueue {
 
   /** The encoded bytes the stream holds, and those waiting for it to ask. */
   get heldBytes(): number {
-    return this.stream.bufferedAmount + this.waitingBytes
+    return this.streamBytes + this.waitingBytes
   }
 
+  /** The encoded bytes a frame that goes at once is behind. */
   get streamBytes(): number {
-    return this.stream.bufferedAmount
+    const { current } = this
+    return this.stream.bufferedAmount + (current === null ? 0 : current.event.byteLength - current.offset)
   }
 
-  /** Data waits for the stream to ask for it, as the frame the replay also holds: it's encoded when it's handed. A frame
-   *  that goes at once is behind no more than the stream holds: an event, unlike a WebSocket's pieces, goes whole. */
+  /** Data waits for the stream to ask for it, as the frame the replay also holds: it's encoded when it's handed. */
   send(frame: Uint8Array<ArrayBuffer>): void {
-    if (
-      passesData(frame[0]!) ||
-      (this.takes && this.waiting.length === 0) ||
-      (frame.byteLength <= WIRE_GATHER_BYTES && overtakes(frame, this.waiting))
-    ) {
-      this.takes = this.stream.push(eventOf(frame))
+    const atOnce = passesData(frame[0]!) || (frame.byteLength <= WIRE_GATHER_BYTES && overtakes(frame, this.waiting))
+    if (atOnce && this.current !== null) {
+      this.passing.push(frame)
+      this.waitingBytes += eventBytes(frame)
+      return
+    }
+    if (atOnce || (this.takes && this.current === null && this.waiting.length === 0)) {
+      this.startEvent(frame)
       return
     }
     this.tookAt ??= performance.now()
@@ -125,7 +135,12 @@ class EventStream implements WireQueue {
   /** Past a wire only lost, what waits is dropped: the page's reconnect gets it from its channels' replay, and it could
    *  wait here for as long as the socket stays open taking nothing. */
   close({ permanent }: { permanent: boolean }): void {
-    if (permanent) while (this.waiting.length > 0) this.stream.push(eventOf(this.waiting.shift()!))
+    while (permanent && (this.current !== null || this.waiting.length > 0)) {
+      if (this.current !== null) this.pushChunks()
+      else this.startEvent(this.waiting.shift()!)
+    }
+    this.current = null
+    this.passing = new Fifo()
     this.waiting = new Fifo()
     this.waitingBytes = 0
     this.stream.close()
@@ -134,17 +149,43 @@ class EventStream implements WireQueue {
   /** Hands the stream the data that waits, as far as it asks. */
   private handWaiting(): void {
     this.takes = true
-    let bytes = 0
+    let bytes = this.current === null ? 0 : this.pushChunks()
     while (this.takes && this.waiting.length > 0) {
       const frame = this.waiting.shift()!
-      bytes += frame.byteLength
       this.waitingBytes -= eventBytes(frame)
-      this.takes = this.stream.push(eventOf(frame))
+      bytes += this.startEvent(frame)
     }
     if (this.tookAt === null) return
     const now = performance.now()
-    this.drain.spanned(bytes, now - this.tookAt)
-    this.tookAt = this.waiting.length > 0 ? now : null
+    this.drain.spanned((bytes * 3) / 4, now - this.tookAt)
+    this.tookAt = this.current !== null || this.waiting.length > 0 ? now : null
+  }
+
+  /** Starts `frame`'s event and returns the bytes that went. */
+  private startEvent(frame: Uint8Array<ArrayBuffer>): number {
+    this.current = { event: eventOf(frame), offset: 0 }
+    return this.pushChunks()
+  }
+
+  /** Pushes the current event's next chunks, at least one, as far as the stream asks, and returns their bytes. What passes
+   *  goes as the event ends. */
+  private pushChunks(): number {
+    const current = this.current!
+    const { event } = current
+    const start = current.offset
+    do {
+      const end = Math.min(event.byteLength, current.offset + SSE_EVENT_CHUNK_BYTES)
+      this.takes = this.stream.push(event.subarray(current.offset, end))
+      current.offset = end
+    } while (this.takes && current.offset < event.byteLength)
+    if (current.offset < event.byteLength) return current.offset - start
+    this.current = null
+    while (this.passing.length > 0) {
+      const frame = this.passing.shift()!
+      this.waitingBytes -= eventBytes(frame)
+      this.takes = this.stream.push(eventOf(frame))
+    }
+    return event.byteLength - start
   }
 }
 
