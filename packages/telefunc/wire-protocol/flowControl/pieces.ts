@@ -71,6 +71,8 @@ type PieceSenderOptions = {
   /** `cut`: data is cut to the headroom; `whole`: a frame that crosses within a ping interval goes whole while headroom is
    *  left, and waits whole if none, so that the socket holds the frame itself and not a copy per piece. */
   cuts: 'cut' | 'whole'
+  /** Whether a data frame may go ahead of the frames `ahead` of it; without it, data keeps its line. */
+  overtakes?: (frame: Uint8Array, ahead: Iterable<Uint8Array>) => boolean
   owner: PieceSenderOwner
 }
 
@@ -91,6 +93,7 @@ class PieceSender {
   private readonly pieceRate: PieceRate
   private readonly cutsData: boolean
   private readonly copiesOnSend: boolean
+  private readonly overtakes: PieceSenderOptions['overtakes']
   private readonly owner: PieceSenderOwner
   /** The bytes of data the socket accepts now: the headroom the current call was given, less what it handed since. */
   private headroom = 0
@@ -110,7 +113,8 @@ class PieceSender {
   private probe: { end: number; second: number | null } | null = null
   /** The rest of a data frame, waiting for headroom. */
   private rest: { frame: Uint8Array<ArrayBuffer>; offset: number } | null = null
-  /** The frames sent while the rest of a data frame waits, in order; one that may pass it (`passesRest`) isn't here. */
+  /** The frames sent while the rest of a data frame waits, in order; one that may pass it (`passesRest`, `goesAhead`)
+   *  isn't here. */
   private readonly waiting = new Fifo<Uint8Array<ArrayBuffer>>()
   /** The bytes waiting for headroom. */
   waitingBytes = 0
@@ -139,12 +143,13 @@ class PieceSender {
   /** Whether `endTask` is queued for this task. */
   private endQueued = false
 
-  constructor({ socket, pingInterval, pieceRate, cuts, owner }: PieceSenderOptions) {
+  constructor({ socket, pingInterval, pieceRate, cuts, overtakes, owner }: PieceSenderOptions) {
     this.socket = socket
     this.pingInterval = pingInterval
     this.pieceRate = pieceRate
     this.cutsData = cuts === 'cut'
     this.copiesOnSend = socket.copiesOnSend === true
+    this.overtakes = overtakes
     this.owner = owner
     this.messages = new SocketMessages(socket)
     this.setWholeUpTo()
@@ -174,9 +179,14 @@ class PieceSender {
     })
   }
 
-  /** Whether the rest of a data frame waits for headroom; every frame sent meanwhile waits behind it. */
+  /** Whether the rest of a data frame waits for headroom. */
   get dataWaits(): boolean {
     return this.rest !== null
+  }
+
+  /** Whether what waits waits for the probe's rate, which comes after its first acknowledgement. */
+  get awaitsProbe(): boolean {
+    return this.probe !== null && !this.cutsData
   }
 
   /** Puts the frame `frame()` returns at that time, if any, ahead of the next message handed to the socket. */
@@ -203,6 +213,7 @@ class PieceSender {
     if (tag === TAG.PIECES_ACK && this.open === null) return this.pass(frame)
     if (this.rest === null) return this.start(frame)
     if (this.passesRest(frame)) return this.pass(frame)
+    if (this.goesAhead(frame)) return this.sendWhole(frame)
     this.waiting.push(frame)
     this.waitingBytes += frame.byteLength
   }
@@ -260,6 +271,24 @@ class PieceSender {
   /** Whether `frame` may pass the waiting rest of a data frame: it `passesData` and is small enough to go whole. */
   private passesRest(frame: Uint8Array<ArrayBuffer>): boolean {
     return passesData(frame[0]!) && frame.byteLength <= this.wholeUpTo
+  }
+
+  /** Whether `frame` goes ahead of what waits: small, past no open announcement, which counts what follows it, and with
+   *  room for a copy where the socket keeps one. */
+  private goesAhead(frame: Uint8Array<ArrayBuffer>): boolean {
+    return (
+      this.overtakes !== undefined &&
+      this.open === null &&
+      frame.byteLength <= this.wholeUpTo &&
+      !(this.copiesOnSend && this.copyRoom() < frame.byteLength) &&
+      this.overtakes(frame, this.framesAhead())
+    )
+  }
+
+  /** The rest of a data frame, then the frames waiting behind it. */
+  private *framesAhead(): Generator<Uint8Array> {
+    yield this.rest!.frame
+    yield* this.waiting
   }
 
   /** Hands the socket `frame`, whole or in pieces. */
@@ -382,14 +411,15 @@ class PieceSender {
       this.messages.hand(encode.announce(0, floorPerS))
       queueMicrotask(this.closeAnnouncement)
     }
+    if (this.pieceRate.fastest === 0 && this.probe === null && bytes > this.wholeUpTo) return this.sendProbe(frame, now)
     this.open.bytes += bytes
-    if (this.pieceRate.fastest === 0 && this.probe === null && bytes > this.wholeUpTo) this.sendProbe(frame, now)
-    else this.sendAnnounced(frame, 0, now)
+    this.sendAnnounced(frame, 0, now)
   }
 
   /** Closes the announcement of this task with an ANNOUNCE of the bytes of the frames sent behind it. */
   private readonly closeAnnouncement = (): void => {
-    const { start, at, bytes } = this.open!
+    if (this.open === null) return
+    const { start, at, bytes } = this.open
     this.open = null
     this.countHanded(ANNOUNCE_BYTES, false)
     this.messages.hand(encode.announce(bytes, 0))
@@ -413,7 +443,15 @@ class PieceSender {
     // The receiver dates the two pieces apart only for a data frame.
     const second = data ? this.transmittedBytes - PIECE_HEADER_BYTES - WIRE_PROBE_PAIR_BYTES : null
     this.probe = { end: this.transmittedBytes, second }
-    this.sendAnnounced(frame, WIRE_PROBE_FIRST_BYTES + WIRE_PROBE_PAIR_BYTES, now)
+    const sent = WIRE_PROBE_FIRST_BYTES + WIRE_PROBE_PAIR_BYTES
+    if (this.cutsData) {
+      this.open!.bytes += bytes
+      return this.sendAnnounced(frame, sent, now)
+    }
+    this.open!.bytes += sent
+    // The rest goes by the rate the probe measures, and what passes it goes outside the announcement.
+    this.closeAnnouncement()
+    this.wait(frame, sent)
   }
 
   /** Sends `frame` from `offset` as announced messages, none past what `announcedNext` allows after the one before. */
@@ -565,7 +603,7 @@ class PieceSender {
 
   /** Sends what waits for headroom, as far as `headroom` goes, and the frames waiting behind it. */
   sendWaiting(headroom: number): void {
-    if (this.rest === null) return
+    if (this.rest === null || this.awaitsProbe) return
     this.headroom = headroom
     this.takeCarried()
     const { frame, offset } = this.rest

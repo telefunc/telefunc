@@ -25,7 +25,7 @@ import {
 } from '../pieces.js'
 import type { PiecesAck } from '../../wire/frame.js'
 import { isSequencedTag } from '../../wire/tags.js'
-import { countWaitingPublishes, droppingPublishes, type WireQueue } from './waitingPublishes.js'
+import { countWaitingPublishes, droppingPublishes, overtakes, type WireQueue } from './waitingPublishes.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 
@@ -73,6 +73,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
       pingInterval,
       pieceRate: this.pieceRate,
       cuts: 'whole',
+      overtakes,
       owner: this,
     })
   }
@@ -208,7 +209,9 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
 
   /** While data waits for headroom, looks again once the rate freed what a piece takes (see `PieceSender.cut`). */
   private pace(): void {
-    if (this.paceTimer !== null || this.sender.waitingBytes === 0 || this.awaitsCopyRoom) return
+    if (this.paceTimer !== null || this.sender.waitingBytes === 0 || this.awaitsCopyRoom || this.sender.awaitsProbe) {
+      return
+    }
     const ms = Math.max(1, (WIRE_PIECES_ACK_BYTES - this.headroom(performance.now())) / this.drainRate())
     this.paceTimer = unrefTimer(setTimeout(this.lookAgain, ms))
   }
