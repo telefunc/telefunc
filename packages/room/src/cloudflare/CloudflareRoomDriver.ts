@@ -148,7 +148,7 @@ class CloudflareRoomDriver implements RoomDriver {
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
     const namespace = this.getNamespace()
     const pages = await Promise.all(
-      CLOUDFLARE_BUCKETS.map((bucket) => openRegionDirectory(namespace, bucket).directoryList(prefix, cursor)),
+      CLOUDFLARE_BUCKETS.map((bucket) => openRegionDirectory(namespace, bucket).list(prefix, cursor)),
     )
     return mergeRegionPages(pages)
   }

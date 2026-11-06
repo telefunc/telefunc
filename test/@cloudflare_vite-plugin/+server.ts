@@ -55,7 +55,7 @@ export class TelefuncDurableObject extends (tf.TelefuncDurableObject as Telefunc
   // Test-only: the Room Durable Objects called while `/__room-calls` traces, by name, with the room a listing call names.
   // An inbox's registration replies slowly, so what waits for that reply comes after it in the trace.
   override async telefuncDurableObjectCall(name: string, method: string, args: unknown[]) {
-    const room = /^(directory|listIn|unlistIn)/.test(method) ? args[0] : null
+    const room = name === 'room-directory' ? args[0] : null
     const object = this.ctx.id.name ?? null
     const inbox = method === 'registerRoute' && (args[0] as { laneKey: string }).laneKey.startsWith('inbox:')
     roomCalls?.push({ object, method: inbox ? 'registerRoute(inbox)' : method, room })

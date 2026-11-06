@@ -1,10 +1,9 @@
 /// <reference types="@cloudflare/workers-types" />
 export {
   initSchema,
-  directoryPut,
-  directoryDelete,
-  directoryGet,
-  directoryList,
+  writeListing,
+  deleteListing,
+  readListing,
   claimListingBucket,
   readListingBucket,
   settleDueListing,
@@ -34,7 +33,6 @@ export type { CellPage }
 
 import {
   CELL_PAGE_SIZE,
-  DIRECTORY_PAGE_SIZE,
   type CellCounter,
   type CellsExchange,
   type CellsExchangeResult,
@@ -75,8 +73,8 @@ type HeadRow = {
 }
 
 function initSchema(sql: SqlStorage): void {
-  // The DO is the room: `head` is one row or absent; `gen` is each installed incarnation's last cell version. Its
-  // `directory` is the room's listing, one row or none; a regional directory DO lists the region's rooms in it instead.
+  // The DO is the room: `head` is one row or absent; `gen` is each installed incarnation's last cell version. `listing`
+  // is the room's listing, one row or none.
   sql.exec(`
     CREATE TABLE IF NOT EXISTS head
       (id INTEGER PRIMARY KEY CHECK (id = 1), rev TEXT NOT NULL, inc TEXT, state TEXT NOT NULL, config BLOB NOT NULL,
@@ -101,16 +99,15 @@ function initSchema(sql: SqlStorage): void {
        lease_id TEXT NOT NULL, bucket TEXT NOT NULL, expires_at INTEGER NOT NULL,
        PRIMARY KEY (inc, lane_key, session_do_id));
     CREATE INDEX IF NOT EXISTS route_expires_at ON route(expires_at);
-    CREATE TABLE IF NOT EXISTS directory (room_id TEXT PRIMARY KEY, inc_tag TEXT NOT NULL, check_at INTEGER);
-    CREATE INDEX IF NOT EXISTS directory_check_at ON directory(check_at);
+    CREATE TABLE IF NOT EXISTS listing (room_id TEXT PRIMARY KEY, inc_tag TEXT NOT NULL, check_at INTEGER);
     CREATE TABLE IF NOT EXISTS listing_bucket (id INTEGER PRIMARY KEY CHECK (id = 1), bucket TEXT NOT NULL);
   `)
 }
 
 /** A NULL check_at is never due. */
-function directoryPut(sql: SqlStorage, roomId: string, incTag: string, checkAt: number): void {
+function writeListing(sql: SqlStorage, roomId: string, incTag: string, checkAt: number): void {
   sql.exec(
-    'INSERT OR REPLACE INTO directory (room_id, inc_tag, check_at) VALUES (?, ?, ?)',
+    'INSERT OR REPLACE INTO listing (room_id, inc_tag, check_at) VALUES (?, ?, ?)',
     roomId,
     incTag,
     checkAt === Infinity ? null : checkAt,
@@ -118,31 +115,12 @@ function directoryPut(sql: SqlStorage, roomId: string, incTag: string, checkAt: 
 }
 
 /** Deletes iff the stored tag matches (a stale tag is a no-op). */
-function directoryDelete(sql: SqlStorage, roomId: string, incTag: string): void {
-  sql.exec('DELETE FROM directory WHERE room_id = ? AND inc_tag = ?', roomId, incTag)
+function deleteListing(sql: SqlStorage, roomId: string, incTag: string): void {
+  sql.exec('DELETE FROM listing WHERE room_id = ? AND inc_tag = ?', roomId, incTag)
 }
 
-function directoryGet(sql: SqlStorage, roomId: string): string | undefined {
-  return sql.exec<{ inc_tag: string }>('SELECT inc_tag FROM directory WHERE room_id = ?', roomId).toArray()[0]?.inc_tag
-}
-
-function directoryList(sql: SqlStorage, prefix: string, cursor?: string): DirectoryPage {
-  const range = keyRange('room_id', prefix, cursor)
-  const matching = sql
-    .exec<{
-      room_id: string
-      inc_tag: string
-    }>(
-      `SELECT room_id, inc_tag FROM directory WHERE ${range.where} ORDER BY room_id LIMIT ?`,
-      ...range.args,
-      DIRECTORY_PAGE_SIZE + 1,
-    )
-    .toArray()
-  const page = matching.slice(0, DIRECTORY_PAGE_SIZE)
-  const entries = page.map((row) => ({ roomId: row.room_id, incTag: row.inc_tag }))
-  const last = page[page.length - 1]
-  const more = last !== undefined && matching.length > DIRECTORY_PAGE_SIZE
-  return more ? { entries, cursor: last.room_id } : { entries }
+function readListing(sql: SqlStorage, roomId: string): string | undefined {
+  return sql.exec<{ inc_tag: string }>('SELECT inc_tag FROM listing WHERE room_id = ?', roomId).toArray()[0]?.inc_tag
 }
 
 /** The bucket whose region's directory lists this authority's room: its first listing's, kept for good, as the
@@ -156,30 +134,20 @@ function readListingBucket(sql: SqlStorage): string | null {
   return sql.exec<{ bucket: string }>('SELECT bucket FROM listing_bucket WHERE id = 1').toArray()[0]?.bucket ?? null
 }
 
-/** At a room authority, its listing once due: due again when the head that still names it may lapse, or else deleted
- *  and returned, as `repairRoomIndex()` does for a directory's sweep. */
+/** Its listing once due: due again when the head that still names it may lapse, or else deleted and returned, as
+ *  `repairRoomIndex()` does for a directory's sweep. */
 function settleDueListing(sql: SqlStorage, now: number): DirectoryPage['entries'][number] | null {
-  const due = directoryDue(sql, now)[0]
+  const due = sql
+    .exec<{ room_id: string; inc_tag: string }>('SELECT room_id, inc_tag FROM listing WHERE check_at <= ?', now)
+    .toArray()[0]
   if (due === undefined) return null
   const head = readLiveHead(sql, now)
-  if (head?.currentInc === due.incTag) {
-    directoryPut(sql, due.roomId, due.incTag, head.expiresAt ?? Infinity)
+  if (head?.currentInc === due.inc_tag) {
+    writeListing(sql, due.room_id, due.inc_tag, head.expiresAt ?? Infinity)
     return null
   }
-  directoryDelete(sql, due.roomId, due.incTag)
-  return due
-}
-
-/** A check_at range, so a page seeks its index instead of scanning every room. */
-function directoryDue(sql: SqlStorage, now: number): DirectoryPage['entries'] {
-  return sql
-    .exec<{ room_id: string; inc_tag: string }>(
-      'SELECT room_id, inc_tag FROM directory WHERE check_at <= ? ORDER BY check_at LIMIT ?',
-      now,
-      DIRECTORY_PAGE_SIZE,
-    )
-    .toArray()
-    .map((row) => ({ roomId: row.room_id, incTag: row.inc_tag }))
+  deleteListing(sql, due.room_id, due.inc_tag)
+  return { roomId: due.room_id, incTag: due.inc_tag }
 }
 
 /** The strings of `column` starting with `prefix`, past `cursor` if given, as a range, so a query seeks its index
@@ -249,7 +217,7 @@ function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
     }>(
       'SELECT MIN(deadline) AS deadline FROM (SELECT MIN(expires_at) AS deadline FROM head ' +
         'UNION ALL SELECT MIN(expires_at) FROM route UNION ALL SELECT MIN(expires_at) FROM expiring_cell ' +
-        'UNION ALL SELECT MIN(check_at) FROM directory)',
+        'UNION ALL SELECT MIN(check_at) FROM listing)',
     )
     .toArray()[0]!.deadline
 }

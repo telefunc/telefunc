@@ -53,10 +53,7 @@ import {
   compareExchangeCells,
   compareExchangeHead,
   dropCellPrefix,
-  directoryDelete,
-  directoryGet,
-  directoryList,
-  directoryPut,
+  deleteListing,
   dropIncarnationRows,
   dropLaneOrderRows,
   initSchema,
@@ -67,9 +64,11 @@ import {
   readCells,
   readCellPage,
   readLiveHead,
+  readListing,
   readListingBucket,
   readOrder,
   settleDueListing,
+  writeListing,
   type CellPage,
   readExpiringCells,
   writeExpiringCell,
@@ -99,8 +98,8 @@ type RenewWire = 'renewed' | 'lapsed' | 'dropped'
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
 const SEMANTIC_LANE: LaneId = { kind: 'semantic' }
 
-/** Room's part of a Durable Object that is a room authority, fanning out through Broadcast's `regions`, or a region's
- *  directory. Its tables are created on first use. */
+/** Room's part of a Durable Object that is a room's authority, fanning out through Broadcast's `regions`. Its tables are
+ *  created on first use. */
 class RoomAuthority {
   private readonly ctx: DurableObjectState
   private readonly getNamespace: () => TelefuncExtensionNamespace
@@ -259,7 +258,7 @@ class RoomAuthority {
     await this.scheduleMaintenanceIfNeeded()
   }
 
-  /** At a room's authority: lists the room, in the region directory of `bucket` if it is the room's first listing. */
+  /** Lists the room, in the region directory of `bucket` if it is the room's first listing. */
   async directoryPut(
     roomId: string,
     incTag: string,
@@ -269,40 +268,24 @@ class RoomAuthority {
   ): Promise<void> {
     const at = Math.max(checkAt, Date.now() + minDelayMs)
     const listedIn = this.transaction((sql) => {
-      directoryPut(sql, roomId, incTag, at)
+      writeListing(sql, roomId, incTag, at)
       return claimListingBucket(sql, bucket)
     })
-    await this.callDirectory(listedIn, (directory) => directory.listInRegion(roomId, incTag))
+    await this.callDirectory(listedIn, (directory) => directory.add(roomId, incTag))
     await this.scheduleMaintenanceIfNeeded()
   }
 
-  /** At a room's authority. Its region directory forgets `incTag` even when the listing here is gone or newer, as after
-   *  an alarm that couldn't reach it. */
+  /** Its region directory forgets `incTag` even when the listing here is gone or newer, as after an alarm that couldn't
+   *  reach it. */
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
-    this.transaction((sql) => directoryDelete(sql, roomId, incTag))
+    this.transaction((sql) => deleteListing(sql, roomId, incTag))
     await this.unlistInItsRegion(roomId, incTag)
   }
 
   async directoryGet(roomId: string): Promise<string | undefined> {
-    return directoryGet(this.sql(), roomId)
+    return readListing(this.sql(), roomId)
   }
 
-  /** At a region's directory. */
-  async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
-    return directoryList(this.sql(), prefix, cursor)
-  }
-
-  /** At a region's directory. */
-  async listInRegion(roomId: string, incTag: string): Promise<void> {
-    this.transaction((sql) => directoryPut(sql, roomId, incTag, Infinity))
-  }
-
-  /** At a region's directory. */
-  async unlistInRegion(roomId: string, incTag: string): Promise<void> {
-    this.transaction((sql) => directoryDelete(sql, roomId, incTag))
-  }
-
-  /** Only a room authority schedules alarms. */
   async alarm(): Promise<void> {
     try {
       const unlisted = this.runSweep(Date.now())
@@ -328,7 +311,7 @@ class RoomAuthority {
 
   private async unlistInItsRegion(roomId: string, incTag: string): Promise<void> {
     const listedIn = readListingBucket(this.sql())
-    if (listedIn !== null) await this.callDirectory(listedIn, (directory) => directory.unlistInRegion(roomId, incTag))
+    if (listedIn !== null) await this.callDirectory(listedIn, (directory) => directory.remove(roomId, incTag))
   }
 
   private callDirectory(bucket: string, invoke: (directory: RegionDirectoryStub) => Promise<void>): Promise<void> {
