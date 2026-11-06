@@ -1,7 +1,7 @@
 export { ReplayBuffer }
 
-import { replayKindOf, type ReplayKind } from '../wire/tags.js'
-import { assert } from '../../utils/assert.js'
+import { replayKindOf, type ReplayKind } from '../../wire/tags.js'
+import { assert } from '../../../utils/assert.js'
 
 /** Sent sequenced frames till their peer acks them, in queues by tag; a data queue evicts its oldest past its budget. */
 class ReplayBuffer {
