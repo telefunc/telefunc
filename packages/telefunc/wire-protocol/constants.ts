@@ -169,8 +169,7 @@ export const WIRE_MAX_CTRL_FRAME_BYTES =
   MAX_CHANNELS_PER_CONNECTION * (UPGRADE_MAX_ID_BYTES + RECONCILE_ENTRY_ENVELOPE_BYTES) + 1_024
 
 /** A peer past its wire's allowance of unprocessed frames is terminated: this base, plus a window per channel. */
-export const WIRE_RECV_BACKLOG_BASE_BYTES = 64 * 1024 * 1024
-export const WIRE_RECV_BACKLOG_BASE_FRAMES = 50_000
+export const WIRE_RECV_BACKLOG_BASE_BYTES = WIRE_MAX_RAW_FRAME_BYTES
 
 /** A server wire holding more for its peer than this base, plus each channel's allowance, is terminated as a loss. */
 export const WIRE_SEND_BACKLOG_BASE_BYTES = WIRE_MAX_RAW_FRAME_BYTES
@@ -339,6 +338,8 @@ export const CREDIT_MSG_WINDOW_INITIAL = 100
  *  `ReceiveCredit.onPingAck` stops growth long before this on hosts that can't
  *  sustain the dispatch rate. */
 export const CREDIT_MSG_WINDOW_MAX = 50_000
+/** See `WIRE_RECV_BACKLOG_BASE_BYTES`: a peer may have a whole window's frames unprocessed on top. */
+export const WIRE_RECV_BACKLOG_BASE_FRAMES = CREDIT_MSG_WINDOW_MAX
 
 /** Floor on the gap between consecutive BDP probes. On a fat-pipe-long-latency link
  *  RTT alone paces the probes; on loopback (RTT ≈ 1 ms) this prevents thousands of
