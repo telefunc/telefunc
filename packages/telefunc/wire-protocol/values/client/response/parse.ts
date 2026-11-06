@@ -2,10 +2,11 @@ export { parseResponse }
 export { BaseStreamReader } from './BaseStreamReader.js'
 
 import { parse } from '@brillout/json-serializer/parse'
-import { assert } from '../../../../utils/assert.js'
+import { assert, assertWarning } from '../../../../utils/assert.js'
 import { isObject } from '../../../../utils/isObject.js'
 import { isObjectOrFunction } from '../../../../utils/isObjectOrFunction.js'
 import { Fifo } from '../../../../utils/Fifo.js'
+import { unrefTimer } from '../../../../utils/unrefTimer.js'
 import { createStreamingReviver } from './registry.js'
 import type { StreamSource, ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
 import { setAbortController } from '../../../../client/abort.js'
@@ -122,7 +123,7 @@ async function reviveResponse(
         return ChannelStreamSource.create(channel, throwStreamError)
       }
       assert(bodyStreamReader, 'Unexpected receiveStream call in non-streaming response')
-      demuxer ??= new FrameDemuxer(bodyStreamReader)
+      demuxer ??= new FrameDemuxer(bodyStreamReader, callContext.telefunctionName)
       return demuxer.create(metadata.__index)
     },
   }
@@ -167,6 +168,7 @@ async function reviveResponse(
     if (pendingValues.length > 0) {
       parsed = await resolvePendingValues(parsed, pendingValues, (value) => closeHandlers.has(value))
     }
+    demuxer?.valuesHandedOut()
   } catch (err) {
     for (const close of allCloseHandlers) close()
     throw err
@@ -184,6 +186,10 @@ async function reviveResponse(
 }
 
 // ===== Frame demultiplexer =====
+
+/** How long code may wait behind another stream's full buffer before the page warns. Handling a chunk takes far less, and
+ *  the wait only counts while nothing is being read, so a slow network doesn't count. */
+const STALL_WARNING_MS = 5_000
 
 /** Demultiplexes indexed frames from a single HTTP stream to multiple consumers.
  *
@@ -203,6 +209,7 @@ async function reviveResponse(
 class FrameDemuxer {
   private static readonly MAX_BUFFER_BYTES_PER_INDEX = 1024 * 1024 // 1 MB
   private streamReader: BaseStreamReader
+  private telefunctionName: string
   private pendingFrames = new Map<number, Fifo<Uint8Array<ArrayBuffer>>>()
   private pendingBytes = new Map<number, number>()
   private indexWaiters = new Map<
@@ -215,9 +222,18 @@ class FrameDemuxer {
   private cancelledIndices = new Set<number>()
   private doneIndices = new Set<number>()
   private totalConsumers = 0
+  /** Until the page has what the call returned, it can't read a stream to make way for a file the call waits for. */
+  private canStopReading = false
+  private stallTimer: ReturnType<typeof setTimeout> | undefined
+  private stallWarned = false
 
-  constructor(streamReader: BaseStreamReader) {
+  constructor(streamReader: BaseStreamReader, telefunctionName: string) {
     this.streamReader = streamReader
+    this.telefunctionName = telefunctionName
+  }
+
+  valuesHandedOut(): void {
+    this.canStopReading = true
   }
 
   private registerConsumer() {
@@ -239,6 +255,8 @@ class FrameDemuxer {
       waiter.resolve(null)
     }
     this.cancelUpstreamIfAllTerminal()
+    // Reading may have stopped on this index's buffer, with another consumer waiting behind it.
+    this.ensureReading()
   }
 
   private cancelUpstreamIfAllTerminal(): void {
@@ -286,14 +304,15 @@ class FrameDemuxer {
       stream: (opts) =>
         createReadableChunkStream({ readNextChunk: readOwnedChunk, cancel, isCancelled, readOptions: opts }),
       cancel,
-      // Inline streams abort via HTTP body reader cancellation, not per-index.
-      abort() {},
+      // Inline streams abort via HTTP body reader cancellation, which reading that has stopped doesn't see.
+      abort: (abortError) => this.failWaiters(abortError),
     }
   }
 
   private async ensureReading() {
     if (this.reading) return
     this.reading = true
+    clearTimeout(this.stallTimer)
     try {
       while (this.indexWaiters.size > 0) {
         const frame = await this.streamReader.readNextFrame()
@@ -336,14 +355,37 @@ class FrameDemuxer {
 
         // Per-index backpressure: stop reading when this index's buffer exceeds 1 MB.
         // The loop restarts when the consumer drains via readNextChunkForIndex().
-        if (newBytes >= FrameDemuxer.MAX_BUFFER_BYTES_PER_INDEX) break
+        if (this.canStopReading && newBytes >= FrameDemuxer.MAX_BUFFER_BYTES_PER_INDEX) {
+          this.warnIfStillStalledLater()
+          break
+        }
       }
     } catch (err) {
-      this.streamError ??= err
-      for (const [, w] of this.indexWaiters) w.reject(err)
-      this.indexWaiters.clear()
+      this.failWaiters(err)
     } finally {
       this.reading = false
     }
+  }
+
+  private failWaiters(err: unknown): void {
+    clearTimeout(this.stallTimer)
+    this.streamError ??= err
+    for (const [, w] of this.indexWaiters) w.reject(err)
+    this.indexWaiters.clear()
+  }
+
+  /** Reading stopped with a consumer waiting: the next read restarts it, which clears this. */
+  private warnIfStillStalledLater(): void {
+    if (this.stallWarned || this.indexWaiters.size === 0) return
+    this.stallTimer = unrefTimer(setTimeout(() => this.warnStalled(), STALL_WARNING_MS))
+  }
+
+  private warnStalled(): void {
+    this.stallWarned = true
+    assertWarning(
+      false,
+      `Reading what ${this.telefunctionName}() returned is waiting for a stream of it with 1 MiB unread: read all of the streams a call returned concurrently, or cancel the ones you don't want.`,
+      { onlyOnce: false },
+    )
   }
 }

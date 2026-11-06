@@ -20,6 +20,7 @@ export {
   onChannelAbortAbortsSiblingStreamingValues,
   onUploadWithProgress,
   onReturnTwoLargeStreams,
+  onReturnFileBesideLargeStream,
   onReturnTwoStreamsOfSmallChunks,
   onReturnOneLargeChunk,
   onReturnFinishedAndEndlessStreams,
@@ -392,6 +393,17 @@ function byteStream(chunks: number) {
 /** 2 MiB each, more than the page buffers for a stream it isn't reading. */
 const onReturnTwoLargeStreams = async () => {
   return { first: byteStream(32), second: byteStream(32) }
+}
+
+/** The page has neither until the file's bytes have arrived, so it can't read the stream to make way for them. */
+const onReturnFileBesideLargeStream = async () => {
+  return {
+    stream: byteStream(32),
+    file: new File(
+      Array.from({ length: 32 }, () => new Uint8Array(64 * 1024)),
+      'large.bin',
+    ),
+  }
 }
 
 function filledStream(byte: number) {

@@ -1,8 +1,9 @@
 export { testStreaming }
 
-import { page, test, expect, autoRetry, getServerUrl, skip } from '@brillout/test-e2e'
+import { page, test, expect, expectLog, autoRetry, getServerUrl, skip } from '@brillout/test-e2e'
 import { resetCleanupState, getCleanupState, navigate, getResult } from '../../e2e-utils'
 
+const stallWarning = 'read all of the streams a call returned concurrently'
 const channelTransports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
 const channelTransport = channelTransports[channelTransports.length - 1]!
 
@@ -341,6 +342,61 @@ function testStreaming() {
         expect(result.firstBytesWhileSecondUnread).lessThan(2 * 1024 * 1024)
         expect(result.firstBytes).toBe(2 * 1024 * 1024)
         expect(result.secondBytes).toBe(2 * 1024 * 1024)
+      })
+    })
+
+    test('streaming: cancelling the unread stream that stops the other lets the other go on', async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await page.click('#test-unread-stream-cancelled')
+      await autoRetry(async () => {
+        expect(await getResult('#streaming-result')).deep.equal({ firstBytes: 2 * 1024 * 1024 })
+      })
+      expect(() => expectLog(stallWarning)).throw()
+    })
+
+    test('streaming: aborting a call whose unread stream stops the other ends the other', async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await page.click('#test-stalled-call-aborted')
+      await autoRetry(async () => {
+        expect((await getResult('#streaming-result')).error).to.be.a('string')
+      })
+    })
+
+    test('streaming: a page held up by an unread stream for seconds is told what to do', async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await page.click('#test-stall-warning')
+      await autoRetry(
+        async () => {
+          expect(await getResult('#streaming-result')).deep.equal({ firstBytes: 2 * 1024 * 1024 })
+        },
+        { timeout: 15_000 },
+      )
+      expectLog(stallWarning)
+    })
+
+    test('streaming: a page reading every stream, however slowly, gets no warning', async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await page.click('#test-second-stream-read-slowly')
+      await autoRetry(
+        async () => {
+          expect(await getResult('#streaming-result')).deep.equal({
+            firstBytes: 2 * 1024 * 1024,
+            secondBytes: 2 * 1024 * 1024,
+          })
+        },
+        { timeout: 20_000 },
+      )
+      expect(() => expectLog(stallWarning)).throw()
+    })
+
+    test("streaming: a stream beside a returned file doesn't stop the file the call waits for", async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await page.click('#test-file-beside-large-stream')
+      await autoRetry(async () => {
+        expect(await getResult('#streaming-result')).deep.equal({
+          fileBytes: 2 * 1024 * 1024,
+          streamBytes: 2 * 1024 * 1024,
+        })
       })
     })
   }

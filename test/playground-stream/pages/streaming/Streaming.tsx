@@ -23,6 +23,7 @@ import {
   onChannelAbortAbortsSiblingStreamingValues,
   onUploadWithProgress,
   onReturnTwoLargeStreams,
+  onReturnFileBesideLargeStream,
   onReturnTwoStreamsOfSmallChunks,
   onReturnOneLargeChunk,
   onReturnFinishedAndEndlessStreams,
@@ -714,6 +715,77 @@ function Streaming() {
         }}
       >
         Two large streams: read the first, then the second too
+      </button>
+
+      {(
+        [
+          ['test-unread-stream-cancelled', 1000],
+          ['test-stall-warning', 6000],
+        ] as const
+      ).map(([id, wait]) => (
+        <button
+          key={id}
+          id={id}
+          onClick={async () => {
+            setResult('')
+            const { first, second } = await onReturnTwoLargeStreams()
+            const firstDone = byteCount(first)
+            await new Promise((resolve) => setTimeout(resolve, wait))
+            second.cancel()
+            setResult(JSON.stringify({ firstBytes: await firstDone }))
+          }}
+        >
+          Two large streams: read the first, then cancel the second after {wait} ms
+        </button>
+      ))}
+
+      <button
+        id="test-stalled-call-aborted"
+        onClick={async () => {
+          setResult('')
+          const returned = await onReturnTwoLargeStreams()
+          const firstDone = byteCount(returned.first)
+          await new Promise((resolve) => setTimeout(resolve, 1000))
+          abort(returned)
+          try {
+            setResult(JSON.stringify({ firstBytes: await firstDone }))
+          } catch (err: any) {
+            setResult(JSON.stringify({ error: err.message }))
+          }
+        }}
+      >
+        Two large streams: read the first, then abort the call
+      </button>
+
+      <button
+        id="test-second-stream-read-slowly"
+        onClick={async () => {
+          setResult('')
+          const { first, second } = await onReturnTwoLargeStreams()
+          const firstDone = byteCount(first)
+          const reader = second.getReader()
+          let secondBytes = 0
+          for (let i = 0; i < 7; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 1000))
+            secondBytes += (await reader.read()).value!.byteLength
+          }
+          reader.releaseLock()
+          secondBytes += await byteCount(second)
+          setResult(JSON.stringify({ firstBytes: await firstDone, secondBytes }))
+        }}
+      >
+        Two large streams: read the first, and the second one chunk a second
+      </button>
+
+      <button
+        id="test-file-beside-large-stream"
+        onClick={async () => {
+          setResult('')
+          const { file, stream } = await onReturnFileBesideLargeStream()
+          setResult(JSON.stringify({ fileBytes: file.size, streamBytes: await byteCount(stream) }))
+        }}
+      >
+        A large file beside a large stream
       </button>
 
       <button
