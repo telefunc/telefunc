@@ -10,7 +10,7 @@ import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validate
 import {
   CHANNEL_CONNECT_TTL_MS,
   CHANNEL_TRANSPORT,
-  SSE_EVENT_CHUNK_BYTES,
+  SSE_EVENT_SLICE_BYTES,
   SSE_METADATA_MAX_BYTES,
   STATUS_CODE_WIRE_VERSION,
   WIRE_GATHER_BYTES,
@@ -71,8 +71,8 @@ class EventStream implements WireQueue {
   private passing = new Fifo<Uint8Array<ArrayBuffer>>()
   /** The encoded bytes of `waiting` and `passing`. */
   private waitingBytes = 0
-  /** The event going to the stream, and how far it went. */
-  private current: { event: Uint8Array<ArrayBuffer>; offset: number } | null = null
+  /** The frame whose event is going to the stream, and how far it went. */
+  private current: { frame: Uint8Array<ArrayBuffer>; offset: number } | null = null
   /** The newest publish's head that left: a body at the front of `waiting` names no channel, only its head does. */
   private headStarted: Uint8Array<ArrayBuffer> | null = null
   /** Whether the stream asks for more. */
@@ -98,10 +98,10 @@ class EventStream implements WireQueue {
   /** The encoded bytes a frame that goes at once is behind. */
   get streamBytes(): number {
     const { current } = this
-    return this.stream.bufferedAmount + (current === null ? 0 : current.event.byteLength - current.offset)
+    return this.stream.bufferedAmount + (current === null ? 0 : encodedBytes(current.frame.byteLength - current.offset))
   }
 
-  /** Data waits for the stream to ask for it, as the frame the replay also holds: it's encoded when it's handed. */
+  /** Data waits for the stream to ask for it, as the frame the replay also holds: it's encoded a slice at a time. */
   send(frame: Uint8Array<ArrayBuffer>): void {
     const atOnce =
       passesData(frame[0]!) || (frame.byteLength <= WIRE_GATHER_BYTES && overtakes(frame, this.framesAhead()))
@@ -173,7 +173,7 @@ class EventStream implements WireQueue {
   /** Starts `frame`'s event and returns the bytes that went. */
   private startEvent(frame: Uint8Array<ArrayBuffer>): number {
     if (frame[0] === TAG.PUBLISH_TO) this.headStarted = frame
-    this.current = { event: eventOf(frame), offset: 0 }
+    this.current = { frame, offset: 0 }
     return this.pushChunks()
   }
 
@@ -181,45 +181,42 @@ class EventStream implements WireQueue {
    *  goes as the event ends. */
   private pushChunks(): number {
     const current = this.current!
-    const { event } = current
-    const start = current.offset
+    const { frame } = current
+    let bytes = 0
     do {
-      const end = Math.min(event.byteLength, current.offset + SSE_EVENT_CHUNK_BYTES)
-      this.takes = this.stream.push(event.subarray(current.offset, end))
+      const start = current.offset
+      const end = Math.min(frame.byteLength, start + SSE_EVENT_SLICE_BYTES)
+      const chunk = encodeChunk(frame, start, end)
+      this.takes = this.stream.push(chunk)
       current.offset = end
-    } while (this.takes && current.offset < event.byteLength)
-    if (current.offset < event.byteLength) return current.offset - start
+      bytes += chunk.byteLength
+    } while (this.takes && current.offset < frame.byteLength)
+    if (current.offset < frame.byteLength) return bytes
     this.current = null
     while (this.passing.length > 0) {
-      const frame = this.passing.shift()!
-      this.waitingBytes -= eventBytes(frame)
-      this.takes = this.stream.push(eventOf(frame))
+      const passing = this.passing.shift()!
+      this.waitingBytes -= eventBytes(passing)
+      this.takes = this.stream.push(encodeChunk(passing, 0, passing.byteLength))
     }
-    return event.byteLength - start
+    return bytes
   }
 }
 
-/** The event of the publish body being delivered in this task: its subscribers hand their streams the one event. */
-const sharedEvent: { frame: Uint8Array | null; event: Uint8Array<ArrayBuffer> | null } = { frame: null, event: null }
-
-function eventOf(frame: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
-  if (sharedEvent.frame === frame) return sharedEvent.event!
-  const event = textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`)
-  if (frame[0] !== TAG.PUBLISH && frame[0] !== TAG.PUBLISH_BINARY) return event
-  if (sharedEvent.frame === null) queueMicrotask(forgetSharedEvent)
-  sharedEvent.frame = frame
-  sharedEvent.event = event
-  return event
+/** The part of `frame`'s event that holds its bytes from `start` to `end`, the first and last parts with the event's
+ *  ends. */
+function encodeChunk(frame: Uint8Array<ArrayBuffer>, start: number, end: number): Uint8Array<ArrayBuffer> {
+  const base64 = uint8ArrayToBase64url(frame.subarray(start, end))
+  return textEncoder.encode(`${start === 0 ? 'data: ' : ''}${base64}${end === frame.byteLength ? '\n\n' : ''}`)
 }
 
-function forgetSharedEvent(): void {
-  sharedEvent.frame = null
-  sharedEvent.event = null
+/** What `bytes` of a frame take as base64url, unpadded. */
+function encodedBytes(bytes: number): number {
+  return Math.ceil((bytes * 4) / 3)
 }
 
-/** What `eventOf` takes for `frame`: its base64url, unpadded, and the 8 bytes around it. */
+/** What `frame`'s event takes: its base64url and the 8 bytes around it. */
 function eventBytes(frame: Uint8Array<ArrayBuffer>): number {
-  return Math.ceil((frame.byteLength * 4) / 3) + 8
+  return encodedBytes(frame.byteLength) + 8
 }
 
 const globalObject = getGlobalObject('wire-protocol/channel/server/sse.ts', {
