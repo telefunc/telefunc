@@ -17,7 +17,7 @@ config.channel = {
 }
 ```
 
-> **You rarely need any of these.** A channel that awaits each `send()` before the next builds no backlog, whatever the client does. A publish can't be awaited, so a `BroadcastChannel` has <Link href="/channel#backpressure">limits of its own</Link>.
+> **You rarely need any of these.** A channel that awaits each `send()` before the next builds no backlog, whatever the client does. A publish waits for no subscriber, so a `BroadcastChannel` has <Link href="/channel#backpressure">limits of its own</Link>.
 
 > - `reconnectTimeout`: a client that comes back within it finds its channels open, and gets the messages held for it. It never gets a `send()` refused past `maxMemory` or 320 MiB, or the oldest messages a `BroadcastChannel` dropped. Past `reconnectTimeout`, its channels close with `NetworkError`. Raise it for clients on bad networks. Lower it to free a gone client's channels sooner.
 > - `pingInterval`: how fast a client that stopped answering counts as gone, which starts its `reconnectTimeout`. Raise it to save a phone's battery. Lower it to notice sooner.

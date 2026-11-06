@@ -290,7 +290,7 @@ So fire-and-forget can leave a gap: the client never gets a `send()` the server 
 
 To fix it, `await` each `send()` before the next, as in the clock example above, or send slower.
 
-A publish can't be awaited or refused, so a `BroadcastChannel` has limits of its own. While its client is connected, the server holds what that client downloads in a minute, at least 64 MiB and at most 320 MiB. While its client is away, the server holds up to 320 MiB. Past that, the client misses its oldest messages (see <Link href="#broadcast" />).
+A publish waits for no subscriber, so a `BroadcastChannel` has limits of its own. While its client is connected, the server holds what that client downloads in a minute, at least 64 MiB and at most 320 MiB. While its client is away, the server holds up to 320 MiB. Past that, the client misses its oldest messages (see <Link href="#broadcast" />).
 
 > On a slow uplink, a client's large message delays what that client sends after it, on all its channels, until the large message has gone up. A 4 MiB `sendBinary()` at 1 MiB/s delays them by about 3 s. Only later messages wait, and what the server sends keeps arriving. To keep later messages quick, split the large one into smaller sends.
 
@@ -526,7 +526,7 @@ Telefunc silently handles rejected promises from `send()`, `sendBinary()`, `publ
 
 A call that can't start throws instead of rejecting: one on a closed channel, or a client's message over the size limit in <Link href="#binary-data" />. `.catch()` doesn't see that throw, so put a `try` around the call.
 
-A channel closes when one of its ends closes or aborts it, and when its client stays gone longer than `reconnectTimeout`. A slow client doesn't close it, and neither does a refused `send()`.
+A channel closes when one of its ends closes or aborts it, and when its client stays gone longer than `reconnectTimeout`. A slow client doesn't close it, and neither does a refused `send()`. It also closes where the server can't hold even the answer to an `{ ack: true }` send.
 
 Channels and broadcasts signal failure through four errors:
 
@@ -536,8 +536,8 @@ Channels and broadcasts signal failure through four errors:
 | `NetworkError` (`isChannel: true`) | The client stayed gone longer than `reconnectTimeout` | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
 | `ChannelOverflowError` (`send()`) | The message would pass 320 MiB on its channel, or `maxMemory` | **Open**; only that message is lost | `await` each `send()` before the next, or raise `maxMemory`. A single message larger than it is refused even if you await it: split it, or raise `maxMemory` |
-| `ChannelOverflowError` (`BroadcastChannel`) | The server couldn't hold even the newest message for its client | Closed | Call its telefunction again to rejoin, or raise `maxMemory` |
-| `ChannelOverflowError` (`messages()`) | Its loop fell over 2 MiB behind the publishes, past its next message | The loop ends, the broadcast stays open | Handle each message faster, or use `subscribe()` |
+| `ChannelOverflowError` (closed) | The server couldn't hold even the newest message for a `BroadcastChannel`'s client, or the answer to an `{ ack: true }` send | Closed | Call its telefunction again, or raise `maxMemory` |
+| `ChannelOverflowError` (`messages()`) | Its loop fell over 2 MiB behind the publishes, past its next message, or `maxMemory` is held and it's behind | The loop ends, the broadcast stays open | Handle each message faster, or use `subscribe()` |
 | `ChannelOverflowError` (`publish()`) | With no Redis or other transport installed, a `subscribe()` callback published more than 320 MiB before its first `await` | Open | Publish less from the callback |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
