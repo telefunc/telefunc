@@ -32,6 +32,7 @@ import { TAG } from '../../wire/tags.js'
 import { encodePublishText, encodePublishBinary } from '../../wire/publishInfo.js'
 import type { ChannelDataFrame } from '../../wire/frame.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
+import { PUBLISH_HOLD_BYTES } from '../../constants.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { isAbort } from '../../../node/server/Abort.js'
@@ -97,7 +98,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   override messages(options?: { signal?: AbortSignal }) {
-    return broadcastMessages<ChannelData<T>>(this, { text: this.bufferLimit, binary: this.bufferLimitBinary }, options)
+    return broadcastMessages<ChannelData<T>>(this, options)
   }
 
   subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {
@@ -191,21 +192,20 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     if (!peer) {
       if (binary) this.offlineBuffer.pushPublishBinary(wire)
       else this.offlineBuffer.pushPublish(wire)
-      this.closeIfDroppedOffline(binary)
+      this.closeIfHoldExceeded()
       return
     }
     if (binary) peer.sendSequenced(encode.publishBinary, wire)
     else peer.sendSequenced(encode.publish, wire)
   }
 
-  /** A publish the buffer for an offline page dropped would leave it a gap: it gets the end at its next attach instead. */
-  private closeIfDroppedOffline(binary: boolean): void {
-    if (!this.offlineBuffer.dropped) return
-    const limit = binary ? 'bufferLimitBinary' : 'bufferLimit'
+  /** A publish it couldn't hold for an offline page would leave it a gap: it gets the end at its next attach instead. */
+  private closeIfHoldExceeded(): void {
+    if (this.offlineBuffer.publishBytes <= PUBLISH_HOLD_BYTES) return
     this.endWithError(
       ERROR_REASON.OVERFLOW,
       new ChannelOverflowError(
-        `Broadcast closed: more was published to its client while it was offline than config.channel.${limit} lets the server hold`,
+        `Broadcast closed: over ${PUBLISH_HOLD_BYTES} bytes were published while its client was away`,
       ),
     )
   }

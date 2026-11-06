@@ -662,12 +662,13 @@ async function onChannelHeldBinary() {
   return { channel: ch.client }
 }
 
-/** With 1 KiB buffers, sends 100,000 empty messages of each kind to an unattached channel; counts rejections by error. */
+/** With a `maxPendingBytes` of 8 KiB, sends 100,000 empty messages of each kind to an unattached channel; counts
+ *  rejections by error. */
 async function onChannelUnattachedFlood() {
   const rejected: Record<'text' | 'binary', Record<string, number>> = { text: {}, binary: {} }
   for (const kind of ['text', 'binary'] as const) {
     const original = config.channel
-    config.channel = { ...original, bufferLimit: 1024, bufferLimitBinary: 1024 }
+    config.channel = { ...original, maxPendingBytes: 8192 }
     const ch = new Channel<never, string>()
     config.channel = original
     const counts: Record<string, number> = {}
@@ -950,7 +951,7 @@ async function onChannelBudgets() {
  */
 async function onChannelAwaitedFromOffline() {
   const original = config.channel
-  config.channel = { ...original, maxPendingBytes: 1024 * 1024, bufferLimitBinary: 8 * 1024 * 1024 }
+  config.channel = { ...original, maxPendingBytes: 1024 * 1024 }
   const ch = new Channel<never, string>()
   config.channel = original
   void (async () => {

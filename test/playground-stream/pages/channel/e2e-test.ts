@@ -944,7 +944,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
-  test('channel: a flood of empty sends to a channel no page attached to rejects the oldest with ChannelOverflowError', async () => {
+  test('channel: a flood of empty sends to a channel no page attached to refuses those past maxPendingBytes with ChannelOverflowError', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-unattached-flood')
 

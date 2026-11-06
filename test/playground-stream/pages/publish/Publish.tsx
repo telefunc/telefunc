@@ -107,7 +107,7 @@ function Publish() {
             })()
             // On the wire after the loop's subscribe, so the server has the subscription before the flood.
             await room.publish('ready')
-            await remote.flood(1000)
+            await remote.flood(2000)
             const error = await loop
             setResult(JSON.stringify({ error, received, server: await remote.serverLoop() }))
           } catch (err) {
@@ -142,7 +142,7 @@ function Publish() {
               }
             })()
             await room.publish('ready')
-            await remote.flood(1000)
+            await remote.flood(2000)
             await new Promise((resolve) => setTimeout(resolve, 1000))
             await remote.close()
             const error = await loop
@@ -608,7 +608,7 @@ function Publish() {
 
       <h2>Published While Offline</h2>
 
-      {[2, 8].map((count) => (
+      {[2, 32].map((count) => (
         <button
           key={count}
           id={`test-broadcast-while-offline-${count}`}

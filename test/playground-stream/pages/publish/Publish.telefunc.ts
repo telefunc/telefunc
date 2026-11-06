@@ -403,7 +403,7 @@ async function onBroadcastBurstThenClose() {
   const serverLoop = readSlowly(room, 'slow')
   await room.publish('start')
   await new Promise((resolve) => setTimeout(resolve, 0))
-  for (let i = 0; i < 1000; i++) await room.publish(`${i}:${'x'.repeat(2048)}`)
+  for (let i = 0; i < 2000; i++) await room.publish(`${i}:${'x'.repeat(2048)}`)
   await room.close()
   return serverLoop
 }

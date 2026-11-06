@@ -249,14 +249,9 @@ export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024
 export const WIRE_SEND_AHEAD_ROUND_TRIPS = 4
 /** How long a page's data frame may wait in its wire's queues, as acknowledgements measure it, before it holds back. */
 export const WIRE_QUEUE_DELAY_MS = 300
-/**
- * Maximum bytes buffered per channel for text messages sent before a peer connects.
- * When the budget is exceeded the oldest entries are evicted (FIFO) so the
- * channel stays alive and memory stays bounded.
- */
-export const CHANNEL_BUFFER_LIMIT_BYTES = 512 * 1024
-/** Maximum bytes buffered per channel for binary messages sent before a peer connects. */
-export const CHANNEL_BUFFER_LIMIT_BINARY_BYTES = 2 * 1024 * 1024
+/** The most held for one subscriber that isn't taking what's published: while its page is away, and behind a
+ *  `messages()` loop. Publishes can't be awaited, so this is what each of a broadcast's subscribers can pin. */
+export const PUBLISH_HOLD_BYTES = 2 * 1024 * 1024
 /** The most a server channel holds for its page past the page's credit and in unanswered ack requests: a sender that
  *  awaits each send holds one, so only sends nobody awaits reach it. */
 export const CHANNEL_MAX_PENDING_BYTES = 256 * 1024 * 1024

@@ -1,9 +1,9 @@
 export { channelMessages, broadcastMessages }
-export type { MessageBudget }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { Fifo } from '../../utils/Fifo.js'
 import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
+import { PUBLISH_HOLD_BYTES } from '../constants.js'
 import { ChannelOverflowError } from './channelErrors.js'
 import type { ChannelPublishInfo } from './channel.js'
 
@@ -24,10 +24,6 @@ interface BroadcastSource<T> {
 
 type Message<T> = { type: 'text'; data: T } | { type: 'binary'; data: Uint8Array }
 
-/** The most bytes of each kind a loop may fall behind by, as `config.channel.bufferLimit` and `bufferLimitBinary` bound
- *  what the server holds for a page. */
-type MessageBudget = { text: number; binary: number }
-
 /** What a queued message holds beyond its payload: its entry, its info and the promise its listener got, about 314 B
  *  measured. */
 const QUEUED_MESSAGE_OVERHEAD_BYTES = 320
@@ -44,12 +40,8 @@ function channelMessages<T>(channel: MessageSource<T>, options?: { signal?: Abor
 }
 
 /** A broadcast's publishes don't wait for its listeners, so what its loop falls behind by is held here, within
- *  `budget`: past it, the loop ends with `ChannelOverflowError`. */
-function broadcastMessages<T>(
-  broadcast: BroadcastSource<T>,
-  budget: MessageBudget,
-  options?: { signal?: AbortSignal },
-) {
+ *  `PUBLISH_HOLD_BYTES`: past it, the loop ends with `ChannelOverflowError`. */
+function broadcastMessages<T>(broadcast: BroadcastSource<T>, options?: { signal?: AbortSignal }) {
   return iterateMessages<Message<T> & { info: ChannelPublishInfo }>(
     broadcast,
     (receive, registration) => {
@@ -60,7 +52,7 @@ function broadcastMessages<T>(
       broadcast.subscribeBinary((data, info) => receive({ type: 'binary', data, info }, data.byteLength), registration)
     },
     options,
-    budget,
+    PUBLISH_HOLD_BYTES,
   )
 }
 
@@ -72,18 +64,18 @@ async function* iterateMessages<M extends Message<unknown>>(
     options: { signal: AbortSignal },
   ) => void,
   { signal }: { signal?: AbortSignal } = {},
-  budget?: MessageBudget,
+  budget?: number,
 ): AsyncIterableIterator<M> {
   const registrations = new AbortController()
   const queue = new Fifo<{ message: M; consumed: () => void; size: number }>()
-  const held = { text: 0, binary: 0 }
+  let held = 0
   let wake: (() => void) | undefined
   let ended = false
   let error: unknown
   let behindCheck: ReturnType<typeof setTimeout> | undefined
   const release = () => {
     for (let item = queue.shift(); item; item = queue.shift()) item.consumed()
-    held.text = held.binary = 0
+    held = 0
   }
   // A failure drops what is queued: the loop throws at its next step. The first failure stays, and a clean end can't
   // erase it.
@@ -100,16 +92,14 @@ async function* iterateMessages<M extends Message<unknown>>(
   // holds more than `budget` then, whether or not its source closed meanwhile.
   const checkBehind = () => {
     behindCheck = undefined
-    const type = held.text > budget!.text ? 'text' : held.binary > budget!.binary ? 'binary' : null
-    if (type === null) return
-    const behind = `${budget![type]} bytes of ${type} messages`
-    finish(new ChannelOverflowError(`messages() ended: its loop fell behind the publishes by more than ${behind}`))
+    if (held <= budget!) return
+    finish(new ChannelOverflowError(`messages() ended: its loop fell over ${budget} bytes behind the publishes`))
   }
   const receive = (message: M, bytes = 0) => {
     if (registrations.signal.aborted) return
     const size = budget ? bytes + QUEUED_MESSAGE_OVERHEAD_BYTES : 0
-    held[message.type] += size
-    if (budget && held[message.type] > budget[message.type]) behindCheck ??= setTimeout(checkBehind, 0)
+    held += size
+    if (budget && held > budget) behindCheck ??= setTimeout(checkBehind, 0)
     return new Promise<void>((consumed) => {
       queue.push({ message, consumed, size })
       wake?.()
@@ -130,7 +120,7 @@ async function* iterateMessages<M extends Message<unknown>>(
         })
         continue
       }
-      held[next.message.type] -= next.size
+      held -= next.size
       try {
         yield next.message
       } finally {

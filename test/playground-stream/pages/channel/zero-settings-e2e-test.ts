@@ -24,7 +24,6 @@ function testZeroSettings() {
     await autoRetry(async () => {
       expect((await getResult<ChannelState>('#channel-state')).perSendAck).toBe('ack:per-send-test')
     })
-    // The server's ticks to a page gone would overflow a zero bufferLimit.
     await page.click('#channel-disconnect')
     await autoRetry(async () => {
       expect((await getResult<ChannelState>('#channel-state')).mainChannelOnCloseFiredClean).toBe(true)

@@ -2,7 +2,7 @@
 export { CloudflareBroadcastTransport, CloudflareBroadcastAuthorityState }
 export type { BroadcastDeliverRequest, BroadcastPublishRequest, TelefuncBroadcastStub }
 
-import { CHANNEL_BUFFER_LIMIT_BYTES } from '../../constants.js'
+import { PUBLISH_HOLD_BYTES } from '../../constants.js'
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorScale, getDeterministicKeyBucketIndex } from './routing.js'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
@@ -187,7 +187,7 @@ class MemberBucketState {
     this.key = key
     this.locationBucket = locationBucket
     this.authority = authority
-    this.pendingPublishes = new CloudflareBucketPublishBuffer(CHANNEL_BUFFER_LIMIT_BYTES)
+    this.pendingPublishes = new CloudflareBucketPublishBuffer(PUBLISH_HOLD_BYTES)
   }
 
   publish(serialized: string): Promise<BroadcastPublishResult> {
