@@ -88,7 +88,11 @@ type ChannelConfigUser = {
   pingInterval?: number
   /**
    * The most all channels on this server hold for their clients, in bytes or as `'4g'`, `'512m'`. It's a ceiling: nothing
-   * is set aside, and one channel holds at most 320 MiB of it. @default a quarter of the memory the process may use
+   * is set aside, and one channel holds at most 320 MiB of it.
+   *
+   * https://telefunc.com/channel-config
+   *
+   * @default a quarter of the memory the process may use
    */
   maxMemory?: number | string
 }
