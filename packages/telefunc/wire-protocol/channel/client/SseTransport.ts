@@ -641,8 +641,6 @@ class SseTransport implements UpgradeSource {
     abortController.abort()
   }
 
-  applyReconciledSettings(): void {}
-
   sendPing(frame: Uint8Array<ArrayBuffer>): void {
     if (!this.hasWire()) return
     this.sendFrame({ kind: 'heartbeat', frame })
