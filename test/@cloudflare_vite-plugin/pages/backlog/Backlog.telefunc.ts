@@ -13,10 +13,10 @@ async function onBacklog() {
     // The sends go in one turn: they wait until the test reports the page's link stalled.
     while ((await env.TelefuncKV.get(`${run}:stalled`)) === null)
       await new Promise((resolve) => setTimeout(resolve, 50))
-    let refused: string | null = null
+    let refused = 0
     for (let sent = 0; sent < count; sent++) {
-      channel.send(String(sent).padEnd(16 * 1024)).catch((err: Error) => {
-        refused = err.name
+      channel.send(String(sent).padEnd(16 * 1024)).catch(() => {
+        refused++
       })
     }
     // A refused send rejects a turn of the microtask queue later.

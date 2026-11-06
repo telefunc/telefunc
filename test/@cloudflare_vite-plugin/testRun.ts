@@ -203,7 +203,16 @@ function testChat() {
 }
 
 function testBacklog() {
-  test('Backlog: 96 MiB the server sends nobody awaiting to a page that stops reading all go out, and arrive whole and in order once it reads, the channel open', async () => {
+  test('Backlog: 24 MiB the server sends nobody awaiting to a page that stops reading all go out, and arrive whole and in order once it reads, the channel open', async () => {
+    expect(await sendToStalledPage(1500)).toBe(0)
+  })
+
+  test("Backlog: of 48 MiB the same way, those past Cloudflare's default maxPendingBytes of 32 MiB are refused, and the rest arrive in order, the channel open", async () => {
+    expect(await sendToStalledPage(3000)).greaterThan(0)
+  })
+
+  /** Returns how many were refused. */
+  async function sendToStalledPage(count: 1500 | 3000) {
     await page.goto(getServerUrl() + '/backlog')
     await autoRetry(async () => {
       expect(await page.locator('#hydrated').count()).toBe(1)
@@ -215,31 +224,32 @@ function testBacklog() {
       expect(channelId).not.toBe(null)
     })
     const runUrl = `${getServerUrl()}/backlog-run?channel=${channelId}`
-    await page.click('#backlog-run')
+    await page.click(`#backlog-run-${count}`)
     await autoRetry(async () => {
       expect(await (await fetch(runUrl)).json()).deep.equal({ started: true })
     })
     // A page that reads nothing: what the server sends waits on the way. The page can't see the run while stalled.
     const { sent, refused } = await withNetworkConditions({ downloadThroughput: 1, uploadThroughput: -1 }, async () => {
       await fetch(runUrl, { method: 'POST' })
-      let run: { sent: number; refused: string | null } | undefined
+      let run: { sent: number; refused: number } | undefined
       await autoRetry(async () => {
         run = await (await fetch(runUrl)).json()
         expect(run!.sent).not.toBe(undefined)
       })
       return run!
     })
-    expect({ sent, refused }).deep.equal({ sent: 6000, refused: null })
+    expect(sent).toBe(count)
     await autoRetry(
       async () => {
         const state = JSON.parse((await page.textContent('#backlog-state'))!)
-        expect(state.received).toBe(6000)
+        expect(state.received).toBe(count - refused)
         expect(state.outOfOrder).toBe(0)
         expect(state.closeErr).toBe(null)
       },
       { timeout: 30_000 },
     )
-  })
+    return refused
+  }
 }
 
 function testChatMembers() {

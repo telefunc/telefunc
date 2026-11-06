@@ -3,6 +3,7 @@ export { getServerConfig }
 export { getServerExtensionTypes }
 export { enableChannelTransports }
 export { setAdapterMaxFrameBytes }
+export { setAdapterMaxPendingBytes }
 export { getAdapterMaxFrameBytes }
 export { setRootFromVite }
 export { getChannelConfig }
@@ -173,6 +174,8 @@ const globalObject = getGlobalObject('serverConfig.ts', {
   adapterChannelTransports: new Set<ChannelTransports[number]>(),
   /** The largest frame the adapter's runtime takes, where that is less than the server reads. */
   adapterMaxFrameBytes: undefined as number | undefined,
+  /** The default of `maxPendingBytes` where the adapter's runtime has less memory than the usual default assumes. */
+  adapterMaxPendingBytes: undefined as number | undefined,
   /** A channel read `config.channel`, whose values each of its parts then relies on staying as they are. */
   channelConfigInUse: false,
 })
@@ -299,7 +302,7 @@ function resolveChannelConfig(channel: ChannelConfigUser): ChannelConfigResolved
     transports: channel.transports ?? [...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...globalObject.adapterChannelTransports],
     reconnectTimeout: channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
     pingInterval: channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
-    maxPendingBytes: channel.maxPendingBytes ?? CHANNEL_MAX_PENDING_BYTES,
+    maxPendingBytes: channel.maxPendingBytes ?? globalObject.adapterMaxPendingBytes ?? CHANNEL_MAX_PENDING_BYTES,
   }
 }
 
@@ -337,6 +340,11 @@ function enableChannelTransports(transports: ChannelTransports): void {
 /** @internal The runtime ends a WebSocket on a larger message: the page refuses one, told by each channel the server makes and by each RECONCILED. */
 function setAdapterMaxFrameBytes(bytes: number | undefined): void {
   globalObject.adapterMaxFrameBytes = bytes
+}
+
+/** @internal */
+function setAdapterMaxPendingBytes(bytes: number): void {
+  globalObject.adapterMaxPendingBytes = bytes
 }
 
 function getAdapterMaxFrameBytes(): number | undefined {
