@@ -67,17 +67,19 @@ class ServerReplay {
   }
 
   /** Of its newest `droppable` publishes, the oldest go until its holder holds `toBytes`, but for the newest of all unless
-   *  `newestToo`; returns how many went. The older ones are on the wire, which a reconnect may have to send again. */
+   *  `newestToo`: a later message then shows the page what it missed. Returns how many went. The older ones are on the
+   *  wire, which a reconnect may have to send again. */
   dropOldestPublishes(toBytes: number, droppable: number, newestToo = false): number {
-    let pinned = Math.max(0, this.publishes - droppable)
+    const waiting = Math.min(this.publishes, droppable)
+    let pinned = this.publishes - waiting
+    const mayGo = newestToo ? waiting : waiting - 1
     let dropped = 0
-    for (let i = this.first; i < this.seqs.length && this.holder.heldBytes > toBytes; i++) {
+    for (let i = this.first; i < this.seqs.length && dropped < mayGo && this.holder.heldBytes > toBytes; i++) {
       if (!this.bodies[i]) continue
       if (pinned > 0) {
         pinned--
         continue
       }
-      if (this.publishes === 1 && !newestToo) break
       this.drop(i)
       dropped++
     }
