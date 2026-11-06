@@ -83,13 +83,6 @@ export function parseStreamConfig(val: unknown): { transport?: StreamTransport }
 }
 export const DEFAULT_STREAM_TRANSPORT: StreamTransport = STREAM_TRANSPORT.BINARY_INLINE
 
-/** The unread bytes of one inline stream at which the page asks the server to pause it, and half of it to resume. */
-export const STREAM_FLOW_PAUSE_BYTES = 1024 * 1024
-/** How long the server holds a pause the page hasn't renewed. */
-export const STREAM_FLOW_LEASE_MS = 60 * 1000
-/** The body of the server's answer when a stream-flow request names a live response. */
-export const STREAM_FLOW_FOUND = 'ok'
-
 /** Transport for persistent channels created with `new Channel()`. */
 export type ChannelTransport = (typeof CHANNEL_TRANSPORT)[keyof typeof CHANNEL_TRANSPORT]
 /** Ordered list of transports to use for channels. `['sse', 'ws']` starts on SSE and upgrades to WebSocket. */

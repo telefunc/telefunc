@@ -63,10 +63,6 @@ console.log(
 )
 
 app.get('/api/cleanup-state', async (c) => c.json(await getCleanupStateSnapshot()))
-app.get('/api/stream-flows', (c) => {
-  const objects = (globalThis as Record<string, any>)._telefunc
-  return c.json({ count: objects?.['wire-protocol/values/server/response/StreamFlow.ts']?.flows.size ?? 0 })
-})
 app.post('/api/cleanup-state/reset', async (c) => {
   await resetCleanupState()
   return c.json({ ok: true })

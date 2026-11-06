@@ -23,12 +23,11 @@ export {
   onReturnTwoStreamsOfSmallChunks,
   onReturnOneLargeChunk,
   onReturnFinishedAndEndlessStreams,
-  onReturnTwoEndless,
   onReturnFailingStream,
   onGeneratorFinallyThrows,
 }
 
-import { Abort, Channel, download, getContext } from 'telefunc'
+import { Abort, Channel, getContext } from 'telefunc'
 import { Subject, interval } from 'rxjs'
 import { map, take } from 'rxjs/operators'
 import { cleanupState } from '../../cleanup-state'
@@ -432,43 +431,6 @@ const onReturnFinishedAndEndlessStreams = async () => {
     },
   })
   return { key, finished, endless }
-}
-
-type EndlessKind = 'stream' | 'generator' | 'download'
-
-/** Endless, each chunk carrying its number, and `cleanupState[name]` says how many chunks its producer made. */
-function endlessValue(kind: EndlessKind, name: string) {
-  let made = 0
-  const end = () => {
-    cleanupState[`${name}_end`] = 'cancelled'
-  }
-  if (kind === 'generator') {
-    return (async function* () {
-      try {
-        while (true) {
-          cleanupState[name] = String(made + 1)
-          yield { n: made++, pad: 'x'.repeat(64 * 1024) }
-        }
-      } finally {
-        end()
-      }
-    })()
-  }
-  const stream = new ReadableStream<Uint8Array<ArrayBuffer>>({
-    pull(controller) {
-      const chunk = new Uint8Array(64 * 1024)
-      new DataView(chunk.buffer).setUint32(0, made++)
-      cleanupState[name] = String(made)
-      controller.enqueue(chunk)
-    },
-    cancel: end,
-  })
-  return kind === 'download' ? download(stream, { name: 'endless.bin' }) : stream
-}
-
-const onReturnTwoEndless = async (firstKind: EndlessKind, secondKind: EndlessKind) => {
-  const key = crypto.randomUUID()
-  return { key, first: endlessValue(firstKind, `first_${key}`), second: endlessValue(secondKind, `second_${key}`) }
 }
 
 const onReturnFailingStream = async (chunksBeforeFailure: number) => {
