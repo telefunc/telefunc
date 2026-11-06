@@ -208,17 +208,17 @@ class PieceSender {
 
   /** Sends `frame`, which nothing waits ahead of. */
   private start(frame: Uint8Array<ArrayBuffer>): void {
-    if (isSequencedTag(frame[0]!) && this.copies(frame)) {
-      const room = this.owner.copyRoom?.() ?? Number.POSITIVE_INFINITY
-      if (room < frame.byteLength) {
-        // An open announcement names whole frames.
-        this.headroom = this.open === null ? room : 0
-        return this.cut(frame, 0)
-      }
+    if (isSequencedTag(frame[0]!) && this.copies(frame) && this.copyRoom() < frame.byteLength) {
+      // An open announcement names whole frames.
+      return this.open === null ? this.cut(frame, 0) : this.wait(frame, 0)
     }
     if (this.open === null && !this.announces(frame)) return this.pass(frame)
     if (this.open === null && this.goesWhole(frame)) return this.sendWhole(frame)
     this.sendBehindAnnouncement(frame)
+  }
+
+  private copyRoom(): number {
+    return this.owner.copyRoom?.() ?? Number.POSITIVE_INFINITY
   }
 
   /** Whether sending `frame` now leaves a copy of it in the socket's hands: pieces do, and on some sockets all does. */
@@ -328,16 +328,19 @@ class PieceSender {
     this.handGathered()
     const bytes = frame.byteLength
     const now = performance.now()
-    const headroom = Math.max(0, Math.floor(this.headroom))
-    const end = isSequencedTag(frame[0]!) ? Math.min(bytes, offset + headroom) : bytes
+    const data = isSequencedTag(frame[0]!)
+    const copyRoom = data ? this.copyRoom() : Number.POSITIVE_INFINITY
+    const headroom = Math.max(0, Math.floor(Math.min(this.headroom, copyRoom)))
+    const end = data ? Math.min(bytes, offset + headroom) : bytes
     // A piece smaller than what the receiver acknowledges at once would cost more than the wait for headroom.
     if (end - offset < Math.min(bytes - offset, WIRE_PIECES_ACK_BYTES)) return this.wait(frame, offset)
-    // An empty first piece makes the receiver acknowledge the next two at once. A frame cut only for headroom isn't
-    // used to measure the rate.
-    if (offset === 0 && bytes > this.wholeUpTo) this.sendEmptyPiece(bytes)
-    const size = Math.max(1, Math.floor(this.wholeUpTo))
+    // An empty piece makes the receiver acknowledge the next two at once, which copies past their room wait for. A
+    // frame cut only for headroom isn't used to measure the rate.
+    const awaitsAck = copyRoom < bytes - offset
+    if (awaitsAck || (offset === 0 && bytes > this.wholeUpTo)) this.sendEmptyPiece(bytes)
+    const size = awaitsAck ? Math.ceil((end - offset) / 2) : Math.max(1, Math.floor(this.wholeUpTo))
     const handed = end - offset + Math.ceil((end - offset) / size) * PIECE_HEADER_BYTES
-    this.countHanded(handed, isSequencedTag(frame[0]!), true)
+    this.countHanded(handed, data, true)
     if (acknowledges(bytes)) this.track(handed, now, false)
     for (let at = offset; at < end; at += size) {
       this.messages.hand(encode.piece(bytes, frame.subarray(at, Math.min(end, at + size))))
@@ -760,15 +763,13 @@ abstract class PieceReceiver implements AckScheduleOwner {
   add(total: number, piece: Uint8Array, at: number): Uint8Array<ArrayBuffer> | null {
     const bytes = piece.byteLength
     this.took += PIECE_HEADER_BYTES
-    if (this.received === 0) {
-      this.total = total
-      if (bytes === 0) {
-        this.probing = 2
-        return null
-      }
-      this.data = isSequencedTag(piece[0]!)
+    if (this.received === 0) this.total = total
+    assertProtocol(total === this.total && bytes <= total - this.received, 'PIECE not cut as its frame is')
+    if (bytes === 0) {
+      this.probing = 2
+      return null
     }
-    assertProtocol(total === this.total && bytes > 0 && bytes <= total - this.received, 'PIECE not cut as its frame is')
+    if (this.received === 0) this.data = isSequencedTag(piece[0]!)
     if (this.received + bytes > this.frame.byteLength) {
       const grown = new Uint8Array(Math.min(total, Math.max(2 * this.frame.byteLength, this.received + bytes)))
       grown.set(this.frame.subarray(0, this.received))

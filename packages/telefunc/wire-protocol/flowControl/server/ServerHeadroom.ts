@@ -192,7 +192,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     this.awaitsCopyRoom = false
     if (this.sender.dataWaits) {
       this.releasing = true
-      this.sender.sendWaiting(Math.min(this.headroom(performance.now()), this.copyRoom()))
+      this.sender.sendWaiting(this.headroom(performance.now()))
       this.releasing = false
     }
     this.pace()
