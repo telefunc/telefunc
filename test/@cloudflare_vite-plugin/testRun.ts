@@ -12,6 +12,10 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
     additionalTimeout: 60_000,
     tolerateError: (log) =>
       log.logText.includes('Detected multiple renderers concurrently rendering') ||
+      // The Channel/Chat streaming (SSE) connection surfaces a benign
+      // `net::ERR_ALPN_NEGOTIATION_FAILED` browser error; the channel still works
+      // (the message flow is asserted by testChannel()/testChat()).
+      log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
       // workerd logs a response it wrote to a connection the browser closed as it navigated away,
       // before the request's signal could report it: "Broken pipe" and "Connection reset by peer" are both that write.
       (log.logText.includes('disconnected: ::write(') &&

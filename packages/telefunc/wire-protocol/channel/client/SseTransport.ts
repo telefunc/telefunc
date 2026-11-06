@@ -110,7 +110,7 @@ class SseTransport implements UpgradeSource {
   private postWatch: ReturnType<typeof setTimeout> | null = null
   private heartbeatFlushDelayMs = Math.floor(CHANNEL_PING_INTERVAL_MS / 2)
   private drainCallbacks: Array<() => void> = []
-  /** The streaming upload POST. Once `unavailable`, it stays so, and frames go in batch POSTs from the outbox. */
+  /** The streaming upload POST. Once `failed`, it stays so, and frames go in batch POSTs from the outbox. */
   private streamRequest:
     | { tag: 'idle' }
     | {
@@ -119,18 +119,14 @@ class SseTransport implements UpgradeSource {
         /** Written before the server acknowledged the POST; null once it did. */
         unconfirmed: Uint8Array<ArrayBuffer>[] | null
       }
-    | { tag: 'unavailable' } = { tag: 'idle' }
+    | { tag: 'failed' } = { tag: 'idle' }
 
   constructor({ telefuncUrl, fetchImpl, userHeaders, owner }: SseTransportOptions) {
     this.telefuncUrl = telefuncUrl
     this.fetchImpl = fetchImpl
     this.userHeaders = userHeaders
     this.owner = owner
-    if (typeof window !== 'undefined') {
-      window.addEventListener('pagehide', this.onPageHide)
-      // A browser streams a request body only over HTTP/2 or later, which needs TLS: the POST could only fail.
-      if (new URL(telefuncUrl, document.baseURI).protocol !== 'https:') this.streamRequest = { tag: 'unavailable' }
-    }
+    if (typeof window !== 'undefined') window.addEventListener('pagehide', this.onPageHide)
   }
 
   /** A page that leaves for good closes its wire, as a WebSocket's does; one kept in the back/forward cache keeps it. */
@@ -255,7 +251,7 @@ class SseTransport implements UpgradeSource {
       abortController.signal,
       { accept: 'text/event-stream' },
     )
-    const upload = this.streamRequest.tag === 'unavailable' ? null : this.openUpload(abortController)
+    const upload = this.streamRequest.tag === 'failed' ? null : this.openUpload(abortController)
     this.owner.onTransportReconcileSent(this)
 
     const body = await this.openDownstream(ssePromise, stage, abortController)
@@ -364,7 +360,7 @@ class SseTransport implements UpgradeSource {
     const unsent = this.streamRequest.tag === 'active' ? this.streamRequest.unconfirmed : null
     // Aborted, not ended: a proxy holding the body forwards it once it ends, and the server would run it after what follows.
     abort.abort()
-    this.streamRequest = { tag: 'unavailable' }
+    this.streamRequest = { tag: 'failed' }
     const now = performance.now()
     if (unsent) this.requeue(unsent.map((frame) => ({ frame, deadline: now, queuedAt: now })))
     this.owner.onTransportBatched(this)
@@ -687,7 +683,7 @@ class SseTransport implements UpgradeSource {
   // ── Persistent client→server stream-request POST (half-duplex streaming body) ──
 
   private closeStreamRequest(): void {
-    // Only 'active' has a body to close; 'unavailable' is sticky-terminal so don't regress to 'idle'.
+    // Only 'active' has a body to close; 'failed' is sticky-terminal so don't regress to 'idle'.
     if (this.streamRequest.tag !== 'active') return
     this.streamRequest.body.close()
     this.streamRequest = { tag: 'idle' }
