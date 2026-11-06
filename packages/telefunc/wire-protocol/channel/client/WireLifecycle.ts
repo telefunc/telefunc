@@ -4,7 +4,7 @@ export type { TransportOwner, WireLifecycleOwner }
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
-import { ChannelOverflowError, replayLossError } from '../channelErrors.js'
+import { ChannelOverflowError } from '../channelErrors.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
@@ -601,12 +601,8 @@ const TRANSPORT_REGISTRY: Record<
 
 /** What a channel the server ended with an ERROR of `reason` closes with. */
 function channelErrorFor(reason: number): Error {
-  switch (reason) {
-    case ERROR_REASON.OVERFLOW:
-      return new ChannelOverflowError('Closed: the server could not hold even the newest message for this client')
-    case ERROR_REASON.LOST:
-      return replayLossError('server')
-    default:
-      return makeBugError()
+  if (reason === ERROR_REASON.OVERFLOW) {
+    return new ChannelOverflowError('Closed: the server could not hold even the newest message for this client')
   }
+  return makeBugError()
 }

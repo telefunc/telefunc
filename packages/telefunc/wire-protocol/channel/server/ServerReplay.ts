@@ -18,8 +18,6 @@ class ServerReplay {
   private dropped = 0
   /** The live publishes. */
   private publishes = 0
-  /** The newest publish it let go for falling behind: past it, every seq is here. */
-  private shedThrough = 0
   private readonly holder: MemoryHolder
   private issuedSeq = 0
   private pushedSeq = 0
@@ -54,21 +52,18 @@ class ServerReplay {
     this.compact()
   }
 
-  /** The frames after `afterSeq`, each publish's head and then its body, or null if it dropped one of them. */
-  getAfter(afterSeq: number): Uint8Array<ArrayBuffer>[] | null {
+  /** The frames after `afterSeq`, each publish's head and then its body. A channel's are all there, as nothing enters
+   *  unadmitted and nothing leaves unacknowledged; what a public subscriber sheds its page sees in `info.seq`. */
+  getAfter(afterSeq: number): Uint8Array<ArrayBuffer>[] {
     const frames: Uint8Array<ArrayBuffer>[] = []
-    const from = Math.max(afterSeq, this.shedThrough)
-    let entries = 0
     for (let i = this.first; i < this.seqs.length; i++) {
       const frame = this.frames[i]
-      const seq = this.seqs[i]!
-      if (seq <= afterSeq || !frame) continue
-      if (seq > from) entries++
+      if (this.seqs[i]! <= afterSeq || !frame) continue
       frames.push(frame)
       const body = this.bodies[i]
       if (body) frames.push(body.frame)
     }
-    return entries >= this.pushedSeq - from ? frames : null
+    return frames
   }
 
   /** Of its newest `droppable` publishes, the oldest go until its holder holds `toBytes`, but for the newest of all unless
@@ -83,7 +78,6 @@ class ServerReplay {
         continue
       }
       if (this.publishes === 1 && !newestToo) break
-      if (this.seqs[i]! > this.shedThrough) this.shedThrough = this.seqs[i]!
       this.drop(i)
       dropped++
     }
@@ -108,7 +102,6 @@ class ServerReplay {
     this.first = 0
     this.dropped = 0
     this.publishes = 0
-    this.shedThrough = 0
     this.issuedSeq = 0
     this.pushedSeq = 0
   }

@@ -777,8 +777,8 @@ class ChannelMux implements UpgradeStagesOwner {
     }
   }
 
-  /** Attaches `channel` to the wire. With `replay`, first sends what the page missed, or ends the channel if the
-   *  replay lost it. Null once the channel keeps nothing for a page (its replay was released). */
+  /** Attaches `channel` to the wire. With `replay`, first sends what the page missed. Null once the channel keeps
+   *  nothing for a page (its replay was released). */
   private attachChannel(
     channel: ServerChannel,
     open: ReconcileOpenEntry,
@@ -789,13 +789,8 @@ class ChannelMux implements UpgradeStagesOwner {
     if (buffer === null) return null
     channel._onPageAttach(open.lastSeq, request)
     const peer = new IndexedPeer({ sender, index: open.ix, replay: buffer })
-    const missed = replay ? buffer.getAfter(open.lastSeq) : []
-    if (missed === null) {
-      channel._onReplayLost(peer)
-    } else {
-      for (const frame of missed) sender.send(frame)
-      channel._attachPeer(peer, open)
-    }
+    if (replay) for (const frame of buffer.getAfter(open.lastSeq)) sender.send(frame)
+    channel._attachPeer(peer, open)
     if (this.ended.has(channel)) this.ended.keep(channel, null)
     return { channel, ix: open.ix, peer }
   }

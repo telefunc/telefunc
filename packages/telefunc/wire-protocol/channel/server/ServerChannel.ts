@@ -523,7 +523,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.ERROR:
         assertProtocol(frame.reason === ERROR_REASON.LOST, `ERROR reason ${frame.reason} from a page`)
-        this.shutdown(replayLossError('client'), { pageGone: true })
+        this.shutdown(replayLossError(), { pageGone: true })
         return
       case TAG.WINDOW:
         this.onDrained(this.sendCredit.onPeerByteWindow(frame.bytes))
@@ -709,15 +709,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._phase === 'ended') return
     this.peer = null
     this.shutdown(undefined, { pageGone: true })
-  }
-
-  /** @internal The replay buffer no longer holds what the page lacks: drops what was buffered offline, sends the page
-   *  a LOST error on `peer`, and ends. */
-  _onReplayLost(peer: IndexedPeer): void {
-    const err = replayLossError('server')
-    this.dropPending(err)
-    peer.sendError(ERROR_REASON.LOST)
-    this.shutdown(err)
   }
 
   /** @internal Called on each of the page's heartbeats; see `ReceiveCredit.acknowledge`. */
