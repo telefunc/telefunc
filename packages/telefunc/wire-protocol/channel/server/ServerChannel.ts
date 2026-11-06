@@ -317,7 +317,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const room = this.maxPendingBytes - this.bytesAhead()
     // Only a send that waits, for its answer or behind sends waiting for credit, is held with its promise.
     const held = ack || this.sendCredit.waitingCount > 0
-    const fits = held ? fitsIn(data, room - HEADER - HELD_SEND_OVERHEAD_BYTES) : room >= 0
+    const fits = fitsIn(data, room - HEADER - (held ? HELD_SEND_OVERHEAD_BYTES : 0))
     return fits ? null : this.refuseSend('maxPendingBytes')
   }
 

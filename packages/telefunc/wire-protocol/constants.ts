@@ -260,6 +260,9 @@ export const CHANNEL_BUFFER_LIMIT_BINARY_BYTES = 2 * 1024 * 1024
 /** The most a server channel holds for its page past the page's credit and in unanswered ack requests: a sender that
  *  awaits each send holds one, so only sends nobody awaits reach it. */
 export const CHANNEL_MAX_PENDING_BYTES = 256 * 1024 * 1024
+/** A stream's chunk larger than this goes in parts, each a message under every channel's frame limit (32 MiB on
+ *  Cloudflare) and under the smallest `maxPendingBytes`. */
+export const STREAM_CHUNK_PART_BYTES = 1024 * 1024
 /** The most ack requests a server channel holds unanswered. */
 export const CHANNEL_MAX_PENDING_ACKS = 16_384
 

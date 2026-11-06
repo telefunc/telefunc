@@ -1143,7 +1143,7 @@ function ChannelDemo() {
     let received = 0
     const closeErr = await new Promise<string | null>((resolve) => {
       channel.listenBinary(() => {
-        if (++received === 3) resolve(null)
+        if (++received === 2) resolve(null)
       })
       channel.onClose((err) => resolve(err?.name ?? 'none'))
     })

@@ -3,7 +3,12 @@ export type { ChannelPumpRunContext }
 
 import type { StreamingProducer } from '../../types.js'
 import { concat } from '../../../wire/envelope.js'
-import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_END, CHANNEL_PUMP_TAG_ERROR } from '../../../constants.js'
+import {
+  CHANNEL_PUMP_TAG_DATA,
+  CHANNEL_PUMP_TAG_END,
+  CHANNEL_PUMP_TAG_ERROR,
+  STREAM_CHUNK_PART_BYTES,
+} from '../../../constants.js'
 import { ChannelClosedError, ServerChannel } from '../../../channel/server/ServerChannel.js'
 import { reconnectWindow } from '../../../../node/server/serverConfig.js'
 import { getChannelMux } from '../../../channel/server/ChannelMux.js'
@@ -86,8 +91,10 @@ function pumpProducerToChannel(
             channel.sendBinary(TAG_END)
             break
           }
-          const pending = channel._sendBinary(concat(TAG_DATA, value))
-          if (pending) await pending
+          for (let at = 0; at < value.byteLength; at += STREAM_CHUNK_PART_BYTES) {
+            const pending = channel._sendBinary(concat(TAG_DATA, value.subarray(at, at + STREAM_CHUNK_PART_BYTES)))
+            if (pending) await pending
+          }
         }
       })
     } catch (err) {

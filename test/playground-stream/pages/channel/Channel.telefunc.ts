@@ -945,8 +945,8 @@ async function onChannelBudgets() {
 }
 
 /**
- * With a `maxPendingBytes` below its messages, sends 3 of 5 MiB, awaiting each, the first before the page attaches.
- * cleanupState: awaitedFromOffline_<id> = `done`, or why a send was refused
+ * With a `maxPendingBytes` of 1 MiB, awaits a send of 1 KiB before the page attaches, one of 5 MiB, and one of 1 KiB.
+ * cleanupState: awaitedFromOffline_<id> = for each send, `sent` or why it was refused
  */
 async function onChannelAwaitedFromOffline() {
   const original = config.channel
@@ -954,12 +954,16 @@ async function onChannelAwaitedFromOffline() {
   const ch = new Channel<never, string>()
   config.channel = original
   void (async () => {
-    try {
-      for (let i = 0; i < 3; i++) await ch.sendBinary(new Uint8Array(5 * 1024 * 1024))
-      cleanupState[`awaitedFromOffline_${ch.id}`] = 'done'
-    } catch (err) {
-      cleanupState[`awaitedFromOffline_${ch.id}`] = (err as Error).message
+    const sends: string[] = []
+    for (const bytes of [1024, 5 * 1024 * 1024, 1024]) {
+      try {
+        await ch.sendBinary(new Uint8Array(bytes))
+        sends.push('sent')
+      } catch (err) {
+        sends.push((err as Error).message)
+      }
     }
+    cleanupState[`awaitedFromOffline_${ch.id}`] = JSON.stringify(sends)
   })()
   return { channel: ch.client, channelId: ch.id }
 }
