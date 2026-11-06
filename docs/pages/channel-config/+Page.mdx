@@ -17,12 +17,11 @@ config.channel = {
 }
 ```
 
-> **You rarely need any of these.** `await` your `send()`s and a channel holds one message at a time, whatever the client does.
+> **You rarely need any of these.** Await each `send()` before the next and no backlog builds up, whatever the client does. A single message must still fit in `maxPendingBytes`.
 
-> Each setting decides one thing, and none of them can break another:
 > - `reconnectTimeout`: a client that comes back within it finds its channels open, with nothing lost. Past it, they close with `NetworkError`. Raise it for clients on bad networks. Lower it to free a gone client's channels sooner.
 > - `pingInterval`: how fast a client that stopped answering counts as gone, which starts its `reconnectTimeout`. Raise it to save a phone's battery. Lower it to notice sooner.
-> - `maxPendingBytes`: only `send()`s nobody awaits reach it. Past it, a `send()` rejects with `ChannelOverflowError` and that message isn't delivered, and the channel stays open. A larger message is refused even if you await it. Lower it to use less memory, which below 64 MiB also limits how much a channel sends per round trip, in both directions.
+> - `maxPendingBytes`: `send()`s nobody awaits can pile up to it, and awaiting each one before the next keeps them from it. Past it, a `send()` rejects with `ChannelOverflowError` and that message isn't delivered, and the channel stays open. A single message larger than it is refused even if you await it. Lower it to use less memory. Below 64 MiB, it also limits how fast messages arrive, in both directions: a channel sends at most this much per round trip, so a distant client gets large transfers more slowly, the more so the closer it is to the 2 MiB minimum.
 
 > These apply to each channel, not to a connection or a server: 100 channels may hold 100 × `maxPendingBytes` in total. On Cloudflare, `maxPendingBytes` defaults to 32 MiB, as <Link href="/stream/cloudflare">a Durable Object's memory</Link> is limited to 128 MB.
 
