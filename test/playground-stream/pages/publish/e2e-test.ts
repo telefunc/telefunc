@@ -301,7 +301,7 @@ function testPublish(isDev: boolean, inDocker = false) {
     await page.click('#test-broadcast-subscriber-aborts')
     await autoRetry(async () => {
       const result = await getResult<{ seq: number; received: string[] }>('#publish-result')
-      expect(result.seq).toBeGreaterThan(0)
+      expect(result.seq).greaterThan(0)
       expect(result.received).deep.equal(['abort'])
     })
   })

@@ -140,6 +140,7 @@ type ChannelState = {
   ackListenerAbortErr: { isAbort: boolean; abortValue: unknown } | null
   heldBytes: number | null
   lateAnswerAsked: boolean
+  listenerAborted: boolean
   ackListenerBugErr: string | null
   ackListenerBugRecoveryAck: string | null
   clientAckListenerBugChannelId: string | null
@@ -237,6 +238,7 @@ const initialState: ChannelState = {
   ackListenerAbortErr: null,
   heldBytes: null,
   lateAnswerAsked: false,
+  listenerAborted: false,
   ackListenerBugErr: null,
   ackListenerBugRecoveryAck: null,
   clientAckListenerBugChannelId: null,
@@ -695,8 +697,8 @@ function ChannelDemo() {
     const closed = new Promise((resolve) => channel.onClose(resolve))
     void channel.send('stop')
     await closed
-    await readHeldBytes()
-  }, [readHeldBytes])
+    setChannelState((s) => ({ ...s, listenerAborted: true }))
+  }, [])
 
   const testLateAnswerHolds = useCallback(async () => {
     const { channel } = await openChannel(onChannelLateAnswerHolds)

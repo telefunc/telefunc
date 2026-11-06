@@ -14,6 +14,9 @@ import {
 import { newCDPSession, sendsOutrunWarning, sendRefusedWarning, withNetworkConditions } from '../../../utils'
 
 type ChannelState = {
+  heldBytes: number | null
+  lateAnswerAsked: boolean
+  listenerAborted: boolean
   connected: boolean
   onOpenFired: boolean
   mainChannelOnCloseFiredClean: boolean | null
@@ -693,8 +696,9 @@ function testChannel(isDev: boolean, inDocker = false) {
   test("channel: a message whose listener throws Abort isn't held once the channel ended", async () => {
     await page.click('#channel-test-listener-abort-holds')
     await autoRetry(async () => {
-      expect((await getResult<ChannelState>('#channel-state')).heldBytes).toBe(0)
+      expect((await getResult<ChannelState>('#channel-state')).listenerAborted).toBe(true)
     })
+    await expectHoldsNothingOnceLeft()
   })
 
   test("channel: an answer that comes after its page left isn't held", async () => {
@@ -702,11 +706,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     await autoRetry(async () => {
       expect((await getResult<ChannelState>('#channel-state')).lateAnswerAsked).toBe(true)
     })
-    await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-read-held-bytes')
-    await autoRetry(async () => {
-      expect((await getResult<ChannelState>('#channel-state')).heldBytes).toBe(0)
-    })
+    await expectHoldsNothingOnceLeft()
   })
 
   test('channel: ack listener bug — send({ ack: true }) rejects but channel stays open for a follow-up ack', async () => {
@@ -1406,6 +1406,14 @@ function parseChannelTransports(value: string | undefined): Array<'sse' | 'ws'> 
     throw new Error(`Invalid PUBLIC_ENV__CHANNEL_TRANSPORTS: ${value ?? '(unset)'}`)
   }
   return parsed
+}
+
+async function expectHoldsNothingOnceLeft() {
+  await navigate(`${getServerUrl()}/channel`)
+  await page.click('#channel-read-held-bytes')
+  await autoRetry(async () => {
+    expect((await getResult<ChannelState>('#channel-state')).heldBytes).toBe(0)
+  })
 }
 
 function testChannelApi() {

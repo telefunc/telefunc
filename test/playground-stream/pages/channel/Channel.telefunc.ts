@@ -240,7 +240,7 @@ async function onChannelAckListenerAbort() {
 }
 
 /** The channel `onChannelHeldBytes` reads what it holds of, once a listener's late answer went. */
-let heldChannel: { heldBytes?: number } | undefined
+let heldChannel: { heldBytes: number } | undefined
 let lateAnswer = Promise.resolve()
 
 /** A listener's `Abort` ends the channel from inside the delivery of the message it got. */
@@ -249,7 +249,7 @@ async function onChannelListenerAbortHolds() {
   ch.listen(() => {
     throw Abort('stop')
   })
-  heldChannel = ch
+  heldChannel = ch as unknown as { heldBytes: number }
   return { channel: ch.client }
 }
 
@@ -267,13 +267,13 @@ async function onChannelLateAnswerHolds() {
     setTimeout(markAnswered)
     return msg
   })
-  heldChannel = ch
+  heldChannel = ch as unknown as { heldBytes: number }
   return { channel: ch.client }
 }
 
 async function onChannelHeldBytes() {
   await lateAnswer
-  return heldChannel!.heldBytes!
+  return heldChannel!.heldBytes
 }
 
 async function onChannelAckListenerBug() {
