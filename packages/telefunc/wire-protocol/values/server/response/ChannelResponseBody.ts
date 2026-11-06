@@ -3,12 +3,7 @@ export type { ChannelPumpRunContext }
 
 import type { StreamingProducer } from '../../types.js'
 import { concat } from '../../../wire/envelope.js'
-import {
-  CHANNEL_PUMP_TAG_DATA,
-  CHANNEL_PUMP_TAG_END,
-  CHANNEL_PUMP_TAG_ERROR,
-  STREAM_CHUNK_PART_BYTES,
-} from '../../../constants.js'
+import { CHANNEL_PUMP_TAG_ERROR } from '../../../constants.js'
 import { ChannelClosedError, ServerChannel } from '../../../channel/server/ServerChannel.js'
 import { reconnectWindow } from '../../../../node/server/serverConfig.js'
 import { getChannelMux } from '../../../channel/server/ChannelMux.js'
@@ -18,11 +13,9 @@ import { restoreContext } from '../../../../node/server/context/context.js'
 import type { Context } from '../../../../node/server/context/context.js'
 import type { RequestContext } from '../../../../node/server/context/requestContext.js'
 import { createDeferred } from '../../../../utils/createDeferred.js'
-import { createStopRace } from '../../../../utils/createStopRace.js'
+import { sendChunks } from '../../sendChunks.js'
 
-const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
 const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
-const TAG_END = new Uint8Array([CHANNEL_PUMP_TAG_END])
 
 type ChannelPumpRunContext = {
   context: Context
@@ -68,38 +61,22 @@ function pumpProducerToChannel(
   }
 
   let cancelled = false
-  const { promise: cancelledPromise, resolve: resolveCancelled } =
-    createDeferred<IteratorResult<Uint8Array<ArrayBuffer>>>()
+  const { promise: cancelledPromise, resolve: resolveCancelled } = createDeferred<null>()
   const doCancel = () => {
     if (cancelled) return
     cancelled = true
-    resolveCancelled({ done: true, value: undefined as never })
+    resolveCancelled(null)
     producer.cancel()
   }
 
   channel.onClose(doCancel)
 
-  async function sendChunks() {
-    const { responseAbort } = runContext.requestContext
-    const race = createStopRace(Promise.race([responseAbort.errorPromise, cancelledPromise]))
-    while (true) {
-      const { done, value } = await race(producer.chunks.next())
-      if (cancelled) return
-      if (done) {
-        channel.sendBinary(TAG_END)
-        return
-      }
-      for (let at = 0; at < value.byteLength; at += STREAM_CHUNK_PART_BYTES) {
-        const pending = channel._sendBinary(concat(TAG_DATA, value.subarray(at, at + STREAM_CHUNK_PART_BYTES)))
-        if (pending) await pending
-      }
-    }
-  }
-
   async function runChannelPump() {
     try {
       await channel.opened
-      await restoreContext(runContext.context, sendChunks)
+      const { responseAbort } = runContext.requestContext
+      const stop = Promise.race([responseAbort.errorPromise, cancelledPromise])
+      await restoreContext(runContext.context, () => sendChunks(channel, producer, stop))
     } catch (err) {
       if (err instanceof ChannelClosedError) return
       if (isAbort(err)) runContext.requestContext.responseAbort.abort(err.abortValue)
