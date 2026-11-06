@@ -1,7 +1,7 @@
 export { ChannelTable }
 export type { ChannelRecord, ClosedState }
 
-import type { ReplayBuffer } from '../ReplayBuffer.js'
+import type { ReplayBuffer } from './ReplayBuffer.js'
 import type { MuxChannel } from './ClientConnection.js'
 import { assert } from '../../../utils/assert.js'
 import { seqThrough } from '../../wire/seq.js'

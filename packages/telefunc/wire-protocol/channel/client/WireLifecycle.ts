@@ -18,7 +18,7 @@ import {
   TIMER_DELAY_MAX_MS,
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../../constants.js'
-import { ReplayBuffer } from '../ReplayBuffer.js'
+import { ReplayBuffer } from './ReplayBuffer.js'
 import { ERROR_REASON, isSequencedFrame } from '../../wire/frame.js'
 import { TAG, isClosingTag } from '../../wire/tags.js'
 import { seqNear } from '../../wire/seq.js'
