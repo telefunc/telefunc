@@ -975,31 +975,30 @@ async function onChannelAwaitedFromOffline() {
   return { channel: ch.client, channelId: ch.id }
 }
 
-/** One channel per kind of text, each sending as its first send what fits `maxMemory` to the byte, and one per
- *  kind sending one byte more. cleanupState: atLimit_<kind>_<fits|over> = `accepted`, or why the send was refused. */
-async function onChannelAtLimit() {
-  // 2 MiB is these 2,096,631 UTF-8 bytes, the two quotes around them, a frame's 7 bytes and a held send's 512.
-  const texts = {
-    twoBytes: `${'é'.repeat(1_048_315)}x`,
-    threeBytes: '€'.repeat(698_877),
-    fourBytes: `${'😀'.repeat(524_157)}xxx`,
-  }
-  const open = (name: string, text: string) => {
-    const ch = new Channel<never, string>()
-    ch.onOpen(() => {
-      cleanupState[`atLimit_${name}`] = 'accepted'
-      ch.send(text, { ack: true }).catch((err: Error) => {
-        // The page has no listener to answer the send that went.
-        if (err.name === 'ChannelOverflowError') cleanupState[`atLimit_${name}`] = err.message
-      })
-    })
-    return ch.client
-  }
-  const channels = Object.entries(texts).flatMap(([kind, text]) => [
-    open(`${kind}_fits`, text),
-    open(`${kind}_over`, `${text}x`),
-  ])
-  return channels
+// 2 MiB is these 2,096,631 UTF-8 bytes, the two quotes around them, a frame's 7 bytes and a held send's 512.
+const atLimitTexts = {
+  twoBytes: `${'é'.repeat(1_048_315)}x`,
+  threeBytes: '€'.repeat(698_877),
+  fourBytes: `${'😀'.repeat(524_157)}xxx`,
+}
+
+/** A channel sending, as its first send, the text of `kind` that fits `maxMemory` to the byte, or one byte more. Told, it
+ *  closes: `maxMemory` is the server's, and the next channel needs all of it.
+ *  cleanupState: atLimit_<kind>_<fits|over> = `accepted`, or why the send was refused. */
+async function onChannelAtLimit(kind: keyof typeof atLimitTexts, over: boolean) {
+  const ch = new Channel<never, string>()
+  const name = `atLimit_${kind}_${over ? 'over' : 'fits'}`
+  ch.onOpen(async () => {
+    cleanupState[name] = 'accepted'
+    try {
+      await ch.send(over ? `${atLimitTexts[kind]}x` : atLimitTexts[kind], { ack: true })
+    } catch (err) {
+      // The page has no listener to answer the send that went.
+      if ((err as Error).name === 'ChannelOverflowError') cleanupState[name] = (err as Error).message
+    }
+    ch.close()
+  })
+  return { channel: ch.client }
 }
 
 /** cleanupState: ownBytes_<alone|beside> = how many frames from the page weren't its listeners' own. */

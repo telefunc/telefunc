@@ -1198,10 +1198,13 @@ function ChannelDemo() {
     document.querySelector('#channel-budgets-result')!.textContent = JSON.stringify({ bytes: bytes.id })
   }, [])
 
-  // A channel the page drops closes once garbage-collected.
-  const atLimitChannels = useRef<unknown>(null)
   const testAtLimit = useCallback(async () => {
-    atLimitChannels.current = await openChannel(onChannelAtLimit)
+    for (const kind of ['twoBytes', 'threeBytes', 'fourBytes'] as const) {
+      for (const over of [false, true]) {
+        const { channel } = await openChannel(() => onChannelAtLimit(kind, over))
+        await channel.closed
+      }
+    }
   }, [])
 
   const testOwnBytes = useCallback(async () => {

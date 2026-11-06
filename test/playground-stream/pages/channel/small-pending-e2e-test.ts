@@ -50,7 +50,9 @@ function testSmallPending() {
       const { id } = JSON.parse((await page.textContent('#channel-offline-budgets-result'))!)
       const sends: string[] = JSON.parse((await getCleanupState())[`offline_budget_${id}`] ?? '[]')
       expect(sends.slice(0, 2)).deep.equal(['answered', 'answered'])
-      expect(sends[2]).toContain('ChannelOverflowError: Send refused: config.channel.maxMemory')
+      expect(sends[2]).toContain(
+        'ChannelOverflowError: Send refused: the most for one channel, or config.channel.maxMemory',
+      )
     })
     expectLog(sendRefusedWarning)
   })
