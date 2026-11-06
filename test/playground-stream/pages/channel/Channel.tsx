@@ -204,6 +204,7 @@ type ChannelState = {
   slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
   publishesBehind: { pingMs: number; closed: string; closeMs: number } | null
   broadcastOverflow: { received: number; closeErr: string } | null
+  broadcastBehind: { seqsAhead: number[]; isClosed: boolean } | null
   lateCallbacks: { channelId: string; onOpen: boolean; onCloseAbortValue: unknown } | null
   openAbort: { channelId: string; abortValue: unknown } | null
 }
@@ -290,6 +291,7 @@ const initialState: ChannelState = {
   slowUplink: null,
   publishesBehind: null,
   broadcastOverflow: null,
+  broadcastBehind: null,
   lateCallbacks: null,
   openAbort: null,
 }
@@ -1467,6 +1469,23 @@ function ChannelDemo() {
     control.close()
   }, [])
 
+  const testBroadcastBehind = useCallback(async () => {
+    setChannelState((s) => ({ ...s, broadcastBehind: null }))
+    const { broadcast, control } = await openChannel(() => onChannelPublishesBehind(256 * 1024))
+    const { seq: before } = await broadcast.publish('before the burst')
+    const seqsAhead: number[] = []
+    const newest = new Promise<void>((resolve) => {
+      broadcast.subscribeBinary((_, info) => {
+        seqsAhead.push(info.seq - before)
+        if (info.seq === before + 16) resolve()
+      })
+    })
+    void control.send(16)
+    await newest
+    setChannelState((s) => ({ ...s, broadcastBehind: { seqsAhead, isClosed: broadcast.isClosed } }))
+    control.close()
+  }, [])
+
   const testSlowUplink = useCallback(async () => {
     setChannelState((s) => ({ ...s, slowUplink: null }))
     const { upload, ticks } = await openChannel(onChannelSlowUplink)
@@ -1863,6 +1882,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             Broadcast Publishes More Than The Server Can Hold
+          </button>
+          <button
+            id="channel-test-broadcast-behind"
+            type="button"
+            onClick={testBroadcastBehind}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Broadcast Publishes More Than The Client Keeps Up With
           </button>
           <button
             id="channel-test-awaited-from-offline"

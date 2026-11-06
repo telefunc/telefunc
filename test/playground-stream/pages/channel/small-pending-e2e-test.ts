@@ -89,4 +89,21 @@ function testSmallPending() {
     )
     expectLog('fell behind what the server holds for its client')
   })
+
+  // 16 publishes of 256 KiB in one go: past 7/8 of maxMemory, the oldest the wire hasn't taken go.
+  test('channel: a client that falls behind a broadcast misses its oldest messages, gets the newest with a jump in info.seq, and stays open', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-broadcast-behind')
+    await autoRetry(
+      async () => {
+        const { seqsAhead, isClosed } = (await getResult<any>('#channel-state')).broadcastBehind
+        expect(seqsAhead.at(-1)).toBe(16)
+        expect(seqsAhead.length).lessThan(16)
+        expect(isClosed).toBe(false)
+      },
+      { timeout: 30_000 },
+    )
+    expectLog('fell behind what the server holds for its client')
+    expectLog('missed messages')
+  })
 }
