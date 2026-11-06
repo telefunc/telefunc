@@ -524,7 +524,7 @@ Telefunc silently handles rejected promises from `send()`, `sendBinary()`, `publ
 
 A call that can't start throws instead of rejecting: one on a closed channel, or a client's message over the size limit in <Link href="#binary-data" />. `.catch()` doesn't see that throw, so put a `try` around the call.
 
-A channel closes when one of its ends closes or aborts it, and when its client stays gone longer than `reconnectTimeout`. A slow client doesn't close it, and neither does a refused `send()`. It also closes where the server can't hold even the answer to an `{ ack: true }` send.
+A channel closes when one of its ends closes or aborts it, and when its client stays gone longer than `reconnectTimeout`. A slow client doesn't close it, and neither does a refused `send()`. It also closes where the server can't hold even the newest message for a `BroadcastChannel`'s client, or the answer to an `{ ack: true }` send.
 
 Channels and broadcasts signal failure through four errors:
 
