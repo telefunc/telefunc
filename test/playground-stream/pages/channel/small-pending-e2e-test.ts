@@ -15,6 +15,7 @@ function testSmallPending() {
       expect(state.unattachedFlood?.text.ChannelOverflowError).greaterThan(0)
       expect(state.unattachedFlood?.binary.ChannelOverflowError).greaterThan(0)
     })
+    expectLog(sendRefusedWarning)
   })
 
   test('channel: the byte cap refuses the send with the named error', async () => {

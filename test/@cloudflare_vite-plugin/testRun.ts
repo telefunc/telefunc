@@ -1,9 +1,9 @@
 export { testRun }
 export { testCloudflareBindings }
 
-import { autoRetry, expect, getServerUrl, page, test } from '@brillout/test-e2e'
+import { autoRetry, expect, expectLog, getServerUrl, page, test } from '@brillout/test-e2e'
 import type { WebSocket } from 'playwright-chromium'
-import { testCounter, testRunClassic, withNetworkConditions } from '../../test/utils'
+import { sendRefusedWarning, testCounter, testRunClassic, withNetworkConditions } from '../../test/utils'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testCloudflareBindings()
@@ -209,6 +209,7 @@ function testBacklog() {
 
   test("Backlog: of 48 MiB the same way, those past Cloudflare's default maxPendingBytes of 32 MiB are refused, and the rest arrive in order, the channel open", async () => {
     expect(await sendToStalledPage(3000)).greaterThan(0)
+    expectLog(sendRefusedWarning)
   })
 
   /** Returns how many were refused. */
