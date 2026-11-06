@@ -204,8 +204,10 @@ class RoomAuthority {
     const receipt: AcceptedCommitWire = { kind: 'accepted', seq: mark.seq, timestamp: mark.timestamp }
     if (lane.kind !== 'inbox' && lane.kind !== 'control') {
       // No committer awaits a data or binary frame's handoff, so a lost one is reported here. A delivery that can be lost
-      // has a route, and each route is this room's.
-      delivery.catch((error: unknown) => reportDeliveryLost(routes[0]!.roomId, String(error)))
+      // has a route, and each route is this room's. A demand page's gap is asked for again: no app wrote it.
+      delivery.catch((error: unknown) => {
+        if (lane.kind !== 'demand') reportDeliveryLost(routes[0]!.roomId, String(error))
+      })
       return receipt
     }
     const lost = await lostReason(delivery)
