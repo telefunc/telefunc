@@ -205,11 +205,15 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     return Math.min(CHANNEL_HOLD_MAX_BYTES, Math.max(CREDIT_WINDOW_MAX_BYTES, perMs * CHANNEL_RECONNECT_TIMEOUT_MS))
   }
 
+  /** How many of its newest publishes no wire has: all of them while it has no wire. */
+  private unhanded(): number {
+    const { peer } = this
+    return peer ? peer.sender.queue.waitingPublishes(peer.index) : Number.POSITIVE_INFINITY
+  }
+
   /** Its newest publish, where no wire has that yet. */
   get newestUnhanded(): PublishBody | undefined {
-    if (this._phase === 'ended' || !this._replayBuffer) return undefined
-    const peer = this.peer
-    if (peer && peer.sender.queue.waitingPublishes(peer.index) === 0) return undefined
+    if (this._phase === 'ended' || !this._replayBuffer || this.unhanded() === 0) return undefined
     return this._replayBuffer.newestPublish()
   }
 
@@ -218,14 +222,11 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   shed(toBytes: number): void {
     const replay = this._replayBuffer
     if (this._phase === 'ended' || !replay) return
-    const peer = this.peer
-    const dropped = replay.dropOldestPublishes(
-      toBytes,
-      peer ? peer.sender.queue.waitingPublishes(peer.index) : Number.POSITIVE_INFINITY,
-      toBytes === 0,
-    )
-    if (peer && dropped > 0) peer.sender.queue.dropWaitingPublishes(peer.index, dropped)
-    if (dropped > 0) this.warnMissed()
+    const dropped = replay.dropOldestPublishes(toBytes, this.unhanded())
+    if (dropped > 0) {
+      this.peer?.sender.queue.dropWaitingPublishes(this.peer.index, dropped)
+      this.warnMissed()
+    }
     if (toBytes === 0) {
       this.endWithError(
         ERROR_REASON.OVERFLOW,
