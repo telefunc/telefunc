@@ -838,7 +838,7 @@ async function onChannelPublishesBehind() {
   const control = new Channel<(msg: 'ping' | 'close' | number) => string, never>()
   control.listen(async (msg) => {
     if (msg === 'ping') return 'pong'
-    if (msg === 'close') return String(await broadcast.close({ timeout: 10_000 }))
+    if (msg === 'close') return String(await broadcast.close({ timeout: 20_000 }))
     for (let i = 0; i < msg; i++) void broadcast.publishBinary(new Uint8Array(4 * 1024 * 1024))
     return 'published'
   })

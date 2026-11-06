@@ -96,7 +96,7 @@ function testSlowLink(isDev: boolean) {
     }
   })
 
-  // The four bodies still to cross take at least 16 s.
+  // The four bodies still to cross take at least 16 s, and 22 s on SSE.
   test("channel: on a 1 MB/s link, publishes falling behind hold up neither another channel's answer nor the server's close", async () => {
     const proxy = await startBlackHoleProxy(getServerUrl())
     try {
@@ -109,12 +109,13 @@ function testSlowLink(isDev: boolean) {
           behind = (await getResult<SlowLinkState>('#channel-state')).publishesBehind
           expect(behind).not.toBe(null)
         },
-        { timeout: 40_000 },
+        { timeout: 45_000 },
       )
-      // An event goes whole, so on SSE they wait for the one the stream holds: 4 MiB in base64 is about 5.6 s.
-      expect(behind!.pingMs).lessThan(8000)
+      // An event goes whole, and two are ahead of what an SSE wire sends now: 4 MiB in base64 takes about 5.6 s here.
+      const upToMs = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!).includes('sse') ? 14_000 : 4000
+      expect(behind!.pingMs).lessThan(upToMs)
       expect(behind!.closed).toBe('0')
-      expect(behind!.closeMs).lessThan(8000)
+      expect(behind!.closeMs).lessThan(upToMs)
     } finally {
       // The page leaves before the proxy closes, which would cut its connections.
       await page.goto('about:blank')
