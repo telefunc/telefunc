@@ -24,6 +24,8 @@ import { getChannelMux } from './ChannelMux.js'
 import type { ReconcileOutcome, ServerTransport } from './ChannelMux.js'
 import { encode } from '../../wire/frame.js'
 import { TAG, passesData } from '../../wire/tags.js'
+import { DrainRate } from '../../flowControl/DrainRate.js'
+import { countWaitingPublishes, droppingPublishes, type WireQueue } from '../../flowControl/server/waitingPublishes.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { isProtocolViolationError, ProtocolViolationError } from '../../wire/protocolViolation.js'
 
@@ -54,12 +56,15 @@ type EventStreamOptions = {
 }
 
 /** The event stream to the page: data waits for it to ask for more, and the frames that go at once pass that data. */
-class EventStream {
+class EventStream implements WireQueue {
   readonly stream: PushReadable | PushReadableStream<Uint8Array<ArrayBuffer>>
   private waiting = new Fifo<Uint8Array<ArrayBuffer>>()
   private waitingBytes = 0
   /** Whether the stream asks for more. */
   private takes: boolean
+  /** The rate the page takes what waits, and when it last took some; null while nothing waits. */
+  private readonly drain = new DrainRate()
+  private tookAt: number | null = null
 
   constructor({ useNodeStream, onCancel }: EventStreamOptions) {
     const onTake = () => this.handWaiting()
@@ -85,8 +90,26 @@ class EventStream {
       this.takes = this.stream.push(eventOf(frame))
       return
     }
+    this.tookAt ??= performance.now()
     this.waiting.push(frame)
     this.waitingBytes += eventBytes(frame)
+  }
+
+  waitingPublishes(ix: number): number {
+    return countWaitingPublishes(this.waiting, ix)
+  }
+
+  dropWaitingPublishes(ix: number, count: number): void {
+    const drops = droppingPublishes(ix, count)
+    this.waiting.remove((frame) => {
+      if (!drops(frame)) return false
+      this.waitingBytes -= eventBytes(frame)
+      return true
+    })
+  }
+
+  drainRate(): number {
+    return this.drain.rate
   }
 
   /** Past a wire only lost, what waits is dropped: the page's reconnect gets it from its channels' replay, and it could
@@ -101,11 +124,17 @@ class EventStream {
   /** Hands the stream the data that waits, as far as it asks. */
   private handWaiting(): void {
     this.takes = true
+    let bytes = 0
     while (this.takes && this.waiting.length > 0) {
       const frame = this.waiting.shift()!
+      bytes += frame.byteLength
       this.waitingBytes -= eventBytes(frame)
       this.takes = this.stream.push(eventOf(frame))
     }
+    if (this.tookAt === null) return
+    const now = performance.now()
+    this.drain.spanned(bytes, now - this.tookAt)
+    this.tookAt = this.waiting.length > 0 ? now : null
   }
 }
 
@@ -157,6 +186,7 @@ class SseServerTransport {
     bufferedAmount: (wire) => Math.floor((wire.events.heldBytes * 3) / 4),
     // A frame that goes at once passes the data waiting for the stream to ask: it waits behind the stream's alone.
     queuedAhead: (wire) => Math.floor((wire.events.streamBytes * 3) / 4),
+    queueOf: (wire) => wire.events,
     terminateWire: (wire) => this.terminateWire(wire),
   }
 

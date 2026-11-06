@@ -8,6 +8,7 @@ import type { PeerSender } from './IndexedPeer.js'
 import type { ServerTransport, Wire } from './ChannelMux.js'
 import type { SessionRegistry } from './SessionRegistry.js'
 import type { Deliveries } from '../../flowControl/Deliveries.js'
+import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
 import { SocketWait, type SocketWaitOwner } from '../../flowControl/server/SocketWait.js'
 import { ServerHeadroom } from '../../flowControl/server/ServerHeadroom.js'
 import { ServerPieceReceiver } from '../../flowControl/server/ServerPieceReceiver.js'
@@ -37,6 +38,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   private readonly transport: ServerTransport<unknown>
   /** Null on a wire that doesn't take pieces (SSE). */
   readonly pieces: WirePieces | null
+  readonly queue: WireQueue
   /** How long the frames that go at once wait behind what the socket holds. */
   private readonly wait = new SocketWait({ owner: this })
   private readonly deliveries: Deliveries
@@ -62,6 +64,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
           receiver: new ServerPieceReceiver({ owner: this }),
         }
       : null
+    this.queue = this.pieces ? this.pieces.headroom : transport.queueOf!(wire)
     this.deliveries = deliveries
     this.sessions = sessions
     this.attaching = attaching
@@ -145,12 +148,13 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
     for (const { ix, probe } of probed) this.send(encode.bdpPingAck(ix, probe, Infinity, Infinity))
   }
 
-  /** What its channels' flow control lets the wire hold, less what it holds; `Infinity` if the runtime can't tell. */
+  /** What the wire may hold, less what it holds; `Infinity` if the runtime can't tell. Its data is what its channels hold,
+   *  so what passes this is what nothing else bounds: a page flooding it with what it answers at once. */
   private measureHeadroom(): number {
     const backlog = this.bufferedAmount()
     if (backlog === undefined) return Infinity
-    let allowed = WIRE_SEND_BACKLOG_BASE_BYTES
-    for (const channel of this.channels()) allowed += channel._sendAllowance() + this.largestSent
+    let allowed = WIRE_SEND_BACKLOG_BASE_BYTES + this.largestSent
+    for (const channel of this.channels()) allowed += channel.heldBytes
     return allowed - backlog
   }
 

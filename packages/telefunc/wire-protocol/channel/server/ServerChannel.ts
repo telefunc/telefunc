@@ -35,13 +35,7 @@ import { NetworkError } from '../../../shared/NetworkError.js'
 import { channelMessages } from '../channelMessages.js'
 import { forListener, listenerAnswer } from '../listenerAnswer.js'
 import { isPromise } from '../../../utils/isPromise.js'
-import {
-  CHANNEL_CONNECT_TTL_MS,
-  TIMER_DELAY_MAX_MS,
-  CHANNEL_HOLD_MAX_BYTES,
-  CREDIT_WINDOW_MAX_BYTES,
-  PUBLISH_HOLD_BYTES,
-} from '../../constants.js'
+import { CHANNEL_CONNECT_TTL_MS, TIMER_DELAY_MAX_MS, CHANNEL_HOLD_MAX_BYTES } from '../../constants.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
 import { creditWindowOf, type CreditOwner } from '../../flowControl/credit.js'
@@ -357,18 +351,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       `A channel's \`send()\` calls outrun its client: ${(ahead / 2 ** 20).toFixed(1)} MiB wait for it and keep growing, while it takes ${mibPerS.toFixed(1)} MiB/s. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next, or send slower: past ${(CHANNEL_HOLD_MAX_BYTES / 2 ** 20).toFixed(0)} MiB, or \`config.channel.maxMemory\` on this server, sends are refused with \`ChannelOverflowError\`.`,
       { onlyOnce: false },
     )
-  }
-
-  /** @internal The most bytes that may wait for a reading page: the credit window, the allowance past it, and the
-   *  publishes held for it while it was away. */
-  _sendAllowance(): number {
-    return CREDIT_WINDOW_MAX_BYTES + this.pastCreditAllowance() + PUBLISH_HOLD_BYTES
-  }
-
-  /** What the wire cap lets a page hold past its credit: the largest window a page grants, and all that this channel's
-   *  sends put ahead of the page, which only the server code's `await` holds back. */
-  protected pastCreditAllowance(): number {
-    return CREDIT_WINDOW_MAX_BYTES + Math.min(CHANNEL_HOLD_MAX_BYTES, this.bytesAhead())
   }
 
   private addPendingAck(

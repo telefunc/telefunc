@@ -7,8 +7,11 @@ import type { PublishBody } from './PublishBody.js'
 import type { ServerReplay } from './ServerReplay.js'
 import type { SendWait } from '../../flowControl/SendWaits.js'
 import type { Urgency } from '../../flowControl/credit.js'
+import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
 
 interface PeerSender {
+  /** What the wire holds back for its page. */
+  readonly queue: WireQueue
   send(frame: Uint8Array): void
   /** Sends `frame` in the next message the wire sends, where it can carry one (see `PieceSender.carry`). */
   carry(frame: Uint8Array): void
@@ -29,7 +32,7 @@ type IndexedPeerOptions = {
 /** Encodes a channel's frames with its index; a sequenced one joins the replay buffer as it goes to the wire. */
 class IndexedPeer {
   readonly sender: PeerSender
-  private index: number
+  readonly index: number
   private replay: ServerReplay
 
   constructor({ sender, index, replay }: IndexedPeerOptions) {

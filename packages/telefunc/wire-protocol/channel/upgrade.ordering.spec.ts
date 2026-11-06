@@ -19,6 +19,7 @@ function createHarness() {
       wholeMessages: false,
       sendNow: (_conn, frame) => sent.push(decode(frame)),
       bufferedAmount: () => 0,
+      queueOf: () => ({ waitingPublishes: () => 0, dropWaitingPublishes() {}, drainRate: () => 0 }),
       terminateWire: () => (terminated = true),
     }
     mux.onWireOpen(conn, transport)

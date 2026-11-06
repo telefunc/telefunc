@@ -23,7 +23,8 @@ import type {
 } from '../../broadcast/broadcastAdapter.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
-import { assert, assertUsage } from '../../../utils/assert.js'
+import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
+import { admitPublish, type MemoryHolder } from './channelMemory.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
@@ -32,7 +33,12 @@ import { TAG } from '../../wire/tags.js'
 import type { ChannelDataFrame } from '../../wire/frame.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { PublishBody } from './PublishBody.js'
-import { PUBLISH_HOLD_BYTES } from '../../constants.js'
+import {
+  CHANNEL_HOLD_MAX_BYTES,
+  CHANNEL_RECONNECT_TIMEOUT_MS,
+  CREDIT_WINDOW_MAX_BYTES,
+  PUBLISH_HOLD_BYTES,
+} from '../../constants.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { isAbort } from '../../../node/server/Abort.js'
@@ -40,7 +46,7 @@ assertIsNotBrowser()
 
 const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
 
-class ServerBroadcast<T = unknown> extends ServerChannel {
+class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder {
   readonly [SERVER_BROADCAST_BRAND] = true
   /** @see ChannelShield in ../channel/channel.ts — broadcast only validates incoming
    *  publishes from clients (the `data` direction). The `ack` slot is unused: publish
@@ -64,11 +70,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this.key = opts.key
   }
 
-  /** A publish can't be awaited per page, so a broadcast's page gets a quarter of the largest window past credit, not
-   *  what was published to it: a page that stops reading has its wire cut, and reconnects. */
-  protected override pastCreditAllowance(): number {
-    return this.sendCredit.peerByteWindowMax / 4
-  }
+  /** Its page is told what it missed by `info.seq`, and the server's log by this once. */
+  private missedWarned = false
 
   static isServerBroadcast(value: unknown): value is ServerBroadcast {
     return value !== null && typeof value === 'object' && SERVER_BROADCAST_BRAND in value
@@ -189,10 +192,58 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   private forwardPublish(body: PublishBody): void {
     if (this.peer) {
       this.peer.sendPublish(body)
+      const share = this.share()
+      if (this.heldBytes > share) this.shed(share)
       return
     }
     this.offlineBuffer.pushPublish(body)
     this.closeIfHoldExceeded()
+  }
+
+  /** What it may hold: 60 s of what its page takes, within what any channel may. */
+  private share(): number {
+    const perMs = this.peer?.sender.queue.drainRate() ?? 0
+    if (perMs === 0) return CHANNEL_HOLD_MAX_BYTES
+    return Math.min(CHANNEL_HOLD_MAX_BYTES, Math.max(CREDIT_WINDOW_MAX_BYTES, perMs * CHANNEL_RECONNECT_TIMEOUT_MS))
+  }
+
+  /** Its newest publish, where no wire has that yet. */
+  get newestUnhanded(): PublishBody | undefined {
+    if (this._phase === 'ended' || !this._replayBuffer) return undefined
+    const peer = this.peer
+    if (peer && peer.sender.queue.waitingPublishes(peer.index) === 0) return undefined
+    return this._replayBuffer.newestPublish()
+  }
+
+  /** `MemoryHolder`: its oldest publishes no wire has go, down to `toBytes`; its page sees the jump in `info.seq`. Above 0
+   *  the newest stays, and at 0, where not even that fits, the channel ends: no later message would show the page. */
+  shed(toBytes: number): void {
+    const replay = this._replayBuffer
+    if (this._phase === 'ended' || !replay) return
+    const peer = this.peer
+    const dropped = replay.dropOldestPublishes(
+      toBytes,
+      peer ? peer.sender.queue.waitingPublishes(peer.index) : Number.POSITIVE_INFINITY,
+      toBytes === 0,
+    )
+    if (peer && dropped > 0) peer.sender.queue.dropWaitingPublishes(peer.index, dropped)
+    if (dropped > 0) this.warnMissed()
+    if (toBytes === 0) {
+      this.endWithError(
+        ERROR_REASON.OVERFLOW,
+        new ChannelOverflowError('Broadcast closed: the server could not hold even the newest message for its client'),
+      )
+    }
+  }
+
+  private warnMissed(): void {
+    if (this.missedWarned) return
+    this.missedWarned = true
+    assertWarning(
+      false,
+      `A \`BroadcastChannel\` on key "${this.key}" fell behind what the server holds for its client, which misses its oldest messages: \`info.seq\` shows the gap on the client.`,
+      { onlyOnce: false },
+    )
   }
 
   /** A publish it couldn't hold for an offline page would leave it a gap: it gets the end at its next attach instead. */
@@ -351,6 +402,7 @@ function bodyOf<T>(
   let body = publishBodies.get(info)
   if (!body) {
     body = new PublishBody(encodeBody(data, info))
+    admitPublish(body)
     publishBodies.set(info, body)
   }
   return body

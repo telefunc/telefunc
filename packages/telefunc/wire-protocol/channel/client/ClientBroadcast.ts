@@ -11,6 +11,7 @@ import { Listeners } from '../../../utils/Listeners.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { ChannelClosedError } from '../channelErrors.js'
 import { isPromise } from '../../../utils/isPromise.js'
+import { assertWarning } from '../../../utils/assert.js'
 import { ClientChannel, type ClientChannelOptions } from './ClientChannel.js'
 
 class ClientBroadcast<T = unknown> extends ClientChannel {
@@ -18,6 +19,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly broadcastBinaryListeners = new Listeners<BroadcastBinaryListener>()
   /** The subscriptions this page asks the server for. */
   private readonly subscribed = { text: false, binary: false }
+  private missedWarned = false
 
   constructor(options: ClientChannelOptions) {
     super(options)
@@ -80,6 +82,17 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this.subscribed[kind] = on
     if (on) this.connection.sendBroadcastSubscribe(this, kind === 'binary')
     else this.connection.sendBroadcastUnsubscribe(this, kind === 'binary')
+  }
+
+  /** @internal The server let its oldest messages go: this page fell behind what it holds. */
+  _onFramesMissed(): void {
+    if (this.missedWarned) return
+    this.missedWarned = true
+    assertWarning(
+      false,
+      `A \`BroadcastChannel\` on key "${this.key}" missed messages, as this client fell behind what the server holds for it: \`info.seq\` shows the gap.`,
+      { onlyOnce: false },
+    )
   }
 
   protected override dispatchDataFrame(frame: ChannelDataFrame): void {

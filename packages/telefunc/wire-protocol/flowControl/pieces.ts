@@ -153,6 +153,20 @@ class PieceSender {
     return this.waitingBytes + this.messages.bytes
   }
 
+  /** The frames waiting behind the rest of a data frame, in order. */
+  get waitingFrames(): Iterable<Uint8Array<ArrayBuffer>> {
+    return this.waiting
+  }
+
+  /** Removes the frames waiting behind the rest of a data frame that `drops` says go, called on each in order. */
+  dropWaiting(drops: (frame: Uint8Array<ArrayBuffer>) => boolean): void {
+    this.waiting.remove((frame) => {
+      if (!drops(frame)) return false
+      this.waitingBytes -= frame.byteLength
+      return true
+    })
+  }
+
   /** Whether the rest of a data frame waits for headroom; every frame sent meanwhile waits behind it. */
   get dataWaits(): boolean {
     return this.rest !== null

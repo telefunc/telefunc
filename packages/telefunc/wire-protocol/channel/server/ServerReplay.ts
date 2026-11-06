@@ -1,6 +1,5 @@
 export { ServerReplay }
 
-import { CHANNEL_HOLD_MAX_BYTES } from '../../constants.js'
 import { assert } from '../../../utils/assert.js'
 import { hold, letGo, type MemoryHolder } from './channelMemory.js'
 import { HELD_SEND_OVERHEAD_BYTES } from './ServerChannelBuffer.js'
@@ -17,6 +16,10 @@ class ServerReplay {
   /** Where the live entries start, and how many are dropped past that. */
   private first = 0
   private dropped = 0
+  /** The live publishes. */
+  private publishes = 0
+  /** The newest publish it let go for falling behind: past it, every seq is here. */
+  private shedThrough = 0
   private readonly holder: MemoryHolder
   private issuedSeq = 0
   private pushedSeq = 0
@@ -42,7 +45,7 @@ class ServerReplay {
   pushPublish(seq: number, head: Uint8Array<ArrayBuffer>, body: PublishBody): void {
     this.add(seq, head, body)
     hold(this.holder, body)
-    this.trim()
+    this.publishes++
   }
 
   /** The page has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
@@ -54,16 +57,47 @@ class ServerReplay {
   /** The frames after `afterSeq`, each publish's head and then its body, or null if it dropped one of them. */
   getAfter(afterSeq: number): Uint8Array<ArrayBuffer>[] | null {
     const frames: Uint8Array<ArrayBuffer>[] = []
+    const from = Math.max(afterSeq, this.shedThrough)
     let entries = 0
     for (let i = this.first; i < this.seqs.length; i++) {
       const frame = this.frames[i]
-      if (this.seqs[i]! <= afterSeq || !frame) continue
-      entries++
+      const seq = this.seqs[i]!
+      if (seq <= afterSeq || !frame) continue
+      if (seq > from) entries++
       frames.push(frame)
       const body = this.bodies[i]
       if (body) frames.push(body.frame)
     }
-    return entries >= this.pushedSeq - afterSeq ? frames : null
+    return entries >= this.pushedSeq - from ? frames : null
+  }
+
+  /** Of its newest `droppable` publishes, the oldest go until its holder holds `toBytes`, but for the newest of all unless
+   *  `newestToo`; returns how many went. The older ones are on the wire, which a reconnect may have to send again. */
+  dropOldestPublishes(toBytes: number, droppable: number, newestToo = false): number {
+    let pinned = Math.max(0, this.publishes - droppable)
+    let dropped = 0
+    for (let i = this.first; i < this.seqs.length && this.holder.heldBytes > toBytes; i++) {
+      if (!this.bodies[i]) continue
+      if (pinned > 0) {
+        pinned--
+        continue
+      }
+      if (this.publishes === 1 && !newestToo) break
+      if (this.seqs[i]! > this.shedThrough) this.shedThrough = this.seqs[i]!
+      this.drop(i)
+      dropped++
+    }
+    this.compact()
+    return dropped
+  }
+
+  /** The body of the newest publish it holds. */
+  newestPublish(): PublishBody | undefined {
+    for (let i = this.seqs.length - 1; i >= this.first; i--) {
+      const body = this.bodies[i]
+      if (body) return body
+    }
+    return undefined
   }
 
   dispose(): void {
@@ -73,6 +107,8 @@ class ServerReplay {
     this.bodies = []
     this.first = 0
     this.dropped = 0
+    this.publishes = 0
+    this.shedThrough = 0
     this.issuedSeq = 0
     this.pushedSeq = 0
   }
@@ -85,21 +121,14 @@ class ServerReplay {
     this.bodies.push(body)
   }
 
-  /** The oldest publishes go past what one channel may hold. */
-  private trim(): void {
-    if (this.holder.heldBytes <= CHANNEL_HOLD_MAX_BYTES) return
-    for (let i = this.first; i < this.seqs.length && this.holder.heldBytes > CHANNEL_HOLD_MAX_BYTES; i++) {
-      if (this.bodies[i]) this.drop(i)
-    }
-    this.compact()
-  }
-
   private drop(i: number): void {
     const frame = this.frames[i]
     if (!frame) return
     const body = this.bodies[i]
-    if (body) letGo(this.holder, body)
-    else letGo(this.holder, frame.byteLength + HELD_SEND_OVERHEAD_BYTES)
+    if (body) {
+      letGo(this.holder, body)
+      this.publishes--
+    } else letGo(this.holder, frame.byteLength + HELD_SEND_OVERHEAD_BYTES)
     this.frames[i] = null
     this.bodies[i] = null
     this.dropped++

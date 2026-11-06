@@ -581,6 +581,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     const seq = seqNear(bits, prev + 1)
     if (seq <= prev) return null
     record.lastSeq = seq
+    // The channel's frames share one seq, so a jump is exactly the frames this page never got.
+    if (seq > prev + 1) record.channel._onFramesMissed?.()
     return seq
   }
 }
@@ -601,9 +603,7 @@ const TRANSPORT_REGISTRY: Record<
 function channelErrorFor(reason: number): Error {
   switch (reason) {
     case ERROR_REASON.OVERFLOW:
-      return new ChannelOverflowError(
-        'Broadcast closed: more was published while this client was offline than the server holds for a client',
-      )
+      return new ChannelOverflowError('Closed: the server could not hold even the newest message for this client')
     case ERROR_REASON.LOST:
       return replayLossError('server')
     default:

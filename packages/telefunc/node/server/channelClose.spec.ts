@@ -17,6 +17,7 @@ function createPeer(frames: Uint8Array[]) {
       bufferedAmount: () => 0,
       deliveredBefore: () => 0,
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+      queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, drainRate: () => 0 },
     },
     index: 7,
     replay: new ServerReplay({ heldBytes: 0 }),

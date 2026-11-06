@@ -12,13 +12,14 @@ import {
 } from '../pieces.js'
 import type { PiecesAck } from '../../wire/frame.js'
 import { isSequencedTag } from '../../wire/tags.js'
+import { countWaitingPublishes, droppingPublishes, type WireQueue } from './waitingPublishes.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 
 type ServerHeadroomOptions = Pick<PieceSenderOptions, 'socket' | 'pingInterval'>
 
 /** The path to the page holds what `headroom` allows; the rest waits in its sender. */
-class ServerHeadroom implements PieceSenderOwner {
+class ServerHeadroom implements PieceSenderOwner, WireQueue {
   /** Sends every frame the WebSocket carries. */
   readonly sender: PieceSender
   private readonly socket: PieceSocket
@@ -60,6 +61,18 @@ class ServerHeadroom implements PieceSenderOwner {
   send(frame: Uint8Array<ArrayBuffer>, at: number): void {
     this.sender.send(frame, isSequencedTag(frame[0]!) && !this.sender.dataWaits ? this.headroom(at) : 0)
     this.pace()
+  }
+
+  waitingPublishes(ix: number): number {
+    return countWaitingPublishes(this.sender.waitingFrames, ix)
+  }
+
+  dropWaitingPublishes(ix: number, count: number): void {
+    this.sender.dropWaiting(droppingPublishes(ix, count))
+  }
+
+  drainRate(): number {
+    return this.drain.rate
   }
 
   /** What the path takes at `at` past what it holds. */

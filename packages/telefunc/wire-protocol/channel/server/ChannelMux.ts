@@ -27,6 +27,7 @@ import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type { BarrierPayload, PreparePayload, ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
 import { IndexedPeer } from './IndexedPeer.js'
+import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
 import { creditWindowOf } from '../../flowControl/credit.js'
 import { WireSender } from './WireSender.js'
@@ -55,6 +56,8 @@ type ServerTransport<TWire> = {
   /** The part of `bufferedAmount` a frame sent now waits behind, where it can pass the rest (SSE). Without this
    *  method, a frame waits behind all of `bufferedAmount`. */
   queuedAhead?(wire: TWire): number | undefined
+  /** What the wire holds back for its page, on a transport that isn't `wholeMessages`. */
+  queueOf?(wire: TWire): WireQueue
   terminateWire(wire: TWire): void
 }
 
