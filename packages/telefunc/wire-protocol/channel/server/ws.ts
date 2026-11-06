@@ -20,12 +20,14 @@ function getTelefuncChannelHooks({
   terminate = (peer) => peer.terminate(),
   bufferedAmount = (peer) => peer.websocket.bufferedAmount,
   wireRequest = (peer) => peer.request,
+  copiesOnSend,
 }: {
   upgrade?: Hooks['upgrade']
   send?: (peer: Peer, frame: Uint8Array<ArrayBuffer>) => void
   terminate?: (peer: Peer) => void
   bufferedAmount?: (peer: Peer) => number | undefined
   wireRequest?: (peer: Peer) => Request
+  copiesOnSend?: boolean
 } = {}) {
   enableChannelTransports(['ws'])
   const mux = getChannelMux()
@@ -39,6 +41,7 @@ function getTelefuncChannelHooks({
     getConnId: () => null,
     sendNow: send,
     wholeMessages: true,
+    copiesOnSend,
     bufferedAmount,
     // Closed at once: a Durable Object peer's terminate() is a close handshake a vanished client never answers.
     terminateWire: (peer) => {

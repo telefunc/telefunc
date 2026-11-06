@@ -47,7 +47,9 @@ const ANNOUNCE_BYTES = encode.announce(0, 0).byteLength
 /** Tracks what a piece sender hands its socket: a page's `ClientHeadroom` or a server's `ServerHeadroom`. */
 interface PieceSenderOwner {
   /** The sender handed the socket `bytes`, or carried them into its next message; `data` says whether they are data. */
-  handed(bytes: number, data: boolean): void
+  handed(bytes: number, data: boolean, copied: boolean): void
+  /** Whether a frame it would copy may go now. If not, the owner has it sent once it may. */
+  mayCopy?(): boolean
 }
 
 /** The socket a piece sender hands its messages to: a page's `WebSocket`, a server wire's `TransportSocket`. */
@@ -55,6 +57,8 @@ interface PieceSocket {
   send(message: Uint8Array<ArrayBuffer>): void
   /** The bytes the socket holds that it has not sent yet. */
   readonly bufferedAmount: number
+  /** Whether it keeps a copy of each message: a frame it holds is then no longer the sender's own bytes. */
+  readonly copiesOnSend?: boolean
 }
 
 type PieceSenderOptions = {
@@ -85,6 +89,7 @@ class PieceSender {
   private pingInterval: number
   private readonly pieceRate: PieceRate
   private readonly cutsData: boolean
+  private readonly copiesOnSend: boolean
   private readonly owner: PieceSenderOwner
   /** The bytes of data the socket accepts now: the headroom the current call was given, less what it handed since. */
   private headroom = 0
@@ -138,6 +143,7 @@ class PieceSender {
     this.pingInterval = pingInterval
     this.pieceRate = pieceRate
     this.cutsData = cuts === 'cut'
+    this.copiesOnSend = socket.copiesOnSend === true
     this.owner = owner
     this.messages = new SocketMessages(socket)
     this.setWholeUpTo()
@@ -194,14 +200,25 @@ class PieceSender {
     const tag = frame[0]!
     // While no announcement is open, a PIECES_ACK goes ahead of what waits: the peer's probe may be waiting for it.
     if (tag === TAG.PIECES_ACK && this.open === null) return this.pass(frame)
-    if (this.rest === null) {
-      if (this.open === null && !this.announces(frame)) return this.pass(frame)
-      if (this.open === null && this.goesWhole(frame)) return this.sendWhole(frame)
-      return this.sendBehindAnnouncement(frame)
-    }
+    if (this.rest === null) return this.start(frame)
     if (this.passesRest(frame)) return this.pass(frame)
     this.waiting.push(frame)
     this.waitingBytes += frame.byteLength
+  }
+
+  /** Sends `frame`, which nothing waits ahead of. */
+  private start(frame: Uint8Array<ArrayBuffer>): void {
+    if (isSequencedTag(frame[0]!) && this.copies(frame) && this.owner.mayCopy?.() === false) {
+      return this.wait(frame, 0)
+    }
+    if (this.open === null && !this.announces(frame)) return this.pass(frame)
+    if (this.open === null && this.goesWhole(frame)) return this.sendWhole(frame)
+    this.sendBehindAnnouncement(frame)
+  }
+
+  /** Whether sending `frame` now leaves a copy of it in the socket's hands: pieces do, and on some sockets all does. */
+  private copies(frame: Uint8Array<ArrayBuffer>): boolean {
+    return this.copiesOnSend || this.open !== null || this.announces(frame) || frame.byteLength > this.wholeUpTo
   }
 
   /** Whether `frame` sent now goes behind an announcement. */
@@ -230,7 +247,7 @@ class PieceSender {
    *  the rate read low. */
   private sendWhole(frame: Uint8Array<ArrayBuffer>): void {
     this.handGathered()
-    this.countHanded(frame.byteLength, true)
+    this.countHanded(frame.byteLength, true, this.copiesOnSend)
     this.messages.hand(frame)
   }
 
@@ -249,7 +266,7 @@ class PieceSender {
     }
     if (bytes < this.gatherUpTo) return this.gather(frame, data)
     this.handGathered()
-    this.countHanded(bytes, data)
+    this.countHanded(bytes, data, this.copiesOnSend)
     if (acknowledges(bytes)) this.track(bytes, performance.now(), false)
     this.messages.hand(frame)
   }
@@ -283,7 +300,7 @@ class PieceSender {
   private count(frame: Uint8Array<ArrayBuffer>, data: boolean): void {
     const length = this.messages.lengthAhead
     if (length > 0) this.countHanded(length, false)
-    this.countHanded(frame.byteLength, data)
+    this.countHanded(frame.byteLength, data, this.copiesOnSend)
   }
 
   /** Before a message that gathers nothing: the frames sent before it go ahead, and those only carried ride on it. */
@@ -315,7 +332,7 @@ class PieceSender {
     if (offset === 0 && bytes > this.wholeUpTo) this.sendEmptyPiece(bytes)
     const size = Math.max(1, Math.floor(this.wholeUpTo))
     const handed = end - offset + Math.ceil((end - offset) / size) * PIECE_HEADER_BYTES
-    this.countHanded(handed, isSequencedTag(frame[0]!))
+    this.countHanded(handed, isSequencedTag(frame[0]!), true)
     if (acknowledges(bytes)) this.track(handed, now, false)
     for (let at = offset; at < end; at += size) {
       this.messages.hand(encode.piece(bytes, frame.subarray(at, Math.min(end, at + size))))
@@ -324,10 +341,10 @@ class PieceSender {
   }
 
   /** Counts `bytes` handed to the socket, of data or not, or carried into the next message. */
-  private countHanded(bytes: number, data: boolean): void {
+  private countHanded(bytes: number, data: boolean, copied = false): void {
     this.transmittedBytes += bytes
     this.headroom -= bytes
-    this.owner.handed(bytes, data)
+    this.owner.handed(bytes, data, copied)
   }
 
   /** Hands the socket the empty piece a frame of `total` bytes starts with. */
@@ -379,7 +396,7 @@ class PieceSender {
       [0, WIRE_PROBE_FIRST_BYTES],
       [WIRE_PROBE_FIRST_BYTES, WIRE_PROBE_PAIR_BYTES],
     ] as const) {
-      this.countHanded(PIECE_HEADER_BYTES + size, data)
+      this.countHanded(PIECE_HEADER_BYTES + size, data, true)
       this.track(PIECE_HEADER_BYTES + size, now, true)
       this.sendAnnouncedMessage(encode.piece(bytes, frame.subarray(at, at + size)), size, this.transmittedBytes, now)
     }
@@ -394,7 +411,7 @@ class PieceSender {
     const bytes = frame.byteLength
     const data = isSequencedTag(frame[0]!)
     if (offset === 0 && bytes <= announcedNext(this.lastAnnounced, this.namedFloor)) {
-      this.countHanded(bytes, data)
+      this.countHanded(bytes, data, this.copiesOnSend)
       if (acknowledges(bytes)) this.track(bytes, now, false)
       return this.sendAnnouncedMessage(frame, bytes, this.transmittedBytes, now)
     }
@@ -411,7 +428,7 @@ class PieceSender {
     }
     let end = this.transmittedBytes
     const handed = bytes - offset + n * PIECE_HEADER_BYTES
-    this.countHanded(handed, data)
+    this.countHanded(handed, data, true)
     if (acknowledges(bytes)) this.track(handed, now, false)
     let at = offset
     for (const size of sizes) {
@@ -546,11 +563,11 @@ class PieceSender {
     this.waitingBytes -= frame.byteLength - offset
     // A sender that doesn't cut data held the whole frame, so it goes as if sent now.
     if (this.cutsData || offset > 0) this.cut(frame, offset)
-    else this.pass(frame)
+    else this.start(frame)
     while (this.rest === null && this.waiting.length > 0) {
       const next = this.waiting.shift()!
       this.waitingBytes -= next.byteLength
-      this.pass(next)
+      this.start(next)
     }
   }
 

@@ -6,6 +6,13 @@ import {
   WIRE_SEND_AHEAD_MIN_BYTES,
   WIRE_SEND_AHEAD_ROUND_TRIPS,
 } from '../../constants.js'
+import {
+  addWireCopies,
+  awaitCopyRoom,
+  dropWireCopies,
+  hasCopyRoom,
+  stopAwaitingCopyRoom,
+} from '../../channel/server/channelMemory.js'
 import { DrainRate } from '../DrainRate.js'
 import { PieceRate } from '../PieceRate.js'
 import {
@@ -53,6 +60,10 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   private inPath = 0
   private inPathAt = 0
   private paceTimer: ReturnType<typeof setTimeout> | null = null
+  /** The copies handed and not covered by an acknowledgement: where each ends, of all the sender handed. */
+  private readonly copied = new Fifo<{ end: number; bytes: number }>()
+  /** Waits for room for copies, which wakes it. */
+  private awaitsCopyRoom = false
 
   constructor({ socket, pingInterval }: ServerHeadroomOptions) {
     this.socket = socket
@@ -93,10 +104,14 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   }
 
   /** `PieceSenderOwner`: the path holds `bytes`; each dated part is dated apart, so a burst's first part measures the path. */
-  handed(bytes: number, data: boolean): void {
+  handed(bytes: number, data: boolean, copied: boolean): void {
     const now = performance.now()
     this.inPath = this.pathHolds(now) + bytes
     this.inPathAt = now
+    if (copied) {
+      this.copied.push({ end: this.sender.transmittedBytes, bytes })
+      addWireCopies(bytes)
+    }
     if (!data) {
       this.handedSinceData += bytes
       return
@@ -106,6 +121,29 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
       this.appLimitedTo = end
     this.handedSinceData = 0
     if (acknowledges(bytes)) this.sent.push({ end, at: now })
+  }
+
+  /** `PieceSenderOwner`: within what copies may hold, or on a wire that proved its rate and holds nothing: a stalled wire
+   *  holds its part till its ping deadline, which mustn't hold up one that delivers. */
+  mayCopy(): boolean {
+    if (hasCopyRoom() || (this.drainRate() > 0 && this.pathHolds(performance.now()) === 0)) return true
+    this.awaitsCopyRoom = true
+    awaitCopyRoom(this.sendWaiting)
+    return false
+  }
+
+  /** Takes a heartbeat (see `PieceSender.heartbeat`), which an acknowledgement's lost tail waits for. */
+  heartbeat(bytes: number, at: number): boolean {
+    if (!this.sender.heartbeat(bytes, at)) return false
+    this.releaseCopies(this.sender.heartbeatBytes)
+    return true
+  }
+
+  /** The page took `bytes` of all the sender handed. */
+  private releaseCopies(bytes: number): void {
+    let released = 0
+    while (this.copied.length > 0 && this.copied.peek()!.end <= bytes) released += this.copied.shift()!.bytes
+    if (released > 0) dropWireCopies(released)
   }
 
   /** Takes a PIECES_ACK (see `PieceSender.acknowledged`), then sends what the freed headroom allows. */
@@ -131,6 +169,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
       this.sender.transmittedBytes - acknowledged - this.drainRate() * Math.max(0, now - arrived),
     )
     this.inPathAt = now
+    this.releaseCopies(acknowledged)
     this.sendWaiting()
     return true
   }
@@ -140,10 +179,13 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     if (this.paceTimer !== null) clearTimeout(this.paceTimer)
     this.paceTimer = null
     this.sender.close()
+    stopAwaitingCopyRoom(this.sendWaiting)
+    this.releaseCopies(Number.POSITIVE_INFINITY)
   }
 
   /** Sends what waits for headroom, as far as the headroom goes now. */
-  private sendWaiting(): void {
+  private readonly sendWaiting = (): void => {
+    this.awaitsCopyRoom = false
     if (this.sender.dataWaits) {
       this.releasing = true
       this.sender.sendWaiting(this.headroom(performance.now()))
@@ -159,7 +201,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
 
   /** While data waits for headroom, looks again once the rate freed what a piece takes (see `PieceSender.cut`). */
   private pace(): void {
-    if (this.paceTimer !== null || this.sender.waitingBytes === 0) return
+    if (this.paceTimer !== null || this.sender.waitingBytes === 0 || this.awaitsCopyRoom) return
     const ms = Math.max(1, (WIRE_PIECES_ACK_BYTES - this.headroom(performance.now())) / this.drainRate())
     this.paceTimer = unrefTimer(setTimeout(this.lookAgain, ms))
   }

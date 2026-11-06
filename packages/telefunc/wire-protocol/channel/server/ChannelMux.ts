@@ -51,6 +51,8 @@ type ServerTransport<TWire> = {
   sendNow(wire: TWire, frame: Uint8Array<ArrayBuffer>): void
   /** True if the peer gets a message only once all of it has arrived, as on a WebSocket (see `pieces.ts`). */
   wholeMessages: boolean
+  /** True if the runtime keeps a copy of each message it's handed, as Bun, Deno and workerd do: Node keeps the bytes. */
+  copiesOnSend?: boolean
   /** Bytes of sent frames still in the wire, never undercounted; `undefined` if the runtime can't tell. */
   bufferedAmount(wire: TWire): number | undefined
   /** The part of `bufferedAmount` a frame sent now waits behind, where it can pass the rest (SSE). Without this
@@ -449,8 +451,7 @@ class ChannelMux implements UpgradeStagesOwner {
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.PING) {
       const pieces = entry.sender.pieces
-      if (pieces)
-        assertProtocol(pieces.headroom.sender.heartbeat(frame.took, performance.now()), 'PING took more than sent')
+      if (pieces) assertProtocol(pieces.headroom.heartbeat(frame.took, performance.now()), 'PING took more than sent')
       this.resetPingTimer(entry)
       this.acknowledgeArrivals(entry)
       this.pong(entry, this.answerPing(entry, frame.ended))

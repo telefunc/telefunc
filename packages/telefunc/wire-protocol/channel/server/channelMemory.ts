@@ -1,4 +1,16 @@
-export { admit, admitPublish, hold, holdsEnough, letGo, queueMemory }
+export {
+  addWireCopies,
+  admit,
+  admitPublish,
+  awaitCopyRoom,
+  dropWireCopies,
+  hasCopyRoom,
+  hold,
+  holdsEnough,
+  letGo,
+  queueMemory,
+  stopAwaitingCopyRoom,
+}
 export type { MemoryHolder }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
@@ -23,6 +35,10 @@ const memory = getGlobalObject('channelMemory.ts', {
   holders: new Set<MemoryHolder>(),
   maxMemory: 0,
   reclaiming: false,
+  /** What wires hold as copies, on no holder: a replay holds the same bytes. */
+  wireCopies: 0,
+  /** The wires waiting for room for copies, oldest first. */
+  copyWaiters: new Set<() => void>(),
 })
 
 /** Whether `bytes` for `holder` may be held; its caller tells whoever asked when not. Near the budget, a holder past an
@@ -90,6 +106,34 @@ function letGo(holder: MemoryHolder, held: number | PublishBody): void {
   if (holder.heldBytes === 0) memory.holders.delete(holder)
 }
 
+/** Whether a wire may hand more copies: what a replay shares, a wire's socket can't. The top eighth is theirs, so the
+ *  ledger's reclaiming never waits on a wire, nor a wire on it. */
+function hasCopyRoom(): boolean {
+  return memory.wireCopies < maxMemoryOf() / 8
+}
+
+function addWireCopies(bytes: number): void {
+  memory.wireCopies += bytes
+}
+
+/** Only a page's acknowledgement or its wire's end gets here, so the wires waiting need no timer. */
+function dropWireCopies(bytes: number): void {
+  memory.wireCopies -= bytes
+  for (const wake of memory.copyWaiters) {
+    if (!hasCopyRoom()) return
+    memory.copyWaiters.delete(wake)
+    wake()
+  }
+}
+
+function awaitCopyRoom(wake: () => void): void {
+  memory.copyWaiters.add(wake)
+}
+
+function stopAwaitingCopyRoom(wake: () => void): void {
+  memory.copyWaiters.delete(wake)
+}
+
 /** Whether the server holds enough that it grants its pages no more credit. */
 function holdsEnough(): boolean {
   return memory.total > shedTarget(maxMemoryOf())
@@ -135,7 +179,7 @@ function maxMemoryOf(): number {
   return (memory.maxMemory ||= getChannelConfig().maxMemory)
 }
 
-/** The top eighth is for those under an equal share. */
+/** The top eighth is for wires' copies and for those under an equal share. */
 function shedTarget(maxMemory: number): number {
   return (maxMemory * 7) / 8
 }
