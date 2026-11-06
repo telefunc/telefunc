@@ -41,14 +41,9 @@ function RedisReconnect() {
       <button
         type="button"
         id="test-redis-subscriber-dropped"
-        onClick={async () => {
-          const result = onBroadcastSubscriberDropped()
-          await new Promise((resolve) => setTimeout(resolve, 200))
-          await fetch('/api/redis/drop-connections', { method: 'POST' })
-          setDropped(await result)
-        }}
+        onClick={async () => setDropped(await onBroadcastSubscriberDropped())}
       >
-        Drop the server's Redis connections during publishes
+        Drop the server's Redis subscriber connection during publishes
       </button>
       <h2>A Publish While a Reconnected Subscription Reads Its Start</h2>
       <pre id="redis-during-resume-result">{JSON.stringify(duringResume)}</pre>

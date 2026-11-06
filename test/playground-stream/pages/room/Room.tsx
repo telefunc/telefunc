@@ -887,10 +887,7 @@ function Room() {
 
       {scenario('subscriber-dropped', 'A dropped subscriber', 'Publish across it', async () => {
         const roomId = await createRoomId('subscriber-dropped')
-        const result = onSubscriberDropped(roomId)
-        await new Promise((resolve) => setTimeout(resolve, 200))
-        await fetch('/api/redis/drop-connections', { method: 'POST' })
-        setResult(JSON.stringify(await result))
+        setResult(JSON.stringify(await onSubscriberDropped(roomId)))
       })}
 
       {scenario('dropped-at-rest', 'A dropped subscriber at rest', 'Reports nothing', async () => {

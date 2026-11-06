@@ -1454,15 +1454,13 @@ function testRoomPublishHold() {
 
 /** Tests that wait out Room's fixed timeouts, run in one lane. */
 function testRoomRedisSubscriberDropped() {
-  testRoomScenario<{ published: number; received: number; reported: number; rejected: number }>(
+  testRoomScenario<{ published: number; received: number; reported: number }>(
     'subscriber-dropped',
     "room: Redis drops a server's subscriber connection during publishes: what didn't arrive is reported, count for count",
     (r) => {
       expect(r.published).toBe(600)
       expect(r.reported > 0).toBe(true)
-      // A rejected publish may have run: the drop can cut its reply and not the commit.
-      expect(r.received + r.reported <= r.published).toBe(true)
-      expect(r.received + r.reported + r.rejected >= r.published).toBe(true)
+      expect(r.received + r.reported).toBe(600)
       expectLog('Redis subscriber connection closed')
     },
   )

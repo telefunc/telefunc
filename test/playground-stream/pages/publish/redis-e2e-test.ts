@@ -47,12 +47,10 @@ function testBroadcastRedisSubscriberDropped() {
           '#redis-subscriber-dropped-result',
         )
         expect(result).not.toBe(null)
-        for (const { published, received, reported, rejected } of Object.values(result!)) {
+        for (const { published, received, reported } of Object.values(result!)) {
           expect(published).toBe(300)
           expect(reported! > 0).toBe(true)
-          // A rejected publish may have run: the drop can cut its reply and not the publish.
-          expect(received! + reported! <= published!).toBe(true)
-          expect(received! + reported! + rejected! >= published!).toBe(true)
+          expect(received! + reported!).toBe(300)
         }
       },
       { timeout: 15_000 },

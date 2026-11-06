@@ -14,7 +14,7 @@ import { REDIS_COMMANDS } from '../../../../packages/redis/dist/commands.js'
 import type { SubscriberSocket } from '../../../../packages/redis/dist/ioredis.js'
 import { RedisBackend } from '../../../../packages/redis/dist/RedisBackend.js'
 import { RedisConnection } from '../../../../packages/redis/dist/RedisConnection.js'
-import { redis } from '../../redis'
+import { dropRedisSubscribers, redis } from '../../redis'
 import { sleep } from '../../sleep'
 
 /** On the page's `start`, the server's Redis connection drops, and it publishes 3 binary frames from one reused buffer
@@ -29,24 +29,27 @@ async function onBinaryBroadcastAcrossReconnect() {
   return room
 }
 
-/** The page drops this server's connections to Redis during these publishes of both kinds to one key: each publish of a
- *  kind arrives, is reported or rejects. */
+/** This server's subscriber connection drops during these publishes of both kinds to one key: each publish of a kind
+ *  arrives or is reported. */
 async function onBroadcastSubscriberDropped() {
   const key = `room:subscriber-dropped:${crypto.randomUUID()}`
-  const text = { published: 0, received: 0, reported: 0, rejected: 0 }
-  const binary = { published: 0, received: 0, reported: 0, rejected: 0 }
+  const text = { published: 0, received: 0, reported: 0 }
+  const binary = { published: 0, received: 0, reported: 0 }
   const unsubscribeText = Broadcast.subscribe(key, () => text.received++)
   const unsubscribeBinary = Broadcast.subscribeBinary(key, () => binary.received++)
   config.broadcast.onDeliveryLost = ({ reason }) => {
     const kind = reason.includes('binary') ? binary : text
     kind.reported += Number.parseInt(reason)
   }
-  const published: Promise<unknown>[] = []
+  const published: unknown[] = []
   for (let i = 0; i < 600; i++) {
+    if (i === 100) {
+      await Promise.all(published)
+      await dropRedisSubscribers()
+    }
     const kind = i % 2 === 0 ? text : binary
     kind.published++
-    const publish = kind === text ? Broadcast.publish(key, i) : Broadcast.publishBinary(key, new Uint8Array(1))
-    published.push(Promise.resolve(publish).catch(() => kind.rejected++))
+    published.push(kind === text ? Broadcast.publish(key, i) : Broadcast.publishBinary(key, new Uint8Array(1)))
     await sleep(1)
   }
   await Promise.all(published)

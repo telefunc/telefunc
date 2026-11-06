@@ -98,6 +98,7 @@ import { Room, roomConfig, type LeaveCause, type LocalParticipant } from '@telef
 import { getRoomPlane } from '@telefunc/room/backend'
 import { anyoneCanJoin } from '../../anyone-can-join'
 import { sleep } from '../../sleep'
+import { dropRedisSubscribers } from '../../redis'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
 import {
@@ -911,7 +912,7 @@ async function onJoinAnswering(roomId: string) {
   return me.id
 }
 
-/** The page drops this server's connections to Redis during these publishes: each arrives, is reported or rejects. */
+/** This server's subscriber connection drops during these publishes: each arrives or is reported. */
 async function onSubscriberDropped(roomId: string) {
   const room = anyoneCanJoin(await Room.get(roomId))
   let received = 0
@@ -921,15 +922,19 @@ async function onSubscriberDropped(roomId: string) {
   reportOf(roomId, (reason) => (reported += Number.parseInt(reason)))
   const published: Promise<unknown>[] = []
   for (let i = 0; i < 600; i++) {
+    if (i === 100) {
+      await Promise.all(published)
+      await dropRedisSubscribers()
+    }
     published.push(me.publish(i))
     await sleep(1)
   }
-  const rejected = (await Promise.allSettled(published)).filter(({ status }) => status === 'rejected').length
+  await Promise.all(published)
   // Long enough to reconnect and read each lane's start.
   await sleep(1_000)
   roomConfig.onDeliveryLost = ({ roomId, reason }) =>
     console.error(`Room delivery handoff of '${roomId}' lost: ${reason}`)
-  return { published: published.length, received, reported, rejected }
+  return { published: published.length, received, reported }
 }
 
 /** What a drop reports of this room: `onDeliveryLost` hears every room on the server, and another test's room may commit
