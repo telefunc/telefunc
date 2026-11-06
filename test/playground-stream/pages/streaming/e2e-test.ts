@@ -1,7 +1,7 @@
 export { testStreaming }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl, skip } from '@brillout/test-e2e'
-import { resetCleanupState, getCleanupState, navigate, getResult } from '../../e2e-utils'
+import { resetCleanupState, getCleanupState, forceServerGc, serverHeapUsed, navigate, getResult } from '../../e2e-utils'
 
 const stallWarning = 'read all of the streams a call returned concurrently'
 const channelTransports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
@@ -400,6 +400,20 @@ function testStreaming() {
       })
     })
   }
+
+  test("streaming: a long-lived returned stream doesn't grow the server's heap with each chunk", async () => {
+    await navigate(`${getServerUrl()}/streaming`)
+    await forceServerGc()
+    const before = await serverHeapUsed()
+    await page.click('#test-many-tiny-chunks')
+    await autoRetry(async () => expect((await getResult('#streaming-result')).chunks).toBe(200_000), {
+      timeout: 60_000,
+    })
+    await forceServerGc()
+    const grown = (await serverHeapUsed()) - before
+    await page.click('#test-many-tiny-chunks-cancel')
+    expect(grown).lessThan(16 * 1024 * 1024)
+  })
 
   test("streaming: transferring one returned stream's chunks to a Web Worker leaves the other stream's chunks intact", async () => {
     await navigate(`${getServerUrl()}/streaming`)

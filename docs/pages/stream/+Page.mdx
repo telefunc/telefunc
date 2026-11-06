@@ -301,7 +301,7 @@ while (true) {
 
 > You can also return a `File` or `Blob` instead, see: <Link href="/file-download" />.
 
-> If a call returns several streams, the client holds the data of a stream your code isn't reading until your code reads or cancels that stream.
+> If a call returns several streams, read them concurrently: a stream left unread past 1 MiB stops the others until your code reads or cancels it. Cancelling one stops it on the client only: on the server it keeps producing until the call's other streams are finished or cancelled too. With the `'channel'` <Link href="/transport">transport</Link> each stream has its own channel, so neither applies.
 
 
 #### Client → server

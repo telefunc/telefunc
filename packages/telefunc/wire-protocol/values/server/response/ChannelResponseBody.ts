@@ -13,6 +13,7 @@ import { restoreContext } from '../../../../node/server/context/context.js'
 import type { Context } from '../../../../node/server/context/context.js'
 import type { RequestContext } from '../../../../node/server/context/requestContext.js'
 import { createDeferred } from '../../../../utils/createDeferred.js'
+import { createStopRace } from '../../../../utils/createStopRace.js'
 
 const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
 const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
@@ -77,12 +78,9 @@ function pumpProducerToChannel(
       await channel.opened
       await restoreContext(runContext.context, async () => {
         const { responseAbort } = runContext.requestContext
+        const race = createStopRace(Promise.race([responseAbort.errorPromise, cancelledPromise]))
         while (true) {
-          const { done, value } = await Promise.race([
-            responseAbort.errorPromise,
-            cancelledPromise,
-            producer.chunks.next(),
-          ])
+          const { done, value } = await race(producer.chunks.next())
           if (cancelled) break
           if (done) {
             channel.sendBinary(TAG_END)

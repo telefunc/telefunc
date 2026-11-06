@@ -24,6 +24,7 @@ import {
   onUploadWithProgress,
   onReturnTwoLargeStreams,
   onReturnFileBesideLargeStream,
+  onReturnManyTinyChunks,
   onReturnTwoStreamsOfSmallChunks,
   onReturnOneLargeChunk,
   onReturnFinishedAndEndlessStreams,
@@ -786,6 +787,26 @@ function Streaming() {
         }}
       >
         A large file beside a large stream
+      </button>
+
+      <button
+        id="test-many-tiny-chunks"
+        onClick={async () => {
+          setResult('')
+          const chunks = 200_000
+          const reader = (await onReturnManyTinyChunks(chunks)).getReader()
+          returnedRef.current = reader
+          for (let i = 0; i < chunks; i++) await reader.read()
+          setResult(JSON.stringify({ chunks }))
+        }}
+      >
+        Read many tiny chunks of a stream that stays open
+      </button>
+      <button
+        id="test-many-tiny-chunks-cancel"
+        onClick={() => (returnedRef.current as ReadableStreamDefaultReader).cancel()}
+      >
+        Cancel the stream of tiny chunks
       </button>
 
       <button

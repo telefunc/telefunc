@@ -21,6 +21,7 @@ export {
   onUploadWithProgress,
   onReturnTwoLargeStreams,
   onReturnFileBesideLargeStream,
+  onReturnManyTinyChunks,
   onReturnTwoStreamsOfSmallChunks,
   onReturnOneLargeChunk,
   onReturnFinishedAndEndlessStreams,
@@ -393,6 +394,17 @@ function byteStream(chunks: number) {
 /** 2 MiB each, more than the page buffers for a stream it isn't reading. */
 const onReturnTwoLargeStreams = async () => {
   return { first: byteStream(32), second: byteStream(32) }
+}
+
+/** Stays open once `chunks` tiny chunks went, for a test to look at the server while the stream is still running. */
+const onReturnManyTinyChunks = async (chunks: number) => {
+  let i = 0
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (i++ < chunks) controller.enqueue(new Uint8Array(8))
+      else return new Promise<void>(() => {})
+    },
+  })
 }
 
 /** The page has neither until the file's bytes have arrived, so it can't read the stream to make way for them. */

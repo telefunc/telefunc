@@ -7,6 +7,7 @@ import { ClientChannel, type ConnectionOptions } from '../../../channel/client/C
 import type { StreamingProducer } from '../../types.js'
 import { randomUuid } from '../../../../utils/randomUuid.js'
 import { createDeferred } from '../../../../utils/createDeferred.js'
+import { createStopRace } from '../../../../utils/createStopRace.js'
 
 const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
 const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
@@ -82,8 +83,9 @@ async function sendChunks(
   cancelledPromise: Promise<IteratorResult<Uint8Array<ArrayBuffer>>>,
   isCancelled: () => boolean,
 ): Promise<void> {
+  const race = createStopRace(cancelledPromise)
   while (true) {
-    const { done, value } = await Promise.race([cancelledPromise, producer.chunks.next()])
+    const { done, value } = await race(producer.chunks.next())
     if (isCancelled()) return
     if (done) {
       channel.sendBinary(TAG_END)
