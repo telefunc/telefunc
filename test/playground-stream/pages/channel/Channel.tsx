@@ -203,6 +203,7 @@ type ChannelState = {
   linkShare: { pingMs: number[]; downloaded: number } | null
   slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
   publishesBehind: { pingMs: number; closed: string; closeMs: number } | null
+  broadcastOverflow: { received: number; closeErr: string } | null
   lateCallbacks: { channelId: string; onOpen: boolean; onCloseAbortValue: unknown } | null
   openAbort: { channelId: string; abortValue: unknown } | null
 }
@@ -288,6 +289,7 @@ const initialState: ChannelState = {
   linkShare: null,
   slowUplink: null,
   publishesBehind: null,
+  broadcastOverflow: null,
   lateCallbacks: null,
   openAbort: null,
 }
@@ -1450,6 +1452,20 @@ function ChannelDemo() {
     control.close()
   }, [])
 
+  const testBroadcastOverflow = useCallback(async () => {
+    setChannelState((s) => ({ ...s, broadcastOverflow: null }))
+    const { broadcast, control } = await openChannel(onChannelPublishesBehind)
+    let received = 0
+    broadcast.subscribeBinary(() => {
+      received++
+    })
+    const closing = new Promise<string>((resolve) => broadcast.onClose((err) => resolve(err?.name ?? 'none')))
+    void control.send(3)
+    const closeErr = await closing
+    setChannelState((s) => ({ ...s, broadcastOverflow: { received, closeErr } }))
+    control.close()
+  }, [])
+
   const testSlowUplink = useCallback(async () => {
     setChannelState((s) => ({ ...s, slowUplink: null }))
     const { upload, ticks } = await openChannel(onChannelSlowUplink)
@@ -1839,6 +1855,14 @@ function ChannelDemo() {
               Server Bursts {count} MiB ({mode})
             </button>
           ))}
+          <button
+            id="channel-test-broadcast-overflow"
+            type="button"
+            onClick={testBroadcastOverflow}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Broadcast Publishes More Than The Server Can Hold
+          </button>
           <button
             id="channel-test-awaited-from-offline"
             type="button"

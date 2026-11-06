@@ -74,4 +74,19 @@ function testSmallPending() {
     )
     expectLog(sendRefusedWarning)
   })
+
+  // Three publishes of 4 MiB in one go: the wire has the first, and neither of the others fits beside it.
+  test("channel: a broadcast the server can't hold even the newest message for closes with ChannelOverflowError", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-broadcast-overflow')
+    await autoRetry(
+      async () => {
+        const { received, closeErr } = (await getResult<any>('#channel-state')).broadcastOverflow
+        expect(closeErr).toBe('ChannelOverflowError')
+        expect(received).lessThan(3)
+      },
+      { timeout: 30_000 },
+    )
+    expectLog('fell behind what the server holds for its client')
+  })
 }
