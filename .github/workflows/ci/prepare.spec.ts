@@ -187,6 +187,14 @@ describe('prepare()', () => {
                   "job": "Playground Stream",
                 },
               },
+              "testFilePath": "test/playground-stream/.test-docker.binary-inline.ws.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
               "testFilePath": "test/playground-stream/.test-preview.binary-inline.node.test.ts",
             },
             {
@@ -212,6 +220,14 @@ describe('prepare()', () => {
                 },
               },
               "testFilePath": "test/playground-stream/.test-preview.binary-inline.ws.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
+              "testFilePath": "test/playground-stream/.test-preview.channel-short-reconnect.ws.test.ts",
             },
             {
               "localConfig": {
