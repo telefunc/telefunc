@@ -16,6 +16,7 @@ import {
   onBroadcastOwnBytes,
   onBroadcastOnOpenPublish,
   onBroadcastSubscriberAborts,
+  onBroadcastLoopLeftBehind,
   onBroadcastAnswerOrder,
   onBroadcastSelfAnswer,
   onStaticPublishReceipts,
@@ -449,6 +450,16 @@ function Publish() {
         }}
       >
         A subscriber aborts its channel
+      </button>
+
+      <button
+        id="test-broadcast-loop-left-behind"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onBroadcastLoopLeftBehind()))
+        }}
+      >
+        A loop stops reading before its channel closes
       </button>
 
       <h2>Listener Answers</h2>

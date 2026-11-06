@@ -30,6 +30,8 @@ interface QueueMemory {
   admit(bytes: number): boolean
   hold(bytes: number): void
   letGo(bytes: number): void
+  /** Its loop or that loop's channel ended: what the queue still has is no longer counted. */
+  release(): void
 }
 
 /** What a queued message holds beyond its payload: its entry, its info and the promise its listener got, about 314 B
@@ -101,6 +103,7 @@ async function* iterateMessages<M extends Message<unknown>>(
     error = err
     registrations.abort()
     if (err !== undefined) release()
+    memory?.release()
     wake?.()
   }
   const abort = () => finish(signal!.reason)

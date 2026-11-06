@@ -11,6 +11,7 @@ export {
   onBroadcastOwnBytes,
   onBroadcastOnOpenPublish,
   onBroadcastSubscriberAborts,
+  onBroadcastLoopLeftBehind,
   onBroadcastAnswerOrder,
   onBroadcastSelfAnswer,
   onStaticPublishReceipts,
@@ -140,6 +141,28 @@ async function onBroadcastSubscriberAborts() {
   })
   return { aborting, room: new BroadcastChannel<string>({ key }) }
 }
+
+/** A loop that read one message and stopped, with the next one queued for it, when its channel closes. */
+async function onBroadcastLoopLeftBehind() {
+  const room = new BroadcastChannel<string>({ key: `room:left-behind:${crypto.randomUUID()}` })
+  const { _telefunc } = globalThis as unknown as Ledger
+  const { holders } = _telefunc['channelMemory.ts']
+  const before = new Set(holders)
+  const first = room.messages().next()
+  const queued = Promise.withResolvers<void>()
+  room.subscribe((msg) => {
+    if (msg === 'left behind') queued.resolve()
+  })
+  await room.publish('read')
+  await first
+  await room.publish('left behind')
+  await queued.promise
+  const loop = [...holders].find((holder) => !before.has(holder))
+  const held = loop?.heldBytes
+  await room.close()
+  return { held, heldOnceClosed: loop?.heldBytes }
+}
+type Ledger = { _telefunc: { 'channelMemory.ts': { holders: Set<{ heldBytes: number }> } } }
 
 /** The first of two subscribers answers message 1 with message 2; both listen until the second sees it, or 10 s pass. */
 async function onBroadcastAnswerOrder() {

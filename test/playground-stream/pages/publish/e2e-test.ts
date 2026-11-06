@@ -306,6 +306,15 @@ function testPublish(isDev: boolean, inDocker = false) {
     })
   })
 
+  test("broadcast: what a loop that stopped reading queued isn't held once its channel closed", async () => {
+    await page.click('#test-broadcast-loop-left-behind')
+    await autoRetry(async () => {
+      const result = await getResult<{ held: number; heldOnceClosed: number }>('#publish-result')
+      expect(result.held).greaterThan(0)
+      expect(result.heldOnceClosed).toBe(0)
+    })
+  })
+
   test("broadcast: a listener's answer reaches every subscriber after the message it answers", async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-answer-order')

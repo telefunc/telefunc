@@ -142,6 +142,7 @@ function queueMemory(): QueueMemory {
     admit: (bytes) => admit(holder, bytes),
     hold: (bytes) => hold(holder, bytes),
     letGo: (bytes) => letGo(holder, bytes),
+    release: () => releaseHolder(holder),
   }
 }
 
