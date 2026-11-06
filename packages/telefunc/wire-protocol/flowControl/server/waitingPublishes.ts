@@ -2,7 +2,7 @@ export { countWaitingPublishes, droppingPublishes, overtakes }
 export type { WireQueue }
 
 import { readU16 } from '../../wire/header.js'
-import { TAG, isSequencedTag } from '../../wire/tags.js'
+import { TAG, isClosingTag, isSequencedTag } from '../../wire/tags.js'
 
 /** What a server wire holds back for its page, which a broadcast falling behind can let go of. */
 interface WireQueue {
@@ -23,8 +23,8 @@ function isPublishBody(tag: number): boolean {
 }
 
 /** Whether data `frame` goes ahead of `ahead`, the frames its wire holds back: a channel orders only its own frames, so a
- *  slow page's publishes don't hold up its other channels. Publishes keep their line, being what falls behind. A channel's
- *  closing answer passes that channel's publishes: a subscriber that closed reads no more of them. */
+ *  slow page's publishes don't hold up its other channels. Publishes keep their line, being what falls behind. What ends a
+ *  channel passes that channel's publishes too: a channel that ends reads no more of them. */
 function overtakes(frame: Uint8Array, ahead: Iterable<Uint8Array>): boolean {
   const tag = frame[0]!
   if (!isSequencedTag(tag) || tag === TAG.PUBLISH_TO || isPublishBody(tag)) return false
@@ -33,7 +33,7 @@ function overtakes(frame: Uint8Array, ahead: Iterable<Uint8Array>): boolean {
     const otherTag = other[0]!
     // A body's index names no channel; its head does.
     if (!isSequencedTag(otherTag) || isPublishBody(otherTag) || readU16(other, 1) !== ix) continue
-    if (tag !== TAG.CLOSE_ACK || otherTag !== TAG.PUBLISH_TO) return false
+    if (!isClosingTag(tag) || otherTag !== TAG.PUBLISH_TO) return false
   }
   return true
 }

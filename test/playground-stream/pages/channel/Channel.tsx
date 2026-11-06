@@ -45,6 +45,7 @@ import {
   onChannelManyListeners,
   onChannelLinkShare,
   onChannelSlowUplink,
+  onChannelPublishesBehind,
   onChannelOpenAnswer,
   onChannelOpenHello,
   onChannelConfigChecks,
@@ -195,6 +196,7 @@ type ChannelState = {
   manyListenersMs: { page: number; server: number | null } | null
   linkShare: { pingMs: number[]; downloaded: number } | null
   slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
+  publishesBehind: { pingMs: number; closed: string; closeMs: number } | null
   lateCallbacks: { channelId: string; onOpen: boolean; onCloseAbortValue: unknown } | null
   openAbort: { channelId: string; abortValue: unknown } | null
 }
@@ -276,6 +278,7 @@ const initialState: ChannelState = {
   manyListenersMs: null,
   linkShare: null,
   slowUplink: null,
+  publishesBehind: null,
   lateCallbacks: null,
   openAbort: null,
 }
@@ -1391,6 +1394,24 @@ function ChannelDemo() {
     ping.close()
   }, [])
 
+  const testPublishesBehind = useCallback(async () => {
+    setChannelState((s) => ({ ...s, publishesBehind: null }))
+    const { broadcast, control } = await openChannel(onChannelPublishesBehind)
+    let resolveFirst!: () => void
+    const first = new Promise<void>((resolve) => (resolveFirst = resolve))
+    broadcast.subscribeBinary(() => resolveFirst())
+    await control.send(5, { ack: true })
+    await first
+    const pinged = performance.now()
+    await control.send('ping', { ack: true })
+    const closing = performance.now()
+    const closed = await control.send('close', { ack: true })
+    const closeMs = Math.round(performance.now() - closing)
+    const publishesBehind = { pingMs: Math.round(closing - pinged), closed, closeMs }
+    setChannelState((s) => ({ ...s, publishesBehind }))
+    control.close()
+  }, [])
+
   const testSlowUplink = useCallback(async () => {
     setChannelState((s) => ({ ...s, slowUplink: null }))
     const { upload, ticks } = await openChannel(onChannelSlowUplink)
@@ -1912,6 +1933,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             Ping Beside a Download
+          </button>
+          <button
+            id="channel-test-publishes-behind"
+            type="button"
+            onClick={testPublishesBehind}
+            className="px-3 py-1.5 text-sm rounded bg-cyan-800 text-white hover:bg-cyan-900"
+          >
+            Publishes Falling Behind
           </button>
           <button
             id="channel-test-slow-uplink"

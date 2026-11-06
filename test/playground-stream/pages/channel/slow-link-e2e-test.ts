@@ -8,6 +8,7 @@ import { withNetworkConditions } from '../../../utils'
 type SlowLinkState = {
   linkShare: { pingMs: number[]; downloaded: number } | null
   slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
+  publishesBehind: { pingMs: number; closed: string; closeMs: number } | null
 }
 
 // Preview only: the page loads through a proxy in the test process, which Vite's HMR socket would share.
@@ -88,6 +89,32 @@ function testSlowLink(isDev: boolean) {
         { timeout: 55_000 },
       )
       expect(connections.stop()).toBe(1)
+    } finally {
+      // The page leaves before the proxy closes, which would cut its connections.
+      await page.goto('about:blank')
+      await proxy.close()
+    }
+  })
+
+  // The four bodies still to cross take at least 16 s.
+  test("channel: on a 1 MB/s link, publishes falling behind hold up neither another channel's answer nor the server's close", async () => {
+    const proxy = await startBlackHoleProxy(getServerUrl())
+    try {
+      await navigate(`${proxy.url}/channel`)
+      proxy.pace({ downBytesPerSecond: 1_000_000, upBytesPerSecond: 1_000_000, queueBytes: 64 * 1024 })
+      await page.click('#channel-test-publishes-behind')
+      let behind: SlowLinkState['publishesBehind'] = null
+      await autoRetry(
+        async () => {
+          behind = (await getResult<SlowLinkState>('#channel-state')).publishesBehind
+          expect(behind).not.toBe(null)
+        },
+        { timeout: 40_000 },
+      )
+      // An event goes whole, so on SSE they wait for the one the stream holds: 4 MiB in base64 is about 5.6 s.
+      expect(behind!.pingMs).lessThan(8000)
+      expect(behind!.closed).toBe('0')
+      expect(behind!.closeMs).lessThan(8000)
     } finally {
       // The page leaves before the proxy closes, which would cut its connections.
       await page.goto('about:blank')

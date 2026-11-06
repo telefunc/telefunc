@@ -1,4 +1,4 @@
-export { TAG, isWireCtrlTag, isChannelCtrlTag, isSequencedTag, passesData, replayKindOf, countsCredit }
+export { TAG, isWireCtrlTag, isChannelCtrlTag, isClosingTag, isSequencedTag, passesData, replayKindOf, countsCredit }
 export type { ReplayKind }
 
 import { assert } from '../../utils/assert.js'

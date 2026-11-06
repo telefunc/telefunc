@@ -38,6 +38,7 @@ export {
   onChannelManyListeners,
   onChannelLinkShare,
   onChannelSlowUplink,
+  onChannelPublishesBehind,
   onChannelOpenAnswer,
   onChannelOpenHello,
   onChannelConfigChecks,
@@ -829,6 +830,19 @@ async function onChannelLinkShare() {
   const ping = new Channel<(msg: string) => string, never>()
   ping.listen(() => 'pong')
   return { download: download.client, ping: ping.client }
+}
+
+/** A broadcast that publishes `count` bodies of 4 MiB, or closes, as a channel beside it asks, and answers its pings. */
+async function onChannelPublishesBehind() {
+  const broadcast = new BroadcastChannel({ key: `behind:${crypto.randomUUID()}` })
+  const control = new Channel<(msg: 'ping' | 'close' | number) => string, never>()
+  control.listen(async (msg) => {
+    if (msg === 'ping') return 'pong'
+    if (msg === 'close') return String(await broadcast.close({ timeout: 10_000 }))
+    for (let i = 0; i < msg; i++) void broadcast.publishBinary(new Uint8Array(4 * 1024 * 1024))
+    return 'published'
+  })
+  return { broadcast, control: control.client }
 }
 
 /** An upload channel that answers with the bytes it received, and a channel that ticks every 100 ms until the page closes it. */

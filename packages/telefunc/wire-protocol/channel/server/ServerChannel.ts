@@ -677,7 +677,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   protected onPeerCloseAck(): void {
     if (this._phase === 'ended') return
-    // The page sends CLOSE_ACK when the close request arrives, so it has received everything sent before it.
+    // The page sends CLOSE_ACK when the close request arrives, so it has everything sent before it, or takes no more of it.
     this.onPageHas(this.closeRequestSeq)
     this.lifecycle.closeAckReceived()
   }
