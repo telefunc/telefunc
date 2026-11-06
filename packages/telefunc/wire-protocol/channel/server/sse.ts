@@ -78,21 +78,21 @@ class EventStream {
     return this.stream.bufferedAmount
   }
 
-  /** Data waits for the stream to ask for it, so a frame that goes at once is behind no more than the stream holds. */
+  /** Data waits for the stream to ask for it, as the frame the replay also holds: it's encoded when it's handed. A frame
+   *  that goes at once is behind no more than the stream holds. */
   send(frame: Uint8Array<ArrayBuffer>): void {
-    const event = textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`)
     if (passesData(frame[0]!) || (this.takes && this.waiting.length === 0)) {
-      this.takes = this.stream.push(event)
+      this.takes = this.stream.push(eventOf(frame))
       return
     }
-    this.waiting.push(event)
-    this.waitingBytes += event.byteLength
+    this.waiting.push(frame)
+    this.waitingBytes += eventBytes(frame)
   }
 
   /** Past a wire only lost, what waits is dropped: the page's reconnect gets it from its channels' replay, and it could
    *  wait here for as long as the socket stays open taking nothing. */
   close({ permanent }: { permanent: boolean }): void {
-    if (permanent) while (this.waiting.length > 0) this.stream.push(this.waiting.shift()!)
+    if (permanent) while (this.waiting.length > 0) this.stream.push(eventOf(this.waiting.shift()!))
     this.waiting = new Fifo()
     this.waitingBytes = 0
     this.stream.close()
@@ -102,11 +102,20 @@ class EventStream {
   private handWaiting(): void {
     this.takes = true
     while (this.takes && this.waiting.length > 0) {
-      const event = this.waiting.shift()!
-      this.waitingBytes -= event.byteLength
-      this.takes = this.stream.push(event)
+      const frame = this.waiting.shift()!
+      this.waitingBytes -= eventBytes(frame)
+      this.takes = this.stream.push(eventOf(frame))
     }
   }
+}
+
+function eventOf(frame: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+  return textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`)
+}
+
+/** What `eventOf` takes for `frame`: its base64url, unpadded, and the 8 bytes around it. */
+function eventBytes(frame: Uint8Array<ArrayBuffer>): number {
+  return Math.ceil((frame.byteLength * 4) / 3) + 8
 }
 
 const globalObject = getGlobalObject('wire-protocol/channel/server/sse.ts', {
