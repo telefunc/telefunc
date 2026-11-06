@@ -502,14 +502,14 @@ async function onInMemoryPublishes() {
   }
   stopLongLoop()
 
-  // A listener's answer waits for the next turn, as a loop publishes 5,000 of 64 KiB: past 256 MiB, what waits goes.
+  // A listener's answer waits for the next turn, as a loop publishes 6,000 of 64 KiB: past 320 MiB, what waits goes.
   await new Promise((resolve) => setTimeout(resolve, 0))
   let behindDelivered = 0
   const stopBehind = Broadcast.subscribeBinary(`behind:${id}`, () => void behindDelivered++)
   const stopFirst = Broadcast.subscribe(`answer-1:${id}`, () => void Broadcast.publish(`answer-2:${id}`, 'seen'))
   const stopSecond = Broadcast.subscribe(`answer-2:${id}`, () => void Broadcast.publish(`answer-3:${id}`, 'seen'))
   void Broadcast.publish(`answer-1:${id}`, 'go')
-  for (let i = 0; i < 5000; i++) void Broadcast.publishBinary(`behind:${id}`, reused)
+  for (let i = 0; i < 6000; i++) void Broadcast.publishBinary(`behind:${id}`, reused)
   const behindInLoop = behindDelivered
   await new Promise((resolve) => setTimeout(resolve, 50))
   const behindAnAnswer = { inLoop: behindInLoop, delivered: behindDelivered }
