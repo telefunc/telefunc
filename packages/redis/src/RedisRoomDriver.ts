@@ -28,7 +28,7 @@ import type {
   RoomSubscriptionSource,
   StaleIncarnation,
 } from '@telefunc/room/backend'
-import { decodeOrderingFrame } from 'telefunc/__internal'
+import { decodeOrderingFrame } from './orderingFrame.js'
 import { isCluster } from './ioredis.js'
 import {
   channelKey,

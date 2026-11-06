@@ -19,7 +19,7 @@ import { ServerBroadcastEnd, type BroadcastEndOwner } from './ServerBroadcastEnd
 import type { ShieldValidator } from '../../../node/server/shield.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import type { BroadcastPayload, BroadcastRoute } from '../../backend/driver.js'
-import type { OrderingInfo } from '../../wire/orderingFrame.js'
+import type { OrderingInfo } from '../../backend/driverOrdering.js'
 import { followBroadcastPlane, getBroadcastPlane, unfollowBroadcastPlane } from '../../backend/install.js'
 import type { BackendSubscription } from '../../backend/SharedSubscriptions.js'
 import { stringify } from '@brillout/json-serializer/stringify'

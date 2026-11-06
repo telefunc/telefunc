@@ -197,6 +197,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   get isClosed(): boolean {
     return this._phase !== 'open'
   }
+
   send(data: ChannelData<ServerToClient>): Promise<void>
   send(data: ChannelData<ServerToClient>, opts: { ack: true }): Promise<ChannelAck<ServerToClient>>
   send(data: ChannelData<ServerToClient>, opts: { ack: false }): Promise<void>

@@ -103,7 +103,11 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     if (level === 0) {
       this.endWithError(
         ERROR_REASON.OVERFLOW,
-        new ChannelOverflowError('Closed: its client fell behind what the server can hold for it'),
+        new ChannelOverflowError(
+          toBytes === 0
+            ? 'Broadcast closed: the server could not hold even the newest message for its client'
+            : 'Closed: its client fell behind what the server can hold for it',
+        ),
       )
     }
   }

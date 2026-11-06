@@ -14,7 +14,7 @@ import type {
   DriverAttempt,
   SubscriptionDriver,
 } from './driver.js'
-import type { OrderingInfo } from '../wire/orderingFrame.js'
+import type { OrderingInfo } from './driverOrdering.js'
 
 /** A consumer's subscription. */
 type BackendSubscription = {

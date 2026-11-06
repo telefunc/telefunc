@@ -153,6 +153,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   get _connection(): MuxConnection {
     return this.connection
   }
+
   send(data: ChannelData<ClientToServer>): Promise<void>
   send(data: ChannelData<ClientToServer>, opts: { ack: true }): Promise<ChannelAck<ClientToServer>>
   send(data: ChannelData<ClientToServer>, opts: { ack: false }): Promise<void>

@@ -78,8 +78,7 @@ local function tf_live_head(key, now)
 end
 `
 
-// The same bytes as telefunc's ordering frame (wire-protocol/wire/orderingFrame.ts): four u32 big-endian words,
-// then the payload.
+// The ordering frame orderingFrame.ts reads: four u32 big-endian words, then the payload.
 const REDIS_ORDERING_FRAME_LUA = `
 local function tf_u64(n)
   local hi = math.floor(n / 4294967296)

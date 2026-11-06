@@ -10,7 +10,7 @@ import type {
   DriverAttempt,
   PublishResult,
 } from '../driver.js'
-import type { OrderingInfo } from '../../wire/orderingFrame.js'
+import type { OrderingInfo } from '../driverOrdering.js'
 import type { BroadcastKind } from '../../wire/payloads.js'
 import { MemoryPubSub, type MemoryAttemptOwner, type Subscribers } from './MemoryPubSub.js'
 

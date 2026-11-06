@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
+import { ServerBroadcastEnd } from './ServerBroadcastEnd.js'
+import { publishBody } from './PublishBody.js'
 import { ServerReplay } from './ServerReplay.js'
-import { ACK_STATUS, decode, encode, type ChannelFrame } from '../../wire/frame.js'
+import { ACK_STATUS, decode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { configureBroadcastTransport, disposeBackend } from '../../backend/install.js'
@@ -27,40 +29,6 @@ describe('keyed in-process broadcast', () => {
     sender.publish({ text: 'hello' })
 
     expect(received).toEqual([{ text: 'hello' }])
-  })
-
-  // A page subscribes as it attaches, but Room's stubs deliver from the moment a response returns them: a page that hasn't
-  // attached yet gets what was delivered, once it does. Asserts at the count level — exact frame encoding is impl detail.
-  it('buffers wire frames until a peer attaches, then flushes them on attach', () => {
-    const sender = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
-    const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
-    sender._end._registerChannel()
-    receiver._end._registerChannel()
-    receiver._end._dispatchFrame(decode(encode.broadcastSub(0, false)) as ChannelFrame) // the page subscribes
-
-    sender.publish({ text: 'hello' })
-
-    const frames: Uint8Array[] = []
-    receiver._end._attachPeer(
-      new IndexedPeer({
-        sender: {
-          send: (frame) => {
-            frames.push(frame)
-          },
-          carry() {},
-          bufferedAmount: () => 0,
-          deliveredBefore: () => 0,
-          terminate() {},
-          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-          queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, drainRate: () => 0 },
-        },
-        index: 7,
-        replay: new ServerReplay({ heldBytes: 0 }),
-      }),
-    )
-
-    // One publish made before attach → its head and its body on attach.
-    expect(frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>).tag)).toEqual([TAG.PUBLISH_TO, TAG.PUBLISH])
   })
 
   // The publisher's own subscribe must fire too — same instance is both pub and sub.
@@ -189,40 +157,6 @@ describe('keyed in-process broadcast', () => {
     expect(received).toEqual([{ text: 'hello' }])
   })
 
-  // A page subscribes as it attaches, but Room's stubs deliver from the moment a response returns them: a page that hasn't
-  // attached yet gets what was delivered, once it does. Asserts at the count level — exact frame encoding is impl detail.
-  it('buffers wire frames until a peer attaches, then flushes them on attach', () => {
-    const sender = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
-    const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
-    sender._end._registerChannel()
-    receiver._end._registerChannel()
-    receiver._end._dispatchFrame(decode(encode.broadcastSub(0, false)) as ChannelFrame) // the page subscribes
-
-    sender.publish({ text: 'hello' })
-
-    const frames: Uint8Array[] = []
-    receiver._end._attachPeer(
-      new IndexedPeer({
-        sender: {
-          send: (frame) => {
-            frames.push(frame)
-          },
-          carry() {},
-          bufferedAmount: () => 0,
-          deliveredBefore: () => 0,
-          terminate() {},
-          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-          queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, drainRate: () => 0 },
-        },
-        index: 7,
-        replay: new ServerReplay({ heldBytes: 0 }),
-      }),
-    )
-
-    // One publish made before attach → its head and its body on attach.
-    expect(frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>).tag)).toEqual([TAG.PUBLISH_TO, TAG.PUBLISH])
-  })
-
   it('publish receipts are key-scoped and seq increments monotonically per key', async () => {
     const k1 = 'room:receipts:A'
     const k2 = 'room:receipts:B'
@@ -282,6 +216,38 @@ describe('binary in-process broadcast', () => {
     expect(text).toEqual([{ text: 'just text' }])
     expect(bin).toHaveLength(1)
     expect(Array.from(bin[0]!)).toEqual([1, 2, 3])
+  })
+})
+
+describe('ServerBroadcastEnd', () => {
+  // Room's stubs deliver from the moment a response returns them, ahead of the page's attach.
+  it('sends what was delivered before its page attached, once it attaches', () => {
+    const end = new ServerBroadcastEnd()
+    end.setOwner({ _onPagePublish() {}, _onPagePublishBinary() {} })
+    end._registerChannel()
+
+    end.deliver(publishBody('"hello"', { seq: 1, timestamp: 1 }))
+
+    const frames: Uint8Array[] = []
+    end._attachPeer(
+      new IndexedPeer({
+        sender: {
+          send: (frame) => {
+            frames.push(frame)
+          },
+          carry() {},
+          bufferedAmount: () => 0,
+          deliveredBefore: () => 0,
+          terminate() {},
+          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+          queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, drainRate: () => 0 },
+        },
+        index: 7,
+        replay: new ServerReplay({ heldBytes: 0 }),
+      }),
+    )
+
+    expect(frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>).tag)).toEqual([TAG.PUBLISH_TO, TAG.PUBLISH])
   })
 })
 
@@ -456,40 +422,6 @@ describe('TransportBroadcastDriver — multi-node transport', () => {
     sender.publish({ text: 'hello' })
 
     expect(received).toEqual([{ text: 'hello' }])
-  })
-
-  // A page subscribes as it attaches, but Room's stubs deliver from the moment a response returns them: a page that hasn't
-  // attached yet gets what was delivered, once it does. Asserts at the count level — exact frame encoding is impl detail.
-  it('buffers wire frames until a peer attaches, then flushes them on attach', () => {
-    const sender = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
-    const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
-    sender._end._registerChannel()
-    receiver._end._registerChannel()
-    receiver._end._dispatchFrame(decode(encode.broadcastSub(0, false)) as ChannelFrame) // the page subscribes
-
-    sender.publish({ text: 'hello' })
-
-    const frames: Uint8Array[] = []
-    receiver._end._attachPeer(
-      new IndexedPeer({
-        sender: {
-          send: (frame) => {
-            frames.push(frame)
-          },
-          carry() {},
-          bufferedAmount: () => 0,
-          deliveredBefore: () => 0,
-          terminate() {},
-          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-          queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, drainRate: () => 0 },
-        },
-        index: 7,
-        replay: new ServerReplay({ heldBytes: 0 }),
-      }),
-    )
-
-    // One publish made before attach → its head and its body on attach.
-    expect(frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>).tag)).toEqual([TAG.PUBLISH_TO, TAG.PUBLISH])
   })
 
   it('cross-node: a publish from node1 reaches node2 subscribers via the shared transport', () => {

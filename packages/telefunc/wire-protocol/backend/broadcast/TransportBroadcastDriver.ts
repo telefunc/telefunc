@@ -1,7 +1,7 @@
 export { TransportBroadcastDriver }
 export type { BroadcastTransport }
 
-import { isOrdering } from '../../wire/orderingFrame.js'
+import { isOrdering } from '../driverOrdering.js'
 import {
   DriverAttempt,
   type BackendReceiver,

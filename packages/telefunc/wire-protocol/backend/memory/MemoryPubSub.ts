@@ -8,7 +8,7 @@ import { CHANNEL_HOLD_MAX_BYTES } from '../../constants.js'
 import { ChannelOverflowError } from '../../channel/channelErrors.js'
 import { HELD_SEND_OVERHEAD_BYTES } from '../../channel/server/ServerChannelBuffer.js'
 import { DriverAttempt, type BackendPayload, type BackendReceiver } from '../driver.js'
-import type { OrderingInfo } from '../../wire/orderingFrame.js'
+import type { OrderingInfo } from '../driverOrdering.js'
 import { nextTurn } from '../../flowControl/macrotaskYield.js'
 
 /** Receivers by key; a change replaces a key's array, so an array read at a publish or commit is its targets. */

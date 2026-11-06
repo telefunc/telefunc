@@ -1,6 +1,6 @@
 // Every add-on: Room (`@telefunc/room`), `@telefunc/rxjs` and `@telefunc/redis`.
 export type { TELEFUNC_SHIELDS } from '../shared/transformer/generateShield/shieldKey.js'
-export type { OrderingInfo } from '../../wire-protocol/wire/orderingFrame.js'
+export type { OrderingInfo } from '../../wire-protocol/backend/driverOrdering.js'
 export { untether } from '../../utils/wrapProxy.js'
 export { invokeChannelListener } from '../../wire-protocol/channel/channel.js'
 export { handleCallbackBug } from './runTelefunc/validateTelefunctionError.js'
@@ -53,7 +53,6 @@ export type { BackendSubscription, SourceRules } from '../../wire-protocol/backe
 export { SharedSubscriptions } from '../../wire-protocol/backend/SharedSubscriptions.js'
 export { assertDriverOrdering } from '../../wire-protocol/backend/driverOrdering.js'
 export { reportBroadcastDeliveryLost } from '../../wire-protocol/backend/broadcast/reportBroadcastDeliveryLost.js'
-export { decodeOrderingFrame } from '../../wire-protocol/wire/orderingFrame.js'
 export { MemoryBackend } from '../../wire-protocol/backend/memory/MemoryBackend.js'
 export { MemoryPubSub, type Subscribers } from '../../wire-protocol/backend/memory/MemoryPubSub.js'
 export { ChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'

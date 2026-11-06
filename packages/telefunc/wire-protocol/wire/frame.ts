@@ -39,8 +39,14 @@ import {
   type ReconcilePayload,
   type ReconciledPayload,
 } from './payloads.js'
-import { decodePublishBinary, decodePublishText, encodePublishText, type WirePublishInfo } from './publishInfo.js'
-import { ORDERING_FRAME_HEADER_BYTES, writeOrdering } from './orderingFrame.js'
+import {
+  PUBLISH_BINARY_HEADER,
+  decodePublishBinary,
+  decodePublishText,
+  encodePublishText,
+  writePublishBinaryInfo,
+  type WirePublishInfo,
+} from './publishInfo.js'
 import { ProtocolViolationError, assertProtocol } from './protocolViolation.js'
 import { textDecoder, textEncoder } from './envelope.js'
 
@@ -195,10 +201,10 @@ const encode = {
   binary: (index: number, data: Uint8Array, seq: number) => encodeBinaryFrame(TAG.BINARY, index, data, seq),
   /** A binary publish's body, as `publish`. */
   publishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Array<ArrayBuffer> {
-    const frame = new Uint8Array(HEADER + ORDERING_FRAME_HEADER_BYTES + data.byteLength)
+    const frame = new Uint8Array(HEADER + PUBLISH_BINARY_HEADER + data.byteLength)
     writeHeader(frame, TAG.PUBLISH_BINARY, 0, 0)
-    writeOrdering(frame, HEADER, info)
-    frame.set(data, HEADER + ORDERING_FRAME_HEADER_BYTES)
+    writePublishBinaryInfo(frame, HEADER, info)
+    frame.set(data, HEADER + PUBLISH_BINARY_HEADER)
     return frame
   },
   publishTo: (index: number, seq: number) => encodeBareFrame(TAG.PUBLISH_TO, index, seq),

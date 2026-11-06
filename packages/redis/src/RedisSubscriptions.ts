@@ -2,10 +2,11 @@ export { RedisSubscriptions, neverReachedSubscription }
 
 import { randomUUID } from 'node:crypto'
 import type { BackendReceiver, OrderingInfo } from 'telefunc/__internal'
-import { DriverAttempt, createDeferred, decodeOrderingFrame, type Deferred } from 'telefunc/__internal'
+import { DriverAttempt, createDeferred, type Deferred } from 'telefunc/__internal'
 import type { CommitChannels, FenceTokens } from './keys.js'
 import { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH } from './commands.js'
 import { isRefusal, type SubscriberSocket } from './ioredis.js'
+import { decodeOrderingFrame } from './orderingFrame.js'
 import type { RedisConnection } from './RedisConnection.js'
 
 type RedisSubscriptionsOptions = { connection: RedisConnection }

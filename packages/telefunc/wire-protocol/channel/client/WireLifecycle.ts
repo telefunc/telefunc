@@ -608,7 +608,7 @@ const TRANSPORT_REGISTRY: Record<
 /** What a channel the server ended with an ERROR of `reason` closes with. */
 function channelErrorFor(reason: number): Error {
   if (reason === ERROR_REASON.OVERFLOW) {
-    return new ChannelOverflowError('Closed: this client fell behind what the server can hold for it')
+    return new ChannelOverflowError('Closed: the server could not hold even the newest message for this client')
   }
   return makeBugError()
 }

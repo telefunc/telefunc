@@ -30,7 +30,7 @@ import type {
   PlaneOf,
   PlaneServer,
 } from '../../backend/driver.js'
-import type { OrderingInfo } from '../../wire/orderingFrame.js'
+import type { OrderingInfo } from '../../backend/driverOrdering.js'
 import { currentCloudflareSession } from './session.js'
 import { DEFAULT_BROADCAST_BUCKETS } from './routing.js'
 
