@@ -335,9 +335,10 @@ class PieceSender {
     const end = data ? Math.min(bytes, offset + headroom) : bytes
     // A piece smaller than what the receiver acknowledges at once would cost more than the wait for headroom.
     if (end - offset < Math.min(bytes - offset, WIRE_PIECES_ACK_BYTES)) return this.wait(frame, offset)
-    // An empty piece makes the receiver acknowledge the next two at once, which copies past their room wait for. A
-    // frame cut only for headroom isn't used to measure the rate.
-    const awaitsAck = copyRoom < bytes - offset
+    // An empty piece makes the receiver acknowledge the next two at once. A frame not sent whole needs that: its rate and
+    // room come back with acknowledgements, and a page sends none of an unfinished frame unasked. A frame cut only for
+    // headroom isn't used to measure the rate.
+    const awaitsAck = end < bytes
     if (awaitsAck || (offset === 0 && bytes > this.wholeUpTo)) this.sendEmptyPiece(bytes)
     const size = awaitsAck ? Math.ceil((end - offset) / 2) : Math.max(1, Math.floor(this.wholeUpTo))
     const handed = end - offset + Math.ceil((end - offset) / size) * PIECE_HEADER_BYTES
