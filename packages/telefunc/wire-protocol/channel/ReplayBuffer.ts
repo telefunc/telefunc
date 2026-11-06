@@ -64,12 +64,6 @@ class ReplayBuffer {
     return length
   }
 
-  get byteLength(): number {
-    let byteLength = 0
-    for (const kind of REPLAY_KINDS) byteLength += this.queues[kind]?.byteLength ?? 0
-    return byteLength
-  }
-
   dispose(): void {
     for (const kind of REPLAY_KINDS) this.queues[kind]?.dispose()
     this.issuedSeq = 0
@@ -119,10 +113,6 @@ class ReplayQueue {
 
   get length(): number {
     return this.frames.length - this.head
-  }
-
-  get byteLength(): number {
-    return this.totalBytes
   }
 
   /** Stores an encoded frame; none larger than the budget. */
