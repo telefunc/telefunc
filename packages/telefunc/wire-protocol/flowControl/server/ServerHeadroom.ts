@@ -23,8 +23,11 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   /** Sends every frame the WebSocket carries. */
   readonly sender: PieceSender
   private readonly socket: PieceSocket
-  /** The rate the page takes data at. */
+  /** The rate the page takes data at, as acknowledgements measure it. */
   private readonly drain = new DrainRate()
+  /** The rate the probe of the wire's first large frame measured, in a round trip: that frame's acknowledgement comes
+   *  only when all of it arrived, which on a slow link is seconds of publishes later. */
+  private readonly pieceRate = new PieceRate()
   /** When the newest acknowledged data arrived, in ms on the page's clock, counted from the first data an
    *  acknowledgement covered. */
   private arrivedAt = 0
@@ -51,7 +54,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     this.sender = new PieceSender({
       socket,
       pingInterval,
-      pieceRate: new PieceRate(),
+      pieceRate: this.pieceRate,
       cuts: 'whole',
       owner: this,
     })
@@ -72,14 +75,15 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   }
 
   drainRate(): number {
-    return this.drain.rate
+    return this.drain.rate || this.pieceRate.fastest
   }
 
   /** What the path takes at `at` past what it holds. */
   headroom(at: number): number {
-    if (this.drain.rate === 0 || this.leastRtt === Number.POSITIVE_INFINITY) return Number.POSITIVE_INFINITY
-    const takes = Math.max(WIRE_SEND_AHEAD_MIN_BYTES, WIRE_SEND_AHEAD_ROUND_TRIPS * this.drain.rate * this.leastRtt)
-    return takes - this.pathHolds(at)
+    const rate = this.drainRate()
+    if (rate === 0) return Number.POSITIVE_INFINITY
+    const roundTrips = this.leastRtt === Number.POSITIVE_INFINITY ? 0 : WIRE_SEND_AHEAD_ROUND_TRIPS * this.leastRtt
+    return Math.max(WIRE_SEND_AHEAD_MIN_BYTES, rate * roundTrips) - this.pathHolds(at)
   }
 
   /** `PieceSenderOwner`: the path holds `bytes`; each dated part is dated apart, so a burst's first part measures the path. */
@@ -118,7 +122,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     // The path holds what the page hasn't acknowledged, less what the rate drained since that data arrived.
     this.inPath = Math.max(
       0,
-      this.sender.transmittedBytes - acknowledged - this.drain.rate * Math.max(0, now - arrived),
+      this.sender.transmittedBytes - acknowledged - this.drainRate() * Math.max(0, now - arrived),
     )
     this.inPathAt = now
     this.sendWaiting()
@@ -144,13 +148,13 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
 
   /** What the path holds at `now`, as the rate drained it since `inPathAt`. */
   private pathHolds(now: number): number {
-    return Math.max(0, this.inPath - this.drain.rate * (now - this.inPathAt))
+    return Math.max(0, this.inPath - this.drainRate() * (now - this.inPathAt))
   }
 
   /** While data waits for headroom, looks again once the rate freed what a piece takes (see `PieceSender.cut`). */
   private pace(): void {
     if (this.paceTimer !== null || this.sender.waitingBytes === 0) return
-    const ms = Math.max(1, (WIRE_PIECES_ACK_BYTES - this.headroom(performance.now())) / this.drain.rate)
+    const ms = Math.max(1, (WIRE_PIECES_ACK_BYTES - this.headroom(performance.now())) / this.drainRate())
     this.paceTimer = unrefTimer(setTimeout(this.lookAgain, ms))
   }
 
