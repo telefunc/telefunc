@@ -31,7 +31,6 @@ import {
   type BroadcastTransport,
 } from '../../wire-protocol/broadcast/broadcastAdapter.js'
 import {
-  CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_MAX_PENDING_BYTES,
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
@@ -82,11 +81,6 @@ type ChannelConfigUser = {
    */
   reconnectTimeout?: number
   /**
-   * How long, in milliseconds, to keep the shared channel connection alive
-   * after the last channel closes.
-   */
-  idleTimeout?: number
-  /**
    * How often, in milliseconds, the client sends a ping for channel health
    * checks. The server considers the client dead after 2x this interval.
    */
@@ -114,7 +108,6 @@ type ChannelConfigUser = {
 type ChannelConfigResolved = {
   transports: ChannelTransports
   reconnectTimeout: number
-  idleTimeout: number
   pingInterval: number
   maxPendingBytes: number
   sseFlushThrottle: number
@@ -317,7 +310,6 @@ function getServerConfig(): ConfigResolved {
         ...globalObject.adapterChannelTransports,
       ],
       reconnectTimeout: configState.channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
-      idleTimeout: configState.channel.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS,
       pingInterval: configState.channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
       maxPendingBytes: configState.channel.maxPendingBytes ?? CHANNEL_MAX_PENDING_BYTES,
       sseFlushThrottle: configState.channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
@@ -465,7 +457,6 @@ function applyChannelConfig(val: unknown): void {
         next[key] = value
         break
       case 'reconnectTimeout':
-      case 'idleTimeout':
       case 'sseFlushThrottle':
       case 'ssePostIdleFlushDelay':
         assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
