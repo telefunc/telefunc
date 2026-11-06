@@ -1328,7 +1328,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     const bugs = async () => Object.keys(await getCleanupState()).filter((key) => key.startsWith('bug:'))
     const bugsBefore = await bugs()
     const answer = await page.evaluate(async () => {
-      const resp = await fetch('/_telefunc?_telefunc=sse&wire=1', {
+      const resp = await fetch('/_telefunc?_telefunc=sse&wire=2', {
         method: 'POST',
         headers: { 'x-telefunc-request': 'sse' },
       })
