@@ -59,4 +59,19 @@ function testBroadcastRedisSubscriberDropped() {
     )
     expectLog('Redis subscriber connection closed')
   })
+
+  test('broadcast: a publish lands while a reconnected subscription reads where its key starts: it arrives, and nothing is reported', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-redis-during-resume')
+    await autoRetry(
+      async () => {
+        expect(await getResult('#redis-during-resume-result')).deep.equal({
+          received: ['before', 'during the read', 'after'],
+          reported: [],
+        })
+      },
+      { timeout: 10_000 },
+    )
+    expectLog('Redis subscriber connection closed')
+  })
 }

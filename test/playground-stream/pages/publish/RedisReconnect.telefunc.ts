@@ -1,9 +1,17 @@
-export { onBinaryBroadcastAcrossReconnect, onBroadcastSubscriberDropped, onRedisChannelDenied, onRedisSubscribeFailure }
+export {
+  onBinaryBroadcastAcrossReconnect,
+  onBroadcastPublishedDuringResume,
+  onBroadcastSubscriberDropped,
+  onRedisChannelDenied,
+  onRedisSubscribeFailure,
+}
 
 import type { Redis } from 'ioredis'
 import { Broadcast, BroadcastChannel, config } from 'telefunc'
 import type { DriverAttempt } from 'telefunc/__internal'
 // Only `installRedis()` is public, and it takes one backend per process.
+import { REDIS_COMMANDS } from '../../../../packages/redis/dist/commands.js'
+import type { SubscriberSocket } from '../../../../packages/redis/dist/ioredis.js'
 import { RedisBackend } from '../../../../packages/redis/dist/RedisBackend.js'
 import { RedisConnection } from '../../../../packages/redis/dist/RedisConnection.js'
 import { redis } from '../../redis'
@@ -48,6 +56,56 @@ async function onBroadcastSubscriberDropped() {
   unsubscribeText()
   unsubscribeBinary()
   return { text, binary }
+}
+
+/** This server's subscriber connection drops, and once it subscribed again a publish lands just before the key's start
+ *  is read back, so the start counts its frame while that frame is on its way. It arrives, and nothing is reported. */
+async function onBroadcastPublishedDuringResume() {
+  const route = { key: `room:during-resume:${crypto.randomUUID()}`, kind: 'text' } as const
+  const connection = new RedisConnection({ redis: redis!.duplicate(), prefix: 'tf:' })
+  const backend = new RedisBackend({ connection })
+  const sockets: SubscriberSocket[] = []
+  const open = connection.openSubscriberSocket.bind(connection)
+  connection.openSubscriberSocket = async () => {
+    const socket = await open()
+    sockets.push(socket)
+    return socket
+  }
+  let resuming = false
+  const run = connection.run.bind(connection)
+  connection.run = (async (command: never, input: never) => {
+    if (resuming && command === REDIS_COMMANDS.broadcastStart) {
+      resuming = false
+      await backend.publish(route, 'during the read')
+    }
+    return run(command, input)
+  }) as typeof connection.run
+  const reported: string[] = []
+  config.broadcast.onDeliveryLost = ({ key, reason }) => {
+    if (key === route.key) reported.push(reason)
+  }
+  const received: string[] = []
+  const attempt = backend.subscribe(route, { deliver: (value) => received.push(value as string) })
+  try {
+    await backend.publish(route, 'before')
+    await receivedCount(received, 1)
+    resuming = true
+    sockets[0]!.disconnect()
+    await receivedCount(received, 2)
+    await backend.publish(route, 'after')
+    await receivedCount(received, 3)
+    return { received, reported }
+  } finally {
+    config.broadcast.onDeliveryLost = ({ key, reason }) =>
+      console.error(`Broadcast delivery of '${key}' lost: ${reason}`)
+    await attempt.unsubscribe()
+    connection.client.disconnect()
+  }
+}
+
+/** Settles once `received` holds `count`, or a moment after it plainly won't. */
+async function receivedCount(received: string[], count: number) {
+  for (let tries = 1; received.length < count && tries <= 40; tries++) await sleep(50)
 }
 
 /** Redis refuses a user's SUBSCRIBEs while its backend publishes on a new subscription; a publish made once that

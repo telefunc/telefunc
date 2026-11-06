@@ -3,6 +3,7 @@ export { RedisReconnect }
 import React, { useRef, useState } from 'react'
 import {
   onBinaryBroadcastAcrossReconnect,
+  onBroadcastPublishedDuringResume,
   onBroadcastSubscriberDropped,
   onRedisChannelDenied,
   onRedisSubscribeFailure,
@@ -13,6 +14,7 @@ function RedisReconnect() {
   const [channelDenied, setChannelDenied] = useState<unknown>(null)
   const [firstBytes, setFirstBytes] = useState<number[]>([])
   const [dropped, setDropped] = useState<unknown>(null)
+  const [duringResume, setDuringResume] = useState<unknown>(null)
   // A broadcast the page drops closes once garbage-collected.
   const roomRef = useRef<Awaited<ReturnType<typeof onBinaryBroadcastAcrossReconnect>> | null>(null)
 
@@ -47,6 +49,15 @@ function RedisReconnect() {
         }}
       >
         Drop the server's Redis connections during publishes
+      </button>
+      <h2>A Publish While a Reconnected Subscription Reads Its Start</h2>
+      <pre id="redis-during-resume-result">{JSON.stringify(duringResume)}</pre>
+      <button
+        type="button"
+        id="test-redis-during-resume"
+        onClick={async () => setDuringResume(await onBroadcastPublishedDuringResume())}
+      >
+        Publish while the start is read back
       </button>
       <h2>Binary Publish Across a Redis Reconnect</h2>
       <pre id="redis-reconnect-result">{JSON.stringify(firstBytes)}</pre>

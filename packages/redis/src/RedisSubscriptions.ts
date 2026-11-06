@@ -283,7 +283,7 @@ class RedisSubscriptions {
       missing.length > 0 && this.subscribeMissing(connection, missing),
     ])
     // After the SUBSCRIBE's acknowledgment: a lane's start read before it would miss a publish between the two.
-    if (this.isCurrent(id)) await this.confirmCovered(id, subscribed)
+    if (this.isCurrent(id)) await this.confirmCovered(connection)
   }
 
   /** Redis refuses a whole SUBSCRIBE over one channel it denies, leaving the connection as it was: each channel then
@@ -306,25 +306,28 @@ class RedisSubscriptions {
   }
 
   /** Confirms the attempts `subscribed` covers. An attempt made during a SUBSCRIBE waits for the sync it queued. */
-  private async confirmCovered(id: ConnectedSocket['id'], subscribed: ConnectedSocket['subscribed']): Promise<void> {
+  private async confirmCovered(connection: ConnectedSocket): Promise<void> {
     const covered: RedisAttempt[] = []
     for (const attempt of this.unconfirmed) {
       if (!attempt.awaitsConfirmation()) {
         this.unconfirmed.delete(attempt)
-      } else if (attempt.channels.every((channel) => subscribed.has(channel))) {
+      } else if (attempt.channels.every((channel) => connection.subscribed.has(channel))) {
         this.unconfirmed.delete(attempt)
         covered.push(attempt)
       }
     }
-    await Promise.all(covered.map((attempt) => this.confirm(attempt, id)))
+    await Promise.all(covered.map((attempt) => this.confirm(attempt, connection)))
   }
 
   /** Its channels are subscribed on a live connection: ready from where each lane stands now, unless its incarnation is
    *  no longer open. */
-  private async confirm(attempt: RedisAttempt, id: number): Promise<void> {
+  private async confirm(attempt: RedisAttempt, { id, socket }: ConnectedSocket): Promise<void> {
     let starts: Map<string, OrderingInfo> | null
     try {
       starts = await attempt.readStarts()
+      // A resume delivers what the starts count that reached this connection. A frame published just before the read can
+      // still be on its way, and the acknowledgment of a repeated SUBSCRIBE comes after it.
+      if (!attempt.establishing) await socket.subscribe(...attempt.channels)
     } catch (error) {
       // A failed read (a command-connection error) fails this attempt, not the shared subscriber connection.
       if (this.isCurrent(id)) attempt.fail(error)
@@ -423,23 +426,39 @@ class RedisAttempt extends DriverAttempt {
     return state === 'establishing' || state === 'lost'
   }
 
-  /** A lane missing from `starts` has no commit yet. */
+  /** A lane missing from `starts` has no commit yet. A first establish promises nothing from before it is ready; on a
+   *  resume, what reached the new subscription while the starts were read goes out, and only the rest was missed. */
   markReady(starts: Map<string, OrderingInfo>): void {
     if (!this.awaitsConfirmation()) return
-    const missed = this.state() === 'lost' ? this.missedBefore(starts) : 0
+    const resuming = this.state() === 'lost'
+    const early = this.early.map((message) => this.decodeLaneFrame(message))
+    this.early = []
+    const missed = resuming ? this.missedBefore(starts) : 0
+    const arrived = resuming && missed !== null ? this.arrivedOfMissed(early, starts) : []
     this.orders = new Map()
     for (const [lane, start] of starts) {
       this.orders.set(lane, { last: start.seq, lastTimestamp: start.timestamp, parked: null, releaseTimer: null })
     }
-    const early = this.early
-    this.early = []
     this.transition('ready')
-    if (missed !== 0) this.reportMissed(missed)
-    for (const message of early) {
+    const neverArrived = missed === null ? null : missed - arrived.length
+    if (neverArrived !== 0) this.reportMissed(neverArrived)
+    for (const { payload, info, token } of arrived) {
       // A consumer may close the lane.
       if (this.state() !== 'ready') return
-      this.order(this.decodeLaneFrame(message))
+      this.deliver(payload, info, token)
     }
+    for (const frame of early) {
+      if (this.state() !== 'ready') return
+      this.order(frame)
+    }
+  }
+
+  /** The frames held that its lanes' starts count as passed by, in place order. */
+  private arrivedOfMissed(early: LaneFrame[], starts: Map<string, OrderingInfo>): LaneFrame[] {
+    const arrived = early.filter(({ lane, place }) => {
+      return place > (this.orders.get(lane)?.last ?? 0) && place <= (starts.get(lane)?.seq ?? 0)
+    })
+    return arrived.sort((a, b) => a.place - b.place)
   }
 
   /** What its lost connection passed by, or null once a lane's order is behind what it delivered: a failover's rewind or
