@@ -1,16 +1,4 @@
-export {
-  addWireCopies,
-  admit,
-  admitPublish,
-  awaitCopyRoom,
-  dropWireCopies,
-  hasCopyRoom,
-  hold,
-  holdsEnough,
-  letGo,
-  queueMemory,
-  stopAwaitingCopyRoom,
-}
+export { addWireCopies, admit, admitPublish, dropWireCopies, hasCopyRoom, hold, holdsEnough, letGo, queueMemory }
 export type { MemoryHolder }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
@@ -37,8 +25,6 @@ const memory = getGlobalObject('channelMemory.ts', {
   reclaiming: false,
   /** What wires hold as copies, on no holder: a replay holds the same bytes. */
   wireCopies: 0,
-  /** The wires waiting for room for copies, oldest first. */
-  copyWaiters: new Set<() => void>(),
 })
 
 /** Whether `bytes` for `holder` may be held; its caller tells whoever asked when not. Near the budget, a holder past an
@@ -116,22 +102,8 @@ function addWireCopies(bytes: number): void {
   memory.wireCopies += bytes
 }
 
-/** Only a page's acknowledgement or its wire's end gets here, so the wires waiting need no timer. */
 function dropWireCopies(bytes: number): void {
   memory.wireCopies -= bytes
-  for (const wake of memory.copyWaiters) {
-    if (!hasCopyRoom()) return
-    memory.copyWaiters.delete(wake)
-    wake()
-  }
-}
-
-function awaitCopyRoom(wake: () => void): void {
-  memory.copyWaiters.add(wake)
-}
-
-function stopAwaitingCopyRoom(wake: () => void): void {
-  memory.copyWaiters.delete(wake)
 }
 
 /** Whether the server holds enough that it grants its pages no more credit. */

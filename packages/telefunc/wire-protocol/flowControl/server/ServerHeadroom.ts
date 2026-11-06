@@ -7,13 +7,7 @@ import {
   WIRE_SEND_AHEAD_MIN_BYTES,
   WIRE_SEND_AHEAD_ROUND_TRIPS,
 } from '../../constants.js'
-import {
-  addWireCopies,
-  awaitCopyRoom,
-  dropWireCopies,
-  hasCopyRoom,
-  stopAwaitingCopyRoom,
-} from '../../channel/server/channelMemory.js'
+import { addWireCopies, dropWireCopies, hasCopyRoom } from '../../channel/server/channelMemory.js'
 import { DrainRate } from '../DrainRate.js'
 import { PieceRate } from '../PieceRate.js'
 import {
@@ -63,7 +57,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   private paceTimer: ReturnType<typeof setTimeout> | null = null
   /** The copies handed and not covered by an acknowledgement: where each ends, of all the sender handed. */
   private readonly copied = new Fifo<{ end: number; bytes: number }>()
-  /** Waits for room for copies or for an acknowledgement, either of which wakes it. */
+  /** Waits for room for copies, which it looks for on its timer once a page has acknowledged, or for an acknowledgement. */
   private awaitsCopyRoom = false
 
   constructor({ socket, pingInterval }: ServerHeadroomOptions) {
@@ -136,7 +130,6 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     const room = WIRE_SEND_AHEAD_MIN_BYTES - (transmittedBytes - acknowledgedBytes)
     if (room >= WIRE_PIECES_ACK_BYTES) return room
     this.awaitsCopyRoom = true
-    if (acknowledgedBytes > 0) awaitCopyRoom(this.sendWaiting)
     return 0
   }
 
@@ -187,7 +180,6 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     if (this.paceTimer !== null) clearTimeout(this.paceTimer)
     this.paceTimer = null
     this.sender.close()
-    stopAwaitingCopyRoom(this.sendWaiting)
     this.releaseCopies(Number.POSITIVE_INFINITY)
   }
 
@@ -209,10 +201,13 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
 
   /** While data waits for headroom, looks again once the rate freed what a piece takes (see `PieceSender.cut`). */
   private pace(): void {
-    if (this.paceTimer !== null || this.sender.waitingBytes === 0 || this.awaitsCopyRoom || this.sender.awaitsProbe) {
-      return
-    }
-    const ms = Math.max(1, (WIRE_PIECES_ACK_BYTES - this.headroom(performance.now())) / this.drainRate())
+    const { waitingBytes, acknowledgedBytes, awaitsProbe } = this.sender
+    if (this.paceTimer !== null || waitingBytes === 0 || awaitsProbe) return
+    if (this.awaitsCopyRoom && acknowledgedBytes === 0) return
+    // Another wire freeing room can't wake this one: on a Durable Object its socket is out of that wire's reach.
+    const ms = this.awaitsCopyRoom
+      ? WIRE_PIECES_ACK_GAP_MS
+      : Math.max(1, (WIRE_PIECES_ACK_BYTES - this.headroom(performance.now())) / this.drainRate())
     this.paceTimer = unrefTimer(setTimeout(this.lookAgain, ms))
   }
 
