@@ -178,6 +178,8 @@ const globalObject = getGlobalObject('serverConfig.ts', {
   adapterMaxFrameBytes: undefined as number | undefined,
   /** The default of `maxMemory` where the adapter's runtime can't tell what the process may use. */
   adapterMaxMemory: undefined as number | undefined,
+  /** The default of `maxMemory` elsewhere: a request reads the config, and this process's memory doesn't change. */
+  defaultMaxMemory: undefined as number | undefined,
   /** A channel read `config.channel`, whose values each of its parts then relies on staying as they are. */
   channelConfigInUse: false,
 })
@@ -304,7 +306,10 @@ function resolveChannelConfig(channel: ChannelConfigUser): ChannelConfigResolved
     transports: channel.transports ?? [...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...globalObject.adapterChannelTransports],
     reconnectTimeout: channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
     pingInterval: channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
-    maxMemory: (channel.maxMemory as number | undefined) ?? globalObject.adapterMaxMemory ?? defaultMaxMemory(),
+    maxMemory:
+      (channel.maxMemory as number | undefined) ??
+      globalObject.adapterMaxMemory ??
+      (globalObject.defaultMaxMemory ??= defaultMaxMemory()),
   }
 }
 
