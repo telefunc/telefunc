@@ -118,6 +118,8 @@ class PieceSender {
   private readonly waiting = new Fifo<Uint8Array<ArrayBuffer>>()
   /** The bytes waiting for headroom. */
   waitingBytes = 0
+  /** The newest publish's head that left: a body at the front of what waits names no channel, only its head does. */
+  private headStarted: Uint8Array<ArrayBuffer> | null = null
   /** The open announcement the current task's frames go behind; a microtask closes it when the task ends. */
   private open: { start: number; at: number; bytes: number } | null = null
   /** The bytes of the newest message it announced. */
@@ -220,6 +222,7 @@ class PieceSender {
 
   /** Sends `frame`, which nothing waits ahead of. */
   private start(frame: Uint8Array<ArrayBuffer>): void {
+    if (frame[0] === TAG.PUBLISH_TO) this.headStarted = frame
     if (isSequencedTag(frame[0]!) && this.copies(frame) && this.copyRoom() < frame.byteLength) {
       // An open announcement names whole frames.
       return this.open === null ? this.cut(frame, 0) : this.wait(frame, 0)
@@ -287,6 +290,7 @@ class PieceSender {
 
   /** The rest of a data frame, then the frames waiting behind it. */
   private *framesAhead(): Generator<Uint8Array> {
+    if (this.headStarted !== null) yield this.headStarted
     yield this.rest!.frame
     yield* this.waiting
   }

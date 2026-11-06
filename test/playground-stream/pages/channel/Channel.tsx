@@ -1397,17 +1397,26 @@ function ChannelDemo() {
   const testPublishesBehind = useCallback(async () => {
     setChannelState((s) => ({ ...s, publishesBehind: null }))
     const { broadcast, control } = await openChannel(onChannelPublishesBehind)
-    let resolveFirst!: () => void
-    const first = new Promise<void>((resolve) => (resolveFirst = resolve))
-    broadcast.subscribeBinary(() => resolveFirst())
-    void control.send(5)
-    await first
+    let firstSeq = 0
+    let bodies = 0
+    let resolveSecond!: () => void
+    const second = new Promise<void>((resolve) => (resolveSecond = resolve))
+    broadcast.subscribeBinary((_, info) => {
+      firstSeq ||= info.seq
+      if (++bodies === 2) resolveSecond()
+    })
+    void control.send(1)
+    // Its answer meets that body on the wire, with its head gone and no later head of this channel ahead.
+    const { seq: ownSeq } = await broadcast.publish('answered behind the body')
+    void control.send(4)
+    await second
     const pinged = performance.now()
     await control.send('ping', { ack: true })
+    const pingMs = Math.round(performance.now() - pinged)
     const closing = performance.now()
     const closed = await control.send('close', { ack: true })
     const closeMs = Math.round(performance.now() - closing)
-    const publishesBehind = { pingMs: Math.round(closing - pinged), closed, closeMs }
+    const publishesBehind = { pingMs, publishesAhead: ownSeq - firstSeq, closed, closeMs }
     setChannelState((s) => ({ ...s, publishesBehind }))
     control.close()
   }, [])

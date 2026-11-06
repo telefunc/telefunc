@@ -73,6 +73,8 @@ class EventStream implements WireQueue {
   private waitingBytes = 0
   /** The event going to the stream, and how far it went. */
   private current: { event: Uint8Array<ArrayBuffer>; offset: number } | null = null
+  /** The newest publish's head that left: a body at the front of `waiting` names no channel, only its head does. */
+  private headStarted: Uint8Array<ArrayBuffer> | null = null
   /** Whether the stream asks for more. */
   private takes: boolean
   /** The rate the page takes what waits, and when it last took some; null while nothing waits. */
@@ -101,7 +103,8 @@ class EventStream implements WireQueue {
 
   /** Data waits for the stream to ask for it, as the frame the replay also holds: it's encoded when it's handed. */
   send(frame: Uint8Array<ArrayBuffer>): void {
-    const atOnce = passesData(frame[0]!) || (frame.byteLength <= WIRE_GATHER_BYTES && overtakes(frame, this.waiting))
+    const atOnce =
+      passesData(frame[0]!) || (frame.byteLength <= WIRE_GATHER_BYTES && overtakes(frame, this.framesAhead()))
     if (atOnce && this.current !== null) {
       this.passing.push(frame)
       this.waitingBytes += eventBytes(frame)
@@ -114,6 +117,11 @@ class EventStream implements WireQueue {
     this.tookAt ??= performance.now()
     this.waiting.push(frame)
     this.waitingBytes += eventBytes(frame)
+  }
+
+  private *framesAhead(): Generator<Uint8Array> {
+    if (this.headStarted !== null) yield this.headStarted
+    yield* this.waiting
   }
 
   waitingPublishes(ix: number): number {
@@ -164,6 +172,7 @@ class EventStream implements WireQueue {
 
   /** Starts `frame`'s event and returns the bytes that went. */
   private startEvent(frame: Uint8Array<ArrayBuffer>): number {
+    if (frame[0] === TAG.PUBLISH_TO) this.headStarted = frame
     this.current = { event: eventOf(frame), offset: 0 }
     return this.pushChunks()
   }
