@@ -27,6 +27,7 @@ import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type { BarrierPayload, PreparePayload, ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
+import { creditWindowOf } from '../../flowControl/credit.js'
 import { WireSender } from './WireSender.js'
 import { EndedChannels } from './EndedChannels.js'
 import { UpgradeStages, type UpgradeStagesOwner } from './UpgradeStages.js'
@@ -78,10 +79,7 @@ type MuxServerOptions = {
   idleTimeout: number
   pingInterval: number
   pingDeadline: number
-  serverReplayBuffer: number
-  serverReplayBufferBinary: number
-  clientReplayBuffer: number
-  clientReplayBufferBinary: number
+  creditWindow: number
   connectTtl: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
@@ -243,10 +241,7 @@ class ChannelMux implements UpgradeStagesOwner {
         idleTimeout: this.options.idleTimeout,
         pingInterval: this.options.pingInterval,
         maxFrameBytes: getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES,
-        serverReplayBuffer: this.options.serverReplayBuffer,
-        serverReplayBufferBinary: this.options.serverReplayBufferBinary,
-        clientReplayBuffer: this.options.clientReplayBuffer,
-        clientReplayBufferBinary: this.options.clientReplayBufferBinary,
+        creditWindow: this.options.creditWindow,
         sseFlushThrottle: this.options.sseFlushThrottle,
         ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
         transports: this.options.transports,
@@ -904,10 +899,7 @@ function resolveMuxServerOptions(): MuxServerOptions {
     idleTimeout: c.idleTimeout,
     pingInterval,
     pingDeadline: pingDeadlineOf(c),
-    serverReplayBuffer: c.serverReplayBuffer,
-    serverReplayBufferBinary: c.serverReplayBufferBinary,
-    clientReplayBuffer: c.clientReplayBuffer,
-    clientReplayBufferBinary: c.clientReplayBufferBinary,
+    creditWindow: creditWindowOf(c.maxPendingBytes),
     connectTtl: c.connectTtl,
     sseFlushThrottle: c.sseFlushThrottle,
     ssePostIdleFlushDelay: c.ssePostIdleFlushDelay,

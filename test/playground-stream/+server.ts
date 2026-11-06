@@ -15,7 +15,7 @@ import { redis } from './redis'
 
 config.channel.pingInterval = 1000
 config.shield = true
-// A lane reaching a channel limit sets it low, e.g. `{"serverReplayBuffer":65536}`.
+// A lane reaching a channel limit sets it low, e.g. `{"maxPendingBytes":2097152}`.
 if (process.env.CHANNEL_CONFIG) Object.assign(config.channel, JSON.parse(process.env.CHANNEL_CONFIG))
 
 const INST = process.env.INSTANCE_ID ?? '?'

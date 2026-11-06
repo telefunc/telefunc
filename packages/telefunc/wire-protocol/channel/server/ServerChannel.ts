@@ -37,7 +37,7 @@ import { isPromise } from '../../../utils/isPromise.js'
 import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES, PUBLISH_HOLD_BYTES } from '../../constants.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
-import { replayWindow, type CreditOwner } from '../../flowControl/credit.js'
+import { creditWindowOf, type CreditOwner } from '../../flowControl/credit.js'
 import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import { SelfTime } from '../../flowControl/SelfTime.js'
 import { SendCredit } from '../../flowControl/SendCredit.js'
@@ -172,8 +172,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.sendCredit = new SendCredit({ owner, selfTime: this.selfTime })
     this.receiveCredit = new ReceiveCredit({ owner, selfTime: this.selfTime })
     const c = getServerConfig().channel
-    this.receiveCredit.fitReplay(replayWindow(c.clientReplayBuffer, c.clientReplayBufferBinary))
-    this.sendCredit.fitReplay(replayWindow(c.serverReplayBuffer, c.serverReplayBufferBinary))
+    this.receiveCredit.capWindow(creditWindowOf(c.maxPendingBytes))
+    this.sendCredit.capWindow(creditWindowOf(c.maxPendingBytes))
     this.maxPendingBytes = c.maxPendingBytes
   }
 
@@ -418,10 +418,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // becomes addressable on the wire, so a peer can attach immediately after this
     // returns.
     const c = getServerConfig().channel
-    this._replayBuffer = new ReplayBuffer({
-      maxBytes: c.serverReplayBuffer,
-      binaryMaxBytes: c.serverReplayBufferBinary,
-    })
+    // All that its sends may get ahead of the page and what's in flight, so a lost wire loses none.
+    this._replayBuffer = new ReplayBuffer(c.maxPendingBytes + creditWindowOf(c.maxPendingBytes))
     if (this._phase === 'ended') return // the mux lets an ended channel go
     if (this.ttlTimer) clearTimeout(this.ttlTimer)
     this.ttlTimer = unrefTimer(

@@ -31,16 +31,12 @@ import {
   type BroadcastTransport,
 } from '../../wire-protocol/broadcast/broadcastAdapter.js'
 import {
-  CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
-  CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_CONNECT_TTL_MS,
   CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_MAX_PENDING_BYTES,
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
-  CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
-  CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
   DEFAULT_SERVER_CHANNEL_TRANSPORTS,
   DEFAULT_STREAM_TRANSPORT,
   parseStreamConfig,
@@ -97,18 +93,6 @@ type ChannelConfigUser = {
    */
   pingInterval?: number
   /**
-   * The most bytes of text messages the server keeps per channel, of those it sent that the client hasn't acknowledged,
-   * to replay after a reconnect. If you `await` your sends, a reconnect loses nothing, as long as each message is at
-   * most half its replay buffer: 64 MiB with the defaults.
-   */
-  serverReplayBuffer?: number
-  /** As `serverReplayBuffer`, for binary messages. */
-  serverReplayBufferBinary?: number
-  /** As `serverReplayBuffer`, for what the client sends: the client keeps that replay, sized as the server tells it. */
-  clientReplayBuffer?: number
-  /** As `clientReplayBuffer`, for binary messages. */
-  clientReplayBufferBinary?: number
-  /**
    * How long, in milliseconds, a newly created channel waits for the client to
    * connect before it is closed automatically.
    */
@@ -138,10 +122,6 @@ type ChannelConfigResolved = {
   reconnectTimeout: number
   idleTimeout: number
   pingInterval: number
-  serverReplayBuffer: number
-  serverReplayBufferBinary: number
-  clientReplayBuffer: number
-  clientReplayBufferBinary: number
   connectTtl: number
   maxPendingBytes: number
   sseFlushThrottle: number
@@ -346,12 +326,6 @@ function getServerConfig(): ConfigResolved {
       reconnectTimeout: configState.channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
       idleTimeout: configState.channel.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS,
       pingInterval: configState.channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
-      serverReplayBuffer: configState.channel.serverReplayBuffer ?? CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
-      serverReplayBufferBinary:
-        configState.channel.serverReplayBufferBinary ?? CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
-      clientReplayBuffer: configState.channel.clientReplayBuffer ?? CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
-      clientReplayBufferBinary:
-        configState.channel.clientReplayBufferBinary ?? CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
       connectTtl: configState.channel.connectTtl ?? CHANNEL_CONNECT_TTL_MS,
       maxPendingBytes: configState.channel.maxPendingBytes ?? CHANNEL_MAX_PENDING_BYTES,
       sseFlushThrottle: configState.channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
@@ -506,10 +480,6 @@ function applyChannelConfig(val: unknown): void {
         assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
         next[key] = value
         break
-      case 'serverReplayBuffer':
-      case 'serverReplayBufferBinary':
-      case 'clientReplayBuffer':
-      case 'clientReplayBufferBinary':
       case 'maxPendingBytes':
         assertUsage(
           typeof value === 'number' && Number.isSafeInteger(value) && value >= 0,

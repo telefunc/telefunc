@@ -30,7 +30,7 @@ class ReceiveCredit {
   /** A page's uplink's: its round trip, which an answer to a `BDP_PING` says. */
   private roundTrips: RoundTrips | null = null
   private downlink: AttachedDownlink | null = null
-  /** `fitReplay` said the replay buffer that bounds the window. */
+  /** `capWindow` said what bounds the window. */
   private fitted = false
   // What arrived, what was consumed, and what had been consumed when each limit last went out.
   private consumedBytes = 0
@@ -71,8 +71,8 @@ class ReceiveCredit {
     return this.roundTrips?.pathRtt ?? Infinity
   }
 
-  /** Keeps what it lets be in flight within the replay buffer that holds what its peer sends (see `replayWindow`). */
-  fitReplay(window: number): void {
+  /** Keeps what it lets be in flight within what the server's `maxPendingBytes` allows. */
+  capWindow(window: number): void {
     this.fitted = true
     this.bdp.capByteWindow(window)
   }
