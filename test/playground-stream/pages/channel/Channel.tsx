@@ -1400,7 +1400,7 @@ function ChannelDemo() {
     let resolveFirst!: () => void
     const first = new Promise<void>((resolve) => (resolveFirst = resolve))
     broadcast.subscribeBinary(() => resolveFirst())
-    await control.send(5, { ack: true })
+    void control.send(5)
     await first
     const pinged = performance.now()
     await control.send('ping', { ack: true })
