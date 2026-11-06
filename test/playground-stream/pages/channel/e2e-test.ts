@@ -927,6 +927,40 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
+  test("channel: a channel its page left open at a navigation can't touch the next page's timers", async () => {
+    await navigate(`${getServerUrl()}/`)
+    await page.evaluate(async () => {
+      const frame = document.createElement('iframe')
+      frame.src = '/channel'
+      document.body.append(frame)
+      await new Promise((resolve) => (frame.onload = resolve))
+    })
+    const frame = page.frameLocator('iframe')
+    await frame.locator('#hydrated').waitFor({ state: 'attached' })
+    await frame.locator('#channel-test-left-open').click()
+    await autoRetry(async () => {
+      expect(await frame.locator('#channel-state').textContent()).toContain('"leftOpen":true')
+    })
+    await page.evaluate(
+      async ({ timers, delay }) => {
+        const frame = document.querySelector('iframe')!
+        // Keeps the left page's realm alive past the navigation, as a browser's own references do at times.
+        ;(window as any).leftPageRealm = (frame.contentWindow as any).Object
+        frame.src = '/'
+        await new Promise((resolve) => (frame.onload = resolve))
+        ;(window as any).timersRan = 0
+        for (let i = 0; i < timers; i++) frame.contentWindow!.setTimeout(() => (window as any).timersRan++, delay)
+      },
+      { timers: 100, delay: 2000 },
+    )
+    const cdp = await newCDPSession()
+    await cdp.send('HeapProfiler.collectGarbage')
+    await cdp.detach()
+    await autoRetry(async () => {
+      expect(await page.evaluate(() => (window as any).timersRan)).toBe(100)
+    })
+  })
+
   test('channel: binary the server sends before the page attaches arrives as sent, though the server reuses the buffer', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-held-binary')

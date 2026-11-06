@@ -170,6 +170,7 @@ type ChannelState = {
   shieldServerAckInvalid: { ok: boolean; value?: string; error?: string } | null
   selfRemovingListener: { pageSeen: string[]; serverSeen: string[] } | null
   unserializableAnswer: { channelId: string; pageSend: string; pageFollowUp: string; isClosed: boolean } | null
+  leftOpen: boolean
   oversize: {
     channelId: string
     thrown: string[]
@@ -257,6 +258,7 @@ const initialState: ChannelState = {
   selfRemovingListener: null,
   unserializableAnswer: null,
   oversize: null,
+  leftOpen: false,
   heldBinary: null,
   unattachedFlood: null,
   durationLimits: null,
@@ -1023,6 +1025,11 @@ function ChannelDemo() {
     setChannelState((s) => ({ ...s, oversize }))
   }, [])
 
+  const testLeftOpen = useCallback(async () => {
+    await openChannel(onChannelInit)
+    setChannelState((s) => ({ ...s, leftOpen: true }))
+  }, [])
+
   const testHeldBinary = useCallback(async () => {
     const { channel } = await openChannel(onChannelHeldBinary)
     const received: number[][] = []
@@ -1689,6 +1696,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-red-700 text-white hover:bg-red-800"
           >
             Unserializable Ack Answer
+          </button>
+          <button
+            id="channel-test-left-open"
+            type="button"
+            onClick={testLeftOpen}
+            className="px-3 py-1.5 text-sm rounded bg-cyan-800 text-white hover:bg-cyan-900"
+          >
+            Open a Channel, Keep No Reference
           </button>
           <button
             id="channel-test-oversize"
