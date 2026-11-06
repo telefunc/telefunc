@@ -1,4 +1,5 @@
 export { channelMessages, broadcastMessages }
+export type { QueueMemory }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { Fifo } from '../../utils/Fifo.js'
@@ -24,6 +25,13 @@ interface BroadcastSource<T> {
 
 type Message<T> = { type: 'text'; data: T } | { type: 'binary'; data: Uint8Array }
 
+/** Where a loop's queue counts what it holds: on a server, the ledger. A page's queue is the page's own memory. */
+interface QueueMemory {
+  admit(bytes: number): boolean
+  hold(bytes: number): void
+  letGo(bytes: number): void
+}
+
 /** What a queued message holds beyond its payload: its entry, its info and the promise its listener got, about 314 B
  *  measured. */
 const QUEUED_MESSAGE_OVERHEAD_BYTES = 320
@@ -39,9 +47,9 @@ function channelMessages<T>(channel: MessageSource<T>, options?: { signal?: Abor
   )
 }
 
-/** A broadcast's publishes don't wait for its listeners, so what its loop falls behind by is held here, within
- *  `PUBLISH_HOLD_BYTES`: past it, the loop ends with `ChannelOverflowError`. */
-function broadcastMessages<T>(broadcast: BroadcastSource<T>, options?: { signal?: AbortSignal }) {
+/** A broadcast's publishes don't wait for its listeners, so what its loop falls behind by is held here: past
+ *  `PUBLISH_HOLD_BYTES` beyond the next message, or what `memory` admits, the loop ends with `ChannelOverflowError`. */
+function broadcastMessages<T>(broadcast: BroadcastSource<T>, options?: { signal?: AbortSignal }, memory?: QueueMemory) {
   return iterateMessages<Message<T> & { info: ChannelPublishInfo }>(
     broadcast,
     (receive, registration) => {
@@ -53,6 +61,7 @@ function broadcastMessages<T>(broadcast: BroadcastSource<T>, options?: { signal?
     },
     options,
     PUBLISH_HOLD_BYTES,
+    memory,
   )
 }
 
@@ -65,6 +74,7 @@ async function* iterateMessages<M extends Message<unknown>>(
   ) => void,
   { signal }: { signal?: AbortSignal } = {},
   budget?: number,
+  memory?: QueueMemory,
 ): AsyncIterableIterator<M> {
   const registrations = new AbortController()
   const queue = new Fifo<{ message: M; consumed: () => void; size: number }>()
@@ -73,9 +83,15 @@ async function* iterateMessages<M extends Message<unknown>>(
   let ended = false
   let error: unknown
   let behindCheck: ReturnType<typeof setTimeout> | undefined
+  const letGo = (size: number) => {
+    held -= size
+    memory?.letGo(size)
+  }
   const release = () => {
-    for (let item = queue.shift(); item; item = queue.shift()) item.consumed()
-    held = 0
+    for (let item = queue.shift(); item; item = queue.shift()) {
+      letGo(item.size)
+      item.consumed()
+    }
   }
   // A failure drops what is queued: the loop throws at its next step. The first failure stays, and a clean end can't
   // erase it.
@@ -88,20 +104,27 @@ async function* iterateMessages<M extends Message<unknown>>(
     wake?.()
   }
   const abort = () => finish(signal!.reason)
+  // The next message waits only for the loop's current one to finish, so what counts is what waits beyond it.
+  const isBehind = () => held - (queue.peek()?.size ?? 0) > budget!
   // A burst delivered in one task reaches the loop only once that task ends, so the loop is behind where it still
   // holds more than `budget` then, whether or not its source closed meanwhile.
   const checkBehind = () => {
     behindCheck = undefined
-    if (held <= budget!) return
+    if (!isBehind()) return
     finish(new ChannelOverflowError(`messages() ended: its loop fell over ${budget} bytes behind the publishes`))
   }
   const receive = (message: M, bytes = 0) => {
     if (registrations.signal.aborted) return
     const size = budget ? bytes + QUEUED_MESSAGE_OVERHEAD_BYTES : 0
+    if (memory && !memory.admit(size)) {
+      finish(new ChannelOverflowError('messages() ended: config.channel.maxMemory is held, and its loop is behind'))
+      return
+    }
+    memory?.hold(size)
     held += size
-    if (budget && held > budget) behindCheck ??= setTimeout(checkBehind, 0)
     return new Promise<void>((consumed) => {
       queue.push({ message, consumed, size })
+      if (budget && isBehind()) behindCheck ??= setTimeout(checkBehind, 0)
       wake?.()
     })
   }
@@ -120,7 +143,7 @@ async function* iterateMessages<M extends Message<unknown>>(
         })
         continue
       }
-      held -= next.size
+      letGo(next.size)
       try {
         yield next.message
       } finally {

@@ -24,7 +24,7 @@ import type {
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
-import { admitPublish, type MemoryHolder } from './channelMemory.js'
+import { admitPublish, queueMemory, type MemoryHolder } from './channelMemory.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
@@ -101,7 +101,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   }
 
   override messages(options?: { signal?: AbortSignal }) {
-    return broadcastMessages<ChannelData<T>>(this, options)
+    return broadcastMessages<ChannelData<T>>(this, options, queueMemory())
   }
 
   subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {

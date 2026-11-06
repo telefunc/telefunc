@@ -1,10 +1,11 @@
-export { admit, admitPublish, hold, letGo }
+export { admit, admitPublish, hold, letGo, queueMemory }
 export type { MemoryHolder }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { getChannelConfig } from '../../../node/server/serverConfig.js'
 import { CHANNEL_HOLD_MAX_BYTES } from '../../constants.js'
 import type { PublishBody } from './PublishBody.js'
+import type { QueueMemory } from '../channelMessages.js'
 
 /** What a held publish takes beyond its share of the body: its head and its entries. */
 const HELD_PUBLISH_OVERHEAD_BYTES = 200
@@ -87,6 +88,16 @@ function letGo(holder: MemoryHolder, held: number | PublishBody): void {
     memory.total -= HELD_PUBLISH_OVERHEAD_BYTES + (--held.refs === 0 ? held.frame.byteLength : 0)
   }
   if (holder.heldBytes === 0) memory.holders.delete(holder)
+}
+
+/** What a `messages()` loop's queue holds, on the ledger as a holder of its own: nothing else can lower it. */
+function queueMemory(): QueueMemory {
+  const holder: MemoryHolder = { heldBytes: 0 }
+  return {
+    admit: (bytes) => admit(holder, bytes),
+    hold: (bytes) => hold(holder, bytes),
+    letGo: (bytes) => letGo(holder, bytes),
+  }
 }
 
 /** Everyone above the level comes down to it. A body shared goes only with its last holder, so the level drops until the
