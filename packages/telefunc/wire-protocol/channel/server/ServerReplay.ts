@@ -98,14 +98,6 @@ class ServerReplay {
 
   dispose(): void {
     for (let i = this.first; i < this.seqs.length; i++) this.drop(i)
-    this.seqs = []
-    this.frames = []
-    this.bodies = []
-    this.first = 0
-    this.dropped = 0
-    this.publishes = 0
-    this.issuedSeq = 0
-    this.pushedSeq = 0
   }
 
   private add(seq: number, frame: Uint8Array<ArrayBuffer>, body: PublishBody | null): void {
