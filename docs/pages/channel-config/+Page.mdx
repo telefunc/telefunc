@@ -11,37 +11,24 @@ import { ConfigWhereServer, TelefuncStreamBeta } from '../../components'
 import { config } from 'telefunc'
 
 config.channel = {
-  reconnectTimeout: 60_000,               // Hold channels open after disconnect (ms)
-  idleTimeout: 60_000,                    // Keep connection alive after last channel closes (ms)
-  pingInterval: 5_000,                    // Client ping interval (ms)
-  connectTtl: 15_000,                     // Wait for client to connect to new channel (ms)
-
-  maxPendingBytes: 268_435_456,           // Sends ahead of the client and unanswered acknowledgements (bytes)
-  maxPendingAcks: 16_384,                 // Unanswered acknowledgement requests (count)
-
-  // Text buffers
-  serverReplayBuffer: 335_544_320,        // Server replay buffer for text messages (bytes)
-  clientReplayBuffer: 134_217_728,        // Client replay buffer for text messages (bytes)
-  bufferLimit: 524_288,                   // Per-peer buffer for text messages (bytes)
-
-  // Binary buffers — separate budget so binary can never evict text
-  serverReplayBufferBinary: 335_544_320,  // Server replay buffer for binary messages (bytes)
-  clientReplayBufferBinary: 134_217_728,  // Client replay buffer for binary messages (bytes)
-  bufferLimitBinary: 2_097_152,           // Per-peer buffer for binary messages (bytes)
+  reconnectTimeout: 60_000,      // How long a client may be gone and get its channels back (ms)
+  pingInterval: 5_000,           // How often a client pings; it counts as gone after twice this (ms)
+  maxPendingBytes: 268_435_456,  // The most one channel holds for a client not taking it (bytes)
 }
 ```
 
-> `maxPendingBytes` covers text and binary sends beyond what the client is ready to take, plus unanswered acknowledgement requests. Both limits apply per channel.
+> **You rarely need any of these.** `await` your `send()`s and a channel holds one message at a time, whatever the client does.
 
-> This is the **server-side** `config.channel` — a separate object from the **client-side** <Link href="/transport"><code>config.channel.transports</code></Link> (`telefunc/client`).
+> Each setting decides one thing, and none of them can break another:
+> - `reconnectTimeout`: a client that comes back within it finds its channels open, with nothing lost. Past it, they close with `NetworkError`. Raise it for clients on bad networks. Lower it to free a gone client's channels sooner.
+> - `pingInterval`: how fast a client that stopped answering counts as gone, which starts its `reconnectTimeout`. Raise it to save a phone's battery. Lower it to notice sooner.
+> - `maxPendingBytes`: only `send()`s nobody awaits reach it. Past it, a `send()` rejects with `ChannelOverflowError` and that message isn't delivered, and the channel stays open. A larger message is refused even if you await it. Lower it to use less memory, which below 64 MiB also limits how much a channel sends per round trip, in both directions.
 
-> **What to tune**: the defaults suit typical stream use cases; tune these only if you run into one of the issues below:
-> - Slow/flaky clients dropping with `NetworkError` (`isChannel: true`) → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
-> - `ChannelOverflowError` while a client is briefly offline → raise `bufferLimit`/`bufferLimitBinary` above your largest message and `await` your sends.
-> - `ChannelOverflowError` while the client is connected → that send wasn't delivered and the channel stays open: `await` the server's sends or raise `maxPendingBytes`/`maxPendingAcks`.
-> - A warning that a channel's sends outrun its client → `await` your `send()`s, or send slower (see <Link href="/channel#backpressure" />); otherwise sends are refused with that `ChannelOverflowError`.
-> - `NetworkError` (`isChannel: true`) right after a reconnect, having missed more messages than the replay buffer holds → `await` your `send()`s, or raise the replay buffer that the error message names.
-> - Too much server memory per channel → `await` your `send()`s and lower the replay buffers. Smaller replay buffers can slow sends to distant clients.
+> These apply to each channel, not to a connection or a server: 100 channels may hold 100 × `maxPendingBytes` in total. On Cloudflare, `maxPendingBytes` defaults to 32 MiB, as <Link href="/stream/cloudflare">a Durable Object's memory</Link> is limited to 128 MB.
+
+> Telefunc refuses a value that can't work when you assign it: `reconnectTimeout` or `pingInterval` under 1 second, or `maxPendingBytes` under 2 MiB. Assign `config.channel` before your server handles its first request: once a channel exists, a change is refused, as open channels would keep the old values.
+
+> This is the **server-side** `config.channel`, a separate object from the **client-side** <Link href="/transport"><code>config.channel.transports</code></Link> (`telefunc/client`).
 
 <ConfigWhereServer />
 

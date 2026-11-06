@@ -87,7 +87,7 @@ Calling `dl.cancel()` aborts the download — the pending `saveToMemory()` call 
 
 ## Example: multiple concurrent downloads
 
-Return any number of `File`, `Blob`, or `download()` values anywhere in the response — in arrays, in nested objects, or mixed with regular data. Each one exposes its own `onProgress` / `cancel` / `saveTo*` methods on the client, independently of the others.
+Return any number of `File`, `Blob`, or `download()` values anywhere in the response — in arrays, in nested objects, or mixed with regular data. Each one exposes its own `onProgress` / `cancel` / `saveTo*` methods on the client. Read them concurrently, or cancel the ones you don't want: see <Link href="/stream" />.
 
 ```ts
 // Document.telefunc.ts
