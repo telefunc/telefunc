@@ -258,7 +258,8 @@ class RoomAuthority {
     await this.scheduleMaintenanceIfNeeded()
   }
 
-  /** Lists the room, in the region directory of `bucket` if it is the room's first listing. */
+  /** Lists the room, and tells its region's directory when `incTag` is new here: `bucket`'s, if it is the room's first
+   *  listing. */
   async directoryPut(
     roomId: string,
     incTag: string,
@@ -267,11 +268,13 @@ class RoomAuthority {
     bucket: string,
   ): Promise<void> {
     const at = Math.max(checkAt, Date.now() + minDelayMs)
-    const listedIn = this.transaction((sql) => {
+    const newlyListedIn = this.transaction((sql) => {
+      const listed = readListing(sql, roomId) === incTag
       writeListing(sql, roomId, incTag, at)
-      return claimListingBucket(sql, bucket)
+      const listedIn = claimListingBucket(sql, bucket)
+      return listed ? null : listedIn
     })
-    await this.callDirectory(listedIn, (directory) => directory.add(roomId, incTag))
+    if (newlyListedIn !== null) await this.callDirectory(newlyListedIn, (directory) => directory.add(roomId, incTag))
     await this.scheduleMaintenanceIfNeeded()
   }
 
