@@ -49,7 +49,7 @@ To prefix Telefunc's Redis keys, pass `installRedis(redis, { prefix })`.
 
 Room keeps its state in Redis: use `maxmemory-policy noeviction`, as any other policy can close a room.
 
-A `publish()` or `publishBinary()` over 28 MiB rejects with `ChannelOverflowError`: at its default [output buffer limits](https://redis.io/docs/latest/develop/reference/clients/#output-buffer-limits), Redis closes the connection of a server it sends a larger message.
+Telefunc's Redis backend takes a message of 28 MiB at most: a `publish()` or `publishBinary()` over that rejects with `ChannelOverflowError`. Telefunc chose this ceiling because, at its default [output buffer limits](https://redis.io/docs/latest/develop/reference/clients/#output-buffer-limits), Redis closes the connection of a server it sends a larger message (measured on Redis 7.4). Raising those limits doesn't lift the ceiling.
 
 ## Channels
 

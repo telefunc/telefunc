@@ -55,7 +55,8 @@ const REDIS_DELIVERY_FENCE_BYTE = 0xff
 const REDIS_DELIVERY_FENCE_TOKEN_LENGTH = 36
 /** What a start read's, a leave's or an incarnation drop's page holds, as a SCAN count. */
 const LANE_PAGE_SIZE = 1024
-/** Over this, Redis closes the subscriber: its allocator rounds the buffer up to the default pubsub limit, 32 MiB. */
+/** Telefunc's ceiling on a message, whatever Redis's limits are set to. Over it, a Redis at its defaults closes the
+ *  subscriber: its allocator rounds the buffer up to the default pubsub limit, 32 MiB. */
 const PUBLISH_MAX_BYTES = 28 * 1024 * 1024
 
 // Authority time in ms from Redis TIME's [sec, µs] pair, never from the caller.
@@ -1180,7 +1181,7 @@ function binaryLaneOf(kit: RoomPlaneKit, laneKey: string): Extract<LaneId, { kin
 function assertPublishable(bytes: number): void {
   if (bytes <= PUBLISH_MAX_BYTES) return
   throw new ChannelOverflowError(
-    `Redis can't deliver a message of ${bytes} bytes: publish ${PUBLISH_MAX_BYTES} at most`,
+    `Telefunc's Redis backend takes a message of ${PUBLISH_MAX_BYTES} bytes at most, and this one has ${bytes}`,
   )
 }
 
