@@ -277,10 +277,8 @@ class RedisRoomDriver implements RoomDriver {
       },
       readStarts: () => this.readStarts(source),
       receiver,
-      reportMissed: (count) => {
-        // Demand is what the servers tell each other, and its pages' gaps are asked for again: no app wrote it.
-        if (kind !== 'demand') this.kit.reportDeliveryLost(source.roomId, neverReachedSubscription(count, 'commit'))
-      },
+      reportMissed: (count) =>
+        this.kit.reportLaneLost(source.roomId, source.lane, neverReachedSubscription(count, 'commit')),
     })
   }
 

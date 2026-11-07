@@ -1,8 +1,9 @@
-export { assertRoomTimeout, roomConfig, getRoomConfig, reportDeliveryLost }
+export { assertRoomTimeout, roomConfig, getRoomConfig, reportDeliveryLost, reportLaneLost }
 export type { RoomConfig }
 
 import { ROOM_DEPARTURE_TIMEOUT_MS, ROOM_EMPTY_TIMEOUT_MS } from './constants.js'
 import { TIMER_DELAY_MAX_MS } from '../shared/constants.js'
+import type { RoomSubscriptionSource } from '../backend/contract.js'
 import { handleCallbackBug } from 'telefunc/__internal'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { assertUsage } from '../utils/assert.js'
@@ -68,6 +69,11 @@ function reportDeliveryLost(roomId: string, reason: string): void {
   } catch (err) {
     handleCallbackBug(err)
   }
+}
+
+/** Tells the app of what a lane lost. Demand is what the servers tell each other, and its gaps are asked for again. */
+function reportLaneLost(roomId: string, lane: RoomSubscriptionSource['lane'], reason: string): void {
+  if (lane.kind !== 'demand') reportDeliveryLost(roomId, reason)
 }
 
 function logDeliveryLost({ roomId, reason }: { roomId: string; reason: string }): void {
