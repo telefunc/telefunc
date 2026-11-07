@@ -48,7 +48,7 @@ function admit(holder: MemoryHolder, bytes: number): boolean {
   if (memory.total + bytes > target) reclaim(bytes, target)
   if (holder.heldBytes + bytes > Math.min(CHANNEL_HOLD_MAX_BYTES, maxMemory)) return false
   if (memory.total + bytes <= target) return true
-  return holder.heldBytes + bytes <= maxMemory / Math.max(1, memory.holders.size) && memory.total + bytes <= maxMemory
+  return holder.heldBytes + bytes <= maxMemory / memory.holders.size && memory.total + bytes <= maxMemory
 }
 
 /** Makes room for a delivery to `owner`'s pages, which nobody can refuse: past what's older, it ends as few as must end,
