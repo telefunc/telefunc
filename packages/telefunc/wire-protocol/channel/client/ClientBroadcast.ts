@@ -6,11 +6,13 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { encode, type ChannelDataFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
-import type { WirePublishInfo } from '../../wire/publishInfo.js'
+import { PUBLISH_BINARY_HEADER, type WirePublishInfo } from '../../wire/publishInfo.js'
+import { HEADER } from '../../wire/header.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { ChannelClosedError } from '../channelErrors.js'
 import { isPromise } from '../../../utils/isPromise.js'
+import { forListener } from '../listenerAnswer.js'
 import { assertWarning } from '../../../utils/assert.js'
 import { ClientChannel, type ClientChannelOptions } from './ClientChannel.js'
 
@@ -126,10 +128,10 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private onPeerPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of this.broadcastBinaryListeners.list()) {
+    const list = this.broadcastBinaryListeners.list()
+    for (const [i, cb] of list.entries()) {
       try {
-        // Bytes of its own: a listener may write into them or transfer their buffer.
-        const result = cb(new Uint8Array(data), info)
+        const result = cb(forListener(data, list, i, HEADER + PUBLISH_BINARY_HEADER), info)
         if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
       } catch (err) {
         if (this.lifecycle.handleCallbackError(err)) return
