@@ -11,7 +11,7 @@ export {
 import type { Socket } from 'node:net'
 import type { Redis } from 'ioredis'
 import { Broadcast, BroadcastChannel, config } from 'telefunc'
-import type { DriverAttempt } from 'telefunc/__internal'
+import type { BroadcastRoute, DriverAttempt } from 'telefunc/__internal'
 // Only `installRedis()` is public, and it takes one backend per process.
 import { REDIS_COMMANDS } from '../../../../packages/redis/dist/commands.js'
 import type { SubscriberSocket } from '../../../../packages/redis/dist/ioredis.js'
@@ -68,21 +68,7 @@ async function onBroadcastSubscriberDropped() {
  *  reports what passed it by, and delivers again. */
 async function onBroadcastSubscriberSilent() {
   const route = { key: `room:subscriber-silent:${crypto.randomUUID()}`, kind: 'text' } as const
-  const connection = new RedisConnection({ redis: redis!.duplicate(), prefix: 'tf:' })
-  const backend = new RedisBackend({ connection })
-  const sockets: SubscriberSocket[] = []
-  const open = connection.openSubscriberSocket.bind(connection)
-  connection.openSubscriberSocket = async () => {
-    const socket = await open()
-    sockets.push(socket)
-    return socket
-  }
-  const reported: string[] = []
-  config.broadcast.onDeliveryLost = ({ key, reason }) => {
-    if (key === route.key) reported.push(reason)
-  }
-  const received: string[] = []
-  const attempt = backend.subscribe(route, { deliver: (value) => received.push(value as string) })
+  const { backend, sockets, reported, received, stop } = ownRedisBackend(route)
   try {
     await backend.publish(route, 'before')
     await receivedCount(received, 1)
@@ -95,10 +81,7 @@ async function onBroadcastSubscriberSilent() {
     await receivedCount(received, 2)
     return { received, reported, connections: sockets.length }
   } finally {
-    config.broadcast.onDeliveryLost = ({ key, reason }) =>
-      console.error(`Broadcast delivery of '${key}' lost: ${reason}`)
-    await attempt.unsubscribe()
-    connection.client.disconnect()
+    await stop()
   }
 }
 
@@ -106,15 +89,7 @@ async function onBroadcastSubscriberSilent() {
  *  is read back, so the start counts its frame while that frame is on its way. It arrives, and nothing is reported. */
 async function onBroadcastPublishedDuringResume() {
   const route = { key: `room:during-resume:${crypto.randomUUID()}`, kind: 'text' } as const
-  const connection = new RedisConnection({ redis: redis!.duplicate(), prefix: 'tf:' })
-  const backend = new RedisBackend({ connection })
-  const sockets: SubscriberSocket[] = []
-  const open = connection.openSubscriberSocket.bind(connection)
-  connection.openSubscriberSocket = async () => {
-    const socket = await open()
-    sockets.push(socket)
-    return socket
-  }
+  const { connection, backend, sockets, reported, received, stop } = ownRedisBackend(route)
   let resuming = false
   const run = connection.run.bind(connection)
   connection.run = (async (command: never, input: never) => {
@@ -124,12 +99,6 @@ async function onBroadcastPublishedDuringResume() {
     }
     return run(command, input)
   }) as typeof connection.run
-  const reported: string[] = []
-  config.broadcast.onDeliveryLost = ({ key, reason }) => {
-    if (key === route.key) reported.push(reason)
-  }
-  const received: string[] = []
-  const attempt = backend.subscribe(route, { deliver: (value) => received.push(value as string) })
   try {
     await backend.publish(route, 'before')
     await receivedCount(received, 1)
@@ -140,11 +109,35 @@ async function onBroadcastPublishedDuringResume() {
     await receivedCount(received, 3)
     return { received, reported }
   } finally {
+    await stop()
+  }
+}
+
+/** A backend of the test's own, as `installRedis()` takes one per process, subscribed to `route`: what arrives, what the
+ *  key's `onDeliveryLost` reports and the subscriber sockets it opens. `stop()` ends all of it. */
+function ownRedisBackend(route: BroadcastRoute) {
+  const connection = new RedisConnection({ redis: redis!.duplicate(), prefix: 'tf:' })
+  const backend = new RedisBackend({ connection })
+  const sockets: SubscriberSocket[] = []
+  const open = connection.openSubscriberSocket.bind(connection)
+  connection.openSubscriberSocket = async () => {
+    const socket = await open()
+    sockets.push(socket)
+    return socket
+  }
+  const reported: string[] = []
+  config.broadcast.onDeliveryLost = ({ key, reason }) => {
+    if (key === route.key) reported.push(reason)
+  }
+  const received: string[] = []
+  const attempt = backend.subscribe(route, { deliver: (value) => received.push(value as string) })
+  const stop = async () => {
     config.broadcast.onDeliveryLost = ({ key, reason }) =>
       console.error(`Broadcast delivery of '${key}' lost: ${reason}`)
     await attempt.unsubscribe()
     connection.client.disconnect()
   }
+  return { connection, backend, sockets, reported, received, stop }
 }
 
 /** The largest message Telefunc's Redis backend takes, and past it by a byte, in bytes and in the bytes of a shorter text. */
