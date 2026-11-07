@@ -2,6 +2,7 @@ export {
   onBinaryBroadcastAcrossReconnect,
   onBroadcastOverRedisLimit,
   onBroadcastPublishedDuringResume,
+  onBroadcastStartReadFailed,
   onBroadcastSubscriberDropped,
   onBroadcastSubscriberSilent,
   onRedisChannelDenied,
@@ -108,6 +109,28 @@ async function onBroadcastPublishedDuringResume() {
     await backend.publish(route, 'after')
     await receivedCount(received, 3)
     return { received, reported }
+  } finally {
+    await stop()
+  }
+}
+
+/** A key's text subscription is up, and the read of where a new binary one starts fails while a text publish waits for
+ *  both. That failure says nothing of the publish, which goes out and arrives; the binary subscription closes. */
+async function onBroadcastStartReadFailed() {
+  const route = { key: `room:start-read-failed:${crypto.randomUUID()}`, kind: 'text' } as const
+  const { connection, backend, reported, received, stop } = ownRedisBackend(route)
+  try {
+    await backend.publish(route, 'before')
+    await receivedCount(received, 1)
+    const run = connection.run.bind(connection)
+    connection.run = (async (command: never, input: never) => {
+      if (command === REDIS_COMMANDS.broadcastStart) throw new Error('the start read failed')
+      return run(command, input)
+    }) as typeof connection.run
+    const binary = backend.subscribe({ key: route.key, kind: 'binary' }, { deliver() {} })
+    await backend.publish(route, 'beside the failed read')
+    await receivedCount(received, 2)
+    return { received, reported, binary: binary.state() }
   } finally {
     await stop()
   }

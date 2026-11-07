@@ -5,6 +5,7 @@ import {
   onBinaryBroadcastAcrossReconnect,
   onBroadcastOverRedisLimit,
   onBroadcastPublishedDuringResume,
+  onBroadcastStartReadFailed,
   onBroadcastSubscriberDropped,
   onBroadcastSubscriberSilent,
   onRedisChannelDenied,
@@ -17,6 +18,7 @@ function RedisReconnect() {
   const [firstBytes, setFirstBytes] = useState<number[]>([])
   const [dropped, setDropped] = useState<unknown>(null)
   const [duringResume, setDuringResume] = useState<unknown>(null)
+  const [startReadFailed, setStartReadFailed] = useState<unknown>(null)
   const [silent, setSilent] = useState<unknown>(null)
   const [overLimit, setOverLimit] = useState<unknown>(null)
   // A broadcast the page drops closes once garbage-collected.
@@ -66,6 +68,15 @@ function RedisReconnect() {
         onClick={async () => setDuringResume(await onBroadcastPublishedDuringResume())}
       >
         Publish while the start is read back
+      </button>
+      <h2>A Publish Beside a Failed Start Read</h2>
+      <pre id="redis-start-read-failed-result">{JSON.stringify(startReadFailed)}</pre>
+      <button
+        type="button"
+        id="test-redis-start-read-failed"
+        onClick={async () => setStartReadFailed(await onBroadcastStartReadFailed())}
+      >
+        Fail the other kind's start read during a publish
       </button>
       <h2>A Silent Subscriber Connection</h2>
       <pre id="redis-silent-result">{JSON.stringify(silent)}</pre>
