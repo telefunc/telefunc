@@ -29,8 +29,9 @@ type NewSubscriptionWaitOptions = { subscriptions: RedisSubscriptions }
  * connection sent just before it, and our own new subscription would miss it. So a send waits, at most SEND_WAIT_MS,
  * until our subscriptions on its channels were ready once, and a later send of its queue waits behind it. Each budget's
  * waiting payload bytes are bounded by `PUBLISH_HOLD_BYTES`, though one send alone waits
- * whatever its size. When a subscription it waits for fails, as Redis refused its SUBSCRIBE, a send fails with that
- * reason rather than go out unseen by our own subscription; a send made after it has no subscription of ours to miss.
+ * whatever its size. When Redis refuses a subscription it waits for, a send fails with that reason rather than go out
+ * unseen by our own subscription; a send made after it has no subscription of ours to miss. A subscription that ends any
+ * other way only ends the wait.
  */
 class NewSubscriptionWait {
   private readonly subscriptions: RedisSubscriptions
@@ -89,8 +90,8 @@ class NewSubscriptionWait {
     else this.waitingBytes.set(budget, left)
   }
 
-  /** A wait for our new subscriptions on `channels`, including ones made meanwhile, that fails when one does; a failed
-   *  wait leaves its queue at once, so the next send there doesn't join it. */
+  /** A wait for our new subscriptions on `channels`, including ones made meanwhile, that fails when Redis refuses one; a
+   *  failed wait leaves its queue at once, so the next send there doesn't join it. */
   private openWait(queue: string, channels: readonly string[]): Wait {
     const wait: Wait = { ready: this.whenReady(channels), sends: 0 }
     void this.leaveOnFailure(queue, wait)

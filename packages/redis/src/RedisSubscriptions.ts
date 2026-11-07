@@ -512,7 +512,8 @@ class RedisAttempt extends DriverAttempt {
 
   fail(error: unknown): void {
     if (this.state() === 'closed') return
-    this.firstReadiness.reject(error)
+    // Only a refusal fails the sends waiting on it: a failed read says nothing of them, and `closed` ends their wait.
+    if (isRefusal(error)) this.firstReadiness.reject(error)
     this.close(error)
     this.transition('closed', error)
   }
