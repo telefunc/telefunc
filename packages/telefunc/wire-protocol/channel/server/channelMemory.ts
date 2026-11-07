@@ -29,6 +29,8 @@ interface MemoryHolder {
   released?: boolean
   shed?(toBytes: number): void
   readonly newestUnhanded?: PublishBody | undefined
+  /** The object that may end it, where the process has several (see `BroadcastAdapter.ownerOf`). */
+  readonly owner?: string | undefined
 }
 
 const memory = getGlobalObject('channelMemory.ts', {
@@ -51,16 +53,16 @@ function admit(holder: MemoryHolder, bytes: number): boolean {
   return holder.heldBytes + bytes <= maxMemory / Math.max(1, memory.holders.size) && memory.total + bytes <= maxMemory
 }
 
-/** Makes room for a delivery, which nobody can refuse: past what's older, it ends as few as must end, where that frees
- *  the bytes. */
-function admitPublish(body: PublishBody): void {
+/** Makes room for a delivery to `owner`'s pages, which nobody can refuse: past what's older, it ends as few as must end,
+ *  where that frees the bytes. Ending writes to a page, so a holder of another owner waits for its own delivery. */
+function admitPublish(body: PublishBody, owner: string | undefined): void {
   const maxMemory = maxMemoryOf()
   const bytes = body.frame.byteLength
   reclaim(bytes, shedTarget(maxMemory))
   if (memory.total + bytes <= maxMemory || memory.reclaiming) return
   memory.reclaiming = true
   try {
-    for (const [newest, holders] of newestsThatEndingFrees()) {
+    for (const [newest, holders] of newestsThatEndingFrees(owner)) {
       if (memory.total + bytes <= maxMemory) return
       if (holders.length === newest.refs) for (const holder of holders) holder.shed!(0)
     }
@@ -70,11 +72,11 @@ function admitPublish(body: PublishBody): void {
 }
 
 /** Fewest sharers first. A body another page has on the wire counts more references than holders here, so it's left. */
-function newestsThatEndingFrees(): [PublishBody, MemoryHolder[]][] {
+function newestsThatEndingFrees(owner: string | undefined): [PublishBody, MemoryHolder[]][] {
   const byBody = new Map<PublishBody, MemoryHolder[]>()
   for (const holder of memory.holders) {
     const newest = holder.newestUnhanded
-    if (!newest) continue
+    if (!newest || holder.owner !== owner) continue
     const holders = byBody.get(newest)
     if (holders) holders.push(holder)
     else byBody.set(newest, [holder])

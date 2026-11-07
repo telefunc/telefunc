@@ -407,7 +407,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   }
 
   /** The Durable Object that may write to a subscriber's page; the server's own subscribers go with the isolate's first. */
-  private ownerOf(wireRequest: Request | undefined): string {
+  ownerOf(wireRequest: Request | undefined): string {
     if (!wireRequest) return this.requireRepresentativeDOName()
     const owner = this.requestOwners.get(wireRequest)
     assert(owner, 'a wire opened by a request no Durable Object received')

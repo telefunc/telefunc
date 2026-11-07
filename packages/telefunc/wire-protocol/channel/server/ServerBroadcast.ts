@@ -171,7 +171,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       }
     }
     if (!this.peerSubscribedText) return
-    this.forwardPublish(bodyOf(encode.publish, serialized, rawInfo))
+    this.forwardPublish(bodyOf(encode.publish, serialized, rawInfo, this.owner))
   }
 
   private deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
@@ -186,7 +186,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       }
     }
     if (!this.peerSubscribedBinary) return
-    this.forwardPublish(bodyOf(encode.publishBinary, data, rawInfo))
+    this.forwardPublish(bodyOf(encode.publishBinary, data, rawInfo, this.owner))
   }
 
   /** A publish to the page. A subscription is the page's, so it has attached before, but it may have ended since: this
@@ -215,6 +215,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   get newestUnhanded(): PublishBody | undefined {
     if (this._phase === 'ended' || !this._replayBuffer || this.unhanded() === 0) return undefined
     return this._replayBuffer.newestPublish()
+  }
+
+  get owner(): string | undefined {
+    return this.adapter?.ownerOf?.(this.wireRequest)
   }
 
   /** `MemoryHolder`: its oldest publishes no wire has go, down to `toBytes`; its page sees the jump in `info.seq`. Above 0
@@ -394,11 +398,12 @@ function bodyOf<T>(
   encodeBody: (data: T, info: WirePublishInfo) => Uint8Array<ArrayBuffer>,
   data: T,
   info: WirePublishInfo,
+  owner: string | undefined,
 ): PublishBody {
   let body = globalObject.publishBodies.get(info)
   if (!body) {
     body = new PublishBody(encodeBody(data, info))
-    admitPublish(body)
+    admitPublish(body, owner)
     globalObject.publishBodies.set(info, body)
   }
   return body

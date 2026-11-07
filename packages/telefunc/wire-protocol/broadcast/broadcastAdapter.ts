@@ -34,6 +34,8 @@ type BroadcastAdapter = {
   publish(key: string, serialized: string): BroadcastPublishResult | Promise<BroadcastPublishResult>
   subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, wireRequest?: Request): BroadcastUnsubscribe
   publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult>
+  /** Where a process runs several objects that can't write to each other's pages, the one a subscriber's page is on. */
+  ownerOf?(wireRequest: Request | undefined): string
 }
 
 /**
