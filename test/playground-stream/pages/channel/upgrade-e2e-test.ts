@@ -112,10 +112,10 @@ function testUpgrade() {
   // The server moves a page's publishes to the WebSocket at the barrier, and the page takes that wire over once the
   // barrier's POST answers. Holding that answer lands a publish between the two, whole or with its body's end after.
   for (const { bytes, what, bodyHeld } of [
-    { bytes: 1024, what: 'whole', bodyHeld: false },
-    { bytes: 4 * 1024 * 1024, what: "with its body's end after", bodyHeld: true },
+    { bytes: 1024, what: 'arrives whole', bodyHeld: false },
+    { bytes: 4 * 1024 * 1024, what: 'starts arriving', bodyHeld: true },
   ]) {
-    test(`${label}: a publish arriving ${what} before the page takes the new wire over reaches the page [${transports.join(',')}]`, async () => {
+    test(`${label}: a publish that ${what} before the page takes the new wire over reaches the page [${transports.join(',')}]`, async () => {
       const context = await page.context().browser()!.newContext()
       const routed = await context.newPage()
       const acrossFlip = async () => {
