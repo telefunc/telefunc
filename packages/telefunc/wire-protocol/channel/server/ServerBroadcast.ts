@@ -70,6 +70,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   /** Its page is told what it missed by `info.seq`, and the server's log by this once. */
   private missedWarned = false
+  /** `shed` let go of all it held, and its page has yet to learn: see `shed`. */
+  private overflowed = false
   /** The page's channel on the wire it last attached on: a publish while the page is away joins the replay through it,
    *  as one a silently dead wire lost does. */
   private lastPeer: IndexedPeer | null = null
@@ -192,6 +194,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** A publish to the page. A subscription is the page's, so it has attached before, but it may have ended since: this
    *  delivery's own listeners or admitting its body can end the channel, and the subscribers after it still get theirs. */
   private forwardPublish(body: PublishBody): void {
+    this.endOverflowed()
     if (this._phase === 'ended') return
     this.lastPeer!.sendPublish(body)
     const share = this.share()
@@ -217,13 +220,14 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     return this._replayBuffer.newestPublish()
   }
 
-  get owner(): string | undefined {
+  private get owner(): string | undefined {
     return this.adapter?.ownerOf?.(this.wireRequest)
   }
 
   /** `MemoryHolder`: its oldest publishes no wire has go, down to `toBytes`; its page sees the jump in `info.seq`. Above 0
-   *  the newest stays, and at 0, where not even that fits, the channel ends: no later message would show the page. */
-  shed(toBytes: number): void {
+   *  the newest stays, and at 0, where not even that fits, the channel ends: no later message would show the page. The
+   *  bytes go at once, but only its own object can write to its page, so from `owner`'s it ends when its own next runs. */
+  shed(toBytes: number, owner?: string): void {
     const replay = this._replayBuffer
     if (this._phase === 'ended' || !replay) return
     const dropped = replay.dropOldestPublishes(toBytes, this.unhanded())
@@ -231,12 +235,17 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       this.peer?.sender.queue.dropWaitingPublishes(this.peer.index, dropped)
       this.warnMissed()
     }
-    if (toBytes === 0) {
-      this.endWithError(
-        ERROR_REASON.OVERFLOW,
-        new ChannelOverflowError('Broadcast closed: the server could not hold even the newest message for its client'),
-      )
-    }
+    if (toBytes > 0) return
+    this.overflowed = true
+    if (owner === this.owner) this.endOverflowed()
+  }
+
+  private endOverflowed(): void {
+    if (!this.overflowed) return
+    this.endWithError(
+      ERROR_REASON.OVERFLOW,
+      new ChannelOverflowError('Broadcast closed: the server could not hold even the newest message for its client'),
+    )
   }
 
   private warnMissed(): void {
@@ -275,6 +284,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   override _attachPeer(peer: IndexedPeer, state?: AttachState): void {
     this.lastPeer = peer
     super._attachPeer(peer, state)
+    this.endOverflowed()
+  }
+
+  override _acknowledge(): void {
+    super._acknowledge()
+    this.endOverflowed()
   }
 
   protected override shutdown(err?: Error, options?: { pageGone?: boolean }): void {

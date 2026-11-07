@@ -27,10 +27,8 @@ interface MemoryHolder {
   heldBytes: number
   /** Its owner ended, so nothing is held for it any more (see `releaseHolder`). */
   released?: boolean
-  shed?(toBytes: number): void
+  shed?(toBytes: number, owner?: string): void
   readonly newestUnhanded?: PublishBody | undefined
-  /** The object that may end it, where the process has several (see `BroadcastAdapter.ownerOf`). */
-  readonly owner?: string | undefined
 }
 
 const memory = getGlobalObject('channelMemory.ts', {
@@ -54,7 +52,7 @@ function admit(holder: MemoryHolder, bytes: number): boolean {
 }
 
 /** Makes room for a delivery to `owner`'s pages, which nobody can refuse: past what's older, it ends as few as must end,
- *  where that frees the bytes. Ending writes to a page, so a holder of another owner waits for its own delivery. */
+ *  where that frees the bytes. */
 function admitPublish(body: PublishBody, owner: string | undefined): void {
   const maxMemory = maxMemoryOf()
   const bytes = body.frame.byteLength
@@ -62,9 +60,9 @@ function admitPublish(body: PublishBody, owner: string | undefined): void {
   if (memory.total + bytes <= maxMemory || memory.reclaiming) return
   memory.reclaiming = true
   try {
-    for (const [newest, holders] of newestsThatEndingFrees(owner)) {
+    for (const [newest, holders] of newestsThatEndingFrees()) {
       if (memory.total + bytes <= maxMemory) return
-      if (holders.length === newest.refs) for (const holder of holders) holder.shed!(0)
+      if (holders.length === newest.refs) for (const holder of holders) holder.shed!(0, owner)
     }
   } finally {
     memory.reclaiming = false
@@ -72,11 +70,11 @@ function admitPublish(body: PublishBody, owner: string | undefined): void {
 }
 
 /** Fewest sharers first. A body another page has on the wire counts more references than holders here, so it's left. */
-function newestsThatEndingFrees(owner: string | undefined): [PublishBody, MemoryHolder[]][] {
+function newestsThatEndingFrees(): [PublishBody, MemoryHolder[]][] {
   const byBody = new Map<PublishBody, MemoryHolder[]>()
   for (const holder of memory.holders) {
     const newest = holder.newestUnhanded
-    if (!newest || holder.owner !== owner) continue
+    if (!newest) continue
     const holders = byBody.get(newest)
     if (holders) holders.push(holder)
     else byBody.set(newest, [holder])
