@@ -2,22 +2,38 @@ export { PieceRate }
 
 import { WIRE_PIECE_RATE_WINDOW_MS } from '../constants.js'
 
+/** The fastest rate measured, which stands if a faster comes, or until it lapsed, when the next replaces it. */
+class StandingRate {
+  rate = 0
+  private roseAt = 0
+
+  /** Takes `rate` measured at `at`. Returns whether it stood. */
+  rise(rate: number, at: number): boolean {
+    if (!(rate > this.rate) && !this.lapsed(at)) return false
+    this.rate = rate
+    this.roseAt = at
+    return true
+  }
+
+  private lapsed(at: number): boolean {
+    return this.rate === 0 || at - this.roseAt > WIRE_PIECE_RATE_WINDOW_MS
+  }
+}
+
 /** The rates one WebSocket carries this side's frames at, as its piece sender measures them. */
 class PieceRate {
-  private fastestRate = 0
-  private roseAt = 0
+  private readonly any = new StandingRate()
+  private readonly data = new StandingRate()
   private floorRate = 0
-  /** Whether a probe gave `fastest`: its few bytes say how the wire starts, not what it carries. */
-  private probed = false
 
   /** In bytes per ms, from a frame sent to its arrival, 0 before any; the next measure replaces one that lapsed. */
   get fastest(): number {
-    return this.fastestRate
+    return this.any.rate
   }
 
-  /** `fastest` once a frame of data gave it, 0 before. */
+  /** `fastest` without a probe's measures: its few bytes say how the wire starts, not what it carries. */
   get carried(): number {
-    return this.probed ? 0 : this.fastestRate
+    return this.data.rate
   }
 
   /** In bytes per ms, a rate the wire carries at least: what an answer, a heartbeat or an acknowledgement showed. */
@@ -25,18 +41,10 @@ class PieceRate {
     return this.floorRate
   }
 
-  /** Takes a rate `rate` measured at `at`: it stands if faster, or once the one before lapsed. Returns whether it stood. */
+  /** Takes a rate `rate` measured at `at`, by a probe if `probed`. Returns whether `fastest` changed. */
   rise(rate: number, at: number, probed: boolean): boolean {
-    if (!(rate > this.fastestRate) && !this.lapsed(at)) return false
-    this.fastestRate = rate
-    this.roseAt = at
-    this.probed = probed
-    return true
-  }
-
-  /** Whether no rate stands at `at`. */
-  private lapsed(at: number): boolean {
-    return this.fastestRate === 0 || at - this.roseAt > WIRE_PIECE_RATE_WINDOW_MS
+    if (!probed) this.data.rise(rate, at)
+    return this.any.rise(rate, at)
   }
 
   /** Takes a rate the wire carried at least. Returns whether it raised the floor. */
