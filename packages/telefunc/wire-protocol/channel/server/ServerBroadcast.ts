@@ -70,7 +70,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   /** Its page is told what it missed by `info.seq`, and the server's log by this once. */
   private missedWarned = false
-  /** `shed` let go of all it held, and its page has yet to learn: see `shed`. */
+  /** `shed` dropped its newest, and its page has yet to learn: see `shed`. */
   private overflowed = false
   /** The page's channel on the wire it last attached on: a publish while the page is away joins the replay through it,
    *  as one a silently dead wire lost does. */
