@@ -504,11 +504,6 @@ class ClientRoom extends RoomStateView implements Room {
   }
 }
 
-type ClientParticipantBaseOptions = {
-  participant: Pick<ParticipantStubMetadata, 'id' | 'meta' | 'selfDelivery' | 'identity'>
-  rewinds: MetaRewinds
-}
-
 abstract class ClientParticipantBase extends ParticipantBase {
   /** `publish(data, { coalesce })`'s conflation, by key. */
   private readonly coalescers = new Map<string, CoalesceSlot>()
@@ -534,10 +529,6 @@ abstract class ClientParticipantBase extends ParticipantBase {
   override _onLeft(cause: LeaveCause): void {
     super._onLeft(cause)
     if (heldMembers.get(this.id) === this) heldMembers.delete(this.id)
-  }
-
-  constructor({ participant, rewinds }: ClientParticipantBaseOptions) {
-    super({ participant, rewinds })
   }
 
   get _demandedTracks(): TrackKey[] {
