@@ -147,7 +147,7 @@ async function onBroadcastPublishedDuringResume() {
   }
 }
 
-/** The largest message Redis delivers, and past it by a byte, in bytes and in the bytes of a shorter text. */
+/** The largest message Telefunc's Redis backend takes, and past it by a byte, in bytes and in the bytes of a shorter text. */
 async function onBroadcastOverRedisLimit() {
   const key = `room:over-limit:${crypto.randomUUID()}`
   const largest = 28 * 1024 * 1024

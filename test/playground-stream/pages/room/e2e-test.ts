@@ -1500,7 +1500,7 @@ function testRoomRedisSubscriberDropped() {
 function testRoomRedisPublishLimit() {
   testRoomScenario<{ refused: string }>(
     'over-redis-limit',
-    'room: a publish larger than Redis delivers rejects',
+    "room: a publish over the Redis backend's ceiling rejects",
     (r) => {
       expect(r).deep.equal({ refused: 'ChannelOverflowError' })
     },

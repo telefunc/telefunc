@@ -946,7 +946,7 @@ async function onSubscriberDropped(roomId: string) {
   return { published: published.length, received, reported }
 }
 
-/** One byte more than the largest message Redis delivers. */
+/** One byte more than the largest message Telefunc's Redis backend takes. */
 async function onPublishOverRedisLimit(roomId: string) {
   const me = await anyoneCanJoin(await Room.get(roomId)).join({ meta: { name: 'Publisher' } })
   return { refused: await me.publishBinary(new Uint8Array(28 * 1024 * 1024 + 1)).catch((error: Error) => error.name) }

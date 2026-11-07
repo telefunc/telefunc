@@ -750,7 +750,7 @@ const REDIS_COMMANDS = {
     lua: PUBLISH_LUA,
     numberOfKeys: 2,
     invoke: (prefix, { route, payload }: { route: BroadcastRoute; payload: BroadcastPayload }) => {
-      assertPublishable(typeof payload === 'string' ? Buffer.byteLength(payload) : payload.byteLength)
+      assertPublishable(payload)
       return {
         keys: [broadcastSequenceKey(prefix, route.key), broadcastChannel(prefix, route)],
         // ioredis sends a string as UTF-8.
@@ -1177,8 +1177,9 @@ function binaryLaneOf(kit: RoomPlaneKit, laneKey: string): Extract<LaneId, { kin
   return lane
 }
 
-/** A larger message never arrives, and closes the connection all of a server's subscriptions share. */
-function assertPublishable(bytes: number): void {
+/** Refuses a message over Telefunc's ceiling before it reaches Redis. */
+function assertPublishable(payload: string | Uint8Array): void {
+  const bytes = typeof payload === 'string' ? Buffer.byteLength(payload) : payload.byteLength
   if (bytes <= PUBLISH_MAX_BYTES) return
   throw new ChannelOverflowError(
     `Telefunc's Redis backend takes a message of ${PUBLISH_MAX_BYTES} bytes at most, and this one has ${bytes}`,
@@ -1188,7 +1189,7 @@ function assertPublishable(bytes: number): void {
 /** COMMIT's KEYS and ARGV, which OPERATION's commit takes too. */
 function commitInvocation(prefix: string, input: CommitInput): { keys: string[]; argv: (string | Buffer)[] } {
   const { roomId, inc, lane, laneKey, channels, fenceTokens } = input
-  assertPublishable(input.payload.byteLength)
+  assertPublishable(input.payload)
   const retained = retainedKey(prefix, roomId, inc, laneKey)
   const indexed = lane.kind === 'binary' && input.retain
   const order =

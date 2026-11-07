@@ -38,7 +38,7 @@ function testRedisReconnect() {
 }
 
 function testBroadcastRedisPublishLimit() {
-  test('broadcast: a publish larger than Redis delivers rejects, by its bytes, and the largest one and the next arrive', async () => {
+  test("broadcast: a publish over the Redis backend's ceiling rejects, by its bytes, and the largest one and the next arrive", async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-redis-over-limit')
     await autoRetry(
