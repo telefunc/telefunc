@@ -1,7 +1,7 @@
 export { NewSubscriptionWait }
 export type { WaitingSend, WaitRule }
 
-import { ChannelOverflowError, createDeferred, PUBLISH_HOLD_BYTES } from 'telefunc/__internal'
+import { ChannelOverflowError, createDeferred, PUBLISH_HOLD_BYTES, unrefTimer } from 'telefunc/__internal'
 import type { RedisSubscriptions } from './RedisSubscriptions.js'
 
 /** How long a send waits for our own new subscriptions on its channels. */
@@ -108,8 +108,7 @@ class NewSubscriptionWait {
 
   private async whenReady(channels: readonly string[]): Promise<void> {
     const timeout = createDeferred()
-    const timer = setTimeout(timeout.resolve, SEND_WAIT_MS)
-    timer.unref()
+    const timer = unrefTimer(setTimeout(timeout.resolve, SEND_WAIT_MS))
     try {
       await Promise.race([this.readyOn(channels), timeout.promise])
     } finally {

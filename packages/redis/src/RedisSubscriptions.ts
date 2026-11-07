@@ -2,7 +2,7 @@ export { RedisSubscriptions, neverReachedSubscription }
 
 import { randomUUID } from 'node:crypto'
 import type { BackendReceiver, OrderingInfo } from 'telefunc/__internal'
-import { DriverAttempt, createDeferred, type Deferred } from 'telefunc/__internal'
+import { DriverAttempt, createDeferred, unrefTimer, type Deferred } from 'telefunc/__internal'
 import type { CommitChannels, FenceTokens } from './keys.js'
 import { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH } from './commands.js'
 import { isRefusal, type SubscriberSocket } from './ioredis.js'
@@ -221,7 +221,7 @@ class RedisSubscriptions {
       id,
       socket,
       subscribed: new Set(),
-      pings: setInterval(() => void this.ping(connected), SUBSCRIBER_PING_MS).unref(),
+      pings: unrefTimer(setInterval(() => void this.ping(connected), SUBSCRIBER_PING_MS)),
       awaitingPong: false,
     }
     this.socket = connected
@@ -254,8 +254,7 @@ class RedisSubscriptions {
       this.outageReported = true
       console.error(error)
     }
-    const timer = setTimeout(() => void this.connect(), this.reconnectDelay)
-    timer.unref()
+    const timer = unrefTimer(setTimeout(() => void this.connect(), this.reconnectDelay))
     this.socket = { phase: 'waiting', timer }
     this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_DELAY_MAX_MS)
   }
@@ -594,8 +593,7 @@ class RedisAttempt extends DriverAttempt {
     order.parked ??= new Map()
     order.parked.set(predecessor, frame)
     if (order.releaseTimer !== null) return
-    order.releaseTimer = setTimeout(() => this.gapTimedOut(order), REORDER_WAIT_MS)
-    order.releaseTimer.unref()
+    order.releaseTimer = unrefTimer(setTimeout(() => this.gapTimedOut(order), REORDER_WAIT_MS))
   }
 
   /** What the lane waited for isn't coming. `lost` says it may have missed messages, which is what makes Room catch up
