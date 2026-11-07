@@ -110,7 +110,6 @@ abstract class ParticipantBase implements LocalParticipant {
   protected abstract _reportError(err: unknown): void
   /** An ack DM's reply to a bug in a `listen()` handler, naming where `_reportError` logged it. */
   protected abstract readonly _bugMessage: string
-  /** The bytes of DMs held before the first `listen()`, past which the oldest is dropped. */
 
   listen(callback: (data: unknown, from: Sender | null) => unknown, options?: ListenerOptions): () => void {
     if (options?.signal?.aborted) return makeDisposer()
