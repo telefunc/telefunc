@@ -42,6 +42,8 @@ export {
   onChannelLinkShare,
   onChannelSlowUplink,
   onChannelPublishesBehind,
+  onChannelAcrossFlip,
+  onPublishAcrossFlip,
   onChannelOpenAnswer,
   onChannelOpenHello,
   onChannelConfigChecks,
@@ -62,7 +64,7 @@ export {
 import { prepareIteratorAck, sendIteratorAck, type IteratorAckOptions } from './iteratorAckProbe'
 import { sendOwnBytes, listenOwnBytesAlone, listenOwnBytesBeside } from './ownBytesProbe'
 
-import { Channel, Abort, BroadcastChannel, config } from 'telefunc'
+import { Channel, Abort, Broadcast, BroadcastChannel, config } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 
 type ServerMessage = { type: 'tick'; count: number } | { type: 'echo'; text: string } | { type: 'welcome' }
@@ -883,6 +885,19 @@ async function onChannelPublishesBehind(bytes = 4 * 1024 * 1024) {
     return 'published'
   })
   return { broadcast, control: control.client }
+}
+
+/** A broadcast, and a channel that shows the page's upgrade finished: what the page sends waits for that. */
+async function onChannelAcrossFlip() {
+  const key = `across-flip:${crypto.randomUUID()}`
+  const broadcast = new BroadcastChannel<string>({ key })
+  const control = new Channel<(msg: string) => void, never>()
+  control.listen(() => {})
+  return { key, broadcast, control: control.client }
+}
+
+async function onPublishAcrossFlip(key: string, bytes: number) {
+  await Broadcast.publish(key, 'x'.repeat(bytes))
 }
 
 /** An upload channel that answers with the bytes it received, and a channel that ticks every 100 ms until the page closes it. */

@@ -544,7 +544,7 @@ class PieceSender {
     const probe = this.probe
     // An ack of the probe's second piece alone carries its time apart from the first, which gives the path's rate.
     if (probe !== null && this.acknowledgedBytes === probe.second && newly === probe.end - probe.second) {
-      this.rise(newly / Math.max(spanUs / 1000, WIRE_PROBE_CLOCK_MS), performance.now())
+      this.rise(newly / Math.max(spanUs / 1000, WIRE_PROBE_CLOCK_MS), performance.now(), true)
     }
     this.acknowledgedBytes += newly
     while (this.announcedEnds.length > 0 && this.announcedEnds.peek()!.end <= this.acknowledgedBytes) {
@@ -576,8 +576,8 @@ class PieceSender {
     while (this.unacknowledged.length > 0 && this.unacknowledged.peek()!.end <= this.acknowledgedBytes) {
       const sent = this.unacknowledged.shift()!
       // A sample within one tick of a coarse clock says nothing, except a probe's: being small, it crossed in one.
-      if (sent.probe) this.rise(sent.crossing / Math.max(arrived - sent.at, WIRE_PROBE_CLOCK_MS), arrived)
-      else if (arrived > sent.at) this.rise(sent.crossing / (arrived - sent.at), arrived)
+      if (sent.probe) this.rise(sent.crossing / Math.max(arrived - sent.at, WIRE_PROBE_CLOCK_MS), arrived, true)
+      else if (arrived > sent.at) this.rise(sent.crossing / (arrived - sent.at), arrived, false)
     }
   }
 
@@ -601,8 +601,8 @@ class PieceSender {
     if (this.pieceRate.raiseFloor(floor)) this.setWholeUpTo()
   }
 
-  private rise(rate: number, at: number): void {
-    if (this.pieceRate.rise(rate, at)) this.setWholeUpTo()
+  private rise(rate: number, at: number, probed: boolean): void {
+    if (this.pieceRate.rise(rate, at, probed)) this.setWholeUpTo()
   }
 
   /** Sends what waits for headroom, as far as `headroom` goes, and the frames waiting behind it. */

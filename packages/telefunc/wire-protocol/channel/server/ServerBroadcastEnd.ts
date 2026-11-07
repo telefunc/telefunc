@@ -2,6 +2,7 @@ export { ServerBroadcastEnd }
 export type { BroadcastEndOwner }
 
 import { ServerChannel } from './ServerChannel.js'
+import { getChannelMux } from './ChannelMux.js'
 import { assert } from '../../../utils/assert.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import type { MemoryHolder } from './channelMemory.js'
@@ -33,6 +34,8 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   /** The page's channel on the wire it last attached on: a publish while the page is away joins the replay through it,
    *  as one a silently dead wire lost does. */
   private lastPeer: IndexedPeer | null = null
+  /** Why it ends, where `shed` couldn't tell its page yet: see `shed`. */
+  private overflow: string | null = null
 
   setOwner(owner: BroadcastEndOwner): void {
     this.owner = owner
@@ -60,6 +63,7 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   /** A publish to its page, never refused. One `resentOnAttach`, which the owner sends again at each attach, isn't held
    *  while the page is away. Its listeners or admitting its body can have ended the channel by now. */
   deliver(body: PublishBody, opts?: { resentOnAttach?: boolean }): void {
+    this.endOverflowed()
     if (this._phase === 'ended' || (this.peer === null && opts?.resentOnAttach)) return
     if (this.lastPeer) this.lastPeer.sendPublish(body)
     else this.offlineBuffer.pushPublish(body.frame)
@@ -88,8 +92,9 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
 
   /** `MemoryHolder`: its oldest publishes no wire has go, down to `toBytes`, and its page sees the jump in `info.seq`. Above
    *  0 the newest stays, and at 0, where not even that fits, the channel ends: no later message would show the page. Where
-   *  the page can't take a jump, the owner has no `_onPublishesMissed`, and the channel ends at once: what the page got
-   *  has no hole. */
+   *  the page can't take a jump, the owner has no `_onPublishesMissed`, and all of them go and the channel ends: what
+   *  the page got has no hole. The bytes go at once, but only its own object can write to its page, so from another's
+   *  it ends when its own next runs. */
   shed(toBytes: number): void {
     const replay = this._replayBuffer
     if (this._phase === 'ended' || !replay) return
@@ -100,24 +105,31 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
       this.peer?.sender.queue.dropWaitingPublishes(this.peer.index, dropped)
       this.owner._onPublishesMissed?.()
     }
-    if (level === 0) {
-      this.endWithError(
-        ERROR_REASON.OVERFLOW,
-        new ChannelOverflowError(
-          toBytes === 0
-            ? 'Broadcast closed: the server could not hold even the newest message for its client'
-            : 'Closed: its client fell behind what the server can hold for it',
-        ),
-      )
-    }
+    if (level > 0) return
+    this.overflow =
+      toBytes === 0
+        ? 'Broadcast closed: the server could not hold even the newest message for its client'
+        : 'Closed: its client fell behind what the server can hold for it'
+    if (getChannelMux() === this.mux) this.endOverflowed()
+  }
+
+  private endOverflowed(): void {
+    if (this.overflow === null) return
+    this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(this.overflow))
   }
 
   override _attachPeer(peer: IndexedPeer, state?: AttachState): void {
     this.lastPeer = peer
     super._attachPeer(peer, state)
+    this.endOverflowed()
     if (this.peer !== peer || this.isClosed) return
     assert(this.owner)
     this.owner._onPageAttach?.()
+  }
+
+  override _acknowledge(): void {
+    super._acknowledge()
+    this.endOverflowed()
   }
 
   protected override shutdown(err?: Error, options?: { pageGone?: boolean }): void {

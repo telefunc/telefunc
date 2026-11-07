@@ -49,6 +49,8 @@ import {
   onChannelLinkShare,
   onChannelSlowUplink,
   onChannelPublishesBehind,
+  onChannelAcrossFlip,
+  onPublishAcrossFlip,
   onChannelOpenAnswer,
   onChannelOpenHello,
   onChannelConfigChecks,
@@ -93,6 +95,7 @@ async function openChannel<T>(open: () => Promise<T>): Promise<T> {
   }
   throw lastErr
 }
+type AcrossFlipPage = { publishAcrossFlip(bytes: number): Promise<void>; sendAcrossFlip(): Promise<void> }
 const OPEN_CHANNEL_ATTEMPTS = 4
 const OPEN_CHANNEL_RETRY_DELAY_MS = 500
 
@@ -205,6 +208,7 @@ type ChannelState = {
   publishesBehind: { pingMs: number; closed: string; closeMs: number } | null
   broadcastOverflow: { received: number; closeErr: string } | null
   broadcastBehind: { seqsAhead: number[]; isClosed: boolean } | null
+  acrossFlip: { received: number[] } | null
   lateCallbacks: { channelId: string; onOpen: boolean; onCloseAbortValue: unknown } | null
   openAbort: { channelId: string; abortValue: unknown } | null
 }
@@ -292,6 +296,7 @@ const initialState: ChannelState = {
   publishesBehind: null,
   broadcastOverflow: null,
   broadcastBehind: null,
+  acrossFlip: null,
   lateCallbacks: null,
   openAbort: null,
 }
@@ -1486,6 +1491,19 @@ function ChannelDemo() {
     control.close()
   }, [])
 
+  const testAcrossFlip = useCallback(async () => {
+    const { key, broadcast, control } = await openChannel(onChannelAcrossFlip)
+    const received: number[] = []
+    broadcast.subscribe((body) => {
+      received.push(body.length)
+      setChannelState((s) => ({ ...s, acrossFlip: { received: [...received] } }))
+    })
+    const page = window as unknown as AcrossFlipPage
+    page.publishAcrossFlip = (bytes) => onPublishAcrossFlip(key, bytes)
+    page.sendAcrossFlip = () => control.send('after-flip')
+    setChannelState((s) => ({ ...s, acrossFlip: { received } }))
+  }, [])
+
   const testSlowUplink = useCallback(async () => {
     setChannelState((s) => ({ ...s, slowUplink: null }))
     const { upload, ticks } = await openChannel(onChannelSlowUplink)
@@ -1890,6 +1908,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             Broadcast Publishes More Than The Client Keeps Up With
+          </button>
+          <button
+            id="channel-test-across-flip"
+            type="button"
+            onClick={testAcrossFlip}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Broadcast Across The Upgrade's Flip
           </button>
           <button
             id="channel-test-awaited-from-offline"

@@ -32,8 +32,8 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   private readonly socket: PieceSocket
   /** The rate the page takes data at, as acknowledgements measure it. */
   private readonly drain = new DrainRate()
-  /** The rate the probe of the wire's first large frame measured, in a round trip: that frame's acknowledgement comes
-   *  only when all of it arrived, which on a slow link is seconds of publishes later. */
+  /** The rates frames crossed at. The probe of the wire's first large frame gives one in a round trip: that frame's
+   *  acknowledgement comes only when all of it arrived, which on a slow link is seconds of publishes later. */
   private readonly pieceRate = new PieceRate()
   /** When the newest acknowledged data arrived, in ms on the page's clock, counted from the first data an
    *  acknowledgement covered. */
@@ -87,12 +87,17 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   }
 
   drainRate(): number {
+    return this.drain.rate || this.pieceRate.carried
+  }
+
+  /** The rate sends go by, which a probe gives before any data does. */
+  private pathRate(): number {
     return this.drain.rate || this.pieceRate.fastest
   }
 
   /** What the path takes at `at` past what it holds. */
   headroom(at: number): number {
-    const rate = this.drainRate()
+    const rate = this.pathRate()
     if (rate === 0) return Number.POSITIVE_INFINITY
     // On a slow link the least round trip still spans a whole frame's arrival, and what goes ahead is copied pieces.
     // The rate's rise waits for acknowledgements, which go a gap apart however short the round trip.
@@ -169,7 +174,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     // The path holds what the page hasn't acknowledged, less what the rate drained since that data arrived.
     this.inPath = Math.max(
       0,
-      this.sender.transmittedBytes - acknowledged - this.drainRate() * Math.max(0, now - arrived),
+      this.sender.transmittedBytes - acknowledged - this.pathRate() * Math.max(0, now - arrived),
     )
     this.inPathAt = now
     this.releaseCopies(acknowledged)
@@ -198,7 +203,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
 
   /** What the path holds at `now`, as the rate drained it since `inPathAt`. */
   private pathHolds(now: number): number {
-    return Math.max(0, this.inPath - this.drainRate() * (now - this.inPathAt))
+    return Math.max(0, this.inPath - this.pathRate() * (now - this.inPathAt))
   }
 
   /** While data waits for headroom, looks again once the rate freed what a piece takes (see `PieceSender.cut`). */
@@ -209,7 +214,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     // Another wire freeing room can't wake this one: on a Durable Object its socket is out of that wire's reach.
     const ms = this.awaitsCopyRoom
       ? WIRE_PIECES_ACK_GAP_MS
-      : Math.max(1, (WIRE_PIECES_ACK_BYTES - this.headroom(performance.now())) / this.drainRate())
+      : Math.max(1, (WIRE_PIECES_ACK_BYTES - this.headroom(performance.now())) / this.pathRate())
     this.paceTimer = unrefTimer(setTimeout(this.lookAgain, ms))
   }
 

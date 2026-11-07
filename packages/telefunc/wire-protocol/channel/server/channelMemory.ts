@@ -21,8 +21,9 @@ import type { QueueMemory } from '../channelMessages.js'
 /** What a held publish takes beyond its share of the body: its head and its entries. */
 const HELD_PUBLISH_OVERHEAD_BYTES = 200
 
-/** Holds bytes for a page. `shed` lets its oldest no wire has go, down to `toBytes`, never its newest; at 0 it ends, told.
- *  One without it refuses instead. `newestUnhanded` is its newest publish, where no wire has that yet. */
+/** Holds bytes for a page. `shed` lets its oldest no wire has go, down to `toBytes`, never its newest; at 0 the newest goes
+ *  too, and its own object ends it, told. One without it refuses instead. `newestUnhanded` is its newest publish, where
+ *  no wire has that yet. */
 interface MemoryHolder {
   heldBytes: number
   /** Its owner ended, so nothing is held for it any more (see `releaseHolder`). */
@@ -48,7 +49,7 @@ function admit(holder: MemoryHolder, bytes: number): boolean {
   if (memory.total + bytes > target) reclaim(bytes, target)
   if (holder.heldBytes + bytes > Math.min(CHANNEL_HOLD_MAX_BYTES, maxMemory)) return false
   if (memory.total + bytes <= target) return true
-  return holder.heldBytes + bytes <= maxMemory / Math.max(1, memory.holders.size) && memory.total + bytes <= maxMemory
+  return holder.heldBytes + bytes <= maxMemory / memory.holders.size && memory.total + bytes <= maxMemory
 }
 
 /** Makes room for a delivery, which nobody can refuse: past what's older, it ends as few as must end, where that frees

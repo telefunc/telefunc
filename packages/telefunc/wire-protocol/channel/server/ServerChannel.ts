@@ -136,7 +136,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private responseAbort: ((abortValue?: unknown) => void) | null = null
   private pendingAckRes: Array<{ ackedSeq: number; result: string; status: AckResultStatus }> = []
   /** The mux that registered this channel; when the channel ends, the mux keeps it or forgets it. */
-  private mux: ChannelMux | null = null
+  protected mux: ChannelMux | null = null
   private pendingEnd: PendingEnd | null = null
   private closeRequestSeq = 0
   /** The highest seq the page is known to have received from this channel. */

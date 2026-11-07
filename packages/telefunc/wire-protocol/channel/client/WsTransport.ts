@@ -30,6 +30,7 @@ type WirePieces = {
   headroom: ClientHeadroom
   sender: PieceSender
   receiver: ClientPieceReceiver
+  pair: ReturnType<typeof pairPublishes>
 }
 
 type WsTransportOptions = {
@@ -189,13 +190,13 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
       headroom,
       sender: headroom.sender,
       receiver: new ClientPieceReceiver({ owner: headroom }),
+      pair: pairPublishes(),
     }
   }
 
   private setupHandlers(ws: WebSocket, pieces: WirePieces): void {
-    const { downlink, headroom, sender, receiver } = pieces
+    const { downlink, headroom, sender, receiver, pair } = pieces
     this.pieces = pieces
-    const pair = pairPublishes()
     const take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
       if (frame.tag === TAG.PIECES_ACK) {
         if (!headroom.acknowledged(frame)) return false
@@ -434,7 +435,10 @@ class PendingProbe implements ProbeWire {
       sender.heartbeat(frame.took, at)
       if (this.phase === 'reporting') this.owner.onProbePong()
       else this.settleProof(true)
-    } else if (this.phase === 'reporting') this.owner.onProbeFrame(frame, byteLength)
+    } else if (this.phase === 'reporting') {
+      const paired = this.pieces.pair(frame)
+      if (paired) this.owner.onProbeFrame(paired, byteLength)
+    }
     return true
   }
 
