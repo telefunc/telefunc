@@ -137,8 +137,8 @@ The plan is three parts, each using only the one before it:
   starts by taking what the lanes' readiness and switches replanned (`takeReplans()`).
 
 **Why not one every-track lane per wanted member, filtered here.** Measured on the memory driver, 50 members each
-publishing 10 frames of 256 bytes on each of 4 tracks (2000 frames), with one handle here listening (the probe counts
-the driver's subscriptions and the binary frames it delivers to this process):
+publishing 10 frames of 256 bytes on each of 4 tracks (2000 frames), with one handle here listening (counting the
+driver's subscriptions and the binary frames it delivers to this process):
 
 | the handle listens to | lanes opened | frames delivered here | one every-track lane per member |
 |---|---|---|---|
@@ -150,9 +150,8 @@ The simpler plan delivers every track of each member it covers, 4 times the fram
 when the unwanted tracks are video. On Redis each frame is a Pub/Sub message to this process, and on Cloudflare a
 delivery to its session's Durable Object. It also opens 50 subscriptions where one does.
 
-**The thresholds, measured.** `probes/lane-plan.mjs` (memory driver; the members joined on another server's lease, so
-only the view's lanes are here; `node packages/room/probes/lane-plan.mjs` after a build) counts the binary
-subscriptions opened and closed:
+**The thresholds, measured.** Measured on the memory driver, with the members joined on another server's lease, so only
+the view's lanes are counted. The binary subscriptions opened and closed:
 
 | what changes | where the plan switches | subscribes and unsubscribes |
 |---|---|---|
@@ -166,7 +165,7 @@ The `byMember` band holds: at 40 members the plan switches at 41 tracks and back
 inside the band switches nothing. `ROOM_MEMBER_NAMED_LANES_MAX` has no band: a member whose named tracks hover at the
 limit switches its lanes on every change.
 
-The same probe times a want change's pass until the lanes it opened are ready. The times below are one dev machine's,
-and depend on it; the probe prints yours. One track of every member plans only that track's every-member lane: 0.2 ms
+The same run timed a want change's pass until the lanes it opened are ready. The times below are one dev machine's,
+and depend on it. One track of every member plans only that track's every-member lane: 0.2 ms
 at 1,000, 10,000 and 100,000 members. Every track of every member plans each member: about 10 ms at 1,000 members and
 90 ms at 10,000, in slices, the longest the event loop waited being 12–15 ms against the 10 ms `ROOM_PLAN_SLICE_MS`.
