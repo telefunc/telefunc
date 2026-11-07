@@ -32,8 +32,8 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   private readonly socket: PieceSocket
   /** The rate the page takes data at, as acknowledgements measure it. */
   private readonly drain = new DrainRate()
-  /** The rate the probe of the wire's first large frame measured, in a round trip: that frame's acknowledgement comes
-   *  only when all of it arrived, which on a slow link is seconds of publishes later. */
+  /** The rates frames crossed at. The probe of the wire's first large frame gives one in a round trip: that frame's
+   *  acknowledgement comes only when all of it arrived, which on a slow link is seconds of publishes later. */
   private readonly pieceRate = new PieceRate()
   /** When the newest acknowledged data arrived, in ms on the page's clock, counted from the first data an
    *  acknowledgement covered. */
