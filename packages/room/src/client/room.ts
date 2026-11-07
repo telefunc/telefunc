@@ -155,7 +155,6 @@ class ClientRoom extends RoomStateView implements Room {
   private readonly roster = createDeferred()
   /** @internal */
   _rosterStream: RosterStream | null = null
-  /** @internal */
 
   messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<RoomMessage> {
     return roomMessages(this, options?.signal)
