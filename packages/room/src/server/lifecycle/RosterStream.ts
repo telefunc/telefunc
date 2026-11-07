@@ -84,7 +84,7 @@ class RosterStream {
     this.owed.delete(stub)
   }
 
-  /** The room closed: no stream reuses a text. */
+  /** The room closed: no stream reuses a body. */
   clear(): void {
     this.bodies = null
   }
