@@ -221,7 +221,7 @@ class RedisSubscriptions {
       id,
       socket,
       subscribed: new Set(),
-      pings: setInterval(() => this.ping(connected), SUBSCRIBER_PING_MS).unref(),
+      pings: setInterval(() => void this.ping(connected), SUBSCRIBER_PING_MS).unref(),
       awaitingPong: false,
     }
     this.socket = connected
@@ -230,12 +230,8 @@ class RedisSubscriptions {
   }
 
   /** A ping still unanswered at the next one means the connection went silent. */
-  private ping(connection: ConnectedSocket): void {
+  private async ping(connection: ConnectedSocket): Promise<void> {
     if (connection.awaitingPong) return this.lost(connection.id, new Error('Redis subscriber connection went silent'))
-    void this.awaitPong(connection)
-  }
-
-  private async awaitPong(connection: ConnectedSocket): Promise<void> {
     connection.awaitingPong = true
     try {
       await connection.socket.ping()
