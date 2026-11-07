@@ -302,23 +302,19 @@ class RoomDemand {
   private settle(): void {
     if (this.settling) return
     this.settling = true
+    void this.tellDue()
+  }
+
+  private async tellDue(): Promise<void> {
     const slice = new Slice()
     const steps = this.evaluations()
-    const run = (): void => {
-      try {
-        while (!steps.next().done) {
-          if (slice.over) {
-            void slice.next().then(run)
-            return
-          }
-        }
-      } catch (error) {
-        this.settling = false
-        throw error
+    try {
+      while (!steps.next().done) {
+        if (slice.over) await slice.next()
       }
+    } finally {
       this.settling = false
     }
-    run()
   }
 
   private *evaluations(): Generator<void> {
