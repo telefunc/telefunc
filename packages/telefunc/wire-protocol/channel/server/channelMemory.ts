@@ -21,9 +21,9 @@ import type { QueueMemory } from '../channelMessages.js'
 /** What a held publish takes beyond its share of the body: its head and its entries. */
 const HELD_PUBLISH_OVERHEAD_BYTES = 200
 
-/** Holds bytes for a page. `shed` lets its oldest no wire has go, down to `toBytes`, never its newest; at 0 the newest goes
- *  too, and its own object ends it, told. One without it refuses instead. `newestUnhanded` is its newest publish, where
- *  no wire has that yet. */
+/** Holds bytes for a page. `shed` drops its oldest publishes no wire has, down to `toBytes`; the newest stays unless
+ *  `toBytes` is 0 or its policy closes on a missed message, when its own object ends it. One without `shed` refuses
+ *  instead. `newestUnhanded` is its newest publish where no wire has it yet. */
 interface MemoryHolder {
   heldBytes: number
   /** Its owner ended, so nothing is held for it any more (see `releaseHolder`). */
