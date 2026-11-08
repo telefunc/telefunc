@@ -6,6 +6,42 @@ import { sendRefusedWarning } from '../../../utils'
 
 // Run by the lanes whose server has the smallest `maxMemory`, 2 MiB.
 function testSmallPending() {
+  // 500 tiny acknowledged sends wait on the server, then their 4 KiB answers come while the page is away: those past
+  // maxMemory are refused, and the channel stays open.
+  test("channel: acknowledged sends waiting for their answers each settle, those whose answers the server can't hold with ChannelOverflowError, and the channel stays open", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-acks-waiting')
+    await autoRetry(
+      async () => {
+        const { error, ended, started, settled, next } = (await getResult<any>('#channel-state')).acksWaiting
+        expect(error).toBe(undefined)
+        expect(ended).toBe('open')
+        expect(started).toBe(500)
+        expect(settled.answered).greaterThan(0)
+        expect(settled.ChannelOverflowError).greaterThan(0)
+        expect(settled.answered + settled.ChannelOverflowError).toBe(500)
+        expect(next).toBe('answered next')
+      },
+      { timeout: 30_000 },
+    )
+  })
+
+  // 10,000 of them: the server can't hold room for all their answers, so it closes the channel before running the rest.
+  test('channel: more acknowledged sends waiting for their answers than the server can hold even refusals for close the channel with ChannelOverflowError', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-acks-flood')
+    await autoRetry(
+      async () => {
+        const { error, ended, started, settled } = (await getResult<any>('#channel-state')).acksWaiting
+        expect(error).toBe(undefined)
+        expect(ended).toBe('ChannelOverflowError')
+        expect(started).lessThan(10_000)
+        expect(settled).deep.equal({ ChannelOverflowError: 10_000 })
+      },
+      { timeout: 30_000 },
+    )
+  })
+
   test('channel: a flood of empty sends to a channel no page attached to refuses those past maxMemory with ChannelOverflowError', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-unattached-flood')

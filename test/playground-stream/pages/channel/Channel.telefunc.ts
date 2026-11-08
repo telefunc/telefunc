@@ -42,6 +42,7 @@ export {
   onChannelLinkShare,
   onChannelSlowUplink,
   onChannelPublishesBehind,
+  onChannelAcksWaiting,
   onChannelAcrossFlip,
   onPublishAcrossFlip,
   onChannelOpenAnswer,
@@ -910,6 +911,30 @@ async function onChannelPublishesBehind(
     return 'published'
   })
   return { broadcast, control: control.client }
+}
+
+/** A channel whose `{ ack: true }` sends wait for a release, then each answers 4 KiB, and one beside it. `'started'`
+ *  answers how many wait; `'release'` drops the page's connections and answers them while the page is away. A send
+ *  of `'next'` is answered at once. */
+async function onChannelAcksWaiting() {
+  let release = () => {}
+  const released = new Promise<void>((resolve) => (release = resolve))
+  let started = 0
+  const channel = new Channel<(msg: number | 'next') => string, never>()
+  channel.listen(async (msg) => {
+    if (msg === 'next') return 'answered next'
+    started++
+    await released
+    return 'x'.repeat(4096)
+  })
+  const control = new Channel<(msg: 'started' | 'release') => string, never>()
+  control.listen((msg) => {
+    if (msg === 'started') return String(started)
+    cutWireSockets()
+    setTimeout(release, 100)
+    return 'released'
+  })
+  return { channel: channel.client, control: control.client }
 }
 
 /** A broadcast, and a channel that shows the page's upgrade finished: what the page sends waits for that. */

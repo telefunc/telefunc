@@ -161,12 +161,13 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     super.dispatchDataFrame(frame)
   }
 
+  // What the publish carries is the broadcast's to hold, so its request holds only the room for its answer.
   _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
-    return this.lifecycle.trackAck(this.dispatchPublishAckReq(text, seq))
+    return this.lifecycle.trackAck(this.answerHeld(seq, 0, () => this.dispatchPublishAckReq(text, seq)))
   }
 
   _onPeerPublishBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
-    return this.lifecycle.trackAck(this.dispatchPublishBinaryAckReq(data, seq))
+    return this.lifecycle.trackAck(this.answerHeld(seq, 0, () => this.dispatchPublishBinaryAckReq(data, seq)))
   }
 
   private deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {

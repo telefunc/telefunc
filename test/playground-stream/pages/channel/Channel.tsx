@@ -56,6 +56,7 @@ import {
   onChannelLinkShare,
   onChannelSlowUplink,
   onChannelPublishesBehind,
+  onChannelAcksWaiting,
   onChannelAcrossFlip,
   onPublishAcrossFlip,
   onChannelOpenAnswer,
@@ -101,6 +102,39 @@ async function openChannel<T>(open: () => Promise<T>): Promise<T> {
     }
   }
   throw lastErr
+}
+
+// `count` acknowledged sends at once, each waiting on the server for its answer. As many as the server can hold room for
+// their answers run; the rest close the channel. Then their answers come while the page is away.
+async function acksWaitingOutcome(count: number) {
+  const { channel, control } = await openChannel(onChannelAcksWaiting)
+  const closed = new Promise<string>((resolve) => channel.onClose((err) => resolve(err?.name ?? 'none')))
+  let settledEarly = 0
+  const sends = Array.from({ length: count }, (_, n) =>
+    channel
+      .send(n, { ack: true })
+      .then(
+        () => 'answered',
+        (err: Error) => err.name,
+      )
+      .finally(() => settledEarly++),
+  )
+  // Until each waits on the server, or was refused as it came.
+  const allIn = async () => {
+    while (!channel.isClosed && Number(await control.send('started', { ack: true })) + settledEarly < count) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    return 'open'
+  }
+  const ended = await Promise.race([closed, allIn()])
+  const started = Number(await control.send('started', { ack: true }))
+  await control.send('release', { ack: true })
+  const settled: Record<string, number> = {}
+  for (const outcome of await Promise.all(sends)) settled[outcome] = (settled[outcome] ?? 0) + 1
+  const next = channel.isClosed ? null : await channel.send('next', { ack: true })
+  channel.close()
+  control.close()
+  return { ended, started, settled, next }
 }
 type AcrossFlipPage = { publishAcrossFlip(bytes: number): Promise<void>; sendAcrossFlip(): Promise<void> }
 const OPEN_CHANNEL_ATTEMPTS = 4
@@ -222,6 +256,10 @@ type ChannelState = {
     reconnected: { receipts: number; last: string }
   } | null
   broadcastAwayShared: { received: number[][]; closed: string[] } | null
+  acksWaiting:
+    | { ended: string; started: number; settled: Record<string, number>; next: string | null }
+    | { error: string }
+    | null
   broadcastBehindCloses: {
     seqsAhead: number[]
     closeErr: string | null
@@ -317,6 +355,7 @@ const initialState: ChannelState = {
   broadcastBehind: null,
   broadcastBehindCloses: null,
   broadcastAwayShared: null,
+  acksWaiting: null,
   acrossFlip: null,
   lateCallbacks: null,
   openAbort: null,
@@ -1577,6 +1616,14 @@ function ChannelDemo() {
     away.control.close()
   }, [])
 
+  const testAcksWaiting = useCallback(async (count: number) => {
+    setChannelState((s) => ({ ...s, acksWaiting: null }))
+    const acksWaiting = await acksWaitingOutcome(count).catch((err: Error) => ({
+      error: `${err.name}: ${err.message}`,
+    }))
+    setChannelState((s) => ({ ...s, acksWaiting }))
+  }, [])
+
   const testBroadcastAwayShared = useCallback(async () => {
     setChannelState((s) => ({ ...s, broadcastAwayShared: null }))
     // Two lossy broadcasts on one key, with bodies of 1200 KiB: one fits the lane's 2 MiB, two don't.
@@ -2035,6 +2082,22 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             Broadcast Closes A Client That Falls Behind
+          </button>
+          <button
+            id="channel-test-acks-waiting"
+            type="button"
+            onClick={() => testAcksWaiting(500)}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            500 Acknowledged Sends Wait For Their Answers
+          </button>
+          <button
+            id="channel-test-acks-flood"
+            type="button"
+            onClick={() => testAcksWaiting(10_000)}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            10,000 Acknowledged Sends Wait For Their Answers
           </button>
           <button
             id="channel-test-broadcast-away-shared"
