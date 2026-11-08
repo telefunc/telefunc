@@ -6,6 +6,7 @@ import {
   ProtocolViolationError,
   reconnectWindow,
   type BroadcastEndOwner,
+  type ChannelPublishAck,
   type ServerBroadcastEnd,
 } from 'telefunc/__internal'
 import type { ShieldValidator } from 'telefunc'
@@ -15,8 +16,9 @@ import {
   decodeParticipantFrame,
   decodeParticipantRequest,
   isRoomRequest,
+  pageFrameMessage,
 } from './requests.js'
-import { DEFAULT_TRACK } from '../shared/binary.js'
+import { DEFAULT_TRACK, type BinaryFrame } from '../shared/binary.js'
 import { DM_FAILURE } from '../shared/errors.js'
 import {
   leaveCauseToWire,
@@ -62,10 +64,15 @@ class RoomParticipantStub implements BroadcastEndOwner {
   }
 
   _onPagePublishBinary(framed: Uint8Array): Promise<RoomResult> {
-    const participant = this.participant
-    return receiveFromPage(this.end, () =>
-      roomResult(participant._publishFrame(decodeParticipantFrame(framed, participant.id), framed)),
-    )
+    return receiveFromPage(this.end, () => {
+      const frame = decodeParticipantFrame(framed, this.participant.id)
+      return roomResult(this.publishFrame(frame, framed, pageFrameMessage(frame)))
+    })
+  }
+
+  private async publishFrame(frame: BinaryFrame, framed: Uint8Array, message: unknown): Promise<ChannelPublishAck> {
+    if (frame.text) assertPublishShield(this.publishShield, message)
+    return await this.participant._publishFrame(frame, framed, message)
   }
 
   _onPageAttach(): void {

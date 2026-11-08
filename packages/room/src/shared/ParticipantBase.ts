@@ -17,7 +17,7 @@ import { makeDisposer, type ListenerOptions } from './disposer.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderSnapshot } from './arguments.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
-import { DEFAULT_TRACK, encodeBinaryFrame, publicTrack, type TrackKey } from './binary.js'
+import { DEFAULT_TRACK, encodeBinaryFrame, encodeFrameMessage, publicTrack, type TrackKey } from './binary.js'
 import { assertUsage } from '../utils/assert.js'
 import type { MemberMetaUpdate, WholeMemberUpdate, RoomResult, InboxMessage } from './protocol.js'
 import type {
@@ -114,16 +114,25 @@ abstract class ParticipantBase implements LocalParticipant {
   /** An ack DM's reply to a bug in a `listen()` handler, naming where `_reportError` logged it. */
   protected abstract readonly _bugMessage: string
 
-  /** `publishBinary()`'s frame. A track keeps the `lossy` its first publish gave it, which a later one may leave out. */
   protected encodeBinaryFrame(data: Uint8Array, options?: BinaryPublishOptions): Uint8Array {
+    return this.encodeTrackFrame(data, options, false)
+  }
+
+  /** The frame of a `publish()` on a track. */
+  protected encodeTextFrame(data: unknown, options: PublishOptions): Uint8Array {
+    return this.encodeTrackFrame(encodeFrameMessage(data), options, true)
+  }
+
+  /** A track keeps the `lossy` its first publish gave it, which a later one may leave out. */
+  private encodeTrackFrame(payload: Uint8Array, options: BinaryPublishOptions | undefined, text: boolean): Uint8Array {
     const track = options?.track ?? DEFAULT_TRACK
     const declared = this.trackLossy.get(track)
     const lossy = options?.lossy ?? declared ?? false
     assertUsage(
       declared === undefined || lossy === declared,
-      `publishBinary(): the ${track === DEFAULT_TRACK ? 'default' : `"${track}"`} track's first publish gave it lossy: ${declared}, which a track keeps`,
+      `The ${track === DEFAULT_TRACK ? 'default' : `"${track}"`} track's first publish gave it lossy: ${declared}, which a track keeps`,
     )
-    const framed = encodeBinaryFrame(this.id, data, { ...options, lossy })
+    const framed = encodeBinaryFrame(this.id, payload, { ...options, lossy }, text)
     if (declared === undefined) this.trackLossy.set(track, lossy)
     return framed
   }

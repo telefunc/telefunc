@@ -76,6 +76,7 @@ type SendGuard<P extends ParticipantMeta = ParticipantMeta> = (
 type PublishGuard<P extends ParticipantMeta = ParticipantMeta> = (
   from: Sender<P>,
   data: unknown,
+  info: { track: string | null },
 ) => void | Promise<void>
 
 /** Runs before admission; throw to reject before membership is written. */
@@ -92,7 +93,7 @@ type RoomAckReceipt = RoomSendReceipt & { response: unknown }
 type AfterPublishHook<P extends ParticipantMeta = ParticipantMeta> = (
   from: Sender<P>,
   data: unknown,
-  info: RoomSendReceipt,
+  info: RoomSendReceipt & { track: string | null },
 ) => void | Promise<void>
 
 /** Runs after a private message is delivered; throwing cannot undo delivery. */
@@ -190,9 +191,14 @@ type BinaryFrameInfo = {
 
 /** Publish-side options for text messages. */
 type PublishOptions = {
-  /** Conflate in-flight updates by key, keeping only the latest pending value. */
-  coalesce?: string
-  /** Keep this as the room's last-write-wins retained message. */
+  /** Your named track (≤ 255 UTF-8 bytes) to publish on, which viewers `subscribe()` to with `{ track }`. Without it,
+   *  the message goes on the room's message stream, where everyone gets every message in one order. */
+  track?: string
+  /** On a `track`: a newer message replaces one no connection has taken yet, so a page that can't keep up skips to the
+   *  newest and the track's `info.seq` jumps over what it skipped. A track keeps the value of its first publish, which
+   *  a later one may leave out; naming the other throws. Throws without `track`. Default: `false`. */
+  lossy?: boolean
+  /** Keep this as the room's last-write-wins retained message, or the track's retained message. */
   retain?: boolean
 }
 
@@ -243,10 +249,11 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   /** One participant, or `null`; loads the member view on first need. */
   getParticipant(id: string): Promise<RemoteParticipant<P, Pub> | null>
 
-  /** Receive all participant messages. Returns an unsubscribe function. */
+  /** Receive all participant messages, or, with `track`, the messages published on that track. Returns an unsubscribe
+   *  function. */
   subscribe(
     callback: (data: Pub, info: ChannelPublishInfo, from: Sender<P>) => unknown,
-    options?: { signal?: AbortSignal },
+    options?: { track?: string; signal?: AbortSignal },
   ): () => void
   /** Receive all members' binary frames, optionally filtered to one track at the source. */
   subscribeBinary(
@@ -349,8 +356,12 @@ type RemoteParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknow
   /** False while the member's page can't be reached and the room waits for it. */
   readonly isConnected: boolean
 
-  /** Receive only this member's messages. Returns an unsubscribe function. */
-  subscribe(callback: (data: Pub, info: ChannelPublishInfo) => unknown, options?: { signal?: AbortSignal }): () => void
+  /** Receive only this member's messages, or, with `track`, its messages on that track. Returns an unsubscribe
+   *  function. */
+  subscribe(
+    callback: (data: Pub, info: ChannelPublishInfo) => unknown,
+    options?: { track?: string; signal?: AbortSignal },
+  ): () => void
   /** Receive only this member's binary frames, optionally filtered to one track. */
   subscribeBinary(callback: MemberBinaryListener, options?: { track?: string | null; signal?: AbortSignal }): () => void
 

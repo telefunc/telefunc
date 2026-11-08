@@ -4,6 +4,7 @@ export {
   decodeRoomDeclaration,
   decodeRoomPublish,
   decodeStubBinaryFrame,
+  pageFrameMessage,
   decodeParticipantRequest,
   decodeParticipantFrame,
   decodeParticipantDeclaration,
@@ -16,6 +17,7 @@ import {
   EVERY_MEMBER,
   EVERY_TRACK,
   decodeBinaryFrame,
+  decodeFrameMessage,
   isMemberId,
   isRoomTrack,
   type BinaryFrame,
@@ -173,6 +175,16 @@ function decodeRoomPublish(value: unknown): RoomDataPublish {
 
 function decodeStubBinaryFrame(framed: Uint8Array): BinaryFrame {
   return decodeBinaryFrame(framed) ?? malformed('binary frame')
+}
+
+/** What a frame from a page shows its guards: its bytes, or a text frame's message. */
+function pageFrameMessage(frame: BinaryFrame): unknown {
+  if (!frame.text) return frame.payload
+  try {
+    return decodeFrameMessage(frame)
+  } catch {
+    return malformed('text frame')
+  }
 }
 
 function decodeParticipantFrame(framed: Uint8Array, participantId: string): BinaryFrame {

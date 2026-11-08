@@ -175,13 +175,16 @@ room.onJoin(follow)
 
 > Each participant's messages arrive in the order it sent them. `from` is that participant as the room knows it when the message arrives, so `from.meta` is its meta then, not when it sent the message. Joins, leaves and meta changes arrive in the same order everywhere, but two pages can see a message and someone else's join in a different order.
 
-For updates that change many times per second, such as a mouse cursor, pass `coalesce` with a name: on a slow connection, only the latest update with that name is sent, and the older ones are skipped.
+For updates that change many times per second, such as a mouse cursor, publish on a track with `lossy: true`: a page that falls behind skips to the newest one, and its `info.seq` jumps over the ones it skipped.
 
 ```js
 // Environment: client
 
-onCursorMove((position) => me.publish({ position }, { coalesce: 'cursor' }))
+onCursorMove((position) => me.publish(position, { track: 'cursor', lossy: true }))
+room.subscribe((position, info, from) => drawCursor(from.id, position), { track: 'cursor' })
 ```
+
+> `lossy` needs a `track`: a message on no track reaches everyone, in the room's order, and is never skipped.
 
 
 ## Check the message type
@@ -603,7 +606,7 @@ Server-side.
 | `getParticipants()` / `getParticipant(id)` | The participants / one participant. |
 | `getParticipants({ hidden: true })` | Server-side: the hidden participants. |
 | `onJoin(cb)` / `onLeave(cb)` / `onParticipantUpdate(cb)` | Someone joined / left / changed their `meta`. |
-| `subscribe(cb)` / `subscribeBinary(cb, { track? }?)` | Everyone's messages / binary frames: `cb(message, info, from)`, with `info` `{ seq, timestamp }`, plus `{ track, meta }` for binary. |
+| `subscribe(cb, { track? }?)` / `subscribeBinary(cb, { track? }?)` | Everyone's messages, or those on `track` / binary frames: `cb(message, info, from)`, with `info` `{ seq, timestamp }`, plus `{ track, meta }` on a track. |
 | `onAnnounce(cb)` | `Room.announce()` messages: `cb(message, info)`. |
 | `onUpdate(cb)` / `onEmpty(cb)` / `onClose(cb)` | The room's `meta` changed: `(meta, prev)` / the last participant left / the room closed. |
 
@@ -613,7 +616,7 @@ Properties: `id`, `meta`, `count`.
 
 | Method | Description |
 |---|---|
-| `publish(message, { coalesce?, retain? }?)` | Send to everyone. |
+| `publish(message, { track?, lossy?, retain? }?)` | Send to everyone. `lossy` needs `track`. |
 | `publishBinary(data, { track?, meta?, retain?, lossy? }?)` | Send binary to everyone. |
 | `send(to, message, { ack? }?)` | Send to one participant. |
 | `listen(cb)` | Receive private messages; return a value to reply. |
@@ -628,7 +631,7 @@ Properties: `id`, `meta`, `identity`, `isConnected`.
 
 | Method | Description |
 |---|---|
-| `subscribe(cb)` / `subscribeBinary(cb, { track? }?)` | This participant's messages / binary frames: `cb(message, info)`. |
+| `subscribe(cb, { track? }?)` / `subscribeBinary(cb, { track? }?)` | This participant's messages, or those on `track` / binary frames: `cb(message, info)`. |
 | `onUpdate(cb)` / `onLeave(cb)` | This participant changed their `meta` / left. |
 | `onDisconnect(cb)` / `onReconnect(cb)` | This participant's connection dropped / is back. |
 
@@ -640,10 +643,10 @@ Properties: `id`, `meta`, `identity`, `isConnected`.
 |---|---|
 | `anyoneCanJoin` | `true`: any client may join. Without it or `onBeforeJoin()`, a client's `room.join()` is refused. |
 | `onBeforeJoin(member)` | Before a join. Throw `Abort()` to reject it. |
-| `onBeforePublish(from, message)` | Before a message to everyone. Throw `Abort()` to reject it. |
+| `onBeforePublish(from, message, { track })` | Before a message or a binary frame to everyone, `track` being `null` off a track. Throw `Abort()` to reject it. |
 | `onBeforeSend(from, to, message)` | Before a private message. Throw `Abort()` to reject it. |
 | `onAfterJoin(member, { joinedAt })` | After a join. |
-| `onAfterPublish(from, message, { seq, timestamp })` | After a message to everyone. |
+| `onAfterPublish(from, message, { seq, timestamp, track })` | After a message or a binary frame to everyone. |
 | `onAfterSend(from, to, message, { seq, timestamp })` | After a private message. |
 
 

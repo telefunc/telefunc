@@ -23,6 +23,7 @@ import {
   decodeRoomRequest,
   type RoomRequest,
   decodeStubBinaryFrame,
+  pageFrameMessage,
   isRoomRequest,
   type RoomDeclaration,
 } from './requests.js'
@@ -138,7 +139,10 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   }
 
   _onPagePublishBinary(framed: Uint8Array): Promise<RoomResult> {
-    return receiveFromPage(this.end, () => roomResult(this.publishBinary(decodeStubBinaryFrame(framed), framed)))
+    return receiveFromPage(this.end, () => {
+      const frame = decodeStubBinaryFrame(framed)
+      return roomResult(this.publishBinary(frame, framed, pageFrameMessage(frame)))
+    })
   }
 
   /** Control always flows; text follows broadcast/member wants, while binary uses `sub-binary`. */
@@ -241,9 +245,10 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     return await this.room.writes.publishText(publish.from, publish.data, publish.retain)
   }
 
-  private async publishBinary(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
+  private async publishBinary(frame: BinaryFrame, framed: Uint8Array, message: unknown): Promise<ChannelPublishAck> {
     this.requireMember(frame.from)
-    return await this.room.writes.publishBinaryFrame(frame, framed)
+    if (frame.text) assertPublishShield(this.publishShield, message)
+    return await this.room.writes.publishBinaryFrame(frame, framed, message)
   }
 
   // Membership

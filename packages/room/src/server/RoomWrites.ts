@@ -5,7 +5,7 @@ import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import type { CommitAccepted } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
 import { type ChannelPublishAck, handleCallbackBug, createDeferred, unrefTimer } from 'telefunc/__internal'
-import type { BinaryFrame } from '../shared/binary.js'
+import { publicTrack, type BinaryFrame } from '../shared/binary.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import {
   DM_FAILURE,
@@ -117,7 +117,7 @@ class RoomWrites {
 
   async publishText(from: string, data: unknown, retain = false): Promise<ChannelPublishAck> {
     const { sender, commit } = await this.inCallOrder(from, async (sent) => {
-      const { sender, stamp } = await this.admitPublish(from, data)
+      const { sender, stamp } = await this.admitPublish(from, data, null)
       const envelope: RoomDataEnvelope = { __r: 'data', from, data, ...stamp }
       const record = encodeRoomRecord(envelope)
       const target = { roomId: this.incarnation.id, inc: this.incarnation.inc, lane: SEMANTIC_LANE }
@@ -126,15 +126,17 @@ class RoomWrites {
       sent()
       return { sender, commit: acceptedOrThrow(this.incarnation.id, await committing) }
     })
-    return await this.finishPublish(sender, data, commit)
+    return await this.finishPublish(sender, data, null, commit)
   }
 
-  /** `frame` is `framed` decoded; receivers trust its sender id, which every caller checked is the publisher's. */
-  async publishBinaryFrame(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
+  /** `frame` is `framed` decoded, and `message` what its guards see: its bytes, or a text frame's message. Receivers
+   *  trust its sender id, which every caller checked is the publisher's. */
+  async publishBinaryFrame(frame: BinaryFrame, framed: Uint8Array, message: unknown): Promise<ChannelPublishAck> {
     const { from } = frame
+    const track = publicTrack(frame.track)
     const lane = { kind: 'binary', member: from, track: frame.track } as const
     const { sender, commit } = await this.inCallOrder(encodeLaneKey(lane), async (sent) => {
-      const { sender } = await this.admitPublish(from, frame.payload)
+      const { sender } = await this.admitPublish(from, message, track)
       const admitted = this.replica.admitTrack(from, lane.track)
       if (admitted !== null) await admitted
       const opts = { retain: frame.retain, owner: from, requiredCellKeys: [memberCellKey(from)] }
@@ -142,7 +144,7 @@ class RoomWrites {
       sent()
       return { sender, commit: acceptedOrThrow(this.incarnation.id, await committing) }
     })
-    return await this.finishPublish(sender, frame.payload, commit)
+    return await this.finishPublish(sender, message, track, commit)
   }
 
   /** A member's publishes on one lane leave in call order: each starts once the one before it was sent to the backend
@@ -162,19 +164,28 @@ class RoomWrites {
   }
 
   /** The sender as its guard sees it, with its stamp. */
-  private async admitPublish(from: string, payload: unknown): Promise<{ sender: Sender; stamp: SenderStamp }> {
+  private async admitPublish(
+    from: string,
+    payload: unknown,
+    track: string | null,
+  ): Promise<{ sender: Sender; stamp: SenderStamp }> {
     if (this.model.closed) throw roomClosedError(this.incarnation.id)
     const sender = this.memberSender(from)
     const stamp = this.stampedSender(from, sender)
     const onBeforePublish = this.owner.guards?.onBeforePublish
-    if (onBeforePublish) await onBeforePublish(sender, payload)
+    if (onBeforePublish) await onBeforePublish(sender, payload, { track })
     return { sender, stamp }
   }
 
-  private async finishPublish(sender: Sender, payload: unknown, commit: CommitAccepted): Promise<ChannelPublishAck> {
+  private async finishPublish(
+    sender: Sender,
+    payload: unknown,
+    track: string | null,
+    commit: CommitAccepted,
+  ): Promise<ChannelPublishAck> {
     const receipt: Omit<ChannelPublishAck, 'key'> = { seq: commit.seq, timestamp: commit.timestamp }
     const onAfterPublish = this.owner.guards?.onAfterPublish
-    if (onAfterPublish) await runAfterHook(() => onAfterPublish(sender, payload, receipt))
+    if (onAfterPublish) await runAfterHook(() => onAfterPublish(sender, payload, { ...receipt, track }))
     return { key: this.incarnation.id, ...receipt }
   }
 

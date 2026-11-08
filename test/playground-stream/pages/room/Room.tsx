@@ -45,6 +45,7 @@ import {
   onRoomMetaFlood,
   onRoomTracks,
   onRoomLossyNearBudget,
+  onRoomTextCursor,
   onGetWatchedCount,
   onRoomRelease,
   onFailBackend,
@@ -480,6 +481,10 @@ function Room() {
           () => null,
           (err: Error) => err.message,
         )
+        const trackError = await me.publish('forbidden', { track: 'cursor' }).then(
+          () => null,
+          (err: Error) => err.message,
+        )
         const sendError = await me.send(peer.id, 'forbidden').then(
           () => null,
           (err: Error) => err.message,
@@ -488,7 +493,7 @@ function Room() {
         await me.send(peer.id, 'psst')
 
         await pollUntil(() => ({
-          result: { joinError, unguardedJoinError, publishError, sendError, received, inbox },
+          result: { joinError, unguardedJoinError, publishError, trackError, sendError, received, inbox },
           done: received.length >= 1 && inbox.length >= 1,
         }))
       })}
@@ -510,7 +515,14 @@ function Room() {
           (err: Error) => err.name,
         )
 
-        await pollUntil(() => ({ result: { okAck, badError, received }, done: received.length >= 1 }))
+        const trackBadError = await me
+          .publish({ kind: 'chat' } as unknown as { kind: 'chat'; text: string }, { track: 'cursor' })
+          .then(
+            () => null,
+            (err: Error) => err.name,
+          )
+
+        await pollUntil(() => ({ result: { okAck, badError, trackBadError, received }, done: received.length >= 1 }))
       })}
 
       {scenario('own-bytes', 'Bytes of its own', 'Listeners that write into or transfer their bytes', async () => {
@@ -550,12 +562,11 @@ function Room() {
         me.listen((data) => dms.push(data))
         await me.setAttributes({}) // same-channel ack orders the declarations before the server's writes
 
-        // The second publish waits behind the first on its coalesce key.
         const first = { n: 10 }
         const second = { n: 11 }
-        const coalesced = Promise.all([me.publish(first, { coalesce: 'c' }), me.publish(second, { coalesce: 'c' })])
+        const published = Promise.all([me.publish(first), me.publish(second)])
         second.n = 12
-        await coalesced
+        await published
         const reuser = await getParticipantWhenJoined(room, await onSendReusingObjects(roomId, me.id))
 
         await pollUntil(() => {
@@ -765,6 +776,7 @@ function Room() {
           (ack) => ack.seq > 0,
           (err: Error) => err.message,
         )
+        await me.publish('on-a-track', { track: 'cursor' })
         // The second publish waits behind the first's guard while its member leaves.
         const slow = me.publish('slow')
         const queued = me.publish('queued')
@@ -1371,20 +1383,6 @@ function Room() {
         },
       )}
 
-      {scenario('conflate', 'Coalesce (conflation)', 'Coalesced burst', async () => {
-        const [roomId, lobby] = await createRoom('conflate')
-        const received: number[] = []
-        lobby.subscribe((data) => received.push((data as { n: number }).n))
-        const me = await lobby.join({ meta: { name: 'Cursor' } })
-
-        const acks = await Promise.all([1, 2, 3, 4, 5].map((n) => me.publish({ n }, { coalesce: 'cursor' })))
-
-        await pollUntil(() => ({
-          result: { received, ackSeqs: acks.map((ack) => ack.seq) },
-          done: received.includes(5) && received.length >= 2,
-        }))
-      })}
-
       {scenario('attributes', 'setAttributes (partial merge)', 'Merge & delete attributes', async () => {
         const [roomId, lobby] = await createRoom('attr')
         const me = await lobby.join({ meta: { name: 'Zoe', score: 1 } })
@@ -1897,7 +1895,7 @@ function Room() {
         await me.publish('hello')
         await me.leave()
         me.publish('after-leave')
-        me.publish('after-leave', { coalesce: 'cursor' })
+        me.publish('after-leave', { track: 'cursor', lossy: true })
         me.publishBinary(new Uint8Array([1]))
         me.send(me.id, 'after-leave')
         const awaited = await me.publish('after-leave').then(
@@ -2079,6 +2077,9 @@ function Room() {
             omitted: thrown(() => me.publishBinary(frame, { track: 'cursor' })),
             other: thrown(() => me.publishBinary(frame, { track: 'cursor', lossy: false })),
             defaultTrack: thrown(() => me.publishBinary(frame, { lossy: true })),
+            text: thrown(() => me.publish('a', { track: 'cursor' })),
+            textOther: thrown(() => me.publish('a', { track: 'cursor', lossy: false })),
+            noTrack: thrown(() => me.publish('a', { lossy: true })),
           }),
         )
       })}
@@ -2093,6 +2094,25 @@ function Room() {
         await onRoomMetaFlood(roomId)
         await pollUntil(() => ({ done: closed && myCause !== null }), 150)
         setResult(JSON.stringify({ closed, myCause }))
+      })}
+
+      {scenario('text-cursor', null, 'Offline past maxMemory on a lossy text track', async () => {
+        const roomId = await createRoomId('text-cursor')
+        const view = await onGetRoom(roomId)
+        const cursor: { n: number; seq: number }[] = []
+        view.subscribe((data, info) => cursor.push({ n: (data as { n: number }).n, seq: info.seq }), {
+          track: 'cursor',
+        })
+        let closed = false
+        view.onClose(() => (closed = true))
+        const me = await view.join({ meta: { name: 'Me' } })
+        let myCause: unknown = null
+        me.onLeave((cause) => (myCause = cause))
+        await onRoomTextCursor(roomId)
+        await pollUntil(() => ({ done: cursor.length > 0 }))
+        setResult(JSON.stringify({ roomId }))
+        await pollUntil(() => ({ done: cursor.at(-1)?.n === 15 || closed }), 150)
+        setResult(JSON.stringify({ roomId, cursor, closed, myCause }))
       })}
 
       {scenario('tracks-cursor', null, 'Offline past maxMemory on a lossy track', tracksBehind('cursor'))}

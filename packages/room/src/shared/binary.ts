@@ -2,6 +2,8 @@ export {
   isMemberId,
   encodeBinaryFrame,
   decodeBinaryFrame,
+  encodeFrameMessage,
+  decodeFrameMessage,
   DEFAULT_TRACK,
   EVERY_MEMBER,
   EVERY_TRACK,
@@ -53,15 +55,22 @@ const FRAME_FLAG_TRACK = 0b0000_0010
 const FRAME_FLAG_RETAIN = 0b0000_0100
 /** Set where its publisher passed `lossy: true`. */
 const FRAME_FLAG_LOSSY = 0b0000_1000
+/** Set on a message `publish()` sent on a track: the payload is the message, serialized. */
+const FRAME_FLAG_TEXT = 0b0001_0000
 /** The only bits the framer defines. Any other bit set is a malformed or forward-incompatible frame. */
-const FRAME_FLAGS_KNOWN = FRAME_FLAG_META | FRAME_FLAG_TRACK | FRAME_FLAG_RETAIN | FRAME_FLAG_LOSSY
+const FRAME_FLAGS_KNOWN = FRAME_FLAG_META | FRAME_FLAG_TRACK | FRAME_FLAG_RETAIN | FRAME_FLAG_LOSSY | FRAME_FLAG_TEXT
 /** Structural maxima of the one-byte track-length and two-byte metadata-length fields. */
 const TRACK_LENGTH_FIELD_MAX = 0xff
 const META_LENGTH_FIELD_MAX = 0xffff
 const frameTextEncoder = /* @__PURE__ */ new TextEncoder()
 const frameTextDecoder = /* @__PURE__ */ new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 
-function encodeBinaryFrame(memberId: string, payload: Uint8Array, opts?: BinaryPublishOptions): Uint8Array {
+function encodeBinaryFrame(
+  memberId: string,
+  payload: Uint8Array,
+  opts?: BinaryPublishOptions,
+  text = false,
+): Uint8Array {
   assertKnownOptions(opts, ['track', 'meta', 'retain', 'lossy'], 'publishBinary()')
   assertUsage(
     opts?.retain === undefined || typeof opts.retain === 'boolean',
@@ -74,6 +83,7 @@ function encodeBinaryFrame(memberId: string, payload: Uint8Array, opts?: BinaryP
   const idBytes = uuidToBytes(memberId)
   let flags = opts?.retain === true ? FRAME_FLAG_RETAIN : 0
   if (opts?.lossy === true) flags |= FRAME_FLAG_LOSSY
+  if (text) flags |= FRAME_FLAG_TEXT
   let trackBytes: Uint8Array | null = null
   if (opts?.track !== undefined) {
     assertUsage(
@@ -115,6 +125,15 @@ function encodeBinaryFrame(memberId: string, payload: Uint8Array, opts?: BinaryP
   }
   framed.set(payload, headerLength)
   return framed
+}
+
+function encodeFrameMessage(message: unknown): Uint8Array {
+  return frameTextEncoder.encode(stringify(message))
+}
+
+/** The message a text frame carries, of the listener's own; throws on one no client library framed. */
+function decodeFrameMessage(frame: BinaryFrame): unknown {
+  return parse(frameTextDecoder.decode(frame.payload))
 }
 
 type FrameCursor = { offset: number }
@@ -161,6 +180,7 @@ type BinaryFrame = {
   meta: Record<string, unknown> | null
   retain: boolean
   lossy: boolean
+  text: boolean
 }
 
 function decodeBinaryFrame(data: Uint8Array): BinaryFrame | null {
@@ -179,6 +199,7 @@ function decodeBinaryFrame(data: Uint8Array): BinaryFrame | null {
     meta,
     retain: !!(flags & FRAME_FLAG_RETAIN),
     lossy: !!(flags & FRAME_FLAG_LOSSY),
+    text: !!(flags & FRAME_FLAG_TEXT),
   }
 }
 

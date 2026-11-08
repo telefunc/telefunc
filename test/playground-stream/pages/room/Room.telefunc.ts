@@ -40,6 +40,7 @@ export {
   onRoomMetaFlood,
   onRoomTracks,
   onRoomLossyNearBudget,
+  onRoomTextCursor,
   onGetWatchedCount,
   onRoomRelease,
   onFailBackend,
@@ -517,6 +518,19 @@ async function onRoomTracks(roomId: string, heavy: 'cursor' | 'drawing') {
   await speaker.publish('before')
 }
 
+/** A speaker sends, run by the test while the page is offline, 16 positions of 256 KiB on a lossy text track: 4 MiB. */
+async function onRoomTextCursor(roomId: string) {
+  const room = await Room.get(roomId)
+  const speaker = await room.join({ meta: { name: 'Speaker' } })
+  awayMembers.set(roomId, [speaker])
+  onServerAction(`roomTextCursor_${roomId}`, async () => {
+    const padding = ' '.repeat(256 * 1024)
+    for (let n = 0; n < 16; n++) await speaker.publish({ n, padding }, { track: 'cursor', lossy: true })
+    cleanupState[`roomTextCursor_${roomId}`] = 'done'
+  })
+  await speaker.publish({ n: -1 }, { track: 'cursor', lossy: true })
+}
+
 /** A speaker sends, run by the test while the page is offline, one 600 KiB frame on each of three lossy tracks: past 7/8 of
  *  its lane's 2 MiB, so the server tries to free what it holds, and within it, so it needn't let the page go. */
 async function onRoomLossyNearBudget(roomId: string) {
@@ -845,27 +859,38 @@ function metaName(meta: Record<string, unknown>, named: Record<string, Record<st
   return `${keys.length} keys from ${keys[0]} to ${keys.at(-1)}`
 }
 
-const guardCalls = new Map<string, Array<{ hook: string; name: unknown; frozen: boolean }>>()
+const guardCalls = new Map<string, Array<{ hook: string; name: unknown; frozen: boolean; track?: string | null }>>()
 
 /** Guards that record what they were handed: a `slow` publish waits 100 ms, a binary one is refused, and
  *  `onAfterPublish` throws for an `after` publish. */
 async function onOpenRecordingGuardRoom(roomId: string) {
   const room = await Room.get(roomId)
-  const calls: Array<{ hook: string; name: unknown; frozen: boolean }> = []
+  const calls: Array<{ hook: string; name: unknown; frozen: boolean; track?: string | null }> = []
   guardCalls.set(roomId, calls)
   Room.guard(room, {
     onBeforeJoin: (member) => {
       calls.push({ hook: 'join', name: member.meta.name, frozen: Object.isFrozen(member.meta) })
     },
-    onBeforePublish: async (from, data) => {
-      calls.push({ hook: 'publish', name: from.meta.name, frozen: Object.isFrozen(from) && Object.isFrozen(from.meta) })
+    onBeforePublish: async (from, data, { track }) => {
+      calls.push({
+        hook: 'publish',
+        name: from.meta.name,
+        frozen: Object.isFrozen(from) && Object.isFrozen(from.meta),
+        track,
+      })
       if (data === 'slow') await new Promise((resolve) => setTimeout(resolve, 100))
       if (data instanceof Uint8Array) throw Abort('no frames')
     },
     onBeforeSend: (from, to) => {
       calls.push({ hook: 'send', name: from.meta.name, frozen: Object.isFrozen(from) && Object.isFrozen(to) })
     },
-    onAfterPublish: (_from, data) => {
+    onAfterPublish: (from, data, { track }) => {
+      calls.push({
+        hook: 'after-publish',
+        name: from.meta.name,
+        frozen: Object.isFrozen(from) && Object.isFrozen(from.meta),
+        track,
+      })
       if (data === 'after') throw new Error('server-listener-bug')
     },
   })

@@ -66,6 +66,7 @@ type GuardResult = {
   joinError: string | null
   unguardedJoinError: string | null
   publishError: string | null
+  trackError: string | null
   sendError: string | null
   received: string[]
   inbox: string[]
@@ -383,11 +384,14 @@ function testRoom() {
   testRoomScenario<{
     binaryError: string | null
     afterHookAck: boolean | string
-    calls: Array<{ hook: string; name: unknown; frozen: boolean }>
+    calls: Array<{ hook: string; name: unknown; frozen: boolean; track?: string | null }>
   }>(
     'guard-calls',
-    "room: guards get a frozen sender and never a stand-in for a member that left; a binary publish a guard refuses rejects with the guard's Abort; an after-hook that throws keeps the publish",
+    "room: guards get a frozen sender and never a stand-in for a member that left; a binary publish a guard refuses rejects with the guard's Abort; an after-hook that throws keeps the publish; both hooks get a message's track",
     (r) => {
+      const tracks = (hook: string) => r.calls.filter((call) => call.hook === hook).map((call) => call.track)
+      expect(tracks('publish')).include('cursor')
+      expect(tracks('after-publish')).include('cursor')
       expect(r.binaryError).toBe('no frames')
       expect(r.afterHookAck).toBe(true)
       expect(r.calls.filter((call) => call.hook === 'join').map((call) => call.name)).deep.equal(['G', 'P'])
@@ -565,18 +569,20 @@ function testRoom() {
       // A room returned without Room.guard() refuses a page's join, and says how to allow it
       expect(result.unguardedJoinError).toContain('Room.guard(room, { anyoneCanJoin: true })')
       expect(result.publishError).toBe('blocked publish from Mallory')
+      expect(result.trackError).toBe('blocked publish from Mallory')
       expect(result.sendError).toBe('blocked send from Mallory')
       expect(result.received).deep.equal(['fine'])
       expect(result.inbox).deep.equal(['psst'])
     },
   )
-  testRoomScenario<{ okAck: boolean; badError: string | null; received: string[] }>(
+  testRoomScenario<{ okAck: boolean; badError: string | null; trackBadError: string | null; received: string[] }>(
     'shield',
     'room: the declared message type is shielded at runtime (a malformed publish is rejected)',
     (r) => {
       expect(r.okAck).toBe(true)
       // The generated shield rejects malformed ingress through the publish promise.
       expect(r.badError).toBe('ShieldValidationError')
+      expect(r.trackBadError).toBe('ShieldValidationError')
       expect(r.received).deep.equal(['hi'])
     },
   )
@@ -591,18 +597,6 @@ function testRoom() {
       expect(result.closed).toBe(true) // Room.onClose fired on close()
       expect(result.isClosed).toBe(true)
       expect(result.count).toBe(0)
-    },
-  )
-  testRoomScenario<{ received: number[]; ackSeqs: number[] }>(
-    'conflate',
-    'room: coalesce conflates a same-key burst to first + latest',
-    (r) => {
-      const first = r.ackSeqs[0]!
-      const latest = r.ackSeqs[4]!
-      expect(r.received).deep.equal([1, 5]) // 2..4 collapsed into the single pending slot
-      expect(first).greaterThan(0)
-      expect(latest).toBe(first + 1) // only first and latest committed
-      expect(r.ackSeqs).deep.equal([first, latest, latest, latest, latest]) // overwritten callers share the winner
     },
   )
   testRoomScenario<{
@@ -1443,11 +1437,14 @@ function testRoomSmallMemory() {
   testRoomScenario<Record<string, string | null>>(
     'track-lossy',
     'room: a track keeps the lossy setting of its first publish: a later publish may leave it out, and one naming the other throws at the call',
-    ({ other, ...accepted }) => {
-      expect(accepted).deep.equal({ first: null, omitted: null, defaultTrack: null })
-      expect(other ?? 'no error').toContain(
-        `publishBinary(): the "cursor" track's first publish gave it lossy: true, which a track keeps`,
-      )
+    ({ other, textOther, noTrack, ...accepted }) => {
+      expect(accepted).deep.equal({ first: null, omitted: null, defaultTrack: null, text: null })
+      for (const thrown of [other, textOther]) {
+        expect(thrown ?? 'no error').toContain(
+          `The "cursor" track's first publish gave it lossy: true, which a track keeps`,
+        )
+      }
+      expect(noTrack ?? 'no error').toContain('publish() options.lossy needs options.track')
     },
   )
   testRoomScenario<{ closed: boolean; myCause: unknown }>(
@@ -1500,6 +1497,35 @@ function testRoomSmallMemory() {
       expectLog('fell behind and skipped frames of its lossy tracks')
     },
   )
+  test('room: a page offline while a lossy text track sent it more than maxMemory holds gets the newest message, with the jump in its info.seq, and stays in its room', async () => {
+    if (!canCutWire()) return
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-text-cursor')
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-text-cursor:/)
+    })
+    await page.context().setOffline(true)
+    await cutWire()
+    await runServerAction(`roomTextCursor_${roomId}`)
+    await autoRetry(async () => {
+      expect((await getCleanupState())[`roomTextCursor_${roomId}`]).toBe('done')
+    })
+    await page.context().setOffline(false)
+    await autoRetry(async () => {
+      const r = await getResult<{ cursor?: { n: number; seq: number }[]; closed: boolean; myCause: unknown }>(
+        '#room-result',
+      )
+      expect(r).deep.include({ closed: false, myCause: null })
+      const cursor = r.cursor!
+      expect(cursor.length).lessThan(17)
+      expect(cursor.at(-1)?.n).toBe(15)
+      expect(cursor.map(({ n, seq }) => seq - n)).deep.equal(cursor.map(() => cursor[0]!.seq - cursor[0]!.n))
+    })
+    expectLog('fell behind and skipped frames of its lossy tracks')
+    expectLog('skipped frames of its lossy tracks, as this client fell behind')
+  })
   test('room: a page offline with only lossy tracks is not let go over them where the server still holds each newest frame', async () => {
     if (!canCutWire()) return
     await navigate(`${getServerUrl()}/room`)

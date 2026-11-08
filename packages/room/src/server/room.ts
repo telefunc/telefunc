@@ -12,9 +12,22 @@ import {
 import { assert, assertUsage } from '../utils/assert.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
-import { decodeBinaryFrame, type BinaryFrame, type BinaryWantChange, type TrackKey } from '../shared/binary.js'
+import {
+  decodeBinaryFrame,
+  decodeFrameMessage,
+  type BinaryFrame,
+  type BinaryWantChange,
+  type TrackKey,
+} from '../shared/binary.js'
 import { RoomError, roomClosedError, ROOM_BUG_MESSAGE } from '../shared/errors.js'
-import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetadata, recipientId } from '../shared/arguments.js'
+import {
+  assertKnownOptions,
+  assertPublishOptions,
+  normalizeJoinOptions,
+  ownMessage,
+  ownMetadata,
+  recipientId,
+} from '../shared/arguments.js'
 import {
   inboxMessageFromWire,
   type SenderStamp,
@@ -575,24 +588,20 @@ class ServerLocalParticipant extends ParticipantBase {
   }
 
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
-    assertKnownOptions(options, ['coalesce', 'retain'], 'publish()')
-    assertUsage(
-      options?.retain === undefined || typeof options.retain === 'boolean',
-      'publish() options.retain should be a boolean',
-    )
-    assertUsage(
-      options?.coalesce === undefined || typeof options.coalesce === 'string',
-      'publish() options.coalesce should be a string',
-    )
-    return markHandled(this.publishText(ownMessage(data), options?.retain))
+    assertPublishOptions(options)
+    if (options?.track === undefined) return markHandled(this.publishText(ownMessage(data), options?.retain))
+    return this.publishOnTrack(this.encodeTextFrame(data, options))
   }
 
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
-    const framed = this.encodeBinaryFrame(data, options)
-    // Local holders get exactly what remote ones decode, not the caller's objects.
+    return this.publishOnTrack(this.encodeBinaryFrame(data, options))
+  }
+
+  /** Local holders get exactly what remote ones decode, not the caller's objects. */
+  private publishOnTrack(framed: Uint8Array): Promise<ChannelPublishAck> {
     const frame = decodeBinaryFrame(framed)
     assert(frame !== null)
-    return markHandled(this._publishFrame(frame, framed))
+    return markHandled(this._publishFrame(frame, framed, frame.text ? decodeFrameMessage(frame) : frame.payload))
   }
 
   private async publishText(data: unknown, retain: boolean | undefined): Promise<ChannelPublishAck> {
@@ -601,9 +610,9 @@ class ServerLocalParticipant extends ParticipantBase {
   }
 
   /** @internal */
-  async _publishFrame(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
+  async _publishFrame(frame: BinaryFrame, framed: Uint8Array, message: unknown): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this.room.writes.publishBinaryFrame(frame, framed)
+    return await this.room.writes.publishBinaryFrame(frame, framed, message)
   }
 
   /** @internal A DM for this member: to the client holding it, else its listeners. */

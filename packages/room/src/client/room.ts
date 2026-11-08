@@ -8,8 +8,8 @@ import type { TELEFUNC_SHIELDS, ChannelPublishAck, ChannelPublishInfo, ClientBro
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange, type TrackKey } from '../shared/binary.js'
 import {
   assertKnownOptions,
+  assertPublishOptions,
   normalizeJoinOptions,
-  ownMessage,
   ownMetaArgument,
   recipientId,
 } from '../shared/arguments.js'
@@ -81,11 +81,6 @@ function heldMemberOf(event: ClientRoomEvent): string | null {
   }
 }
 
-/** One awaiter of a conflated publish, resolved with the winning send's receipt (see `drainCoalesce`). */
-type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err: unknown) => void }
-/** A key's conflation: at most one send in flight, while the newest value waits in `pending`, superseding any
- *  earlier one. */
-type CoalesceSlot = { sending: boolean; pending: { data: unknown; retain?: boolean; waiters: CoalesceWaiter[] } | null }
 /** A join awaiting its ack: the member the server admitted, once `joined` names it, and the events naming that
  *  member. */
 type PendingJoin = { id: string | null; held: Array<{ envelope: unknown; rawInfo: ChannelPublishInfo }> }
@@ -509,8 +504,6 @@ class ClientRoom extends RoomStateView implements Room {
 }
 
 abstract class ClientParticipantBase extends ParticipantBase {
-  /** `publish(data, { coalesce })`'s conflation, by key. */
-  private readonly coalescers = new Map<string, CoalesceSlot>()
   private readonly wantedTracks = new Set<TrackKey>()
   protected readonly _bugMessage = CLIENT_ROOM_BUG_MESSAGE
 
@@ -552,7 +545,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
     super._onDemand(track, wanted)
   }
 
-  /** Each flavor's wire publish; `publish()` adds conflation. */
+  /** Each flavor's wire publish. */
   protected abstract _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck>
   protected abstract _sendPublishBinary(framed: Uint8Array, lossyStream: string | null): Promise<ChannelPublishAck>
   /** The wire request of a flavor: the base's DMs and metadata writes, and the standalone's publish and leave. */
@@ -560,32 +553,17 @@ abstract class ClientParticipantBase extends ParticipantBase {
 
   // Messaging is often fire-and-forget: a usage error throws, and a failure is a rejection left handled.
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
-    assertKnownOptions(options, ['coalesce', 'retain'], 'publish()')
-    assertUsage(
-      options?.retain === undefined || typeof options.retain === 'boolean',
-      'publish() options.retain should be a boolean',
-    )
-    assertUsage(
-      options?.coalesce === undefined || typeof options.coalesce === 'string',
-      'publish() options.coalesce should be a string',
-    )
-    const key = options?.coalesce
-    if (key === undefined) return markHandled(this._sendPublish(data, options?.retain))
-    return markHandled(
-      new Promise<ChannelPublishAck>((resolve, reject) => {
-        const slot = getOrCreate(this.coalescers, key, () => ({ sending: false, pending: null }))
-        // Supersede any queued value; its waiters ride along and all resolve with the winning send.
-        const waiters = slot.pending?.waiters ?? []
-        waiters.push({ resolve, reject })
-        slot.pending = { data: ownMessage(data), retain: options?.retain, waiters }
-        this.drainCoalesce(key)
-      }),
-    )
+    assertPublishOptions(options)
+    if (options?.track === undefined) return markHandled(this._sendPublish(data, options?.retain))
+    return this.publishOnTrack(this.encodeTextFrame(data, options), options.track)
   }
 
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
-    const framed = this.encodeBinaryFrame(data, options)
-    return markHandled(this._sendPublishBinary(framed, this.lossyStreamOf(options?.track)))
+    return this.publishOnTrack(this.encodeBinaryFrame(data, options), options?.track)
+  }
+
+  private publishOnTrack(framed: Uint8Array, track: string | undefined): Promise<ChannelPublishAck> {
+    return markHandled(this._sendPublishBinary(framed, this.lossyStreamOf(track)))
   }
 
   send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
@@ -618,31 +596,6 @@ abstract class ClientParticipantBase extends ParticipantBase {
 
   /** Concurrent writes can commit out of request order: adopt the sequence-accepted value, as observers do. */
   protected abstract _onOwnMetaWritten(accepted: MemberMetaUpdate): void
-
-  private drainCoalesce(key: string): void {
-    const slot = this.coalescers.get(key)
-    if (!slot || slot.sending || !slot.pending) return
-    const pending = slot.pending
-    slot.pending = null
-    slot.sending = true
-    void this.sendCoalesced(key, slot, pending)
-  }
-
-  private async sendCoalesced(
-    key: string,
-    slot: CoalesceSlot,
-    { data, retain, waiters }: NonNullable<CoalesceSlot['pending']>,
-  ): Promise<void> {
-    try {
-      const ack = await this._sendPublish(data, retain)
-      for (const waiter of waiters) waiter.resolve(ack)
-    } catch (err) {
-      for (const waiter of waiters) waiter.reject(err)
-    }
-    slot.sending = false
-    if (slot.pending) this.drainCoalesce(key)
-    else this.coalescers.delete(key)
-  }
 
   protected _reportError(err: unknown): void {
     reportClientCallbackError(err)

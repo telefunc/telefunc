@@ -10,6 +10,7 @@ import {
   EVERY_TRACK,
   DEFAULT_TRACK,
   isNamedTrack,
+  decodeFrameMessage,
   publicTrack,
   type EveryTrack,
   type BinaryFrame,
@@ -22,24 +23,25 @@ import type { MemberSnapshot, MemberWants, RoomDataEvent, SenderStamp } from './
 import type { BinaryFrameInfo, LeaveCause, ParticipantMeta, RemoteParticipant, RoomMeta, Sender } from '../types.js'
 
 type BinaryListenerOptions = ListenerOptions & { track?: string | null }
+type MessageListenerOptions = ListenerOptions & { track?: string }
 /** A binary listener's track filter: one track, or `EVERY_TRACK`. */
 type TrackFilter = TrackKey | EveryTrack
 /** A binary listener list's filters as counts: every-track listeners, and listeners per lane track. */
 type TrackCounts = { all: number; named: Map<TrackKey, number> }
 type CountedTrack = { counts: TrackCounts; track: TrackFilter }
+/** A listener on tracks: `subscribeBinary()`'s gets their binary frames, `subscribe({ track })`'s their messages. */
+type TrackListener<From extends unknown[]> = {
+  cb: (data: any, info: ChannelPublishInfo & BinaryFrameInfo, ...from: From) => unknown
+  track: TrackFilter
+  text: boolean
+}
 
 /** One view's remote of a member and its listeners on it; each list is made when its first listener is added: most
  *  members never get one. */
 type MemberListeners = {
   remote: RemoteParticipant | null
   dataListeners: Listeners<(data: unknown, info: ChannelPublishInfo) => unknown> | null
-  binary: {
-    listeners: Listeners<{
-      cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown
-      track: TrackFilter
-    }>
-    tracks: TrackCounts
-  } | null
+  binary: { listeners: Listeners<TrackListener<[]>>; tracks: TrackCounts } | null
   updateListeners: Listeners<(meta: ParticipantMeta, prev: ParticipantMeta) => void> | null
   disconnectListeners: Listeners<() => void> | null
   reconnectListeners: Listeners<() => void> | null
@@ -102,7 +104,7 @@ abstract class RoomStateView {
 
   subscribe(
     callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown,
-    options?: ListenerOptions,
+    options?: MessageListenerOptions,
   ): () => void {
     return this._state.subscribe(callback, options)
   }
@@ -167,10 +169,7 @@ class RoomState {
   private readonly roomDataListeners: Listeners<(data: unknown, info: ChannelPublishInfo, from: Sender) => unknown> =
     new Listeners()
 
-  private readonly roomBinaryListeners: Listeners<{
-    cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown
-    track: TrackFilter
-  }> = new Listeners()
+  private readonly roomBinaryListeners: Listeners<TrackListener<[Sender]>> = new Listeners()
 
   private readonly roomBinaryTracks: TrackCounts = newTrackCounts()
   /** The members with a `subscribe()` listener. */
@@ -241,16 +240,20 @@ class RoomState {
   // Each registration returns its unlisten function.
   subscribe(
     cb: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown,
-    opts?: ListenerOptions,
+    opts?: MessageListenerOptions,
   ): () => void {
-    return this.register(this.roomDataListeners, cb, opts)
+    if (opts?.track === undefined) return this.register(this.roomDataListeners, cb, opts)
+    return this.registerRoomTrack(textListener(cb, opts.track), opts)
   }
 
   subscribeBinary(
     cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
     opts?: BinaryListenerOptions,
   ): () => void {
-    const listener = binaryListener(cb, opts)
+    return this.registerRoomTrack(binaryListener(cb, opts), opts)
+  }
+
+  private registerRoomTrack(listener: TrackListener<[Sender]>, opts: ListenerOptions | undefined): () => void {
     return this.register(this.roomBinaryListeners, listener, opts, null, {
       counts: this.roomBinaryTracks,
       track: listener.track,
@@ -373,8 +376,9 @@ class RoomState {
     return 'entry' in resolved ? this.remote(resolved.entry) : resolved.sender
   }
 
-  /** A binary frame names only its sender's id: one from a member not yet known surfaces as `{ id, meta: {} }`. */
-  applyBinary({ from, payload, track, meta }: BinaryFrame, info: ChannelPublishInfo): void {
+  /** A frame names only its sender's id: one from a member not yet known surfaces as `{ id, meta: {} }`. */
+  applyBinary(frame: BinaryFrame, info: ChannelPublishInfo): void {
+    const { from, track, meta } = frame
     const frameInfo: ChannelPublishInfo & BinaryFrameInfo = {
       key: info.key,
       seq: info.seq,
@@ -384,17 +388,15 @@ class RoomState {
     }
     const entry = this.model.entry(from)
     const sender = entry ? this.remote(entry) : senderSnapshot(from, {}, null)
-    // Each listener gets bytes of its own: one may write into them or transfer their buffer.
-    for (const { cb, track: want } of this.roomBinaryListeners.list()) {
-      if (want === EVERY_TRACK || want === track) {
-        invokeChannelListener(cb, [new Uint8Array(payload), frameInfo, sender], this.reportError)
-      }
+    for (const listener of this.roomBinaryListeners.list()) {
+      if (hearsFrame(listener, frame))
+        invokeChannelListener(listener.cb, [listenerData(frame), frameInfo, sender], this.reportError)
     }
     const binary = entry && this.memberListeners.get(entry)?.binary
     if (!binary) return
-    for (const { cb, track: want } of binary.listeners.list()) {
-      if (want === EVERY_TRACK || want === track)
-        invokeChannelListener(cb, [new Uint8Array(payload), frameInfo], this.reportError)
+    for (const listener of binary.listeners.list()) {
+      if (hearsFrame(listener, frame))
+        invokeChannelListener(listener.cb, [listenerData(frame), frameInfo], this.reportError)
     }
   }
 
@@ -432,15 +434,12 @@ class RoomState {
       get isConnected() {
         return model.isConnected(entry)
       },
-      subscribe: (cb, opts) => this.registerLive(entry, (listeners.dataListeners ??= new Listeners()), cb, opts),
-      subscribeBinary: (cb, opts) => {
-        const listener = binaryListener(cb, opts)
-        const binary = (listeners.binary ??= { listeners: new Listeners(), tracks: newTrackCounts() })
-        return this.registerLive(entry, binary.listeners, listener, opts, {
-          counts: binary.tracks,
-          track: listener.track,
-        })
+      subscribe: (cb, opts) => {
+        if (opts?.track === undefined)
+          return this.registerLive(entry, (listeners.dataListeners ??= new Listeners()), cb, opts)
+        return this.registerMemberTrack(entry, listeners, textListener(cb, opts.track), opts)
       },
+      subscribeBinary: (cb, opts) => this.registerMemberTrack(entry, listeners, binaryListener(cb, opts), opts),
       onUpdate: (cb, opts) => this.registerLive(entry, (listeners.updateListeners ??= new Listeners()), cb, opts),
       onDisconnect: (cb, opts) =>
         this.registerLive(entry, (listeners.disconnectListeners ??= new Listeners()), cb, opts),
@@ -455,6 +454,19 @@ class RoomState {
     listeners.remote = remote
     remoteBackings.set(remote, { state: this, entry })
     return remote
+  }
+
+  private registerMemberTrack(
+    entry: MemberEntry,
+    listeners: MemberListeners,
+    listener: TrackListener<[]>,
+    opts: ListenerOptions | undefined,
+  ): () => void {
+    const binary = (listeners.binary ??= { listeners: new Listeners(), tracks: newTrackCounts() })
+    return this.registerLive(entry, binary.listeners, listener, opts, {
+      counts: binary.tracks,
+      track: listener.track,
+    })
   }
 
   /** A departed member's listeners were released at its leave, so one added after it is never held. */
@@ -563,8 +575,25 @@ function normalizeTrackFilter(opts: BinaryListenerOptions | undefined): TrackFil
   return track
 }
 
-function binaryListener<CB>(cb: CB, opts: BinaryListenerOptions | undefined): { cb: CB; track: TrackFilter } {
-  return { cb, track: normalizeTrackFilter(opts) }
+function binaryListener<CB>(
+  cb: CB,
+  opts: BinaryListenerOptions | undefined,
+): { cb: CB; track: TrackFilter; text: boolean } {
+  return { cb, track: normalizeTrackFilter(opts), text: false }
+}
+
+function textListener<CB>(cb: CB, track: unknown): { cb: CB; track: TrackFilter; text: boolean } {
+  assertUsage(isNamedTrack(track), 'subscribe() track should be a valid non-empty string')
+  return { cb, track, text: true }
+}
+
+function hearsFrame({ track, text }: Omit<TrackListener<[]>, 'cb'>, frame: BinaryFrame): boolean {
+  return text === frame.text && (track === EVERY_TRACK || track === frame.track)
+}
+
+/** Of the listener's own: one may write into its bytes or transfer their buffer. */
+function listenerData(frame: BinaryFrame): unknown {
+  return frame.text ? decodeFrameMessage(frame) : new Uint8Array(frame.payload)
 }
 
 function newTrackCounts(): TrackCounts {

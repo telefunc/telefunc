@@ -1,5 +1,6 @@
 export {
   assertKnownOptions,
+  assertPublishOptions,
   isRecord,
   ownMessage,
   ownMetadata,
@@ -20,7 +21,21 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assertUsage } from '../utils/assert.js'
 import { assignAttributes } from './MemberMeta.js'
 import { freezeMeta } from './freezeMeta.js'
-import type { JoinOptions, LeaveCause, ParticipantMeta, RoomMeta, Sender } from '../types.js'
+import type { JoinOptions, LeaveCause, ParticipantMeta, PublishOptions, RoomMeta, Sender } from '../types.js'
+
+function assertPublishOptions(options: PublishOptions | undefined): void {
+  assertKnownOptions(options, ['track', 'lossy', 'retain'], 'publish()')
+  for (const name of ['retain', 'lossy'] as const) {
+    assertUsage(
+      options?.[name] === undefined || typeof options[name] === 'boolean',
+      `publish() options.${name} should be a boolean`,
+    )
+  }
+  assertUsage(
+    options?.lossy === undefined || options.track !== undefined,
+    "publish() options.lossy needs options.track: a message on no track reaches everyone, in the room's order",
+  )
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (!isObject(value) || Array.isArray(value)) return false
