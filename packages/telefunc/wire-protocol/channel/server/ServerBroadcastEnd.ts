@@ -10,11 +10,16 @@ import type { PublishBody } from './PublishBody.js'
 import { CHANNEL_HOLD_MAX_BYTES, CHANNEL_RECONNECT_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
 import { ChannelOverflowError, isChannelOverflowError } from '../channelErrors.js'
 import { isShieldValidationError } from '../../../shared/ShieldValidationError.js'
-import { ACK_STATUS, ERROR_REASON } from '../../wire/frame.js'
+import { ACK_STATUS, ERROR_REASON, type AckResultStatus } from '../../wire/frame.js'
 import type { BroadcastKind, AttachState } from '../../wire/payloads.js'
+
+const NOT_EVEN_NEWEST = 'the server could not hold even the newest message for its client'
+const FELL_BEHIND = 'its client fell behind what the server holds for it; `lossy: true` lets it skip to the newest'
 
 /** What a page's publishes, subscriptions and attaches go to. */
 type BroadcastEndOwner = {
+  /** A publish no wire has taken yet goes as a newer one takes its place: at most its newest waits for its page. */
+  readonly lossy?: boolean
   /** What it returns answers the page's `publish()`. */
   _onPagePublish(serialized: string): unknown
   _onPagePublishBinary(data: Uint8Array): unknown
@@ -25,8 +30,10 @@ type BroadcastEndOwner = {
   /** What its page gets where it falls behind what the server holds for it: at `'missOldest'` it misses the oldest it
    *  may miss of each stream, at `'close'` none, and its channel closes there instead (see `shed`). */
   readonly _whenBehind: 'missOldest' | 'close'
-  /** Its page fell behind and misses its oldest publishes, of those at `behind` (see `ShedLevel`). */
+  /** Its page fell behind and misses its oldest publishes, of those at `behind` (see `ShedLevel`), or a lossy one's. */
   _onPublishesMissed?(): void
+  /** Whether a lossy page's publish on `key` of `kind` reaches this owner's page. */
+  _reaches?(key: string, kind: BroadcastKind): boolean
 }
 
 /** The server end of a page's `ClientBroadcast`: a channel to that page, which also takes the page's publishes and
@@ -37,7 +44,7 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
    *  as one a silently dead wire lost does. */
   private lastPeer: IndexedPeer | null = null
   /** Why it ends, where `shed` couldn't tell its page yet: see `shed`. */
-  private overflow: string | null = null
+  private overflowed: string | null = null
 
   setOwner(owner: BroadcastEndOwner): void {
     this.owner = owner
@@ -67,10 +74,28 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   deliver(body: PublishBody): void {
     this.endOverflowed()
     if (this._phase === 'ended') return
+    const lossy = this.owner?.lossy === true
+    if (lossy) this.letWaitingGo()
     if (this.lastPeer) this.lastPeer.sendPublish(body)
     else this.offlineBuffer.pushPublish(body)
+    if (lossy) return
     const share = this.share()
     if (this.heldBytes > share) this.shed(share)
+  }
+
+  /** A lossy page's publishes that no wire has taken go, as a newer one takes their place. */
+  private letWaitingGo(): void {
+    const replay = this._replayBuffer
+    if (this._phase === 'ended' || !replay) return
+    const seqs = replay.dropNewestPublishes(this.unhanded())
+    if (seqs.length === 0) return
+    this.dropWaiting(seqs)
+    this.owner?._onPublishesMissed?.()
+  }
+
+  /** Where this is a lossy page the publish on `key` of `kind` reaches (on its object), it lets go of what that replaces. */
+  replaceWaitingOf(key: string, kind: BroadcastKind): void {
+    if (getChannelMux() === this.mux && this.owner?._reaches?.(key, kind)) this.letWaitingGo()
   }
 
   /** What it may hold: 60 s of what its page takes, within what any channel may. */
@@ -93,32 +118,41 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   }
 
   /** `MemoryHolder`: its oldest publishes no wire has that its page may miss go, down to `toBytes`, and its page sees the
-   *  jump. Above 0 the newest of each stream stays, and at 0, where not even that fits, the channel ends: no later message
-   *  would show the page. Where its owner's `_whenBehind` is `'close'` and one would go, or what its page can't miss alone
-   *  is over `toBytes`, all of them go and the channel ends: what the page got has no hole. The bytes go at once, but only
-   *  its own object can write to its page, so from another's it ends when its own next runs. */
+   *  jump. Above 0 the newest of each stream stays. Where its page may miss none of them (`'close'`), or what it can't miss
+   *  alone is over `toBytes`, from the gap on everything goes, receipts too, and it reads on up to the gap and no further.
+   *  A lossy one holds no publish waiting but its newest, so it ends only at 0, where not even that fits. The bytes go at
+   *  once, but only its own object can write to its page, so from another's it ends when its own next runs. */
   shed(toBytes: number): void {
     const replay = this._replayBuffer
     if (this._phase === 'ended' || !replay) return
     const owner = this.owner
     assert(owner)
-    const missesOldest = owner._whenBehind === 'missOldest'
-    if (toBytes > 0) {
+    if (owner.lossy && toBytes > 0) return
+    let gapLevel = toBytes
+    if (owner._whenBehind === 'missOldest' && toBytes > 0) {
       const { seqs, keptOver } = replay.dropOldestPublishes(toBytes, this.unhanded())
       this.dropWaiting(seqs)
-      const missed = seqs.length > 0
-      if (!keptOver && (missesOldest || !missed)) {
-        if (missed) owner._onPublishesMissed?.()
-        return
-      }
+      if (seqs.length > 0) owner._onPublishesMissed?.()
+      if (!keptOver) return
+      gapLevel = 0
     }
-    const { seqs } = replay.dropOldestPublishes(0, this.unhanded())
-    this.dropWaiting(seqs)
-    if (toBytes === 0 && seqs.length > 0 && missesOldest) owner._onPublishesMissed?.()
-    this.overflow =
-      toBytes === 0
-        ? 'Broadcast closed: the server could not hold even the newest message for its client'
-        : 'Closed: its client fell behind what the server can hold for it'
+    const gap = replay.dropFromGap(gapLevel, this.unhanded()) > 0
+    if (gap) {
+      this.peer?.sender.queue.dropWaitingFromPublish(this.peer.index)
+      this.dropPendingAnswers()
+    }
+    if (toBytes === 0) this.overflow(NOT_EVEN_NEWEST)
+    else if (gap) this.overflow(FELL_BEHIND)
+  }
+
+  /** An answer past the gap would cross it: the channel ends first, and the publish it answers settles with that. */
+  protected override sendAckRes(ackedSeq: number, result: string, status?: AckResultStatus): void {
+    if (this.overflowed !== null) return this.endOverflowed()
+    super.sendAckRes(ackedSeq, result, status)
+  }
+
+  private overflow(why: string): void {
+    this.overflowed ??= why
     if (getChannelMux() === this.mux) this.endOverflowed()
   }
 
@@ -127,8 +161,8 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   }
 
   private endOverflowed(): void {
-    if (this.overflow === null) return
-    this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(this.overflow))
+    if (this.overflowed === null) return
+    this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(`Broadcast closed: ${this.overflowed}`))
   }
 
   override _attachPeer(peer: IndexedPeer, state?: AttachState): void {
@@ -153,13 +187,18 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   override _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
     const owner = this.owner
     assert(owner)
-    return this.lifecycle.trackAck(this.answerRequest(seq, [(t: string) => owner._onPagePublish(t)], text))
+    // What the publish carries is its owner's to hold, so its request holds only the room for its answer.
+    return this.lifecycle.trackAck(
+      this.answerHeld(seq, 0, () => this.answerRequest(seq, [(t: string) => owner._onPagePublish(t)], text)),
+    )
   }
 
   override _onPeerPublishBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
     const owner = this.owner
     assert(owner)
-    return this.lifecycle.trackAck(this.answerRequest(seq, [(d: Uint8Array) => owner._onPagePublishBinary(d)], data))
+    return this.lifecycle.trackAck(
+      this.answerHeld(seq, 0, () => this.answerRequest(seq, [(d: Uint8Array) => owner._onPagePublishBinary(d)], data)),
+    )
   }
 
   /** A full buffer or a shield failure answers with the status its page's `publish()` rejects with. */

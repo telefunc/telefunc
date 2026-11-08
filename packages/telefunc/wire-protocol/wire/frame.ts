@@ -69,8 +69,8 @@ type PongEntry = { ix: number; lastSeq: number | null }
  *  - `ABORT`: `text` is the serialized abort value.
  *  - `SHIELD_ERROR`: a shield validator rejected the data/ack; `text` is the validator message.
  *    Kept distinct from `ERROR` so the receiving side can throw `ShieldValidationError`.
- *  - `OVERFLOW`: a full buffer refused a publish; `text` is the error message. The publisher throws
- *    `ChannelOverflowError`. */
+ *  - `OVERFLOW`: the server couldn't hold the page's ack request or its answer, with no `text`; or a full buffer refused
+ *    a publish, and `text` says why. The publisher throws `ChannelOverflowError`. */
 const ACK_STATUS = {
   OK: 0x00 as const,
   ERROR: 0x01 as const,

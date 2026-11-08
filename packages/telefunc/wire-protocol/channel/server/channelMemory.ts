@@ -21,9 +21,9 @@ import type { QueueMemory } from '../channelMessages.js'
 /** What a held publish takes beyond its share of the body: its head and its entries. */
 const HELD_PUBLISH_OVERHEAD_BYTES = 200
 
-/** Holds bytes for a page. `shed` lets its oldest no wire has go, down to `toBytes`, never its newest; at 0 the newest goes
- *  too, and its own object ends it, told. One without it refuses instead. `newestUnhanded` is its newest publish, where
- *  no wire has that yet. */
+/** Holds bytes for a page. `shed` frees what no wire has, down to `toBytes`, and its own object ends it where its page
+ *  would miss a message it may not, or at 0. A lossy page's holder only waits on its newest, so above 0 it frees
+ *  nothing. One without `shed` refuses instead. `newestUnhanded` is its newest publish where no wire has it yet. */
 interface MemoryHolder {
   heldBytes: number
   /** Its owner ended, so nothing is held for it any more (see `releaseHolder`). */
@@ -52,12 +52,15 @@ function admit(holder: MemoryHolder, bytes: number): boolean {
   return holder.heldBytes + bytes <= maxMemory / memory.holders.size && memory.total + bytes <= maxMemory
 }
 
-/** Makes room for a delivery, which nobody can refuse: past what's older, it ends as few as must end, where that frees
- *  the bytes. */
-function admitPublish(body: PublishBody): void {
+/** Makes room for a delivery, which nobody can refuse. Near the budget, each page whose waiting publishes it replaces
+ *  lets go of them first (`replace`), so what's measured is what stays; past what's older, it ends as few as must end,
+ *  where that frees the bytes. */
+function admitPublish(body: PublishBody, replace?: (holder: MemoryHolder) => void): void {
   const maxMemory = maxMemoryOf()
   const bytes = body.frame.byteLength
-  reclaim(bytes, shedTarget(maxMemory))
+  const target = shedTarget(maxMemory)
+  if (replace && memory.total + bytes > target) for (const holder of [...memory.holders]) replace(holder)
+  reclaim(bytes, target)
   if (memory.total + bytes <= maxMemory || memory.reclaiming) return
   memory.reclaiming = true
   try {

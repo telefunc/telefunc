@@ -26,7 +26,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage, assertWarning } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import { queueMemory } from './channelMemory.js'
+import { queueMemory, type MemoryHolder } from './channelMemory.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { markHandled } from '../../../utils/markHandled.js'
 import { Listeners } from '../../../utils/Listeners.js'
@@ -41,7 +41,7 @@ const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
 type BroadcastUnsubscribe = () => void
 
 class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
-  readonly _whenBehind = 'missOldest'
+  readonly _whenBehind = 'close'
   readonly [SERVER_BROADCAST_BRAND] = true
   /** @see ChannelShield in ../channel/channel.ts — broadcast only validates incoming
    *  publishes from clients (the `data` direction). The `ack` slot is unused: publish
@@ -61,9 +61,15 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
   private readonly peerSubscriptions: Record<BroadcastKind, boolean> = { text: false, binary: false }
   private missedWarned = false
 
-  constructor(opts: { key: string }) {
-    assertBroadcastKey(opts.key)
-    this.key = opts.key
+  /** A newer publish replaces those no wire has taken yet, on the way to its page and on the page's way up. */
+  readonly lossy: boolean
+
+  constructor(opts: BroadcastChannelOptions) {
+    const { key, lossy = false } = opts
+    assertBroadcastKey(key)
+    assertUsage(typeof lossy === 'boolean', "`new BroadcastChannel()`'s `lossy` should be a boolean")
+    this.key = key
+    this.lossy = lossy
     this._end = new ServerBroadcastEnd()
     this._end.setOwner(this)
     this.routes = {
@@ -181,7 +187,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
       }
     }
     if (!this.peerSubscriptions.text) return
-    this._end.deliver(bodyOf(this.key, serialized, rawInfo))
+    this._end.deliver(bodyOf(serialized, rawInfo, (holder) => this.replaceIn(holder, 'text')))
   }
 
   private deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
@@ -196,7 +202,18 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
       }
     }
     if (!this.peerSubscriptions.binary) return
-    this._end.deliver(bodyOf(this.key, data, rawInfo))
+    this._end.deliver(bodyOf(data, rawInfo, (holder) => this.replaceIn(holder, 'binary')))
+  }
+
+  /** Where `holder` is a lossy page this publish reaches (its key, on its object), it lets go of what the publish
+   *  replaces. */
+  private replaceIn(holder: MemoryHolder, kind: BroadcastKind): void {
+    if (holder instanceof ServerBroadcastEnd) holder.replaceWaitingOf(this.key, kind)
+  }
+
+  /** @internal `BroadcastEndOwner`. */
+  _reaches(key: string, kind: BroadcastKind): boolean {
+    return this.lossy && key === this.key && this.peerSubscriptions[kind]
   }
 
   /** @internal `BroadcastEndOwner`: its page is told by `info.seq`, and the server's log by this once. */
@@ -205,7 +222,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     this.missedWarned = true
     assertWarning(
       false,
-      `A \`BroadcastChannel\` on key "${this.key}" fell behind what the server holds for its client, which misses its oldest messages: \`info.seq\` shows the gap on the client.`,
+      `A lossy \`BroadcastChannel\` on key "${this.key}" skipped messages its client hadn't taken yet: \`info.seq\` shows the gap on the client.`,
       { onlyOnce: false },
     )
   }
@@ -306,8 +323,22 @@ function publishOnPlane<Kind extends BroadcastKind>(
   }
 }
 
+type BroadcastChannelOptions = {
+  key: string
+  /**
+   * A client that can't keep up skips to the newest: a newer message replaces those no connection has taken yet, and
+   * `info.seq` jumps over them. Without it, the client gets every message, or the channel closes with
+   * `ChannelOverflowError` past what the server holds for it.
+   *
+   * https://telefunc.com/channel#skip-to-the-newest
+   *
+   * @default false
+   */
+  lossy?: boolean
+}
+
 const BroadcastChannel = ServerBroadcast as {
-  new <T = unknown>(opts: { key: string }): BroadcastChannel<T>
+  new <T = unknown>(opts: BroadcastChannelOptions): BroadcastChannel<T>
 }
 
 const globalObject = getGlobalObject('wire-protocol/channel/server/ServerBroadcast.ts', {
@@ -315,11 +346,14 @@ const globalObject = getGlobalObject('wire-protocol/channel/server/ServerBroadca
   publishBodies: new WeakMap<WirePublishInfo, PublishBody>(),
 })
 
-/** Its subscribers' pages may miss it: the broadcast is one stream, its `key`. */
-function bodyOf(key: string, payload: string | Uint8Array, info: WirePublishInfo): PublishBody {
+function bodyOf(
+  payload: string | Uint8Array,
+  info: WirePublishInfo,
+  replace: (holder: MemoryHolder) => void,
+): PublishBody {
   let body = globalObject.publishBodies.get(info)
   if (!body) {
-    body = publishBody(payload, info, { level: 'behind', stream: key })
+    body = publishBody(payload, info, { level: 'never' }, replace)
     globalObject.publishBodies.set(info, body)
   }
   return body

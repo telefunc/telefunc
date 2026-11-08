@@ -4,11 +4,11 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { HEADER } from '../wire/header.js'
 
 /** What `listeners[i]` gets of `value`: bytes of its own, which it may keep or transfer without touching another
- *  listener's. The last takes the frame itself where its buffer holds nothing else: a frame on Node can be a view of a
- *  socket read. */
-function forListener<T>(value: T, listeners: readonly unknown[], i: number): T {
+ *  listener's. The last takes `value` itself where its buffer holds only it and the `ahead` bytes its frame has before
+ *  it: a frame on Node can be a view of a socket read. */
+function forListener<T>(value: T, listeners: readonly unknown[], i: number, ahead = HEADER): T {
   if (!(value instanceof Uint8Array)) return value
-  const ownsBuffer = i === listeners.length - 1 && value.buffer.byteLength === value.byteLength + HEADER
+  const ownsBuffer = i === listeners.length - 1 && value.buffer.byteLength === ahead + value.byteLength
   return ownsBuffer ? value : (new Uint8Array(value) as T)
 }
 

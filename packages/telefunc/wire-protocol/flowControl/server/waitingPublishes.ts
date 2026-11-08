@@ -1,4 +1,4 @@
-export { countWaitingPublishes, droppingPublishes, overtakes }
+export { countWaitingPublishes, droppingPublishes, droppingFromPublish, overtakes }
 export type { WireQueue }
 
 import { SEQ_OFFSET, SEQ_SPAN, readU16, readU32 } from '../../wire/header.js'
@@ -10,6 +10,8 @@ interface WireQueue {
   waitingPublishes(ix: number): number
   /** Drops channel `ix`'s publishes at `seqs`, oldest first, that wait here. */
   dropWaitingPublishes(ix: number, seqs: readonly number[]): void
+  /** Drops what of channel `ix` waits here from its oldest publish on, receipts too. */
+  dropWaitingFromPublish(ix: number): void
   /** The rate the page takes data at, in bytes per ms, 0 before one was measured. */
   drainRate(): number
 }
@@ -43,6 +45,21 @@ function countWaitingPublishes(waiting: Iterable<Uint8Array>, ix: number): numbe
   let count = 0
   for (const frame of waiting) if (isHeadOf(frame, ix)) count++
   return count
+}
+
+/** Tells, in the queue's order, whether each frame goes: channel `ix`'s sequenced frames from its first head on, and the
+ *  body after each head. */
+function droppingFromPublish(ix: number): (frame: Uint8Array) => boolean {
+  let dropping = false
+  let bodyNext = false
+  return (frame) => {
+    if (bodyNext) {
+      bodyNext = false
+      return true
+    }
+    if (isHeadOf(frame, ix)) dropping = bodyNext = true
+    return dropping && isSequencedTag(frame[0]!) && !isPublishBody(frame[0]!) && readU16(frame, 1) === ix
+  }
 }
 
 /** Tells, in the queue's order, whether each frame goes: channel `ix`'s heads at `seqs`, oldest first, and the body

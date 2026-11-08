@@ -29,6 +29,7 @@ import { TAG, passesData } from '../../wire/tags.js'
 import { DrainRate } from '../../flowControl/DrainRate.js'
 import {
   countWaitingPublishes,
+  droppingFromPublish,
   droppingPublishes,
   overtakes,
   type WireQueue,
@@ -129,7 +130,14 @@ class EventStream implements WireQueue {
   }
 
   dropWaitingPublishes(ix: number, seqs: readonly number[]): void {
-    const drops = droppingPublishes(ix, seqs)
+    this.dropWaiting(droppingPublishes(ix, seqs))
+  }
+
+  dropWaitingFromPublish(ix: number): void {
+    this.dropWaiting(droppingFromPublish(ix))
+  }
+
+  private dropWaiting(drops: (frame: Uint8Array) => boolean): void {
     this.waiting.remove((frame) => {
       if (!drops(frame)) return false
       this.waitingBytes -= eventBytes(frame)

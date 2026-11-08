@@ -42,6 +42,7 @@ export {
   onChannelLinkShare,
   onChannelSlowUplink,
   onChannelPublishesBehind,
+  onChannelAcksWaiting,
   onChannelAcrossFlip,
   onPublishAcrossFlip,
   onChannelOpenAnswer,
@@ -66,6 +67,7 @@ import { sendOwnBytes, listenOwnBytesAlone, listenOwnBytesBeside } from './ownBy
 
 import { Channel, Abort, Broadcast, BroadcastChannel, config } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
+import { cutWireSockets } from '../../wire-sockets'
 
 type ServerMessage = { type: 'tick'; count: number } | { type: 'echo'; text: string } | { type: 'welcome' }
 type ClientMessage = { type: 'ping' } | { type: 'echo'; text: string }
@@ -874,17 +876,65 @@ async function onChannelLinkShare() {
   return { download: download.client, ping: ping.client }
 }
 
-/** A broadcast that publishes `count` bodies of `bytes`, or closes, as a channel beside it asks, and answers its pings. */
-async function onChannelPublishesBehind(bytes = 4 * 1024 * 1024) {
-  const broadcast = new BroadcastChannel({ key: `behind:${crypto.randomUUID()}` })
-  const control = new Channel<(msg: 'ping' | 'close' | number) => string, never>()
+/** A broadcast that publishes `count` bodies of `bytes`, or closes, as a channel beside it asks, and answers its pings.
+ *  After `'away'`, the page's next publish drops its connections: one body follows on the cut wire, ahead of that
+ *  publish's receipt, and 16 more while the page is away (it retries after 500 ms). `'last'` answers the ordinal of the
+ *  newest `<ordinal>:…` text its server subscription got. */
+async function onChannelPublishesBehind(
+  bytes = 4 * 1024 * 1024,
+  lossy?: boolean,
+  key = `behind:${crypto.randomUUID()}`,
+) {
+  const broadcast = new BroadcastChannel({ key, lossy })
+  const publish = (count: number) => {
+    for (let i = 0; i < count; i++) void broadcast.publishBinary(new Uint8Array(bytes))
+  }
+  let lastOrdinal = 'none'
+  broadcast.subscribe((message) => {
+    if (typeof message === 'string' && /^\d+:/.test(message)) lastOrdinal = message.slice(0, message.indexOf(':'))
+  })
+  const control = new Channel<(msg: 'ping' | 'close' | 'away' | 'last' | number) => string, never>()
   control.listen(async (msg) => {
     if (msg === 'ping') return 'pong'
+    if (msg === 'last') return lastOrdinal
     if (msg === 'close') return String(await broadcast.close({ timeout: 20_000 }))
-    for (let i = 0; i < msg; i++) void broadcast.publishBinary(new Uint8Array(bytes))
+    if (msg === 'away') {
+      const stop = broadcast.subscribe(() => {
+        stop()
+        cutWireSockets()
+        publish(1)
+        setTimeout(() => publish(16), 100)
+      })
+      return 'armed'
+    }
+    publish(msg)
     return 'published'
   })
   return { broadcast, control: control.client }
+}
+
+/** A channel whose `{ ack: true }` sends wait for a release, then each answers 4 KiB, and one beside it. `'started'`
+ *  answers how many wait; `'release'` drops the page's connections and answers them while the page is away. A send
+ *  of `'next'` is answered at once. */
+async function onChannelAcksWaiting() {
+  let release = () => {}
+  const released = new Promise<void>((resolve) => (release = resolve))
+  let started = 0
+  const channel = new Channel<(msg: number | 'next') => string, never>()
+  channel.listen(async (msg) => {
+    if (msg === 'next') return 'answered next'
+    started++
+    await released
+    return 'x'.repeat(4096)
+  })
+  const control = new Channel<(msg: 'started' | 'release') => string, never>()
+  control.listen((msg) => {
+    if (msg === 'started') return String(started)
+    cutWireSockets()
+    setTimeout(release, 100)
+    return 'released'
+  })
+  return { channel: channel.client, control: control.client }
 }
 
 /** A broadcast, and a channel that shows the page's upgrade finished: what the page sends waits for that. */
@@ -1080,8 +1130,10 @@ async function onChannelOwnBytes() {
   return { alone: alone.client, beside: beside.client }
 }
 
+/** Three acknowledged sends of 800 KiB before the page attaches, and an answer to each of the page's own. */
 async function onChannelOfflineBudgets() {
-  const ch = new Channel<never, string>()
+  const ch = new Channel<(msg: string) => string, string>()
+  ch.listen((msg) => `answered ${msg}`)
   // Sent before the page attaches: they wait in the channel's buffer until it does.
   const sends = Array.from({ length: 3 }, () => ch.send('x'.repeat(800 * 1024), { ack: true }))
   void Promise.allSettled(sends).then((results) => {

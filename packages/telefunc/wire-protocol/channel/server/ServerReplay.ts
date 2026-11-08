@@ -100,6 +100,33 @@ class ServerReplay {
     return { seqs, keptOver: kept && this.holder.heldBytes > toBytes }
   }
 
+  /** Its newest `droppable` publishes go, for a newer one to take their place: the page's `info.seq` shows what it
+   *  skipped. Receipts stay. Returns the seqs that went, oldest first. The older ones are on the wire, which a reconnect
+   *  may have to send again. */
+  dropNewestPublishes(droppable: number): number[] {
+    const seqs: number[] = []
+    for (let i = this.oldestDroppable(droppable); i < this.seqs.length; i++) {
+      if (!this.bodies[i]) continue
+      seqs.push(this.seqs[i]!)
+      this.drop(i)
+    }
+    this.compact()
+    return seqs
+  }
+
+  /** For a page that may miss none: where its holder holds more than `toBytes`, and one of its newest `droppable`
+   *  publishes may go (any at 0, all but the newest above), the oldest of them goes with every frame after it, receipts
+   *  too, so nothing reaches the page past the gap. Returns how many publishes went. */
+  dropFromGap(toBytes: number, droppable: number): number {
+    const waiting = Math.min(this.publishes, droppable)
+    const mayGo = toBytes === 0 ? waiting : waiting - 1
+    if (mayGo <= 0 || this.holder.heldBytes <= toBytes) return 0
+    const publishes = this.publishes
+    for (let i = this.oldestDroppable(droppable); i < this.seqs.length; i++) this.drop(i)
+    this.compact()
+    return publishes - this.publishes
+  }
+
   /** The body of the newest publish it holds. */
   newestPublish(): PublishBody | undefined {
     for (let i = this.seqs.length - 1; i >= this.first; i--) {
@@ -107,6 +134,17 @@ class ServerReplay {
       if (body) return body
     }
     return undefined
+  }
+
+  /** Where the oldest of its newest `droppable` publishes is: the older ones are on the wire. */
+  private oldestDroppable(droppable: number): number {
+    let pinned = this.publishes - Math.min(this.publishes, droppable)
+    for (let i = this.first; i < this.seqs.length; i++) {
+      if (!this.bodies[i]) continue
+      if (pinned === 0) return i
+      pinned--
+    }
+    return this.seqs.length
   }
 
   dispose(): void {

@@ -47,6 +47,9 @@ import { forListener, listenerAnswer } from '../listenerAnswer.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 
+/** What a page's `send(…, { ack: true })` rejects with where the server can't hold it or its answer. */
+const ACK_REFUSED_TEXT = 'Send refused: the server holds the most for this channel, or config.channel.maxMemory'
+
 /** The connection a channel rides (see `ClientConnection.getOrCreate`). */
 type ConnectionOptions = {
   transports: ChannelTransports
@@ -418,7 +421,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
           pending.reject(new ShieldValidationError(text))
           return
         case ACK_STATUS.OVERFLOW:
-          pending.reject(new ChannelOverflowError(text))
+          pending.reject(new ChannelOverflowError(text || ACK_REFUSED_TEXT))
       }
     } catch (err) {
       pending.reject(err instanceof Error ? err : new Error(String(err)))
@@ -474,9 +477,12 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** An ack-bearing send: what refuses it throws here, as it does for a send without an ack. */
-  protected sendAckReq<T, D>(encodeFrame: SequencedEncoder<D>, data: D): Promise<T> {
+  protected sendAckReq<T, D>(encodeFrame: SequencedEncoder<D>, data: D, onQueued?: (seq: number) => void): Promise<T> {
     const ack = createDeferred<T>()
-    this.connection.sendSequenced(this, 'ack', encodeFrame, data, (seq) => this.pendingAcks.set(seq, ack))
+    this.connection.sendSequenced(this, 'ack', encodeFrame, data, (seq) => {
+      this.pendingAcks.set(seq, ack)
+      onQueued?.(seq)
+    })
     return this.lifecycle.trackAck(ack.promise)
   }
 

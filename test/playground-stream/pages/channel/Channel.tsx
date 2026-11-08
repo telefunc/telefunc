@@ -4,7 +4,14 @@ import { prepareIteratorAck, sendIteratorAck, type IteratorAckOptions } from './
 import { sendOwnBytes, listenOwnBytesAlone, listenOwnBytesBeside } from './ownBytesProbe'
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Abort as TelefuncAbort, abort, close, ConnectionError, withContext } from 'telefunc/client'
+import {
+  Abort as TelefuncAbort,
+  abort,
+  ChannelOverflowError,
+  close,
+  ConnectionError,
+  withContext,
+} from 'telefunc/client'
 import {
   onChannelInit,
   onChannelAbortTest,
@@ -49,6 +56,7 @@ import {
   onChannelLinkShare,
   onChannelSlowUplink,
   onChannelPublishesBehind,
+  onChannelAcksWaiting,
   onChannelAcrossFlip,
   onPublishAcrossFlip,
   onChannelOpenAnswer,
@@ -94,6 +102,39 @@ async function openChannel<T>(open: () => Promise<T>): Promise<T> {
     }
   }
   throw lastErr
+}
+
+// `count` acknowledged sends at once, each waiting on the server for its answer. As many as the server can hold room for
+// their answers run; the rest close the channel. Then their answers come while the page is away.
+async function acksWaitingOutcome(count: number) {
+  const { channel, control } = await openChannel(onChannelAcksWaiting)
+  const closed = new Promise<string>((resolve) => channel.onClose((err) => resolve(err?.name ?? 'none')))
+  let settledEarly = 0
+  const sends = Array.from({ length: count }, (_, n) =>
+    channel
+      .send(n, { ack: true })
+      .then(
+        () => 'answered',
+        (err: Error) => err.name,
+      )
+      .finally(() => settledEarly++),
+  )
+  // Until each waits on the server, or was refused as it came.
+  const allIn = async () => {
+    while (!channel.isClosed && Number(await control.send('started', { ack: true })) + settledEarly < count) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    return 'open'
+  }
+  const ended = await Promise.race([closed, allIn()])
+  const started = Number(await control.send('started', { ack: true }))
+  await control.send('release', { ack: true })
+  const settled: Record<string, number> = {}
+  for (const outcome of await Promise.all(sends)) settled[outcome] = (settled[outcome] ?? 0) + 1
+  const next = channel.isClosed ? null : await channel.send('next', { ack: true })
+  channel.close()
+  control.close()
+  return { ended, started, settled, next }
 }
 type AcrossFlipPage = { publishAcrossFlip(bytes: number): Promise<void>; sendAcrossFlip(): Promise<void> }
 const OPEN_CHANNEL_ATTEMPTS = 4
@@ -207,7 +248,23 @@ type ChannelState = {
   slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
   publishesBehind: { pingMs: number; closed: string; closeMs: number } | null
   broadcastOverflow: { received: number; closeErr: string } | null
-  broadcastBehind: { seqsAhead: number[]; isClosed: boolean } | null
+  broadcastBehind: {
+    seqsAhead: number[]
+    isClosed: boolean
+    receiptAhead: number
+    opening: { receipts: number; last: string }
+    reconnected: { receipts: number; last: string }
+  } | null
+  broadcastAwayShared: { received: number[][]; closed: string[] } | null
+  acksWaiting:
+    | { ended: string; started: number; settled: Record<string, number>; next: string | null }
+    | { error: string }
+    | null
+  broadcastBehindCloses: {
+    seqsAhead: number[]
+    closeErr: string | null
+    across: { publish: string; received: number; closeErr: string }
+  } | null
   acrossFlip: { received: number[] } | null
   lateCallbacks: { channelId: string; onOpen: boolean; onCloseAbortValue: unknown } | null
   openAbort: { channelId: string; abortValue: unknown } | null
@@ -296,6 +353,9 @@ const initialState: ChannelState = {
   publishesBehind: null,
   broadcastOverflow: null,
   broadcastBehind: null,
+  broadcastBehindCloses: null,
+  broadcastAwayShared: null,
+  acksWaiting: null,
   acrossFlip: null,
   lateCallbacks: null,
   openAbort: null,
@@ -1270,7 +1330,14 @@ function ChannelDemo() {
   const testOfflineBudgets = useCallback(async () => {
     const { channel } = await openChannel(onChannelOfflineBudgets)
     channel.listen(() => new Promise<void>((done) => setTimeout(done, 1000)))
-    document.querySelector('#channel-offline-budgets-result')!.textContent = JSON.stringify({ id: channel.id })
+    // The page's own: one more than the server holds for a channel is refused, and the next is answered.
+    const refused = await channel.send('x'.repeat(3 * 1024 * 1024), { ack: true }).then(
+      () => 'answered',
+      (err: Error) => (err instanceof ChannelOverflowError ? 'ChannelOverflowError' : `${err.name}: ${err.message}`),
+    )
+    const next = await channel.send('next', { ack: true })
+    const result = { id: channel.id, refused, next, isClosed: channel.isClosed }
+    document.querySelector('#channel-offline-budgets-result')!.textContent = JSON.stringify(result)
   }, [])
 
   const testCreditFailure = useCallback(async () => {
@@ -1476,19 +1543,118 @@ function ChannelDemo() {
 
   const testBroadcastBehind = useCallback(async () => {
     setChannelState((s) => ({ ...s, broadcastBehind: null }))
-    const { broadcast, control } = await openChannel(() => onChannelPublishesBehind(256 * 1024))
+    const { broadcast, control } = await openChannel(() => onChannelPublishesBehind(256 * 1024, true))
+    // The page's own 20 publishes at once, each its ordinal at the same size: one still waiting to go takes the next
+    // one's data in its place, and both get its receipt. The server's subscription gets the last.
+    const publishOrdinals = async (from: number) => {
+      const receipts = await Promise.all(
+        Array.from({ length: 20 }, (_, n) => broadcast.publish(`${from + n}:`.padEnd(256 * 1024, 'x'))),
+      )
+      return {
+        receipts: new Set(receipts.map((receipt) => receipt.seq)).size,
+        last: await control.send('last', { ack: true }),
+      }
+    }
+    // As it opens, faster than its uplink takes them, they wait for its headroom.
+    const opening = await publishOrdinals(0)
     const { seq: before } = await broadcast.publish('before the burst')
     const seqsAhead: number[] = []
-    const newest = new Promise<void>((resolve) => {
+    broadcast.subscribeBinary((_, info) => seqsAhead.push(info.seq - before))
+    const reaching = (ahead: number) =>
+      new Promise<void>((resolve) => broadcast.subscribeBinary((_, info) => info.seq === before + ahead && resolve()))
+    const burst = reaching(16)
+    void control.send(16)
+    await burst
+    // A publish outstanding across a disconnect, as the page falls behind: its receipt and the newest, 17 later, come.
+    const newest = reaching(34)
+    await control.send('away', { ack: true })
+    const { seq } = await broadcast.publish('across the disconnect')
+    await newest
+    // Right after its reconnect, they wait in the page's held queue.
+    const reconnected = await publishOrdinals(100)
+    const broadcastBehind = {
+      seqsAhead,
+      isClosed: broadcast.isClosed,
+      receiptAhead: seq - before,
+      opening,
+      reconnected,
+    }
+    setChannelState((s) => ({ ...s, broadcastBehind }))
+    control.close()
+  }, [])
+
+  const testBroadcastBehindCloses = useCallback(async () => {
+    setChannelState((s) => ({ ...s, broadcastBehindCloses: null }))
+    const opened = () => openChannel(() => onChannelPublishesBehind(256 * 1024))
+    const { broadcast, control } = await opened()
+    const { seq: before } = await broadcast.publish('before the burst')
+    const seqsAhead: number[] = []
+    // It closes, or, as a lossy one does, reads on up to the newest.
+    const ended = new Promise<string | null>((resolve) => {
+      broadcast.onClose((err) => resolve(err?.name ?? 'none'))
       broadcast.subscribeBinary((_, info) => {
         seqsAhead.push(info.seq - before)
-        if (info.seq === before + 16) resolve()
+        if (info.seq === before + 16) resolve(null)
       })
     })
     void control.send(16)
-    await newest
-    setChannelState((s) => ({ ...s, broadcastBehind: { seqsAhead, isClosed: broadcast.isClosed } }))
+    const closeErr = await ended
     control.close()
+    // A publish outstanding across a disconnect, as the page falls behind: it settles with the close, and nothing that
+    // follows it comes.
+    const away = await opened()
+    let received = 0
+    away.broadcast.subscribeBinary(() => received++)
+    const closed = new Promise<string>((resolve) => away.broadcast.onClose((err) => resolve(err?.name ?? 'none')))
+    await away.control.send('away', { ack: true })
+    const publish = await away.broadcast.publish('across the disconnect').then(
+      () => 'resolved',
+      (err: Error) => err.name,
+    )
+    const across = { publish, received, closeErr: await closed }
+    setChannelState((s) => ({ ...s, broadcastBehindCloses: { seqsAhead, closeErr, across } }))
+    away.control.close()
+  }, [])
+
+  const testAcksWaiting = useCallback(async (count: number) => {
+    setChannelState((s) => ({ ...s, acksWaiting: null }))
+    const acksWaiting = await acksWaitingOutcome(count).catch((err: Error) => ({
+      error: `${err.name}: ${err.message}`,
+    }))
+    setChannelState((s) => ({ ...s, acksWaiting }))
+  }, [])
+
+  const testBroadcastAwayShared = useCallback(async () => {
+    setChannelState((s) => ({ ...s, broadcastAwayShared: null }))
+    // Two lossy broadcasts on one key, with bodies of 1200 KiB: one fits the lane's 2 MiB, two don't.
+    const key = `away-shared:${crypto.randomUUID()}`
+    const pages = await Promise.all(
+      [0, 1].map(() => openChannel(() => onChannelPublishesBehind(1200 * 1024, true, key))),
+    )
+    const { broadcast, control } = pages[0]!
+    const { seq: before } = await broadcast.publish('before the disconnect')
+    const received: number[][] = [[], []]
+    const closed = ['open', 'open']
+    // Its publish (1) is outstanding as its connection drops, and 17 bodies follow while it is away: each receives the
+    // newest (18), or closes.
+    const newest = pages.map(
+      ({ broadcast }, i) =>
+        new Promise<void>((resolve) => {
+          broadcast.subscribeBinary((_, info) => {
+            received[i]!.push(info.seq - before)
+            if (info.seq === before + 18) resolve()
+          })
+          broadcast.onClose((err) => {
+            closed[i] = err?.name ?? 'none'
+            resolve()
+          })
+        }),
+    )
+    await control.send('away', { ack: true })
+    void broadcast.publish('across the disconnect').catch(() => {})
+    await Promise.all(newest)
+    setChannelState((s) => ({ ...s, broadcastAwayShared: { received, closed } }))
+    for (const { control } of pages) control.close()
   }, [])
 
   const testAcrossFlip = useCallback(async () => {
@@ -1907,7 +2073,39 @@ function ChannelDemo() {
             onClick={testBroadcastBehind}
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
-            Broadcast Publishes More Than The Client Keeps Up With
+            Lossy Broadcast Publishes More Than The Client Keeps Up With
+          </button>
+          <button
+            id="channel-test-broadcast-behind-closes"
+            type="button"
+            onClick={testBroadcastBehindCloses}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Broadcast Closes A Client That Falls Behind
+          </button>
+          <button
+            id="channel-test-acks-waiting"
+            type="button"
+            onClick={() => testAcksWaiting(500)}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            500 Acknowledged Sends Wait For Their Answers
+          </button>
+          <button
+            id="channel-test-acks-flood"
+            type="button"
+            onClick={() => testAcksWaiting(10_000)}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            10,000 Acknowledged Sends Wait For Their Answers
+          </button>
+          <button
+            id="channel-test-broadcast-away-shared"
+            type="button"
+            onClick={testBroadcastAwayShared}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Two Lossy Broadcasts Whose Client Is Away Past What Two Bodies Fit
           </button>
           <button
             id="channel-test-across-flip"

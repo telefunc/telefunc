@@ -3,7 +3,7 @@ export type { ShedLevel }
 
 import { encode } from '../../wire/frame.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
-import { admitPublish } from './channelMemory.js'
+import { admitPublish, type MemoryHolder } from './channelMemory.js'
 
 /** What a page that falls behind what the server holds for it may miss of a publish: `never`, or, at `behind`, the
  *  oldest of its `stream`, of which a shed keeps the newest (see `ServerBroadcastEnd.shed`). */
@@ -23,9 +23,14 @@ class PublishBody {
 }
 
 /** The body of a publish at `info`, admitted before anyone holds it: one per delivery, whoever it goes to. */
-function publishBody(payload: string | Uint8Array, info: WirePublishInfo, shed: ShedLevel): PublishBody {
+function publishBody(
+  payload: string | Uint8Array,
+  info: WirePublishInfo,
+  shed: ShedLevel,
+  replace?: (holder: MemoryHolder) => void,
+): PublishBody {
   const frame = typeof payload === 'string' ? encode.publish(payload, info) : encode.publishBinary(payload, info)
   const body = new PublishBody(frame, shed)
-  admitPublish(body)
+  admitPublish(body, replace)
   return body
 }

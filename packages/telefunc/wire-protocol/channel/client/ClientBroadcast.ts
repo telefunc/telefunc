@@ -10,17 +10,21 @@ import type {
 } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
-import { encode, type ChannelDataFrame } from '../../wire/frame.js'
+import { encode, type ChannelDataFrame, type SequencedEncoder } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { BroadcastKind, BroadcastSubscriptions } from '../../wire/payloads.js'
-import type { WirePublishInfo } from '../../wire/publishInfo.js'
+import { PUBLISH_BINARY_HEADER, type WirePublishInfo } from '../../wire/publishInfo.js'
+import { HEADER } from '../../wire/header.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { ChannelClosedError, isExpectedChannelFailure } from '../channelErrors.js'
 import { classifyTelefuncError } from '../errorClassification.js'
 import { isPromise } from '../../../utils/isPromise.js'
+import { forListener } from '../listenerAnswer.js'
 import { assertWarning } from '../../../utils/assert.js'
 import { ClientChannel, reportChannelError, type ClientChannelOptions } from './ClientChannel.js'
+
+type ClientBroadcastOptions = ClientChannelOptions & { lossy?: boolean }
 
 class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
@@ -29,9 +33,14 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private missedWarned = false
   /** Who hears each gap in place of the warning: a Room view, which warns in a Room's words. */
   private missedHandler: (() => void) | null = null
+  /** A newer publish replaces this page's own that no wire has taken yet: see `sendPublish`. */
+  private readonly lossy: boolean
+  /** This page's newest publish on a lossy broadcast, which may still wait to go. */
+  private newestPublish: { seq: number; receipt: Promise<ChannelPublishAck> } | null = null
 
-  constructor(options: ClientChannelOptions) {
+  constructor(options: ClientBroadcastOptions) {
     super(options)
+    this.lossy = options.lossy === true
     // Nothing waits on a publish's credit, so the page grants the largest window from the start.
     this.receiveCredit.widenByteWindow()
     this._attach.declareSubscriptions(this.subscribed)
@@ -73,7 +82,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   /** @internal A publish that leaves reporting its rejection to the caller. */
   _publishUnreported(data: ChannelData<T>): Promise<ChannelPublishAck> {
     if (this.stopped) throw new ChannelClosedError()
-    return this.sendAckReq<ChannelPublishAck, string>(encode.publishAckReq, stringify(data))
+    return this.sendPublish(encode.publishAckReq, stringify(data))
   }
 
   override messages(options?: { signal?: AbortSignal }) {
@@ -91,7 +100,18 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   /** @internal A publish that leaves reporting its rejection to the caller. */
   _publishBinaryUnreported(data: Uint8Array): Promise<ChannelPublishAck> {
     if (this.stopped) throw new ChannelClosedError()
-    return this.sendAckReq<ChannelPublishAck, Uint8Array>(encode.publishBinaryAckReq, data)
+    return this.sendPublish(encode.publishBinaryAckReq, data)
+  }
+
+  /** On a lossy broadcast, a publish that still waits to go takes the newer one's data in its place, and both get its
+   *  receipt. */
+  private sendPublish<D>(encodeFrame: SequencedEncoder<D>, data: D): Promise<ChannelPublishAck> {
+    const newest = this.newestPublish
+    if (newest !== null && this.connection.replaceWaiting(this, newest.seq, encodeFrame, data)) return newest.receipt
+    let seq = 0
+    const receipt = this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data, (queued) => (seq = queued))
+    if (this.lossy) this.newestPublish = { seq, receipt }
+    return receipt
   }
 
   subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
@@ -172,10 +192,10 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private onPeerPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
     const info = { key: this.key!, seq: wireInfo.seq, timestamp: wireInfo.timestamp }
-    for (const cb of this.subscribers.binary.list()) {
+    const list = this.subscribers.binary.list()
+    for (const [i, cb] of list.entries()) {
       try {
-        // Bytes of its own: a listener may write into them or transfer their buffer.
-        const result = cb(new Uint8Array(data), info)
+        const result = cb(forListener(data, list, i, HEADER + PUBLISH_BINARY_HEADER), info)
         if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
       } catch (err) {
         if (this.lifecycle.handleCallbackError(err)) return

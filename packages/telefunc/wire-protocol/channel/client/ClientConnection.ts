@@ -64,6 +64,8 @@ interface MuxConnection {
     data: T,
     onQueued?: (seq: number) => void,
   ): number
+  /** Puts a newer frame in the place of the channel's frame `seq` while that still waits to go: false once it went. */
+  replaceWaiting<T>(channel: MuxChannel, seq: number, encodeFrame: SequencedEncoder<T>, data: T): boolean
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status?: AckResultStatus): void
   sendAbort(channel: MuxChannel, abortValue: string): void
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
@@ -211,6 +213,18 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     onQueued?.(seq)
     this.gate.send(record, seq, frame, kind)
     return frame.byteLength
+  }
+
+  replaceWaiting<T>(channel: MuxChannel, seq: number, encodeFrame: SequencedEncoder<T>, data: T): boolean {
+    const record = this.channels.of(channel)
+    if (record === undefined) return false
+    const frame = encodeFrame(record.ix, data, seq)
+    const maxFrameBytes = this.maxFrameBytesOf(channel)
+    assertUsage(
+      frame.byteLength <= maxFrameBytes,
+      `Channel message too large: ${frame.byteLength} bytes encoded, the server accepts ${maxFrameBytes} at most`,
+    )
+    return this.gate.replaceWaiting(record.ix, seq, frame)
   }
 
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {

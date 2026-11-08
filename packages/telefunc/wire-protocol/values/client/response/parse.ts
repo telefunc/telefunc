@@ -119,6 +119,7 @@ async function reviveResponse(
       return new ClientBroadcast({
         channelId: opts.channelId,
         key: opts.key,
+        lossy: opts.lossy,
         maxFrameBytes: opts.maxFrameBytes,
         connection,
       })

@@ -75,13 +75,14 @@ import type {
 } from '../../wire/frame.js'
 import type { AttachState, BroadcastKind } from '../../wire/payloads.js'
 
-/** What a page's ack request gets where the server can't hold it or its answer. */
-const NOT_ADMITTED_TEXT = 'The server holds all it may for this channel; try again later'
-
 /** What an answer of `result` holds in a replay, or while its page is away. */
 function heldAnswerBytes(result: string): number {
   return utf8ByteLength(result) + MESSAGE_FRAME_OVERHEAD_MAX_BYTES + HELD_SEND_OVERHEAD_BYTES
 }
+/** What a refusal holds: every ack request being answered holds at least this, so its refusal can take its place. */
+const REFUSAL_BYTES = heldAnswerBytes('')
+const TOO_MANY_ANSWERS_TEXT =
+  'Channel closed: more `{ ack: true }` sends and `publish()` calls wait for their answers than the server can hold even refusals for, see config.channel.maxMemory'
 
 /** Closing frames the channel produced while no page was attached; the next attach sends them. */
 type PendingEnd = { closeAck: boolean; closeRequest: boolean; abort: string | null; error: ErrorReason | null }
@@ -135,6 +136,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private responseAbort: ((abortValue?: unknown) => void) | null = null
   private pendingAckRes: Array<{ ackedSeq: number; result: string; status: AckResultStatus }> = []
+  /** What each ack request being answered holds, by its seq: its answer takes that place. */
+  private readonly answering = new Map<number, number>()
   /** The mux that registered this channel; when the channel ends, the mux keeps it or forgets it. */
   protected mux: ChannelMux | null = null
   private pendingEnd: PendingEnd | null = null
@@ -589,11 +592,16 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // Parsed here rather than inside the async dispatch so a malformed payload throws in the recv
     // turn, where the violation still names the wire that sent it.
     const data = parsePeerText(text) as ChannelData<ClientToServer>
-    return this.lifecycle.trackAck(this.answerAdmitted(this.listeners, data, seq, bytes, this._validators.get('data')))
+    const validate = this._validators.get('data')
+    return this.lifecycle.trackAck(
+      this.answerHeld(seq, bytes, () => this.answerAckReq(this.listeners, data, seq, validate)),
+    )
   }
 
   protected onPeerBinaryAckReqMessage(data: Uint8Array, seq: number, bytes: number): Promise<void> {
-    return this.lifecycle.trackAck(this.answerAdmitted(this.binaryListeners, data, seq, bytes))
+    return this.lifecycle.trackAck(
+      this.answerHeld(seq, bytes, () => this.answerAckReq(this.binaryListeners, data, seq)),
+    )
   }
 
   protected onPeerBinaryMessage(data: Uint8Array, bytes: number): void {
@@ -842,23 +850,30 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected endWithError(reason: ErrorReason, err: Error): void {
     if (this._phase === 'ended') return
     this.offlineBuffer.clear(err)
+    // First, so the ERROR, held without asking, takes their room.
+    this.letAnsweringGo()
     if (this.peer) this.peer.sendError(reason)
     else this.ensurePendingEnd().error = reason
     this.shutdown(err)
   }
 
-  /** Send an ack response, buffering it if the peer is currently disconnected. An answer that isn't admitted becomes an
-   *  error for the page's `send`, and where not even that is, the channel ends: the page has to learn. Past the channel's
-   *  release no page can get it, so it isn't held. */
+  /** Send an ack response, buffering it if the peer is currently disconnected. It takes its request's place. One that
+   *  isn't admitted becomes a refusal: the page's `send` rejects with `ChannelOverflowError` and the channel stays open.
+   *  Its request held room for it, so it needs no more; only a request refused on arrival asks, and where even its
+   *  refusal doesn't fit, the channel ends. Past the channel's end the page's send settles with that, so it isn't sent. */
   protected sendAckRes(ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
-    if (this.released) return
+    if (this._phase === 'ended') return
+    const room = this.answering.get(ackedSeq)
+    if (room !== undefined) {
+      this.answering.delete(ackedSeq)
+      letGo(this, room)
+    }
     if (!admit(this, heldAnswerBytes(result))) {
-      if (!admit(this, heldAnswerBytes(NOT_ADMITTED_TEXT))) {
-        this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(NOT_ADMITTED_TEXT))
-        return
+      if (room === undefined && !admit(this, REFUSAL_BYTES)) {
+        return this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(TOO_MANY_ANSWERS_TEXT))
       }
-      result = NOT_ADMITTED_TEXT
-      status = ACK_STATUS.ERROR
+      result = ''
+      status = ACK_STATUS.OVERFLOW
     }
     if (this.peer) {
       this.peer.sendAckRes(ackedSeq, result, status)
@@ -869,23 +884,18 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  /** Answers an ack request of `bytes`, held until it's answered; one that isn't admitted runs no listener. */
-  private async answerAdmitted<T>(
-    listeners: Listeners<(data: T) => unknown>,
-    data: T,
-    seq: number,
-    bytes: number,
-    validate?: ShieldValidator,
-  ): Promise<void> {
-    if (!admit(this, bytes)) {
-      this.sendAckRes(seq, NOT_ADMITTED_TEXT, ACK_STATUS.ERROR)
-      return
-    }
-    hold(this, bytes)
+  /** Answers the ack request `seq` of `bytes` with `answer`, held until its answer takes its place, and at least as much
+   *  as its refusal. One that isn't admitted is refused, and `answer` doesn't run. */
+  protected async answerHeld(seq: number, bytes: number, answer: () => Promise<void>): Promise<void> {
+    const held = Math.max(bytes, REFUSAL_BYTES)
+    if (!admit(this, held)) return this.sendAckRes(seq, '', ACK_STATUS.OVERFLOW)
+    hold(this, held)
+    this.answering.set(seq, held)
     try {
-      await this.answerAckReq(listeners, data, seq, validate)
+      await answer()
     } finally {
-      letGo(this, bytes)
+      // Where no answer took its place, nor the channel's end.
+      if (this.answering.delete(seq)) letGo(this, held)
     }
   }
 
@@ -972,7 +982,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       }
       this.pendingAcks.clear()
       this.pendingAckBytes = 0
+      this.letAnsweringGo()
     })
+  }
+
+  /** Nothing answers its requests once it ends, so what they held goes. */
+  private letAnsweringGo(): void {
+    for (const held of this.answering.values()) letGo(this, held)
+    this.answering.clear()
   }
 
   /** @internal Drops what the channel holds for its page: the replay buffer and all it buffered while detached. */
@@ -988,9 +1005,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** Drops all buffered while no page was attached; buffered sends reject with `err` when it is given. */
   private dropPending(err?: Error): void {
     this.offlineBuffer.clear(err)
+    this.dropPendingAnswers()
+    this.pendingEnd = null
+  }
+
+  /** Drops the answers held for a page not attached, whose sends then settle as the channel ends. */
+  protected dropPendingAnswers(): void {
     for (const { result } of this.pendingAckRes) letGo(this, heldAnswerBytes(result))
     this.pendingAckRes = []
-    this.pendingEnd = null
   }
 }
 

@@ -19,7 +19,13 @@ import {
 } from '../pieces.js'
 import type { PiecesAck } from '../../wire/frame.js'
 import { isSequencedTag } from '../../wire/tags.js'
-import { countWaitingPublishes, droppingPublishes, overtakes, type WireQueue } from './waitingPublishes.js'
+import {
+  countWaitingPublishes,
+  droppingFromPublish,
+  droppingPublishes,
+  overtakes,
+  type WireQueue,
+} from './waitingPublishes.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 
@@ -84,6 +90,10 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
 
   dropWaitingPublishes(ix: number, seqs: readonly number[]): void {
     this.sender.dropWaiting(droppingPublishes(ix, seqs))
+  }
+
+  dropWaitingFromPublish(ix: number): void {
+    this.sender.dropWaiting(droppingFromPublish(ix))
   }
 
   drainRate(): number {
