@@ -578,15 +578,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // turn, where the violation still names the wire that sent it.
     const data = parsePeerText(text) as ChannelData<ClientToServer>
     const validate = this._validators.get('data')
-    return this.lifecycle.trackAck(
-      this.answerHeld(seq, bytes, () => this.answerAckReq(this.listeners, data, seq, validate)),
-    )
+    return this.answerHeld(seq, bytes, () => this.answerAckReq(this.listeners, data, seq, validate))
   }
 
   protected onPeerBinaryAckReqMessage(data: Uint8Array, seq: number, bytes: number): Promise<void> {
-    return this.lifecycle.trackAck(
-      this.answerHeld(seq, bytes, () => this.answerAckReq(this.binaryListeners, data, seq)),
-    )
+    return this.answerHeld(seq, bytes, () => this.answerAckReq(this.binaryListeners, data, seq))
   }
 
   protected onPeerBinaryMessage(data: Uint8Array, bytes: number): void {
@@ -871,15 +867,16 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  /** Answers the ack request `seq` of `bytes` with `answer`, held until its answer takes its place, and at least as much
-   *  as its refusal. One that isn't admitted is refused, and `answer` doesn't run. */
+  /** Answers the ack request `seq` of `bytes` with `answer`, which the channel's close waits for. The request is held
+   *  until its answer takes its place, and at least as much as its refusal. One that isn't admitted is refused, and
+   *  `answer` doesn't run. */
   protected async answerHeld(seq: number, bytes: number, answer: () => Promise<void>): Promise<void> {
     const held = Math.max(bytes, REFUSAL_BYTES)
     if (!admit(this, held)) return this.sendAckRes(seq, '', ACK_STATUS.OVERFLOW)
     hold(this, held)
     this.answering.set(seq, held)
     try {
-      await answer()
+      await this.lifecycle.trackAck(answer())
     } finally {
       // Where no answer took its place, nor the channel's end.
       if (this.answering.delete(seq)) letGo(this, held)
