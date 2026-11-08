@@ -1457,6 +1457,15 @@ function testRoomSmallMemory() {
       expect(r).deep.equal({ closed: true, myCause: { type: 'disconnected' } })
     },
   )
+  testRoomScenario<{ receipts: number; seen: number[] }>(
+    'lossy-uplink',
+    "room: a lossy track's frames that wait for the page's uplink are replaced by the newest, which its viewers get, and their publishes share its receipt",
+    (r) => {
+      expect(r.receipts).lessThan(20)
+      expect(r.seen.at(-1)).toBe(19)
+      expect(r.seen).deep.equal([...r.seen].sort((a, b) => a - b))
+    },
+  )
   testRoomTracksBehind(
     'cursor',
     "room: a page offline while its room sent it more than maxMemory holds on lossy tracks gets each track's newest frame, with the jump in its info.seq, and gets the reliable track and the messages whole",

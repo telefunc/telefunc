@@ -128,6 +128,13 @@ abstract class ParticipantBase implements LocalParticipant {
     return framed
   }
 
+  /** The stream a newer frame of this member's lossy `track` replaces an older one in on its way up; null if `track` is
+   *  reliable. */
+  protected lossyStreamOf(track: string | undefined): string | null {
+    const key = track ?? DEFAULT_TRACK
+    return this.trackLossy.get(key) === true ? `${this.id}:${key}` : null
+  }
+
   listen(callback: (data: unknown, from: Sender | null) => unknown, options?: ListenerOptions): () => void {
     if (options?.signal?.aborted) return makeDisposer()
     const unlisten = this.register((this.messageListeners ??= new Listeners()), callback, options)

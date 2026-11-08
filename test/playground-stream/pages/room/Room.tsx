@@ -2112,6 +2112,20 @@ function Room() {
         setResult(JSON.stringify({ roomId, tracks: [...got].sort(), closed }))
       })}
 
+      {scenario('lossy-uplink', null, "A lossy track's frames waiting for the page's uplink", async () => {
+        const [, view] = await createRoom('lossy-uplink')
+        const seen: number[] = []
+        view.subscribeBinary((_data, info) => seen.push(info.meta!.n as number), { track: 'cursor' })
+        const me = await view.join({ meta: { name: 'Me' } })
+        const receipts = await Promise.all(
+          Array.from({ length: 20 }, (_, n) =>
+            me.publishBinary(new Uint8Array(256 * 1024), { track: 'cursor', meta: { n }, lossy: true }),
+          ),
+        )
+        await pollUntil(() => ({ done: seen.at(-1) === 19 }))
+        setResult(JSON.stringify({ receipts: new Set(receipts.map((receipt) => receipt.seq)).size, seen }))
+      })}
+
       {scenario('slow-link', 'Slow link', '640 KB each way', async () => {
         const [roomId, view] = await createRoom('slow-link')
         await onWatchRoom(roomId)

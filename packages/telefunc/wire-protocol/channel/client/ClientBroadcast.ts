@@ -35,8 +35,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private missedHandler: (() => void) | null = null
   /** A newer publish replaces this page's own that no wire has taken yet: see `sendPublish`. */
   private readonly lossy: boolean
-  /** This page's newest publish on a lossy broadcast, which may still wait to go. */
-  private newestPublish: { seq: number; receipt: Promise<ChannelPublishAck> } | null = null
+  /** This page's newest publish of each lossy stream, which may still wait to go. */
+  private readonly newestPublishes = new Map<string, { seq: number; receipt: Promise<ChannelPublishAck> }>()
 
   constructor(options: ClientBroadcastOptions) {
     super(options)
@@ -80,9 +80,12 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   /** @internal A publish that leaves reporting its rejection to the caller. */
-  _publishUnreported(data: ChannelData<T>): Promise<ChannelPublishAck> {
+  _publishUnreported(
+    data: ChannelData<T>,
+    lossyStream: string | null = this.lossy ? 'text' : null,
+  ): Promise<ChannelPublishAck> {
     if (this.stopped) throw new ChannelClosedError()
-    return this.sendPublish(encode.publishAckReq, stringify(data))
+    return this.sendPublish(encode.publishAckReq, stringify(data), lossyStream)
   }
 
   override messages(options?: { signal?: AbortSignal }) {
@@ -98,19 +101,29 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   /** @internal A publish that leaves reporting its rejection to the caller. */
-  _publishBinaryUnreported(data: Uint8Array): Promise<ChannelPublishAck> {
+  _publishBinaryUnreported(
+    data: Uint8Array,
+    lossyStream: string | null = this.lossy ? 'binary' : null,
+  ): Promise<ChannelPublishAck> {
     if (this.stopped) throw new ChannelClosedError()
-    return this.sendPublish(encode.publishBinaryAckReq, data)
+    return this.sendPublish(encode.publishBinaryAckReq, data, lossyStream)
   }
 
-  /** On a lossy broadcast, a publish that still waits to go takes the newer one's data in its place, and both get its
+  /** Of `lossyStream`, a publish that still waits to go takes the newer one's data in its place, and both get its
    *  receipt. */
-  private sendPublish<D>(encodeFrame: SequencedEncoder<D>, data: D): Promise<ChannelPublishAck> {
-    const newest = this.newestPublish
-    if (newest !== null && this.connection.replaceWaiting(this, newest.seq, encodeFrame, data)) return newest.receipt
+  private sendPublish<D>(
+    encodeFrame: SequencedEncoder<D>,
+    data: D,
+    lossyStream: string | null,
+  ): Promise<ChannelPublishAck> {
+    if (lossyStream === null) return this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data)
+    const newest = this.newestPublishes.get(lossyStream)
+    if (newest !== undefined && this.connection.replaceWaiting(this, newest.seq, encodeFrame, data)) {
+      return newest.receipt
+    }
     let seq = 0
     const receipt = this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data, (queued) => (seq = queued))
-    if (this.lossy) this.newestPublish = { seq, receipt }
+    this.newestPublishes.set(lossyStream, { seq, receipt })
     return receipt
   }
 
