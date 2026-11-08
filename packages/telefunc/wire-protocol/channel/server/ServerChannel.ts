@@ -75,6 +75,7 @@ import type {
   ChannelDataFrame,
   ChannelFrame,
   ErrorReason,
+  SequencedEncoder,
 } from '../../wire/frame.js'
 import type { AttachState } from '../../wire/payloads.js'
 
@@ -251,15 +252,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
     // Promise already serializes the next send, so credit would add nothing.
-    if (needsAck) {
-      return this.lifecycle.trackAck(
-        new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
-          this.peer!.sendSequenced(encode.textAckReq, serialized, (seq, bytes) =>
-            this.addPendingAck(seq, bytes, { resolve, reject }),
-          )
-        }),
-      )
-    }
+    if (needsAck) return this.sendAckRequest(encode.textAckReq, serialized)
     // Cooperative credit model: the send already fired; `decrement` only gates the return
     // value. Awaiting throttles the caller's next send; not awaiting bypasses credit.
     return this.sendCredit.decrement(this.peer.sendSequenced(encode.text, serialized))
@@ -297,15 +290,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       })
     }
     // Ack-bearing path bypasses credit; see `sendData` for rationale.
-    if (needsAck) {
-      return this.lifecycle.trackAck(
-        new Promise<unknown>((resolve, reject) => {
-          this.peer!.sendSequenced(encode.binaryAckReq, data, (seq, bytes) =>
-            this.addPendingAck(seq, bytes, { resolve, reject }),
-          )
-        }),
-      )
-    }
+    if (needsAck) return this.sendAckRequest(encode.binaryAckReq, data)
     // Cooperative credit model; see `sendData`.
     return this.sendCredit.decrement(this.peer.sendSequenced(encode.binary, data))
   }
@@ -357,6 +342,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       false,
       `A channel's \`send()\` calls outrun its client: ${(ahead / 2 ** 20).toFixed(1)} MiB wait for it and keep growing, while it takes ${mibPerS.toFixed(1)} MiB/s. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next, or send slower: past ${(maxPendingBytesOf() / 2 ** 20).toFixed(0)} MiB, or \`config.channel.maxMemory\` on this server, sends are refused with \`ChannelOverflowError\`.`,
       { onlyOnce: false },
+    )
+  }
+
+  /** Sends `data` as an ack request; it settles with the page's answer, and the close waits for it. */
+  private sendAckRequest<D>(encodeFrame: SequencedEncoder<D>, data: D): Promise<ChannelAck<ServerToClient>> {
+    return this.lifecycle.trackAck(
+      new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
+        this.peer!.sendSequenced(encodeFrame, data, (seq, bytes) => this.addPendingAck(seq, bytes, { resolve, reject }))
+      }),
     )
   }
 
