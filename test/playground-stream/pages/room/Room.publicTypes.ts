@@ -49,3 +49,12 @@ function assertClientJoinBoundary(room: ClientRoom) {
   // @ts-expect-error hidden membership is created only by a server-side join
   void room.join({ hidden: true })
 }
+
+function assertTrackInfo(room: ClientRoom, member: ClientRemote) {
+  room.subscribe((_message, info) => void info.track, { track: 'cursor' })
+  member.subscribe((_message, info) => void info.meta, { track: 'cursor' })
+  // @ts-expect-error a message on no track has no track in its info
+  room.subscribe((_message, info) => void info.track)
+  // @ts-expect-error a message on no track has no track in its info
+  member.subscribe((_message, info) => void info.track)
+}

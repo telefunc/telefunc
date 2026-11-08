@@ -24,6 +24,8 @@ import type { BinaryFrameInfo, LeaveCause, ParticipantMeta, RemoteParticipant, R
 
 type BinaryListenerOptions = ListenerOptions & { track?: string | null }
 type MessageListenerOptions = ListenerOptions & { track?: string }
+/** A `subscribe()` listener: its `info` has the frame's fields where it names a track. */
+type MessageListener<From extends unknown[]> = (data: unknown, info: any, ...from: From) => unknown
 /** A binary listener's track filter: one track, or `EVERY_TRACK`. */
 type TrackFilter = TrackKey | EveryTrack
 /** A binary listener list's filters as counts: every-track listeners, and listeners per lane track. */
@@ -102,10 +104,7 @@ abstract class RoomStateView {
     return this._state.model.closed
   }
 
-  subscribe(
-    callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown,
-    options?: MessageListenerOptions,
-  ): () => void {
+  subscribe(callback: MessageListener<[Sender]>, options?: MessageListenerOptions): () => void {
     return this._state.subscribe(callback, options)
   }
 
@@ -238,10 +237,7 @@ class RoomState {
   }
 
   // Each registration returns its unlisten function.
-  subscribe(
-    cb: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown,
-    opts?: MessageListenerOptions,
-  ): () => void {
+  subscribe(cb: MessageListener<[Sender]>, opts?: MessageListenerOptions): () => void {
     if (opts?.track === undefined) return this.register(this.roomDataListeners, cb, opts)
     return this.registerRoomTrack(textListener(cb, opts.track), opts)
   }
@@ -434,7 +430,7 @@ class RoomState {
       get isConnected() {
         return model.isConnected(entry)
       },
-      subscribe: (cb, opts) => {
+      subscribe: (cb: MessageListener<[]>, opts?: MessageListenerOptions) => {
         if (opts?.track === undefined)
           return this.registerLive(entry, (listeners.dataListeners ??= new Listeners()), cb, opts)
         return this.registerMemberTrack(entry, listeners, textListener(cb, opts.track), opts)

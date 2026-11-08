@@ -181,7 +181,7 @@ type RoomInfo<M extends RoomMeta = RoomMeta> = {
   readonly isEmpty: boolean
 }
 
-/** Per-frame binary metadata, straight from the frame header. */
+/** Per-frame metadata of a track, straight from the frame header. */
 type BinaryFrameInfo = {
   /** Named substream, or `null` for the default track. */
   track: string | null
@@ -249,11 +249,15 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   /** One participant, or `null`; loads the member view on first need. */
   getParticipant(id: string): Promise<RemoteParticipant<P, Pub> | null>
 
-  /** Receive all participant messages, or, with `track`, the messages published on that track. Returns an unsubscribe
-   *  function. */
+  /** Receive the messages published on `track`. Returns an unsubscribe function. */
+  subscribe(
+    callback: (data: Pub, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender<P>) => unknown,
+    options: { track: string; signal?: AbortSignal },
+  ): () => void
+  /** Receive all participant messages. Returns an unsubscribe function. */
   subscribe(
     callback: (data: Pub, info: ChannelPublishInfo, from: Sender<P>) => unknown,
-    options?: { track?: string; signal?: AbortSignal },
+    options?: { signal?: AbortSignal },
   ): () => void
   /** Receive all members' binary frames, optionally filtered to one track at the source. */
   subscribeBinary(
@@ -356,12 +360,13 @@ type RemoteParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknow
   /** False while the member's page can't be reached and the room waits for it. */
   readonly isConnected: boolean
 
-  /** Receive only this member's messages, or, with `track`, its messages on that track. Returns an unsubscribe
-   *  function. */
+  /** Receive this member's messages on `track`. Returns an unsubscribe function. */
   subscribe(
-    callback: (data: Pub, info: ChannelPublishInfo) => unknown,
-    options?: { track?: string; signal?: AbortSignal },
+    callback: (data: Pub, info: ChannelPublishInfo & BinaryFrameInfo) => unknown,
+    options: { track: string; signal?: AbortSignal },
   ): () => void
+  /** Receive only this member's messages. Returns an unsubscribe function. */
+  subscribe(callback: (data: Pub, info: ChannelPublishInfo) => unknown, options?: { signal?: AbortSignal }): () => void
   /** Receive only this member's binary frames, optionally filtered to one track. */
   subscribeBinary(callback: MemberBinaryListener, options?: { track?: string | null; signal?: AbortSignal }): () => void
 
