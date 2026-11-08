@@ -155,6 +155,7 @@ class ClientRoom extends RoomStateView implements Room {
   private readonly roster = createDeferred()
   /** @internal */
   _rosterStream: RosterStream | null = null
+  private framesMissedWarned = false
 
   messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<RoomMessage> {
     return roomMessages(this, options?.signal)
@@ -179,6 +180,7 @@ class ClientRoom extends RoomStateView implements Room {
     // text while subscribed, binary per `sub-binary`.
     end._subscribeLocal('text', (envelope, info) => this.onEnvelope(envelope, info))
     end._subscribeLocal('binary', (framed, info) => this.onBinaryFrame(framed, info))
+    end._handleFramesMissed(() => this.warnFramesMissed())
     // Wire death; a server `Room.close()` arrives before it, as the `closed` event.
     const view = new WeakRef(this)
     roomViews.add(view)
@@ -377,6 +379,15 @@ class ClientRoom extends RoomStateView implements Room {
     if (!local) return
     this.localParticipants.delete(id)
     local._onLeft(cause)
+  }
+
+  /** The server let this page's oldest frames of a track go, as it fell behind what the server holds for it. */
+  private warnFramesMissed(): void {
+    if (this.framesMissedWarned) return
+    this.framesMissedWarned = true
+    console.warn(
+      `[@telefunc/room][Warning] Room "${this.id}" missed binary frames, as this client fell behind what the server holds for it: \`info.seq\` of each track shows its gap.`,
+    )
   }
 
   private onBinaryFrame(framed: Uint8Array, rawInfo: ChannelPublishInfo): void {

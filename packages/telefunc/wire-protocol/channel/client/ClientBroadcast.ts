@@ -27,6 +27,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   /** The subscriptions this page asks the server for. */
   private readonly subscribed: BroadcastSubscriptions = { text: false, binary: false }
   private missedWarned = false
+  /** Who hears each gap in place of the warning: a Room view, which warns in a Room's words. */
+  private missedHandler: (() => void) | null = null
 
   constructor(options: ClientChannelOptions) {
     super(options)
@@ -122,8 +124,14 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this.sendCredit.countSent(this.connection.sendSequenced(this, 'data', encode.text, stringify(data)))
   }
 
+  /** @internal Each gap goes to `handler` instead of the warning. */
+  _handleFramesMissed(handler: () => void): void {
+    this.missedHandler = handler
+  }
+
   /** @internal The server let its oldest messages go: this page fell behind what it holds. */
   _onFramesMissed(): void {
+    if (this.missedHandler) return this.missedHandler()
     if (this.missedWarned) return
     this.missedWarned = true
     assertWarning(

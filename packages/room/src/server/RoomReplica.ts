@@ -442,7 +442,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope | Extract<RoomEnvelope, { __r: 'announce' }>
     if (envelope.__r === 'announce') {
       for (const handle of this.receivers) handle.local.relayAnnouncement(envelope.data, info)
-      const body = publishBody(serialized, info, { lossy: true })
+      const body = publishBody(serialized, info, { lossy: false })
       for (const stub of this.stubs) stub.relayAnnouncement(body, info)
       return
     }

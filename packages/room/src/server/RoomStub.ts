@@ -95,7 +95,7 @@ function unorderedEventBody(
 }
 
 /** A member's message as its lane carried it, stamped, and without the stamp, each made once for every client. A page
- *  that falls behind may miss a message to everyone, never a DM. */
+ *  never misses one: its room's `info.seq` stays whole. */
 class MemberMessageBodies {
   private _stamped: PublishBody | null = null
   private _unstamped: PublishBody | null = null
@@ -113,17 +113,13 @@ class MemberMessageBodies {
   }
 
   stamped(): PublishBody {
-    return (this._stamped ??= publishBody(this.serialized, this.info, this.lossy()))
+    return (this._stamped ??= publishBody(this.serialized, this.info, { lossy: false }))
   }
 
   unstamped(): PublishBody {
     if (this._unstamped !== null) return this._unstamped
     const { fromMeta, fromMetaSeq, fromIdentity, fromDisconnected, ...unstamped } = this.envelope
-    return (this._unstamped = publishBody(stringify(unstamped), this.info, this.lossy()))
-  }
-
-  private lossy(): { lossy: boolean } {
-    return { lossy: this.envelope.__r === 'data' }
+    return (this._unstamped = publishBody(stringify(unstamped), this.info, { lossy: false }))
   }
 }
 
@@ -209,6 +205,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   private tail: TailHold | null = null
   /** Whether this client was sent the whole roster since it attached. */
   rosterSent = false
+  private missedWarned = false
 
   constructor({ room, roster, end, publishShield, grants }: RoomStubOptions) {
     this.room = room
@@ -252,6 +249,15 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   _onPageAttach(): void {
     this.rosterSent = false
     this.room.replica.onStubAttached(this)
+  }
+
+  /** Its client sees each gap in a track's `info.seq`, and the server's log this once. */
+  _onPublishesMissed(): void {
+    if (this.missedWarned) return
+    this.missedWarned = true
+    console.warn(
+      `[@telefunc/room][Warning] A client of room "${this.room.model.roomId}" fell behind what the server holds for it, and misses the oldest frames of its tracks: \`info.seq\` of each track shows its gap.`,
+    )
   }
 
   // Client requests
@@ -474,7 +480,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
 
   emitRetainedText(event: RoomDataEnvelope, info: OrderingInfo, serialized: string, hold: ReplayHold): void {
     if (this.replay.admitRetained(hold, event.from, null, info)) {
-      this.end.deliver(publishBody(serialized, info, { lossy: true }))
+      this.end.deliver(publishBody(serialized, info, { lossy: false }))
     }
   }
 
@@ -522,7 +528,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     this.tail = null
     for (const { serialized, ord, from } of held) {
       if (!this.wantsTextFrom(from)) continue
-      this.relayTextLive(from, publishBody(serialized, ord, { lossy: true }), ord)
+      this.relayTextLive(from, publishBody(serialized, ord, { lossy: false }), ord)
     }
   }
 

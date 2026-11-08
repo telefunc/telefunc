@@ -105,6 +105,7 @@ type ClientBroadcast = Pick<
   | '_setSubscribed'
   | '_sendReply'
   | '_subscribeLocal'
+  | '_handleFramesMissed'
   | 'isClosed'
   | 'isConnected'
   | 'send'
