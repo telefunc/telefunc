@@ -1463,6 +1463,19 @@ function testRoomSmallMemory() {
       expect(r.seen).deep.equal([...r.seen].sort((a, b) => a - b))
     },
   )
+  testRoomScenario<{ refused: string | null; next: string; closed: boolean; myCause: unknown; leaves: unknown[] }>(
+    'meta-past-memory',
+    'room: a setMeta() larger than maxMemory rejects with ChannelOverflowError, its page stays in the room and the others see no leave',
+    (r) => {
+      expect(r).deep.equal({
+        refused: 'ChannelOverflowError',
+        next: 'accepted',
+        closed: false,
+        myCause: null,
+        leaves: [],
+      })
+    },
+  )
   testRoomTracksBehind(
     'cursor',
     "room: a page offline while its room sent it more than maxMemory holds on lossy tracks gets each track's newest frame, with the jump in its info.seq, and gets the reliable track and the messages whole",

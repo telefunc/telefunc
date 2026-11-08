@@ -2096,6 +2096,27 @@ function Room() {
         setResult(JSON.stringify({ closed, myCause }))
       })}
 
+      {scenario('meta-past-memory', null, 'A setMeta() larger than maxMemory', async () => {
+        const [roomId, view] = await createRoom('meta-past-memory')
+        const other = await onGetRoom(roomId)
+        const leaves: unknown[] = []
+        other.onLeave((member) => leaves.push(member.meta.name))
+        let closed = false
+        view.onClose(() => (closed = true))
+        const me = await view.join({ meta: { name: 'Me' } })
+        let myCause: unknown = null
+        me.onLeave((cause) => (myCause = cause))
+        const refused = await me.setMeta({ name: 'Me', blob: 'x'.repeat(3 * 1024 * 1024) }).then(
+          () => null,
+          (err: Error) => err.name,
+        )
+        const next = await me.setAttributes({ next: true }).then(
+          () => 'accepted',
+          (err: Error) => err.name,
+        )
+        setResult(JSON.stringify({ refused, next, closed, myCause, leaves }))
+      })}
+
       {scenario('text-cursor', null, 'Offline past maxMemory on a lossy text track', async () => {
         const roomId = await createRoomId('text-cursor')
         const view = await onGetRoom(roomId)
