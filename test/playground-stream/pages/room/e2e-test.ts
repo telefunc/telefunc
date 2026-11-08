@@ -1440,6 +1440,81 @@ function testRoomSmallMemory() {
       expect(r.seen).deep.equal(r.seen.map((_, n) => n))
     },
   )
+  testRoomScenario<Record<string, string | null>>(
+    'track-when-behind',
+    'room: a track keeps the whenBehind of its first publish: a later publish may leave it out, and one naming another throws at the call',
+    ({ other, ...accepted }) => {
+      expect(accepted).deep.equal({ first: null, omitted: null, defaultTrack: null })
+      expect(other ?? 'no error').toContain(
+        `publishBinary(): the "drawing" track's first publish gave it whenBehind: 'close', which a track keeps`,
+      )
+    },
+  )
+  testRoomScenario<{ closed: boolean; myCause: unknown }>(
+    'meta-flood',
+    "room: a connected page whose room's events alone are more than the server holds for it is let go",
+    (r) => {
+      expect(r).deep.equal({ closed: true, myCause: { type: 'disconnected' } })
+    },
+  )
+  testRoomTracksBehind(
+    'cursor',
+    "room: a page offline while its room sent it more than maxMemory holds on a lossy track misses that track's oldest frames, with the jump in its info.seq, and gets the whenBehind: 'close' track and the messages whole",
+    (r) => {
+      expect(r).deep.include({ closed: false, myCause: null })
+      const all = Array.from({ length: 16 }, (_, n) => n)
+      expect(r.text.map(({ data }) => data)).deep.equal(['before', ...all.map(String)])
+      expect(r.drawing.map(({ n }) => n)).deep.equal(all)
+      for (const stream of [r.text, r.drawing]) {
+        expect(stream.map(({ seq }) => seq - stream[0]!.seq)).deep.equal(stream.map((_, i) => i))
+      }
+      expect(r.cursor.length).lessThan(16)
+      expect(r.cursor.at(-1)!.n).toBe(15)
+      // The cursor's seq jumps by as many frames as it missed.
+      expect(r.cursor.map(({ n, seq }) => seq - n)).deep.equal(r.cursor.map(() => r.cursor[0]!.seq - r.cursor[0]!.n))
+      expectLog('fell behind what the server holds for it, and misses the oldest frames of its tracks')
+      expectLog('missed binary frames, as this client fell behind what the server holds for it')
+    },
+  )
+  testRoomTracksBehind(
+    'drawing',
+    "room: a page offline while its room sent it more than maxMemory holds on a whenBehind: 'close' track is let go at its reconnect, with no gap in that track",
+    (r) => {
+      expect(r).deep.include({ closed: true, myCause: { type: 'disconnected' } })
+      expect(r.drawing.map(({ n }) => n)).deep.equal(r.drawing.map((_, i) => i))
+    },
+  )
+}
+
+type TracksBehind = {
+  text: { data: string; seq: number }[]
+  cursor: { n: number; seq: number }[]
+  drawing: { n: number; seq: number }[]
+  closed: boolean
+  myCause: unknown
+}
+
+/** A page offline while its room's speaker sends 16 rounds of a lossy `cursor` frame, a `drawing` frame published with
+ *  `whenBehind: 'close'` and a message, the `heavy` track's frames 4 MiB in all. */
+function testRoomTracksBehind(heavy: 'cursor' | 'drawing', name: string, validate: (r: TracksBehind) => void) {
+  test(name, async () => {
+    if (!canCutWire()) return
+    await navigate(`${getServerUrl()}/room`)
+    await page.click(`#test-room-tracks-${heavy}`)
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-tracks-/)
+    })
+    await page.context().setOffline(true)
+    await cutWire()
+    await runServerAction(`roomTracks_${roomId}`)
+    await autoRetry(async () => {
+      expect((await getCleanupState())[`roomTracks_${roomId}`]).toBe('done')
+    })
+    await page.context().setOffline(false)
+    await autoRetry(async () => validate(await getResult<TracksBehind>('#room-result')))
+  })
 }
 
 /** Runs on Redis. */

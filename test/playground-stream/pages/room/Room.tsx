@@ -42,6 +42,8 @@ import {
   onGetRoomOverflow,
   onRoomBurst,
   onRoomFlood,
+  onRoomMetaFlood,
+  onRoomTracks,
   onGetWatchedCount,
   onRoomRelease,
   onFailBackend,
@@ -211,6 +213,28 @@ function Room() {
     const participant = await room.getParticipant(id)
     if (!participant) throw new Error(`Participant did not join within the test horizon: ${id}`)
     return participant
+  }
+
+  /** What reaches a page offline while its room's speaker sends 16 rounds on two tracks and its messages. */
+  const tracksBehind = (heavy: 'cursor' | 'drawing') => async () => {
+    const [roomId, view] = await createRoom(`tracks-${heavy}`)
+    const text: { data: string; seq: number }[] = []
+    view.subscribe((data, info) => text.push({ data: data as string, seq: info.seq }))
+    const tracks = { cursor: [] as { n: number; seq: number }[], drawing: [] as { n: number; seq: number }[] }
+    for (const track of ['cursor', 'drawing'] as const) {
+      view.subscribeBinary((_data, info) => tracks[track].push({ n: info.meta!.n as number, seq: info.seq }), { track })
+    }
+    let closed = false
+    view.onClose(() => (closed = true))
+    const me = await view.join({ meta: { name: 'Me' } })
+    let myCause: unknown = null
+    me.onLeave((cause) => (myCause = cause))
+    await onRoomTracks(roomId, heavy)
+    await pollUntil(() => ({ done: text.some(({ data }) => data === 'before') }))
+    setResult(JSON.stringify({ roomId }))
+    const done = () => text.at(-1)?.data === '15' && tracks.cursor.at(-1)?.n === 15 && tracks.drawing.length === 16
+    await pollUntil(() => ({ done: done() || (closed && myCause !== null) }), 150)
+    setResult(JSON.stringify({ roomId, text, ...tracks, closed, myCause }))
   }
 
   const scenario = (id: string, heading: string | null, label: string, run: () => Promise<void>) => (
@@ -2029,6 +2053,49 @@ function Room() {
         await pollUntil(() => ({ done: closed }), 150)
         setResult(JSON.stringify({ seen, closed }))
       })}
+
+      {scenario('track-when-behind', null, "A track keeps its first publish's whenBehind", async () => {
+        const [, view] = await createRoom('track-when-behind')
+        const me = await view.join({ meta: { name: 'Me' } })
+        const frame = new Uint8Array(1)
+        const thrown = (publish: () => unknown) => {
+          try {
+            publish()
+            return null
+          } catch (err) {
+            return (err as Error).message
+          }
+        }
+        setResult(
+          JSON.stringify({
+            first: thrown(() => me.publishBinary(frame, { track: 'drawing', whenBehind: 'close' })),
+            omitted: thrown(() => me.publishBinary(frame, { track: 'drawing' })),
+            other: thrown(() => me.publishBinary(frame, { track: 'drawing', whenBehind: 'missOldest' })),
+            defaultTrack: thrown(() => me.publishBinary(frame, { whenBehind: 'close' })),
+          }),
+        )
+      })}
+
+      {scenario('meta-flood', null, 'Connected, behind on room events alone', async () => {
+        const [roomId, view] = await createRoom('meta-flood')
+        let closed = false
+        view.onClose(() => (closed = true))
+        const me = await view.join({ meta: { name: 'Me' } })
+        let myCause: unknown = null
+        me.onLeave((cause) => (myCause = cause))
+        await onRoomMetaFlood(roomId)
+        await pollUntil(() => ({ done: closed && myCause !== null }), 150)
+        setResult(JSON.stringify({ closed, myCause }))
+      })}
+
+      {scenario('tracks-cursor', null, 'Offline past maxMemory on a lossy track', tracksBehind('cursor'))}
+
+      {scenario(
+        'tracks-drawing',
+        null,
+        "Offline past maxMemory on a whenBehind: 'close' track",
+        tracksBehind('drawing'),
+      )}
 
       {scenario('slow-link', 'Slow link', '640 KB each way', async () => {
         const [roomId, view] = await createRoom('slow-link')

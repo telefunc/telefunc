@@ -37,6 +37,8 @@ export {
   onGetRoomOverflow,
   onRoomBurst,
   onRoomFlood,
+  onRoomMetaFlood,
+  onRoomTracks,
   onGetWatchedCount,
   onRoomRelease,
   onFailBackend,
@@ -481,6 +483,36 @@ async function onRoomFlood(roomId: string, count: number, size: number) {
   const speaker = await (await Room.get(roomId)).join({ meta: { name: 'Speaker' } })
   awayMembers.set(roomId, [speaker])
   await Promise.all(Array.from({ length: count }, (_, n) => speaker.publish(String(n).padEnd(size))))
+}
+
+/** 16 members each set a 256 KiB meta at once: more events than the page's wire takes, and than its lane's `maxMemory`
+ *  holds. */
+async function onRoomMetaFlood(roomId: string) {
+  const room = await Room.get(roomId)
+  const members = await Promise.all(Array.from({ length: 16 }, (_, n) => room.join({ meta: { name: `M${n}` } })))
+  awayMembers.set(roomId, members)
+  await Promise.all(members.map((member, n) => member.setMeta({ name: `M${n}`, filler: ''.padEnd(256 * 1024) })))
+}
+
+/** A speaker says 'before', then, run by the test while the page is offline, sends 16 rounds of a `cursor` frame, a
+ *  `drawing` frame published with `whenBehind: 'close'`, and a message. The `heavy` track's frames are 256 KiB each,
+ *  4 MiB in all: twice what its lane's `maxMemory` lets the server hold. */
+async function onRoomTracks(roomId: string, heavy: 'cursor' | 'drawing') {
+  const room = await Room.get(roomId)
+  const speaker = await room.join({ meta: { name: 'Speaker' } })
+  awayMembers.set(roomId, [speaker])
+  const frame = (track: string) => new Uint8Array(track === heavy ? 256 * 1024 : 1024)
+  onServerAction(`roomTracks_${roomId}`, async () => {
+    for (let n = 0; n < 16; n++) {
+      await speaker.publishBinary(frame('cursor'), { track: 'cursor', meta: { n } })
+      // Its first publish gives the track whenBehind: 'close', which the later ones keep.
+      const declared = n === 0 ? ({ whenBehind: 'close' } as const) : {}
+      await speaker.publishBinary(frame('drawing'), { track: 'drawing', meta: { n }, ...declared })
+      await speaker.publish(String(n))
+    }
+    cleanupState[`roomTracks_${roomId}`] = 'done'
+  })
+  await speaker.publish('before')
 }
 
 /** A server member publishes `count` messages of `size` bytes, each awaited. */
