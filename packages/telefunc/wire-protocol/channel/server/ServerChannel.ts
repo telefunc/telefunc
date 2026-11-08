@@ -23,7 +23,15 @@ import type { ChannelMux } from './ChannelMux.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
-import { admit, hold, holdsEnough, letGo, releaseHolder, type MemoryHolder } from './channelMemory.js'
+import {
+  admit,
+  hold,
+  holdsEnough,
+  letGo,
+  maxPendingBytesOf,
+  releaseHolder,
+  type MemoryHolder,
+} from './channelMemory.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { ShieldValidator, ShieldValidators } from '../../../node/server/shield.js'
@@ -35,7 +43,7 @@ import { NetworkError } from '../../../shared/NetworkError.js'
 import { channelMessages } from '../channelMessages.js'
 import { forListener, listenerAnswer } from '../listenerAnswer.js'
 import { isPromise } from '../../../utils/isPromise.js'
-import { TIMER_DELAY_MAX_MS, CHANNEL_HOLD_MAX_BYTES } from '../../constants.js'
+import { TIMER_DELAY_MAX_MS } from '../../constants.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
 import { creditWindowOf, type CreditOwner } from '../../flowControl/credit.js'
@@ -188,8 +196,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.sendCredit = new SendCredit({ owner, selfTime: this.selfTime })
     this.receiveCredit = new ReceiveCredit({ owner, selfTime: this.selfTime })
     const c = getChannelConfig()
-    this.receiveCredit.capWindow(creditWindowOf(c.maxMemory))
-    this.sendCredit.capWindow(creditWindowOf(c.maxMemory))
+    this.receiveCredit.capWindow(creditWindowOf(c.maxMemory, c.maxPendingBytes))
+    this.sendCredit.capWindow(creditWindowOf(c.maxMemory, c.maxPendingBytes))
   }
 
   get opened(): Promise<void> {
@@ -322,7 +330,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this.refusalWarned = true
       assertWarning(
         false,
-        `A channel refused a \`send()\`: it holds ${CHANNEL_HOLD_MAX_BYTES} bytes, the most for one channel, or this server's channels hold \`config.channel.maxMemory\`, so that message isn't delivered and its promise rejects with \`ChannelOverflowError\`. Later sends that fit still go. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next.`,
+        `A channel refused a \`send()\`: it holds ${maxPendingBytesOf()} bytes, the most for one channel, or this server's channels hold \`config.channel.maxMemory\`, so that message isn't delivered and its promise rejects with \`ChannelOverflowError\`. Later sends that fit still go. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next.`,
         { onlyOnce: false },
       )
     }
@@ -352,7 +360,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.outrun = null
     assertWarning(
       false,
-      `A channel's \`send()\` calls outrun its client: ${(ahead / 2 ** 20).toFixed(1)} MiB wait for it and keep growing, while it takes ${mibPerS.toFixed(1)} MiB/s. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next, or send slower: past ${(CHANNEL_HOLD_MAX_BYTES / 2 ** 20).toFixed(0)} MiB, or \`config.channel.maxMemory\` on this server, sends are refused with \`ChannelOverflowError\`.`,
+      `A channel's \`send()\` calls outrun its client: ${(ahead / 2 ** 20).toFixed(1)} MiB wait for it and keep growing, while it takes ${mibPerS.toFixed(1)} MiB/s. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next, or send slower: past ${(maxPendingBytesOf() / 2 ** 20).toFixed(0)} MiB, or \`config.channel.maxMemory\` on this server, sends are refused with \`ChannelOverflowError\`.`,
       { onlyOnce: false },
     )
   }

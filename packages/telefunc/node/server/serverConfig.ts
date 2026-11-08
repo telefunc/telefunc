@@ -34,6 +34,7 @@ import {
 } from '../../wire-protocol/broadcast/broadcastAdapter.js'
 import {
   CHANNEL_CONNECT_TTL_MS,
+  CHANNEL_HOLD_MAX_BYTES,
   CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
@@ -104,6 +105,9 @@ type ChannelConfigUser = {
    * @default a quarter of the memory the process may use
    */
   maxMemory?: number | string
+  /** The most one channel holds for its client, of its sends and of what awaits acknowledgement, in bytes, within
+   *  `maxMemory`. @default 335544320 */
+  maxPendingBytes?: number
   /**
    * How long, in milliseconds, a newly created channel waits for the client to
    * connect before it is closed automatically.
@@ -133,6 +137,7 @@ type ChannelConfigResolved = {
   idleTimeout: number
   pingInterval: number
   maxMemory: number
+  maxPendingBytes: number
   connectTtl: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
@@ -352,6 +357,7 @@ function resolveChannelConfig(channel: ChannelConfigUser): ChannelConfigResolved
       (channel.maxMemory as number | undefined) ??
       globalObject.adapterMaxMemory ??
       (globalObject.defaultMaxMemory ??= defaultMaxMemory()),
+    maxPendingBytes: channel.maxPendingBytes ?? CHANNEL_HOLD_MAX_BYTES,
     sseFlushThrottle: channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
     ssePostIdleFlushDelay: channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
   }
@@ -538,6 +544,13 @@ function applyChannelConfig(val: unknown): void {
         assertUsage(
           value >= CHANNEL_RECONNECT_TIMEOUT_MIN_MS,
           `\`${configPath}\` should be at least ${CHANNEL_RECONNECT_TIMEOUT_MIN_MS}: in less, no client can reconnect`,
+        )
+        next[key] = value
+        break
+      case 'maxPendingBytes':
+        assertUsage(
+          typeof value === 'number' && Number.isSafeInteger(value) && value >= CREDIT_WINDOW_INITIAL_BYTES,
+          `\`${configPath}\` should be an integer of at least ${CREDIT_WINDOW_INITIAL_BYTES}: a channel's credit window starts at that`,
         )
         next[key] = value
         break

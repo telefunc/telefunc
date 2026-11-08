@@ -900,7 +900,7 @@ function resolveMuxServerOptions(): MuxServerOptions {
     idleTimeout: c.idleTimeout,
     pingInterval: c.pingInterval,
     pingDeadline: pingDeadlineOf(c),
-    creditWindow: creditWindowOf(c.maxMemory),
+    creditWindow: creditWindowOf(c.maxMemory, c.maxPendingBytes),
     connectTtl: c.connectTtl,
     sseFlushThrottle: c.sseFlushThrottle,
     ssePostIdleFlushDelay: c.ssePostIdleFlushDelay,

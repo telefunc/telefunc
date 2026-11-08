@@ -7,6 +7,7 @@ export {
   hold,
   holdsEnough,
   letGo,
+  maxPendingBytesOf,
   queueMemory,
   releaseHolder,
 }
@@ -14,7 +15,6 @@ export type { MemoryHolder }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { getChannelConfig } from '../../../node/server/serverConfig.js'
-import { CHANNEL_HOLD_MAX_BYTES } from '../../constants.js'
 import type { PublishBody } from './PublishBody.js'
 import type { QueueMemory } from '../channelMessages.js'
 
@@ -36,6 +36,7 @@ const memory = getGlobalObject('channelMemory.ts', {
   total: 0,
   holders: new Set<MemoryHolder>(),
   maxMemory: 0,
+  maxPendingBytes: 0,
   reclaiming: false,
   /** What wires hold as copies, on no holder: a replay holds the same bytes. */
   wireCopies: 0,
@@ -47,7 +48,7 @@ function admit(holder: MemoryHolder, bytes: number): boolean {
   const maxMemory = maxMemoryOf()
   const target = shedTarget(maxMemory)
   if (memory.total + bytes > target) reclaim(bytes, target)
-  if (holder.heldBytes + bytes > Math.min(CHANNEL_HOLD_MAX_BYTES, maxMemory)) return false
+  if (holder.heldBytes + bytes > Math.min(maxPendingBytesOf(), maxMemory)) return false
   if (memory.total + bytes <= target) return true
   return holder.heldBytes + bytes <= maxMemory / memory.holders.size && memory.total + bytes <= maxMemory
 }
@@ -178,6 +179,11 @@ function reclaim(need: number, target: number): void {
 /** `config.channel` can't change once a channel exists. */
 function maxMemoryOf(): number {
   return (memory.maxMemory ||= getChannelConfig().maxMemory)
+}
+
+/** The most one channel holds, as `maxMemoryOf`. */
+function maxPendingBytesOf(): number {
+  return (memory.maxPendingBytes ||= getChannelConfig().maxPendingBytes)
 }
 
 /** The top eighth is for wires' copies and for those under an equal share. */

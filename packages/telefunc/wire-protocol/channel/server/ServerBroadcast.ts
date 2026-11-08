@@ -25,7 +25,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage, assertWarning } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import { admitPublish, queueMemory, type MemoryHolder } from './channelMemory.js'
+import { admitPublish, maxPendingBytesOf, queueMemory, type MemoryHolder } from './channelMemory.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ChannelOverflowError } from '../channelErrors.js'
@@ -34,7 +34,7 @@ import { TAG } from '../../wire/tags.js'
 import type { ChannelDataFrame } from '../../wire/frame.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { PublishBody } from './PublishBody.js'
-import { CHANNEL_HOLD_MAX_BYTES, CHANNEL_RECONNECT_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
+import { CHANNEL_RECONNECT_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import type { AttachState } from '../../wire/payloads.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
@@ -233,8 +233,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** What it may hold: 60 s of what its page takes, within what any channel may. */
   private share(): number {
     const perMs = this.peer?.sender.queue.drainRate() ?? 0
-    if (perMs === 0) return CHANNEL_HOLD_MAX_BYTES
-    return Math.min(CHANNEL_HOLD_MAX_BYTES, Math.max(CREDIT_WINDOW_MAX_BYTES, perMs * CHANNEL_RECONNECT_TIMEOUT_MS))
+    const most = maxPendingBytesOf()
+    if (perMs === 0) return most
+    return Math.min(most, Math.max(CREDIT_WINDOW_MAX_BYTES, perMs * CHANNEL_RECONNECT_TIMEOUT_MS))
   }
 
   /** How many of its newest publishes no wire has: all of them while it has no wire. */
