@@ -111,6 +111,7 @@ function testVideoChat() {
       await bobTab.context().setOffline(false)
       await autoRetry(async () => expect(await callText()).to.equal('In the call: Alice, Bob'))
       await aliceDraws(seesBob)
+      expect((await tally(page)).decodeErrors).to.equal(0)
       // The frames Bob's page could not take gave way to newer ones, once.
       expectLog('fell behind and skipped frames of its lossy tracks')
       await leave(bobTab, 'Bob')

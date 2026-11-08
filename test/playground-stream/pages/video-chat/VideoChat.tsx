@@ -55,7 +55,7 @@ function Person({ call, name }: { call: Call; name: string }) {
     localVideo.current!.srcObject = camera
     const me = inOtherTab ? await onSwitchHere(name) : await onJoinCall(name)
 
-    const stopReceiving = showVideo(call, me.id, remoteVideo.current!)
+    const stopReceiving = showVideo(call, me, remoteVideo.current!)
     const stopSending = sendVideo(camera, me)
     setMessages([])
     const stopChat = call.subscribe((message, _info, from) => {
@@ -143,20 +143,29 @@ const noticeStyle = {
 } as const
 
 // Draws the other person's video.
-function showVideo(call: Call, myId: string, canvas: HTMLCanvasElement) {
+function showVideo(call: Call, me: Me, canvas: HTMLCanvasElement) {
   const ctx = canvas.getContext('2d')!
   // One player per sender: VP8 frames of two senders through one decoder corrupt the picture
   const players = new Map<string, ReturnType<typeof createPlayer>>()
   const stopFrames = call.subscribeBinary(
     (frame, info, from) => {
-      if (from.id === myId) return
-      const isKeyframe = info.meta?.isKeyframe === true
+      if (from.id === me.id) return
+      const { isKeyframe, ordinal } = info.meta as { isKeyframe: boolean; ordinal: number }
       let player = players.get(from.id)
-      if (!player) {
-        if (!isKeyframe) return
+      // A frame is missing: the delta frames after it can't be decoded, so restart from the next key frame
+      if (player?.next !== ordinal) {
+        if (!isKeyframe) {
+          if (player && !player.askedForKeyframe) {
+            player.askedForKeyframe = true
+            void me.send(from.id, 'send a key frame')
+          }
+          return
+        }
+        player?.stop()
         player = createPlayer(ctx)
         players.set(from.id, player)
       }
+      player.next = ordinal + 1
       player.push(new EncodedVideoChunk({ type: isKeyframe ? 'key' : 'delta', timestamp: 0, data: frame }))
     },
     { track: 'camera' },
@@ -195,6 +204,9 @@ function createPlayer(ctx: CanvasRenderingContext2D) {
     }, 1000 / 15)
   }, 300)
   return {
+    /** The ordinal of the frame that continues what was decoded. */
+    next: 0,
+    askedForKeyframe: false,
     push: (chunk: EncodedVideoChunk) => queue.push(chunk),
     stop() {
       clearTimeout(starting)
@@ -205,13 +217,24 @@ function createPlayer(ctx: CanvasRenderingContext2D) {
 }
 
 function sendVideo(camera: MediaStream, me: Me) {
+  // Counts the frames as encoded: one replaced before it reached the server never gets an `info.seq`
+  let ordinal = 0
+  let keyFrameAsked = false
+  me.listen(() => {
+    keyFrameAsked = true
+  })
   const encoder = new VideoEncoder({
     output(chunk) {
       const frame = new Uint8Array(chunk.byteLength)
       chunk.copyTo(frame)
       const isKeyframe = chunk.type === 'key'
       // Live video: not awaited, or each frame waits a round trip for the previous one
-      void me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe, lossy: true })
+      void me.publishBinary(frame, {
+        track: 'camera',
+        meta: { isKeyframe, ordinal: ordinal++ },
+        retain: isKeyframe,
+        lossy: true,
+      })
     },
     error(err) {
       console.error('encode error:', err)
@@ -225,7 +248,8 @@ function sendVideo(camera: MediaStream, me: Me) {
     for (let i = 0; ; i++) {
       const { done, value: frame } = await frames.read()
       if (done) return
-      if (encoder.state === 'configured') encoder.encode(frame, { keyFrame: i % 30 === 0 })
+      if (encoder.state === 'configured') encoder.encode(frame, { keyFrame: keyFrameAsked || i % 30 === 0 })
+      keyFrameAsked = false
       frame.close()
     }
   })()

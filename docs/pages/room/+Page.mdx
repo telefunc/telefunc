@@ -437,6 +437,8 @@ me.publishBinary(position, { track: 'cursor', lossy: true }) // a viewer that fa
 me.publishBinary(stroke, { track: 'drawing' }) // a viewer never misses one
 ```
 
+A lossy video track can skip a frame that later frames depend on, so number the frames in `meta` (a frame replaced on its way to the server never gets an `info.seq`) and, at a gap, drop frames until the next keyframe and restart your decoder from it.
+
 To send frames only while someone watches, use `onDemand()`, which also fires, as you call it, for the tracks already watched:
 
 ```js
