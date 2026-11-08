@@ -283,14 +283,14 @@ channel.send({ type: 'ping' }) // no await needed
 
 On the server, `send()` works the same whether the client is connected, offline, or hasn't opened the channel yet:
 
-- It holds each message until the client confirms it, up to 320 MiB per channel, within <Link href="/channel-config">`maxMemory`</Link> for all channels. An awaited `send()` resolves once the client has room, so a sender that awaits builds no backlog.
+- It holds each message until the client confirms it, up to the default per-channel limit of 320 MiB, within <Link href="/channel-config">`maxMemory`</Link> for all channels. An awaited `send()` resolves once the client has room, so a sender that awaits builds no backlog.
 - A `send()` past that rejects with `ChannelOverflowError`, and that message isn't delivered. The channel stays open, and later sends that fit go through.
 
 So fire-and-forget can leave a gap: the client never gets a `send()` the server refused. Telefunc logs a warning once per channel when your sends keep outrunning the client, well before that limit, and another at the first refused `send()`.
 
 To fix it, `await` each `send()` before the next, as in the clock example above, or send slower.
 
-A publish waits for no subscriber, so a `BroadcastChannel` has limits of its own. While its client is connected, the server holds up to as much as that client downloads in a minute: at least 64 MiB, at most 320 MiB. While its client is away, the server holds up to 320 MiB. Past that, the channel closes with `ChannelOverflowError`, unless it's lossy (see <Link href="#broadcast" />).
+A publish waits for no subscriber, so a `BroadcastChannel` has limits of its own. While its client is connected, the server holds up to as much as that client downloads in a minute: at least 64 MiB, at most the default per-channel limit of 320 MiB. While its client is away, the server holds up to that limit. Past that, the channel closes with `ChannelOverflowError`, unless it's lossy (see <Link href="#broadcast" />).
 
 > On a slow uplink, a client's large message delays what that client sends after it, on all its channels, until the large message has gone up. A 4 MiB `sendBinary()` at 1 MiB/s delays them by about 3 s. Only later messages wait, and what the server sends keeps arriving. To keep later messages quick, split the large one into smaller sends.
 
@@ -302,7 +302,7 @@ A publish waits for no subscriber, so a `BroadcastChannel` has limits of its own
 
 | Held | Where | Limit | Clears |
 |---|---|---|---|
-| A channel's `send()`s | Server | 320 MiB per channel, within `maxMemory` | As the client confirms them, in batches, once its `listen()` callbacks are done, including the promises they return |
+| A channel's `send()`s | Server | 320 MiB per channel by default, within `maxMemory` | As the client confirms them, in batches, once its `listen()` callbacks are done, including the promises they return |
 | A `BroadcastChannel`'s publishes | Server | See above, within `maxMemory` | As the client confirms them, in batches, once its `subscribe()` callbacks have returned. Their promises aren't awaited |
 | A `BroadcastChannel`'s `messages()` loop | Where the loop runs | 2 MiB past its next message | As the loop reaches each message |
 
@@ -562,7 +562,7 @@ Channels and broadcasts signal failure through four errors:
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
 | `NetworkError` (`isChannel: true`) | The client stayed gone longer than `reconnectTimeout` | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
-| `ChannelOverflowError` (`send()`) | The message would pass 320 MiB on its channel, or `maxMemory`. For a client's `send(data, { ack: true })`, also where the server can't hold the answer | **Open**; only that message is lost | `await` each `send()` before the next, or raise `maxMemory`. A single message larger than it is refused even if you await it: split it, or raise `maxMemory` |
+| `ChannelOverflowError` (`send()`) | The message would pass the default per-channel limit of 320 MiB, or `maxMemory`. For a client's `send(data, { ack: true })`, also where the server can't hold the answer | **Open**; only that message is lost | `await` each `send()` before the next, or raise `maxMemory`. A single message larger than it is refused even if you await it: split it, or raise `maxMemory` |
 | `ChannelOverflowError` (closed) | A `BroadcastChannel`'s client fell behind what the server holds for it; for a lossy one, the server couldn't hold even the newest message. For any channel, its client had so many `send(data, { ack: true })` or `publish()` calls waiting for their answers at once that the server couldn't hold even their refusals | Closed | Call its telefunction again, then pass `lossy: true`, `await` each acknowledged call before the next, or raise `maxMemory` |
 | `ChannelOverflowError` (`messages()`) | Its loop fell over 2 MiB behind the publishes, past its next message, or `maxMemory` is held and it's behind | The loop ends, the broadcast stays open | Handle each message faster, or use `subscribe()` |
 | `ChannelOverflowError` (`publish()`) | With no Redis or other transport installed, a `subscribe()` callback published more than 320 MiB before its first `await` | Open | Publish less from the callback |
@@ -578,10 +578,10 @@ See also:
 
 If the connection drops, Telefunc reconnects automatically and resumes existing channels and broadcasts:
 
-- Messages sent while offline are held and delivered in order on reconnect, up to 320 MiB per channel, within <Link href="/channel-config">`maxMemory`</Link>.
+- Messages sent while offline are held and delivered in order on reconnect, up to the default per-channel limit of 320 MiB, within <Link href="/channel-config">`maxMemory`</Link>.
 - Messages lost in the disconnect are resent after reconnect, if the client is back within `reconnectTimeout`.
 - Otherwise, the channel closes with `NetworkError`.
-- A `BroadcastChannel` holds up to 320 MiB of what's published while its client is away, and closes with `ChannelOverflowError` past that. A lossy one holds only the newest, and `info.seq` shows the jump.
+- A `BroadcastChannel` holds up to the default per-channel limit of 320 MiB of what's published while its client is away, and closes with `ChannelOverflowError` past that. A lossy one holds only the newest, and `info.seq` shows the jump.
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.
 
 > Reconnection is automatic — you don't need to handle it in your application code.

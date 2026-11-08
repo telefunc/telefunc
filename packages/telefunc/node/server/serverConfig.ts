@@ -97,7 +97,7 @@ type ChannelConfigUser = {
   pingInterval?: number
   /**
    * The most all channels on this server hold for their clients, in bytes or as `'4g'`, `'512m'`. It's a ceiling: nothing
-   * is set aside, and one channel holds at most 320 MiB of it.
+   * is set aside, and one channel holds at most 320 MiB of it by default.
    *
    * https://telefunc.com/channel-config
    *
