@@ -9,7 +9,6 @@ import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validate
 import {
   CREDIT_MSG_WINDOW_MAX,
   CHANNEL_CONNECT_TTL_MS,
-  CHANNEL_IDLE_TIMEOUT_MS,
   CREDIT_WINDOW_MAX_BYTES,
   MAX_CHANNELS_PER_CONNECTION,
   TIMER_DELAY_MAX_MS,
@@ -893,7 +892,7 @@ function resolveMuxServerOptions(): MuxServerOptions {
   const c = getChannelConfig()
   return {
     reconnectTimeout: c.reconnectTimeout,
-    idleTimeout: Math.min(c.reconnectTimeout, CHANNEL_IDLE_TIMEOUT_MS),
+    idleTimeout: c.idleTimeout,
     pingInterval: c.pingInterval,
     pingDeadline: pingDeadlineOf(c),
     creditWindow: creditWindowOf(c.maxMemory),
