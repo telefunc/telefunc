@@ -37,7 +37,6 @@ import { PublishBody } from './PublishBody.js'
 import { CHANNEL_HOLD_MAX_BYTES, CHANNEL_RECONNECT_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import type { AttachState } from '../../wire/payloads.js'
-import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { isAbort } from '../../../node/server/Abort.js'
 assertIsNotBrowser()
@@ -401,8 +400,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       const result = await this.publishBroadcast(serialized)
       this.sendAckRes(seq, stringify(result))
     } catch (err) {
-      if (this.lifecycle.handleCallbackError(err)) return
-      this.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+      this.answerFailed(seq, err)
     }
   }
 
@@ -412,8 +410,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       const result = await this.publishBinaryBroadcast(data)
       this.sendAckRes(seq, stringify(result))
     } catch (err) {
-      if (this.lifecycle.handleCallbackError(err)) return
-      this.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+      this.answerFailed(seq, err)
     }
   }
 }

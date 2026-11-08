@@ -883,6 +883,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
+  /** Answers ack request `seq` with an error where its answer threw `err`; an `Abort` aborts the channel instead. */
+  protected answerFailed(seq: number, err: unknown): void {
+    if (this.lifecycle.handleCallbackError(err)) return
+    this.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+  }
+
   private async answerAckReq<T>(
     listeners: Listeners<(data: T) => unknown>,
     data: T,
@@ -904,9 +910,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     try {
       answer = await listenerAnswer(listeners.list(), data)
     } catch (err) {
-      if (this.lifecycle.handleCallbackError(err)) return
-      this.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
-      return
+      return this.answerFailed(seq, err)
     }
     if (answer === null) {
       this.sendAckRes(seq, 'Only one channel listener may return an acknowledgement value', ACK_STATUS.ERROR)
