@@ -66,6 +66,7 @@ import { sendOwnBytes, listenOwnBytesAlone, listenOwnBytesBeside } from './ownBy
 
 import { Channel, Abort, Broadcast, BroadcastChannel, config } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
+import { cutWireSockets } from '../../wire-sockets'
 
 type ServerMessage = { type: 'tick'; count: number } | { type: 'echo'; text: string } | { type: 'welcome' }
 type ClientMessage = { type: 'ping' } | { type: 'echo'; text: string }
@@ -874,14 +875,28 @@ async function onChannelLinkShare() {
   return { download: download.client, ping: ping.client }
 }
 
-/** A broadcast that publishes `count` bodies of `bytes`, or closes, as a channel beside it asks, and answers its pings. */
+/** A broadcast that publishes `count` bodies of `bytes`, or closes, as a channel beside it asks, and answers its pings.
+ *  After `'away'`, the page's next publish drops its connections: one body follows on the cut wire, ahead of that
+ *  publish's receipt, and 16 more while the page is away (it retries after 500 ms). */
 async function onChannelPublishesBehind(bytes = 4 * 1024 * 1024, whenBehind?: 'missOldest' | 'close') {
   const broadcast = new BroadcastChannel({ key: `behind:${crypto.randomUUID()}`, whenBehind })
-  const control = new Channel<(msg: 'ping' | 'close' | number) => string, never>()
+  const publish = (count: number) => {
+    for (let i = 0; i < count; i++) void broadcast.publishBinary(new Uint8Array(bytes))
+  }
+  const control = new Channel<(msg: 'ping' | 'close' | 'away' | number) => string, never>()
   control.listen(async (msg) => {
     if (msg === 'ping') return 'pong'
     if (msg === 'close') return String(await broadcast.close({ timeout: 20_000 }))
-    for (let i = 0; i < msg; i++) void broadcast.publishBinary(new Uint8Array(bytes))
+    if (msg === 'away') {
+      const stop = broadcast.subscribe(() => {
+        stop()
+        cutWireSockets()
+        publish(1)
+        setTimeout(() => publish(16), 100)
+      })
+      return 'armed'
+    }
+    publish(msg)
     return 'published'
   })
   return { broadcast, control: control.client }

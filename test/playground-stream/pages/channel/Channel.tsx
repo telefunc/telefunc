@@ -207,8 +207,12 @@ type ChannelState = {
   slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
   publishesBehind: { pingMs: number; closed: string; closeMs: number } | null
   broadcastOverflow: { received: number; closeErr: string } | null
-  broadcastBehind: { seqsAhead: number[]; isClosed: boolean } | null
-  broadcastBehindCloses: { seqsAhead: number[]; closeErr: string | null } | null
+  broadcastBehind: { seqsAhead: number[]; isClosed: boolean; receiptAhead: number } | null
+  broadcastBehindCloses: {
+    seqsAhead: number[]
+    closeErr: string | null
+    across: { publish: string; received: number; closeErr: string }
+  } | null
   acrossFlip: { received: number[] } | null
   lateCallbacks: { channelId: string; onOpen: boolean; onCloseAbortValue: unknown } | null
   openAbort: { channelId: string; abortValue: unknown } | null
@@ -1481,21 +1485,26 @@ function ChannelDemo() {
     const { broadcast, control } = await openChannel(() => onChannelPublishesBehind(256 * 1024))
     const { seq: before } = await broadcast.publish('before the burst')
     const seqsAhead: number[] = []
-    const newest = new Promise<void>((resolve) => {
-      broadcast.subscribeBinary((_, info) => {
-        seqsAhead.push(info.seq - before)
-        if (info.seq === before + 16) resolve()
-      })
-    })
+    broadcast.subscribeBinary((_, info) => seqsAhead.push(info.seq - before))
+    const reaching = (ahead: number) =>
+      new Promise<void>((resolve) => broadcast.subscribeBinary((_, info) => info.seq === before + ahead && resolve()))
+    const burst = reaching(16)
     void control.send(16)
+    await burst
+    // A publish outstanding across a disconnect, as the page falls behind: its receipt and the newest, 17 later, come.
+    const newest = reaching(34)
+    await control.send('away', { ack: true })
+    const { seq } = await broadcast.publish('across the disconnect')
     await newest
-    setChannelState((s) => ({ ...s, broadcastBehind: { seqsAhead, isClosed: broadcast.isClosed } }))
+    const broadcastBehind = { seqsAhead, isClosed: broadcast.isClosed, receiptAhead: seq - before }
+    setChannelState((s) => ({ ...s, broadcastBehind }))
     control.close()
   }, [])
 
   const testBroadcastBehindCloses = useCallback(async () => {
     setChannelState((s) => ({ ...s, broadcastBehindCloses: null }))
-    const { broadcast, control } = await openChannel(() => onChannelPublishesBehind(256 * 1024, 'close'))
+    const opened = () => openChannel(() => onChannelPublishesBehind(256 * 1024, 'close'))
+    const { broadcast, control } = await opened()
     const { seq: before } = await broadcast.publish('before the burst')
     const seqsAhead: number[] = []
     // It closes, or, as with `whenBehind: 'missOldest'`, reads on up to the newest.
@@ -1508,8 +1517,21 @@ function ChannelDemo() {
     })
     void control.send(16)
     const closeErr = await ended
-    setChannelState((s) => ({ ...s, broadcastBehindCloses: { seqsAhead, closeErr } }))
     control.close()
+    // A publish outstanding across a disconnect, as the page falls behind: it settles with the close, and nothing that
+    // follows it comes.
+    const away = await opened()
+    let received = 0
+    away.broadcast.subscribeBinary(() => received++)
+    const closed = new Promise<string>((resolve) => away.broadcast.onClose((err) => resolve(err?.name ?? 'none')))
+    await away.control.send('away', { ack: true })
+    const publish = await away.broadcast.publish('across the disconnect').then(
+      () => 'resolved',
+      (err: Error) => err.name,
+    )
+    const across = { publish, received, closeErr: await closed }
+    setChannelState((s) => ({ ...s, broadcastBehindCloses: { seqsAhead, closeErr, across } }))
+    away.control.close()
   }, [])
 
   const testAcrossFlip = useCallback(async () => {
