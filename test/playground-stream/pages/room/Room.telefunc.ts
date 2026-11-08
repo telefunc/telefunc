@@ -41,6 +41,7 @@ export {
   onRoomTracks,
   onRoomLossyNearBudget,
   onRoomTextCursor,
+  onOpenReliableGapRoom,
   onGetWatchedCount,
   onRoomRelease,
   onFailBackend,
@@ -105,6 +106,7 @@ import { getRoomPlane } from '@telefunc/room/backend'
 import { anyoneCanJoin } from '../../anyone-can-join'
 import { sleep } from '../../sleep'
 import { dropRedisSubscribers } from '../../redis'
+import { createDeferred } from '../../createDeferred'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
 import {
@@ -516,6 +518,29 @@ async function onRoomTracks(roomId: string, heavy: 'cursor' | 'drawing') {
     cleanupState[`roomTracks_${roomId}`] = 'done'
   })
   await speaker.publish('before')
+}
+
+/** A room whose guard holds the publish `'held'` until a speaker sent, run by the test while the page is offline, 14
+ *  reliable messages of 132 KiB: past 7/8 of the lane's 2 MiB, so the server frees what it holds for the page, and
+ *  within it. */
+async function onOpenReliableGapRoom(roomId: string) {
+  const room = await Room.get(roomId)
+  const released = createDeferred()
+  Room.guard(room, {
+    anyoneCanJoin: true,
+    onBeforePublish: async (_from, data) => {
+      if (data === 'held') await released.promise
+    },
+  })
+  const speaker = await room.join({ meta: { name: 'Speaker' } })
+  awayMembers.set(roomId, [speaker])
+  onServerAction(`roomReliableGap_${roomId}`, async () => {
+    const padding = 'x'.repeat(132 * 1024)
+    for (let n = 0; n < 14; n++) await speaker.publish(`${n} ${padding}`)
+    cleanupState[`roomReliableGap_${roomId}`] = 'done'
+    released.resolve()
+  })
+  return room
 }
 
 /** A speaker sends, run by the test while the page is offline, 16 positions of 256 KiB on a lossy text track: 4 MiB. */

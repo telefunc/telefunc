@@ -46,6 +46,7 @@ import {
   onRoomTracks,
   onRoomLossyNearBudget,
   onRoomTextCursor,
+  onOpenReliableGapRoom,
   onGetWatchedCount,
   onRoomRelease,
   onFailBackend,
@@ -2115,6 +2116,28 @@ function Room() {
           (err: Error) => err.name,
         )
         setResult(JSON.stringify({ refused, next, closed, myCause, leaves }))
+      })}
+
+      {scenario('reliable-gap', null, 'Offline past 7/8 of maxMemory on reliable messages, a receipt due', async () => {
+        const roomId = await createRoomId('reliable-gap')
+        const view = await onOpenReliableGapRoom(roomId)
+        const received: string[] = []
+        view.subscribe((data) => received.push((data as string).split(' ')[0]!))
+        let closed = false
+        view.onClose(() => (closed = true))
+        const me = await view.join({ meta: { name: 'Me' } })
+        let myCause: unknown = null
+        me.onLeave((cause) => (myCause = cause))
+        await me.publish('before')
+        await pollUntil(() => ({ done: received.includes('before') }))
+        let receipt: string | null = null
+        me.publish('held').then(
+          () => (receipt = 'answered'),
+          (err: Error) => (receipt = err.name),
+        )
+        setResult(JSON.stringify({ roomId }))
+        await pollUntil(() => ({ done: closed ? receipt !== null : receipt === 'answered' }), 150)
+        setResult(JSON.stringify({ roomId, received, receipt, closed, myCause }))
       })}
 
       {scenario('text-cursor', null, 'Offline past maxMemory on a lossy text track', async () => {

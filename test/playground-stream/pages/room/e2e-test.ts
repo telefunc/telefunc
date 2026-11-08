@@ -1513,20 +1513,7 @@ function testRoomSmallMemory() {
   )
   test('room: a page offline while a lossy text track sent it more than maxMemory holds gets the newest message, with the jump in its info.seq, and stays in its room', async () => {
     if (!canCutWire()) return
-    await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-text-cursor')
-    let roomId = ''
-    await autoRetry(async () => {
-      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
-      expect(roomId).match(/^e2e-text-cursor:/)
-    })
-    await page.context().setOffline(true)
-    await cutWire()
-    await runServerAction(`roomTextCursor_${roomId}`)
-    await autoRetry(async () => {
-      expect((await getCleanupState())[`roomTextCursor_${roomId}`]).toBe('done')
-    })
-    await page.context().setOffline(false)
+    await runServerActionOffline('text-cursor', 'roomTextCursor')
     await autoRetry(async () => {
       const r = await getResult<{ cursor?: { n: number; seq: number }[]; closed: boolean; myCause: unknown }>(
         '#room-result',
@@ -1540,28 +1527,49 @@ function testRoomSmallMemory() {
     expectLog('fell behind and skipped frames of its lossy tracks')
     expectLog('skipped frames of its lossy tracks, as this client fell behind')
   })
+  test('room: a page offline while reliable messages pass 7/8 of maxMemory, its publish waiting for a receipt, is let go: no message and no receipt crosses what it missed', async () => {
+    if (!canCutWire()) return
+    await runServerActionOffline('reliable-gap', 'roomReliableGap')
+    await autoRetry(async () => {
+      const r = await getResult<{ received?: string[]; receipt: string | null; closed: boolean; myCause: unknown }>(
+        '#room-result',
+      )
+      expect(r).deep.equal({
+        ...r,
+        received: ['before'],
+        receipt: 'ChannelOverflowError',
+        closed: true,
+        myCause: { type: 'disconnected' },
+      })
+    })
+  })
   test('room: a page offline with only lossy tracks is not let go over them where the server still holds each newest frame', async () => {
     if (!canCutWire()) return
-    await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-lossy-near-budget')
-    let roomId = ''
-    await autoRetry(async () => {
-      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
-      expect(roomId).match(/^e2e-lossy-near-budget:/)
-    })
-    await page.context().setOffline(true)
-    await cutWire()
-    await runServerAction(`roomLossyNearBudget_${roomId}`)
-    await autoRetry(async () => {
-      expect((await getCleanupState())[`roomLossyNearBudget_${roomId}`]).toBe('done')
-    })
-    await page.context().setOffline(false)
+    await runServerActionOffline('lossy-near-budget', 'roomLossyNearBudget')
     await autoRetry(async () => {
       const { tracks, closed } = await getResult<{ tracks?: string[]; closed?: boolean }>('#room-result')
       expect(closed).toBe(false)
       expect(tracks).deep.equal(['a', 'b', 'c'])
     })
   })
+}
+
+/** Runs the room scenario `id`, whose result names its room, then its server `action` while the page is offline. */
+async function runServerActionOffline(id: string, action: string) {
+  await navigate(`${getServerUrl()}/room`)
+  await page.click(`#test-room-${id}`)
+  let roomId = ''
+  await autoRetry(async () => {
+    roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+    expect(roomId).match(new RegExp(`^e2e-${id}:`))
+  })
+  await page.context().setOffline(true)
+  await cutWire()
+  await runServerAction(`${action}_${roomId}`)
+  await autoRetry(async () => {
+    expect((await getCleanupState())[`${action}_${roomId}`]).toBe('done')
+  })
+  await page.context().setOffline(false)
 }
 
 type TracksBehind = {
@@ -1578,20 +1586,7 @@ type TracksBehind = {
 function testRoomTracksBehind(scenario: 'cursor' | 'drawing', name: string, validate: (r: TracksBehind) => void) {
   test(name, async () => {
     if (!canCutWire()) return
-    await navigate(`${getServerUrl()}/room`)
-    await page.click(`#test-room-tracks-${scenario}`)
-    let roomId = ''
-    await autoRetry(async () => {
-      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
-      expect(roomId).match(/^e2e-tracks-/)
-    })
-    await page.context().setOffline(true)
-    await cutWire()
-    await runServerAction(`roomTracks_${roomId}`)
-    await autoRetry(async () => {
-      expect((await getCleanupState())[`roomTracks_${roomId}`]).toBe('done')
-    })
-    await page.context().setOffline(false)
+    await runServerActionOffline(`tracks-${scenario}`, 'roomTracks')
     await autoRetry(async () => validate(await getResult<TracksBehind>('#room-result')))
   })
 }
