@@ -13,6 +13,7 @@ import {
   forceServerGc,
   serverHeapUsed,
   serverRuntime,
+  expectServerError,
 } from '../../e2e-utils'
 
 type ShieldState = {
@@ -356,16 +357,7 @@ function testPublish(isDev: boolean, inDocker = false) {
       const result = await getResult<{ received: string[]; receiptKey: boolean }>('#publish-result')
       expect(result).deep.equal({ received: ['static:hello', 'channel:hello'], receiptKey: true })
     })
-    for (const error of ['broadcast-listener-throws', 'broadcast-listener-rejects']) {
-      expectLog(error, {
-        // docker compose prints a server's stderr on its stdout, each line prefixed with the container's name.
-        filter: (log) =>
-          inDocker
-            ? log.logSource === 'stdout' &&
-              log.logText.split('\n').some((line) => line.includes(error) && /^playground-[a-z]-\d+ +\| /.test(line))
-            : log.logSource === 'stderr',
-      })
-    }
+    for (const error of ['broadcast-listener-throws', 'broadcast-listener-rejects']) expectServerError(error, inDocker)
   })
 
   test('broadcast: in a chat whose saving, history, avatar or mark-as-read fails, the error is reported and the next message still arrives', async () => {
@@ -382,16 +374,7 @@ function testPublish(isDev: boolean, inDocker = false) {
       expect(state['bug:Database unavailable']).toBe('reported')
       expect(state['bug:Could not load the chat history']).toBe('reported')
     })
-    for (const error of ['Database unavailable', 'Could not load the chat history']) {
-      expectLog(error, {
-        // docker compose prints a server's stderr on its stdout, each line prefixed with the container's name.
-        filter: (log) =>
-          inDocker
-            ? log.logSource === 'stdout' &&
-              log.logText.split('\n').some((line) => line.includes(error) && /^playground-[a-z]-\d+ +\| /.test(line))
-            : log.logSource === 'stderr',
-      })
-    }
+    for (const error of ['Database unavailable', 'Could not load the chat history']) expectServerError(error, inDocker)
     for (const error of ['Could not load the avatar', 'Could not mark the chat as read']) {
       expectLog(`[telefunc:channel-error] Error: ${error}`, { filter: (log) => log.logSource === 'Browser Error' })
     }
