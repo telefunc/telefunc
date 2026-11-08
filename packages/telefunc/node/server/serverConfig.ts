@@ -375,7 +375,7 @@ function defaultMaxMemory(): number {
 /** The settings a channel runs by, which can't change from here on. */
 function getChannelConfig(): ChannelConfigResolved {
   globalObject.channelConfigInUse = true
-  return getServerConfig().channel
+  return resolveChannelConfig(configState.channel)
 }
 
 /** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
