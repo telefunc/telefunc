@@ -1095,8 +1095,10 @@ async function onChannelOwnBytes() {
   return { alone: alone.client, beside: beside.client }
 }
 
+/** Three acknowledged sends of 800 KiB before the page attaches, and an answer to each of the page's own. */
 async function onChannelOfflineBudgets() {
-  const ch = new Channel<never, string>()
+  const ch = new Channel<(msg: string) => string, string>()
+  ch.listen((msg) => `answered ${msg}`)
   // Sent before the page attaches: they wait in the channel's buffer until it does.
   const sends = Array.from({ length: 3 }, () => ch.send('x'.repeat(800 * 1024), { ack: true }))
   void Promise.allSettled(sends).then((results) => {

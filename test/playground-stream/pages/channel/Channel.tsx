@@ -4,7 +4,14 @@ import { prepareIteratorAck, sendIteratorAck, type IteratorAckOptions } from './
 import { sendOwnBytes, listenOwnBytesAlone, listenOwnBytesBeside } from './ownBytesProbe'
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Abort as TelefuncAbort, abort, close, ConnectionError, withContext } from 'telefunc/client'
+import {
+  Abort as TelefuncAbort,
+  abort,
+  ChannelOverflowError,
+  close,
+  ConnectionError,
+  withContext,
+} from 'telefunc/client'
 import {
   onChannelInit,
   onChannelAbortTest,
@@ -1276,7 +1283,14 @@ function ChannelDemo() {
   const testOfflineBudgets = useCallback(async () => {
     const { channel } = await openChannel(onChannelOfflineBudgets)
     channel.listen(() => new Promise<void>((done) => setTimeout(done, 1000)))
-    document.querySelector('#channel-offline-budgets-result')!.textContent = JSON.stringify({ id: channel.id })
+    // The page's own: one more than the server holds for a channel is refused, and the next is answered.
+    const refused = await channel.send('x'.repeat(3 * 1024 * 1024), { ack: true }).then(
+      () => 'answered',
+      (err: Error) => (err instanceof ChannelOverflowError ? 'ChannelOverflowError' : `${err.name}: ${err.message}`),
+    )
+    const next = await channel.send('next', { ack: true })
+    const result = { id: channel.id, refused, next, isClosed: channel.isClosed }
+    document.querySelector('#channel-offline-budgets-result')!.textContent = JSON.stringify(result)
   }, [])
 
   const testCreditFailure = useCallback(async () => {

@@ -43,11 +43,14 @@ function testSmallPending() {
     expectLog(sendRefusedWarning)
   })
 
-  test('channel: acknowledged sends made before the page attaches are refused once they pass maxMemory, and the rest are answered', async () => {
+  test("channel: acknowledged sends made before the page attaches are refused once they pass maxMemory, and the rest are answered; a page's acknowledged send the server can't hold is refused with ChannelOverflowError and the channel stays open", async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-offline-budgets')
     await autoRetry(async () => {
-      const { id } = JSON.parse((await page.textContent('#channel-offline-budgets-result'))!)
+      const { id, refused, next, isClosed } = JSON.parse((await page.textContent('#channel-offline-budgets-result'))!)
+      expect(refused).toBe('ChannelOverflowError')
+      expect(next).toBe('answered next')
+      expect(isClosed).toBe(false)
       const sends: string[] = JSON.parse((await getCleanupState())[`offline_budget_${id}`] ?? '[]')
       expect(sends.slice(0, 2)).deep.equal(['answered', 'answered'])
       expect(sends[2]).toContain(

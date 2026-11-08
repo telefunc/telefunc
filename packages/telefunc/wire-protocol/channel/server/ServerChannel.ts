@@ -84,9 +84,6 @@ function parsePeerText(text: string): unknown {
   }
 }
 
-/** What a page's ack request gets where the server can't hold it or its answer. */
-const NOT_ADMITTED_TEXT = 'The server holds all it may for this channel; try again later'
-
 /** What an answer of `result` holds in a replay, or while its page is away. */
 function heldAnswerBytes(result: string): number {
   return utf8ByteLength(result) + MESSAGE_FRAME_OVERHEAD_MAX_BYTES + HELD_SEND_OVERHEAD_BYTES
@@ -831,18 +828,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.shutdown(err)
   }
 
-  /** Send an ack response, buffering it if the peer is currently disconnected. An answer that isn't admitted becomes an
-   *  error for the page's `send`, and where not even that is, the channel ends: the page has to learn. Past the channel's
-   *  release no page can get it, so it isn't held. */
+  /** Send an ack response, buffering it if the peer is currently disconnected. An answer that isn't admitted becomes a
+   *  refusal, held without asking, as a closing frame is: the page's `send` rejects with `ChannelOverflowError` and the
+   *  channel stays open. Past the channel's release no page can get it, so it isn't held. */
   protected sendAckRes(ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
     if (this.released) return
     if (!admit(this, heldAnswerBytes(result))) {
-      if (!admit(this, heldAnswerBytes(NOT_ADMITTED_TEXT))) {
-        this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(NOT_ADMITTED_TEXT))
-        return
-      }
-      result = NOT_ADMITTED_TEXT
-      status = ACK_STATUS.ERROR
+      result = ''
+      status = ACK_STATUS.OVERFLOW
     }
     if (this.peer) {
       this.peer.sendAckRes(ackedSeq, result, status)
@@ -862,7 +855,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     validate?: ShieldValidator,
   ): Promise<void> {
     if (!admit(this, bytes)) {
-      this.sendAckRes(seq, NOT_ADMITTED_TEXT, ACK_STATUS.ERROR)
+      this.sendAckRes(seq, '', ACK_STATUS.OVERFLOW)
       return
     }
     hold(this, bytes)

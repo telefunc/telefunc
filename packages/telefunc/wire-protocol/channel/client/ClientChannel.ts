@@ -30,6 +30,7 @@ import { assert } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
+import { ChannelOverflowError } from '../channelErrors.js'
 import { ClientConnection } from './ClientConnection.js'
 import { FC_PAGE_YIELD_BYTES, WIRE_MAX_RAW_FRAME_BYTES, type ChannelTransports } from '../../constants.js'
 import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
@@ -47,6 +48,9 @@ import { channelMessages } from '../channelMessages.js'
 import { forListener, listenerAnswer } from '../listenerAnswer.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
+
+/** What a page's `send(…, { ack: true })` rejects with where the server can't hold it or its answer. */
+const ACK_REFUSED_TEXT = 'Send refused: the server holds the most for this channel, or config.channel.maxMemory'
 
 /** The connection a channel rides (see `ClientConnection.getOrCreate`). */
 type ConnectionOptions = {
@@ -397,6 +401,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
           return
         case ACK_STATUS.SHIELD_ERROR:
           pending.reject(new ShieldValidationError(text))
+          return
+        case ACK_STATUS.OVERFLOW:
+          pending.reject(new ChannelOverflowError(ACK_REFUSED_TEXT))
       }
     } catch (err) {
       pending.reject(err instanceof Error ? err : new Error(String(err)))
