@@ -279,7 +279,7 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   /** The last participant left. */
   onEmpty(callback: () => void, options?: { signal?: AbortSignal }): () => void
   /** The room was closed via `Room.close()` (on the client, also: the connection is gone, or the room sent it more
-   *  while it was offline than the server holds for it). */
+   *  that it can't miss than the server holds for it). */
   onClose(callback: () => void, options?: { signal?: AbortSignal }): () => void
 
   /** Anything observable changed; pairs with `snapshot()`. */
@@ -330,7 +330,7 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
 
   leave(): Promise<void>
   /** You left. `cause.type` says how: `'left'` (you), `'removed'` (kicked, with the kick's `reason`), `'closed'` (the
-   *  room), `'disconnected'` (the connection died, or more was sent to it while offline than the server holds). */
+   *  room), `'disconnected'` (the connection died, or the server couldn't hold what it had to send you). */
   onLeave(callback: (cause: LeaveCause) => void, options?: { signal?: AbortSignal }): () => void
   /** The page holding you can't reach the room; the room keeps you meanwhile. */
   onDisconnect(callback: () => void, options?: { signal?: AbortSignal }): () => void
