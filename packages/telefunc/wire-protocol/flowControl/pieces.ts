@@ -364,7 +364,7 @@ class PieceSender {
     const now = performance.now()
     const data = isSequencedTag(frame[0]!)
     const copyRoom = data ? this.copyRoom() : Number.POSITIVE_INFINITY
-    const headroom = Math.max(0, Math.floor(Math.min(this.headroom, copyRoom)))
+    const headroom = Math.max(0, Math.floor(Math.min(this.headroom, copyRoom, this.largestCut())))
     const end = data ? Math.min(bytes, offset + headroom) : bytes
     // A piece smaller than what the receiver acknowledges at once would cost more than the wait for headroom.
     if (end - offset < Math.min(bytes - offset, WIRE_PIECES_ACK_BYTES)) return this.wait(frame, offset)
@@ -381,6 +381,14 @@ class PieceSender {
       this.messages.hand(encode.piece(bytes, frame.subarray(at, Math.min(end, at + size))))
     }
     if (end < bytes) this.wait(frame, end)
+  }
+
+  /** The most data a cut hands: two pieces, each crossing within a ping deadline at the rate data has carried. */
+  private largestCut(): number {
+    return Math.max(
+      WIRE_SEND_AHEAD_MIN_BYTES,
+      (2 * this.pieceRate.carried * this.pingInterval) / WIRE_PIECE_RATE_MARGIN,
+    )
   }
 
   /** Counts `bytes` handed to the socket, of data or not, or carried into the next message. */
@@ -542,9 +550,15 @@ class PieceSender {
     const newly = (bytes - this.acknowledgedBytes) >>> 0
     if (newly < 1 || newly > this.transmittedBytes - this.acknowledgedBytes) return false
     const probe = this.probe
-    // An ack of the probe's second piece alone carries its time apart from the first, which gives the path's rate.
-    if (probe !== null && this.acknowledgedBytes === probe.second && newly === probe.end - probe.second) {
-      this.rise(newly / Math.max(spanUs / 1000, WIRE_PROBE_CLOCK_MS), performance.now(), true)
+    // An ack of the probe's second piece alone gives the path's rate, by a span the clock tells from one read of both.
+    const spanMs = spanUs / 1000
+    if (
+      probe !== null &&
+      this.acknowledgedBytes === probe.second &&
+      newly === probe.end - probe.second &&
+      spanMs > WIRE_PROBE_CLOCK_MS
+    ) {
+      this.rise(newly / spanMs, performance.now(), true)
     }
     this.acknowledgedBytes += newly
     while (this.announcedEnds.length > 0 && this.announcedEnds.peek()!.end <= this.acknowledgedBytes) {
