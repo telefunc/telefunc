@@ -488,14 +488,12 @@ const Broadcast = {
     options?: { signal?: AbortSignal },
   ): BroadcastUnsubscribe {
     const adapter = getBroadcastAdapter()
-    return subscribeWithSignal(
-      () =>
-        adapter.subscribe(key, (serialized, info) => {
-          const data = parse(serialized) as ChannelData<U>
-          callStaticListener(callback, data, makePublishInfo(key, info.seq, info.timestamp))
-        }),
-      options,
-    )
+    if (options?.signal?.aborted) return () => {}
+    const unsubscribe = adapter.subscribe(key, (serialized, info) => {
+      const data = parse(serialized) as ChannelData<U>
+      callStaticListener(callback, data, makePublishInfo(key, info.seq, info.timestamp))
+    })
+    return unsubscribeOnAbort(unsubscribe, options?.signal)
   },
   publishBinary(key: string, data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     const adapter = getBroadcastAdapter()
@@ -507,14 +505,12 @@ const Broadcast = {
     options?: { signal?: AbortSignal },
   ): BroadcastUnsubscribe {
     const adapter = getBroadcastAdapter()
-    return subscribeWithSignal(
-      () =>
-        adapter.subscribeBinary(key, (data, info) => {
-          // A copy of its own, as a `BroadcastChannel` listener gets.
-          callStaticListener(callback, new Uint8Array(data), makePublishInfo(key, info.seq, info.timestamp))
-        }),
-      options,
-    )
+    if (options?.signal?.aborted) return () => {}
+    const unsubscribe = adapter.subscribeBinary(key, (data, info) => {
+      // A copy of its own, as a `BroadcastChannel` listener gets.
+      callStaticListener(callback, new Uint8Array(data), makePublishInfo(key, info.seq, info.timestamp))
+    })
+    return unsubscribeOnAbort(unsubscribe, options?.signal)
   },
 }
 
@@ -536,14 +532,14 @@ function reportStaticListenerError(err: unknown): void {
   if (!isAbort(err)) handleCallbackBug(err)
 }
 
-function subscribeWithSignal(subscribe: () => () => void, { signal }: { signal?: AbortSignal } = {}): () => void {
-  if (signal?.aborted) return () => {}
-  let unsubscribe: (() => void) | undefined = subscribe()
+/** Unsubscribes once `signal` aborts, at once if it aborted while subscribing, or when the returned function runs. */
+function unsubscribeOnAbort(unsubscribe: () => void, signal: AbortSignal | undefined): () => void {
+  let current: (() => void) | undefined = unsubscribe
   const remove = () => {
-    const current = unsubscribe
-    unsubscribe = undefined
+    const pending = current
+    current = undefined
     signal?.removeEventListener('abort', remove)
-    current?.()
+    pending?.()
   }
   signal?.addEventListener('abort', remove, { once: true })
   if (signal?.aborted) remove()
