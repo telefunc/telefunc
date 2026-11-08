@@ -71,20 +71,29 @@ class ServerReplay {
    *  reconnect may have to send again. */
   dropOldestPublishes(toBytes: number, droppable: number): number {
     const waiting = Math.min(this.publishes, droppable)
-    let pinned = this.publishes - waiting
     const mayGo = toBytes === 0 ? waiting : waiting - 1
     let dropped = 0
-    for (let i = this.first; i < this.seqs.length && dropped < mayGo && this.holder.heldBytes > toBytes; i++) {
+    for (let i = this.oldestDroppable(droppable); i < this.seqs.length && dropped < mayGo; i++) {
+      if (this.holder.heldBytes <= toBytes) break
       if (!this.bodies[i]) continue
-      if (pinned > 0) {
-        pinned--
-        continue
-      }
       this.drop(i)
       dropped++
     }
     this.compact()
     return dropped
+  }
+
+  /** As `dropOldestPublishes`, for a page that may miss none: where that would let one go, the oldest of its newest
+   *  `droppable` publishes goes with every frame after it, receipts too, so nothing reaches the page past the gap.
+   *  Returns how many publishes went. */
+  dropFromGap(toBytes: number, droppable: number): number {
+    const waiting = Math.min(this.publishes, droppable)
+    const mayGo = toBytes === 0 ? waiting : waiting - 1
+    if (mayGo <= 0 || this.holder.heldBytes <= toBytes) return 0
+    const publishes = this.publishes
+    for (let i = this.oldestDroppable(droppable); i < this.seqs.length; i++) this.drop(i)
+    this.compact()
+    return publishes - this.publishes
   }
 
   /** The body of the newest publish it holds. */
@@ -94,6 +103,17 @@ class ServerReplay {
       if (body) return body
     }
     return undefined
+  }
+
+  /** Where the oldest of its newest `droppable` publishes is: the older ones are on the wire. */
+  private oldestDroppable(droppable: number): number {
+    let pinned = this.publishes - Math.min(this.publishes, droppable)
+    for (let i = this.first; i < this.seqs.length; i++) {
+      if (!this.bodies[i]) continue
+      if (pinned === 0) return i
+      pinned--
+    }
+    return this.seqs.length
   }
 
   dispose(): void {

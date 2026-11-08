@@ -29,7 +29,7 @@ import { admitPublish, queueMemory, type MemoryHolder } from './channelMemory.js
 import { isPromise } from '../../../utils/isPromise.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
-import { ACK_STATUS, ERROR_REASON, encode } from '../../wire/frame.js'
+import { ACK_STATUS, ERROR_REASON, encode, type AckResultStatus } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { ChannelDataFrame } from '../../wire/frame.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
@@ -43,6 +43,7 @@ import { isAbort } from '../../../node/server/Abort.js'
 assertIsNotBrowser()
 
 const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
+const NOT_EVEN_NEWEST = 'the server could not hold even the newest message for its client'
 
 class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder {
   readonly [SERVER_BROADCAST_BRAND] = true
@@ -235,27 +236,37 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   /** `MemoryHolder`: its oldest publishes no wire has go, down to `toBytes`; its page sees the jump in `info.seq`. Above 0
    *  the newest stays, and at 0, where not even that fits, the channel ends: no later message would show the page. With
-   *  `whenBehind: 'close'` it ends where its page would miss any, and all that no wire has goes, so its page reads on up to
-   *  the gap and no further. The bytes go at once, but only its own object can write to its page, so from `owner`'s it
-   *  ends when its own next runs. */
+   *  `whenBehind: 'close'` it ends where its page would miss any, and from that gap on everything goes, receipts too, so
+   *  its page reads on up to the gap and no further. The bytes go at once, but only its own object can write to its
+   *  page, so from `owner`'s it ends when its own next runs. */
   shed(toBytes: number, owner?: string): void {
-    if (this._phase === 'ended' || !this._replayBuffer) return
-    const dropped = this.dropOldestPublishes(toBytes)
-    if (toBytes > 0 && dropped > 0 && this.whenBehind === 'close') {
-      this.dropOldestPublishes(0)
-      this.overflow("its client fell behind what the server holds for it, and its `whenBehind` is 'close'", owner)
+    const replay = this._replayBuffer
+    if (this._phase === 'ended' || !replay) return
+    if (this.whenBehind === 'close') {
+      const gap = replay.dropFromGap(toBytes, this.unhanded()) > 0
+      if (gap) {
+        this.peer?.sender.queue.dropWaitingFromPublish(this.peer.index)
+        this.dropPendingAnswers()
+      }
+      if (toBytes === 0) this.overflow(NOT_EVEN_NEWEST, owner)
+      else if (gap)
+        this.overflow("its client fell behind what the server holds for it, and its `whenBehind` is 'close'", owner)
       return
     }
-    if (dropped > 0) this.warnMissed()
+    const dropped = replay.dropOldestPublishes(toBytes, this.unhanded())
+    if (dropped > 0) {
+      this.peer?.sender.queue.dropWaitingPublishes(this.peer.index, dropped)
+      this.warnMissed()
+    }
     if (toBytes > 0) return
-    this.overflow('the server could not hold even the newest message for its client', owner)
+    this.overflow(NOT_EVEN_NEWEST, owner)
   }
 
-  /** Drops its oldest publishes no wire has, down to `toBytes`, from its replay and from its wire's queue. */
-  private dropOldestPublishes(toBytes: number): number {
-    const dropped = this._replayBuffer!.dropOldestPublishes(toBytes, this.unhanded())
-    if (dropped > 0) this.peer?.sender.queue.dropWaitingPublishes(this.peer.index, dropped)
-    return dropped
+  /** An answer past a gap its page may not miss would cross it: the channel ends first, and the publish it answers
+   *  settles with that. */
+  protected override sendAckRes(ackedSeq: number, result: string, status?: AckResultStatus): void {
+    if (this.whenBehind === 'close' && this.overflowed !== null) return this.endOverflowed()
+    super.sendAckRes(ackedSeq, result, status)
   }
 
   private overflow(why: string, owner: string | undefined): void {

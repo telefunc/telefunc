@@ -963,9 +963,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** Drops all buffered while no page was attached; buffered sends reject with `err` when it is given. */
   private dropPending(err?: Error): void {
     this.offlineBuffer.clear(err)
+    this.dropPendingAnswers()
+    this.pendingEnd = null
+  }
+
+  /** Drops the answers held for a page not attached, whose sends then settle as the channel ends. */
+  protected dropPendingAnswers(): void {
     for (const { result } of this.pendingAckRes) letGo(this, heldAnswerBytes(result))
     this.pendingAckRes = []
-    this.pendingEnd = null
   }
 }
 
