@@ -895,17 +895,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     seq: number,
     validate?: ShieldValidator,
   ): Promise<void> {
-    if (listeners.size === 0) {
-      this.sendAckRes(seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
-      return
-    }
+    if (listeners.size === 0) return this.sendAckRes(seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
     const verdict = validate ? validate(data) : true
     // `shield-error` status lets the client reject its `send()` promise with a branded
     // ShieldValidationError — same identity every other shield-fail surface produces.
-    if (verdict !== true) {
-      this.sendAckRes(seq, verdict, ACK_STATUS.SHIELD_ERROR)
-      return
-    }
+    if (verdict !== true) return this.sendAckRes(seq, verdict, ACK_STATUS.SHIELD_ERROR)
     let answer: string | null
     try {
       answer = await listenerAnswer(listeners.list(), data)
@@ -913,8 +907,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       return this.answerFailed(seq, err)
     }
     if (answer === null) {
-      this.sendAckRes(seq, 'Only one channel listener may return an acknowledgement value', ACK_STATUS.ERROR)
-      return
+      return this.sendAckRes(seq, 'Only one channel listener may return an acknowledgement value', ACK_STATUS.ERROR)
     }
     this.sendAckRes(seq, answer)
   }

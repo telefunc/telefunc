@@ -387,18 +387,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     try {
       this.ensureBroadcast()
       const validateData = this._validators.get('data')
-      if (validateData) {
-        const data = parse(serialized) as ChannelData<T>
-        const result = validateData(data)
-        // `shield-error` status lets the client reject its `publish()` promise with a branded
-        // ShieldValidationError — same identity every other shield-fail surface produces.
-        if (result !== true) {
-          this.sendAckRes(seq, result, ACK_STATUS.SHIELD_ERROR)
-          return
-        }
-      }
-      const result = await this.publishBroadcast(serialized)
-      this.sendAckRes(seq, stringify(result))
+      const verdict = validateData ? validateData(parse(serialized) as ChannelData<T>) : true
+      // `shield-error` status lets the client reject its `publish()` promise with a branded
+      // ShieldValidationError — same identity every other shield-fail surface produces.
+      if (verdict !== true) return this.sendAckRes(seq, verdict, ACK_STATUS.SHIELD_ERROR)
+      const receipt = await this.publishBroadcast(serialized)
+      this.sendAckRes(seq, stringify(receipt))
     } catch (err) {
       this.answerFailed(seq, err)
     }
