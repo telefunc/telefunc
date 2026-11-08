@@ -371,9 +371,9 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     return this.replay.hold(change)
   }
 
-  relayDm(bodies: MemberMessageBodies, { from, fromMetaSeq, ackId }: RoomDmEnvelope): void {
+  relayDm(bodies: MemberMessageBodies, { from, ackId }: RoomDmEnvelope): void {
     if (ackId) this.awaitDmReply(ackId, from)
-    this.end.deliver(fromMetaSeq !== undefined && this.namesSender(from) ? bodies.unstamped() : bodies.stamped())
+    this.end.deliver(this.namesSender(from) ? bodies.unstamped() : bodies.stamped())
   }
 
   /** Whether this client names `member` as this view does: it got the whole roster since it attached, and every event
