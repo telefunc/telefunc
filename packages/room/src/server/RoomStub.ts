@@ -1,7 +1,6 @@
-export { RoomStub, RoomParticipantStub, ResponseRoomGrants, MemberMessageBodies, unorderedEventBody, trackFrameBody }
+export { RoomStub, RoomParticipantStub, ResponseRoomGrants }
 export type { RoomStubOptions, RoomParticipantStubOptions }
 
-import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { ROOM_TRACK_WANTS_MAX, ROOM_VIEW_MEMBERS_MAX } from '../shared/constants.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
@@ -10,7 +9,6 @@ import {
   isProtocolViolationError,
   parsePeerText,
   ProtocolViolationError,
-  publishBody,
   reconnectWindow,
   type PublishBody,
   type BroadcastEndOwner,
@@ -60,13 +58,12 @@ import {
   type InboxMessage,
   type RoomDmEnvelope,
   type RoomFailure,
-  type RoomJoinedEvent,
   type RoomResult,
   type RoomRosterEvent,
 } from '../shared/protocol.js'
 import type { RoomDataEnvelope } from './protocol.js'
 import { toggle } from '../utils/sets.js'
-import { encodeLaneKey } from '../backend/laneKey.js'
+import { MemberMessageBodies, orderedBody, trackFrameBody, unorderedEventBody } from './publishBodies.js'
 assertIsNotBrowser()
 
 /** What one response's Room values grant the client on a room: echo drops for its own members, and hidden members it
@@ -85,50 +82,6 @@ class ResponseRoomGrants {
 
   onSuppressed(listener: (member: string) => void): void {
     this.suppressedListeners.push(listener)
-  }
-}
-
-/** An event an instance originates, outside any lane's order, which a page never misses. */
-function unorderedEventBody(
-  event: RoomCtrlEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent | ParticipantStubNotice,
-): PublishBody {
-  return publishBody(stringify(event), { seq: 0, timestamp: Date.now() }, { level: 'never' })
-}
-
-/** A track's frame as its lane carried it. A page that falls behind may miss one published with
- *  `whenBehind: 'missOldest'`, among its track's oldest. */
-function trackFrameBody(frame: BinaryFrame, framed: Uint8Array, info: OrderingInfo): PublishBody {
-  if (frame.whenBehind === 'close') return publishBody(framed, info, { level: 'never' })
-  const lane = { kind: 'binary', member: frame.from, track: frame.track } as const
-  return publishBody(framed, info, { level: 'behind', stream: encodeLaneKey(lane) })
-}
-
-/** A member's message as its lane carried it, stamped, and without the stamp, each made once for every client. A page
- *  never misses one: its room's `info.seq` stays whole. */
-class MemberMessageBodies {
-  private _stamped: PublishBody | null = null
-  private _unstamped: PublishBody | null = null
-
-  private readonly serialized: string
-  private readonly info: OrderingInfo
-  /** What `serialized` encodes. */
-  private readonly envelope: RoomDataEnvelope | RoomDmEnvelope
-
-  // Positional, as one is built per message.
-  constructor(serialized: string, info: OrderingInfo, envelope: RoomDataEnvelope | RoomDmEnvelope) {
-    this.serialized = serialized
-    this.info = info
-    this.envelope = envelope
-  }
-
-  stamped(): PublishBody {
-    return (this._stamped ??= publishBody(this.serialized, this.info, { level: 'never' }))
-  }
-
-  unstamped(): PublishBody {
-    if (this._unstamped !== null) return this._unstamped
-    const { fromMeta, fromMetaSeq, fromIdentity, fromDisconnected, ...unstamped } = this.envelope
-    return (this._unstamped = publishBody(stringify(unstamped), this.info, { level: 'never' }))
   }
 }
 
@@ -491,7 +444,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
 
   emitRetainedText(event: RoomDataEnvelope, info: OrderingInfo, serialized: string, hold: ReplayHold): void {
     if (this.replay.admitRetained(hold, event.from, null, info)) {
-      this.end.deliver(publishBody(serialized, info, { level: 'never' }))
+      this.end.deliver(orderedBody(serialized, info))
     }
   }
 
@@ -539,7 +492,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     this.tail = null
     for (const { serialized, ord, from } of held) {
       if (!this.wantsTextFrom(from)) continue
-      this.relayTextLive(from, publishBody(serialized, ord, { level: 'never' }), ord)
+      this.relayTextLive(from, orderedBody(serialized, ord), ord)
     }
   }
 

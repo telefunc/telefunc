@@ -30,13 +30,8 @@ import type { RoomDataEnvelope, RoomMemberRecord, RoomIncarnation } from './prot
 import type { RoomModel } from '../shared/RoomModel.js'
 import { RoomState, RoomStateView, type RoomStateOwner } from '../shared/state.js'
 import { ParticipantBase, type ParticipantBaseOptions } from '../shared/ParticipantBase.js'
-import {
-  MemberMessageBodies,
-  RoomParticipantStub,
-  RoomStub,
-  type RoomParticipantStubOptions,
-  type RoomStubOptions,
-} from './RoomStub.js'
+import { RoomParticipantStub, RoomStub, type RoomParticipantStubOptions, type RoomStubOptions } from './RoomStub.js'
+import { MemberMessageBodies } from './publishBodies.js'
 import type { RoomRequest } from './requests.js'
 import { LocalHolder, type LaneHolder, type TextWantsChange } from './lifecycle/replay.js'
 import { TailHold, type TailHoldOwner } from './lifecycle/TailHold.js'
@@ -343,7 +338,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
       if (envelope.fromMetaSeq !== undefined) {
         this.replica.applyStamp(envelope.from, envelope as RoomDmEnvelope & SenderStamp)
       }
-      const bodies = new MemberMessageBodies(serialized, info, envelope)
+      const bodies = new MemberMessageBodies({ serialized, info, envelope })
       return holder.relayDm(bodies, envelope)
     }
     if (holder === undefined) return

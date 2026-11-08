@@ -7,7 +7,7 @@ import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { getRoomPlane } from '../backend/plane.js'
 import type { LaneId } from '../backend/contract.js'
-import { publishBody, hostLocal, type OrderingInfo, type PublishBody } from 'telefunc/__internal'
+import { hostLocal, type OrderingInfo, type PublishBody } from 'telefunc/__internal'
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { ROOM_MEMBER_TRACKS_MAX } from '../shared/constants.js'
 import { DemandExchange } from './lanes/DemandExchange.js'
@@ -38,7 +38,8 @@ import type { LaneHolder, ReplayHold, TextWantsChange } from './lifecycle/replay
 import { type MetaMirror, type RoomHandle, ServerRoom } from './room.js'
 import { RosterStream } from './lifecycle/RosterStream.js'
 import { toggle } from '../utils/sets.js'
-import { MemberMessageBodies, type RoomStub, trackFrameBody, unorderedEventBody } from './RoomStub.js'
+import type { RoomStub } from './RoomStub.js'
+import { MemberMessageBodies, orderedBody, trackFrameBody, unorderedEventBody } from './publishBodies.js'
 import { LanePlan, type LaneDelivery, type LaneEvent, type LanePlanOwner } from './lanes/LanePlan.js'
 import { RoomHeartbeat } from './lifecycle/RoomHeartbeat.js'
 assertIsNotBrowser()
@@ -435,21 +436,21 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.authority.controlDelivered(info.seq)
     const ctrl = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
     if (ctrl.__r === 'demand-ask') return this.demandExchange.onAsk(ctrl)
-    this.applyControl(ctrl, () => publishBody(serialized, info, { level: 'never' }))
+    this.applyControl(ctrl, () => orderedBody(serialized, info))
   }
 
   private onTextData(serialized: string, info: OrderingInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope | Extract<RoomEnvelope, { __r: 'announce' }>
     if (envelope.__r === 'announce') {
       for (const handle of this.receivers) handle.local.relayAnnouncement(envelope.data, info)
-      const body = publishBody(serialized, info, { level: 'never' })
+      const body = orderedBody(serialized, info)
       for (const stub of this.stubs) stub.relayAnnouncement(body, info)
       return
     }
     this.applyStamp(envelope.from, envelope)
     for (const handle of this.receivers) handle.relayData(serialized, envelope, info)
     if (this.stubs.size === 0) return
-    const bodies = new MemberMessageBodies(serialized, info, envelope)
+    const bodies = new MemberMessageBodies({ serialized, info, envelope })
     for (const stub of this.stubs) stub.relayText(serialized, bodies, envelope.from, info)
   }
 

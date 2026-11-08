@@ -8,7 +8,8 @@ import type { MemberSnapshot, RoomRosterEvent } from '../../shared/protocol.js'
 import { Slice } from '../../shared/Slice.js'
 import type { MembershipEvent, RoomModel, RosterRead } from '../../shared/RoomModel.js'
 import { reportRoomError } from '../reportRoomError.js'
-import { type RoomStub, unorderedEventBody } from '../RoomStub.js'
+import type { RoomStub } from '../RoomStub.js'
+import { unorderedEventBody } from '../publishBodies.js'
 assertIsNotBrowser()
 
 /** One part of a roster stream: its index, its members' ids, and whether a part follows. */
