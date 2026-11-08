@@ -459,9 +459,12 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** An ack-bearing send: what refuses it throws here, as it does for a send without an ack. */
-  protected sendAckReq<T, D>(encodeFrame: SequencedEncoder<D>, data: D): Promise<T> {
+  protected sendAckReq<T, D>(encodeFrame: SequencedEncoder<D>, data: D, onQueued?: (seq: number) => void): Promise<T> {
     const ack = createDeferred<T>()
-    this.connection.sendSequenced(this, 'ack', encodeFrame, data, (seq) => this.pendingAcks.set(seq, ack))
+    this.connection.sendSequenced(this, 'ack', encodeFrame, data, (seq) => {
+      this.pendingAcks.set(seq, ack)
+      onQueued?.(seq)
+    })
     return this.lifecycle.trackAck(ack.promise)
   }
 

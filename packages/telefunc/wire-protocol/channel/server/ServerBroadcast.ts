@@ -44,6 +44,7 @@ assertIsNotBrowser()
 
 const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
 const NOT_EVEN_NEWEST = 'the server could not hold even the newest message for its client'
+const FELL_BEHIND = 'its client fell behind what the server holds for it; `lossy: true` lets it skip to the newest'
 
 class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder {
   readonly [SERVER_BROADCAST_BRAND] = true
@@ -64,18 +65,15 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private peerSubscribedText = false
   private peerSubscribedBinary = false
 
-  /** What its page gets where it falls behind: see `shed`. */
-  private readonly whenBehind: 'missOldest' | 'close'
+  /** A newer publish replaces those no wire has taken yet, on the way to its page and on the page's way up. */
+  readonly lossy: boolean
 
   constructor(opts: BroadcastChannelOptions) {
     super()
-    const { key, whenBehind = 'missOldest' } = opts
-    assertUsage(
-      whenBehind === 'missOldest' || whenBehind === 'close',
-      "`new BroadcastChannel()`'s `whenBehind` should be 'missOldest' or 'close'",
-    )
+    const { key, lossy = false } = opts
+    assertUsage(typeof lossy === 'boolean', "`new BroadcastChannel()`'s `lossy` should be a boolean")
     this.key = key
-    this.whenBehind = whenBehind
+    this.lossy = lossy
   }
 
   /** Its page is told what it missed by `info.seq`, and the server's log by this once. */
@@ -207,8 +205,17 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.endOverflowed()
     if (this._phase === 'ended') return
     this.lastPeer!.sendPublish(body)
+    if (this.lossy) return this.skipToNewest()
     const share = this.share()
     if (this.heldBytes > share) this.shed(share, this.owner)
+  }
+
+  /** A lossy page's publishes that no wire has taken, but the newest, go. */
+  private skipToNewest(): void {
+    const dropped = this._replayBuffer!.dropBeforeNewest(this.unhanded())
+    if (dropped === 0) return
+    this.peer?.sender.queue.dropWaitingPublishes(this.peer.index, dropped)
+    this.warnMissed()
   }
 
   /** What it may hold: 60 s of what its page takes, within what any channel may. */
@@ -234,38 +241,25 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     return this.adapter?.ownerOf?.(this.wireRequest)
   }
 
-  /** `MemoryHolder`: its oldest publishes no wire has go, down to `toBytes`; its page sees the jump in `info.seq`. Above 0
-   *  the newest stays, and at 0, where not even that fits, the channel ends: no later message would show the page. With
-   *  `whenBehind: 'close'` it ends where its page would miss any, and from that gap on everything goes, receipts too, so
-   *  its page reads on up to the gap and no further. The bytes go at once, but only its own object can write to its
-   *  page, so from `owner`'s it ends when its own next runs. */
+  /** `MemoryHolder`: its page gets every publish, so where it would miss one no wire has, the channel ends: from that gap
+   *  on everything goes, receipts too, and its page reads on up to the gap and no further. A lossy one holds no publish
+   *  waiting but its newest, so it ends only at 0, where not even that fits. The bytes go at once, but only its own
+   *  object can write to its page, so from `owner`'s it ends when its own next runs. */
   shed(toBytes: number, owner?: string): void {
     const replay = this._replayBuffer
-    if (this._phase === 'ended' || !replay) return
-    if (this.whenBehind === 'close') {
-      const gap = replay.dropFromGap(toBytes, this.unhanded()) > 0
-      if (gap) {
-        this.peer?.sender.queue.dropWaitingFromPublish(this.peer.index)
-        this.dropPendingAnswers()
-      }
-      if (toBytes === 0) this.overflow(NOT_EVEN_NEWEST, owner)
-      else if (gap)
-        this.overflow("its client fell behind what the server holds for it, and its `whenBehind` is 'close'", owner)
-      return
+    if (this._phase === 'ended' || !replay || (this.lossy && toBytes > 0)) return
+    const gap = replay.dropFromGap(toBytes, this.unhanded()) > 0
+    if (gap) {
+      this.peer?.sender.queue.dropWaitingFromPublish(this.peer.index)
+      this.dropPendingAnswers()
     }
-    const dropped = replay.dropOldestPublishes(toBytes, this.unhanded())
-    if (dropped > 0) {
-      this.peer?.sender.queue.dropWaitingPublishes(this.peer.index, dropped)
-      this.warnMissed()
-    }
-    if (toBytes > 0) return
-    this.overflow(NOT_EVEN_NEWEST, owner)
+    if (toBytes === 0) this.overflow(NOT_EVEN_NEWEST, owner)
+    else if (gap) this.overflow(FELL_BEHIND, owner)
   }
 
-  /** An answer past a gap its page may not miss would cross it: the channel ends first, and the publish it answers
-   *  settles with that. */
+  /** An answer past the gap would cross it: the channel ends first, and the publish it answers settles with that. */
   protected override sendAckRes(ackedSeq: number, result: string, status?: AckResultStatus): void {
-    if (this.whenBehind === 'close' && this.overflowed !== null) return this.endOverflowed()
+    if (this.overflowed !== null) return this.endOverflowed()
     super.sendAckRes(ackedSeq, result, status)
   }
 
@@ -284,7 +278,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.missedWarned = true
     assertWarning(
       false,
-      `A \`BroadcastChannel\` on key "${this.key}" fell behind what the server holds for its client, which misses its oldest messages: \`info.seq\` shows the gap on the client.`,
+      `A lossy \`BroadcastChannel\` on key "${this.key}" skipped messages its client hadn't taken yet: \`info.seq\` shows the gap on the client.`,
       { onlyOnce: false },
     )
   }
@@ -434,15 +428,15 @@ type BroadcastChannel<T = unknown> = {
 type BroadcastChannelOptions = {
   key: string
   /**
-   * What its client gets where it falls behind what the server holds for it: `'missOldest'` misses its oldest messages
-   * and keeps reading up to the newest, with a jump in `info.seq`; `'close'` gets every message up to the first one it
-   * would miss, and the channel closes with `ChannelOverflowError`.
+   * A client that can't keep up skips to the newest: a newer message replaces those no connection has taken yet, and
+   * `info.seq` jumps over them. Without it, the client gets every message, or the channel closes with
+   * `ChannelOverflowError` past what the server holds for it.
    *
-   * https://telefunc.com/channel#close-a-client-that-falls-behind
+   * https://telefunc.com/channel#skip-to-the-newest
    *
-   * @default 'missOldest'
+   * @default false
    */
-  whenBehind?: 'missOldest' | 'close'
+  lossy?: boolean
 }
 
 const BroadcastChannel = ServerBroadcast as {

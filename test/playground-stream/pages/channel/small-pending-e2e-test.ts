@@ -90,34 +90,35 @@ function testSmallPending() {
       },
       { timeout: 30_000 },
     )
-    expectLog('fell behind what the server holds for its client')
   })
 
-  // 16 publishes of 256 KiB in one go: past 7/8 of maxMemory, the oldest the wire hasn't taken go. Then the page's
-  // publish (17) is outstanding as its connection drops, with 17 more published behind its receipt while it is away.
-  test('channel: a client that falls behind a broadcast misses its oldest messages, gets the newest with a jump in info.seq, and stays open', async () => {
+  // 16 publishes of 256 KiB in one go to a lossy broadcast: each one the wire hasn't taken goes as a newer one comes.
+  // Then the page's publish (17) is outstanding as its connection drops, with 17 more published behind its receipt
+  // while it is away: only the newest of them is held. Then the page's own 20 publishes at once.
+  test('channel: a client that falls behind a lossy broadcast skips to the newest, with a jump in info.seq, and stays open, and so does its own uplink', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-broadcast-behind')
     await autoRetry(
       async () => {
-        const { seqsAhead, isClosed, receiptAhead } = (await getResult<any>('#channel-state')).broadcastBehind
+        const { seqsAhead, isClosed, receiptAhead, uplinkReceipts } = (await getResult<any>('#channel-state'))
+          .broadcastBehind
         const [burst, away] = [seqsAhead.filter((a: number) => a <= 16), seqsAhead.filter((a: number) => a > 17)]
         expect(burst.at(-1)).toBe(16)
         expect(burst.length).lessThan(16)
         expect(receiptAhead).toBe(17)
-        expect(away.at(-1)).toBe(34)
-        expect(away.length).lessThan(17)
+        expect(away).deep.equal([34])
+        expect(uplinkReceipts).lessThan(20)
         expect(isClosed).toBe(false)
       },
       { timeout: 30_000 },
     )
-    expectLog('fell behind what the server holds for its client')
+    expectLog('skipped messages its client')
     expectLog('missed messages')
   })
 
-  // The same two with `whenBehind: 'close'`, the second on a broadcast of its own: where its page would miss the oldest,
-  // it closes instead, and the receipt behind the gap doesn't come either.
-  test("channel: a client that falls behind a broadcast with whenBehind 'close' gets every message up to the gap, then closes with ChannelOverflowError", async () => {
+  // The same two without `lossy`, the second on a broadcast of its own: where its page would miss a message, it closes
+  // instead, and the receipt behind the gap doesn't come either.
+  test('channel: a client that falls behind a broadcast gets every message up to the gap, then closes with ChannelOverflowError', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-broadcast-behind-closes')
     await autoRetry(

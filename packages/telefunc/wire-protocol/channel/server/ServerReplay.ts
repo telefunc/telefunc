@@ -66,15 +66,13 @@ class ServerReplay {
     return frames
   }
 
-  /** Of its newest `droppable` publishes, the oldest go until its holder holds `toBytes`, but for the newest of all above 0:
-   *  a later message then shows the page what it missed. Returns how many went. The older ones are on the wire, which a
-   *  reconnect may have to send again. */
-  dropOldestPublishes(toBytes: number, droppable: number): number {
-    const waiting = Math.min(this.publishes, droppable)
-    const mayGo = toBytes === 0 ? waiting : waiting - 1
+  /** Of its newest `droppable` publishes, all but the newest go: the page gets that one, and its `info.seq` shows what
+   *  it skipped. Receipts stay. Returns how many went. The older ones are on the wire, which a reconnect may have to
+   *  send again. */
+  dropBeforeNewest(droppable: number): number {
+    const mayGo = Math.min(this.publishes, droppable) - 1
     let dropped = 0
     for (let i = this.oldestDroppable(droppable); i < this.seqs.length && dropped < mayGo; i++) {
-      if (this.holder.heldBytes <= toBytes) break
       if (!this.bodies[i]) continue
       this.drop(i)
       dropped++
@@ -83,9 +81,9 @@ class ServerReplay {
     return dropped
   }
 
-  /** As `dropOldestPublishes`, for a page that may miss none: where that would let one go, the oldest of its newest
-   *  `droppable` publishes goes with every frame after it, receipts too, so nothing reaches the page past the gap.
-   *  Returns how many publishes went. */
+  /** For a page that may miss none: where its holder holds more than `toBytes`, and one of its newest `droppable`
+   *  publishes may go (any at 0, all but the newest above), the oldest of them goes with every frame after it, receipts
+   *  too, so nothing reaches the page past the gap. Returns how many publishes went. */
   dropFromGap(toBytes: number, droppable: number): number {
     const waiting = Math.min(this.publishes, droppable)
     const mayGo = toBytes === 0 ? waiting : waiting - 1

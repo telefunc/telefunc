@@ -74,6 +74,21 @@ class SendGate {
     this.waitForHeadroom({ frame, channelIx: record.ix, seq })
   }
 
+  /** Puts `frame` in the place of channel `ix`'s frame `seq` while that is held or waits for headroom: false once it
+   *  went, as the wire then has it. */
+  replaceWaiting(ix: number, seq: number, frame: Uint8Array<ArrayBuffer>): boolean {
+    for (const entry of this.waitingForHeadroom) {
+      if (entry.channelIx !== ix || entry.seq !== seq) continue
+      this.waitingForHeadroomBytes += frame.byteLength - entry.frame.byteLength
+      entry.frame = frame
+      return true
+    }
+    const held = this.settleQueue().find((entry) => entry.channelIx === ix && entry.seq === seq)
+    if (held === undefined) return false
+    held.frame = frame
+    return true
+  }
+
   /** Sends a frame without a seq, or holds it as `send` does: a late WINDOW is still right, its limit cumulative. */
   sendUnsequenced(record: ChannelRecord, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
     if (!this.canSendImmediately(record)) {

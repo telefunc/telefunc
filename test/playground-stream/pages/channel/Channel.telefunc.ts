@@ -878,8 +878,8 @@ async function onChannelLinkShare() {
 /** A broadcast that publishes `count` bodies of `bytes`, or closes, as a channel beside it asks, and answers its pings.
  *  After `'away'`, the page's next publish drops its connections: one body follows on the cut wire, ahead of that
  *  publish's receipt, and 16 more while the page is away (it retries after 500 ms). */
-async function onChannelPublishesBehind(bytes = 4 * 1024 * 1024, whenBehind?: 'missOldest' | 'close') {
-  const broadcast = new BroadcastChannel({ key: `behind:${crypto.randomUUID()}`, whenBehind })
+async function onChannelPublishesBehind(bytes = 4 * 1024 * 1024, lossy?: boolean) {
+  const broadcast = new BroadcastChannel({ key: `behind:${crypto.randomUUID()}`, lossy })
   const publish = (count: number) => {
     for (let i = 0; i < count; i++) void broadcast.publishBinary(new Uint8Array(bytes))
   }

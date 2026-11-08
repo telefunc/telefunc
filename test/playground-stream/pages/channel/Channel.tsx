@@ -214,7 +214,7 @@ type ChannelState = {
   slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
   publishesBehind: { pingMs: number; closed: string; closeMs: number } | null
   broadcastOverflow: { received: number; closeErr: string } | null
-  broadcastBehind: { seqsAhead: number[]; isClosed: boolean; receiptAhead: number } | null
+  broadcastBehind: { seqsAhead: number[]; isClosed: boolean; receiptAhead: number; uplinkReceipts: number } | null
   broadcastBehindCloses: {
     seqsAhead: number[]
     closeErr: string | null
@@ -1496,7 +1496,7 @@ function ChannelDemo() {
 
   const testBroadcastBehind = useCallback(async () => {
     setChannelState((s) => ({ ...s, broadcastBehind: null }))
-    const { broadcast, control } = await openChannel(() => onChannelPublishesBehind(256 * 1024))
+    const { broadcast, control } = await openChannel(() => onChannelPublishesBehind(256 * 1024, true))
     const { seq: before } = await broadcast.publish('before the burst')
     const seqsAhead: number[] = []
     broadcast.subscribeBinary((_, info) => seqsAhead.push(info.seq - before))
@@ -1510,18 +1510,21 @@ function ChannelDemo() {
     await control.send('away', { ack: true })
     const { seq } = await broadcast.publish('across the disconnect')
     await newest
-    const broadcastBehind = { seqsAhead, isClosed: broadcast.isClosed, receiptAhead: seq - before }
+    // The page's own 20 publishes at once, faster than its uplink: one still waiting takes the next one's place.
+    const receipts = await Promise.all(Array.from({ length: 20 }, () => broadcast.publish('x'.repeat(256 * 1024))))
+    const uplinkReceipts = new Set(receipts.map((receipt) => receipt.seq)).size
+    const broadcastBehind = { seqsAhead, isClosed: broadcast.isClosed, receiptAhead: seq - before, uplinkReceipts }
     setChannelState((s) => ({ ...s, broadcastBehind }))
     control.close()
   }, [])
 
   const testBroadcastBehindCloses = useCallback(async () => {
     setChannelState((s) => ({ ...s, broadcastBehindCloses: null }))
-    const opened = () => openChannel(() => onChannelPublishesBehind(256 * 1024, 'close'))
+    const opened = () => openChannel(() => onChannelPublishesBehind(256 * 1024))
     const { broadcast, control } = await opened()
     const { seq: before } = await broadcast.publish('before the burst')
     const seqsAhead: number[] = []
-    // It closes, or, as with `whenBehind: 'missOldest'`, reads on up to the newest.
+    // It closes, or, as a lossy one does, reads on up to the newest.
     const ended = new Promise<string | null>((resolve) => {
       broadcast.onClose((err) => resolve(err?.name ?? 'none'))
       broadcast.subscribeBinary((_, info) => {
@@ -1964,7 +1967,7 @@ function ChannelDemo() {
             onClick={testBroadcastBehind}
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
-            Broadcast Publishes More Than The Client Keeps Up With
+            Lossy Broadcast Publishes More Than The Client Keeps Up With
           </button>
           <button
             id="channel-test-broadcast-behind-closes"
