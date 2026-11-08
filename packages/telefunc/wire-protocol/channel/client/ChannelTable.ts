@@ -5,7 +5,6 @@ import type { ReplayBuffer } from './ReplayBuffer.js'
 import type { MuxChannel } from './ClientConnection.js'
 import { assert } from '../../../utils/assert.js'
 import { seqNear, seqThrough } from '../../wire/seq.js'
-import { isClosingTag } from '../../wire/tags.js'
 
 /** `closed`: unregistered, and kept till released, as the RECONCILE releasing it, or a new wire's leaving it out, ends
  *  it on the server. */
@@ -101,7 +100,7 @@ class ChannelTable {
   }
 
   /** The full seq of a frame the server sent on a channel, or null for a frame to drop. */
-  receivedSeq({ tag, index, seq: bits }: { tag: number; index: number; seq: number }): number | null {
+  receivedSeq({ index, seq: bits }: { index: number; seq: number }): number | null {
     const record = this.records.get(index)
     // A channel this page let go.
     if (record === undefined) return null
@@ -111,9 +110,6 @@ class ChannelTable {
     // A seq already seen: a replay resends what arrived.
     if (seq <= prev) return null
     record.lastSeq = seq
-    // A channel's frames take consecutive seqs, so a gap is publishes the server let go as this page fell behind. A
-    // closing frame goes ahead of its channel's waiting publishes on purpose, so its gap is no loss.
-    if (seq > prev + 1 && !isClosingTag(tag)) record.channel._onFramesMissed?.()
     return seq
   }
 
