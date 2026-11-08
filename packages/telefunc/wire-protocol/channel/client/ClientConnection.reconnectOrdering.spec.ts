@@ -140,6 +140,8 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
         pingInterval: 100_000,
         maxFrameBytes: 64 * 1024 * 1024,
         creditWindow: 1_000_000,
+        sseFlushThrottle: 300,
+        ssePostIdleFlushDelay: 50,
         transports: ['sse'],
       }),
     )

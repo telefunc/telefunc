@@ -42,6 +42,8 @@ import {
   DEFAULT_STREAM_TRANSPORT,
   parseStreamConfig,
   validateChannelTransports,
+  SSE_FLUSH_THROTTLE_MS,
+  SSE_POST_IDLE_FLUSH_DELAY_MS,
   type ChannelTransports,
   type StreamTransport,
   TIMER_DELAY_MAX_MS,
@@ -95,6 +97,22 @@ type ChannelConfigUser = {
    * @default a quarter of the memory the process may use
    */
   maxMemory?: number | string
+  /**
+   * When using SSE channels, upstream client-to-server frames are batched for at
+   * most this many milliseconds before Telefunc sends a POST.
+   *
+   * This value also defines the idle window used to detect the first POST after
+   * an idle period.
+   */
+  sseFlushThrottle?: number
+  /**
+   * When using SSE channels, the first upstream batch POST after an idle period
+   * waits at most this many milliseconds before Telefunc flushes it.
+   *
+   * Idle means no upstream SSE batch POST has started within the current
+   * `sseFlushThrottle` window.
+   */
+  ssePostIdleFlushDelay?: number
 }
 
 type ChannelConfigResolved = {
@@ -102,6 +120,8 @@ type ChannelConfigResolved = {
   reconnectTimeout: number
   pingInterval: number
   maxMemory: number
+  sseFlushThrottle: number
+  ssePostIdleFlushDelay: number
 }
 
 /** Telefunc Server Configuration */
@@ -314,6 +334,8 @@ function resolveChannelConfig(channel: ChannelConfigUser): ChannelConfigResolved
       (channel.maxMemory as number | undefined) ??
       globalObject.adapterMaxMemory ??
       (globalObject.defaultMaxMemory ??= defaultMaxMemory()),
+    sseFlushThrottle: channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
+    ssePostIdleFlushDelay: channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
   }
 }
 
@@ -477,6 +499,11 @@ function applyChannelConfig(val: unknown): void {
           value >= CHANNEL_PING_INTERVAL_MIN_MS,
           `\`${configPath}\` should be at least ${CHANNEL_PING_INTERVAL_MIN_MS}: more pings than that flood the wire`,
         )
+        next[key] = value
+        break
+      case 'sseFlushThrottle':
+      case 'ssePostIdleFlushDelay':
+        assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
         next[key] = value
         break
       case 'reconnectTimeout':

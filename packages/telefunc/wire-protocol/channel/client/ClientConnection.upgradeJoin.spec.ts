@@ -91,6 +91,8 @@ function reconciled(extra: { ix: number; sessionId: string; upgradeId?: string }
     pingInterval: 100_000,
     maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
     creditWindow: 1_000_000,
+    sseFlushThrottle: 300,
+    ssePostIdleFlushDelay: 50,
     transports: ['sse', 'ws'],
     ...(extra.upgradeId === undefined ? {} : { upgradeId: extra.upgradeId }),
   })
