@@ -1,6 +1,6 @@
 export { testVideoChat }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Page } from 'playwright-chromium'
 import { canCutWire, cutWire } from '../../e2e-utils'
 
@@ -111,6 +111,8 @@ function testVideoChat() {
       await bobTab.context().setOffline(false)
       await autoRetry(async () => expect(await callText()).to.equal('In the call: Alice, Bob'))
       await aliceDraws(seesBob)
+      // The frames Bob's page could not take gave way to newer ones, once.
+      expectLog('fell behind and skipped frames of its lossy tracks')
       await leave(bobTab, 'Bob')
       await bobTab.close()
       await leave(page, 'Alice')
