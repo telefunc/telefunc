@@ -2164,7 +2164,10 @@ function Room() {
           ),
         )
         await pollUntil(() => ({ done: seen.at(-1) === 19 }))
-        setResult(JSON.stringify({ receipts: new Set(receipts.map((receipt) => receipt.seq)).size, seen }))
+        await new Promise((resolve) => setTimeout(resolve))
+        const { end } = view as unknown as { end: { newestPublishes: Map<string, unknown> } }
+        const receiptSeqs = new Set(receipts.map((receipt) => receipt.seq))
+        setResult(JSON.stringify({ receipts: receiptSeqs.size, seen, listed: end.newestPublishes.size }))
       })}
 
       {scenario('slow-link', 'Slow link', '640 KB each way', async () => {

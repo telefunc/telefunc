@@ -26,6 +26,9 @@ import { ClientChannel, reportChannelError, type ClientChannelOptions } from './
 
 type ClientBroadcastOptions = ClientChannelOptions & { lossy?: boolean }
 
+/** A publish of a lossy stream that may still wait to go, under its seq. */
+type NewestPublish = { seq: number; receipt: Promise<ChannelPublishAck> }
+
 class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
   /** The subscriptions this page asks the server for. */
@@ -35,8 +38,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private missedHandler: (() => void) | null = null
   /** A newer publish replaces this page's own that no wire has taken yet: see `sendPublish`. */
   private readonly lossy: boolean
-  /** This page's newest publish of each lossy stream, which may still wait to go. */
-  private readonly newestPublishes = new Map<string, { seq: number; receipt: Promise<ChannelPublishAck> }>()
+  /** This page's newest publish of each lossy stream, while it isn't settled. */
+  private readonly newestPublishes = new Map<string, NewestPublish>()
 
   constructor(options: ClientBroadcastOptions) {
     super(options)
@@ -123,8 +126,16 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     }
     let seq = 0
     const receipt = this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data, (queued) => (seq = queued))
-    this.newestPublishes.set(lossyStream, { seq, receipt })
+    const publish = { seq, receipt }
+    this.newestPublishes.set(lossyStream, publish)
+    void this.forgetOnceSettled(lossyStream, publish)
     return receipt
+  }
+
+  /** A settled publish has nothing left to replace; a newer one may have taken its stream by then. */
+  private async forgetOnceSettled(lossyStream: string, publish: NewestPublish): Promise<void> {
+    await Promise.allSettled([publish.receipt])
+    if (this.newestPublishes.get(lossyStream) === publish) this.newestPublishes.delete(lossyStream)
   }
 
   subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
@@ -135,6 +146,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     super._end(err)
     this.subscribers.text.clear()
     this.subscribers.binary.clear()
+    this.newestPublishes.clear()
   }
 
   /** The first listener of a kind subscribes the wire, and the last one's removal unsubscribes it. */

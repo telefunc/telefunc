@@ -1454,10 +1454,11 @@ function testRoomSmallMemory() {
       expect(r).deep.equal({ closed: true, myCause: { type: 'disconnected' } })
     },
   )
-  testRoomScenario<{ receipts: number; seen: number[] }>(
+  testRoomScenario<{ receipts: number; seen: number[]; listed: number }>(
     'lossy-uplink',
-    "room: a lossy track's frames that wait for the page's uplink are replaced by the newest, which its viewers get, and their publishes share its receipt",
+    "room: a lossy track's frames that wait for the page's uplink are replaced by the newest, which its viewers get, their publishes share its receipt, and none stays listed once settled",
     (r) => {
+      expect(r.listed).toBe(0)
       expect(r.receipts).lessThan(20)
       expect(r.seen.at(-1)).toBe(19)
       expect(r.seen).deep.equal([...r.seen].sort((a, b) => a - b))
