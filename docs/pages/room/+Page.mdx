@@ -368,6 +368,8 @@ export async function onStartMatch() {
 }
 ```
 
+> A page that falls behind gets every message, so state it may skip belongs on a <Link href="#stream-audio-or-video">track</Link>, where it skips to the newest frame.
+
 A hidden participant can do everything a participant does, but players don't see it among the room's participants.
 
 To let players send it commands, return it with the room:
