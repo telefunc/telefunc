@@ -298,12 +298,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   protected override onPeerSubscription({ binary, subscribed }: { binary: boolean; subscribed: boolean }): void {
     if (binary) this.peerSubscribedBinary = subscribed
     else this.peerSubscribedText = subscribed
-    if (subscribed) {
-      if (binary) this.subscribeBinaryBroadcast()
-      else this.subscribeBroadcast()
-      return
-    }
-    this.unsubscribeUnusedBroadcasts()
+    if (!subscribed) return this.unsubscribeUnusedBroadcasts()
+    if (binary) this.subscribeBinaryBroadcast()
+    else this.subscribeBroadcast()
   }
 
   private unsubscribeUnusedBroadcasts(): void {
