@@ -107,6 +107,8 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
   // `teardown()`), and the replica reconsiders the handle.
   /** `Room.get({ tail: true })`'s hold until a stub attaches and takes it. */
   private tail: TailHold | null = null
+  /** `Room.get({ whenBehind })`'s, which each stub it opens for a page takes. */
+  whenBehind: 'missOldest' | 'close' = 'missOldest'
   guards: RoomGuards | null = null
   /** This handle's listeners over the replica's model. */
   readonly state: RoomState

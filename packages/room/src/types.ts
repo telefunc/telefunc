@@ -136,6 +136,11 @@ type RoomOptions<M extends RoomMeta = RoomMeta> = {
 type RoomGetOptions = {
   /** Hold a bounded server-side live tail until the client's first subscription. */
   tail?: boolean
+  /** What the page this room is returned to gets where it falls behind what the server holds for it: with
+   *  `'missOldest'` it misses the oldest frames of tracks published with `whenBehind: 'missOldest'`, and their
+   *  `info.seq` jumps; with `'close'` it misses none, and leaves the room (`'disconnected'`) there instead. Default:
+   *  `'missOldest'`. */
+  whenBehind?: 'missOldest' | 'close'
 }
 
 /** Options for `join()`; `identity` and `hidden` are server-only. */

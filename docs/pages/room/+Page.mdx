@@ -430,6 +430,16 @@ me.publishBinary(position, { track: 'cursor' }) // a viewer that falls behind sk
 me.publishBinary(stroke, { track: 'drawing', whenBehind: 'close' }) // a viewer never misses one
 ```
 
+A viewer that would rather leave than miss any frame gets its room with `whenBehind: 'close'`:
+
+```js
+// Environment: server
+
+export async function onWatchBoard(boardId) {
+  return await Room.get(boardId, { whenBehind: 'close' }) // this page never skips a frame
+}
+```
+
 To send frames only while someone watches, use `onDemand()`, which also fires, as you call it, for the tracks already watched:
 
 ```js
@@ -575,8 +585,8 @@ Server-side.
 | Method | Description |
 |---|---|
 | `Room.create(id, options?)` | Create a room. Throws if it exists. |
-| `Room.get(id, { tail? }?)` | Get a room. Throws if it doesn't exist. With `tail: true`, the client also gets the messages published after the history you load (see <Link href="#load-chat-history" />). |
-| `Room.getOrCreate(id, { ...options, tail? }?)` | Get a room, or create it. `tail` as for `Room.get()`. |
+| `Room.get(id, { tail?, whenBehind? }?)` | Get a room. Throws if it doesn't exist. With `tail: true`, the client also gets the messages published after the history you load (see <Link href="#load-chat-history" />). With `whenBehind: 'close'`, the client leaves rather than miss a frame (see <Link href="#stream-audio-or-video" />). |
+| `Room.getOrCreate(id, { ...options, tail?, whenBehind? }?)` | Get a room, or create it. `tail` and `whenBehind` as for `Room.get()`. |
 | `Room.guard(room, hooks)` | Add `onBefore*()` and `onAfter*()` hooks to a room, once, and say who may join it from the client. |
 | `Room.join(id, { meta?, selfDelivery?, identity?, hidden? }?)` | Join a room from the server, without getting the room first. |
 | `Room.list({ prefix? }?)` | List the open rooms. |

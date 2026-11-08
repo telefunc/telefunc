@@ -145,10 +145,26 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
 }
 
 async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
-  assertKnownOptions(options, ['tail'], 'Room.get()')
+  assertKnownOptions(options, ['tail', 'whenBehind'], 'Room.get()')
+  assertWhenBehind(options?.whenBehind, 'Room.get()')
   const room = await openRoom(await requireRoom(id))
-  if (options?.tail === true) await handleOf(room).startTail()
+  await applyGetOptions(room, options)
   return room
+}
+
+async function applyGetOptions(
+  room: ServerRoom,
+  { tail, whenBehind = 'missOldest' }: RoomGetOptions = {},
+): Promise<void> {
+  handleOf(room).whenBehind = whenBehind
+  if (tail === true) await handleOf(room).startTail()
+}
+
+function assertWhenBehind(whenBehind: unknown, api: string): void {
+  assertUsage(
+    whenBehind === undefined || whenBehind === 'missOldest' || whenBehind === 'close',
+    `${api}'s whenBehind should be 'missOldest' or 'close'`,
+  )
 }
 
 /** A handle on this process's view of the room: a held view catches up unless it is current; a new one reads the member
@@ -170,11 +186,12 @@ async function requireRoomMeta(id: string, config: RoomConfigRecord): Promise<St
 
 async function getOrCreateRoom(id: string, options?: RoomOptions & RoomGetOptions): Promise<Room> {
   assertRoomId(id)
-  const { tail, ...roomOptions } = options ?? {}
+  const { tail, whenBehind, ...roomOptions } = options ?? {}
+  assertWhenBehind(whenBehind, 'Room.getOrCreate()')
   const result = await tryCreateRoom(id, roomOptions)
   if (result.kind === 'closing') throw new RoomError(`Room is closing: ${id}`)
   const room = result.kind === 'created' ? result.room : await openRoom({ id, ...configFromHead(result.head) })
-  if (tail === true) await handleOf(room).startTail()
+  await applyGetOptions(room, { tail, whenBehind })
   return room
 }
 

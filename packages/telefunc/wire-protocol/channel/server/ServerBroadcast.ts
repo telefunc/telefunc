@@ -41,6 +41,7 @@ const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
 type BroadcastUnsubscribe = () => void
 
 class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
+  readonly _whenBehind = 'missOldest'
   readonly [SERVER_BROADCAST_BRAND] = true
   /** @see ChannelShield in ../channel/channel.ts — broadcast only validates incoming
    *  publishes from clients (the `data` direction). The `ack` slot is unused: publish

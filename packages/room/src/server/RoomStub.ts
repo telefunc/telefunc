@@ -193,6 +193,7 @@ type RoomStubOptions = {
 class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   /** Its channel to its client. */
   readonly end: ServerBroadcastEnd
+  readonly _whenBehind: 'missOldest' | 'close'
   private readonly room: RoomHandle
   private readonly roster: RoomStubOptions['roster']
   private readonly publishShield: ShieldValidator | undefined
@@ -218,6 +219,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
 
   constructor({ room, roster, end, publishShield, grants }: RoomStubOptions) {
     this.room = room
+    this._whenBehind = room.whenBehind
     this.roster = roster
     this.publishShield = publishShield
     this.selfSuppressed = grants.selfSuppressed
@@ -558,6 +560,8 @@ type RoomParticipantStubOptions = {
 class RoomParticipantStub implements BroadcastEndOwner {
   /** Its channel to its client. */
   private readonly end: ServerBroadcastEnd
+  /** Its client gets every DM and notice, or loses the participant. */
+  readonly _whenBehind = 'close'
   private readonly participant: ServerLocalParticipant
   private readonly publishShield: ShieldValidator | undefined
   private readonly dmReplies = new PendingDmReplies()

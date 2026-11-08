@@ -22,8 +22,10 @@ type BroadcastEndOwner = {
   _onPageSubscription?(kind: BroadcastKind, on: boolean): void
   /** Each attach of the page while the channel is open, after the page's subscriptions applied. */
   _onPageAttach?(): void
-  /** Its page fell behind and misses its oldest publishes, of those at `behind` (see `ShedLevel`). An owner without this
-   *  keeps its page whole instead: past what the server holds for it, its channel closes. */
+  /** What its page gets where it falls behind what the server holds for it: at `'missOldest'` it misses the oldest it
+   *  may miss of each stream, at `'close'` none, and its channel closes there instead (see `shed`). */
+  readonly _whenBehind: 'missOldest' | 'close'
+  /** Its page fell behind and misses its oldest publishes, of those at `behind` (see `ShedLevel`). */
   _onPublishesMissed?(): void
 }
 
@@ -91,26 +93,28 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   }
 
   /** `MemoryHolder`: its oldest publishes no wire has that its page may miss go, down to `toBytes`, and its page sees the
-   *  jump. Above 0 the newest stays, and at 0, where not even that fits, the channel ends: no later message would show the
-   *  page. Where the page can't take a jump (the owner has no `_onPublishesMissed`), or what it can't miss alone is over
-   *  `toBytes`, all of them go and the channel ends: what the page got has no hole. The bytes go at once, but only its own
-   *  object can write to its page, so from another's it ends when its own next runs. */
+   *  jump. Above 0 the newest of each stream stays, and at 0, where not even that fits, the channel ends: no later message
+   *  would show the page. Where its owner's `_whenBehind` is `'close'` and one would go, or what its page can't miss alone
+   *  is over `toBytes`, all of them go and the channel ends: what the page got has no hole. The bytes go at once, but only
+   *  its own object can write to its page, so from another's it ends when its own next runs. */
   shed(toBytes: number): void {
     const replay = this._replayBuffer
     if (this._phase === 'ended' || !replay) return
     const owner = this.owner
     assert(owner)
-    if (owner._onPublishesMissed && toBytes > 0) {
+    const missesOldest = owner._whenBehind === 'missOldest'
+    if (toBytes > 0) {
       const { seqs, keptOver } = replay.dropOldestPublishes(toBytes, this.unhanded())
       this.dropWaiting(seqs)
-      if (!keptOver) {
-        if (seqs.length > 0) owner._onPublishesMissed()
+      const missed = seqs.length > 0
+      if (!keptOver && (missesOldest || !missed)) {
+        if (missed) owner._onPublishesMissed?.()
         return
       }
     }
     const { seqs } = replay.dropOldestPublishes(0, this.unhanded())
     this.dropWaiting(seqs)
-    if (toBytes === 0 && seqs.length > 0) owner._onPublishesMissed?.()
+    if (toBytes === 0 && seqs.length > 0 && missesOldest) owner._onPublishesMissed?.()
     this.overflow =
       toBytes === 0
         ? 'Broadcast closed: the server could not hold even the newest message for its client'

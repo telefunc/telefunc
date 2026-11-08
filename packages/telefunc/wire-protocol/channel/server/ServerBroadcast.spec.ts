@@ -223,7 +223,7 @@ describe('ServerBroadcastEnd', () => {
   // Room's stubs deliver from the moment a response returns them, ahead of the page's attach.
   it('sends what was delivered before its page attached, once it attaches', () => {
     const end = new ServerBroadcastEnd()
-    end.setOwner({ _onPagePublish() {}, _onPagePublishBinary() {} })
+    end.setOwner({ _whenBehind: 'missOldest', _onPagePublish() {}, _onPagePublishBinary() {} })
     end._registerChannel()
 
     end.deliver(publishBody('"hello"', { seq: 1, timestamp: 1 }, { level: 'behind', stream: 'room:early' }))

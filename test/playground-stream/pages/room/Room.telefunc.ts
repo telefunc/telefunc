@@ -1,6 +1,7 @@
 export {
   onCreateRoom,
   onGetRoom,
+  onGetRoomClosingBehind,
   onGetRoomTail,
   onGetOrCreateRoom,
   onGetOrCreateRoomTail,
@@ -127,6 +128,10 @@ async function onCreateRoomWithBytes(roomId: string) {
 
 async function onGetRoom(roomId: string) {
   return anyoneCanJoin(await Room.get(roomId))
+}
+
+async function onGetRoomClosingBehind(roomId: string) {
+  return anyoneCanJoin(await Room.get(roomId, { whenBehind: 'close' }))
 }
 
 /** Tail starts at serialization, covering the gap before the client's first subscribe. */

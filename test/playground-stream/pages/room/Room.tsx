@@ -6,6 +6,7 @@ import { keepReachable } from '../keepReachable'
 import {
   onCreateRoom,
   onGetRoom,
+  onGetRoomClosingBehind,
   onGetRoomTail,
   onGetOrCreateRoom,
   onGetOrCreateRoomTail,
@@ -216,8 +217,9 @@ function Room() {
   }
 
   /** What reaches a page offline while its room's speaker sends 16 rounds on two tracks and its messages. */
-  const tracksBehind = (heavy: 'cursor' | 'drawing') => async () => {
-    const [roomId, view] = await createRoom(`tracks-${heavy}`)
+  const tracksBehind = (heavy: 'cursor' | 'drawing', whenBehind?: 'close') => async () => {
+    const roomId = await createRoomId(`tracks-${heavy}`)
+    const view = whenBehind === 'close' ? await onGetRoomClosingBehind(roomId) : await onGetRoom(roomId)
     const text: { data: string; seq: number }[] = []
     view.subscribe((data, info) => text.push({ data: data as string, seq: info.seq }))
     type Frame = { n: number; seq: number }
@@ -2105,6 +2107,13 @@ function Room() {
         null,
         "Offline past maxMemory on a whenBehind: 'close' track",
         tracksBehind('drawing'),
+      )}
+
+      {scenario(
+        'tracks-cursor-close',
+        null,
+        "Offline past maxMemory on 'missOldest' tracks, in a room got with whenBehind: 'close'",
+        tracksBehind('cursor', 'close'),
       )}
 
       {scenario('slow-link', 'Slow link', '640 KB each way', async () => {
