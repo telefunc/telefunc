@@ -257,7 +257,19 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     }
   }
 
+  /** What handling `frame` throws, a bug or a malformed frame of the server's, is thrown on its own: the page reports it
+   *  as uncaught, and the frames after it still go, on either transport and after a join as well. */
   private dispatchFrame(frame: DecodedFrame): void {
+    try {
+      this.handleFrame(frame)
+    } catch (err) {
+      queueMicrotask(() => {
+        throw err
+      })
+    }
+  }
+
+  private handleFrame(frame: DecodedFrame): void {
     // Track seq for ALL sequenced frames, ACK_RES and the closing ones too; otherwise reconciles under-report lastSeq.
     if (isSequencedFrame(frame)) {
       const seq = this.channels.receivedSeq(frame)
