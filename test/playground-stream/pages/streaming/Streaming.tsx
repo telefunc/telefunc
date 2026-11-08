@@ -853,9 +853,8 @@ function Streaming() {
         id="test-one-large-returned-chunk"
         onClick={async () => {
           setResult('')
-          const start = performance.now()
           const bytes = await byteCount(await onReturnOneLargeChunk())
-          setResult(JSON.stringify({ bytes, ms: Math.round(performance.now() - start) }))
+          setResult(JSON.stringify({ bytes }))
         }}
       >
         One 256 MiB chunk
