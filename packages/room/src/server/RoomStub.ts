@@ -87,14 +87,15 @@ class ResponseRoomGrants {
   }
 }
 
-/** An event an instance originates, outside any lane's order. */
+/** An event an instance originates, outside any lane's order, which a page never misses. */
 function unorderedEventBody(
   event: RoomCtrlEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent | ParticipantStubNotice,
 ): PublishBody {
-  return publishBody(stringify(event), { seq: 0, timestamp: Date.now() })
+  return publishBody(stringify(event), { seq: 0, timestamp: Date.now() }, { lossy: false })
 }
 
-/** A member's message as its lane carried it, stamped, and without the stamp, each made once for every client. */
+/** A member's message as its lane carried it, stamped, and without the stamp, each made once for every client. A page
+ *  that falls behind may miss a message to everyone, never a DM. */
 class MemberMessageBodies {
   private _stamped: PublishBody | null = null
   private _unstamped: PublishBody | null = null
@@ -112,13 +113,17 @@ class MemberMessageBodies {
   }
 
   stamped(): PublishBody {
-    return (this._stamped ??= publishBody(this.serialized, this.info))
+    return (this._stamped ??= publishBody(this.serialized, this.info, this.lossy()))
   }
 
   unstamped(): PublishBody {
     if (this._unstamped !== null) return this._unstamped
     const { fromMeta, fromMetaSeq, fromIdentity, fromDisconnected, ...unstamped } = this.envelope
-    return (this._unstamped = publishBody(stringify(unstamped), this.info))
+    return (this._unstamped = publishBody(stringify(unstamped), this.info, this.lossy()))
+  }
+
+  private lossy(): { lossy: boolean } {
+    return { lossy: this.envelope.__r === 'data' }
   }
 }
 
@@ -468,12 +473,14 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   }
 
   emitRetainedText(event: RoomDataEnvelope, info: OrderingInfo, serialized: string, hold: ReplayHold): void {
-    if (this.replay.admitRetained(hold, event.from, null, info)) this.end.deliver(publishBody(serialized, info))
+    if (this.replay.admitRetained(hold, event.from, null, info)) {
+      this.end.deliver(publishBody(serialized, info, { lossy: true }))
+    }
   }
 
   emitRetainedBinary(frame: BinaryFrame, info: OrderingInfo, framed: Uint8Array, hold: ReplayHold): void {
     if (this.replay.admitRetained(hold, frame.from, frame.track, info)) {
-      this.end.deliver(publishBody(framed, info))
+      this.end.deliver(publishBody(framed, info, { lossy: true }))
     }
   }
 
@@ -515,7 +522,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     this.tail = null
     for (const { serialized, ord, from } of held) {
       if (!this.wantsTextFrom(from)) continue
-      this.relayTextLive(from, publishBody(serialized, ord), ord)
+      this.relayTextLive(from, publishBody(serialized, ord, { lossy: true }), ord)
     }
   }
 

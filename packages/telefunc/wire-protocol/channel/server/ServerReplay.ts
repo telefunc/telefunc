@@ -66,38 +66,47 @@ class ServerReplay {
     return frames
   }
 
-  /** Of its newest `droppable` publishes, the oldest go until its holder holds `toBytes`, but for the newest of all above 0:
-   *  a later message then shows the page what it missed. Returns how many went. The older ones are on the wire, which a
-   *  reconnect may have to send again. */
-  dropOldestPublishes(toBytes: number, droppable: number): number {
-    const waiting = Math.min(this.publishes, droppable)
-    let pinned = this.publishes - waiting
-    const mayGo = toBytes === 0 ? waiting : waiting - 1
-    let dropped = 0
-    for (let i = this.first; i < this.seqs.length && dropped < mayGo && this.holder.heldBytes > toBytes; i++) {
-      if (!this.bodies[i]) continue
+  /** Of its newest `droppable` publishes, the oldest its page may miss go until its holder holds `toBytes`, but for the
+   *  newest of all above 0: a later message then shows the page what it missed. At 0 every one goes. The older ones are
+   *  on the wire, which a reconnect may have to send again. Returns the seqs that went, oldest first, and whether one its
+   *  page can't miss stayed while it holds more than `toBytes`. */
+  dropOldestPublishes(toBytes: number, droppable: number): { seqs: number[]; keptOver: boolean } {
+    let pinned = this.publishes - Math.min(this.publishes, droppable)
+    const newest = toBytes === 0 ? -1 : this.newestPublishAt()
+    const seqs: number[] = []
+    let kept = false
+    for (let i = this.first; i < this.seqs.length && this.holder.heldBytes > toBytes; i++) {
+      const body = this.bodies[i]
+      if (!body) continue
       if (pinned > 0) {
         pinned--
         continue
       }
+      if (i === newest) break
+      if (toBytes > 0 && !body.lossy) {
+        kept = true
+        continue
+      }
+      seqs.push(this.seqs[i]!)
       this.drop(i)
-      dropped++
     }
     this.compact()
-    return dropped
+    return { seqs, keptOver: kept && this.holder.heldBytes > toBytes }
   }
 
   /** The body of the newest publish it holds. */
   newestPublish(): PublishBody | undefined {
-    for (let i = this.seqs.length - 1; i >= this.first; i--) {
-      const body = this.bodies[i]
-      if (body) return body
-    }
-    return undefined
+    const i = this.newestPublishAt()
+    return i === -1 ? undefined : this.bodies[i]!
   }
 
   dispose(): void {
     for (let i = this.first; i < this.seqs.length; i++) this.drop(i)
+  }
+
+  private newestPublishAt(): number {
+    for (let i = this.seqs.length - 1; i >= this.first; i--) if (this.bodies[i]) return i
+    return -1
   }
 
   private add(seq: number, frame: Uint8Array<ArrayBuffer>, body: PublishBody | null): void {

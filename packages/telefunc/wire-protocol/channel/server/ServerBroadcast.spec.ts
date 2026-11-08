@@ -226,7 +226,7 @@ describe('ServerBroadcastEnd', () => {
     end.setOwner({ _onPagePublish() {}, _onPagePublishBinary() {} })
     end._registerChannel()
 
-    end.deliver(publishBody('"hello"', { seq: 1, timestamp: 1 }))
+    end.deliver(publishBody('"hello"', { seq: 1, timestamp: 1 }, { lossy: true }))
 
     const frames: Uint8Array[] = []
     end._attachPeer(

@@ -5,6 +5,7 @@ import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import { TAG } from '../../wire/tags.js'
 import { HEADER } from '../../wire/header.js'
 import type { IndexedPeer } from './IndexedPeer.js'
+import type { PublishBody } from './PublishBody.js'
 
 /** What a send held in memory (buffered, or awaiting its answer or credit) takes beyond its payload: its callbacks and
  *  promise, about 480 B. */
@@ -25,7 +26,7 @@ interface BufferedSender {
   _sendBuffered(peer: IndexedPeer, tag: number, data: EntryData, callback: EntryCallback | null): void
 }
 
-type EntryData = string | Uint8Array
+type EntryData = string | Uint8Array | PublishBody
 type Entry = { tag: number; data: EntryData; callback: EntryCallback | null }
 
 /**
@@ -64,8 +65,8 @@ class ServerChannelBuffer<TAck = never> {
   }
 
   /** A publish to a page that never attached: until it does, its channel has no index for the head. */
-  pushPublish(frame: Uint8Array<ArrayBuffer>): void {
-    this.pushSend(TAG.PUBLISH, frame, frame.byteLength, null)
+  pushPublish(body: PublishBody): void {
+    this.pushSend(TAG.PUBLISH, body, body.frame.byteLength, null)
   }
 
   /** Sends every entry to its channel in the order it came, then empties the buffer. */

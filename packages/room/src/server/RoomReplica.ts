@@ -435,14 +435,14 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.authority.controlDelivered(info.seq)
     const ctrl = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
     if (ctrl.__r === 'demand-ask') return this.demandExchange.onAsk(ctrl)
-    this.applyControl(ctrl, () => publishBody(serialized, info))
+    this.applyControl(ctrl, () => publishBody(serialized, info, { lossy: false }))
   }
 
   private onTextData(serialized: string, info: OrderingInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope | Extract<RoomEnvelope, { __r: 'announce' }>
     if (envelope.__r === 'announce') {
       for (const handle of this.receivers) handle.local.relayAnnouncement(envelope.data, info)
-      const body = publishBody(serialized, info)
+      const body = publishBody(serialized, info, { lossy: true })
       for (const stub of this.stubs) stub.relayAnnouncement(body, info)
       return
     }
@@ -458,7 +458,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     assert(unframed)
     for (const handle of this.receivers) handle.local.relayBinary(unframed, info)
     if (this.stubs.size === 0) return
-    const body = publishBody(framed, info)
+    const body = publishBody(framed, info, { lossy: true })
     for (const stub of this.stubs) stub.relayBinary(body, unframed.from, unframed.track, info)
   }
 

@@ -82,8 +82,8 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     return countWaitingPublishes(this.sender.waitingFrames, ix)
   }
 
-  dropWaitingPublishes(ix: number, count: number): void {
-    this.sender.dropWaiting(droppingPublishes(ix, count))
+  dropWaitingPublishes(ix: number, seqs: readonly number[]): void {
+    this.sender.dropWaiting(droppingPublishes(ix, seqs))
   }
 
   drainRate(): number {

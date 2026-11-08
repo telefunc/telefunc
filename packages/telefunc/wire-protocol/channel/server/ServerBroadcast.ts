@@ -317,7 +317,7 @@ const globalObject = getGlobalObject('wire-protocol/channel/server/ServerBroadca
 function bodyOf(payload: string | Uint8Array, info: WirePublishInfo): PublishBody {
   let body = globalObject.publishBodies.get(info)
   if (!body) {
-    body = publishBody(payload, info)
+    body = publishBody(payload, info, { lossy: true })
     globalObject.publishBodies.set(info, body)
   }
   return body

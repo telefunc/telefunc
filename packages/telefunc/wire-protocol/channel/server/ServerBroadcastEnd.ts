@@ -22,8 +22,8 @@ type BroadcastEndOwner = {
   _onPageSubscription?(kind: BroadcastKind, on: boolean): void
   /** Each attach of the page while the channel is open, after the page's subscriptions applied. */
   _onPageAttach?(): void
-  /** Its page fell behind and misses its oldest publishes. An owner without this keeps its page whole instead: past what
-   *  the server holds for it, its channel closes. */
+  /** Its page fell behind and misses its oldest publishes, of those marked `lossy`. An owner without this keeps its
+   *  page whole instead: past what the server holds for it, its channel closes. */
   _onPublishesMissed?(): void
 }
 
@@ -66,7 +66,7 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     this.endOverflowed()
     if (this._phase === 'ended' || (this.peer === null && opts?.resentOnAttach)) return
     if (this.lastPeer) this.lastPeer.sendPublish(body)
-    else this.offlineBuffer.pushPublish(body.frame)
+    else this.offlineBuffer.pushPublish(body)
     const share = this.share()
     if (this.heldBytes > share) this.shed(share)
   }
@@ -90,27 +90,36 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     return this._replayBuffer.newestPublish()
   }
 
-  /** `MemoryHolder`: its oldest publishes no wire has go, down to `toBytes`, and its page sees the jump in `info.seq`. Above
-   *  0 the newest stays, and at 0, where not even that fits, the channel ends: no later message would show the page. Where
-   *  the page can't take a jump, the owner has no `_onPublishesMissed`, and all of them go and the channel ends: what
-   *  the page got has no hole. The bytes go at once, but only its own object can write to its page, so from another's
-   *  it ends when its own next runs. */
+  /** `MemoryHolder`: its oldest publishes no wire has that its page may miss go, down to `toBytes`, and its page sees the
+   *  jump. Above 0 the newest stays, and at 0, where not even that fits, the channel ends: no later message would show the
+   *  page. Where the page can't take a jump (the owner has no `_onPublishesMissed`), or what it can't miss alone is over
+   *  `toBytes`, all of them go and the channel ends: what the page got has no hole. The bytes go at once, but only its own
+   *  object can write to its page, so from another's it ends when its own next runs. */
   shed(toBytes: number): void {
     const replay = this._replayBuffer
     if (this._phase === 'ended' || !replay) return
-    assert(this.owner)
-    const level = this.owner._onPublishesMissed ? toBytes : 0
-    const dropped = replay.dropOldestPublishes(level, this.unhanded())
-    if (dropped > 0) {
-      this.peer?.sender.queue.dropWaitingPublishes(this.peer.index, dropped)
-      this.owner._onPublishesMissed?.()
+    const owner = this.owner
+    assert(owner)
+    if (owner._onPublishesMissed && toBytes > 0) {
+      const { seqs, keptOver } = replay.dropOldestPublishes(toBytes, this.unhanded())
+      this.dropWaiting(seqs)
+      if (!keptOver) {
+        if (seqs.length > 0) owner._onPublishesMissed()
+        return
+      }
     }
-    if (level > 0) return
+    const { seqs } = replay.dropOldestPublishes(0, this.unhanded())
+    this.dropWaiting(seqs)
+    if (toBytes === 0 && seqs.length > 0) owner._onPublishesMissed?.()
     this.overflow =
       toBytes === 0
         ? 'Broadcast closed: the server could not hold even the newest message for its client'
         : 'Closed: its client fell behind what the server can hold for it'
     if (getChannelMux() === this.mux) this.endOverflowed()
+  }
+
+  private dropWaiting(seqs: number[]): void {
+    if (this.peer && seqs.length > 0) this.peer.sender.queue.dropWaitingPublishes(this.peer.index, seqs)
   }
 
   private endOverflowed(): void {

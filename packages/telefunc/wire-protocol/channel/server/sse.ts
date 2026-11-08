@@ -128,8 +128,8 @@ class EventStream implements WireQueue {
     return countWaitingPublishes(this.waiting, ix)
   }
 
-  dropWaitingPublishes(ix: number, count: number): void {
-    const drops = droppingPublishes(ix, count)
+  dropWaitingPublishes(ix: number, seqs: readonly number[]): void {
+    const drops = droppingPublishes(ix, seqs)
     this.waiting.remove((frame) => {
       if (!drops(frame)) return false
       this.waitingBytes -= eventBytes(frame)

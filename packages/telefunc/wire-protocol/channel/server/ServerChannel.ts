@@ -813,8 +813,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         })
         break
       case TAG.PUBLISH:
-        assert(data instanceof Uint8Array)
-        peer.sendPublish(new PublishBody(data as Uint8Array<ArrayBuffer>))
+        assert(data instanceof PublishBody)
+        peer.sendPublish(data)
         break
     }
   }

@@ -1,15 +1,15 @@
 export { countWaitingPublishes, droppingPublishes, overtakes }
 export type { WireQueue }
 
-import { readU16 } from '../../wire/header.js'
+import { SEQ_OFFSET, SEQ_SPAN, readU16, readU32 } from '../../wire/header.js'
 import { TAG, isClosingTag, isSequencedTag } from '../../wire/tags.js'
 
 /** What a server wire holds back for its page, which a broadcast falling behind can let go of. */
 interface WireQueue {
   /** How many of channel `ix`'s publishes wait here, heads and bodies both: its newest ones. */
   waitingPublishes(ix: number): number
-  /** Drops channel `ix`'s oldest `count` publishes that wait here. */
-  dropWaitingPublishes(ix: number, count: number): void
+  /** Drops channel `ix`'s publishes at `seqs`, oldest first, that wait here. */
+  dropWaitingPublishes(ix: number, seqs: readonly number[]): void
   /** The rate the page takes data at, in bytes per ms, 0 before one was measured. */
   drainRate(): number
 }
@@ -45,17 +45,20 @@ function countWaitingPublishes(waiting: Iterable<Uint8Array>, ix: number): numbe
   return count
 }
 
-/** Tells, in the queue's order, whether each frame goes: the first `count` heads of channel `ix`, and the body after each. */
-function droppingPublishes(ix: number, count: number): (frame: Uint8Array) => boolean {
-  let left = count
+/** Tells, in the queue's order, whether each frame goes: channel `ix`'s heads at `seqs`, oldest first, and the body
+ *  after each. A head carries its seq's low 32 bits, which no two of a queue's publishes share. */
+function droppingPublishes(ix: number, seqs: readonly number[]): (frame: Uint8Array) => boolean {
+  let next = 0
   let bodyNext = false
   return (frame) => {
     if (bodyNext) {
       bodyNext = false
       return true
     }
-    if (left === 0 || !isHeadOf(frame, ix)) return false
-    left--
+    if (next === seqs.length || !isHeadOf(frame, ix) || readU32(frame, SEQ_OFFSET) !== seqs[next]! % SEQ_SPAN) {
+      return false
+    }
+    next++
     bodyNext = true
     return true
   }
