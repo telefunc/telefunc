@@ -20,21 +20,21 @@ assertIsNotBrowser()
 function unorderedEventBody(
   event: RoomCtrlEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent | ParticipantStubNotice,
 ): PublishBody {
-  return publishBody(stringify(event), { seq: 0, timestamp: Date.now() }, { level: 'never' })
+  return publishBody(stringify(event), { seq: 0, timestamp: Date.now() }, null)
 }
 
 /** A message, an announcement or an event as its lane carried it, which a page never misses: its room's `info.seq` stays
  *  whole. */
 function orderedBody(serialized: string, info: OrderingInfo): PublishBody {
-  return publishBody(serialized, info, { level: 'never' })
+  return publishBody(serialized, info, null)
 }
 
 /** A track's frame as its lane carried it. A page that falls behind may miss one published with
  *  `whenBehind: 'missOldest'`, among its track's oldest. */
 function trackFrameBody(frame: BinaryFrame, framed: Uint8Array, info: OrderingInfo): PublishBody {
-  if (frame.whenBehind === 'close') return publishBody(framed, info, { level: 'never' })
-  const lane = { kind: 'binary', member: frame.from, track: frame.track } as const
-  return publishBody(framed, info, { level: 'behind', stream: encodeLaneKey(lane) })
+  const lossyStream =
+    frame.whenBehind === 'close' ? null : encodeLaneKey({ kind: 'binary', member: frame.from, track: frame.track })
+  return publishBody(framed, info, lossyStream)
 }
 
 /** A member's message as its lane carried it, stamped, and without the stamp, each made once for every client. */

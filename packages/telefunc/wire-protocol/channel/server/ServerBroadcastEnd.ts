@@ -18,8 +18,6 @@ const FELL_BEHIND = 'its client fell behind what the server holds for it; `lossy
 
 /** What a page's publishes, subscriptions and attaches go to. */
 type BroadcastEndOwner = {
-  /** A publish no wire has taken yet goes as a newer one takes its place: at most its newest waits for its page. */
-  readonly lossy?: boolean
   /** What it returns answers the page's `publish()`. */
   _onPagePublish(serialized: string): unknown
   _onPagePublishBinary(data: Uint8Array): unknown
@@ -27,13 +25,8 @@ type BroadcastEndOwner = {
   _onPageSubscription?(kind: BroadcastKind, on: boolean): void
   /** Each attach of the page while the channel is open, after the page's subscriptions applied. */
   _onPageAttach?(): void
-  /** What its page gets where it falls behind what the server holds for it: at `'missOldest'` it misses the oldest it
-   *  may miss of each stream, at `'close'` none, and its channel closes there instead (see `shed`). */
-  readonly _whenBehind: 'missOldest' | 'close'
-  /** Its page fell behind and misses its oldest publishes, of those at `behind` (see `ShedLevel`), or a lossy one's. */
+  /** A newer publish of a lossy stream took the place of one its page hadn't taken. */
   _onPublishesMissed?(): void
-  /** Whether a lossy page's publish on `key` of `kind` reaches this owner's page. */
-  _reaches?(key: string, kind: BroadcastKind): boolean
 }
 
 /** The server end of a page's `ClientBroadcast`: a channel to that page, which also takes the page's publishes and
@@ -74,28 +67,27 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   deliver(body: PublishBody): void {
     this.endOverflowed()
     if (this._phase === 'ended') return
-    const lossy = this.owner?.lossy === true
-    if (lossy) this.letWaitingGo()
+    const { lossyStream } = body
+    if (lossyStream !== null) this.takeWaitingPlace(lossyStream)
     if (this.lastPeer) this.lastPeer.sendPublish(body)
     else this.offlineBuffer.pushPublish(body)
-    if (lossy) return
+    if (lossyStream !== null) return
     const share = this.share()
     if (this.heldBytes > share) this.shed(share)
   }
 
-  /** A lossy page's publishes that no wire has taken go, as a newer one takes their place. */
-  private letWaitingGo(): void {
-    const replay = this._replayBuffer
-    if (this._phase === 'ended' || !replay) return
-    const seqs = replay.dropNewestPublishes(this.unhanded())
-    if (seqs.length === 0) return
-    this.dropWaiting(seqs)
+  /** A newer publish of `stream` takes the place of the one no wire has taken. */
+  private takeWaitingPlace(stream: string): void {
+    if (this._phase === 'ended') return
+    const seq = this._replayBuffer?.dropNewestOf(stream, this.unhanded())
+    if (seq === undefined) return
+    this.dropWaiting([seq])
     this.owner?._onPublishesMissed?.()
   }
 
-  /** Where this is a lossy page the publish on `key` of `kind` reaches (on its object), it lets go of what that replaces. */
-  replaceWaitingOf(key: string, kind: BroadcastKind): void {
-    if (getChannelMux() === this.mux && this.owner?._reaches?.(key, kind)) this.letWaitingGo()
+  /** `MemoryHolder`: on its object, as what another's holds waits for that object's own delivery. */
+  replaceWaiting(stream: string): void {
+    if (getChannelMux() === this.mux) this.takeWaitingPlace(stream)
   }
 
   /** What it may hold: 60 s of what its page takes, within what any channel may. */
@@ -117,26 +109,14 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     return this._replayBuffer.newestPublish()
   }
 
-  /** `MemoryHolder`: its oldest publishes no wire has that its page may miss go, down to `toBytes`, and its page sees the
-   *  jump. Above 0 the newest of each stream stays. Where its page may miss none of them (`'close'`), or what it can't miss
-   *  alone is over `toBytes`, from the gap on everything goes, receipts too, and it reads on up to the gap and no further.
-   *  A lossy one holds no publish waiting but its newest, so it ends only at 0, where not even that fits. The bytes go at
-   *  once, but only its own object can write to its page, so from another's it ends when its own next runs. */
+  /** `MemoryHolder`: its page gets every reliable publish, so where it would miss one no wire has, the channel ends: from
+   *  that gap on everything goes, receipts too, and its page reads on up to the gap and no further. A lossy stream holds
+   *  no publish waiting but its newest, so a page only on those ends at 0, where not even that fits. The bytes go at once,
+   *  but only its own object can write to its page, so from another's it ends when its own next runs. */
   shed(toBytes: number): void {
     const replay = this._replayBuffer
     if (this._phase === 'ended' || !replay) return
-    const owner = this.owner
-    assert(owner)
-    if (owner.lossy && toBytes > 0) return
-    let gapLevel = toBytes
-    if (owner._whenBehind === 'missOldest' && toBytes > 0) {
-      const { seqs, keptOver } = replay.dropOldestPublishes(toBytes, this.unhanded())
-      this.dropWaiting(seqs)
-      if (seqs.length > 0) owner._onPublishesMissed?.()
-      if (!keptOver) return
-      gapLevel = 0
-    }
-    const gap = replay.dropFromGap(gapLevel, this.unhanded()) > 0
+    const gap = replay.dropFromGap(toBytes, this.unhanded()) > 0
     if (gap) {
       this.peer?.sender.queue.dropWaitingFromPublish(this.peer.index)
       this.dropPendingAnswers()

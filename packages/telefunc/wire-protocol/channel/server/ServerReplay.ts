@@ -18,7 +18,7 @@ class ServerReplay {
   private dropped = 0
   /** The live publishes. */
   private publishes = 0
-  /** The seq of each stream's newest publish it holds (see `ShedLevel`). */
+  /** The seq of each lossy stream's newest publish it holds. */
   private readonly newestOfStream = new Map<string, number>()
   private readonly holder: MemoryHolder
   private issuedSeq = 0
@@ -46,7 +46,7 @@ class ServerReplay {
     this.add(seq, head, body)
     hold(this.holder, body)
     this.publishes++
-    if (body.shed.level === 'behind') this.newestOfStream.set(body.shed.stream, seq)
+    if (body.lossyStream !== null) this.newestOfStream.set(body.lossyStream, seq)
   }
 
   /** The page has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
@@ -69,60 +69,35 @@ class ServerReplay {
     return frames
   }
 
-  /** Of its newest `droppable` publishes, the oldest its page may miss go until its holder holds `toBytes`, but for the
-   *  newest of each stream above 0: a later message of that stream then shows the page what it missed of it. At 0 every
-   *  one goes. The older ones are on the wire, which a reconnect may have to send again. Returns the seqs that went,
-   *  oldest first, and whether one its page can't miss stayed while it holds more than `toBytes`. */
-  dropOldestPublishes(toBytes: number, droppable: number): { seqs: number[]; keptOver: boolean } {
-    let pinned = this.publishes - Math.min(this.publishes, droppable)
-    const seqs: number[] = []
-    let kept = false
-    for (let i = this.first; i < this.seqs.length && this.holder.heldBytes > toBytes; i++) {
-      const body = this.bodies[i]
-      if (!body) continue
-      if (pinned > 0) {
-        pinned--
-        continue
-      }
-      const seq = this.seqs[i]!
-      if (toBytes > 0) {
-        const { shed } = body
-        if (shed.level === 'never') {
-          kept = true
-          continue
-        }
-        if (this.newestOfStream.get(shed.stream) === seq) continue
-      }
-      seqs.push(seq)
-      this.drop(i)
-    }
-    this.compact()
-    return { seqs, keptOver: kept && this.holder.heldBytes > toBytes }
-  }
-
-  /** Its newest `droppable` publishes go, for a newer one to take their place: the page's `info.seq` shows what it
-   *  skipped. Receipts stay. Returns the seqs that went, oldest first. The older ones are on the wire, which a reconnect
-   *  may have to send again. */
-  dropNewestPublishes(droppable: number): number[] {
-    const seqs: number[] = []
-    for (let i = this.oldestDroppable(droppable); i < this.seqs.length; i++) {
+  /** The newest publish of lossy `stream` goes if it is among its newest `droppable` publishes, the ones no wire has, for
+   *  a newer one to take its place: the page's `info.seq` shows what it skipped. Returns its seq where it went. */
+  dropNewestOf(stream: string, droppable: number): number | undefined {
+    const seq = this.newestOfStream.get(stream)
+    if (seq === undefined) return undefined
+    let newest = Math.min(this.publishes, droppable)
+    for (let i = this.seqs.length - 1; i >= this.first && newest > 0; i--) {
       if (!this.bodies[i]) continue
-      seqs.push(this.seqs[i]!)
-      this.drop(i)
+      if (this.seqs[i] === seq) {
+        this.drop(i)
+        this.compact()
+        return seq
+      }
+      newest--
     }
-    this.compact()
-    return seqs
+    return undefined
   }
 
-  /** For a page that may miss none: where its holder holds more than `toBytes`, and one of its newest `droppable`
-   *  publishes may go (any at 0, all but the newest above), the oldest of them goes with every frame after it, receipts
-   *  too, so nothing reaches the page past the gap. Returns how many publishes went. */
+  /** A page gets every reliable publish: where its holder holds more than `toBytes` and one of its newest `droppable`
+   *  publishes would have to go (any at 0; above, a reliable one but the newest reliable, once its waiting lossy publishes,
+   *  each its stream's newest, are counted out), the oldest of them goes with every frame after it, receipts too, so
+   *  nothing reaches the page past the gap. Returns how many publishes went. */
   dropFromGap(toBytes: number, droppable: number): number {
-    const waiting = Math.min(this.publishes, droppable)
-    const mayGo = toBytes === 0 ? waiting : waiting - 1
-    if (mayGo <= 0 || this.holder.heldBytes <= toBytes) return 0
+    if (this.holder.heldBytes <= toBytes) return 0
+    const oldest = this.oldestDroppable(droppable)
+    if (toBytes > 0 && !this.reliableOver(toBytes, oldest)) return 0
+    if (toBytes === 0 && Math.min(this.publishes, droppable) === 0) return 0
     const publishes = this.publishes
-    for (let i = this.oldestDroppable(droppable); i < this.seqs.length; i++) this.drop(i)
+    for (let i = oldest; i < this.seqs.length; i++) this.drop(i)
     this.compact()
     return publishes - this.publishes
   }
@@ -134,6 +109,20 @@ class ServerReplay {
       if (body) return body
     }
     return undefined
+  }
+
+  /** Whether, from `oldest` on, more than one reliable publish waits, and what it holds without the lossy ones waiting is
+   *  over `toBytes`. */
+  private reliableOver(toBytes: number, oldest: number): boolean {
+    let reliable = 0
+    let lossyBytes = 0
+    for (let i = oldest; i < this.seqs.length; i++) {
+      const body = this.bodies[i]
+      if (!body) continue
+      if (body.lossyStream === null) reliable++
+      else lossyBytes += body.frame.byteLength
+    }
+    return reliable > 1 && this.holder.heldBytes - lossyBytes > toBytes
   }
 
   /** Where the oldest of its newest `droppable` publishes is: the older ones are on the wire. */
@@ -166,9 +155,9 @@ class ServerReplay {
     if (body) {
       letGo(this.holder, body)
       this.publishes--
-      const { shed } = body
-      if (shed.level === 'behind' && this.newestOfStream.get(shed.stream) === this.seqs[i]) {
-        this.newestOfStream.delete(shed.stream)
+      const { lossyStream } = body
+      if (lossyStream !== null && this.newestOfStream.get(lossyStream) === this.seqs[i]) {
+        this.newestOfStream.delete(lossyStream)
       }
     } else letGo(this.holder, frame.byteLength + HELD_SEND_OVERHEAD_BYTES)
     this.frames[i] = null

@@ -2109,13 +2109,6 @@ function Room() {
         tracksBehind('drawing'),
       )}
 
-      {scenario(
-        'tracks-cursor-close',
-        null,
-        "Offline past maxMemory on 'missOldest' tracks, in a room got with whenBehind: 'close'",
-        tracksBehind('cursor', 'close'),
-      )}
-
       {scenario('slow-link', 'Slow link', '640 KB each way', async () => {
         const [roomId, view] = await createRoom('slow-link')
         await onWatchRoom(roomId)

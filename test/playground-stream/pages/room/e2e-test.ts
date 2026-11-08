@@ -1491,17 +1491,6 @@ function testRoomSmallMemory() {
       expectLog('fell behind what the server holds for it, and misses the oldest frames of its tracks')
     },
   )
-  testRoomTracksBehind(
-    'cursor-close',
-    "room: a page whose room was got with whenBehind: 'close', offline while its room sent it more than maxMemory holds on whenBehind: 'missOldest' tracks, is let go at its reconnect, with no gap in any stream",
-    (r) => {
-      expect(r).deep.include({ closed: true, myCause: { type: 'disconnected' } })
-      for (const stream of [r.pointer, r.cursor, r.drawing]) {
-        expect(stream.map(({ n }) => n)).deep.equal(stream.map((_, i) => i))
-      }
-      expect(r.text.map(({ data }) => data)).deep.equal(['before', ...r.text.slice(1).map((_, i) => String(i))])
-    },
-  )
 }
 
 type TracksBehind = {
@@ -1514,13 +1503,8 @@ type TracksBehind = {
 }
 
 /** A page offline while its room's speaker sends 8 `pointer` frames, then 16 rounds of a `cursor` frame, a `drawing`
- *  frame published with `whenBehind: 'close'` and a message, the `scenario`'s track 4 MiB in all; at `cursor-close`,
- *  the page got its room with `whenBehind: 'close'`. */
-function testRoomTracksBehind(
-  scenario: 'cursor' | 'drawing' | 'cursor-close',
-  name: string,
-  validate: (r: TracksBehind) => void,
-) {
+ *  frame published with `whenBehind: 'close'` and a message, the `scenario`'s track 4 MiB in all. */
+function testRoomTracksBehind(scenario: 'cursor' | 'drawing', name: string, validate: (r: TracksBehind) => void) {
   test(name, async () => {
     if (!canCutWire()) return
     await navigate(`${getServerUrl()}/room`)

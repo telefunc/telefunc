@@ -22,13 +22,15 @@ import type { QueueMemory } from '../channelMessages.js'
 const HELD_PUBLISH_OVERHEAD_BYTES = 200
 
 /** Holds bytes for a page. `shed` frees what no wire has, down to `toBytes`, and its own object ends it where its page
- *  would miss a message it may not, or at 0. A lossy page's holder only waits on its newest, so above 0 it frees
- *  nothing. One without `shed` refuses instead. `newestUnhanded` is its newest publish where no wire has it yet. */
+ *  would miss a message it may not, or at 0. A lossy stream's holder only waits on its newest, so above 0 it frees
+ *  nothing of it. One without `shed` refuses instead. `newestUnhanded` is its newest publish where no wire has it yet. */
 interface MemoryHolder {
   heldBytes: number
   /** Its owner ended, so nothing is held for it any more (see `releaseHolder`). */
   released?: boolean
   shed?(toBytes: number): void
+  /** A newer publish of lossy `stream` reaches its page: the one no wire has taken of that stream goes. */
+  replaceWaiting?(stream: string): void
   readonly newestUnhanded?: PublishBody | undefined
 }
 
@@ -52,14 +54,16 @@ function admit(holder: MemoryHolder, bytes: number): boolean {
   return holder.heldBytes + bytes <= maxMemory / memory.holders.size && memory.total + bytes <= maxMemory
 }
 
-/** Makes room for a delivery, which nobody can refuse. Near the budget, each page whose waiting publishes it replaces
- *  lets go of them first (`replace`), so what's measured is what stays; past what's older, it ends as few as must end,
- *  where that frees the bytes. */
-function admitPublish(body: PublishBody, replace?: (holder: MemoryHolder) => void): void {
+/** Makes room for a delivery, which nobody can refuse. Near the budget, each page whose waiting publish it replaces
+ *  lets go of that first, so what's measured is what stays; past what's older, it ends as few as must end, where that
+ *  frees the bytes. */
+function admitPublish(body: PublishBody): void {
   const maxMemory = maxMemoryOf()
   const bytes = body.frame.byteLength
   const target = shedTarget(maxMemory)
-  if (replace && memory.total + bytes > target) for (const holder of [...memory.holders]) replace(holder)
+  if (body.lossyStream !== null && memory.total + bytes > target) {
+    for (const holder of [...memory.holders]) holder.replaceWaiting?.(body.lossyStream)
+  }
   reclaim(bytes, target)
   if (memory.total + bytes <= maxMemory || memory.reclaiming) return
   memory.reclaiming = true

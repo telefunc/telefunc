@@ -26,7 +26,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage, assertWarning } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import { queueMemory, type MemoryHolder } from './channelMemory.js'
+import { queueMemory } from './channelMemory.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { markHandled } from '../../../utils/markHandled.js'
 import { Listeners } from '../../../utils/Listeners.js'
@@ -41,7 +41,6 @@ const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
 type BroadcastUnsubscribe = () => void
 
 class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
-  readonly _whenBehind = 'close'
   readonly [SERVER_BROADCAST_BRAND] = true
   /** @see ChannelShield in ../channel/channel.ts — broadcast only validates incoming
    *  publishes from clients (the `data` direction). The `ack` slot is unused: publish
@@ -187,7 +186,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
       }
     }
     if (!this.peerSubscriptions.text) return
-    this._end.deliver(bodyOf(serialized, rawInfo, (holder) => this.replaceIn(holder, 'text')))
+    this._end.deliver(bodyOf(serialized, rawInfo, this.lossy ? `text:${this.key}` : null))
   }
 
   private deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
@@ -202,18 +201,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
       }
     }
     if (!this.peerSubscriptions.binary) return
-    this._end.deliver(bodyOf(data, rawInfo, (holder) => this.replaceIn(holder, 'binary')))
-  }
-
-  /** Where `holder` is a lossy page this publish reaches (its key, on its object), it lets go of what the publish
-   *  replaces. */
-  private replaceIn(holder: MemoryHolder, kind: BroadcastKind): void {
-    if (holder instanceof ServerBroadcastEnd) holder.replaceWaitingOf(this.key, kind)
-  }
-
-  /** @internal `BroadcastEndOwner`. */
-  _reaches(key: string, kind: BroadcastKind): boolean {
-    return this.lossy && key === this.key && this.peerSubscriptions[kind]
+    this._end.deliver(bodyOf(data, rawInfo, this.lossy ? `binary:${this.key}` : null))
   }
 
   /** @internal `BroadcastEndOwner`: its page is told by `info.seq`, and the server's log by this once. */
@@ -344,17 +332,17 @@ const BroadcastChannel = ServerBroadcast as {
 const globalObject = getGlobalObject('wire-protocol/channel/server/ServerBroadcast.ts', {
   /** One delivery hands every subscriber on this server the same `info`, so they share the body the first one makes. */
   publishBodies: new WeakMap<WirePublishInfo, PublishBody>(),
+  lossyPublishBodies: new WeakMap<WirePublishInfo, PublishBody>(),
 })
 
-function bodyOf(
-  payload: string | Uint8Array,
-  info: WirePublishInfo,
-  replace: (holder: MemoryHolder) => void,
-): PublishBody {
-  let body = globalObject.publishBodies.get(info)
+/** A broadcast's one stream is its `key`, of each kind: a text message doesn't take a binary one's place. A lossy subscriber
+ *  and a reliable one of a key share neither the body nor its place in a replay. */
+function bodyOf(payload: string | Uint8Array, info: WirePublishInfo, lossyStream: string | null): PublishBody {
+  const bodies = lossyStream === null ? globalObject.publishBodies : globalObject.lossyPublishBodies
+  let body = bodies.get(info)
   if (!body) {
-    body = publishBody(payload, info, { level: 'never' }, replace)
-    globalObject.publishBodies.set(info, body)
+    body = publishBody(payload, info, lossyStream)
+    bodies.set(info, body)
   }
   return body
 }
