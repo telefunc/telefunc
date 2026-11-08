@@ -624,8 +624,15 @@ function Publish() {
           listenedRef.current = room
           aborting.subscribe(() => {})
           const received: string[] = []
-          room.subscribe((msg) => received.push(msg))
+          // A transport like Redis may answer the publish before it delivers the message.
+          const delivered = new Promise<void>((resolve) =>
+            room.subscribe((msg) => {
+              received.push(msg)
+              resolve()
+            }),
+          )
           const { seq } = await room.publish('abort')
+          await delivered
           setResult(JSON.stringify({ seq, received }))
         }}
       >

@@ -78,7 +78,8 @@ function testSlowLink(isDev: boolean) {
     const proxy = await startBlackHoleProxy(getServerUrl())
     try {
       await navigate(`${proxy.url}/channel`)
-      proxy.pace({ downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 })
+      // In 40 ms bursts, as a cell link delivers: a wire's first two pieces reach the page together.
+      proxy.pace({ downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024, burstMs: 40 })
       const connections = countConnections()
       await page.click('#wire-large-slow-link')
       await autoRetry(

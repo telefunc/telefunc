@@ -6,6 +6,22 @@ import { sendRefusedWarning } from '../../../utils'
 
 // Run by the lanes whose server has the smallest `maxMemory`, 2 MiB.
 function testSmallPending() {
+  // 1 MiB queued on each of eight channels before their telefunction returns: on 2 MiB, one fits and a second doesn't.
+  test('channel: sends queued before a telefunction returns count against maxMemory together: those past it are refused with ChannelOverflowError, and every channel stays open', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-channels-queued')
+    await autoRetry(
+      async () => {
+        const { queued, received, closed } = (await getResult<any>('#channel-state')).channelsQueued
+        expect(received).deep.equal([['queued'], ...Array(7).fill([])])
+        expect(queued).deep.equal(['delivered', ...Array(7).fill('ChannelOverflowError')])
+        expect(closed).deep.equal(Array(8).fill(false))
+      },
+      { timeout: 30_000 },
+    )
+    expectLog(sendRefusedWarning)
+  })
+
   // 500 tiny acknowledged sends wait on the server, then their 4 KiB answers come while the page is away: those past
   // maxMemory are refused, and the channel stays open.
   test("channel: acknowledged sends waiting for their answers each settle, those whose answers the server can't hold with ChannelOverflowError, and the channel stays open", async () => {

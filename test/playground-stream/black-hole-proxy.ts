@@ -13,7 +13,7 @@ type BlackHoleProxy = {
   /** Null until the server closes the muted WebSocket, then how many WebSockets the page opened after it meanwhile. */
   openedBeforeMutedClosed(): number | null
   /** From now on each direction carries `bytesPerSecond` (download, upload) through its own queue of `queueBytes`, as a slow link does; a direction whose queue is full stops reading its senders. */
-  pace(link: { downBytesPerSecond: number; upBytesPerSecond: number; queueBytes: number }): void
+  pace(link: { downBytesPerSecond: number; upBytesPerSecond: number; queueBytes: number; burstMs?: number }): void
   close(): Promise<void>
 }
 
@@ -95,9 +95,9 @@ async function startBlackHoleProxy(target: string): Promise<BlackHoleProxy> {
       muteNext = true
     },
     openedBeforeMutedClosed: () => openedBeforeMutedClosed,
-    pace({ downBytesPerSecond, upBytesPerSecond, queueBytes }) {
-      down = new PacedDirection(downBytesPerSecond, queueBytes)
-      up = new PacedDirection(upBytesPerSecond, queueBytes)
+    pace({ downBytesPerSecond, upBytesPerSecond, queueBytes, burstMs = 5 }) {
+      down = new PacedDirection(downBytesPerSecond, queueBytes, burstMs)
+      up = new PacedDirection(upBytesPerSecond, queueBytes, burstMs)
     },
     async close() {
       down?.stop()
@@ -145,12 +145,15 @@ class PacedDirection {
   private paused = new Set<net.Socket>()
   private allowance = 0
   private last = performance.now()
-  private timer = setInterval(() => this.drain(), 5)
+  private timer: ReturnType<typeof setInterval>
 
   constructor(
     private bytesPerSecond: number,
     private queueBytes: number,
-  ) {}
+    private burstMs: number,
+  ) {
+    this.timer = setInterval(() => this.drain(), burstMs)
+  }
 
   enqueue(from: net.Socket, to: net.Socket, chunk: Buffer) {
     this.queue.push({ from, to, chunk })
@@ -166,7 +169,7 @@ class PacedDirection {
     // A link idle for a while doesn't send a burst once it has data again.
     this.allowance = Math.min(
       this.allowance + ((now - this.last) * this.bytesPerSecond) / 1000,
-      this.bytesPerSecond / 100,
+      (this.bytesPerSecond * 2 * this.burstMs) / 1000,
     )
     this.last = now
     while (this.allowance >= 1 && this.head < this.queue.length) {

@@ -57,6 +57,7 @@ import {
   onChannelSlowUplink,
   onChannelPublishesBehind,
   onChannelAcksWaiting,
+  onChannelsQueuedBeforeReturn,
   onChannelAcrossFlip,
   onPublishAcrossFlip,
   onChannelOpenAnswer,
@@ -256,6 +257,7 @@ type ChannelState = {
     reconnected: { receipts: number; last: string }
   } | null
   broadcastAwayShared: { received: number[][]; closed: string[] } | null
+  channelsQueued: { queued: string[]; received: string[][]; closed: boolean[] } | null
   acksWaiting:
     | { ended: string; started: number; settled: Record<string, number>; next: string | null }
     | { error: string }
@@ -355,6 +357,7 @@ const initialState: ChannelState = {
   broadcastBehind: null,
   broadcastBehindCloses: null,
   broadcastAwayShared: null,
+  channelsQueued: null,
   acksWaiting: null,
   acrossFlip: null,
   lateCallbacks: null,
@@ -1616,6 +1619,23 @@ function ChannelDemo() {
     away.control.close()
   }, [])
 
+  const testChannelsQueued = useCallback(async () => {
+    setChannelState((s) => ({ ...s, channelsQueued: null }))
+    const channels = await openChannel(onChannelsQueuedBeforeReturn)
+    const received = channels.map((channel) => {
+      const queuedMessages: string[] = []
+      channel.listenBinary(() => queuedMessages.push('queued'))
+      return queuedMessages
+    })
+    // Its answer comes after anything queued before it, and is a message the channel can still carry.
+    const queued = await Promise.all(
+      channels.map((channel) => channel.send('how', { ack: true }).catch((err: Error) => err.name)),
+    )
+    const closed = channels.map((channel) => channel.isClosed)
+    for (const channel of channels) channel.close()
+    setChannelState((s) => ({ ...s, channelsQueued: { queued, received, closed } }))
+  }, [])
+
   const testAcksWaiting = useCallback(async (count: number) => {
     setChannelState((s) => ({ ...s, acksWaiting: null }))
     const acksWaiting = await acksWaitingOutcome(count).catch((err: Error) => ({
@@ -2082,6 +2102,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             Broadcast Closes A Client That Falls Behind
+          </button>
+          <button
+            id="channel-test-channels-queued"
+            type="button"
+            onClick={testChannelsQueued}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Eight Channels Queue 1 MiB Each Before Their Telefunction Returns
           </button>
           <button
             id="channel-test-acks-waiting"

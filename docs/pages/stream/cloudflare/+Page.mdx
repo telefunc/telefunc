@@ -224,7 +224,7 @@ See also: <Link href="/Telefunc" />.
 >
 > Channel state is in-memory JavaScript. If the Durable Object hibernates, that state is gone. Telefunc keeps the Durable Object alive while channels are open.
 
-The Durable Object can hibernate once all channels are closed and no clients remain connected, which `reconnectTimeout` shortens.
+The Durable Object can hibernate once all channels are closed and no clients remain connected. A client that disconnected keeps its channels open for `reconnectTimeout`, so lower it to hibernate sooner.
 
 ```ts
 import { config } from 'telefunc'
