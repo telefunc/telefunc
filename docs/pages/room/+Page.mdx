@@ -171,6 +171,8 @@ room.onJoin(follow)
 
 > You also receive your own messages. To not receive them, join with `room.join({ meta, selfDelivery: false })`.
 
+> `info.seq` numbers everyone's messages and the room's announcements in one order for the whole room, so it jumps over the ones this page doesn't receive: its own with `selfDelivery: false`, or those of participants it doesn't subscribe to. It never jumps over a lost message: a page never misses one (see <Link href="#remove-a-participant" />).
+
 > Each participant's messages arrive in the order it sent them. `from` is that participant as the room knows it when the message arrives, so `from.meta` is its meta then, not when it sent the message. Joins, leaves and meta changes arrive in the same order everywhere, but two pages can see a message and someone else's join in a different order.
 
 For updates that change many times per second, such as a mouse cursor, pass `coalesce` with a name: on a slow connection, only the latest update with that name is sent, and the older ones are skipped.
@@ -421,7 +423,7 @@ room.onJoin(watch)
 
 With `retain: isKeyframe`, a viewer who arrives mid-stream starts from the last keyframe, see <Link href="#give-late-joiners-the-current-state" />.
 
-A viewer that falls behind misses the oldest frames of a track, and `info.seq` jumps over them. Where a missed frame makes the next ones wrong, give the track `whenBehind: 'close'` in its first publish, which it keeps: a viewer then gets every frame of it, and gets `'disconnected'` where the server can't hold them for it:
+On a track, `info.seq` counts its sender's frames on that track. A viewer that falls behind misses the oldest of them, and `info.seq` jumps over exactly those. Where a missed frame makes the next ones wrong, give the track `whenBehind: 'close'` in its first publish, which it keeps: a viewer then gets every frame of it, and gets `'disconnected'` where the server can't hold them for it:
 
 ```js
 // Environment: client
