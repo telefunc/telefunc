@@ -118,7 +118,7 @@ type ClientChannelTransport = {
   bufferedAmount(): number
   abandonActiveTransport(): void
   closeAbandonedTransport(): void
-  applyReconciledSettings?(ctrl: ReconciledPayload): void
+  applyReconciledSettings(ctrl: ReconciledPayload): void
   /** The heartbeat of its current wire, which also tracks what the wire delivers. */
   readonly heartbeat: Heartbeat | null
   /** Liveness builds the Heartbeat and hands it over; the transport's receive path then reports each PONG to it. */

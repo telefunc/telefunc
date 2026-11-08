@@ -351,7 +351,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   private handleReconciled(ctrl: ReconciledPayload): void {
     if (!this.upgrade.onReconciled(ctrl)) return
-    this.transport.applyReconciledSettings?.(ctrl)
+    this.transport.applyReconciledSettings(ctrl)
     this.takeServerSettings(ctrl)
     const outcome = this.exchange.applyReconciled(ctrl, {
       deferOmitted: this.upgrade.handingOff,
