@@ -423,9 +423,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // becomes addressable on the wire, so a peer can attach immediately after this
     // returns.
     this._replayBuffer = new ServerReplay(this)
-    const heldBefore = this.heldBytes
     this.heldBytes = 0
-    if (heldBefore > 0) hold(this, heldBefore)
+    // Each send was admitted by its channel alone; now they count with all this server's channels.
+    this.offlineBuffer.admitAgain(
+      (held) => admit(this, held),
+      () => this.refuseSend(),
+    )
     if (this._phase === 'ended') return // the mux lets an ended channel go
     if (this.ttlTimer) clearTimeout(this.ttlTimer)
     this.ttlTimer = unrefTimer(

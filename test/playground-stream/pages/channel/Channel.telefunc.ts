@@ -43,6 +43,7 @@ export {
   onChannelSlowUplink,
   onChannelPublishesBehind,
   onChannelAcksWaiting,
+  onChannelsQueuedBeforeReturn,
   onChannelAcrossFlip,
   onPublishAcrossFlip,
   onChannelOpenAnswer,
@@ -911,6 +912,20 @@ async function onChannelPublishesBehind(
     return 'published'
   })
   return { broadcast, control: control.client }
+}
+
+/** Eight channels with 1 MiB queued on each before the telefunction returns. An acknowledged send to one answers how its
+ *  queued send went. */
+async function onChannelsQueuedBeforeReturn() {
+  return Array.from({ length: 8 }, () => {
+    const channel = new Channel<(msg: 'how') => string, never>()
+    const queued = channel.sendBinary(new Uint8Array(1024 * 1024)).then(
+      () => 'delivered',
+      (err: Error) => err.name,
+    )
+    channel.listen(() => queued)
+    return channel.client
+  })
 }
 
 /** A channel whose `{ ack: true }` sends wait for a release, then each answers 4 KiB, and one beside it. `'started'`

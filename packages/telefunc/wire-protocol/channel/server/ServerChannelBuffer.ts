@@ -26,7 +26,7 @@ interface BufferedSender {
 }
 
 type EntryData = string | Uint8Array
-type Entry = { tag: number; data: EntryData; callback: EntryCallback | null }
+type Entry = { tag: number; data: EntryData; callback: EntryCallback | null; held: number }
 
 /**
  * Holds what a channel sends while no peer is attached (text, binary, ack requests), for `flush` to send in order. It
@@ -85,11 +85,25 @@ class ServerChannelBuffer<TAck = never> {
     }
   }
 
+  /** Decides anew, oldest first, as for a send made now: those `admit` takes stay, and the rest go and reject. */
+  admitAgain(admit: (held: number) => boolean, refusal: () => Error): void {
+    const entries = this.entries
+    this.entries = []
+    this.sendBytes = 0
+    for (const entry of entries) {
+      if (admit(entry.held)) this.keep(entry)
+      else entry.callback?.reject(refusal())
+    }
+  }
+
   private pushSend(tag: number, data: EntryData, bytes: number, callback: EntryCallback): void {
-    this.entries.push({ tag, data, callback })
-    const held = bytes + HEADER + HELD_SEND_OVERHEAD_BYTES
-    this.sendBytes += held
-    this.owner._holdOffline(held)
+    this.keep({ tag, data, callback, held: bytes + HEADER + HELD_SEND_OVERHEAD_BYTES })
+  }
+
+  private keep(entry: Entry): void {
+    this.entries.push(entry)
+    this.sendBytes += entry.held
+    this.owner._holdOffline(entry.held)
   }
 
   private letGoSends(): void {
