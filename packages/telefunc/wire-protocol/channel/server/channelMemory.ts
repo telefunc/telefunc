@@ -163,20 +163,31 @@ function reclaim(need: number, target: number): void {
   try {
     const stuck = new Set<MemoryHolder>()
     while (memory.total + need > target) {
-      let largest = 0
-      for (const holder of memory.holders) {
-        if (holder.shed && !stuck.has(holder) && holder.heldBytes > largest) largest = holder.heldBytes
-      }
+      const largest = largestSheddable(stuck)
       const level = Math.max(1, largest - (memory.total + need - target))
       if (level >= largest) return
-      for (const holder of [...memory.holders]) {
-        if (!holder.shed || stuck.has(holder) || holder.heldBytes <= level) continue
-        holder.shed(level)
-        if (holder.heldBytes > level) stuck.add(holder)
-      }
+      shedTo(level, stuck)
     }
   } finally {
     memory.reclaiming = false
+  }
+}
+
+/** The most a holder that sheds holds, of those not in `stuck`. */
+function largestSheddable(stuck: ReadonlySet<MemoryHolder>): number {
+  let largest = 0
+  for (const holder of memory.holders) {
+    if (holder.shed && !stuck.has(holder) && holder.heldBytes > largest) largest = holder.heldBytes
+  }
+  return largest
+}
+
+/** Every holder that sheds, of those not in `stuck`, comes down to `level`; one that can't joins `stuck`. */
+function shedTo(level: number, stuck: Set<MemoryHolder>): void {
+  for (const holder of [...memory.holders]) {
+    if (!holder.shed || stuck.has(holder) || holder.heldBytes <= level) continue
+    holder.shed(level)
+    if (holder.heldBytes > level) stuck.add(holder)
   }
 }
 
