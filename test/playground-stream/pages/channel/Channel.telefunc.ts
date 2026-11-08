@@ -875,8 +875,8 @@ async function onChannelLinkShare() {
 }
 
 /** A broadcast that publishes `count` bodies of `bytes`, or closes, as a channel beside it asks, and answers its pings. */
-async function onChannelPublishesBehind(bytes = 4 * 1024 * 1024) {
-  const broadcast = new BroadcastChannel({ key: `behind:${crypto.randomUUID()}` })
+async function onChannelPublishesBehind(bytes = 4 * 1024 * 1024, whenBehind?: 'missOldest' | 'close') {
+  const broadcast = new BroadcastChannel({ key: `behind:${crypto.randomUUID()}`, whenBehind })
   const control = new Channel<(msg: 'ping' | 'close' | number) => string, never>()
   control.listen(async (msg) => {
     if (msg === 'ping') return 'pong'

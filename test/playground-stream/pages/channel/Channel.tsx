@@ -208,6 +208,7 @@ type ChannelState = {
   publishesBehind: { pingMs: number; closed: string; closeMs: number } | null
   broadcastOverflow: { received: number; closeErr: string } | null
   broadcastBehind: { seqsAhead: number[]; isClosed: boolean } | null
+  broadcastBehindCloses: { seqsAhead: number[]; closeErr: string | null } | null
   acrossFlip: { received: number[] } | null
   lateCallbacks: { channelId: string; onOpen: boolean; onCloseAbortValue: unknown } | null
   openAbort: { channelId: string; abortValue: unknown } | null
@@ -296,6 +297,7 @@ const initialState: ChannelState = {
   publishesBehind: null,
   broadcastOverflow: null,
   broadcastBehind: null,
+  broadcastBehindCloses: null,
   acrossFlip: null,
   lateCallbacks: null,
   openAbort: null,
@@ -1491,6 +1493,25 @@ function ChannelDemo() {
     control.close()
   }, [])
 
+  const testBroadcastBehindCloses = useCallback(async () => {
+    setChannelState((s) => ({ ...s, broadcastBehindCloses: null }))
+    const { broadcast, control } = await openChannel(() => onChannelPublishesBehind(256 * 1024, 'close'))
+    const { seq: before } = await broadcast.publish('before the burst')
+    const seqsAhead: number[] = []
+    // It closes, or, as with `whenBehind: 'missOldest'`, reads on up to the newest.
+    const ended = new Promise<string | null>((resolve) => {
+      broadcast.onClose((err) => resolve(err?.name ?? 'none'))
+      broadcast.subscribeBinary((_, info) => {
+        seqsAhead.push(info.seq - before)
+        if (info.seq === before + 16) resolve(null)
+      })
+    })
+    void control.send(16)
+    const closeErr = await ended
+    setChannelState((s) => ({ ...s, broadcastBehindCloses: { seqsAhead, closeErr } }))
+    control.close()
+  }, [])
+
   const testAcrossFlip = useCallback(async () => {
     const { key, broadcast, control } = await openChannel(onChannelAcrossFlip)
     const received: number[] = []
@@ -1908,6 +1929,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             Broadcast Publishes More Than The Client Keeps Up With
+          </button>
+          <button
+            id="channel-test-broadcast-behind-closes"
+            type="button"
+            onClick={testBroadcastBehindCloses}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Broadcast Closes A Client That Falls Behind
           </button>
           <button
             id="channel-test-across-flip"

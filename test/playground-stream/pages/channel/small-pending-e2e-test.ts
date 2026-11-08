@@ -106,4 +106,19 @@ function testSmallPending() {
     expectLog('fell behind what the server holds for its client')
     expectLog('missed messages')
   })
+
+  // The same burst to a broadcast with `whenBehind: 'close'`: where its page would miss the oldest, it closes instead.
+  test("channel: a client that falls behind a broadcast with whenBehind 'close' gets every message up to the gap, then closes with ChannelOverflowError", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-broadcast-behind-closes')
+    await autoRetry(
+      async () => {
+        const { seqsAhead, closeErr } = (await getResult<any>('#channel-state')).broadcastBehindCloses
+        expect(closeErr).toBe('ChannelOverflowError')
+        expect(seqsAhead.length).lessThan(16)
+        expect(seqsAhead).deep.equal(seqsAhead.map((_: number, i: number) => i + 1))
+      },
+      { timeout: 30_000 },
+    )
+  })
 }
