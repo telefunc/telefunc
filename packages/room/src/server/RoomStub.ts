@@ -486,7 +486,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
 
   emitRetainedBinary(frame: BinaryFrame, info: OrderingInfo, framed: Uint8Array, hold: ReplayHold): void {
     if (this.replay.admitRetained(hold, frame.from, frame.track, info)) {
-      this.end.deliver(publishBody(framed, info, { lossy: true }))
+      this.end.deliver(publishBody(framed, info, { lossy: frame.whenBehind === 'missOldest' }))
     }
   }
 

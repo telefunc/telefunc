@@ -17,7 +17,8 @@ import { makeDisposer, type ListenerOptions } from './disposer.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderSnapshot } from './arguments.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
-import { publicTrack, type TrackKey } from './binary.js'
+import { DEFAULT_TRACK, encodeBinaryFrame, publicTrack, type TrackKey } from './binary.js'
+import { assertUsage } from '../utils/assert.js'
 import type { MemberMetaUpdate, WholeMemberUpdate, RoomResult, InboxMessage } from './protocol.js'
 import type {
   BinaryPublishOptions,
@@ -61,6 +62,8 @@ abstract class ParticipantBase implements LocalParticipant {
   /** DMs held until the first `listen()` (`null` once flushed); an ack DM carries the resolver of its reply. */
   private pendingInbox: Fifo<HeldDm> | null = null
   private pendingInboxBytes = 0
+  /** The `whenBehind` each track's first publish gave it. */
+  private readonly trackWhenBehind = new Map<TrackKey, 'missOldest' | 'close'>()
 
   constructor({ participant, rewinds }: ParticipantBaseOptions) {
     this.id = participant.id
@@ -110,6 +113,21 @@ abstract class ParticipantBase implements LocalParticipant {
   protected abstract _reportError(err: unknown): void
   /** An ack DM's reply to a bug in a `listen()` handler, naming where `_reportError` logged it. */
   protected abstract readonly _bugMessage: string
+
+  /** `publishBinary()`'s frame. A track keeps the `whenBehind` its first publish gave it, which a later one may leave
+   *  out. */
+  protected encodeBinaryFrame(data: Uint8Array, options?: BinaryPublishOptions): Uint8Array {
+    const track = options?.track ?? DEFAULT_TRACK
+    const declared = this.trackWhenBehind.get(track)
+    const whenBehind = options?.whenBehind ?? declared ?? 'missOldest'
+    assertUsage(
+      declared === undefined || whenBehind === declared,
+      `publishBinary(): the ${track === DEFAULT_TRACK ? 'default' : `"${track}"`} track's first publish gave it whenBehind: '${declared}', which a track keeps`,
+    )
+    const framed = encodeBinaryFrame(this.id, data, { ...options, whenBehind })
+    if (declared === undefined) this.trackWhenBehind.set(track, whenBehind)
+    return framed
+  }
 
   listen(callback: (data: unknown, from: Sender | null) => unknown, options?: ListenerOptions): () => void {
     if (options?.signal?.aborted) return makeDisposer()

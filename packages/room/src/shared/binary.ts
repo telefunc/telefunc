@@ -51,8 +51,10 @@ function bytesToUuid(bytes: Uint8Array): string {
 const FRAME_FLAG_META = 0b0000_0001
 const FRAME_FLAG_TRACK = 0b0000_0010
 const FRAME_FLAG_RETAIN = 0b0000_0100
+/** Set where its publisher passed `whenBehind: 'close'`. */
+const FRAME_FLAG_CLOSE_WHEN_BEHIND = 0b0000_1000
 /** The only bits the framer defines. Any other bit set is a malformed or forward-incompatible frame. */
-const FRAME_FLAGS_KNOWN = FRAME_FLAG_META | FRAME_FLAG_TRACK | FRAME_FLAG_RETAIN
+const FRAME_FLAGS_KNOWN = FRAME_FLAG_META | FRAME_FLAG_TRACK | FRAME_FLAG_RETAIN | FRAME_FLAG_CLOSE_WHEN_BEHIND
 /** Structural maxima of the one-byte track-length and two-byte metadata-length fields. */
 const TRACK_LENGTH_FIELD_MAX = 0xff
 const META_LENGTH_FIELD_MAX = 0xffff
@@ -60,13 +62,18 @@ const frameTextEncoder = /* @__PURE__ */ new TextEncoder()
 const frameTextDecoder = /* @__PURE__ */ new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 
 function encodeBinaryFrame(memberId: string, payload: Uint8Array, opts?: BinaryPublishOptions): Uint8Array {
-  assertKnownOptions(opts, ['track', 'meta', 'retain'], 'publishBinary()')
+  assertKnownOptions(opts, ['track', 'meta', 'retain', 'whenBehind'], 'publishBinary()')
   assertUsage(
     opts?.retain === undefined || typeof opts.retain === 'boolean',
     'publishBinary() options.retain should be a boolean',
   )
+  assertUsage(
+    opts?.whenBehind === undefined || opts.whenBehind === 'missOldest' || opts.whenBehind === 'close',
+    "publishBinary() options.whenBehind should be 'missOldest' or 'close'",
+  )
   const idBytes = uuidToBytes(memberId)
   let flags = opts?.retain === true ? FRAME_FLAG_RETAIN : 0
+  if (opts?.whenBehind === 'close') flags |= FRAME_FLAG_CLOSE_WHEN_BEHIND
   let trackBytes: Uint8Array | null = null
   if (opts?.track !== undefined) {
     assertUsage(
@@ -153,6 +160,7 @@ type BinaryFrame = {
   track: TrackKey
   meta: Record<string, unknown> | null
   retain: boolean
+  whenBehind: 'missOldest' | 'close'
 }
 
 function decodeBinaryFrame(data: Uint8Array): BinaryFrame | null {
@@ -170,6 +178,7 @@ function decodeBinaryFrame(data: Uint8Array): BinaryFrame | null {
     track,
     meta,
     retain: !!(flags & FRAME_FLAG_RETAIN),
+    whenBehind: flags & FRAME_FLAG_CLOSE_WHEN_BEHIND ? 'close' : 'missOldest',
   }
 }
 

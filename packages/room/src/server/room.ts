@@ -12,13 +12,7 @@ import {
 import { assert, assertUsage } from '../utils/assert.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
-import {
-  encodeBinaryFrame,
-  decodeBinaryFrame,
-  type BinaryFrame,
-  type BinaryWantChange,
-  type TrackKey,
-} from '../shared/binary.js'
+import { decodeBinaryFrame, type BinaryFrame, type BinaryWantChange, type TrackKey } from '../shared/binary.js'
 import { RoomError, roomClosedError, ROOM_BUG_MESSAGE } from '../shared/errors.js'
 import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetadata, recipientId } from '../shared/arguments.js'
 import {
@@ -598,7 +592,7 @@ class ServerLocalParticipant extends ParticipantBase {
   }
 
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
-    const framed = encodeBinaryFrame(this.id, data, options)
+    const framed = this.encodeBinaryFrame(data, options)
     // Local holders get exactly what remote ones decode, not the caller's objects.
     const frame = decodeBinaryFrame(framed)
     assert(frame !== null)

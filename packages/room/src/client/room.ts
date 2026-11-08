@@ -5,14 +5,7 @@ import { assert, assertUsage } from '../utils/assert.js'
 import { createDeferred, getOrCreate, markHandled } from 'telefunc/__internal'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import type { TELEFUNC_SHIELDS, ChannelPublishAck, ChannelPublishInfo, ClientBroadcast } from 'telefunc/__internal'
-import {
-  EVERY_MEMBER,
-  EVERY_TRACK,
-  decodeBinaryFrame,
-  encodeBinaryFrame,
-  type BinaryWantChange,
-  type TrackKey,
-} from '../shared/binary.js'
+import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange, type TrackKey } from '../shared/binary.js'
 import {
   assertKnownOptions,
   normalizeJoinOptions,
@@ -591,7 +584,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
   }
 
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
-    return markHandled(this._sendPublishBinary(encodeBinaryFrame(this.id, data, options)))
+    return markHandled(this._sendPublishBinary(this.encodeBinaryFrame(data, options)))
   }
 
   send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {

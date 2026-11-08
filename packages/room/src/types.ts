@@ -204,6 +204,11 @@ type BinaryPublishOptions = {
   meta?: Record<string, unknown>
   /** Keep this as the track's last-write-wins retained frame. */
   retain?: boolean
+  /** What a page that falls behind what the server holds for it gets of this track: with `'missOldest'` it misses its
+   *  oldest frames, and the track's `info.seq` jumps over them; with `'close'` it misses none, and leaves the room
+   *  (`'disconnected'`) where the server can't hold them. A track keeps the value of its first publish, which a later
+   *  one may leave out; naming another throws. Default: `'missOldest'`. */
+  whenBehind?: 'missOldest' | 'close'
 }
 
 /** One message `messages()` yields: what a `subscribe()` or `subscribeBinary()` listener receives, `from` being the

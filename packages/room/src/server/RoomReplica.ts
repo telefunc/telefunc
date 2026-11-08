@@ -458,7 +458,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     assert(unframed)
     for (const handle of this.receivers) handle.local.relayBinary(unframed, info)
     if (this.stubs.size === 0) return
-    const body = publishBody(framed, info, { lossy: true })
+    const body = publishBody(framed, info, { lossy: unframed.whenBehind === 'missOldest' })
     for (const stub of this.stubs) stub.relayBinary(body, unframed.from, unframed.track, info)
   }
 
