@@ -36,7 +36,13 @@ import {
 } from './lifecycle/replay.js'
 import { TailHold, type TailEntry, type TailHoldOwner } from './lifecycle/TailHold.js'
 import { EVERY_MEMBER, EVERY_TRACK, type BinaryFrame, type BinaryWantChange } from '../shared/binary.js'
-import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './lanes/binaryWants.js'
+import {
+  applyBinaryWantChange,
+  binaryWantsCovers,
+  emptyBinaryWants,
+  forgetMemberWants,
+  type BinaryWants,
+} from './lanes/binaryWants.js'
 import { RoomError } from '../shared/errors.js'
 import type {
   MemberSnapshot,
@@ -102,8 +108,6 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   private readonly textMemberWants = new Set<string>()
   private announce = false
   private readonly binary: BinaryWants = emptyBinaryWants()
-  /** The tracks `binary` names, each `(member or room, track)` pair once. */
-  private trackWants = 0
   /** A tail waits for the client's first text selector, then flushes once in order. */
   private tail: TailHold | null = null
   /** Whether this client was sent the whole roster since it attached. */
@@ -170,7 +174,6 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   private receive(message: unknown): Promise<RoomResult> | undefined {
     if (isRoomRequest(message)) return roomResult(this.handleRequest(decodeRoomRequest(message)))
     const declaration = decodeRoomDeclaration(message)
-    if (declaration.__r === 'sub-binary') this.assertTrackWantFits(declaration)
     this.applyDeclaration(declaration)
     return undefined
   }
@@ -205,7 +208,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
 
   /** The client library names at most `ROOM_TRACK_WANTS_MAX` tracks, so only a peer bypassing it names more. */
   private assertTrackWantFits({ member, track, on }: BinaryWantChange): void {
-    if (!on || track === EVERY_TRACK || this.trackWants < ROOM_TRACK_WANTS_MAX) return
+    if (!on || track === EVERY_TRACK || this.binary.named < ROOM_TRACK_WANTS_MAX) return
     const scope = member === EVERY_MEMBER ? this.binary.everyMember : this.binary.members.get(member)
     assertProtocol(scope?.tracks.has(track), 'Room binary wants over ROOM_TRACK_WANTS_MAX')
   }
@@ -213,10 +216,10 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   /** A client learns its members from this view alone, so a want naming any other id names one that
    *  left or never was. */
   private declareBinaryWant(change: BinaryWantChange): void {
-    const { member, track, on } = change
+    this.assertTrackWantFits(change)
+    const { member, on } = change
     if (on && member !== EVERY_MEMBER && !this.room.model.hasMember(member)) return
     if (!applyBinaryWantChange(this.binary, change)) return
-    if (track !== EVERY_TRACK) this.trackWants += on ? 1 : -1
     if (!on) this.replay.forgetUnwantedBinary((member, track) => this.wantsBinary(member, track))
     this.room.onHolderBinaryChanged(this, change)
   }
@@ -280,8 +283,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   /** Drops its wants naming `id`; returns whether it held any. */
   forgetWantsOf(id: string): boolean {
     const text = this.textMemberWants.delete(id)
-    this.trackWants -= this.binary.members.get(id)?.tracks.size ?? 0
-    return this.binary.members.delete(id) || text
+    return forgetMemberWants(this.binary, id) || text
   }
 
   // Wants, as the room's subscription planner reads them
