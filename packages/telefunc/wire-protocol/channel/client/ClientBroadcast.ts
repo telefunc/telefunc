@@ -1,6 +1,12 @@
 export { ClientBroadcast }
 
-import type { BroadcastBinaryListener, BroadcastListener, ChannelData, ChannelPublishAck } from '../channel.js'
+import type {
+  BroadcastBinaryListener,
+  BroadcastListener,
+  ChannelData,
+  ChannelPublishAck,
+  ChannelPublishInfo,
+} from '../channel.js'
 import { makePublishInfo } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -117,25 +123,27 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private onPeerPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
     const parsed = parse(data) as ChannelData<T>
-    const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of this.broadcastListeners.list()) {
-      try {
-        const result = cb(parsed, info)
-        if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
-      } catch (err) {
-        if (this.lifecycle.handleCallbackError(err)) return
-      }
-    }
-    this.receiveCredit.onPublishConsumed(bytes)
+    this.deliverPublish(this.broadcastListeners.list(), () => parsed, wireInfo, bytes)
   }
 
   private onPeerPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
-    const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     const list = this.broadcastBinaryListeners.list()
-    for (const [i, cb] of list.entries()) {
+    this.deliverPublish(list, (i) => forListener(data, list, i, HEADER + PUBLISH_BINARY_HEADER), wireInfo, bytes)
+  }
+
+  /** Calls each listener with its value, `valueFor` its index; an `Abort` stops the rest and leaves the publish
+   *  unconsumed. A listener's promise isn't awaited. */
+  private deliverPublish<V>(
+    listeners: readonly ((value: V, info: ChannelPublishInfo) => unknown)[],
+    valueFor: (i: number) => V,
+    wireInfo: WirePublishInfo,
+    bytes: number,
+  ): void {
+    const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
+    for (const [i, cb] of listeners.entries()) {
       try {
-        const result = cb(forListener(data, list, i, HEADER + PUBLISH_BINARY_HEADER), info)
+        const result = cb(valueFor(i), info)
         if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
       } catch (err) {
         if (this.lifecycle.handleCallbackError(err)) return
