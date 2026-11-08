@@ -20,8 +20,7 @@ import {
 } from '../../constants.js'
 import { ReplayBuffer } from './ReplayBuffer.js'
 import { ERROR_REASON, isSequencedFrame } from '../../wire/frame.js'
-import { TAG, isClosingTag } from '../../wire/tags.js'
-import { seqNear } from '../../wire/seq.js'
+import { TAG } from '../../wire/tags.js'
 import type { ChannelFrame, DecodedFrame, PongEntry } from '../../wire/frame.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 
@@ -260,7 +259,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private dispatchFrame(frame: DecodedFrame): void {
     // Track seq for ALL sequenced frames, ACK_RES and the closing ones too; otherwise reconciles under-report lastSeq.
     if (isSequencedFrame(frame)) {
-      const seq = this.trackSeq(frame)
+      const seq = this.channels.receivedSeq(frame)
       if (seq === null) return
       frame.seq = seq
     }
@@ -571,23 +570,6 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       channel._onEnded(err)
     }
     this.dispose()
-  }
-
-  /** A frame's 7-byte header holds only the low 32 bits of its seq, while a channel's seqs count past that; this widens
-   *  them to the full seq nearest the channel's last one plus one, as no wire or replay holds 2^31 frames. Returns that
-   *  seq, or null for a frame to drop: a seq already seen, such as a replay resending what arrived, or a channel this
-   *  page let go. */
-  private trackSeq({ tag, index, seq: bits }: { tag: number; index: number; seq: number }): number | null {
-    const record = this.channels.get(index)
-    if (record === undefined) return null
-    const prev = record.lastSeq
-    const seq = seqNear(bits, prev + 1)
-    if (seq <= prev) return null
-    record.lastSeq = seq
-    // A channel's frames take consecutive seqs, so a gap is publishes the server let go as this page fell behind. A
-    // closing frame goes ahead of its channel's waiting publishes on purpose, so its gap is no loss.
-    if (seq > prev + 1 && !isClosingTag(tag)) record.channel._onFramesMissed?.()
-    return seq
   }
 }
 
