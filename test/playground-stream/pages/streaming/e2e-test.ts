@@ -255,6 +255,17 @@ function testStreaming() {
     })
   })
 
+  test('streaming: a generator that throws a non-object ends its stream as a bug, and the server reports the mistake', async () => {
+    await page.click('#test-generator-throws-non-object')
+    await autoRetry(async () => {
+      const result = await getResult('#streaming-result')
+      expect(result.error).toBe(true)
+      expect(result.isBug).toBe(true)
+      expect(result.values).deep.equal(['before-bug'])
+    })
+    expectLog('threw a non-object error')
+  })
+
   test('streaming: Abort in one producer aborts all multiplexed streaming values', async () => {
     await page.click('#test-abort-one-of-many-streaming-values')
     await autoRetry(async () => {

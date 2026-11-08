@@ -19,6 +19,7 @@ import {
   onGeneratorAbortMidStream,
   onGeneratorAbortWithValue,
   onGeneratorBugMidStream,
+  onGeneratorThrowsNonObject,
   onAbortOneOfManyStreamingValues,
   onChannelAbortAbortsSiblingStreamingValues,
   onUploadWithProgress,
@@ -471,6 +472,22 @@ function Streaming() {
         }}
       >
         Generator Bug mid-stream
+      </button>
+
+      <button
+        id="test-generator-throws-non-object"
+        onClick={async () => {
+          setResult('')
+          const values: string[] = []
+          try {
+            for await (const v of onGeneratorThrowsNonObject()) values.push(v)
+            setResult(JSON.stringify({ error: false, values }))
+          } catch (e: any) {
+            setResult(JSON.stringify({ error: true, isBug: !(e instanceof TelefuncAbort), values }))
+          }
+        }}
+      >
+        Generator throws a non-object
       </button>
 
       <button

@@ -16,6 +16,7 @@ export {
   onGeneratorAbortMidStream,
   onGeneratorAbortWithValue,
   onGeneratorBugMidStream,
+  onGeneratorThrowsNonObject,
   onAbortOneOfManyStreamingValues,
   onChannelAbortAbortsSiblingStreamingValues,
   onUploadWithProgress,
@@ -234,6 +235,11 @@ async function* onGeneratorAbortWithValue(): AsyncGenerator<string> {
 async function* onGeneratorBugMidStream(): AsyncGenerator<string> {
   yield 'before-bug'
   throw new Error('Unexpected generator error')
+}
+
+async function* onGeneratorThrowsNonObject(): AsyncGenerator<string> {
+  yield 'before-bug'
+  throw 'not-an-error'
 }
 
 const onAbortOneOfManyStreamingValues = async () => {
