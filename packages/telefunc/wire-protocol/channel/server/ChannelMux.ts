@@ -4,15 +4,13 @@ export type { WireEntry, ReconcileOutcome, ServerTransport, Wire }
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { getRawContext } from '../../../node/server/context/context.js'
-import { getAdapterMaxFrameBytes, getChannelConfig, pingDeadlineOf } from '../../../node/server/serverConfig.js'
+import { getAdapterMaxFrameBytes, getChannelConfig } from '../../../node/server/serverConfig.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { GcRegistry } from '../../../utils/GcRegistry.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
   CREDIT_MSG_WINDOW_MAX,
-  CHANNEL_CONNECT_TTL_MS,
-  CHANNEL_IDLE_TIMEOUT_MS,
   CREDIT_WINDOW_MAX_BYTES,
   MAX_CHANNELS_PER_CONNECTION,
   TIMER_DELAY_MAX_MS,
@@ -25,6 +23,7 @@ import {
 } from '../../constants.js'
 import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, withTook } from '../../wire/frame.js'
 import { TAG, isWireCtrlTag } from '../../wire/tags.js'
+import { pingDeadline } from '../../wire/pingDeadline.js'
 import { textEncoder } from '../../wire/envelope.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
@@ -89,6 +88,9 @@ type MuxServerOptions = {
   pingInterval: number
   pingDeadline: number
   creditWindow: number
+  connectTtl: number
+  sseFlushThrottle: number
+  ssePostIdleFlushDelay: number
   transports: ChannelTransports
 }
 
@@ -177,6 +179,11 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
     return (this.resolvedOptions ??= resolveMuxServerOptions())
   }
 
+  /** Exposed for transport-level race timers (SSE's `waitForWire`). */
+  get connectTtl(): number {
+    return this.options.connectTtl
+  }
+
   // ── ServerChannel registry ──────────────────────────────────────────
 
   /** Callers must not invoke `channel._registerChannel()` directly. */
@@ -262,6 +269,8 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
         pingInterval: this.options.pingInterval,
         maxFrameBytes: getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES,
         creditWindow: this.options.creditWindow,
+        sseFlushThrottle: this.options.sseFlushThrottle,
+        ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
         transports: this.options.transports,
       }),
     )
@@ -473,7 +482,11 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.PING) {
       const pieces = entry.sender.pieces
-      if (pieces) assertProtocol(pieces.headroom.heartbeat(frame.took, performance.now()), 'PING took more than sent')
+      // A PING counts the bytes the page took off this wire: more than it was sent is a broken peer, and the wire ends.
+      if (pieces) {
+        const known = pieces.headroom.heartbeat(frame.took, performance.now())
+        assertProtocol(known, 'PING says the page took more bytes than this wire sent it')
+      }
       this.resetPingTimer(entry)
       this.acknowledgeArrivals(entry)
       this.pong(entry, this.answerPing(entry, frame.ended))
@@ -741,7 +754,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
       phase: 'waiting',
       ttl: null,
     }
-    this.registrationWaits.wait(awaited, CHANNEL_CONNECT_TTL_MS)
+    this.registrationWaits.wait(awaited, this.options.connectTtl)
     entry.state.awaited.add(awaited)
   }
 
@@ -907,10 +920,13 @@ function resolveMuxServerOptions(): MuxServerOptions {
   const c = getChannelConfig()
   return {
     reconnectTimeout: c.reconnectTimeout,
-    idleTimeout: Math.min(c.reconnectTimeout, CHANNEL_IDLE_TIMEOUT_MS),
+    idleTimeout: c.idleTimeout,
     pingInterval: c.pingInterval,
-    pingDeadline: pingDeadlineOf(c),
-    creditWindow: creditWindowOf(c.maxMemory),
+    pingDeadline: pingDeadline(c.pingInterval),
+    creditWindow: creditWindowOf(c.maxMemory, c.maxPendingBytes),
+    connectTtl: c.connectTtl,
+    sseFlushThrottle: c.sseFlushThrottle,
+    ssePostIdleFlushDelay: c.ssePostIdleFlushDelay,
     transports: c.transports,
   }
 }

@@ -8,6 +8,7 @@ import { isObject } from '../../utils/isObject.js'
 import { assert } from '../../utils/assert.js'
 import { createReadableChunkStream } from './createReadableChunkStream.js'
 import { readChunksToBytes } from './readChunksToBytes.js'
+import { Fifo } from '../../utils/Fifo.js'
 import type { Channel } from '../channel/server/ServerChannel.js'
 import type { AbortError } from '../../shared/Abort.js'
 import type { StreamSource } from './types.js'
@@ -30,12 +31,9 @@ type StreamSourceChannel = Pick<Channel, 'listenBinary' | 'onClose' | 'close' | 
  *
  * The optional `throwError` callback handles error frames with caller-specific
  * formatting (e.g. telefunc abort/bug errors). If omitted, a generic Error is thrown.
- *
- * Internally uses a read-head index for O(1) dequeues with periodic compaction.
  */
 class ChannelStreamSource {
-  private queue: Array<{ frame: Uint8Array<ArrayBuffer>; onConsumed: () => void }> = []
-  private readHead = 0
+  private readonly queue = new Fifo<{ frame: Uint8Array<ArrayBuffer>; onConsumed: () => void }>()
   private wake: (() => void) | null = null
   private closed = false
   private closeError: Error | null = null
@@ -96,23 +94,16 @@ class ChannelStreamSource {
   }
 
   private async readNextChunk(): Promise<Uint8Array<ArrayBuffer> | null> {
-    while (this.readHead >= this.queue.length) {
+    while (this.queue.length === 0) {
       if (this.ended) return null
       if (this.closed) return this.endOfClosed()
       await new Promise<void>((r) => {
         this.wake = r
       })
     }
-    const entry = this.queue[this.readHead]!
-    this.queue[this.readHead] = undefined! // release reference
-    this.readHead++
+    const entry = this.queue.shift()!
     // Signal the channel that this frame has been consumed — drives window updates.
     entry.onConsumed()
-    // Compact when half the array is consumed to avoid unbounded growth.
-    if (this.readHead > 16 && this.readHead >= this.queue.length >>> 1) {
-      this.queue = this.queue.slice(this.readHead)
-      this.readHead = 0
-    }
     // Tag is the first byte: 0x00 = data, 0x01 = error, 0x02 = end.
     const tag = entry.frame[0]
     if (tag === CHANNEL_PUMP_TAG_END) {

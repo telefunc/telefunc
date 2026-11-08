@@ -1498,7 +1498,6 @@ function testRoomSmallMemory() {
         expect(stream.map(({ n, seq }) => seq - n)).deep.equal(stream.map(() => stream[0]!.seq - stream[0]!.n))
       }
       expectLog('fell behind and skipped frames of its lossy tracks')
-      expectLog('skipped frames of its lossy tracks, as this client fell behind')
     },
   )
   testRoomTracksBehind(
@@ -1525,7 +1524,6 @@ function testRoomSmallMemory() {
       expect(cursor.map(({ n, seq }) => seq - n)).deep.equal(cursor.map(() => cursor[0]!.seq - cursor[0]!.n))
     })
     expectLog('fell behind and skipped frames of its lossy tracks')
-    expectLog('skipped frames of its lossy tracks, as this client fell behind')
   })
   test('room: a page offline while reliable messages pass 7/8 of maxMemory, its publish waiting for a receipt, is let go: no message and no receipt crosses what it missed', async () => {
     if (!canCutWire()) return

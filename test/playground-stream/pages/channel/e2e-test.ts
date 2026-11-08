@@ -339,49 +339,54 @@ function testChannel(isDev: boolean, inDocker = false) {
 
   // ── Binary sendBinary / listenBinary round-trip ───────────────────────
 
+  // Whichever wire carries the ACK_RES, the WebSocket or the SSE stream, the page gets it with its value corrupted, for
+  // OK and ABORT: the send rejects, and the parse failure is reported as uncaught, the same on both.
+  test('channel: a malformed acknowledgement rejects its send with the parse failure', async () => {
+    const context = await page.context().browser()!.newContext()
+    const routed = await context.newPage()
+    try {
+      let status = 0
+      let corrupted = 0
+      const failures: string[] = []
+      routed.on('pageerror', (err) => failures.push(err.name))
+      await routed.addInitScript(corruptSseAcks, PER_SEND_ACK)
+      await routed.routeWebSocket(/\/_telefunc/, (ws) => {
+        const server = ws.connectToServer()
+        ws.onMessage((message) => server.send(message))
+        server.onMessage((message) => {
+          if (typeof message !== 'string') {
+            const payload = message.indexOf(Buffer.from(PER_SEND_ACK))
+            if (payload !== -1) {
+              message = Buffer.from(message)
+              // Keep the ACK_RES envelope valid; corrupt its serialized value.
+              message[payload - 1] = status
+              message[payload] = '{'.charCodeAt(0)
+              corrupted++
+            }
+          }
+          ws.send(message)
+        })
+      })
+      for (status of [0, 2]) {
+        await navigate(`${getServerUrl()}/channel`, undefined, routed)
+        await routed.evaluate((s) => ((window as any).ackStatus = s), status)
+        await routed.click('#channel-test-per-send-ack')
+        await autoRetry(async () => {
+          const state = JSON.parse((await routed.textContent('#channel-state'))!)
+          expect(state.perSendAck).toBe('SyntaxError')
+        })
+        corrupted += await routed.evaluate(() => (window as any).acksCorrupted ?? 0)
+      }
+      expect(corrupted).toBe(2)
+      expect(failures).deep.equal(['SyntaxError', 'SyntaxError'])
+    } finally {
+      await context.close()
+    }
+  })
+
   // The page's first wire is the WebSocket, whose RECONCILE names the channel. In `vike dev` the channel is the
   // telefunction's copy of telefunc, not the server's: the server tells the violation it raises by its brand.
   if (channelTransports[0] === 'ws') {
-    test('channel: a malformed acknowledgement rejects its send with the parse failure', async () => {
-      const context = await page.context().browser()!.newContext()
-      const routed = await context.newPage()
-      try {
-        let status = 0
-        let corrupted = 0
-        const failures: string[] = []
-        routed.on('pageerror', (err) => failures.push(err.name))
-        await routed.routeWebSocket(/\/_telefunc/, (ws) => {
-          const server = ws.connectToServer()
-          ws.onMessage((message) => server.send(message))
-          server.onMessage((message) => {
-            if (typeof message !== 'string') {
-              const payload = message.indexOf(Buffer.from('"ack:per-send-test"'))
-              if (payload !== -1) {
-                message = Buffer.from(message)
-                // Keep the ACK_RES envelope valid; corrupt its serialized value for OK and ABORT.
-                message[payload - 1] = status
-                message[payload] = '{'.charCodeAt(0)
-                corrupted++
-              }
-            }
-            ws.send(message)
-          })
-        })
-        for (status of [0, 2]) {
-          await navigate(`${getServerUrl()}/channel`, undefined, routed)
-          await routed.click('#channel-test-per-send-ack')
-          await autoRetry(async () => {
-            const state = JSON.parse((await routed.textContent('#channel-state'))!)
-            expect(state.perSendAck).toBe('SyntaxError')
-          })
-        }
-        expect(corrupted).toBe(2)
-        expect(failures).deep.equal(['SyntaxError', 'SyntaxError'])
-      } finally {
-        await context.close()
-      }
-    })
-
     test("channel: a text message the server can't parse, on a channel a telefunction returned, closes the page's WebSocket", async () => {
       // A page of its own: its WebSocket stays routed through the test for as long as the page lives.
       const context = await page.context().browser()!.newContext()
@@ -1516,4 +1521,52 @@ function testChannelApi() {
       expect(await page.textContent('#channel-late-abort-result')).toBe('late-stop')
     })
   })
+}
+
+const PER_SEND_ACK = '"ack:per-send-test"'
+
+/** In the page: an SSE event carrying `needle` gets it corrupted as the WebSocket route does, its status byte set to
+ *  `window.ackStatus`; `window.acksCorrupted` counts them. */
+function corruptSseAcks(needle: string) {
+  const w = window as any
+  const bytes = new TextEncoder().encode(needle)
+  const indexOf = (frame: Uint8Array) => {
+    for (let i = 0; i + bytes.length <= frame.length; i++) if (bytes.every((b, k) => frame[i + k] === b)) return i
+    return -1
+  }
+  const fromBase64url = (s: string) =>
+    Uint8Array.from(atob(s.replaceAll('-', '+').replaceAll('_', '/')), (c) => c.charCodeAt(0))
+  const toBase64url = (frame: Uint8Array) =>
+    btoa(String.fromCharCode(...frame))
+      .replaceAll('+', '-')
+      .replaceAll('/', '_')
+      .replace(/=+$/, '')
+  const corruptLine = (line: string) => {
+    if (!line.startsWith('data: ')) return line
+    const frame = fromBase64url(line.slice(6))
+    const payload = indexOf(frame)
+    if (payload === -1) return line
+    frame[payload - 1] = w.ackStatus
+    frame[payload] = '{'.charCodeAt(0)
+    w.acksCorrupted = (w.acksCorrupted ?? 0) + 1
+    return `data: ${toBase64url(frame)}`
+  }
+  const corrupting = () => {
+    const decoder = new TextDecoder()
+    const encoder = new TextEncoder()
+    let partial = ''
+    return new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        const lines = (partial + decoder.decode(chunk, { stream: true })).split('\n')
+        partial = lines.pop()!
+        for (const line of lines) controller.enqueue(encoder.encode(`${corruptLine(line)}\n`))
+      },
+    })
+  }
+  const fetchPage = window.fetch
+  window.fetch = async (input, init) => {
+    const response = await fetchPage(input, init)
+    if (!response.body || !response.headers.get('content-type')?.includes('text/event-stream')) return response
+    return new Response(response.body.pipeThrough(corrupting()), response)
+  }
 }

@@ -1,4 +1,5 @@
 export {
+  HELD_SEND_OVERHEAD_BYTES,
   addWireCopies,
   admit,
   admitPublish,
@@ -7,6 +8,7 @@ export {
   hold,
   holdsEnough,
   letGo,
+  maxPendingBytesOf,
   queueMemory,
   releaseHolder,
 }
@@ -14,10 +16,12 @@ export type { MemoryHolder }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { getChannelConfig } from '../../../node/server/serverConfig.js'
-import { CHANNEL_HOLD_MAX_BYTES } from '../../constants.js'
 import type { PublishBody } from './PublishBody.js'
 import type { QueueMemory } from '../channelMessages.js'
 
+/** What a held send takes beyond its payload, its callbacks and promise, rounded up: one buffered, awaiting its answer
+ *  or credit, kept to replay, or waiting in the in-memory broadcast adapter. */
+const HELD_SEND_OVERHEAD_BYTES = 512
 /** What a held publish takes beyond its share of the body: its head and its entries. */
 const HELD_PUBLISH_OVERHEAD_BYTES = 200
 
@@ -38,6 +42,7 @@ const memory = getGlobalObject('channelMemory.ts', {
   total: 0,
   holders: new Set<MemoryHolder>(),
   maxMemory: 0,
+  maxPendingBytes: 0,
   reclaiming: false,
   /** What wires hold as copies, on no holder: a replay holds the same bytes. */
   wireCopies: 0,
@@ -49,7 +54,7 @@ function admit(holder: MemoryHolder, bytes: number): boolean {
   const maxMemory = maxMemoryOf()
   const target = shedTarget(maxMemory)
   if (memory.total + bytes > target) reclaim(bytes, target)
-  if (holder.heldBytes + bytes > Math.min(CHANNEL_HOLD_MAX_BYTES, maxMemory)) return false
+  if (holder.heldBytes + bytes > Math.min(maxPendingBytesOf(), maxMemory)) return false
   if (memory.total + bytes <= target) return true
   return holder.heldBytes + bytes <= maxMemory / memory.holders.size && memory.total + bytes <= maxMemory
 }
@@ -162,26 +167,42 @@ function reclaim(need: number, target: number): void {
   try {
     const stuck = new Set<MemoryHolder>()
     while (memory.total + need > target) {
-      let largest = 0
-      for (const holder of memory.holders) {
-        if (holder.shed && !stuck.has(holder) && holder.heldBytes > largest) largest = holder.heldBytes
-      }
+      const largest = largestSheddable(stuck)
       const level = Math.max(1, largest - (memory.total + need - target))
       if (level >= largest) return
-      for (const holder of [...memory.holders]) {
-        if (!holder.shed || stuck.has(holder) || holder.heldBytes <= level) continue
-        holder.shed(level)
-        if (holder.heldBytes > level) stuck.add(holder)
-      }
+      shedTo(level, stuck)
     }
   } finally {
     memory.reclaiming = false
   }
 }
 
+/** The most a holder that sheds holds, of those not in `stuck`. */
+function largestSheddable(stuck: ReadonlySet<MemoryHolder>): number {
+  let largest = 0
+  for (const holder of memory.holders) {
+    if (holder.shed && !stuck.has(holder) && holder.heldBytes > largest) largest = holder.heldBytes
+  }
+  return largest
+}
+
+/** Every holder that sheds, of those not in `stuck`, comes down to `level`; one that can't joins `stuck`. */
+function shedTo(level: number, stuck: Set<MemoryHolder>): void {
+  for (const holder of [...memory.holders]) {
+    if (!holder.shed || stuck.has(holder) || holder.heldBytes <= level) continue
+    holder.shed(level)
+    if (holder.heldBytes > level) stuck.add(holder)
+  }
+}
+
 /** `config.channel` can't change once a channel exists. */
 function maxMemoryOf(): number {
   return (memory.maxMemory ||= getChannelConfig().maxMemory)
+}
+
+/** The most one channel holds, as `maxMemoryOf`. */
+function maxPendingBytesOf(): number {
+  return (memory.maxPendingBytes ||= getChannelConfig().maxPendingBytes)
 }
 
 /** The top eighth is for wires' copies and for those under an equal share. */

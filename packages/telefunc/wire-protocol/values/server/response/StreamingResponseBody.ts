@@ -215,7 +215,12 @@ function buildInlineResponseBody(runContext: {
  *  inline path (with a u32 marker prefix) and the channel pump path (with a
  *  tag prefix) — only the framing differs. */
 function encodeErrorPayload(err: unknown, telefuncId: TelefuncId): Uint8Array<ArrayBuffer> {
-  validateTelefunctionError(err, telefuncId)
+  try {
+    validateTelefunctionError(err, telefuncId)
+  } catch (usageErr) {
+    // A non-object or a bare `Abort` thrown: the mistake is what's reported, and the page gets a bug.
+    err = usageErr
+  }
   let errorPayload: string
   if (isAbort(err)) {
     const abortError: AbortError = err

@@ -7,6 +7,7 @@ import type {
   BroadcastListeners,
   ChannelData,
   ChannelPublishAck,
+  ChannelPublishInfo,
 } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -21,7 +22,6 @@ import { ChannelClosedError, isExpectedChannelFailure } from '../channelErrors.j
 import { classifyTelefuncError } from '../errorClassification.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { forListener } from '../listenerAnswer.js'
-import { assertWarning } from '../../../utils/assert.js'
 import { ClientChannel, reportChannelError, type ClientChannelOptions } from './ClientChannel.js'
 
 type ClientBroadcastOptions = ClientChannelOptions & { lossy?: boolean }
@@ -33,9 +33,6 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
   /** The subscriptions this page asks the server for. */
   private readonly subscribed: BroadcastSubscriptions = { text: false, binary: false }
-  private missedWarned = false
-  /** Who hears each gap in place of the warning: a Room view, which warns in a Room's words. */
-  private missedHandler: (() => void) | null = null
   /** A newer publish replaces this page's own that no wire has taken yet: see `sendPublish`. */
   private readonly lossy: boolean
   /** This page's newest publish of each lossy stream, while it isn't settled. */
@@ -169,23 +166,6 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this.sendCredit.countSent(this.connection.sendSequenced(this, 'data', encode.text, stringify(data)))
   }
 
-  /** @internal Each gap goes to `handler` instead of the warning. */
-  _handleFramesMissed(handler: () => void): void {
-    this.missedHandler = handler
-  }
-
-  /** @internal The server let its oldest messages go: this page fell behind what it holds. */
-  _onFramesMissed(): void {
-    if (this.missedHandler) return this.missedHandler()
-    if (this.missedWarned) return
-    this.missedWarned = true
-    assertWarning(
-      false,
-      `A \`BroadcastChannel\` on key "${this.key}" missed messages, as this client fell behind what the server holds for it: \`info.seq\` shows the gap.`,
-      { onlyOnce: false },
-    )
-  }
-
   protected override dispatchDataFrame(frame: ChannelDataFrame): void {
     if (frame.tag === TAG.PUBLISH) {
       this.onPeerPublish(frame.text, frame.info, frame.bytes)
@@ -202,25 +182,27 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private onPeerPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
     const parsed = parse(data) as ChannelData<T>
-    const info = { key: this.key!, seq: wireInfo.seq, timestamp: wireInfo.timestamp }
-    for (const cb of this.subscribers.text.list()) {
-      try {
-        const result = cb(parsed, info)
-        if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
-      } catch (err) {
-        if (this.lifecycle.handleCallbackError(err)) return
-      }
-    }
-    this.receiveCredit.onPublishConsumed(bytes)
+    this.deliverPublish(this.subscribers.text.list(), () => parsed, wireInfo, bytes)
   }
 
   private onPeerPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
-    const info = { key: this.key!, seq: wireInfo.seq, timestamp: wireInfo.timestamp }
     const list = this.subscribers.binary.list()
-    for (const [i, cb] of list.entries()) {
+    this.deliverPublish(list, (i) => forListener(data, list, i, HEADER + PUBLISH_BINARY_HEADER), wireInfo, bytes)
+  }
+
+  /** Calls each listener with its value, `valueFor` its index; an `Abort` stops the rest and leaves the publish
+   *  unconsumed. A listener's promise isn't awaited. */
+  private deliverPublish<V>(
+    listeners: readonly ((value: V, info: ChannelPublishInfo) => unknown)[],
+    valueFor: (i: number) => V,
+    wireInfo: WirePublishInfo,
+    bytes: number,
+  ): void {
+    const info = { key: this.key!, seq: wireInfo.seq, timestamp: wireInfo.timestamp }
+    for (const [i, cb] of listeners.entries()) {
       try {
-        const result = cb(forListener(data, list, i, HEADER + PUBLISH_BINARY_HEADER), info)
+        const result = cb(valueFor(i), info)
         if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
       } catch (err) {
         if (this.lifecycle.handleCallbackError(err)) return

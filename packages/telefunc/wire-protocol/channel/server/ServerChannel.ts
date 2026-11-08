@@ -22,7 +22,16 @@ import type { IndexedPeer } from './IndexedPeer.js'
 import type { ChannelMux } from './ChannelMux.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
-import { admit, hold, holdsEnough, letGo, releaseHolder, type MemoryHolder } from './channelMemory.js'
+import {
+  HELD_SEND_OVERHEAD_BYTES,
+  admit,
+  hold,
+  holdsEnough,
+  letGo,
+  maxPendingBytesOf,
+  releaseHolder,
+  type MemoryHolder,
+} from './channelMemory.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { ShieldValidator, ShieldValidators } from '../../../node/server/shield.js'
@@ -34,7 +43,7 @@ import { NetworkError } from '../../../shared/NetworkError.js'
 import { channelMessages } from '../channelMessages.js'
 import { forListener, listenerAnswer } from '../listenerAnswer.js'
 import { isPromise } from '../../../utils/isPromise.js'
-import { CHANNEL_CONNECT_TTL_MS, TIMER_DELAY_MAX_MS, CHANNEL_HOLD_MAX_BYTES } from '../../constants.js'
+import { TIMER_DELAY_MAX_MS } from '../../constants.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
 import { creditWindowOf, type CreditOwner } from '../../flowControl/credit.js'
@@ -43,13 +52,7 @@ import { SelfTime } from '../../flowControl/SelfTime.js'
 import { SendCredit } from '../../flowControl/SendCredit.js'
 import { SendsOutrun } from '../../flowControl/server/SendsOutrun.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
-import {
-  ServerChannelBuffer,
-  HELD_SEND_OVERHEAD_BYTES,
-  type BufferedSender,
-  type EntryCallback,
-  type EntryData,
-} from './ServerChannelBuffer.js'
+import { ServerChannelBuffer, type BufferedSender, type EntryCallback, type EntryData } from './ServerChannelBuffer.js'
 import { ServerReplay } from './ServerReplay.js'
 import { PublishBody } from './PublishBody.js'
 import { getChannelConfig } from '../../../node/server/serverConfig.js'
@@ -72,6 +75,7 @@ import type {
   ChannelDataFrame,
   ChannelFrame,
   ErrorReason,
+  SequencedEncoder,
 } from '../../wire/frame.js'
 import type { AttachState, BroadcastKind } from '../../wire/payloads.js'
 
@@ -177,8 +181,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.sendCredit = new SendCredit({ owner, selfTime: this.selfTime })
     this.receiveCredit = new ReceiveCredit({ owner, selfTime: this.selfTime })
     const c = getChannelConfig()
-    this.receiveCredit.capWindow(creditWindowOf(c.maxMemory))
-    this.sendCredit.capWindow(creditWindowOf(c.maxMemory))
+    this.receiveCredit.capWindow(creditWindowOf(c.maxMemory, c.maxPendingBytes))
+    this.sendCredit.capWindow(creditWindowOf(c.maxMemory, c.maxPendingBytes))
   }
 
   get opened(): Promise<void> {
@@ -241,15 +245,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
     // Promise already serializes the next send, so credit would add nothing.
-    if (needsAck) {
-      return this.lifecycle.trackAck(
-        new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
-          this.peer!.sendSequenced(encode.textAckReq, serialized, (seq, bytes) =>
-            this.addPendingAck(seq, bytes, { resolve, reject }),
-          )
-        }),
-      )
-    }
+    if (needsAck) return this.sendAckRequest(encode.textAckReq, serialized)
     // Cooperative credit model: the send already fired; `decrement` only gates the return
     // value. Awaiting throttles the caller's next send; not awaiting bypasses credit.
     return this.sendCredit.decrement(this.peer.sendSequenced(encode.text, serialized))
@@ -287,15 +283,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       })
     }
     // Ack-bearing path bypasses credit; see `sendData` for rationale.
-    if (needsAck) {
-      return this.lifecycle.trackAck(
-        new Promise<unknown>((resolve, reject) => {
-          this.peer!.sendSequenced(encode.binaryAckReq, data, (seq, bytes) =>
-            this.addPendingAck(seq, bytes, { resolve, reject }),
-          )
-        }),
-      )
-    }
+    if (needsAck) return this.sendAckRequest(encode.binaryAckReq, data)
     // Cooperative credit model; see `sendData`.
     return this.sendCredit.decrement(this.peer.sendSequenced(encode.binary, data))
   }
@@ -315,7 +303,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this.refusalWarned = true
       assertWarning(
         false,
-        `A channel refused a \`send()\`: it holds ${CHANNEL_HOLD_MAX_BYTES} bytes, the most for one channel, or this server's channels hold \`config.channel.maxMemory\`, so that message isn't delivered and its promise rejects with \`ChannelOverflowError\`. Later sends that fit still go. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next.`,
+        `A channel refused a \`send()\`: it holds ${maxPendingBytesOf()} bytes, the most for one channel, or this server's channels hold \`config.channel.maxMemory\`, so that message isn't delivered and its promise rejects with \`ChannelOverflowError\`. Later sends that fit still go. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next.`,
         { onlyOnce: false },
       )
     }
@@ -345,8 +333,17 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.outrun = null
     assertWarning(
       false,
-      `A channel's \`send()\` calls outrun its client: ${(ahead / 2 ** 20).toFixed(1)} MiB wait for it and keep growing, while it takes ${mibPerS.toFixed(1)} MiB/s. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next, or send slower: past ${(CHANNEL_HOLD_MAX_BYTES / 2 ** 20).toFixed(0)} MiB, or \`config.channel.maxMemory\` on this server, sends are refused with \`ChannelOverflowError\`.`,
+      `A channel's \`send()\` calls outrun its client: ${(ahead / 2 ** 20).toFixed(1)} MiB wait for it and keep growing, while it takes ${mibPerS.toFixed(1)} MiB/s. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next, or send slower: past ${(maxPendingBytesOf() / 2 ** 20).toFixed(0)} MiB, or \`config.channel.maxMemory\` on this server, sends are refused with \`ChannelOverflowError\`.`,
       { onlyOnce: false },
+    )
+  }
+
+  /** Sends `data` as an ack request; it settles with the page's answer, and the close waits for it. */
+  private sendAckRequest<D>(encodeFrame: SequencedEncoder<D>, data: D): Promise<ChannelAck<ServerToClient>> {
+    return this.lifecycle.trackAck(
+      new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
+        this.peer!.sendSequenced(encodeFrame, data, (seq, bytes) => this.addPendingAck(seq, bytes, { resolve, reject }))
+      }),
     )
   }
 
@@ -393,7 +390,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._phase !== 'open') return
     this._phase = 'closing'
     const serializedAbortValue = stringify(abortValue)
-    if (this.peer) this.peer.sendAbort(serializedAbortValue)
+    if (this.peer) this.peer.sendSequenced(encode.abort, serializedAbortValue)
     else this.ensurePendingEnd().abort = serializedAbortValue
     this.shutdown(createAbortError(abortValue, message))
   }
@@ -439,7 +436,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
           new NetworkError('Channel timed out: no client connected within TTL after response was sent', true),
           { pageGone: true },
         )
-      }, CHANNEL_CONNECT_TTL_MS),
+      }, getChannelConfig().connectTtl),
     )
   }
 
@@ -596,15 +593,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // turn, where the violation still names the wire that sent it.
     const data = parsePeerText(text) as ChannelData<ClientToServer>
     const validate = this._validators.get('data')
-    return this.lifecycle.trackAck(
-      this.answerHeld(seq, bytes, () => this.answerAckReq(this.listeners, data, seq, validate)),
-    )
+    return this.answerHeld(seq, bytes, () => this.answerAckReq(this.listeners, data, seq, validate))
   }
 
   protected onPeerBinaryAckReqMessage(data: Uint8Array, seq: number, bytes: number): Promise<void> {
-    return this.lifecycle.trackAck(
-      this.answerHeld(seq, bytes, () => this.answerAckReq(this.binaryListeners, data, seq)),
-    )
+    return this.answerHeld(seq, bytes, () => this.answerAckReq(this.binaryListeners, data, seq))
   }
 
   protected onPeerBinaryMessage(data: Uint8Array, bytes: number): void {
@@ -844,8 +837,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const { closeAck, closeRequest, abort, error } = this.pendingEnd
     if (closeAck) peer.sendCloseAck()
     if (closeRequest) this.closeRequestSeq = peer.sendCloseRequest(this.lifecycle.timeLeft())
-    if (abort !== null) peer.sendAbort(abort)
-    if (error !== null) peer.sendError(error)
+    if (abort !== null) peer.sendSequenced(encode.abort, abort)
+    if (error !== null) peer.sendSequenced(encode.error, error)
     this.pendingEnd = null
   }
 
@@ -855,7 +848,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.offlineBuffer.clear(err)
     // First, so the ERROR, held without asking, takes their room.
     this.letAnsweringGo()
-    if (this.peer) this.peer.sendError(reason)
+    if (this.peer) this.peer.sendSequenced(encode.error, reason)
     else this.ensurePendingEnd().error = reason
     this.shutdown(err)
   }
@@ -887,38 +880,39 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  /** Answers the ack request `seq` of `bytes` with `answer`, held until its answer takes its place, and at least as much
-   *  as its refusal. One that isn't admitted is refused, and `answer` doesn't run. */
+  /** Answers the ack request `seq` of `bytes` with `answer`, which the channel's close waits for. The request is held
+   *  until its answer takes its place, and at least as much as its refusal. One that isn't admitted is refused, and
+   *  `answer` doesn't run. */
   protected async answerHeld(seq: number, bytes: number, answer: () => Promise<void>): Promise<void> {
     const held = Math.max(bytes, REFUSAL_BYTES)
     if (!admit(this, held)) return this.sendAckRes(seq, '', ACK_STATUS.OVERFLOW)
     hold(this, held)
     this.answering.set(seq, held)
     try {
-      await answer()
+      await this.lifecycle.trackAck(answer())
     } finally {
       // Where no answer took its place, nor the channel's end.
       if (this.answering.delete(seq)) letGo(this, held)
     }
   }
 
-  private answerAckReq<T>(
+  /** Answers ack request `seq` with an error where its answer threw `err`; an `Abort` aborts the channel instead. */
+  protected answerFailed(seq: number, err: unknown): void {
+    if (this.lifecycle.handleCallbackError(err)) return
+    this.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+  }
+
+  private async answerAckReq<T>(
     listeners: Listeners<(data: T) => unknown>,
     data: T,
     seq: number,
     validate?: ShieldValidator,
   ): Promise<void> {
-    if (listeners.size === 0) {
-      this.sendAckRes(seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
-      return Promise.resolve()
-    }
+    if (listeners.size === 0) return this.sendAckRes(seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
     const verdict = validate ? validate(data) : true
     // `shield-error` status lets the client reject its `send()` promise with a branded
     // ShieldValidationError — same identity every other shield-fail surface produces.
-    if (verdict !== true) {
-      this.sendAckRes(seq, verdict, ACK_STATUS.SHIELD_ERROR)
-      return Promise.resolve()
-    }
+    if (verdict !== true) return this.sendAckRes(seq, verdict, ACK_STATUS.SHIELD_ERROR)
     return this.answerRequest(seq, listeners.list(), data)
   }
 
@@ -928,19 +922,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     try {
       answer = await listenerAnswer(listeners, data)
     } catch (err) {
-      this.sendRequestFailure(seq, err)
-      return
+      return this.answerFailed(seq, err)
     }
     if (answer === null) {
-      this.sendAckRes(seq, 'Only one channel listener may return an acknowledgement value', ACK_STATUS.ERROR)
-      return
+      return this.sendAckRes(seq, 'Only one channel listener may return an acknowledgement value', ACK_STATUS.ERROR)
     }
     this.sendAckRes(seq, answer)
-  }
-
-  protected sendRequestFailure(seq: number, err: unknown): void {
-    if (this.lifecycle.handleCallbackError(err)) return
-    this.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
   }
 
   /** @internal */

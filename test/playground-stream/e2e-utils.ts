@@ -15,6 +15,7 @@ export {
   refuseNextSsePost,
   releaseHeldSsePosts,
   navigate,
+  expectServerError,
   getResult,
   sleep,
   restartProxy,
@@ -36,7 +37,7 @@ export {
   canCutWire,
 }
 
-import { page, getServerUrl } from '@brillout/test-e2e'
+import { page, getServerUrl, expectLog } from '@brillout/test-e2e'
 import type { Request, Response, WebSocket } from 'playwright-chromium'
 import type { BackendFault } from './failing-backend'
 import { execSync } from 'node:child_process'
@@ -258,6 +259,18 @@ async function releaseHeldSsePosts(): Promise<number> {
  *
  * `target` defaults to the shared `page`; pass another page to load a second tab/context resiliently.
  */
+/** The server logged `error`: on its stderr, or under Docker on compose's stdout, each line prefixed with the container's
+ *  name. */
+function expectServerError(error: string, inDocker: boolean) {
+  expectLog(error, {
+    filter: (log) =>
+      inDocker
+        ? log.logSource === 'stdout' &&
+          log.logText.split('\n').some((line) => line.includes(error) && /^playground-[a-z]-\d+ +\| /.test(line))
+        : log.logSource === 'stderr',
+  })
+}
+
 async function navigate(url: string, options?: Parameters<typeof page.goto>[1], target: typeof page = page) {
   for (let attempt = 1; attempt <= NAVIGATE_ATTEMPTS; attempt++) {
     const lastAttempt = attempt === NAVIGATE_ATTEMPTS

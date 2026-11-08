@@ -50,8 +50,6 @@ interface MuxChannel {
   _onEnded(err?: Error): void
   /** The channel's wire went away, and the connection reconnects. */
   _onTransportDisconnect(): void
-  /** Its frames' seq jumped: the server let some go, which only a broadcast's falling behind does. */
-  _onFramesMissed?(): void
   /** Its credits as the connection drives them across wires. */
   readonly _attach: ChannelAttach
 }
@@ -120,7 +118,7 @@ type ClientChannelTransport = {
   bufferedAmount(): number
   abandonActiveTransport(): void
   closeAbandonedTransport(): void
-  applyReconciledSettings?(ctrl: ReconciledPayload): void
+  applyReconciledSettings(ctrl: ReconciledPayload): void
   /** The heartbeat of its current wire, which also tracks what the wire delivers. */
   readonly heartbeat: Heartbeat | null
   /** Liveness builds the Heartbeat and hands it over; the transport's receive path then reports each PONG to it. */

@@ -5,9 +5,9 @@ import { ServerChannel } from './ServerChannel.js'
 import { getChannelMux } from './ChannelMux.js'
 import { assert } from '../../../utils/assert.js'
 import type { IndexedPeer } from './IndexedPeer.js'
-import type { MemoryHolder } from './channelMemory.js'
+import { maxPendingBytesOf, type MemoryHolder } from './channelMemory.js'
 import type { PublishBody } from './PublishBody.js'
-import { CHANNEL_HOLD_MAX_BYTES, CHANNEL_RECONNECT_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
+import { CHANNEL_RECONNECT_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
 import { ChannelOverflowError, isChannelOverflowError } from '../channelErrors.js'
 import { isShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { ACK_STATUS, ERROR_REASON, type AckResultStatus } from '../../wire/frame.js'
@@ -90,11 +90,13 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     if (getChannelMux() === this.mux) this.takeWaitingPlace(stream)
   }
 
-  /** What it may hold: 60 s of what its page takes, within what any channel may. */
+  /** What it may hold: 60 s of what its page takes, at least 64 MiB, within what any channel may; that most before its
+   *  page's rate is measured. */
   private share(): number {
     const perMs = this.peer?.sender.queue.drainRate() ?? 0
-    if (perMs === 0) return CHANNEL_HOLD_MAX_BYTES
-    return Math.min(CHANNEL_HOLD_MAX_BYTES, Math.max(CREDIT_WINDOW_MAX_BYTES, perMs * CHANNEL_RECONNECT_TIMEOUT_MS))
+    const most = maxPendingBytesOf()
+    if (perMs === 0) return most
+    return Math.min(most, Math.max(CREDIT_WINDOW_MAX_BYTES, perMs * CHANNEL_RECONNECT_TIMEOUT_MS))
   }
 
   /** How many of its newest publishes no wire has: all of them while it has no wire. */
@@ -168,24 +170,22 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     const owner = this.owner
     assert(owner)
     // What the publish carries is its owner's to hold, so its request holds only the room for its answer.
-    return this.lifecycle.trackAck(
-      this.answerHeld(seq, 0, () => this.answerRequest(seq, [(t: string) => owner._onPagePublish(t)], text)),
-    )
+    return this.answerHeld(seq, 0, () => this.answerRequest(seq, [(t: string) => owner._onPagePublish(t)], text))
   }
 
   override _onPeerPublishBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
     const owner = this.owner
     assert(owner)
-    return this.lifecycle.trackAck(
-      this.answerHeld(seq, 0, () => this.answerRequest(seq, [(d: Uint8Array) => owner._onPagePublishBinary(d)], data)),
+    return this.answerHeld(seq, 0, () =>
+      this.answerRequest(seq, [(d: Uint8Array) => owner._onPagePublishBinary(d)], data),
     )
   }
 
   /** A full buffer or a shield failure answers with the status its page's `publish()` rejects with. */
-  protected override sendRequestFailure(seq: number, err: unknown): void {
+  protected override answerFailed(seq: number, err: unknown): void {
     if (isChannelOverflowError(err)) return this.sendAckRes(seq, err.message, ACK_STATUS.OVERFLOW)
     if (isShieldValidationError(err)) return this.sendAckRes(seq, err.message, ACK_STATUS.SHIELD_ERROR)
-    super.sendRequestFailure(seq, err)
+    super.answerFailed(seq, err)
   }
 
   protected override onPeerSubscription(kind: BroadcastKind, on: boolean): void {

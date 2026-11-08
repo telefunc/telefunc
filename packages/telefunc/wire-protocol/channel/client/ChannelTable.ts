@@ -4,7 +4,7 @@ export type { ChannelRecord, ClosedState }
 import type { ReplayBuffer } from './ReplayBuffer.js'
 import type { MuxChannel } from './ClientConnection.js'
 import { assert } from '../../../utils/assert.js'
-import { seqThrough } from '../../wire/seq.js'
+import { seqNear, seqThrough } from '../../wire/seq.js'
 
 /** `closed`: unregistered, and kept till released, as the RECONCILE releasing it, or a new wire's leaving it out, ends
  *  it on the server. */
@@ -97,6 +97,20 @@ class ChannelTable {
   /** The wire carries a seq's low 32 bits: the server's acknowledgement is the latest seq with them the page sent. */
   sentThrough(ix: number, lastSeq: number): number {
     return seqThrough(lastSeq, this.records.get(ix)?.replay.seq ?? 0)
+  }
+
+  /** The full seq of a frame the server sent on a channel, or null for a frame to drop. */
+  receivedSeq({ index, seq: bits }: { index: number; seq: number }): number | null {
+    const record = this.records.get(index)
+    // A channel this page let go.
+    if (record === undefined) return null
+    const prev = record.lastSeq
+    // The header holds a seq's low 32 bits: the full seq is the one nearest the next, as no wire holds 2^31 frames.
+    const seq = seqNear(bits, prev + 1)
+    // A seq already seen: a replay resends what arrived.
+    if (seq <= prev) return null
+    record.lastSeq = seq
+    return seq
   }
 
   /** The server has what the page sent on channel `ix` through `lastSeq`, which its replay lets go. */

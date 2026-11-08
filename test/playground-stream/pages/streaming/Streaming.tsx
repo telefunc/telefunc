@@ -19,6 +19,7 @@ import {
   onGeneratorAbortMidStream,
   onGeneratorAbortWithValue,
   onGeneratorBugMidStream,
+  onGeneratorThrowsNonObject,
   onAbortOneOfManyStreamingValues,
   onChannelAbortAbortsSiblingStreamingValues,
   onUploadWithProgress,
@@ -474,6 +475,22 @@ function Streaming() {
       </button>
 
       <button
+        id="test-generator-throws-non-object"
+        onClick={async () => {
+          setResult('')
+          const values: string[] = []
+          try {
+            for await (const v of onGeneratorThrowsNonObject()) values.push(v)
+            setResult(JSON.stringify({ error: false, values }))
+          } catch (e: any) {
+            setResult(JSON.stringify({ error: true, isBug: !(e instanceof TelefuncAbort), values }))
+          }
+        }}
+      >
+        Generator throws a non-object
+      </button>
+
+      <button
         id="test-abort-one-of-many-streaming-values"
         onClick={async () => {
           setResult('')
@@ -836,9 +853,8 @@ function Streaming() {
         id="test-one-large-returned-chunk"
         onClick={async () => {
           setResult('')
-          const start = performance.now()
           const bytes = await byteCount(await onReturnOneLargeChunk())
-          setResult(JSON.stringify({ bytes, ms: Math.round(performance.now() - start) }))
+          setResult(JSON.stringify({ bytes }))
         }}
       >
         One 256 MiB chunk

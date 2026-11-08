@@ -20,7 +20,8 @@ interface CreditOwner {
   holdsEnough?(): boolean
 }
 
-/** The largest credit window, each way, of a server with this `maxMemory`: what a small host holds is small. */
-function creditWindowOf(maxMemory: number): number {
-  return Math.min(CREDIT_WINDOW_MAX_BYTES, maxMemory / 2)
+/** The largest credit window, each way, of a server whose channels hold `maxMemory` together and `maxPendingBytes`
+ *  each: what a small host or channel holds is small. */
+function creditWindowOf(maxMemory: number, maxPendingBytes: number): number {
+  return Math.min(CREDIT_WINDOW_MAX_BYTES, Math.min(maxMemory, maxPendingBytes) / 2)
 }

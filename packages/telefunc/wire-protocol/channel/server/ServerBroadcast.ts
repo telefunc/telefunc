@@ -172,18 +172,11 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     this._end.abort(abortValue, message)
   }
 
-  /** Calls each listener directly, as a channel's receive does, since this runs per subscriber per message; a
-   *  listener's error that ends the channel stops the delivery. */
   private deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
     const info = { key: this.key, seq: rawInfo.seq, timestamp: rawInfo.timestamp }
     const data = parse(serialized) as ChannelData<T>
     for (const cb of this.subscribers.text.list()) {
-      try {
-        const result = cb(data, info)
-        if (isPromise(result)) result.catch((err: unknown) => this._end._handleCallbackError(err))
-      } catch (err) {
-        if (this._end._handleCallbackError(err)) return
-      }
+      if (this.callListener(cb, data, info)) return
     }
     if (!this.peerSubscriptions.text) return
     this._end.deliver(bodyOf(serialized, rawInfo, this.lossy ? `text:${this.key}` : null))
@@ -192,16 +185,26 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
   private deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
     const info = { key: this.key, seq: rawInfo.seq, timestamp: rawInfo.timestamp }
     for (const cb of this.subscribers.binary.list()) {
-      try {
-        // Each listener gets bytes of its own: one may write into them or transfer their buffer.
-        const result = cb(new Uint8Array(data), info)
-        if (isPromise(result)) result.catch((err: unknown) => this._end._handleCallbackError(err))
-      } catch (err) {
-        if (this._end._handleCallbackError(err)) return
-      }
+      // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
+      if (this.callListener(cb, new Uint8Array(data), info)) return
     }
     if (!this.peerSubscriptions.binary) return
     this._end.deliver(bodyOf(data, rawInfo, this.lossy ? `binary:${this.key}` : null))
+  }
+
+  /** Calls `listener` with a publish; true where it threw `Abort`, which aborts the channel, so the rest get none. */
+  private callListener<D>(
+    listener: (data: D, info: ChannelPublishInfo) => unknown,
+    data: D,
+    info: ChannelPublishInfo,
+  ): boolean {
+    try {
+      const result = listener(data, info)
+      if (isPromise(result)) result.catch((err: unknown) => this._end._handleCallbackError(err))
+    } catch (err) {
+      return this._end._handleCallbackError(err)
+    }
+    return false
   }
 
   /** @internal `BroadcastEndOwner`: its page is told by `info.seq`, and the server's log by this once. */
@@ -357,10 +360,9 @@ const Broadcast = {
     callback: BroadcastListener<U>,
     options?: { signal?: AbortSignal },
   ): BroadcastUnsubscribe {
-    return subscribeWithSignal(
-      () => subscribeRoute({ key, kind: 'text' }, (payload) => parse(payload) as ChannelData<U>, callback),
-      options,
-    )
+    if (options?.signal?.aborted) return () => {}
+    const unsubscribe = subscribeRoute({ key, kind: 'text' }, (payload) => parse(payload) as ChannelData<U>, callback)
+    return unsubscribeOnAbort(unsubscribe, options?.signal)
   },
   publishBinary(key: string, data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     assertBroadcastKey(key)
@@ -371,11 +373,10 @@ const Broadcast = {
     callback: BroadcastBinaryListener,
     options?: { signal?: AbortSignal },
   ): BroadcastUnsubscribe {
-    // Bytes of its own: every subscriber on the key gets the same delivery.
-    return subscribeWithSignal(
-      () => subscribeRoute({ key, kind: 'binary' }, (payload) => new Uint8Array(payload), callback),
-      options,
-    )
+    if (options?.signal?.aborted) return () => {}
+    // A copy of its own, as a `BroadcastChannel` listener gets.
+    const unsubscribe = subscribeRoute({ key, kind: 'binary' }, (payload) => new Uint8Array(payload), callback)
+    return unsubscribeOnAbort(unsubscribe, options?.signal)
   },
 }
 
@@ -413,14 +414,14 @@ function reportStaticListenerError(err: unknown): void {
   if (!isAbort(err)) handleCallbackBug(err)
 }
 
-function subscribeWithSignal(subscribe: () => () => void, { signal }: { signal?: AbortSignal } = {}): () => void {
-  if (signal?.aborted) return () => {}
-  let unsubscribe: (() => void) | undefined = subscribe()
+/** Unsubscribes once `signal` aborts, at once if it aborted while subscribing, or when the returned function runs. */
+function unsubscribeOnAbort(unsubscribe: () => void, signal: AbortSignal | undefined): () => void {
+  let current: (() => void) | undefined = unsubscribe
   const remove = () => {
-    const current = unsubscribe
-    unsubscribe = undefined
+    const pending = current
+    current = undefined
     signal?.removeEventListener('abort', remove)
-    current?.()
+    pending?.()
   }
   signal?.addEventListener('abort', remove, { once: true })
   if (signal?.aborted) remove()

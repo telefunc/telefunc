@@ -27,8 +27,6 @@ class SendCredit {
   private sentMessages = 0
   private limitBytes: number = CREDIT_WINDOW_INITIAL_BYTES
   private limitMessages: number = CREDIT_MSG_WINDOW_INITIAL
-  /** The largest window the peer grants (see `capWindow`). */
-  private peerByteWindowCap: number = CREDIT_WINDOW_MAX_BYTES
   /** A `WINDOW` raised the byte limit past the one this side assumed the peer starts with. */
   private limitRaised = false
   /** Senders waiting on credit, oldest first, from the first that waited on. */
@@ -55,15 +53,9 @@ class SendCredit {
     return this.waiters?.length ?? 0
   }
 
-  /** The largest window the peer grants. */
-  get peerByteWindowMax(): number {
-    return this.peerByteWindowCap
-  }
-
   /** Keeps what it lets be in flight within what the server's `maxMemory` allows. */
   capWindow(peerWindow: number): void {
-    this.peerByteWindowCap = Math.min(CREDIT_WINDOW_MAX_BYTES, peerWindow)
-    if (!this.limitRaised) this.limitBytes = Math.min(CREDIT_WINDOW_INITIAL_BYTES, this.peerByteWindowCap)
+    if (!this.limitRaised) this.limitBytes = Math.min(CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_MAX_BYTES, peerWindow)
   }
 
   /** Bytes sent past the byte limit and still past it. */

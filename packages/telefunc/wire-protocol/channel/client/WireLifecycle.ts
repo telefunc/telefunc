@@ -8,6 +8,7 @@ import { ChannelOverflowError } from '../channelErrors.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
+  CHANNEL_HOLD_MAX_BYTES,
   CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   CHANNEL_RECONNECT_MAX_DELAY_MS,
@@ -20,8 +21,7 @@ import {
 } from '../../constants.js'
 import { ReplayBuffer } from './ReplayBuffer.js'
 import { ERROR_REASON, isSequencedFrame } from '../../wire/frame.js'
-import { TAG, isClosingTag } from '../../wire/tags.js'
-import { seqNear } from '../../wire/seq.js'
+import { TAG } from '../../wire/tags.js'
 import type { ChannelFrame, DecodedFrame, PongEntry } from '../../wire/frame.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 
@@ -257,10 +257,22 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     }
   }
 
+  /** What handling `frame` throws, a bug or a malformed frame of the server's, is thrown on its own: the page reports it
+   *  as uncaught, and the frames after it still go, on either transport and after a join as well. */
   private dispatchFrame(frame: DecodedFrame): void {
+    try {
+      this.handleFrame(frame)
+    } catch (err) {
+      queueMicrotask(() => {
+        throw err
+      })
+    }
+  }
+
+  private handleFrame(frame: DecodedFrame): void {
     // Track seq for ALL sequenced frames, ACK_RES and the closing ones too; otherwise reconciles under-report lastSeq.
     if (isSequencedFrame(frame)) {
-      const seq = this.trackSeq(frame)
+      const seq = this.channels.receivedSeq(frame)
       if (seq === null) return
       frame.seq = seq
     }
@@ -351,7 +363,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   private handleReconciled(ctrl: ReconciledPayload): void {
     if (!this.upgrade.onReconciled(ctrl)) return
-    this.transport.applyReconciledSettings?.(ctrl)
+    this.transport.applyReconciledSettings(ctrl)
     this.takeServerSettings(ctrl)
     const outcome = this.exchange.applyReconciled(ctrl, {
       deferOmitted: this.upgrade.handingOff,
@@ -412,8 +424,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
         break
       case 'not-emitted':
         if (!this.exchange.reconcileOwed) this.drainBufferedFramesToWire()
-        // An attempt that ended without its barrier goes again once the outbox drained.
-        void from.drained().then(() => this.maybeUpgrade())
+        void this.upgradeOnceDrained(from)
         break
       case 'stranded':
         this.fallbackToSse(new NetworkError('Upgrade barrier attempt timed out', true))
@@ -424,6 +435,12 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
         break
     }
     this.onReconcileDue()
+  }
+
+  /** An attempt that ended without its barrier goes again once the outbox drained. */
+  private async upgradeOnceDrained(from: UpgradeSource): Promise<void> {
+    await from.drained()
+    this.maybeUpgrade()
   }
 
   /** A completion frame of the join, applied once the connection flipped: FIN from the old wire, RECONCILED from the
@@ -577,20 +594,6 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     }
     this.dispose()
   }
-
-  /** Widens a sequenced frame's seq from its low bits; null drops a duplicate or a released channel's. */
-  private trackSeq({ tag, index, seq: bits }: { tag: number; index: number; seq: number }): number | null {
-    const record = this.channels.get(index)
-    if (record === undefined) return null
-    const prev = record.lastSeq
-    const seq = seqNear(bits, prev + 1)
-    if (seq <= prev) return null
-    record.lastSeq = seq
-    // The channel's frames share one seq, so a jump is exactly the frames this page never got, bar those a closing frame
-    // passed on purpose.
-    if (seq > prev + 1 && !isClosingTag(tag)) record.channel._onFramesMissed?.()
-    return seq
-  }
 }
 
 // ── Transport registry ──
@@ -608,7 +611,9 @@ const TRANSPORT_REGISTRY: Record<
 /** What a channel the server ended with an ERROR of `reason` closes with. */
 function channelErrorFor(reason: number): Error {
   if (reason === ERROR_REASON.OVERFLOW) {
-    return new ChannelOverflowError('Closed: the server could not hold all this client had yet to receive')
+    return new ChannelOverflowError(
+      `Channel closed: this client fell behind, and what it had yet to receive passed what the server holds for one channel (${CHANNEL_HOLD_MAX_BYTES / 2 ** 20} MiB by default) or config.channel.maxMemory. Read messages faster, send less or await each send and publish(), pass \`lossy: true\` to a BroadcastChannel that may skip to the newest, or raise config.channel.maxMemory`,
+    )
   }
   return makeBugError()
 }

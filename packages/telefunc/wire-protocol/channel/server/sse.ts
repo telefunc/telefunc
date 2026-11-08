@@ -8,7 +8,6 @@ import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
-  CHANNEL_CONNECT_TTL_MS,
   CHANNEL_TRANSPORT,
   SSE_EVENT_SLICE_BYTES,
   SSE_METADATA_MAX_BYTES,
@@ -236,7 +235,7 @@ class SseServerTransport {
    *  wire — covers the same-instance race where the long-lived stream-request POST
    *  lands before the stream-response POST. */
   private readonly pendingWires = new Map<string, Set<(wire: SseWire | null) => void>>()
-  /** When each wire closed and the session it had, for `CHANNEL_CONNECT_TTL_MS`: a page never reuses a connId, so a POST for one is
+  /** When each wire closed and the session it had, for `connectTtl`: a page never reuses a connId, so a POST for one is
    *  refused. */
   private readonly closedWires = new Map<string, { at: number; sessionId: string | null }>()
   /** Per use: a Cloudflare session DO hosts its own channels, and this transport serves every one in the isolate. */
@@ -464,7 +463,7 @@ class SseServerTransport {
   private rememberClosed({ connId, sessionId }: SseWire): void {
     const now = performance.now()
     for (const [closed, { at }] of this.closedWires) {
-      if (now - at < CHANNEL_CONNECT_TTL_MS) break
+      if (now - at < this.mux.connectTtl) break
       this.closedWires.delete(closed)
     }
     this.closedWires.set(connId, { at: now, sessionId })
@@ -493,7 +492,7 @@ class SseServerTransport {
       }
       const waiter = (wire: SseWire | null): void => settle(wire)
       pending.add(waiter)
-      timer = setTimeout(() => settle(null), CHANNEL_CONNECT_TTL_MS)
+      timer = setTimeout(() => settle(null), this.mux.connectTtl)
     })
   }
 
@@ -516,7 +515,7 @@ class SseServerTransport {
   /** Resolves false on timeout — caller drops the POST. */
   private waitReady(wire: SseWire): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
-      const timer = unrefTimer(setTimeout(() => resolve(false), CHANNEL_CONNECT_TTL_MS))
+      const timer = unrefTimer(setTimeout(() => resolve(false), this.mux.connectTtl))
       wire.ready.then(() => {
         clearTimeout(timer)
         resolve(true)

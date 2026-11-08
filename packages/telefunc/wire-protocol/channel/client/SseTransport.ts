@@ -109,6 +109,8 @@ class SseTransport implements UpgradeSource {
   private outboxBytes = 0
   /** The batch POST out is lost if this passes. */
   private postWatch: ReturnType<typeof setTimeout> | null = null
+  private flushThrottleMs = SSE_FLUSH_THROTTLE_MS
+  private postIdleFlushDelayMs = SSE_POST_IDLE_FLUSH_DELAY_MS
   private heartbeatFlushDelayMs = Math.floor(CHANNEL_PING_INTERVAL_MS / 2)
   private drainCallbacks: Array<() => void> = []
   /** The streaming upload POST. Once `failed`, it stays so, and frames go in batch POSTs from the outbox. */
@@ -616,7 +618,7 @@ class SseTransport implements UpgradeSource {
       case 'ack':
       case 'data':
         // From the last POST's start: a frame coming as that POST's credit returns would hold the next one longer.
-        return Math.max(now + SSE_POST_IDLE_FLUSH_DELAY_MS, this.lastPostStartedAt + SSE_FLUSH_THROTTLE_MS)
+        return Math.max(now + this.postIdleFlushDelayMs, this.lastPostStartedAt + this.flushThrottleMs)
     }
   }
 
@@ -639,6 +641,11 @@ class SseTransport implements UpgradeSource {
     if (!abortController) return
     this.abandonedStream = null
     abortController.abort()
+  }
+
+  applyReconciledSettings(ctrl: ReconciledPayload): void {
+    this.flushThrottleMs = ctrl.sseFlushThrottle
+    this.postIdleFlushDelayMs = ctrl.ssePostIdleFlushDelay
   }
 
   sendPing(frame: Uint8Array<ArrayBuffer>): void {

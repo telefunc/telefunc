@@ -7,7 +7,6 @@ export { setAdapterMaxMemory }
 export { getAdapterMaxFrameBytes }
 export { setRootFromVite }
 export { getChannelConfig }
-export { pingDeadlineOf }
 export { reconnectWindow }
 export type {
   ConfigUser,
@@ -30,6 +29,9 @@ import { toPosixPath, pathIsAbsolute, assertPosixPath } from '../../utils/path.j
 import { configureBroadcastTransport } from '../../wire-protocol/backend/install.js'
 import type { BroadcastTransport } from '../../wire-protocol/backend/broadcast/TransportBroadcastDriver.js'
 import {
+  CHANNEL_CONNECT_TTL_MS,
+  CHANNEL_HOLD_MAX_BYTES,
+  CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_TIMEOUT_MIN_MS,
@@ -39,6 +41,8 @@ import {
   DEFAULT_STREAM_TRANSPORT,
   parseStreamConfig,
   validateChannelTransports,
+  SSE_FLUSH_THROTTLE_MS,
+  SSE_POST_IDLE_FLUSH_DELAY_MS,
   type ChannelTransports,
   type StreamTransport,
   TIMER_DELAY_MAX_MS,
@@ -86,26 +90,60 @@ type ChannelConfigUser = {
    */
   reconnectTimeout?: number
   /**
+   * How long, in milliseconds, to keep the shared channel connection alive
+   * after the last channel closes.
+   */
+  idleTimeout?: number
+  /**
    * How often, in milliseconds, the client sends a ping for channel health
    * checks. The server considers the client dead after 2x this interval.
    */
   pingInterval?: number
   /**
    * The most all channels on this server hold for their clients, in bytes or as `'4g'`, `'512m'`. It's a ceiling: nothing
-   * is set aside, and one channel holds at most 320 MiB of it.
+   * is set aside, and one channel holds at most 320 MiB of it by default.
    *
    * https://telefunc.com/channel-config
    *
    * @default a quarter of the memory the process may use
    */
   maxMemory?: number | string
+  /** The most one channel holds for its client, of its sends and of what awaits acknowledgement, in bytes, within
+   *  `maxMemory`. @default 335544320 */
+  maxPendingBytes?: number
+  /**
+   * How long, in milliseconds, a newly created channel waits for the client to
+   * connect before it is closed automatically.
+   */
+  connectTtl?: number
+  /**
+   * When using SSE channels, upstream client-to-server frames are batched for at
+   * most this many milliseconds before Telefunc sends a POST.
+   *
+   * This value also defines the idle window used to detect the first POST after
+   * an idle period.
+   */
+  sseFlushThrottle?: number
+  /**
+   * When using SSE channels, the first upstream batch POST after an idle period
+   * waits at most this many milliseconds before Telefunc flushes it.
+   *
+   * Idle means no upstream SSE batch POST has started within the current
+   * `sseFlushThrottle` window.
+   */
+  ssePostIdleFlushDelay?: number
 }
 
 type ChannelConfigResolved = {
   transports: ChannelTransports
   reconnectTimeout: number
+  idleTimeout: number
   pingInterval: number
   maxMemory: number
+  maxPendingBytes: number
+  connectTtl: number
+  sseFlushThrottle: number
+  ssePostIdleFlushDelay: number
 }
 
 /** Telefunc Server Configuration */
@@ -310,14 +348,21 @@ function getServerConfig(): ConfigResolved {
 }
 
 function resolveChannelConfig(channel: ChannelConfigUser): ChannelConfigResolved {
+  const reconnectTimeout = channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS
   return {
     transports: channel.transports ?? [...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...globalObject.adapterChannelTransports],
-    reconnectTimeout: channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
+    reconnectTimeout,
+    // A long reconnect window doesn't pin an idle wire, and a short one (Cloudflare's) doesn't wait longer than itself.
+    idleTimeout: channel.idleTimeout ?? Math.min(reconnectTimeout, CHANNEL_IDLE_TIMEOUT_MS),
     pingInterval: channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
+    connectTtl: channel.connectTtl ?? CHANNEL_CONNECT_TTL_MS,
     maxMemory:
       (channel.maxMemory as number | undefined) ??
       globalObject.adapterMaxMemory ??
       (globalObject.defaultMaxMemory ??= defaultMaxMemory()),
+    maxPendingBytes: channel.maxPendingBytes ?? CHANNEL_HOLD_MAX_BYTES,
+    sseFlushThrottle: channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
+    ssePostIdleFlushDelay: channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
   }
 }
 
@@ -331,21 +376,16 @@ function defaultMaxMemory(): number {
   return Math.floor(Math.min(process?.constrainedMemory?.() || total, total) / 4)
 }
 
-/** How long a wire may deliver nothing before it is taken for dead: two ping intervals, each of at least a second. */
-function pingDeadlineOf({ pingInterval }: Pick<ChannelConfigResolved, 'pingInterval'>): number {
-  return pingDeadline(pingInterval)
-}
-
 /** The settings a channel runs by, which can't change from here on. */
 function getChannelConfig(): ChannelConfigResolved {
   globalObject.channelConfigInUse = true
-  return getServerConfig().channel
+  return resolveChannelConfig(configState.channel)
 }
 
 /** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
 function reconnectWindow(): number {
   const c = getChannelConfig()
-  return Math.min(TIMER_DELAY_MAX_MS, pingDeadlineOf(c) + c.reconnectTimeout)
+  return Math.min(TIMER_DELAY_MAX_MS, pingDeadline(c.pingInterval) + c.reconnectTimeout)
 }
 
 /** Extension wire types are consumed after user modules may have registered more extensions.
@@ -483,11 +523,25 @@ function applyChannelConfig(val: unknown): void {
         )
         next[key] = value
         break
+      case 'connectTtl':
+      case 'idleTimeout':
+      case 'sseFlushThrottle':
+      case 'ssePostIdleFlushDelay':
+        assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
+        next[key] = value
+        break
       case 'reconnectTimeout':
         assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
         assertUsage(
           value >= CHANNEL_RECONNECT_TIMEOUT_MIN_MS,
           `\`${configPath}\` should be at least ${CHANNEL_RECONNECT_TIMEOUT_MIN_MS}: in less, no client can reconnect`,
+        )
+        next[key] = value
+        break
+      case 'maxPendingBytes':
+        assertUsage(
+          typeof value === 'number' && Number.isSafeInteger(value) && value >= CREDIT_WINDOW_INITIAL_BYTES,
+          `\`${configPath}\` should be an integer of at least ${CREDIT_WINDOW_INITIAL_BYTES}: a channel's credit window starts at that`,
         )
         next[key] = value
         break

@@ -170,7 +170,6 @@ function testSmallPending() {
       { timeout: 30_000 },
     )
     expectLog('skipped messages its client')
-    expectLog('missed messages')
   })
 
   // Two lossy broadcasts of one key whose page is away, with bodies of 1200 KiB: one fits the 2 MiB budget, two don't.
@@ -187,7 +186,6 @@ function testSmallPending() {
       { timeout: 30_000 },
     )
     expectLog('skipped messages its client')
-    expectLog('missed messages')
   })
 
   // The same two without `lossy`, the second on a broadcast of its own: where its page would miss a message, it closes

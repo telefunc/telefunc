@@ -6,7 +6,7 @@ import { TAG, isClosingTag, isSequencedTag } from '../../wire/tags.js'
 
 /** What a server wire holds back for its page, which a broadcast falling behind can let go of. */
 interface WireQueue {
-  /** How many of channel `ix`'s publishes wait here, heads and bodies both: its newest ones. */
+  /** How many of channel `ix`'s publishes wait here, counted by their heads: its newest ones. */
   waitingPublishes(ix: number): number
   /** Drops channel `ix`'s publishes at `seqs`, oldest first, that wait here. */
   dropWaitingPublishes(ix: number, seqs: readonly number[]): void
