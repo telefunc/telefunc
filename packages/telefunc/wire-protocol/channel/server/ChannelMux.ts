@@ -3,7 +3,7 @@ export type { WireEntry, ReconcileOutcome, ServerTransport, Wire }
 
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import { getAdapterMaxFrameBytes, getChannelConfig, pingDeadlineOf } from '../../../node/server/serverConfig.js'
+import { getAdapterMaxFrameBytes, getChannelConfig } from '../../../node/server/serverConfig.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
@@ -20,6 +20,7 @@ import {
 } from '../../constants.js'
 import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, withTook } from '../../wire/frame.js'
 import { TAG, isWireCtrlTag } from '../../wire/tags.js'
+import { pingDeadline } from '../../wire/pingDeadline.js'
 import { textEncoder } from '../../wire/envelope.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
@@ -899,7 +900,7 @@ function resolveMuxServerOptions(): MuxServerOptions {
     reconnectTimeout: c.reconnectTimeout,
     idleTimeout: c.idleTimeout,
     pingInterval: c.pingInterval,
-    pingDeadline: pingDeadlineOf(c),
+    pingDeadline: pingDeadline(c.pingInterval),
     creditWindow: creditWindowOf(c.maxMemory, c.maxPendingBytes),
     connectTtl: c.connectTtl,
     sseFlushThrottle: c.sseFlushThrottle,

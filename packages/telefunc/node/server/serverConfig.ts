@@ -7,7 +7,6 @@ export { setAdapterMaxMemory }
 export { getAdapterMaxFrameBytes }
 export { setRootFromVite }
 export { getChannelConfig }
-export { pingDeadlineOf }
 export { reconnectWindow }
 export type {
   ConfigUser,
@@ -373,11 +372,6 @@ function defaultMaxMemory(): number {
   return Math.floor(Math.min(process?.constrainedMemory?.() || total, total) / 4)
 }
 
-/** How long a wire may deliver nothing before it is taken for dead: two ping intervals, each of at least a second. */
-function pingDeadlineOf({ pingInterval }: Pick<ChannelConfigResolved, 'pingInterval'>): number {
-  return pingDeadline(pingInterval)
-}
-
 /** The settings a channel runs by, which can't change from here on. */
 function getChannelConfig(): ChannelConfigResolved {
   globalObject.channelConfigInUse = true
@@ -387,7 +381,7 @@ function getChannelConfig(): ChannelConfigResolved {
 /** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
 function reconnectWindow(): number {
   const c = getChannelConfig()
-  return Math.min(TIMER_DELAY_MAX_MS, pingDeadlineOf(c) + c.reconnectTimeout)
+  return Math.min(TIMER_DELAY_MAX_MS, pingDeadline(c.pingInterval) + c.reconnectTimeout)
 }
 
 /** Extension wire types are consumed after user modules may have registered more extensions.

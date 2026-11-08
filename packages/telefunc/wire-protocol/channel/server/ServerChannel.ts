@@ -400,7 +400,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._phase !== 'open') return
     this._phase = 'closing'
     const serializedAbortValue = stringify(abortValue)
-    if (this.peer) this.peer.sendAbort(serializedAbortValue)
+    if (this.peer) this.peer.sendSequenced(encode.abort, serializedAbortValue)
     else this.ensurePendingEnd().abort = serializedAbortValue
     this.shutdown(createAbortError(abortValue, message))
   }
@@ -832,8 +832,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const { closeAck, closeRequest, abort, error } = this.pendingEnd
     if (closeAck) peer.sendCloseAck()
     if (closeRequest) this.closeRequestSeq = peer.sendCloseRequest(this.lifecycle.timeLeft())
-    if (abort !== null) peer.sendAbort(abort)
-    if (error !== null) peer.sendError(error)
+    if (abort !== null) peer.sendSequenced(encode.abort, abort)
+    if (error !== null) peer.sendSequenced(encode.error, error)
     this.pendingEnd = null
   }
 
@@ -843,7 +843,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.offlineBuffer.clear(err)
     // First, so the ERROR, held without asking, takes their room.
     this.letAnsweringGo()
-    if (this.peer) this.peer.sendError(reason)
+    if (this.peer) this.peer.sendSequenced(encode.error, reason)
     else this.ensurePendingEnd().error = reason
     this.shutdown(err)
   }

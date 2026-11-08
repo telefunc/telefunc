@@ -2,7 +2,7 @@ export { IndexedPeer }
 export type { PeerSender }
 
 import { ACK_STATUS, encode } from '../../wire/frame.js'
-import type { AckResultStatus, ErrorReason, SequencedEncoder } from '../../wire/frame.js'
+import type { AckResultStatus, SequencedEncoder } from '../../wire/frame.js'
 import type { PublishBody } from './PublishBody.js'
 import type { ServerReplay } from './ServerReplay.js'
 import type { SendWait } from '../../flowControl/SendWaits.js'
@@ -77,14 +77,6 @@ class IndexedPeer {
   sendCloseAck(): void {
     const seq = this.replay.nextSeq()
     this.commit(seq, encode.closeAck(this.index, seq))
-  }
-
-  sendAbort(abortValue: string): void {
-    this.sendSequenced(encode.abort, abortValue)
-  }
-
-  sendError(reason: ErrorReason): void {
-    this.sendSequenced(encode.error, reason)
   }
 
   /** `lastSeq`: the last seq the server has of what the page sent on the channel. */
