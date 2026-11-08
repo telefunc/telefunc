@@ -498,9 +498,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     if (this.stubs.size === 0) return
     const body = carried()
     const hiddenMember = hiddenMemberOf(event)
-    // Each attach sends the roster and the room's meta again, which carry every event but the close.
-    const opts = { resentOnAttach: event.__r !== 'closed' }
-    for (const stub of this.stubs) stub.relayControl(body, hiddenMember, opts)
+    for (const stub of this.stubs) stub.relayControl(body, hiddenMember)
   }
 
   /** A local participant takes each update its member's meta takes here. */

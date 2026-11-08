@@ -420,14 +420,14 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
 
   // Relays
 
-  /** An event this instance originates for this client alone: state each attach sends again. */
+  /** An event this instance originates for this client alone. */
   relayEvent(event: RoomRosterEvent | RoomDemandEvent | Extract<RoomCtrlEnvelope, { __r: 'update' }>): void {
-    this.end.deliver(unorderedEventBody(event), { resentOnAttach: true })
+    this.end.deliver(unorderedEventBody(event))
   }
 
   /** `relayEvent` with the event's body already made, so one body can go to many clients. */
   relayEventBody(body: PublishBody): void {
-    this.end.deliver(body, { resentOnAttach: true })
+    this.end.deliver(body)
   }
 
   /** A roster part's members this client gets: `visible` itself unless the part holds a hidden member this client was
@@ -439,8 +439,8 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   }
 
   /** A hidden member's events reach only the clients that were handed it. */
-  relayControl(body: PublishBody, hiddenMember: string | null, opts: { resentOnAttach: boolean }): void {
-    if (hiddenMember === null || this.grantedHidden.has(hiddenMember)) this.end.deliver(body, opts)
+  relayControl(body: PublishBody, hiddenMember: string | null): void {
+    if (hiddenMember === null || this.grantedHidden.has(hiddenMember)) this.end.deliver(body)
   }
 
   relayAnnouncement(body: PublishBody, ord: OrderingInfo): void {
@@ -671,9 +671,7 @@ class RoomParticipantStub implements BroadcastEndOwner {
   /** A closed stub's client gets no notice: one sent after an overflow ended it would arrive after a gap. */
   private notify(notice: ParticipantStubNotice): void {
     if (this.end.isClosed) return
-    // Each attach sends the meta and the demand again.
-    const resentOnAttach = notice.__r === 'p-meta' || notice.__r === 'demand' || notice.__r === 'demand-state'
-    this.end.deliver(unorderedEventBody(notice), { resentOnAttach })
+    this.end.deliver(unorderedEventBody(notice))
   }
 }
 

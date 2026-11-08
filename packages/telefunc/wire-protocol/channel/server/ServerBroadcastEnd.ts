@@ -62,11 +62,11 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     return this.lifecycle.handleCallbackError(err)
   }
 
-  /** A publish to its page, never refused. One `resentOnAttach`, which the owner sends again at each attach, isn't held
-   *  while the page is away. Its listeners or admitting its body can have ended the channel by now. */
-  deliver(body: PublishBody, opts?: { resentOnAttach?: boolean }): void {
+  /** A publish to its page, never refused, and held while the page is away. Its listeners or admitting its body can have
+   *  ended the channel by now. */
+  deliver(body: PublishBody): void {
     this.endOverflowed()
-    if (this._phase === 'ended' || (this.peer === null && opts?.resentOnAttach)) return
+    if (this._phase === 'ended') return
     if (this.lastPeer) this.lastPeer.sendPublish(body)
     else this.offlineBuffer.pushPublish(body)
     const share = this.share()
