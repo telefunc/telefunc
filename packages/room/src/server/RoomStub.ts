@@ -1,4 +1,4 @@
-export { RoomStub, RoomParticipantStub, ResponseRoomGrants, MemberMessageBodies, unorderedEventBody }
+export { RoomStub, RoomParticipantStub, ResponseRoomGrants, MemberMessageBodies, unorderedEventBody, trackFrameBody }
 export type { RoomStubOptions, RoomParticipantStubOptions }
 
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -66,6 +66,7 @@ import {
 } from '../shared/protocol.js'
 import type { RoomDataEnvelope } from './protocol.js'
 import { toggle } from '../utils/sets.js'
+import { encodeLaneKey } from '../backend/laneKey.js'
 assertIsNotBrowser()
 
 /** What one response's Room values grant the client on a room: echo drops for its own members, and hidden members it
@@ -91,7 +92,15 @@ class ResponseRoomGrants {
 function unorderedEventBody(
   event: RoomCtrlEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent | ParticipantStubNotice,
 ): PublishBody {
-  return publishBody(stringify(event), { seq: 0, timestamp: Date.now() }, { lossy: false })
+  return publishBody(stringify(event), { seq: 0, timestamp: Date.now() }, { level: 'never' })
+}
+
+/** A track's frame as its lane carried it. A page that falls behind may miss one published with
+ *  `whenBehind: 'missOldest'`, among its track's oldest. */
+function trackFrameBody(frame: BinaryFrame, framed: Uint8Array, info: OrderingInfo): PublishBody {
+  if (frame.whenBehind === 'close') return publishBody(framed, info, { level: 'never' })
+  const lane = { kind: 'binary', member: frame.from, track: frame.track } as const
+  return publishBody(framed, info, { level: 'behind', stream: encodeLaneKey(lane) })
 }
 
 /** A member's message as its lane carried it, stamped, and without the stamp, each made once for every client. A page
@@ -113,13 +122,13 @@ class MemberMessageBodies {
   }
 
   stamped(): PublishBody {
-    return (this._stamped ??= publishBody(this.serialized, this.info, { lossy: false }))
+    return (this._stamped ??= publishBody(this.serialized, this.info, { level: 'never' }))
   }
 
   unstamped(): PublishBody {
     if (this._unstamped !== null) return this._unstamped
     const { fromMeta, fromMetaSeq, fromIdentity, fromDisconnected, ...unstamped } = this.envelope
-    return (this._unstamped = publishBody(stringify(unstamped), this.info, { lossy: false }))
+    return (this._unstamped = publishBody(stringify(unstamped), this.info, { level: 'never' }))
   }
 }
 
@@ -480,13 +489,13 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
 
   emitRetainedText(event: RoomDataEnvelope, info: OrderingInfo, serialized: string, hold: ReplayHold): void {
     if (this.replay.admitRetained(hold, event.from, null, info)) {
-      this.end.deliver(publishBody(serialized, info, { lossy: false }))
+      this.end.deliver(publishBody(serialized, info, { level: 'never' }))
     }
   }
 
   emitRetainedBinary(frame: BinaryFrame, info: OrderingInfo, framed: Uint8Array, hold: ReplayHold): void {
     if (this.replay.admitRetained(hold, frame.from, frame.track, info)) {
-      this.end.deliver(publishBody(framed, info, { lossy: frame.whenBehind === 'missOldest' }))
+      this.end.deliver(trackFrameBody(frame, framed, info))
     }
   }
 
@@ -528,7 +537,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     this.tail = null
     for (const { serialized, ord, from } of held) {
       if (!this.wantsTextFrom(from)) continue
-      this.relayTextLive(from, publishBody(serialized, ord, { lossy: false }), ord)
+      this.relayTextLive(from, publishBody(serialized, ord, { level: 'never' }), ord)
     }
   }
 

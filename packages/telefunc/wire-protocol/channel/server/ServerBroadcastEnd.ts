@@ -22,8 +22,8 @@ type BroadcastEndOwner = {
   _onPageSubscription?(kind: BroadcastKind, on: boolean): void
   /** Each attach of the page while the channel is open, after the page's subscriptions applied. */
   _onPageAttach?(): void
-  /** Its page fell behind and misses its oldest publishes, of those marked `lossy`. An owner without this keeps its
-   *  page whole instead: past what the server holds for it, its channel closes. */
+  /** Its page fell behind and misses its oldest publishes, of those at `behind` (see `ShedLevel`). An owner without this
+   *  keeps its page whole instead: past what the server holds for it, its channel closes. */
   _onPublishesMissed?(): void
 }
 

@@ -220,8 +220,9 @@ function Room() {
     const [roomId, view] = await createRoom(`tracks-${heavy}`)
     const text: { data: string; seq: number }[] = []
     view.subscribe((data, info) => text.push({ data: data as string, seq: info.seq }))
-    const tracks = { cursor: [] as { n: number; seq: number }[], drawing: [] as { n: number; seq: number }[] }
-    for (const track of ['cursor', 'drawing'] as const) {
+    type Frame = { n: number; seq: number }
+    const tracks = { pointer: [] as Frame[], cursor: [] as Frame[], drawing: [] as Frame[] }
+    for (const track of ['pointer', 'cursor', 'drawing'] as const) {
       view.subscribeBinary((_data, info) => tracks[track].push({ n: info.meta!.n as number, seq: info.seq }), { track })
     }
     let closed = false
@@ -232,7 +233,11 @@ function Room() {
     await onRoomTracks(roomId, heavy)
     await pollUntil(() => ({ done: text.some(({ data }) => data === 'before') }))
     setResult(JSON.stringify({ roomId }))
-    const done = () => text.at(-1)?.data === '15' && tracks.cursor.at(-1)?.n === 15 && tracks.drawing.length === 16
+    const done = () =>
+      text.at(-1)?.data === '15' &&
+      tracks.pointer.at(-1)?.n === 7 &&
+      tracks.cursor.at(-1)?.n === 15 &&
+      tracks.drawing.length === 16
     await pollUntil(() => ({ done: done() || (closed && myCause !== null) }), 150)
     setResult(JSON.stringify({ roomId, text, ...tracks, closed, myCause }))
   }
@@ -2088,7 +2093,12 @@ function Room() {
         setResult(JSON.stringify({ closed, myCause }))
       })}
 
-      {scenario('tracks-cursor', null, 'Offline past maxMemory on a lossy track', tracksBehind('cursor'))}
+      {scenario(
+        'tracks-cursor',
+        null,
+        "Offline past maxMemory on a whenBehind: 'missOldest' track",
+        tracksBehind('cursor'),
+      )}
 
       {scenario(
         'tracks-drawing',

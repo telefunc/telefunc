@@ -180,7 +180,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
       }
     }
     if (!this.peerSubscriptions.text) return
-    this._end.deliver(bodyOf(serialized, rawInfo))
+    this._end.deliver(bodyOf(this.key, serialized, rawInfo))
   }
 
   private deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
@@ -195,7 +195,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
       }
     }
     if (!this.peerSubscriptions.binary) return
-    this._end.deliver(bodyOf(data, rawInfo))
+    this._end.deliver(bodyOf(this.key, data, rawInfo))
   }
 
   /** @internal `BroadcastEndOwner`: its page is told by `info.seq`, and the server's log by this once. */
@@ -314,10 +314,11 @@ const globalObject = getGlobalObject('wire-protocol/channel/server/ServerBroadca
   publishBodies: new WeakMap<WirePublishInfo, PublishBody>(),
 })
 
-function bodyOf(payload: string | Uint8Array, info: WirePublishInfo): PublishBody {
+/** Its subscribers' pages may miss it: the broadcast is one stream, its `key`. */
+function bodyOf(key: string, payload: string | Uint8Array, info: WirePublishInfo): PublishBody {
   let body = globalObject.publishBodies.get(info)
   if (!body) {
-    body = publishBody(payload, info, { lossy: true })
+    body = publishBody(payload, info, { level: 'behind', stream: key })
     globalObject.publishBodies.set(info, body)
   }
   return body

@@ -18,6 +18,8 @@ class ServerReplay {
   private dropped = 0
   /** The live publishes. */
   private publishes = 0
+  /** The seq of each stream's newest publish it holds (see `ShedLevel`). */
+  private readonly newestOfStream = new Map<string, number>()
   private readonly holder: MemoryHolder
   private issuedSeq = 0
   private pushedSeq = 0
@@ -44,6 +46,7 @@ class ServerReplay {
     this.add(seq, head, body)
     hold(this.holder, body)
     this.publishes++
+    if (body.shed.level === 'behind') this.newestOfStream.set(body.shed.stream, seq)
   }
 
   /** The page has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
@@ -67,12 +70,11 @@ class ServerReplay {
   }
 
   /** Of its newest `droppable` publishes, the oldest its page may miss go until its holder holds `toBytes`, but for the
-   *  newest of all above 0: a later message then shows the page what it missed. At 0 every one goes. The older ones are
-   *  on the wire, which a reconnect may have to send again. Returns the seqs that went, oldest first, and whether one its
-   *  page can't miss stayed while it holds more than `toBytes`. */
+   *  newest of each stream above 0: a later message of that stream then shows the page what it missed of it. At 0 every
+   *  one goes. The older ones are on the wire, which a reconnect may have to send again. Returns the seqs that went,
+   *  oldest first, and whether one its page can't miss stayed while it holds more than `toBytes`. */
   dropOldestPublishes(toBytes: number, droppable: number): { seqs: number[]; keptOver: boolean } {
     let pinned = this.publishes - Math.min(this.publishes, droppable)
-    const newest = toBytes === 0 ? -1 : this.newestPublishAt()
     const seqs: number[] = []
     let kept = false
     for (let i = this.first; i < this.seqs.length && this.holder.heldBytes > toBytes; i++) {
@@ -82,12 +84,16 @@ class ServerReplay {
         pinned--
         continue
       }
-      if (i === newest) break
-      if (toBytes > 0 && !body.lossy) {
-        kept = true
-        continue
+      const seq = this.seqs[i]!
+      if (toBytes > 0) {
+        const { shed } = body
+        if (shed.level === 'never') {
+          kept = true
+          continue
+        }
+        if (this.newestOfStream.get(shed.stream) === seq) continue
       }
-      seqs.push(this.seqs[i]!)
+      seqs.push(seq)
       this.drop(i)
     }
     this.compact()
@@ -96,17 +102,15 @@ class ServerReplay {
 
   /** The body of the newest publish it holds. */
   newestPublish(): PublishBody | undefined {
-    const i = this.newestPublishAt()
-    return i === -1 ? undefined : this.bodies[i]!
+    for (let i = this.seqs.length - 1; i >= this.first; i--) {
+      const body = this.bodies[i]
+      if (body) return body
+    }
+    return undefined
   }
 
   dispose(): void {
     for (let i = this.first; i < this.seqs.length; i++) this.drop(i)
-  }
-
-  private newestPublishAt(): number {
-    for (let i = this.seqs.length - 1; i >= this.first; i--) if (this.bodies[i]) return i
-    return -1
   }
 
   private add(seq: number, frame: Uint8Array<ArrayBuffer>, body: PublishBody | null): void {
@@ -124,6 +128,10 @@ class ServerReplay {
     if (body) {
       letGo(this.holder, body)
       this.publishes--
+      const { shed } = body
+      if (shed.level === 'behind' && this.newestOfStream.get(shed.stream) === this.seqs[i]) {
+        this.newestOfStream.delete(shed.stream)
+      }
     } else letGo(this.holder, frame.byteLength + HELD_SEND_OVERHEAD_BYTES)
     this.frames[i] = null
     this.bodies[i] = null

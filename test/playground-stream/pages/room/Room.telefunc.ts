@@ -494,15 +494,18 @@ async function onRoomMetaFlood(roomId: string) {
   await Promise.all(members.map((member, n) => member.setMeta({ name: `M${n}`, filler: ''.padEnd(256 * 1024) })))
 }
 
-/** A speaker says 'before', then, run by the test while the page is offline, sends 16 rounds of a `cursor` frame, a
- *  `drawing` frame published with `whenBehind: 'close'`, and a message. The `heavy` track's frames are 256 KiB each,
- *  4 MiB in all: twice what its lane's `maxMemory` lets the server hold. */
+/** A speaker says 'before', then, run by the test while the page is offline, sends 8 `pointer` frames of 256 KiB and
+ *  goes quiet on that track, then 16 rounds of a `cursor` frame, a `drawing` frame published with
+ *  `whenBehind: 'close'`, and a message. The `heavy` track's frames are 256 KiB each, 4 MiB in all: twice what its
+ *  lane's `maxMemory` lets the server hold. */
 async function onRoomTracks(roomId: string, heavy: 'cursor' | 'drawing') {
   const room = await Room.get(roomId)
   const speaker = await room.join({ meta: { name: 'Speaker' } })
   awayMembers.set(roomId, [speaker])
   const frame = (track: string) => new Uint8Array(track === heavy ? 256 * 1024 : 1024)
   onServerAction(`roomTracks_${roomId}`, async () => {
+    for (let n = 0; n < 8; n++)
+      await speaker.publishBinary(new Uint8Array(256 * 1024), { track: 'pointer', meta: { n } })
     for (let n = 0; n < 16; n++) {
       await speaker.publishBinary(frame('cursor'), { track: 'cursor', meta: { n } })
       // Its first publish gives the track whenBehind: 'close', which the later ones keep.

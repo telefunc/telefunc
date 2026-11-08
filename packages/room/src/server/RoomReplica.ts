@@ -38,7 +38,7 @@ import type { LaneHolder, ReplayHold, TextWantsChange } from './lifecycle/replay
 import { type MetaMirror, type RoomHandle, ServerRoom } from './room.js'
 import { RosterStream } from './lifecycle/RosterStream.js'
 import { toggle } from '../utils/sets.js'
-import { MemberMessageBodies, type RoomStub, unorderedEventBody } from './RoomStub.js'
+import { MemberMessageBodies, type RoomStub, trackFrameBody, unorderedEventBody } from './RoomStub.js'
 import { LanePlan, type LaneDelivery, type LaneEvent, type LanePlanOwner } from './lanes/LanePlan.js'
 import { RoomHeartbeat } from './lifecycle/RoomHeartbeat.js'
 assertIsNotBrowser()
@@ -435,14 +435,14 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.authority.controlDelivered(info.seq)
     const ctrl = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
     if (ctrl.__r === 'demand-ask') return this.demandExchange.onAsk(ctrl)
-    this.applyControl(ctrl, () => publishBody(serialized, info, { lossy: false }))
+    this.applyControl(ctrl, () => publishBody(serialized, info, { level: 'never' }))
   }
 
   private onTextData(serialized: string, info: OrderingInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope | Extract<RoomEnvelope, { __r: 'announce' }>
     if (envelope.__r === 'announce') {
       for (const handle of this.receivers) handle.local.relayAnnouncement(envelope.data, info)
-      const body = publishBody(serialized, info, { lossy: false })
+      const body = publishBody(serialized, info, { level: 'never' })
       for (const stub of this.stubs) stub.relayAnnouncement(body, info)
       return
     }
@@ -458,7 +458,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     assert(unframed)
     for (const handle of this.receivers) handle.local.relayBinary(unframed, info)
     if (this.stubs.size === 0) return
-    const body = publishBody(framed, info, { lossy: unframed.whenBehind === 'missOldest' })
+    const body = trackFrameBody(unframed, framed, info)
     for (const stub of this.stubs) stub.relayBinary(body, unframed.from, unframed.track, info)
   }
 

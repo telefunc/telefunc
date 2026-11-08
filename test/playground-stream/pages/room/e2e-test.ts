@@ -1459,7 +1459,7 @@ function testRoomSmallMemory() {
   )
   testRoomTracksBehind(
     'cursor',
-    "room: a page offline while its room sent it more than maxMemory holds on a lossy track misses that track's oldest frames, with the jump in its info.seq, and gets the whenBehind: 'close' track and the messages whole",
+    "room: a page offline while its room sent it more than maxMemory holds on whenBehind: 'missOldest' tracks misses each track's oldest frames but its newest, with the jump in its info.seq, and gets the whenBehind: 'close' track and the messages whole",
     (r) => {
       expect(r).deep.include({ closed: false, myCause: null })
       const all = Array.from({ length: 16 }, (_, n) => n)
@@ -1468,10 +1468,15 @@ function testRoomSmallMemory() {
       for (const stream of [r.text, r.drawing]) {
         expect(stream.map(({ seq }) => seq - stream[0]!.seq)).deep.equal(stream.map((_, i) => i))
       }
-      expect(r.cursor.length).lessThan(16)
-      expect(r.cursor.at(-1)!.n).toBe(15)
-      // The cursor's seq jumps by as many frames as it missed.
-      expect(r.cursor.map(({ n, seq }) => seq - n)).deep.equal(r.cursor.map(() => r.cursor[0]!.seq - r.cursor[0]!.n))
+      // Each gets its newest, the pointer's too though it went quiet first, and its seq jumps by as many as it missed.
+      for (const [stream, count] of [
+        [r.pointer, 8],
+        [r.cursor, 16],
+      ] as const) {
+        expect(stream.length).lessThan(count)
+        expect(stream.at(-1)?.n).toBe(count - 1)
+        expect(stream.map(({ n, seq }) => seq - n)).deep.equal(stream.map(() => stream[0]!.seq - stream[0]!.n))
+      }
       expectLog('fell behind what the server holds for it, and misses the oldest frames of its tracks')
       expectLog('missed binary frames, as this client fell behind what the server holds for it')
     },
@@ -1482,20 +1487,23 @@ function testRoomSmallMemory() {
     (r) => {
       expect(r).deep.include({ closed: true, myCause: { type: 'disconnected' } })
       expect(r.drawing.map(({ n }) => n)).deep.equal(r.drawing.map((_, i) => i))
+      // The pointer's oldest frames went first, before the drawing's didn't fit.
+      expectLog('fell behind what the server holds for it, and misses the oldest frames of its tracks')
     },
   )
 }
 
 type TracksBehind = {
   text: { data: string; seq: number }[]
+  pointer: { n: number; seq: number }[]
   cursor: { n: number; seq: number }[]
   drawing: { n: number; seq: number }[]
   closed: boolean
   myCause: unknown
 }
 
-/** A page offline while its room's speaker sends 16 rounds of a lossy `cursor` frame, a `drawing` frame published with
- *  `whenBehind: 'close'` and a message, the `heavy` track's frames 4 MiB in all. */
+/** A page offline while its room's speaker sends 8 `pointer` frames, then 16 rounds of a `cursor` frame, a `drawing`
+ *  frame published with `whenBehind: 'close'` and a message, the `heavy` track's frames 4 MiB in all. */
 function testRoomTracksBehind(heavy: 'cursor' | 'drawing', name: string, validate: (r: TracksBehind) => void) {
   test(name, async () => {
     if (!canCutWire()) return
