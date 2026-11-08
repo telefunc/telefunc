@@ -1,8 +1,8 @@
 export {
   isMemberId,
   encodeBinaryFrame,
+  encodeMessageFrame,
   decodeBinaryFrame,
-  encodeFrameMessage,
   decodeFrameMessage,
   DEFAULT_TRACK,
   EVERY_MEMBER,
@@ -65,13 +65,22 @@ const META_LENGTH_FIELD_MAX = 0xffff
 const frameTextEncoder = /* @__PURE__ */ new TextEncoder()
 const frameTextDecoder = /* @__PURE__ */ new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 
-function encodeBinaryFrame(
+function encodeBinaryFrame(memberId: string, payload: Uint8Array, opts?: BinaryPublishOptions): Uint8Array {
+  assertKnownOptions(opts, ['track', 'meta', 'retain', 'lossy'], 'publishBinary()')
+  return encodeFrame(memberId, payload, opts, 0)
+}
+
+/** The frame of a message `publish()` sends on a track: its payload is the message, serialized. */
+function encodeMessageFrame(memberId: string, message: unknown, opts: BinaryPublishOptions): Uint8Array {
+  return encodeFrame(memberId, frameTextEncoder.encode(stringify(message)), opts, FRAME_FLAG_TEXT)
+}
+
+function encodeFrame(
   memberId: string,
   payload: Uint8Array,
-  opts?: BinaryPublishOptions,
-  text = false,
+  opts: BinaryPublishOptions | undefined,
+  kindFlag: number,
 ): Uint8Array {
-  assertKnownOptions(opts, ['track', 'meta', 'retain', 'lossy'], 'publishBinary()')
   assertUsage(
     opts?.retain === undefined || typeof opts.retain === 'boolean',
     'publishBinary() options.retain should be a boolean',
@@ -81,9 +90,8 @@ function encodeBinaryFrame(
     'publishBinary() options.lossy should be a boolean',
   )
   const idBytes = uuidToBytes(memberId)
-  let flags = opts?.retain === true ? FRAME_FLAG_RETAIN : 0
+  let flags = kindFlag | (opts?.retain === true ? FRAME_FLAG_RETAIN : 0)
   if (opts?.lossy === true) flags |= FRAME_FLAG_LOSSY
-  if (text) flags |= FRAME_FLAG_TEXT
   let trackBytes: Uint8Array | null = null
   if (opts?.track !== undefined) {
     assertUsage(
@@ -125,10 +133,6 @@ function encodeBinaryFrame(
   }
   framed.set(payload, headerLength)
   return framed
-}
-
-function encodeFrameMessage(message: unknown): Uint8Array {
-  return frameTextEncoder.encode(stringify(message))
 }
 
 /** The message a text frame carries, of the listener's own; throws on one no client library framed. */
