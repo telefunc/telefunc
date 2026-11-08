@@ -52,12 +52,15 @@ function admit(holder: MemoryHolder, bytes: number): boolean {
   return holder.heldBytes + bytes <= maxMemory / memory.holders.size && memory.total + bytes <= maxMemory
 }
 
-/** Makes room for a delivery to `owner`'s pages, which nobody can refuse: past what's older, it ends as few as must end,
- *  where that frees the bytes. */
-function admitPublish(body: PublishBody, owner: string | undefined): void {
+/** Makes room for a delivery to `owner`'s pages, which nobody can refuse. Near the budget, each page whose waiting
+ *  publishes it replaces lets go of them first (`replace`), so what's measured is what stays; past what's older, it ends
+ *  as few as must end, where that frees the bytes. */
+function admitPublish(body: PublishBody, owner: string | undefined, replace: (holder: MemoryHolder) => void): void {
   const maxMemory = maxMemoryOf()
   const bytes = body.frame.byteLength
-  reclaim(bytes, shedTarget(maxMemory))
+  const target = shedTarget(maxMemory)
+  if (memory.total + bytes > target) for (const holder of [...memory.holders]) replace(holder)
+  reclaim(bytes, target)
   if (memory.total + bytes <= maxMemory || memory.reclaiming) return
   memory.reclaiming = true
   try {

@@ -116,6 +116,23 @@ function testSmallPending() {
     expectLog('missed messages')
   })
 
+  // Two lossy broadcasts of one key whose page is away, with bodies of 1200 KiB: one fits the 2 MiB budget, two don't.
+  // Each newer body replaces the one waiting before the server decides what it can hold, so neither closes.
+  test("channel: a lossy broadcast whose client is away keeps its newest where it and the one before don't both fit the server's memory, for two subscribers sharing them", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-broadcast-away-shared')
+    await autoRetry(
+      async () => {
+        const { received, closed } = (await getResult<any>('#channel-state')).broadcastAwayShared
+        expect(closed).deep.equal(['open', 'open'])
+        expect(received).deep.equal([[18], [18]])
+      },
+      { timeout: 30_000 },
+    )
+    expectLog('skipped messages its client')
+    expectLog('missed messages')
+  })
+
   // The same two without `lossy`, the second on a broadcast of its own: where its page would miss a message, it closes
   // instead, and the receipt behind the gap doesn't come either.
   test('channel: a client that falls behind a broadcast gets every message up to the gap, then closes with ChannelOverflowError', async () => {

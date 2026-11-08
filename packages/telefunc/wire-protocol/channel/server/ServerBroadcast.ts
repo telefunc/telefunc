@@ -181,7 +181,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       }
     }
     if (!this.peerSubscribedText) return
-    this.forwardPublish(bodyOf(encode.publish, serialized, rawInfo, this.owner))
+    this.forwardPublish(
+      bodyOf(encode.publish, serialized, rawInfo, this.owner, (holder) => this.replaceIn(holder, false)),
+    )
   }
 
   private deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
@@ -196,7 +198,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       }
     }
     if (!this.peerSubscribedBinary) return
-    this.forwardPublish(bodyOf(encode.publishBinary, data, rawInfo, this.owner))
+    this.forwardPublish(
+      bodyOf(encode.publishBinary, data, rawInfo, this.owner, (holder) => this.replaceIn(holder, true)),
+    )
   }
 
   /** A publish to the page. A subscription is the page's, so it has attached before, but it may have ended since: this
@@ -204,18 +208,29 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private forwardPublish(body: PublishBody): void {
     this.endOverflowed()
     if (this._phase === 'ended') return
+    if (this.lossy) this.letWaitingGo()
     this.lastPeer!.sendPublish(body)
-    if (this.lossy) return this.skipToNewest()
+    if (this.lossy) return
     const share = this.share()
     if (this.heldBytes > share) this.shed(share, this.owner)
   }
 
-  /** A lossy page's publishes that no wire has taken, but the newest, go. */
-  private skipToNewest(): void {
-    const dropped = this._replayBuffer!.dropBeforeNewest(this.unhanded())
+  /** A lossy page's publishes that no wire has taken go, as a newer one takes their place. */
+  private letWaitingGo(): void {
+    const replay = this._replayBuffer
+    if (this._phase === 'ended' || !replay) return
+    const dropped = replay.dropNewestPublishes(this.unhanded())
     if (dropped === 0) return
     this.peer?.sender.queue.dropWaitingPublishes(this.peer.index, dropped)
     this.warnMissed()
+  }
+
+  /** Where `holder` is a lossy page this publish reaches (its key, on its object), it lets go of what the publish
+   *  replaces. */
+  private replaceIn(holder: MemoryHolder, binary: boolean): void {
+    if (!(holder instanceof ServerBroadcast) || !holder.lossy || holder.key !== this.key) return
+    if (holder.owner !== this.owner) return
+    if (binary ? holder.peerSubscribedBinary : holder.peerSubscribedText) holder.letWaitingGo()
   }
 
   /** What it may hold: 60 s of what its page takes, within what any channel may. */
@@ -453,11 +468,12 @@ function bodyOf<T>(
   data: T,
   info: WirePublishInfo,
   owner: string | undefined,
+  replace: (holder: MemoryHolder) => void,
 ): PublishBody {
   let body = globalObject.publishBodies.get(info)
   if (!body) {
     body = new PublishBody(encodeBody(data, info))
-    admitPublish(body, owner)
+    admitPublish(body, owner, replace)
     globalObject.publishBodies.set(info, body)
   }
   return body

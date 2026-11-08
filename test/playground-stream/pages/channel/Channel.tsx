@@ -215,6 +215,7 @@ type ChannelState = {
   publishesBehind: { pingMs: number; closed: string; closeMs: number } | null
   broadcastOverflow: { received: number; closeErr: string } | null
   broadcastBehind: { seqsAhead: number[]; isClosed: boolean; receiptAhead: number; uplinkReceipts: number } | null
+  broadcastAwayShared: { received: number[][]; closed: string[] } | null
   broadcastBehindCloses: {
     seqsAhead: number[]
     closeErr: string | null
@@ -309,6 +310,7 @@ const initialState: ChannelState = {
   broadcastOverflow: null,
   broadcastBehind: null,
   broadcastBehindCloses: null,
+  broadcastAwayShared: null,
   acrossFlip: null,
   lateCallbacks: null,
   openAbort: null,
@@ -1551,6 +1553,39 @@ function ChannelDemo() {
     away.control.close()
   }, [])
 
+  const testBroadcastAwayShared = useCallback(async () => {
+    setChannelState((s) => ({ ...s, broadcastAwayShared: null }))
+    // Two lossy broadcasts on one key, with bodies of 1200 KiB: one fits the lane's 2 MiB, two don't.
+    const key = `away-shared:${crypto.randomUUID()}`
+    const pages = await Promise.all(
+      [0, 1].map(() => openChannel(() => onChannelPublishesBehind(1200 * 1024, true, key))),
+    )
+    const { broadcast, control } = pages[0]!
+    const { seq: before } = await broadcast.publish('before the disconnect')
+    const received: number[][] = [[], []]
+    const closed = ['open', 'open']
+    // Its publish (1) is outstanding as its connection drops, and 17 bodies follow while it is away: each receives the
+    // newest (18), or closes.
+    const newest = pages.map(
+      ({ broadcast }, i) =>
+        new Promise<void>((resolve) => {
+          broadcast.subscribeBinary((_, info) => {
+            received[i]!.push(info.seq - before)
+            if (info.seq === before + 18) resolve()
+          })
+          broadcast.onClose((err) => {
+            closed[i] = err?.name ?? 'none'
+            resolve()
+          })
+        }),
+    )
+    await control.send('away', { ack: true })
+    void broadcast.publish('across the disconnect').catch(() => {})
+    await Promise.all(newest)
+    setChannelState((s) => ({ ...s, broadcastAwayShared: { received, closed } }))
+    for (const { control } of pages) control.close()
+  }, [])
+
   const testAcrossFlip = useCallback(async () => {
     const { key, broadcast, control } = await openChannel(onChannelAcrossFlip)
     const received: number[] = []
@@ -1976,6 +2011,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             Broadcast Closes A Client That Falls Behind
+          </button>
+          <button
+            id="channel-test-broadcast-away-shared"
+            type="button"
+            onClick={testBroadcastAwayShared}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Two Lossy Broadcasts Whose Client Is Away Past What Two Bodies Fit
           </button>
           <button
             id="channel-test-across-flip"

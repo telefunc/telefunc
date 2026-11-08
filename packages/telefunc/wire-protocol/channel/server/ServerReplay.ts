@@ -66,11 +66,11 @@ class ServerReplay {
     return frames
   }
 
-  /** Of its newest `droppable` publishes, all but the newest go: the page gets that one, and its `info.seq` shows what
-   *  it skipped. Receipts stay. Returns how many went. The older ones are on the wire, which a reconnect may have to
-   *  send again. */
-  dropBeforeNewest(droppable: number): number {
-    const mayGo = Math.min(this.publishes, droppable) - 1
+  /** Its newest `droppable` publishes go, for a newer one to take their place: the page's `info.seq` shows what it
+   *  skipped. Receipts stay. Returns how many went. The older ones are on the wire, which a reconnect may have to send
+   *  again. */
+  dropNewestPublishes(droppable: number): number {
+    const mayGo = Math.min(this.publishes, droppable)
     let dropped = 0
     for (let i = this.oldestDroppable(droppable); i < this.seqs.length && dropped < mayGo; i++) {
       if (!this.bodies[i]) continue
