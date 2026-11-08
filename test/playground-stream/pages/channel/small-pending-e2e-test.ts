@@ -92,22 +92,27 @@ function testSmallPending() {
     )
   })
 
-  // 16 publishes of 256 KiB in one go to a lossy broadcast: each one the wire hasn't taken goes as a newer one comes.
-  // Then the page's publish (17) is outstanding as its connection drops, with 17 more published behind its receipt
-  // while it is away: only the newest of them is held. Then the page's own 20 publishes at once.
+  // The page's own 20 publishes at once as it opens, each its ordinal at the same size: those its uplink hasn't taken
+  // share one receipt, and the server gets the last. Then 16 publishes of 256 KiB in one go to a lossy broadcast: each
+  // one the wire hasn't taken goes as a newer one comes. Then the page's publish (17) is outstanding as its connection
+  // drops, with 17 more published behind its receipt while it is away: only the newest of them is held. Then the page's
+  // own 20 again, right after its reconnect.
   test('channel: a client that falls behind a lossy broadcast skips to the newest, with a jump in info.seq, and stays open, and so does its own uplink', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-broadcast-behind')
     await autoRetry(
       async () => {
-        const { seqsAhead, isClosed, receiptAhead, uplinkReceipts } = (await getResult<any>('#channel-state'))
+        const { seqsAhead, isClosed, receiptAhead, opening, reconnected } = (await getResult<any>('#channel-state'))
           .broadcastBehind
         const [burst, away] = [seqsAhead.filter((a: number) => a <= 16), seqsAhead.filter((a: number) => a > 17)]
         expect(burst.at(-1)).toBe(16)
         expect(burst.length).lessThan(16)
         expect(receiptAhead).toBe(17)
         expect(away).deep.equal([34])
-        expect(uplinkReceipts).lessThan(20)
+        expect(opening.receipts).lessThan(20)
+        expect(opening.last).toBe('19')
+        expect(reconnected.receipts).lessThan(20)
+        expect(reconnected.last).toBe('119')
         expect(isClosed).toBe(false)
       },
       { timeout: 30_000 },

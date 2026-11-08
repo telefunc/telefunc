@@ -214,7 +214,13 @@ type ChannelState = {
   slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
   publishesBehind: { pingMs: number; closed: string; closeMs: number } | null
   broadcastOverflow: { received: number; closeErr: string } | null
-  broadcastBehind: { seqsAhead: number[]; isClosed: boolean; receiptAhead: number; uplinkReceipts: number } | null
+  broadcastBehind: {
+    seqsAhead: number[]
+    isClosed: boolean
+    receiptAhead: number
+    opening: { receipts: number; last: string }
+    reconnected: { receipts: number; last: string }
+  } | null
   broadcastAwayShared: { received: number[][]; closed: string[] } | null
   broadcastBehindCloses: {
     seqsAhead: number[]
@@ -1499,6 +1505,19 @@ function ChannelDemo() {
   const testBroadcastBehind = useCallback(async () => {
     setChannelState((s) => ({ ...s, broadcastBehind: null }))
     const { broadcast, control } = await openChannel(() => onChannelPublishesBehind(256 * 1024, true))
+    // The page's own 20 publishes at once, each its ordinal at the same size: one still waiting to go takes the next
+    // one's data in its place, and both get its receipt. The server's subscription gets the last.
+    const publishOrdinals = async (from: number) => {
+      const receipts = await Promise.all(
+        Array.from({ length: 20 }, (_, n) => broadcast.publish(`${from + n}:`.padEnd(256 * 1024, 'x'))),
+      )
+      return {
+        receipts: new Set(receipts.map((receipt) => receipt.seq)).size,
+        last: await control.send('last', { ack: true }),
+      }
+    }
+    // As it opens, faster than its uplink takes them, they wait for its headroom.
+    const opening = await publishOrdinals(0)
     const { seq: before } = await broadcast.publish('before the burst')
     const seqsAhead: number[] = []
     broadcast.subscribeBinary((_, info) => seqsAhead.push(info.seq - before))
@@ -1512,10 +1531,15 @@ function ChannelDemo() {
     await control.send('away', { ack: true })
     const { seq } = await broadcast.publish('across the disconnect')
     await newest
-    // The page's own 20 publishes at once, faster than its uplink: one still waiting takes the next one's place.
-    const receipts = await Promise.all(Array.from({ length: 20 }, () => broadcast.publish('x'.repeat(256 * 1024))))
-    const uplinkReceipts = new Set(receipts.map((receipt) => receipt.seq)).size
-    const broadcastBehind = { seqsAhead, isClosed: broadcast.isClosed, receiptAhead: seq - before, uplinkReceipts }
+    // Right after its reconnect, they wait in the page's held queue.
+    const reconnected = await publishOrdinals(100)
+    const broadcastBehind = {
+      seqsAhead,
+      isClosed: broadcast.isClosed,
+      receiptAhead: seq - before,
+      opening,
+      reconnected,
+    }
     setChannelState((s) => ({ ...s, broadcastBehind }))
     control.close()
   }, [])

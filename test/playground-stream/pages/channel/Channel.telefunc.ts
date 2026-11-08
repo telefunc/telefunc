@@ -877,7 +877,8 @@ async function onChannelLinkShare() {
 
 /** A broadcast that publishes `count` bodies of `bytes`, or closes, as a channel beside it asks, and answers its pings.
  *  After `'away'`, the page's next publish drops its connections: one body follows on the cut wire, ahead of that
- *  publish's receipt, and 16 more while the page is away (it retries after 500 ms). */
+ *  publish's receipt, and 16 more while the page is away (it retries after 500 ms). `'last'` answers the ordinal of the
+ *  newest `<ordinal>:…` text its server subscription got. */
 async function onChannelPublishesBehind(
   bytes = 4 * 1024 * 1024,
   lossy?: boolean,
@@ -887,9 +888,14 @@ async function onChannelPublishesBehind(
   const publish = (count: number) => {
     for (let i = 0; i < count; i++) void broadcast.publishBinary(new Uint8Array(bytes))
   }
-  const control = new Channel<(msg: 'ping' | 'close' | 'away' | number) => string, never>()
+  let lastOrdinal = 'none'
+  broadcast.subscribe((message) => {
+    if (typeof message === 'string' && /^\d+:/.test(message)) lastOrdinal = message.slice(0, message.indexOf(':'))
+  })
+  const control = new Channel<(msg: 'ping' | 'close' | 'away' | 'last' | number) => string, never>()
   control.listen(async (msg) => {
     if (msg === 'ping') return 'pong'
+    if (msg === 'last') return lastOrdinal
     if (msg === 'close') return String(await broadcast.close({ timeout: 20_000 }))
     if (msg === 'away') {
       const stop = broadcast.subscribe(() => {
