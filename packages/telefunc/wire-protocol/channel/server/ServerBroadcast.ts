@@ -174,34 +174,37 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     const data = parse(serialized) as ChannelData<T>
     for (const cb of this.broadcastListeners.list()) {
-      try {
-        const result = cb(data, info)
-        if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
-      } catch (err) {
-        if (this.lifecycle.handleCallbackError(err)) return
-      }
+      if (this.callListener(cb, data, info)) return
     }
     if (!this.peerSubscribedText) return
-    this.forwardPublish(
-      bodyOf(encode.publish, serialized, rawInfo, this.owner, (holder) => this.replaceIn(holder, false)),
-    )
+    const body = bodyOf(encode.publish, serialized, rawInfo, this.owner, (holder) => this.replaceIn(holder, false))
+    this.forwardPublish(body)
   }
 
   private deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     for (const cb of this.broadcastBinaryListeners.list()) {
-      try {
-        // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
-        const result = cb(new Uint8Array(data), info)
-        if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
-      } catch (err) {
-        if (this.lifecycle.handleCallbackError(err)) return
-      }
+      // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
+      if (this.callListener(cb, new Uint8Array(data), info)) return
     }
     if (!this.peerSubscribedBinary) return
-    this.forwardPublish(
-      bodyOf(encode.publishBinary, data, rawInfo, this.owner, (holder) => this.replaceIn(holder, true)),
-    )
+    const body = bodyOf(encode.publishBinary, data, rawInfo, this.owner, (holder) => this.replaceIn(holder, true))
+    this.forwardPublish(body)
+  }
+
+  /** Calls `listener` with a publish; true where it threw `Abort`, which aborts the channel, so the rest get none. */
+  private callListener<D>(
+    listener: (data: D, info: ChannelPublishInfo) => unknown,
+    data: D,
+    info: ChannelPublishInfo,
+  ): boolean {
+    try {
+      const result = listener(data, info)
+      if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
+    } catch (err) {
+      return this.lifecycle.handleCallbackError(err)
+    }
+    return false
   }
 
   /** A publish to the page. A subscription is the page's, so it has attached before, but it may have ended since: this
