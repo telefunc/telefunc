@@ -59,8 +59,8 @@ const TAG = {
   PUBLISH_BINARY: 0x17 as const,
   /** Replayable keyed binary publish frame that requests an acknowledgement receipt. */
   PUBLISH_BINARY_ACK_REQ: 0x18 as const,
-  /** Names the channel and seq of the PUBLISH or PUBLISH_BINARY that follows it on its wire, a body all of a publish's
-   *  subscribers share, its own index and seq 0. */
+  /** Goes right before a PUBLISH or PUBLISH_BINARY on a subscriber's wire and names that subscriber's channel and seq
+   *  for it: the body is the same bytes for every subscriber, so its own index and seq are 0. */
   PUBLISH_TO: 0x19 as const,
 
   // ─── Per-channel control (carries ix) ───
