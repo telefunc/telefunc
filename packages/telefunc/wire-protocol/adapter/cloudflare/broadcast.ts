@@ -6,6 +6,7 @@ import { PUBLISH_HOLD_BYTES } from '../../constants.js'
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorScale, getDeterministicKeyBucketIndex } from './routing.js'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
+import { Fifo } from '../../../utils/Fifo.js'
 import { OrderedStubs } from './OrderedStubs.js'
 import type {
   BroadcastBinaryOnMessage,
@@ -78,8 +79,7 @@ async function warnRefusedWrite(write: Promise<void>, warning: string): Promise<
  * Payload-agnostic — each entry carries its own send function (works for both text and binary).
  */
 class CloudflareBucketPublishBuffer {
-  private entries: BufferedPublish[] = []
-  private head = 0
+  private readonly entries = new Fifo<BufferedPublish>()
   private totalBytes = 0
   private readonly maxBytes: number
   private isFlushing = false
@@ -112,11 +112,10 @@ class CloudflareBucketPublishBuffer {
     if (this.isFlushing) return
     this.isFlushing = true
     try {
-      while (this.head < this.entries.length) {
+      while (this.entries.length > 0) {
         // It leaves before its send: eviction and clear() are for what still waits, and its send holds its bytes.
-        const entry = this.entries[this.head++]!
+        const entry = this.entries.shift()!
         this.totalBytes -= entry.bytes
-        this.compact()
         try {
           const ack = await entry.send()
           entry.pending.resolve(ack)
@@ -130,11 +129,9 @@ class CloudflareBucketPublishBuffer {
   }
 
   clear(): void {
-    for (let i = this.head; i < this.entries.length; i++) {
-      this.entries[i]!.pending.reject(new Error('Keyed publish was dropped from the Cloudflare bucket buffer'))
+    while (this.entries.length > 0) {
+      this.entries.shift()!.pending.reject(new Error('Keyed publish was dropped from the Cloudflare bucket buffer'))
     }
-    this.entries.length = 0
-    this.head = 0
     this.totalBytes = 0
   }
 
@@ -153,21 +150,13 @@ class CloudflareBucketPublishBuffer {
   }
 
   private evict(): void {
-    while (this.totalBytes > this.maxBytes && this.head < this.entries.length) {
-      this.entries[this.head]!.pending.reject(
+    while (this.totalBytes > this.maxBytes && this.entries.length > 0) {
+      const entry = this.entries.shift()!
+      entry.pending.reject(
         new Error('Keyed publish was evicted from the Cloudflare bucket buffer before bucket setup completed'),
       )
-      this.totalBytes -= this.entries[this.head]!.bytes
-      this.head++
+      this.totalBytes -= entry.bytes
     }
-    this.compact()
-  }
-
-  private compact(): void {
-    if (this.head === 0) return
-    if (this.head < this.entries.length - this.head) return
-    this.entries = this.entries.slice(this.head)
-    this.head = 0
   }
 }
 
