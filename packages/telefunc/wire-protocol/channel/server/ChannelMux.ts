@@ -451,7 +451,11 @@ class ChannelMux implements UpgradeStagesOwner {
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.PING) {
       const pieces = entry.sender.pieces
-      if (pieces) assertProtocol(pieces.headroom.heartbeat(frame.took, performance.now()), 'PING took more than sent')
+      // A PING counts the bytes the page took off this wire: more than it was sent is a broken peer, and the wire ends.
+      if (pieces) {
+        const known = pieces.headroom.heartbeat(frame.took, performance.now())
+        assertProtocol(known, 'PING says the page took more bytes than this wire sent it')
+      }
       this.resetPingTimer(entry)
       this.acknowledgeArrivals(entry)
       this.pong(entry, this.answerPing(entry, frame.ended))
