@@ -411,8 +411,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
         break
       case 'not-emitted':
         if (!this.exchange.reconcileOwed) this.drainBufferedFramesToWire()
-        // An attempt that ended without its barrier goes again once the outbox drained.
-        void from.drained().then(() => this.maybeUpgrade())
+        void this.upgradeOnceDrained(from)
         break
       case 'stranded':
         this.fallbackToSse(new NetworkError('Upgrade barrier attempt timed out', true))
@@ -423,6 +422,12 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
         break
     }
     this.onReconcileDue()
+  }
+
+  /** An attempt that ended without its barrier goes again once the outbox drained. */
+  private async upgradeOnceDrained(from: UpgradeSource): Promise<void> {
+    await from.drained()
+    this.maybeUpgrade()
   }
 
   /** A completion frame of the join, applied once the connection flipped: FIN from the old wire, RECONCILED from the
