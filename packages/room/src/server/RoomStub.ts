@@ -1,15 +1,11 @@
-export { RoomStub, RoomParticipantStub, ResponseRoomGrants }
-export type { RoomStubOptions, RoomParticipantStubOptions }
+export { RoomStub, ResponseRoomGrants }
+export type { RoomStubOptions }
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { ROOM_TRACK_WANTS_MAX, ROOM_VIEW_MEMBERS_MAX } from '../shared/constants.js'
-import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import {
   assertProtocol,
-  isProtocolViolationError,
   parsePeerText,
-  ProtocolViolationError,
-  reconnectWindow,
   type PublishBody,
   type BroadcastEndOwner,
   type BroadcastKind,
@@ -17,14 +13,11 @@ import {
   type OrderingInfo,
   type ChannelPublishAck,
 } from 'telefunc/__internal'
-import { ShieldValidationError, type ShieldValidator } from 'telefunc'
-import type { RoomHandle, ServerLocalParticipant } from './room.js'
+import type { ShieldValidator } from 'telefunc'
+import type { RoomHandle } from './room.js'
 import type { RosterStream } from './lifecycle/RosterStream.js'
 import { reportRoomError } from './reportRoomError.js'
 import {
-  decodeParticipantDeclaration,
-  decodeParticipantFrame,
-  decodeParticipantRequest,
   decodeRoomDeclaration,
   decodeRoomPublish,
   decodeRoomRequest,
@@ -42,28 +35,23 @@ import {
   type ReplayHold,
 } from './lifecycle/replay.js'
 import { TailHold, type TailEntry, type TailHoldOwner } from './lifecycle/TailHold.js'
-import { EVERY_MEMBER, EVERY_TRACK, DEFAULT_TRACK, type BinaryFrame, type BinaryWantChange } from '../shared/binary.js'
+import { EVERY_MEMBER, EVERY_TRACK, type BinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './lanes/binaryWants.js'
-import { DM_FAILURE, RoomError, ROOM_BUG_MESSAGE, toRoomFailure } from '../shared/errors.js'
-import {
-  leaveCauseToWire,
-  dmNotice,
-  type MemberSnapshot,
-  type MemberWants,
-  type ParticipantStubNotice,
-  type ParticipantStubRequest,
-  type RoomCtrlEnvelope,
-  type RoomDataPublish,
-  type RoomDemandEvent,
-  type InboxMessage,
-  type RoomDmEnvelope,
-  type RoomFailure,
-  type RoomResult,
-  type RoomRosterEvent,
+import { RoomError } from '../shared/errors.js'
+import type {
+  MemberSnapshot,
+  MemberWants,
+  RoomCtrlEnvelope,
+  RoomDataPublish,
+  RoomDemandEvent,
+  RoomDmEnvelope,
+  RoomResult,
+  RoomRosterEvent,
 } from '../shared/protocol.js'
 import type { RoomDataEnvelope } from './protocol.js'
 import { toggle } from '../utils/sets.js'
 import { MemberMessageBodies, orderedBody, trackFrameBody, unorderedEventBody } from './publishBodies.js'
+import { PendingDmReplies, assertPublishShield, receiveFromPage, roomResult } from './pageRequests.js'
 assertIsNotBrowser()
 
 /** What one response's Room values grant the client on a room: echo drops for its own members, and hidden members it
@@ -82,54 +70,6 @@ class ResponseRoomGrants {
 
   onSuppressed(listener: (member: string) => void): void {
     this.suppressedListeners.push(listener)
-  }
-}
-
-/** A stub's ack DMs awaiting their `dm-reply`: null at the next `await()` once its sender timed out, or on `drop()`. */
-class PendingDmReplies {
-  private readonly pending = new Map<string, { expiresAt: number; resolve: (reply: RoomResult | null) => void }>()
-
-  /** Drops the replies whose sender already timed out. */
-  await(ackId: string): Promise<RoomResult | null> {
-    const now = performance.now()
-    for (const [id, entry] of this.pending) {
-      if (entry.expiresAt > now) break // constant offset ⇒ insertion order is deadline order; the rest are younger
-      this.pending.delete(id)
-      entry.resolve(null)
-    }
-    return new Promise((resolve) => this.pending.set(ackId, { expiresAt: now + ROOM_DM_ACK_TIMEOUT_MS, resolve }))
-  }
-
-  settle(ackId: string, reply: RoomResult): void {
-    const entry = this.pending.get(ackId)
-    // The sender drops a reply after its timeout.
-    if (!entry) return
-    this.pending.delete(ackId)
-    entry.resolve(reply)
-  }
-
-  drop(): void {
-    for (const entry of this.pending.values()) entry.resolve(null)
-    this.pending.clear()
-  }
-}
-
-async function roomResult(work: Promise<unknown>): Promise<RoomResult> {
-  try {
-    return { ok: true, value: await work }
-  } catch (err) {
-    return toRoomFailure(err, reportRoomError, ROOM_BUG_MESSAGE)
-  }
-}
-
-/** Runs a stub's handling of what its page sent: a malformed message ends the page's wire and fails its request. */
-function receiveFromPage<T>(end: ServerBroadcastEnd, handle: () => T): T | Promise<RoomFailure> {
-  try {
-    return handle()
-  } catch (err) {
-    if (!isProtocolViolationError(err)) throw err
-    end.terminateWire()
-    return Promise.resolve({ ok: false, kind: 'error', message: err.message })
   }
 }
 
@@ -500,137 +440,4 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     this.tail?.end()
     this.tail = null
   }
-}
-
-type RoomParticipantStubOptions = {
-  participant: ServerLocalParticipant
-  end: ServerBroadcastEnd
-  publishShield?: ShieldValidator
-}
-
-/** One client's hold on a server participant: its requests act as that participant, whose inbox, demand, meta and leave
- *  flow back to the client. */
-class RoomParticipantStub implements BroadcastEndOwner {
-  /** Its channel to its client. */
-  private readonly end: ServerBroadcastEnd
-  /** Its client gets every DM and notice, or loses the participant. */
-  readonly _whenBehind = 'close'
-  private readonly participant: ServerLocalParticipant
-  private readonly publishShield: ShieldValidator | undefined
-  private readonly dmReplies = new PendingDmReplies()
-
-  constructor({ participant, end, publishShield }: RoomParticipantStubOptions) {
-    this.participant = participant
-    this.publishShield = publishShield
-    this.end = end
-    end.setOwner(this)
-    end.listen((message) => receiveFromPage(end, () => this.receive(message)))
-    this.mirrorParticipant()
-  }
-
-  /** Its client publishes text as a `req-publish` request. */
-  _onPagePublish(): Promise<RoomResult> {
-    return receiveFromPage(this.end, () => {
-      throw new ProtocolViolationError('text publish on a Room participant stub')
-    })
-  }
-
-  _onPagePublishBinary(framed: Uint8Array): Promise<RoomResult> {
-    const participant = this.participant
-    return receiveFromPage(this.end, () =>
-      roomResult(participant._publishFrame(decodeParticipantFrame(framed, participant.id), framed)),
-    )
-  }
-
-  _onPageAttach(): void {
-    this.notify({ __r: 'p-meta', ...this.participant._acceptedMeta })
-    this.notify({ __r: 'demand-state', tracks: this.participant._demandedTracks })
-  }
-
-  /** A request, sent with an ack, answers with its result; an ack DM's reply, sent without one, settles that DM. */
-  private receive(message: unknown): Promise<RoomResult> | undefined {
-    if (isRoomRequest(message)) return roomResult(this.handleRequest(decodeParticipantRequest(message)))
-    const { ackId, reply } = decodeParticipantDeclaration(message)
-    this.dmReplies.settle(ackId, reply)
-    return undefined
-  }
-
-  private async handleRequest(req: ParticipantStubRequest): Promise<unknown> {
-    const participant = this.participant
-    switch (req.__r) {
-      case 'req-publish':
-        assertPublishShield(this.publishShield, req.data)
-        return await participant.publish(req.data, req.retain ? { retain: true } : undefined)
-      case 'req-set-meta':
-        return await participant._setMeta(req.meta)
-      case 'req-set-attrs':
-        return await participant._setAttributes(req.attrs)
-      case 'req-dm':
-        return await participant.send(req.to, req.data, req.ack ? { ack: true } : undefined)
-      case 'req-leave':
-        return await participant.leave()
-    }
-  }
-
-  private mirrorParticipant(): void {
-    const participant = this.participant
-    const unlistenMeta = participant._onMeta({
-      accepted: (accepted) => this.notify({ __r: 'p-meta', ...accepted }),
-      rewound: () => this.notify({ __r: 'rewound' }),
-    })
-
-    const unlistenDemand = participant.onDemand((track, wanted) =>
-      this.notify({ __r: 'demand', track: track ?? DEFAULT_TRACK, wanted }),
-    )
-
-    let left = false
-    const unlistenLeave = participant.onLeave((cause) => {
-      left = true
-      this.notify({ __r: 'left', ...leaveCauseToWire(cause) })
-      // A client back while its channel still holds it gets its leave.
-      void this.end.close({ timeout: reconnectWindow() }).catch(() => {})
-    })
-
-    this.end.onDisconnect(() => participant._setHolderConnected(false))
-    this.end.onReconnect(() => participant._setHolderConnected(true))
-    this.end.onClose(() => {
-      unlistenMeta()
-      unlistenDemand()
-      unlistenLeave()
-      this.dmReplies.drop()
-      if (!left) void participant._releaseHolder()
-    })
-  }
-
-  /** Its participant's inbox forwards here. */
-  deliver(msg: InboxMessage): void {
-    this.notify(dmNotice(msg))
-  }
-
-  /** A closed stub's client left with the participant; a closing stub's close waits for the replies to DMs it
-   *  forwarded. */
-  deliverAck(msg: InboxMessage): Promise<RoomResult> {
-    if (this.end.isClosed) return Promise.resolve(DM_FAILURE.left)
-    const reply = this.dmReplies.await(msg.ackId!)
-    this.notify(dmNotice(msg))
-    return this.end.trackAck(reply.then((answer) => answer ?? DM_FAILURE.left))
-  }
-
-  /** Its close waits for the reply's commit, as a room stub's does (`awaitDmReply`). */
-  trackReply(replied: Promise<void>): void {
-    if (!this.end.isClosed) void this.end.trackAck(replied).catch(() => {})
-  }
-
-  /** A closed stub's client gets no notice: one sent after an overflow ended it would arrive after a gap. */
-  private notify(notice: ParticipantStubNotice): void {
-    if (this.end.isClosed) return
-    this.end.deliver(unorderedEventBody(notice))
-  }
-}
-
-/** The publish shield validates a page's Room data at ingress only. */
-function assertPublishShield(validate: ShieldValidator | undefined, data: unknown): void {
-  if (!validate) return
-  const result = validate(data)
-  if (result !== true) throw new ShieldValidationError(result)
 }
