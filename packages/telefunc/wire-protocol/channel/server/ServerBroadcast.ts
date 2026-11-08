@@ -230,7 +230,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     if (binary ? holder.peerSubscribedBinary : holder.peerSubscribedText) holder.letWaitingGo()
   }
 
-  /** What it may hold: 60 s of what its page takes, within what any channel may. */
+  /** What it may hold: 60 s of what its page takes, at least 64 MiB, within what any channel may; that most before its
+   *  page's rate is measured. */
   private share(): number {
     const perMs = this.peer?.sender.queue.drainRate() ?? 0
     const most = maxPendingBytesOf()
