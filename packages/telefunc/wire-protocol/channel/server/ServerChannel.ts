@@ -24,6 +24,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import {
+  HELD_SEND_OVERHEAD_BYTES,
   admit,
   hold,
   holdsEnough,
@@ -52,13 +53,7 @@ import { SelfTime } from '../../flowControl/SelfTime.js'
 import { SendCredit } from '../../flowControl/SendCredit.js'
 import { SendsOutrun } from '../../flowControl/server/SendsOutrun.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
-import {
-  ServerChannelBuffer,
-  HELD_SEND_OVERHEAD_BYTES,
-  type BufferedSender,
-  type EntryCallback,
-  type EntryData,
-} from './ServerChannelBuffer.js'
+import { ServerChannelBuffer, type BufferedSender, type EntryCallback, type EntryData } from './ServerChannelBuffer.js'
 import { ServerReplay } from './ServerReplay.js'
 import { getChannelConfig } from '../../../node/server/serverConfig.js'
 import { assert, assertWarning } from '../../../utils/assert.js'

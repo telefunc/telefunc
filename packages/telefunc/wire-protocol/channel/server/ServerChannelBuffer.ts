@@ -1,14 +1,11 @@
-export { ServerChannelBuffer, HELD_SEND_OVERHEAD_BYTES }
+export { ServerChannelBuffer }
 export type { BufferedSender, EntryCallback, EntryData }
 
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import { TAG } from '../../wire/tags.js'
 import { HEADER } from '../../wire/header.js'
+import { HELD_SEND_OVERHEAD_BYTES } from './channelMemory.js'
 import type { IndexedPeer } from './IndexedPeer.js'
-
-/** What a send held in memory (buffered, or awaiting its answer or credit) takes beyond its payload: its callbacks and
- *  promise, about 480 B. */
-const HELD_SEND_OVERHEAD_BYTES = 512
 
 /** Callback pair for buffered entries: resolve on flush, reject where the channel ends first. */
 type EntryCallback = {

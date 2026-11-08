@@ -1,8 +1,7 @@
 export { ServerReplay }
 
 import { assert } from '../../../utils/assert.js'
-import { hold, letGo, type MemoryHolder } from './channelMemory.js'
-import { HELD_SEND_OVERHEAD_BYTES } from './ServerChannelBuffer.js'
+import { HELD_SEND_OVERHEAD_BYTES, hold, letGo, type MemoryHolder } from './channelMemory.js'
 import type { PublishBody } from './PublishBody.js'
 
 type Publish = { head: Uint8Array<ArrayBuffer>; body: PublishBody }

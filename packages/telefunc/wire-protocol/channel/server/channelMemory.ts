@@ -1,4 +1,5 @@
 export {
+  HELD_SEND_OVERHEAD_BYTES,
   addWireCopies,
   admit,
   admitPublish,
@@ -18,6 +19,9 @@ import { getChannelConfig } from '../../../node/server/serverConfig.js'
 import type { PublishBody } from './PublishBody.js'
 import type { QueueMemory } from '../channelMessages.js'
 
+/** What a held send takes beyond its payload, its callbacks and promise, rounded up: one buffered, awaiting its answer
+ *  or credit, kept to replay, or waiting in the in-memory broadcast adapter. */
+const HELD_SEND_OVERHEAD_BYTES = 512
 /** What a held publish takes beyond its share of the body: its head and its entries. */
 const HELD_PUBLISH_OVERHEAD_BYTES = 200
 

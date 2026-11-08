@@ -15,7 +15,7 @@ import { isCloudflareWorkers } from '../../utils/isCloudflareWorkers.js'
 import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import { CHANNEL_HOLD_MAX_BYTES } from '../constants.js'
 import { ChannelOverflowError } from '../channel/channelErrors.js'
-import { HELD_SEND_OVERHEAD_BYTES } from '../channel/server/ServerChannelBuffer.js'
+import { HELD_SEND_OVERHEAD_BYTES } from '../channel/server/channelMemory.js'
 import type { WirePublishInfo } from '../wire/publishInfo.js'
 
 /** Transport-level publish result. */
