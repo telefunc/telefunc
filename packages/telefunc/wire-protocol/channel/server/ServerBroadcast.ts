@@ -23,12 +23,12 @@ import type {
 } from '../../broadcast/broadcastAdapter.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
-import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
+import { assertUsage, assertWarning } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { admitPublish, queueMemory, type MemoryHolder } from './channelMemory.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { Listeners } from '../../../utils/Listeners.js'
-import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
+import { ChannelOverflowError } from '../channelErrors.js'
 import { ACK_STATUS, ERROR_REASON, encode, type AckResultStatus } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { ChannelDataFrame } from '../../wire/frame.js'
@@ -102,8 +102,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
-    this.ensureBroadcast()
-    if (!this.adapter) throw new ChannelClosedError()
     const serialized = stringify(data)
     const ret = this.lifecycle.trackAck(Promise.resolve(this.publishBroadcast(serialized)))
     ret.catch(() => {})
@@ -116,7 +114,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {
     if (options.signal?.aborted) return () => {}
-    this.ensureBroadcast()
     const remove = this.broadcastListeners.add(callback, {
       ...options,
       onRemove: () => this.unsubscribeUnusedBroadcasts(),
@@ -127,8 +124,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
-    this.ensureBroadcast()
-    if (!this.adapter) throw new ChannelClosedError()
     const ret = this.lifecycle.trackAck(Promise.resolve(this.publishBinaryBroadcast(data)))
     ret.catch(() => {})
     return ret
@@ -136,7 +131,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
     if (options.signal?.aborted) return () => {}
-    this.ensureBroadcast()
     const remove = this.broadcastBinaryListeners.add(callback, {
       ...options,
       onRemove: () => this.unsubscribeUnusedBroadcasts(),
@@ -305,7 +299,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     if (binary) this.peerSubscribedBinary = subscribed
     else this.peerSubscribedText = subscribed
     if (subscribed) {
-      this.ensureBroadcast()
       if (binary) this.subscribeBinaryBroadcast()
       else this.subscribeBroadcast()
       return
@@ -348,15 +341,15 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   // --- Internal broadcast helpers ---
 
-  private ensureBroadcast(): void {
-    if (this.adapter) return
-    this.adapter = getBroadcastAdapter()
+  /** The installed adapter, which the channel keeps from its first use. */
+  private broadcastAdapter(): BroadcastAdapter {
+    this.adapter ??= getBroadcastAdapter()
+    return this.adapter
   }
 
   private subscribeBroadcast(): void {
     if (this.unsubBroadcast) return
-    assert(this.adapter)
-    this.unsubBroadcast = this.adapter.subscribe(
+    this.unsubBroadcast = this.broadcastAdapter().subscribe(
       this.key,
       (serialized, rawInfo) => this.deliverBroadcastMessage(serialized, rawInfo),
       this.wireRequest,
@@ -365,8 +358,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   private subscribeBinaryBroadcast(): void {
     if (this.unsubBinaryBroadcast) return
-    assert(this.adapter)
-    this.unsubBinaryBroadcast = this.adapter.subscribeBinary(
+    this.unsubBinaryBroadcast = this.broadcastAdapter().subscribeBinary(
       this.key,
       (data, rawInfo) => this.deliverBroadcastBinaryMessage(data, rawInfo),
       this.wireRequest,
@@ -374,18 +366,15 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   }
 
   private publishBroadcast(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
-    assert(this.adapter)
-    return receiptOf(this.key, this.adapter.publish(this.key, serialized))
+    return receiptOf(this.key, this.broadcastAdapter().publish(this.key, serialized))
   }
 
   private publishBinaryBroadcast(data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
-    assert(this.adapter)
-    return receiptOf(this.key, this.adapter.publishBinary(this.key, data))
+    return receiptOf(this.key, this.broadcastAdapter().publishBinary(this.key, data))
   }
 
   private async dispatchPublishAckReq(serialized: string, seq: number): Promise<void> {
     try {
-      this.ensureBroadcast()
       const validateData = this._validators.get('data')
       const verdict = validateData ? validateData(parse(serialized) as ChannelData<T>) : true
       // `shield-error` status lets the client reject its `publish()` promise with a branded
@@ -400,7 +389,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   private async dispatchPublishBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
     try {
-      this.ensureBroadcast()
       const result = await this.publishBinaryBroadcast(data)
       this.sendAckRes(seq, stringify(result))
     } catch (err) {
