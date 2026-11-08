@@ -35,7 +35,7 @@ import { NetworkError } from '../../../shared/NetworkError.js'
 import { channelMessages } from '../channelMessages.js'
 import { forListener, listenerAnswer } from '../listenerAnswer.js'
 import { isPromise } from '../../../utils/isPromise.js'
-import { CHANNEL_CONNECT_TTL_MS, TIMER_DELAY_MAX_MS, CHANNEL_HOLD_MAX_BYTES } from '../../constants.js'
+import { TIMER_DELAY_MAX_MS, CHANNEL_HOLD_MAX_BYTES } from '../../constants.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
 import { creditWindowOf, type CreditOwner } from '../../flowControl/credit.js'
@@ -438,7 +438,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
           new NetworkError('Channel timed out: no client connected within TTL after response was sent', true),
           { pageGone: true },
         )
-      }, CHANNEL_CONNECT_TTL_MS),
+      }, getChannelConfig().connectTtl),
     )
   }
 

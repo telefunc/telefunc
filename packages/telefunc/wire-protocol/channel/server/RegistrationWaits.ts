@@ -3,7 +3,7 @@ export { RegistrationWaits }
 import { expireAwaited, type AwaitedChannel } from './AwaitedChannels.js'
 
 /** The awaited channels on a mux's wires that wait for their channel's registration, by id, in the order they began;
- *  one that waits `CHANNEL_CONNECT_TTL_MS` in vain expires. */
+ *  one that waits `connectTtl` in vain expires. */
 class RegistrationWaits {
   private readonly byId = new Map<string, Set<AwaitedChannel>>()
 

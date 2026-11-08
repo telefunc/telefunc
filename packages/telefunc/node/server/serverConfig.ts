@@ -33,6 +33,7 @@ import {
   type BroadcastTransport,
 } from '../../wire-protocol/broadcast/broadcastAdapter.js'
 import {
+  CHANNEL_CONNECT_TTL_MS,
   CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
@@ -104,6 +105,11 @@ type ChannelConfigUser = {
    */
   maxMemory?: number | string
   /**
+   * How long, in milliseconds, a newly created channel waits for the client to
+   * connect before it is closed automatically.
+   */
+  connectTtl?: number
+  /**
    * When using SSE channels, upstream client-to-server frames are batched for at
    * most this many milliseconds before Telefunc sends a POST.
    *
@@ -127,6 +133,7 @@ type ChannelConfigResolved = {
   idleTimeout: number
   pingInterval: number
   maxMemory: number
+  connectTtl: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
 }
@@ -340,6 +347,7 @@ function resolveChannelConfig(channel: ChannelConfigUser): ChannelConfigResolved
     // A long reconnect window doesn't pin an idle wire, and a short one (Cloudflare's) doesn't wait longer than itself.
     idleTimeout: channel.idleTimeout ?? Math.min(reconnectTimeout, CHANNEL_IDLE_TIMEOUT_MS),
     pingInterval: channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
+    connectTtl: channel.connectTtl ?? CHANNEL_CONNECT_TTL_MS,
     maxMemory:
       (channel.maxMemory as number | undefined) ??
       globalObject.adapterMaxMemory ??
@@ -508,6 +516,14 @@ function applyChannelConfig(val: unknown): void {
         assertUsage(
           value >= CHANNEL_PING_INTERVAL_MIN_MS,
           `\`${configPath}\` should be at least ${CHANNEL_PING_INTERVAL_MIN_MS}: more pings than that flood the wire`,
+        )
+        next[key] = value
+        break
+      case 'connectTtl':
+        assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
+        assertUsage(
+          value >= CHANNEL_CONNECT_TTL_MS,
+          `\`${configPath}\` should be at least ${CHANNEL_CONNECT_TTL_MS}: in less, a channel made while its client's connection was down closes before the client reconnects`,
         )
         next[key] = value
         break

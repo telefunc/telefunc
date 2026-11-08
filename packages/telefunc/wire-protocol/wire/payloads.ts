@@ -19,7 +19,7 @@ type ReconcileOpenEntry = {
   id: string
   ix: number
   lastSeq: number
-  /** First reconcile: the server awaits it up to `CHANNEL_CONNECT_TTL_MS`, then an ATTACH_RESULT settles it; others fail fast. */
+  /** First reconcile: the server awaits it up to `connectTtl`, then an ATTACH_RESULT settles it; others fail fast. */
   initial?: true
   /** A broadcast's subscriptions as of this (re)attach, applied before its `onOpen` fires. */
   broadcast?: { text: boolean; binary: boolean }

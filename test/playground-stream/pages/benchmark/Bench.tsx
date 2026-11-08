@@ -455,7 +455,7 @@ async function measureThroughputCell(
   )
   const instanceList = opens.map((o) => o.instance)
   // Each channel has a connection of its own, and while one of a page's WebSockets floods a host, Chrome holds up its
-  // next handshake to that host for seconds: a channel still connecting as the others flood can miss the server's wait for it to connect.
+  // next handshake to that host for seconds: a channel still connecting as the others flood can miss connectTtl.
   await Promise.all(opens.map((o) => o.channel.opened))
   const binaryPayload = scenario.binary ? new Uint8Array(bytes).fill(0xab) : null
   const textPayload = scenario.binary ? null : 'x'.repeat(bytes)

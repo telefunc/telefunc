@@ -8,7 +8,6 @@ import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
   CREDIT_MSG_WINDOW_MAX,
-  CHANNEL_CONNECT_TTL_MS,
   CREDIT_WINDOW_MAX_BYTES,
   MAX_CHANNELS_PER_CONNECTION,
   TIMER_DELAY_MAX_MS,
@@ -85,6 +84,7 @@ type MuxServerOptions = {
   pingInterval: number
   pingDeadline: number
   creditWindow: number
+  connectTtl: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
   transports: ChannelTransports
@@ -154,6 +154,11 @@ class ChannelMux implements UpgradeStagesOwner {
 
   private get options(): MuxServerOptions {
     return (this.resolvedOptions ??= resolveMuxServerOptions())
+  }
+
+  /** Exposed for transport-level race timers (SSE's `waitForWire`). */
+  get connectTtl(): number {
+    return this.options.connectTtl
   }
 
   // ── ServerChannel registry ──────────────────────────────────────────
@@ -726,7 +731,7 @@ class ChannelMux implements UpgradeStagesOwner {
       phase: 'waiting',
       ttl: null,
     }
-    this.registrationWaits.wait(awaited, CHANNEL_CONNECT_TTL_MS)
+    this.registrationWaits.wait(awaited, this.options.connectTtl)
     entry.state.awaited.add(awaited)
   }
 
@@ -896,6 +901,7 @@ function resolveMuxServerOptions(): MuxServerOptions {
     pingInterval: c.pingInterval,
     pingDeadline: pingDeadlineOf(c),
     creditWindow: creditWindowOf(c.maxMemory),
+    connectTtl: c.connectTtl,
     sseFlushThrottle: c.sseFlushThrottle,
     ssePostIdleFlushDelay: c.ssePostIdleFlushDelay,
     transports: c.transports,
