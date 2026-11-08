@@ -520,13 +520,6 @@ function applyChannelConfig(val: unknown): void {
         next[key] = value
         break
       case 'connectTtl':
-        assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
-        assertUsage(
-          value >= CHANNEL_CONNECT_TTL_MS,
-          `\`${configPath}\` should be at least ${CHANNEL_CONNECT_TTL_MS}: in less, a channel made while its client's connection was down closes before the client reconnects`,
-        )
-        next[key] = value
-        break
       case 'idleTimeout':
       case 'sseFlushThrottle':
       case 'ssePostIdleFlushDelay':
