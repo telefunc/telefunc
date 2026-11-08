@@ -29,11 +29,10 @@ function orderedBody(serialized: string, info: OrderingInfo): PublishBody {
   return publishBody(serialized, info, null)
 }
 
-/** A track's frame as its lane carried it. A page that falls behind may miss one published with
- *  `whenBehind: 'missOldest'`, among its track's oldest. */
+/** A track's frame as its lane carried it. One published with `lossy: true` gives way to a newer one of its track that no
+ *  wire has taken. */
 function trackFrameBody(frame: BinaryFrame, framed: Uint8Array, info: OrderingInfo): PublishBody {
-  const lossyStream =
-    frame.whenBehind === 'close' ? null : encodeLaneKey({ kind: 'binary', member: frame.from, track: frame.track })
+  const lossyStream = frame.lossy ? encodeLaneKey({ kind: 'binary', member: frame.from, track: frame.track }) : null
   return publishBody(framed, info, lossyStream)
 }
 

@@ -41,8 +41,6 @@ type RoomParticipantStubOptions = {
 class RoomParticipantStub implements BroadcastEndOwner {
   /** Its channel to its client. */
   private readonly end: ServerBroadcastEnd
-  /** Its client gets every DM and notice, or loses the participant. */
-  readonly _whenBehind = 'close'
   private readonly participant: ServerLocalParticipant
   private readonly publishShield: ShieldValidator | undefined
   private readonly dmReplies = new PendingDmReplies()

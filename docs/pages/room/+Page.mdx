@@ -342,7 +342,7 @@ me.onLeave((cause) => {
 })
 ```
 
-A page that falls behind what the server can hold for it misses the oldest frames of its binary tracks, and each track's `info.seq` jumps over what it missed (see <Link href="#stream-audio-or-video" />). It never misses a message, a join, a leave or a `meta` change: it gets `'disconnected'` when those are more than the server can hold for it.
+A page that falls behind what the server can hold for it gets `'disconnected'`. It never misses a message, a join, a leave, a `meta` change or a frame, except on a track published with `lossy: true`, where it skips to the newest frame (see <Link href="#stream-audio-or-video" />).
 
 
 ## Run a game loop or a bot on the server
@@ -368,7 +368,7 @@ export async function onStartMatch() {
 }
 ```
 
-> A page that falls behind gets every message, so state it may skip belongs on a <Link href="#stream-audio-or-video">track</Link>, where it skips to the newest frame.
+> A page that falls behind gets every message, so state it may skip belongs on a <Link href="#stream-audio-or-video">lossy track</Link>, where it skips to the newest frame.
 
 A hidden participant can do everything a participant does, but players don't see it among the room's participants.
 
@@ -413,7 +413,7 @@ Publish each source on its own track, and subscribe to the tracks you show:
 // encodeCamera(): your encoder, e.g. WebCodecs' VideoEncoder
 // live video: don't await, or each frame waits a round trip for the previous one
 encodeCamera((frame, isKeyframe) =>
-  me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe }),
+  me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe, lossy: true }),
 )
 
 // The participants who watch; showVideo(): your decoder, e.g. WebCodecs' VideoDecoder
@@ -425,23 +425,13 @@ room.onJoin(watch)
 
 With `retain: isKeyframe`, a viewer who arrives mid-stream starts from the last keyframe, see <Link href="#give-late-joiners-the-current-state" />.
 
-On a track, `info.seq` counts its sender's frames on that track. A viewer that falls behind misses the oldest of them, and `info.seq` jumps over exactly those. Where a missed frame makes the next ones wrong, give the track `whenBehind: 'close'` in its first publish, which it keeps: a viewer then gets every frame of it, and gets `'disconnected'` where the server can't hold them for it:
+On a track, `info.seq` counts its sender's frames on that track. A viewer that falls behind gets every frame, and gets `'disconnected'` where the server can't hold them for it. Where only the newest frame matters, such as a position or live audio and video, give the track `lossy: true` in its first publish, which it keeps: a newer frame then replaces one no connection has taken yet, and a viewer's `info.seq` jumps over what it skipped:
 
 ```js
 // Environment: client
 
-me.publishBinary(position, { track: 'cursor' }) // a viewer that falls behind skips to the newest
-me.publishBinary(stroke, { track: 'drawing', whenBehind: 'close' }) // a viewer never misses one
-```
-
-A viewer that would rather leave than miss any frame gets its room with `whenBehind: 'close'`:
-
-```js
-// Environment: server
-
-export async function onWatchBoard(boardId) {
-  return await Room.get(boardId, { whenBehind: 'close' }) // this page never skips a frame
-}
+me.publishBinary(position, { track: 'cursor', lossy: true }) // a viewer that falls behind skips to the newest
+me.publishBinary(stroke, { track: 'drawing' }) // a viewer never misses one
 ```
 
 To send frames only while someone watches, use `onDemand()`, which also fires, as you call it, for the tracks already watched:
@@ -454,7 +444,7 @@ me.onDemand((track, on) => (on ? wanted.add(track) : wanted.delete(track))) // n
 // live video: don't await, or each frame waits a round trip for the previous one
 encodeCamera((frame, isKeyframe) => {
   if (wanted.has('camera') || wanted.has(null)) {
-    me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe })
+    me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe, lossy: true })
   }
 })
 ```
@@ -472,7 +462,7 @@ Publish with `retain: true`, and a room that starts listening later receives tha
 // Environment: client
 
 await me.publish({ phase: 'voting' }, { retain: true })
-await me.publishBinary(keyframe, { track: 'camera', meta: { isKeyframe: true }, retain: true })
+await me.publishBinary(keyframe, { track: 'camera', meta: { isKeyframe: true }, retain: true, lossy: true })
 ```
 
 A late joiner gets the last retained message, and each participant's last retained frame on each track, as long as its publisher is in the room. For state that outlives the participants, such as a game phase, publish it from a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>.
@@ -589,8 +579,8 @@ Server-side.
 | Method | Description |
 |---|---|
 | `Room.create(id, options?)` | Create a room. Throws if it exists. |
-| `Room.get(id, { tail?, whenBehind? }?)` | Get a room. Throws if it doesn't exist. With `tail: true`, the client also gets the messages published after the history you load (see <Link href="#load-chat-history" />). With `whenBehind: 'close'`, the client leaves rather than miss a frame (see <Link href="#stream-audio-or-video" />). |
-| `Room.getOrCreate(id, { ...options, tail?, whenBehind? }?)` | Get a room, or create it. `tail` and `whenBehind` as for `Room.get()`. |
+| `Room.get(id, { tail? }?)` | Get a room. Throws if it doesn't exist. With `tail: true`, the client also gets the messages published after the history you load (see <Link href="#load-chat-history" />). |
+| `Room.getOrCreate(id, { ...options, tail? }?)` | Get a room, or create it. `tail` as for `Room.get()`. |
 | `Room.guard(room, hooks)` | Add `onBefore*()` and `onAfter*()` hooks to a room, once, and say who may join it from the client. |
 | `Room.join(id, { meta?, selfDelivery?, identity?, hidden? }?)` | Join a room from the server, without getting the room first. |
 | `Room.list({ prefix? }?)` | List the open rooms. |
@@ -624,7 +614,7 @@ Properties: `id`, `meta`, `count`.
 | Method | Description |
 |---|---|
 | `publish(message, { coalesce?, retain? }?)` | Send to everyone. |
-| `publishBinary(data, { track?, meta?, retain?, whenBehind? }?)` | Send binary to everyone. |
+| `publishBinary(data, { track?, meta?, retain?, lossy? }?)` | Send binary to everyone. |
 | `send(to, message, { ack? }?)` | Send to one participant. |
 | `listen(cb)` | Receive private messages; return a value to reply. |
 | `setMeta(meta)` / `setAttributes(attributes)` | Replace / update your `meta`. |

@@ -211,7 +211,7 @@ function sendVideo(camera: MediaStream, me: Me) {
       chunk.copyTo(frame)
       const isKeyframe = chunk.type === 'key'
       // Live video: not awaited, or each frame waits a round trip for the previous one
-      void me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe })
+      void me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe, lossy: true })
     },
     error(err) {
       console.error('encode error:', err)

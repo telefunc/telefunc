@@ -374,12 +374,12 @@ class ClientRoom extends RoomStateView implements Room {
     local._onLeft(cause)
   }
 
-  /** The server let this page's oldest frames of a track go, as it fell behind what the server holds for it. */
+  /** The server let frames of this page's lossy tracks go, as it fell behind. */
   private warnFramesMissed(): void {
     if (this.framesMissedWarned) return
     this.framesMissedWarned = true
     console.warn(
-      `[@telefunc/room][Warning] Room "${this.id}" missed binary frames, as this client fell behind what the server holds for it: \`info.seq\` of each track shows its gap.`,
+      `[@telefunc/room][Warning] Room "${this.id}" skipped frames of its lossy tracks, as this client fell behind: \`info.seq\` of each track shows its gap.`,
     )
   }
 

@@ -62,8 +62,8 @@ abstract class ParticipantBase implements LocalParticipant {
   /** DMs held until the first `listen()` (`null` once flushed); an ack DM carries the resolver of its reply. */
   private pendingInbox: Fifo<HeldDm> | null = null
   private pendingInboxBytes = 0
-  /** The `whenBehind` each track's first publish gave it. */
-  private readonly trackWhenBehind = new Map<TrackKey, 'missOldest' | 'close'>()
+  /** The `lossy` each track's first publish gave it. */
+  private readonly trackLossy = new Map<TrackKey, boolean>()
 
   constructor({ participant, rewinds }: ParticipantBaseOptions) {
     this.id = participant.id
@@ -114,18 +114,17 @@ abstract class ParticipantBase implements LocalParticipant {
   /** An ack DM's reply to a bug in a `listen()` handler, naming where `_reportError` logged it. */
   protected abstract readonly _bugMessage: string
 
-  /** `publishBinary()`'s frame. A track keeps the `whenBehind` its first publish gave it, which a later one may leave
-   *  out. */
+  /** `publishBinary()`'s frame. A track keeps the `lossy` its first publish gave it, which a later one may leave out. */
   protected encodeBinaryFrame(data: Uint8Array, options?: BinaryPublishOptions): Uint8Array {
     const track = options?.track ?? DEFAULT_TRACK
-    const declared = this.trackWhenBehind.get(track)
-    const whenBehind = options?.whenBehind ?? declared ?? 'missOldest'
+    const declared = this.trackLossy.get(track)
+    const lossy = options?.lossy ?? declared ?? false
     assertUsage(
-      declared === undefined || whenBehind === declared,
-      `publishBinary(): the ${track === DEFAULT_TRACK ? 'default' : `"${track}"`} track's first publish gave it whenBehind: '${declared}', which a track keeps`,
+      declared === undefined || lossy === declared,
+      `publishBinary(): the ${track === DEFAULT_TRACK ? 'default' : `"${track}"`} track's first publish gave it lossy: ${declared}, which a track keeps`,
     )
-    const framed = encodeBinaryFrame(this.id, data, { ...options, whenBehind })
-    if (declared === undefined) this.trackWhenBehind.set(track, whenBehind)
+    const framed = encodeBinaryFrame(this.id, data, { ...options, lossy })
+    if (declared === undefined) this.trackLossy.set(track, lossy)
     return framed
   }
 

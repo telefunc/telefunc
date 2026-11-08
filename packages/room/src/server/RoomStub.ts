@@ -92,7 +92,6 @@ type RoomStubOptions = {
 class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   /** Its channel to its client. */
   readonly end: ServerBroadcastEnd
-  readonly _whenBehind: 'missOldest' | 'close'
   private readonly room: RoomHandle
   private readonly roster: RoomStubOptions['roster']
   private readonly publishShield: ShieldValidator | undefined
@@ -116,7 +115,6 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
 
   constructor({ room, roster, end, publishShield, grants }: RoomStubOptions) {
     this.room = room
-    this._whenBehind = room.whenBehind
     this.roster = roster
     this.publishShield = publishShield
     this.selfSuppressed = grants.selfSuppressed
@@ -164,7 +162,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     if (this.missedWarned) return
     this.missedWarned = true
     console.warn(
-      `[@telefunc/room][Warning] A client of room "${this.room.model.roomId}" fell behind what the server holds for it, and misses the oldest frames of its tracks: \`info.seq\` of each track shows its gap.`,
+      `[@telefunc/room][Warning] A client of room "${this.room.model.roomId}" fell behind and skipped frames of its lossy tracks: \`info.seq\` of each track shows its gap.`,
     )
   }
 

@@ -1,7 +1,6 @@
 export {
   onCreateRoom,
   onGetRoom,
-  onGetRoomClosingBehind,
   onGetRoomTail,
   onGetOrCreateRoom,
   onGetOrCreateRoomTail,
@@ -40,6 +39,7 @@ export {
   onRoomFlood,
   onRoomMetaFlood,
   onRoomTracks,
+  onRoomLossyNearBudget,
   onGetWatchedCount,
   onRoomRelease,
   onFailBackend,
@@ -128,10 +128,6 @@ async function onCreateRoomWithBytes(roomId: string) {
 
 async function onGetRoom(roomId: string) {
   return anyoneCanJoin(await Room.get(roomId))
-}
-
-async function onGetRoomClosingBehind(roomId: string) {
-  return anyoneCanJoin(await Room.get(roomId, { whenBehind: 'close' }))
 }
 
 /** Tail starts at serialization, covering the gap before the client's first subscribe. */
@@ -499,9 +495,8 @@ async function onRoomMetaFlood(roomId: string) {
   await Promise.all(members.map((member, n) => member.setMeta({ name: `M${n}`, filler: ''.padEnd(256 * 1024) })))
 }
 
-/** A speaker says 'before', then, run by the test while the page is offline, sends 8 `pointer` frames of 256 KiB and
- *  goes quiet on that track, then 16 rounds of a `cursor` frame, a `drawing` frame published with
- *  `whenBehind: 'close'`, and a message. The `heavy` track's frames are 256 KiB each, 4 MiB in all: twice what its
+/** A speaker says 'before', then, run by the test while the page is offline, sends 8 lossy `pointer` frames of 256 KiB
+ *  and goes quiet on that track, then 16 rounds of a lossy `cursor` frame, a reliable `drawing` frame, and a message. The `heavy` track's frames are 256 KiB each, 4 MiB in all: twice what its
  *  lane's `maxMemory` lets the server hold. */
 async function onRoomTracks(roomId: string, heavy: 'cursor' | 'drawing') {
   const room = await Room.get(roomId)
@@ -510,15 +505,29 @@ async function onRoomTracks(roomId: string, heavy: 'cursor' | 'drawing') {
   const frame = (track: string) => new Uint8Array(track === heavy ? 256 * 1024 : 1024)
   onServerAction(`roomTracks_${roomId}`, async () => {
     for (let n = 0; n < 8; n++)
-      await speaker.publishBinary(new Uint8Array(256 * 1024), { track: 'pointer', meta: { n } })
+      await speaker.publishBinary(new Uint8Array(256 * 1024), { track: 'pointer', meta: { n }, lossy: true })
     for (let n = 0; n < 16; n++) {
-      await speaker.publishBinary(frame('cursor'), { track: 'cursor', meta: { n } })
-      // Its first publish gives the track whenBehind: 'close', which the later ones keep.
-      const declared = n === 0 ? ({ whenBehind: 'close' } as const) : {}
-      await speaker.publishBinary(frame('drawing'), { track: 'drawing', meta: { n }, ...declared })
+      // Its first publish makes the track lossy, which the later ones keep.
+      await speaker.publishBinary(frame('cursor'), { track: 'cursor', meta: { n }, ...(n === 0 && { lossy: true }) })
+      await speaker.publishBinary(frame('drawing'), { track: 'drawing', meta: { n } })
       await speaker.publish(String(n))
     }
     cleanupState[`roomTracks_${roomId}`] = 'done'
+  })
+  await speaker.publish('before')
+}
+
+/** A speaker sends, run by the test while the page is offline, one 600 KiB frame on each of three lossy tracks: past 7/8 of
+ *  its lane's 2 MiB, so the server tries to free what it holds, and within it, so it needn't let the page go. */
+async function onRoomLossyNearBudget(roomId: string) {
+  const room = await Room.get(roomId)
+  const speaker = await room.join({ meta: { name: 'Speaker' } })
+  awayMembers.set(roomId, [speaker])
+  onServerAction(`roomLossyNearBudget_${roomId}`, async () => {
+    for (const track of ['a', 'b', 'c']) {
+      await speaker.publishBinary(new Uint8Array(600 * 1024), { track, lossy: true })
+    }
+    cleanupState[`roomLossyNearBudget_${roomId}`] = 'done'
   })
   await speaker.publish('before')
 }

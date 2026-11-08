@@ -6,7 +6,6 @@ import { keepReachable } from '../keepReachable'
 import {
   onCreateRoom,
   onGetRoom,
-  onGetRoomClosingBehind,
   onGetRoomTail,
   onGetOrCreateRoom,
   onGetOrCreateRoomTail,
@@ -45,6 +44,7 @@ import {
   onRoomFlood,
   onRoomMetaFlood,
   onRoomTracks,
+  onRoomLossyNearBudget,
   onGetWatchedCount,
   onRoomRelease,
   onFailBackend,
@@ -217,9 +217,9 @@ function Room() {
   }
 
   /** What reaches a page offline while its room's speaker sends 16 rounds on two tracks and its messages. */
-  const tracksBehind = (heavy: 'cursor' | 'drawing', whenBehind?: 'close') => async () => {
+  const tracksBehind = (heavy: 'cursor' | 'drawing') => async () => {
     const roomId = await createRoomId(`tracks-${heavy}`)
-    const view = whenBehind === 'close' ? await onGetRoomClosingBehind(roomId) : await onGetRoom(roomId)
+    const view = await onGetRoom(roomId)
     const text: { data: string; seq: number }[] = []
     view.subscribe((data, info) => text.push({ data: data as string, seq: info.seq }))
     type Frame = { n: number; seq: number }
@@ -2061,8 +2061,8 @@ function Room() {
         setResult(JSON.stringify({ seen, closed }))
       })}
 
-      {scenario('track-when-behind', null, "A track keeps its first publish's whenBehind", async () => {
-        const [, view] = await createRoom('track-when-behind')
+      {scenario('track-lossy', null, "A track keeps its first publish's lossy", async () => {
+        const [, view] = await createRoom('track-lossy')
         const me = await view.join({ meta: { name: 'Me' } })
         const frame = new Uint8Array(1)
         const thrown = (publish: () => unknown) => {
@@ -2075,10 +2075,10 @@ function Room() {
         }
         setResult(
           JSON.stringify({
-            first: thrown(() => me.publishBinary(frame, { track: 'drawing', whenBehind: 'close' })),
-            omitted: thrown(() => me.publishBinary(frame, { track: 'drawing' })),
-            other: thrown(() => me.publishBinary(frame, { track: 'drawing', whenBehind: 'missOldest' })),
-            defaultTrack: thrown(() => me.publishBinary(frame, { whenBehind: 'close' })),
+            first: thrown(() => me.publishBinary(frame, { track: 'cursor', lossy: true })),
+            omitted: thrown(() => me.publishBinary(frame, { track: 'cursor' })),
+            other: thrown(() => me.publishBinary(frame, { track: 'cursor', lossy: false })),
+            defaultTrack: thrown(() => me.publishBinary(frame, { lossy: true })),
           }),
         )
       })}
@@ -2095,19 +2095,22 @@ function Room() {
         setResult(JSON.stringify({ closed, myCause }))
       })}
 
-      {scenario(
-        'tracks-cursor',
-        null,
-        "Offline past maxMemory on a whenBehind: 'missOldest' track",
-        tracksBehind('cursor'),
-      )}
+      {scenario('tracks-cursor', null, 'Offline past maxMemory on a lossy track', tracksBehind('cursor'))}
 
-      {scenario(
-        'tracks-drawing',
-        null,
-        "Offline past maxMemory on a whenBehind: 'close' track",
-        tracksBehind('drawing'),
-      )}
+      {scenario('tracks-drawing', null, 'Offline past maxMemory on a reliable track', tracksBehind('drawing'))}
+
+      {scenario('lossy-near-budget', null, 'Offline with only lossy tracks near maxMemory', async () => {
+        const [roomId, view] = await createRoom('lossy-near-budget')
+        const got = new Set<string | null>()
+        view.subscribeBinary((_data, info) => got.add(info.track))
+        let closed = false
+        view.onClose(() => (closed = true))
+        await view.join({ meta: { name: 'Me' } })
+        await onRoomLossyNearBudget(roomId)
+        setResult(JSON.stringify({ roomId }))
+        await pollUntil(() => ({ done: got.size === 3 || closed }), 150)
+        setResult(JSON.stringify({ roomId, tracks: [...got].sort(), closed }))
+      })}
 
       {scenario('slow-link', 'Slow link', '640 KB each way', async () => {
         const [roomId, view] = await createRoom('slow-link')
