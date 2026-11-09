@@ -164,6 +164,8 @@ class ReceiveCredit {
     this.sendWait = null
     this.roundTrips = null
     this.downlink = null
+    if (this.confirmTimer !== null) clearTimeout(this.confirmTimer)
+    this.confirmTimer = null
   }
 
   /** Frames held back arrived at once: the round in flight doesn't count them as delivered within its round trip. */
