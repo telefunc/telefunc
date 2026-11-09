@@ -1552,8 +1552,8 @@ function ChannelDemo() {
   const testBroadcastBehind = useCallback(async () => {
     setChannelState((s) => ({ ...s, broadcastBehind: null }))
     const { broadcast, control } = await openChannel(() => onChannelPublishesBehind(256 * 1024, true))
-    // The page's own 20 publishes at once, each its ordinal at the same size: one still waiting to go takes the next
-    // one's data in its place, and both get its receipt. The server's subscription gets the last.
+    // The page's own 20 publishes at once, each its ordinal at the same size: on a link that keeps up each goes with a
+    // receipt of its own, and the server's subscription gets the last.
     const publishOrdinals = async (from: number) => {
       const receipts = await Promise.all(
         Array.from({ length: 20 }, (_, n) => broadcast.publish(`${from + n}:`.padEnd(256 * 1024, 'x'))),
