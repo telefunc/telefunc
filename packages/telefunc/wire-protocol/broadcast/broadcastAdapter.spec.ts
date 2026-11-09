@@ -323,6 +323,45 @@ describe('Broadcast shield validation', () => {
   })
 })
 
+describe('lossy broadcast under memory pressure', () => {
+  // Another owner's publish sheds it: the channel ends once its own owner runs, but what it holds goes at once.
+  it('lets go of the newest it holds for a page that is behind', async () => {
+    const broadcast = new ServerBroadcast<string>({ key: 'room:lossy-shed', lossy: true })
+    broadcast._registerChannel()
+    broadcast._attachPeer(
+      new IndexedPeer({
+        sender: {
+          send() {},
+          carry() {},
+          bufferedAmount: () => 0,
+          behindAfter: 0,
+          deliveredBefore: () => 0,
+          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+          queue: {
+            waitingPublishes: () => 0,
+            dropWaitingPublishes() {},
+            dropWaitingFromPublish() {},
+            drainRate: () => 0,
+          },
+        },
+        index: 7,
+        replay: broadcast._replayBuffer!,
+      }),
+      { broadcast: { text: true, binary: false } },
+    )
+    await broadcast.publish('first')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await broadcast.publish('x'.repeat(256 * 1024))
+    expect(broadcast.newestUnhanded).toBeDefined()
+    expect(broadcast.heldBytes).greaterThan(256 * 1024)
+
+    broadcast.shed(0, 'another owner')
+
+    expect(broadcast.newestUnhanded).toBe(undefined)
+    expect(broadcast.heldBytes).lessThan(1024)
+  })
+})
+
 // ───────────────────────────────────────────────────────────────────────────
 // DefaultBroadcastAdapter with a custom transport — multi-node behavior. Each
 // node has its own DefaultBroadcastAdapter; the transport simulates the bus.

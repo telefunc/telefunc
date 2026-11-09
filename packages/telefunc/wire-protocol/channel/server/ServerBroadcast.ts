@@ -303,6 +303,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   shed(toBytes: number, owner?: string): void {
     const replay = this._replayBuffer
     if (this._phase === 'ended' || !replay || (this.lossy && toBytes > 0)) return
+    if (toBytes === 0) this.dropHeld()
     const gap = replay.dropFromGap(toBytes, this.unhanded()) > 0
     if (gap) {
       this.peer?.sender.queue.dropWaitingFromPublish(this.peer.index)
