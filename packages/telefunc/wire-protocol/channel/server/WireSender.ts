@@ -1,10 +1,10 @@
 export { WireSender }
 
-import { LOSSY_CONFIRM_SLACK_MS, WIRE_QUEUE_DELAY_MS, WIRE_SEND_BACKLOG_BASE_BYTES } from '../../constants.js'
-import { encode } from '../../wire/frame.js'
+import { WIRE_SEND_BACKLOG_BASE_BYTES } from '../../constants.js'
+import { encode, type PiecesAck } from '../../wire/frame.js'
 import { TAG, passesData } from '../../wire/tags.js'
 import type { ServerChannel } from './ServerChannel.js'
-import type { PeerSender } from './IndexedPeer.js'
+import type { PeerSender, RoomWaiter } from './IndexedPeer.js'
 import type { ServerTransport, Wire } from './ChannelMux.js'
 import type { SessionRegistry } from './SessionRegistry.js'
 import type { Deliveries } from '../../flowControl/Deliveries.js'
@@ -20,8 +20,6 @@ type WireSenderOptions = {
   transport: ServerTransport<unknown>
   /** The wire's ping interval, which sizes the frames its headroom sends whole. */
   pingInterval: number
-  /** The POST turn of the page's confirmations on SSE. */
-  sseFlushThrottle: number
   /** What the wire delivered. */
   deliveries: Deliveries
   /** The mux's sessions, whose channels on the wire its headroom counts. */
@@ -41,7 +39,9 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   /** Null on a wire that doesn't take pieces (SSE). */
   readonly pieces: WirePieces | null
   readonly queue: WireQueue
-  private readonly sseFlushThrottle: number
+  /** The lossy channels waiting for room to hand the page more, and the timer that wakes them at the path's pace. */
+  private roomWaiters = new Set<RoomWaiter>()
+  private paceTimer: ReturnType<typeof setTimeout> | null = null
   /** How long the frames that go at once wait behind what the socket holds. */
   private readonly wait = new SocketWait({ owner: this })
   private readonly deliveries: Deliveries
@@ -58,7 +58,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   /** The RECONCILE's probes its RECONCILED hasn't answered: a frame ahead of it goes behind their BDP_PING_ACKs. */
   private probed: { ix: number; probe: number }[] = []
 
-  constructor({ wire, transport, pingInterval, sseFlushThrottle, deliveries, sessions, attaching }: WireSenderOptions) {
+  constructor({ wire, transport, pingInterval, deliveries, sessions, attaching }: WireSenderOptions) {
     this.wire = wire
     this.transport = transport
     this.pieces = transport.wholeMessages
@@ -68,17 +68,38 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
         }
       : null
     this.queue = this.pieces ? this.pieces.headroom : transport.queueOf!(wire)
-    this.sseFlushThrottle = sseFlushThrottle
     this.deliveries = deliveries
     this.sessions = sessions
     this.attaching = attaching
   }
 
-  /** A WebSocket page's confirmation waits behind its wire's queues; an SSE page's waits for its POST's turn: the
-   *  throttle, or the POST ahead of it, which takes a round trip. */
-  behindAfter(roundTrip: number): number {
-    const wait = this.pieces ? WIRE_QUEUE_DELAY_MS : Math.max(this.sseFlushThrottle, roundTrip)
-    return LOSSY_CONFIRM_SLACK_MS + wait + roundTrip
+  room(): number {
+    return this.queue.path.room - this.queue.unhandedBytes
+  }
+
+  waitForRoom(waiter: RoomWaiter): void {
+    if (this.closed) return
+    this.roomWaiters.add(waiter)
+    const wait = this.queue.path.paceWait(performance.now())
+    if (wait > 0 && this.paceTimer === null) {
+      this.paceTimer = setTimeout(() => {
+        this.paceTimer = null
+        this.wakeRoomWaiters()
+      }, wait)
+    }
+  }
+
+  /** Takes the page's report of what it took (see `WireQueue.acknowledged`), which may leave room for what waits. */
+  acknowledged(ack: PiecesAck): boolean {
+    if (!this.queue.acknowledged(ack)) return false
+    this.wakeRoomWaiters()
+    return true
+  }
+
+  private wakeRoomWaiters(): void {
+    const waiters = this.roomWaiters
+    this.roomWaiters = new Set()
+    for (const waiter of waiters) waiter.roomMayHaveOpened()
   }
 
   send(frame: Uint8Array<ArrayBuffer>): void {
@@ -126,6 +147,9 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   /** The wire closed: drops what is sent from now on, and stops its headroom. */
   close(): void {
     this.closed = true
+    this.roomWaiters.clear()
+    if (this.paceTimer !== null) clearTimeout(this.paceTimer)
+    this.paceTimer = null
     this.pieces?.headroom.close()
   }
 

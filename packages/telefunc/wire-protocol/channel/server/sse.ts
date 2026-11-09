@@ -151,6 +151,10 @@ class EventStream implements WireQueue {
     })
   }
 
+  get unhandedBytes(): number {
+    return Math.floor((this.waitingBytes * 3) / 4)
+  }
+
   drainRate(): number {
     return this.drain.rate
   }

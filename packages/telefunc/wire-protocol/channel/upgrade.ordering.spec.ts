@@ -26,6 +26,7 @@ function createHarness() {
         dropWaitingFromPublish() {},
         drainRate: () => 0,
         acknowledged: () => true,
+        unhandedBytes: 0,
         path: new PathEstimate({ reportGap: 0 }),
       }),
       terminateWire: () => (terminated = true),

@@ -1,5 +1,5 @@
 export { IndexedPeer }
-export type { PeerSender }
+export type { PeerSender, RoomWaiter }
 
 import { ACK_STATUS, encode } from '../../wire/frame.js'
 import type { AckResultStatus, SequencedEncoder } from '../../wire/frame.js'
@@ -12,9 +12,11 @@ import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
 interface PeerSender {
   /** What the wire holds back for its page. */
   readonly queue: WireQueue
-  /** How long a lossy page on the wire may leave a publish unconfirmed before it counts as behind, where a confirmation
-   *  takes at least `roundTrip` ms: `Infinity` before one was measured. */
-  behindAfter(roundTrip: number): number
+  /** The bytes a lossy channel may hand the wire now: what its path takes (see `PathEstimate.room`), less what the wire
+   *  holds back. */
+  room(): number
+  /** `waiter` hears once that the wire may have room: at the page's next report, or once its path's pace allows. */
+  waitForRoom(waiter: RoomWaiter): void
   send(frame: Uint8Array): void
   /** Sends `frame` in the next message the wire sends, where it can carry one (see `PieceSender.carry`). */
   carry(frame: Uint8Array): void
@@ -24,6 +26,10 @@ interface PeerSender {
   sendWait(): SendWait
   /** The bytes the wire delivered in the `ms` before the frame it's handling arrived. */
   deliveredBefore(ms: number): number
+}
+
+interface RoomWaiter {
+  roomMayHaveOpened(): void
 }
 
 type IndexedPeerOptions = {

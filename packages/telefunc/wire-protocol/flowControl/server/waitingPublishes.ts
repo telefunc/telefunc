@@ -14,6 +14,8 @@ interface WireQueue {
   dropWaitingPublishes(ix: number, count: number): void
   /** Drops what of channel `ix` waits here from its oldest publish on, receipts too. */
   dropWaitingFromPublish(ix: number): void
+  /** The bytes it holds back, as the page counts them. */
+  readonly unhandedBytes: number
   /** The rate the page takes data at, in bytes per ms, 0 before one was measured. */
   drainRate(): number
   /** What the path to the page delivers, from the page's reports of what it took. */

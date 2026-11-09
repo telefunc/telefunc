@@ -1,0 +1,100 @@
+export { LossyDelivery }
+
+import { hold, letGo, type MemoryHolder } from './channelMemory.js'
+import type { IndexedPeer, RoomWaiter } from './IndexedPeer.js'
+import type { PublishBody } from './PublishBody.js'
+import { Fifo } from '../../../utils/Fifo.js'
+
+type LossyDeliveryOptions = {
+  /** What the publishes waiting here are charged to. */
+  holder: MemoryHolder
+  /** A publish waiting here was skipped: the page sees the gap in `info.seq`. */
+  onSkip: () => void
+}
+
+/** A lossy channel's publishes on their way to its page, held before the wire and handed as its path has room (see
+ *  `PathEstimate`). While the path carries what the wire's lossy streams offer, they go in order, every one of them.
+ *  Once it doesn't, or while the page has no wire, a newer publish replaces those waiting, and what waits goes at the
+ *  path's pace, so that what reaches the page is young. */
+class LossyDelivery implements RoomWaiter {
+  private readonly holder: MemoryHolder
+  private readonly onSkip: () => void
+  /** The page's channel on the wire it last attached on; whether that wire is still the page's. */
+  private peer: IndexedPeer | null = null
+  private attached = false
+  /** In order, what the wire has yet to be handed. */
+  private readonly waiting = new Fifo<PublishBody>()
+  private newest: PublishBody | undefined
+
+  constructor({ holder, onSkip }: LossyDeliveryOptions) {
+    this.holder = holder
+    this.onSkip = onSkip
+  }
+
+  /** Its newest publish, where no wire has that yet. */
+  get newestWaiting(): PublishBody | undefined {
+    return this.newest
+  }
+
+  publish(body: PublishBody): void {
+    hold(this.holder, body)
+    const path = this.attached ? this.peer!.sender.queue.path : null
+    path?.offer(body.frame.byteLength, performance.now())
+    if (path === null || path.pathBound) this.skipWaiting()
+    this.waiting.push(body)
+    this.newest = body
+    if (this.attached) this.hand()
+  }
+
+  /** The page attached on `peer`'s wire, whose path is measured anew: what waits goes on it. */
+  attach(peer: IndexedPeer): void {
+    this.peer = peer
+    this.attached = true
+    if (this.waiting.length > 0) this.hand()
+  }
+
+  /** The page's wire went away: until it attaches again, only the newest publish waits. */
+  detach(): void {
+    this.attached = false
+  }
+
+  /** `RoomWaiter`: the wire may have room for what waits. */
+  roomMayHaveOpened(): void {
+    if (this.attached && this.waiting.length > 0) this.hand()
+  }
+
+  /** A graceful close goes behind every publish its page is due: what waits goes on the wire it last attached on. */
+  flush(): void {
+    if (this.peer === null) return
+    while (this.waiting.length > 0) this.handOne(this.peer)
+  }
+
+  /** What waits goes, unsent, for a newer publish to take its place. */
+  skipWaiting(): void {
+    if (this.drop()) this.onSkip()
+  }
+
+  /** What waits goes, unsent: returns whether anything did. */
+  drop(): boolean {
+    if (this.waiting.length === 0) return false
+    while (this.waiting.length > 0) letGo(this.holder, this.waiting.shift()!)
+    this.newest = undefined
+    return true
+  }
+
+  /** Hands the wire what waits, in order, while its path has room and its pace allows; the rest waits for either. */
+  private hand(): void {
+    const peer = this.peer!
+    const { sender } = peer
+    const { path } = sender.queue
+    while (this.waiting.length > 0 && sender.room() > 0 && path.paceWait(performance.now()) === 0) this.handOne(peer)
+    if (this.waiting.length > 0) sender.waitForRoom(this)
+  }
+
+  private handOne(peer: IndexedPeer): void {
+    const body = this.waiting.shift()!
+    if (this.waiting.length === 0) this.newest = undefined
+    peer.sendPublish(body)
+    letGo(this.holder, body)
+  }
+}

@@ -217,7 +217,6 @@ class ChannelMux implements UpgradeStagesOwner {
         wire,
         transport: transport as ServerTransport<unknown>,
         pingInterval: this.options.pingInterval,
-        sseFlushThrottle: this.options.sseFlushThrottle,
         deliveries,
         sessions: this.sessions,
         attaching,
@@ -472,7 +471,7 @@ class ChannelMux implements UpgradeStagesOwner {
       return null
     }
     if (frame.tag === TAG.PIECES_ACK) {
-      const known = entry.sender.queue.acknowledged(frame)
+      const known = entry.sender.acknowledged(frame)
       assertProtocol(known, 'PIECES_ACK for nothing sent')
       return null
     }

@@ -99,6 +99,10 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     this.sender.dropWaiting(droppingFromPublish(ix))
   }
 
+  get unhandedBytes(): number {
+    return this.sender.unhandedBytes
+  }
+
   drainRate(): number {
     return this.drain.rate || this.pieceRate.carried
   }

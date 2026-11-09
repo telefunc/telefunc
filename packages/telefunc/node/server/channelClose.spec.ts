@@ -16,7 +16,8 @@ function createPeer(frames: Uint8Array[]) {
       },
       carry() {},
       bufferedAmount: () => 0,
-      behindAfter: () => 700,
+      room: () => Infinity,
+      waitForRoom() {},
       deliveredBefore: () => 0,
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
       queue: {
@@ -25,6 +26,7 @@ function createPeer(frames: Uint8Array[]) {
         dropWaitingFromPublish() {},
         drainRate: () => 0,
         acknowledged: () => true,
+        unhandedBytes: 0,
         path: new PathEstimate({ reportGap: 0 }),
       },
     },
