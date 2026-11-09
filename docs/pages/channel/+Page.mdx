@@ -476,7 +476,7 @@ broadcast.subscribe((n) => showToast(n))
 
 ### Skip to the newest
 
-Where only the newest message matters, such as a price or a pointer's position, pass `lossy: true`. A client that keeps up still gets every message. Once a message has waited over 700 ms, a newer one replaces those waiting, on the way to the client and on the client's own way up, so a client that can't keep up gets the newest soon:
+Where only the newest message matters, such as a price or a pointer's position, pass `lossy: true`. A client that keeps up still gets every message. Once a message has waited longer than its connection takes to confirm one, about 700 ms, a newer one replaces those waiting, on the way to the client and on the client's own way up, so a client that can't keep up gets the newest soon:
 
 ```ts
 // Price.telefunc.ts

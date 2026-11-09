@@ -12,6 +12,8 @@ import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
 interface PeerSender {
   /** What the wire holds back for its page. */
   readonly queue: WireQueue
+  /** How long a lossy page on the wire may leave a publish unconfirmed before it counts as behind. */
+  readonly behindAfter: number
   send(frame: Uint8Array): void
   /** Sends `frame` in the next message the wire sends, where it can carry one (see `PieceSender.carry`). */
   carry(frame: Uint8Array): void

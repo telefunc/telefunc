@@ -5,7 +5,6 @@ import type { ChannelRecord, ChannelTable } from './ChannelTable.js'
 import type { ClientChannelTransport, OutboundFrame, OutboundFrameKind } from './ClientConnection.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { TAG } from '../../wire/tags.js'
-import { LOSSY_BEHIND_MS } from '../../constants.js'
 
 type BufferedFrame = {
   frame: Uint8Array<ArrayBuffer>
@@ -18,10 +17,6 @@ type HeldFrame = BufferedFrame & { seq: number }
 /** A WINDOW or MSG_WINDOW frame's key, made of its channel and its tag; null for any other frame. */
 function limitKey({ frame, channelIx }: BufferedFrame): number | null {
   return frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW ? channelIx * 256 + frame[0] : null
-}
-
-function isBehind({ waitingSince }: BufferedFrame): boolean {
-  return performance.now() - waitingSince > LOSSY_BEHIND_MS
 }
 
 /** The connection, whose transport takes what the gate lets go. */
@@ -87,7 +82,7 @@ class SendGate {
   replaceWaiting(ix: number, seq: number, frame: Uint8Array<ArrayBuffer>): boolean {
     for (const entry of this.waitingForHeadroom) {
       if (entry.channelIx !== ix || entry.seq !== seq) continue
-      if (!isBehind(this.waitingForHeadroom.peek()!)) return false
+      if (!this.isBehind(this.waitingForHeadroom.peek()!)) return false
       this.waitingForHeadroomBytes += frame.byteLength - entry.frame.byteLength
       entry.frame = frame
       return true
@@ -95,7 +90,7 @@ class SendGate {
     const sendBuffer = this.settleQueue()
     const held = sendBuffer.find((entry) => entry.channelIx === ix && entry.seq === seq)
     if (held === undefined) return false
-    if (!this.owner.reconnecting && !isBehind(sendBuffer.find((entry) => entry.channelIx === ix)!)) return false
+    if (!this.owner.reconnecting && !this.isBehind(sendBuffer.find((entry) => entry.channelIx === ix)!)) return false
     held.frame = frame
     return true
   }
@@ -208,6 +203,10 @@ class SendGate {
     this.waitingForHeadroom = new Fifo()
     this.waitingForHeadroomBytes = 0
     this.droppedQueues.clear()
+  }
+
+  private isBehind({ waitingSince }: BufferedFrame): boolean {
+    return performance.now() - waitingSince > this.owner.transport.behindAfter
   }
 
   private canSendImmediately(record: ChannelRecord): boolean {

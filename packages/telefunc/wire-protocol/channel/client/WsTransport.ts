@@ -4,6 +4,8 @@ import { assert } from '../../../utils/assert.js'
 import {
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_TRANSPORT,
+  LOSSY_BEHIND_MS,
+  WIRE_QUEUE_DELAY_MS,
   WS_CLOSE_PAGE_LEFT,
   WS_CLOSE_WIRE_VERSION,
   WS_PROBE_TIMEOUT_MS,
@@ -254,6 +256,10 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     assert(this.ws && this.pieces)
     if (frame.kind === 'acknowledgement') this.pieces.sender.carry(() => frame.frame)
     else this.pieces.headroom.send(frame.frame)
+  }
+
+  get behindAfter(): number {
+    return LOSSY_BEHIND_MS + WIRE_QUEUE_DELAY_MS
   }
 
   headroom(): number {

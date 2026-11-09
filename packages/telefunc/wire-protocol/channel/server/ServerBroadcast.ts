@@ -34,7 +34,7 @@ import { TAG } from '../../wire/tags.js'
 import type { ChannelDataFrame } from '../../wire/frame.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { PublishBody } from './PublishBody.js'
-import { CHANNEL_RECONNECT_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES, LOSSY_BEHIND_MS } from '../../constants.js'
+import { CHANNEL_RECONNECT_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import type { AttachState } from '../../wire/payloads.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
@@ -64,7 +64,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private peerSubscribedText = false
   private peerSubscribedBinary = false
 
-  /** Past `LOSSY_BEHIND_MS` of waiting, a newer publish replaces those waiting, on the way to its page and on the page's
+  /** Past what its wire takes to confirm, a newer publish replaces those waiting, on the way to its page and on the page's
    *  way up. */
   readonly lossy: boolean
 
@@ -230,7 +230,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** Whether its page has an older publish to confirm than a page that keeps up would. */
   private isBehind(): boolean {
     const sentAt = this._replayBuffer?.oldestPublishAt
-    return this.peer !== null && sentAt !== undefined && performance.now() - sentAt > LOSSY_BEHIND_MS
+    return this.peer !== null && sentAt !== undefined && performance.now() - sentAt > this.peer.sender.behindAfter
   }
 
   private sendHeld(): void {
