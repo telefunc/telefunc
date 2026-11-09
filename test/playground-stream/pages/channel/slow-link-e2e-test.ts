@@ -152,6 +152,29 @@ function testSlowLink(isDev: boolean) {
     }
   })
 
+  // 60/s of 100 B for 5 s over 450 ms each way: a link that keeps up, whose confirmations take 900 ms.
+  test('channel: on a 900 ms round trip that keeps up, a lossy broadcast delivers every message', async () => {
+    const proxy = await startBlackHoleProxy(getServerUrl())
+    try {
+      await navigate(`${proxy.url}/channel`)
+      proxy.pace({ downBytesPerSecond: 12_500_000, upBytesPerSecond: 12_500_000, queueBytes: 256 * 1024, delayMs: 450 })
+      await page.click('#channel-test-lossy-ticker-small')
+      let ticker: SlowLinkState['lossyTicker'] = null
+      await autoRetry(
+        async () => {
+          ticker = (await getResult<SlowLinkState>('#channel-state')).lossyTicker
+          expect(ticker).not.toBe(null)
+        },
+        { timeout: 40_000 },
+      )
+      expect(ticker).deep.equal({ ...ticker!, received: 300, last: 299 })
+    } finally {
+      // The page leaves before the proxy closes, which would cut its connections.
+      await page.goto('about:blank')
+      await proxy.close()
+    }
+  })
+
   test('channel: on a 125 kB/s uplink, a 2 MiB upload arrives and keeps the download coming on the connection it started on, and a channel opened meanwhile opens on it', async () => {
     const proxy = await startBlackHoleProxy(getServerUrl())
     try {

@@ -227,10 +227,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.lastPeer!.sendPublish(body)
   }
 
-  /** Whether its page has an older publish to confirm than a page that keeps up would. */
+  /** Whether its page has an older publish to confirm than a page that keeps up would. Before its first confirmation it
+   *  isn't: that comes within a round trip of an idle link, and it measures the round trip. */
   private isBehind(): boolean {
-    const sentAt = this._replayBuffer?.oldestPublishAt
-    return this.peer !== null && sentAt !== undefined && performance.now() - sentAt > this.peer.sender.behindAfter
+    const replay = this._replayBuffer
+    if (this.peer === null || !replay || replay.oldestPublishAt === undefined) return false
+    return performance.now() - replay.oldestPublishAt > this.peer.sender.behindAfter(replay.leastConfirmMs)
   }
 
   private sendHeld(): void {

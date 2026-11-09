@@ -260,7 +260,7 @@ describe('Broadcast shield validation', () => {
           },
           carry() {},
           bufferedAmount: () => 0,
-          behindAfter: 700,
+          behindAfter: () => 700,
           deliveredBefore: () => 0,
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
           queue: {
@@ -303,7 +303,7 @@ describe('Broadcast shield validation', () => {
           send: () => {},
           carry() {},
           bufferedAmount: () => 0,
-          behindAfter: 700,
+          behindAfter: () => 700,
           deliveredBefore: () => 0,
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
           queue: {
@@ -334,7 +334,7 @@ describe('lossy broadcast under memory pressure', () => {
           send() {},
           carry() {},
           bufferedAmount: () => 0,
-          behindAfter: 0,
+          behindAfter: () => 0,
           deliveredBefore: () => 0,
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
           queue: {

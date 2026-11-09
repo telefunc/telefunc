@@ -512,9 +512,10 @@ class SseTransport implements UpgradeSource {
     )
   }
 
-  /** Its frames wait for their POST's turn. */
+  /** Its frames wait for their POST's turn: the throttle, or the POST ahead of them, which takes a round trip. */
   get behindAfter(): number {
-    return LOSSY_CONFIRM_SLACK_MS + this.flushThrottleMs
+    const roundTrip = this.uplink.roundTrips.pathRtt
+    return LOSSY_CONFIRM_SLACK_MS + Math.max(this.flushThrottleMs, roundTrip) + roundTrip
   }
 
   headroom(): number {

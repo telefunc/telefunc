@@ -258,8 +258,9 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     else this.pieces.headroom.send(frame.frame)
   }
 
+  /** Its frames wait behind the wire's queues, and for headroom that acknowledgements free. */
   get behindAfter(): number {
-    return LOSSY_CONFIRM_SLACK_MS + WIRE_QUEUE_DELAY_MS
+    return LOSSY_CONFIRM_SLACK_MS + WIRE_QUEUE_DELAY_MS + this.uplink.roundTrips.pathRtt
   }
 
   headroom(): number {

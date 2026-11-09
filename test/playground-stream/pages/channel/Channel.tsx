@@ -1609,9 +1609,9 @@ function ChannelDemo() {
     control.close()
   }, [])
 
-  const testLossyTicker = useCallback(async () => {
+  const testLossyTicker = useCallback(async (bytes: number) => {
     setChannelState((s) => ({ ...s, lossyTicker: null }))
-    const { broadcast, control } = await openChannel(() => onChannelLossyTicker(4096, 300, 1000 / 60))
+    const { broadcast, control } = await openChannel(() => onChannelLossyTicker(bytes, 300, 1000 / 60))
     const received: number[] = []
     let worstMs = 0
     broadcast.subscribe((message) => {
@@ -2147,10 +2147,18 @@ function ChannelDemo() {
           <button
             id="channel-test-lossy-ticker"
             type="button"
-            onClick={testLossyTicker}
+            onClick={() => testLossyTicker(4096)}
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             Lossy Broadcast Ticker
+          </button>
+          <button
+            id="channel-test-lossy-ticker-small"
+            type="button"
+            onClick={() => testLossyTicker(100)}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Lossy Broadcast Ticker Of Small Messages
           </button>
           <button
             id="channel-test-broadcast-behind-closes"

@@ -41,10 +41,18 @@ class ServerReplay {
     hold(this.holder, body)
   }
 
+  /** The least time a publish waited for its page's confirmation, `Infinity` before the first. */
+  leastConfirmMs = Number.POSITIVE_INFINITY
+
   /** The page has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
   acknowledge(lastSeq: number): void {
     while (this.frames.length > 0 && this.frames.seqAt(0) <= lastSeq) this.letFrameGo(this.frames.shift())
-    while (this.publishes.length > 0 && this.publishes.seqAt(0) <= lastSeq) this.letPublishGo(this.publishes.shift())
+    let newest: Publish | undefined
+    while (this.publishes.length > 0 && this.publishes.seqAt(0) <= lastSeq) {
+      newest = this.publishes.shift()
+      this.letPublishGo(newest)
+    }
+    if (newest !== undefined) this.leastConfirmMs = Math.min(this.leastConfirmMs, performance.now() - newest.at)
   }
 
   /** The frames after `afterSeq` in seq order, each publish's head and then its body. A channel's are all there, as

@@ -17,7 +17,7 @@ class ChannelAttach {
   private readonly channel: { readonly isClosed: boolean }
   private readonly sendCredit: SendCredit
   readonly receiveCredit: ReceiveCredit
-  /** A broadcast's subscriptions, which its entry declares in place of a probe. */
+  /** A broadcast's subscriptions, which its entry declares beside its probe. */
   private subscriptions: { readonly text: boolean; readonly binary: boolean } | null = null
 
   constructor({ channel, sendCredit, receiveCredit }: ChannelAttachOptions) {
@@ -27,11 +27,14 @@ class ChannelAttach {
   }
 
   /** The channel's entry in the RECONCILE sent each time it attaches to `uplink`'s wire: a probe of a path it hasn't
-   *  measured, or a broadcast's subscriptions. */
+   *  measured, and a broadcast's subscriptions. A page of broadcasts alone measures its round trip so: a lossy one's
+   *  `behindAfter` needs it. */
   state(uplink: Uplink): AttachState {
-    if (this.subscriptions !== null) return { broadcast: this.subscriptions }
     const probe = this.receiveCredit.probeAttach(uplink.roundTrips)
-    return probe === undefined ? {} : { probe }
+    return {
+      ...(this.subscriptions !== null && { broadcast: this.subscriptions }),
+      ...(probe !== undefined && { probe }),
+    }
   }
 
   /** A broadcast declares its subscriptions on every (re)attach: a SUB or UNSUB written to a dead wire isn't replayed.

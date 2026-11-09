@@ -41,7 +41,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   /** Null on a wire that doesn't take pieces (SSE). */
   readonly pieces: WirePieces | null
   readonly queue: WireQueue
-  readonly behindAfter: number
+  private readonly sseFlushThrottle: number
   /** How long the frames that go at once wait behind what the socket holds. */
   private readonly wait = new SocketWait({ owner: this })
   private readonly deliveries: Deliveries
@@ -68,10 +68,17 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
         }
       : null
     this.queue = this.pieces ? this.pieces.headroom : transport.queueOf!(wire)
-    this.behindAfter = LOSSY_CONFIRM_SLACK_MS + (this.pieces ? WIRE_QUEUE_DELAY_MS : sseFlushThrottle)
+    this.sseFlushThrottle = sseFlushThrottle
     this.deliveries = deliveries
     this.sessions = sessions
     this.attaching = attaching
+  }
+
+  /** A WebSocket page's confirmation waits behind its wire's queues; an SSE page's waits for its POST's turn: the
+   *  throttle, or the POST ahead of it, which takes a round trip. */
+  behindAfter(roundTrip: number): number {
+    const wait = this.pieces ? WIRE_QUEUE_DELAY_MS : Math.max(this.sseFlushThrottle, roundTrip)
+    return LOSSY_CONFIRM_SLACK_MS + wait + roundTrip
   }
 
   send(frame: Uint8Array<ArrayBuffer>): void {
