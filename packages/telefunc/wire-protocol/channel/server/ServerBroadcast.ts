@@ -34,7 +34,7 @@ import { TAG } from '../../wire/tags.js'
 import type { ChannelDataFrame } from '../../wire/frame.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { PublishBody } from './PublishBody.js'
-import { CHANNEL_RECONNECT_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
+import { CHANNEL_RECONNECT_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES, LOSSY_BEHIND_MS } from '../../constants.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import type { AttachState } from '../../wire/payloads.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
@@ -64,7 +64,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private peerSubscribedText = false
   private peerSubscribedBinary = false
 
-  /** A newer publish replaces those no wire has taken yet, on the way to its page and on the page's way up. */
+  /** Past `LOSSY_BEHIND_MS` of waiting, a newer publish replaces those waiting, on the way to its page and on the page's
+   *  way up. */
   readonly lossy: boolean
 
   constructor(opts: BroadcastChannelOptions) {
@@ -205,11 +206,22 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private forwardPublish(body: PublishBody): void {
     this.endOverflowed()
     if (this._phase === 'ended') return
-    if (this.lossy) this.letWaitingGo()
+    if (this.lossy) return this.forwardLossy(body)
     this.lastPeer!.sendPublish(body)
-    if (this.lossy) return
     const share = this.share()
     if (this.heldBytes > share) this.shed(share, this.owner)
+  }
+
+  /** A page that keeps up gets every publish; with no wire, its replay keeps the newest. */
+  private forwardLossy(body: PublishBody): void {
+    if (!this.peer || this.isBehind()) this.letWaitingGo()
+    this.lastPeer!.sendPublish(body)
+  }
+
+  /** Whether its page has an older publish to confirm than a page that keeps up would. */
+  private isBehind(): boolean {
+    const sentAt = this._replayBuffer?.oldestPublishAt
+    return this.peer !== null && sentAt !== undefined && performance.now() - sentAt > LOSSY_BEHIND_MS
   }
 
   /** A lossy page's publishes that no wire has taken go, as a newer one takes their place. */
@@ -425,8 +437,8 @@ type BroadcastChannel<T = unknown> = {
 type BroadcastChannelOptions = {
   key: string
   /**
-   * A client that can't keep up skips to the newest: a newer message replaces those no connection has taken yet, and
-   * `info.seq` jumps over them. Without it, the client gets every message, or the channel closes with
+   * A client that keeps up gets every message. One that can't skips to the newest: a newer message replaces those
+   * waiting, and `info.seq` jumps over them. Without it, the client gets every message, or the channel closes with
    * `ChannelOverflowError` past what the server holds for it.
    *
    * https://telefunc.com/channel#skip-to-the-newest

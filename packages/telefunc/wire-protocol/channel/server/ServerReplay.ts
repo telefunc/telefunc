@@ -4,7 +4,7 @@ import { assert } from '../../../utils/assert.js'
 import { HELD_SEND_OVERHEAD_BYTES, hold, letGo, type MemoryHolder } from './channelMemory.js'
 import type { PublishBody } from './PublishBody.js'
 
-type Publish = { head: Uint8Array<ArrayBuffer>; body: PublishBody }
+type Publish = { head: Uint8Array<ArrayBuffer>; body: PublishBody; at: number }
 
 /** What a channel sent and its page hasn't confirmed, for a reconnect to send again: its own frames, and its publishes,
  *  each a head and a reference to the body its subscribers share. Each queue is in seq order and loses entries only at
@@ -37,7 +37,7 @@ class ServerReplay {
 
   pushPublish(seq: number, head: Uint8Array<ArrayBuffer>, body: PublishBody): void {
     this.pushed(seq)
-    this.publishes.push(seq, { head, body })
+    this.publishes.push(seq, { head, body, at: performance.now() })
     hold(this.holder, body)
   }
 
@@ -86,6 +86,11 @@ class ServerReplay {
       this.letFrameGo(this.frames.pop())
     for (let i = 0; i < waiting; i++) this.letPublishGo(this.publishes.pop())
     return waiting
+  }
+
+  /** When the oldest publish its page hasn't confirmed was sent, `undefined` with none. */
+  get oldestPublishAt(): number | undefined {
+    return this.publishes.length > 0 ? this.publishes.at(0).at : undefined
   }
 
   /** The body of the newest publish it holds. */

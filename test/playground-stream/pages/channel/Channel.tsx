@@ -256,6 +256,7 @@ type ChannelState = {
     opening: { receipts: number; last: string }
     reconnected: { receipts: number; last: string }
   } | null
+  lossyKeepsUp: { fromServer: number; fromPage: number; last: string } | null
   broadcastAwayShared: { received: number[][]; closed: string[] } | null
   channelsQueued: { queued: string[]; received: string[][]; closed: boolean[] } | null
   acksWaiting:
@@ -356,6 +357,7 @@ const initialState: ChannelState = {
   broadcastOverflow: null,
   broadcastBehind: null,
   broadcastBehindCloses: null,
+  lossyKeepsUp: null,
   broadcastAwayShared: null,
   channelsQueued: null,
   acksWaiting: null,
@@ -1573,7 +1575,9 @@ function ChannelDemo() {
     await control.send('away', { ack: true })
     const { seq } = await broadcast.publish('across the disconnect')
     await newest
-    // Right after its reconnect, they wait in the page's held queue.
+    // While the page is reconnecting: only the newest of them waits.
+    await control.send('cut', { ack: true })
+    await new Promise((resolve) => setTimeout(resolve, 150))
     const reconnected = await publishOrdinals(100)
     const broadcastBehind = {
       seqsAhead,
@@ -1583,6 +1587,22 @@ function ChannelDemo() {
       reconnected,
     }
     setChannelState((s) => ({ ...s, broadcastBehind }))
+    control.close()
+  }, [])
+
+  const testLossyKeepsUp = useCallback(async () => {
+    setChannelState((s) => ({ ...s, lossyKeepsUp: null }))
+    const { broadcast, control } = await openChannel(() => onChannelPublishesBehind(4096, true))
+    let fromServer = 0
+    broadcast.subscribeBinary(() => void fromServer++)
+    await control.send(100, { ack: true })
+    for (let i = 0; i < 30 && fromServer < 100; i++) await new Promise((resolve) => setTimeout(resolve, 100))
+    const receipts = await Promise.all(
+      Array.from({ length: 100 }, (_, n) => broadcast.publish(`${n}:`.padEnd(4096, 'x'))),
+    )
+    const fromPage = new Set(receipts.map((receipt) => receipt.seq)).size
+    const lossyKeepsUp = { fromServer, fromPage, last: await control.send('last', { ack: true }) }
+    setChannelState((s) => ({ ...s, lossyKeepsUp }))
     control.close()
   }, [])
 
@@ -2094,6 +2114,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             Lossy Broadcast Publishes More Than The Client Keeps Up With
+          </button>
+          <button
+            id="channel-test-lossy-keeps-up"
+            type="button"
+            onClick={testLossyKeepsUp}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Lossy Broadcast On A Link That Keeps Up
           </button>
           <button
             id="channel-test-broadcast-behind-closes"

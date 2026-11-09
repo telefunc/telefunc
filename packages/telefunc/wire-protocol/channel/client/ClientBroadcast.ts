@@ -71,8 +71,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return ret
   }
 
-  /** On a lossy broadcast, a publish that still waits to go takes the newer one's data in its place, and both get its
-   *  receipt. */
+  /** On a lossy broadcast, once its uplink is behind, a publish that still waits to go takes the newer one's data in its
+   *  place, and both get its receipt. */
   private sendPublish<D>(encodeFrame: SequencedEncoder<D>, data: D): Promise<ChannelPublishAck> {
     const newest = this.newestPublish
     if (newest !== null && this.connection.replaceWaiting(this, newest.seq, encodeFrame, data)) return newest.receipt
@@ -150,5 +150,6 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
       }
     }
     this.receiveCredit.onPublishConsumed(bytes)
+    if (this.lossy) this.receiveCredit.confirmSoon()
   }
 }

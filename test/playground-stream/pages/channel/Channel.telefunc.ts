@@ -894,10 +894,14 @@ async function onChannelPublishesBehind(
   broadcast.subscribe((message) => {
     if (typeof message === 'string' && /^\d+:/.test(message)) lastOrdinal = message.slice(0, message.indexOf(':'))
   })
-  const control = new Channel<(msg: 'ping' | 'close' | 'away' | 'last' | number) => string, never>()
+  const control = new Channel<(msg: 'ping' | 'close' | 'away' | 'cut' | 'last' | number) => string, never>()
   control.listen(async (msg) => {
     if (msg === 'ping') return 'pong'
     if (msg === 'last') return lastOrdinal
+    if (msg === 'cut') {
+      setTimeout(cutWireSockets, 50)
+      return 'cut'
+    }
     if (msg === 'close') return String(await broadcast.close({ timeout: 20_000 }))
     if (msg === 'away') {
       const stop = broadcast.subscribe(() => {
