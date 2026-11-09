@@ -249,6 +249,9 @@ export const WIRE_SEND_ACK_MS = 25
 export const WIRE_SEND_ACK_MIN_BYTES = 2 * 1024
 /** The least data the sender on a WebSocket, page or server, hands its socket ahead of its peer's acknowledgements. */
 export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024
+/** What every TCP sender may have in flight before its first acknowledgement, 10 segments: the kernel under a wire
+ *  ramps from it too, so a wire's path estimate starts there. */
+export const WIRE_INITIAL_WINDOW_BYTES = 10 * 1460
 /** A server hands its socket data while its path holds less than the page takes in this many least round trips. */
 export const WIRE_SEND_AHEAD_ROUND_TRIPS = 4
 /** How long a data frame may wait in its wire's queues, as acknowledgements measure it, before its sender holds back. */

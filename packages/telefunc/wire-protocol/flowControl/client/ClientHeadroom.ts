@@ -4,9 +4,12 @@ export type { ClientHeadroomOwner }
 import {
   CREDIT_WINDOW_MAX_BYTES,
   WIRE_PIECES_ACK_BYTES,
+  WIRE_PIECES_ACK_GAP_MS,
   WIRE_QUEUE_DELAY_MS,
+  WIRE_SEND_ACK_GAP_MS,
   WIRE_SEND_AHEAD_MIN_BYTES,
 } from '../../constants.js'
+import { PathEstimate } from '../PathEstimate.js'
 import { PieceSender, type PieceReceiverOwner, type PieceSenderOptions, type PieceSenderOwner } from '../pieces.js'
 import type { Uplink } from './Uplink.js'
 import type { Downlink } from './Downlink.js'
@@ -30,6 +33,9 @@ type ClientHeadroomOptions = Pick<PieceSenderOptions, 'socket' | 'pingInterval'>
 class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
   /** Sends every frame the WebSocket carries. */
   readonly sender: PieceSender
+  /** What the path to the server delivers, from the server's acknowledgements of every data frame: one rides the
+   *  server's next message after its gap, or goes alone a `WIRE_PIECES_ACK_GAP_MS` later. */
+  readonly path = new PathEstimate({ reportGap: WIRE_SEND_ACK_GAP_MS + WIRE_PIECES_ACK_GAP_MS })
   private readonly uplink: Uplink
   private readonly downlink: Downlink
   private readonly owner: ClientHeadroomOwner
@@ -124,6 +130,7 @@ class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
     const spanMs = ack.spanUs / 1000
     this.arrivedAt += spanMs
     const now = performance.now()
+    this.path.reported(acknowledged, now, ack.heldMs)
     const back = now - this.arrivedAt - ack.heldMs
     if (back < this.leastBack) this.leastBack = back
     this.lateMs = Math.max(back - this.leastBack, this.lateMs - (now - this.lateAt))
@@ -166,6 +173,7 @@ class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
 
   /** `PieceSenderOwner`: notes `bytes` the sender handed the socket. */
   handed(bytes: number): void {
+    this.path.handed(this.sender.transmittedBytes, performance.now())
     this.uplink.handed(bytes)
   }
 }
