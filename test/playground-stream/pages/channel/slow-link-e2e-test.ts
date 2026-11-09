@@ -9,7 +9,7 @@ type SlowLinkState = {
   linkShare: { pingMs: number[]; downloaded: number } | null
   slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
   publishesBehind: { pingMs: number; publishesAhead: number; closed: string; closeMs: number } | null
-  lossyTicker: { received: number; last: number | undefined; worstMs: number } | null
+  lossyTicker: { received: number; last: number | undefined; worstMs: number; closed: string | null } | null
 }
 
 // Preview only: the page loads through a proxy in the test process, which Vite's HMR socket would share.
@@ -144,6 +144,30 @@ function testSlowLink(isDev: boolean) {
       expect(ticker!.last).toBe(299)
       expect(ticker!.received).lessThan(300)
       expect(ticker!.worstMs).lessThan(3000)
+      expectLog('skipped messages its client')
+    } finally {
+      // The page leaves before the proxy closes, which would cut its connections.
+      await page.goto('about:blank')
+      await proxy.close()
+    }
+  })
+
+  // 120 messages of 4 KiB at 60/s, then the server closes the broadcast: whatever was replaced, the last arrives first.
+  test('channel: on a 125 kB/s link, a lossy broadcast closed gracefully delivers its newest message before it closes', async () => {
+    const proxy = await startBlackHoleProxy(getServerUrl())
+    try {
+      await navigate(`${proxy.url}/channel`)
+      proxy.pace({ downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024, delayMs: 25 })
+      await page.click('#channel-test-lossy-ticker-close')
+      let ticker: SlowLinkState['lossyTicker'] = null
+      await autoRetry(
+        async () => {
+          ticker = (await getResult<SlowLinkState>('#channel-state')).lossyTicker
+          expect(ticker).not.toBe(null)
+        },
+        { timeout: 40_000 },
+      )
+      expect(ticker).deep.equal({ ...ticker!, last: 119, closed: 'none' })
       expectLog('skipped messages its client')
     } finally {
       // The page leaves before the proxy closes, which would cut its connections.

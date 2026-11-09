@@ -920,14 +920,15 @@ async function onChannelPublishesBehind(
 }
 
 /** Once the page asks, `count` publishes of `bytes` to a lossy broadcast, `periodMs` apart, each with its ordinal and when
- *  it went. */
-async function onChannelLossyTicker(bytes: number, count: number, periodMs: number) {
+ *  it went; then, with `close`, a graceful close. */
+async function onChannelLossyTicker(bytes: number, count: number, periodMs: number, close = false) {
   const broadcast = new BroadcastChannel<string>({ key: `ticker:${crypto.randomUUID()}`, lossy: true })
   const publishAll = async () => {
     for (let i = 0; i < count; i++) {
       void broadcast.publish(`${i}:${Date.now()}:`.padEnd(bytes, 'x'))
       await new Promise((resolve) => setTimeout(resolve, periodMs))
     }
+    if (close) await broadcast.close({ timeout: 10_000 })
   }
   const control = new Channel<(msg: 'start') => string, never>()
   control.listen(() => {

@@ -227,6 +227,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.lastPeer!.sendPublish(body)
   }
 
+  /** A graceful close goes behind the newest its page is due; an abort may drop it. */
+  override close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
+    if (this._phase === 'open') this.sendHeld()
+    return super.close(opts)
+  }
+
   /** Whether its page has an older publish to confirm than a page that keeps up would. Before its first confirmation it
    *  isn't: that comes within a round trip of an idle link, and it measures the round trip. */
   private isBehind(): boolean {

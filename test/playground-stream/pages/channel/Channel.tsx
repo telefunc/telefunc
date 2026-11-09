@@ -258,7 +258,7 @@ type ChannelState = {
     reconnected: { receipts: number; last: string }
   } | null
   lossyKeepsUp: { fromServer: number; fromPage: number; last: string } | null
-  lossyTicker: { received: number; last: number | undefined; worstMs: number } | null
+  lossyTicker: { received: number; last: number | undefined; worstMs: number; closed: string | null } | null
   broadcastAwayShared: { received: number[][]; closed: string[] } | null
   channelsQueued: { queued: string[]; received: string[][]; closed: boolean[] } | null
   acksWaiting:
@@ -1609,20 +1609,25 @@ function ChannelDemo() {
     control.close()
   }, [])
 
-  const testLossyTicker = useCallback(async (bytes: number) => {
+  const testLossyTicker = useCallback(async (bytes: number, count: number, close: boolean) => {
     setChannelState((s) => ({ ...s, lossyTicker: null }))
-    const { broadcast, control } = await openChannel(() => onChannelLossyTicker(bytes, 300, 1000 / 60))
+    const { broadcast, control } = await openChannel(() => onChannelLossyTicker(bytes, count, 1000 / 60, close))
     const received: number[] = []
     let worstMs = 0
+    let closed: string | null = null
     broadcast.subscribe((message) => {
       const [ordinal, sentAt] = message.split(':')
       received.push(Number(ordinal))
       worstMs = Math.max(worstMs, Date.now() - Number(sentAt))
     })
+    broadcast.onClose((err) => {
+      closed = err?.name ?? 'none'
+    })
     await control.send('start', { ack: true })
     const newest = Date.now() + 25_000
-    while (received.at(-1) !== 299 && Date.now() < newest) await new Promise((resolve) => setTimeout(resolve, 100))
-    const lossyTicker = { received: received.length, last: received.at(-1), worstMs }
+    const done = () => (close ? closed !== null : received.at(-1) === count - 1)
+    while (!done() && Date.now() < newest) await new Promise((resolve) => setTimeout(resolve, 100))
+    const lossyTicker = { received: received.length, last: received.at(-1), worstMs, closed }
     setChannelState((s) => ({ ...s, lossyTicker }))
     control.close()
   }, [])
@@ -2147,7 +2152,7 @@ function ChannelDemo() {
           <button
             id="channel-test-lossy-ticker"
             type="button"
-            onClick={() => testLossyTicker(4096)}
+            onClick={() => testLossyTicker(4096, 300, false)}
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             Lossy Broadcast Ticker
@@ -2155,10 +2160,18 @@ function ChannelDemo() {
           <button
             id="channel-test-lossy-ticker-small"
             type="button"
-            onClick={() => testLossyTicker(100)}
+            onClick={() => testLossyTicker(100, 300, false)}
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             Lossy Broadcast Ticker Of Small Messages
+          </button>
+          <button
+            id="channel-test-lossy-ticker-close"
+            type="button"
+            onClick={() => testLossyTicker(4096, 120, true)}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Lossy Broadcast Ticker Closed Gracefully
           </button>
           <button
             id="channel-test-broadcast-behind-closes"
