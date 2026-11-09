@@ -2,6 +2,7 @@ export { PathEstimate }
 export type { PathEstimateOptions }
 
 import { WIRE_INITIAL_WINDOW_BYTES } from '../constants.js'
+import type { PiecesAck } from '../wire/frame.js'
 import { Fifo } from '../../utils/Fifo.js'
 
 type PathEstimateOptions = {
@@ -88,9 +89,12 @@ class PathEstimate {
     this.heldSinceReport = true
   }
 
-  /** A report that the receiver took `took` bytes in all, `heldMs` after the newest of them arrived, came at `now`. */
-  reported(took: number, now: number, heldMs: number): void {
-    if (took <= this.took) return
+  /** Takes a report that came at `now`: the receiver took `bytes` in all, counted mod 2^32, and sent it `heldMs` after
+   *  the newest of them arrived. Returns false if it reports more than was handed. */
+  acknowledged({ bytes, heldMs }: PiecesAck, now: number): boolean {
+    const took = this.took + ((bytes - this.took) >>> 0)
+    if (took > this.handedBytes) return false
+    if (took === this.took) return true
     let newest: Handed | undefined
     while (this.sent.length > 0 && this.sent.peek()!.end <= took) newest = this.sent.shift()
     if (newest === this.newestSent) this.newestSent = null
@@ -104,6 +108,7 @@ class PathEstimate {
     this.tookAt = now
     this.heldSinceReport = false
     if (took >= round.end) this.endRound(now)
+    return true
   }
 
   private sample(newest: Handed, took: number, now: number, heldMs: number): void {

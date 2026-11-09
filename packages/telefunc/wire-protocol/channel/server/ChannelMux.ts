@@ -472,7 +472,7 @@ class ChannelMux implements UpgradeStagesOwner {
       return null
     }
     if (frame.tag === TAG.PIECES_ACK) {
-      const known = entry.sender.pieces?.headroom.acknowledged(frame)
+      const known = entry.sender.queue.acknowledged(frame)
       assertProtocol(known, 'PIECES_ACK for nothing sent')
       return null
     }

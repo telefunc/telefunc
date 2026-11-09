@@ -173,7 +173,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     const before = this.sender.acknowledgedBytes
     if (!this.sender.acknowledged(ack)) return false
     const now = performance.now()
-    this.path.reported(this.sender.acknowledgedBytes, now, ack.heldMs)
+    this.path.acknowledged(ack, now)
     const spanMs = ack.spanUs / 1000
     this.arrivedAt += spanMs
     this.leastBack = Math.min(this.leastBack, now - ack.heldMs - this.arrivedAt)

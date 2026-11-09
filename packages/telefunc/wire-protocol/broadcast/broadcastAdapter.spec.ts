@@ -6,6 +6,7 @@ import { TAG } from '../wire/tags.js'
 import { IndexedPeer } from '../channel/server/IndexedPeer.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcastAdapter.js'
 import type { BroadcastTransport } from './broadcastAdapter.js'
+import { PathEstimate } from '../flowControl/PathEstimate.js'
 
 const previousBroadcastAdapter = getBroadcastAdapter()
 afterEach(() => _resetBroadcastAdapterForTesting(previousBroadcastAdapter))
@@ -268,6 +269,8 @@ describe('Broadcast shield validation', () => {
             dropWaitingPublishes() {},
             dropWaitingFromPublish() {},
             drainRate: () => 0,
+            acknowledged: () => true,
+            path: new PathEstimate({ reportGap: 0 }),
           },
         },
         index: 7,
@@ -311,6 +314,8 @@ describe('Broadcast shield validation', () => {
             dropWaitingPublishes() {},
             dropWaitingFromPublish() {},
             drainRate: () => 0,
+            acknowledged: () => true,
+            path: new PathEstimate({ reportGap: 0 }),
           },
         },
         index: 7,
@@ -342,6 +347,8 @@ describe('lossy broadcast under memory pressure', () => {
             dropWaitingPublishes() {},
             dropWaitingFromPublish() {},
             drainRate: () => 0,
+            acknowledged: () => true,
+            path: new PathEstimate({ reportGap: 0 }),
           },
         },
         index: 7,

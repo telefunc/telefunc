@@ -6,6 +6,7 @@ import { TAG } from '../../wire-protocol/wire/tags.js'
 import { ProtocolViolationError } from '../../wire-protocol/wire/protocolViolation.js'
 import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'
 import { ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
+import { PathEstimate } from '../../wire-protocol/flowControl/PathEstimate.js'
 
 function createPeer(frames: Uint8Array[]) {
   return new IndexedPeer({
@@ -18,7 +19,14 @@ function createPeer(frames: Uint8Array[]) {
       behindAfter: () => 700,
       deliveredBefore: () => 0,
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-      queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, dropWaitingFromPublish() {}, drainRate: () => 0 },
+      queue: {
+        waitingPublishes: () => 0,
+        dropWaitingPublishes() {},
+        dropWaitingFromPublish() {},
+        drainRate: () => 0,
+        acknowledged: () => true,
+        path: new PathEstimate({ reportGap: 0 }),
+      },
     },
     index: 7,
     replay: new ServerReplay({ heldBytes: 0 }),

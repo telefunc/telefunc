@@ -23,7 +23,7 @@ import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire/requestKind.js'
 import { getWireUrl } from './getSessionUrl.js'
-import { decode } from '../../wire/frame.js'
+import { decode, encode } from '../../wire/frame.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
 import { pairPublishes } from './pairPublishes.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
@@ -96,6 +96,13 @@ class SseTransport implements UpgradeSource {
   private readonly flushScheduler = new DeadlineScheduler(() => {
     void this.flushOutbox()
   })
+  /** The bytes of the frames the wire's event stream brought, when the newest came, and what the last report said: the
+   *  server measures its path by these reports. A batch POST carries one with the frames it goes for, but none goes for a
+   *  report alone, which would hold the next frames' POST a round trip; a streaming upload takes one at its turn. */
+  private took = 0
+  private newestAt = 0
+  private reportedTook = 0
+  private readonly reportScheduler = new DeadlineScheduler(() => this.sendReport())
   private flushing = false
   /** Bytes pushed to the outbox since `foldOutbox` last folded: when to fold, not what. */
   private unfolded = 0
@@ -240,6 +247,7 @@ class SseTransport implements UpgradeSource {
 
   private async openStream(): Promise<void> {
     this.connId = randomUuid()
+    this.took = this.reportedTook = 0
     this.uplink = new Uplink()
     this.downlink = new Downlink(this.uplink)
     const abortController = new AbortController()
@@ -391,6 +399,7 @@ class SseTransport implements UpgradeSource {
       while (true) {
         const raw = await reader.readNextEntry()
         if (!raw) break
+        if (this.transportAbort === abortController) this.tookFrame(raw.byteLength)
         if (raw[0] === TAG.STREAM_REQUEST_OPEN_ACK) {
           onOpenAck()
           continue
@@ -421,6 +430,27 @@ class SseTransport implements UpgradeSource {
       // Abandoned controllers are owned by a successor transport — don't notify closed.
       if (!this.abandonedControllers.has(abortController)) this.owner.onTransportClosed(this)
     }
+  }
+
+  private tookFrame(bytes: number): void {
+    this.took += bytes
+    this.newestAt = performance.now()
+    if (this.streamRequest.tag === 'active' && !this.reportScheduler.pending) {
+      this.reportScheduler.schedule(this.getFrameDeadline('acknowledgement'))
+    }
+  }
+
+  private sendReport(): void {
+    if (this.streamRequest.tag !== 'active') return
+    const report = this.takeReport()
+    if (report) this.sendFrame({ kind: 'control', frame: report })
+  }
+
+  /** A report of what the event stream brought, if it brought anything since the last. */
+  private takeReport(): Uint8Array<ArrayBuffer> | null {
+    if (this.took === this.reportedTook) return null
+    this.reportedTook = this.took
+    return encode.piecesAck(this.took, Math.floor(performance.now() - this.newestAt), 0)
   }
 
   private stageInitialBatch(): SseInitialBatchStage {
@@ -473,11 +503,10 @@ class SseTransport implements UpgradeSource {
     this.lastPostStartedAt = now
     const wire = this.transportAbort
     try {
-      const body = encodeSseRequest(
-        { connId: this.connId },
-        queued.slice(head?.count ?? 0).map((entry) => entry.frame),
-        head?.blob,
-      )
+      const frames = queued.slice(head?.count ?? 0).map((entry) => entry.frame)
+      const report = this.takeReport()
+      if (report) frames.push(report)
+      const body = encodeSseRequest({ connId: this.connId }, frames, head?.blob)
       this.postOutBytes = body.size
       this.watchPost(wire, SSE_POST_FLOOR_MS + (body.size * 1000) / SSE_POST_MIN_BYTES_PER_S)
       const response = await this.postAndRead(body, wire.signal)
@@ -688,6 +717,7 @@ class SseTransport implements UpgradeSource {
       this.startTimer = null
     }
     this.flushScheduler.cancel()
+    this.reportScheduler.cancel()
     this.takeOutbox()
     this.folded = null
     this.closeStreamRequest()

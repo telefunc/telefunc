@@ -4,6 +4,7 @@ import { ServerChannel } from './server/ServerChannel.js'
 import { decode, encode, type DecodedFrame } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
 import { WIRE_MAX_CTRL_FRAME_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
+import { PathEstimate } from '../flowControl/PathEstimate.js'
 
 function createHarness() {
   const mux = new ChannelMux()
@@ -24,6 +25,8 @@ function createHarness() {
         dropWaitingPublishes() {},
         dropWaitingFromPublish() {},
         drainRate: () => 0,
+        acknowledged: () => true,
+        path: new PathEstimate({ reportGap: 0 }),
       }),
       terminateWire: () => (terminated = true),
     }

@@ -130,7 +130,7 @@ class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
     const spanMs = ack.spanUs / 1000
     this.arrivedAt += spanMs
     const now = performance.now()
-    this.path.reported(acknowledged, now, ack.heldMs)
+    this.path.acknowledged(ack, now)
     const back = now - this.arrivedAt - ack.heldMs
     if (back < this.leastBack) this.leastBack = back
     this.lateMs = Math.max(back - this.leastBack, this.lateMs - (now - this.lateAt))
