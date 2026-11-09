@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { WIRE_INITIAL_WINDOW_BYTES, WIRE_PIECES_ACK_BYTES, WIRE_SEGMENT_BYTES } from '../constants.js'
 import { PathEstimate } from './PathEstimate.js'
 
 /** A WebSocket's 10 kHz lossy stream: what one value takes on the wire, and the gap between the receiver's reports. */
@@ -20,7 +21,11 @@ type Link = {
 
 /** A lossy sender on a path that carries `link.rate` bytes per ms in order, a millisecond at a time: it hands the values
  *  published while `PathEstimate.room` and its pace allow, and once the path is the limit a newer value replaces those
- *  waiting. Its receiver reports every `REPORT_GAP_MS` while bytes arrived. */
+ *  waiting. Its receiver reports as the page does: a gap after the first bytes since its last report, but no sooner
+ *  than a gap after that report, and at once once `WIRE_PIECES_ACK_BYTES` arrived since it.
+ *
+ *  With `kernel`, the sender is instead a TCP sender in slow start with no window of ours: one that starts at the initial
+ *  window and grows by every byte acknowledged, its receiver acknowledging every other segment at once (RFC 5681). */
 class Sim {
   readonly path = new PathEstimate({ reportGap: REPORT_GAP_MS })
   /** Of the values published in the run's second half, how old each was when it arrived, in ms. */
@@ -33,16 +38,24 @@ class Sim {
   private readonly arrivals: { at: number; end: number }[] = []
   private arrived = 0
   private arrivedAt = 0
-  private reportedAt = 0
+  private reportedAt = Number.NEGATIVE_INFINITY
   private reportedNewestAt: number | null = null
   private reported = 0
   private reportCount = 0
+  private firstUnreportedAt: number | null = null
+  private readonly kernel: boolean
+  private readonly valueBytes: number
+  /** With `kernel`: its window, and what its receiver acknowledged. */
+  private window = WIRE_INITIAL_WINDOW_BYTES
+  private acknowledged = 0
   private readonly reports: { bytes: number; heldMs: number; spanUs: number; at: number }[] = []
   private waiting: number[] = []
   private published = 0
 
-  constructor(link: Link) {
+  constructor(link: Link, { kernel = false, valueBytes = VALUE_BYTES } = {}) {
     this.link = link
+    this.kernel = kernel
+    this.valueBytes = valueBytes
   }
 
   /** `perMs` values a ms are published for `ms`, and those published after `lateFrom` count as late. */
@@ -60,9 +73,10 @@ class Sim {
     const { path } = this
     while (this.arrived < this.arrivals.length && this.arrivals[this.arrived]!.at <= t) {
       this.arrivedAt = this.arrivals[this.arrived++]!.at
+      this.firstUnreportedAt ??= this.arrivedAt
     }
     const took = this.arrived === 0 ? 0 : this.arrivals[this.arrived - 1]!.end
-    if (t - this.reportedAt >= REPORT_GAP_MS && took > this.reported) {
+    if (this.reportDue(t, took)) {
       const late = this.link.pairedReports && this.reportCount++ % 2 === 0 ? REPORT_GAP_MS : 0
       const spanUs = this.reportedNewestAt === null ? 0 : (this.arrivedAt - this.reportedNewestAt) * 1000
       const heldMs = t - this.arrivedAt
@@ -73,14 +87,19 @@ class Sim {
       this.reported = took
       this.reportedAt = t
       this.reportedNewestAt = this.arrivedAt
+      this.firstUnreportedAt = null
     }
     while (this.reports.length > 0 && this.reports[0]!.at <= t) {
-      expect(path.acknowledged(this.reports.shift()!, t)).toBe(true)
+      const report = this.reports.shift()!
+      if (this.kernel) {
+        this.window += report.bytes - this.acknowledged
+        this.acknowledged = report.bytes
+      } else expect(path.acknowledged(report, t)).toBe(true)
       this.hand(t, lateFrom)
     }
     for (this.published += perMs; this.published >= 1; this.published--) {
-      path.offer(VALUE_BYTES, t)
-      if (path.pathBound) {
+      path.offer(this.valueBytes, t)
+      if (!this.kernel && path.pathBound) {
         this.skipped += this.waiting.length
         this.waiting = []
       }
@@ -89,15 +108,28 @@ class Sim {
     this.hand(t, lateFrom)
   }
 
+  private reportDue(t: number, took: number): boolean {
+    const first = this.firstUnreportedAt
+    if (first === null) return false
+    if (this.kernel) return took - this.reported >= 2 * WIRE_SEGMENT_BYTES || this.arrivedAt < t
+    if (took - this.reported >= WIRE_PIECES_ACK_BYTES) return true
+    return t >= (first >= this.reportedAt + REPORT_GAP_MS ? first : this.reportedAt) + REPORT_GAP_MS
+  }
+
+  private mayHand(t: number): boolean {
+    if (this.kernel) return this.handedBytes - this.acknowledged < this.window
+    return this.path.room > 0 && this.path.paceWait(t) === 0
+  }
+
   private hand(t: number, lateFrom: number): void {
     const { path } = this
-    while (this.waiting.length > 0 && path.room > 0 && path.paceWait(t) === 0) {
+    while (this.waiting.length > 0 && this.mayHand(t)) {
       const publishedAt = this.waiting.shift()!
-      this.handedBytes += VALUE_BYTES
+      this.handedBytes += this.valueBytes
       path.handed(this.handedBytes, t)
       let start = Math.max(this.linkFreeAt, t)
       while (this.link.stalled?.(Math.floor(start))) start = Math.floor(start) + 1
-      this.linkFreeAt = start + VALUE_BYTES / this.link.rate
+      this.linkFreeAt = start + this.valueBytes / this.link.rate
       const at = this.linkFreeAt + this.oneWay(this.linkFreeAt)
       this.arrivals.push({ at, end: this.handedBytes })
       if (publishedAt >= lateFrom) this.lateAges.push(at - publishedAt)
@@ -136,9 +168,16 @@ describe('PathEstimate', () => {
     expect(sim.skipped).toBe(0)
   })
 
+  it('ramps up on a path its stream nearly fills no slower than TCP would under it', () => {
+    const ours = new Sim(c).run(10_000, 10, 5000)
+    const kernel = new Sim(c, { kernel: true }).run(10_000, 10, 5000)
+    expect(ours.skipped).toBe(0)
+    expect(ours.lateAgeP99).toBeLessThanOrEqual(kernel.lateAgeP99)
+  })
+
   it('lets a stream go whole through a stall and a path grown longer', () => {
     const stalled = (t: number) => (t > 3000 && t <= 4000) || (t > 6000 && t <= 6300)
-    expect(new Sim({ ...a, stalled }).run(10_000, 1).skipped).toBe(0)
+    expect(new Sim({ ...a, stalled }).run(10_000, 4).skipped).toBe(0)
     expect(new Sim({ ...a, delayAfter: { at: 1500, oneWay: 450 } }).run(10_000, 0.06).skipped).toBe(0)
   })
 
@@ -154,6 +193,19 @@ describe('PathEstimate', () => {
     const long = new Sim(d).run(10_000, 10, 5000)
     expect(long.path.pathBound).toBe(true)
     expect(long.lateAgeP99).toBeLessThanOrEqual(2 * (2 * d.oneWay + REPORT_GAP_MS))
+  })
+
+  it('keeps what reaches the receiver young when the stream outruns its path again, after keeping to it', () => {
+    const sim = new Sim(b).run(3000, 10).run(1500, 1).run(3000, 10, 4500)
+    expect(sim.lateAgeP99).toBeLessThanOrEqual(3 * (2 * b.oneWay + REPORT_GAP_MS))
+  })
+
+  it('keeps the bytes in flight within twice a round trip and report gap of the path, when no report judges it', () => {
+    // Values of 16 KiB take two gaps and more each on b: every report reads as after a stall, and judges nothing. The
+    // least round trip includes one value's time on the path.
+    const sim = new Sim(b, { valueBytes: 16 * 1024 }).run(10_000, 1 / 50)
+    const window = 2 * b.rate * (sim.path.roundTrip + REPORT_GAP_MS)
+    expect(sim.path.inFlight).toBeLessThanOrEqual(window + 16 * 1024)
   })
 
   it('stops skipping once the stream slows to what its path carries', () => {

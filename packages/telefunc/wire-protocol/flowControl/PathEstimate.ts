@@ -47,6 +47,10 @@ class PathEstimate {
   private readonly offered = new Fifo<Offered>()
   private newestOffered: Offered | null = null
   private offeredBefore = 0
+  /** What a TCP sender's slow start under the wire would have grown its window to (RFC 5681 §3.1): the initial window
+   *  and every byte reported taken since. It ends, null, at the first report that shows a queue, as HyStart++ ends TCP's
+   *  (RFC 9406), so that the wire doesn't flood its path whether or not its lossy streams outrun it. */
+  private slowStart: number | null = WIRE_INITIAL_WINDOW_BYTES
   /** Bytes the wire may hand while the path is the limit: they come at its pace, and every byte handed takes some. */
   private tokens = 0
   private tokensAt = 0
@@ -78,11 +82,12 @@ class PathEstimate {
   }
 
   /** The bytes the wire may hand now: what the path delivers in a round trip and the wait for its report while it is the
-   *  limit, else twice that, as a slow start, and at least the initial window every TCP sender starts with. */
+   *  limit, else twice that, at least the slow start's window while it lasts, and at least the initial window. */
   get room(): number {
     const { rate, roundTrip } = this
     const window = rate === 0 || roundTrip === Number.POSITIVE_INFINITY ? 0 : rate * (roundTrip + this.reportGap)
-    const bound = this.pathBound && window > 0 ? window : Math.max(WIRE_INITIAL_WINDOW_BYTES, 2 * window)
+    const bound =
+      this.pathBound && window > 0 ? window : Math.max(this.slowStart ?? WIRE_INITIAL_WINDOW_BYTES, 2 * window)
     return bound - this.inFlight
   }
 
@@ -137,6 +142,7 @@ class PathEstimate {
     const handedAt = newest?.end === took ? newest.at : this.sent.peek()!.at
     const roundTrip = Math.max(0, now - heldMs - handedAt)
     if (roundTrip < this.leastRoundTrip) this.leastRoundTrip = roundTrip
+    if (roundTrip > this.leastRoundTrip + this.reportGap) this.slowStart = null
     this.recentRoundTrips.add(roundTrip, now)
     const first = this.tookAt === 0
     const sinceReport = now - this.tookAt
@@ -151,6 +157,7 @@ class PathEstimate {
     if (!first && deliveredMs > 0) this.deliveredRates.add((took - this.took) / deliveredMs, now)
     if (paused) this.span = null
     else this.measureCarried(took, handedAt, now, heldMs, spanMs)
+    if (this.slowStart !== null) this.slowStart += took - this.took
     this.took = took
     this.tookAt = now
     this.tookHandedAt = handedAt
