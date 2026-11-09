@@ -102,6 +102,7 @@ class SseTransport implements UpgradeSource {
   private took = 0
   private newestAt = 0
   private reportedTook = 0
+  private reportedNewestAt: number | null = null
   private readonly reportScheduler = new DeadlineScheduler(() => this.sendReport())
   private flushing = false
   /** Bytes pushed to the outbox since `foldOutbox` last folded: when to fold, not what. */
@@ -248,6 +249,7 @@ class SseTransport implements UpgradeSource {
   private async openStream(): Promise<void> {
     this.connId = randomUuid()
     this.took = this.reportedTook = 0
+    this.reportedNewestAt = null
     this.uplink = new Uplink()
     this.downlink = new Downlink(this.uplink)
     const abortController = new AbortController()
@@ -446,11 +448,14 @@ class SseTransport implements UpgradeSource {
     if (report) this.sendFrame({ kind: 'control', frame: report })
   }
 
-  /** A report of what the event stream brought, if it brought anything since the last. */
+  /** A report of what the event stream brought, if it brought anything since the last, and the span it arrived over
+   *  since the last report's. */
   private takeReport(): Uint8Array<ArrayBuffer> | null {
     if (this.took === this.reportedTook) return null
+    const spanUs = this.reportedNewestAt === null ? 0 : Math.round((this.newestAt - this.reportedNewestAt) * 1000)
     this.reportedTook = this.took
-    return encode.piecesAck(this.took, Math.floor(performance.now() - this.newestAt), 0)
+    this.reportedNewestAt = this.newestAt
+    return encode.piecesAck(this.took, Math.floor(performance.now() - this.newestAt), spanUs)
   }
 
   private stageInitialBatch(): SseInitialBatchStage {
