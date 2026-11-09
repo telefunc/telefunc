@@ -42,6 +42,7 @@ export {
   onChannelLinkShare,
   onChannelSlowUplink,
   onChannelPublishesBehind,
+  onChannelLossyTicker,
   onChannelAcksWaiting,
   onChannelsQueuedBeforeReturn,
   onChannelAcrossFlip,
@@ -914,6 +915,24 @@ async function onChannelPublishesBehind(
     }
     publish(msg)
     return 'published'
+  })
+  return { broadcast, control: control.client }
+}
+
+/** Once the page asks, `count` publishes of `bytes` to a lossy broadcast, `periodMs` apart, each with its ordinal and when
+ *  it went. */
+async function onChannelLossyTicker(bytes: number, count: number, periodMs: number) {
+  const broadcast = new BroadcastChannel<string>({ key: `ticker:${crypto.randomUUID()}`, lossy: true })
+  const publishAll = async () => {
+    for (let i = 0; i < count; i++) {
+      void broadcast.publish(`${i}:${Date.now()}:`.padEnd(bytes, 'x'))
+      await new Promise((resolve) => setTimeout(resolve, periodMs))
+    }
+  }
+  const control = new Channel<(msg: 'start') => string, never>()
+  control.listen(() => {
+    void publishAll()
+    return 'started'
   })
   return { broadcast, control: control.client }
 }

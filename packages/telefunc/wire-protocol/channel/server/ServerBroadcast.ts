@@ -25,7 +25,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage, assertWarning } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import { admitPublish, maxPendingBytesOf, queueMemory, type MemoryHolder } from './channelMemory.js'
+import { admitPublish, hold, letGo, maxPendingBytesOf, queueMemory, type MemoryHolder } from './channelMemory.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ChannelOverflowError } from '../channelErrors.js'
@@ -76,6 +76,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.lossy = lossy
   }
 
+  /** A lossy page's newest publish, waiting for the page to catch up: only a newer one replaces it. */
+  private newestHeld: PublishBody | null = null
   /** Its page is told what it missed by `info.seq`, and the server's log by this once. */
   private missedWarned = false
   /** Why `shed` ended it, which its page has yet to learn: see `shed`. */
@@ -212,9 +214,16 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     if (this.heldBytes > share) this.shed(share, this.owner)
   }
 
-  /** A page that keeps up gets every publish; with no wire, its replay keeps the newest. */
+  /** A page that keeps up gets every publish. One that is behind gets the newest once it catches up, so that older ones
+   *  don't fill its link first; with no wire, its replay keeps the newest. */
   private forwardLossy(body: PublishBody): void {
     if (!this.peer || this.isBehind()) this.letWaitingGo()
+    if (this.isBehind()) {
+      this.newestHeld = body
+      hold(this, body)
+      return
+    }
+    this.sendHeld()
     this.lastPeer!.sendPublish(body)
   }
 
@@ -224,14 +233,34 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     return this.peer !== null && sentAt !== undefined && performance.now() - sentAt > LOSSY_BEHIND_MS
   }
 
+  private sendHeld(): void {
+    const body = this.newestHeld
+    if (body === null) return
+    this.newestHeld = null
+    this.lastPeer!.sendPublish(body)
+    letGo(this, body)
+  }
+
+  /** Returns whether one was held. */
+  private dropHeld(): boolean {
+    if (this.newestHeld === null) return false
+    letGo(this, this.newestHeld)
+    this.newestHeld = null
+    return true
+  }
+
+  protected override onPageHas(lastSeq: number): void {
+    super.onPageHas(lastSeq)
+    if (this.newestHeld !== null && this._phase !== 'ended' && !this.isBehind()) this.sendHeld()
+  }
+
   /** A lossy page's publishes that no wire has taken go, as a newer one takes their place. */
   private letWaitingGo(): void {
     const replay = this._replayBuffer
     if (this._phase === 'ended' || !replay) return
     const dropped = replay.dropNewestPublishes(this.unhanded())
-    if (dropped === 0) return
-    this.peer?.sender.queue.dropWaitingPublishes(this.peer.index, dropped)
-    this.warnMissed()
+    if (dropped > 0) this.peer?.sender.queue.dropWaitingPublishes(this.peer.index, dropped)
+    if (this.dropHeld() || dropped > 0) this.warnMissed()
   }
 
   /** Where `holder` is a lossy page this publish reaches (its key, on its object), it lets go of what the publish
@@ -259,8 +288,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   /** Its newest publish, where no wire has that yet. */
   get newestUnhanded(): PublishBody | undefined {
-    if (this._phase === 'ended' || !this._replayBuffer || this.unhanded() === 0) return undefined
-    return this._replayBuffer.newestPublish()
+    if (this._phase === 'ended' || !this._replayBuffer) return undefined
+    return this.newestHeld ?? (this.unhanded() === 0 ? undefined : this._replayBuffer.newestPublish())
   }
 
   private get owner(): string | undefined {
@@ -340,6 +369,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   }
 
   protected override shutdown(err?: Error, options?: { pageGone?: boolean }): void {
+    this.dropHeld()
     this.lastPeer = null
     this.unsubBroadcast?.()
     this.unsubBroadcast = null

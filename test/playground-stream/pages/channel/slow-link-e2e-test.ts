@@ -1,6 +1,6 @@
 export { testSlowLink }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult, countConnections, serverArrayBuffers, sleep } from '../../e2e-utils'
 import { startBlackHoleProxy } from '../../black-hole-proxy'
 import { withNetworkConditions } from '../../../utils'
@@ -9,6 +9,7 @@ type SlowLinkState = {
   linkShare: { pingMs: number[]; downloaded: number } | null
   slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
   publishesBehind: { pingMs: number; publishesAhead: number; closed: string; closeMs: number } | null
+  lossyTicker: { received: number; last: number | undefined; worstMs: number } | null
 }
 
 // Preview only: the page loads through a proxy in the test process, which Vite's HMR socket would share.
@@ -118,6 +119,32 @@ function testSlowLink(isDev: boolean) {
       expect(behind!.publishesAhead).toBe(1)
       expect(behind!.closed).toBe('0')
       expect(behind!.closeMs).lessThan(upToMs)
+    } finally {
+      // The page leaves before the proxy closes, which would cut its connections.
+      await page.goto('about:blank')
+      await proxy.close()
+    }
+  })
+
+  // 240 KB/s of 4 KiB messages for 5 s: the link holds a second of them at most, not all of them in turn.
+  test('channel: on a 125 kB/s link, a lossy broadcast faster than the link replaces what waits, so the newest stays recent and the last arrives', async () => {
+    const proxy = await startBlackHoleProxy(getServerUrl())
+    try {
+      await navigate(`${proxy.url}/channel`)
+      proxy.pace({ downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 })
+      await page.click('#channel-test-lossy-ticker')
+      let ticker: SlowLinkState['lossyTicker'] = null
+      await autoRetry(
+        async () => {
+          ticker = (await getResult<SlowLinkState>('#channel-state')).lossyTicker
+          expect(ticker).not.toBe(null)
+        },
+        { timeout: 40_000 },
+      )
+      expect(ticker!.last).toBe(299)
+      expect(ticker!.received).lessThan(300)
+      expect(ticker!.worstMs).lessThan(3000)
+      expectLog('skipped messages its client')
     } finally {
       // The page leaves before the proxy closes, which would cut its connections.
       await page.goto('about:blank')

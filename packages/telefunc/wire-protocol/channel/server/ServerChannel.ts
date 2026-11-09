@@ -740,7 +740,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** The page received this channel's frames through `lastSeq`, so the replay buffer lets them go. */
-  private onPageHas(lastSeq: number): void {
+  protected onPageHas(lastSeq: number): void {
     if (lastSeq > this.pageLastSeq) this.pageLastSeq = lastSeq
     this._replayBuffer?.acknowledge(lastSeq)
   }

@@ -56,6 +56,7 @@ import {
   onChannelLinkShare,
   onChannelSlowUplink,
   onChannelPublishesBehind,
+  onChannelLossyTicker,
   onChannelAcksWaiting,
   onChannelsQueuedBeforeReturn,
   onChannelAcrossFlip,
@@ -257,6 +258,7 @@ type ChannelState = {
     reconnected: { receipts: number; last: string }
   } | null
   lossyKeepsUp: { fromServer: number; fromPage: number; last: string } | null
+  lossyTicker: { received: number; last: number | undefined; worstMs: number } | null
   broadcastAwayShared: { received: number[][]; closed: string[] } | null
   channelsQueued: { queued: string[]; received: string[][]; closed: boolean[] } | null
   acksWaiting:
@@ -358,6 +360,7 @@ const initialState: ChannelState = {
   broadcastBehind: null,
   broadcastBehindCloses: null,
   lossyKeepsUp: null,
+  lossyTicker: null,
   broadcastAwayShared: null,
   channelsQueued: null,
   acksWaiting: null,
@@ -1606,6 +1609,24 @@ function ChannelDemo() {
     control.close()
   }, [])
 
+  const testLossyTicker = useCallback(async () => {
+    setChannelState((s) => ({ ...s, lossyTicker: null }))
+    const { broadcast, control } = await openChannel(() => onChannelLossyTicker(4096, 300, 1000 / 60))
+    const received: number[] = []
+    let worstMs = 0
+    broadcast.subscribe((message) => {
+      const [ordinal, sentAt] = message.split(':')
+      received.push(Number(ordinal))
+      worstMs = Math.max(worstMs, Date.now() - Number(sentAt))
+    })
+    await control.send('start', { ack: true })
+    const newest = Date.now() + 25_000
+    while (received.at(-1) !== 299 && Date.now() < newest) await new Promise((resolve) => setTimeout(resolve, 100))
+    const lossyTicker = { received: received.length, last: received.at(-1), worstMs }
+    setChannelState((s) => ({ ...s, lossyTicker }))
+    control.close()
+  }, [])
+
   const testBroadcastBehindCloses = useCallback(async () => {
     setChannelState((s) => ({ ...s, broadcastBehindCloses: null }))
     const opened = () => openChannel(() => onChannelPublishesBehind(256 * 1024))
@@ -2122,6 +2143,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             Lossy Broadcast On A Link That Keeps Up
+          </button>
+          <button
+            id="channel-test-lossy-ticker"
+            type="button"
+            onClick={testLossyTicker}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Lossy Broadcast Ticker
           </button>
           <button
             id="channel-test-broadcast-behind-closes"
