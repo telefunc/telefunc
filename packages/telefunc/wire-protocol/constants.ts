@@ -253,9 +253,8 @@ export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024
 export const WIRE_SEND_AHEAD_ROUND_TRIPS = 4
 /** How long a data frame may wait in its wire's queues, as acknowledgements measure it, before its sender holds back. */
 export const WIRE_QUEUE_DELAY_MS = 300
-/** A lossy sender is behind once its oldest unconfirmed message waited a round trip and this much past its wire's own
- *  wait: `WIRE_QUEUE_DELAY_MS` on a WebSocket, the POST turn (`sseFlushThrottle`) on SSE. */
-export const LOSSY_BEHIND_MS = 400
+/** What a lossy sender's `behindAfter` allows past its wire's own wait, for the confirmation to come back. */
+export const LOSSY_CONFIRM_SLACK_MS = 400
 /** The most a broadcast's `messages()` loop holds behind, and a Cloudflare bucket for a Durable Object starting up:
  *  publishes can't be awaited. */
 export const PUBLISH_HOLD_BYTES = 2 * 1024 * 1024

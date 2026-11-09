@@ -1,6 +1,6 @@
 export { WireSender }
 
-import { LOSSY_BEHIND_MS, WIRE_QUEUE_DELAY_MS, WIRE_SEND_BACKLOG_BASE_BYTES } from '../../constants.js'
+import { LOSSY_CONFIRM_SLACK_MS, WIRE_QUEUE_DELAY_MS, WIRE_SEND_BACKLOG_BASE_BYTES } from '../../constants.js'
 import { encode } from '../../wire/frame.js'
 import { TAG, passesData } from '../../wire/tags.js'
 import type { ServerChannel } from './ServerChannel.js'
@@ -68,7 +68,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
         }
       : null
     this.queue = this.pieces ? this.pieces.headroom : transport.queueOf!(wire)
-    this.behindAfter = LOSSY_BEHIND_MS + (this.pieces ? WIRE_QUEUE_DELAY_MS : sseFlushThrottle)
+    this.behindAfter = LOSSY_CONFIRM_SLACK_MS + (this.pieces ? WIRE_QUEUE_DELAY_MS : sseFlushThrottle)
     this.deliveries = deliveries
     this.sessions = sessions
     this.attaching = attaching

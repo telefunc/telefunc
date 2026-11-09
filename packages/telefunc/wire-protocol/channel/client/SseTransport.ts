@@ -4,7 +4,7 @@ import { assert } from '../../../utils/assert.js'
 import {
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_TRANSPORT,
-  LOSSY_BEHIND_MS,
+  LOSSY_CONFIRM_SLACK_MS,
   SSE_FLUSH_THROTTLE_MS,
   SSE_POST_FLOOR_MS,
   SSE_POST_IDLE_FLUSH_DELAY_MS,
@@ -514,7 +514,7 @@ class SseTransport implements UpgradeSource {
 
   /** Its frames wait for their POST's turn. */
   get behindAfter(): number {
-    return LOSSY_BEHIND_MS + this.flushThrottleMs
+    return LOSSY_CONFIRM_SLACK_MS + this.flushThrottleMs
   }
 
   headroom(): number {
