@@ -111,7 +111,7 @@ const { data: todos } = useQuery({
 
 `todos` is the rows. The query refetches when a write changes the rows `onGetTodos()` read.
 
-> `live()` wraps the `queryFn`, so it works with every TanStack Query adapter: React, Vue, Solid and Svelte.
+> `live()` wraps the `queryFn` and imports only `@tanstack/query-core`, no framework adapter. Its tests use React.
 
 > A query rendered on the server shows its rows in the HTML, then fetches once more in the browser to go live, whatever its `staleTime`.
 
@@ -179,7 +179,7 @@ When `@telefunc/live` can't tell whether a write changed the result (a function 
 
 A query that keeps changing refetches at most every 100 ms, one refetch at a time, and its last change is always fetched.
 
-When many queries change at once, for example a public feed watched by thousands of clients, the server tells clients to refetch as fast as it can serve them: right away while it has time to spare, in turn while it's busy. Writes stay fast, and results update as often as the server can afford.
+When many queries change at once, for example a public feed, the server tells clients to refetch as fast as it can serve them: right away while it has time to spare, in turn while it's busy. Writes stay fast, and results update as often as the server can afford.
 
 > Identical queries (same SQL, same parameters) refetching at the same time run once on the database. Your telefunction still runs for each client, with its permission checks. A query calling a volatile function, such as `random()` or `nextval()`, runs for each client.
 

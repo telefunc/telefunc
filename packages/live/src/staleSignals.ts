@@ -11,7 +11,7 @@ const SLOWEST = 100
 
 /**
  * Stale signals, sent as fast as this server can serve the refetches they cause. Each signal makes a client run a
- * telefunction again: when thousands of results change at once (a public feed, a burst of writes), sending every
+ * telefunction again: when many results change at once (a public feed, a burst of writes), sending every
  * signal at once queues all those runs in front of every other request. So signals go out at once while the event
  * loop has time to spare, and wait their turn when it doesn't: the server keeps answering, and under load results
  * update as often as it can afford, a client's result never staying stale for good.

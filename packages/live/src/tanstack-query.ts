@@ -22,7 +22,7 @@ const registries = new WeakMap<QueryClient, Registry>()
  * const { data: todos } = useQuery({ queryKey: ['todos', userId], queryFn: live(onGetTodos, userId) })
  * ```
  *
- * It wraps the `queryFn`, so it works with every TanStack framework adapter (React, Vue, Solid, Svelte).
+ * It wraps the `queryFn` and imports only `@tanstack/query-core`, no framework adapter. Its tests use React.
  */
 function live<T, TArgs extends unknown[]>(
   telefunction: (...args: TArgs) => Promise<Live<T>>,
