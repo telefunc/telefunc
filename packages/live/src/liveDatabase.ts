@@ -9,6 +9,7 @@ import { Transactions } from './capture/transactions.js'
 import { currentQuery, type LiveQuery } from './liveQuery.js'
 import type { Row } from './match/condition.js'
 import type { Change } from './match/liveRead.js'
+import { operandValues, type OperandValue } from './match/operands.js'
 import type { ReadShape } from './match/readShape.js'
 import { Router } from './match/router.js'
 import { keyOfValues, SharedReads, WatchedRead, type Joined } from './sharedReads.js'
@@ -21,13 +22,13 @@ type LiveOptions = {
 }
 
 /** How a driver runs one statement: send `text`, give back each row's last `hiddenColumns` values (as text) to
- *  `succeeded` and the rest to the caller (no rows at all unless `returnsRows`), or call `failed`. When `succeeded`
- *  returns a follow-up, run it next on the same connection, before the caller can send anything else. */
+ *  `succeeded` and the rest to the caller (no rows at all unless `returnsRows`), or call `failed`. Run the follow-ups
+ *  `succeeded` returns next, in order, on the same connection, before the caller can send anything else. */
 type Statement = {
   text: string
   hiddenColumns: number
   returnsRows: boolean
-  succeeded(hiddenRows: (string | null)[][]): FollowUp | void
+  succeeded(hiddenRows: (string | null)[][]): FollowUp[]
   failed(): void
   /** Identical reads wait for this one's result: give it to them with `answered()`. */
   leads: boolean
@@ -47,8 +48,11 @@ type Reservation = { read: WatchedRead; lead: ReturnType<SharedReads['lead']>; f
 /** A query whose rows (each value as text, in an array) go to `done`; `undefined` when it failed. */
 type FollowUp = { text: string; values: unknown[]; done(rows: (string | null)[][] | undefined): void }
 
-const READS_EVERYTHING: ReadShape = { kind: 'other', aliases: [], alsoReads: 'all', hiddenColumns: [] }
+type Rows = (string | null)[][]
+
+const READS_EVERYTHING: ReadShape = { kind: 'other', aliases: [], alsoReads: 'all', hiddenColumns: [], operands: [] }
 const MAX_PLANS = 10_000
+const MAX_KNOWN_OPERANDS = 10_000
 /** A read returning more rows keeps no result keys: any change to a matching row counts. */
 const MAX_RESULT_ROWS = 10_000
 /** A write changing more rows counts as changing any row of its table: matching each row against the live reads
@@ -69,6 +73,8 @@ class LiveDatabase {
   private readonly shared = new SharedReads()
   /** A statement changed a session: connections may answer the same read differently from now on. */
   private sessionsDiffer = false
+  /** The values Postgres gave a read's operands, by its text and parameters: an identical read doesn't ask again. */
+  private knownOperands = new Map<string, OperandValue[]>()
 
   constructor(options: LiveOptions) {
     this.transport = options.transport
@@ -111,7 +117,7 @@ class LiveDatabase {
     if (!key || plan.kind !== 'read') return undefined
     const joined = this.shared.join(key, live)
     if (joined) return { joined }
-    const read = this.watched(plan.shape, values, live)
+    const read = this.watched(plan.shape, text, values, live)
     const lead = this.shared.lead(key, read)
     let settled = false
     const failed = () => {
@@ -127,7 +133,7 @@ class LiveDatabase {
    *  current `.live()` query counts as changed by any write. */
   statementWithTextLater(connection: object): { sent(text: string, values: readonly unknown[]): Statement } {
     const live = currentQuery()
-    const anything = live && this.watched(READS_EVERYTHING, [], live)
+    const anything = live && this.watched(READS_EVERYTHING, '', [], live)
     return {
       sent: (text, values) => {
         const statement = this.planned(connection, text, values, false, live, undefined)
@@ -151,7 +157,10 @@ class LiveDatabase {
     sharing: Sharing | undefined,
   ): Statement {
     const plan = this.planOf(text, this.catalog!)
-    if (changesSession(plan)) this.sessionsDiffer = true
+    if (changesSession(plan)) {
+      this.sessionsDiffer = true
+      this.knownOperands.clear()
+    }
     switch (plan.kind) {
       case 'read':
         return this.read(rewrite ? plan : { ...plan, liveText: undefined }, text, values, connection, live, sharing)
@@ -179,21 +188,15 @@ class LiveDatabase {
     const joined = key ? this.shared.join(key, live) : undefined
     if (joined) return { ...this.statement(connection, text, 0, () => []), joined }
     const reservation = sharing?.reservation
-    const watched = reservation?.read ?? this.watched(plan.shape, values, live)
+    const watched = reservation?.read ?? this.watched(plan.shape, text, values, live)
     const lead = reservation?.lead ?? (key ? this.shared.lead(key, watched) : undefined)
-    const { read } = watched
     return {
       text: plan.liveText ?? text,
       hiddenColumns: plan.liveText ? plan.shape.hiddenColumns.length : 0,
       returnsRows: true,
       succeeded: (hiddenRows) => {
         const rows = plan.liveText && hiddenRows.length <= MAX_RESULT_ROWS ? hiddenRows : undefined
-        const { state } = plan.shape
-        // Inside a transaction, a query of ours failing would fail the caller's transaction.
-        if (!rows || !state || (state.onlyWhenEmpty && rows.length > 0) || this.transactions.isOpen(connection))
-          return read.resolve(rows)
-        const params = state.params.map((i) => values[i])
-        return { text: state.text, values: params, done: (stateRows) => read.resolve(rows, stateRows) }
+        return this.resolve(watched, plan.shape, rows, text, values, connection)
       },
       failed: () => {
         if (reservation) reservation.failed()
@@ -209,11 +212,66 @@ class LiveDatabase {
   }
 
   /** A live read `live` watches, filed in the router. */
-  private watched(shape: ReadShape, values: readonly unknown[], live: LiveQuery): WatchedRead {
-    const read = new WatchedRead(shape, values, this.router)
+  private watched(shape: ReadShape, text: string, values: readonly unknown[], live: LiveQuery): WatchedRead {
+    const operandsKey = this.operandsKey(text, values)
+    const operands = !shape.operandQuery ? [] : operandsKey ? this.knownOperands.get(operandsKey) : undefined
+    const read = new WatchedRead(shape, values, operands, this.router)
     this.watchTables(shape)
     read.watch(live)
     return read
+  }
+
+  /** Gives a read its result once the queries of ours it needs answered: the state of its tally, and its operands'
+   *  values unless known. Returns those queries, for the driver to run. */
+  private resolve(
+    watched: WatchedRead,
+    shape: ReadShape,
+    rows: Rows | undefined,
+    text: string,
+    values: readonly unknown[],
+    connection: object,
+  ): FollowUp[] {
+    // Inside a transaction, a query of ours failing would fail the caller's transaction.
+    if (this.transactions.isOpen(connection)) {
+      watched.resolve(rows)
+      return []
+    }
+    const followUps: FollowUp[] = []
+    const ask = (query: { text: string; params: number[] }) =>
+      new Promise<Rows | undefined>((done) =>
+        followUps.push({ text: query.text, values: query.params.map((i) => values[i]), done }),
+      )
+    const { state, operandQuery } = shape
+    const stateRows = rows && state && !(state.onlyWhenEmpty && rows.length > 0) ? ask(state) : undefined
+    const operandRows = operandQuery && watched.read.operands === undefined ? ask(operandQuery) : undefined
+    if (followUps.length === 0) watched.resolve(rows)
+    else void this.resolveWhenAnswered(watched, shape, rows, stateRows, operandRows, this.operandsKey(text, values))
+    return followUps
+  }
+
+  private async resolveWhenAnswered(
+    watched: WatchedRead,
+    shape: ReadShape,
+    rows: Rows | undefined,
+    stateRows: Promise<Rows | undefined> | undefined,
+    operandRows: Promise<Rows | undefined> | undefined,
+    operandsKey: string | undefined,
+  ): Promise<void> {
+    const [state, operandRow] = await Promise.all([stateRows, operandRows?.then((r) => r?.[0])])
+    // Not answered: they stay unknown, and any change to the tables counts.
+    const operands = operandRow && operandValues(shape.operands, operandRow)
+    if (operands && operandsKey) {
+      if (this.knownOperands.size >= MAX_KNOWN_OPERANDS) this.knownOperands.clear()
+      this.knownOperands.set(operandsKey, operands)
+    }
+    watched.resolve(rows, state, operands)
+  }
+
+  /** What makes two reads' operands the same values; `undefined` when they may not be. */
+  private operandsKey(text: string, values: readonly unknown[]): string | undefined {
+    if (this.sessionsDiffer) return undefined
+    const valuesKey = keyOfValues(values)
+    return valuesKey === undefined ? undefined : `${valuesKey}\0${text}`
   }
 
   /** What makes two live reads return the same rows (`SharedReads`); `undefined` when they may not. */
@@ -238,7 +296,10 @@ class LiveDatabase {
       text,
       hiddenColumns,
       returnsRows: true,
-      succeeded: (rows) => this.transactions.record(connection, changesOf(rows)),
+      succeeded: (rows) => {
+        this.transactions.record(connection, changesOf(rows))
+        return []
+      },
       failed: () => this.transactions.failed(connection),
       leads: false,
       answered: () => {},
@@ -324,6 +385,7 @@ class LiveDatabase {
   private forgetSchema(): void {
     this.catalog = undefined
     this.plans = new Map()
+    this.knownOperands = new Map()
   }
 
   private watchTables(shape: ReadShape): void {

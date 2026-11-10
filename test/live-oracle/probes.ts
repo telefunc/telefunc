@@ -118,6 +118,17 @@ const probes: Record<string, () => void> = {
       query.add(this)
     }
   },
+  /** An operand's value is the text the app sent, its casts dropped, rather than the value Postgres gave it. */
+  'operand-text'() {
+    const resolveWhenAnswered = database.resolveWhenAnswered
+    database.resolveWhenAnswered = function (watched: any, shape: any, ...rest: any[]) {
+      const [rows, stateRows, operandRows, key] = rest
+      const asSent = operandRows?.then(
+        (answered: any) => answered && [sentTexts(shape, watched.read.params, answered[0])],
+      )
+      return resolveWhenAnswered.call(this, watched, shape, rows, stateRows, asSent, key)
+    }
+  },
   /** A cascade only reaches the groups the counts have. */
   'tally-cascade'() {
     const dropAll = tally.dropAll
@@ -125,6 +136,17 @@ const probes: Record<string, () => void> = {
       return dropAll.call(this, source, row).filter((key: string) => this.groups.get(key).counts.size > 0)
     }
   },
+}
+
+/** Each operand as the app sent it: a parameter's value or a constant's text, under any casts. */
+function sentTexts(shape: any, params: unknown[], evaluated: unknown[]): unknown[] {
+  return shape.operands.map((operand: any, i: number) => {
+    const sent = /^\(*(\$(\d+)|'((?:[^']|'')*)')/.exec(operand.expression)
+    if (operand.list || !sent) return evaluated[i]
+    if (sent[3] !== undefined) return sent[3].replace(/''/g, "'")
+    const value = params[Number(sent[2]) - 1]
+    return value === null || value === undefined ? null : value instanceof Date ? value.toISOString() : String(value)
+  })
 }
 
 const probe = process.env.PROBE

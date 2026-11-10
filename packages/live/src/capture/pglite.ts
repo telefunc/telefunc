@@ -81,8 +81,7 @@ function captureExecutor(executor: Executor, connection: Pglite, live: LiveDatab
     const sent = statement
     const result = await run(sent, () => query(sent.text, params, options))
     const hidden = takeHiddenFields(result.fields, sent)
-    const followUp = sent.succeeded(takeHiddenValues(result.rows, hidden, options?.rowMode === 'array'))
-    if (followUp) runFollowUp(followUp)
+    sent.succeeded(takeHiddenValues(result.rows, hidden, options?.rowMode === 'array')).forEach(runFollowUp)
     if (!sent.returnsRows) result.rows.length = 0
     sent.answered(result, (r) => ({ ...r, rows: copyRows(r.rows) }))
     return result

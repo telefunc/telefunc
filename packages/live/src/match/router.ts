@@ -2,7 +2,8 @@ export { Router }
 
 import type { Row } from './condition.js'
 import type { Change, LiveRead } from './liveRead.js'
-import { paramText, valueKey, type Column } from './values.js'
+import type { OperandValue } from './operands.js'
+import { valueKey, type Column } from './values.js'
 
 /** The live reads of one table: by the value each requires of a column, and those that require none. */
 type TableIndex = {
@@ -34,7 +35,7 @@ class Router {
     for (const alias of aliases) {
       const index = this.index(alias.table.id)
       const route = alias.routes
-        .map((r) => ({ column: r.column, keys: this.keysOf(r, read.params) }))
+        .map((r) => ({ column: r.column, keys: read.operands && this.keysOf(r, read.operands) }))
         .find((r) => r.keys)
       if (!route) {
         file(index.unrouted)
@@ -55,6 +56,13 @@ class Router {
       }
     }
     this.filings.set(read, filings)
+  }
+
+  /** Files `read` again, now that its operands are known. */
+  refile(read: LiveRead): void {
+    if (!this.filings.has(read)) return
+    this.remove(read)
+    this.add(read)
   }
 
   remove(read: LiveRead): void {
@@ -86,18 +94,18 @@ class Router {
     return reached
   }
 
-  private keysOf(route: LiveRead['shape']['aliases'][number]['routes'][number], params: readonly unknown[]) {
+  /** The keys of the values a route allows; `undefined` when one isn't known. */
+  private keysOf(route: LiveRead['shape']['aliases'][number]['routes'][number], operands: readonly OperandValue[]) {
     const texts =
       'anyOf' in route
-        ? params[route.anyOf]
-        : route.values.map((v) => (v.kind === 'param' ? params[v.index] : v.kind === 'const' ? v.text : undefined))
+        ? operands[route.anyOf]
+        : route.values.map((v) => (v.kind === 'operand' ? operands[v.index] : undefined))
     if (!Array.isArray(texts)) return undefined
     const keys: string[] = []
-    for (const value of texts) {
-      const text = paramText(value)
+    for (const text of texts) {
       // `NULL` equals nothing: such a read matches no row.
       if (text === null) continue
-      const key = text === undefined ? undefined : valueKey(text, route.column)
+      const key = typeof text === 'string' ? valueKey(text, route.column) : undefined
       if (key === undefined) return undefined
       keys.push(key)
     }

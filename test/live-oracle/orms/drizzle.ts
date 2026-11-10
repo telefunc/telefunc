@@ -19,11 +19,24 @@ import {
   sum,
 } from 'drizzle-orm'
 import { drizzle as drizzlePg } from 'drizzle-orm/node-postgres'
-import { boolean, except, integer, numeric, pgTable, serial, text, timestamp, union } from 'drizzle-orm/pg-core'
+import {
+  boolean,
+  char,
+  except,
+  integer,
+  numeric,
+  pgTable,
+  serial,
+  text,
+  timestamp,
+  union,
+  uuid,
+} from 'drizzle-orm/pg-core'
 import { drizzle as drizzlePglite } from 'drizzle-orm/pglite'
 import { drizzle as drizzlePostgresJs } from 'drizzle-orm/postgres-js'
 import { liveDrizzle } from '@telefunc/live/drizzle'
 import type { BroadcastAdapter } from 'telefunc'
+import { arrayOf, CODES, REFS, type Spelling } from '../spellings.ts'
 import type { OrmDriver } from './types.ts'
 
 const users = pgTable('users', {
@@ -39,6 +52,8 @@ const todos = pgTable('todos', {
   priority: integer('priority').notNull(),
   amount: numeric('amount').notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull(),
+  ref: uuid('ref').notNull(),
+  code: char('code', { length: 4 }).notNull(),
 })
 const tags = pgTable('tags', {
   id: serial('id').primaryKey(),
@@ -181,6 +196,24 @@ function createDrizzle(
           .leftJoin(tags, eq(tags.todoId, todos.id))
           .where(eq(todos.userId, user))
           .orderBy(todos.id, tags.id),
+      spelled: ({ spellings: [a] }) =>
+        db
+          .select({ id: todos.id })
+          .from(todos)
+          .where(sql`${column(a!)} = ${operand(a!)}`)
+          .orderBy(todos.id),
+      spelledIn: ({ spellings: [a, b] }) =>
+        db
+          .select({ id: todos.id })
+          .from(todos)
+          .where(sql`${column(a!)} in (${operand(a!)}, ${operand(b!)})`)
+          .orderBy(todos.id),
+      spelledAny: ({ spellings }) =>
+        db
+          .select({ id: todos.id })
+          .from(todos)
+          .where(sql`${column(spellings[0]!)} = any(${arrayOf(spellings)})`)
+          .orderBy(todos.id),
     },
     writes: {
       insertTodo: ({ user, value, text, date }) =>
@@ -249,7 +282,18 @@ function createDrizzle(
       // Two statements in one text: sent as written.
       deleteUserRaw: ({ user }) => db.execute(sql.raw(`delete from users where id = ${Number(user)}; select 1`)),
       insertUser: ({ text, value }) => db.insert(users).values({ name: text, team: (value % 3) + 1 }),
+      recode: ({ todo, value }) =>
+        db
+          .update(todos)
+          .set({ code: CODES[value % CODES.length]!, ref: REFS[(value >> 2) % REFS.length]! })
+          .where(eq(todos.id, todo)),
     },
     async close() {},
   }
 }
+
+const column = ({ column }: Spelling) => sql.raw(`"todos"."${column}"`)
+
+/** A spelling as a parameter or inline, followed by its cast. */
+const operand = ({ value, cast, inline }: Spelling) =>
+  inline ? sql.raw(`'${value.replace(/'/g, "''")}'${cast}`) : sql`${value}${sql.raw(cast)}`

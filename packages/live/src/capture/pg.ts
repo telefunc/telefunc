@@ -174,8 +174,7 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
       return result
     }
     const hidden = takeHiddenFields(result.fields, statement)
-    const followUp = statement.succeeded(takeHiddenValues(result.rows, hidden, config.rowMode === 'array'))
-    if (followUp) runFollowUp(followUp)
+    statement.succeeded(takeHiddenValues(result.rows, hidden, config.rowMode === 'array')).forEach(runFollowUp)
     if (!statement.returnsRows) result.rows.length = 0
     if (!statement.leads) return result
     // Text values, parsed by each caller: nothing they parse is shared.
@@ -227,8 +226,7 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
       if (settled || !statement) return
       settled = true
       if (err) return statement.failed()
-      const followUp = statement.succeeded(hiddenRows)
-      if (followUp) runFollowUp(followUp)
+      statement.succeeded(hiddenRows).forEach(runFollowUp)
     }
     cursor.read = (count, callback) =>
       read(count, (err, rows, result) => {

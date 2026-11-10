@@ -2,7 +2,8 @@ export { analyzeTally, MAX_TALLY_ROWS }
 export type { TallyShape, TallyContext, ColumnAggregate, Comparison, SetTree }
 
 import { fromClauseAt, isAggregateCall, names, quote, splitAnd, walk, type Node } from '../sql.js'
-import { COMPARISONS, valueSource, type ValueSource } from './condition.js'
+import { COMPARISONS } from './condition.js'
+import { isOperand, type Operands } from './operands.js'
 import type { Alias } from './readShape.js'
 import { hasCanonicalText, type Column } from './values.js'
 
@@ -40,7 +41,8 @@ type GroupRule = {
 /** `count(*)`, or an aggregate of the source's `columns[column]`. */
 type Aggregate = { kind: 'count' } | ColumnAggregate
 type ColumnAggregate = { kind: 'min' | 'max' | 'countDistinct'; column: number }
-type Comparison = { aggregate: Aggregate; operator: string; value: ValueSource }
+/** `aggregate operator value`, `value` an operand of the read (`Operands`). */
+type Comparison = { aggregate: Aggregate; operator: string; operand: number }
 
 /** The result's rows are the hidden columns: a set operation's output. */
 type SetRule = { kind: 'set'; tree: SetTree }
@@ -57,6 +59,7 @@ type TallyContext = {
   tableOf: (select: Node) => Alias | undefined
   /** The column of that table `ref` names. */
   columnOf: (select: Node, ref: Node) => Column | undefined
+  operands: Operands
 }
 
 type TallyAnalysis = {
@@ -133,9 +136,15 @@ function analyzeGroups(select: Node, context: TallyContext): TallyAnalysis | und
     const expr = conjunct.A_Expr
     const operator = expr?.kind === 'AEXPR_OP' ? names(expr.name)[0]! : ''
     const aggregate = expr && aggregateOf(expr.lexpr)
-    const value = expr && valueSource(expr.rexpr, () => undefined)
-    if (!aggregate || !(operator in COMPARISONS) || (value?.kind !== 'param' && value?.kind !== 'const')) return
-    having.push({ aggregate, operator, value })
+    if (!aggregate || !(operator in COMPARISONS) || !isOperand(expr.rexpr)) return
+    // An untyped operand is read as the aggregate's type: `count` is a `bigint`, `min` and `max` the column's.
+    const as =
+      aggregate.kind === 'count' || aggregate.kind === 'countDistinct'
+        ? 'pg_catalog.int8'
+        : columns[aggregate.column]!.sqlType
+    const operand = context.operands.of(expr.rexpr, { as })
+    if (operand === undefined) return
+    having.push({ aggregate, operator, operand })
   }
   // `count`, `sum` and `avg` alone change with any row of their group: the counts can't rule anything out.
   if (having.length === 0 && outputs.length === 0) return undefined

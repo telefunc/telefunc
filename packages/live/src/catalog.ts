@@ -58,6 +58,7 @@ type CatalogRow = {
       name: string,
       category: string,
       type: string,
+      sqlType: string,
       collation: string,
       deterministic: boolean,
       generated: boolean,
@@ -86,9 +87,11 @@ const CATALOG_QUERY = `select json_build_object(
     'name', c.relname,
     'view', case when c.relkind in ('v', 'm') then pg_get_viewdef(c.oid) end,
     'rls', c.relrowsecurity,
-    'columns', (select json_agg(json_build_array(a.attname, t.typcategory, t.typname, coalesce(co.collname, ''),
+    'columns', (select json_agg(json_build_array(a.attname, t.typcategory, t.typname,
+        quote_ident(tn.nspname) || '.' || quote_ident(t.typname), coalesce(co.collname, ''),
         coalesce(co.collisdeterministic, true), a.attgenerated <> '') order by a.attnum)
-      from pg_attribute a join pg_type t on t.oid = a.atttypid left join pg_collation co on co.oid = a.attcollation
+      from pg_attribute a join pg_type t on t.oid = a.atttypid join pg_namespace tn on tn.oid = t.typnamespace
+      left join pg_collation co on co.oid = a.attcollation
       where a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped),
     'primaryKey', (select json_agg(a.attname order by k.ord) from pg_index i
       cross join unnest(i.indkey) with ordinality k(attnum, ord)
@@ -142,10 +145,11 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
   }
   for (const t of row.tables) {
     const columns = t.columns.map(
-      ([name, category, type, collation, deterministic]): Column => ({
+      ([name, category, type, sqlType, collation, deterministic]): Column => ({
         name,
         category,
         type,
+        sqlType,
         deterministic,
         orderableText: ['C', 'POSIX', 'ucs_basic'].includes(collation) || (collation === 'default' && row.cOrdering),
       }),
@@ -168,7 +172,7 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
       })),
       references: (t.references ?? []).map(([column, parent, parentColumn]) => ({ column, parent, parentColumn })),
       updateChangesOtherColumns:
-        t.columns.some((c) => c[5]) ||
+        t.columns.some((c) => c[6]) ||
         triggers.some(
           ([type]) => (type & TRIGGER_ROW) !== 0 && (type & TRIGGER_BEFORE) !== 0 && (type & TRIGGER_UPDATE) !== 0,
         ),

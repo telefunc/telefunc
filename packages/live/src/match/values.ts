@@ -7,6 +7,9 @@ type Column = {
   /** `pg_type.typcategory`: N numeric, S string, B boolean, D date/time, U user-defined, E enum, ... */
   category: string
   type: string
+  /** Its type as SQL, schema-qualified, without modifiers (`pg_catalog.bpchar`): what an untyped value compared
+   *  with it is read as. */
+  sqlType: string
   /** Text order is reproducible in JavaScript only under the `C` (or `POSIX`) collation. */
   orderableText: boolean
   /** A nondeterministic collation can call different strings equal. */

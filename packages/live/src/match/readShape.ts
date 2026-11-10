@@ -15,6 +15,7 @@ import {
   type RangeVar,
 } from '../sql.js'
 import { allOf, ALWAYS, compileCondition, inListCondition, type Condition, type ValueSource } from './condition.js'
+import { isOperand, Operands, type Operand } from './operands.js'
 import { analyzeTally, type TallyContext, type TallyShape } from './tallyShape.js'
 import type { Column } from './values.js'
 
@@ -35,8 +36,12 @@ type ReadShape = {
    *  counts, or the join seeds of an empty result (which has no row to carry them). */
   state?: { text: string; params: number[]; onlyWhenEmpty: boolean }
   tally?: TallyShape
-  limit?: ValueSource
-  offset?: ValueSource
+  limit?: Bound
+  offset?: Bound
+  /** The parameters and constants the statement's predicates compare columns with (`Operands`), and the query giving
+   *  their values, with the read's parameters at `params`. */
+  operands: Operand[]
+  operandQuery?: { text: string; params: number[] }
   /** `undefined`: the order can't be evaluated on a row (an expression, or columns of several tables). */
   sort?: SortKey[]
   /** A `SELECT DISTINCT` of one table's columns: each result row carries those columns and how many rows have them. */
@@ -90,6 +95,9 @@ type Correlation = { column: Column; parent: Alias; parentColumn: Column; hidden
  *  from another table's route, through a join. */
 type Route = ({ column: Column; values: ValueSource[] } | { column: Column; anyOf: number }) & { derived?: true }
 
+/** A `LIMIT` or `OFFSET`: a parameter, a constant, or an expression. */
+type Bound = { kind: 'param'; index: number } | { kind: 'const'; text: string } | { kind: 'unknown' }
+
 type SortKey = { column: Column; alias: Alias; descending: boolean; nullsFirst: boolean; hidden: number }
 
 type Scope = {
@@ -114,6 +122,7 @@ type Analysis = {
   text: string | undefined
   /** The scope of each plain `SELECT` analyzed. */
   scopes: Map<Node, Scope>
+  operands: Operands
 }
 
 const EXACT_AGGREGATES = new Set(['count', 'sum', 'avg'])
@@ -121,14 +130,34 @@ const SEED_LIMIT = 100
 
 /** `text`: the statement's text, when it is the whole text sent. */
 function analyzeRead(select: Node, catalog: Catalog, text?: string): ReadShape {
-  const analysis: Analysis = { catalog, aliases: [], alsoReads: new Set(), text, scopes: new Map() }
+  const analysis: Analysis = {
+    catalog,
+    aliases: [],
+    alsoReads: new Set(),
+    text,
+    scopes: new Map(),
+    operands: new Operands(),
+  }
+  const shape = shapeOf(select, analysis)
+  // Every operand is known once the whole statement is analyzed.
+  return { ...shape, operandQuery: analysis.operands.query() }
+}
+
+function shapeOf(select: Node, analysis: Analysis): ReadShape {
+  const { text } = analysis
   const top = analyzeSelect(select, undefined, { top: true, outputOnly: false }, analysis)
   let kind = top ? readKind(select) : 'other'
   const distinct = kind === 'rows' && select.distinctClause ? distinctColumns(select, top!, analysis) : undefined
   if (select.distinctClause && !distinct) kind = 'other'
-  const shape: ReadShape = { kind, aliases: analysis.aliases, alsoReads: analysis.alsoReads, hiddenColumns: [] }
+  const shape: ReadShape = {
+    kind,
+    aliases: analysis.aliases,
+    alsoReads: analysis.alsoReads,
+    hiddenColumns: [],
+    operands: analysis.operands.list,
+  }
   if (kind === 'rows' && top) {
-    addResultKeys(shape, select, top, distinct)
+    addResultKeys(shape, select, top, distinct, analysis.operands)
     return shape
   }
   for (const alias of shape.aliases) alias.role = 'other'
@@ -157,7 +186,7 @@ function tallyContext(analysis: Analysis, text: string): TallyContext {
     const found = alias && resolveColumn(ref, analysis.scopes.get(select)!)
     return alias && found?.alias === alias ? found.column : undefined
   }
-  return { text, aliases: analysis.aliases, tableOf, columnOf }
+  return { text, aliases: analysis.aliases, tableOf, columnOf, operands: analysis.operands }
 }
 
 /** The columns of a plain `SELECT DISTINCT` listing only columns of its one table. */
@@ -219,7 +248,7 @@ function analyzeSelect(
   for (const item of (stmt.fromClause ?? []) as Node[])
     addFromItem(item, false, scope, flags, analysis, filters, subqueries)
   for (const conjunct of splitAnd(stmt.whereClause)) filters.push({ conjunct })
-  const edges = applyFilters(filters, scope)
+  const edges = applyFilters(filters, scope, analysis.operands)
   scope.edges = edges
 
   const subFlags = { top: false, outputOnly: flags.outputOnly }
@@ -300,7 +329,7 @@ function outerReferences(node: unknown, scope: Scope): number {
 type Filter = { conjunct: Node; nullableOnly?: Alias[] }
 
 /** Compiles each alias's own conditions and routes; returns the equalities tying an alias to another. */
-function applyFilters(filters: Filter[], scope: Scope): Edge[] {
+function applyFilters(filters: Filter[], scope: Scope, operands: Operands): Edge[] {
   const edges: Edge[] = []
   const ownFilters = new Map<Alias, Node[]>()
   for (const { conjunct, nullableOnly } of filters) {
@@ -319,8 +348,8 @@ function applyFilters(filters: Filter[], scope: Scope): Edge[] {
       const found = resolveColumn(ref, scope)
       return found?.alias === alias ? found.column : undefined
     }
-    alias.condition = allOf(conjuncts.map((c) => compileCondition(c, resolve)))
-    alias.routes = conjuncts.flatMap((c) => routeOf(c, resolve) ?? [])
+    alias.condition = allOf(conjuncts.map((c) => compileCondition(c, resolve, operands)))
+    alias.routes = conjuncts.flatMap((c) => routeOf(c, resolve, operands) ?? [])
   }
   deriveRoutes(edges)
   return edges
@@ -510,32 +539,26 @@ function usingEquality(column: string, left: Alias[], right: Alias[]): Node | un
 
 // ── Routes ──
 
-function routeOf(conjunct: Node, resolve: (ref: Node) => Column | undefined): Route | undefined {
+function routeOf(conjunct: Node, resolve: (ref: Node) => Column | undefined, operands: Operands): Route | undefined {
   const expr = conjunct.A_Expr
   if (!expr || names(expr.name)[0] !== '=' || !expr.lexpr.ColumnRef) return undefined
   const column = resolve(expr.lexpr)
   if (!column) return undefined
-  const value = (node: Node): ValueSource | undefined => {
-    const inner = node.TypeCast ? node.TypeCast.arg : node
-    if (inner.ParamRef) return { kind: 'param', index: inner.ParamRef.number - 1 }
-    if (inner.A_Const && !inner.A_Const.isnull) {
-      const c = inner.A_Const
-      const text = c.ival ? String(c.ival.ival ?? 0) : c.sval ? (c.sval.sval ?? '') : c.fval ? c.fval.fval : undefined
-      return text === undefined ? undefined : { kind: 'const', text }
-    }
-    return undefined
-  }
+  // The operands the condition compares with: routes key the values Postgres gave them.
+  const operand = (node: Node, form?: 'list') =>
+    isOperand(node) ? operands.of(node, { as: column.sqlType, form }) : undefined
   if (expr.kind === 'AEXPR_OP') {
-    const v = value(expr.rexpr)
-    return v ? { column, values: [v] } : undefined
+    const index = operand(expr.rexpr)
+    return index === undefined ? undefined : { column, values: [{ kind: 'operand', index }] }
   }
   if (expr.kind === 'AEXPR_IN') {
-    const values = ((expr.rexpr.List?.items ?? []) as Node[]).map(value)
-    return values.every((v) => v) ? { column, values: values as ValueSource[] } : undefined
+    const indexes = ((expr.rexpr.List?.items ?? []) as Node[]).map((item) => operand(item))
+    if (indexes.some((index) => index === undefined)) return undefined
+    return { column, values: indexes.map((index) => ({ kind: 'operand', index: index! })) }
   }
   if (expr.kind === 'AEXPR_OP_ANY') {
-    const v = value(expr.rexpr)
-    return v?.kind === 'param' ? { column, anyOf: v.index } : undefined
+    const index = operand(expr.rexpr, 'list')
+    return index === undefined ? undefined : { column, anyOf: index }
   }
   return undefined
 }
@@ -585,7 +608,13 @@ function readKind(select: Node): ReadShape['kind'] {
   return aggregates > 0 ? 'aggregate' : 'rows'
 }
 
-function addResultKeys(shape: ReadShape, select: Node, top: Scope, distinct: Column[] | undefined): void {
+function addResultKeys(
+  shape: ReadShape,
+  select: Node,
+  top: Scope,
+  distinct: Column[] | undefined,
+  operands: Operands,
+): void {
   const add = (expression: string) => {
     const known = shape.hiddenColumns.indexOf(expression)
     if (known !== -1) return known
@@ -615,7 +644,7 @@ function addResultKeys(shape: ReadShape, select: Node, top: Scope, distinct: Col
       if (join.partner.role !== 'top') continue
       join.hidden = hidden(join.partner, join.partnerColumn.name)
       const routes = join.partner.routes.filter((r) => !r.derived)
-      if (routes.length > 0) join.seed = add(seedOf(join.partner, join.partnerColumn, routes))
+      if (routes.length > 0) join.seed = add(seedOf(join.partner, join.partnerColumn, routes, operands.list))
     }
   }
   shape.limit = limitValue(select.limitCount)
@@ -629,23 +658,18 @@ function addResultKeys(shape: ReadShape, select: Node, top: Scope, distinct: Col
 }
 
 /** The distinct `column` values of `alias`'s rows its `routes` allow, as a JSON array; up to `SEED_LIMIT + 1`. */
-function seedOf(alias: Alias, column: Column, routes: Route[]): string {
+function seedOf(alias: Alias, column: Column, routes: Route[], operands: Operand[]): string {
   const name = quote(alias.name)
-  const value = (source: ValueSource) =>
-    source.kind === 'param'
-      ? `$${source.index + 1}`
-      : source.kind === 'const' && source.text !== null
-        ? `'${source.text.replace(/'/g, "''")}'`
-        : 'NULL'
+  const value = (source: ValueSource) => (source.kind === 'operand' ? operands[source.index]!.expression : 'NULL')
   const where = routes.map((route) =>
     'anyOf' in route
-      ? `${name}.${quote(route.column.name)} = ANY($${route.anyOf + 1})`
+      ? `${name}.${quote(route.column.name)} = ANY(${operands[route.anyOf]!.expression})`
       : `${name}.${quote(route.column.name)} IN (${route.values.map(value).join(', ')})`,
   )
   return `(SELECT coalesce(to_json(array_agg("v")), '[]')::text FROM (SELECT DISTINCT ${name}.${quote(column.name)}::text AS "v" FROM ${alias.table.sqlName} AS ${name} WHERE ${where.join(' AND ')} LIMIT ${SEED_LIMIT + 1}) AS "__live_seed")`
 }
 
-function limitValue(node: Node | undefined): ValueSource | undefined {
+function limitValue(node: Node | undefined): Bound | undefined {
   if (!node || node.A_Const?.isnull) return undefined
   if (node.ParamRef) return { kind: 'param', index: node.ParamRef.number - 1 }
   if (node.A_Const?.ival) return { kind: 'const', text: String(node.A_Const.ival.ival ?? 0) }

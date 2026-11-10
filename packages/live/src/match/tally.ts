@@ -3,7 +3,8 @@ export { Tally }
 import { and, COMPARISONS, FALSE, isTrue, mayBeTrue, not, NULL, or, TRUE, type Row, type Truth } from './condition.js'
 import type { Alias } from './readShape.js'
 import { MAX_TALLY_ROWS, type ColumnAggregate, type Comparison, type SetTree, type TallyShape } from './tallyShape.js'
-import { compareValues, paramText, valueKey, type Column } from './values.js'
+import type { OperandValue } from './operands.js'
+import { compareValues, valueKey, type Column } from './values.js'
 
 /** How many matching rows of `source` have some values (`texts`, the source's columns): at least `lo`, at most `hi`.
  *  A change may be counted already, by the counts query that ran after the read, or not: an insert raises `hi`, a
@@ -22,18 +23,18 @@ const UNKNOWN = TRUE | FALSE | NULL
 /** The counts of a tally read, and what the read returned: decides whether a change can alter its result. */
 class Tally {
   private readonly shape: TallyShape
-  private readonly params: readonly unknown[]
+  private readonly operands: readonly OperandValue[]
   private readonly groups = new Map<string, Group>()
 
   /** `undefined` when the counts can't be keyed, or there are too many to keep. */
   static of(
     shape: TallyShape,
-    params: readonly unknown[],
+    operands: readonly OperandValue[],
     hiddenRows: (string | null)[][],
     countRows: (string | null)[][],
   ): Tally | undefined {
     if (countRows.length > MAX_TALLY_ROWS) return undefined
-    const tally = new Tally(shape, params)
+    const tally = new Tally(shape, operands)
     for (const [json, count] of countRows) {
       const [source, ...texts] = JSON.parse(json!) as [string, ...(string | null)[]]
       const place = tally.placeOf(Number(source), texts)
@@ -53,9 +54,9 @@ class Tally {
     return tally
   }
 
-  private constructor(shape: TallyShape, params: readonly unknown[]) {
+  private constructor(shape: TallyShape, operands: readonly OperandValue[]) {
     this.shape = shape
-    this.params = params
+    this.operands = operands
   }
 
   /** Counts a change to a row of `alias`: `old` and `now` when they may match, `surely` when both surely do; `several`
@@ -126,11 +127,10 @@ class Tally {
   }
 
   private holds(test: Comparison, counts: Count[]): Truth {
-    const { aggregate, operator, value } = test
-    const text =
-      value.kind === 'param' ? paramText(this.params[value.index]) : value.kind === 'const' ? value.text : undefined
-    if (text === undefined) return UNKNOWN
+    const { aggregate, operator, operand } = test
+    const text = this.operands[operand]
     if (text === null) return NULL
+    if (typeof text !== 'string') return UNKNOWN
     const holds = (order: number) => (COMPARISONS[operator]!(order as -1 | 0 | 1) ? TRUE : FALSE)
     if (aggregate.kind === 'count' || aggregate.kind === 'countDistinct') {
       const { lo, hi } = aggregate.kind === 'count' ? total(counts) : this.distinct(aggregate.column, counts)

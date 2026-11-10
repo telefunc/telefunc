@@ -132,10 +132,10 @@ async function run(query: Query, { live, sql, connection = {} }: Target): Promis
   const { resolve, reject } = query
   query.resolve = (result) => {
     const done = sent()
-    const followUp = done.succeeded(takeHidden(query, result, done))
+    const followUps = done.succeeded(takeHidden(query, result, done))
     done.answered(result, copyResult)
     resolve(result)
-    if (followUp) runFollowUp(sql, followUp)
+    for (const followUp of followUps) runFollowUp(sql, followUp)
   }
   query.reject = (err) => {
     sent().failed()

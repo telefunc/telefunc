@@ -1,10 +1,11 @@
 export { compileCondition, inListCondition, allOf, mayBeTrue, isTrue, ALWAYS, TRUE, FALSE, NULL, and, or, not }
-export { valueSource, COMPARISONS }
+export { COMPARISONS }
 export type { Condition, Row, Truth, ValueSource }
 
 import type { Node } from '../sql.js'
 import { names } from '../sql.js'
-import { compareValues, paramText, type Column } from './values.js'
+import { isOperand, type Comparison, type OperandValue, type Operands } from './operands.js'
+import { compareValues, type Column } from './values.js'
 
 /** A row image: each column's value in Postgres's text form, `null` for SQL `NULL`. A column absent from the object
  *  has an unknown value. */
@@ -18,26 +19,24 @@ const FALSE = 2
 const NULL = 4
 const ALWAYS: Condition = () => TRUE | FALSE | NULL
 
-type Condition = (row: Row, params: readonly unknown[]) => Truth
+/** A test of one row, given the read's operands (`Operands`) as Postgres gave them. */
+type Condition = (row: Row, operands: readonly OperandValue[]) => Truth
 
-/** Where a scalar's value comes from: a column of the row being tested, a bound parameter, or a constant. */
-type ValueSource =
-  | { kind: 'column'; column: Column }
-  | { kind: 'param'; index: number }
-  | { kind: 'const'; text: string | null }
-  | { kind: 'unknown' }
+/** Where a scalar's value comes from: a column of the row being tested, or an operand of the read. */
+type ValueSource = { kind: 'column'; column: Column } | { kind: 'operand'; index: number } | { kind: 'unknown' }
 
 /** Compiles `node` into a test of one row. `resolve` maps a column reference to the row's column, or `undefined` when
- *  it belongs to another table: then the condition says nothing about the row (all outcomes possible). */
-function compileCondition(node: Node, resolve: (columnRef: Node) => Column | undefined): Condition {
-  const scalar = (n: Node) => valueSource(n, resolve)
+ *  it belongs to another table: then the condition says nothing about the row (all outcomes possible). Parameters
+ *  and constants become operands in `registry`. */
+function compileCondition(node: Node, resolve: (columnRef: Node) => Column | undefined, registry: Operands): Condition {
+  const scalar = (n: Node, comparison: Comparison = {}) => valueSource(n, resolve, registry, comparison)
   if (n(node, 'BoolExpr')) {
     const { boolop, args } = node.BoolExpr
-    const parts = (args as Node[]).map((a) => compileCondition(a, resolve))
-    if (boolop === 'NOT_EXPR') return (row, params) => not(parts[0]!(row, params))
+    const parts = (args as Node[]).map((a) => compileCondition(a, resolve, registry))
+    if (boolop === 'NOT_EXPR') return (row, operands) => not(parts[0]!(row, operands))
     const combine = boolop === 'AND_EXPR' ? and : or
-    return (row, params) =>
-      parts.reduce((acc, part) => combine(acc, part(row, params)), boolop === 'AND_EXPR' ? TRUE : FALSE)
+    return (row, operands) =>
+      parts.reduce((acc, part) => combine(acc, part(row, operands)), boolop === 'AND_EXPR' ? TRUE : FALSE)
   }
   if (n(node, 'A_Const')) {
     const constant = node.A_Const
@@ -45,18 +44,18 @@ function compileCondition(node: Node, resolve: (columnRef: Node) => Column | und
     return ALWAYS
   }
   if (n(node, 'NullTest')) {
-    const source = scalar(node.NullTest.arg)
+    const source = scalar(node.NullTest.arg, { form: 'nullness' })
     const isNull = node.NullTest.nulltesttype === 'IS_NULL'
-    return (row, params) => {
-      const value = read(source, row, params)
+    return (row, operands) => {
+      const value = read(source, row, operands)
       if (value === undefined) return TRUE | FALSE
       return (value === null) === isNull ? TRUE : FALSE
     }
   }
   if (n(node, 'BooleanTest')) {
-    const inner = compileCondition(node.BooleanTest.arg, resolve)
+    const inner = compileCondition(node.BooleanTest.arg, resolve, registry)
     const test = booleanTest(node.BooleanTest.booltesttype)
-    return (row, params) => mapTruth(inner(row, params), test)
+    return (row, operands) => mapTruth(inner(row, operands), test)
   }
   if (n(node, 'ColumnRef')) {
     const column = resolve(node)
@@ -72,45 +71,47 @@ function compileCondition(node: Node, resolve: (columnRef: Node) => Column | und
   return ALWAYS
 }
 
-function compileExpression(expr: Node, scalar: (n: Node) => ValueSource): Condition {
+function compileExpression(expr: Node, scalar: (n: Node, comparison?: Comparison) => ValueSource): Condition {
   const operator = names(expr.name)[0]!
   const left = scalar(expr.lexpr)
+  // An operand compared with a column is read as the column's type.
+  const as = left.kind === 'column' ? left.column.sqlType : undefined
   switch (expr.kind) {
     case 'AEXPR_OP': {
-      const right = scalar(expr.rexpr)
+      const right = scalar(expr.rexpr, { as })
       if (!COMPARISONS[operator]) return ALWAYS
-      return comparison(operator, left, right)
+      const leftOperand = right.kind === 'column' ? scalar(expr.lexpr, { as: right.column.sqlType }) : left
+      return comparison(operator, leftOperand, right)
     }
     case 'AEXPR_IN': {
       const list = (expr.rexpr.List?.items ?? []) as Node[]
-      const equalities = list.map((item) => comparison('=', left, scalar(item)))
-      const any: Condition = (row, params) => equalities.reduce((acc, eq) => or(acc, eq(row, params)), FALSE)
-      return operator === '=' ? any : (row, params) => not(any(row, params))
+      const equalities = list.map((item) => comparison('=', left, scalar(item, { as })))
+      const any: Condition = (row, operands) => equalities.reduce((acc, eq) => or(acc, eq(row, operands)), FALSE)
+      return operator === '=' ? any : (row, operands) => not(any(row, operands))
     }
     case 'AEXPR_OP_ANY':
     case 'AEXPR_OP_ALL': {
-      const right = scalar(expr.rexpr)
-      if (!COMPARISONS[operator] || right.kind !== 'param') return ALWAYS
+      const right = scalar(expr.rexpr, { as, form: 'list' })
+      if (!COMPARISONS[operator] || right.kind !== 'operand') return ALWAYS
       const isAny = expr.kind === 'AEXPR_OP_ANY'
-      return (row, params) => {
-        const list = params[right.index]
-        if (!Array.isArray(list)) return ALWAYS(row, params)
-        const parts = list.map((item) =>
-          compare(operator, left, { kind: 'const', text: paramText(item) ?? null }, row, params),
-        )
+      return (row, operands) => {
+        const list = operands[right.index]
+        const value = read(left, row, operands)
+        if (!Array.isArray(list) || left.kind !== 'column') return ALWAYS(row, operands)
+        const parts = list.map((item) => truthOf(operator, value, item, left.column))
         return parts.reduce((acc, t) => (isAny ? or : and)(acc, t), isAny ? FALSE : TRUE)
       }
     }
     case 'AEXPR_BETWEEN':
     case 'AEXPR_NOT_BETWEEN': {
-      const [low, high] = (expr.rexpr.List.items as Node[]).map(scalar)
-      const between: Condition = (row, params) =>
-        and(compare('>=', left, low!, row, params), compare('<=', left, high!, row, params))
-      return expr.kind === 'AEXPR_BETWEEN' ? between : (row, params) => not(between(row, params))
+      const [low, high] = (expr.rexpr.List.items as Node[]).map((bound) => scalar(bound, { as }))
+      const between: Condition = (row, operands) =>
+        and(compare('>=', left, low!, row, operands), compare('<=', left, high!, row, operands))
+      return expr.kind === 'AEXPR_BETWEEN' ? between : (row, operands) => not(between(row, operands))
     }
     case 'AEXPR_LIKE':
     case 'AEXPR_ILIKE':
-      return like(left, scalar(expr.rexpr), expr.kind === 'AEXPR_ILIKE', operator.startsWith('!'))
+      return like(left, scalar(expr.rexpr, { form: 'pattern' }), expr.kind === 'AEXPR_ILIKE', operator.startsWith('!'))
     default:
       return ALWAYS
   }
@@ -120,13 +121,13 @@ function compileExpression(expr: Node, scalar: (n: Node) => ValueSource): Condit
 function inListCondition(column: Column, values: ValueSource[]): Condition {
   const source: ValueSource = { kind: 'column', column }
   const equalities = values.map((v) => comparison('=', source, v))
-  return (row, params) => equalities.reduce((acc, eq) => or(acc, eq(row, params)), FALSE)
+  return (row, operands) => equalities.reduce((acc, eq) => or(acc, eq(row, operands)), FALSE)
 }
 
 function allOf(conditions: Condition[]): Condition {
   if (conditions.length === 0) return ALWAYS
   if (conditions.length === 1) return conditions[0]!
-  return (row, params) => conditions.reduce((acc, condition) => and(acc, condition(row, params)), TRUE)
+  return (row, operands) => conditions.reduce((acc, condition) => and(acc, condition(row, operands)), TRUE)
 }
 
 function mayBeTrue(truth: Truth): boolean {
@@ -139,40 +140,31 @@ function isTrue(truth: Truth): boolean {
 
 // ── Values ──
 
-function valueSource(node: Node, resolve: (columnRef: Node) => Column | undefined): ValueSource {
-  if (n(node, 'TypeCast')) {
-    const inner = valueSource(node.TypeCast.arg, resolve)
-    // A cast changes how a column compares; a parameter or constant is read as the column's type anyway.
-    return inner.kind === 'column' ? { kind: 'unknown' } : inner
-  }
-  if (n(node, 'ParamRef')) return { kind: 'param', index: node.ParamRef.number - 1 }
-  if (n(node, 'A_Const')) return { kind: 'const', text: constantText(node.A_Const) }
+function valueSource(
+  node: Node,
+  resolve: (columnRef: Node) => Column | undefined,
+  registry: Operands,
+  comparison: Comparison,
+): ValueSource {
   if (n(node, 'ColumnRef')) {
     const column = resolve(node)
     return column ? { kind: 'column', column } : { kind: 'unknown' }
   }
-  return { kind: 'unknown' }
-}
-
-function constantText(constant: Node): string | null {
-  if (constant.isnull) return null
-  if (constant.ival) return String(constant.ival.ival ?? 0)
-  if (constant.fval) return constant.fval.fval
-  if (constant.sval) return constant.sval.sval ?? ''
-  if (constant.boolval) return constant.boolval.boolval ? 'true' : 'false'
-  if (constant.bsval) return null
-  return null
+  // A cast of a column changes how it compares.
+  if (n(node, 'TypeCast') && !isOperand(node)) return { kind: 'unknown' }
+  const index = registry.of(node, comparison)
+  return index === undefined ? { kind: 'unknown' } : { kind: 'operand', index }
 }
 
 /** `undefined`: unknown. */
-function read(source: ValueSource, row: Row, params: readonly unknown[]): string | null | undefined {
+function read(source: ValueSource, row: Row, operands: readonly OperandValue[]): string | null | undefined {
   switch (source.kind) {
     case 'column':
       return row[source.column.name]
-    case 'param':
-      return paramText(params[source.index])
-    case 'const':
-      return source.text
+    case 'operand': {
+      const value = operands[source.index]
+      return typeof value === 'string' || value === null ? value : undefined
+    }
     case 'unknown':
       return undefined
   }
@@ -191,28 +183,44 @@ const COMPARISONS: Record<string, (c: -1 | 0 | 1) => boolean> = {
 }
 
 function comparison(operator: string, left: ValueSource, right: ValueSource): Condition {
-  return (row, params) => compare(operator, left, right, row, params)
+  return (row, operands) => compare(operator, left, right, row, operands)
 }
 
-function compare(operator: string, left: ValueSource, right: ValueSource, row: Row, params: readonly unknown[]): Truth {
+function compare(
+  operator: string,
+  left: ValueSource,
+  right: ValueSource,
+  row: Row,
+  operands: readonly OperandValue[],
+): Truth {
+  const a = read(left, row, operands)
+  const b = read(right, row, operands)
+  // Two columns of different types: the type to compare as isn't known.
+  if (left.kind === 'column' && right.kind === 'column' && left.column.type !== right.column.type)
+    return truthOf(operator, a, b, undefined)
   const column = left.kind === 'column' ? left.column : right.kind === 'column' ? right.column : undefined
-  const a = read(left, row, params)
-  const b = read(right, row, params)
+  return truthOf(operator, a, b, column)
+}
+
+/** `a operator b`, both in Postgres's text form, compared as values of `column` (`undefined`: unknown). */
+function truthOf(
+  operator: string,
+  a: string | null | undefined,
+  b: string | null | undefined,
+  column: Column | undefined,
+): Truth {
   if (a === undefined || b === undefined) return TRUE | FALSE | NULL
   if (a === null || b === null) return NULL
-  // Two columns of different types, or no column at all: the type to compare as isn't known.
-  if (!column || (left.kind === 'column' && right.kind === 'column' && left.column.type !== right.column.type)) {
-    return TRUE | FALSE
-  }
+  if (!column) return TRUE | FALSE
   const order = compareValues(a, b, column)
   if (order === undefined) return TRUE | FALSE
   return COMPARISONS[operator]!(order) ? TRUE : FALSE
 }
 
 function like(left: ValueSource, pattern: ValueSource, caseInsensitive: boolean, negated: boolean): Condition {
-  return (row, params) => {
-    const value = read(left, row, params)
-    const text = read(pattern, row, params)
+  return (row, operands) => {
+    const value = read(left, row, operands)
+    const text = read(pattern, row, operands)
     if (value === undefined || text === undefined) return TRUE | FALSE | NULL
     if (value === null || text === null) return NULL
     const column = left.kind === 'column' ? left.column : undefined

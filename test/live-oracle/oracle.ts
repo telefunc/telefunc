@@ -25,6 +25,7 @@ import { createKysely } from './orms/kysely.ts'
 import { createPrisma } from './orms/prisma.ts'
 import type { OrmDriver, ReadArgs, WriteArgs } from './orms/types.ts'
 import { seed, USERS } from './schema.ts'
+import { SPELLED_COLUMNS, spell } from './spellings.ts'
 import { derived, type LiveCell } from '../../packages/live/dist/live.js'
 import { readLive } from '../../packages/live/dist/liveQuery.js'
 import { Refetcher } from '../../packages/live/dist/refetcher.js'
@@ -253,17 +254,24 @@ function derivedView(shape: string, rows: LiveCell<unknown>): LiveCell<string> {
 
 // ── The run ──
 
+// Values of the seeded todos in Postgres's text form, for the `spelled*` shapes to spell.
+const seeded = await query(
+  `select ref::text, code::text, priority::text, amount::text, done::text, text,
+     (updated_at at time zone 'UTC')::text || '+00' as updated_at from todos`,
+)
 const subscribers: Subscriber[] = []
 for (const shape of Object.keys(driver.reads).filter((s) => !SHAPES || SHAPES.includes(s))) {
   for (let i = 0; i < 3; i++) {
     const user = 1 + Math.floor(random() * USERS)
     const low = Math.floor(random() * 4)
+    const column = pick(SPELLED_COLUMNS)
     const args: ReadArgs = {
       user,
       user2: 1 + ((user + 2) % USERS),
       team: 1 + Math.floor(random() * 3),
       low,
       high: low + 1,
+      spellings: [spell(column, pick(seeded)[column], random), spell(column, pick(seeded)[column], random)],
     }
     subscribers.push({ shape, args, result: '', invalidated: false, stop: () => {}, derived: i % 2 === 1 })
   }

@@ -3,6 +3,7 @@ export type { Joined }
 
 import type { LiveQuery } from './liveQuery.js'
 import { LiveRead } from './match/liveRead.js'
+import type { OperandValue } from './match/operands.js'
 import type { ReadShape } from './match/readShape.js'
 import type { Router } from './match/router.js'
 
@@ -17,10 +18,27 @@ class WatchedRead {
   private readonly watchers = new Set<LiveQuery>()
   private isAffected = false
 
-  constructor(shape: ReadShape, params: readonly unknown[], router: Router) {
-    this.read = new LiveRead(shape, params, () => this.affected())
+  /** `operands`: the shape's operands' values, when already known (`undefined`: filed by no value until they are). */
+  constructor(
+    shape: ReadShape,
+    params: readonly unknown[],
+    operands: readonly OperandValue[] | undefined,
+    router: Router,
+  ) {
+    this.read = new LiveRead(shape, params, operands, () => this.affected())
     this.router = router
     router.add(this.read)
+  }
+
+  /** The statement's result (`LiveRead.resolve()`); with its operands' values, the read is filed by them. */
+  resolve(
+    hiddenRows: (string | null)[][] | undefined,
+    state?: (string | null)[][],
+    operands?: readonly OperandValue[],
+  ): void {
+    const known = this.read.operands !== undefined
+    this.read.resolve(hiddenRows, state, operands)
+    if (!known && operands) this.router.refile(this.read)
   }
 
   /** `query` watches it too: from now on, and for what changed since it started (its result is this read's). */

@@ -1,5 +1,7 @@
 export { SCHEMA, seed, USERS }
 
+import { CODES, REFS } from './spellings.ts'
+
 const USERS = 6
 
 /** The same tables for every ORM; each run starts from them. */
@@ -14,7 +16,9 @@ create table todos (
   done boolean not null default false,
   priority int not null default 0,
   amount numeric(12, 2) not null default 0,
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  ref uuid not null default '${REFS[0]}',
+  code char(4) not null default '${CODES[0]}'
 );
 create table tags (id serial primary key, todo_id int not null references todos (id) on delete cascade, name text not null);
 -- Written by a trigger, also when a user's deletion cascades to their todos.
@@ -33,11 +37,13 @@ function seed(random: () => number): string {
     const user = 1 + Math.floor(random() * USERS)
     const text = `${'abc'[i % 3]}${i}`
     const at = `'2026-11-10 08:00:00+00'::timestamptz + interval '${Math.floor(random() * 1000)} seconds'`
-    return `(${user}, '${text}', ${random() < 0.4}, ${Math.floor(random() * 5)}, ${(random() * 100).toFixed(2)}, ${at})`
+    const ref = REFS[Math.floor(random() * REFS.length)]
+    const code = CODES[Math.floor(random() * CODES.length)]
+    return `(${user}, '${text}', ${random() < 0.4}, ${Math.floor(random() * 5)}, ${(random() * 100).toFixed(2)}, ${at}, '${ref}', '${code}')`
   })
   const tags = Array.from({ length: 20 }, (_, i) => `(${1 + Math.floor(random() * 40)}, 'tag ${i % 4}')`)
   return `${SCHEMA}
 insert into users (name, team) values ${users.join(', ')};
-insert into todos (user_id, text, done, priority, amount, updated_at) values ${todos.join(', ')};
+insert into todos (user_id, text, done, priority, amount, updated_at, ref, code) values ${todos.join(', ')};
 insert into tags (todo_id, name) values ${tags.join(', ')};`
 }

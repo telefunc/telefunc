@@ -4,6 +4,7 @@ import { Kysely, PostgresDialect, sql } from 'kysely'
 import { jsonArrayFrom } from 'kysely/helpers/postgres'
 import { liveKysely } from '@telefunc/live/kysely'
 import type { BroadcastAdapter } from 'telefunc'
+import { arrayOf, CODES, REFS, type Spelling } from '../spellings.ts'
 import type { OrmDriver } from './types.ts'
 
 function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastAdapter): OrmDriver {
@@ -174,6 +175,27 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
           .orderBy('todos.id')
           .orderBy('tags.id')
           .execute(),
+      spelled: ({ spellings: [a] }) =>
+        db
+          .selectFrom('todos')
+          .select('id')
+          .where(sql<boolean>`${column(a!)} = ${operand(a!)}`)
+          .orderBy('id')
+          .execute(),
+      spelledIn: ({ spellings: [a, b] }) =>
+        db
+          .selectFrom('todos')
+          .select('id')
+          .where(sql<boolean>`${column(a!)} in (${operand(a!)}, ${operand(b!)})`)
+          .orderBy('id')
+          .execute(),
+      spelledAny: ({ spellings }) =>
+        db
+          .selectFrom('todos')
+          .select('id')
+          .where(sql<boolean>`${column(spellings[0]!)} = any(${arrayOf(spellings)})`)
+          .orderBy('id')
+          .execute(),
     },
     writes: {
       insertTodo: ({ user, value, text, date }) =>
@@ -264,7 +286,19 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
           .insertInto('users')
           .values({ name: text, team: (value % 3) + 1 })
           .execute(),
+      recode: ({ todo, value }) =>
+        db
+          .updateTable('todos')
+          .set({ code: CODES[value % CODES.length], ref: REFS[(value >> 2) % REFS.length] })
+          .where('id', '=', todo)
+          .execute(),
     },
     async close() {},
   }
 }
+
+const column = ({ column }: Spelling) => sql.ref(`todos.${column}`)
+
+/** A spelling as a parameter or inline, followed by its cast. */
+const operand = ({ value, cast, inline }: Spelling) =>
+  inline ? sql.raw(`'${value.replace(/'/g, "''")}'${cast}`) : sql`${value}${sql.raw(cast)}`

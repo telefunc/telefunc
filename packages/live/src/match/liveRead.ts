@@ -4,6 +4,7 @@ export type { Change }
 import { isTrue, mayBeTrue, type Row } from './condition.js'
 import { SEED_LIMIT, type Alias, type Join, type ReadShape } from './readShape.js'
 import { Tally } from './tally.js'
+import type { OperandValue } from './operands.js'
 import { compareValues, paramText, valueKey, type Column } from './values.js'
 
 /** A committed change to a table, with the images of the rows it wrote. `old` may lack columns: an `UPDATE` on
@@ -38,6 +39,8 @@ type Result = {
 class LiveRead {
   readonly shape: ReadShape
   readonly params: readonly unknown[]
+  /** The values of the shape's operands as Postgres gave them; `undefined` until known. */
+  operands: readonly OperandValue[] | undefined
   private result: Result | undefined
   private tally: Tally | undefined
   /** Changes that arrived while the statement ran: they are judged once its result is known. */
@@ -45,17 +48,28 @@ class LiveRead {
   private affected = false
   private readonly onAffected: () => void
 
-  constructor(shape: ReadShape, params: readonly unknown[], onAffected: () => void) {
+  constructor(
+    shape: ReadShape,
+    params: readonly unknown[],
+    operands: readonly OperandValue[] | undefined,
+    onAffected: () => void,
+  ) {
     this.shape = shape
     this.params = params
+    this.operands = operands
     this.onAffected = onAffected
   }
 
-  /** The statement's result: its rows' hidden columns as text, one array per row; and the rows of the shape's
-   *  `state` query, when it ran. */
-  resolve(hiddenRows: (string | null)[][] | undefined, state?: (string | null)[][]): void {
+  /** The statement's result: its rows' hidden columns as text, one array per row; the rows of the shape's `state`
+   *  query, when it ran; and its operands' values, when they weren't known. */
+  resolve(
+    hiddenRows: (string | null)[][] | undefined,
+    state?: (string | null)[][],
+    operands?: readonly OperandValue[],
+  ): void {
+    this.operands ??= operands
     const { tally } = this.shape
-    if (hiddenRows && tally) this.tally = state && Tally.of(tally, this.params, hiddenRows, state)
+    if (hiddenRows && tally) this.tally = state && Tally.of(tally, this.operands ?? [], hiddenRows, state)
     else if (hiddenRows) this.result = this.resultOf(hiddenRows, state?.[0])
     const pending = this.pending!
     this.pending = undefined
@@ -85,8 +99,9 @@ class LiveRead {
   private affectsThrough(alias: Alias, change: Change & { kind: 'insert' | 'update' | 'delete' }): boolean {
     const old = change.kind === 'insert' ? undefined : change.old
     const now = change.kind === 'delete' ? undefined : change.new
-    const oldTruth = old && alias.condition(old, this.params)
-    const newTruth = now && alias.condition(now, this.params)
+    const operands = this.operands ?? []
+    const oldTruth = old && alias.condition(old, operands)
+    const newTruth = now && alias.condition(now, operands)
     const oldMatches = oldTruth !== undefined && mayBeTrue(oldTruth)
     const newMatches = newTruth !== undefined && mayBeTrue(newTruth)
     // Surely part of the result, were it not for the other tables, the limit and the offset.
