@@ -27,6 +27,8 @@ type PgResultClass = new (
 type SharedPgResult = { result: PgResult; types: unknown }
 type PgCallback = (err: Error | null, result?: PgResult | PgResult[]) => void
 type PgClient = { query: (...args: any[]) => any }
+/** A client checked out of a `pg.Pool`, until it calls `release()`. */
+type CheckedOut = PgClient & { release: (err?: Error | boolean) => void }
 type PgPool = {
   on(event: 'connect', listener: (client: PgClient) => void): unknown
   connect: (callback?: (...args: any[]) => void) => any
@@ -51,12 +53,14 @@ const CAPTURED = Symbol.for('@telefunc/live/captured')
 const RESERVATION = Symbol('reservation')
 /** Type parsers that keep each value's text: a shared read's callers each parse it their own way. */
 const AS_TEXT = { getTypeParser: () => (text: string) => text }
+/** The follow-up queries of ours a client still runs, one after the other; settles once they all ended. */
+const followingUp = new WeakMap<PgClient, Promise<void>>()
 
 /** Captures every statement of a `pg.Pool` (each of its clients) or a `pg.Client`. */
 function capturePg(database: PgPool | PgClient, live: LiveDatabase): void {
   if (!('totalCount' in database)) return captureClient(database, live)
   database.on('connect', (client) => captureClient(client, live))
-  keepCallerContext(database)
+  checkOutForCaller(database)
   shareReadsBeforeConnecting(database, live)
 }
 
@@ -123,12 +127,35 @@ function parsedFor({ result, types }: SharedPgResult, config: PgQueryConfig): Pg
   return Object.assign(own, { command: result.command, rowCount: result.rowCount, oid: result.oid })
 }
 
-/** A waiting `connect(callback)` (each `pool.query()` makes one) is called back by whoever frees a client: without
- *  this, its statements would run in that caller's telefunction call, and its reads would be watched for the wrong
- *  client. */
-function keepCallerContext(pool: PgPool): void {
+/**
+ * A waiting `connect(callback)` (each `pool.query()` makes one) is called back in the caller's context, not that of
+ * whoever frees a client: else its statements would run in that caller's telefunction call, and its reads would be
+ * watched for the wrong client. And the client goes back to the pool only once our follow-up queries ended, so that
+ * no one else's query is sent while one of ours runs.
+ */
+function checkOutForCaller(pool: PgPool): void {
   const connect = pool.connect.bind(pool)
-  pool.connect = (callback) => (callback ? connect(AsyncResource.bind(callback)) : connect())
+  pool.connect = (callback) => {
+    if (!callback) return connect().then(releasedAfterFollowUps)
+    return connect(
+      AsyncResource.bind((err: Error | undefined, client: CheckedOut | undefined, release: unknown) => {
+        if (!client) return callback(err, client, release)
+        releasedAfterFollowUps(client)
+        callback(err, client, client.release)
+      }),
+    )
+  }
+}
+
+/** Makes the `release()` the pool gave `client` for this checkout wait for our follow-up queries. */
+function releasedAfterFollowUps(client: CheckedOut): CheckedOut {
+  const release = client.release
+  client.release = (err) => {
+    const pending = followingUp.get(client)
+    if (!pending) return release(err)
+    void pending.then(() => release(err))
+  }
+  return client
 }
 
 function captureClient(client: PgClient, live: LiveDatabase): void {
@@ -140,6 +167,11 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
   /** A query of ours: its rows, as arrays of text. */
   const sendOurs = async (text: string) =>
     ((await query({ text, rowMode: 'array' })) as PgResult).rows as (string | null)[][]
+  /** Once our follow-up queries ended and the schema is known: what the caller sends next comes after both. */
+  const free = async () => {
+    await followingUp.get(client)
+    if (!live.isReady()) await live.ready(runOurs)
+  }
   client.query = (config: unknown, values?: unknown, callback?: PgCallback) => {
     if (isSubmittable(config)) return submit(config)
     if (typeof values === 'function') {
@@ -153,7 +185,7 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
   }
 
   async function run(queryConfig: PgQueryConfig, reservation: Reservation | undefined): Promise<PgResult | PgResult[]> {
-    if (!live.isReady()) await live.ready(runOurs)
+    await free()
     const plan = () =>
       live.statementFor(client, queryConfig.text, queryConfig.values ?? [], {
         sharing: isShareable(queryConfig) ? { rowForm: ROW_FORM, reservation } : undefined,
@@ -179,7 +211,7 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
       return result
     }
     const hidden = takeHiddenFields(result.fields, statement)
-    statement.succeeded(takeHiddenValues(result.rows, hidden, config.rowMode === 'array')).forEach(runFollowUp)
+    runFollowUps(statement.succeeded(takeHiddenValues(result.rows, hidden, config.rowMode === 'array')))
     if (!statement.returnsRows) result.rows.length = 0
     if (!statement.leads) return result
     // Text values, parsed by each caller: nothing they parse is shared.
@@ -188,13 +220,26 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
     return parsedFor(shared, queryConfig)
   }
 
-  /** Queued on the client now: it runs before anything the caller sends next. */
-  function runFollowUp({ text, values, done }: FollowUp): void {
-    const answered = query({ text, values, rowMode: 'array' }) as Promise<PgResult>
-    answered.then(
-      (result) => done(result.rows as (string | null)[][]),
-      () => done(undefined),
-    )
+  /** Sent one after the other, after those still running, and before anything the caller sends next (`free()`): the
+   *  caller's result doesn't wait for them. */
+  function runFollowUps(followUps: FollowUp[]): void {
+    if (followUps.length === 0) return
+    const running = sendInOrder(followingUp.get(client), followUps)
+    followingUp.set(client, running)
+    void running.then(() => {
+      if (followingUp.get(client) === running) followingUp.delete(client)
+    })
+  }
+
+  async function sendInOrder(previous: Promise<void> | undefined, followUps: FollowUp[]): Promise<void> {
+    await previous
+    for (const { text, values, done } of followUps) {
+      try {
+        done(((await query({ text, values, rowMode: 'array' })) as PgResult).rows as (string | null)[][])
+      } catch {
+        done(undefined)
+      }
+    }
   }
 
   function submit(submittable: Submittable): Submittable {
@@ -215,9 +260,9 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
       begin(statement)
       return query(submittable)
     }
-    if (live.isReady()) return send()
-    // The schema isn't known yet: a `pg-cursor` queues reads until it is submitted.
-    void live.ready(runOurs).then(send, (err) => submittable.handleError?.(err))
+    if (live.isReady() && !followingUp.has(client)) return send()
+    // A `pg-cursor` queues reads until it is submitted.
+    void free().then(send, (err) => submittable.handleError?.(err))
     return submittable
   }
 
@@ -233,7 +278,7 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
       handleError?.(err, connection)
     }
     submittable.handleReadyForQuery = (connection) => {
-      if (!failed) statement.succeeded([]).forEach(runFollowUp)
+      if (!failed) runFollowUps(statement.succeeded([]))
       handleReadyForQuery?.(connection)
     }
   }
@@ -250,7 +295,7 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
       if (settled || !statement) return
       settled = true
       if (err) return statement.failed()
-      statement.succeeded(hiddenRows).forEach(runFollowUp)
+      runFollowUps(statement.succeeded(hiddenRows))
     }
     cursor.read = (count, callback) =>
       read(count, (err, rows, result) => {
