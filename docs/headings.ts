@@ -165,6 +165,11 @@ const headings = [
     url: '/rxjs',
   },
   {
+    level: 2,
+    title: '`@telefunc/webtransport`',
+    url: '/webtransport',
+  },
+  {
     level: 4,
     title: 'Files',
   },

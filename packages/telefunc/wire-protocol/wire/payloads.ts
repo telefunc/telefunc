@@ -75,6 +75,8 @@ type ReconciledPayload = {
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
   transports: ChannelTransports
+  /** How the page reaches this process on each transport a package offers, by its name. */
+  offers?: Record<string, unknown>
   upgradeId?: string
 }
 

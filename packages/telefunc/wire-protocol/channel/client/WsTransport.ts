@@ -21,7 +21,7 @@ import { pairPublishes } from './pairPublishes.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import type { OutboundFrame } from './ClientConnection.js'
 import type { TransportOwner } from './WireLifecycle.js'
-import type { ProbeOwner, ProbeWire, UpgradeTarget } from './Upgrade.js'
+import type { BarrierEmission, ProbeOwner, ProbeWire, UpgradeSource, UpgradeTarget } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 import { getWireUrl } from './getSessionUrl.js'
 
@@ -40,7 +40,7 @@ type WsTransportOptions = {
   owner: TransportOwner
 }
 
-class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
+class WsTransport implements UpgradeSource, UpgradeTarget, ClientHeadroomOwner {
   readonly type = CHANNEL_TRANSPORT.WS
   readonly carriesReconcileInOpen = false
   readonly batched = false
@@ -242,6 +242,13 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   private headroomChanged(sender: PieceSender): void {
     if (sender.waitingBytes === 0) this.settleDrained()
     this.owner.onTransportHeadroom(this)
+  }
+
+  /** The barrier goes as the wire's last frame, behind what it was handed. */
+  async emitBarrier(buildFrame: () => OutboundFrame): Promise<BarrierEmission> {
+    if (this.ws === null || this.pieces === null) return 'not-emitted'
+    this.pieces.headroom.send(buildFrame().frame)
+    return 'emitted'
   }
 
   hasWire(): boolean {

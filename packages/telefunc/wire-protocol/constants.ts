@@ -83,15 +83,15 @@ export function parseStreamConfig(val: unknown): { transport?: StreamTransport }
 }
 export const DEFAULT_STREAM_TRANSPORT: StreamTransport = STREAM_TRANSPORT.BINARY_INLINE
 
-/** Transport for persistent channels created with `new Channel()`. */
-export type ChannelTransport = (typeof CHANNEL_TRANSPORT)[keyof typeof CHANNEL_TRANSPORT]
+/** Transport for persistent channels created with `new Channel()`: 'sse', 'ws', or one a `@telefunc/*` package adds. */
+export type ChannelTransport = (typeof CHANNEL_TRANSPORT)[keyof typeof CHANNEL_TRANSPORT] | (string & {})
 /** Ordered list of transports to use for channels. `['sse', 'ws']` starts on SSE and upgrades to WebSocket. */
 export type ChannelTransports = ChannelTransport[]
 
 /** `configPath`'s value as the transports it lists, validated; `example` is what its message suggests. */
 export function validateChannelTransports(val: unknown, configPath: string, example: string): ChannelTransports {
   assertUsage(
-    Array.isArray(val) && val.length > 0 && val.every((v) => v === 'sse' || v === 'ws'),
+    Array.isArray(val) && val.length > 0 && val.every((v) => typeof v === 'string' && v !== ''),
     `\`${configPath}\` should be an array of transports, e.g. ${example}`,
   )
   return val as ChannelTransports

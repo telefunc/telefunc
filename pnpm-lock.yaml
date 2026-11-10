@@ -459,6 +459,22 @@ importers:
         specifier: ^8.0.16
         version: 8.0.16(@types/node@24.0.10)(esbuild@0.28.2)(jiti@2.7.0)
 
+  packages/webtransport:
+    dependencies:
+      quico:
+        specifier: 0.8.0
+        version: 0.8.0
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.4
+        version: 24.0.10
+      telefunc:
+        specifier: link:../telefunc
+        version: link:../telefunc
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+
   test/@cloudflare_vite-plugin:
     dependencies:
       '@telefunc/room':
@@ -608,6 +624,9 @@ importers:
       '@telefunc/tanstack-query':
         specifier: workspace:*
         version: link:../../packages/tanstack-query
+      '@telefunc/webtransport':
+        specifier: workspace:*
+        version: link:../../packages/webtransport
       '@types/react':
         specifier: ^19.2.14
         version: 19.2.14
@@ -4753,6 +4772,10 @@ packages:
     resolution: {integrity: sha512-f7ccFPK3SXFHpx15UIGyRJ/FJQctuKZ0zVuN3frBo4HnK3cay9VEW0R6yPYFHC0AgqhukPzKjq22t5DmAyqGyw==}
     engines: {node: '>=16'}
 
+  flat-ranges@2.2.0:
+    resolution: {integrity: sha512-0B9+lGBQFDb9jLuFMcOiT8vqmwi20oWfdL6++DvktAG885983NnSzvzBmlDZMpE3+hOwrbAdTbPdVX9vtBysiw==}
+    engines: {node: '>=10'}
+
   flatted@3.3.3:
     resolution: {integrity: sha512-GX+ysw4PBCz0PzosHDepZGANEuFCMLrnRTiEy9McGjmkCQYwRq4A/X786G/fjM/+OjsWSU1ZrY5qyARZmO/uwg==}
 
@@ -5181,6 +5204,10 @@ packages:
   language-tags@1.0.9:
     resolution: {integrity: sha512-MbjN408fEndfiQXbFQ1vnd+1NoLDsnQW41410oQBXiyXDMYH5z505juWa4KUE1LqxRC7DgOgZDbKLxHIwm27hA==}
     engines: {node: '>=0.10'}
+
+  lemon-tls@0.10.0:
+    resolution: {integrity: sha512-hKimpdHUWEOXkJkdFm85DIFit8tKVgR7ijXBTs5YUqerjZqL+dHlEY+tlGG0ZZA88NAXmKVoDjKDlmv1X0DOUQ==}
+    engines: {node: '>=24.0.0'}
 
   levn@0.4.1:
     resolution: {integrity: sha512-+bT2uH4E5LGE7h/n3evcS/sQlJXCpIp6ym8OWJ5eV6+67Dsql/LaaT7qJBAt2rzfoa/5QBGBhxDix1dMt2kQKQ==}
@@ -5907,6 +5934,10 @@ packages:
 
   queue-microtask@1.2.3:
     resolution: {integrity: sha512-NuaNSa6flKT5JaSYQzJok04JzTL1CA6aGhv5rfLW3PgqA+M2ChpZQnAC8h8i4ZFkBS8X5RqkDBHA7r4hej3K9A==}
+
+  quico@0.8.0:
+    resolution: {integrity: sha512-foDz0AIZg5Jq21jNwAWZWZknO1cEOBIHLiQb0XikxkkxO1+/HoCsuzWEcX/o48ddKANi2qGsBCxOBJJLb1Vvqw==}
+    engines: {node: '>=24.0.0'}
 
   range-parser@1.2.1:
     resolution: {integrity: sha512-Hrgsx+orqoygnmhFbKaHE6c296J+HTAQXoxEF6gNupROmmGJRoyzfG3ccAveqCBrwr/2yxQ5BVd/GTl5agOwSg==}
@@ -11168,6 +11199,8 @@ snapshots:
       flatted: 3.3.3
       keyv: 4.5.4
 
+  flat-ranges@2.2.0: {}
+
   flatted@3.3.3: {}
 
   for-each@0.3.5:
@@ -11658,6 +11691,8 @@ snapshots:
   language-tags@1.0.9:
     dependencies:
       language-subtag-registry: 0.3.23
+
+  lemon-tls@0.10.0: {}
 
   levn@0.4.1:
     dependencies:
@@ -12613,6 +12648,11 @@ snapshots:
   qs@6.9.6: {}
 
   queue-microtask@1.2.3: {}
+
+  quico@0.8.0:
+    dependencies:
+      flat-ranges: 2.2.0
+      lemon-tls: 0.10.0
 
   range-parser@1.2.1: {}
 

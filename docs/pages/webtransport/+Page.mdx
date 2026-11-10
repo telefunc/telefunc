@@ -1,0 +1,33 @@
+import { Link } from '@brillout/docpress'
+import { TelefuncStreamBeta } from '../../components'
+
+**Environment**: server & client.
+
+<TelefuncStreamBeta />
+
+The `@telefunc/webtransport` package moves your <Link href="/channel">channels</Link> to [WebTransport](https://developer.mozilla.org/en-US/docs/Web/API/WebTransport_API), where each channel travels on a stream of its own: a lost packet, or a channel you don't read, holds back none of the others.
+
+## Install
+
+```bash
+npm install @telefunc/webtransport
+```
+
+That's it.
+
+> Telefunc finds `@telefunc/*` packages in your `package.json` and auto-loads them. Without a Telefunc bundler plugin, `import '@telefunc/webtransport/server'` in your server entry and `import '@telefunc/webtransport/client'` in your client entry.
+
+The page connects over SSE or a WebSocket as before, then moves to WebTransport once the server tells it where to reach it. Where WebTransport can't reach the server (a browser without it, a network that blocks UDP, a load balancer that passes only TCP), the page stays on its WebSocket or SSE connection.
+
+> The server listens on the UDP port numbered as the `PORT` environment variable, else on any free one. Where your host filters ports (a container's port list, a firewall), open that UDP port.
+
+> The server signs its own certificate, and the page trusts it by its hash, which the server sends over the connection the page already has. You don't need a certificate for it.
+
+> A `lossy: true` <Link href="/channel#new-broadcastchannel">broadcast</Link> sends each message on a stream of its own, so a lost packet delays no newer message. A message that arrives after a newer one is dropped.
+
+> Runs on Node.js and Bun. On Cloudflare, pages stay on their WebSocket: no Cloudflare product takes a WebTransport session into app code.
+
+## See also
+
+- <Link href="/channel" />
+- <Link href="/transport" />

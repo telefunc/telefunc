@@ -12,12 +12,12 @@ config.channel.transports = channelTransports
 // config.channel.transports = ['ws']
 // config.channel.transports = ['sse', 'ws']
 
-function parseChannelTransports(value: string | undefined): Array<'sse' | 'ws'> {
+function parseChannelTransports(value: string | undefined): Array<'sse' | 'ws' | 'webtransport'> {
   const parsed: unknown = JSON.parse(value ?? '["sse"]')
   if (
     !Array.isArray(parsed) ||
     parsed.length === 0 ||
-    !parsed.every((transport) => transport === 'sse' || transport === 'ws')
+    !parsed.every((transport) => transport === 'sse' || transport === 'ws' || transport === 'webtransport')
   ) {
     throw new Error(`Invalid PUBLIC_ENV__CHANNEL_TRANSPORTS: ${value ?? '(unset)'}`)
   }

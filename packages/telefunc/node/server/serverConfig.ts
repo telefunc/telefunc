@@ -2,6 +2,8 @@ export { configUser as config }
 export { getServerConfig }
 export { getServerExtensionTypes }
 export { enableChannelTransports }
+export { offerChannelTransport }
+export { getChannelTransportOffers }
 export { setAdapterMaxFrameBytes }
 export { setAdapterMaxMemory }
 export { getAdapterMaxFrameBytes }
@@ -220,6 +222,8 @@ const globalObject = getGlobalObject('serverConfig.ts', {
   config: { stream: {}, channel: {}, broadcast: {}, extensions: [] } as ConfigUser,
   /** Transports a server adapter enables: kept apart from the user's config, which a later assignment replaces. */
   adapterChannelTransports: new Set<ChannelTransports[number]>(),
+  /** What a page needs to reach this process on each transport a package offers, by its name. */
+  channelTransportOffers: new Map<string, () => unknown>(),
   /** The largest frame the adapter's runtime takes, where that is less than the server reads. */
   adapterMaxFrameBytes: undefined as number | undefined,
   /** The default of `maxMemory` where the adapter's runtime can't tell what the process may use. */
@@ -400,6 +404,23 @@ function getServerExtensionTypes() {
 /** @internal Adds transports to the defaults, which apply while the user sets none. */
 function enableChannelTransports(transports: ChannelTransports): void {
   for (const transport of transports) globalObject.adapterChannelTransports.add(transport)
+}
+
+/** @internal Enables `transport`, whose RECONCILED entry is what `offer` returns: how the page reaches this process on
+ *  it, or undefined while it can't. */
+function offerChannelTransport(transport: string, offer: () => unknown): void {
+  enableChannelTransports([transport])
+  globalObject.channelTransportOffers.set(transport, offer)
+}
+
+/** The offers of the transports a package enabled, undefined if none has one. */
+function getChannelTransportOffers(): Record<string, unknown> | undefined {
+  let offers: Record<string, unknown> | undefined
+  for (const [transport, offer] of globalObject.channelTransportOffers) {
+    const value = offer()
+    if (value !== undefined) (offers ??= {})[transport] = value
+  }
+  return offers
 }
 
 /** @internal The runtime ends a WebSocket on a larger message: the page refuses one, told by each channel the server makes and by each RECONCILED. */

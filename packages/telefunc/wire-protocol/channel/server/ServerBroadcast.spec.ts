@@ -10,9 +10,10 @@ import { configureBroadcastTransport, disposeBackend } from '../../backend/insta
 import type { BroadcastTransport } from '../../backend/broadcast/TransportBroadcastDriver.js'
 import { PathEstimate } from '../../flowControl/PathEstimate.js'
 import { PathLane } from './PathLane.js'
+import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
 
 /** `sender` with the lossy lane of its own queue. */
-const withLossyLane = (sender: Omit<PeerSender, 'lossy'>): PeerSender => ({
+const withLossyLane = (sender: Omit<PeerSender, 'lossy' | 'queue'> & { queue: WireQueue }): PeerSender => ({
   ...sender,
   lossy: new PathLane(sender.queue),
 })

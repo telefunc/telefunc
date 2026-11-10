@@ -4,7 +4,11 @@ export type { WireEntry, ReconcileOutcome, ServerTransport, Wire }
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { getRawContext } from '../../../node/server/context/context.js'
-import { getAdapterMaxFrameBytes, getChannelConfig } from '../../../node/server/serverConfig.js'
+import {
+  getAdapterMaxFrameBytes,
+  getChannelConfig,
+  getChannelTransportOffers,
+} from '../../../node/server/serverConfig.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { GcRegistry } from '../../../utils/GcRegistry.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
@@ -28,7 +32,7 @@ import { textEncoder } from '../../wire/envelope.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type { BarrierPayload, PreparePayload, ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
-import { IndexedPeer } from './IndexedPeer.js'
+import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
 import { creditWindowOf } from '../../flowControl/credit.js'
@@ -63,6 +67,9 @@ type ServerTransport<TWire> = {
   /** What the wire holds back for its page, on a transport that isn't `wholeMessages`. */
   queueOf?(wire: TWire): WireQueue
   terminateWire(wire: TWire): void
+  /** A sender of channel `index`'s own, on a transport that carries each channel apart; it may share the delivery count
+   *  and send wait of `wireSender`, its wire's. Without this method, the channel sends on its wire's. */
+  peerSender?(wire: TWire, index: number, wireSender: PeerSender): PeerSender
 }
 
 /** What a RECONCILE or a barrier settled, which `sendReconciled` answers with the RECONCILED. */
@@ -70,9 +77,9 @@ type ReconcileOutcome = {
   sessionId: string
   /** Each `lastSeq` is read as the RECONCILED goes out, so it counts what was dispatched before then. */
   attached: ChannelHandle[]
-  /** The wire a barrier retired, which gets its FIN once this RECONCILED went out; null except on an SSE→WS upgrade. */
+  /** The wire a barrier retired, which gets its FIN once this RECONCILED went out; null except on an upgrade. */
   retiredWire: Wire | null
-  /** The wire this RECONCILED belongs on — a barrier reconciles the staged WS, not the sender. */
+  /** The wire this RECONCILED belongs on — a barrier reconciles the staged probe, not the sender. */
   deliverTo: Wire
   upgradeId?: string
 }
@@ -158,7 +165,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
   /** Reverse index for transports with a stable connId (SSE). Lets data POSTs locate the
    *  live stream wire, and catches a duplicate-connId reconnect racing teardown. */
   private readonly wiresByConnId = new Map<string, Wire>()
-  /** The SSE→WS upgrades staged on probe WebSockets. */
+  /** The upgrades staged on probe wires. */
   private readonly stages = new UpgradeStages({ owner: this })
   private readonly ended = new EndedChannels({
     onRelease: (channel) => {
@@ -272,6 +279,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
         sseFlushThrottle: this.options.sseFlushThrottle,
         ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
         transports: this.options.transports,
+        offers: getChannelTransportOffers(),
       }),
     )
     // Sends are sync, so the FIN can't pass anything on the new wire.
@@ -614,7 +622,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
   ): Promise<ReconcileOutcome> {
     const probe = wsEntry.wire
     try {
-      // `reconcile` ran against the staged WS, so the outcome already carries it as `deliverTo`. Awaited: the stage
+      // `reconcile` ran against the staged probe, so the outcome already carries it as `deliverTo`. Awaited: the stage
       // stays committing for a microtask, so a claim of the old session that runs in it is refused.
       const outcome = await this.reconcile(wsEntry, ctrl, true)
       return { ...outcome, upgradeId }
@@ -818,12 +826,13 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
   private attachChannel(
     channel: ServerChannel,
     open: ReconcileOpenEntry,
-    { sender }: WireEntry,
+    { wire, transport, sender: wireSender }: WireEntry,
     replay: boolean,
   ): ChannelHandle | null {
     const buffer = channel._replayBuffer
     if (buffer === null) return null
     channel._onPageHas(open.lastSeq)
+    const sender = transport.peerSender?.(wire, open.ix, wireSender) ?? wireSender
     const peer = new IndexedPeer({ sender, index: open.ix, replay: buffer })
     if (replay) for (const frame of buffer.getAfter(open.lastSeq)) sender.send(frame)
     channel._attachPeer(peer, open)

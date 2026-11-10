@@ -35,6 +35,7 @@ import { pingDeadline } from '../../wire/pingDeadline.js'
 
 import { WsTransport } from './WsTransport.js'
 import { SseTransport } from './SseTransport.js'
+import { getPackageTransport } from './packageTransports.js'
 
 import type { ClientChannelTransport, ClientConnectionOptions, MuxChannel } from './ClientConnection.js'
 
@@ -108,11 +109,11 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private readonly liveness = new Liveness({ owner: this, channels: this.channels, gate: this.gate })
   private readonly exchange = new AttachExchange({ owner: this, channels: this.channels, gate: this.gate })
   private readonly upgrade: Upgrade
-  /** The page's transports include a WebSocket. */
-  private readonly allowsWebSocket: boolean
   /** The transports the server allows, from the last settled RECONCILED: an upgrade may start once it came, whether
    *  before or after the SSE wire opened. */
   private serverTransports: ReconciledPayload['transports'] | null = null
+  /** How the page reaches the server on the transports a package adds, from the same RECONCILED. */
+  private serverOffers: ReconciledPayload['offers'] = undefined
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
   private idleTimeoutMs: number
   /** The largest credit window, each way, from the last RECONCILED. */
@@ -124,9 +125,28 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.telefuncUrl = telefuncUrl
     this.connectionOptions = options
     this.upgrade = new Upgrade({ owner: this })
-    this.allowsWebSocket = options.transports.includes(CHANNEL_TRANSPORT.WS)
     this.idleTimeoutMs = options.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS
-    this.transport = TRANSPORT_REGISTRY[options.transports[0]!](telefuncUrl, options, this)
+    const first = options.transports[0]!
+    assertUsage(
+      first === CHANNEL_TRANSPORT.SSE || first === CHANNEL_TRANSPORT.WS,
+      `config.channel.transports should start with 'sse' or 'ws': a page reaches '${first}' from one of them`,
+    )
+    this.transport = this.createTransport(first)
+  }
+
+  /** A transport of `type`: a built-in one, or a package's, given the server's offer for it. */
+  private createTransport(type: ChannelTransport): ClientChannelTransport {
+    if (type !== CHANNEL_TRANSPORT.SSE) return this.createUpgradeTarget(type)
+    const { fetchImpl, headers: userHeaders } = this.connectionOptions
+    return new SseTransport({ telefuncUrl: this.telefuncUrl, fetchImpl, userHeaders, owner: this })
+  }
+
+  private createUpgradeTarget(type: ChannelTransport): UpgradeTarget {
+    const { telefuncUrl } = this
+    if (type === CHANNEL_TRANSPORT.WS) return new WsTransport({ telefuncUrl, owner: this })
+    const create = getPackageTransport(type)
+    assertUsage(create, `config.channel.transports lists '${type}', which no installed package adds`)
+    return create({ telefuncUrl, owner: this, offer: this.serverOffers?.[type] })
   }
 
   private enterOpen(): void {
@@ -256,7 +276,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
         this.applyCompletionFrame(frame)
         return
       case 'fallback':
-        this.fallbackToSse(new NetworkError('Upgrade handoff buffer limit exceeded', true))
+        this.fallBack(new NetworkError('Upgrade handoff buffer limit exceeded', true))
         return
     }
   }
@@ -356,7 +376,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     }
     if (transport !== this.transport) {
       if (this.upgrade.isLeftWire(transport)) {
-        this.fallbackToSse(new NetworkError('Connection dropped', true))
+        this.fallBack(new NetworkError('Connection dropped', true))
       }
       return
     }
@@ -383,6 +403,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.releaseJoin(this.upgrade.tryComplete())
     if (outcome.reconcileComplete) {
       this.serverTransports = ctrl.transports
+      this.serverOffers = ctrl.offers
       this.startTtlIfIdle()
       this.maybeUpgrade()
     }
@@ -393,25 +414,45 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.wire++
   }
 
-  // ── The SSE→WS upgrade: when one starts, and an attempt's steps ──
+  // ── The upgrade: when one starts, and an attempt's steps ──
 
-  /** Starts an upgrade where one may: on an open SSE wire, the only kind that can end with a barrier, with no
-   *  RECONCILE in flight, when both the page and the server take WebSockets and no attempt is under way. */
+  /** Starts an upgrade where one may: on an open wire that can end with a barrier, with no RECONCILE in flight, to the
+   *  next rung up, when no attempt is under way. */
   private maybeUpgrade(): void {
     if (!this.connected || !this.upgrade.canStart) return
     // A RECONCILE in flight retries it once its RECONCILED settles (`handleReconciled`).
     if (this.exchange.reconciling) return
-    if (this.transport.type !== CHANNEL_TRANSPORT.SSE) return
-    if (!this.allowsWebSocket || !this.serverTransports?.includes(CHANNEL_TRANSPORT.WS)) return
+    const from = this.transport
+    if (!isUpgradeSource(from)) return
+    const to = this.nextRungUp(from.type)
+    if (to === null) return
     const { sessionId } = this.exchange
     if (sessionId === null) return
-    void this.runUpgrade(this.transport as UpgradeSource, sessionId)
+    void this.runUpgrade(from, to, sessionId)
+  }
+
+  /** The first transport after `type` that the page lists and the server allows, past SSE, which no upgrade reaches. */
+  private nextRungUp(type: ChannelTransport): ChannelTransport | null {
+    const { transports } = this.connectionOptions
+    for (const next of transports.slice(transports.indexOf(type) + 1)) {
+      if (next !== CHANNEL_TRANSPORT.SSE && this.serverTransports?.includes(next)) return next
+    }
+    return null
+  }
+
+  /** The last transport before `type` that the page lists and the server allows; else the page's first. */
+  private rungBelow(type: ChannelTransport): ChannelTransport {
+    const { transports } = this.connectionOptions
+    for (let i = transports.indexOf(type) - 1; i > 0; i--) {
+      if (this.serverTransports?.includes(transports[i]!)) return transports[i]!
+    }
+    return transports[0]!
   }
 
   /** One attempt, then what its end leaves to the connection. However it ends, the RECONCILE a registration owes goes
    *  after it. */
-  private async runUpgrade(from: UpgradeSource, sessionId: string): Promise<void> {
-    const to = new WsTransport({ telefuncUrl: this.telefuncUrl, owner: this })
+  private async runUpgrade(from: UpgradeSource, type: ChannelTransport, sessionId: string): Promise<void> {
+    const to = this.createUpgradeTarget(type)
     const end = await this.upgrade.run(
       from,
       to,
@@ -431,7 +472,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
         void this.upgradeOnceDrained(from)
         break
       case 'stranded':
-        this.fallbackToSse(new NetworkError('Upgrade barrier attempt timed out', true))
+        this.fallBack(new NetworkError('Upgrade barrier attempt timed out', true))
         break
       case 'flipped':
         for (const frame of end.completion) this.applyCompletionFrame(frame)
@@ -463,13 +504,15 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     for (const frame of release.new) this.dispatchFrame(frame)
     for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._attach.onUpgradeJoined()
     this.startTtlIfIdle()
+    this.maybeUpgrade()
   }
 
   onHandoffFailed(err: Error): void {
-    this.fallbackToSse(err)
+    this.fallBack(err)
   }
 
-  private fallbackToSse(err: Error): void {
+  /** The upgrade is given up: the connection reconnects a rung below the wire it lost. */
+  private fallBack(err: Error): void {
     if (this.closed) return
     const abandoned = this.upgrade.abandon()
     if (abandoned) {
@@ -477,9 +520,13 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.exchange.closeUnacknowledged(abandoned.deferredOmitted)
     }
     this.transport.abandonActiveTransport()
-    this.transport.dispose()
-    this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.SSE](this.telefuncUrl, this.connectionOptions, this)
+    this.dropToRungBelow()
     this.handleTransportLoss(err, false)
+  }
+
+  private dropToRungBelow(): void {
+    this.transport.dispose()
+    this.transport = this.createTransport(this.rungBelow(this.transport.type))
   }
 
   private drainBufferedFramesToWire(): void {
@@ -490,9 +537,12 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private handleTransportLoss(err: Error, rejected: boolean): void {
     if (this.closed) return
     if (this.upgrade.flipped) {
-      this.fallbackToSse(err)
+      this.fallBack(err)
       return
     }
+    // Only an upgrade reaches a package's transport, whose wire may be lost for good (its UDP blocked): the page
+    // reconnects a rung below, and upgrades again from there.
+    if (getPackageTransport(this.transport.type)) this.dropToRungBelow()
     this.wire++
     // The wire is dying: the queued RECONCILE is not sent, since the reconnect's RECONCILE lists every channel.
     this.exchange.cancelRegisterReconcile()
@@ -600,16 +650,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 }
 
-// ── Transport registry ──
-
-/** Maps each ChannelTransport to a factory that creates the corresponding ClientChannelTransport. */
-const TRANSPORT_REGISTRY: Record<
-  ChannelTransport,
-  (telefuncUrl: string, options: ClientConnectionOptions, owner: WireLifecycle) => ClientChannelTransport
-> = {
-  [CHANNEL_TRANSPORT.WS]: (telefuncUrl, _options, owner) => new WsTransport({ telefuncUrl, owner }),
-  [CHANNEL_TRANSPORT.SSE]: (telefuncUrl, options, owner) =>
-    new SseTransport({ telefuncUrl, fetchImpl: options.fetchImpl, userHeaders: options.headers, owner }),
+function isUpgradeSource(transport: ClientChannelTransport): transport is UpgradeSource {
+  return 'emitBarrier' in transport
 }
 
 /** What a channel the server ended with an ERROR of `reason` closes with. */
