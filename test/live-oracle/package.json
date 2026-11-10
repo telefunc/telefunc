@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "oracle": "node oracle.ts"
+    "oracle": "node --expose-gc oracle.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "0.5.16",
