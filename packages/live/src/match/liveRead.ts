@@ -20,8 +20,9 @@ type Change =
 type Result = {
   /** The page is full: a row sorting after its last row can't enter. */
   full: boolean
-  /** Per hidden column, the canonical keys of its values; `undefined` entries can't be keyed. */
-  values: Set<string | undefined>[]
+  /** A hidden column's canonical keys of its values; `undefined` entries can't be keyed. Keyed when a change first
+   *  asks: most results are replaced by a refetch before any change does. */
+  values(hidden: number): Set<string | undefined>
   first: (string | null)[] | undefined
   last: (string | null)[] | undefined
   /** Per join seed: the keys of its values, plus those of matching rows written since; `undefined`: unknown. */
@@ -242,22 +243,19 @@ class LiveRead {
     // `NULL` joins nothing.
     if (text === null) return false
     const key = valueKey(text, column)
-    const values = this.result!.values[hidden]!
+    const values = this.result!.values(hidden)
     return key === undefined || values.has(undefined) || values.has(key)
   }
 
   /** `seedRow`: the seeds, when no row carries them. */
   private resultOf(rows: (string | null)[][], seedRow: (string | null)[] | undefined): Result {
-    const { hiddenColumns, sort, limit } = this.shape
-    const columns = hiddenColumnTypes(this.shape)
-    const values = hiddenColumns.map((_, i) => {
-      const keys = new Set<string | undefined>()
-      for (const row of rows) {
-        const text = row[i]
-        if (text !== null && text !== undefined) keys.add(columns[i] ? valueKey(text, columns[i]!) : undefined)
-      }
+    const { sort, limit } = this.shape
+    const keyed = new Map<number, Set<string | undefined>>()
+    const values = (hidden: number) => {
+      let keys = keyed.get(hidden)
+      if (!keys) keyed.set(hidden, (keys = keysOf(rows, hidden, hiddenColumnTypes(this.shape)[hidden])))
       return keys
-    })
+    }
     const limitText =
       limit?.kind === 'param' ? paramText(this.params[limit.index]) : limit?.kind === 'const' ? limit.text : undefined
     const full =
@@ -303,6 +301,16 @@ function tupleKey(columns: Column[], row: Row): string | undefined {
     keys.push(key)
   }
   return JSON.stringify(keys)
+}
+
+/** The keys of one hidden column's values in `rows`. */
+function keysOf(rows: (string | null)[][], hidden: number, column: Column | undefined): Set<string | undefined> {
+  const keys = new Set<string | undefined>()
+  for (const row of rows) {
+    const text = row[hidden]
+    if (text !== null && text !== undefined) keys.add(column ? valueKey(text, column) : undefined)
+  }
+  return keys
 }
 
 /** A seed column's JSON array as keys; `undefined` when there was no row to carry it, or too many values. */
