@@ -328,6 +328,15 @@ for (const shape of Object.keys(driver.reads).filter((s) => !SHAPES || SHAPES.in
 }
 // All at once, as clients do: more calls than the pool has connections, so some wait for one.
 await Promise.all(subscribers.map((sub) => subscribe(sub)))
+// A read calling a volatile function returns something new each run: twins that shared one got the same ticket. Its
+// result changes without any write, so it's left out of what follows.
+const VOLATILE_SHAPES = ['ticket']
+const volatile = subscribers.filter((sub) => VOLATILE_SHAPES.includes(sub.shape))
+const sharedVolatile = volatile.filter((sub, i) => volatile.some((other, j) => j !== i && other.result === sub.result))
+for (const sub of volatile) {
+  sub.stop()
+  subscribers.splice(subscribers.indexOf(sub), 1)
+}
 
 type Counts = { invalidations: number; changes: number; extra: number; missed: number }
 const byShape = new Map<string, Counts>()
@@ -484,10 +493,13 @@ console.log(
   `bursts: missed=${burstMisses} (${BURSTS} bursts of ${BURST_WRITES} writes, refetch window ${BURST_WINDOW} ms, ${burstRefetches} refetches)`,
 )
 console.log(`writes failed other than by the database: ${failedWrites.length}`)
+console.log(`volatile reads shared: ${sharedVolatile.length} of ${volatile.length}`)
 console.log(`derived: rows held=${heldRows} of ${subscribers.filter((s) => s.derive).length} derived subscribers`)
 for (const miss of misses.slice(0, 10)) console.log(`MISSED ${miss}`)
 for (const failure of failedWrites.slice(0, 10)) console.log(`FAILED ${failure}`)
-process.exit(total.missed > 0 || burstMisses > 0 || heldRows > 0 || failedWrites.length > 0 ? 1 : 0)
+const failed =
+  total.missed > 0 || burstMisses > 0 || heldRows > 0 || failedWrites.length > 0 || sharedVolatile.length > 0
+process.exit(failed ? 1 : 0)
 
 // ── Helpers ──
 

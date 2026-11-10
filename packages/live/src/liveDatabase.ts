@@ -127,7 +127,7 @@ class LiveDatabase {
     const live = currentQuery()
     if (!live || !this.isReady()) return undefined
     const plan = this.planOf(text, this.catalog!)
-    const key = plan.kind === 'read' ? this.shareKey(text, values, undefined, rowForm) : undefined
+    const key = plan.kind === 'read' && plan.shareable ? this.shareKey(text, values, undefined, rowForm) : undefined
     if (!key || plan.kind !== 'read') return undefined
     const joined = this.shared.join(key, live)
     if (joined) return { joined }
@@ -240,7 +240,10 @@ class LiveDatabase {
   ): Statement {
     // A read outside `.live()` is sent as written.
     if (!live) return this.statement(connection, text, 0, () => [])
-    const key = sharing && !sharing.reservation ? this.shareKey(text, values, connection, sharing.rowForm) : undefined
+    const key =
+      sharing && !sharing.reservation && plan.shareable
+        ? this.shareKey(text, values, connection, sharing.rowForm)
+        : undefined
     const joined = key ? this.shared.join(key, live) : undefined
     if (joined) return { ...this.statement(connection, text, 0, () => []), joined }
     const reservation = sharing?.reservation

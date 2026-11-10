@@ -62,6 +62,9 @@ type Catalog = {
   volatileWritingFunctions: Set<string>
   /** The functions `node` calls, with those their default arguments call: the caller evaluates those. */
   calls(node: unknown): string[]
+  /** The volatile functions of every schema, built-in ones included (`random()`, `nextval()`, `clock_timestamp()`):
+   *  two calls may return different values. */
+  volatileFunctions: Set<string>
   /** The `search_path` of the session that loaded the catalog, which unqualified names resolve against while every
    *  session has it; `undefined` once a statement may have changed a session's (`LiveDatabase`). */
   searchPath: string[] | undefined
@@ -78,6 +81,7 @@ type CatalogRow = {
   serverVersion: number
   cOrdering: boolean
   functions: [name: string, writing: boolean, volatile: boolean, defaults: string | null][]
+  volatileFunctions: string[]
   tables: {
     schema: string
     name: string
@@ -124,6 +128,7 @@ const CATALOG_QUERY = `select json_build_object(
       pg_get_expr(p.proargdefaults, 0))), '[]') from pg_proc p
     join pg_namespace n on n.oid = p.pronamespace join pg_language l on l.oid = p.prolang
     where n.nspname not in ('pg_catalog', 'information_schema') and p.prorettype <> 'trigger'::regtype),
+  'volatileFunctions', (select coalesce(json_agg(distinct p.proname), '[]') from pg_proc p where p.provolatile = 'v'),
   'tables', (select coalesce(json_agg(json_build_object(
     'schema', n.nspname,
     'name', c.relname,
@@ -236,6 +241,7 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
     calls(node) {
       return withDefaultCalls(functionNamesIn(node))
     },
+    volatileFunctions: new Set(row.volatileFunctions),
     searchPath: row.searchPath,
     find(table) {
       const named = this.named(table)

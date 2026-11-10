@@ -20,6 +20,8 @@ type ReadPlan = {
   shape: ReadShape
   /** The statement with the hidden columns appended to its select list; `undefined` when it has none. */
   liveText: string | undefined
+  /** Identical reads may share one run: it calls no volatile function (`Catalog.volatileFunctions`). */
+  shareable: boolean
 }
 
 type WritePlan = {
@@ -156,16 +158,17 @@ function planOne(statement: Node, text: string | undefined, catalog: Catalog): P
 
 function planRead(select: Node, text: string | undefined, catalog: Catalog): ReadPlan {
   const shape = analyzeRead(select, catalog, text)
-  if (shape.hiddenColumns.length === 0 || !text) return { kind: 'read', shape, liveText: undefined }
+  const shareable = !catalog.calls(select).some((name) => catalog.volatileFunctions.has(name))
+  if (shape.hiddenColumns.length === 0 || !text) return { kind: 'read', shape, liveText: undefined, shareable }
   const splices = shape.hiddenAt ?? [{ from: topLevelFrom(text), columns: shape.hiddenColumns }]
-  if (splices.some((s) => s.from === undefined)) return { kind: 'read', shape, liveText: undefined }
+  if (splices.some((s) => s.from === undefined)) return { kind: 'read', shape, liveText: undefined, shareable }
   let liveText = text
   // From the last: a splice leaves the byte offsets before it as they were.
   for (const { from, columns } of splices.toSorted((a, b) => b.from! - a.from!)) {
     const hidden = columns.map((expression, i) => `${expression} AS "${HIDDEN_PREFIX}${i}"`)
     liveText = spliceBytes(liveText, from!, `, ${hidden.join(', ')} `)
   }
-  return { kind: 'read', shape, liveText }
+  return { kind: 'read', shape, liveText, shareable }
 }
 
 function planWrite(kind: string, node: Node, text: string | undefined, catalog: Catalog): Plan {

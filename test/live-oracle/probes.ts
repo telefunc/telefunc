@@ -59,6 +59,14 @@ const probes: Record<string, () => void> = {
       for (const table of this.catalog.tables.values()) for (const column of table.columns) column.orderableText = true
     }
   },
+  /** A read calling a volatile function shares a run with identical ones. */
+  'volatile-sharing'() {
+    const planOf = database.planOf
+    database.planOf = function (...args: unknown[]) {
+      const plan = planOf.apply(this, args)
+      return plan.kind === 'read' ? { ...plan, shareable: true } : plan
+    }
+  },
   /** A cursor's `read()` given no callback returns nothing, rather than a promise of its rows. */
   'cursor-promise'() {
     // The capture sets each cursor's `read`: a setter on the prototype gets it.

@@ -230,6 +230,7 @@ function createDrizzle(
         db.execute(sql`select kind, count(*)::int as n from event_log group by kind order by kind`).then(rowsOf),
       counters: () => db.execute(sql`select id, n from counters order by id`).then(rowsOf),
       chained: () => db.execute(sql`select n from chained`).then(rowsOf),
+      ticket: () => db.execute(sql`select nextval('tickets') as n`).then(rowsOf),
       ...(kind === 'pg' && {
         cursorTexts: ({ user }) =>
           cursorRead(client as never, 'select id, text from todos where user_id = $1 order by id', [user]),

@@ -212,6 +212,7 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
         (await sql`select kind, count(*)::int as n from event_log group by kind order by kind`.execute(db)).rows,
       counters: async () => (await sql`select id, n from counters order by id`.execute(db)).rows,
       chained: async () => (await sql`select n from chained`.execute(db)).rows,
+      ticket: async () => (await sql`select nextval('tickets') as n`.execute(db)).rows,
       labelled: () =>
         db.selectFrom('todos').select('id').where(sql<boolean>`label_of(text) like 'A%'`).orderBy('id').execute(),
       measuresAtFloat: async () =>
