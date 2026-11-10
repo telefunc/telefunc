@@ -8,6 +8,7 @@ import { AsyncResource } from 'node:async_hooks'
 import { PGlite } from '@electric-sql/pglite'
 import '../../packages/live/dist/live.js'
 import { LiveDatabase } from '../../packages/live/dist/liveDatabase.js'
+import { EVENT_TAG } from './orms/eventQuery.ts'
 import { LiveRead } from '../../packages/live/dist/match/liveRead.js'
 import { Tally } from '../../packages/live/dist/match/tally.js'
 import { Refetcher } from '../../packages/live/dist/refetcher.js'
@@ -158,6 +159,14 @@ const probes: Record<string, () => void> = {
    *  PGlite to have started. The run hangs. */
   startup() {
     Object.defineProperty(PGlite.prototype, 'ready', { get: () => false })
+  },
+  /** The write of an event-based `pg.Query` isn't announced. */
+  'event-query'() {
+    const statementFor = database.statementFor
+    database.statementFor = function (connection: unknown, text: string, ...rest: unknown[]) {
+      const statement = statementFor.call(this, connection, text, ...rest)
+      return text === EVENT_TAG ? { ...statement, succeeded: () => [] } : statement
+    }
   },
   /** A cascade only reaches the groups the counts have. */
   'tally-cascade'() {

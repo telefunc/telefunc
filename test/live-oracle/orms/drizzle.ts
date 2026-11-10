@@ -37,6 +37,7 @@ import { drizzle as drizzlePostgresJs } from 'drizzle-orm/postgres-js'
 import { liveDrizzle } from '@telefunc/live/drizzle'
 import type { BroadcastAdapter } from 'telefunc'
 import { arrayOf, CODES, REFS, type Spelling } from '../spellings.ts'
+import { EVENT_TAG, eventQuery } from './eventQuery.ts'
 import type { OrmDriver } from './types.ts'
 
 const users = pgTable('users', {
@@ -299,6 +300,9 @@ function createDrizzle(
             `set search_path to ${schemaOf(value)}, public; update notes set n = n + 1 where id = ${1 + (value % 5)}`,
           ),
         ),
+      ...(kind === 'pg' && {
+        eventTag: ({ todo, text }) => eventQuery(client as never, EVENT_TAG, [todo, text]),
+      }),
       recode: ({ todo, value }) =>
         db
           .update(todos)

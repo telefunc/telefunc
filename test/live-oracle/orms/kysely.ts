@@ -5,6 +5,7 @@ import { jsonArrayFrom } from 'kysely/helpers/postgres'
 import { liveKysely } from '@telefunc/live/kysely'
 import type { BroadcastAdapter } from 'telefunc'
 import { arrayOf, CODES, REFS, type Spelling } from '../spellings.ts'
+import { EVENT_TAG, eventQuery } from './eventQuery.ts'
 import type { OrmDriver } from './types.ts'
 
 function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastAdapter): OrmDriver {
@@ -305,6 +306,9 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
             `set search_path to ${schemaOf(value)}, public; update notes set n = n + 1 where id = ${1 + (value % 5)}`,
           )
           .execute(db),
+      ...(kind === 'pg' && {
+        eventTag: ({ todo, text }) => eventQuery(client, EVENT_TAG, [todo, text]),
+      }),
       recode: ({ todo, value }) =>
         db
           .updateTable('todos')

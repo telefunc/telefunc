@@ -41,7 +41,8 @@ type Submittable = {
   read?: (count: number, callback: (err: Error | null, rows: unknown[], result: unknown) => void) => void
   close?: (callback?: (err?: Error) => void) => unknown
   _result?: { fields: { name: string }[] }
-  handleError?: (err: Error) => void
+  handleError?: (err: Error, connection?: unknown) => void
+  handleReadyForQuery?: (connection: unknown) => void
 }
 
 const CAPTURED = Symbol.for('@telefunc/live/captured')
@@ -196,22 +197,41 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
     // Wrapped now: the caller may read before the statement is planned, and rows only come after.
     const begin = isCursor(submittable) ? captureCursor(submittable) : undefined
     const send = () => {
-      const statement = live.statementFor(client, submittable.text, submittable.values ?? [])
+      const values = submittable.values ?? []
+      if (!begin) {
+        // Rows reach the caller as events (an event-based `pg.Query`): run as written, nothing to strip.
+        settleWhenDone(submittable, live.statementFor(client, submittable.text, values, { rewrite: false }))
+        return query(submittable)
+      }
+      const statement = live.statementFor(client, submittable.text, values)
       if (statement.text !== submittable.text) {
         submittable.text = statement.text
         if (submittable.name) submittable.name += HIDDEN_PREFIX
       }
-      if (begin) begin(statement)
-      // Rows reach the caller as events here: can't strip what the statement added.
-      else if (statement.hiddenColumns > 0)
-        throw new Error('Unreachable: a rewritten statement on a non-cursor submittable')
-      else statement.succeeded([])
+      begin(statement)
       return query(submittable)
     }
     if (live.isReady()) return send()
     // The schema isn't known yet: a `pg-cursor` queues reads until it is submitted.
     void live.ready(runOurs).then(send, (err) => submittable.handleError?.(err))
     return submittable
+  }
+
+  /** Tells `statement` how a submittable that isn't a cursor ended: the client calls `handleReadyForQuery()` once it
+   *  did, after `handleError()` when it failed. */
+  function settleWhenDone(submittable: Submittable, statement: Statement): void {
+    const handleError = submittable.handleError?.bind(submittable)
+    const handleReadyForQuery = submittable.handleReadyForQuery?.bind(submittable)
+    let failed = false
+    submittable.handleError = (err, connection) => {
+      failed = true
+      statement.failed()
+      handleError?.(err, connection)
+    }
+    submittable.handleReadyForQuery = (connection) => {
+      if (!failed) statement.succeeded([]).forEach(runFollowUp)
+      handleReadyForQuery?.(connection)
+    }
   }
 
   /** Strips the hidden columns from the rows of a cursor as they are read; returns how to give it its statement. */

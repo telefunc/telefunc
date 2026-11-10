@@ -301,6 +301,18 @@ const writeNames = Object.keys(driver.writes)
 const SESSION_WRITES = ['setPath', 'notesPath']
 const writesBeforeHalf = writeNames.filter((name) => !SESSION_WRITES.includes(name))
 
+/** Writes that failed other than by the database's refusal. */
+const failedWrites: string[] = []
+
+/** A write the database refused (a deleted row's foreign key) changed nothing; any other failure is the wrapper's. */
+function writeFailed(write: string, err: unknown): void {
+  const { code, cause } = err as { code?: unknown; cause?: { code?: unknown } }
+  const sqlState = code ?? cause?.code
+  if (typeof sqlState === 'string' && /^[0-9A-Z]{5}$/.test(sqlState)) {
+    if (VERBOSE) console.log(`write ${write} refused: ${String(err).slice(0, 120)}`)
+  } else failedWrites.push(`${write}: ${String(err).slice(0, 200)}`)
+}
+
 for (let step = 0; step < STEPS; step++) {
   const write = pick(step < STEPS / 2 ? writesBeforeHalf : writeNames)
   const args = await writeArgs()
@@ -309,8 +321,7 @@ for (let step = 0; step < STEPS; step++) {
     if (racing) await Promise.all([subscribe(racing, true), writer.writes[write]!(args)])
     else await writer.writes[write]!(args)
   } catch (err) {
-    // A write the data doesn't allow (a deleted row's foreign key): it changed nothing.
-    if (VERBOSE) console.log(`write ${write} failed: ${String(err).slice(0, 120)}`)
+    writeFailed(write, err)
   }
   await queriesAnswered()
   // Lets the transport deliver what the write published, then the server tell its clients.
@@ -362,8 +373,7 @@ for (let burst = 0; burst < BURSTS; burst++) {
   for (let i = 0; i < BURST_WRITES; i++) {
     const write = pick(writeNames)
     const args = await writeArgs()
-    // A write the data doesn't allow changes nothing.
-    await Promise.resolve(writer.writes[write]!(args)).catch(() => {})
+    await Promise.resolve(writer.writes[write]!(args)).catch((err) => writeFailed(write, err))
   }
   await settled()
   for (const sub of subscribers) {
@@ -420,9 +430,11 @@ for (const [write, c] of [...byWrite].sort(([, a], [, b]) => b.extra - a.extra))
 console.log(
   `bursts: missed=${burstMisses} (${BURSTS} bursts of ${BURST_WRITES} writes, refetch window ${BURST_WINDOW} ms, ${burstRefetches} refetches)`,
 )
+console.log(`writes failed other than by the database: ${failedWrites.length}`)
 console.log(`derived: rows held=${heldRows} of ${subscribers.filter((s) => s.derive).length} derived subscribers`)
 for (const miss of misses.slice(0, 10)) console.log(`MISSED ${miss}`)
-process.exit(total.missed > 0 || burstMisses > 0 || heldRows > 0 ? 1 : 0)
+for (const failure of failedWrites.slice(0, 10)) console.log(`FAILED ${failure}`)
+process.exit(total.missed > 0 || burstMisses > 0 || heldRows > 0 || failedWrites.length > 0 ? 1 : 0)
 
 // ── Helpers ──
 
