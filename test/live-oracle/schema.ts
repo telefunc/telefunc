@@ -1,4 +1,4 @@
-export { ROLES, SCHEMA, seed, USERS }
+export { roles, SCHEMA, seed, USERS }
 
 import { CODES, REFS } from './spellings.ts'
 
@@ -122,14 +122,29 @@ end $$;
 create trigger measures_set after update on measures for each statement execute function measure_set();
 `
 
-/** A role that may write `todos` but not read it all, for `ROLES=1` runs: a write's widened `RETURNING` would be
- *  refused. Roles are the server's, shared by its databases: created once, never dropped. After one of these runs a
- *  statement, no write is widened: `ROLES` runs measure the rest less precisely. */
-const ROLES = `
-do $$ begin create role live_restricted; exception when duplicate_object then null; end $$;
+/** Roles of `ROLES=1` runs, which a write switches to for its transaction: `live_restricted` may write `todos` but not
+ *  read it all, so a widened `RETURNING` would be refused; row level security shows `live_tenant` the todos of users 1
+ *  to 3 only, so a widened `RETURNING` would make it insert or change fewer rows. A server's roles are shared by its
+ *  databases: created once, never dropped (`server`); a fresh PGlite has none. */
+function roles(server: boolean): string {
+  const create = (role: string) =>
+    server
+      ? `do $$ begin create role ${role}; exception when duplicate_object then null; end $$;`
+      : `create role ${role};`
+  return `
+${create('live_restricted')}
 grant insert (user_id, text), select (id) on todos to live_restricted;
 grant usage on sequence todos_id_seq to live_restricted;
+${create('live_tenant')}
+grant select, insert, update, delete on todos to live_tenant;
+grant usage on sequence todos_id_seq to live_tenant;
+alter table todos enable row level security;
+create policy tenant_reads on todos for select using (user_id <= 3);
+create policy tenant_inserts on todos for insert with check (true);
+create policy tenant_updates on todos for update using (true) with check (true);
+create policy tenant_deletes on todos for delete using (true);
 `
+}
 
 function seed(random: () => number): string {
   const users = Array.from({ length: USERS }, (_, i) => `('user ${i + 1}', ${(i % 3) + 1})`)

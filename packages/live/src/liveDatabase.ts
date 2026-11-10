@@ -2,9 +2,19 @@ export { LiveDatabase, MAX_RESULT_ROWS }
 export type { Statement, FollowUp, LiveOptions, Sharing, Reservation }
 
 import type { BroadcastAdapter } from 'telefunc'
-import { loadCatalog, tablesChangedBy, type Catalog, type Table, type TableSet } from './catalog.js'
+import {
+  accessAnswered,
+  ACCESS_QUERY,
+  loadCatalog,
+  tablesChangedBy,
+  type Access,
+  type Catalog,
+  type Table,
+  type TableSet,
+} from './catalog.js'
 import { ChangeFeed } from './changeFeed.js'
 import { ofRows, planStatement, type ChangedTables, type Plan, type WritePlan } from './capture/statement.js'
+import { ConnectionRoles } from './capture/roles.js'
 import { named, Transactions, UNNAMED_TABLES } from './capture/transactions.js'
 import { currentQuery, type LiveQuery } from './liveQuery.js'
 import type { Row } from './match/condition.js'
@@ -88,8 +98,10 @@ class LiveDatabase {
   /** A statement may have changed a session's `search_path`, if only for its transaction: an unqualified name may mean
    *  another table than the catalog's `search_path` resolves it to. */
   private pathsDiffer = false
-  /** A statement may have changed a session's role: the catalog's privileges (`Table.readable`) may not be its. */
-  private rolesDiffer = false
+  /** The role each connection's statements run as, from the catalog's on. */
+  private roles: ConnectionRoles | undefined
+  /** What each role sees of the tables (`Access`), by role name: learned by a query run as that role. */
+  private access = new Map<string, Map<string, Access>>()
   /** The values Postgres gave a read's operands, by its text and parameters: an identical read doesn't ask again. */
   private knownOperands = new Map<string, OperandValue[]>()
 
@@ -174,7 +186,6 @@ class LiveDatabase {
     sharing: Sharing | undefined,
   ): Statement {
     let plan = this.planOf(text, this.catalog!)
-    if (changesRole(plan, this.catalog!.role)) this.rolesDiffer = true
     const sessionsStart = changesSession(plan) && !this.sessionsDiffer
     const pathsStart = (sessionsStart || changesPath(plan)) && !this.pathsDiffer
     if (sessionsStart) this.sessionsStartDiffering()
@@ -188,7 +199,7 @@ class LiveDatabase {
         return this.read(rewrite ? plan : { ...plan, liveText: undefined }, text, values, connection, live, sharing)
       case 'write':
         // Sent as written, a write changes its table as a whole.
-        if (!rewrite || this.rolesDiffer) break
+        if (!rewrite || !this.widens(plan, connection)) break
         return {
           ...this.statement(connection, plan.text, plan.images.length, (rows) => this.changesOfWrite(plan, rows)),
           returnsRows: plan.hadReturning,
@@ -200,7 +211,42 @@ class LiveDatabase {
         if (rewrite && isUnnamed(plan) && !this.transactions.isOpen(connection))
           return this.inOwnTransaction(connection, text, plan)
     }
-    return this.statement(connection, text, 0, () => this.changesOf(plan, connection))
+    return this.learningAccess(
+      connection,
+      this.statement(connection, text, 0, () => this.changesOf(plan, connection)),
+    )
+  }
+
+  /** Whether `plan`'s widened `RETURNING` gives the same answer as the write alone, run as its connection's role: the
+   *  role may `SELECT` what it adds (the whole table for an upsert's `xmax` before Postgres 18), and row level security
+   *  doesn't filter it, unless the write has a `RETURNING` of its own, filtered the same. */
+  private widens(plan: WritePlan, connection: object): boolean {
+    const role = this.roles!.of(connection)
+    const access = role === null ? undefined : this.access.get(role)?.get(plan.table.id)
+    if (!access) return false
+    const readable = access.readable === 'table' || (access.readable === 'columns' && !plan.images.includes('inserted'))
+    return readable && (!access.rowSecurity || plan.hadReturning)
+  }
+
+  /** Learns what its connection's role sees of the tables, right after `statement`, when that isn't known yet. */
+  private learningAccess(connection: object, statement: Statement): Statement {
+    return {
+      ...statement,
+      succeeded: (rows) => {
+        const followUps = statement.succeeded(rows)
+        const role = this.roles!.of(connection)
+        if (role === null || this.access.has(role)) return followUps
+        return [...followUps, { text: ACCESS_QUERY, values: [], done: (rows) => this.learnAccess(rows) }]
+      },
+    }
+  }
+
+  /** Files `ACCESS_QUERY`'s answer under the role it ran as; nothing when it failed (the next statement asks again). */
+  private learnAccess(rows: Rows | undefined): void {
+    const answer = rows?.[0]?.[0]
+    if (!answer) return
+    const { role, access } = accessAnswered(answer)
+    this.access.set(role, access)
   }
 
   /** A `COMMIT`: when its transaction changed tables the catalog can't name, queries of ours name them first. `chain`:
@@ -213,12 +259,11 @@ class LiveDatabase {
       ...(queries ? { beforeCommit: { queries, ownTransaction: false } } : {}),
       succeeded: () => {
         if (locked) this.transactions.name(connection, locked)
-        this.transactions.apply(connection, 'commit')
-        if (chain) this.transactions.apply(connection, 'begin')
+        this.transactionEnded(connection, 'commit', chain)
         return []
       },
       // The transaction is over: rolled back.
-      failed: () => this.transactions.apply(connection, 'rollback'),
+      failed: () => this.transactionEnded(connection, 'rollback', false),
     }
   }
 
@@ -371,12 +416,17 @@ class LiveDatabase {
     }
   }
 
-  /** Changes of a statement that isn't a single captured write; applies transaction statements. */
+  /** Changes of a statement that isn't a single captured write; applies transaction statements and role changes. */
   private changesOf(plan: Plan, connection: object): Change[] {
+    if ('role' in plan && plan.role) this.roles!.changed(connection, plan.role)
     switch (plan.kind) {
       case 'transaction':
-        this.transactions.apply(connection, plan.action, plan.savepoint)
-        if (plan.chain) this.transactions.apply(connection, 'begin')
+        if (plan.action === 'commit' || plan.action === 'rollback')
+          this.transactionEnded(connection, plan.action, plan.chain === true)
+        else {
+          this.transactions.apply(connection, plan.action, plan.savepoint)
+          this.roles!.transaction(connection, plan.action)
+        }
         return []
       case 'unknownWrite':
         if (plan.schemaChange) this.forgetSchema()
@@ -393,6 +443,15 @@ class LiveDatabase {
       default:
         return []
     }
+  }
+
+  /** A transaction's end on `connection`; `chain`: the next one begins at once. */
+  private transactionEnded(connection: object, action: 'commit' | 'rollback', chain: boolean): void {
+    this.transactions.apply(connection, action)
+    this.roles!.transaction(connection, action)
+    if (!chain) return
+    this.transactions.apply(connection, 'begin')
+    this.roles!.transaction(connection, 'begin')
   }
 
   private changesOfWrite(plan: WritePlan, rows: (string | null)[][]): Change[] {
@@ -440,6 +499,8 @@ class LiveDatabase {
       this.loadingCatalog = undefined
     }
     if (this.pathsDiffer) this.catalog.searchPath = undefined
+    this.roles ??= new ConnectionRoles(this.catalog.role)
+    this.access.set(this.catalog.role, this.catalog.access)
     if (this.transport && !this.feed) {
       this.feed = new ChangeFeed(this.transport, this.catalog.database, (changes) => this.receive(changes))
     }
@@ -467,6 +528,8 @@ class LiveDatabase {
     this.catalog = undefined
     this.plans = new Map()
     this.knownOperands = new Map()
+    // The tables may be others: each role's access is learned again.
+    this.access = new Map()
   }
 
   private watchTables(shape: ReadShape): void {
@@ -522,13 +585,6 @@ function imageOf(text: string | null | undefined, table: Table): Row | undefined
 function assumedOld(now: Row, plan: WritePlan): Row {
   const kept = plan.table.updateChangesOtherColumns ? plan.table.primaryKey : Object.keys(now)
   return Object.fromEntries(kept.filter((c) => !plan.assigned.includes(c)).map((c) => [c, now[c]!]))
-}
-
-/** Whether `plan` may give its session another role than `role` (`Plan.changesRole`). */
-function changesRole(plan: Plan, role: string): boolean {
-  if (plan.kind === 'several') return plan.plans.some((p) => changesRole(p, role))
-  if (plan.kind === 'session' || plan.kind === 'none') return plan.changesRole === true && plan.role !== role
-  return plan.kind === 'unknownWrite' && plan.changesRole === true
 }
 
 /** A statement after which the connection it ran on may answer reads differently from the others. */

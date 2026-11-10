@@ -1,5 +1,5 @@
-export { loadCatalog, actionOf, sideEffects, tablesChangedBy, union }
-export type { Catalog, Table, TableSet, ForeignKey, Written }
+export { loadCatalog, accessAnswered, actionOf, sideEffects, tablesChangedBy, union, ACCESS_QUERY }
+export type { Access, Catalog, Table, TableSet, ForeignKey, Written }
 
 import { parsePlPgSQLSync } from 'libpg-query'
 import type { Column } from './match/values.js'
@@ -13,6 +13,11 @@ type Write = 'insert' | 'update' | 'delete' | 'truncate'
 
 /** A table written, by a kind of write (`undefined`: any). */
 type Written = readonly [table: string, write: Write | undefined]
+
+/** What a role sees of a table: what it may `SELECT`, the whole table or each of its columns (system columns such as
+ *  `xmax` aren't among them), and whether row level security filters the rows it reads, and so those a `RETURNING`
+ *  gives it. */
+type Access = { readable: 'table' | 'columns' | undefined; rowSecurity: boolean }
 
 type Table = {
   id: string
@@ -35,9 +40,6 @@ type Table = {
   references: { column: string; parent: string; parentColumn: string }[]
   /** An `UPDATE` can change columns its `SET` list doesn't name (`BEFORE` row triggers, generated columns). */
   updateChangesOtherColumns: boolean
-  /** What the role that loaded the catalog may `SELECT`: the whole table, or each of its columns (system columns
-   *  such as `xmax` aren't among them). A write's widened `RETURNING` reads them. */
-  readable: 'table' | 'columns' | undefined
 }
 
 /** `table.column` references the parent's `parentColumn`; on a parent's delete or key update the child rows are
@@ -46,8 +48,9 @@ type ForeignKey = { table: string; column?: string; parentColumn?: string; onDel
 
 type Catalog = {
   database: string
-  /** The role that loaded the catalog: the one `Table.readable` holds the privileges of. */
+  /** The role that loaded the catalog, which connections start as, and what it sees of each table, by id. */
   role: string
+  access: Map<string, Access>
   serverVersion: number
   tables: Map<string, Table>
   /** User-defined functions: a statement calling one may read any table, and write any table when it's one of
@@ -77,6 +80,7 @@ type Catalog = {
 type CatalogRow = {
   database: string
   role: string
+  access: AccessRow[]
   searchPath: string[]
   serverVersion: number
   cOrdering: boolean
@@ -87,7 +91,6 @@ type CatalogRow = {
     name: string
     view: string | null
     rls: boolean
-    readable: 'table' | 'columns' | null
     columns: [
       name: string,
       category: string,
@@ -114,6 +117,21 @@ type CatalogRow = {
   }[]
 }
 
+type AccessRow = [table: string, readable: 'table' | 'columns' | null, rowSecurity: boolean]
+
+/** What the current role sees of each table (`AccessRow`). */
+const ACCESS_ROWS = `select coalesce(json_agg(json_build_array(n.nspname || '.' || c.relname,
+    case when has_table_privilege(c.oid, 'SELECT') then 'table'
+      when not exists (select from pg_attribute a where a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
+        and not has_column_privilege(c.oid, a.attnum, 'SELECT')) then 'columns' end,
+    row_security_active(c.oid))), '[]')
+  from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where c.relkind in ('r', 'p', 'v', 'm', 'f') and n.nspname not in ('pg_catalog', 'information_schema') and n.nspname !~ '^pg_toast'`
+
+/** The current role, and what it sees of each table: run as the role it asks about (`row_security_active()` takes
+ *  none). */
+const ACCESS_QUERY = `select json_build_object('role', current_user, 'access', (${ACCESS_ROWS}))::text`
+
 /** Whether the function `p`, in language `l`, is one of `Catalog.writingFunctions`. */
 const WRITING = `l.lanname not in ('c', 'internal')`
 
@@ -121,6 +139,7 @@ const WRITING = `l.lanname not in ('c', 'internal')`
 const CATALOG_QUERY = `select json_build_object(
   'database', current_database(),
   'role', current_user,
+  'access', (${ACCESS_ROWS}),
   'searchPath', current_schemas(false),
   'serverVersion', current_setting('server_version_num')::int,
   'cOrdering', (select datlocprovider in ('c', 'b') and datcollate in ('C', 'POSIX') from pg_database where datname = current_database()),
@@ -134,9 +153,6 @@ const CATALOG_QUERY = `select json_build_object(
     'name', c.relname,
     'view', case when c.relkind in ('v', 'm') then pg_get_viewdef(c.oid) end,
     'rls', c.relrowsecurity,
-    'readable', case when has_table_privilege(c.oid, 'SELECT') then 'table'
-      when not exists (select from pg_attribute a where a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
-        and not has_column_privilege(c.oid, a.attnum, 'SELECT')) then 'columns' end,
     'columns', (select json_agg(json_build_array(a.attname, t.typcategory, t.typname,
         quote_ident(tn.nspname) || '.' || quote_ident(t.typname), coalesce(co.collname, ''),
         coalesce(co.collisdeterministic, true), a.attgenerated <> '', bn.nspname, bt.typname,
@@ -233,6 +249,7 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
   const catalog: Catalog = {
     database: row.database,
     role: row.role,
+    access: accessOf(row.access),
     serverVersion: row.serverVersion,
     tables,
     functions: new Set(row.functions.map(([name]) => name)),
@@ -288,7 +305,6 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
         triggers.some(
           ([type]) => (type & TRIGGER_ROW) !== 0 && (type & TRIGGER_BEFORE) !== 0 && (type & TRIGGER_UPDATE) !== 0,
         ),
-      readable: t.readable ?? undefined,
     }
     tables.set(table.id, table)
     byName.set(t.name, [...(byName.get(t.name) ?? []), table])
@@ -417,4 +433,17 @@ function tablesChangedBy(written: Written[], catalog: Catalog): TableSet {
 function union(sets: TableSet[]): TableSet {
   if (sets.includes('all')) return 'all'
   return new Set(sets.flatMap((s) => [...s]))
+}
+
+/** The role `ACCESS_QUERY` ran as, and what it sees of each table, from its answer. */
+function accessAnswered(answer: string): { role: string; access: Map<string, Access> } {
+  const { role, access } = JSON.parse(answer) as { role: string; access: AccessRow[] }
+  return { role, access: accessOf(access) }
+}
+
+/** `ACCESS_ROWS`' rows by table id. */
+function accessOf(rows: AccessRow[]): Map<string, Access> {
+  return new Map(
+    rows.map(([table, readable, rowSecurity]) => [table, { readable: readable ?? undefined, rowSecurity }]),
+  )
 }

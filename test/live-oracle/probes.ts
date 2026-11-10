@@ -8,6 +8,7 @@ import { AsyncResource } from 'node:async_hooks'
 import { PGlite } from '@electric-sql/pglite'
 import '../../packages/live/dist/live.js'
 import { LiveDatabase } from '../../packages/live/dist/liveDatabase.js'
+import { ConnectionRoles } from '../../packages/live/dist/capture/roles.js'
 import { UNNAMED_TABLES } from '../../packages/live/dist/capture/transactions.js'
 import { EVENT_TAG } from './orms/eventQuery.ts'
 import Cursor from 'pg-cursor'
@@ -118,11 +119,17 @@ const probes: Record<string, () => void> = {
       },
     })
   },
-  /** A write is widened whatever role its session took: the catalog's privileges are taken as every session's. */
+  /** A write is widened by what the role that loaded the catalog sees, whatever role its connection took. */
   'role-privilege'() {
-    const planOf = database.planOf
-    database.planOf = function (...args: unknown[]) {
-      return withoutRoleChanges(planOf.apply(this, args))
+    ConnectionRoles.prototype.of = function () {
+      return (this as any).login
+    }
+  },
+  /** A write is widened on a table row level security filters for its role, as if it had a `RETURNING` of its own. */
+  'row-security'() {
+    const widens = database.widens
+    database.widens = function (plan: any, connection: object) {
+      return widens.call(this, { ...plan, hadReturning: true }, connection)
     }
   },
   /** The widened `RETURNING` names the old row `old`, even where the statement renamed it (the oracle's `prev`). */
@@ -372,11 +379,6 @@ const probes: Record<string, () => void> = {
       return dropAll.call(this, source, row).filter((key: string) => this.groups.get(key).counts.size > 0)
     }
   },
-}
-
-function withoutRoleChanges(plan: any): any {
-  if (plan.kind === 'several') return { ...plan, plans: plan.plans.map(withoutRoleChanges) }
-  return { ...plan, changesRole: false }
 }
 
 /** Changes the catalog as its query returns it (`CatalogRow`), before it's read. */

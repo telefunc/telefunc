@@ -10,7 +10,7 @@
 //   SERVERS=2 ROLES=1 SHAPES=byUser,recent DRIVER=pg|postgres-js node --expose-gc oracle.ts
 //
 // DRIVER=postgres-js (with ORM=drizzle DB=pg): postgres.js instead of `pg`. PG=18 adds the writes in Postgres 18's
-// syntax. ROLES=1 adds a write by a role that can't read the table it writes.
+// syntax. ROLES=1 adds writes by roles that can't read the table they write, or only some of its rows.
 //
 // SERVERS=2 (pooled Postgres): the live reads are on one server, the writes on another, connected by a transport that
 // delivers out of order and twice.
@@ -26,7 +26,7 @@ import { createDrizzle } from './orms/drizzle.ts'
 import { createKysely } from './orms/kysely.ts'
 import { createPrisma } from './orms/prisma.ts'
 import type { OrmDriver, ReadArgs, WriteArgs } from './orms/types.ts'
-import { ROLES, seed, USERS } from './schema.ts'
+import { roles, seed, USERS } from './schema.ts'
 import { arrayOf, SPELLED_COLUMNS, spell } from './spellings.ts'
 import { derived, type LiveCell } from '../../packages/live/dist/live.js'
 // The same file under another URL: a module of its own, as a second copy of the package is.
@@ -158,7 +158,7 @@ async function connect(): Promise<{
 }> {
   if (DB === 'pglite') {
     const { pglite, driver } = await wrappedPglite()
-    if (WITH_ROLES) await pglite.exec(ROLES)
+    if (WITH_ROLES) await pglite.exec(roles(false))
     return {
       driver,
       writer: driver,
@@ -170,7 +170,7 @@ async function connect(): Promise<{
   const admin = new pg.Client({ connectionString: url })
   await admin.connect()
   await admin.query(seed(random))
-  if (WITH_ROLES) await admin.query(ROLES)
+  if (WITH_ROLES) await admin.query(roles(true))
   const transport = SERVERS === 2 ? new UnreliableTransport() : undefined
   if (DRIVER === 'postgres-js') {
     // One connection on even seeds: a `BEGIN` sent through `sql` then holds for the statements after it.
@@ -351,14 +351,16 @@ const count = (map: Map<string, Counts>, key: string) => {
 const misses: string[] = []
 /** Writes in Postgres 18's syntax (`RETURNING WITH (OLD AS …)`): left out on older servers and PGlite. */
 const POSTGRES_18_WRITES = ['renamedOld']
+/** Writes as another role (`roles()`): only on `ROLES=1` runs. */
+const ROLE_WRITES = ['restrictedInsert', 'tenantInsert', 'tenantUpdate', 'tenantUpdateReturning']
 const writeNames = Object.keys(driver.writes).filter(
   (name) =>
     (!POSTGRES_18_WRITES.includes(name) || (DB === 'pg' && process.env.PG === '18')) &&
-    (name !== 'restrictedInsert' || WITH_ROLES),
+    (!ROLE_WRITES.includes(name) || WITH_ROLES),
 )
 /** After one of these, connections may differ (reads no longer share): they start halfway, so that sharing is checked.
  *  `stampRead` calls a function of the app's, which may set anything. */
-const SESSION_WRITES = ['setPath', 'notesPath', 'restrictedInsert', 'stampRead']
+const SESSION_WRITES = ['setPath', 'notesPath', 'stampRead']
 const writesBeforeHalf = writeNames.filter((name) => !SESSION_WRITES.includes(name))
 
 /** Writes that failed other than by the database's refusal. */

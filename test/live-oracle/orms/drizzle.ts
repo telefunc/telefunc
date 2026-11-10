@@ -368,6 +368,31 @@ function createDrizzle(
           .catch((err: unknown) => {
             throw new Error(`restricted insert refused: ${err}`)
           }),
+      // As a tenant row level security shows some todos only: a todo it may not see is still inserted.
+      tenantInsert: ({ user, text }) =>
+        db
+          .transaction(async (tx: any) => {
+            await tx.execute(sql`set local role live_tenant`)
+            await tx.execute(sql`insert into todos (user_id, text) values (${user}, ${text})`)
+          })
+          .catch((err: unknown) => {
+            throw new Error(`tenant insert refused: ${err}`)
+          }),
+      // Every todo, those the tenant may not see included.
+      tenantUpdate: ({ value }) =>
+        db.transaction(async (tx: any) => {
+          await tx.execute(sql`lock table todos in exclusive mode`)
+          const [{ n }] = rowsOf(await tx.execute(sql`select count(*)::int as n from todos`))
+          await tx.execute(sql`set local role live_tenant`)
+          const changed = affectedRows(await tx.execute(sql`update todos set priority = ${value % 5}`))
+          if (changed !== n) throw new Error(`tenant update changed ${changed} of ${n} todos`)
+        }),
+      // Its own `RETURNING` shows it only the todos it may see, widened or not.
+      tenantUpdateReturning: ({ todo }) =>
+        db.transaction(async (tx: any) => {
+          await tx.execute(sql`set local role live_tenant`)
+          await tx.execute(sql`update todos set done = not done where id = ${todo} returning id`)
+        }),
       // The widened `RETURNING` must name the old row as the statement does. Refused, the app's own write fails.
       renamedOld: ({ todo }) =>
         db
@@ -438,5 +463,8 @@ const schemaOf = (value: number) => (value % 3 === 0 ? 'public' : 'tenant')
 
 /** `db.execute()`'s rows: the result itself on postgres.js, its `rows` elsewhere. */
 const rowsOf = (result: any) => result.rows ?? [...result]
+
+/** How many rows `db.execute()` changed: `count` on postgres.js, `affectedRows` on PGlite, `rowCount` on pg. */
+const affectedRows = (result: any): number => result.count ?? result.affectedRows ?? result.rowCount
 
 const arrayType = ({ column }: Spelling) => `::${COLUMN_TYPES[column]}[]`
