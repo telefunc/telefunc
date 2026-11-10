@@ -27,7 +27,7 @@ type VideoReceiverStats = {
    *  frame was due first. */
   shown: number
   dropped: number
-  /** Key-frame groups the server skipped for this page, or that it started within. */
+  /** Key-frame groups the server cut short or skipped for this page. */
   skippedGroups: number
   freezes: number
   frozenMs: number
@@ -155,7 +155,8 @@ class VideoReceiver {
     this.lateInRow = late ? this.lateInRow + 1 : 0
     if (late || skippedGroup) this.onTimeSince = performance.now()
     if ((skippedGroup || this.lateInRow >= LATE_FRAMES_DOWN) && this.cap > 0) {
-      this.cap = Math.min(this.cap, this.sizes.indexOf(receiver.size)) - 1
+      // The smallest size is as far down as it goes.
+      this.cap = Math.max(0, Math.min(this.cap, this.sizes.indexOf(receiver.size)) - 1)
       this.lateInRow = 0
       return this.choose()
     }
@@ -240,12 +241,15 @@ class SizeReceiver {
   /** The group being decoded, and its newest frame's index; null until a key frame, and after a frame went missing. */
   private group: number | null = null
   private index = 0
-  private lastGroup = 0
+  /** The track's newest `info.seq`: a gap is what the server skipped of it. */
+  private lastSeq: number | null = null
 
   constructor(options: SizeReceiverOptions) {
     this.options = options
     this.size = options.size
-    this.unsubscribe = options.member.subscribeBinary((data) => this.receive(data), { track: this.size.track })
+    this.unsubscribe = options.member.subscribeBinary((data, info) => this.receive(data, info.seq), {
+      track: this.size.track,
+    })
     options.requestKeyFrame()
   }
 
@@ -255,16 +259,17 @@ class SizeReceiver {
     this.decoder = null
   }
 
-  private receive(data: Uint8Array): void {
+  private receive(data: Uint8Array, seq: number): void {
+    // Once the server skips a frame of a group, it skips the rest of it: the key frame after a gap begins anew.
+    const skipped = this.lastSeq !== null && seq > this.lastSeq + 1
+    this.lastSeq = seq
     const unit = decodeUnit(data)
     if (unit === null) return
     const { key, group, index, captured } = unit.header
-    const skippedGroup = key && this.lastGroup !== 0 && group > this.lastGroup + 1
-    this.options.onUnit(this, captured, skippedGroup)
+    this.options.onUnit(this, captured, key && skipped)
     if (key) {
       this.group = group
       this.index = 0
-      this.lastGroup = group
     } else if (group === this.group && index === this.index + 1 && this.decoder !== null) {
       this.index = index
     } else {
