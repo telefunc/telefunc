@@ -224,6 +224,10 @@ function createDrizzle(
       eventLog: () =>
         db.execute(sql`select kind, count(*)::int as n from event_log group by kind order by kind`).then(rowsOf),
       counters: () => db.execute(sql`select id, n from counters order by id`).then(rowsOf),
+      measuresAtFloat: () =>
+        db.execute(sql`select id from measures where value = ${String(2 ** 53)}::float8 order by id`).then(rowsOf),
+      measuresOffFloat: () =>
+        db.execute(sql`select id from measures where value <> ${String(2 ** 53)}::float8 order by id`).then(rowsOf),
       settled: () => db.execute(sql`select n from settled`).then(rowsOf),
       spelled: ({ spellings: [a] }) =>
         db
@@ -300,6 +304,11 @@ function createDrizzle(
           .values({ id: todo, userId: user, text, updatedAt: new Date() })
           .onConflictDoUpdate({ target: todos.id, set: { text } }),
       rawBump: ({ user }) => db.execute(sql`update todos set priority = priority + 1 where user_id = ${user}`),
+      // 2^53, 2^53 + 1 or 2^53 + 2: the first two are one float8.
+      setMeasure: ({ value }) =>
+        db.execute(
+          sql`update measures set value = ${String(2 ** 53)}::numeric + ${value % 3} where id = ${(value % 2) + 1}`,
+        ),
       txCommit: ({ todo, user, text }) =>
         db.transaction(async (tx: any) => {
           await tx.insert(todos).values({ userId: user, text, updatedAt: new Date() })

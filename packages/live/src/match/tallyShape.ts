@@ -73,6 +73,9 @@ type TallyAnalysis = {
 /** More rows of counts aren't kept: any change to a matching row counts. */
 const MAX_TALLY_ROWS = 10_000
 
+/** The type of `count`: an operand compared with it is read as a `bigint`. */
+const COUNT = { sqlType: 'pg_catalog.int8', base: ['pg_catalog', 'int8'] } as const
+
 const SET_OPERATIONS: Record<string, 'union' | 'intersect' | 'except'> = {
   SETOP_UNION: 'union',
   SETOP_INTERSECT: 'intersect',
@@ -138,10 +141,7 @@ function analyzeGroups(select: Node, context: TallyContext): TallyAnalysis | und
     const aggregate = expr && aggregateOf(expr.lexpr)
     if (!aggregate || !(operator in COMPARISONS) || !isOperand(expr.rexpr)) return
     // An untyped operand is read as the aggregate's type: `count` is a `bigint`, `min` and `max` the column's.
-    const as =
-      aggregate.kind === 'count' || aggregate.kind === 'countDistinct'
-        ? 'pg_catalog.int8'
-        : columns[aggregate.column]!.sqlType
+    const as = aggregate.kind === 'count' || aggregate.kind === 'countDistinct' ? COUNT : columns[aggregate.column]!
     const operand = context.operands.of(expr.rexpr, { as })
     if (operand === undefined) return
     having.push({ aggregate, operator, operand })

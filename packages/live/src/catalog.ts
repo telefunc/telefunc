@@ -79,6 +79,8 @@ type CatalogRow = {
       collation: string,
       deterministic: boolean,
       generated: boolean,
+      baseSchema: string,
+      baseName: string,
     ][]
     primaryKey: string[] | null
     policies: string[] | null
@@ -113,8 +115,10 @@ const CATALOG_QUERY = `select json_build_object(
     'rls', c.relrowsecurity,
     'columns', (select json_agg(json_build_array(a.attname, t.typcategory, t.typname,
         quote_ident(tn.nspname) || '.' || quote_ident(t.typname), coalesce(co.collname, ''),
-        coalesce(co.collisdeterministic, true), a.attgenerated <> '') order by a.attnum)
+        coalesce(co.collisdeterministic, true), a.attgenerated <> '', bn.nspname, bt.typname) order by a.attnum)
       from pg_attribute a join pg_type t on t.oid = a.atttypid join pg_namespace tn on tn.oid = t.typnamespace
+      join pg_type bt on bt.oid = case when t.typtype = 'd' then t.typbasetype else t.oid end
+      join pg_namespace bn on bn.oid = bt.typnamespace
       left join pg_collation co on co.oid = a.attcollation
       where a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped),
     'primaryKey', (select json_agg(a.attname order by k.ord) from pg_index i
@@ -198,11 +202,12 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
   }
   for (const t of row.tables) {
     const columns = t.columns.map(
-      ([name, category, type, sqlType, collation, deterministic]): Column => ({
+      ([name, category, type, sqlType, collation, deterministic, , baseSchema, baseName]): Column => ({
         name,
         category,
         type,
         sqlType,
+        base: [baseSchema, baseName],
         deterministic,
         orderableText: ['C', 'POSIX', 'ucs_basic'].includes(collation) || (collation === 'default' && row.cOrdering),
       }),

@@ -546,8 +546,7 @@ function routeOf(conjunct: Node, resolve: (ref: Node) => Column | undefined, ope
   const column = resolve(expr.lexpr)
   if (!column) return undefined
   // The operands the condition compares with: routes key the values Postgres gave them.
-  const operand = (node: Node, form?: 'list') =>
-    isOperand(node) ? operands.of(node, { as: column.sqlType, form }) : undefined
+  const operand = (node: Node, form?: 'list') => (isOperand(node) ? operands.of(node, { as: column, form }) : undefined)
   if (expr.kind === 'AEXPR_OP') {
     const index = operand(expr.rexpr)
     return index === undefined ? undefined : { column, values: [{ kind: 'operand', index }] }

@@ -75,12 +75,12 @@ function compileExpression(expr: Node, scalar: (n: Node, comparison?: Comparison
   const operator = names(expr.name)[0]!
   const left = scalar(expr.lexpr)
   // An operand compared with a column is read as the column's type.
-  const as = left.kind === 'column' ? left.column.sqlType : undefined
+  const as = left.kind === 'column' ? left.column : undefined
   switch (expr.kind) {
     case 'AEXPR_OP': {
       const right = scalar(expr.rexpr, { as })
       if (!COMPARISONS[operator]) return ALWAYS
-      const leftOperand = right.kind === 'column' ? scalar(expr.lexpr, { as: right.column.sqlType }) : left
+      const leftOperand = right.kind === 'column' ? scalar(expr.lexpr, { as: right.column }) : left
       return comparison(operator, leftOperand, right)
     }
     case 'AEXPR_IN': {

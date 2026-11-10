@@ -11,6 +11,7 @@ import { LiveDatabase } from '../../packages/live/dist/liveDatabase.js'
 import { UNNAMED_TABLES } from '../../packages/live/dist/capture/transactions.js'
 import { EVENT_TAG } from './orms/eventQuery.ts'
 import { LiveRead } from '../../packages/live/dist/match/liveRead.js'
+import { Operands } from '../../packages/live/dist/match/operands.js'
 import { Tally } from '../../packages/live/dist/match/tally.js'
 import { Refetcher } from '../../packages/live/dist/refetcher.js'
 import { WatchedRead } from '../../packages/live/dist/sharedReads.js'
@@ -55,6 +56,17 @@ const probes: Record<string, () => void> = {
     database.loadCatalog = async function (query: unknown) {
       await loadCatalog.call(this, query)
       for (const table of this.catalog.tables.values()) for (const column of table.columns) column.orderableText = true
+    }
+  },
+  /** A typed operand, a cast or a number, is compared with a column whatever its type, as if Postgres compared both
+   *  as the column's type. */
+  'operand-type'() {
+    const operands = Operands.prototype as any
+    const of = operands.of
+    operands.of = function (node: any, comparison: any) {
+      const constant = node.A_Const
+      const typed = node.TypeCast || constant?.ival || constant?.fval || constant?.boolval
+      return of.call(this, node, typed ? { ...comparison, as: undefined } : comparison)
     }
   },
   /** A foreign key is taken to reference its parent column's name in every table, not only in its parent. */

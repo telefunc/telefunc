@@ -10,6 +10,9 @@ type Column = {
   /** Its type as SQL, schema-qualified, without modifiers (`pg_catalog.bpchar`): what an untyped value compared
    *  with it is read as. */
   sqlType: string
+  /** Its type after domains, `[schema, name]` (`['pg_catalog', 'numeric']`): a typed operand, a cast or a number, is
+   *  compared with it only when it has this type. */
+  base: readonly [schema: string, name: string]
   /** Text order is reproducible in JavaScript only under the `C` (or `POSIX`) collation. */
   orderableText: boolean
   /** A nondeterministic collation can call different strings equal. */

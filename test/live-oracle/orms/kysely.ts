@@ -208,6 +208,10 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
       eventLog: async () =>
         (await sql`select kind, count(*)::int as n from event_log group by kind order by kind`.execute(db)).rows,
       counters: async () => (await sql`select id, n from counters order by id`.execute(db)).rows,
+      measuresAtFloat: async () =>
+        (await sql`select id from measures where value = ${String(2 ** 53)}::float8 order by id`.execute(db)).rows,
+      measuresOffFloat: async () =>
+        (await sql`select id from measures where value <> ${String(2 ** 53)}::float8 order by id`.execute(db)).rows,
       settled: async () => (await sql`select n from settled`.execute(db)).rows,
       spelled: ({ spellings: [a] }) =>
         db
@@ -294,6 +298,11 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
           .onConflict((oc) => oc.column('id').doUpdateSet({ text }))
           .execute(),
       rawBump: ({ user }) => sql`update todos set priority = priority + 1 where user_id = ${user}`.execute(db),
+      // 2^53, 2^53 + 1 or 2^53 + 2: the first two are one float8.
+      setMeasure: ({ value }) =>
+        sql`update measures set value = ${String(2 ** 53)}::numeric + ${value % 3} where id = ${(value % 2) + 1}`.execute(
+          db,
+        ),
       txCommit: ({ todo, user, text }) =>
         db.transaction().execute(async (tx) => {
           await tx.insertInto('todos').values({ user_id: user, text }).execute()
