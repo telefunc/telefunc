@@ -1,5 +1,5 @@
 export { ParticipantBase }
-export type { ParticipantBaseOptions, TrackStream }
+export type { ParticipantBaseOptions }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import {

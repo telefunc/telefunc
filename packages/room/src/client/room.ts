@@ -40,7 +40,7 @@ import { RoomModel, type MembershipEvent, type RoomModelOwner } from '../shared/
 import { RoomState, RoomStateView, type RoomStateOwner } from '../shared/state.js'
 import { ROOM_TRACK_WANTS_MAX } from '../shared/constants.js'
 import { CLIENT_ROOM_BUG_MESSAGE, roomResultValue } from '../shared/errors.js'
-import { ParticipantBase, type TrackStream } from '../shared/ParticipantBase.js'
+import { ParticipantBase, type ParticipantBaseOptions } from '../shared/ParticipantBase.js'
 import type { MetaRewinds } from '../shared/MemberMeta.js'
 import type {
   BinaryPublishOptions,
@@ -215,6 +215,7 @@ class ClientRoom extends RoomStateView implements Room {
       }
       const participant = new ClientRoomParticipant({
         clientRoom: this,
+        end: this.end,
         id,
         meta,
         selfDelivery,
@@ -275,11 +276,6 @@ class ClientRoom extends RoomStateView implements Room {
     const publish: RoomDataPublish = { __r: 'data', from, data }
     if (retain) publish.retain = true
     return roomResultValue<ChannelPublishAck>(this.end._publishUnreported(publish))
-  }
-
-  /** @internal */
-  async _publishBinaryFramed(framed: Uint8Array, stream: TrackStream, delta: boolean): Promise<ChannelPublishAck> {
-    return roomResultValue<ChannelPublishAck>(publishOnTrackStream(this.end, framed, stream, delta))
   }
 
   /** @internal A local participant completed its voluntary leave. */
@@ -433,16 +429,6 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   /** @internal */
-  get _isConnected(): boolean {
-    return this.end.isConnected
-  }
-
-  /** @internal */
-  get _uplinkRate(): number {
-    return this.end._uplinkRate
-  }
-
-  /** @internal */
   _heldConnectionChanged(id: string, wasConnected: boolean | null): void {
     this.model.heldConnectionChanged(id, wasConnected)
   }
@@ -502,9 +488,28 @@ class ClientRoom extends RoomStateView implements Room {
   }
 }
 
+type ClientParticipantBaseOptions = ParticipantBaseOptions & {
+  /** The channel end it publishes its tracks' frames on: its room view's, or its own. */
+  end: ClientBroadcast
+}
+
 abstract class ClientParticipantBase extends ParticipantBase {
+  protected readonly end: ClientBroadcast
   private readonly wantedTracks = new Set<TrackKey>()
   protected readonly _bugMessage = CLIENT_ROOM_BUG_MESSAGE
+
+  constructor({ end, ...options }: ClientParticipantBaseOptions) {
+    super(options)
+    this.end = end
+  }
+
+  get isConnected(): boolean {
+    return this.end.isConnected
+  }
+
+  get uplinkRate(): number {
+    return this.end._uplinkRate
+  }
 
   /** @internal The page holds this member from now on, until it leaves. */
   _holdOnPage(): void {
@@ -546,11 +551,6 @@ abstract class ClientParticipantBase extends ParticipantBase {
 
   /** Each flavor's wire publish. */
   protected abstract _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck>
-  protected abstract _sendPublishBinary(
-    framed: Uint8Array,
-    stream: TrackStream,
-    delta: boolean,
-  ): Promise<ChannelPublishAck>
   /** The wire request of a flavor: the base's DMs and metadata writes, and the standalone's publish and leave. */
   protected abstract _request(request: MemberMutationRequest): Promise<unknown>
 
@@ -558,15 +558,24 @@ abstract class ClientParticipantBase extends ParticipantBase {
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
     assertPublishOptions(options)
     if (options?.track === undefined) return markHandled(this._sendPublish(data, options?.retain))
-    return this.publishOnTrack(this.encodeTextFrame(data, options), options.track)
+    return markHandled(this.publishOnTrack(this.encodeTextFrame(data, options), { track: options.track }))
   }
 
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
-    return this.publishOnTrack(this.encodeBinaryFrame(data, options), options?.track, options?.delta === true)
+    const { track, delta } = options ?? {}
+    return markHandled(this.publishOnTrack(this.encodeBinaryFrame(data, options), { track, delta }))
   }
 
-  private publishOnTrack(framed: Uint8Array, track: string | undefined, delta = false): Promise<ChannelPublishAck> {
-    return markHandled(this._sendPublishBinary(framed, this.trackStreamOf(track), delta))
+  /** A track's frame, on its stream's domain. */
+  private async publishOnTrack(
+    framed: Uint8Array,
+    { track, delta = false }: { track: string | undefined; delta?: boolean },
+  ): Promise<ChannelPublishAck> {
+    this._assertActive()
+    const { name, lossy } = this.trackStreamOf(track)
+    return roomResultValue<ChannelPublishAck>(
+      this.end._publishBinaryUnreported(framed, lossy ? name : null, name, delta),
+    )
   }
 
   send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
@@ -638,6 +647,7 @@ class ClientRoomOwner implements RoomModelOwner, RoomStateOwner {
 
 type ClientRoomParticipantOptions = {
   clientRoom: ClientRoom
+  end: ClientBroadcast
   id: string
   meta: ParticipantMeta
   selfDelivery: boolean
@@ -650,21 +660,14 @@ class ClientRoomParticipant extends ClientParticipantBase {
   /** Weak: the room reaches this member, so a strong one would hold the room open for good. */
   private handle: WeakRef<LocalParticipant> | null = null
 
-  constructor({ clientRoom, id, meta, selfDelivery, rewinds }: ClientRoomParticipantOptions) {
+  constructor({ clientRoom, end, id, meta, selfDelivery, rewinds }: ClientRoomParticipantOptions) {
     super({
       // Client-side joins carry no identity: it's server-assigned (see JoinOptions.identity).
       participant: { id, meta, selfDelivery, identity: null },
       rewinds,
+      end,
     })
     this.room = clientRoom
-  }
-
-  get isConnected(): boolean {
-    return this.room._isConnected
-  }
-
-  get uplinkRate(): number {
-    return this.room._uplinkRate
   }
 
   protected override _resolveSender(id: string): Sender | null {
@@ -679,15 +682,6 @@ class ClientRoomParticipant extends ClientParticipantBase {
   protected async _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
     this._assertActive()
     return await this.room._publishText(this.id, data, retain)
-  }
-
-  protected async _sendPublishBinary(
-    framed: Uint8Array,
-    stream: TrackStream,
-    delta: boolean,
-  ): Promise<ChannelPublishAck> {
-    this._assertActive()
-    return await this.room._publishBinaryFramed(framed, stream, delta)
   }
 
   protected _request(request: MemberMutationRequest): Promise<unknown> {
@@ -728,12 +722,9 @@ type ClientStandaloneParticipantOptions = { end: ClientBroadcast; metadata: Part
 
 /** `LocalParticipant` revived from a serialized `ServerLocalParticipant`. Owns its channel. */
 class ClientStandaloneParticipant extends ClientParticipantBase {
-  private readonly end: ClientBroadcast
-
   constructor({ end, metadata }: ClientStandaloneParticipantOptions) {
     // Its own: the `rewound` notice forgets its seq.
-    super({ participant: metadata, rewinds: { count: 0 } })
-    this.end = end
+    super({ participant: metadata, rewinds: { count: 0 }, end })
 
     end._subscribeLocal('text', (notice) => this.onNotice(notice))
     end.onClose(() => this._onLeft({ type: 'disconnected' }))
@@ -741,14 +732,6 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     end.onOpen(() => this._holdOnPage())
     end.onDisconnect(() => this._onDisconnected())
     end.onReconnect(() => this._onReconnected())
-  }
-
-  get isConnected(): boolean {
-    return this.end.isConnected
-  }
-
-  get uplinkRate(): number {
-    return this.end._uplinkRate
   }
 
   private onNotice(notice: unknown): void {
@@ -785,15 +768,6 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     return (await this._request(request)) as ChannelPublishAck
   }
 
-  protected async _sendPublishBinary(
-    framed: Uint8Array,
-    stream: TrackStream,
-    delta: boolean,
-  ): Promise<ChannelPublishAck> {
-    this._assertActive()
-    return roomResultValue<ChannelPublishAck>(publishOnTrackStream(this.end, framed, stream, delta))
-  }
-
   protected async _request(request: ParticipantStubRequest): Promise<unknown> {
     return roomResultValue(this.end.send(request, { ack: true }))
   }
@@ -804,16 +778,6 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     this._onLeft({ type: 'left' })
     void this.end.close().catch(() => {})
   }
-}
-
-/** A track's frame, on its stream's domain. */
-function publishOnTrackStream(
-  end: ClientBroadcast,
-  framed: Uint8Array,
-  stream: TrackStream,
-  delta: boolean,
-): Promise<ChannelPublishAck> {
-  return end._publishBinaryUnreported(framed, stream.lossy ? stream.name : null, stream.name, delta)
 }
 
 function reportClientCallbackError(err: unknown): void {
