@@ -158,7 +158,7 @@ function analyzeGroups(select: Node, context: TallyContext): TallyAnalysis | und
 function analyzeSetOperation(select: Node, context: TallyContext): TallyAnalysis | undefined {
   if (select.limitCount || select.limitOffset || select.withClause) return undefined
   const sources: TallySource[] = []
-  const froms: string[] = []
+  const fromClauses: string[] = []
   const hiddenAt: { from: number; columns: string[] }[] = []
   const treeOf = (node: Node): SetTree | undefined => {
     if (node.limitCount || node.limitOffset || node.withClause) return undefined
@@ -180,7 +180,7 @@ function analyzeSetOperation(select: Node, context: TallyContext): TallyAnalysis
     }
     const from = fromClauseAt(context.text, node.fromClause[0].RangeVar.location)
     if (!from) return undefined
-    froms.push(from.text)
+    fromClauses.push(from.text)
     hiddenAt.push({ from: from.start, columns: columns.map((c) => `${quote(alias.name)}.${quote(c.name)}::text`) })
     return sources.push({ alias, columns, groupColumns: columns.length }) - 1
   }
@@ -191,14 +191,14 @@ function analyzeSetOperation(select: Node, context: TallyContext): TallyAnalysis
     shape: { sources, rule: { kind: 'set', tree } },
     hiddenColumns: hiddenAt[0]!.columns,
     hiddenAt,
-    query: countsQuery(sources, froms),
+    query: countsQuery(sources, fromClauses),
   }
 }
 
-function countsQuery(sources: TallySource[], froms: string[]): string {
+function countsQuery(sources: TallySource[], fromClauses: string[]): string {
   const counts = sources.map((source, i) => {
     const texts = source.columns.map((c) => `${quote(source.alias.name)}.${quote(c.name)}::text`)
-    return `SELECT to_json(ARRAY[${[`'${i}'`, ...texts].join(', ')}])::text, count(*)::text ${froms[i]} GROUP BY 1`
+    return `SELECT to_json(ARRAY[${[`'${i}'`, ...texts].join(', ')}])::text, count(*)::text ${fromClauses[i]} GROUP BY 1`
   })
   return `${counts.join(' UNION ALL ')} LIMIT ${MAX_TALLY_ROWS + 1}`
 }
