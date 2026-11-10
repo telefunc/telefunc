@@ -612,6 +612,9 @@ importers:
       '@telefunc/tanstack-query':
         specifier: workspace:*
         version: link:../../packages/tanstack-query
+      '@types/pg':
+        specifier: 8.20.4
+        version: 8.20.4
       '@types/react':
         specifier: ^19.2.14
         version: 19.2.14
@@ -629,7 +632,7 @@ importers:
         version: 6.0.2(vite@8.0.16(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0))
       drizzle-orm:
         specifier: 0.45.4
-        version: 0.45.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.16)(@types/pg@8.23.1)(kysely@0.29.8)(pg@8.23.1)
+        version: 0.45.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.16)(@types/pg@8.20.4)(kysely@0.29.8)(pg@8.23.1)
       hono:
         specifier: ^4.10.4
         version: 4.10.4
@@ -11995,6 +11998,14 @@ snapshots:
       is-obj: 2.0.0
 
   dotenv@17.4.2: {}
+
+  drizzle-orm@0.45.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.16)(@types/pg@8.20.4)(kysely@0.29.8)(pg@8.23.1):
+    optionalDependencies:
+      '@cloudflare/workers-types': 4.20260615.1
+      '@electric-sql/pglite': 0.5.16
+      '@types/pg': 8.20.4
+      kysely: 0.29.8
+      pg: 8.23.1
 
   drizzle-orm@0.45.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.16)(@types/pg@8.23.1)(kysely@0.29.8)(pg@8.23.1):
     optionalDependencies:

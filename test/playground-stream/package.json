@@ -24,6 +24,7 @@
     "@telefunc/redis": "workspace:*",
     "@telefunc/rxjs": "workspace:*",
     "@telefunc/tanstack-query": "workspace:*",
+    "@types/pg": "8.20.4",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@universal-middleware/core": "^0.4.17",
