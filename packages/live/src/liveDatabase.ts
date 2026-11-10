@@ -2,10 +2,10 @@ export { LiveDatabase, MAX_RESULT_ROWS }
 export type { Statement, FollowUp, LiveOptions, Sharing, Reservation }
 
 import type { BroadcastAdapter } from 'telefunc'
-import { loadCatalog, tablesChangedWith, union, type Catalog, type Table, type TableSet } from './catalog.js'
+import { loadCatalog, tablesChangedBy, type Catalog, type Table, type TableSet } from './catalog.js'
 import { ChangeFeed } from './changeFeed.js'
-import { planStatement, type Plan, type WritePlan } from './capture/statement.js'
-import { Transactions } from './capture/transactions.js'
+import { ofRows, planStatement, type ChangedTables, type Plan, type WritePlan } from './capture/statement.js'
+import { named, Transactions, UNNAMED_TABLES } from './capture/transactions.js'
 import { currentQuery, type LiveQuery } from './liveQuery.js'
 import type { Row } from './match/condition.js'
 import type { Change } from './match/liveRead.js'
@@ -36,6 +36,12 @@ type Statement = {
   answered<R>(result: R, copy: (result: R) => R): void
   /** An identical read is running: don't send this one, give the caller a copy of that one's result. */
   joined?: Joined
+  /** Queries of ours naming the tables a transaction changed without the catalog naming them, sent on the same
+   *  connection right before it commits, with nothing else between: when one fails, the transaction rolls back and the
+   *  caller gets its error. `ownTransaction`: the statement runs in a transaction of ours (`BEGIN`, the statement, the
+   *  queries, `COMMIT`); otherwise it is the `COMMIT` they precede. A driver that doesn't send them leaves those
+   *  changes counting for every table. */
+  beforeCommit?: { queries: FollowUp[]; ownTransaction: boolean }
 }
 
 /** How a driver that can hand its result to identical reads (`Statement.answered()`) returns rows: reads share only
@@ -51,6 +57,12 @@ type FollowUp = { text: string; values: unknown[]; done(rows: (string | null)[][
 type Rows = (string | null)[][]
 
 const READS_EVERYTHING: ReadShape = { kind: 'other', aliases: [], alsoReads: 'all', hiddenColumns: [], operands: [] }
+/** The tables the transaction locked as a write does, or more strongly (`TRUNCATE`): an explicit `LOCK TABLE`, which
+ *  writes nothing, lists its table too. */
+const LOCKED_TABLES = `select n.nspname || '.' || c.relname from pg_locks l
+  join pg_class c on c.oid = l.relation join pg_namespace n on n.oid = c.relnamespace
+  where l.locktype = 'relation' and l.pid = pg_backend_pid() and c.relkind in ('r', 'p', 'v', 'm', 'f')
+    and l.mode in ('RowExclusiveLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')`
 const MAX_PLANS = 10_000
 const MAX_KNOWN_OPERANDS = 10_000
 /** A read returning more rows keeps no result keys: any change to a matching row counts. */
@@ -171,8 +183,45 @@ class LiveDatabase {
           ...this.statement(connection, plan.text, plan.images.length, (rows) => this.changesOfWrite(plan, rows)),
           returnsRows: plan.hadReturning,
         }
+      case 'transaction':
+        if (plan.action === 'commit') return this.commit(connection, text)
+        break
+      case 'unknownWrite':
+        if (rewrite && isUnnamed(plan) && !this.transactions.isOpen(connection))
+          return this.inOwnTransaction(connection, text, plan)
     }
     return this.statement(connection, text, 0, () => this.changesOf(plan, connection))
+  }
+
+  /** A `COMMIT`: when its transaction changed tables the catalog can't name, queries of ours name them first. */
+  private commit(connection: object, text: string): Statement {
+    let locked: string[] | undefined
+    const queries = this.transactions.hasUnnamed(connection) ? namingQueries((tables) => (locked = tables)) : undefined
+    return {
+      ...this.statement(connection, text, 0, () => []),
+      ...(queries ? { beforeCommit: { queries, ownTransaction: false } } : {}),
+      succeeded: () => {
+        if (locked) this.transactions.name(connection, locked)
+        this.transactions.apply(connection, 'commit')
+        return []
+      },
+      // The transaction is over: rolled back.
+      failed: () => this.transactions.apply(connection, 'rollback'),
+    }
+  }
+
+  /** A statement outside a transaction that may change tables the catalog can't name: it runs in a transaction of
+   *  ours, whose locks name them. */
+  private inOwnTransaction(connection: object, text: string, plan: Plan & { kind: 'unknownWrite' }): Statement {
+    let locked: string[] | undefined
+    const statement = this.statement(connection, text, 0, () => {
+      const changes = this.changesOf(plan, connection)
+      return locked ? named(changes, locked) : changes
+    })
+    return {
+      ...statement,
+      beforeCommit: { queries: namingQueries((tables) => (locked = tables)), ownTransaction: true },
+    }
   }
 
   private read(
@@ -317,7 +366,7 @@ class LiveDatabase {
         if (plan.schemaChange) this.forgetSchema()
         return unknownChanges(plan.tables)
       case 'write':
-        return unknownChanges(tablesChangedWith(new Set([plan.table.id]), this.catalog!))
+        return unknownChanges(ofRows(tablesChangedBy([[plan.table.id, undefined]], this.catalog!)))
       case 'several':
         // Applied in order, after the whole text succeeded.
         return plan.plans.flatMap((p) => {
@@ -332,7 +381,7 @@ class LiveDatabase {
 
   private changesOfWrite(plan: WritePlan, rows: (string | null)[][]): Change[] {
     if (rows.length > MAX_CHANGED_ROWS)
-      return unknownChanges(tablesChangedWith(new Set([plan.table.id]), this.catalog!))
+      return unknownChanges(ofRows(tablesChangedBy([[plan.table.id, undefined]], this.catalog!)))
     const changes: Change[] = []
     for (const row of rows) {
       const image = (which: WritePlan['images'][number]) => row[plan.images.indexOf(which)]
@@ -347,7 +396,7 @@ class LiveDatabase {
         changes.push({ table: plan.table.id, kind: 'insert', new: now! })
       else changes.push({ table: plan.table.id, kind: 'update', old: old ?? assumedOld(now!, plan), new: now! })
     }
-    return [...changes, ...cascades(plan, changes, this.catalog!), ...unknownChanges(plan.alsoWrites)]
+    return [...changes, ...cascadedDeletes(plan, changes), ...unknownChanges(plan.alsoWrites)]
   }
 
   private announce(changes: Change[]): void {
@@ -407,32 +456,37 @@ class LiveDatabase {
   }
 }
 
-/** What foreign key actions change in other tables. A deleted parent's children are found by its key; anything
- *  further (what deleting them changes, `SET NULL`, a key update) counts as a change to any row of the table. */
-function cascades(plan: WritePlan, changes: Change[], catalog: Catalog): Change[] {
-  const result: Change[] = []
-  const wholeTables: TableSet[] = []
-  for (const key of plan.table.referencedBy) {
-    const child = catalog.tables.get(key.table)!
-    if (plan.statement === 'delete' && key.onDelete === 'c' && key.column) {
-      for (const change of changes) {
-        if (change.kind !== 'delete') continue
-        const old = { [key.column]: change.old[key.parentColumn!] ?? null }
-        result.push({ table: key.table, kind: 'delete', old, several: true })
-      }
-      // The deleted children fire their own triggers and foreign key actions.
-      wholeTables.push(child.alsoWrites, new Set(child.referencedBy.map((k) => k.table)))
-    } else if (plan.statement === 'delete' && ['c', 'n', 'd'].includes(key.onDelete))
-      wholeTables.push(new Set([child.id]))
-    else if (plan.statement !== 'insert' || plan.assigned.length > 0) {
-      const keyAssigned = !key.parentColumn || plan.assigned.includes(key.parentColumn)
-      if (['c', 'n', 'd'].includes(key.onUpdate) && keyAssigned) wholeTables.push(new Set([child.id]))
-    }
-  }
-  return [...result, ...unknownChanges(tablesChangedWith(union(wholeTables), catalog))]
+/** The rows a foreign key's `ON DELETE CASCADE` deletes, found by the key of each deleted parent (what deleting them
+ *  changes in turn is in `WritePlan.alsoWrites`). */
+function cascadedDeletes(plan: WritePlan, changes: Change[]): Change[] {
+  const keys = plan.statement === 'delete' ? plan.table.referencedBy.filter((k) => k.onDelete === 'c' && k.column) : []
+  return keys.flatMap((key) =>
+    changes.flatMap((change): Change[] => {
+      if (change.kind !== 'delete') return []
+      const old = { [key.column!]: change.old[key.parentColumn!] ?? null }
+      return [{ table: key.table, kind: 'delete', old, several: true }]
+    }),
+  )
 }
 
-function unknownChanges(tables: TableSet): Change[] {
+/** Queries naming the tables a transaction changed, for `Statement.beforeCommit`: `named` gets them. */
+function namingQueries(named: (tables: string[]) => void): FollowUp[] {
+  return [
+    // Its deferred triggers fire now: the tables they write are locked before the locks are read.
+    { text: 'SET CONSTRAINTS ALL IMMEDIATE', values: [], done: () => {} },
+    { text: LOCKED_TABLES, values: [], done: (rows) => rows && named(rows.map((row) => row[0]!)) },
+  ]
+}
+
+/** Whether `plan` changes rows of tables the catalog can't name: its transaction then reads its locks before it
+ *  commits, and one sent on its own runs in a transaction of ours. */
+function isUnnamed(plan: Plan): boolean {
+  return plan.kind === 'unknownWrite' && plan.tables === 'unnamed'
+}
+
+/** Changes to any row of each of `tables`: of the tables the transaction locked, once known, for `'unnamed'`. */
+function unknownChanges(tables: ChangedTables): Change[] {
+  if (tables === 'unnamed') return [UNNAMED_TABLES]
   if (tables === 'all') return [{ table: '*', kind: 'unknown' }]
   return [...tables].map((table) => ({ table, kind: 'unknown' }))
 }

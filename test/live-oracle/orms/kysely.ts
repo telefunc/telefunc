@@ -186,6 +186,10 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
         (await sql`select note, count(*)::int as n from note_log group by note order by note`.execute(db)).rows,
       publicNotes: async () => (await sql`select id, n from public.notes order by id`.execute(db)).rows,
       tenantNotes: async () => (await sql`select id, n from tenant.notes order by id`.execute(db)).rows,
+      eventLog: async () =>
+        (await sql`select kind, count(*)::int as n from event_log group by kind order by kind`.execute(db)).rows,
+      counters: async () => (await sql`select id, n from counters order by id`.execute(db)).rows,
+      settled: async () => (await sql`select n from settled`.execute(db)).rows,
       spelled: ({ spellings: [a] }) =>
         db
           .selectFrom('todos')
@@ -323,6 +327,17 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
           .execute(),
       setPath: ({ value }) => sql.raw(`set search_path to ${schemaOf(value)}, public`).execute(db),
       bumpNote: ({ value }) => sql`update notes set n = n + 1 where id = ${1 + (value % 5)}`.execute(db),
+      addEvent: ({ text }) => sql`insert into events (kind) values (${text.slice(0, 1)})`.execute(db),
+      eventInTx: ({ todo, text, value }) =>
+        db.transaction().execute(async (tx) => {
+          await sql`insert into events (kind) values (${text.slice(0, 1)})`.execute(tx)
+          await tx
+            .updateTable('todos')
+            .set({ priority: value % 5 })
+            .where('id', '=', todo)
+            .execute()
+        }),
+      resetEvents: () => sql`insert into resets default values`.execute(db),
       // One text: the update names the table by the search_path the statement before it sets.
       notesPath: ({ value }) =>
         sql

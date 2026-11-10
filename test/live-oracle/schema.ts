@@ -6,9 +6,11 @@ const USERS = 6
 
 /** The same tables for every ORM; each run starts from them. */
 const SCHEMA = `
-drop table if exists tags, todos, users, deleted_todos, notes, tag_log, note_log cascade;
+drop table if exists tags, todos, users, deleted_todos, notes, tag_log, note_log, events, event_log, counters, settled,
+  resets cascade;
 drop schema if exists tenant cascade;
-drop function if exists log_deleted_todo, log_tag, tag_added, log_note, note_bumped;
+drop function if exists log_deleted_todo, log_tag, tag_added, log_note, note_bumped, next_event, settle_event,
+  event_inserted, empty_event_log;
 create table users (id serial primary key, name text not null, team int not null);
 create table todos (
   id serial primary key,
@@ -57,6 +59,31 @@ begin
   return new;
 end $$;
 create trigger notes_bumped after update on tenant.notes for each row execute function note_bumped();
+-- A write to \`events\` runs code that writes other tables: a rule, a column default calling a function, and a
+-- deferred constraint trigger calling one. A trigger empties \`event_log\` on each write to \`resets\`.
+create table counters (id int primary key, n int not null);
+insert into counters values (1, 0), (2, 0);
+create table settled (id int primary key, n int not null);
+insert into settled values (1, 0);
+create table event_log (id serial primary key, kind text not null);
+create function next_event() returns int language sql as $$ update counters set n = n + 1 where id = 1 returning n $$;
+create table events (id serial primary key, kind text not null, seq int not null default next_event());
+create rule events_logged as on insert to events do also insert into event_log (kind) values (new.kind);
+create function settle_event() returns void language sql as $$ update settled set n = n + 1 $$;
+create function event_inserted() returns trigger language plpgsql as $$
+begin
+  perform settle_event();
+  return new;
+end $$;
+create constraint trigger events_settled after insert on events deferrable initially deferred
+  for each row execute function event_inserted();
+create table resets (id serial primary key);
+create function empty_event_log() returns trigger language plpgsql as $$
+begin
+  truncate event_log;
+  return null;
+end $$;
+create trigger resets_emptied after insert on resets for each statement execute function empty_event_log();
 `
 
 function seed(random: () => number): string {

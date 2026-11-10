@@ -205,6 +205,10 @@ function createDrizzle(
         db.execute(sql`select note, count(*)::int as n from note_log group by note order by note`).then(rowsOf),
       publicNotes: () => db.execute(sql`select id, n from public.notes order by id`).then(rowsOf),
       tenantNotes: () => db.execute(sql`select id, n from tenant.notes order by id`).then(rowsOf),
+      eventLog: () =>
+        db.execute(sql`select kind, count(*)::int as n from event_log group by kind order by kind`).then(rowsOf),
+      counters: () => db.execute(sql`select id, n from counters order by id`).then(rowsOf),
+      settled: () => db.execute(sql`select n from settled`).then(rowsOf),
       spelled: ({ spellings: [a] }) =>
         db
           .select({ id: todos.id })
@@ -312,6 +316,16 @@ function createDrizzle(
       insertUser: ({ text, value }) => db.insert(users).values({ name: text, team: (value % 3) + 1 }),
       setPath: ({ value }) => db.execute(sql.raw(`set search_path to ${schemaOf(value)}, public`)),
       bumpNote: ({ value }) => db.execute(sql`update notes set n = n + 1 where id = ${1 + (value % 5)}`),
+      addEvent: ({ text }) => db.execute(sql`insert into events (kind) values (${text.slice(0, 1)})`),
+      eventInTx: ({ todo, text, value }) =>
+        db.transaction(async (tx: any) => {
+          await tx.execute(sql`insert into events (kind) values (${text.slice(0, 1)})`)
+          await tx
+            .update(todos)
+            .set({ priority: value % 5 })
+            .where(eq(todos.id, todo))
+        }),
+      resetEvents: () => db.execute(sql`insert into resets default values`),
       // One text: the update names the table by the search_path the statement before it sets.
       notesPath: ({ value }) =>
         db.execute(

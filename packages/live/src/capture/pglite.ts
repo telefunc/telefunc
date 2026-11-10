@@ -3,6 +3,7 @@ export type { Pglite }
 
 import type { FollowUp, LiveDatabase, Statement } from '../liveDatabase.js'
 import { copyRows } from '../sharedReads.js'
+import { runInOrder, sendWithBeforeCommit } from './beforeCommit.js'
 import { takeHiddenFields, takeHiddenValues } from './hiddenColumns.js'
 
 // The parts of PGlite used here, so that `@electric-sql/pglite` stays the app's dependency.
@@ -13,8 +14,9 @@ type Executor = {
   exec(text: string, options?: unknown): Promise<Results[]>
 }
 type Transaction = Executor & { rollback(): Promise<void> }
+type TransactionOf = <T>(callback: (tx: Transaction) => Promise<T>) => Promise<T>
 type Pglite = Executor & {
-  transaction<T>(callback: (tx: Transaction) => Promise<T>): Promise<T>
+  transaction: TransactionOf
   waitReady: Promise<void>
   /** Its database runs: from then on, until `waitReady` resolves, it runs statements of its own. */
   ready: boolean
@@ -26,32 +28,44 @@ const CAPTURED = Symbol.for('@telefunc/live/captured')
 function capturePglite(pglite: Pglite, live: LiveDatabase): void {
   if (CAPTURED in pglite) return
   Object.defineProperty(pglite, CAPTURED, { value: true, configurable: true })
-  const ready = captureExecutor(pglite, pglite, live, startingStatements(pglite))
-  const transaction = pglite.transaction.bind(pglite)
+  const transaction: TransactionOf = pglite.transaction.bind(pglite)
+  const ready = captureExecutor(pglite, pglite, live, startingStatements(pglite), transaction)
   // PGlite sends its own `BEGIN` and `COMMIT`, past `query()`.
   const control = (text: string) => live.statementFor(pglite, text, []).succeeded([])
   pglite.transaction = async <T>(callback: (tx: Transaction) => Promise<T>): Promise<T> => {
     await ready()
+    let commit: Statement | undefined
     let result: T
     try {
       result = await transaction(async (tx) => {
+        const query = tx.query.bind(tx)
+        let rolledBack = false
         control('BEGIN')
-        captureExecutor(tx, pglite, live, () => false)
+        captureExecutor(tx, pglite, live, () => false, transaction)
         const rollback = tx.rollback.bind(tx)
         tx.rollback = async () => {
           await rollback()
+          rolledBack = true
           control('ROLLBACK')
         }
-        return callback(tx)
+        const result = await callback(tx)
+        if (rolledBack) return result
+        // PGlite commits once this returns.
+        commit = live.statementFor(pglite, 'COMMIT', [])
+        await runInOrder(commit.beforeCommit?.queries ?? [], oursThrough(query))
+        return result
       })
     } catch (err) {
-      control('ROLLBACK')
+      if (commit) commit.failed()
+      else control('ROLLBACK')
       throw err
     }
-    control('COMMIT')
+    commit?.succeeded([])
     return result
   }
 }
+
+const ARRAYS: QueryOptions = { rowMode: 'array' }
 
 /** Whether a statement is one PGlite runs while it starts, through `query()` and `exec()` like the app's. */
 function startingStatements(pglite: Pglite): () => boolean {
@@ -68,12 +82,14 @@ function startingStatements(pglite: Pglite): () => boolean {
 }
 
 /** Returns how to load what capturing needs, through `executor`'s own `query()`. `isStarting`: the statement is one
- *  PGlite runs while it starts, sent as it is (ours wait for it to have started). */
+ *  PGlite runs while it starts, sent as it is (ours wait for it to have started). `transaction`: PGlite's own, which
+ *  holds the database while a statement and ours run in a transaction of ours. */
 function captureExecutor(
   executor: Executor,
   connection: Pglite,
   live: LiveDatabase,
   isStarting: () => boolean,
+  transaction: TransactionOf,
 ): () => Promise<void> {
   const query = executor.query.bind(executor)
   const exec = executor.exec.bind(executor)
@@ -85,7 +101,7 @@ function captureExecutor(
   }
   /** Queued on the database now: it runs before anything the caller sends next. */
   const runFollowUp = ({ text, values, done }: FollowUp) => {
-    const answered = query(text, values, { rowMode: 'array' })
+    const answered = query(text, values, ARRAYS)
     answered.then(
       (result) => done(result.rows as (string | null)[][]),
       () => done(undefined),
@@ -105,7 +121,7 @@ function captureExecutor(
       statement = plan()
     }
     const sent = statement
-    const result = await run(sent, () => query(sent.text, params, options))
+    const result = await run(sent, () => withBeforeCommit(sent, (send) => send(sent.text, params, options)))
     const hidden = takeHiddenFields(result.fields, sent)
     sent.succeeded(takeHiddenValues(result.rows, hidden, options?.rowMode === 'array')).forEach(runFollowUp)
     if (!sent.returnsRows) result.rows.length = 0
@@ -121,7 +137,28 @@ function captureExecutor(
     statement.succeeded([])
     return results
   }
+  /** Sends `statement` through `send` with the queries of ours its commit needs (`Statement.beforeCommit`). */
+  function withBeforeCommit(
+    statement: Statement,
+    send: (query: Executor['query']) => Promise<Results>,
+  ): Promise<Results> {
+    if (!statement.beforeCommit?.ownTransaction)
+      return sendWithBeforeCommit(statement, () => send(query), oursThrough(query))
+    const { queries } = statement.beforeCommit
+    return transaction(async (tx) => {
+      const txQuery = tx.query.bind(tx)
+      const result = await send(txQuery)
+      await runInOrder(queries, oursThrough(txQuery))
+      return result
+    })
+  }
+
   return ready
+}
+
+/** Sends a query of ours through `query`: its rows, as arrays of text. */
+function oursThrough(query: Executor['query']): (text: string) => Promise<(string | null)[][]> {
+  return async (text) => (await query(text, [], ARRAYS)).rows as (string | null)[][]
 }
 
 async function run<T>(statement: Statement, send: () => Promise<T>): Promise<T> {

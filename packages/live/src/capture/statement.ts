@@ -1,7 +1,15 @@
-export { planStatement, HIDDEN_PREFIX }
-export type { Plan, ReadPlan, WritePlan, TransactionAction }
+export { planStatement, ofRows, HIDDEN_PREFIX }
+export type { Plan, ReadPlan, WritePlan, TransactionAction, ChangedTables }
 
-import { tablesChangedWith, type Catalog, type Table, type TableSet } from '../catalog.js'
+import {
+  actionOf,
+  sideEffects,
+  tablesChangedBy,
+  type Catalog,
+  type Table,
+  type TableSet,
+  type Written,
+} from '../catalog.js'
 import { analyzeRead, type ReadShape } from '../match/readShape.js'
 import {
   functionNamesIn,
@@ -35,9 +43,15 @@ type WritePlan = {
   images: ('new' | 'old' | 'inserted')[]
   /** The columns an `UPDATE` (or an upsert's update) assigns. */
   assigned: string[]
-  /** What the table's triggers write, and what writing that changes in turn. */
-  alsoWrites: TableSet
+  /** What the write changes besides the rows it returns and those a cascade deletes by key (`cascadedDeletes()`): what
+   *  the table's triggers write and the rows its foreign key actions change, then what those changes change in turn. */
+  alsoWrites: ReadonlySet<string>
 }
+
+/** What a statement may have changed: rows of these tables, or anything (`'all'`, schema changes included).
+ *  `'unnamed'`: rows only, of tables the catalog can't name (what a rule or a function of the app's writes); the locks
+ *  its transaction holds name them (`isUnnamed()`). */
+type ChangedTables = TableSet | 'unnamed'
 
 type Plan =
   | ReadPlan
@@ -45,7 +59,7 @@ type Plan =
   | { kind: 'transaction'; action: TransactionAction; savepoint?: string }
   /** A statement whose changes aren't captured row by row: every listed table may have changed. `changesSession`: it
    *  may also change settings of its session (`set_config()`, `DISCARD`), or those new sessions start with. */
-  | { kind: 'unknownWrite'; tables: TableSet; schemaChange: boolean; changesSession?: boolean }
+  | { kind: 'unknownWrite'; tables: ChangedTables; schemaChange: boolean; changesSession?: boolean }
   /** `SET`, `RESET`: the settings of its session change (a role, a `search_path`, what a row level security policy
    *  reads). */
   | { kind: 'session' }
@@ -53,6 +67,9 @@ type Plan =
   | { kind: 'several'; plans: Plan[] }
 
 const HIDDEN_PREFIX = '__live_'
+
+/** Statements that change rows only, and can run in a transaction of ours. */
+const DATA_STATEMENTS = new Set(['SelectStmt', 'InsertStmt', 'UpdateStmt', 'DeleteStmt', 'MergeStmt'])
 
 /** Statements that may set a session's settings (they run any code), or those new sessions start with. */
 const SETS_SESSIONS = new Set(['DoStmt', 'CallStmt', 'ExecuteStmt', 'AlterRoleSetStmt', 'AlterDatabaseSetStmt'])
@@ -69,13 +86,18 @@ function planStatement(text: string, catalog: Catalog): Plan {
 function planOne(statement: Node, text: string | undefined, catalog: Catalog): Plan {
   const [kind, node] = Object.entries(statement)[0] as [string, Node]
   const functions = functionNamesIn(node)
-  const volatile = functions.some((name) => catalog.volatileFunctions.has(name))
-  // `set_config()` sets a setting of the session; so may any function of the app's.
-  const changesSession = volatile || functions.includes('set_config')
+  const writing = functions.some((name) => catalog.writingFunctions.has(name))
+  // `set_config()` sets a setting of the session; so may a function of the app's that may write.
+  const changesSession = writing || functions.includes('set_config')
   const writingCte = ((node.withClause?.ctes ?? []) as Node[]).some((c) => !c.CommonTableExpr.ctequery.SelectStmt)
   if (changesSession || writingCte) {
-    const tables = volatile ? 'all' : writtenTables(node, catalog)
-    return { kind: 'unknownWrite', tables, schemaChange: false, changesSession }
+    const tables = writing ? 'all' : writtenTables(node, catalog)
+    return {
+      kind: 'unknownWrite',
+      tables: DATA_STATEMENTS.has(kind) ? ofRows(tables) : 'all',
+      schemaChange: false,
+      changesSession,
+    }
   }
   switch (kind) {
     case 'SelectStmt':
@@ -91,7 +113,9 @@ function planOne(statement: Node, text: string | undefined, catalog: Catalog): P
     case 'CopyStmt':
     case 'TruncateStmt':
       if (kind === 'CopyStmt' && !node.is_from) return { kind: 'none' }
-      return { kind: 'unknownWrite', tables: writtenTables(node, catalog), schemaChange: false }
+      // `TRUNCATE … CASCADE` empties the tables referencing them, whatever their foreign keys' actions.
+      if (node.behavior === 'DROP_CASCADE') return { kind: 'unknownWrite', tables: 'unnamed', schemaChange: false }
+      return { kind: 'unknownWrite', tables: ofRows(writtenTables(node, catalog)), schemaChange: false }
     case 'VariableSetStmt':
       // `SET LOCAL` ends with its transaction, whose reads never share.
       return node.is_local ? { kind: 'none' } : { kind: 'session' }
@@ -133,14 +157,16 @@ function planRead(select: Node, text: string | undefined, catalog: Catalog): Rea
 
 function planWrite(kind: string, node: Node, text: string | undefined, catalog: Catalog): Plan {
   const table = catalog.find(node.relation)
-  const tables = writtenTables(node, catalog)
-  if (!table || table.isView || !text) return { kind: 'unknownWrite', tables, schemaChange: false }
   const statement = kind === 'InsertStmt' ? 'insert' : kind === 'UpdateStmt' ? 'update' : 'delete'
   const upsert = node.onConflictClause?.action === 'ONCONFLICT_UPDATE'
   const assignments = (
     statement === 'update' ? node.targetList : upsert ? node.onConflictClause.targetList : []
   ) as Node[]
   const assigned = (assignments ?? []).map((t) => t.ResTarget.name as string)
+  const also = table ? alsoWrites(table, upsert ? ['insert', 'update'] : [statement], assigned, catalog) : 'all'
+  // Sent as written when the catalog can't name what else it changes: the locks naming that name its table too.
+  if (!table || !text || also === 'all')
+    return { kind: 'unknownWrite', tables: ofRows(writtenTables(node, catalog)), schemaChange: false }
   const hasOld = catalog.serverVersion >= 180000
   const target = quote(node.relation.alias?.aliasname ?? node.relation.relname)
   const images: WritePlan['images'] = statement === 'delete' ? ['old'] : ['new']
@@ -166,8 +192,36 @@ function planWrite(kind: string, node: Node, text: string | undefined, catalog: 
     hadReturning,
     images,
     assigned,
-    alsoWrites: tablesChangedWith(table.alsoWrites, catalog),
+    alsoWrites: also,
   }
+}
+
+/** What `writes` to `table` change besides their rows: `WritePlan.alsoWrites`. */
+function alsoWrites(
+  table: Table,
+  writes: ('insert' | 'update' | 'delete')[],
+  assigned: string[],
+  catalog: Catalog,
+): TableSet {
+  const written: Written[] = []
+  for (const write of writes) {
+    const also = table.alsoWrites[write]
+    if (also === 'all') return 'all'
+    for (const id of also) written.push([id, undefined])
+    for (const key of table.referencedBy) {
+      const child = catalog.tables.get(key.table)!
+      if (write === 'delete' && key.onDelete === 'c' && key.column) {
+        // Its deleted rows are found by key; what deleting them changes counts as a whole.
+        const effects = sideEffects(child, 'delete')
+        if (effects === 'all') return 'all'
+        written.push(...effects)
+        continue
+      }
+      const action = actionOf(key, write, assigned)
+      if (action) written.push([child.id, action])
+    }
+  }
+  return tablesChangedBy(written, catalog)
 }
 
 function planTransaction(node: Node): Plan {
@@ -192,6 +246,11 @@ function planTransaction(node: Node): Plan {
   }
 }
 
+/** What a statement that changes rows only may change: `'unnamed'` for every table. */
+function ofRows(tables: TableSet): ChangedTables {
+  return tables === 'all' ? 'unnamed' : tables
+}
+
 /** The tables a statement may write, with what their writes reach (tables it only reads are included too). */
 function writtenTables(node: Node, catalog: Catalog): TableSet {
   const ids = new Set<string>()
@@ -204,5 +263,8 @@ function writtenTables(node: Node, catalog: Catalog): TableSet {
     if (named.length === 0) return 'all'
     for (const table of named) ids.add(table.id)
   }
-  return tablesChangedWith(ids, catalog)
+  return tablesChangedBy(
+    [...ids].map((id) => [id, undefined]),
+    catalog,
+  )
 }

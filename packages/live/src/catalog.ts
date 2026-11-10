@@ -1,5 +1,5 @@
-export { loadCatalog, tablesChangedWith, union }
-export type { Catalog, Table, TableSet, ForeignKey }
+export { loadCatalog, actionOf, sideEffects, tablesChangedBy, union }
+export type { Catalog, Table, TableSet, ForeignKey, Written }
 
 import { parsePlPgSQLSync } from 'libpg-query'
 import type { Column } from './match/values.js'
@@ -7,6 +7,12 @@ import { functionNamesIn, parseStatements, quote, tablesIn, walk, type Node, typ
 
 /** Tables by id (`schema.name`), or every table. */
 type TableSet = ReadonlySet<string> | 'all'
+
+/** The kinds of write that fire a table's triggers and rules. */
+type Write = 'insert' | 'update' | 'delete' | 'truncate'
+
+/** A table written, by a kind of write (`undefined`: any). */
+type Written = readonly [table: string, write: Write | undefined]
 
 type Table = {
   id: string
@@ -18,8 +24,10 @@ type Table = {
   isView: boolean
   /** A read of this table also reads these: a view's tables, the tables its row-level security policies read. */
   alsoReads: TableSet
-  /** A write to this table may also change these: what its triggers write. */
-  alsoWrites: TableSet
+  /** What each kind of write to this table also changes: the tables its triggers write. Every table (`'all'`) when the
+   *  catalog can't name them: a rule, a column default or a trigger calling a function of the app's, SQL a trigger
+   *  builds at run time, a view's tables. */
+  alsoWrites: Record<Write, TableSet>
   /** Foreign keys of other tables referencing this one with an action that changes them (`ON DELETE CASCADE`, ...). */
   referencedBy: ForeignKey[]
   /** Single-column foreign keys checked at the end of each statement: every non-`NULL` `column` value is the
@@ -37,9 +45,12 @@ type Catalog = {
   database: string
   serverVersion: number
   tables: Map<string, Table>
-  /** User-defined functions: a statement calling one may read any table, and write any table when it's volatile. */
+  /** User-defined functions: a statement calling one may read any table, and write any table when it's one of
+   *  `writingFunctions`. */
   functions: Set<string>
-  volatileFunctions: Set<string>
+  /** The volatile functions in SQL or a procedural language: they may write any table. A function in C (`internal`
+   *  included: `uuid_generate_v4()`) is taken to compute a value. */
+  writingFunctions: Set<string>
   /** The `search_path` of the session that loaded the catalog, which unqualified names resolve against while every
    *  session has it; `undefined` once a statement may have changed a session's (`LiveDatabase`). */
   searchPath: string[] | undefined
@@ -54,14 +65,7 @@ type CatalogRow = {
   searchPath: string[]
   serverVersion: number
   cOrdering: boolean
-  functions: [
-    name: string,
-    volatile: boolean,
-    language: string,
-    source: string | null,
-    argumentList: string,
-    result: string | null,
-  ][]
+  functions: [name: string, writing: boolean][]
   tables: {
     schema: string
     name: string
@@ -79,6 +83,10 @@ type CatalogRow = {
     primaryKey: string[] | null
     policies: string[] | null
     triggers: [type: number, language: string, source: string][] | null
+    /** The events its rules fire on (`pg_rewrite.ev_type`). */
+    rules: string[] | null
+    /** A column default calls one of `Catalog.writingFunctions`. */
+    callingDefault: boolean
     referencedBy:
       | [table: string, columns: string[], parentColumns: string[], onDelete: string, onUpdate: string][]
       | null
@@ -86,15 +94,16 @@ type CatalogRow = {
   }[]
 }
 
+/** Whether the function `p`, in language `l`, is one of `Catalog.writingFunctions`. */
+const WRITING = `p.provolatile = 'v' and l.lanname not in ('c', 'internal')`
+
 // One round trip: everything the matcher needs to know about the database's tables.
 const CATALOG_QUERY = `select json_build_object(
   'database', current_database(),
   'searchPath', current_schemas(false),
   'serverVersion', current_setting('server_version_num')::int,
   'cOrdering', (select datlocprovider in ('c', 'b') and datcollate in ('C', 'POSIX') from pg_database where datname = current_database()),
-  'functions', (select coalesce(json_agg(json_build_array(p.proname, p.provolatile = 'v', l.lanname,
-      case when p.prosqlbody is null then p.prosrc end, pg_get_function_arguments(p.oid),
-      pg_get_function_result(p.oid))), '[]') from pg_proc p
+  'functions', (select coalesce(json_agg(json_build_array(p.proname, ${WRITING})), '[]') from pg_proc p
     join pg_namespace n on n.oid = p.pronamespace join pg_language l on l.oid = p.prolang
     where n.nspname not in ('pg_catalog', 'information_schema') and p.prorettype <> 'trigger'::regtype),
   'tables', (select coalesce(json_agg(json_build_object(
@@ -117,6 +126,12 @@ const CATALOG_QUERY = `select json_build_object(
     'triggers', (select json_agg(json_build_array(tg.tgtype, l.lanname, pr.prosrc)) from pg_trigger tg
       join pg_proc pr on pr.oid = tg.tgfoid join pg_language l on l.oid = pr.prolang
       where tg.tgrelid = c.oid and not tg.tgisinternal),
+    'rules', (select json_agg(r.ev_type) from pg_rewrite r where r.ev_class = c.oid and r.ev_type <> '1'),
+    'callingDefault', exists (select from pg_attrdef d
+      join pg_depend dp on dp.classid = 'pg_attrdef'::regclass and dp.objid = d.oid and dp.refclassid = 'pg_proc'::regclass
+      join pg_proc p on p.oid = dp.refobjid join pg_namespace ns on ns.oid = p.pronamespace
+      join pg_language l on l.oid = p.prolang
+      where d.adrelid = c.oid and ${WRITING} and ns.nspname not in ('pg_catalog', 'information_schema')),
     'referencedBy', (select json_agg(json_build_array(rn.nspname || '.' || rc.relname,
         (select json_agg(a.attname order by k.ord) from unnest(f.conkey) with ordinality k(attnum, ord)
           join pg_attribute a on a.attrelid = f.conrelid and a.attnum = k.attnum),
@@ -138,20 +153,23 @@ const CATALOG_QUERY = `select json_build_object(
 const TRIGGER_ROW = 1
 const TRIGGER_BEFORE = 2
 const TRIGGER_UPDATE = 16
+const TRIGGER_EVENTS: [bit: number, write: Write][] = [
+  [4, 'insert'],
+  [8, 'delete'],
+  [TRIGGER_UPDATE, 'update'],
+  [32, 'truncate'],
+]
+/** `pg_rewrite.ev_type` */
+const RULE_EVENTS: Record<string, Write> = { '2': 'update', '3': 'insert', '4': 'delete' }
+const WRITES_OF_ANY_KIND: Write[] = ['insert', 'update', 'delete', 'truncate']
 
 // `PLpgSQL_expr.parseMode`: a whole statement, an expression, an assignment (`target := value`).
 const PARSE_STATEMENT = 0
 const PARSE_EXPRESSION = 2
 
-/** Statements a function's body may run that change no table but those their nodes name (`WRITES`). */
+/** Statements a trigger may run that change no table but those their nodes name (`WRITES`). */
 const KNOWN_STATEMENTS = new Set(['SelectStmt', 'InsertStmt', 'UpdateStmt', 'DeleteStmt', 'MergeStmt', 'NotifyStmt'])
 const WRITES = new Set(['InsertStmt', 'UpdateStmt', 'DeleteStmt', 'MergeStmt'])
-
-/** A function of the app's: its body (`null` when the catalog doesn't give it as text), and its header's parts. */
-type FunctionBody = { language: string; source: string | null; argumentList: string; result: string | null }
-
-/** How the bodies of the app's functions name what they write and call. */
-type Names = { tables: (table: RangeVar) => Table[]; functions: Map<string, FunctionBody[]> }
 
 async function loadCatalog(query: (text: string) => Promise<string>): Promise<Catalog> {
   const row = JSON.parse(await query(CATALOG_QUERY)) as CatalogRow
@@ -167,7 +185,7 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
     serverVersion: row.serverVersion,
     tables,
     functions: new Set(row.functions.map(([name]) => name)),
-    volatileFunctions: new Set(row.functions.filter(([, volatile]) => volatile).map(([name]) => name)),
+    writingFunctions: new Set(row.functions.filter(([, writing]) => writing).map(([name]) => name)),
     searchPath: row.searchPath,
     find(table) {
       const named = this.named(table)
@@ -198,7 +216,7 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
       primaryKey: t.primaryKey ?? [],
       isView: t.view !== null,
       alsoReads: new Set(),
-      alsoWrites: new Set(),
+      alsoWrites: { insert: new Set(), update: new Set(), delete: new Set(), truncate: new Set() },
       referencedBy: (t.referencedBy ?? []).map(([table, columns, parentColumns, onDelete, onUpdate]) => ({
         table,
         ...(columns.length === 1 ? { column: columns[0], parentColumn: parentColumns[0] } : {}),
@@ -215,21 +233,22 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
     tables.set(table.id, table)
     byName.set(t.name, [...(byName.get(t.name) ?? []), table])
   }
-  const functions = new Map<string, FunctionBody[]>()
-  for (const [name, , language, source, argumentList, result] of row.functions)
-    functions.set(name, [...(functions.get(name) ?? []), { language, source, argumentList, result }])
-  // A function resolves names with the `search_path` of the session that calls it: any schema's table may be meant.
-  const names: Names = { tables: anySchema, functions }
   // Second pass: these name other tables, which must all be known first.
   for (const t of row.tables) {
     const table = tables.get(`${t.schema}.${t.name}`)!
     const reads = [...(t.view ? [t.view] : []), ...(t.rls ? (t.policies ?? []).map((p) => `select 1 where ${p}`) : [])]
     // Printed for the loading session: its `search_path` resolves them.
     table.alsoReads = union(reads.map((sql) => tablesOfStatements(parseStatements(sql), (t) => catalog.named(t))))
-    const triggerWrites = (t.triggers ?? []).map(([, language, source]) =>
-      tablesWrittenByFunction({ language, source, argumentList: '', result: 'trigger' }, names),
-    )
-    table.alsoWrites = union([table.alsoWrites, ...triggerWrites])
+    const { alsoWrites } = table
+    for (const [type, language, source] of t.triggers ?? []) {
+      // A trigger resolves names with the `search_path` of the session that fires it: any schema's table may be meant.
+      const written = tablesWrittenByTrigger(language, source, anySchema, catalog.writingFunctions)
+      for (const [bit, write] of TRIGGER_EVENTS) if (type & bit) alsoWrites[write] = union([alsoWrites[write], written])
+    }
+    for (const event of t.rules ?? []) alsoWrites[RULE_EVENTS[event]!] = 'all'
+    if (t.callingDefault) alsoWrites.insert = alsoWrites.update = 'all'
+    // A write to a view writes its tables, or what its rules and `INSTEAD OF` triggers write.
+    if (t.view) for (const write of WRITES_OF_ANY_KIND) alsoWrites[write] = 'all'
   }
   return catalog
 }
@@ -241,25 +260,26 @@ function tablesOfStatements(statements: Node[] | null, named: (table: RangeVar) 
 }
 
 /**
- * What running a function of the app's may write: the tables its statements write, and what the functions of the app's
- * they call write, and so on. Every table when that can't be told: a body run with `EXECUTE`, in a language other than
- * SQL and PL/pgSQL, or that doesn't parse.
+ * What a trigger may write: the tables its statements write. Every table when that can't be told: it calls one of
+ * `Catalog.writingFunctions`, runs SQL built at run time or a statement other than a query, a write or `NOTIFY`, writes a
+ * table the catalog doesn't know, isn't written in PL/pgSQL, or doesn't parse.
  */
-function tablesWrittenByFunction(fn: FunctionBody, names: Names, seen = new Set<FunctionBody>()): TableSet {
-  if (seen.has(fn)) return new Set()
-  seen.add(fn)
-  const sql = fn.language === 'sql' ? fn.source && [fn.source] : fn.language === 'plpgsql' ? statementsOf(fn) : null
-  if (!sql) return 'all'
-  return union(sql.map((text) => tablesWrittenBySql(text, names, seen)))
+function tablesWrittenByTrigger(
+  language: string,
+  source: string,
+  named: (table: RangeVar) => Table[],
+  writingFunctions: Set<string>,
+): TableSet {
+  const statements = language === 'plpgsql' ? statementsOf(source) : null
+  if (!statements) return 'all'
+  return union(statements.map((sql) => tablesWrittenBySql(sql, named, writingFunctions)))
 }
 
-/** The SQL a PL/pgSQL function runs, every expression as a `SELECT`; `null` when it runs SQL built at run time. */
-function statementsOf({ source, argumentList, result }: FunctionBody): string[] | null {
+/** The SQL a trigger runs, every expression as a `SELECT`; `null` when it runs SQL built at run time. */
+function statementsOf(source: string): string[] | null {
   let parsed: unknown
   try {
-    parsed = parsePlPgSQLSync(
-      `create function f(${argumentList}) returns ${result} language plpgsql as $live$${source}$live$`,
-    )
+    parsed = parsePlPgSQLSync(`create function f() returns trigger language plpgsql as $live$${source}$live$`)
   } catch {
     return null
   }
@@ -275,32 +295,60 @@ function statementsOf({ source, argumentList, result }: FunctionBody): string[] 
   return dynamic ? null : statements
 }
 
-function tablesWrittenBySql(sql: string, names: Names, seen: Set<FunctionBody>): TableSet {
+function tablesWrittenBySql(sql: string, named: (table: RangeVar) => Table[], writingFunctions: Set<string>): TableSet {
   const statements = parseStatements(sql)
   if (!statements || statements.some((s) => !KNOWN_STATEMENTS.has(Object.keys(s)[0]!))) return 'all'
-  const written: TableSet[] = []
+  if (functionNamesIn(statements).some((name) => writingFunctions.has(name))) return 'all'
+  const written: Table[][] = []
   walk(statements, (key, value) => {
-    if (WRITES.has(key)) written.push(new Set(names.tables(value.relation).map((table) => table.id)))
+    if (WRITES.has(key)) written.push(named(value.relation))
   })
-  for (const name of functionNamesIn(statements))
-    for (const fn of names.functions.get(name) ?? []) written.push(tablesWrittenByFunction(fn, names, seen))
-  return union(written)
+  if (written.some((tables) => tables.length === 0)) return 'all'
+  return new Set(written.flat().map((table) => table.id))
 }
 
-/** `tables`, and every table a write to them may change too: what their triggers write and what their foreign key
- *  actions change, then what writing those changes, and so on. */
-function tablesChangedWith(tables: TableSet, catalog: Catalog): TableSet {
-  if (tables === 'all') return 'all'
+/** What writing `table` changes at once besides its own rows: the tables its triggers and rules write, and the
+ *  referencing tables whose foreign key actions change rows. `'all'` when the catalog can't name them. */
+function sideEffects(table: Table, write: Write | undefined): Written[] | 'all' {
+  const effects: Written[] = []
+  for (const kind of write ? [write] : WRITES_OF_ANY_KIND) {
+    const also = table.alsoWrites[kind]
+    if (also === 'all') return 'all'
+    for (const id of also) effects.push([id, undefined])
+    for (const key of table.referencedBy) {
+      const action = actionOf(key, kind)
+      if (action) effects.push([key.table, action])
+    }
+  }
+  return effects
+}
+
+/** What a foreign key's action does to the referencing rows when their parent gets `write` (`assigned`: the columns
+ *  an update assigns, when known). */
+function actionOf(key: ForeignKey, write: Write, assigned?: string[]): Write | undefined {
+  if (write === 'delete')
+    return key.onDelete === 'c' ? 'delete' : ['n', 'd'].includes(key.onDelete) ? 'update' : undefined
+  const keyAssigned = !assigned || !key.parentColumn || assigned.includes(key.parentColumn)
+  return write === 'update' && keyAssigned && ['c', 'n', 'd'].includes(key.onUpdate) ? 'update' : undefined
+}
+
+/** The tables of `written`, and every table writing them may change: their side effects, then those of writing those,
+ *  and so on. */
+function tablesChangedBy(written: Written[], catalog: Catalog): TableSet {
   const reached = new Set<string>()
-  const pending = [...tables]
+  const seen = new Set<string>()
+  const pending = [...written]
   while (pending.length > 0) {
-    const id = pending.pop()!
-    if (reached.has(id)) continue
+    const [id, write] = pending.pop()!
+    const key = `${write}\0${id}`
+    if (seen.has(key)) continue
+    seen.add(key)
     reached.add(id)
     const table = catalog.tables.get(id)
     if (!table) continue
-    if (table.alsoWrites === 'all') return 'all'
-    pending.push(...table.alsoWrites, ...table.referencedBy.map((key) => key.table))
+    const effects = sideEffects(table, write)
+    if (effects === 'all') return 'all'
+    pending.push(...effects)
   }
   return reached
 }

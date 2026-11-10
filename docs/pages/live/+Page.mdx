@@ -164,7 +164,7 @@ A client refetches when a committed write, through a wrapped database, changes r
 - A write to another user's rows doesn't refetch `onGetTodos(userId)`.
 - A row sorting past the last row of a `limit` doesn't refetch the page.
 - A rolled-back transaction refetches nothing; a committed one refetches once its `COMMIT` succeeds.
-- A write also changes the tables its triggers and foreign key actions (`on delete cascade`) write to.
+- A write also changes the tables its triggers, rules, column defaults and foreign key actions (`on delete cascade`) write to. When the schema doesn't say which (a rule, a call to a function written in SQL or PL/pgSQL, SQL built at run time), the tables the transaction locked do: they're read right before its `COMMIT` (a lone write runs in a transaction for it), and every query of those tables refetches.
 
 When `@telefunc/live` can't tell whether a write changed the result (a function call in the query, a statement it doesn't follow, a write of more than 10,000 rows), it refetches.
 

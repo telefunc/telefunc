@@ -3,6 +3,7 @@ export type { PostgresJs }
 
 import type { FollowUp, LiveDatabase, Statement } from '../liveDatabase.js'
 import { copyRows } from '../sharedReads.js'
+import { sendWithBeforeCommit } from './beforeCommit.js'
 import { takeHiddenFields, takeHiddenValues } from './hiddenColumns.js'
 import { HIDDEN_PREFIX } from './statement.js'
 
@@ -38,8 +39,9 @@ type Query = Promise<Result> & {
 }
 
 /** How the queries of one handler are captured: the database, and the connection they run on (`undefined`: any
- *  connection of the pool, a new one for each statement). */
-type Target = { live: LiveDatabase; sql: PostgresJs; connection: object | undefined }
+ *  connection of the pool, a new one for each statement). `shared`: other callers' statements may run on it between
+ *  ours (a pool's connections): a transaction of ours reserves a connection first. */
+type Target = { live: LiveDatabase; sql: PostgresJs; connection: object | undefined; shared: boolean }
 
 const CAPTURED = Symbol.for('@telefunc/live/captured')
 const TARGETS = Symbol.for('@telefunc/live/postgresJsTargets')
@@ -56,7 +58,7 @@ function capturePostgresJs(sql: PostgresJs, live: LiveDatabase): void {
   Object.defineProperty(sql, CAPTURED, { value: true, configurable: true })
   const targets = captureQueries(Object.getPrototypeOf(sql.unsafe('')))
   // With one connection, a `BEGIN` sent through `sql` holds for the statements after it.
-  targets.set(handlerOf(sql), { live, sql, connection: sql.options.max === 1 ? sql : undefined })
+  targets.set(handlerOf(sql), { live, sql, connection: sql.options.max === 1 ? sql : undefined, shared: true })
 
   const begin = sql.begin.bind(sql)
   sql.begin = (...args) => {
@@ -72,13 +74,13 @@ function capturePostgresJs(sql: PostgresJs, live: LiveDatabase): void {
   const reserve = sql.reserve.bind(sql)
   sql.reserve = async () => {
     const reserved = await reserve()
-    targets.set(handlerOf(reserved), { live, sql: reserved, connection: reserved })
+    targets.set(handlerOf(reserved), { live, sql: reserved, connection: reserved, shared: false })
     return reserved
   }
 }
 
 function captureScope(scope: Scope, transaction: object, live: LiveDatabase, targets: WeakMap<object, Target>): void {
-  targets.set(handlerOf(scope), { live, sql: scope, connection: transaction })
+  targets.set(handlerOf(scope), { live, sql: scope, connection: transaction, shared: false })
   const savepoint = scope.savepoint.bind(scope)
   let savepoints = 0
   scope.savepoint = (...args) => {
@@ -111,7 +113,7 @@ function captureQueries(query: Query): WeakMap<object, Target> {
   return targets
 }
 
-async function run(query: Query, { live, sql, connection = {} }: Target): Promise<void> {
+async function run(query: Query, { live, sql, connection = {}, shared }: Target): Promise<void> {
   // As postgres.js does: `.values()` and the like are called before it runs.
   await 1
   try {
@@ -130,18 +132,34 @@ async function run(query: Query, { live, sql, connection = {} }: Target): Promis
   const opaque = known ? undefined : live.statementWithTextLater(connection)
   const sent = () => statement || opaque!.sent(query.string ?? '', query.parameters ?? [])
   const { resolve, reject } = query
-  query.resolve = (result) => {
-    const done = sent()
-    const followUps = done.succeeded(takeHidden(query, result, done))
-    done.answered(result, copyResult)
-    resolve(result)
-    for (const followUp of followUps) runFollowUp(sql, followUp)
-  }
-  query.reject = (err) => {
+  const answered = new Promise<Result>((resolveAnswered, rejectAnswered) => {
+    query.resolve = resolveAnswered
+    query.reject = rejectAnswered
+  })
+  const reserved = statement?.beforeCommit?.ownTransaction && shared ? await sql.reserve() : undefined
+  if (reserved) query.handler = handlerOf(reserved)
+  const on = reserved ?? sql
+  let result: Result
+  try {
+    result = await sendWithBeforeCommit(
+      statement || {},
+      () => {
+        query.handler(query)
+        return answered
+      },
+      (text) => sendOurs(on, text),
+    )
+  } catch (err) {
     sent().failed()
-    reject(err)
+    return reject(err as Error)
+  } finally {
+    reserved?.release()
   }
-  query.handler(query)
+  const done = sent()
+  const followUps = done.succeeded(takeHidden(query, result, done))
+  done.answered(result, copyResult)
+  resolve(result)
+  for (const followUp of followUps) runFollowUp(sql, followUp)
 }
 
 function rewritten(query: Query, known: { text: string; args: unknown[] }, live: LiveDatabase, connection: object) {
@@ -200,6 +218,10 @@ function runFollowUp(sql: PostgresJs, { text, values, done }: FollowUp): void {
   )
 }
 
+async function sendOurs(sql: PostgresJs, text: string): Promise<(string | null)[][]> {
+  return (await ours(sql, text)) as unknown[] as (string | null)[][]
+}
+
 function ours(sql: PostgresJs, text: string, values: unknown[] = []): Query {
   const query = sql.unsafe(text, values).values()
   Object.defineProperty(query, OURS, { value: true })
@@ -211,6 +233,6 @@ function control(live: LiveDatabase, connection: object, text: string): void {
   live.statementFor(connection, text, []).succeeded([])
 }
 
-function handlerOf(sql: PostgresJs): object {
+function handlerOf(sql: PostgresJs): Query['handler'] {
   return sql.unsafe('').handler
 }

@@ -8,6 +8,7 @@ import { AsyncResource } from 'node:async_hooks'
 import { PGlite } from '@electric-sql/pglite'
 import '../../packages/live/dist/live.js'
 import { LiveDatabase } from '../../packages/live/dist/liveDatabase.js'
+import { UNNAMED_TABLES } from '../../packages/live/dist/capture/transactions.js'
 import { EVENT_TAG } from './orms/eventQuery.ts'
 import { LiveRead } from '../../packages/live/dist/match/liveRead.js'
 import { Tally } from '../../packages/live/dist/match/tally.js'
@@ -160,13 +161,24 @@ const probes: Record<string, () => void> = {
       this.catalog.searchPath = searchPath
     }
   },
-  /** The functions a trigger calls aren't followed: what they write is missed. */
-  'function-calls'() {
-    const loadCatalog = database.loadCatalog
-    database.loadCatalog = function (query: (text: string) => Promise<string>) {
-      return loadCatalog.call(this, async (text: string) =>
-        JSON.stringify({ ...JSON.parse(await query(text)), functions: [] }),
-      )
+  /** Deferred triggers fire after the transaction's locks are read: the tables they write go unannounced. */
+  immediate() {
+    queriesBeforeCommit((queries) => queries.filter((query) => !query.text.startsWith('SET CONSTRAINTS')))
+  },
+  /** The transaction's locks are read as none: what a rule or a function of the app's wrote goes unannounced. */
+  locks() {
+    queriesBeforeCommit((queries) =>
+      queries.map((query) => (query.text.includes('pg_locks') ? { ...query, done: () => query.done([]) } : query)),
+    )
+  },
+  /** No write marks its transaction as changing tables the catalog can't name: its locks go unread, and what a rule or
+   *  a function of the app's wrote goes unannounced. */
+  'unnamed-flag'() {
+    for (const method of ['changesOf', 'changesOfWrite']) {
+      const original = database[method]
+      database[method] = function (...args: unknown[]) {
+        return original.apply(this, args).filter((change: unknown) => change !== UNNAMED_TABLES)
+      }
     }
   },
   /** PGlite's own statements while it starts are captured like the app's: they wait for the catalog, which waits for
@@ -202,6 +214,23 @@ const probes: Record<string, () => void> = {
       return dropAll.call(this, source, row).filter((key: string) => this.groups.get(key).counts.size > 0)
     }
   },
+}
+
+type QueryBeforeCommit = { text: string; done(rows: unknown[][] | undefined): void }
+
+/** Changes the queries a statement sends before its transaction commits (`Statement.beforeCommit`). */
+function queriesBeforeCommit(change: (queries: QueryBeforeCommit[]) => QueryBeforeCommit[]) {
+  for (const method of ['commit', 'inOwnTransaction']) {
+    const original = database[method]
+    database[method] = function (...args: unknown[]) {
+      const statement = original.apply(this, args)
+      if (!statement.beforeCommit) return statement
+      return {
+        ...statement,
+        beforeCommit: { ...statement.beforeCommit, queries: change(statement.beforeCommit.queries) },
+      }
+    }
+  }
 }
 
 /** Each operand as the app sent it: a parameter's value or a constant's text, under any casts. */

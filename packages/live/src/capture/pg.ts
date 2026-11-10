@@ -3,6 +3,7 @@ export type { PgPool, PgClient }
 
 import { AsyncResource } from 'node:async_hooks'
 import { MAX_RESULT_ROWS, type FollowUp, type LiveDatabase, type Reservation, type Statement } from '../liveDatabase.js'
+import { sendWithBeforeCommit } from './beforeCommit.js'
 import { takeHiddenFields, takeHiddenValues } from './hiddenColumns.js'
 import { HIDDEN_PREFIX } from './statement.js'
 
@@ -136,6 +137,9 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
   const query = client.query.bind(client)
   const runOurs = async (text: string) =>
     ((await query(text)) as PgResult).rows.map((row: any) => row.catalog)[0] as string
+  /** A query of ours: its rows, as arrays of text. */
+  const sendOurs = async (text: string) =>
+    ((await query({ text, rowMode: 'array' })) as PgResult).rows as (string | null)[][]
   client.query = (config: unknown, values?: unknown, callback?: PgCallback) => {
     if (isSubmittable(config)) return submit(config)
     if (typeof values === 'function') {
@@ -164,7 +168,7 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
     const config = statement.leads ? { ...queryConfig, rowMode: 'array' as const, types: AS_TEXT } : queryConfig
     let result: PgResult | PgResult[]
     try {
-      result = await query(sent(config, statement))
+      result = await sendWithBeforeCommit(statement, () => query(sent(config, statement)), sendOurs)
     } catch (err) {
       statement.failed()
       throw err
