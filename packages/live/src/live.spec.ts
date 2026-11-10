@@ -45,11 +45,12 @@ describe('LiveCell', () => {
     const notesSource = new FakeSource()
     const todos = new LiveCell(['First todo'], [todosSource])
     const notes = new LiveCell(['Note'], [notesSource])
-    const summary = derived(() => `${todos.data.length} todos, ${notes.data.length} notes`)
+    // The server side of what `derived()` returns.
+    const summary = derived(() => `${todos.data.length} todos, ${notes.data.length} notes`) as LiveCell<string>
     let stale = 0
     summary.onStale(() => stale++)
 
-    expect((summary as LiveCell<string>).send()).toBe('1 todos, 1 notes')
+    expect(summary.send()).toBe('1 todos, 1 notes')
     expect(todosSource.listeners.size).toBe(1)
     notesSource.stale()
     await Promise.resolve()
