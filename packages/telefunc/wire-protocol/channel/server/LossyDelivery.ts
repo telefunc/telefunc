@@ -38,9 +38,9 @@ class LossyDelivery implements RoomWaiter {
 
   publish(body: PublishBody): void {
     hold(this.holder, body)
-    const path = this.attached ? this.peer!.sender.queue.path : null
-    path?.offer(body.frame.byteLength, performance.now())
-    if (path === null || path.pathBound) this.skipWaiting()
+    const lane = this.attached ? this.peer!.sender.lossy : null
+    lane?.offer(body.frame.byteLength, performance.now())
+    if (lane === null || lane.pathBound) this.skipWaiting()
     this.waiting.push(body)
     this.newest = body
     if (this.attached) this.hand()
@@ -85,16 +85,13 @@ class LossyDelivery implements RoomWaiter {
   /** Hands the wire what waits, in order, while its path has room and its pace allows; the rest waits for either. */
   private hand(): void {
     const peer = this.peer!
-    const { sender } = peer
-    const { path } = sender.queue
-    while (this.waiting.length > 0 && sender.room() > 0 && path.paceWait(performance.now()) === 0) this.handOne(peer)
-    if (this.waiting.length > 0) sender.waitForRoom(this)
+    while (this.waiting.length > 0 && peer.sender.lossy.mayHand(performance.now(), this)) this.handOne(peer)
   }
 
   private handOne(peer: IndexedPeer): void {
     const body = this.waiting.shift()!
     if (this.waiting.length === 0) this.newest = undefined
-    peer.sendPublish(body)
+    peer.sender.lossy.hand(peer, body)
     letGo(this.holder, body)
   }
 }

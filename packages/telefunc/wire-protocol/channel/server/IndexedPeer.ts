@@ -8,15 +8,13 @@ import type { ServerReplay } from './ServerReplay.js'
 import type { SendWait } from '../../flowControl/SendWaits.js'
 import type { Urgency } from '../../flowControl/credit.js'
 import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
+import type { PathLane } from './PathLane.js'
 
 interface PeerSender {
   /** What the wire holds back for its page. */
   readonly queue: WireQueue
-  /** The bytes a lossy channel may hand the wire now: what its path takes (see `PathEstimate.room`), less what the wire
-   *  holds back. */
-  room(): number
-  /** `waiter` hears once that the wire may have room: at the page's next report, or once its path's pace allows. */
-  waitForRoom(waiter: RoomWaiter): void
+  /** Where its lossy channels' publishes go. */
+  readonly lossy: PathLane
   send(frame: Uint8Array): void
   /** Sends `frame` in the next message the wire sends, where it can carry one (see `PieceSender.carry`). */
   carry(frame: Uint8Array): void

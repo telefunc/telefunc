@@ -3,10 +3,17 @@ import { Broadcast, ServerBroadcast } from '../channel/server/ServerBroadcast.js
 import { ServerReplay } from '../channel/server/ServerReplay.js'
 import { ACK_STATUS, decode, encode, type ChannelFrame } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
-import { IndexedPeer } from '../channel/server/IndexedPeer.js'
+import { IndexedPeer, type PeerSender } from '../channel/server/IndexedPeer.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcastAdapter.js'
 import type { BroadcastTransport } from './broadcastAdapter.js'
 import { PathEstimate } from '../flowControl/PathEstimate.js'
+import { PathLane } from '../channel/server/PathLane.js'
+
+/** `sender` with the lossy lane of its own queue. */
+const withLossyLane = (sender: Omit<PeerSender, 'lossy'>): PeerSender => ({
+  ...sender,
+  lossy: new PathLane(sender.queue),
+})
 
 const previousBroadcastAdapter = getBroadcastAdapter()
 afterEach(() => _resetBroadcastAdapterForTesting(previousBroadcastAdapter))
@@ -255,14 +262,12 @@ describe('Broadcast shield validation', () => {
     const frames: Uint8Array[] = []
     broadcast._attachPeer(
       new IndexedPeer({
-        sender: {
+        sender: withLossyLane({
           send: (frame) => {
             frames.push(frame)
           },
           carry() {},
           bufferedAmount: () => 0,
-          room: () => Infinity,
-          waitForRoom() {},
           deliveredBefore: () => 0,
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
           queue: {
@@ -274,7 +279,7 @@ describe('Broadcast shield validation', () => {
             unhandedBytes: 0,
             path: new PathEstimate({ reportGap: 0 }),
           },
-        },
+        }),
         index: 7,
         replay: new ServerReplay({ heldBytes: 0 }),
       }),
@@ -304,12 +309,10 @@ describe('Broadcast shield validation', () => {
 
     sender._attachPeer(
       new IndexedPeer({
-        sender: {
+        sender: withLossyLane({
           send: () => {},
           carry() {},
           bufferedAmount: () => 0,
-          room: () => Infinity,
-          waitForRoom() {},
           deliveredBefore: () => 0,
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
           queue: {
@@ -321,7 +324,7 @@ describe('Broadcast shield validation', () => {
             unhandedBytes: 0,
             path: new PathEstimate({ reportGap: 0 }),
           },
-        },
+        }),
         index: 7,
         replay: new ServerReplay({ heldBytes: 0 }),
       }),
@@ -339,12 +342,10 @@ describe('lossy broadcast under memory pressure', () => {
     broadcast._registerChannel()
     broadcast._attachPeer(
       new IndexedPeer({
-        sender: {
+        sender: withLossyLane({
           send() {},
           carry() {},
           bufferedAmount: () => 0,
-          room: () => 0,
-          waitForRoom() {},
           deliveredBefore: () => 0,
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
           queue: {
@@ -353,10 +354,11 @@ describe('lossy broadcast under memory pressure', () => {
             dropWaitingFromPublish() {},
             drainRate: () => 0,
             acknowledged: () => true,
-            unhandedBytes: 0,
+            // More than its path has room for: the page is behind.
+            unhandedBytes: Infinity,
             path: new PathEstimate({ reportGap: 0 }),
           },
-        },
+        }),
         index: 7,
         replay: broadcast._replayBuffer!,
       }),

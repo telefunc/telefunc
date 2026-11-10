@@ -4,20 +4,25 @@ import { ServerReplay } from '../../wire-protocol/channel/server/ServerReplay.js
 import { ACK_STATUS, decode, encode, type AckResultStatus, type ChannelFrame } from '../../wire-protocol/wire/frame.js'
 import { TAG } from '../../wire-protocol/wire/tags.js'
 import { ProtocolViolationError } from '../../wire-protocol/wire/protocolViolation.js'
-import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'
+import { IndexedPeer, type PeerSender } from '../../wire-protocol/channel/server/IndexedPeer.js'
 import { ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
 import { PathEstimate } from '../../wire-protocol/flowControl/PathEstimate.js'
+import { PathLane } from '../../wire-protocol/channel/server/PathLane.js'
+
+/** `sender` with the lossy lane of its own queue. */
+const withLossyLane = (sender: Omit<PeerSender, 'lossy'>): PeerSender => ({
+  ...sender,
+  lossy: new PathLane(sender.queue),
+})
 
 function createPeer(frames: Uint8Array[]) {
   return new IndexedPeer({
-    sender: {
+    sender: withLossyLane({
       send(frame) {
         frames.push(frame)
       },
       carry() {},
       bufferedAmount: () => 0,
-      room: () => Infinity,
-      waitForRoom() {},
       deliveredBefore: () => 0,
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
       queue: {
@@ -29,7 +34,7 @@ function createPeer(frames: Uint8Array[]) {
         unhandedBytes: 0,
         path: new PathEstimate({ reportGap: 0 }),
       },
-    },
+    }),
     index: 7,
     replay: new ServerReplay({ heldBytes: 0 }),
   })

@@ -4,7 +4,7 @@ import { WIRE_SEND_BACKLOG_BASE_BYTES } from '../../constants.js'
 import { encode, type PiecesAck } from '../../wire/frame.js'
 import { TAG, passesData } from '../../wire/tags.js'
 import type { ServerChannel } from './ServerChannel.js'
-import type { PeerSender, RoomWaiter } from './IndexedPeer.js'
+import type { PeerSender } from './IndexedPeer.js'
 import type { ServerTransport, Wire } from './ChannelMux.js'
 import type { SessionRegistry } from './SessionRegistry.js'
 import type { Deliveries } from '../../flowControl/Deliveries.js'
@@ -14,6 +14,7 @@ import { ServerHeadroom } from '../../flowControl/server/ServerHeadroom.js'
 import { ServerPieceReceiver } from '../../flowControl/server/ServerPieceReceiver.js'
 import type { PieceReceiverOwner } from '../../flowControl/pieces.js'
 import { TransportSocket } from './TransportSocket.js'
+import { PathLane } from './PathLane.js'
 
 type WireSenderOptions = {
   wire: Wire
@@ -39,9 +40,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   /** Null on a wire that doesn't take pieces (SSE). */
   readonly pieces: WirePieces | null
   readonly queue: WireQueue
-  /** The lossy channels waiting for room to hand the page more, and the timer that wakes them at the path's pace. */
-  private roomWaiters = new Set<RoomWaiter>()
-  private paceTimer: ReturnType<typeof setTimeout> | null = null
+  readonly lossy: PathLane
   /** How long the frames that go at once wait behind what the socket holds. */
   private readonly wait = new SocketWait({ owner: this })
   private readonly deliveries: Deliveries
@@ -68,38 +67,17 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
         }
       : null
     this.queue = this.pieces ? this.pieces.headroom : transport.queueOf!(wire)
+    this.lossy = new PathLane(this.queue)
     this.deliveries = deliveries
     this.sessions = sessions
     this.attaching = attaching
   }
 
-  room(): number {
-    return this.queue.path.room - this.queue.unhandedBytes
-  }
-
-  waitForRoom(waiter: RoomWaiter): void {
-    if (this.closed) return
-    this.roomWaiters.add(waiter)
-    const wait = this.queue.path.paceWait(performance.now())
-    if (wait > 0 && this.paceTimer === null) {
-      this.paceTimer = setTimeout(() => {
-        this.paceTimer = null
-        this.wakeRoomWaiters()
-      }, wait)
-    }
-  }
-
   /** Takes the page's report of what it took (see `WireQueue.acknowledged`), which may leave room for what waits. */
   acknowledged(ack: PiecesAck): boolean {
     if (!this.queue.acknowledged(ack)) return false
-    this.wakeRoomWaiters()
+    this.lossy.wake()
     return true
-  }
-
-  private wakeRoomWaiters(): void {
-    const waiters = this.roomWaiters
-    this.roomWaiters = new Set()
-    for (const waiter of waiters) waiter.roomMayHaveOpened()
   }
 
   send(frame: Uint8Array<ArrayBuffer>): void {
@@ -147,9 +125,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   /** The wire closed: drops what is sent from now on, and stops its headroom. */
   close(): void {
     this.closed = true
-    this.roomWaiters.clear()
-    if (this.paceTimer !== null) clearTimeout(this.paceTimer)
-    this.paceTimer = null
+    this.lossy.close()
     this.pieces?.headroom.close()
   }
 

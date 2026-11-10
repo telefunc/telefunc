@@ -115,7 +115,8 @@ class PathEstimate {
     return this.tokens >= 0 ? 0 : -this.tokens / this.paceRate(now)
   }
 
-  /** The wire handed bytes up to `total`, counted as its receiver counts them, at `at`. */
+  /** The wire handed bytes up to `total`, counted as its receiver counts them, at `at`. Only its ordered stream's bytes
+   *  count: a report's `took` is matched against these totals. */
   handed(total: number, at: number): void {
     if (total <= this.handedBytes) return
     if (this.pathBound) {
