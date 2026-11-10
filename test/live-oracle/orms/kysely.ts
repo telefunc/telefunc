@@ -30,6 +30,7 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
       deletedTodos: ({ user }) =>
         db.selectFrom('deleted_todos').select('todo_id').where('user_id', '=', user).orderBy('todo_id').execute(),
       firstTexts: () => db.selectFrom('todos').select(['id', 'text']).orderBy('text').orderBy('id').limit(3).execute(),
+      textsBelow: () => db.selectFrom('todos').select(['id', 'text']).where('text', '<', 'B').orderBy('id').execute(),
       recent: ({ user }) =>
         db
           .selectFrom('todos')

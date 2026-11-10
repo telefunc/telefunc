@@ -12,6 +12,7 @@ import {
   gt,
   inArray,
   like,
+  lt,
   max,
   not,
   relations,
@@ -99,6 +100,8 @@ function createDrizzle(
           .limit(2),
       firstTexts: () =>
         db.select({ id: todos.id, text: todos.text }).from(todos).orderBy(todos.text, todos.id).limit(3),
+      textsBelow: () =>
+        db.select({ id: todos.id, text: todos.text }).from(todos).where(lt(todos.text, 'B')).orderBy(todos.id),
       openPage: () =>
         db
           .select({ id: todos.id, text: todos.text })

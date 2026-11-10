@@ -27,6 +27,11 @@ function createPrisma(pool: unknown, transport?: BroadcastAdapter): OrmDriver {
           .orderBy([(t: any) => t.text.asc(), (t: any) => t.id.asc()])
           .limit(3)
           .all(),
+      textsBelow: () =>
+        Todo.select('id', 'text')
+          .where((t: any) => t.text.lt('B'))
+          .orderBy((t: any) => t.id.asc())
+          .all(),
       recent: ({ user }) =>
         Todo.where((t: any) => t.userId.eq(user))
           .orderBy([(t: any) => t.updatedAt.desc(), (t: any) => t.id.desc()])

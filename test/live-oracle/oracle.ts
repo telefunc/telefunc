@@ -349,13 +349,18 @@ function writeFailed(write: string, err: unknown): void {
   } else failedWrites.push(`${write}: ${String(err).slice(0, 200)}`)
 }
 
+/** Shapes counting todos in groups a user's deletion may empty: they race it. */
+const EMPTIED_BY_DELETE_USER = ['countByDone', 'busyUsers', 'topPriority']
+
 for (let step = 0; step < STEPS; step++) {
   const write = pick(step < STEPS / 2 ? writesBeforeHalf : writeNames)
   const args = await writeArgs()
-  const racing = CHURN && random() < 0.3 ? pick(subscribers) : undefined
+  const racing = CHURN && random() < 0.3 ? [pick(subscribers)] : []
+  // Committed after one of these reads but before its counts query, it leaves groups the read returned uncounted.
+  if (CHURN && write === 'deleteUser')
+    racing.push(...subscribers.filter((sub) => EMPTIED_BY_DELETE_USER.includes(sub.shape) && !racing.includes(sub)))
   try {
-    if (racing) await Promise.all([subscribe(racing, true), writer.writes[write]!(args)])
-    else await writer.writes[write]!(args)
+    await Promise.all([...racing.map((sub) => subscribe(sub, true)), writer.writes[write]!(args)])
   } catch (err) {
     writeFailed(write, err)
   }
