@@ -4,7 +4,7 @@ import { assert } from '../../../utils/assert.js'
 import { HELD_SEND_OVERHEAD_BYTES, hold, letGo, type MemoryHolder } from './channelMemory.js'
 import type { PublishBody } from './PublishBody.js'
 
-type Publish = { seq: number; head: Uint8Array<ArrayBuffer>; body: PublishBody }
+type Publish = { seq: number; head: Uint8Array<ArrayBuffer>; body: PublishBody; at: number }
 
 /** What a channel sent and its page hasn't confirmed, for a reconnect to send again: its own frames, and its publishes,
  *  each a head and a reference to the body its subscribers share. Each queue is in seq order: acknowledged entries leave
@@ -39,15 +39,23 @@ class ServerReplay {
 
   pushPublish(seq: number, head: Uint8Array<ArrayBuffer>, body: PublishBody): void {
     this.pushed(seq)
-    this.publishes.push(seq, { seq, head, body })
+    this.publishes.push(seq, { seq, head, body, at: performance.now() })
     hold(this.holder, body)
     if (body.lossyStream !== null) this.newestOfStream.set(body.lossyStream, seq)
   }
 
+  /** The least time a publish waited for its page's confirmation, `Infinity` before the first. */
+  leastConfirmMs = Number.POSITIVE_INFINITY
+
   /** The page has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
   acknowledge(lastSeq: number): void {
     while (this.frames.length > 0 && this.frames.seqAt(0) <= lastSeq) this.letFrameGo(this.frames.shift())
-    while (this.publishes.length > 0 && this.publishes.seqAt(0) <= lastSeq) this.letPublishGo(this.publishes.shift())
+    let newest: Publish | undefined
+    while (this.publishes.length > 0 && this.publishes.seqAt(0) <= lastSeq) {
+      newest = this.publishes.shift()
+      this.letPublishGo(newest)
+    }
+    if (newest !== undefined) this.leastConfirmMs = Math.min(this.leastConfirmMs, performance.now() - newest.at)
   }
 
   /** The frames after `afterSeq` in seq order, each publish's head and then its body. A channel's are all there, as
@@ -92,6 +100,11 @@ class ServerReplay {
       this.letFrameGo(this.frames.pop())
     for (let i = 0; i < waiting; i++) this.letPublishGo(this.publishes.pop())
     return waiting
+  }
+
+  /** When the oldest publish its page hasn't confirmed was sent, `undefined` with none. */
+  get oldestPublishAt(): number | undefined {
+    return this.publishes.length > 0 ? this.publishes.at(0).at : undefined
   }
 
   /** The body of the newest publish it holds. */

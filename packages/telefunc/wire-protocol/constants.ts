@@ -253,6 +253,8 @@ export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024
 export const WIRE_SEND_AHEAD_ROUND_TRIPS = 4
 /** How long a data frame may wait in its wire's queues, as acknowledgements measure it, before its sender holds back. */
 export const WIRE_QUEUE_DELAY_MS = 300
+/** What a lossy sender allows past its wire's own wait and its least round trip: their variation, a confirmation's wait. */
+export const LOSSY_CONFIRM_SLACK_MS = 300
 /** The most a broadcast's or a Room's `messages()` loop holds behind, a participant holds before its first `listen()`,
  *  and a Redis publish waits behind on a new subscription: publishes can't be awaited. */
 export const PUBLISH_HOLD_BYTES = 2 * 1024 * 1024

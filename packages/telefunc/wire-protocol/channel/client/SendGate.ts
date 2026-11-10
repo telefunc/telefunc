@@ -10,6 +10,7 @@ type BufferedFrame = {
   frame: Uint8Array<ArrayBuffer>
   channelIx: number
   seq?: number
+  waitingSince: number
 }
 type HeldFrame = BufferedFrame & { seq: number }
 
@@ -22,6 +23,8 @@ function limitKey({ frame, channelIx }: BufferedFrame): number | null {
 interface SendGateOwner {
   /** False while a RECONCILE or an upgrade holds sends back. */
   readonly sendsOpen: boolean
+  /** The page lost its wire and has none yet. */
+  readonly reconnecting: boolean
   readonly transport: ClientChannelTransport
 }
 
@@ -60,7 +63,7 @@ class SendGate {
   /** Sends after the frames waiting for headroom; holds it while sends are held back or its channel isn't attached. */
   send(record: ChannelRecord, seq: number, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
     if (!this.canSendImmediately(record)) {
-      this.settleQueue().push({ frame, channelIx: record.ix, seq })
+      this.settleQueue().push({ frame, channelIx: record.ix, seq, waitingSince: performance.now() })
       return
     }
     // What waited goes first.
@@ -71,20 +74,23 @@ class SendGate {
       transport.sendFrame({ kind, frame })
       return
     }
-    this.waitForHeadroom({ frame, channelIx: record.ix, seq })
+    this.waitForHeadroom({ frame, channelIx: record.ix, seq, waitingSince: performance.now() })
   }
 
-  /** Puts `frame` in the place of channel `ix`'s frame `seq` while that is held or waits for headroom: false once it
-   *  went, as the wire then has it. */
+  /** Puts `frame` in the place of channel `ix`'s frame `seq` while that waits and the page is behind: false once it went,
+   *  as the wire then has it, or while the link keeps up. A page with no wire has no link to keep up with. */
   replaceWaiting(ix: number, seq: number, frame: Uint8Array<ArrayBuffer>): boolean {
     for (const entry of this.waitingForHeadroom) {
       if (entry.channelIx !== ix || entry.seq !== seq) continue
+      if (!this.isBehind(this.waitingForHeadroom.peek()!)) return false
       this.waitingForHeadroomBytes += frame.byteLength - entry.frame.byteLength
       entry.frame = frame
       return true
     }
-    const held = this.settleQueue().find((entry) => entry.channelIx === ix && entry.seq === seq)
+    const sendBuffer = this.settleQueue()
+    const held = sendBuffer.find((entry) => entry.channelIx === ix && entry.seq === seq)
     if (held === undefined) return false
+    if (!this.owner.reconnecting && !this.isBehind(sendBuffer.find((entry) => entry.channelIx === ix)!)) return false
     held.frame = frame
     return true
   }
@@ -92,7 +98,7 @@ class SendGate {
   /** Sends a frame without a seq, or holds it as `send` does: a late WINDOW is still right, its limit cumulative. */
   sendUnsequenced(record: ChannelRecord, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
     if (!this.canSendImmediately(record)) {
-      this.settleQueue().push({ frame, channelIx: record.ix, seq: undefined })
+      this.settleQueue().push({ frame, channelIx: record.ix, seq: undefined, waitingSince: performance.now() })
       return
     }
     this.owner.transport.sendFrame({ kind, frame })
@@ -151,7 +157,7 @@ class SendGate {
       if (key !== null && newestLimit.get(key) !== readIx) continue
       if (seq !== undefined) {
         if (headroom <= 0 || this.waitingForHeadroom.length > 0) {
-          this.waitForHeadroom({ frame, channelIx, seq })
+          this.waitForHeadroom({ ...entry, seq })
           continue
         }
         headroom -= frame.byteLength
@@ -197,6 +203,10 @@ class SendGate {
     this.waitingForHeadroom = new Fifo()
     this.waitingForHeadroomBytes = 0
     this.droppedQueues.clear()
+  }
+
+  private isBehind({ waitingSince }: BufferedFrame): boolean {
+    return performance.now() - waitingSince > this.owner.transport.behindAfter
   }
 
   private canSendImmediately(record: ChannelRecord): boolean {

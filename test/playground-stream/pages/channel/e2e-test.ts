@@ -1012,6 +1012,21 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
+  // 100 messages of 4 KiB in one go, each way, on a link that keeps up.
+  test('channel: a lossy broadcast on a link that keeps up delivers every message of a burst, from the server and from the page', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-lossy-keeps-up')
+    await autoRetry(
+      async () => {
+        const { lossyKeepsUp } = await getResult<{
+          lossyKeepsUp: { fromServer: number; fromPage: number; last: string } | null
+        }>('#channel-state')
+        expect(lossyKeepsUp).deep.equal({ fromServer: 100, fromPage: 100, last: '99' })
+      },
+      { timeout: 30_000 },
+    )
+  })
+
   test('channel: the page lets go of a channel and a broadcast it closed and a generator it read to the end', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-ended-values')

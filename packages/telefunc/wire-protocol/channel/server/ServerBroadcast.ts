@@ -60,7 +60,8 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
   private readonly peerSubscriptions: Record<BroadcastKind, boolean> = { text: false, binary: false }
   private missedWarned = false
 
-  /** A newer publish replaces those no wire has taken yet, on the way to its page and on the page's way up. */
+  /** Past what its wire takes to confirm, a newer publish replaces those waiting, on the way to its page and on the page's
+   *  way up. */
   readonly lossy: boolean
 
   constructor(opts: BroadcastChannelOptions) {
@@ -317,8 +318,8 @@ function publishOnPlane<Kind extends BroadcastKind>(
 type BroadcastChannelOptions = {
   key: string
   /**
-   * A client that can't keep up skips to the newest: a newer message replaces those no connection has taken yet, and
-   * `info.seq` jumps over them. Without it, the client gets every message, or the channel closes with
+   * A client that keeps up gets every message. One that can't skips to the newest: a newer message replaces those
+   * waiting, and `info.seq` jumps over them. Without it, the client gets every message, or the channel closes with
    * `ChannelOverflowError` past what the server holds for it.
    *
    * https://telefunc.com/channel#skip-to-the-newest

@@ -67,6 +67,12 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     }
   }
 
+  /** @internal A publish of a lossy stream arrived, which the page confirms soon: the server tells by that whether it
+   *  keeps up. */
+  _confirmSoon(): void {
+    this.receiveCredit.confirmSoon()
+  }
+
   /** @internal Declare what it asks the server for; a reconnect carries it in the RECONCILE entry. */
   _setSubscribed(kind: BroadcastKind, on: boolean): void {
     if (on === this.subscribed[kind] || this.stopped) return
@@ -109,8 +115,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return this.sendPublish(encode.publishBinaryAckReq, data, lossyStream)
   }
 
-  /** Of `lossyStream`, a publish that still waits to go takes the newer one's data in its place, and both get its
-   *  receipt. */
+  /** Of `lossyStream`, once its uplink is behind, a publish that still waits to go takes the newer one's data in its
+   *  place, and both get its receipt. */
   private sendPublish<D>(
     encodeFrame: SequencedEncoder<D>,
     data: D,
@@ -209,6 +215,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
       }
     }
     this.receiveCredit.onPublishConsumed(bytes)
+    if (this.lossy) this._confirmSoon()
   }
 }
 

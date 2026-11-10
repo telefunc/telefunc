@@ -6,7 +6,13 @@ import type { CreditOwner, Urgency } from './credit.js'
 import type { RoundTrips } from './RoundTrips.js'
 import type { SelfTime } from './SelfTime.js'
 import type { SendWait } from './SendWaits.js'
-import { CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_INITIAL_BYTES_BATCH, FC_SELF_UTIL_THRESHOLD } from '../constants.js'
+import {
+  CREDIT_WINDOW_INITIAL_BYTES,
+  CREDIT_WINDOW_INITIAL_BYTES_BATCH,
+  FC_SELF_UTIL_THRESHOLD,
+  WIRE_PIECES_ACK_GAP_MS,
+} from '../constants.js'
+import { unrefTimer } from '../../utils/unrefTimer.js'
 import type { BdpPingAck } from '../wire/frame.js'
 
 type ReceiveCreditOptions = {
@@ -45,6 +51,7 @@ class ReceiveCredit {
   private urgentMessages = 0
   /** Bytes of the frames credit doesn't count that arrived since the byte limit last went out. */
   private uncountedBytes = 0
+  private confirmTimer: ReturnType<typeof setTimeout> | null = null
   /** A frame arrived since the byte limit last went out, which acknowledges what arrived. */
   private arrived = false
   /** The owner held enough when the byte limit last went out, so that limit granted nothing new. */
@@ -157,6 +164,8 @@ class ReceiveCredit {
     this.sendWait = null
     this.roundTrips = null
     this.downlink = null
+    if (this.confirmTimer !== null) clearTimeout(this.confirmTimer)
+    this.confirmTimer = null
   }
 
   /** Frames held back arrived at once: the round in flight doesn't count them as delivered within its round trip. */
@@ -186,6 +195,16 @@ class ReceiveCredit {
   /** A publish arrived, which starts no BDP probe. */
   onPublishArrived(): void {
     this.arrived = true
+  }
+
+  /** A `WINDOW` confirms what arrived soon: a lossy broadcast's server tells by that whether its page keeps up. */
+  confirmSoon(): void {
+    this.confirmTimer ??= unrefTimer(setTimeout(this.confirm, WIRE_PIECES_ACK_GAP_MS))
+  }
+
+  private readonly confirm = (): void => {
+    this.confirmTimer = null
+    if (this.arrived) this.advertiseBytes('flow-control')
   }
 
   /** A publish of `bytes` was consumed, which takes no message credit. */

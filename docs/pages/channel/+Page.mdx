@@ -497,7 +497,7 @@ broadcast.subscribe((n) => showToast(n))
 
 ### Skip to the newest
 
-Where only the newest message matters, such as a price or a pointer's position, pass `lossy: true`. A newer message then replaces those a client's connection hasn't taken yet, on the way to the client and on the client's own way up, so a client that can't keep up gets the newest soon:
+Where only the newest message matters, such as a price or a pointer's position, pass `lossy: true`. A client that keeps up still gets every message. Once a message has waited longer than its connection takes to confirm one, about 600 ms past its round trip, a newer one replaces those waiting, on the way to the client and on the client's own way up, so a client that can't keep up gets the newest soon:
 
 ```ts
 // Price.telefunc.ts
@@ -520,7 +520,7 @@ const price = await onWatchPrice('ACME')
 price.subscribe((value, info) => showPrice(value, info.seq))
 ```
 
-> `info.seq` jumps over the messages a client skipped, and Telefunc logs a warning once on each side. A key is one stream: a newer message replaces an older one whoever published it, so give each value its own key, such as one per pointer.
+> `info.seq` jumps over the messages a client skipped, and the server logs a warning once. A key is one stream: a newer message replaces an older one whoever published it, so give each value its own key, such as one per pointer.
 
 > Without `lossy`, a client gets every message, and past what the server holds for it the channel closes with `ChannelOverflowError` (see <Link href="#broadcast" />). To catch up, load the state again and call the telefunction for a new channel.
 

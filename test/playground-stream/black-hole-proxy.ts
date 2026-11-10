@@ -12,8 +12,14 @@ type BlackHoleProxy = {
   muteNextWebSocket(): void
   /** Null until the server closes the muted WebSocket, then how many WebSockets the page opened after it meanwhile. */
   openedBeforeMutedClosed(): number | null
-  /** From now on each direction carries `bytesPerSecond` (download, upload) through its own queue of `queueBytes`, as a slow link does; a direction whose queue is full stops reading its senders. */
-  pace(link: { downBytesPerSecond: number; upBytesPerSecond: number; queueBytes: number; burstMs?: number }): void
+  /** From now on each direction carries `bytesPerSecond` (download, upload) through its own queue of `queueBytes`, as a slow link does, each byte `delayMs` late; a direction whose queue is full stops reading its senders. */
+  pace(link: {
+    downBytesPerSecond: number
+    upBytesPerSecond: number
+    queueBytes: number
+    burstMs?: number
+    delayMs?: number
+  }): void
   close(): Promise<void>
 }
 
@@ -95,9 +101,9 @@ async function startBlackHoleProxy(target: string): Promise<BlackHoleProxy> {
       muteNext = true
     },
     openedBeforeMutedClosed: () => openedBeforeMutedClosed,
-    pace({ downBytesPerSecond, upBytesPerSecond, queueBytes, burstMs = 5 }) {
-      down = new PacedDirection(downBytesPerSecond, queueBytes, burstMs)
-      up = new PacedDirection(upBytesPerSecond, queueBytes, burstMs)
+    pace({ downBytesPerSecond, upBytesPerSecond, queueBytes, burstMs = 5, delayMs = 0 }) {
+      down = new PacedDirection(downBytesPerSecond, queueBytes, burstMs, delayMs)
+      up = new PacedDirection(upBytesPerSecond, queueBytes, burstMs, delayMs)
     },
     async close() {
       down?.stop()
@@ -137,9 +143,9 @@ function frameLength(bytes: Buffer): number | null {
   return bytes.length < 10 ? null : 10 + 4 + Number(bytes.readBigUInt64BE(2))
 }
 
-/** One direction of a slow link: what its senders write leaves in order at `bytesPerSecond`. */
+/** One direction of a slow link: what its senders write leaves in order at `bytesPerSecond`, no sooner than `delayMs`. */
 class PacedDirection {
-  private queue: { from: net.Socket; to: net.Socket; chunk: Buffer }[] = []
+  private queue: { from: net.Socket; to: net.Socket; chunk: Buffer; at: number }[] = []
   private head = 0
   private queued = 0
   private paused = new Set<net.Socket>()
@@ -151,12 +157,13 @@ class PacedDirection {
     private bytesPerSecond: number,
     private queueBytes: number,
     private burstMs: number,
+    private delayMs: number,
   ) {
     this.timer = setInterval(() => this.drain(), burstMs)
   }
 
   enqueue(from: net.Socket, to: net.Socket, chunk: Buffer) {
-    this.queue.push({ from, to, chunk })
+    this.queue.push({ from, to, chunk, at: performance.now() + this.delayMs })
     this.queued += chunk.length
     if (this.queued > this.queueBytes && !this.paused.has(from)) {
       from.pause()
@@ -172,7 +179,7 @@ class PacedDirection {
       (this.bytesPerSecond * 2 * this.burstMs) / 1000,
     )
     this.last = now
-    while (this.allowance >= 1 && this.head < this.queue.length) {
+    while (this.allowance >= 1 && this.head < this.queue.length && this.queue[this.head]!.at <= now) {
       const entry = this.queue[this.head]!
       const bytes = Math.min(entry.chunk.length, Math.floor(this.allowance))
       if (!entry.to.destroyed) entry.to.write(entry.chunk.subarray(0, bytes))

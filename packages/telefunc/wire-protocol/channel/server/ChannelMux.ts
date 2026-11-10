@@ -240,6 +240,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
         wire,
         transport: transport as ServerTransport<unknown>,
         pingInterval: this.options.pingInterval,
+        sseFlushThrottle: this.options.sseFlushThrottle,
         deliveries,
         sessions: this.sessions,
         attaching,

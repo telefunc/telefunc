@@ -42,6 +42,7 @@ export {
   onChannelLinkShare,
   onChannelSlowUplink,
   onChannelPublishesBehind,
+  onChannelLossyTicker,
   onChannelAcksWaiting,
   onChannelsQueuedBeforeReturn,
   onChannelAcrossFlip,
@@ -894,10 +895,14 @@ async function onChannelPublishesBehind(
   broadcast.subscribe((message) => {
     if (typeof message === 'string' && /^\d+:/.test(message)) lastOrdinal = message.slice(0, message.indexOf(':'))
   })
-  const control = new Channel<(msg: 'ping' | 'close' | 'away' | 'last' | number) => string, never>()
+  const control = new Channel<(msg: 'ping' | 'close' | 'away' | 'cut' | 'last' | number) => string, never>()
   control.listen(async (msg) => {
     if (msg === 'ping') return 'pong'
     if (msg === 'last') return lastOrdinal
+    if (msg === 'cut') {
+      setTimeout(cutWireSockets, 50)
+      return 'cut'
+    }
     if (msg === 'close') return String(await broadcast.close({ timeout: 20_000 }))
     if (msg === 'away') {
       const stop = broadcast.subscribe(() => {
@@ -910,6 +915,25 @@ async function onChannelPublishesBehind(
     }
     publish(msg)
     return 'published'
+  })
+  return { broadcast, control: control.client }
+}
+
+/** Once the page asks, `count` publishes of `bytes` to a lossy broadcast, `periodMs` apart, each with its ordinal and when
+ *  it went; then, with `close`, a graceful close. */
+async function onChannelLossyTicker(bytes: number, count: number, periodMs: number, close = false) {
+  const broadcast = new BroadcastChannel<string>({ key: `ticker:${crypto.randomUUID()}`, lossy: true })
+  const publishAll = async () => {
+    for (let i = 0; i < count; i++) {
+      void broadcast.publish(`${i}:${Date.now()}:`.padEnd(bytes, 'x'))
+      await new Promise((resolve) => setTimeout(resolve, periodMs))
+    }
+    if (close) await broadcast.close({ timeout: 10_000 })
+  }
+  const control = new Channel<(msg: 'start') => string, never>()
+  control.listen(() => {
+    void publishAll()
+    return 'started'
   })
   return { broadcast, control: control.client }
 }

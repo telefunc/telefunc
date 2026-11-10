@@ -4,6 +4,7 @@ import { assert } from '../../../utils/assert.js'
 import {
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_TRANSPORT,
+  LOSSY_CONFIRM_SLACK_MS,
   SSE_FLUSH_THROTTLE_MS,
   SSE_POST_FLOOR_MS,
   SSE_POST_IDLE_FLUSH_DELAY_MS,
@@ -509,6 +510,12 @@ class SseTransport implements UpgradeSource {
       SSE_POST_MAX_BYTES,
       Math.max(SSE_POST_MIN_BYTES, (bytes * SSE_POST_TARGET_MS) / Math.max(1, ms)),
     )
+  }
+
+  /** Its frames wait for their POST's turn: the throttle, or the POST ahead of them, which takes a round trip. */
+  get behindAfter(): number {
+    const roundTrip = this.uplink.roundTrips.pathRtt
+    return LOSSY_CONFIRM_SLACK_MS + Math.max(this.flushThrottleMs, roundTrip) + roundTrip
   }
 
   headroom(): number {

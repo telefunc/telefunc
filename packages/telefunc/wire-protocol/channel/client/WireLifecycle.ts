@@ -147,6 +147,10 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.upgrade.forget()
   }
 
+  get reconnecting(): boolean {
+    return this.state.tag === 'reconnecting'
+  }
+
   get sendsOpen(): boolean {
     return this.connected && !this.exchange.reconciling && !this.upgrade.gatesSends && !this.exchange.reconcileOwed
   }

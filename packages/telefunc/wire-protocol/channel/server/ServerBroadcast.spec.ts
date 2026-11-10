@@ -237,6 +237,7 @@ describe('ServerBroadcastEnd', () => {
           },
           carry() {},
           bufferedAmount: () => 0,
+          behindAfter: () => 700,
           deliveredBefore: () => 0,
           terminate() {},
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
@@ -297,6 +298,7 @@ describe('Broadcast shield validation', () => {
           },
           carry() {},
           bufferedAmount: () => 0,
+          behindAfter: () => 700,
           deliveredBefore: () => 0,
           terminate() {},
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
@@ -340,6 +342,7 @@ describe('Broadcast shield validation', () => {
           send: () => {},
           carry() {},
           bufferedAmount: () => 0,
+          behindAfter: () => 700,
           deliveredBefore: () => 0,
           terminate() {},
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
@@ -357,6 +360,47 @@ describe('Broadcast shield validation', () => {
     await sender._end._onPeerPublishAckReqMessage(JSON.stringify({ text: 'malicious' }), 1)
 
     expect(seen).toEqual([])
+  })
+})
+
+describe('lossy broadcast under memory pressure', () => {
+  // Another object's publish sheds it: the channel ends once its own object runs, but what it holds goes at once.
+  it('lets go of the newest it holds for a page that is behind', async () => {
+    const broadcast = new ServerBroadcast<string>({ key: 'room:lossy-shed', lossy: true })
+    const end = broadcast._end
+    end._registerChannel()
+    end._attachPeer(
+      new IndexedPeer({
+        sender: {
+          send() {},
+          carry() {},
+          bufferedAmount: () => 0,
+          behindAfter: () => 0,
+          deliveredBefore: () => 0,
+          terminate() {},
+          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+          queue: {
+            waitingPublishes: () => 0,
+            dropWaitingPublishes() {},
+            dropWaitingFromPublish() {},
+            drainRate: () => 0,
+          },
+        },
+        index: 7,
+        replay: end._replayBuffer!,
+      }),
+      { broadcast: { text: true, binary: false } },
+    )
+    await broadcast.publish('first')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await broadcast.publish('x'.repeat(256 * 1024))
+    expect(end.newestUnhanded).toBeDefined()
+    expect(end.heldBytes).greaterThan(256 * 1024)
+
+    end.shed(0)
+
+    expect(end.newestUnhanded).toBe(undefined)
+    expect(end.heldBytes).lessThan(1024)
   })
 })
 

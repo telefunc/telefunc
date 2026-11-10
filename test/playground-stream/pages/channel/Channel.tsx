@@ -56,6 +56,7 @@ import {
   onChannelLinkShare,
   onChannelSlowUplink,
   onChannelPublishesBehind,
+  onChannelLossyTicker,
   onChannelAcksWaiting,
   onChannelsQueuedBeforeReturn,
   onChannelAcrossFlip,
@@ -256,6 +257,8 @@ type ChannelState = {
     opening: { receipts: number; last: string }
     reconnected: { receipts: number; last: string }
   } | null
+  lossyKeepsUp: { fromServer: number; fromPage: number; last: string } | null
+  lossyTicker: { received: number; last: number | undefined; worstMs: number; closed: string | null } | null
   broadcastAwayShared: { received: number[][]; closed: string[] } | null
   channelsQueued: { queued: string[]; received: string[][]; closed: boolean[] } | null
   acksWaiting:
@@ -356,6 +359,8 @@ const initialState: ChannelState = {
   broadcastOverflow: null,
   broadcastBehind: null,
   broadcastBehindCloses: null,
+  lossyKeepsUp: null,
+  lossyTicker: null,
   broadcastAwayShared: null,
   channelsQueued: null,
   acksWaiting: null,
@@ -1547,8 +1552,8 @@ function ChannelDemo() {
   const testBroadcastBehind = useCallback(async () => {
     setChannelState((s) => ({ ...s, broadcastBehind: null }))
     const { broadcast, control } = await openChannel(() => onChannelPublishesBehind(256 * 1024, true))
-    // The page's own 20 publishes at once, each its ordinal at the same size: one still waiting to go takes the next
-    // one's data in its place, and both get its receipt. The server's subscription gets the last.
+    // The page's own 20 publishes at once, each its ordinal at the same size: on a link that keeps up each goes with a
+    // receipt of its own, and the server's subscription gets the last.
     const publishOrdinals = async (from: number) => {
       const receipts = await Promise.all(
         Array.from({ length: 20 }, (_, n) => broadcast.publish(`${from + n}:`.padEnd(256 * 1024, 'x'))),
@@ -1573,7 +1578,9 @@ function ChannelDemo() {
     await control.send('away', { ack: true })
     const { seq } = await broadcast.publish('across the disconnect')
     await newest
-    // Right after its reconnect, they wait in the page's held queue.
+    // While the page is reconnecting: only the newest of them waits.
+    await control.send('cut', { ack: true })
+    await new Promise((resolve) => setTimeout(resolve, 150))
     const reconnected = await publishOrdinals(100)
     const broadcastBehind = {
       seqsAhead,
@@ -1583,6 +1590,45 @@ function ChannelDemo() {
       reconnected,
     }
     setChannelState((s) => ({ ...s, broadcastBehind }))
+    control.close()
+  }, [])
+
+  const testLossyKeepsUp = useCallback(async () => {
+    setChannelState((s) => ({ ...s, lossyKeepsUp: null }))
+    const { broadcast, control } = await openChannel(() => onChannelPublishesBehind(4096, true))
+    let fromServer = 0
+    broadcast.subscribeBinary(() => void fromServer++)
+    await control.send(100, { ack: true })
+    for (let i = 0; i < 30 && fromServer < 100; i++) await new Promise((resolve) => setTimeout(resolve, 100))
+    const receipts = await Promise.all(
+      Array.from({ length: 100 }, (_, n) => broadcast.publish(`${n}:`.padEnd(4096, 'x'))),
+    )
+    const fromPage = new Set(receipts.map((receipt) => receipt.seq)).size
+    const lossyKeepsUp = { fromServer, fromPage, last: await control.send('last', { ack: true }) }
+    setChannelState((s) => ({ ...s, lossyKeepsUp }))
+    control.close()
+  }, [])
+
+  const testLossyTicker = useCallback(async (bytes: number, count: number, close: boolean) => {
+    setChannelState((s) => ({ ...s, lossyTicker: null }))
+    const { broadcast, control } = await openChannel(() => onChannelLossyTicker(bytes, count, 1000 / 60, close))
+    const received: number[] = []
+    let worstMs = 0
+    let closed: string | null = null
+    broadcast.subscribe((message) => {
+      const [ordinal, sentAt] = message.split(':')
+      received.push(Number(ordinal))
+      worstMs = Math.max(worstMs, Date.now() - Number(sentAt))
+    })
+    broadcast.onClose((err) => {
+      closed = err?.name ?? 'none'
+    })
+    await control.send('start', { ack: true })
+    const newest = Date.now() + 25_000
+    const done = () => (close ? closed !== null : received.at(-1) === count - 1)
+    while (!done() && Date.now() < newest) await new Promise((resolve) => setTimeout(resolve, 100))
+    const lossyTicker = { received: received.length, last: received.at(-1), worstMs, closed }
+    setChannelState((s) => ({ ...s, lossyTicker }))
     control.close()
   }, [])
 
@@ -2094,6 +2140,38 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             Lossy Broadcast Publishes More Than The Client Keeps Up With
+          </button>
+          <button
+            id="channel-test-lossy-keeps-up"
+            type="button"
+            onClick={testLossyKeepsUp}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Lossy Broadcast On A Link That Keeps Up
+          </button>
+          <button
+            id="channel-test-lossy-ticker"
+            type="button"
+            onClick={() => testLossyTicker(4096, 300, false)}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Lossy Broadcast Ticker
+          </button>
+          <button
+            id="channel-test-lossy-ticker-small"
+            type="button"
+            onClick={() => testLossyTicker(100, 300, false)}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Lossy Broadcast Ticker Of Small Messages
+          </button>
+          <button
+            id="channel-test-lossy-ticker-close"
+            type="button"
+            onClick={() => testLossyTicker(4096, 120, true)}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Lossy Broadcast Ticker Closed Gracefully
           </button>
           <button
             id="channel-test-broadcast-behind-closes"

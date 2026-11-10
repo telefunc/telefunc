@@ -370,6 +370,7 @@ class ClientRoom extends RoomStateView implements Room {
   private onBinaryFrame(framed: Uint8Array, rawInfo: ChannelPublishInfo): void {
     const frame = decodeBinaryFrame(framed)
     assert(frame)
+    if (frame.lossy) this.end._confirmSoon()
     this._state.applyBinary(frame, { key: this.id, seq: rawInfo.seq, timestamp: rawInfo.timestamp })
   }
 
