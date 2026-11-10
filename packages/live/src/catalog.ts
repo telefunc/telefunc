@@ -40,7 +40,13 @@ type Catalog = {
   /** User-defined functions: a statement calling one may read any table, and write any table when it's volatile. */
   functions: Set<string>
   volatileFunctions: Set<string>
+  /** The `search_path` of the session that loaded the catalog, which unqualified names resolve against while every
+   *  session has it; `undefined` once a statement may have changed a session's (`LiveDatabase`). */
+  searchPath: string[] | undefined
+  /** The table a name means; `undefined` when unknown, or when it may mean several (`named()`). */
   find(table: RangeVar): Table | undefined
+  /** Every table a name may mean: in any schema, unless qualified or resolved by `searchPath`. */
+  named(table: RangeVar): Table[]
 }
 
 type CatalogRow = {
@@ -127,13 +133,11 @@ const TRIGGER_UPDATE = 16
 async function loadCatalog(query: (text: string) => Promise<string>): Promise<Catalog> {
   const row = JSON.parse(await query(CATALOG_QUERY)) as CatalogRow
   const tables = new Map<string, Table>()
-  const find = (table: RangeVar) => {
-    if (table.schemaname) return tables.get(`${table.schemaname}.${table.relname}`)
-    for (const schema of row.searchPath) {
-      const found = tables.get(`${schema}.${table.relname}`)
-      if (found) return found
-    }
-    return undefined
+  const byName = new Map<string, Table[]>()
+  const anySchema = (table: RangeVar): Table[] => {
+    if (!table.schemaname) return byName.get(table.relname) ?? []
+    const found = tables.get(`${table.schemaname}.${table.relname}`)
+    return found ? [found] : []
   }
   const catalog: Catalog = {
     database: row.database,
@@ -141,7 +145,15 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
     tables,
     functions: new Set(row.functions.map(([name]) => name)),
     volatileFunctions: new Set(row.functions.filter(([, volatile]) => volatile).map(([name]) => name)),
-    find,
+    searchPath: row.searchPath,
+    find(table) {
+      const named = this.named(table)
+      return named.length === 1 ? named[0] : undefined
+    },
+    named(table) {
+      const inPath = this.searchPath?.map((schema) => tables.get(`${schema}.${table.relname}`)).find(Boolean)
+      return table.schemaname || !inPath ? anySchema(table) : [inPath]
+    },
   }
   for (const t of row.tables) {
     const columns = t.columns.map(
@@ -155,7 +167,7 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
       }),
     )
     const triggers = t.triggers ?? []
-    tables.set(`${t.schema}.${t.name}`, {
+    const table: Table = {
       id: `${t.schema}.${t.name}`,
       sqlName: `${quote(t.schema)}.${quote(t.name)}`,
       columns,
@@ -176,33 +188,33 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
         triggers.some(
           ([type]) => (type & TRIGGER_ROW) !== 0 && (type & TRIGGER_BEFORE) !== 0 && (type & TRIGGER_UPDATE) !== 0,
         ),
-    })
+    }
+    tables.set(table.id, table)
+    byName.set(t.name, [...(byName.get(t.name) ?? []), table])
   }
   // Second pass: these name other tables, which must all be known first.
   for (const t of row.tables) {
     const table = tables.get(`${t.schema}.${t.name}`)!
     const reads = [...(t.view ? [t.view] : []), ...(t.rls ? (t.policies ?? []).map((p) => `select 1 where ${p}`) : [])]
-    table.alsoReads = union(reads.map((sql) => tablesOfStatements(parseStatements(sql), catalog)))
+    // Printed for the loading session: its `search_path` resolves them.
+    table.alsoReads = union(reads.map((sql) => tablesOfStatements(parseStatements(sql), (t) => catalog.named(t))))
+    // A function resolves names with the `search_path` of the session that calls it: any schema's table may be meant.
     const triggerWrites = (t.triggers ?? []).map(([, language, source]) =>
-      tablesWrittenByFunction(language, source, catalog),
+      tablesWrittenByFunction(language, source, anySchema),
     )
     table.alsoWrites = union([table.alsoWrites, ...triggerWrites])
   }
   return catalog
 }
 
-function tablesOfStatements(statements: Node[] | null, catalog: Catalog): TableSet {
+/** The tables `statements` name, each name resolved by `named`. */
+function tablesOfStatements(statements: Node[] | null, named: (table: RangeVar) => Table[]): TableSet {
   if (!statements) return 'all'
-  const ids = new Set<string>()
-  for (const table of tablesIn(statements)) {
-    const found = catalog.find(table)
-    if (found) ids.add(found.id)
-  }
-  return ids
+  return new Set(tablesIn(statements).flatMap((table) => named(table).map((found) => found.id)))
 }
 
 /** What a trigger function may write: the targets of its SQL statements, or every table when that can't be told. */
-function tablesWrittenByFunction(language: string, source: string, catalog: Catalog): TableSet {
+function tablesWrittenByFunction(language: string, source: string, named: (table: RangeVar) => Table[]): TableSet {
   if (language !== 'plpgsql') return 'all'
   let parsed: unknown
   try {
@@ -221,7 +233,7 @@ function tablesWrittenByFunction(language: string, source: string, catalog: Cata
     const parsedStatements = parseStatements(sql)
     if (!parsedStatements) return 'all'
     const writes = parsedStatements.filter((s) => s.InsertStmt || s.UpdateStmt || s.DeleteStmt || s.MergeStmt)
-    return tablesOfStatements(writes, catalog)
+    return tablesOfStatements(writes, named)
   })
   return union(written)
 }

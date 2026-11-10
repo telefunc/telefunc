@@ -196,6 +196,8 @@ function createDrizzle(
           .leftJoin(tags, eq(tags.todoId, todos.id))
           .where(eq(todos.userId, user))
           .orderBy(todos.id, tags.id),
+      publicNotes: () => db.execute(sql`select id, n from public.notes order by id`).then(rowsOf),
+      tenantNotes: () => db.execute(sql`select id, n from tenant.notes order by id`).then(rowsOf),
       spelled: ({ spellings: [a] }) =>
         db
           .select({ id: todos.id })
@@ -282,6 +284,15 @@ function createDrizzle(
       // Two statements in one text: sent as written.
       deleteUserRaw: ({ user }) => db.execute(sql.raw(`delete from users where id = ${Number(user)}; select 1`)),
       insertUser: ({ text, value }) => db.insert(users).values({ name: text, team: (value % 3) + 1 }),
+      setPath: ({ value }) => db.execute(sql.raw(`set search_path to ${schemaOf(value)}, public`)),
+      bumpNote: ({ value }) => db.execute(sql`update notes set n = n + 1 where id = ${1 + (value % 5)}`),
+      // One text: the update names the table by the search_path the statement before it sets.
+      notesPath: ({ value }) =>
+        db.execute(
+          sql.raw(
+            `set search_path to ${schemaOf(value)}, public; update notes set n = n + 1 where id = ${1 + (value % 5)}`,
+          ),
+        ),
       recode: ({ todo, value }) =>
         db
           .update(todos)
@@ -297,3 +308,8 @@ const column = ({ column }: Spelling) => sql.raw(`"todos"."${column}"`)
 /** A spelling as a parameter or inline, followed by its cast. */
 const operand = ({ value, cast, inline }: Spelling) =>
   inline ? sql.raw(`'${value.replace(/'/g, "''")}'${cast}`) : sql`${value}${sql.raw(cast)}`
+
+const schemaOf = (value: number) => (value % 3 === 0 ? 'public' : 'tenant')
+
+/** `db.execute()`'s rows: the result itself on postgres.js, its `rows` elsewhere. */
+const rowsOf = (result: any) => result.rows ?? [...result]

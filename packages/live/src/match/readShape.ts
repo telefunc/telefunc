@@ -373,7 +373,7 @@ function addFromItem(
     }
     const table = analysis.catalog.find(rv)
     if (!table) {
-      readsEverything(analysis)
+      readsAny(analysis.catalog.named(rv), analysis)
       scope.opaque.add(name)
       return []
     }
@@ -732,6 +732,16 @@ function addAlsoReads(table: Table, analysis: Analysis, seen = new Set<string>()
     analysis.alsoReads.add(id)
     const other = analysis.catalog.tables.get(id)
     if (other) addAlsoReads(other, analysis, seen)
+  }
+}
+
+/** A name that may mean any of `tables` (`Catalog.named()`): a change to any of them counts, and to any table when
+ *  none is known. */
+function readsAny(tables: Table[], analysis: Analysis): void {
+  if (tables.length === 0) return readsEverything(analysis)
+  for (const table of tables) {
+    if (analysis.alsoReads !== 'all') analysis.alsoReads.add(table.id)
+    addAlsoReads(table, analysis)
   }
 }
 

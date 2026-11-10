@@ -200,9 +200,9 @@ function writtenTables(node: Node, catalog: Catalog): TableSet {
     if (key === 'relation' || (key === 'RangeVar' && value.relname)) targets.push(value)
   })
   for (const target of targets) {
-    const table = catalog.find(target as never)
-    if (!table) return 'all'
-    ids.add(table.id)
+    const named = catalog.named(target as never)
+    if (named.length === 0) return 'all'
+    for (const table of named) ids.add(table.id)
   }
   return tablesChangedWith(ids, catalog)
 }

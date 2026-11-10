@@ -296,9 +296,12 @@ const count = (map: Map<string, Counts>, key: string) => {
 }
 const misses: string[] = []
 const writeNames = Object.keys(driver.writes)
+/** After one of these, connections may differ (reads no longer share): they start halfway, so that sharing is checked. */
+const SESSION_WRITES = ['setPath', 'notesPath']
+const writesBeforeHalf = writeNames.filter((name) => !SESSION_WRITES.includes(name))
 
 for (let step = 0; step < STEPS; step++) {
-  const write = pick(writeNames)
+  const write = pick(step < STEPS / 2 ? writesBeforeHalf : writeNames)
   const args = await writeArgs()
   const racing = CHURN && random() < 0.3 ? pick(subscribers) : undefined
   try {

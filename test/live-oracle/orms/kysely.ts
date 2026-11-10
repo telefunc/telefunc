@@ -175,6 +175,8 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
           .orderBy('todos.id')
           .orderBy('tags.id')
           .execute(),
+      publicNotes: async () => (await sql`select id, n from public.notes order by id`.execute(db)).rows,
+      tenantNotes: async () => (await sql`select id, n from tenant.notes order by id`.execute(db)).rows,
       spelled: ({ spellings: [a] }) =>
         db
           .selectFrom('todos')
@@ -286,6 +288,15 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
           .insertInto('users')
           .values({ name: text, team: (value % 3) + 1 })
           .execute(),
+      setPath: ({ value }) => sql.raw(`set search_path to ${schemaOf(value)}, public`).execute(db),
+      bumpNote: ({ value }) => sql`update notes set n = n + 1 where id = ${1 + (value % 5)}`.execute(db),
+      // One text: the update names the table by the search_path the statement before it sets.
+      notesPath: ({ value }) =>
+        sql
+          .raw(
+            `set search_path to ${schemaOf(value)}, public; update notes set n = n + 1 where id = ${1 + (value % 5)}`,
+          )
+          .execute(db),
       recode: ({ todo, value }) =>
         db
           .updateTable('todos')
@@ -302,3 +313,5 @@ const column = ({ column }: Spelling) => sql.ref(`todos.${column}`)
 /** A spelling as a parameter or inline, followed by its cast. */
 const operand = ({ value, cast, inline }: Spelling) =>
   inline ? sql.raw(`'${value.replace(/'/g, "''")}'${cast}`) : sql`${value}${sql.raw(cast)}`
+
+const schemaOf = (value: number) => (value % 3 === 0 ? 'public' : 'tenant')

@@ -135,6 +135,15 @@ const probes: Record<string, () => void> = {
   tracking() {
     delete (globalThis as any)[Symbol.for('@telefunc/live/tracking')]
   },
+  /** Unqualified names keep resolving by the loading session's `search_path` after a session may have changed it. */
+  'search-path'() {
+    const sessionsStartDiffering = database.sessionsStartDiffering
+    database.sessionsStartDiffering = function () {
+      const { searchPath } = this.catalog
+      sessionsStartDiffering.call(this)
+      this.catalog.searchPath = searchPath
+    }
+  },
   /** A cascade only reaches the groups the counts have. */
   'tally-cascade'() {
     const dropAll = tally.dropAll

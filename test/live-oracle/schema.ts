@@ -6,7 +6,8 @@ const USERS = 6
 
 /** The same tables for every ORM; each run starts from them. */
 const SCHEMA = `
-drop table if exists tags, todos, users, deleted_todos cascade;
+drop table if exists tags, todos, users, deleted_todos, notes cascade;
+drop schema if exists tenant cascade;
 drop function if exists log_deleted_todo;
 create table users (id serial primary key, name text not null, team int not null);
 create table todos (
@@ -29,6 +30,12 @@ begin
   return old;
 end $$;
 create trigger todos_deleted after delete on todos for each row execute function log_deleted_todo();
+-- One name in two schemas: which table an unqualified \`notes\` means depends on the session's search_path.
+create schema tenant;
+create table notes (id int primary key, n int not null default 0);
+create table tenant.notes (id int primary key, n int not null default 0);
+insert into notes (id) select generate_series(1, 5);
+insert into tenant.notes (id) select generate_series(1, 5);
 `
 
 function seed(random: () => number): string {

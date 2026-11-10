@@ -156,10 +156,11 @@ class LiveDatabase {
     live: LiveQuery | undefined,
     sharing: Sharing | undefined,
   ): Statement {
-    const plan = this.planOf(text, this.catalog!)
-    if (changesSession(plan)) {
-      this.sessionsDiffer = true
-      this.knownOperands.clear()
+    let plan = this.planOf(text, this.catalog!)
+    if (changesSession(plan) && !this.sessionsDiffer) {
+      this.sessionsStartDiffering()
+      // The text's other statements may name tables by a `search_path` it changes.
+      plan = this.planOf(text, this.catalog!)
     }
     switch (plan.kind) {
       case 'read':
@@ -373,6 +374,7 @@ class LiveDatabase {
       // A failure fails the statement waiting for it; the next one tries again.
       this.loadingCatalog = undefined
     }
+    if (this.sessionsDiffer) this.catalog.searchPath = undefined
     if (this.transport && !this.feed) {
       this.feed = new ChangeFeed(this.transport, this.catalog.database, (changes) => this.receive(changes))
     }
@@ -380,6 +382,15 @@ class LiveDatabase {
 
   private receive(changes: Change[]): void {
     for (const change of changes) this.router.route(change)
+  }
+
+  /** After a statement that may have changed its session: connections may answer the same read differently, and mean
+   *  different tables by one unqualified name. */
+  private sessionsStartDiffering(): void {
+    this.sessionsDiffer = true
+    this.knownOperands.clear()
+    this.catalog!.searchPath = undefined
+    this.plans = new Map()
   }
 
   private forgetSchema(): void {
