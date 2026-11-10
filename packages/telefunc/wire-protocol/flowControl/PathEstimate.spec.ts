@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import { WIRE_INITIAL_WINDOW_BYTES, WIRE_PIECES_ACK_BYTES, WIRE_SEGMENT_BYTES } from '../constants.js'
+import {
+  WIRE_INITIAL_WINDOW_BYTES,
+  WIRE_PATH_PROBE_GAIN,
+  WIRE_PATH_PROBE_ROUNDS,
+  WIRE_PIECES_ACK_BYTES,
+  WIRE_SEGMENT_BYTES,
+} from '../constants.js'
 import { PathEstimate } from './PathEstimate.js'
 
 /** A WebSocket's 10 kHz lossy stream: what one value takes on the wire, and the gap between the receiver's reports. */
@@ -8,8 +14,9 @@ const VALUE_BYTES = 84
 const REPORT_GAP_MS = 50
 
 type Link = {
-  /** What the path carries, in bytes per ms. */
+  /** What the path carries, in bytes per ms; `rateAfter` changes it from a time on. */
   rate: number
+  rateAfter?: { at: number; rate: number }
   /** Its one-way delay, in ms; `delayAfter` lengthens it from a time on. */
   oneWay: number
   delayAfter?: { at: number; oneWay: number }
@@ -64,6 +71,11 @@ class Sim {
   run(ms: number, perMs: number, lateFrom = Number.POSITIVE_INFINITY): this {
     for (const end = this.t + ms; this.t < end; ) this.tick(++this.t, perMs, lateFrom)
     return this
+  }
+
+  private rate(t: number): number {
+    const { rateAfter } = this.link
+    return rateAfter && t >= rateAfter.at ? rateAfter.rate : this.link.rate
   }
 
   private oneWay(t: number): number {
@@ -133,7 +145,7 @@ class Sim {
       path.handed(this.handedBytes, t)
       let start = Math.max(this.linkFreeAt, t)
       while (this.link.stalled?.(Math.floor(start))) start = Math.floor(start) + 1
-      this.linkFreeAt = start + this.valueBytes / this.link.rate
+      this.linkFreeAt = start + this.valueBytes / this.rate(start)
       const at = this.linkFreeAt + this.oneWay(this.linkFreeAt)
       this.arrivals.push({ at, end: this.handedBytes })
       if (publishedAt >= lateFrom) this.lateAges.push(at - publishedAt)
@@ -229,6 +241,24 @@ describe('PathEstimate', () => {
     const sim = new Sim(b, { valueBytes: 16 * 1024 }).run(10_000, 1 / 50)
     const window = 2 * b.rate * (sim.path.roundTrip + REPORT_GAP_MS)
     expect(sim.path.inFlight).toBeLessThanOrEqual(window + 16 * 1024)
+  })
+
+  it('finds a path that sped up while the stream outran it, a quarter faster every eight round trips', () => {
+    // A congested spell: the path carries a quarter of its rate until 1.5 s, less than the stream.
+    for (const [link, perMs] of [
+      [b, 1],
+      [c, 4],
+      [d, 0.4],
+    ] as const) {
+      const sim = new Sim({ ...link, rate: link.rate / 4, rateAfter: { at: 1500, rate: link.rate } }).run(1500, perMs)
+      expect(sim.path.pathBound).toBe(true)
+      const probes = Math.ceil(Math.log((perMs * VALUE_BYTES) / (link.rate / 4)) / Math.log(WIRE_PATH_PROBE_GAIN))
+      sim.run((probes + 1) * WIRE_PATH_PROBE_ROUNDS * (sim.path.roundTrip + REPORT_GAP_MS), perMs)
+      expect(sim.path.pathBound).toBe(false)
+      const skipped = sim.skipped
+      sim.run(3000, perMs)
+      expect(sim.skipped).toBe(skipped)
+    }
   })
 
   it('stops skipping once the stream slows to what its path carries', () => {

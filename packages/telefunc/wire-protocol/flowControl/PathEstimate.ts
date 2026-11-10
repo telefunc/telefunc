@@ -1,7 +1,12 @@
 export { PathEstimate }
 export type { PathEstimateOptions }
 
-import { WIRE_INITIAL_WINDOW_BYTES, WIRE_SEGMENT_BYTES } from '../constants.js'
+import {
+  WIRE_INITIAL_WINDOW_BYTES,
+  WIRE_PATH_PROBE_GAIN,
+  WIRE_PATH_PROBE_ROUNDS,
+  WIRE_SEGMENT_BYTES,
+} from '../constants.js'
 import type { PiecesAck } from '../wire/frame.js'
 import { Fifo } from '../../utils/Fifo.js'
 
@@ -59,8 +64,9 @@ class PathEstimate {
   /** Bytes the wire may hand while the path is the limit: they come at its pace, and every byte handed takes some. */
   private tokens = 0
   private tokensAt = 0
-  /** The lossy streams offer more than the path carries, and queued what it couldn't. */
+  /** The lossy streams offer more than the path carries, and queued what it couldn't; since when. */
   pathBound = false
+  private boundAt = 0
 
   constructor({ reportGap }: PathEstimateOptions) {
     this.reportGap = reportGap
@@ -77,7 +83,10 @@ class PathEstimate {
   }
 
   /** In bytes per ms, what the path carries, from bytes that arrived spaced by the path, not by the sender: `Infinity`
-   *  before measured. While the path is the limit it stands until measured again, as paced bytes measure nothing. */
+   *  before measured. While the path is the limit it stands until measured again, as paced bytes measure nothing, but
+   *  for what the path delivered: a probe's bytes, delivered faster, raise it. So a path that sped up while it was the
+   *  limit is found at most a quarter faster every eight round trips (`WIRE_PATH_PROBE_GAIN`): twice as fast takes
+   *  25 round trips. */
   get pathRate(): number {
     return this.carriedRate
   }
@@ -86,13 +95,16 @@ class PathEstimate {
     return this.handedBytes - this.took
   }
 
-  /** The bytes the wire may hand now: what the path delivers in a round trip and the wait for its report while it is the
-   *  limit, else twice that, at least the slow start's window while it lasts, and at least the initial window. */
+  /** The bytes the wire may hand now: what the path delivers in a round trip and the wait for its report, and what a
+   *  probe adds to it, while it is the limit, else twice that, at least the slow start's window while it lasts, and at
+   *  least the initial window. */
   get room(): number {
     const { rate, roundTrip } = this
     const window = rate === 0 || roundTrip === Number.POSITIVE_INFINITY ? 0 : rate * (roundTrip + this.reportGap)
     const bound =
-      this.pathBound && window > 0 ? window : Math.max(this.slowStart ?? WIRE_INITIAL_WINDOW_BYTES, 2 * window)
+      this.pathBound && window > 0
+        ? WIRE_PATH_PROBE_GAIN * window
+        : Math.max(this.slowStart ?? WIRE_INITIAL_WINDOW_BYTES, 2 * window)
     return bound - this.inFlight
   }
 
@@ -100,7 +112,7 @@ class PathEstimate {
   paceWait(now: number): number {
     if (!this.pathBound) return 0
     this.accrue(now)
-    return this.tokens >= 0 ? 0 : -this.tokens / this.paceRate
+    return this.tokens >= 0 ? 0 : -this.tokens / this.paceRate(now)
   }
 
   /** The wire handed bytes up to `total`, counted as its receiver counts them, at `at`. */
@@ -182,6 +194,8 @@ class PathEstimate {
     const carried = this.carriedRates.best(since, 0)
     if (carried > 0) this.carriedRate = carried
     else if (!this.pathBound) this.carriedRate = Number.POSITIVE_INFINITY
+    // A path carries at least what it delivered.
+    if (this.pathBound && this.deliveredRate > this.carriedRate) this.carriedRate = this.deliveredRate
     this.recentRoundTrip = this.recentRoundTrips.best(now - this.leastRoundTrip - this.reportGap, this.leastRoundTrip)
   }
 
@@ -228,20 +242,30 @@ class PathEstimate {
     }
     if (!offersMore || !spaced || roundTrip <= this.leastRoundTrip + this.reportGap) return
     this.pathBound = true
+    this.boundAt = now
     this.tokens = 0
     this.tokensAt = now
   }
 
   /** The bytes per ms the path takes at the pace that drains the queue it holds: what it carries, less the share of the
-   *  latest round trip that is queue. */
-  private get paceRate(): number {
+   *  latest round trip that is queue, times the gain of the round trip `now` is in. */
+  private paceRate(now: number): number {
     const { leastRoundTrip, recentRoundTrip } = this
-    return recentRoundTrip > leastRoundTrip ? (this.carriedRate * leastRoundTrip) / recentRoundTrip : this.carriedRate
+    const drained =
+      recentRoundTrip > leastRoundTrip ? (this.carriedRate * leastRoundTrip) / recentRoundTrip : this.carriedRate
+    return drained * this.probeGain(now)
+  }
+
+  /** Of every `WIRE_PATH_PROBE_ROUNDS` round trips since the path became the limit, the last probes for more than the
+   *  path carries. */
+  private probeGain(now: number): number {
+    const round = Math.floor((now - this.boundAt) / (this.leastRoundTrip + this.reportGap)) % WIRE_PATH_PROBE_ROUNDS
+    return round === WIRE_PATH_PROBE_ROUNDS - 1 ? WIRE_PATH_PROBE_GAIN : 1
   }
 
   /** The tokens of the time since they were last counted, up to two segments, which go back to back. */
   private accrue(now: number): void {
-    this.tokens = Math.min(2 * WIRE_SEGMENT_BYTES, this.tokens + this.paceRate * (now - this.tokensAt))
+    this.tokens = Math.min(2 * WIRE_SEGMENT_BYTES, this.tokens + this.paceRate(now) * (now - this.tokensAt))
     this.tokensAt = now
   }
 

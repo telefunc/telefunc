@@ -254,6 +254,12 @@ export const WIRE_SEGMENT_BYTES = 1460
 /** What every TCP sender may have in flight before its first acknowledgement, 10 segments: the kernel under a wire
  *  ramps from it too, so a wire's path estimate starts there. */
 export const WIRE_INITIAL_WINDOW_BYTES = 10 * WIRE_SEGMENT_BYTES
+/** While the path is a wire's limit, one round trip in `WIRE_PATH_PROBE_ROUNDS` paces this much faster than the path
+ *  carries, to find a path that sped up. A cost bound: a probe queues at most a quarter of a round trip, which the bytes
+ *  the wire may have in flight allow and no more, and the pace drains it as any queue a report shows. */
+export const WIRE_PATH_PROBE_GAIN = 1.25
+/** See `WIRE_PATH_PROBE_GAIN`. A cost bound: the queue the probes add is a 32nd of a round trip on average. */
+export const WIRE_PATH_PROBE_ROUNDS = 8
 /** A server hands its socket data while its path holds less than the page takes in this many least round trips. */
 export const WIRE_SEND_AHEAD_ROUND_TRIPS = 4
 /** How long a data frame may wait in its wire's queues, as acknowledgements measure it, before its sender holds back. */
