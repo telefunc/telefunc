@@ -21,6 +21,7 @@ import {
 import { drizzle as drizzlePg } from 'drizzle-orm/node-postgres'
 import { boolean, except, integer, numeric, pgTable, serial, text, timestamp, union } from 'drizzle-orm/pg-core'
 import { drizzle as drizzlePglite } from 'drizzle-orm/pglite'
+import { drizzle as drizzlePostgresJs } from 'drizzle-orm/postgres-js'
 import type { OrmDriver } from './types.ts'
 
 const users = pgTable('users', {
@@ -48,10 +49,9 @@ const todosRelations = relations(todos, ({ one }) => ({
 }))
 const schema = { users, todos, tags, usersRelations, todosRelations }
 
-function createDrizzle(client: unknown, kind: 'pg' | 'pglite'): OrmDriver {
-  const db = (
-    kind === 'pg' ? drizzlePg({ client: client as never, schema }) : drizzlePglite({ client: client as never, schema })
-  ) as any
+function createDrizzle(client: unknown, kind: 'pg' | 'pglite' | 'postgres-js'): OrmDriver {
+  const connect = { pg: drizzlePg, pglite: drizzlePglite, 'postgres-js': drizzlePostgresJs }[kind]
+  const db = connect({ client: client as never, schema }) as any
   return {
     reads: {
       byUser: ({ user }) => db.select().from(todos).where(eq(todos.userId, user)).orderBy(todos.id),

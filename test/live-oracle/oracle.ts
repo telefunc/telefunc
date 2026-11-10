@@ -2,7 +2,9 @@
 // without an invalidation is a miss (exit 1). Extra invalidations (refetches that return the same result) are reported.
 //
 //   ORM=drizzle|kysely|prisma DB=pglite|pg PG_PORT=<port> PG_DATABASE=postgres SEED=1 STEPS=300 CHURN=1 SERVERS=2
-//   SHAPES=byUser,recent node oracle.ts
+//   SHAPES=byUser,recent DRIVER=pg|postgres-js node oracle.ts
+//
+// DRIVER=postgres-js (with ORM=drizzle DB=pg): postgres.js instead of `pg`.
 //
 // SERVERS=2 (pooled Postgres): the live reads are on one server, the writes on another, connected by a transport that
 // delivers out of order and twice.
@@ -13,6 +15,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { PGlite } from '@electric-sql/pglite'
 import { withLiveQueries } from '@telefunc/live'
 import pg from 'pg'
+import postgres from 'postgres'
 import { createDrizzle } from './orms/drizzle.ts'
 import { createKysely } from './orms/kysely.ts'
 import { createPrisma } from './orms/prisma.ts'
@@ -21,6 +24,7 @@ import { seed, USERS } from './schema.ts'
 
 const ORM = process.env.ORM ?? 'drizzle'
 const DB = process.env.DB ?? 'pglite'
+const DRIVER = process.env.DRIVER ?? 'pg'
 const SEED = Number(process.env.SEED ?? 1)
 const STEPS = Number(process.env.STEPS ?? 300)
 const CHURN = process.env.CHURN === '1' && DB !== 'pglite'
@@ -90,6 +94,29 @@ pg.Client.prototype.query = function (this: pg.Client, ...args: unknown[]) {
     .finally(() => inFlight--)
 } as never
 
+/** The same for postgres.js, on its query class: after `withLiveQueries()` patched it, so that a late read reaches
+ *  `@telefunc/live` late too. */
+function countQueries(sql: postgres.Sql): void {
+  const prototype = Object.getPrototypeOf(sql.unsafe(''))
+  const handle = prototype.handle
+  prototype.handle = function (this: any) {
+    if (this.executed) return handle.call(this)
+    const handled = handle.call(this)
+    inFlight++
+    const answered = () => inFlight--
+    Promise.prototype.then.call(this, answered, answered)
+    if ((store.getStore() as Record<symbol, unknown> | undefined)?.[LATE]) {
+      const handler = this.handler
+      this.handler = (query: any) => {
+        const resolve = query.resolve
+        query.resolve = (result: unknown) => setTimeout(() => resolve(result), 10)
+        handler(query)
+      }
+    }
+    return handled
+  }
+}
+
 async function queriesAnswered(): Promise<void> {
   do await new Promise((resolve) => setImmediate(resolve))
   while (inFlight > 0)
@@ -119,9 +146,26 @@ async function connect(): Promise<{
   const admin = new pg.Client({ connectionString: url })
   await admin.connect()
   await admin.query(seed(random))
+  const transport = SERVERS === 2 ? new UnreliableTransport() : undefined
+  if (DRIVER === 'postgres-js') {
+    const connectSql = () => withLiveQueries(postgres(url, { max: 8, onnotice: () => {} }), { transport })
+    const sql = connectSql()
+    const writerSql = SERVERS === 2 ? connectSql() : sql
+    countQueries(sql)
+    const driver = createDrizzle(sql, 'postgres-js')
+    return {
+      driver,
+      writer: SERVERS === 2 ? createDrizzle(writerSql, 'postgres-js') : driver,
+      query: async (text) => (await admin.query(text)).rows,
+      close: async () => {
+        await sql.end()
+        if (writerSql !== sql) await writerSql.end()
+        await admin.end()
+      },
+    }
+  }
   const create = (pool: pg.Pool) =>
     ORM === 'prisma' ? createPrisma(pool) : ORM === 'kysely' ? createKysely(pool, 'pg') : createDrizzle(pool, 'pg')
-  const transport = SERVERS === 2 ? new UnreliableTransport() : undefined
   const pool = withLiveQueries(new pg.Pool({ connectionString: url, max: 8 }), { transport })
   const writerPool =
     SERVERS === 2 ? withLiveQueries(new pg.Pool({ connectionString: url, max: 8 }), { transport }) : pool

@@ -7,13 +7,18 @@ import './extension.js'
 import { assertUsage } from './assert.js'
 import { capturePg, type PgClient, type PgPool } from './capture/pg.js'
 import { capturePglite, type Pglite } from './capture/pglite.js'
+import { capturePostgresJs, isPostgresJs, type PostgresJs } from './capture/postgresJs.js'
 import { LiveDatabase, type LiveQueriesOptions } from './liveDatabase.js'
 
 /** Makes the queries your telefunctions run through `database` live: a client watching a telefunction's result
  *  refetches it when a committed write changes what it read. Wrap the database before creating the ORM on it. */
-function withLiveQueries<T extends PgPool | PgClient | Pglite>(database: T, options: LiveQueriesOptions = {}): T {
+function withLiveQueries<T extends PgPool | PgClient | Pglite | PostgresJs>(
+  database: T,
+  options: LiveQueriesOptions = {},
+): T {
   const live = new LiveDatabase(options)
-  if ('transaction' in database && 'exec' in database) capturePglite(database as Pglite, live)
+  if (isPostgresJs(database)) capturePostgresJs(database, live)
+  else if ('transaction' in database && 'exec' in database) capturePglite(database as Pglite, live)
   else {
     assertUsage(
       !('totalCount' in database) || database.totalCount === 0,
