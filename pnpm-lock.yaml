@@ -331,6 +331,9 @@ importers:
       '@electric-sql/pglite':
         specifier: 0.5.16
         version: 0.5.16
+      '@types/node':
+        specifier: ^24.0.4
+        version: 24.0.10
       '@types/pg':
         specifier: ^8.15.6
         version: 8.23.1

@@ -221,7 +221,8 @@ for (const shape of Object.keys(driver.reads).filter((s) => !SHAPES || SHAPES.in
     subscribers.push({ shape, args, result: '', invalidated: false, stop: () => {} })
   }
 }
-for (const sub of subscribers) await subscribe(sub)
+// All at once, as clients do: more calls than the pool has connections, so some wait for one.
+await Promise.all(subscribers.map((sub) => subscribe(sub)))
 
 type Counts = { invalidations: number; changes: number; extra: number; missed: number }
 const byShape = new Map<string, Counts>()
@@ -247,6 +248,7 @@ for (let step = 0; step < STEPS; step++) {
   // Lets the transport deliver what the write published.
   await queriesAnswered()
   for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve))
+  const stale: Subscriber[] = []
   for (const sub of subscribers) {
     const now = canonical(sub.shape, await driver.reads[sub.shape]!(sub.args))
     const changed = now !== sub.result
@@ -261,8 +263,9 @@ for (let step = 0; step < STEPS; step++) {
         `step ${step} ${write}(${JSON.stringify(args)}) → ${sub.shape}(${JSON.stringify(sub.args)})\n  before ${sub.result}\n  after  ${now}`,
       )
     }
-    if (changed || sub.invalidated) await subscribe(sub)
+    if (changed || sub.invalidated) stale.push(sub)
   }
+  await Promise.all(stale.map((sub) => subscribe(sub)))
 }
 
 for (const sub of subscribers) sub.stop()

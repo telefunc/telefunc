@@ -44,6 +44,7 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.16",
+    "@types/node": "^24.0.4",
     "@types/pg": "^8.15.6",
     "pg": "^8.23.1",
     "telefunc": "workspace:*",

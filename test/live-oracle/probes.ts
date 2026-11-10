@@ -4,6 +4,7 @@
 //
 // Probes patch the package's built classes; their methods are private to TypeScript only.
 
+import { AsyncResource } from 'node:async_hooks'
 import { LiveDatabase } from '../../packages/live/dist/liveDatabase.js'
 import { LiveRead } from '../../packages/live/dist/match/liveRead.js'
 import { Tally } from '../../packages/live/dist/match/tally.js'
@@ -73,6 +74,10 @@ const probes: Record<string, () => void> = {
         return original.call(this, alias, undefined, now, ...rest)
       }
     }
+  },
+  /** A call waiting for a pool's connection runs its statements in the call of whoever freed one. */
+  'pool-context'() {
+    AsyncResource.bind = ((callback: unknown) => callback) as typeof AsyncResource.bind
   },
   /** A group the read returned is forgotten when the counts, taken after the read, no longer have it. */
   'tally-view'() {

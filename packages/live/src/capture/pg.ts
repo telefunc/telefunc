@@ -1,6 +1,7 @@
 export { capturePg }
 export type { PgPool, PgClient }
 
+import { AsyncResource } from 'node:async_hooks'
 import { MAX_RESULT_ROWS, type FollowUp, type LiveDatabase, type Statement } from '../liveDatabase.js'
 import { takeHiddenFields, takeHiddenValues } from './hiddenColumns.js'
 import { HIDDEN_PREFIX } from './statement.js'
@@ -10,7 +11,11 @@ type PgQueryConfig = { text: string; values?: unknown[]; name?: string; rowMode?
 type PgResult = { rows: unknown[]; fields: { name: string }[]; [key: string]: unknown }
 type PgCallback = (err: Error | null, result?: PgResult | PgResult[]) => void
 type PgClient = { query: (...args: any[]) => any }
-type PgPool = { on(event: 'connect', listener: (client: PgClient) => void): unknown; totalCount: number }
+type PgPool = {
+  on(event: 'connect', listener: (client: PgClient) => void): unknown
+  connect: (callback?: (...args: any[]) => void) => any
+  totalCount: number
+}
 /** A `pg-cursor` (Prisma reads and writes through one), or another object `pg` submits. */
 type Submittable = {
   submit: (connection: unknown) => void
@@ -27,8 +32,17 @@ const CAPTURED = Symbol.for('@telefunc/live/captured')
 
 /** Captures every statement of a `pg.Pool` (each of its clients) or a `pg.Client`. */
 function capturePg(database: PgPool | PgClient, live: LiveDatabase): void {
-  if ('totalCount' in database) database.on('connect', (client) => captureClient(client, live))
-  else captureClient(database, live)
+  if (!('totalCount' in database)) return captureClient(database, live)
+  database.on('connect', (client) => captureClient(client, live))
+  keepCallerContext(database)
+}
+
+/** A waiting `connect(callback)` (each `pool.query()` makes one) is called back by whoever frees a client: without
+ *  this, its statements would run in that caller's telefunction call, and its reads would be watched for the wrong
+ *  client. */
+function keepCallerContext(pool: PgPool): void {
+  const connect = pool.connect.bind(pool)
+  pool.connect = (callback) => (callback ? connect(AsyncResource.bind(callback)) : connect())
 }
 
 function captureClient(client: PgClient, live: LiveDatabase): void {
