@@ -47,6 +47,8 @@ function createDrizzle(client: unknown, kind: 'pg' | 'pglite'): OrmDriver {
           .where(eq(todos.userId, user))
           .orderBy(desc(todos.priority))
           .limit(2),
+      firstTexts: () =>
+        db.select({ id: todos.id, text: todos.text }).from(todos).orderBy(todos.text, todos.id).limit(3),
       openPage: () =>
         db
           .select({ id: todos.id, text: todos.text })

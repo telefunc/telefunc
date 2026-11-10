@@ -1,7 +1,8 @@
 // Differential oracle for @telefunc/live: after every write, each live read is run again; a result that changed
 // without an invalidation is a miss (exit 1). Extra invalidations (refetches that return the same result) are reported.
 //
-//   ORM=drizzle|kysely|prisma DB=pglite|pg PG_PORT=<port> SEED=1 STEPS=300 CHURN=1 SERVERS=2 SHAPES=byUser,recent node oracle.ts
+//   ORM=drizzle|kysely|prisma DB=pglite|pg PG_PORT=<port> PG_DATABASE=postgres SEED=1 STEPS=300 CHURN=1 SERVERS=2
+//   SHAPES=byUser,recent node oracle.ts
 //
 // SERVERS=2 (pooled Postgres): the live reads are on one server, the writes on another, connected by a transport that
 // delivers out of order and twice.
@@ -66,6 +67,22 @@ class UnreliableTransport {
   }
 }
 
+const telefuncGlobals = (globalThis as any)._telefunc
+const store: AsyncLocalStorage<object> = (telefuncGlobals['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
+
+// A racing read's rows reach the app 10 ms late, so that the write racing it can commit after the read's snapshot
+// and be announced before the read's result is known.
+const LATE = Symbol('late')
+const pgQuery = pg.Client.prototype.query as (...args: unknown[]) => unknown
+pg.Client.prototype.query = function (this: pg.Client, ...args: unknown[]) {
+  const result = pgQuery.apply(this, args)
+  if (!(store.getStore() as Record<symbol, unknown> | undefined)?.[LATE] || !(result instanceof Promise)) return result
+  return result.then(async (rows) => {
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    return rows
+  })
+} as never
+
 const { driver, writer, query, close } = await connect()
 
 async function connect(): Promise<{
@@ -86,7 +103,7 @@ async function connect(): Promise<{
       close: () => pglite.close(),
     }
   }
-  const url = `postgres://postgres:postgres@127.0.0.1:${process.env.PG_PORT}/postgres`
+  const url = `postgres://postgres:postgres@127.0.0.1:${process.env.PG_PORT}/${process.env.PG_DATABASE ?? 'postgres'}`
   const admin = new pg.Client({ connectionString: url })
   await admin.connect()
   await admin.query(seed(random))
@@ -113,16 +130,16 @@ async function connect(): Promise<{
 
 // ── Telefunction calls ──
 
-const telefuncGlobals = (globalThis as any)._telefunc
-const store: AsyncLocalStorage<object> = (telefuncGlobals['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
-
 type Subscriber = { shape: string; args: ReadArgs; result: string; invalidated: boolean; stop: () => void }
 
-async function subscribe(sub: Subscriber): Promise<void> {
+async function subscribe(sub: Subscriber, late = false): Promise<void> {
   sub.stop()
   sub.invalidated = false
   const closing: (() => void)[] = []
-  const context: Record<symbol, unknown> = { [REQUEST_CONTEXT]: { onClose: (cb: () => void) => closing.push(cb) } }
+  const context: Record<symbol, unknown> = {
+    [REQUEST_CONTEXT]: { onClose: (cb: () => void) => closing.push(cb) },
+    [LATE]: late,
+  }
   // A telefunction is an async function: the query runs (and is awaited) inside its call.
   const result = await store.run(context, async () => await driver.reads[sub.shape]!(sub.args))
   sub.result = canonical(sub.shape, result)
@@ -165,7 +182,7 @@ for (let step = 0; step < STEPS; step++) {
   const args = await writeArgs()
   const racing = CHURN && random() < 0.3 ? pick(subscribers) : undefined
   try {
-    if (racing) await Promise.all([subscribe(racing), writer.writes[write]!(args)])
+    if (racing) await Promise.all([subscribe(racing, true), writer.writes[write]!(args)])
     else await writer.writes[write]!(args)
   } catch (err) {
     // A write the data doesn't allow (a deleted row's foreign key): it changed nothing.
@@ -235,7 +252,8 @@ async function writeArgs(): Promise<WriteArgs> {
     user: users.length ? pick(users) : 1,
     otherUser: users.length ? pick(users) : 1,
     value,
-    text: `${'abc'[value % 3]}${value}`,
+    // Mixed case: Postgres sorts it by the database's collation, unlike JavaScript.
+    text: `${'abcAB'[value % 5]}${value}`,
     date: new Date(Date.UTC(2026, 10, 10, 8, 0, value)),
   }
 }

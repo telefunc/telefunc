@@ -23,6 +23,7 @@ function createKysely(client: any, kind: 'pg' | 'pglite'): OrmDriver {
   return {
     reads: {
       byUser: ({ user }) => db.selectFrom('todos').selectAll().where('user_id', '=', user).orderBy('id').execute(),
+      firstTexts: () => db.selectFrom('todos').select(['id', 'text']).orderBy('text').orderBy('id').limit(3).execute(),
       recent: ({ user }) =>
         db
           .selectFrom('todos')
@@ -187,14 +188,19 @@ function createKysely(client: any, kind: 'pg' | 'pglite'): OrmDriver {
           .catch(() => {}),
       savepointRollback: async ({ todo, user, text }) => {
         const tx = await db.startTransaction().execute()
-        await tx.updateTable('todos').set({ text }).where('id', '=', todo).execute()
-        const sp = await tx.savepoint('sp1').execute()
-        await sp
-          .insertInto('todos')
-          .values({ user_id: user, text: `${text}!` })
-          .execute()
-        await sp.rollbackToSavepoint('sp1').execute()
-        await tx.commit().execute()
+        try {
+          await tx.updateTable('todos').set({ text }).where('id', '=', todo).execute()
+          const sp = await tx.savepoint('sp1').execute()
+          await sp
+            .insertInto('todos')
+            .values({ user_id: user, text: `${text}!` })
+            .execute()
+          await sp.rollbackToSavepoint('sp1').execute()
+          await tx.commit().execute()
+        } catch (err) {
+          await tx.rollback().execute()
+          throw err
+        }
       },
       insertSelect: ({ user }) =>
         db
