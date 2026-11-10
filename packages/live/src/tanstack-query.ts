@@ -4,11 +4,14 @@ import { hashKey, type QueryClient, type QueryFunctionContext, type QueryKey } f
 import { withContext } from 'telefunc/client'
 import { assertUsage } from './assert.js'
 import type { Live } from './live.js'
+import { Refetcher } from './refetcher.js'
 import { closeSubscription, subscriptionOf, type Subscription } from './wire/shared.js'
 
-/** The `Live` values of one `QueryClient`'s live queries, by `hashKey(queryKey)`, and how to stop watching its cache.
- *  Kept per client, not per `live()` call: `queryFn: live(onGetTodos)` makes a new function on each render. */
-type Registry = { values: Map<string, Live<unknown>>; stopWatchingCache: (() => void) | undefined }
+/** The live queries of one `QueryClient`, by `hashKey(queryKey)`, and how to stop watching its cache. Kept per
+ *  client, not per `live()` call: `queryFn: live(onGetTodos)` makes a new function on each render. */
+type Registry = { queries: Map<string, Watched>; stopWatchingCache: (() => void) | undefined }
+/** A query's `Live` (holding it keeps its channel open) and when to refetch it. */
+type Watched = { value: Live<unknown> | undefined; refetcher: Refetcher }
 const registries = new WeakMap<QueryClient, Registry>()
 
 /**
@@ -52,16 +55,23 @@ function live<T, TArgs extends unknown[]>(
 function bind(client: QueryClient, queryKey: QueryKey, value: Live<unknown>, subscription: Subscription): void {
   const registry = registryOf(client)
   const hash = hashKey(queryKey)
-  closeSubscription(registry.values.get(hash))
-  registry.values.set(hash, value)
-  // `cancelRefetch`: a value going stale while it is being fetched again restarts the fetch.
-  subscription.onStale(() => void client.invalidateQueries({ queryKey, exact: true }, { cancelRefetch: true }))
+  let watched = registry.queries.get(hash)
+  if (!watched) {
+    // A fetch running when the value goes stale isn't cancelled: one going stale while it runs refetches after it.
+    const refetch = () => client.invalidateQueries({ queryKey, exact: true }, { cancelRefetch: false })
+    watched = { value: undefined, refetcher: new Refetcher(refetch) }
+    registry.queries.set(hash, watched)
+  }
+  closeSubscription(watched.value)
+  watched.value = value
+  const { refetcher } = watched
+  subscription.onStale(() => refetcher.stale())
 }
 
 function registryOf(client: QueryClient): Registry {
   let registry = registries.get(client)
   if (!registry) {
-    registry = { values: new Map(), stopWatchingCache: undefined }
+    registry = { queries: new Map(), stopWatchingCache: undefined }
     registries.set(client, registry)
   }
   // A query leaving the cache (garbage-collected, removed) stops being watched; one merely unmounted stays live.
@@ -73,9 +83,11 @@ function registryOf(client: QueryClient): Registry {
 
 function unbind(registry: Registry, queryKey: QueryKey): void {
   const hash = hashKey(queryKey)
-  closeSubscription(registry.values.get(hash))
-  registry.values.delete(hash)
-  if (registry.values.size > 0) return
+  const watched = registry.queries.get(hash)
+  watched?.refetcher.stop()
+  closeSubscription(watched?.value)
+  registry.queries.delete(hash)
+  if (registry.queries.size > 0) return
   registry.stopWatchingCache?.()
   registry.stopWatchingCache = undefined
 }

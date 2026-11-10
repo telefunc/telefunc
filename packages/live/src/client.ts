@@ -2,11 +2,13 @@ export { watch }
 
 import { assertUsage } from './assert.js'
 import type { Live } from './live.js'
+import { Refetcher } from './refetcher.js'
 import { closeSubscription, subscriptionOf } from './wire/shared.js'
 
 /**
  * Calls `telefunction(...args)`, gives its value to `onData`, and calls it again each time the value goes stale on the
- * server. At most one call runs at a time. Returns `stop`.
+ * server. At most one call runs at a time, and a value that keeps changing is fetched again at most every 100 ms.
+ * Returns `stop`.
  *
  * ```ts
  * const stop = watch(onGetTodos, [userId], (todos) => render(todos))
@@ -24,25 +26,12 @@ function watch<T, TArgs extends unknown[]>(
   // The value watched now: holding it keeps its channel open.
   let current: Live<T> | undefined
   let stopped = false
-  let running = false
-  let staleWhileRunning = false
-  void refetch()
+  const refetcher = new Refetcher(fetchOnce)
+  refetcher.stale()
   return () => {
     stopped = true
+    refetcher.stop()
     closeSubscription(current)
-  }
-
-  async function refetch(): Promise<void> {
-    if (running) {
-      staleWhileRunning = true
-      return
-    }
-    running = true
-    do {
-      staleWhileRunning = false
-      await fetchOnce()
-    } while (staleWhileRunning && !stopped)
-    running = false
   }
 
   async function fetchOnce(): Promise<void> {
@@ -61,7 +50,7 @@ function watch<T, TArgs extends unknown[]>(
     }
     closeSubscription(current)
     current = live
-    subscription.onStale(() => void refetch())
+    subscription.onStale(() => refetcher.stale())
     onData(live.data)
   }
 }
