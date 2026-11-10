@@ -74,8 +74,9 @@ async function kyselyReads() {
 }
 
 // ── Prisma 8 ──
-declare const prisma: {
-  orm: { public: { Todo: Collection<any, 'Todo', Todo> } }
+type PrismaModels = { orm: { public: { Todo: Collection<any, 'Todo', Todo> } } }
+declare const prisma: PrismaModels & {
+  transaction<R>(run: (tx: PrismaModels) => PromiseLike<R>): Promise<R>
   contract: { roots: Record<string, { model: string; namespace: string }> }
 }
 const pdb = livePrisma(prisma, pool)
@@ -89,6 +90,35 @@ async function prismaReads() {
     .live()
   // This stand-in client has no contract types, so a selected column's type is unknown.
   same<typeof picked, Live<{ id: unknown; text: unknown }[]>>(true)
+}
+// Every step that returns a collection keeps `.live()`, with the rows Prisma gives that step.
+async function prismaSteps() {
+  const { Todo } = pdb.orm.public
+  const ordered = await Todo.orderBy((t: any) => t.id.asc()).live()
+  same<typeof ordered, Live<Todo[]>>(true)
+  const paged = await Todo.orderBy((t: any) => t.id.asc())
+    .offset(10)
+    .limit(5)
+    .live()
+  same<typeof paged, Live<Todo[]>>(true)
+  const distinct = await Todo.distinct('text').live()
+  same<typeof distinct, Live<Todo[]>>(true)
+  const after = await Todo.orderBy((t: any) => t.id.asc())
+    .cursor({ id: 1 } as never)
+    .live()
+  same<typeof after, Live<Todo[]>>(true)
+  // The stand-in contract has no relations, so `include()` adds none here.
+  const included = await Todo.include('tags' as never).live()
+  same<typeof included, Live<Todo[]>>(true)
+  const selected = await Todo.select('id').live()
+  same<typeof selected, Live<{ id: unknown }[]>>(true)
+  const picked = await Todo.where({ userId: 1 } as never)
+    .select('id', 'text')
+    .limit(5)
+    .live()
+  same<typeof picked, Live<{ id: unknown; text: unknown }[]>>(true)
+  const inTransaction = await pdb.transaction((tx) => tx.orm.public.Todo.where({ userId: 1 } as never).live())
+  same<typeof inTransaction, Live<Todo[]>>(true)
 }
 const unwrappedPrisma = postgres({ contract: contractFromJson({}), pg: pool })
 const wrappedPrisma = livePrisma(unwrappedPrisma, pool)
@@ -123,4 +153,4 @@ const stop: () => void = watch(onGetTodos, [1], (rows) => same<typeof rows, Todo
 // @ts-expect-error Forgetting `.live()`.
 watch(onGetTodosPlain, [1], () => {})
 
-void [drizzleReads, kyselyReads, prismaReads, prismaScope, stop]
+void [drizzleReads, kyselyReads, prismaReads, prismaSteps, prismaScope, stop]

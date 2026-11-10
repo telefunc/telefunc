@@ -1,8 +1,15 @@
 export { livePrisma }
 export type { LivePrisma }
 
-import type { CollectionContext, CollectionRowOf, HasRow } from '@prisma/orm-postgres/orm-client'
-import type { PostgresClient } from '@prisma/orm-postgres/runtime'
+import type {
+  Collection,
+  CollectionContext,
+  CollectionRowOf,
+  CollectionTypeStateOf,
+  DefaultModelRow,
+  HasRow,
+  HasTypeState,
+} from '@prisma/orm-postgres/orm-client'
 import { assertUsage } from './assert.js'
 import { isDatabaseClient, liveDatabaseOf, type DatabaseClient } from './database.js'
 import type { Live } from './live.js'
@@ -12,40 +19,53 @@ import { readLive } from './liveQuery.js'
 type LiveMethod = {
   /** Runs the query like `all()` does, and also makes its result live: the client fetches it again when a committed
    *  write changes what it read. */
-  live<Self extends HasRow>(this: Self & Wrapped<Self>): Promise<Live<CollectionRowOf<Self>[]>>
+  live<Self extends HasRow>(this: Self): Promise<Live<CollectionRowOf<Self>[]>>
 }
 
-// Prisma's collection class isn't exported, so its type can't take a method. `livePrisma()` adds `live()` to each
-// model's collection, and the steps that return it (`limit()`, `include()`, …) keep it. `select()` returns a new
-// collection type; `where()` and `orderBy()` mark theirs with `HasWhere` and `HasOrderBy`, which carry `live()`.
-// Those are Prisma's own, on every client: what every collection does carry is its contract's type, and
-// `livePrisma()` adds a mark to it, so `live()` type-checks only on the collections of a wrapped client.
-
-declare const LIVE_CONTRACT: unique symbol
-/** The mark on the contract of a client wrapped by `livePrisma()`. It exists in types only. */
-type LiveContract = { readonly [LIVE_CONTRACT]: true }
-type Wrapped<Self> = Self extends { readonly ctx: CollectionContext<infer TContract> }
-  ? TContract extends LiveContract
-    ? unknown
-    : 'live() needs a client wrapped by livePrisma(): livePrisma(db, pool)'
-  : unknown
-
-declare module '@prisma/orm-postgres/orm-client' {
-  interface HasWhere extends LiveMethod {}
-  interface HasOrderBy extends LiveMethod {}
-}
+// Prisma's collection class isn't exported, so its type can't take a method, and an interface it implements can't
+// either: a class's type doesn't get what is merged into such an interface. `livePrisma()` gives each model's
+// collection `live()`; the steps that return the collection they're called on (`where()`, `limit()`, `include()`, …)
+// keep it, and `select()`, which returns a new collection type, is retyped to keep it too. `variant()` isn't: the rows
+// it returns are typed by Prisma types the package doesn't export.
 
 type PrismaClient = { orm: object; contract: { roots: Record<string, { model: string; namespace: string }> } }
 
-/** The client `livePrisma()` returns: the same, with its contract marked and `.live()` on each model's collection. */
-type LivePrisma<TDb extends PrismaClient> = WithLiveModels<
-  TDb extends PostgresClient<infer TContract, infer TCollections>
-    ? PostgresClient<TContract & LiveContract, TCollections>
-    : TDb
->
-type WithLiveModels<TDb> = TDb extends { orm: infer Orm }
-  ? TDb & { orm: { [Ns in keyof Orm]: { [Model in keyof Orm[Ns]]: Orm[Ns][Model] & LiveMethod } } }
-  : TDb
+/** The client `livePrisma()` returns: the same, with `.live()` at the end of its models' collections, its
+ *  transactions' too. */
+type LivePrisma<TDb extends PrismaClient> = WithLiveModels<TDb>
+type WithLiveModels<T> = T extends { orm: infer Orm }
+  ? Omit<T, 'orm' | 'transaction'> & { readonly orm: { [Ns in keyof Orm]: LiveModels<Orm[Ns]> } } & (T extends {
+        transaction(run: (tx: infer Tx) => PromiseLike<any>): Promise<any>
+      }
+        ? { transaction<R>(run: (tx: WithLiveModels<Tx>) => PromiseLike<R>): Promise<R> }
+        : {})
+  : T
+type LiveModels<Models> = Models extends (...args: any[]) => any
+  ? Models
+  : { [Model in keyof Models]: Models[Model] extends HasRow ? LiveCollection<Models[Model]> : Models[Model] }
+
+/** A collection whose steps keep `live()`. */
+type LiveCollection<C> = Omit<C, 'select'> &
+  LiveMethod & {
+    select<Fields extends FieldsOf<C>>(...fields: Fields): LiveCollection<Picked<C, Fields[number]>>
+  }
+type FieldsOf<C> = C extends { select(...fields: infer Fields): unknown } ? Fields : never
+
+/** What `select(...fields)` returns, as Prisma types it: the collection with the model's `fields` and its included
+ *  relations. Spelled out because a generic method's result can't be read off its type for given arguments. */
+type Picked<C, Field> = C extends HasRow &
+  HasTypeState & { ctx: CollectionContext<infer Contract>; modelName: infer Model extends string }
+  ? Collection<
+      Contract,
+      Model,
+      Simplify<
+        Pick<DefaultModelRow<Contract, Model>, Field & keyof DefaultModelRow<Contract, Model>> &
+          Omit<CollectionRowOf<C>, keyof DefaultModelRow<Contract, Model>>
+      >,
+      CollectionTypeStateOf<C>
+    >
+  : never
+type Simplify<T> = { [K in keyof T]: T[K] }
 
 /**
  * Lets a collection read of `db` end with `.live()`: the client fetches it again when a committed write changes what
