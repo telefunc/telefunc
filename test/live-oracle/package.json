@@ -1,0 +1,17 @@
+{
+  "name": "live-oracle",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "oracle": "node oracle.ts"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.16",
+    "@prisma/orm-postgres": "8.0.0-rc.23",
+    "@telefunc/live": "workspace:*",
+    "drizzle-orm": "0.45.4",
+    "kysely": "0.29.8",
+    "pg": "^8.23.1",
+    "telefunc": "workspace:*"
+  }
+}
