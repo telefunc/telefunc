@@ -3,11 +3,14 @@
 //
 //   PG_PORT=<port> MODE=plain|live RATE=1000 READ_RATE=200 SECONDS=10 N=1000 FEED=0|1 node --expose-gc latency.ts
 //
+// DB_CPU_STAT=<the database container's cgroup cpu.stat>: also reports the cores Postgres used during the load.
+//
 // Each client watches its own user's latest todos, or with FEED=1 the latest todos of everyone (a public feed). A
 // client refetches when its read is invalidated, with at most one refetch in flight and one more queued, as `watch()`
 // does. Latency is measured from when a statement was due, so a saturated pool shows as queueing.
 
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { readFileSync } from 'node:fs'
 import { withLiveQueries } from '@telefunc/live'
 import { desc, eq, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/node-postgres'
@@ -67,9 +70,10 @@ async function call(read: () => Promise<unknown>) {
   const closing: (() => void)[] = []
   const context: Record<symbol, unknown> = { [REQUEST_CONTEXT]: { onClose: (cb: () => void) => closing.push(cb) } }
   await store.run(context, async () => await read())
+  const reads = context[LIVE_READS] as { onChange(cb: () => void): () => void } | undefined
+  if (MODE === 'live' && !reads) throw new Error('A live read ran outside its telefunction call')
   return {
-    watch: (onChange: () => void) =>
-      (context[LIVE_READS] as { onChange(cb: () => void): () => void } | undefined)?.onChange(onChange),
+    watch: (onChange: () => void) => reads?.onChange(onChange),
     close: () => closing.forEach((cb) => cb()),
   }
 }
@@ -80,9 +84,12 @@ let invalidations = 0
 let refetches = 0
 let refetchesInFlight = 0
 class Client {
+  private readonly user: number
   private inFlight = false
   private queued = false
-  constructor(private readonly user: number) {}
+  constructor(user: number) {
+    this.user = user
+  }
   async fetch(): Promise<void> {
     this.inFlight = true
     const { watch } = await call(() => latest(this.user))
@@ -175,10 +182,32 @@ async function openLoop(rate: number, run: (i: number) => Promise<void>): Promis
   return latencies
 }
 
+/** Postgres's CPU time (µs), commits and rows read so far. */
+async function databaseLoad(): Promise<{ cpu: number; commits: number; rows: number }> {
+  const stat = process.env.DB_CPU_STAT ? readFileSync(process.env.DB_CPU_STAT, 'utf8') : ''
+  const client = new pg.Client({ connectionString: url })
+  await client.connect()
+  const { rows } = await client.query(
+    `select xact_commit::text as commits, (tup_returned + tup_fetched)::text as rows
+     from pg_stat_database where datname = current_database()`,
+  )
+  await client.end()
+  return {
+    cpu: Number(/usage_usec (\d+)/.exec(stat)?.[1]),
+    commits: Number(rows[0].commits),
+    rows: Number(rows[0].rows),
+  }
+}
+
+const loadBefore = await databaseLoad()
 const loadStart = performance.now()
 const [writeLatencies, readLatencies] = await Promise.all([openLoop(RATE, write), openLoop(READ_RATE, read)])
 const loadSeconds = (performance.now() - loadStart) / 1000
 while (refetchesInFlight > 0) await new Promise((resolve) => setTimeout(resolve, 10))
+// Postgres publishes other sessions' counts within a second.
+await new Promise((resolve) => setTimeout(resolve, 1100))
+const loadAfter = await databaseLoad()
+const settledSeconds = (performance.now() - loadStart) / 1000
 
 const percentile = (values: number[], p: number) => {
   const sorted = [...values].sort((a, b) => a - b)
@@ -197,6 +226,9 @@ console.log(
     invalidationsPerSecond: Math.round(invalidations / loadSeconds),
     refetchesPerSecond: Math.round(refetches / loadSeconds),
     heapPerClientKB: Number(heapPerClientKB.toFixed(1)),
+    dbCores: Number(((loadAfter.cpu - loadBefore.cpu) / 1e6 / settledSeconds).toFixed(2)),
+    dbCommitsPerSecond: Math.round((loadAfter.commits - loadBefore.commits) / settledSeconds),
+    dbRowsPerSecond: Math.round((loadAfter.rows - loadBefore.rows) / settledSeconds),
     load: (await import('node:os')).loadavg()[0]!.toFixed(2),
   }),
 )
