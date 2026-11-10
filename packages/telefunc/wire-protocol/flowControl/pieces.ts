@@ -711,8 +711,8 @@ class SocketMessages {
   }
 }
 
-/** A whole frame of `bytes` that arrived at `at`, a data frame if `data`, as an announced message if `announced`. */
-type FrameArrival = { bytes: number; data: boolean; announced: boolean; at: number }
+/** A whole frame of `bytes` that arrived, a data frame if `data`, as an announced message if `announced`. */
+type FrameArrival = { bytes: number; data: boolean; announced: boolean }
 
 /** A piece that arrived and made its frame `whole`, a data frame if `data`, as an announced message if `announced`. */
 type PieceArrival = { whole: boolean; data: boolean; announced: boolean }
@@ -764,22 +764,25 @@ abstract class PieceReceiver implements AckScheduleOwner {
 
   protected abstract tookFrame(frame: FrameArrival): void
   protected abstract tookPiece(piece: PieceArrival): void
-  /** An ANNOUNCE that arrived at `at` closed an announcement. */
-  protected abstract tookClose(at: number): void
+  /** An ANNOUNCE closed an announcement. */
+  protected abstract tookClose(): void
   /** How long an acknowledgement waits after the newest arrival. */
   protected abstract ackWait(): number
 
-  /** A whole frame of `tag` and `bytes` arrived at `at`. Only a message's last frame dates the message: one
-   *  `'riding'` ahead of it is not dated, and came after its LENGTH if its tag doesn't fix its bytes. */
+  /** A whole frame of `tag` and `bytes` arrived at `at`. Only a message's last frame times an announced message: one
+   *  `'riding'` ahead of it doesn't, and came after its LENGTH if its tag doesn't fix its bytes. */
   arrived(tag: number, bytes: number, at: number, arrival: 'alone' | 'riding'): void {
     this.took += arrival === 'riding' ? bytes + lengthBytes(tag) : bytes
+    const data = isSequencedTag(tag)
+    this.date(data, at)
     const announced = arrival === 'alone' && this.paced(bytes, at)
-    this.tookFrame({ bytes, data: isSequencedTag(tag), announced, at })
+    this.tookFrame({ bytes, data, announced })
   }
 
   /** Takes an ANNOUNCE that arrived at `at`: one of 0 bytes opens an announcement; one naming its bytes closes it. */
   announce(bytes: number, at: number, floor = 0): void {
     this.took += ANNOUNCE_BYTES
+    this.date(false, at)
     if (this.announced === null) {
       assertProtocol(bytes === 0, 'ANNOUNCE of bytes with none announced')
       this.announced = 0
@@ -789,7 +792,7 @@ abstract class PieceReceiver implements AckScheduleOwner {
     }
     assertProtocol(bytes === this.announced, 'ANNOUNCE of other bytes than followed the one before')
     this.announced = null
-    this.tookClose(at)
+    this.tookClose()
   }
 
   /** The time by which the next announced message should arrive; 0 with no announcement open or no rate known. */
@@ -824,6 +827,7 @@ abstract class PieceReceiver implements AckScheduleOwner {
     if (this.received === 0) this.total = total
     assertProtocol(total === this.total && bytes <= total - this.received, 'PIECE not cut as its frame is')
     if (bytes === 0) {
+      this.date(false, at)
       this.probing = 2
       return null
     }
@@ -850,8 +854,10 @@ abstract class PieceReceiver implements AckScheduleOwner {
     return frame
   }
 
-  /** Records `at` as the newest arrival, and the newest data arrival if `data`; the next acknowledgement covers it. */
-  protected date(data: boolean, at: number): void {
+  /** Records `at` as the newest arrival, and the newest data arrival if `data`; the next acknowledgement covers it, and
+   *  says how long it held it. Every byte `took` counts is dated: the sender dates the newest byte an acknowledgement
+   *  covers by when it handed it, so one counted but not dated would read as arriving before it was handed. */
+  private date(data: boolean, at: number): void {
     this.newestAt = at
     if (data) this.newestDataAt = at
   }

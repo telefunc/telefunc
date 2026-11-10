@@ -19,8 +19,7 @@ class ServerPieceReceiver extends PieceReceiver {
     if (this.took - this.acknowledgedTook >= WIRE_SEND_ACK_MIN_BYTES) this.acknowledgeWithNext()
   }
 
-  protected tookFrame({ data, announced, at }: FrameArrival): void {
-    this.date(data, at)
+  protected tookFrame({ data, announced }: FrameArrival): void {
     this.acknowledgeTaken(data, announced)
   }
 
