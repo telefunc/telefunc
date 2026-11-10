@@ -295,9 +295,10 @@ for (let step = 0; step < STEPS; step++) {
     // A write the data doesn't allow (a deleted row's foreign key): it changed nothing.
     if (VERBOSE) console.log(`write ${write} failed: ${String(err).slice(0, 120)}`)
   }
-  // Lets the transport deliver what the write published.
   await queriesAnswered()
+  // Lets the transport deliver what the write published, then the server tell its clients.
   for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve))
+  await queriesAnswered()
   const stale: Subscriber[] = []
   for (const sub of subscribers) {
     const now = canonical(sub.shape, await driver.reads[sub.shape]!(sub.args))
@@ -344,7 +345,8 @@ for (let burst = 0; burst < BURSTS; burst++) {
   for (let i = 0; i < BURST_WRITES; i++) {
     const write = pick(writeNames)
     const args = await writeArgs()
-    await writer.writes[write]!(args).catch(() => {})
+    // A write the data doesn't allow changes nothing.
+    await Promise.resolve(writer.writes[write]!(args)).catch(() => {})
   }
   await settled()
   for (const sub of subscribers) {
