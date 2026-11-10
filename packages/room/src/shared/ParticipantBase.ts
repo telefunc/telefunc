@@ -1,5 +1,5 @@
 export { ParticipantBase }
-export type { ParticipantBaseOptions }
+export type { ParticipantBaseOptions, TrackStream }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import {
@@ -43,6 +43,9 @@ type ParticipantBaseOptions = {
 }
 
 /** The private-message inbox and the leave lifecycle, identical on server and client; flavors supply the transport. */
+/** A track of a member's on its way up: its stream's name, and whether a newer frame replaces an older one waiting. */
+type TrackStream = { name: string; lossy: boolean }
+
 abstract class ParticipantBase implements LocalParticipant {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
@@ -141,11 +144,11 @@ abstract class ParticipantBase implements LocalParticipant {
     return framed
   }
 
-  /** The stream a newer frame of this member's lossy `track` replaces an older one in on its way up; null if `track` is
-   *  reliable. */
-  protected lossyStreamOf(track: string | undefined): string | null {
+  /** The stream of this member's `track` on its way up: its frames go on a domain of their own (see telefunc's
+   *  `TAG.DOMAIN`), so no other track's loss delays them, and a newer frame of a lossy one replaces an older one. */
+  protected trackStreamOf(track: string | undefined): TrackStream {
     const key = track ?? DEFAULT_TRACK
-    return this.trackLossy.get(key) === true ? `${this.id}:${key}` : null
+    return { name: `${this.id}:${key}`, lossy: this.trackLossy.get(key) === true }
   }
 
   listen(callback: (data: unknown, from: Sender | null) => unknown, options?: ListenerOptions): () => void {
