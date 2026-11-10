@@ -356,6 +356,15 @@ const probes: Record<string, () => void> = {
       },
     })
   },
+  /** A tally keeps every count, however many changes add: it never re-anchors. */
+  'tally-anchor'() {
+    const of = Tally.of
+    Tally.of = function (...args: Parameters<typeof of>) {
+      const counted: any = of.apply(this, args)
+      if (counted) counted.maxCounts = Number.POSITIVE_INFINITY
+      return counted
+    }
+  },
   /** A cascade only reaches the groups the counts have. */
   'tally-cascade'() {
     const dropAll = tally.dropAll

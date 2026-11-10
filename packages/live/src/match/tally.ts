@@ -20,11 +20,19 @@ type Place = { group: string; entry: string; source: number; texts: (string | nu
 
 const UNKNOWN = TRUE | FALSE | NULL
 
+/** The fewest counts a tally may grow to before it re-anchors (`Tally.maxCounts`). */
+const MIN_MAX_COUNTS = 1_000
+
 /** The counts of a tally read, and what the read returned: decides whether a change can alter its result. */
 class Tally {
   private readonly shape: TallyShape
   private readonly operands: readonly OperandValue[]
   private readonly groups = new Map<string, Group>()
+  private counts = 0
+  /** Counts aren't dropped once down to 0: a change may be counted already (`Count`), so the count may be wrong. Past
+   *  this many, twice those the counts query gave (within `MIN_MAX_COUNTS` and `MAX_TALLY_ROWS`), the read goes stale
+   *  once, and its refetch counts afresh. */
+  private maxCounts = Number.POSITIVE_INFINITY
 
   /** `undefined` when the counts can't be keyed, or there are too many to keep. */
   static of(
@@ -43,6 +51,7 @@ class Tally {
       counted.lo += Number(count)
       counted.hi += Number(count)
     }
+    tally.maxCounts = Math.max(MIN_MAX_COUNTS, Math.min(2 * tally.counts, MAX_TALLY_ROWS))
     const { columns, groupColumns } = shape.sources[0]!
     const shownHidden = shape.rule.kind === 'set' ? columns.map((_, i) => i) : shape.rule.groupHidden
     for (const row of hiddenRows) {
@@ -95,6 +104,7 @@ class Tally {
         touched.push(after.group)
       }
     }
+    if (this.counts > this.maxCounts) return true
     return touched.some((group) => this.mayDiffer(this.groups.get(group)!))
   }
 
@@ -228,6 +238,7 @@ class Tally {
     if (!count) {
       count = { source, texts, lo: 0, hi: 0 }
       counts.set(entry, count)
+      this.counts++
     }
     return count
   }
