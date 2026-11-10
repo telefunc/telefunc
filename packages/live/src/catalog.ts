@@ -48,9 +48,15 @@ type Catalog = {
   /** User-defined functions: a statement calling one may read any table, and write any table when it's one of
    *  `writingFunctions`. */
   functions: Set<string>
-  /** The volatile functions in SQL or a procedural language: they may write any table. A function in C (`internal`
-   *  included: `uuid_generate_v4()`) is taken to compute a value. */
+  /** The functions in SQL or a procedural language: a write calling one, or firing a trigger, rule or default that
+   *  calls one, may write any table, whatever the function's volatility (a `STABLE` function's body may call a
+   *  volatile one). A function in C (`internal` included: `uuid_generate_v4()`) is taken to compute a value. */
   writingFunctions: Set<string>
+  /** The volatile `writingFunctions`: a read calling one may write any table. Postgres refuses a write in a `STABLE`
+   *  or `IMMUTABLE` function's own body, and a read calling one stays a read. */
+  volatileWritingFunctions: Set<string>
+  /** The functions `node` calls, with those their default arguments call: the caller evaluates those. */
+  calls(node: unknown): string[]
   /** The `search_path` of the session that loaded the catalog, which unqualified names resolve against while every
    *  session has it; `undefined` once a statement may have changed a session's (`LiveDatabase`). */
   searchPath: string[] | undefined
@@ -65,7 +71,7 @@ type CatalogRow = {
   searchPath: string[]
   serverVersion: number
   cOrdering: boolean
-  functions: [name: string, writing: boolean][]
+  functions: [name: string, writing: boolean, volatile: boolean, defaults: string | null][]
   tables: {
     schema: string
     name: string
@@ -88,8 +94,8 @@ type CatalogRow = {
     triggers: [type: number, language: string, source: string][] | null
     /** The events its rules fire on (`pg_rewrite.ev_type`). */
     rules: string[] | null
-    /** A column default calls one of `Catalog.writingFunctions`. */
-    callingDefault: boolean
+    /** The functions its column defaults call. */
+    defaultCalls: string[] | null
     referencedBy:
       | [table: string, columns: string[], parentColumns: string[], onDelete: string, onUpdate: string][]
       | null
@@ -98,7 +104,7 @@ type CatalogRow = {
 }
 
 /** Whether the function `p`, in language `l`, is one of `Catalog.writingFunctions`. */
-const WRITING = `p.provolatile = 'v' and l.lanname not in ('c', 'internal')`
+const WRITING = `l.lanname not in ('c', 'internal')`
 
 // One round trip: everything the matcher needs to know about the database's tables.
 const CATALOG_QUERY = `select json_build_object(
@@ -106,7 +112,8 @@ const CATALOG_QUERY = `select json_build_object(
   'searchPath', current_schemas(false),
   'serverVersion', current_setting('server_version_num')::int,
   'cOrdering', (select datlocprovider in ('c', 'b') and datcollate in ('C', 'POSIX') from pg_database where datname = current_database()),
-  'functions', (select coalesce(json_agg(json_build_array(p.proname, ${WRITING})), '[]') from pg_proc p
+  'functions', (select coalesce(json_agg(json_build_array(p.proname, ${WRITING}, p.provolatile = 'v',
+      pg_get_expr(p.proargdefaults, 0))), '[]') from pg_proc p
     join pg_namespace n on n.oid = p.pronamespace join pg_language l on l.oid = p.prolang
     where n.nspname not in ('pg_catalog', 'information_schema') and p.prorettype <> 'trigger'::regtype),
   'tables', (select coalesce(json_agg(json_build_object(
@@ -133,11 +140,10 @@ const CATALOG_QUERY = `select json_build_object(
       join pg_proc pr on pr.oid = tg.tgfoid join pg_language l on l.oid = pr.prolang
       where tg.tgrelid = c.oid and not tg.tgisinternal),
     'rules', (select json_agg(r.ev_type) from pg_rewrite r where r.ev_class = c.oid and r.ev_type <> '1'),
-    'callingDefault', exists (select from pg_attrdef d
+    'defaultCalls', (select json_agg(p.proname) from pg_attrdef d
       join pg_depend dp on dp.classid = 'pg_attrdef'::regclass and dp.objid = d.oid and dp.refclassid = 'pg_proc'::regclass
       join pg_proc p on p.oid = dp.refobjid join pg_namespace ns on ns.oid = p.pronamespace
-      join pg_language l on l.oid = p.prolang
-      where d.adrelid = c.oid and ${WRITING} and ns.nspname not in ('pg_catalog', 'information_schema')),
+      where d.adrelid = c.oid and ns.nspname not in ('pg_catalog', 'information_schema')),
     'referencedBy', (select json_agg(json_build_array(rn.nspname || '.' || rc.relname,
         (select json_agg(a.attname order by k.ord) from unnest(f.conkey) with ordinality k(attnum, ord)
           join pg_attribute a on a.attrelid = f.conrelid and a.attnum = k.attnum),
@@ -186,12 +192,38 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
     const found = tables.get(`${table.schemaname}.${table.relname}`)
     return found ? [found] : []
   }
+  const writingFunctions = new Set(row.functions.filter(([, writing]) => writing).map(([name]) => name))
+  const volatileWritingFunctions = new Set(
+    row.functions.filter(([, writing, volatile]) => writing && volatile).map(([name]) => name),
+  )
+  const defaultCalls = new Map<string, string[]>()
+  for (const [name, , , defaults] of row.functions) {
+    if (defaults === null) continue
+    const parsed = parseStatements(`SELECT ${defaults}`)
+    if (parsed) {
+      defaultCalls.set(name, [...(defaultCalls.get(name) ?? []), ...functionNamesIn(parsed)])
+      continue
+    }
+    // Defaults that don't parse may call anything.
+    writingFunctions.add(name)
+    volatileWritingFunctions.add(name)
+  }
+  /** `called`, with the functions their default arguments call, theirs too. */
+  const withDefaultCalls = (called: string[]): string[] => {
+    const all = new Set(called)
+    for (const name of all) for (const inner of defaultCalls.get(name) ?? []) all.add(inner)
+    return [...all]
+  }
   const catalog: Catalog = {
     database: row.database,
     serverVersion: row.serverVersion,
     tables,
     functions: new Set(row.functions.map(([name]) => name)),
-    writingFunctions: new Set(row.functions.filter(([, writing]) => writing).map(([name]) => name)),
+    writingFunctions,
+    volatileWritingFunctions,
+    calls(node) {
+      return withDefaultCalls(functionNamesIn(node))
+    },
     searchPath: row.searchPath,
     find(table) {
       const named = this.named(table)
@@ -251,11 +283,12 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
     const { alsoWrites } = table
     for (const [type, language, source] of t.triggers ?? []) {
       // A trigger resolves names with the `search_path` of the session that fires it: any schema's table may be meant.
-      const written = tablesWrittenByTrigger(language, source, anySchema, catalog.writingFunctions)
+      const written = tablesWrittenByTrigger(language, source, anySchema, catalog)
       for (const [bit, write] of TRIGGER_EVENTS) if (type & bit) alsoWrites[write] = union([alsoWrites[write], written])
     }
     for (const event of t.rules ?? []) alsoWrites[RULE_EVENTS[event]!] = 'all'
-    if (t.callingDefault) alsoWrites.insert = alsoWrites.update = 'all'
+    if (withDefaultCalls(t.defaultCalls ?? []).some((name) => catalog.writingFunctions.has(name)))
+      alsoWrites.insert = alsoWrites.update = 'all'
     // A write to a view writes its tables, or what its rules and `INSTEAD OF` triggers write.
     if (t.view) for (const write of WRITES_OF_ANY_KIND) alsoWrites[write] = 'all'
   }
@@ -277,11 +310,11 @@ function tablesWrittenByTrigger(
   language: string,
   source: string,
   named: (table: RangeVar) => Table[],
-  writingFunctions: Set<string>,
+  catalog: Catalog,
 ): TableSet {
   const statements = language === 'plpgsql' ? statementsOf(source) : null
   if (!statements) return 'all'
-  return union(statements.map((sql) => tablesWrittenBySql(sql, named, writingFunctions)))
+  return union(statements.map((sql) => tablesWrittenBySql(sql, named, catalog)))
 }
 
 /** The SQL a trigger runs, every expression as a `SELECT`; `null` when it runs SQL built at run time. */
@@ -304,10 +337,10 @@ function statementsOf(source: string): string[] | null {
   return dynamic ? null : statements
 }
 
-function tablesWrittenBySql(sql: string, named: (table: RangeVar) => Table[], writingFunctions: Set<string>): TableSet {
+function tablesWrittenBySql(sql: string, named: (table: RangeVar) => Table[], catalog: Catalog): TableSet {
   const statements = parseStatements(sql)
   if (!statements || statements.some((s) => !KNOWN_STATEMENTS.has(Object.keys(s)[0]!))) return 'all'
-  if (functionNamesIn(statements).some((name) => writingFunctions.has(name))) return 'all'
+  if (catalog.calls(statements).some((name) => catalog.writingFunctions.has(name))) return 'all'
   const written: Table[][] = []
   walk(statements, (key, value) => {
     if (WRITES.has(key)) written.push(named(value.relation))

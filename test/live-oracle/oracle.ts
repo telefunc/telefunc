@@ -333,8 +333,9 @@ const count = (map: Map<string, Counts>, key: string) => {
 }
 const misses: string[] = []
 const writeNames = Object.keys(driver.writes)
-/** After one of these, connections may differ (reads no longer share): they start halfway, so that sharing is checked. */
-const SESSION_WRITES = ['setPath', 'notesPath']
+/** After one of these, connections may differ (reads no longer share): they start halfway, so that sharing is checked.
+ *  `stampRead` calls a function of the app's, which may set anything. */
+const SESSION_WRITES = ['setPath', 'notesPath', 'stampRead']
 const writesBeforeHalf = writeNames.filter((name) => !SESSION_WRITES.includes(name))
 
 /** Writes that failed other than by the database's refusal. */

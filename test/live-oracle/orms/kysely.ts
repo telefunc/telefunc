@@ -211,6 +211,8 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
       eventLog: async () =>
         (await sql`select kind, count(*)::int as n from event_log group by kind order by kind`.execute(db)).rows,
       counters: async () => (await sql`select id, n from counters order by id`.execute(db)).rows,
+      labelled: () =>
+        db.selectFrom('todos').select('id').where(sql<boolean>`label_of(text) like 'A%'`).orderBy('id').execute(),
       measuresAtFloat: async () =>
         (await sql`select id from measures where value = ${String(2 ** 53)}::float8 order by id`.execute(db)).rows,
       measuresOffFloat: async () =>
@@ -369,6 +371,7 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
             .execute()
         }),
       resetEvents: () => sql`insert into resets default values`.execute(db),
+      stampRead: () => sql`select stamp()`.execute(db),
       // One text: the update names the table by the search_path the statement before it sets.
       notesPath: ({ value }) =>
         sql

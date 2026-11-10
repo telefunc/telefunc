@@ -58,6 +58,31 @@ const probes: Record<string, () => void> = {
       for (const table of this.catalog.tables.values()) for (const column of table.columns) column.orderableText = true
     }
   },
+  /** A write, and what it fires, is judged by the volatility of the functions it calls: a `STABLE` function counts
+   *  as computing a value. */
+  'write-volatility'() {
+    catalogRow((row) => {
+      row.functions = row.functions.map(([name, writing, volatile, defaults]: any[]) => [
+        name,
+        writing && volatile,
+        volatile,
+        defaults,
+      ])
+    })
+  },
+  /** A read is judged by the language of the functions it calls, as a write is: a read calling a `STABLE` SQL helper
+   *  counts as a write, and its `.live()` fails. */
+  'read-language'() {
+    catalogRow((row) => {
+      row.functions = row.functions.map(([name, writing, , defaults]: any[]) => [name, writing, true, defaults])
+    })
+  },
+  /** A function's default arguments are taken to call nothing. */
+  'default-calls'() {
+    catalogRow((row) => {
+      row.functions = row.functions.map(([name, writing, volatile]: any[]) => [name, writing, volatile, null])
+    })
+  },
   /** A typed operand, a cast or a number, is compared with a column whatever its type, as if Postgres compared both
    *  as the column's type. */
   'operand-type'() {
@@ -246,6 +271,20 @@ const probes: Record<string, () => void> = {
       return dropAll.call(this, source, row).filter((key: string) => this.groups.get(key).counts.size > 0)
     }
   },
+}
+
+/** Changes the catalog as its query returns it (`CatalogRow`), before it's read. */
+function catalogRow(change: (row: any) => void) {
+  const loadCatalog = database.loadCatalog
+  database.loadCatalog = async function (query: (text: string) => Promise<string>) {
+    await loadCatalog.call(this, async (text: string) => {
+      const answer = await query(text)
+      if (!text.startsWith('select json_build_object(')) return answer
+      const row = JSON.parse(answer)
+      change(row)
+      return JSON.stringify(row)
+    })
+  }
 }
 
 type QueryBeforeCommit = { text: string; done(rows: unknown[][] | undefined): void }

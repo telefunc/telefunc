@@ -11,16 +11,7 @@ import {
   type Written,
 } from '../catalog.js'
 import { analyzeRead, type ReadShape } from '../match/readShape.js'
-import {
-  functionNamesIn,
-  parseStatements,
-  quote,
-  spliceBytes,
-  statementEnd,
-  topLevelFrom,
-  walk,
-  type Node,
-} from '../sql.js'
+import { parseStatements, quote, spliceBytes, statementEnd, topLevelFrom, walk, type Node } from '../sql.js'
 
 type TransactionAction = 'begin' | 'commit' | 'rollback' | 'savepoint' | 'release' | 'rollbackTo'
 
@@ -85,11 +76,14 @@ function planStatement(text: string, catalog: Catalog): Plan {
 /** `text` is set when the statement is the whole text, so that it can be rewritten. */
 function planOne(statement: Node, text: string | undefined, catalog: Catalog): Plan {
   const [kind, node] = Object.entries(statement)[0] as [string, Node]
-  const functions = functionNamesIn(node)
-  const writing = functions.some((name) => catalog.writingFunctions.has(name))
+  const functions = catalog.calls(node)
+  const writingCte = ((node.withClause?.ctes ?? []) as Node[]).some((c) => !c.CommonTableExpr.ctequery.SelectStmt)
+  // A read is judged by the volatility of what it calls as well (`Catalog.volatileWritingFunctions`).
+  const read = kind === 'SelectStmt' && !node.intoClause && !writingCte
+  const writers = read ? catalog.volatileWritingFunctions : catalog.writingFunctions
+  const writing = functions.some((name) => writers.has(name))
   // `set_config()` sets a setting of the session; so may a function of the app's that may write.
   const changesSession = writing || functions.includes('set_config')
-  const writingCte = ((node.withClause?.ctes ?? []) as Node[]).some((c) => !c.CommonTableExpr.ctequery.SelectStmt)
   if (changesSession || writingCte) {
     const tables = writing ? 'all' : writtenTables(node, catalog)
     return {

@@ -228,6 +228,8 @@ function createDrizzle(
       eventLog: () =>
         db.execute(sql`select kind, count(*)::int as n from event_log group by kind order by kind`).then(rowsOf),
       counters: () => db.execute(sql`select id, n from counters order by id`).then(rowsOf),
+      labelled: () =>
+        db.select({ id: todos.id }).from(todos).where(sql`label_of(${todos.text}) like 'A%'`).orderBy(todos.id),
       measuresAtFloat: () =>
         db.execute(sql`select id from measures where value = ${String(2 ** 53)}::float8 order by id`).then(rowsOf),
       measuresOffFloat: () =>
@@ -355,6 +357,7 @@ function createDrizzle(
             .where(eq(todos.id, todo))
         }),
       resetEvents: () => db.execute(sql`insert into resets default values`),
+      stampRead: () => db.execute(sql`select stamp()`),
       // One text: the update names the table by the search_path the statement before it sets.
       notesPath: ({ value }) =>
         db.execute(

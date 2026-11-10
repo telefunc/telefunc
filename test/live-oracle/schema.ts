@@ -10,7 +10,7 @@ drop table if exists tags, todos, users, deleted_todos, notes, tag_log, note_log
   resets, measures cascade;
 drop schema if exists tenant cascade;
 drop function if exists log_deleted_todo, log_tag, tag_added, log_note, note_bumped, next_event, settle_event,
-  event_inserted, empty_event_log;
+  event_inserted, empty_event_log, stamp, reset_stamped, label_of, settle_stably, measure_set;
 create table users (id serial primary key, name text not null, team int not null);
 create table todos (
   id serial primary key,
@@ -84,9 +84,28 @@ begin
   return null;
 end $$;
 create trigger resets_emptied after insert on resets for each statement execute function empty_event_log();
+-- A STABLE function whose default argument writes \`counters\`: the caller evaluates it. A trigger on \`resets\` calls
+-- it, and so does a read.
+create function stamp(n int default next_event()) returns int language sql stable as $$ select n $$;
+create function reset_stamped() returns trigger language plpgsql as $$
+begin
+  perform stamp();
+  return null;
+end $$;
+create trigger resets_stamped after insert on resets for each statement execute function reset_stamped();
+-- A STABLE helper a live read calls: the read stays a read.
+create function label_of(t text) returns text language sql stable as $$ select upper(t) $$;
 -- Whole numbers past a float8's precision: compared with a float8, they compare as float8s, rounded.
 create table measures (id int primary key, value numeric not null);
 insert into measures values (1, 9007199254740992), (2, 9007199254740994);
+-- A STABLE function whose body calls a writing one: a trigger on \`measures\` calls it, and writes \`settled\`.
+create function settle_stably() returns void language sql stable as $$ select settle_event() $$;
+create function measure_set() returns trigger language plpgsql as $$
+begin
+  perform settle_stably();
+  return null;
+end $$;
+create trigger measures_set after update on measures for each statement execute function measure_set();
 `
 
 function seed(random: () => number): string {

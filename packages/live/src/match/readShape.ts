@@ -3,7 +3,6 @@ export type { ReadShape, Alias, Join, Route, SortKey }
 
 import type { Catalog, Table, TableSet } from '../catalog.js'
 import {
-  functionNamesIn,
   isAggregateCall,
   names,
   parenthesizedAt,
@@ -240,7 +239,7 @@ function analyzeSelect(
     else readsEverything(analysis)
     scope.ctes.add(cte.CommonTableExpr.ctename)
   }
-  for (const name of functionNamesIn(stmt)) if (analysis.catalog.functions.has(name)) readsEverything(analysis)
+  for (const name of analysis.catalog.calls(stmt)) if (analysis.catalog.functions.has(name)) readsEverything(analysis)
 
   // This scope's own tables first: subqueries below derive their routes from them.
   const filters: Filter[] = []
