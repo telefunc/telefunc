@@ -2,6 +2,7 @@ export { capturePostgresJs, isPostgresJs }
 export type { PostgresJs }
 
 import type { FollowUp, LiveDatabase, Statement } from '../liveDatabase.js'
+import { copyRows } from '../sharedReads.js'
 import { takeHiddenFields, takeHiddenValues } from './hiddenColumns.js'
 import { HIDDEN_PREFIX } from './statement.js'
 
@@ -119,7 +120,12 @@ async function run(query: Query, { live, sql, connection = {} }: Target): Promis
     return query.reject(err as Error)
   }
   const known = textOf(query)
-  const statement = known && rewritten(query, known, live, connection)
+  let statement = known && rewritten(query, known, live, connection)
+  while (statement && statement.joined) {
+    const joined = await statement.joined
+    if (joined) return query.resolve(joined.result as Result)
+    statement = rewritten(query, known!, live, connection)
+  }
   // A template with helpers: its text is known once built.
   const opaque = known ? undefined : live.statementWithTextLater(connection)
   const sent = () => statement || opaque!.sent(query.string ?? '', query.parameters ?? [])
@@ -127,6 +133,7 @@ async function run(query: Query, { live, sql, connection = {} }: Target): Promis
   query.resolve = (result) => {
     const done = sent()
     const followUp = done.succeeded(takeHidden(query, result, done))
+    done.answered(result, copyResult)
     resolve(result)
     if (followUp) runFollowUp(sql, followUp)
   }
@@ -140,7 +147,8 @@ async function run(query: Query, { live, sql, connection = {} }: Target): Promis
 function rewritten(query: Query, known: { text: string; args: unknown[] }, live: LiveDatabase, connection: object) {
   // Rows reach the caller other than as the result: can't strip what the statement would add.
   const asWritten = Boolean(query.cursorFn || query.forEachFn || query.onlyDescribe || query.streaming)
-  const statement = live.statementFor(connection, known.text, known.args, !asWritten)
+  const sharing = asWritten ? undefined : { rowForm: `postgres.js:${query.isRaw || 'object'}` }
+  const statement = live.statementFor(connection, known.text, known.args, { rewrite: !asWritten, sharing })
   if (statement.text !== known.text) {
     query.strings = [statement.text]
     query.args = known.args
@@ -172,6 +180,17 @@ function takeHidden(query: Query, result: Result, statement: Statement): (string
   if (!statement.returnsRows) result.length = 0
   // `.raw()` rows hold buffers.
   return values.map((row) => row.map((v) => (v === null || typeof v === 'string' ? v : String(v))))
+}
+
+/** A copy of a result for a read that joined this one: postgres.js's own array, with its `count`, `columns`, …. */
+function copyResult(result: Result): Result {
+  const copy = new (result.constructor as new () => Result)()
+  for (const row of copyRows(result)) copy.push(row)
+  for (const key of Object.getOwnPropertyNames(result)) {
+    if (key !== 'length' && !/^\d+$/.test(key))
+      (copy as unknown as Record<string, unknown>)[key] = (result as unknown as Record<string, unknown>)[key]
+  }
+  return copy
 }
 
 function runFollowUp(sql: PostgresJs, { text, values, done }: FollowUp): void {

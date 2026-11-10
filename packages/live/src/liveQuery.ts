@@ -9,8 +9,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { getRawContext, REQUEST_CONTEXT } from 'telefunc'
 import { assertUsage } from './assert.js'
 import { LiveCell, type Live, type LiveSource } from './live.js'
-import type { LiveRead } from './match/liveRead.js'
-import type { Router } from './match/router.js'
+import type { WatchedRead } from './sharedReads.js'
 
 type RequestContext = { onClose(callback: () => void): void }
 
@@ -36,7 +35,7 @@ function currentQuery(): LiveQuery | undefined {
 
 /** The live reads of one `.live()` query: until its `Live` is sent, then while a client holds it. */
 class LiveQuery implements LiveSource {
-  private readonly reads = new Map<LiveRead, Router>()
+  private readonly reads = new Set<WatchedRead>()
   private readonly listeners = new Set<() => void>()
   private recorded = false
   private isChanged = false
@@ -49,14 +48,15 @@ class LiveQuery implements LiveSource {
     })
   }
 
-  add(read: LiveRead, router: Router): void {
+  /** Called by `read.watch()`. */
+  add(read: WatchedRead): void {
     this.recorded = true
-    if (this.isChanged) router.remove(read)
-    else this.reads.set(read, router)
+    if (this.isChanged) read.unwatch(this)
+    else this.reads.add(read)
   }
 
-  remove(read: LiveRead): void {
-    this.reads.get(read)?.remove(read)
+  remove(read: WatchedRead): void {
+    read.unwatch(this)
     this.reads.delete(read)
   }
 
@@ -84,7 +84,7 @@ class LiveQuery implements LiveSource {
   }
 
   private release(): void {
-    for (const [read, router] of this.reads) router.remove(read)
+    for (const read of this.reads) read.unwatch(this)
     this.reads.clear()
   }
 }

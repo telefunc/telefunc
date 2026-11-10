@@ -2,6 +2,7 @@ export { capturePglite }
 export type { Pglite }
 
 import type { FollowUp, LiveDatabase, Statement } from '../liveDatabase.js'
+import { copyRows } from '../sharedReads.js'
 import { takeHiddenFields, takeHiddenValues } from './hiddenColumns.js'
 
 // The parts of PGlite used here, so that `@electric-sql/pglite` stays the app's dependency.
@@ -67,18 +68,29 @@ function captureExecutor(executor: Executor, connection: Pglite, live: LiveDatab
   }
   executor.query = async (text, params = [], options) => {
     await ready()
-    const statement = live.statementFor(connection, text, params)
-    const result = await run(statement, () => query(statement.text, params, options))
-    const hidden = takeHiddenFields(result.fields, statement)
-    const followUp = statement.succeeded(takeHiddenValues(result.rows, hidden, options?.rowMode === 'array'))
+    // Other options (parsers, serializers) make rows only this caller can be given.
+    const rowForm =
+      Object.keys(options ?? {}).every((key) => key === 'rowMode') && `pglite:${options?.rowMode ?? 'object'}`
+    const plan = () => live.statementFor(connection, text, params, { sharing: rowForm ? { rowForm } : undefined })
+    let statement = plan()
+    while (statement.joined) {
+      const joined = await statement.joined
+      if (joined) return joined.result as Results
+      statement = plan()
+    }
+    const sent = statement
+    const result = await run(sent, () => query(sent.text, params, options))
+    const hidden = takeHiddenFields(result.fields, sent)
+    const followUp = sent.succeeded(takeHiddenValues(result.rows, hidden, options?.rowMode === 'array'))
     if (followUp) runFollowUp(followUp)
-    if (!statement.returnsRows) result.rows.length = 0
+    if (!sent.returnsRows) result.rows.length = 0
+    sent.answered(result, (r) => ({ ...r, rows: copyRows(r.rows) }))
     return result
   }
   executor.exec = async (text, options) => {
     await ready()
     // Several statements, possibly: run as written, and count every write as a change to its whole table.
-    const statement = live.statementFor(connection, text, [], false)
+    const statement = live.statementFor(connection, text, [], { rewrite: false })
     const results = await run(statement, () => exec(text, options))
     statement.succeeded([])
     return results

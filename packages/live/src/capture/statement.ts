@@ -43,8 +43,12 @@ type Plan =
   | ReadPlan
   | WritePlan
   | { kind: 'transaction'; action: TransactionAction; savepoint?: string }
-  /** A statement whose changes aren't captured row by row: every listed table may have changed. */
-  | { kind: 'unknownWrite'; tables: TableSet; schemaChange: boolean }
+  /** A statement whose changes aren't captured row by row: every listed table may have changed. `changesSession`: it
+   *  may also change settings of its session (`set_config()`, `DISCARD`). */
+  | { kind: 'unknownWrite'; tables: TableSet; schemaChange: boolean; changesSession?: true }
+  /** `SET`, `RESET`: the settings of its session change (a role, a `search_path`, what a row level security policy
+   *  reads). */
+  | { kind: 'session' }
   | { kind: 'none' }
   | { kind: 'several'; plans: Plan[] }
 
@@ -61,10 +65,15 @@ function planStatement(text: string, catalog: Catalog): Plan {
 /** `text` is set when the statement is the whole text, so that it can be rewritten. */
 function planOne(statement: Node, text: string | undefined, catalog: Catalog): Plan {
   const [kind, node] = Object.entries(statement)[0] as [string, Node]
-  const volatile = functionNamesIn(node).some((name) => catalog.volatileFunctions.has(name))
+  const functions = functionNamesIn(node)
+  const volatile = functions.some((name) => catalog.volatileFunctions.has(name))
   const writingCte = ((node.withClause?.ctes ?? []) as Node[]).some((c) => !c.CommonTableExpr.ctequery.SelectStmt)
-  if (volatile || writingCte)
-    return { kind: 'unknownWrite', tables: volatile ? 'all' : writtenTables(node, catalog), schemaChange: false }
+  if (volatile || writingCte) {
+    const tables = volatile ? 'all' : writtenTables(node, catalog)
+    if (functions.includes('set_config'))
+      return { kind: 'unknownWrite', tables, schemaChange: false, changesSession: true }
+    return { kind: 'unknownWrite', tables, schemaChange: false }
+  }
   switch (kind) {
     case 'SelectStmt':
       if (node.intoClause) return { kind: 'unknownWrite', tables: 'all', schemaChange: true }
@@ -81,6 +90,10 @@ function planOne(statement: Node, text: string | undefined, catalog: Catalog): P
       if (kind === 'CopyStmt' && !node.is_from) return { kind: 'none' }
       return { kind: 'unknownWrite', tables: writtenTables(node, catalog), schemaChange: false }
     case 'VariableSetStmt':
+      // `SET LOCAL` ends with its transaction, whose reads never share.
+      return node.is_local ? { kind: 'none' } : { kind: 'session' }
+    case 'DiscardStmt':
+      return { kind: 'unknownWrite', tables: 'all', schemaChange: true, changesSession: true }
     case 'VariableShowStmt':
     case 'ListenStmt':
     case 'UnlistenStmt':

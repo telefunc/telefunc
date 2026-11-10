@@ -1,5 +1,5 @@
 export { LiveDatabase, MAX_RESULT_ROWS }
-export type { Statement, FollowUp, LiveOptions }
+export type { Statement, FollowUp, LiveOptions, Sharing, Reservation }
 
 import type { BroadcastAdapter } from 'telefunc'
 import { loadCatalog, tablesChangedWith, union, type Catalog, type Table, type TableSet } from './catalog.js'
@@ -8,9 +8,10 @@ import { planStatement, type Plan, type WritePlan } from './capture/statement.js
 import { Transactions } from './capture/transactions.js'
 import { currentQuery, type LiveQuery } from './liveQuery.js'
 import type { Row } from './match/condition.js'
-import { LiveRead, type Change } from './match/liveRead.js'
+import type { Change } from './match/liveRead.js'
 import type { ReadShape } from './match/readShape.js'
 import { Router } from './match/router.js'
+import { keyOfValues, SharedReads, WatchedRead, type Joined } from './sharedReads.js'
 import { loadParser } from './sql.js'
 
 type LiveOptions = {
@@ -28,7 +29,20 @@ type Statement = {
   returnsRows: boolean
   succeeded(hiddenRows: (string | null)[][]): FollowUp | void
   failed(): void
+  /** Identical reads wait for this one's result: give it to them with `answered()`. */
+  leads: boolean
+  /** Gives the result to the identical reads that joined this one; `copy` makes each its own. */
+  answered<R>(result: R, copy: (result: R) => R): void
+  /** An identical read is running: don't send this one, give the caller a copy of that one's result. */
+  joined?: Joined
 }
+
+/** How a driver that can hand its result to identical reads (`Statement.answered()`) returns rows: reads share only
+ *  with reads whose rows come in the same form. */
+type Sharing = { rowForm: string; reservation?: Reservation }
+
+/** A read that leads identical ones before its driver got a connection (`reserveRead()`). */
+type Reservation = { read: WatchedRead; lead: ReturnType<SharedReads['lead']>; failed(): void }
 
 /** A query whose rows (each value as text, in an array) go to `done`; `undefined` when it failed. */
 type FollowUp = { text: string; values: unknown[]; done(rows: (string | null)[][] | undefined): void }
@@ -52,6 +66,9 @@ class LiveDatabase {
   private readonly transactions = new Transactions((changes) => this.announce(changes))
   private readonly transport: BroadcastAdapter | undefined
   private feed: ChangeFeed | undefined
+  private readonly shared = new SharedReads()
+  /** A statement changed a session: connections may answer the same read differently from now on. */
+  private sessionsDiffer = false
 
   constructor(options: LiveOptions) {
     this.transport = options.transport
@@ -69,27 +86,54 @@ class LiveDatabase {
   }
 
   /** Called before each statement, on the connection that runs it, once `isReady()`. Without `rewrite`, the text is
-   *  sent as is: its writes count as changes to their whole tables, its reads can't be bounded by their result. */
-  statementFor(connection: object, text: string, values: readonly unknown[], rewrite = true): Statement {
-    return this.planned(connection, text, values, rewrite, currentQuery())
+   *  sent as is: its writes count as changes to their whole tables, its reads can't be bounded by their result. With
+   *  `sharing`, a live read may join an identical one running (`Statement.joined`). */
+  statementFor(
+    connection: object,
+    text: string,
+    values: readonly unknown[],
+    { rewrite = true, sharing }: { rewrite?: boolean; sharing?: Sharing } = {},
+  ): Statement {
+    return this.planned(connection, text, values, rewrite, currentQuery(), sharing)
+  }
+
+  /** For a driver that gets a connection after the call (a `pg.Pool`): a live read joins an identical one running, or
+   *  reserves its place so that those arriving while it waits for a connection join it. */
+  reserveRead(
+    text: string,
+    values: readonly unknown[],
+    rowForm: string,
+  ): { joined: Joined } | { reservation: Reservation } | undefined {
+    const live = currentQuery()
+    if (!live || !this.isReady()) return undefined
+    const plan = this.planOf(text, this.catalog!)
+    const key = plan.kind === 'read' ? this.shareKey(text, values, undefined, rowForm) : undefined
+    if (!key || plan.kind !== 'read') return undefined
+    const joined = this.shared.join(key, live)
+    if (joined) return { joined }
+    const read = this.watched(plan.shape, values, live)
+    const lead = this.shared.lead(key, read)
+    let settled = false
+    const failed = () => {
+      if (settled) return
+      settled = true
+      read.drop()
+      lead.failed()
+    }
+    return { reservation: { read, lead, failed } }
   }
 
   /** For a statement whose text is known only once it was sent (a postgres.js template with helpers): until then, the
    *  current `.live()` query counts as changed by any write. */
   statementWithTextLater(connection: object): { sent(text: string, values: readonly unknown[]): Statement } {
     const live = currentQuery()
-    const anything = live && new LiveRead(READS_EVERYTHING, [], () => live.changed())
-    if (live && anything) {
-      this.router.add(anything)
-      this.watchTables(READS_EVERYTHING)
-      live.add(anything, this.router)
-    }
+    const anything = live && this.watched(READS_EVERYTHING, [], live)
     return {
       sent: (text, values) => {
-        const statement = this.planned(connection, text, values, false, live)
+        const statement = this.planned(connection, text, values, false, live, undefined)
         // What committed while it ran is judged now; the statement's own read takes over.
         if (live && anything) {
-          anything.resolve(undefined)
+          anything.read.resolve(undefined)
           live.remove(anything)
         }
         return statement
@@ -104,11 +148,13 @@ class LiveDatabase {
     values: readonly unknown[],
     rewrite: boolean,
     live: LiveQuery | undefined,
+    sharing: Sharing | undefined,
   ): Statement {
     const plan = this.planOf(text, this.catalog!)
+    if (changesSession(plan)) this.sessionsDiffer = true
     switch (plan.kind) {
       case 'read':
-        return this.read(rewrite ? plan : { ...plan, liveText: undefined }, text, values, connection, live)
+        return this.read(rewrite ? plan : { ...plan, liveText: undefined }, text, values, connection, live, sharing)
       case 'write':
         if (!rewrite) break
         return {
@@ -125,13 +171,17 @@ class LiveDatabase {
     values: readonly unknown[],
     connection: object,
     live: LiveQuery | undefined,
+    sharing: Sharing | undefined,
   ): Statement {
     // A read outside `.live()` is sent as written.
     if (!live) return this.statement(connection, text, 0, () => [])
-    const read = new LiveRead(plan.shape, values, () => live.changed())
-    this.router.add(read)
-    this.watchTables(plan.shape)
-    live.add(read, this.router)
+    const key = sharing && !sharing.reservation ? this.shareKey(text, values, connection, sharing.rowForm) : undefined
+    const joined = key ? this.shared.join(key, live) : undefined
+    if (joined) return { ...this.statement(connection, text, 0, () => []), joined }
+    const reservation = sharing?.reservation
+    const watched = reservation?.read ?? this.watched(plan.shape, values, live)
+    const lead = reservation?.lead ?? (key ? this.shared.lead(key, watched) : undefined)
+    const { read } = watched
     return {
       text: plan.liveText ?? text,
       hiddenColumns: plan.liveText ? plan.shape.hiddenColumns.length : 0,
@@ -146,10 +196,36 @@ class LiveDatabase {
         return { text: state.text, values: params, done: (stateRows) => read.resolve(rows, stateRows) }
       },
       failed: () => {
-        live.remove(read)
+        if (reservation) reservation.failed()
+        else {
+          watched.drop()
+          lead?.failed()
+        }
         this.transactions.failed(connection)
       },
+      leads: lead !== undefined,
+      answered: (result, copy) => lead?.answered(result, copy),
     }
+  }
+
+  /** A live read `live` watches, filed in the router. */
+  private watched(shape: ReadShape, values: readonly unknown[], live: LiveQuery): WatchedRead {
+    const read = new WatchedRead(shape, values, this.router)
+    this.watchTables(shape)
+    read.watch(live)
+    return read
+  }
+
+  /** What makes two live reads return the same rows (`SharedReads`); `undefined` when they may not. */
+  private shareKey(
+    text: string,
+    values: readonly unknown[],
+    connection: object | undefined,
+    rowForm: string,
+  ): string | undefined {
+    if (this.sessionsDiffer || (connection && this.transactions.isOpen(connection))) return undefined
+    const valuesKey = keyOfValues(values)
+    return valuesKey === undefined ? undefined : `${rowForm}\0${valuesKey}\0${text}`
   }
 
   private statement(
@@ -164,6 +240,8 @@ class LiveDatabase {
       returnsRows: true,
       succeeded: (rows) => this.transactions.record(connection, changesOf(rows)),
       failed: () => this.transactions.failed(connection),
+      leads: false,
+      answered: () => {},
     }
   }
 
@@ -248,7 +326,7 @@ class LiveDatabase {
     this.plans = new Map()
   }
 
-  private watchTables(shape: LiveRead['shape']): void {
+  private watchTables(shape: ReadShape): void {
     if (!this.feed) return
     this.feed.watch('*')
     for (const alias of shape.aliases) this.feed.watch(alias.table.id)
@@ -296,4 +374,10 @@ function imageOf(text: string | null | undefined, table: Table): Row | undefined
 function assumedOld(now: Row, plan: WritePlan): Row {
   const kept = plan.table.updateChangesOtherColumns ? plan.table.primaryKey : Object.keys(now)
   return Object.fromEntries(kept.filter((c) => !plan.assigned.includes(c)).map((c) => [c, now[c]!]))
+}
+
+/** A statement after which the connection it ran on may answer reads differently from the others. */
+function changesSession(plan: Plan): boolean {
+  if (plan.kind === 'several') return plan.plans.some(changesSession)
+  return plan.kind === 'session' || (plan.kind === 'unknownWrite' && plan.changesSession === true)
 }
