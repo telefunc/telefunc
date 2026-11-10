@@ -367,7 +367,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     ) {
       return
     }
-    if (replay.admitBinary(from, track, info)) this.end.deliver(body)
+    if (replay.admitBinary(from, track, info, body.delta)) this.end.deliver(body)
   }
 
   hold(change: BinaryWantChange | null): ReplayHold {

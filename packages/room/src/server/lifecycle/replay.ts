@@ -84,6 +84,9 @@ class ReplayGate {
   private readonly high = new Map<string, OrderingInfo>()
   /** Binary lanes by sender, then track, so a sender's leave forgets only its own. */
   private readonly binaryHigh = new Map<string, Map<string, OrderingInfo>>()
+  /** Of those, by sender, the tracks whose newest frame the holder got is a retained one: a `delta` frame there needs
+   *  live frames the holder never got, so it waits for the next frame without `delta`. */
+  private readonly awaitingGroup = new Map<string, Set<string>>()
   /** The binary replays whose reads haven't settled. */
   private readonly replays = new Set<ReplayHold>()
   /** The late retained frames the holder got while some replay is pending: overlapping replays read the same one. */
@@ -98,10 +101,13 @@ class ReplayGate {
     return true
   }
 
-  admitBinary(member: string, track: string, info: OrderingInfo): boolean {
+  /** A holder starts a track at a live frame without `delta`: one with it needs the frames before it. */
+  admitBinary(member: string, track: string, info: OrderingInfo, delta: boolean): boolean {
     const high = getOrCreate(this.binaryHigh, member, () => new Map())
     const first = !high.has(track)
+    if (delta && (first || this.awaitingGroup.get(member)?.has(track))) return false
     if (!admitInto(high, track, info)) return false
+    if (!delta) this.awaitingGroup.get(member)?.delete(track)
     if (first) this.firstLive(member, track, info)
     return true
   }
@@ -112,13 +118,19 @@ class ReplayGate {
     if (track === null) {
       if (hold.holding || !this.high.has(member)) return this.admit(member, info)
     } else if (hold.holding || !this.binaryHigh.get(member)?.has(track)) {
-      return this.admitBinary(member, track, info)
+      return this.admitBinary(member, track, info, false) && this.retainedNewest(member, track)
     }
     const firstLive = hold.firstLive.get(member)?.get(track ?? '')
     if (firstLive === undefined || !isNewer(firstLive, info)) return false
     const key = JSON.stringify([member, track, info.seq, info.timestamp])
     if (this.lateRetained.has(key)) return false
     this.lateRetained.add(key)
+    return track === null || this.retainedNewest(member, track)
+  }
+
+  /** The holder's newest frame on `member`'s `track` is a retained one. */
+  private retainedNewest(member: string, track: string): true {
+    getOrCreate(this.awaitingGroup, member, () => new Set()).add(track)
     return true
   }
 
@@ -130,7 +142,11 @@ class ReplayGate {
   /** A lane no want covers any more starts afresh: a later subscription to it gets its retained frame again. */
   forgetUnwantedBinary(wanted: (member: string, track: string) => boolean): void {
     for (const [member, high] of this.binaryHigh) {
-      for (const track of high.keys()) if (!wanted(member, track)) high.delete(track)
+      for (const track of high.keys()) {
+        if (wanted(member, track)) continue
+        high.delete(track)
+        this.awaitingGroup.get(member)?.delete(track)
+      }
       if (high.size === 0) this.binaryHigh.delete(member)
     }
   }
@@ -139,6 +155,7 @@ class ReplayGate {
   forgetMember(member: string): void {
     this.high.delete(member)
     this.binaryHigh.delete(member)
+    this.awaitingGroup.delete(member)
     for (const hold of this.replays) {
       for (const frame of hold.held) if (frame.from === member) this.unhold(hold, frame.bytes)
       hold.held = hold.held.filter((frame) => frame.from !== member)
@@ -341,7 +358,7 @@ class LocalHolder implements LaneHolder {
       const weight = heldWeight(frame.payload, frame.payload.byteOffset)
       if (replay.held(from, track, weight, () => this.relayBinary(frame, info))) return
     }
-    if (replay.admitBinary(from, track, info)) this.applyBinaryFrame(frame, info)
+    if (replay.admitBinary(from, track, info, frame.delta)) this.applyBinaryFrame(frame, info)
   }
 
   hold(change: BinaryWantChange | null): ReplayHold {

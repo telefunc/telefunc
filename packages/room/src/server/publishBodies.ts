@@ -30,10 +30,11 @@ function orderedBody(serialized: string, info: OrderingInfo): PublishBody {
 }
 
 /** A track's frame as its lane carried it, on its track's domain (see telefunc's `TAG.DOMAIN`), so that no other track's
- *  loss delays it. One published with `lossy: true` gives way to a newer one of its track that no wire has taken. */
+ *  loss delays it. One published with `lossy: true` gives way to a newer one of its track that no wire has taken, and
+ *  one with `delta: true` goes only behind the frames of its group. */
 function trackFrameBody(frame: BinaryFrame, framed: Uint8Array, info: OrderingInfo): PublishBody {
   const stream = encodeLaneKey({ kind: 'binary', member: frame.from, track: frame.track })
-  return publishBody(framed, info, frame.lossy ? stream : null, stream)
+  return publishBody(framed, info, frame.lossy ? stream : null, stream, frame.delta)
 }
 
 /** A member's message as its lane carried it, stamped, and without the stamp, each made once for every client. */

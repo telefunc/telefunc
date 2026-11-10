@@ -215,6 +215,12 @@ type BinaryPublishOptions = {
    *  (`'disconnected'`) where the server can't hold them. A track keeps the value of its first publish, which a later
    *  one may leave out; naming the other throws. Default: `false`. */
   lossy?: boolean
+  /** On a lossy track: this frame needs every frame of the track since its newest one without `delta`, as a video's
+   *  frame needs those since its key frame. A page that can't keep up then skips to the newest frame without it, and
+   *  gets the frames after that one in order, as many as its path takes, never one without those before it; a page
+   *  that starts watching gets none until the next frame without it. Throws unless the track is lossy, and with
+   *  `retain`. Default: `false`. */
+  delta?: boolean
 }
 
 /** One message `messages()` yields: what a `subscribe()` or `subscribeBinary()` listener receives, `from` being the

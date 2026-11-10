@@ -57,8 +57,11 @@ const FRAME_FLAG_RETAIN = 0b0000_0100
 const FRAME_FLAG_LOSSY = 0b0000_1000
 /** Set on a message `publish()` sent on a track: the payload is the message, serialized. */
 const FRAME_FLAG_TEXT = 0b0001_0000
+/** Set where its publisher passed `delta: true`. */
+const FRAME_FLAG_DELTA = 0b0010_0000
 /** The only bits the framer defines. Any other bit set is a malformed or forward-incompatible frame. */
-const FRAME_FLAGS_KNOWN = FRAME_FLAG_META | FRAME_FLAG_TRACK | FRAME_FLAG_RETAIN | FRAME_FLAG_LOSSY | FRAME_FLAG_TEXT
+const FRAME_FLAGS_KNOWN =
+  FRAME_FLAG_META | FRAME_FLAG_TRACK | FRAME_FLAG_RETAIN | FRAME_FLAG_LOSSY | FRAME_FLAG_TEXT | FRAME_FLAG_DELTA
 /** Structural maxima of the one-byte track-length and two-byte metadata-length fields. */
 const TRACK_LENGTH_FIELD_MAX = 0xff
 const META_LENGTH_FIELD_MAX = 0xffff
@@ -66,7 +69,7 @@ const frameTextEncoder = /* @__PURE__ */ new TextEncoder()
 const frameTextDecoder = /* @__PURE__ */ new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 
 function encodeBinaryFrame(memberId: string, payload: Uint8Array, opts?: BinaryPublishOptions): Uint8Array {
-  assertKnownOptions(opts, ['track', 'meta', 'retain', 'lossy'], 'publishBinary()')
+  assertKnownOptions(opts, ['track', 'meta', 'retain', 'lossy', 'delta'], 'publishBinary()')
   return encodeFrame(memberId, payload, opts, 0)
 }
 
@@ -89,9 +92,18 @@ function encodeFrame(
     opts?.lossy === undefined || typeof opts.lossy === 'boolean',
     'publishBinary() options.lossy should be a boolean',
   )
+  assertUsage(
+    opts?.delta === undefined || typeof opts.delta === 'boolean',
+    'publishBinary() options.delta should be a boolean',
+  )
+  if (opts?.delta === true) {
+    assertUsage(opts.lossy === true, 'publishBinary() options.delta is for a lossy track')
+    assertUsage(opts.retain !== true, 'publishBinary() options.delta and options.retain exclude each other')
+  }
   const idBytes = uuidToBytes(memberId)
   let flags = kindFlag | (opts?.retain === true ? FRAME_FLAG_RETAIN : 0)
   if (opts?.lossy === true) flags |= FRAME_FLAG_LOSSY
+  if (opts?.delta === true) flags |= FRAME_FLAG_DELTA
   let trackBytes: Uint8Array | null = null
   if (opts?.track !== undefined) {
     assertUsage(
@@ -184,6 +196,7 @@ type BinaryFrame = {
   meta: Record<string, unknown> | null
   retain: boolean
   lossy: boolean
+  delta: boolean
   text: boolean
 }
 
@@ -203,6 +216,7 @@ function decodeBinaryFrame(data: Uint8Array): BinaryFrame | null {
     meta,
     retain: !!(flags & FRAME_FLAG_RETAIN),
     lossy: !!(flags & FRAME_FLAG_LOSSY),
+    delta: !!(flags & FRAME_FLAG_DELTA),
     text: !!(flags & FRAME_FLAG_TEXT),
   }
 }
