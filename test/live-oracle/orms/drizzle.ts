@@ -41,6 +41,7 @@ import type { BroadcastAdapter } from 'telefunc'
 import { arrayOf, CODES, COLUMN_TYPES, METRICS, REFS, type Spelling } from '../spellings.ts'
 import { cursorRead } from './cursorRead.ts'
 import { EVENT_TAG, eventQuery } from './eventQuery.ts'
+import { exclaim } from './exclaim.ts'
 import type { OrmDriver } from './types.ts'
 
 const users = pgTable('users', {
@@ -230,6 +231,8 @@ function createDrizzle(
         db.execute(sql`select kind, count(*)::int as n from event_log group by kind order by kind`).then(rowsOf),
       counters: () => db.execute(sql`select id, n from counters order by id`).then(rowsOf),
       chained: () => db.execute(sql`select n from chained`).then(rowsOf),
+      exclaimed: ({ user }) =>
+        db.execute(sql`select id, text from todos where user_id = ${user} order by id`).then(rowsOf).then(exclaim),
       metricIs: ({ low }) =>
         db.execute(sql`select id from metrics where metric is not distinct from ${METRICS[low]}::float8`).then(rowsOf),
       products: () => db.execute(sql`select id, brand from products order by id`).then(rowsOf),

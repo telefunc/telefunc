@@ -15,12 +15,13 @@ import { LiveRead } from '../../packages/live/dist/match/liveRead.js'
 import { Operands } from '../../packages/live/dist/match/operands.js'
 import { Tally } from '../../packages/live/dist/match/tally.js'
 import { Refetcher } from '../../packages/live/dist/refetcher.js'
-import { WatchedRead } from '../../packages/live/dist/sharedReads.js'
+import { SharedReads, WatchedRead } from '../../packages/live/dist/sharedReads.js'
 import { staleSignals } from '../../packages/live/dist/staleSignals.js'
 
 const live = LiveRead.prototype as any
 const database = LiveDatabase.prototype as any
 const tally = Tally.prototype as any
+const sharedReads = SharedReads.prototype as any
 
 const probes: Record<string, () => void> = {
   /** A write's old image is ignored: an update counts as an insert of its new row, a delete as nothing. */
@@ -73,6 +74,14 @@ const probes: Record<string, () => void> = {
     const shareKey = database.shareKey
     database.shareKey = function (text: string, values: unknown[], ...rest: unknown[]) {
       return shareKey.call(this, text, JSON.parse(JSON.stringify(values)), ...rest)
+    }
+  },
+  /** A read that joins an identical one gets that read's rows themselves, rather than a copy. */
+  'row-copies'() {
+    const lead = sharedReads.lead
+    sharedReads.lead = function (...args: unknown[]) {
+      const leading = lead.apply(this, args)
+      return { ...leading, answered: (result: unknown) => leading.answered(result, (rows: unknown) => rows) }
     }
   },
   /** A read calling a volatile function shares a run with identical ones. */
