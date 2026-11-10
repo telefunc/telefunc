@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "bulk": "node --expose-gc bulk.ts",
     "engine": "node --expose-gc engine.ts",
     "latency": "node --expose-gc latency.ts"
   },
