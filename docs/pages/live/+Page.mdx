@@ -168,6 +168,8 @@ A client refetches when a committed write, through a wrapped database, changes r
 
 When `@telefunc/live` can't tell whether a write changed the result (a function call in the query, a statement it doesn't follow, a write of more than 10,000 rows), it refetches.
 
+> A write to a table your database role can't `SELECT` in full, or any write after a statement that may change a session's role (`SET ROLE`, `SET SESSION AUTHORIZATION`, `RESET ALL`, `DISCARD`, a `DO` block, a procedure), refetches every query of the tables it writes.
+
 > The refetch is an ordinary call of your telefunction: its <Link href="/permissions">permission checks</Link> run again, and no row is sent to a client otherwise.
 
 > Writes that don't go through your app — another app, a migration, `psql` — aren't seen.

@@ -1,4 +1,4 @@
-export { SCHEMA, seed, USERS }
+export { ROLES, SCHEMA, seed, USERS }
 
 import { CODES, REFS } from './spellings.ts'
 
@@ -109,6 +109,15 @@ begin
   return null;
 end $$;
 create trigger measures_set after update on measures for each statement execute function measure_set();
+`
+
+/** A role that may write `todos` but not read it all, for `ROLES=1` runs: a write's widened `RETURNING` would be
+ *  refused. Roles are the server's, shared by its databases: created once, never dropped. After one of these runs a
+ *  statement, no write is widened: `ROLES` runs measure the rest less precisely. */
+const ROLES = `
+do $$ begin create role live_restricted; exception when duplicate_object then null; end $$;
+grant insert (user_id, text), select (id) on todos to live_restricted;
+grant usage on sequence todos_id_seq to live_restricted;
 `
 
 function seed(random: () => number): string {

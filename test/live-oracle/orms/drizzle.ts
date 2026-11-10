@@ -346,6 +346,16 @@ function createDrizzle(
             })
             .catch(() => {})
         }),
+      // A role that can't read `todos` whole: a write isn't widened, or the app's own write fails.
+      restrictedInsert: ({ user, text }) =>
+        db
+          .transaction(async (tx: any) => {
+            await tx.execute(sql`set local role live_restricted`)
+            await tx.execute(sql`insert into todos (user_id, text) values (${user}, ${text})`)
+          })
+          .catch((err: unknown) => {
+            throw new Error(`restricted insert refused: ${err}`)
+          }),
       // The widened `RETURNING` must name the old row as the statement does. Refused, the app's own write fails.
       renamedOld: ({ todo }) =>
         db

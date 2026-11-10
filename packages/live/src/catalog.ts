@@ -35,6 +35,9 @@ type Table = {
   references: { column: string; parent: string; parentColumn: string }[]
   /** An `UPDATE` can change columns its `SET` list doesn't name (`BEFORE` row triggers, generated columns). */
   updateChangesOtherColumns: boolean
+  /** What the role that loaded the catalog may `SELECT`: the whole table, or each of its columns (system columns
+   *  such as `xmax` aren't among them). A write's widened `RETURNING` reads them. */
+  readable: 'table' | 'columns' | undefined
 }
 
 /** `table.column` references the parent's `parentColumn`; on a parent's delete or key update the child rows are
@@ -43,6 +46,8 @@ type ForeignKey = { table: string; column?: string; parentColumn?: string; onDel
 
 type Catalog = {
   database: string
+  /** The role that loaded the catalog: the one `Table.readable` holds the privileges of. */
+  role: string
   serverVersion: number
   tables: Map<string, Table>
   /** User-defined functions: a statement calling one may read any table, and write any table when it's one of
@@ -68,6 +73,7 @@ type Catalog = {
 
 type CatalogRow = {
   database: string
+  role: string
   searchPath: string[]
   serverVersion: number
   cOrdering: boolean
@@ -77,6 +83,7 @@ type CatalogRow = {
     name: string
     view: string | null
     rls: boolean
+    readable: 'table' | 'columns' | null
     columns: [
       name: string,
       category: string,
@@ -109,6 +116,7 @@ const WRITING = `l.lanname not in ('c', 'internal')`
 // One round trip: everything the matcher needs to know about the database's tables.
 const CATALOG_QUERY = `select json_build_object(
   'database', current_database(),
+  'role', current_user,
   'searchPath', current_schemas(false),
   'serverVersion', current_setting('server_version_num')::int,
   'cOrdering', (select datlocprovider in ('c', 'b') and datcollate in ('C', 'POSIX') from pg_database where datname = current_database()),
@@ -121,6 +129,9 @@ const CATALOG_QUERY = `select json_build_object(
     'name', c.relname,
     'view', case when c.relkind in ('v', 'm') then pg_get_viewdef(c.oid) end,
     'rls', c.relrowsecurity,
+    'readable', case when has_table_privilege(c.oid, 'SELECT') then 'table'
+      when not exists (select from pg_attribute a where a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
+        and not has_column_privilege(c.oid, a.attnum, 'SELECT')) then 'columns' end,
     'columns', (select json_agg(json_build_array(a.attname, t.typcategory, t.typname,
         quote_ident(tn.nspname) || '.' || quote_ident(t.typname), coalesce(co.collname, ''),
         coalesce(co.collisdeterministic, true), a.attgenerated <> '', bn.nspname, bt.typname,
@@ -216,6 +227,7 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
   }
   const catalog: Catalog = {
     database: row.database,
+    role: row.role,
     serverVersion: row.serverVersion,
     tables,
     functions: new Set(row.functions.map(([name]) => name)),
@@ -270,6 +282,7 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
         triggers.some(
           ([type]) => (type & TRIGGER_ROW) !== 0 && (type & TRIGGER_BEFORE) !== 0 && (type & TRIGGER_UPDATE) !== 0,
         ),
+      readable: t.readable ?? undefined,
     }
     tables.set(table.id, table)
     byName.set(t.name, [...(byName.get(t.name) ?? []), table])

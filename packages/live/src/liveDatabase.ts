@@ -85,6 +85,8 @@ class LiveDatabase {
   private readonly shared = new SharedReads()
   /** A statement changed a session: connections may answer the same read differently from now on. */
   private sessionsDiffer = false
+  /** A statement may have changed a session's role: the catalog's privileges (`Table.readable`) may not be its. */
+  private rolesDiffer = false
   /** The values Postgres gave a read's operands, by its text and parameters: an identical read doesn't ask again. */
   private knownOperands = new Map<string, OperandValue[]>()
 
@@ -169,6 +171,7 @@ class LiveDatabase {
     sharing: Sharing | undefined,
   ): Statement {
     let plan = this.planOf(text, this.catalog!)
+    if (changesRole(plan, this.catalog!.role)) this.rolesDiffer = true
     if (changesSession(plan) && !this.sessionsDiffer) {
       this.sessionsStartDiffering()
       // The text's other statements may name tables by a `search_path` it changes.
@@ -178,7 +181,8 @@ class LiveDatabase {
       case 'read':
         return this.read(rewrite ? plan : { ...plan, liveText: undefined }, text, values, connection, live, sharing)
       case 'write':
-        if (!rewrite) break
+        // Sent as written, a write changes its table as a whole.
+        if (!rewrite || this.rolesDiffer) break
         return {
           ...this.statement(connection, plan.text, plan.images.length, (rows) => this.changesOfWrite(plan, rows)),
           returnsRows: plan.hadReturning,
@@ -507,6 +511,13 @@ function assumedOld(now: Row, plan: WritePlan): Row {
 }
 
 /** A statement after which the connection it ran on may answer reads differently from the others. */
+/** Whether `plan` may give its session another role than `role` (`Plan.changesRole`). */
+function changesRole(plan: Plan, role: string): boolean {
+  if (plan.kind === 'several') return plan.plans.some((p) => changesRole(p, role))
+  if (plan.kind === 'session' || plan.kind === 'none') return plan.changesRole === true && plan.role !== role
+  return plan.kind === 'unknownWrite' && plan.changesRole === true
+}
+
 function changesSession(plan: Plan): boolean {
   if (plan.kind === 'several') return plan.plans.some(changesSession)
   return plan.kind === 'session' || (plan.kind === 'unknownWrite' && plan.changesSession === true)

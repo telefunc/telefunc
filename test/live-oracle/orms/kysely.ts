@@ -346,6 +346,17 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
           throw err
         }
       },
+      // A role that can't read `todos` whole: a write isn't widened, or the app's own write fails.
+      restrictedInsert: ({ user, text }) =>
+        db
+          .transaction()
+          .execute(async (tx) => {
+            await sql`set local role live_restricted`.execute(tx)
+            await sql`insert into todos (user_id, text) values (${user}, ${text})`.execute(tx)
+          })
+          .catch((err: unknown) => {
+            throw new Error(`restricted insert refused: ${err}`)
+          }),
       // The widened `RETURNING` must name the old row as the statement does. Refused, the app's own write fails.
       renamedOld: ({ todo }) =>
         sql`update todos set priority = priority + 1 where id = ${todo} returning with (old as prev) prev.priority`

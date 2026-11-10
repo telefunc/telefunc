@@ -11,7 +11,7 @@ import {
   type Written,
 } from '../catalog.js'
 import { analyzeRead, type ReadShape } from '../match/readShape.js'
-import { parseStatements, quote, spliceBytes, statementEnd, topLevelFrom, walk, type Node } from '../sql.js'
+import { names, parseStatements, quote, spliceBytes, statementEnd, topLevelFrom, walk, type Node } from '../sql.js'
 
 type TransactionAction = 'begin' | 'commit' | 'rollback' | 'savepoint' | 'release' | 'rollbackTo'
 
@@ -50,18 +50,30 @@ type Plan =
   /** `chain`: a `COMMIT` or `ROLLBACK` `AND CHAIN`, which starts the next transaction at once. */
   | { kind: 'transaction'; action: TransactionAction; savepoint?: string; chain?: boolean }
   /** A statement whose changes aren't captured row by row: every listed table may have changed. `changesSession`: it
-   *  may also change settings of its session (`set_config()`, `DISCARD`), or those new sessions start with. */
-  | { kind: 'unknownWrite'; tables: ChangedTables; schemaChange: boolean; changesSession?: boolean }
+   *  may also change settings of its session (`set_config()`, `DISCARD`), or those new sessions start with;
+   *  `changesRole`: its role among them. */
+  | {
+      kind: 'unknownWrite'
+      tables: ChangedTables
+      schemaChange: boolean
+      changesSession?: boolean
+      changesRole?: boolean
+    }
   /** `SET`, `RESET`: the settings of its session change (a role, a `search_path`, what a row level security policy
-   *  reads). */
-  | { kind: 'session' }
-  | { kind: 'none' }
+   *  reads). `changesRole`: its role may change, to `role` when the statement names it. */
+  | { kind: 'session'; changesRole?: boolean; role?: string }
+  /** `SET LOCAL` is one too, until its transaction ends. */
+  | { kind: 'none'; changesRole?: boolean; role?: string }
   | { kind: 'several'; plans: Plan[] }
 
 const HIDDEN_PREFIX = '__live_'
 
 /** Statements that change rows only, and can run in a transaction of ours. */
 const DATA_STATEMENTS = new Set(['SelectStmt', 'InsertStmt', 'UpdateStmt', 'DeleteStmt', 'MergeStmt'])
+
+/** The settings naming a session's role: a write's widened `RETURNING` needs that role's `SELECT` privilege
+ *  (`Plan.changesRole`). */
+const ROLE_SETTINGS = new Set(['role', 'session_authorization'])
 
 /** Statements that may set a session's settings (they run any code), or those new sessions start with. */
 const SETS_SESSIONS = new Set(['DoStmt', 'CallStmt', 'ExecuteStmt', 'AlterRoleSetStmt', 'AlterDatabaseSetStmt'])
@@ -92,6 +104,7 @@ function planOne(statement: Node, text: string | undefined, catalog: Catalog): P
       tables: DATA_STATEMENTS.has(kind) ? ofRows(tables) : 'all',
       schemaChange: false,
       changesSession,
+      changesRole: setsRole(node),
     }
   }
   switch (kind) {
@@ -111,11 +124,14 @@ function planOne(statement: Node, text: string | undefined, catalog: Catalog): P
       // `TRUNCATE … CASCADE` empties the tables referencing them, whatever their foreign keys' actions.
       if (node.behavior === 'DROP_CASCADE') return { kind: 'unknownWrite', tables: 'unnamed', schemaChange: false }
       return { kind: 'unknownWrite', tables: ofRows(writtenTables(node, catalog)), schemaChange: false }
-    case 'VariableSetStmt':
+    case 'VariableSetStmt': {
+      const changesRole = node.kind === 'VAR_RESET_ALL' || ROLE_SETTINGS.has(node.name)
+      const role = changesRole && node.kind === 'VAR_SET_VALUE' ? node.args?.[0]?.A_Const?.sval?.sval : undefined
       // `SET LOCAL` ends with its transaction, whose reads never share.
-      return node.is_local ? { kind: 'none' } : { kind: 'session' }
+      return { kind: node.is_local ? 'none' : 'session', changesRole, ...(role ? { role } : {}) }
+    }
     case 'DiscardStmt':
-      return { kind: 'unknownWrite', tables: 'all', schemaChange: true, changesSession: true }
+      return { kind: 'unknownWrite', tables: 'all', schemaChange: true, changesSession: true, changesRole: true }
     case 'VariableShowStmt':
     case 'ListenStmt':
     case 'UnlistenStmt':
@@ -130,9 +146,11 @@ function planOne(statement: Node, text: string | undefined, catalog: Catalog): P
       const analyze = ((node.options ?? []) as Node[]).some((o) => o.DefElem?.defname === 'analyze')
       return analyze ? planOne(node.query, undefined, catalog) : { kind: 'none' }
     }
-    default:
+    default: {
       // Schema changes, `CALL`, `DO`, `EXECUTE`, `REFRESH MATERIALIZED VIEW`, ...: anything may have changed.
-      return { kind: 'unknownWrite', tables: 'all', schemaChange: true, changesSession: SETS_SESSIONS.has(kind) }
+      const changesSession = SETS_SESSIONS.has(kind)
+      return { kind: 'unknownWrite', tables: 'all', schemaChange: true, changesSession, changesRole: changesSession }
+    }
   }
 }
 
@@ -163,6 +181,10 @@ function planWrite(kind: string, node: Node, text: string | undefined, catalog: 
   if (!table || !text || also === 'all')
     return { kind: 'unknownWrite', tables: ofRows(writtenTables(node, catalog)), schemaChange: false }
   const hasOld = catalog.serverVersion >= 180000
+  // The widened `RETURNING` reads every column, and an upsert before Postgres 18 `xmax`, which takes the whole table:
+  // without that privilege, the write is sent as written and changes its table as a whole.
+  if (table.readable !== 'table' && (table.readable !== 'columns' || (upsert && !hasOld)))
+    return { kind: 'unknownWrite', tables: ofRows(writtenTables(node, catalog)), schemaChange: false }
   const target = quote(node.relation.alias?.aliasname ?? node.relation.relname)
   // `RETURNING WITH (OLD AS o)` renames the old row: `old` no longer names it.
   const options = (node.returningClause?.options ?? []) as Node[]
@@ -243,6 +265,17 @@ function planTransaction(node: Node): Plan {
       // Two-phase commit: the transaction may commit from another session, later.
       return { kind: 'unknownWrite', tables: 'all', schemaChange: false }
   }
+}
+
+/** Whether `node` calls `set_config()` with a role setting, or with a name that isn't written out. */
+function setsRole(node: Node): boolean {
+  let sets = false
+  walk(node, (key, value) => {
+    if (key !== 'FuncCall' || names(value.funcname).at(-1) !== 'set_config') return
+    const name = value.args?.[0]?.A_Const?.sval?.sval
+    if (typeof name !== 'string' || ROLE_SETTINGS.has(name.toLowerCase())) sets = true
+  })
+  return sets
 }
 
 /** What a statement that changes rows only may change: `'unnamed'` for every table. */

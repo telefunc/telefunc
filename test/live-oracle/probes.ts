@@ -58,6 +58,13 @@ const probes: Record<string, () => void> = {
       for (const table of this.catalog.tables.values()) for (const column of table.columns) column.orderableText = true
     }
   },
+  /** A write is widened whatever role its session took: the catalog's privileges are taken as every session's. */
+  'role-privilege'() {
+    const planOf = database.planOf
+    database.planOf = function (...args: unknown[]) {
+      return withoutRoleChanges(planOf.apply(this, args))
+    }
+  },
   /** The widened `RETURNING` names the old row `old`, even where the statement renamed it (the oracle's `prev`). */
   'old-alias'() {
     const planOf = database.planOf
@@ -288,6 +295,11 @@ const probes: Record<string, () => void> = {
       return dropAll.call(this, source, row).filter((key: string) => this.groups.get(key).counts.size > 0)
     }
   },
+}
+
+function withoutRoleChanges(plan: any): any {
+  if (plan.kind === 'several') return { ...plan, plans: plan.plans.map(withoutRoleChanges) }
+  return { ...plan, changesRole: false }
 }
 
 /** Changes the catalog as its query returns it (`CatalogRow`), before it's read. */
