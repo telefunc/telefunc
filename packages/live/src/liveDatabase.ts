@@ -1,22 +1,19 @@
 export { LiveDatabase, MAX_RESULT_ROWS }
-export type { Statement, FollowUp, LiveQueriesOptions }
+export type { Statement, FollowUp, LiveOptions }
 
 import type { BroadcastAdapter } from 'telefunc'
 import { loadCatalog, tablesChangedWith, union, type Catalog, type Table, type TableSet } from './catalog.js'
 import { ChangeFeed } from './changeFeed.js'
 import { planStatement, type Plan, type WritePlan } from './capture/statement.js'
 import { Transactions } from './capture/transactions.js'
-import { getCallReads } from './callReads.js'
-
-/** The reads of the telefunction call a statement runs in; `undefined` outside one. */
-type CallReads = ReturnType<typeof getCallReads>
+import { currentQuery, type LiveQuery } from './liveQuery.js'
 import type { Row } from './match/condition.js'
 import { LiveRead, type Change } from './match/liveRead.js'
 import type { ReadShape } from './match/readShape.js'
 import { Router } from './match/router.js'
 import { loadParser } from './sql.js'
 
-type LiveQueriesOptions = {
+type LiveOptions = {
   /** Carries changes to the other servers, e.g. `new DefaultBroadcastAdapter(new RedisTransport({ redis }))`.
    *  @default process-local */
   transport?: BroadcastAdapter
@@ -56,7 +53,7 @@ class LiveDatabase {
   private readonly transport: BroadcastAdapter | undefined
   private feed: ChangeFeed | undefined
 
-  constructor(options: LiveQueriesOptions) {
+  constructor(options: LiveOptions) {
     this.transport = options.transport
   }
 
@@ -74,44 +71,44 @@ class LiveDatabase {
   /** Called before each statement, on the connection that runs it, once `isReady()`. Without `rewrite`, the text is
    *  sent as is: its writes count as changes to their whole tables, its reads can't be bounded by their result. */
   statementFor(connection: object, text: string, values: readonly unknown[], rewrite = true): Statement {
-    return this.planned(connection, text, values, rewrite, getCallReads())
+    return this.planned(connection, text, values, rewrite, currentQuery())
   }
 
   /** For a statement whose text is known only once it was sent (a postgres.js template with helpers): until then, the
-   *  current call's result counts as changed by any write. */
+   *  current `.live()` query counts as changed by any write. */
   statementWithTextLater(connection: object): { sent(text: string, values: readonly unknown[]): Statement } {
-    const call = getCallReads()
-    const anything = call && new LiveRead(READS_EVERYTHING, [], () => call.changed())
-    if (call && anything) {
+    const live = currentQuery()
+    const anything = live && new LiveRead(READS_EVERYTHING, [], () => live.changed())
+    if (live && anything) {
       this.router.add(anything)
       this.watchTables(READS_EVERYTHING)
-      call.add(anything, this.router)
+      live.add(anything, this.router)
     }
     return {
       sent: (text, values) => {
-        const statement = this.planned(connection, text, values, false, call)
+        const statement = this.planned(connection, text, values, false, live)
         // What committed while it ran is judged now; the statement's own read takes over.
-        if (call && anything) {
+        if (live && anything) {
           anything.resolve(undefined)
-          call.remove(anything)
+          live.remove(anything)
         }
         return statement
       },
     }
   }
 
-  /** `call`: the telefunction call the statement runs in. */
+  /** `live`: the `.live()` query the statement runs in. */
   private planned(
     connection: object,
     text: string,
     values: readonly unknown[],
     rewrite: boolean,
-    call: CallReads,
+    live: LiveQuery | undefined,
   ): Statement {
     const plan = this.planOf(text, this.catalog!)
     switch (plan.kind) {
       case 'read':
-        return this.read(rewrite ? plan : { ...plan, liveText: undefined }, text, values, connection, call)
+        return this.read(rewrite ? plan : { ...plan, liveText: undefined }, text, values, connection, live)
       case 'write':
         if (!rewrite) break
         return {
@@ -127,14 +124,14 @@ class LiveDatabase {
     text: string,
     values: readonly unknown[],
     connection: object,
-    call: CallReads,
+    live: LiveQuery | undefined,
   ): Statement {
-    // Outside a telefunction call nobody can watch the result.
-    if (!call) return this.statement(connection, text, 0, () => [])
-    const read = new LiveRead(plan.shape, values, () => call.changed())
+    // A read outside `.live()` is sent as written.
+    if (!live) return this.statement(connection, text, 0, () => [])
+    const read = new LiveRead(plan.shape, values, () => live.changed())
     this.router.add(read)
     this.watchTables(plan.shape)
-    call.add(read, this.router)
+    live.add(read, this.router)
     return {
       text: plan.liveText ?? text,
       hiddenColumns: plan.liveText ? plan.shape.hiddenColumns.length : 0,
@@ -149,7 +146,7 @@ class LiveDatabase {
         return { text: state.text, values: params, done: (stateRows) => read.resolve(rows, stateRows) }
       },
       failed: () => {
-        call.remove(read)
+        live.remove(read)
         this.transactions.failed(connection)
       },
     }

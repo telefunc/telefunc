@@ -1,60 +1,67 @@
 export { watch }
 
-import type { ClientChannel } from 'telefunc'
-import { withContext } from 'telefunc/client'
-import { EXTENSION_NAME, type LiveResult } from './shared.js'
+import { assertUsage } from './assert.js'
+import type { Live } from './live.js'
+import { closeSubscription, subscriptionOf } from './wire/shared.js'
 
-/** Calls `call`, gives its result to `onData`, and calls it again whenever the result changes on the server.
- *  At most one call runs at a time. Returns `stop`.
+/**
+ * Calls `telefunction(...args)`, gives its value to `onData`, and calls it again each time the value goes stale on the
+ * server. At most one call runs at a time. Returns `stop`.
  *
- *  ```ts
- *  const stop = watch(() => onGetTodos(userId), (todos) => render(todos))
- *  ```
+ * ```ts
+ * const stop = watch(onGetTodos, [userId], (todos) => render(todos))
+ * ```
+ *
+ * On the server (SSR) it does nothing: the browser starts watching once it runs.
  */
-function watch<T>(
-  call: () => Promise<T>,
+function watch<T, TArgs extends unknown[]>(
+  telefunction: (...args: TArgs) => Promise<Live<T>>,
+  args: TArgs,
   onData: (data: T) => void,
   onError: (err: unknown) => void = console.error,
 ): () => void {
-  const liveCall = withContext(call, { extensions: { [EXTENSION_NAME]: {} } })
-  let changes: ClientChannel<never, 'changed'> | undefined
+  if (typeof window === 'undefined') return () => {}
+  // The value watched now: holding it keeps its channel open.
+  let current: Live<T> | undefined
   let stopped = false
   let running = false
-  let changedWhileRunning = false
+  let staleWhileRunning = false
   void refetch()
   return () => {
     stopped = true
-    void changes?.close()
+    closeSubscription(current)
   }
 
   async function refetch(): Promise<void> {
     if (running) {
-      changedWhileRunning = true
+      staleWhileRunning = true
       return
     }
     running = true
     do {
-      changedWhileRunning = false
+      staleWhileRunning = false
       await fetchOnce()
-    } while (changedWhileRunning && !stopped)
+    } while (staleWhileRunning && !stopped)
     running = false
   }
 
   async function fetchOnce(): Promise<void> {
-    let result: LiveResult
+    let live: Live<T>
     try {
-      result = (await liveCall()) as unknown as LiveResult
+      live = await telefunction(...args)
     } catch (err) {
       if (!stopped) onError(err)
       return
     }
-    void changes?.close()
-    changes = result.changes
+    const subscription = subscriptionOf(live)
+    assertUsage(subscription, 'watch() takes a telefunction returning a `Live`, e.g. a query ending with `.live()`.')
     if (stopped) {
-      void changes.close()
+      closeSubscription(live)
       return
     }
-    changes.listen(() => void refetch())
-    onData(result.data as T)
+    closeSubscription(current)
+    current = live
+    subscription.onStale(() => void refetch())
+    onData(live.data)
   }
 }
