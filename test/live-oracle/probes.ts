@@ -5,6 +5,7 @@
 // Probes patch the package's built classes; their methods are private to TypeScript only.
 
 import { AsyncResource } from 'node:async_hooks'
+import '../../packages/live/dist/live.js'
 import { LiveDatabase } from '../../packages/live/dist/liveDatabase.js'
 import { LiveRead } from '../../packages/live/dist/match/liveRead.js'
 import { Tally } from '../../packages/live/dist/match/tally.js'
@@ -128,6 +129,11 @@ const probes: Record<string, () => void> = {
       )
       return resolveWhenAnswered.call(this, watched, shape, rows, stateRows, asSent, key)
     }
+  },
+  /** Each copy of the package tracks `derived()`'s dependencies on its own: values one copy reads aren't seen by
+   *  another copy's `derived()`. */
+  tracking() {
+    delete (globalThis as any)[Symbol.for('@telefunc/live/tracking')]
   },
   /** A cascade only reaches the groups the counts have. */
   'tally-cascade'() {

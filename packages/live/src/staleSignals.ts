@@ -27,8 +27,15 @@ class StaleSignals {
   private last = performance.now()
   private usage = performance.eventLoopUtilization()
   private ticking: ReturnType<typeof setInterval> | undefined
+  private measuresLoad = false
 
   send(signal: () => void): void {
+    if (!this.measuresLoad) {
+      // Node measures the event loop's time once its loop runs; Bun and Deno never do: there's no pace to keep.
+      const { idle, active } = performance.eventLoopUtilization()
+      this.measuresLoad = idle + active > 0
+      if (!this.measuresLoad) return signal()
+    }
     this.refill()
     if (this.waiting.length === 0 && this.allowance >= 1) {
       this.allowance--

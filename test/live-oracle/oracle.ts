@@ -3,7 +3,8 @@
 // Then bursts of writes run faster than the subscribers refetch, each subscriber refetching through `Refetcher` as a
 // client does: once a burst settles, a subscriber whose rows aren't the current ones is a miss too. Each shape has a
 // twin subscriber with the same arguments, so that identical reads run at once and share. Half the subscribers watch a
-// `derived()` value of their rows: at the end, no rows they read may still be held (exit 1).
+// `derived()` value of their rows: at the end, no rows they read may still be held (exit 1). The twins derive it with a
+// second copy of the package, as an app with two versions installed does.
 //
 //   ORM=drizzle|kysely|prisma DB=pglite|pg PG_PORT=<port> PG_DATABASE=postgres SEED=1 STEPS=300 CHURN=1 SERVERS=2
 //   SHAPES=byUser,recent DRIVER=pg|postgres-js node --expose-gc oracle.ts
@@ -27,6 +28,9 @@ import type { OrmDriver, ReadArgs, WriteArgs } from './orms/types.ts'
 import { seed, USERS } from './schema.ts'
 import { SPELLED_COLUMNS, spell } from './spellings.ts'
 import { derived, type LiveCell } from '../../packages/live/dist/live.js'
+// The same file under another URL: a module of its own, as a second copy of the package is.
+const SECOND_COPY = '../../packages/live/dist/live.js?second-copy'
+const secondCopy = (await import(SECOND_COPY)) as { derived: typeof derived }
 import { readLive } from '../../packages/live/dist/liveQuery.js'
 import { Refetcher } from '../../packages/live/dist/refetcher.js'
 import { staleSignals } from '../../packages/live/dist/staleSignals.js'
@@ -213,8 +217,8 @@ type Subscriber = {
   result: string
   invalidated: boolean
   stop: () => void
-  /** Watches a `derived()` value of its rows, and holds the rows' own `Live` weakly. */
-  derived: boolean
+  /** Watches a value of its rows that this `derived()` derives, and holds the rows' own `Live` weakly. */
+  derive?: typeof derived
   rows?: WeakRef<object>
   /** Called when its value goes stale, in the bursts. */
   onStale?: () => void
@@ -232,10 +236,10 @@ async function subscribe(sub: Subscriber, late = false): Promise<void> {
   const rows = (await store.run(context, () =>
     readLive(() => driver.reads[sub.shape]!(sub.args), 'the oracle'),
   )) as LiveCell<unknown>
-  const live = sub.derived ? derivedView(sub.shape, rows) : rows
-  sub.rows = sub.derived ? new WeakRef(rows) : undefined
+  const live = sub.derive ? derivedView(sub.derive, sub.shape, rows) : rows
+  sub.rows = sub.derive ? new WeakRef(rows) : undefined
   const value = live.send()
-  sub.result = sub.derived ? (value as string) : canonical(sub.shape, value)
+  sub.result = sub.derive ? (value as string) : canonical(sub.shape, value)
   const stop = live.onStale(() => {
     sub.invalidated = true
     sub.onStale?.()
@@ -248,8 +252,8 @@ async function subscribe(sub: Subscriber, late = false): Promise<void> {
 }
 
 /** Its own function: a closure keeps every variable its function's closures capture, and `subscribe()`'s outlive it. */
-function derivedView(shape: string, rows: LiveCell<unknown>): LiveCell<string> {
-  return derived(() => canonical(shape, rows.data)) as LiveCell<string>
+function derivedView(derive: typeof derived, shape: string, rows: LiveCell<unknown>): LiveCell<string> {
+  return derive(() => canonical(shape, rows.data)) as LiveCell<string>
 }
 
 // ── The run ──
@@ -273,11 +277,12 @@ for (const shape of Object.keys(driver.reads).filter((s) => !SHAPES || SHAPES.in
       high: low + 1,
       spellings: [spell(column, pick(seeded)[column], random), spell(column, pick(seeded)[column], random)],
     }
-    subscribers.push({ shape, args, result: '', invalidated: false, stop: () => {}, derived: i % 2 === 1 })
+    const derive = i % 2 === 1 ? derived : undefined
+    subscribers.push({ shape, args, result: '', invalidated: false, stop: () => {}, derive })
   }
   // The first one's twin: when both refetch at once, one joins the other's read.
   const first = subscribers.at(-3)!
-  subscribers.push({ ...first, result: '', invalidated: false, stop: () => {}, derived: true })
+  subscribers.push({ ...first, result: '', invalidated: false, stop: () => {}, derive: secondCopy.derived })
 }
 // All at once, as clients do: more calls than the pool has connections, so some wait for one.
 await Promise.all(subscribers.map((sub) => subscribe(sub)))
@@ -411,7 +416,7 @@ for (const [write, c] of [...byWrite].sort(([, a], [, b]) => b.extra - a.extra))
 console.log(
   `bursts: missed=${burstMisses} (${BURSTS} bursts of ${BURST_WRITES} writes, refetch window ${BURST_WINDOW} ms, ${burstRefetches} refetches)`,
 )
-console.log(`derived: rows held=${heldRows} of ${subscribers.filter((s) => s.derived).length} derived subscribers`)
+console.log(`derived: rows held=${heldRows} of ${subscribers.filter((s) => s.derive).length} derived subscribers`)
 for (const miss of misses.slice(0, 10)) console.log(`MISSED ${miss}`)
 process.exit(total.missed > 0 || burstMisses > 0 || heldRows > 0 ? 1 : 0)
 
