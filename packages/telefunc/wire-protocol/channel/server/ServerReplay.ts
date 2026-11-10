@@ -4,7 +4,8 @@ import { assert } from '../../../utils/assert.js'
 import { HELD_SEND_OVERHEAD_BYTES, hold, letGo, type MemoryHolder } from './channelMemory.js'
 import type { PublishBody } from './PublishBody.js'
 
-type Publish = { head: Uint8Array<ArrayBuffer>; body: PublishBody; at: number }
+/** `alone`: sent with none of its channel's unconfirmed, so no publish of the channel's waits ahead of its confirmation. */
+type Publish = { head: Uint8Array<ArrayBuffer>; body: PublishBody; at: number; alone: boolean }
 
 /** What a channel sent and its page hasn't confirmed, for a reconnect to send again: its own frames, and its publishes,
  *  each a head and a reference to the body its subscribers share. Each queue is in seq order and loses entries only at
@@ -37,22 +38,27 @@ class ServerReplay {
 
   pushPublish(seq: number, head: Uint8Array<ArrayBuffer>, body: PublishBody): void {
     this.pushed(seq)
-    this.publishes.push(seq, { head, body, at: performance.now() })
+    this.publishes.push(seq, { head, body, at: performance.now(), alone: this.publishes.length === 0 })
     hold(this.holder, body)
   }
 
-  /** The least time a publish waited for its page's confirmation, `Infinity` before the first. */
+  /** The least time a publish waited for its page's confirmation, `Infinity` before the first. One sent alone waited
+   *  for the path alone, so its confirmation sets it, also where the path got slower; the others only lower it. */
   leastConfirmMs = Number.POSITIVE_INFINITY
 
   /** The page has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
   acknowledge(lastSeq: number): void {
     while (this.frames.length > 0 && this.frames.seqAt(0) <= lastSeq) this.letFrameGo(this.frames.shift())
+    // Only the oldest can be alone: the others were sent while it was unconfirmed.
+    const alone = this.publishes.length > 0 && this.publishes.at(0).alone
     let newest: Publish | undefined
     while (this.publishes.length > 0 && this.publishes.seqAt(0) <= lastSeq) {
       newest = this.publishes.shift()
       this.letPublishGo(newest)
     }
-    if (newest !== undefined) this.leastConfirmMs = Math.min(this.leastConfirmMs, performance.now() - newest.at)
+    if (newest === undefined) return
+    const confirmMs = performance.now() - newest.at
+    this.leastConfirmMs = alone ? confirmMs : Math.min(this.leastConfirmMs, confirmMs)
   }
 
   /** The frames after `afterSeq` in seq order, each publish's head and then its body. A channel's are all there, as
