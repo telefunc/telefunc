@@ -1,0 +1,76 @@
+export { createPrismaDatabase }
+
+import type { PGlite } from '@electric-sql/pglite'
+import { PGLiteSocketServer } from '@electric-sql/pglite-socket'
+import postgres from '@prisma/orm-postgres/runtime'
+import { contractFromJson } from '@prisma/orm-postgres/static'
+import { withLiveQueries } from '@telefunc/live'
+import pg from 'pg'
+import contractJson from './prisma-contract.json'
+import type { Database } from '.'
+
+// `prisma contract emit` also writes the contract's types, but they import Prisma packages an app can't resolve
+// (8.0.0-rc.23), so the rows are typed here.
+type Todo = { id: number; text: string; notes: Note[] }
+type Note = { id: number; text: string; todoId: number | null }
+
+async function createPrismaDatabase(pglite: PGlite): Promise<Database> {
+  // Prisma connects through a `pg.Pool`: PGlite answers the Postgres protocol on a free port, one session at a time.
+  const server = new PGLiteSocketServer({ db: pglite, port: 0 })
+  await server.start()
+  const pool = new pg.Pool({ connectionString: `postgres://postgres@${server.getServerConn()}/postgres`, max: 1 })
+  const db = postgres({ contract: contractFromJson(contractJson), pg: withLiveQueries(pool) }) as any
+  const orm = (from: { orm: any }) => from.orm.public
+  return {
+    async getTodos() {
+      return (
+        (await orm(db)
+          .Todo.orderBy((todo: any) => todo.id.asc())
+          .all()) as Todo[]
+      ).map((todo) => todo.text)
+    },
+    async getFirstTodos() {
+      const rows = (await orm(db)
+        .Todo.orderBy((todo: any) => todo.id.asc())
+        .limit(2)
+        .all()) as Todo[]
+      return rows.map((todo) => todo.text)
+    },
+    async getNotesOf(todoId) {
+      const rows = (await orm(db)
+        .Note.where((note: any) => note.todoId.eq(todoId))
+        .orderBy((note: any) => note.id.asc())
+        .all()) as Note[]
+      return rows.map((note) => note.text)
+    },
+    async getTodosWithNotes() {
+      const rows = (await orm(db)
+        .Todo.include('notes')
+        .orderBy((todo: any) => todo.id.asc())
+        .all()) as Todo[]
+      return rows.flatMap((todo) =>
+        todo.notes.length === 0 ? [`${todo.text}: -`] : todo.notes.map((note) => `${todo.text}: ${note.text}`),
+      )
+    },
+    async addTodo(text) {
+      await orm(db).Todo.create({ text })
+    },
+    async addNote(todoId, text) {
+      await orm(db).Note.create({ text, todoId })
+    },
+    async addTodoAndNote(text) {
+      await db.transaction(async (tx: { orm: any }) => {
+        const todo = (await orm(tx).Todo.create({ text })) as Todo
+        await orm(tx).Note.create({ text, todoId: todo.id })
+      })
+    },
+    async addTodoThenRollBack(text) {
+      await db
+        .transaction(async (tx: { orm: any }) => {
+          await orm(tx).Todo.create({ text })
+          throw new Error('Roll back')
+        })
+        .catch(() => {})
+    },
+  }
+}

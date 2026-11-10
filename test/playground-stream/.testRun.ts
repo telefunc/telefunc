@@ -12,6 +12,7 @@ import { testChannel } from './pages/channel/e2e-test'
 import { testFunction } from './pages/function/e2e-test'
 import { testStreamToServer } from './pages/stream-to-server/e2e-test'
 import { testLiveQuery } from './pages/live-query/e2e-test'
+import { testLiveOrm } from './pages/live-orm/e2e-test'
 import { testRxjs } from './pages/rxjs/e2e-test'
 import { testPublish } from './pages/publish/e2e-test'
 import { testRedisReconnect } from './pages/publish/redis-e2e-test'
@@ -107,6 +108,8 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm p
   testStreamToServer(isDev)
 
   testLiveQuery()
+
+  testLiveOrm()
 
   testRxjs()
 
