@@ -5,9 +5,17 @@ import { publishBody } from './PublishBody.js'
 import { ServerReplay } from './ServerReplay.js'
 import { ACK_STATUS, decode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
-import { IndexedPeer } from './IndexedPeer.js'
+import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { configureBroadcastTransport, disposeBackend } from '../../backend/install.js'
 import type { BroadcastTransport } from '../../backend/broadcast/TransportBroadcastDriver.js'
+import { PathEstimate } from '../../flowControl/PathEstimate.js'
+import { PathLane } from './PathLane.js'
+
+/** `sender` with the lossy lane of its own queue. */
+const withLossyLane = (sender: Omit<PeerSender, 'lossy'>): PeerSender => ({
+  ...sender,
+  lossy: new PathLane(sender.queue),
+})
 
 afterEach(() => disposeBackend())
 
@@ -231,13 +239,12 @@ describe('ServerBroadcastEnd', () => {
     const frames: Uint8Array[] = []
     end._attachPeer(
       new IndexedPeer({
-        sender: {
+        sender: withLossyLane({
           send: (frame) => {
             frames.push(frame)
           },
           carry() {},
           bufferedAmount: () => 0,
-          behindAfter: () => 700,
           deliveredBefore: () => 0,
           terminate() {},
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
@@ -246,8 +253,11 @@ describe('ServerBroadcastEnd', () => {
             dropWaitingPublishes() {},
             dropWaitingFromPublish() {},
             drainRate: () => 0,
+            acknowledged: () => true,
+            unhandedBytes: 0,
+            path: new PathEstimate({ reportGap: 0 }),
           },
-        },
+        }),
         index: 7,
         replay: new ServerReplay({ heldBytes: 0 }),
       }),
@@ -292,13 +302,12 @@ describe('Broadcast shield validation', () => {
     const frames: Uint8Array[] = []
     broadcast._end._attachPeer(
       new IndexedPeer({
-        sender: {
+        sender: withLossyLane({
           send: (frame) => {
             frames.push(frame)
           },
           carry() {},
           bufferedAmount: () => 0,
-          behindAfter: () => 700,
           deliveredBefore: () => 0,
           terminate() {},
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
@@ -307,8 +316,11 @@ describe('Broadcast shield validation', () => {
             dropWaitingPublishes() {},
             dropWaitingFromPublish() {},
             drainRate: () => 0,
+            acknowledged: () => true,
+            unhandedBytes: 0,
+            path: new PathEstimate({ reportGap: 0 }),
           },
-        },
+        }),
         index: 7,
         replay: new ServerReplay({ heldBytes: 0 }),
       }),
@@ -338,11 +350,10 @@ describe('Broadcast shield validation', () => {
 
     sender._end._attachPeer(
       new IndexedPeer({
-        sender: {
+        sender: withLossyLane({
           send: () => {},
           carry() {},
           bufferedAmount: () => 0,
-          behindAfter: () => 700,
           deliveredBefore: () => 0,
           terminate() {},
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
@@ -351,8 +362,11 @@ describe('Broadcast shield validation', () => {
             dropWaitingPublishes() {},
             dropWaitingFromPublish() {},
             drainRate: () => 0,
+            acknowledged: () => true,
+            unhandedBytes: 0,
+            path: new PathEstimate({ reportGap: 0 }),
           },
-        },
+        }),
         index: 7,
         replay: new ServerReplay({ heldBytes: 0 }),
       }),
@@ -371,11 +385,10 @@ describe('lossy broadcast under memory pressure', () => {
     end._registerChannel()
     end._attachPeer(
       new IndexedPeer({
-        sender: {
+        sender: withLossyLane({
           send() {},
           carry() {},
           bufferedAmount: () => 0,
-          behindAfter: () => 0,
           deliveredBefore: () => 0,
           terminate() {},
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
@@ -384,8 +397,12 @@ describe('lossy broadcast under memory pressure', () => {
             dropWaitingPublishes() {},
             dropWaitingFromPublish() {},
             drainRate: () => 0,
+            acknowledged: () => true,
+            // More than its path has room for: the page is behind.
+            unhandedBytes: Infinity,
+            path: new PathEstimate({ reportGap: 0 }),
           },
-        },
+        }),
         index: 7,
         replay: end._replayBuffer!,
       }),

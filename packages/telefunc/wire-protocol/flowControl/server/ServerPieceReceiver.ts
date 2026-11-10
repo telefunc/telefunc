@@ -8,9 +8,11 @@ import {
 } from '../../constants.js'
 import { PieceReceiver, type FrameArrival, type PieceArrival } from '../pieces.js'
 
-/** The server's `PieceReceiver`, which puts a WebSocket frame sent in pieces back together. Once it took
- *  `WIRE_SEND_ACK_MIN_BYTES` since it last acknowledged, headers and control frames included, it acknowledges them
- *  within `WIRE_SEND_ACK_MS` of a data frame, as the page's headroom waits on it, or in its next answer. */
+/** The server's `PieceReceiver`, which puts a WebSocket frame sent in pieces back together. It acknowledges each data
+ *  frame in its next message, or alone a `WIRE_PIECES_ACK_GAP_MS` after its gap, so that the page measures its path
+ *  whatever their size. Once it took `WIRE_SEND_ACK_MIN_BYTES` since it last acknowledged, headers and control frames
+ *  included, it acknowledges them within `WIRE_SEND_ACK_MS` of a data frame, as the page's headroom waits on it, or in
+ *  its next answer. */
 class ServerPieceReceiver extends PieceReceiver {
   /** Its side answers: the answer carries the acknowledgement, so the page's next request doesn't wait on its timer. */
   answering(): void {
@@ -26,8 +28,10 @@ class ServerPieceReceiver extends PieceReceiver {
     this.acknowledgeTaken(data, announced)
   }
 
-  /** Acknowledges enough data in `WIRE_SEND_ACK_MS`, and soon past `WIRE_PIECES_ACK_BYTES` or an announced message. */
+  /** Acknowledges data in its next message, enough of it in `WIRE_SEND_ACK_MS`, and soon past `WIRE_PIECES_ACK_BYTES`
+   *  or an announced message. */
   private acknowledgeTaken(data: boolean, announced: boolean): void {
+    if (data) this.acknowledgeWithNextSoon()
     if (data && this.took - this.acknowledgedTook >= WIRE_SEND_ACK_MIN_BYTES) this.acknowledgeIn(WIRE_SEND_ACK_MS)
     if (announced || this.took - this.acknowledgedTook > WIRE_PIECES_ACK_BYTES) this.acknowledgeSoon()
   }

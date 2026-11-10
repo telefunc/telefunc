@@ -1,5 +1,5 @@
 export { IndexedPeer }
-export type { PeerSender }
+export type { PeerSender, RoomWaiter }
 
 import { ACK_STATUS, encode } from '../../wire/frame.js'
 import type { AckResultStatus, SequencedEncoder } from '../../wire/frame.js'
@@ -8,13 +8,13 @@ import type { ServerReplay } from './ServerReplay.js'
 import type { SendWait } from '../../flowControl/SendWaits.js'
 import type { Urgency } from '../../flowControl/credit.js'
 import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
+import type { PathLane } from './PathLane.js'
 
 interface PeerSender {
   /** What the wire holds back for its page. */
   readonly queue: WireQueue
-  /** How long a lossy page on the wire may leave a publish unconfirmed before it counts as behind, where a confirmation
-   *  takes at least `roundTrip` ms: `Infinity` before one was measured. */
-  behindAfter(roundTrip: number): number
+  /** Where its lossy channels' publishes go. */
+  readonly lossy: PathLane
   send(frame: Uint8Array): void
   /** Sends `frame` in the next message the wire sends, where it can carry one (see `PieceSender.carry`). */
   carry(frame: Uint8Array): void
@@ -26,6 +26,10 @@ interface PeerSender {
   deliveredBefore(ms: number): number
   /** Ends the wire, as a frame that breaks the protocol does. */
   terminate(): void
+}
+
+interface RoomWaiter {
+  roomMayHaveOpened(): void
 }
 
 type IndexedPeerOptions = {

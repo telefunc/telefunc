@@ -9,6 +9,7 @@ import {
 } from '../../constants.js'
 import { addWireCopies, dropWireCopies, hasCopyRoom } from '../../channel/server/channelMemory.js'
 import { DrainRate } from '../DrainRate.js'
+import { PathEstimate } from '../PathEstimate.js'
 import { PieceRate } from '../PieceRate.js'
 import {
   PieceSender,
@@ -35,6 +36,8 @@ type ServerHeadroomOptions = Pick<PieceSenderOptions, 'socket' | 'pingInterval'>
 class ServerHeadroom implements PieceSenderOwner, WireQueue {
   /** Sends every frame the WebSocket carries. */
   readonly sender: PieceSender
+  /** What the path to the page delivers, from the page's acknowledgements of every data frame. */
+  readonly path = new PathEstimate({ reportGap: WIRE_PIECES_ACK_GAP_MS })
   private readonly socket: PieceSocket
   /** The rate the page takes data at, as acknowledgements measure it. */
   private readonly drain = new DrainRate()
@@ -96,6 +99,10 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     this.sender.dropWaiting(droppingFromPublish(ix))
   }
 
+  get unhandedBytes(): number {
+    return this.sender.unhandedBytes
+  }
+
   drainRate(): number {
     return this.drain.rate || this.pieceRate.carried
   }
@@ -119,6 +126,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   /** `PieceSenderOwner`: the path holds `bytes`; each dated part is dated apart, so a burst's first part measures the path. */
   handed(bytes: number, data: boolean, copied: boolean): void {
     const now = performance.now()
+    this.path.handed(this.sender.transmittedBytes, now)
     this.inPath = this.pathHolds(now) + bytes
     this.inPathAt = now
     if (copied) {
@@ -169,6 +177,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     const before = this.sender.acknowledgedBytes
     if (!this.sender.acknowledged(ack)) return false
     const now = performance.now()
+    this.path.acknowledged(ack, now)
     const spanMs = ack.spanUs / 1000
     this.arrivedAt += spanMs
     this.leastBack = Math.min(this.leastBack, now - ack.heldMs - this.arrivedAt)

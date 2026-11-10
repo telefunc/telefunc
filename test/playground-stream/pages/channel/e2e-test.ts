@@ -1215,13 +1215,18 @@ function testChannel(isDev: boolean, inDocker = false) {
   })
 
   if (channelTransport === 'ws') {
-    test('channel: the page answers 500 small messages its server sends as the channel opens in at most 4 WebSocket messages', async () => {
+    // Besides its answers, the page reports what it took at most once a report gap (`WIRE_PIECES_ACK_GAP_MS`, 50 ms), in
+    // its next message or alone (a PIECES_ACK frame, tag 0x0b).
+    test('channel: the page answers 500 small messages its server sends as the channel opens in at most 4 WebSocket messages, and reports what it took once a report gap at most', async () => {
       let sent = 0
+      let reports = 0
       let counting = false
       const onWebSocket = (ws: WebSocket) => {
         if (!ws.url().includes('/_telefunc')) return
-        ws.on('framesent', () => {
-          if (counting) sent++
+        ws.on('framesent', ({ payload }) => {
+          if (!counting) return
+          if (typeof payload !== 'string' && payload[0] === 0x0b) reports++
+          else sent++
         })
       }
       page.on('websocket', onWebSocket)
@@ -1236,7 +1241,10 @@ function testChannel(isDev: boolean, inDocker = false) {
         // The first run opens the WebSocket, so only the second's messages count.
         await run()
         counting = true
+        const start = Date.now()
         await run()
+        counting = false
+        expect(reports).lessThanOrEqual(1 + Math.ceil((Date.now() - start) / 50))
       } finally {
         page.off('websocket', onWebSocket)
       }

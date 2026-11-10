@@ -522,6 +522,8 @@ price.subscribe((value, info) => showPrice(value, info.seq))
 
 > `info.seq` jumps over the messages a client skipped, and the server logs a warning once. A key is one stream: a newer message replaces an older one whoever published it, so give each value its own key, such as one per pointer.
 
+> A client whose connection speeds up after a congested spell gets more of the stream a step at a time: one round trip in eight, the server sends a quarter more than the connection carried. Twice the rate takes about 25 round trips, 2.5 s at 100 ms, and each step can hold the connection's other messages up to a quarter of a round trip longer.
+
 > Without `lossy`, a client gets every message, and past what the server holds for it the channel closes with `ChannelOverflowError` (see <Link href="#broadcast" />). To catch up, load the state again and call the telefunction for a new channel.
 
 ### `BroadcastChannel` methods

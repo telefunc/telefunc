@@ -4,16 +4,14 @@ import { assert } from '../../../utils/assert.js'
 import { HELD_SEND_OVERHEAD_BYTES, hold, letGo, type MemoryHolder } from './channelMemory.js'
 import type { PublishBody } from './PublishBody.js'
 
-type Publish = { seq: number; head: Uint8Array<ArrayBuffer>; body: PublishBody; at: number }
+type Publish = { head: Uint8Array<ArrayBuffer>; body: PublishBody }
 
 /** What a channel sent and its page hasn't confirmed, for a reconnect to send again: its own frames, and its publishes,
  *  each a head and a reference to the body its subscribers share. Each queue is in seq order: acknowledged entries leave
- *  from its oldest end, publishes past a gap from its newest, and a skipped one from among the newest. */
+ *  from its oldest end, publishes past a gap from its newest, and a lossy stream's from anywhere. */
 class ServerReplay {
   private readonly frames = new SeqQueue<Uint8Array<ArrayBuffer>>()
   private readonly publishes = new SeqQueue<Publish>()
-  /** The seq of each lossy stream's newest publish it holds. */
-  private readonly newestOfStream = new Map<string, number>()
   private readonly holder: MemoryHolder
   private issuedSeq = 0
   private pushedSeq = 0
@@ -39,23 +37,14 @@ class ServerReplay {
 
   pushPublish(seq: number, head: Uint8Array<ArrayBuffer>, body: PublishBody): void {
     this.pushed(seq)
-    this.publishes.push(seq, { seq, head, body, at: performance.now() })
+    this.publishes.push(seq, { head, body })
     hold(this.holder, body)
-    if (body.lossyStream !== null) this.newestOfStream.set(body.lossyStream, seq)
   }
-
-  /** The least time a publish waited for its page's confirmation, `Infinity` before the first. */
-  leastConfirmMs = Number.POSITIVE_INFINITY
 
   /** The page has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
   acknowledge(lastSeq: number): void {
     while (this.frames.length > 0 && this.frames.seqAt(0) <= lastSeq) this.letFrameGo(this.frames.shift())
-    let newest: Publish | undefined
-    while (this.publishes.length > 0 && this.publishes.seqAt(0) <= lastSeq) {
-      newest = this.publishes.shift()
-      this.letPublishGo(newest)
-    }
-    if (newest !== undefined) this.leastConfirmMs = Math.min(this.leastConfirmMs, performance.now() - newest.at)
+    while (this.publishes.length > 0 && this.publishes.seqAt(0) <= lastSeq) this.letPublishGo(this.publishes.shift())
   }
 
   /** The frames after `afterSeq` in seq order, each publish's head and then its body. A channel's are all there, as
@@ -76,20 +65,18 @@ class ServerReplay {
     return out
   }
 
-  /** The newest publish of lossy `stream` goes if it is among its newest `droppable` publishes, the ones no wire has, for
-   *  a newer one to take its place: the page's `info.seq` shows what it skipped. Returns its seq where it went. */
-  dropNewestOf(stream: string, droppable: number): number | undefined {
-    const seq = this.newestOfStream.get(stream)
-    if (seq === undefined) return undefined
-    const publish = this.publishes.removeAmongNewest(seq, droppable)
-    if (!publish) return undefined
-    this.letPublishGo(publish)
-    return seq
+  /** Lossy `stream`'s publishes go, for a newer one to take their place on the page's next wire: the page's `info.seq`
+   *  shows what it skipped. Receipts stay. Returns how many went. */
+  dropPublishesOf(stream: string): number {
+    return this.publishes.remove(
+      ({ body }) => body.lossyStream === stream,
+      (publish) => this.letPublishGo(publish),
+    )
   }
 
   /** A page gets every reliable publish: where its holder holds more than `toBytes` and one of its newest `droppable`
    *  publishes would have to go (any at 0; above 0, a reliable one but the newest reliable, once its waiting lossy
-   *  publishes, each its stream's newest, are counted out), the oldest of them goes with every frame after it, receipts
+   *  publishes are counted out), the oldest of them goes with every frame after it, receipts
    *  too, so nothing reaches the page past the gap. Returns how many publishes went. */
   dropFromGap(toBytes: number, droppable: number): number {
     const waiting = Math.min(this.publishes.length, droppable)
@@ -100,11 +87,6 @@ class ServerReplay {
       this.letFrameGo(this.frames.pop())
     for (let i = 0; i < waiting; i++) this.letPublishGo(this.publishes.pop())
     return waiting
-  }
-
-  /** When the oldest publish its page hasn't confirmed was sent, `undefined` with none. */
-  get oldestPublishAt(): number | undefined {
-    return this.publishes.length > 0 ? this.publishes.at(0).at : undefined
   }
 
   /** The body of the newest publish it holds. */
@@ -139,15 +121,13 @@ class ServerReplay {
     letGo(this.holder, frame.byteLength + HELD_SEND_OVERHEAD_BYTES)
   }
 
-  private letPublishGo({ seq, body }: Publish): void {
+  private letPublishGo({ body }: Publish): void {
     letGo(this.holder, body)
-    const { lossyStream } = body
-    if (lossyStream !== null && this.newestOfStream.get(lossyStream) === seq) this.newestOfStream.delete(lossyStream)
   }
 }
 
-/** Entries in seq order that leave at the ends, as `channel/client/ReplayBuffer.ts`'s queues, or from among the newest: a
- *  slot left at the oldest end holds nothing, and the slots go once they are as many as the live ones, which keeps a
+/** Entries in seq order that leave at the ends, as `channel/client/ReplayBuffer.ts`'s queues, or by a filter: a slot left
+ *  at the oldest end holds nothing, and the slots go once they are as many as the live ones, which keeps a
  *  shift amortised O(1). Indices count from the oldest live entry. */
 class SeqQueue<T> {
   // Seqs in an array of their own, so a scan by seq reads only numbers.
@@ -198,17 +178,23 @@ class SeqQueue<T> {
     return item
   }
 
-  /** Takes out the entry of `seq` where it is among the newest `newest`, and returns it. */
-  removeAmongNewest(seq: number, newest: number): T | undefined {
-    const oldest = Math.max(this.head, this.seqs.length - newest)
-    for (let i = this.seqs.length - 1; i >= oldest; i--) {
-      if (this.seqs[i] !== seq) continue
-      this.seqs.splice(i, 1)
-      const [item] = this.items.splice(i, 1)
-      if (this.head >= this.items.length) this.clear()
-      return item
+  /** Takes out the entries `drops` says go, handing each to `gone`, and returns how many went. */
+  remove(drops: (item: T) => boolean, gone: (item: T) => void): number {
+    const seqs: number[] = []
+    const items: T[] = []
+    for (let i = this.head; i < this.items.length; i++) {
+      const item = this.items[i]!
+      if (drops(item)) gone(item)
+      else {
+        seqs.push(this.seqs[i]!)
+        items.push(item)
+      }
     }
-    return undefined
+    const removed = this.length - items.length
+    this.seqs = seqs
+    this.items = items
+    this.head = 0
+    return removed
   }
 
   private clear(): void {

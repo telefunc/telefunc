@@ -23,9 +23,10 @@ import { parseSseRequestMetadata, textEncoder, type SseRequestMetadata } from '.
 import { OversizeFrameError, BodyReader, StreamTruncatedError } from '../../wire/BodyReader.js'
 import { getChannelMux } from './ChannelMux.js'
 import type { ChannelMux, ReconcileOutcome, ServerTransport } from './ChannelMux.js'
-import { encode } from '../../wire/frame.js'
+import { encode, type PiecesAck } from '../../wire/frame.js'
 import { TAG, passesData } from '../../wire/tags.js'
 import { DrainRate } from '../../flowControl/DrainRate.js'
+import { PathEstimate } from '../../flowControl/PathEstimate.js'
 import {
   countWaitingPublishes,
   droppingFromPublish,
@@ -60,6 +61,8 @@ type SseWire = {
 type EventStreamOptions = {
   useNodeStream: boolean
   onCancel: () => void
+  /** The page reports what it took in its POSTs: one goes each `sseFlushThrottle` at most. */
+  reportGap: number
 }
 
 /** The event stream to the page: data waits for it to ask for more, and the frames that go at once pass that data. An
@@ -80,8 +83,12 @@ class EventStream implements WireQueue {
   /** The rate the page takes what waits, and when it last took some; null while nothing waits. */
   private readonly drain = new DrainRate()
   private tookAt: number | null = null
+  readonly path: PathEstimate
+  /** The bytes of the frames whose events went to the stream, as the page counts them. */
+  private handedBytes = 0
 
-  constructor({ useNodeStream, onCancel }: EventStreamOptions) {
+  constructor({ useNodeStream, onCancel, reportGap }: EventStreamOptions) {
+    this.path = new PathEstimate({ reportGap })
     // A Web stream asks from inside `enqueue`: an ask waits, so that no push runs inside another.
     const onTake = () => queueMicrotask(() => this.handWaiting())
     this.stream = useNodeStream
@@ -144,8 +151,16 @@ class EventStream implements WireQueue {
     })
   }
 
+  get unhandedBytes(): number {
+    return Math.floor((this.waitingBytes * 3) / 4)
+  }
+
   drainRate(): number {
     return this.drain.rate
+  }
+
+  acknowledged(ack: PiecesAck): boolean {
+    return this.path.acknowledged(ack, performance.now())
   }
 
   /** Past a wire only lost, what waits is dropped: the page's reconnect gets it from its channels' replay, and it could
@@ -180,6 +195,7 @@ class EventStream implements WireQueue {
   /** Starts `frame`'s event and returns the bytes that went. */
   private startEvent(frame: Uint8Array<ArrayBuffer>): number {
     if (frame[0] === TAG.PUBLISH_TO) this.headStarted = frame
+    this.handed(frame)
     this.current = { frame, offset: 0 }
     return this.pushChunks()
   }
@@ -203,9 +219,15 @@ class EventStream implements WireQueue {
     while (this.passing.length > 0) {
       const passing = this.passing.shift()!
       this.waitingBytes -= eventBytes(passing)
+      this.handed(passing)
       this.takes = this.stream.push(encodeChunk(passing, 0, passing.byteLength))
     }
     return bytes
+  }
+
+  private handed(frame: Uint8Array<ArrayBuffer>): void {
+    this.handedBytes += frame.byteLength
+    this.path.handed(this.handedBytes, performance.now())
   }
 }
 
@@ -313,7 +335,7 @@ class SseServerTransport {
       const wire = this.mux.getWireByConnId<SseWire>(connId)
       if (wire) this.closeWire(wire, { permanent: false })
     }
-    const events = new EventStream({ useNodeStream, onCancel })
+    const events = new EventStream({ useNodeStream, onCancel, reportGap: getServerConfig().channel.sseFlushThrottle })
 
     const { promise: ready, resolve: resolveReady } = createDeferred()
     const wire: SseWire = {

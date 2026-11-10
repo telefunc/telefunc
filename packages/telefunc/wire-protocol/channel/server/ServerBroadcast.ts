@@ -60,8 +60,8 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
   private readonly peerSubscriptions: Record<BroadcastKind, boolean> = { text: false, binary: false }
   private missedWarned = false
 
-  /** Past what its wire takes to confirm, a newer publish replaces those waiting, on the way to its page and on the page's
-   *  way up. */
+  /** Where its page's path carries less than the wire's lossy streams offer, a newer publish replaces those waiting, on
+   *  the way to its page, and on the page's way up once the page is behind. */
   readonly lossy: boolean
 
   constructor(opts: BroadcastChannelOptions) {

@@ -1,6 +1,8 @@
 export { countWaitingPublishes, droppingPublishes, droppingFromPublish, overtakes }
 export type { WireQueue }
 
+import type { PathEstimate } from '../PathEstimate.js'
+import type { PiecesAck } from '../../wire/frame.js'
 import { SEQ_OFFSET, SEQ_SPAN, readU16, readU32 } from '../../wire/header.js'
 import { TAG, isClosingTag, isSequencedTag } from '../../wire/tags.js'
 
@@ -12,8 +14,14 @@ interface WireQueue {
   dropWaitingPublishes(ix: number, seqs: readonly number[]): void
   /** Drops what of channel `ix` waits here from its oldest publish on, receipts too. */
   dropWaitingFromPublish(ix: number): void
+  /** The bytes it holds back, as the page counts them. */
+  readonly unhandedBytes: number
   /** The rate the page takes data at, in bytes per ms, 0 before one was measured. */
   drainRate(): number
+  /** What the path to the page delivers, from the page's reports of what it took. */
+  readonly path: PathEstimate
+  /** Takes the page's report of what it took; false if it reports more than was sent. */
+  acknowledged(ack: PiecesAck): boolean
 }
 
 function isHeadOf(frame: Uint8Array, ix: number): boolean {
