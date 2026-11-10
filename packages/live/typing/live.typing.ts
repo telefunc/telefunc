@@ -2,6 +2,8 @@
 // forgetting it is a compile error where the client consumes the telefunction.
 
 import type { Collection } from '@prisma/orm-postgres/orm-client'
+import postgres from '@prisma/orm-postgres/runtime'
+import { contractFromJson } from '@prisma/orm-postgres/static'
 import { eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { boolean, integer, pgTable, serial, text } from 'drizzle-orm/pg-core'
@@ -49,10 +51,13 @@ async function drizzleReads() {
 
 // ── Kysely ──
 type DB = { todos: Todo }
-const kdb = liveKysely(new Kysely<DB>({ dialect: new PostgresDialect({ pool }) }), pool)
+const unwrappedKdb = new Kysely<DB>({ dialect: new PostgresDialect({ pool }) })
+const kdb = liveKysely(unwrappedKdb, pool)
 async function kyselyReads() {
   const rows = await kdb.selectFrom('todos').select(['id', 'text']).where('userId', '=', 1).orderBy('id').live()
   same<typeof rows, Live<{ id: number; text: string }[]>>(true)
+  // @ts-expect-error `.live()` on a Kysely that `liveKysely()` didn't wrap.
+  await unwrappedKdb.selectFrom('todos').selectAll().live()
 }
 
 // ── Prisma 8 ──
@@ -71,6 +76,13 @@ async function prismaReads() {
     .live()
   // This stand-in client has no contract types, so a selected column's type is unknown.
   same<typeof picked, Live<{ id: unknown; text: unknown }[]>>(true)
+}
+const unwrappedPrisma = postgres({ contract: contractFromJson({}), pg: pool })
+const wrappedPrisma = livePrisma(unwrappedPrisma, pool)
+async function prismaScope() {
+  await wrappedPrisma.orm.public!.Todo!.where({}).live()
+  // @ts-expect-error `.live()` on a client that `livePrisma()` didn't wrap.
+  await unwrappedPrisma.orm.public!.Todo!.where({}).live()
 }
 
 // ── Composing on the server ──
@@ -98,4 +110,4 @@ const stop: () => void = watch(onGetTodos, [1], (rows) => same<typeof rows, Todo
 // @ts-expect-error Forgetting `.live()`.
 watch(onGetTodosPlain, [1], () => {})
 
-void [drizzleReads, kyselyReads, prismaReads, stop]
+void [drizzleReads, kyselyReads, prismaReads, prismaScope, stop]
