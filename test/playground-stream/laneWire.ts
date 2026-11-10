@@ -1,4 +1,5 @@
 export { test, checkWire, expectWire }
+export type { WireCheck }
 
 // A lane that names its wire (`checkWire`) has each test end by checking, from every page the test used, that the
 // channel data went on that wire: a page that falls back a rung still passes a test that only checks what arrived.
@@ -31,12 +32,13 @@ function expectWire(check: WireCheck): void {
   testCheck = check
 }
 
-function test(name: string, fn: () => void | Promise<void>): void {
+/** `check`: the wire this test runs on, in a lane that names none. */
+function test(name: string, fn: () => void | Promise<void>, check?: WireCheck): void {
   testE2e(name, async () => {
-    testCheck = laneCheck
+    testCheck = check ?? laneCheck
     testPages.clear()
     testContexts.clear()
-    if (laneCheck) {
+    if (testCheck) {
       await probe(page)
       await page.evaluate(forgetWireData)
     }

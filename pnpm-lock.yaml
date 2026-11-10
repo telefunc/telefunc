@@ -331,6 +331,18 @@ importers:
         specifier: ^8.0.16
         version: 8.0.16(@types/node@24.0.10)(esbuild@0.28.2)(jiti@2.7.0)
 
+  packages/media:
+    devDependencies:
+      '@telefunc/room':
+        specifier: workspace:*
+        version: link:../room
+      telefunc:
+        specifier: link:../telefunc
+        version: link:../telefunc
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+
   packages/redis:
     devDependencies:
       '@telefunc/room':
@@ -612,6 +624,9 @@ importers:
       '@tanstack/react-query':
         specifier: ^5.95.2
         version: 5.101.0(react@19.2.4)
+      '@telefunc/media':
+        specifier: workspace:*
+        version: link:../../packages/media
       '@telefunc/redis':
         specifier: workspace:*
         version: link:../../packages/redis

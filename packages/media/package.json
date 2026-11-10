@@ -1,0 +1,39 @@
+{
+  "name": "@telefunc/media",
+  "version": "0.1.0",
+  "description": "Group meetings on Telefunc rooms: audio and video, encoded and played in the page.",
+  "homepage": "https://github.com/telefunc/telefunc/tree/main/packages/media#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/telefunc/telefunc.git",
+    "directory": "packages/media"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "rm -rf dist/ && tsc",
+    "dev": "tsc --watch"
+  },
+  "peerDependencies": {
+    "@telefunc/room": ">=0.1.0"
+  },
+  "devDependencies": {
+    "@telefunc/room": "workspace:*",
+    "telefunc": "workspace:*",
+    "typescript": "^7.0.2"
+  }
+}
