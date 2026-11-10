@@ -16,6 +16,8 @@ type Transaction = Executor & { rollback(): Promise<void> }
 type Pglite = Executor & {
   transaction<T>(callback: (tx: Transaction) => Promise<T>): Promise<T>
   waitReady: Promise<void>
+  /** Its database runs: from then on, until `waitReady` resolves, it runs statements of its own. */
+  ready: boolean
 }
 
 const CAPTURED = Symbol.for('@telefunc/live/captured')
@@ -24,7 +26,7 @@ const CAPTURED = Symbol.for('@telefunc/live/captured')
 function capturePglite(pglite: Pglite, live: LiveDatabase): void {
   if (CAPTURED in pglite) return
   Object.defineProperty(pglite, CAPTURED, { value: true, configurable: true })
-  const ready = captureExecutor(pglite, pglite, live)
+  const ready = captureExecutor(pglite, pglite, live, startingStatements(pglite))
   const transaction = pglite.transaction.bind(pglite)
   // PGlite sends its own `BEGIN` and `COMMIT`, past `query()`.
   const control = (text: string) => live.statementFor(pglite, text, []).succeeded([])
@@ -34,7 +36,7 @@ function capturePglite(pglite: Pglite, live: LiveDatabase): void {
     try {
       result = await transaction(async (tx) => {
         control('BEGIN')
-        captureExecutor(tx, pglite, live)
+        captureExecutor(tx, pglite, live, () => false)
         const rollback = tx.rollback.bind(tx)
         tx.rollback = async () => {
           await rollback()
@@ -51,12 +53,33 @@ function capturePglite(pglite: Pglite, live: LiveDatabase): void {
   }
 }
 
-/** Returns how to load what capturing needs, through `executor`'s own `query()`. */
-function captureExecutor(executor: Executor, connection: Pglite, live: LiveDatabase): () => Promise<void> {
+/** Whether a statement is one PGlite runs while it starts, through `query()` and `exec()` like the app's. */
+function startingStatements(pglite: Pglite): () => boolean {
+  let starting = true
+  pglite.waitReady.then(
+    () => {
+      starting = false
+    },
+    () => {},
+  )
+  return () => starting && pglite.ready
+}
+
+/** Returns how to load what capturing needs, through `executor`'s own `query()`. `isStarting`: the statement is one
+ *  PGlite runs while it starts, sent as it is (ours wait for it to have started). */
+function captureExecutor(
+  executor: Executor,
+  connection: Pglite,
+  live: LiveDatabase,
+  isStarting: () => boolean,
+): () => Promise<void> {
   const query = executor.query.bind(executor)
   const exec = executor.exec.bind(executor)
   const ready = async () => {
-    if (!live.isReady()) await live.ready(async (text) => firstValue(await query(text)))
+    if (live.isReady()) return
+    // A database just created starts first.
+    await connection.waitReady
+    await live.ready(async (text) => firstValue(await query(text)))
   }
   /** Queued on the database now: it runs before anything the caller sends next. */
   const runFollowUp = ({ text, values, done }: FollowUp) => {
@@ -67,6 +90,7 @@ function captureExecutor(executor: Executor, connection: Pglite, live: LiveDatab
     )
   }
   executor.query = async (text, params = [], options) => {
+    if (isStarting()) return query(text, params, options)
     await ready()
     // Other options (parsers, serializers) make rows only this caller can be given.
     const rowForm =
@@ -87,6 +111,7 @@ function captureExecutor(executor: Executor, connection: Pglite, live: LiveDatab
     return result
   }
   executor.exec = async (text, options) => {
+    if (isStarting()) return exec(text, options)
     await ready()
     // Several statements, possibly: run as written, and count every write as a change to its whole table.
     const statement = live.statementFor(connection, text, [], { rewrite: false })

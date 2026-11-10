@@ -154,9 +154,10 @@ async function connect(): Promise<{
   close: () => Promise<void>
 }> {
   if (DB === 'pglite') {
+    // Wrapped as it is created, before it started: the seed goes through the wrapper.
     const pglite = new PGlite()
-    await pglite.exec(seed(random))
     const driver = ORM === 'kysely' ? createKysely(pglite, 'pglite') : createDrizzle(pglite, 'pglite')
+    await pglite.exec(seed(random))
     return {
       driver,
       writer: driver,

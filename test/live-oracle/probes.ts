@@ -5,6 +5,7 @@
 // Probes patch the package's built classes; their methods are private to TypeScript only.
 
 import { AsyncResource } from 'node:async_hooks'
+import { PGlite } from '@electric-sql/pglite'
 import '../../packages/live/dist/live.js'
 import { LiveDatabase } from '../../packages/live/dist/liveDatabase.js'
 import { LiveRead } from '../../packages/live/dist/match/liveRead.js'
@@ -152,6 +153,11 @@ const probes: Record<string, () => void> = {
         JSON.stringify({ ...JSON.parse(await query(text)), functions: [] }),
       )
     }
+  },
+  /** PGlite's own statements while it starts are captured like the app's: they wait for the catalog, which waits for
+   *  PGlite to have started. The run hangs. */
+  startup() {
+    Object.defineProperty(PGlite.prototype, 'ready', { get: () => false })
   },
   /** A cascade only reaches the groups the counts have. */
   'tally-cascade'() {
