@@ -38,7 +38,7 @@ import { drizzle as drizzlePglite } from 'drizzle-orm/pglite'
 import { drizzle as drizzlePostgresJs } from 'drizzle-orm/postgres-js'
 import { liveDrizzle } from '@telefunc/live/drizzle'
 import type { BroadcastAdapter } from 'telefunc'
-import { arrayOf, CODES, COLUMN_TYPES, REFS, type Spelling } from '../spellings.ts'
+import { arrayOf, CODES, COLUMN_TYPES, METRICS, REFS, type Spelling } from '../spellings.ts'
 import { cursorRead } from './cursorRead.ts'
 import { EVENT_TAG, eventQuery } from './eventQuery.ts'
 import type { OrmDriver } from './types.ts'
@@ -230,6 +230,8 @@ function createDrizzle(
         db.execute(sql`select kind, count(*)::int as n from event_log group by kind order by kind`).then(rowsOf),
       counters: () => db.execute(sql`select id, n from counters order by id`).then(rowsOf),
       chained: () => db.execute(sql`select n from chained`).then(rowsOf),
+      metricIs: ({ low }) =>
+        db.execute(sql`select id from metrics where metric is not distinct from ${METRICS[low]}::float8`).then(rowsOf),
       products: () => db.execute(sql`select id, brand from products order by id`).then(rowsOf),
       ticket: () => db.execute(sql`select nextval('tickets') as n`).then(rowsOf),
       ...(kind === 'pg' && {

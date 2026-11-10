@@ -337,6 +337,9 @@ for (const sub of volatile) {
   sub.stop()
   subscribers.splice(subscribers.indexOf(sub), 1)
 }
+// No write ran yet: each read holds what it returns alone, unless it shared another read's run (other parameters).
+const alone = await Promise.all(subscribers.map((sub) => driver.reads[sub.shape]!(sub.args)))
+const misshared = subscribers.filter((sub, i) => sub.result !== canonical(sub.shape, alone[i]))
 
 type Counts = { invalidations: number; changes: number; extra: number; missed: number }
 const byShape = new Map<string, Counts>()
@@ -494,11 +497,17 @@ console.log(
 )
 console.log(`writes failed other than by the database: ${failedWrites.length}`)
 console.log(`volatile reads shared: ${sharedVolatile.length} of ${volatile.length}`)
+console.log(`reads holding another read's rows: ${misshared.length}${misshared.map((s) => ` ${s.shape}`).join('')}`)
 console.log(`derived: rows held=${heldRows} of ${subscribers.filter((s) => s.derive).length} derived subscribers`)
 for (const miss of misses.slice(0, 10)) console.log(`MISSED ${miss}`)
 for (const failure of failedWrites.slice(0, 10)) console.log(`FAILED ${failure}`)
 const failed =
-  total.missed > 0 || burstMisses > 0 || heldRows > 0 || failedWrites.length > 0 || sharedVolatile.length > 0
+  total.missed > 0 ||
+  burstMisses > 0 ||
+  heldRows > 0 ||
+  failedWrites.length > 0 ||
+  sharedVolatile.length > 0 ||
+  misshared.length > 0
 process.exit(failed ? 1 : 0)
 
 // ── Helpers ──

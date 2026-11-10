@@ -118,6 +118,9 @@ function keyOfValues(values: readonly unknown[]): string | undefined {
       if (original instanceof Date) return `\0date:${original.getTime()}`
       if (typeof original === 'bigint') return `\0bigint:${original}`
       if (original instanceof Uint8Array) return `\0bytes:${Buffer.from(original).toString('base64')}`
+      // JSON writes `NaN` and the infinities as `null`, and `-0` as `0`.
+      if (typeof original === 'number' && (!Number.isFinite(original) || Object.is(original, -0)))
+        return `\0number:${Object.is(original, -0) ? '-0' : original}`
       if (original === null || ['string', 'number', 'boolean', 'undefined'].includes(typeof original)) return value
       if (Array.isArray(original) || Object.getPrototypeOf(original) === Object.prototype) return value
       throw new Error('Not comparable')

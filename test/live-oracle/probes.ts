@@ -68,6 +68,13 @@ const probes: Record<string, () => void> = {
       for (const table of this.catalog.tables.values()) table.updateChangesOtherColumns = false
     }
   },
+  /** Reads are told apart by their parameters' JSON, which writes `NaN` and the infinities as `null`. */
+  'value-keys'() {
+    const shareKey = database.shareKey
+    database.shareKey = function (text: string, values: unknown[], ...rest: unknown[]) {
+      return shareKey.call(this, text, JSON.parse(JSON.stringify(values)), ...rest)
+    }
+  },
   /** A read calling a volatile function shares a run with identical ones. */
   'volatile-sharing'() {
     const planOf = database.planOf

@@ -7,7 +7,7 @@ const USERS = 6
 /** The same tables for every ORM; each run starts from them. */
 const SCHEMA = `
 drop table if exists tags, todos, users, deleted_todos, notes, tag_log, note_log, events, event_log, counters, settled,
-  resets, measures, chained, brands, products cascade;
+  resets, measures, chained, brands, products, metrics cascade;
 drop sequence if exists tickets;
 drop schema if exists tenant cascade;
 drop function if exists log_deleted_todo, log_tag, tag_added, log_note, note_bumped, next_event, settle_event,
@@ -99,6 +99,9 @@ create table chained (id int primary key, n int not null);
 insert into chained values (1, 0);
 -- Each read of the next ticket takes one: identical reads of it never share a run.
 create sequence tickets;
+-- One row per parameter of \`METRICS\`: a read with one of them can't share a run with a read with another.
+create table metrics (id int primary key, metric float8);
+insert into metrics values (1, 'NaN'), (2, null), (3, 'Infinity'), (4, '-Infinity');
 -- A product references its brand by a slug the brand's name generates: renaming the brand moves its products.
 create table brands (id int primary key, name text not null, slug text generated always as (lower(name)) stored unique);
 create table products (id int primary key, brand text references brands (slug) on update cascade);

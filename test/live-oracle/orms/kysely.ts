@@ -4,7 +4,7 @@ import { Kysely, PostgresDialect, sql } from 'kysely'
 import { jsonArrayFrom } from 'kysely/helpers/postgres'
 import { liveKysely } from '@telefunc/live/kysely'
 import type { BroadcastAdapter } from 'telefunc'
-import { arrayOf, CODES, COLUMN_TYPES, REFS, type Spelling } from '../spellings.ts'
+import { arrayOf, CODES, COLUMN_TYPES, METRICS, REFS, type Spelling } from '../spellings.ts'
 import { EVENT_TAG, eventQuery } from './eventQuery.ts'
 import type { OrmDriver } from './types.ts'
 
@@ -212,6 +212,8 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
         (await sql`select kind, count(*)::int as n from event_log group by kind order by kind`.execute(db)).rows,
       counters: async () => (await sql`select id, n from counters order by id`.execute(db)).rows,
       chained: async () => (await sql`select n from chained`.execute(db)).rows,
+      metricIs: async ({ low }) =>
+        (await sql`select id from metrics where metric is not distinct from ${METRICS[low]}::float8`.execute(db)).rows,
       products: async () => (await sql`select id, brand from products order by id`.execute(db)).rows,
       ticket: async () => (await sql`select nextval('tickets') as n`.execute(db)).rows,
       labelled: () =>

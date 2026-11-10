@@ -1,8 +1,10 @@
-export { arrayOf, CODES, COLUMN_TYPES, REFS, SPELLED_COLUMNS, spell }
+export { arrayOf, CODES, COLUMN_TYPES, METRICS, REFS, SPELLED_COLUMNS, spell }
 export type { Spelling, SpelledColumn }
 
 /** The values the writes give `todos.code` (a `char(4)`) and `todos.ref` (a `uuid`). */
 const CODES = ['ab', 'cd', 'abcd', 'x']
+/** The `metricIs` read's parameters, one per row of `metrics`: JSON writes each of them as `null`. */
+const METRICS = [Number.NaN, null, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]
 const REFS = [
   'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
   '6ba7b810-9dad-11d1-80b4-00c04fd430c8',
