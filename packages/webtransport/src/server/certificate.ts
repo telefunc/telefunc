@@ -28,6 +28,8 @@ function createCertificate(): Certificate {
     sequence(time(new Date(now)), time(new Date(now + CERTIFICATE_LIFETIME_MS))),
     name,
     publicKey.export({ type: 'spki', format: 'der' }),
+    // Chrome's QUIC stack parses a certificate only with its extensions: one basicConstraints, not a CA.
+    der(0xa3, sequence(sequence(oid('2.5.29.19'), der(0x04, sequence())))),
   )
   const signature = sign('sha256', tbs, privateKey)
   const bytes = sequence(tbs, ecdsaWithSha256, der(0x03, Buffer.concat([Buffer.from([0]), signature])))
