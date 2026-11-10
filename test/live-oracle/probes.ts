@@ -58,6 +58,15 @@ const probes: Record<string, () => void> = {
       for (const table of this.catalog.tables.values()) for (const column of table.columns) column.orderableText = true
     }
   },
+  /** `COMMIT AND CHAIN` and `ROLLBACK AND CHAIN` end the transaction without starting the next: its writes are
+   *  announced as they run. */
+  chain() {
+    const planOf = database.planOf
+    database.planOf = function (...args: unknown[]) {
+      const plan = planOf.apply(this, args)
+      return plan.kind === 'transaction' ? { ...plan, chain: false } : plan
+    }
+  },
   /** A write, and what it fires, is judged by the volatility of the functions it calls: a `STABLE` function counts
    *  as computing a value. */
   'write-volatility'() {

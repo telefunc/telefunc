@@ -47,7 +47,8 @@ type ChangedTables = TableSet | 'unnamed'
 type Plan =
   | ReadPlan
   | WritePlan
-  | { kind: 'transaction'; action: TransactionAction; savepoint?: string }
+  /** `chain`: a `COMMIT` or `ROLLBACK` `AND CHAIN`, which starts the next transaction at once. */
+  | { kind: 'transaction'; action: TransactionAction; savepoint?: string; chain?: boolean }
   /** A statement whose changes aren't captured row by row: every listed table may have changed. `changesSession`: it
    *  may also change settings of its session (`set_config()`, `DISCARD`), or those new sessions start with. */
   | { kind: 'unknownWrite'; tables: ChangedTables; schemaChange: boolean; changesSession?: boolean }
@@ -225,9 +226,9 @@ function planTransaction(node: Node): Plan {
     case 'TRANS_STMT_START':
       return { kind: 'transaction', action: 'begin' }
     case 'TRANS_STMT_COMMIT':
-      return { kind: 'transaction', action: 'commit' }
+      return { kind: 'transaction', action: 'commit', chain: node.chain === true }
     case 'TRANS_STMT_ROLLBACK':
-      return { kind: 'transaction', action: 'rollback' }
+      return { kind: 'transaction', action: 'rollback', chain: node.chain === true }
     case 'TRANS_STMT_SAVEPOINT':
       return { kind: 'transaction', action: 'savepoint', savepoint }
     case 'TRANS_STMT_RELEASE':

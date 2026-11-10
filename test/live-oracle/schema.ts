@@ -7,7 +7,7 @@ const USERS = 6
 /** The same tables for every ORM; each run starts from them. */
 const SCHEMA = `
 drop table if exists tags, todos, users, deleted_todos, notes, tag_log, note_log, events, event_log, counters, settled,
-  resets, measures cascade;
+  resets, measures, chained cascade;
 drop schema if exists tenant cascade;
 drop function if exists log_deleted_todo, log_tag, tag_added, log_note, note_bumped, next_event, settle_event,
   event_inserted, empty_event_log, stamp, reset_stamped, label_of, settle_stably, measure_set;
@@ -93,6 +93,9 @@ begin
   return null;
 end $$;
 create trigger resets_stamped after insert on resets for each statement execute function reset_stamped();
+-- Written only after a \`COMMIT AND CHAIN\`.
+create table chained (id int primary key, n int not null);
+insert into chained values (1, 0);
 -- A STABLE helper a live read calls: the read stays a read.
 create function label_of(t text) returns text language sql stable as $$ select upper(t) $$;
 -- Whole numbers past a float8's precision: compared with a float8, they compare as float8s, rounded.

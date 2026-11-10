@@ -228,6 +228,7 @@ function createDrizzle(
       eventLog: () =>
         db.execute(sql`select kind, count(*)::int as n from event_log group by kind order by kind`).then(rowsOf),
       counters: () => db.execute(sql`select id, n from counters order by id`).then(rowsOf),
+      chained: () => db.execute(sql`select n from chained`).then(rowsOf),
       labelled: () =>
         db.select({ id: todos.id }).from(todos).where(sql`label_of(${todos.text}) like 'A%'`).orderBy(todos.id),
       measuresAtFloat: () =>
@@ -315,6 +316,14 @@ function createDrizzle(
         db.execute(
           sql`update measures set value = ${String(2 ** 53)}::numeric + ${value % 3} where id = ${(value % 2) + 1}`,
         ),
+      // The update runs in the transaction `COMMIT AND CHAIN` starts: it's announced when that one commits. A refetch
+      // in the pause would see the row as it was.
+      chainCommit: () =>
+        db.transaction(async (tx: any) => {
+          await tx.execute(sql`commit and chain`)
+          await tx.execute(sql`update chained set n = n + 1`)
+          await new Promise((resolve) => setTimeout(resolve, 100))
+        }),
       txCommit: ({ todo, user, text }) =>
         db.transaction(async (tx: any) => {
           await tx.insert(todos).values({ userId: user, text, updatedAt: new Date() })

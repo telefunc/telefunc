@@ -211,6 +211,7 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
       eventLog: async () =>
         (await sql`select kind, count(*)::int as n from event_log group by kind order by kind`.execute(db)).rows,
       counters: async () => (await sql`select id, n from counters order by id`.execute(db)).rows,
+      chained: async () => (await sql`select n from chained`.execute(db)).rows,
       labelled: () =>
         db.selectFrom('todos').select('id').where(sql<boolean>`label_of(text) like 'A%'`).orderBy('id').execute(),
       measuresAtFloat: async () =>
@@ -308,6 +309,14 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
         sql`update measures set value = ${String(2 ** 53)}::numeric + ${value % 3} where id = ${(value % 2) + 1}`.execute(
           db,
         ),
+      // The update runs in the transaction `COMMIT AND CHAIN` starts: it's announced when that one commits. A refetch
+      // in the pause would see the row as it was.
+      chainCommit: () =>
+        db.transaction().execute(async (tx) => {
+          await sql`commit and chain`.execute(tx)
+          await sql`update chained set n = n + 1`.execute(tx)
+          await new Promise((resolve) => setTimeout(resolve, 100))
+        }),
       txCommit: ({ todo, user, text }) =>
         db.transaction().execute(async (tx) => {
           await tx.insertInto('todos').values({ user_id: user, text }).execute()

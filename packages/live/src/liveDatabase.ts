@@ -184,7 +184,7 @@ class LiveDatabase {
           returnsRows: plan.hadReturning,
         }
       case 'transaction':
-        if (plan.action === 'commit') return this.commit(connection, text)
+        if (plan.action === 'commit') return this.commit(connection, text, plan.chain)
         break
       case 'unknownWrite':
         if (rewrite && isUnnamed(plan) && !this.transactions.isOpen(connection))
@@ -193,8 +193,9 @@ class LiveDatabase {
     return this.statement(connection, text, 0, () => this.changesOf(plan, connection))
   }
 
-  /** A `COMMIT`: when its transaction changed tables the catalog can't name, queries of ours name them first. */
-  private commit(connection: object, text: string): Statement {
+  /** A `COMMIT`: when its transaction changed tables the catalog can't name, queries of ours name them first. `chain`:
+   *  the next transaction starts once it succeeds (a `COMMIT AND CHAIN` that fails ends without one). */
+  private commit(connection: object, text: string, chain = false): Statement {
     let locked: string[] | undefined
     const queries = this.transactions.hasUnnamed(connection) ? namingQueries((tables) => (locked = tables)) : undefined
     return {
@@ -203,6 +204,7 @@ class LiveDatabase {
       succeeded: () => {
         if (locked) this.transactions.name(connection, locked)
         this.transactions.apply(connection, 'commit')
+        if (chain) this.transactions.apply(connection, 'begin')
         return []
       },
       // The transaction is over: rolled back.
@@ -361,6 +363,7 @@ class LiveDatabase {
     switch (plan.kind) {
       case 'transaction':
         this.transactions.apply(connection, plan.action, plan.savepoint)
+        if (plan.chain) this.transactions.apply(connection, 'begin')
         return []
       case 'unknownWrite':
         if (plan.schemaChange) this.forgetSchema()
