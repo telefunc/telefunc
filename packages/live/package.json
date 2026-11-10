@@ -14,7 +14,8 @@
   },
   "type": "module",
   "sideEffects": [
-    "./dist/index.js"
+    "./dist/index.js",
+    "./dist/extension.js"
   ],
   "exports": {
     "./package.json": "./package.json",
