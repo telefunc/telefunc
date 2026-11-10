@@ -4,7 +4,8 @@ import type { PGlite } from '@electric-sql/pglite'
 import { PGLiteSocketServer } from '@electric-sql/pglite-socket'
 import postgres from '@prisma/orm-postgres/runtime'
 import { contractFromJson } from '@prisma/orm-postgres/static'
-import { withLiveQueries } from '@telefunc/live'
+import { derived, type Live } from '@telefunc/live'
+import { livePrisma } from '@telefunc/live/prisma'
 import pg from 'pg'
 import contractJson from './prisma-contract.json'
 import type { Database } from '.'
@@ -19,37 +20,41 @@ async function createPrismaDatabase(pglite: PGlite): Promise<Database> {
   const server = new PGLiteSocketServer({ db: pglite, port: 0 })
   await server.start()
   const pool = new pg.Pool({ connectionString: `postgres://postgres@${server.getServerConn()}/postgres`, max: 1 })
-  const db = postgres({ contract: contractFromJson(contractJson), pg: withLiveQueries(pool) }) as any
+  const db = livePrisma(postgres({ contract: contractFromJson(contractJson), pg: pool }) as any, pool) as any
   const orm = (from: { orm: any }) => from.orm.public
   return {
     async getTodos() {
-      return (
-        (await orm(db)
+      return texts(
+        await orm(db)
           .Todo.orderBy((todo: any) => todo.id.asc())
-          .all()) as Todo[]
-      ).map((todo) => todo.text)
+          .live(),
+      )
     },
     async getFirstTodos() {
-      const rows = (await orm(db)
-        .Todo.orderBy((todo: any) => todo.id.asc())
-        .limit(2)
-        .all()) as Todo[]
-      return rows.map((todo) => todo.text)
+      return texts(
+        await orm(db)
+          .Todo.orderBy((todo: any) => todo.id.asc())
+          .limit(2)
+          .live(),
+      )
     },
     async getNotesOf(todoId) {
-      const rows = (await orm(db)
-        .Note.where((note: any) => note.todoId.eq(todoId))
-        .orderBy((note: any) => note.id.asc())
-        .all()) as Note[]
-      return rows.map((note) => note.text)
+      return texts(
+        await orm(db)
+          .Note.where((note: any) => note.todoId.eq(todoId))
+          .orderBy((note: any) => note.id.asc())
+          .live(),
+      )
     },
     async getTodosWithNotes() {
-      const rows = (await orm(db)
+      const rows: Live<Todo[]> = await orm(db)
         .Todo.include('notes')
         .orderBy((todo: any) => todo.id.asc())
-        .all()) as Todo[]
-      return rows.flatMap((todo) =>
-        todo.notes.length === 0 ? [`${todo.text}: -`] : todo.notes.map((note) => `${todo.text}: ${note.text}`),
+        .live()
+      return derived(() =>
+        rows.data.flatMap((todo) =>
+          todo.notes.length === 0 ? [`${todo.text}: -`] : todo.notes.map((note) => `${todo.text}: ${note.text}`),
+        ),
       )
     },
     async addTodo(text) {
@@ -73,4 +78,8 @@ async function createPrismaDatabase(pglite: PGlite): Promise<Database> {
         .catch(() => {})
     },
   }
+}
+
+function texts(rows: Live<{ text: string }[]>): Live<string[]> {
+  return derived(() => rows.data.map((row) => row.text))
 }

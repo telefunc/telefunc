@@ -81,7 +81,8 @@ function testLiveOrm() {
   }
 }
 
-/** Opens the page and waits until it is live: each server-rendered list fetched once more in the browser. */
+/** Opens the page and waits until it is live: each server-rendered list fetched once more in the browser. Then collects
+ *  the browser's garbage: the lists must stay live without the values the page rendered. */
 async function open(p: Page, url: string) {
   await navigate(url, undefined, p)
   await waitForFetches(p, {
@@ -92,6 +93,10 @@ async function open(p: Page, url: string) {
     'notes-of-2': 2,
     'watched-notes-of-1': 1,
   })
+  // test-e2e's `page` is a proxy, and a CDP session needs the page itself.
+  const cdp = await p.context().newCDPSession(p.mainFrame().page())
+  await cdp.send('HeapProfiler.collectGarbage')
+  await cdp.detach()
 }
 
 async function write(p: Page, button: string, text: string) {

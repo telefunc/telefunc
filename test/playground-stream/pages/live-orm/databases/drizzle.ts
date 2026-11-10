@@ -1,7 +1,8 @@
 export { createDrizzleDatabase }
 
 import type { PGlite } from '@electric-sql/pglite'
-import { withLiveQueries } from '@telefunc/live'
+import { derived, type Live } from '@telefunc/live'
+import { liveDrizzle } from '@telefunc/live/drizzle'
 import { eq } from 'drizzle-orm'
 import { integer, pgTable, serial, text } from 'drizzle-orm/pg-core'
 import { drizzle } from 'drizzle-orm/pglite'
@@ -11,20 +12,25 @@ const todos = pgTable('todos', { id: serial().primaryKey(), text: text().notNull
 const notes = pgTable('notes', { id: serial().primaryKey(), text: text().notNull(), todoId: integer('todo_id') })
 
 function createDrizzleDatabase(client: PGlite): Database {
-  const db = drizzle({ client: withLiveQueries(client) })
+  const db = liveDrizzle(drizzle({ client }))
   return {
     async getTodos() {
-      return (await db.select().from(todos).orderBy(todos.id)).map((todo) => todo.text)
+      return texts(await db.select().from(todos).orderBy(todos.id).live())
     },
     async getFirstTodos() {
-      return (await db.select().from(todos).orderBy(todos.id).limit(2)).map((todo) => todo.text)
+      return texts(await db.select().from(todos).orderBy(todos.id).limit(2).live())
     },
     async getNotesOf(todoId) {
-      return (await db.select().from(notes).where(eq(notes.todoId, todoId)).orderBy(notes.id)).map((note) => note.text)
+      return texts(await db.select().from(notes).where(eq(notes.todoId, todoId)).orderBy(notes.id).live())
     },
     async getTodosWithNotes() {
-      const rows = await db.select().from(todos).leftJoin(notes, eq(notes.todoId, todos.id)).orderBy(todos.id, notes.id)
-      return rows.map((row) => `${row.todos.text}: ${row.notes?.text ?? '-'}`)
+      const rows = await db
+        .select()
+        .from(todos)
+        .leftJoin(notes, eq(notes.todoId, todos.id))
+        .orderBy(todos.id, notes.id)
+        .live()
+      return derived(() => rows.data.map((row) => `${row.todos.text}: ${row.notes?.text ?? '-'}`))
     },
     async addTodo(text) {
       await db.insert(todos).values({ text })
@@ -47,4 +53,8 @@ function createDrizzleDatabase(client: PGlite): Database {
         .catch(() => {})
     },
   }
+}
+
+function texts(rows: Live<{ text: string }[]>): Live<string[]> {
+  return derived(() => rows.data.map((row) => row.text))
 }

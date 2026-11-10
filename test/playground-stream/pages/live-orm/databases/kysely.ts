@@ -1,7 +1,8 @@
 export { createKyselyDatabase }
 
 import type { PGlite } from '@electric-sql/pglite'
-import { withLiveQueries } from '@telefunc/live'
+import { derived, type Live } from '@telefunc/live'
+import { liveKysely } from '@telefunc/live/kysely'
 import { Kysely, type Generated } from 'kysely'
 import { PGliteDialect } from 'kysely-pglite-dialect'
 import type { Database } from '.'
@@ -12,17 +13,16 @@ type Tables = {
 }
 
 function createKyselyDatabase(client: PGlite): Database {
-  const db = new Kysely<Tables>({ dialect: new PGliteDialect(withLiveQueries(client)) })
+  const db = liveKysely(new Kysely<Tables>({ dialect: new PGliteDialect(client) }), client)
   return {
     async getTodos() {
-      return (await db.selectFrom('todos').select('text').orderBy('id').execute()).map((todo) => todo.text)
+      return texts(await db.selectFrom('todos').select('text').orderBy('id').live())
     },
     async getFirstTodos() {
-      return (await db.selectFrom('todos').select('text').orderBy('id').limit(2).execute()).map((todo) => todo.text)
+      return texts(await db.selectFrom('todos').select('text').orderBy('id').limit(2).live())
     },
     async getNotesOf(todoId) {
-      const rows = await db.selectFrom('notes').select('text').where('todo_id', '=', todoId).orderBy('id').execute()
-      return rows.map((note) => note.text)
+      return texts(await db.selectFrom('notes').select('text').where('todo_id', '=', todoId).orderBy('id').live())
     },
     async getTodosWithNotes() {
       const rows = await db
@@ -31,8 +31,8 @@ function createKyselyDatabase(client: PGlite): Database {
         .select(['todos.text as todo', 'notes.text as note'])
         .orderBy('todos.id')
         .orderBy('notes.id')
-        .execute()
-      return rows.map((row) => `${row.todo}: ${row.note ?? '-'}`)
+        .live()
+      return derived(() => rows.data.map((row) => `${row.todo}: ${row.note ?? '-'}`))
     },
     async addTodo(text) {
       await db.insertInto('todos').values({ text }).execute()
@@ -56,4 +56,8 @@ function createKyselyDatabase(client: PGlite): Database {
         .catch(() => {})
     },
   }
+}
+
+function texts(rows: Live<{ text: string }[]>): Live<string[]> {
+  return derived(() => rows.data.map((row) => row.text))
 }

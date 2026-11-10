@@ -2,18 +2,19 @@ export { getDatabase, ORMS }
 export type { Orm, Database }
 
 import type { PGlite } from '@electric-sql/pglite'
+import type { Live } from '@telefunc/live'
 
 const ORMS = ['drizzle', 'prisma', 'kysely'] as const
 type Orm = (typeof ORMS)[number]
 
 /** The same queries through each ORM, on a PGlite database of its own. */
 type Database = {
-  getTodos(): Promise<string[]>
+  getTodos(): Promise<Live<string[]>>
   /** The first two todos: a todo added after them is past the boundary. */
-  getFirstTodos(): Promise<string[]>
+  getFirstTodos(): Promise<Live<string[]>>
   /** The notes of one todo: the other todo's notes are rows of the same table. */
-  getNotesOf(todoId: number): Promise<string[]>
-  getTodosWithNotes(): Promise<string[]>
+  getNotesOf(todoId: number): Promise<Live<string[]>>
+  getTodosWithNotes(): Promise<Live<string[]>>
   addTodo(text: string): Promise<void>
   addNote(todoId: number, text: string): Promise<void>
   /** One transaction that commits. */
