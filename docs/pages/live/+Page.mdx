@@ -5,7 +5,7 @@ import { TelefuncStreamBeta, PoweredByTelefuncStream } from '../../components'
 
 <TelefuncStreamBeta />
 
-Live database queries — a client showing what a telefunction read from your database refetches it when a write changes those rows.
+Live database queries — end a read with `.live()`, and a client showing its rows fetches them again when a write changes them.
 
 <PoweredByTelefuncStream pkg="live" />
 
@@ -15,17 +15,17 @@ Live database queries — a client showing what a telefunction read from your da
 npm install @telefunc/live
 ```
 
-Pass your database client through `withLiveQueries()`, once, where your app creates it:
+Wrap your database once, where your app creates it:
 
 ```ts
 // database.ts
 // Environment: server
 
 import { drizzle } from 'drizzle-orm/node-postgres'
-import { withLiveQueries } from '@telefunc/live'
+import { liveDrizzle } from '@telefunc/live/drizzle'
 import pg from 'pg'
 
-export const db = drizzle({ client: withLiveQueries(new pg.Pool({ connectionString })) })
+export const db = liveDrizzle(drizzle({ client: new pg.Pool({ connectionString }) }))
 ```
 
 ```ts
@@ -33,12 +33,11 @@ export const db = drizzle({ client: withLiveQueries(new pg.Pool({ connectionStri
 // Environment: server
 
 import { Kysely, PostgresDialect } from 'kysely'
-import { withLiveQueries } from '@telefunc/live'
+import { liveKysely } from '@telefunc/live/kysely'
 import pg from 'pg'
 
-export const db = new Kysely<Database>({
-  dialect: new PostgresDialect({ pool: withLiveQueries(new pg.Pool({ connectionString })) }),
-})
+const pool = new pg.Pool({ connectionString })
+export const db = liveKysely(new Kysely<Database>({ dialect: new PostgresDialect({ pool }) }), pool)
 ```
 
 ```ts
@@ -46,49 +45,75 @@ export const db = new Kysely<Database>({
 // Environment: server
 
 import postgres from '@prisma/orm-postgres/runtime'
-import { withLiveQueries } from '@telefunc/live'
+import { livePrisma } from '@telefunc/live/prisma'
 import pg from 'pg'
 
-export const db = postgres({ contract, pg: withLiveQueries(new pg.Pool({ connectionString })) })
+const pool = new pg.Pool({ connectionString })
+export const db = livePrisma(postgres({ contract, pg: pool }), pool)
 ```
 
-> `withLiveQueries()` takes a `pg.Pool` or a `pg.Client` (Postgres 17 and above), or a PGlite database, and returns it. Call it before the first query.
+> Kysely and Prisma don't expose the pool they use: pass it as the second argument.
+
+> The database client is a `pg.Pool` or `pg.Client`, a postgres.js `sql`, or a PGlite database, on Postgres 17 and above. Wrap it before its first query.
 
 > There isn't any other setup: Telefunc finds `@telefunc/*` packages in your `package.json` and auto-loads them.
 
 
 ## Usage
 
-Read from the database in a telefunction, as usual:
+End a read with `.live()` and return it:
 
 ```ts
 // TodoList.telefunc.ts
 // Environment: server
 
+import { eq } from 'drizzle-orm'
 import { db } from './database'
+import { todos } from './schema'
 
 export async function onGetTodos(userId: number) {
-  return await db.select().from(todos).where(eq(todos.userId, userId)).orderBy(todos.id)
+  return await db.select().from(todos).where(eq(todos.userId, userId)).orderBy(todos.id).live()
+}
+
+export async function onAddTodo(userId: number, text: string) {
+  await db.insert(todos).values({ userId, text })
 }
 ```
 
-### With TanStack Query
+The same read with Kysely and with Prisma:
 
-Use a <Link href="/tanstack-query#local-vs-global-keys">global key</Link>:
+```ts
+await db.selectFrom('todos').selectAll().where('userId', '=', userId).orderBy('id').live()
+await db.orm.public.Todo.where({ userId }).orderBy((todo) => todo.id.asc()).live()
+```
+
+`.live()` runs the query and resolves to a `Live<Todo[]>`: the rows are its `data`. Reads without `.live()`, and writes, run as before.
+
+> Forgetting `.live()` is a type error where the client uses the telefunction: `live()` and `watch()` below take a telefunction returning a `Live`.
+
+> Calling `onGetTodos()` yourself gives the rows once, in `data`. To follow them, use `live()` or `watch()`.
+
+### With TanStack Query
 
 ```tsx
 // TodoList.tsx
 // Environment: client
 
+import { useQuery } from '@tanstack/react-query'
+import { live } from '@telefunc/live/tanstack-query'
+import { onGetTodos } from './TodoList.telefunc'
+
 const { data: todos } = useQuery({
-  queryKey: ['global:todos', userId],
-  queryFn: () => onGetTodos(userId),
+  queryKey: ['todos', userId],
+  queryFn: live(onGetTodos, userId),
 })
 ```
 
-The query refetches when a write changes the rows `onGetTodos()` read.
+`todos` is the rows. The query refetches when a write changes the rows `onGetTodos()` read.
 
-> Server-side rendered queries become live once the page hydrates: each one fetches once more in the browser.
+> `live()` wraps the `queryFn`, so it works with every TanStack Query adapter: React, Vue, Solid and Svelte.
+
+> A query rendered on the server shows its rows in the HTML, then fetches once more in the browser to go live, whatever its `staleTime`.
 
 ### Without a library
 
@@ -97,27 +122,51 @@ The query refetches when a write changes the rows `onGetTodos()` read.
 // Environment: client
 
 import { watch } from '@telefunc/live/client'
+import { onGetTodos } from './TodoList.telefunc'
 
-const stop = watch(
-  () => onGetTodos(userId),
-  (todos) => render(todos),
-)
+const stop = watch(onGetTodos, [userId], (todos) => render(todos))
 ```
 
-`watch()` calls the telefunction, passes its result to your callback, and calls it again each time the result changes. Call `stop()` when you no longer show it.
+`watch()` calls the telefunction, passes the rows to your callback, and calls it again each time they change. Call `stop()` when you no longer show them.
 
 > At most one call runs at a time: changes arriving while it runs lead to one more call after it.
+
+> On the server (SSR), `watch()` does nothing: it starts in the browser.
+
+### Derived values
+
+Compute a value from live values with `derived()`:
+
+```ts
+// TodoList.telefunc.ts
+// Environment: server
+
+import { derived } from '@telefunc/live'
+import { eq } from 'drizzle-orm'
+import { db } from './database'
+import { todos } from './schema'
+
+export async function onGetOpenCount(userId: number) {
+  const rows = await db.select().from(todos).where(eq(todos.userId, userId)).live()
+  return derived(() => rows.data.filter((todo) => !todo.done).length)
+}
+```
+
+The derived value changes when a value its callback read changes.
+
+> `derived()` runs the callback once. When a value it read changes, the client calls your telefunction again.
 
 
 ## What refetches
 
-A client refetches when a committed write, through the client you passed to `withLiveQueries()`, changes rows its query returned or could return:
+A client refetches when a committed write, through a wrapped database, changes rows its query returned or could return:
 
 - A write to another user's rows doesn't refetch `onGetTodos(userId)`.
 - A row sorting past the last row of a `limit` doesn't refetch the page.
 - A rolled-back transaction refetches nothing; a committed one refetches once its `COMMIT` succeeds.
+- A write also changes the tables its triggers and foreign key actions (`on delete cascade`) write to.
 
-When `@telefunc/live` can't tell whether a write changed the result (a function call in the query, a statement it doesn't follow), it refetches.
+When `@telefunc/live` can't tell whether a write changed the result (a function call in the query, a statement it doesn't follow, a write of more than 10,000 rows), it refetches.
 
 > The refetch is an ordinary call of your telefunction: its <Link href="/permissions">permission checks</Link> run again, and no row is sent to a client otherwise.
 
@@ -134,13 +183,16 @@ On several servers, pass a transport that carries the changes to the other serve
 
 import IORedis from 'ioredis'
 import pg from 'pg'
+import { drizzle } from 'drizzle-orm/node-postgres'
 import { DefaultBroadcastAdapter } from 'telefunc'
 import { RedisTransport } from '@telefunc/redis'
-import { withLiveQueries } from '@telefunc/live'
+import { liveDrizzle } from '@telefunc/live/drizzle'
 
 const transport = new DefaultBroadcastAdapter(new RedisTransport({ redis: new IORedis(redisUrl) }))
-const pool = withLiveQueries(new pg.Pool({ connectionString }), { transport })
+export const db = liveDrizzle(drizzle({ client: new pg.Pool({ connectionString }) }), { transport })
 ```
+
+> `liveKysely()` and `livePrisma()` take it as their third argument: `liveKysely(db, pool, { transport })`.
 
 > Without `transport`, a write is seen by the server that made it only.
 
