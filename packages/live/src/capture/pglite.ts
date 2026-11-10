@@ -1,7 +1,7 @@
 export { capturePglite }
 export type { Pglite }
 
-import type { LiveDatabase, Statement } from '../liveDatabase.js'
+import type { FollowUp, LiveDatabase, Statement } from '../liveDatabase.js'
 import { takeHiddenFields, takeHiddenValues } from './hiddenColumns.js'
 
 // The parts of PGlite used here, so that `@electric-sql/pglite` stays the app's dependency.
@@ -57,12 +57,21 @@ function captureExecutor(executor: Executor, connection: Pglite, live: LiveDatab
   const ready = async () => {
     if (!live.isReady()) await live.ready(async (text) => firstValue(await query(text)))
   }
+  /** Queued on the database now: it runs before anything the caller sends next. */
+  const runFollowUp = ({ text, values, done }: FollowUp) => {
+    const answered = query(text, values, { rowMode: 'array' })
+    answered.then(
+      (result) => done(result.rows as (string | null)[][]),
+      () => done(undefined),
+    )
+  }
   executor.query = async (text, params = [], options) => {
     await ready()
     const statement = live.statementFor(connection, text, params)
     const result = await run(statement, () => query(statement.text, params, options))
     const hidden = takeHiddenFields(result.fields, statement)
-    statement.succeeded(takeHiddenValues(result.rows, hidden, options?.rowMode === 'array'))
+    const followUp = statement.succeeded(takeHiddenValues(result.rows, hidden, options?.rowMode === 'array'))
+    if (followUp) runFollowUp(followUp)
     if (!statement.returnsRows) result.rows.length = 0
     return result
   }

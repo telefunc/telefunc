@@ -3,6 +3,7 @@ export type { Change }
 
 import { isTrue, mayBeTrue, type Row } from './condition.js'
 import { SEED_LIMIT, type Alias, type Join, type ReadShape } from './readShape.js'
+import { Tally } from './tally.js'
 import { compareValues, paramText, valueKey, type Column } from './values.js'
 
 /** A committed change to a table, with the images of the rows it wrote. `old` may lack columns: an `UPDATE` on
@@ -37,6 +38,7 @@ class LiveRead {
   readonly shape: ReadShape
   readonly params: readonly unknown[]
   private result: Result | undefined
+  private tally: Tally | undefined
   /** Changes that arrived while the statement ran: they are judged once its result is known. */
   private pending: Change[] | undefined = []
   private affected = false
@@ -48,9 +50,12 @@ class LiveRead {
     this.onAffected = onAffected
   }
 
-  /** The statement's result: its rows' hidden columns as text, one array per row. */
-  resolve(hiddenRows: (string | null)[][] | undefined): void {
-    if (hiddenRows) this.result = this.resultOf(hiddenRows)
+  /** The statement's result: its rows' hidden columns as text, one array per row; and the rows of the shape's
+   *  `state` query, when it ran. */
+  resolve(hiddenRows: (string | null)[][] | undefined, state?: (string | null)[][]): void {
+    const { tally } = this.shape
+    if (hiddenRows && tally) this.tally = state && Tally.of(tally, this.params, hiddenRows, state)
+    else if (hiddenRows) this.result = this.resultOf(hiddenRows, state?.[0])
     const pending = this.pending!
     this.pending = undefined
     for (const change of pending) this.consider(change)
@@ -84,9 +89,13 @@ class LiveRead {
     const oldMatches = oldTruth !== undefined && mayBeTrue(oldTruth)
     const newMatches = newTruth !== undefined && mayBeTrue(newTruth)
     // Surely part of the result, were it not for the other tables, the limit and the offset.
+    const oldSurely = oldTruth !== undefined && isTrue(oldTruth)
     const newSurely = newTruth !== undefined && isTrue(newTruth)
     if (!oldMatches && !newMatches) return false
     if (old && now && unchanged(alias, old, now)) return false
+    const several = change.kind === 'delete' && change.several === true
+    const [before, after] = [oldMatches ? old : undefined, newMatches ? now : undefined]
+    if (this.tally) return this.tally.changed(alias, before, after, oldSurely && newSurely, several)
     const result = this.result
     if (alias.role === 'other' || !result) return true
     if (newMatches) this.growSeeds(alias, now!)
@@ -97,11 +106,9 @@ class LiveRead {
           (newMatches && this.inResult(now![c.column.name], c.column, c.hidden!)),
       )
     }
-    const several = change.kind === 'delete' && change.several === true
-    const [before, after] = [oldMatches ? old : undefined, newMatches ? now : undefined]
     if (alias.role === 'exists') return this.existsChanged(alias, before, after, newSurely, several)
     if (this.shape.distinct) return this.distinctChanged(alias, before, after, newSurely, several)
-    if (oldTruth !== undefined && isTrue(oldTruth) && newSurely && this.staysOutside(alias, old!, now!)) return false
+    if (oldSurely && newSurely && this.staysOutside(alias, old!, now!)) return false
     if (oldMatches && this.wasInResult(alias, old!)) return true
     if (newMatches && this.mayEnter(alias, now!, change.kind === 'insert')) return true
     // A row leaving from before the page moves the page.
@@ -239,7 +246,8 @@ class LiveRead {
     return key === undefined || values.has(undefined) || values.has(key)
   }
 
-  private resultOf(rows: (string | null)[][]): Result {
+  /** `seedRow`: the seeds, when no row carries them. */
+  private resultOf(rows: (string | null)[][], seedRow: (string | null)[] | undefined): Result {
     const { hiddenColumns, sort, limit } = this.shape
     const columns = hiddenColumnTypes(this.shape)
     const values = hiddenColumns.map((_, i) => {
@@ -260,7 +268,8 @@ class LiveRead {
     const counts: Result['counts'] = new Map()
     for (const alias of this.shape.aliases) {
       for (const join of alias.joins) {
-        if (join.seed !== undefined) seeds.set(join.seed, seedKeys(rows[0]?.[join.seed], join.partnerColumn))
+        if (join.seed !== undefined)
+          seeds.set(join.seed, seedKeys((rows[0] ?? seedRow)?.[join.seed], join.partnerColumn))
       }
       if (alias.existsCountHidden === undefined) continue
       const { parentColumn, hidden } = alias.correlations[0]!

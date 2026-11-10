@@ -1,10 +1,18 @@
 export { planStatement, HIDDEN_PREFIX }
 export type { Plan, ReadPlan, WritePlan, TransactionAction }
 
-import { scanSync } from 'libpg-query'
 import type { Catalog, Table, TableSet } from '../catalog.js'
 import { analyzeRead, type ReadShape } from '../match/readShape.js'
-import { functionNamesIn, parseStatements, quote, walk, type Node } from '../sql.js'
+import {
+  functionNamesIn,
+  parseStatements,
+  quote,
+  spliceBytes,
+  statementEnd,
+  topLevelFrom,
+  walk,
+  type Node,
+} from '../sql.js'
 
 type TransactionAction = 'begin' | 'commit' | 'rollback' | 'savepoint' | 'release' | 'rollbackTo'
 
@@ -94,12 +102,17 @@ function planOne(statement: Node, text: string | undefined, catalog: Catalog): P
 }
 
 function planRead(select: Node, text: string | undefined, catalog: Catalog): ReadPlan {
-  const shape = analyzeRead(select, catalog, (location) => (text ? parenthesizedAt(text, location) : undefined))
+  const shape = analyzeRead(select, catalog, text)
   if (shape.hiddenColumns.length === 0 || !text) return { kind: 'read', shape, liveText: undefined }
-  const from = topLevelFrom(text)
-  if (from === undefined) return { kind: 'read', shape, liveText: undefined }
-  const hidden = shape.hiddenColumns.map((expression, i) => `${expression} AS "${HIDDEN_PREFIX}${i}"`)
-  return { kind: 'read', shape, liveText: spliceBytes(text, from, `, ${hidden.join(', ')} `) }
+  const splices = shape.hiddenAt ?? [{ from: topLevelFrom(text), columns: shape.hiddenColumns }]
+  if (splices.some((s) => s.from === undefined)) return { kind: 'read', shape, liveText: undefined }
+  let liveText = text
+  // From the last: a splice leaves the byte offsets before it as they were.
+  for (const { from, columns } of splices.toSorted((a, b) => b.from! - a.from!)) {
+    const hidden = columns.map((expression, i) => `${expression} AS "${HIDDEN_PREFIX}${i}"`)
+    liveText = spliceBytes(liveText, from!, `, ${hidden.join(', ')} `)
+  }
+  return { kind: 'read', shape, liveText }
 }
 
 function planWrite(kind: string, node: Node, text: string | undefined, catalog: Catalog): Plan {
@@ -179,47 +192,4 @@ function writtenTables(node: Node, catalog: Catalog): TableSet {
     for (const key of table.referencedBy) ids.add(key.table)
   }
   return ids
-}
-
-// ── Text splicing (scanner offsets are UTF-8 byte offsets) ──
-
-/** Byte offset of the `FROM` keyword of the outermost `SELECT`. */
-function topLevelFrom(text: string): number | undefined {
-  let depth = 0
-  let seenSelect = false
-  for (const token of scanSync(text).tokens) {
-    const keyword = token.keywordKind !== 0 ? token.text.toLowerCase() : undefined
-    if (token.text === '(') depth++
-    else if (token.text === ')') depth--
-    else if (depth === 0 && keyword === 'select') seenSelect = true
-    else if (depth === 0 && seenSelect && keyword === 'from') return token.start
-  }
-  return undefined
-}
-
-/** The text from the first `(` at or after byte `location` to its matching `)`. */
-function parenthesizedAt(text: string, location: number): string | undefined {
-  const tokens = scanSync(text).tokens
-  const open = tokens.findIndex((t) => t.start >= location && t.text === '(')
-  if (open === -1) return undefined
-  let depth = 0
-  for (const token of tokens.slice(open)) {
-    if (token.text === '(') depth++
-    else if (token.text === ')') depth--
-    if (depth === 0)
-      return new TextDecoder().decode(new TextEncoder().encode(text).subarray(tokens[open]!.start, token.end))
-  }
-  return undefined
-}
-
-/** Byte offset just after the statement's last token (before a trailing `;` or comment). */
-function statementEnd(text: string): number {
-  const tokens = scanSync(text).tokens.filter((t) => t.text !== ';' && !/COMMENT/.test(t.tokenName))
-  return tokens.at(-1)!.end
-}
-
-function spliceBytes(text: string, at: number, insert: string): string {
-  const bytes = new TextEncoder().encode(text)
-  const decoder = new TextDecoder()
-  return decoder.decode(bytes.subarray(0, at)) + insert + decoder.decode(bytes.subarray(at))
 }

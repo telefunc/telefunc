@@ -1,8 +1,25 @@
 export { createDrizzle }
 
-import { and, asc, between, count, desc, eq, exists, inArray, like, not, relations, sql, sum } from 'drizzle-orm'
+import {
+  and,
+  asc,
+  between,
+  count,
+  countDistinct,
+  desc,
+  eq,
+  exists,
+  gt,
+  inArray,
+  like,
+  max,
+  not,
+  relations,
+  sql,
+  sum,
+} from 'drizzle-orm'
 import { drizzle as drizzlePg } from 'drizzle-orm/node-postgres'
-import { boolean, integer, numeric, pgTable, serial, text, timestamp } from 'drizzle-orm/pg-core'
+import { boolean, except, integer, numeric, pgTable, serial, text, timestamp, union } from 'drizzle-orm/pg-core'
 import { drizzle as drizzlePglite } from 'drizzle-orm/pglite'
 import type { OrmDriver } from './types.ts'
 
@@ -84,6 +101,34 @@ function createDrizzle(client: unknown, kind: 'pg' | 'pglite'): OrmDriver {
           .select({ total: sum(todos.amount) })
           .from(todos)
           .where(eq(todos.userId, user)),
+      busyUsers: () =>
+        db
+          .select({ userId: todos.userId, n: count() })
+          .from(todos)
+          .groupBy(todos.userId)
+          .having(gt(count(), 7))
+          .orderBy(todos.userId),
+      topPriority: () =>
+        db
+          .select({ userId: todos.userId, top: max(todos.priority) })
+          .from(todos)
+          .groupBy(todos.userId)
+          .orderBy(todos.userId),
+      priorityKinds: ({ user }) =>
+        db
+          .select({ kinds: countDistinct(todos.priority) })
+          .from(todos)
+          .where(eq(todos.userId, user)),
+      todosOrTagged: ({ user }) =>
+        union(
+          db.select({ id: todos.id }).from(todos).where(eq(todos.userId, user)),
+          db.select({ id: tags.todoId }).from(tags).where(eq(tags.name, 'tag 1')),
+        ).orderBy(sql`1`),
+      untagged: ({ user }) =>
+        except(
+          db.select({ id: todos.id }).from(todos).where(eq(todos.userId, user)),
+          db.select({ id: tags.todoId }).from(tags),
+        ).orderBy(sql`1`),
       distinctUsers: () =>
         db.selectDistinct({ userId: todos.userId }).from(todos).where(eq(todos.done, true)).orderBy(todos.userId),
       usersWithOpen: () =>

@@ -6,9 +6,11 @@
 
 import { LiveDatabase } from '../../packages/live/dist/liveDatabase.js'
 import { LiveRead } from '../../packages/live/dist/match/liveRead.js'
+import { Tally } from '../../packages/live/dist/match/tally.js'
 
 const live = LiveRead.prototype as any
 const database = LiveDatabase.prototype as any
+const tally = Tally.prototype as any
 
 const probes: Record<string, () => void> = {
   /** A write's old image is ignored: an update counts as an insert of its new row, a delete as nothing. */
@@ -57,8 +59,8 @@ const probes: Record<string, () => void> = {
   /** A join seed that didn't come back (an empty result, too many values) is taken as empty. */
   seed() {
     const resultOf = live.resultOf
-    live.resultOf = function (rows: unknown) {
-      const result = resultOf.call(this, rows)
+    live.resultOf = function (...args: unknown[]) {
+      const result = resultOf.apply(this, args)
       for (const [hidden, keys] of result.seeds) if (!keys) result.seeds.set(hidden, new Set())
       return result
     }
@@ -70,6 +72,22 @@ const probes: Record<string, () => void> = {
       live[method] = function (alias: unknown, _old: unknown, now: unknown, ...rest: unknown[]) {
         return original.call(this, alias, undefined, now, ...rest)
       }
+    }
+  },
+  /** A group the read returned is forgotten when the counts, taken after the read, no longer have it. */
+  'tally-view'() {
+    const of = (Tally as any).of
+    ;(Tally as any).of = function (...args: unknown[]) {
+      const counted = of.apply(this, args)
+      for (const [key, group] of counted?.groups ?? []) if (group.counts.size === 0) counted.groups.delete(key)
+      return counted
+    }
+  },
+  /** A cascade only reaches the groups the counts have. */
+  'tally-cascade'() {
+    const dropAll = tally.dropAll
+    tally.dropAll = function (source: unknown, row: unknown) {
+      return dropAll.call(this, source, row).filter((key: string) => this.groups.get(key).counts.size > 0)
     }
   },
 }

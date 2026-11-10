@@ -1,7 +1,7 @@
 export { capturePg }
 export type { PgPool, PgClient }
 
-import { MAX_RESULT_ROWS, type LiveDatabase, type Statement } from '../liveDatabase.js'
+import { MAX_RESULT_ROWS, type FollowUp, type LiveDatabase, type Statement } from '../liveDatabase.js'
 import { takeHiddenFields, takeHiddenValues } from './hiddenColumns.js'
 import { HIDDEN_PREFIX } from './statement.js'
 
@@ -70,9 +70,19 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
       return result
     }
     const hidden = takeHiddenFields(result.fields, statement)
-    statement.succeeded(takeHiddenValues(result.rows, hidden, queryConfig.rowMode === 'array'))
+    const followUp = statement.succeeded(takeHiddenValues(result.rows, hidden, queryConfig.rowMode === 'array'))
+    if (followUp) runFollowUp(followUp)
     if (!statement.returnsRows) result.rows.length = 0
     return result
+  }
+
+  /** Queued on the client now: it runs before anything the caller sends next. */
+  function runFollowUp({ text, values, done }: FollowUp): void {
+    const answered = query({ text, values, rowMode: 'array' }) as Promise<PgResult>
+    answered.then(
+      (result) => done(result.rows as (string | null)[][]),
+      () => done(undefined),
+    )
   }
 
   function submit(submittable: Submittable): Submittable {
@@ -108,8 +118,9 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
     const settle = (err?: Error | null) => {
       if (settled || !statement) return
       settled = true
-      if (err) statement.failed()
-      else statement.succeeded(hiddenRows)
+      if (err) return statement.failed()
+      const followUp = statement.succeeded(hiddenRows)
+      if (followUp) runFollowUp(followUp)
     }
     cursor.read = (count, callback) =>
       read(count, (err, rows, result) => {

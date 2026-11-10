@@ -91,6 +91,43 @@ function createKysely(client: any, kind: 'pg' | 'pglite'): OrmDriver {
           .select((eb) => eb.fn.sum('amount').as('total'))
           .where('user_id', '=', user)
           .execute(),
+      busyUsers: () =>
+        db
+          .selectFrom('todos')
+          .select(['user_id', (eb) => eb.fn.countAll().as('n')])
+          .groupBy('user_id')
+          .having((eb) => eb.fn.countAll(), '>', 7)
+          .orderBy('user_id')
+          .execute(),
+      topPriority: () =>
+        db
+          .selectFrom('todos')
+          .select(['user_id', (eb) => eb.fn.max('priority').as('top')])
+          .groupBy('user_id')
+          .orderBy('user_id')
+          .execute(),
+      priorityKinds: ({ user }) =>
+        db
+          .selectFrom('todos')
+          .select((eb) => eb.fn.count('priority').distinct().as('kinds'))
+          .where('user_id', '=', user)
+          .execute(),
+      todosOrTagged: ({ user }) =>
+        db
+          .selectFrom('todos')
+          .select('id')
+          .where('user_id', '=', user)
+          .union(db.selectFrom('tags').select('todo_id as id').where('name', '=', 'tag 1'))
+          .orderBy('id')
+          .execute(),
+      untagged: ({ user }) =>
+        db
+          .selectFrom('todos')
+          .select('id')
+          .where('user_id', '=', user)
+          .except(db.selectFrom('tags').select('todo_id as id'))
+          .orderBy('id')
+          .execute(),
       distinctUsers: () =>
         db.selectFrom('todos').select('user_id').distinct().where('done', '=', true).orderBy('user_id').execute(),
       usersWithOpen: () =>

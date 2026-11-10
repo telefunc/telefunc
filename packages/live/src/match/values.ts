@@ -1,4 +1,4 @@
-export { compareValues, valueKey, paramText }
+export { compareValues, valueKey, hasCanonicalText, paramText }
 export type { Column }
 
 /** A column as the catalog describes it: how Postgres compares its values. */
@@ -61,6 +61,25 @@ function valueKey(text: string, column: Column): string | undefined {
       return text
     default:
       return undefined
+  }
+}
+
+/** Whether equal values of `column` always have the same text (`1.0` and `1.00` are equal `numeric`s). */
+function hasCanonicalText(column: Column): boolean {
+  switch (column.category) {
+    case 'N':
+      return ['int2', 'int4', 'int8'].includes(column.type)
+    case 'S':
+      return column.deterministic
+    case 'D':
+      return ['timestamptz', 'timestamp', 'date'].includes(column.type)
+    case 'U':
+      return column.type === 'uuid'
+    case 'B':
+    case 'E':
+      return true
+    default:
+      return false
   }
 }
 

@@ -1,5 +1,5 @@
 export { LiveDatabase, MAX_RESULT_ROWS }
-export type { Statement, LiveQueriesOptions }
+export type { Statement, FollowUp, LiveQueriesOptions }
 
 import type { BroadcastAdapter } from 'telefunc'
 import { loadCatalog, type Catalog, type Table, type TableSet } from './catalog.js'
@@ -19,14 +19,18 @@ type LiveQueriesOptions = {
 }
 
 /** How a driver runs one statement: send `text`, give back each row's last `hiddenColumns` values (as text) to
- *  `succeeded` and the rest to the caller (no rows at all unless `returnsRows`), or call `failed`. */
+ *  `succeeded` and the rest to the caller (no rows at all unless `returnsRows`), or call `failed`. When `succeeded`
+ *  returns a follow-up, run it next on the same connection, before the caller can send anything else. */
 type Statement = {
   text: string
   hiddenColumns: number
   returnsRows: boolean
-  succeeded(hiddenRows: (string | null)[][]): void
+  succeeded(hiddenRows: (string | null)[][]): FollowUp | void
   failed(): void
 }
+
+/** A query whose rows (each value as text, in an array) go to `done`; `undefined` when it failed. */
+type FollowUp = { text: string; values: unknown[]; done(rows: (string | null)[][] | undefined): void }
 
 const MAX_PLANS = 10_000
 /** A read returning more rows keeps no result keys: any change to a matching row counts. */
@@ -88,8 +92,15 @@ class LiveDatabase {
       text: plan.liveText ?? text,
       hiddenColumns: plan.liveText ? plan.shape.hiddenColumns.length : 0,
       returnsRows: true,
-      succeeded: (hiddenRows) =>
-        read.resolve(plan.liveText && hiddenRows.length <= MAX_RESULT_ROWS ? hiddenRows : undefined),
+      succeeded: (hiddenRows) => {
+        const rows = plan.liveText && hiddenRows.length <= MAX_RESULT_ROWS ? hiddenRows : undefined
+        const { state } = plan.shape
+        // Inside a transaction, a query of ours failing would fail the caller's transaction.
+        if (!rows || !state || (state.onlyWhenEmpty && rows.length > 0) || this.transactions.isOpen(connection))
+          return read.resolve(rows)
+        const params = state.params.map((i) => values[i])
+        return { text: state.text, values: params, done: (stateRows) => read.resolve(rows, stateRows) }
+      },
       failed: () => {
         call.remove(read)
         this.transactions.failed(connection)

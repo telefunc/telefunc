@@ -2,20 +2,39 @@ export { analyzeRead, SEED_LIMIT }
 export type { ReadShape, Alias, Join, Route, SortKey }
 
 import type { Catalog, Table, TableSet } from '../catalog.js'
-import { functionNamesIn, names, quote, walk, type Node, type RangeVar } from '../sql.js'
+import {
+  functionNamesIn,
+  isAggregateCall,
+  names,
+  parenthesizedAt,
+  quote,
+  renumberParams,
+  splitAnd,
+  walk,
+  type Node,
+  type RangeVar,
+} from '../sql.js'
 import { allOf, ALWAYS, compileCondition, inListCondition, type Condition, type ValueSource } from './condition.js'
+import { analyzeTally, type TallyContext, type TallyShape } from './tallyShape.js'
 import type { Column } from './values.js'
 
 /** What a `SELECT` reads, from its text alone: one entry per table occurrence, and how to bound it by its result. */
 type ReadShape = {
   /** `rows`: a list of table rows, bounded by its result (hidden columns carry the keys); `aggregate`: `count`, `sum`
-   *  and `avg`, changed exactly by writes to the rows they count; `other`: changed by any write to a matching row. */
-  kind: 'rows' | 'aggregate' | 'other'
+   *  and `avg`, changed exactly by writes to the rows they count; `tally`: decided by how many rows have which values
+   *  (`tally`); `other`: changed by any write to a matching row. */
+  kind: 'rows' | 'aggregate' | 'tally' | 'other'
   aliases: Alias[]
   /** Tables read without a known filter: views' tables, row-level security policies' tables, user functions. */
   alsoReads: TableSet
-  /** Expressions appended to the select list of a `rows` read, each `::text`. */
+  /** Expressions appended to the select list, each `::text`. */
   hiddenColumns: string[]
+  /** For a set operation: each branch's own hidden columns, inserted before its `FROM` (a byte offset). */
+  hiddenAt?: { from: number; columns: string[] }[]
+  /** A query to run right after the read, on its connection, with the read's parameters at `params`: a tally's
+   *  counts, or the join seeds of an empty result (which has no row to carry them). */
+  state?: { text: string; params: number[]; onlyWhenEmpty: boolean }
+  tally?: TallyShape
   limit?: ValueSource
   offset?: ValueSource
   /** `undefined`: the order can't be evaluated on a row (an expression, or columns of several tables). */
@@ -91,47 +110,54 @@ type Analysis = {
   catalog: Catalog
   aliases: Alias[]
   alsoReads: Set<string> | 'all'
-  /** The statement's parenthesized text at the first `(` from a byte offset; `undefined` without the text. */
-  parenthesizedAt: (location: number) => string | undefined
+  /** The statement's text, when it is the whole text sent. */
+  text: string | undefined
+  /** The scope of each plain `SELECT` analyzed. */
+  scopes: Map<Node, Scope>
 }
 
-const AGGREGATES = new Set([
-  'count',
-  'sum',
-  'avg',
-  'min',
-  'max',
-  'array_agg',
-  'json_agg',
-  'jsonb_agg',
-  'string_agg',
-  'json_object_agg',
-  'jsonb_object_agg',
-  'bool_and',
-  'bool_or',
-  'every',
-  'bit_and',
-  'bit_or',
-  'stddev',
-  'variance',
-])
 const EXACT_AGGREGATES = new Set(['count', 'sum', 'avg'])
 const SEED_LIMIT = 100
 
-function analyzeRead(
-  select: Node,
-  catalog: Catalog,
-  parenthesizedAt: Analysis['parenthesizedAt'] = () => undefined,
-): ReadShape {
-  const analysis: Analysis = { catalog, aliases: [], alsoReads: new Set(), parenthesizedAt }
+/** `text`: the statement's text, when it is the whole text sent. */
+function analyzeRead(select: Node, catalog: Catalog, text?: string): ReadShape {
+  const analysis: Analysis = { catalog, aliases: [], alsoReads: new Set(), text, scopes: new Map() }
   const top = analyzeSelect(select, undefined, { top: true, outputOnly: false }, analysis)
   let kind = top ? readKind(select) : 'other'
   const distinct = kind === 'rows' && select.distinctClause ? distinctColumns(select, top!, analysis) : undefined
   if (select.distinctClause && !distinct) kind = 'other'
   const shape: ReadShape = { kind, aliases: analysis.aliases, alsoReads: analysis.alsoReads, hiddenColumns: [] }
-  if (kind === 'rows' && top) addResultKeys(shape, select, top, distinct)
-  else for (const alias of shape.aliases) alias.role = 'other'
-  return shape
+  if (kind === 'rows' && top) {
+    addResultKeys(shape, select, top, distinct)
+    return shape
+  }
+  for (const alias of shape.aliases) alias.role = 'other'
+  const tally = kind === 'other' && text ? analyzeTally(select, tallyContext(analysis, text)) : undefined
+  if (!tally) return shape
+  return {
+    ...shape,
+    kind: 'tally',
+    tally: tally.shape,
+    hiddenColumns: tally.hiddenColumns,
+    hiddenAt: tally.hiddenAt,
+    state: { ...renumberParams(tally.query), onlyWhenEmpty: false },
+  }
+}
+
+/** The scopes as the tally analysis needs them: a plain `SELECT` of one table, and its columns. */
+function tallyContext(analysis: Analysis, text: string): TallyContext {
+  const tableOf = (select: Node) => {
+    const scope = analysis.scopes.get(select)
+    const [item, ...more] = (select.fromClause ?? []) as Node[]
+    if (!scope || scope.opaque.size > 0 || scope.aliases.size !== 1 || !item?.RangeVar || more.length > 0) return
+    return [...scope.aliases.values()][0]
+  }
+  const columnOf = (select: Node, ref: Node) => {
+    const alias = tableOf(select)
+    const found = alias && resolveColumn(ref, analysis.scopes.get(select)!)
+    return alias && found?.alias === alias ? found.column : undefined
+  }
+  return { text, aliases: analysis.aliases, tableOf, columnOf }
 }
 
 /** The columns of a plain `SELECT DISTINCT` listing only columns of its one table. */
@@ -177,6 +203,7 @@ function analyzeSelect(
     outputOnly: flags.outputOnly,
     edges: [],
   }
+  analysis.scopes.set(stmt, scope)
   for (const cte of (stmt.withClause?.ctes ?? []) as Node[]) {
     const query = cte.CommonTableExpr.ctequery
     if (query.SelectStmt)
@@ -242,7 +269,7 @@ function analyzeExists(
   const [edge] = outer
   if (outer.length !== 1 || scope.aliases.get(edge!.other.name) !== edge!.other) return
   if (edge!.other.role !== 'top' || edge!.other.nullable || outerReferences(subquery.whereClause, sub) !== 1) return
-  const text = analysis.parenthesizedAt(sublink.location)
+  const text = analysis.text && parenthesizedAt(analysis.text, sublink.location)
   if (!text) return
   child.role = 'exists'
   child.existsQuery = text
@@ -549,7 +576,7 @@ function readKind(select: Node): ReadShape['kind'] {
     if (key !== 'FuncCall') return
     const name = names(value.funcname).at(-1)!
     if (value.over) inexact = true
-    if (value.agg_star || AGGREGATES.has(name)) {
+    if (isAggregateCall(value)) {
       aggregates++
       if (!EXACT_AGGREGATES.has(name) || value.agg_distinct) inexact = true
     }
@@ -594,6 +621,11 @@ function addResultKeys(shape: ReadShape, select: Node, top: Scope, distinct: Col
   shape.limit = limitValue(select.limitCount)
   shape.offset = limitValue(select.limitOffset)
   shape.sort = sortKeys(select, top, (alias, column) => hidden(alias, column.name))
+  const seeds = new Set(shape.aliases.flatMap((a) => a.joins.flatMap((j) => (j.seed === undefined ? [] : [j.seed]))))
+  if (seeds.size === 0) return
+  // The same row of hidden columns, with only the seeds.
+  const seedRow = shape.hiddenColumns.map((expression, i) => (seeds.has(i) ? expression : 'NULL'))
+  shape.state = { ...renumberParams(`SELECT ${seedRow.join(', ')}`), onlyWhenEmpty: true }
 }
 
 /** The distinct `column` values of `alias`'s rows its `routes` allow, as a JSON array; up to `SEED_LIMIT + 1`. */
@@ -650,12 +682,6 @@ function sortColumn(node: Node, select: Node, scope: Scope): { alias: Alias; col
 }
 
 // ── Helpers ──
-
-function splitAnd(node: Node | undefined): Node[] {
-  if (!node) return []
-  if (node.BoolExpr?.boolop === 'AND_EXPR') return (node.BoolExpr.args as Node[]).flatMap(splitAnd)
-  return [node]
-}
 
 function hasSublink(node: Node): boolean {
   let found = false

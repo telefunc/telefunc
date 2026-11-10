@@ -1,5 +1,6 @@
-export { compileCondition, inListCondition, allOf, mayBeTrue, isTrue, ALWAYS }
-export type { Condition, Row, ValueSource }
+export { compileCondition, inListCondition, allOf, mayBeTrue, isTrue, ALWAYS, TRUE, FALSE, NULL, and, or, not }
+export { valueSource, COMPARISONS }
+export type { Condition, Row, Truth, ValueSource }
 
 import type { Node } from '../sql.js'
 import { names } from '../sql.js'

@@ -73,15 +73,27 @@ const store: AsyncLocalStorage<object> = (telefuncGlobals['getContext/async.ts']
 // A racing read's rows reach the app 10 ms late, so that the write racing it can commit after the read's snapshot
 // and be announced before the read's result is known.
 const LATE = Symbol('late')
+// Queries not answered yet. A live read whose shape has a `state` query settles after it, so its invalidation can
+// come that much later than the write's commit: the check waits for it.
+let inFlight = 0
 const pgQuery = pg.Client.prototype.query as (...args: unknown[]) => unknown
 pg.Client.prototype.query = function (this: pg.Client, ...args: unknown[]) {
   const result = pgQuery.apply(this, args)
-  if (!(store.getStore() as Record<symbol, unknown> | undefined)?.[LATE] || !(result instanceof Promise)) return result
-  return result.then(async (rows) => {
-    await new Promise((resolve) => setTimeout(resolve, 10))
-    return rows
-  })
+  if (!(result instanceof Promise)) return result
+  const late = (store.getStore() as Record<symbol, unknown> | undefined)?.[LATE]
+  inFlight++
+  return result
+    .then(async (rows) => {
+      if (late) await new Promise((resolve) => setTimeout(resolve, 10))
+      return rows
+    })
+    .finally(() => inFlight--)
 } as never
+
+async function queriesAnswered(): Promise<void> {
+  do await new Promise((resolve) => setImmediate(resolve))
+  while (inFlight > 0)
+}
 
 const { driver, writer, query, close } = await connect()
 
@@ -189,6 +201,7 @@ for (let step = 0; step < STEPS; step++) {
     if (VERBOSE) console.log(`write ${write} failed: ${String(err).slice(0, 120)}`)
   }
   // Lets the transport deliver what the write published.
+  await queriesAnswered()
   for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve))
   for (const sub of subscribers) {
     const now = canonical(sub.shape, await driver.reads[sub.shape]!(sub.args))
