@@ -259,7 +259,7 @@ class LiveDatabase {
     operandsKey: string | undefined,
   ): Promise<void> {
     const [state, operandRow] = await Promise.all([stateRows, operandRows?.then((r) => r?.[0])])
-    // Not answered: they stay unknown, and any change to the tables counts.
+    // Not answered, or not as asked: they stay unknown, and any change to the tables counts.
     const operands = operandRow && operandValues(shape.operands, operandRow)
     if (operands && operandsKey) {
       if (this.knownOperands.size >= MAX_KNOWN_OPERANDS) this.knownOperands.clear()

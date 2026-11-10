@@ -1,4 +1,4 @@
-export { arrayOf, CODES, REFS, SPELLED_COLUMNS, spell }
+export { arrayOf, CODES, COLUMN_TYPES, REFS, SPELLED_COLUMNS, spell }
 export type { Spelling, SpelledColumn }
 
 /** The values the writes give `todos.code` (a `char(4)`) and `todos.ref` (a `uuid`). */
@@ -12,6 +12,16 @@ const REFS = [
 
 const SPELLED_COLUMNS = ['ref', 'code', 'priority', 'amount', 'done', 'updated_at', 'text'] as const
 type SpelledColumn = (typeof SPELLED_COLUMNS)[number]
+/** Each column's SQL type, for the lists cast to an array of it. */
+const COLUMN_TYPES: Record<SpelledColumn, string> = {
+  ref: 'uuid',
+  code: 'char(4)',
+  priority: 'int',
+  amount: 'numeric(12, 2)',
+  done: 'boolean',
+  updated_at: 'timestamptz',
+  text: 'text',
+}
 
 /** A value compared with a column of `todos`, spelled as an app may send it: as a parameter or inline, followed by
  *  `cast` (SQL such as `::numeric::int`). Postgres reads many spellings as one value, and some casts change it.

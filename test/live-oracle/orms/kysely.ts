@@ -4,7 +4,7 @@ import { Kysely, PostgresDialect, sql } from 'kysely'
 import { jsonArrayFrom } from 'kysely/helpers/postgres'
 import { liveKysely } from '@telefunc/live/kysely'
 import type { BroadcastAdapter } from 'telefunc'
-import { arrayOf, CODES, REFS, type Spelling } from '../spellings.ts'
+import { arrayOf, CODES, COLUMN_TYPES, REFS, type Spelling } from '../spellings.ts'
 import { EVENT_TAG, eventQuery } from './eventQuery.ts'
 import type { OrmDriver } from './types.ts'
 
@@ -207,6 +207,30 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
           .where(sql<boolean>`${column(spellings[0]!)} = any(${arrayOf(spellings)})`)
           .orderBy('id')
           .execute(),
+      // Lists cast to an array of the column's type, `NULL` lists, and Boolean tests that tell `NULL` from `FALSE`.
+      listCast: ({ spellings, list }) =>
+        db
+          .selectFrom('todos')
+          .select('id')
+          .where(sql<boolean>`${column(spellings[0]!)} = any(${list}${sql.raw(arrayType(spellings[0]!))})`)
+          .orderBy('id')
+          .execute(),
+      listIsNotFalse: ({ spellings, list }) =>
+        db
+          .selectFrom('todos')
+          .select('id')
+          .where(sql<boolean>`(${column(spellings[0]!)} = any(${list})) is not false`)
+          .orderBy('id')
+          .execute(),
+      listAllIsNotTrue: ({ spellings, list }) =>
+        db
+          .selectFrom('todos')
+          .select('id')
+          .where(
+            sql<boolean>`(${column(spellings[0]!)} = all(${list}${sql.raw(arrayType(spellings[0]!))})) is not true`,
+          )
+          .orderBy('id')
+          .execute(),
     },
     writes: {
       insertTodo: ({ user, value, text, date }) =>
@@ -327,3 +351,5 @@ const operand = ({ value, cast, inline }: Spelling) =>
   inline ? sql.raw(`'${value.replace(/'/g, "''")}'${cast}`) : sql`${value}${sql.raw(cast)}`
 
 const schemaOf = (value: number) => (value % 3 === 0 ? 'public' : 'tenant')
+
+const arrayType = ({ column }: Spelling) => `::${COLUMN_TYPES[column]}[]`

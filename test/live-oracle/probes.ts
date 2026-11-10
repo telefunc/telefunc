@@ -137,6 +137,20 @@ const probes: Record<string, () => void> = {
   tracking() {
     delete (globalThis as any)[Symbol.for('@telefunc/live/tracking')]
   },
+  /** A `NULL` list (`= ANY(NULL)`) is taken as an empty one: `ANY` is `FALSE` and `ALL` `TRUE`, where SQL gives `NULL`. */
+  'null-list'() {
+    const resolveWhenAnswered = database.resolveWhenAnswered
+    database.resolveWhenAnswered = function (watched: any, shape: any, ...rest: any[]) {
+      const [rows, stateRows, operandRows, key] = rest
+      const asEmpty = operandRows?.then(
+        (answered: any) =>
+          answered && [
+            answered[0].map((value: unknown, i: number) => (shape.operands[i].list && value === null ? '[]' : value)),
+          ],
+      )
+      return resolveWhenAnswered.call(this, watched, shape, rows, stateRows, asEmpty, key)
+    }
+  },
   /** Unqualified names keep resolving by the loading session's `search_path` after a session may have changed it. */
   'search-path'() {
     const sessionsStartDiffering = database.sessionsStartDiffering

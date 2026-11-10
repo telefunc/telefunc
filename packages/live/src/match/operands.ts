@@ -11,13 +11,14 @@ import { names, quote, renumberParams, type Node } from '../sql.js'
 type Operand = {
   /** As written: what a query of ours compares a column with. */
   expression: string
-  /** Its value in Postgres's text form, coerced as the comparison coerces it; for `= ANY(…)`, a JSON array of them. */
+  /** Its value in Postgres's text form, coerced as the comparison coerces it; for `= ANY(…)`, a JSON array of its
+   *  elements' (`NULL` for a `NULL` array). */
   evaluated: string
   list: boolean
 }
 
-/** An operand's value as Postgres gave it: its text, `null`, or for `= ANY(…)` the values listed; `undefined` while
- *  unknown. */
+/** An operand's value as Postgres gave it: its text, `null`, or for `= ANY(…)` the values listed (`null` for a `NULL`
+ *  array); `undefined` while unknown. */
 type OperandValue = string | null | readonly (string | null)[] | undefined
 
 /** How a predicate compares an operand: with a value of SQL type `as` (an untyped operand, a parameter or a quoted
@@ -46,22 +47,28 @@ class Operands {
   }
 }
 
-/** The operands' values from the row `Operands.query()` returned. */
-function operandValues(operands: Operand[], row: readonly (string | null)[]): OperandValue[] {
-  return operands.map((operand, i) => {
-    const text = row[i]
-    if (!operand.list) return text
-    // `= ANY` of an empty array or of `NULL` holds for no row.
-    return text === null || text === undefined ? [] : (JSON.parse(text) as (string | null)[])
-  })
+/** The operands' values from the row `Operands.query()` returned; `undefined` when it isn't one it returns. */
+function operandValues(operands: Operand[], row: readonly (string | null)[]): OperandValue[] | undefined {
+  if (row.length !== operands.length) return undefined
+  try {
+    return operands.map((operand, i) =>
+      operand.list && row[i] !== null ? (JSON.parse(row[i]!) as (string | null)[]) : row[i],
+    )
+  } catch {
+    return undefined
+  }
 }
 
 function evaluation(expression: string, node: Node, { as, form }: Comparison): string | undefined {
   if (form === 'nullness') return `CASE WHEN (${expression}) IS NULL THEN NULL ELSE '' END`
+  if (form === 'list') {
+    if (!isTyped(node) && !as) return undefined
+    const array = isTyped(node) ? `(${expression})` : `(${expression})::${as}[]`
+    // Each element's text form, cast or not; a `NULL` array gives no row: `NULL`.
+    return `(SELECT to_json(array(SELECT "v"::text FROM unnest("a") AS "v"))::text FROM (SELECT ${array} AS "a") AS "l" WHERE "a" IS NOT NULL)`
+  }
   if (form === 'pattern' || isTyped(node)) return `(${expression})::text`
   if (!as) return undefined
-  if (form === 'list')
-    return `(SELECT to_json(array_agg("v"::text)) FROM unnest((${expression})::${as}[]) AS "v")::text`
   return `((${expression})::${as})::text`
 }
 

@@ -97,6 +97,8 @@ function compileExpression(expr: Node, scalar: (n: Node, comparison?: Comparison
       return (row, operands) => {
         const list = operands[right.index]
         const value = read(left, row, operands)
+        // `ANY` and `ALL` of a `NULL` array are `NULL`.
+        if (list === null) return NULL
         if (!Array.isArray(list) || left.kind !== 'column') return ALWAYS(row, operands)
         const parts = list.map((item) => truthOf(operator, value, item, left.column))
         return parts.reduce((acc, t) => (isAny ? or : and)(acc, t), isAny ? FALSE : TRUE)

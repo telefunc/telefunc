@@ -26,7 +26,7 @@ import { createKysely } from './orms/kysely.ts'
 import { createPrisma } from './orms/prisma.ts'
 import type { OrmDriver, ReadArgs, WriteArgs } from './orms/types.ts'
 import { seed, USERS } from './schema.ts'
-import { SPELLED_COLUMNS, spell } from './spellings.ts'
+import { arrayOf, SPELLED_COLUMNS, spell } from './spellings.ts'
 import { derived, type LiveCell } from '../../packages/live/dist/live.js'
 // The same file under another URL: a module of its own, as a second copy of the package is.
 const SECOND_COPY = '../../packages/live/dist/live.js?second-copy'
@@ -277,7 +277,9 @@ for (const shape of Object.keys(driver.reads).filter((s) => !SHAPES || SHAPES.in
       low,
       high: low + 1,
       spellings: [spell(column, pick(seeded)[column], random), spell(column, pick(seeded)[column], random)],
+      list: null,
     }
+    args.list = random() < 1 / 3 ? null : arrayOf(args.spellings)
     const derive = i % 2 === 1 ? derived : undefined
     subscribers.push({ shape, args, result: '', invalidated: false, stop: () => {}, derive })
   }

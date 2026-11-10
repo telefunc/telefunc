@@ -36,7 +36,7 @@ import { drizzle as drizzlePglite } from 'drizzle-orm/pglite'
 import { drizzle as drizzlePostgresJs } from 'drizzle-orm/postgres-js'
 import { liveDrizzle } from '@telefunc/live/drizzle'
 import type { BroadcastAdapter } from 'telefunc'
-import { arrayOf, CODES, REFS, type Spelling } from '../spellings.ts'
+import { arrayOf, CODES, COLUMN_TYPES, REFS, type Spelling } from '../spellings.ts'
 import { EVENT_TAG, eventQuery } from './eventQuery.ts'
 import type { OrmDriver } from './types.ts'
 
@@ -223,6 +223,25 @@ function createDrizzle(
           .from(todos)
           .where(sql`${column(spellings[0]!)} = any(${arrayOf(spellings)})`)
           .orderBy(todos.id),
+      // Lists cast to an array of the column's type, `NULL` lists, and Boolean tests that tell `NULL` from `FALSE`.
+      listCast: ({ spellings, list }) =>
+        db
+          .select({ id: todos.id })
+          .from(todos)
+          .where(sql`${column(spellings[0]!)} = any(${list}${sql.raw(arrayType(spellings[0]!))})`)
+          .orderBy(todos.id),
+      listIsNotFalse: ({ spellings, list }) =>
+        db
+          .select({ id: todos.id })
+          .from(todos)
+          .where(sql`(${column(spellings[0]!)} = any(${list})) is not false`)
+          .orderBy(todos.id),
+      listAllIsNotTrue: ({ spellings, list }) =>
+        db
+          .select({ id: todos.id })
+          .from(todos)
+          .where(sql`(${column(spellings[0]!)} = all(${list}${sql.raw(arrayType(spellings[0]!))})) is not true`)
+          .orderBy(todos.id),
     },
     writes: {
       insertTodo: ({ user, value, text, date }) =>
@@ -323,3 +342,5 @@ const schemaOf = (value: number) => (value % 3 === 0 ? 'public' : 'tenant')
 
 /** `db.execute()`'s rows: the result itself on postgres.js, its `rows` elsewhere. */
 const rowsOf = (result: any) => result.rows ?? [...result]
+
+const arrayType = ({ column }: Spelling) => `::${COLUMN_TYPES[column]}[]`
