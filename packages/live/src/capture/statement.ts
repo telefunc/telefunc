@@ -243,7 +243,8 @@ function alsoWrites(
         written.push(...effects)
         continue
       }
-      const action = actionOf(key, write, assigned)
+      // A trigger or a generated column may change a key the `SET` list doesn't name.
+      const action = actionOf(key, write, table.updateChangesOtherColumns ? undefined : assigned)
       if (action) written.push([child.id, action])
     }
   }

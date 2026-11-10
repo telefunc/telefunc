@@ -212,6 +212,7 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
         (await sql`select kind, count(*)::int as n from event_log group by kind order by kind`.execute(db)).rows,
       counters: async () => (await sql`select id, n from counters order by id`.execute(db)).rows,
       chained: async () => (await sql`select n from chained`.execute(db)).rows,
+      products: async () => (await sql`select id, brand from products order by id`.execute(db)).rows,
       ticket: async () => (await sql`select nextval('tickets') as n`.execute(db)).rows,
       labelled: () =>
         db.selectFrom('todos').select('id').where(sql<boolean>`label_of(text) like 'A%'`).orderBy('id').execute(),
@@ -400,6 +401,9 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
         }),
       resetEvents: () => sql`insert into resets default values`.execute(db),
       stampRead: () => sql`select stamp()`.execute(db),
+      // The brand's slug follows its name, and its products' references the slug.
+      renameBrand: ({ text, value }) =>
+        sql`update brands set name = ${`${text.slice(0, 3)}${value % 4}`} where id = ${1 + (value % 3)}`.execute(db),
       // Per tenant, for its transaction only: the update names the table by that search_path.
       notesLocalPath: ({ value }) =>
         db.transaction().execute(async (tx) => {

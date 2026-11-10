@@ -230,6 +230,7 @@ function createDrizzle(
         db.execute(sql`select kind, count(*)::int as n from event_log group by kind order by kind`).then(rowsOf),
       counters: () => db.execute(sql`select id, n from counters order by id`).then(rowsOf),
       chained: () => db.execute(sql`select n from chained`).then(rowsOf),
+      products: () => db.execute(sql`select id, brand from products order by id`).then(rowsOf),
       ticket: () => db.execute(sql`select nextval('tickets') as n`).then(rowsOf),
       ...(kind === 'pg' && {
         cursorTexts: ({ user }) =>
@@ -392,6 +393,9 @@ function createDrizzle(
         }),
       resetEvents: () => db.execute(sql`insert into resets default values`),
       stampRead: () => db.execute(sql`select stamp()`),
+      // The brand's slug follows its name, and its products' references the slug.
+      renameBrand: ({ text, value }) =>
+        db.execute(sql`update brands set name = ${`${text.slice(0, 3)}${value % 4}`} where id = ${1 + (value % 3)}`),
       // Per tenant, for its transaction only: the update names the table by that search_path.
       notesLocalPath: ({ value }) =>
         db.transaction(async (tx: any) => {

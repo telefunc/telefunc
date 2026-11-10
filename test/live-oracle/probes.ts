@@ -59,6 +59,15 @@ const probes: Record<string, () => void> = {
       for (const table of this.catalog.tables.values()) for (const column of table.columns) column.orderableText = true
     }
   },
+  /** An update changes only the columns its `SET` list names, as if no trigger or generated column changed others: a
+   *  key referenced `ON UPDATE CASCADE` among them. */
+  'other-columns'() {
+    const loadCatalog = database.loadCatalog
+    database.loadCatalog = async function (query: unknown) {
+      await loadCatalog.call(this, query)
+      for (const table of this.catalog.tables.values()) table.updateChangesOtherColumns = false
+    }
+  },
   /** A read calling a volatile function shares a run with identical ones. */
   'volatile-sharing'() {
     const planOf = database.planOf
