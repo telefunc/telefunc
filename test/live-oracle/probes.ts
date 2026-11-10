@@ -136,7 +136,7 @@ const probes: Record<string, () => void> = {
   /** Each copy of the package tracks `derived()`'s dependencies on its own: values one copy reads aren't seen by
    *  another copy's `derived()`. */
   tracking() {
-    delete (globalThis as any)[Symbol.for('@telefunc/live/tracking')]
+    delete (globalThis as any)[Symbol.for('@telefunc/live')].tracking
   },
   /** A `NULL` list (`= ANY(NULL)`) is taken as an empty one: `ANY` is `FALSE` and `ALL` `TRUE`, where SQL gives `NULL`. */
   'null-list'() {

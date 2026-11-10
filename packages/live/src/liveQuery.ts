@@ -9,13 +9,15 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { getRawContext, REQUEST_CONTEXT } from 'telefunc'
 import { assertUsage } from './assert.js'
 import { LiveCell, type Live, type LiveSource } from './live.js'
+import { processWide } from './processWide.js'
 import type { WatchedRead } from './sharedReads.js'
 import { staleSignals } from './staleSignals.js'
 
 type RequestContext = { onClose(callback: () => void): void }
 
-/** The `.live()` query running now: the statements it sends record their reads on it. */
-const running = new AsyncLocalStorage<LiveQuery>()
+/** The `.live()` query running now: the statements it sends record their reads on it, whichever copy of this package
+ *  captures them. */
+const running = processWide('running', () => new AsyncLocalStorage<LiveQuery>())
 
 /** Runs `query` (the ORM's own execution of a read) and records what it reads: the `Live` it resolves to goes stale
  *  when a committed write changes that. `wrapper` names the function that makes a database's reads recordable. */

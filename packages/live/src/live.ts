@@ -2,10 +2,10 @@ export { derived, LiveCell, LIVE }
 export type { Live, LiveSource }
 
 import { assertUsage } from './assert.js'
+import { processWide } from './processWide.js'
 
 /** Marks a server-side `LiveCell`, for the response replacer to find. */
 const LIVE = Symbol.for('@telefunc/live/LiveCell')
-const TRACKING = Symbol.for('@telefunc/live/tracking')
 
 /**
  * A live value: `.data` is the snapshot the telefunction read. Returned from a telefunction, it tells the client when
@@ -39,9 +39,9 @@ function derived<R>(compute: () => R): Live<R> {
   return LiveCell.derived(compute)
 }
 
-/** The values `.data` reads register on, one frame per `derived()` running. One per process: a value of another copy
- *  of this package (two versions installed, or a bundle besides `node_modules`) registers on the same frames. */
-const tracking: Set<LiveCell<unknown>>[] = ((globalThis as any)[TRACKING] ??= [])
+/** The values `.data` reads register on, one frame per `derived()` running: a value of another copy of this package
+ *  registers on the same frames. */
+const tracking = processWide('tracking', (): Set<LiveCell<unknown>>[] => [])
 
 /** The server side of a `Live<T>`. Nothing is watched until the response sends it, and the watching stops when the
  *  client lets go of it (`release()`). */

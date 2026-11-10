@@ -6,11 +6,13 @@ import { capturePg, type PgClient, type PgPool } from './capture/pg.js'
 import { capturePglite, type Pglite } from './capture/pglite.js'
 import { capturePostgresJs, isPostgresJs, type PostgresJs } from './capture/postgresJs.js'
 import { LiveDatabase, type LiveOptions } from './liveDatabase.js'
+import { processWide } from './processWide.js'
 
 /** What an ORM sends its SQL through: a `pg.Pool` or `pg.Client`, a postgres.js `sql`, a PGlite instance. */
 type DatabaseClient = PgPool | PgClient | Pglite | PostgresJs
 
-const databases = new WeakMap<object, { live: LiveDatabase; options: LiveOptions }>()
+/** By client: a client one copy of this package wraps is captured once, whichever copies wrap it. */
+const databases = processWide('databases', () => new WeakMap<object, { live: LiveDatabase; options: LiveOptions }>())
 
 /** The live database of `client`, which captures its statements from now on. Several ORMs over one pool share it. */
 function liveDatabaseOf(client: DatabaseClient, options: LiveOptions): LiveDatabase {
