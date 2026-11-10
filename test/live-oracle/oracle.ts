@@ -1,7 +1,10 @@
 // Differential oracle for @telefunc/live: after every write, each live read is run again; a result that changed
 // without an invalidation is a miss (exit 1). Extra invalidations (refetches that return the same result) are reported.
 //
-//   ORM=drizzle|kysely|prisma DB=pglite|pg PG_PORT=<port> SEED=1 STEPS=300 CHURN=1 node oracle.ts
+//   ORM=drizzle|kysely|prisma DB=pglite|pg PG_PORT=<port> SEED=1 STEPS=300 CHURN=1 SERVERS=2 node oracle.ts
+//
+// SERVERS=2 (pooled Postgres): the live reads are on one server, the writes on another, connected by a transport that
+// delivers out of order and twice.
 //
 // A telefunction call is simulated by running the read with a call context, as telefunc's server does.
 
@@ -21,6 +24,7 @@ const SEED = Number(process.env.SEED ?? 1)
 const STEPS = Number(process.env.STEPS ?? 300)
 const CHURN = process.env.CHURN === '1' && DB !== 'pglite'
 const VERBOSE = process.env.VERBOSE === '1'
+const SERVERS = DB === 'pglite' ? 1 : Number(process.env.SERVERS ?? 1)
 
 const REQUEST_CONTEXT = Symbol.for('telefunc.requestContext')
 const LIVE_READS = Symbol.for('telefunc.liveReads')
@@ -31,10 +35,41 @@ const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.le
 
 // ── Database and ORM ──
 
-const { driver, query, close } = await connect()
+/** A `BroadcastAdapter` between the two servers of this process that delivers late, out of order, and some messages
+ *  twice. */
+class UnreliableTransport {
+  private readonly listeners = new Map<
+    string,
+    Set<(serialized: string, info: { seq: number; timestamp: number }) => void>
+  >()
+  private readonly seqs = new Map<string, number>()
+  subscribe(key: string, onMessage: (serialized: string, info: { seq: number; timestamp: number }) => void) {
+    if (!this.listeners.has(key)) this.listeners.set(key, new Set())
+    this.listeners.get(key)!.add(onMessage)
+    return () => this.listeners.get(key)!.delete(onMessage)
+  }
+  publish(key: string, serialized: string) {
+    const info = { seq: (this.seqs.get(key) ?? 0) + 1, timestamp: Date.now() }
+    this.seqs.set(key, info.seq)
+    const deliver = () => this.listeners.get(key)?.forEach((onMessage) => onMessage(serialized, info))
+    // Two turns at most, so that a step's checks run after every delivery.
+    setImmediate(random() < 0.3 ? () => setImmediate(deliver) : deliver)
+    if (random() < 0.1) setImmediate(deliver)
+    return info
+  }
+  subscribeBinary(): () => void {
+    throw new Error('Unused')
+  }
+  publishBinary(): never {
+    throw new Error('Unused')
+  }
+}
+
+const { driver, writer, query, close } = await connect()
 
 async function connect(): Promise<{
   driver: OrmDriver
+  writer: OrmDriver
   query: (text: string) => Promise<any[]>
   close: () => Promise<void>
 }> {
@@ -43,21 +78,33 @@ async function connect(): Promise<{
     await pglite.exec(seed(random))
     withLiveQueries(pglite)
     const driver = ORM === 'kysely' ? createKysely(pglite, 'pglite') : createDrizzle(pglite, 'pglite')
-    return { driver, query: async (text) => (await pglite.query(text)).rows, close: () => pglite.close() }
+    return {
+      driver,
+      writer: driver,
+      query: async (text) => (await pglite.query(text)).rows,
+      close: () => pglite.close(),
+    }
   }
   const url = `postgres://postgres:postgres@127.0.0.1:${process.env.PG_PORT}/postgres`
   const admin = new pg.Client({ connectionString: url })
   await admin.connect()
   await admin.query(seed(random))
-  const pool = withLiveQueries(new pg.Pool({ connectionString: url, max: 8 }))
-  const driver =
+  const create = (pool: pg.Pool) =>
     ORM === 'prisma' ? createPrisma(pool) : ORM === 'kysely' ? createKysely(pool, 'pg') : createDrizzle(pool, 'pg')
+  const transport = SERVERS === 2 ? new UnreliableTransport() : undefined
+  const pool = withLiveQueries(new pg.Pool({ connectionString: url, max: 8 }), { transport })
+  const writerPool =
+    SERVERS === 2 ? withLiveQueries(new pg.Pool({ connectionString: url, max: 8 }), { transport }) : pool
+  const driver = create(pool)
+  const writer = SERVERS === 2 ? create(writerPool) : driver
   return {
     driver,
+    writer,
     query: async (text) => (await admin.query(text)).rows,
     close: async () => {
       await driver.close()
       await pool.end()
+      if (writerPool !== pool) await writerPool.end()
       await admin.end()
     },
   }
@@ -117,13 +164,14 @@ for (let step = 0; step < STEPS; step++) {
   const args = await writeArgs()
   const racing = CHURN && random() < 0.3 ? pick(subscribers) : undefined
   try {
-    if (racing) await Promise.all([subscribe(racing), driver.writes[write]!(args)])
-    else await driver.writes[write]!(args)
+    if (racing) await Promise.all([subscribe(racing), writer.writes[write]!(args)])
+    else await writer.writes[write]!(args)
   } catch (err) {
     // A write the data doesn't allow (a deleted row's foreign key): it changed nothing.
     if (VERBOSE) console.log(`write ${write} failed: ${String(err).slice(0, 120)}`)
   }
-  await new Promise((resolve) => setImmediate(resolve))
+  // Lets the transport deliver what the write published.
+  for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve))
   for (const sub of subscribers) {
     const now = canonical(sub.shape, await driver.reads[sub.shape]!(sub.args))
     const changed = now !== sub.result
@@ -155,7 +203,7 @@ const total = [...byShape.values()].reduce(
   { invalidations: 0, changes: 0, extra: 0, missed: 0 },
 )
 console.log(
-  `# oracle ORM=${ORM} DB=${DB}${process.env.PG_PORT ? ` (port ${process.env.PG_PORT})` : ''} SEED=${SEED} STEPS=${STEPS} CHURN=${CHURN ? 1 : 0} subscribers=${subscribers.length}`,
+  `# oracle ORM=${ORM} DB=${DB}${process.env.PG_PORT ? ` (port ${process.env.PG_PORT})` : ''} SEED=${SEED} STEPS=${STEPS} CHURN=${CHURN ? 1 : 0} SERVERS=${SERVERS} subscribers=${subscribers.length}`,
 )
 console.log(
   `total: missed=${total.missed} changes=${total.changes} invalidations=${total.invalidations} extra=${total.extra} (extra per write ${(total.extra / STEPS).toFixed(3)})`,
