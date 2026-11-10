@@ -74,9 +74,9 @@ type ReconcileOutcome = {
   sessionId: string
   /** Each `lastSeq` is read as the RECONCILED goes out, so it counts what was dispatched before then. */
   attached: ChannelHandle[]
-  /** The wire a barrier retired, which gets its FIN once this RECONCILED went out; null except on an SSE→WS upgrade. */
+  /** The wire a barrier retired, which gets its FIN once this RECONCILED went out; null except on an upgrade. */
   retiredWire: Wire | null
-  /** The wire this RECONCILED belongs on — a barrier reconciles the staged WS, not the sender. */
+  /** The wire this RECONCILED belongs on — a barrier reconciles the staged probe, not the sender. */
   deliverTo: Wire
   upgradeId?: string
 }
@@ -147,7 +147,7 @@ class ChannelMux implements UpgradeStagesOwner {
   /** Reverse index for transports with a stable connId (SSE). Lets data POSTs locate the
    *  live stream wire, and catches a duplicate-connId reconnect racing teardown. */
   private readonly wiresByConnId = new Map<string, Wire>()
-  /** The SSE→WS upgrades staged on probe WebSockets. */
+  /** The upgrades staged on probe wires. */
   private readonly stages = new UpgradeStages({ owner: this })
   private readonly ended = new EndedChannels({
     onRelease: (channel) => {
@@ -600,7 +600,7 @@ class ChannelMux implements UpgradeStagesOwner {
   ): Promise<ReconcileOutcome> {
     const probe = wsEntry.wire
     try {
-      // `reconcile` ran against the staged WS, so the outcome already carries it as `deliverTo`. Awaited: the stage
+      // `reconcile` ran against the staged probe, so the outcome already carries it as `deliverTo`. Awaited: the stage
       // stays committing for a microtask, so a claim of the old session that runs in it is refused.
       const outcome = await this.reconcile(wsEntry, ctrl, true)
       return { ...outcome, upgradeId }

@@ -158,7 +158,7 @@ type UpgradeOptions = {
   owner: UpgradeOwner
 }
 
-/** The SSE→WS upgrade: a WebSocket probe staged beside the SSE wire, the barrier that ends the old wire, and the join
+/** An upgrade: a probe of the next rung staged beside the wire, the barrier that ends the old wire, and the join
  *  of both wires' frames once the connection flipped to the new one. The connection runs an attempt with `run`. */
 class Upgrade implements ProbeOwner {
   private readonly owner: UpgradeOwner

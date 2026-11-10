@@ -17,7 +17,7 @@ type UpgradeStagesOptions = {
   owner: UpgradeStagesOwner
 }
 
-/** A probe WebSocket's stage, from its PREPARE until its barrier commits it. */
+/** A probe wire's stage, from its PREPARE until its barrier commits it. */
 type StagedUpgrade = {
   upgradeId: string
   /** The session the upgrade moves off, which its barrier retires. */
@@ -28,7 +28,7 @@ type StagedUpgrade = {
   phase: 'staged' | 'committing'
 }
 
-/** The SSE→WS upgrades staged on probe WebSockets, one per session, within a record and a byte budget. A stage ends
+/** The upgrades staged on probe wires, one per session, within a record and a byte budget. A stage ends
  *  when its barrier commits it, its TTL passes, a RECONCILE claims its session, or its probe closes. */
 class UpgradeStages {
   private readonly owner: UpgradeStagesOwner
