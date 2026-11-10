@@ -669,6 +669,11 @@ class ServerLocalParticipant extends ParticipantBase {
     return this._acceptedConnected
   }
 
+  /** The server sends on no page's uplink. */
+  get uplinkRate(): number {
+    return Number.POSITIVE_INFINITY
+  }
+
   override _acceptMeta(update: MemberMetaUpdate): boolean {
     const wasConnected = this.isConnected
     if (!super._acceptMeta(update)) return false

@@ -434,6 +434,11 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   /** @internal */
+  get _uplinkRate(): number {
+    return this.end._uplinkRate
+  }
+
+  /** @internal */
   _heldConnectionChanged(id: string, wasConnected: boolean | null): void {
     this.model.heldConnectionChanged(id, wasConnected)
   }
@@ -654,6 +659,10 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return this.room._isConnected
   }
 
+  get uplinkRate(): number {
+    return this.room._uplinkRate
+  }
+
   protected override _resolveSender(id: string): Sender | null {
     // A sync read: delivery must not wait on I/O.
     return this.room._state.getRemote(id)
@@ -732,6 +741,10 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
 
   get isConnected(): boolean {
     return this.end.isConnected
+  }
+
+  get uplinkRate(): number {
+    return this.end._uplinkRate
   }
 
   private onNotice(notice: unknown): void {

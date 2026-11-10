@@ -275,6 +275,10 @@ class WsTransport implements UpgradeSource, UpgradeTarget, ClientHeadroomOwner {
     return this.pieces.headroom.headroomPastSent()
   }
 
+  get uplinkRate(): number {
+    return this.pieces?.headroom.path.pathRate ?? Number.POSITIVE_INFINITY
+  }
+
   get uplink(): Uplink {
     assert(this.pieces)
     return this.pieces.uplink

@@ -90,6 +90,11 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     }
   }
 
+  /** @internal See `ClientChannelTransport.uplinkRate`. */
+  get _uplinkRate(): number {
+    return this.connection.uplinkRate
+  }
+
   /** @internal A publish of a lossy stream arrived, which the page confirms soon: the server tells by that whether it
    *  keeps up. */
   _confirmSoon(): void {

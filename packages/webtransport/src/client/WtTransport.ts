@@ -106,6 +106,8 @@ class WtTransport implements UpgradeTarget {
 
   readonly behindAfter = Number.POSITIVE_INFINITY
 
+  readonly uplinkRate = Number.POSITIVE_INFINITY
+
   bufferedAmount(): number {
     return this.session?.unsentBytes ?? 0
   }

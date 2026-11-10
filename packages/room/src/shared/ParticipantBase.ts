@@ -112,6 +112,7 @@ abstract class ParticipantBase implements LocalParticipant {
   abstract setAttributes(attributes: ParticipantMeta): Promise<void>
   abstract leave(): Promise<void>
   abstract get isConnected(): boolean
+  abstract get uplinkRate(): number
   /** A user callback threw. Each side reports through its own pipeline. */
   protected abstract _reportError(err: unknown): void
   /** An ack DM's reply to a bug in a `listen()` handler, naming where `_reportError` logged it. */

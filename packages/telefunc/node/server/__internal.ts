@@ -106,6 +106,7 @@ type ClientBroadcast = Pick<
   | '_sendReply'
   | '_subscribeLocal'
   | '_confirmSoon'
+  | '_uplinkRate'
   | 'isClosed'
   | 'isConnected'
   | 'send'

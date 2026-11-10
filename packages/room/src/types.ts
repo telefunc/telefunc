@@ -324,6 +324,10 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   readonly selfDelivery: boolean
   /** False while the page holding you can't reach the room. */
   readonly isConnected: boolean
+  /** In bytes per ms, what the path from the page holding you to the server carries, as the server's acknowledgements
+   *  measure it: what an encoder's bitrate fits in. `Infinity` until measured, where the page's wire doesn't measure it
+   *  (SSE), and on the server. */
+  readonly uplinkRate: number
 
   /** Publish a message to the whole room. */
   publish(data: Pub, options?: PublishOptions): Promise<ChannelPublishAck>

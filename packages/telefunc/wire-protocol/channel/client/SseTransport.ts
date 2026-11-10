@@ -556,6 +556,9 @@ class SseTransport implements UpgradeSource {
     return this.batched ? this.postBytes - this.postOutBytes - this.outboxBytes : Infinity
   }
 
+  /** A POST takes the page's frames at the page's own pace, which says nothing of the path's. */
+  readonly uplinkRate = Number.POSITIVE_INFINITY
+
   /** The wire is lost with the POST out for `ms`, as one that missed its pong: a reconnect resends what it carried. */
   private watchPost(wire: AbortController, ms: number): void {
     this.postWatch = setTimeout(() => {

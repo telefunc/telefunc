@@ -74,6 +74,8 @@ interface MuxConnection {
   sendBdpPingAck(channel: MuxChannel, ack: BdpPingAck): void
   /** Bytes the wire holds that haven't gone out. */
   bufferedAmount(): number
+  /** See `ClientChannelTransport.uplinkRate`. */
+  readonly uplinkRate: number
   /** Bytes the wire delivered in the `ms` before its latest delivery: the frame being handled, on arrival. */
   deliveredBefore(ms: number): number
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
@@ -119,6 +121,9 @@ type ClientChannelTransport = {
   readonly behindAfter: number
   /** Bytes of the frames it was handed that haven't gone out to the network. */
   bufferedAmount(): number
+  /** In bytes per ms, what the path to the server carries, from the server's acknowledgements: `Infinity` until
+   *  measured, or where the wire doesn't measure it. */
+  readonly uplinkRate: number
   abandonActiveTransport(): void
   closeAbandonedTransport(): void
   applyReconciledSettings(ctrl: ReconciledPayload): void
@@ -300,6 +305,10 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
 
   bufferedAmount(): number {
     return this.transport.bufferedAmount() + this.gate.waitingBytes
+  }
+
+  get uplinkRate(): number {
+    return this.transport.uplinkRate
   }
 
   deliveredBefore(ms: number): number {
