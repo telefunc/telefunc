@@ -3,13 +3,15 @@ export type { Catalog, Table, TableSet, ForeignKey }
 
 import { parsePlPgSQLSync } from 'libpg-query'
 import type { Column } from './match/values.js'
-import { parseStatements, tablesIn, walk, type Node, type RangeVar } from './sql.js'
+import { parseStatements, quote, tablesIn, walk, type Node, type RangeVar } from './sql.js'
 
 /** Tables by id (`schema.name`), or every table. */
 type TableSet = ReadonlySet<string> | 'all'
 
 type Table = {
   id: string
+  /** Quoted, schema-qualified. */
+  sqlName: string
   columns: Column[]
   column: Map<string, Column>
   primaryKey: string[]
@@ -20,6 +22,9 @@ type Table = {
   alsoWrites: TableSet
   /** Foreign keys of other tables referencing this one with an action that changes them (`ON DELETE CASCADE`, ...). */
   referencedBy: ForeignKey[]
+  /** Single-column foreign keys checked at the end of each statement: every non-`NULL` `column` value is the
+   *  `parentColumn` of a row of `parent`. */
+  references: { column: string; parent: string; parentColumn: string }[]
   /** An `UPDATE` can change columns its `SET` list doesn't name (`BEFORE` row triggers, generated columns). */
   updateChangesOtherColumns: boolean
 }
@@ -63,6 +68,7 @@ type CatalogRow = {
     referencedBy:
       | [table: string, columns: string[], parentColumns: string[], onDelete: string, onUpdate: string][]
       | null
+    references: [column: string, parent: string, parentColumn: string][] | null
   }[]
 }
 
@@ -100,7 +106,12 @@ const CATALOG_QUERY = `select json_build_object(
           join pg_attribute a on a.attrelid = f.confrelid and a.attnum = k.attnum),
         f.confdeltype, f.confupdtype))
       from pg_constraint f join pg_class rc on rc.oid = f.conrelid join pg_namespace rn on rn.oid = rc.relnamespace
-      where f.confrelid = c.oid and f.contype = 'f' and (f.confdeltype in ('c', 'n', 'd') or f.confupdtype in ('c', 'n', 'd')))
+      where f.confrelid = c.oid and f.contype = 'f' and (f.confdeltype in ('c', 'n', 'd') or f.confupdtype in ('c', 'n', 'd'))),
+    'references', (select json_agg(json_build_array(a.attname, ps.nspname || '.' || p.relname, pa.attname))
+      from pg_constraint f join pg_class p on p.oid = f.confrelid join pg_namespace ps on ps.oid = p.relnamespace
+      join pg_attribute a on a.attrelid = f.conrelid and a.attnum = f.conkey[1]
+      join pg_attribute pa on pa.attrelid = f.confrelid and pa.attnum = f.confkey[1]
+      where f.conrelid = c.oid and f.contype = 'f' and not f.condeferrable and cardinality(f.conkey) = 1)
   )), '[]') from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where c.relkind in ('r', 'p', 'v', 'm', 'f') and n.nspname not in ('pg_catalog', 'information_schema') and n.nspname !~ '^pg_toast')
 )::text as catalog`
@@ -142,6 +153,7 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
     const triggers = t.triggers ?? []
     tables.set(`${t.schema}.${t.name}`, {
       id: `${t.schema}.${t.name}`,
+      sqlName: `${quote(t.schema)}.${quote(t.name)}`,
       columns,
       column: new Map(columns.map((c) => [c.name, c])),
       primaryKey: t.primaryKey ?? [],
@@ -154,6 +166,7 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
         onDelete,
         onUpdate,
       })),
+      references: (t.references ?? []).map(([column, parent, parentColumn]) => ({ column, parent, parentColumn })),
       updateChangesOtherColumns:
         t.columns.some((c) => c[5]) ||
         triggers.some(

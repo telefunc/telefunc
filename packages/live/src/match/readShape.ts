@@ -1,8 +1,8 @@
-export { analyzeRead }
-export type { ReadShape, Alias, Route, SortKey }
+export { analyzeRead, SEED_LIMIT }
+export type { ReadShape, Alias, Join, Route, SortKey }
 
 import type { Catalog, Table, TableSet } from '../catalog.js'
-import { functionNamesIn, names, walk, type Node, type RangeVar } from '../sql.js'
+import { functionNamesIn, names, quote, walk, type Node, type RangeVar } from '../sql.js'
 import { allOf, ALWAYS, compileCondition, inListCondition, type Condition, type ValueSource } from './condition.js'
 import type { Column } from './values.js'
 
@@ -20,6 +20,8 @@ type ReadShape = {
   offset?: ValueSource
   /** `undefined`: the order can't be evaluated on a row (an expression, or columns of several tables). */
   sort?: SortKey[]
+  /** A `SELECT DISTINCT` of one table's columns: each result row carries those columns and how many rows have them. */
+  distinct?: { columns: Column[]; hidden: number[]; countHidden: number }
 }
 
 type Alias = {
@@ -33,20 +35,41 @@ type Alias = {
   /** The columns the statement uses; `all` for `*` or a whole-row reference. */
   referenced: Set<string> | 'all'
   /** `top`: in the outer `FROM` of a `rows` read; `child`: in a subquery that only fills columns of the outer rows (a
-   *  relational include), tied to an outer row by `correlations`; `other`: changes to matching rows always count. */
-  role: 'top' | 'child' | 'other'
+   *  relational include), tied to an outer row by `correlations`; `exists`: the table of an `EXISTS` filtering the
+   *  outer rows, tied to them by its one correlation; `other`: changes to matching rows always count. */
+  role: 'top' | 'child' | 'exists' | 'other'
   /** Indexes into the hidden columns: this table's primary key, for `top`. */
   primaryKeyHidden?: number[]
   correlations: Correlation[]
   /** For a `top` alias on the null-extended side: the outer rows it attaches to. */
   partners: Correlation[]
+  /** For a `top` alias: the rows of other tables each of its result rows needs. */
+  joins: Join[]
+  /** For `exists`: the subquery, parenthesized; each result row carries how many rows it finds for it. */
+  existsQuery?: string
+  existsCountHidden?: number
+}
+
+/** `column = partner.partnerColumn` holds on every result row, and `partner` is an inner join or an `EXISTS`. */
+type Join = {
+  column: Column
+  partner: Alias
+  partnerColumn: Column
+  /** A foreign key of the partner table references `column`: a row just inserted has no partner yet. */
+  referenced: boolean
+  /** For a `top` partner: index of the hidden column holding `partnerColumn`. */
+  hidden?: number
+  /** Index of the hidden column listing, as a JSON array, the `partnerColumn` values of the rows the partner's
+   *  routes allow; more than `SEED_LIMIT` aren't kept. */
+  seed?: number
 }
 
 /** `column = parent.parentColumn`, with `hidden` the index of the parent column among the hidden columns. */
 type Correlation = { column: Column; parent: Alias; parentColumn: Column; hidden?: number }
 
-/** `column = value` or `column IN (values)`: a row whose value isn't listed can't be part of the result. */
-type Route = { column: Column; values: ValueSource[] } | { column: Column; anyOf: number }
+/** `column = value` or `column IN (values)`: a row whose value isn't listed can't be part of the result. `derived`:
+ *  from another table's route, through a join. */
+type Route = ({ column: Column; values: ValueSource[] } | { column: Column; anyOf: number }) & { derived?: true }
 
 type SortKey = { column: Column; alias: Alias; descending: boolean; nullsFirst: boolean; hidden: number }
 
@@ -57,12 +80,20 @@ type Scope = {
   opaque: Set<string>
   ctes: Set<string>
   outputOnly: boolean
+  /** Equalities tying an alias of this scope to another, of this scope or an outer one. */
+  edges: Edge[]
 }
 
 /** `alias.column = other.otherColumn` holds on every row of `alias` that can be part of the result. */
 type Edge = { alias: Alias; column: Column; other: Alias; otherColumn: Column }
 
-type Analysis = { catalog: Catalog; aliases: Alias[]; alsoReads: Set<string> | 'all' }
+type Analysis = {
+  catalog: Catalog
+  aliases: Alias[]
+  alsoReads: Set<string> | 'all'
+  /** The statement's parenthesized text at the first `(` from a byte offset; `undefined` without the text. */
+  parenthesizedAt: (location: number) => string | undefined
+}
 
 const AGGREGATES = new Set([
   'count',
@@ -85,15 +116,41 @@ const AGGREGATES = new Set([
   'variance',
 ])
 const EXACT_AGGREGATES = new Set(['count', 'sum', 'avg'])
+const SEED_LIMIT = 100
 
-function analyzeRead(select: Node, catalog: Catalog): ReadShape {
-  const analysis: Analysis = { catalog, aliases: [], alsoReads: new Set() }
+function analyzeRead(
+  select: Node,
+  catalog: Catalog,
+  parenthesizedAt: Analysis['parenthesizedAt'] = () => undefined,
+): ReadShape {
+  const analysis: Analysis = { catalog, aliases: [], alsoReads: new Set(), parenthesizedAt }
   const top = analyzeSelect(select, undefined, { top: true, outputOnly: false }, analysis)
-  const kind = top ? readKind(select) : 'other'
+  let kind = top ? readKind(select) : 'other'
+  const distinct = kind === 'rows' && select.distinctClause ? distinctColumns(select, top!, analysis) : undefined
+  if (select.distinctClause && !distinct) kind = 'other'
   const shape: ReadShape = { kind, aliases: analysis.aliases, alsoReads: analysis.alsoReads, hiddenColumns: [] }
-  if (kind === 'rows' && top) addResultKeys(shape, select, top)
+  if (kind === 'rows' && top) addResultKeys(shape, select, top, distinct)
   else for (const alias of shape.aliases) alias.role = 'other'
   return shape
+}
+
+/** The columns of a plain `SELECT DISTINCT` listing only columns of its one table. */
+function distinctColumns(select: Node, top: Scope, analysis: Analysis): Column[] | undefined {
+  const [alias] = analysis.aliases
+  if (analysis.aliases.length !== 1 || top.opaque.size > 0 || Object.keys(select.distinctClause[0]).length > 0) return
+  const columns: Column[] = []
+  for (const target of select.targetList as Node[]) {
+    const ref = target.ResTarget.val
+    if (!ref.ColumnRef) return undefined
+    if (ref.ColumnRef.fields.at(-1).A_Star) {
+      columns.push(...alias!.table.columns)
+      continue
+    }
+    const found = resolveColumn(ref, top)
+    if (found?.alias !== alias) return undefined
+    columns.push(found!.column)
+  }
+  return columns
 }
 
 // ── Scopes ──
@@ -106,12 +163,20 @@ function analyzeSelect(
   analysis: Analysis,
 ): Scope | undefined {
   if (stmt.op && stmt.op !== 'SETOP_NONE') {
+    // spellcheck-ignore: `larg` and `rarg` are the parse tree's names
     analyzeSelect(stmt.larg, parent, { top: false, outputOnly: flags.outputOnly }, analysis)
     analyzeSelect(stmt.rarg, parent, { top: false, outputOnly: flags.outputOnly }, analysis)
     analyzeOrdering(stmt, parent, flags, analysis)
     return undefined
   }
-  const scope: Scope = { parent, aliases: new Map(), opaque: new Set(), ctes: new Set(), outputOnly: flags.outputOnly }
+  const scope: Scope = {
+    parent,
+    aliases: new Map(),
+    opaque: new Set(),
+    ctes: new Set(),
+    outputOnly: flags.outputOnly,
+    edges: [],
+  }
   for (const cte of (stmt.withClause?.ctes ?? []) as Node[]) {
     const query = cte.CommonTableExpr.ctequery
     if (query.SelectStmt)
@@ -128,10 +193,15 @@ function analyzeSelect(
     addFromItem(item, false, scope, flags, analysis, filters, subqueries)
   for (const conjunct of splitAnd(stmt.whereClause)) filters.push({ conjunct })
   const edges = applyFilters(filters, scope)
+  scope.edges = edges
 
   const subFlags = { top: false, outputOnly: flags.outputOnly }
   for (const analyzeSubquery of subqueries) analyzeSubquery()
-  for (const { conjunct } of filters) analyzeSublinks(conjunct, scope, subFlags, analysis)
+  for (const { conjunct, nullableOnly } of filters) {
+    if (flags.top && !nullableOnly && conjunct.SubLink?.subLinkType === 'EXISTS_SUBLINK')
+      analyzeExists(conjunct.SubLink, scope, subFlags, analysis)
+    else analyzeSublinks(conjunct, scope, subFlags, analysis)
+  }
   for (const target of (stmt.targetList ?? []) as Node[]) {
     analyzeSublinks(target, scope, { top: false, outputOnly: flags.top || flags.outputOnly }, analysis)
     markReferenced(target, scope)
@@ -150,8 +220,54 @@ function analyzeSelect(
     }
     if (alias.role === 'top' && alias.nullable && other.role === 'top' && !other.nullable)
       alias.partners.push(correlation)
+    if (alias.role === 'top' && !alias.nullable && other.role === 'top' && !other.nullable)
+      alias.joins.push(joinOf(column, other, otherColumn))
   }
   return scope
+}
+
+/** `EXISTS (SELECT … FROM child WHERE child.x = outer.y AND …)` in the outer `WHERE`: an outer row is in the result
+ *  while the subquery finds rows for it. Needs one child table, tied to the outer rows by one equality only. */
+function analyzeExists(
+  sublink: Node,
+  scope: Scope,
+  flags: { top: boolean; outputOnly: boolean },
+  analysis: Analysis,
+): void {
+  const subquery = sublink.subselect.SelectStmt
+  const sub = analyzeSelect(subquery, scope, flags, analysis)
+  if (!sub || sub.aliases.size !== 1 || sub.opaque.size > 0 || subquery.groupClause || subquery.havingClause) return
+  const child = [...sub.aliases.values()][0]!
+  const outer = sub.edges.filter((e) => e.alias === child && e.other !== child)
+  const [edge] = outer
+  if (outer.length !== 1 || scope.aliases.get(edge!.other.name) !== edge!.other) return
+  if (edge!.other.role !== 'top' || edge!.other.nullable || outerReferences(subquery.whereClause, sub) !== 1) return
+  const text = analysis.parenthesizedAt(sublink.location)
+  if (!text) return
+  child.role = 'exists'
+  child.existsQuery = text
+  child.correlations.push({ column: edge!.column, parent: edge!.other, parentColumn: edge!.otherColumn })
+  edge!.other.joins.push(joinOf(edge!.otherColumn, child, edge!.column))
+}
+
+function joinOf(column: Column, partner: Alias, partnerColumn: Column): Join {
+  const referenced = partner.table.references.some(
+    (key) => key.column === partnerColumn.name && key.parentColumn === column.name,
+  )
+  return { column, partner, partnerColumn, referenced }
+}
+
+/** How many column references in `node` don't belong to `scope`'s own tables; `Infinity` when one can't be told. */
+function outerReferences(node: unknown, scope: Scope): number {
+  let count = 0
+  walk(node, (key, value) => {
+    if (key === 'SubLink') count = Infinity
+    if (key !== 'ColumnRef') return
+    const found = resolveColumn({ ColumnRef: value }, scope)
+    if (!found) count = Infinity
+    else if (scope.aliases.get(found.alias.name) !== found.alias) count++
+  })
+  return count
 }
 
 type Filter = { conjunct: Node; nullableOnly?: Alias[] }
@@ -216,6 +332,7 @@ function addFromItem(
       role: flags.top ? 'top' : 'other',
       correlations: [],
       partners: [],
+      joins: [],
     }
     scope.aliases.set(name, alias)
     analysis.aliases.push(alias)
@@ -225,6 +342,7 @@ function addFromItem(
     const join = item.JoinExpr
     const type = join.jointype as string
     const leftNullable = nullable || type === 'JOIN_RIGHT' || type === 'JOIN_FULL'
+    // spellcheck-ignore: `larg` is the parse tree's name
     const left = addFromItem(join.larg, leftNullable, scope, flags, analysis, filters, subqueries)
     const rightNullable = nullable || type === 'JOIN_LEFT' || type === 'JOIN_FULL'
     const right = addFromItem(join.rarg, rightNullable, scope, flags, analysis, filters, subqueries)
@@ -404,7 +522,10 @@ function deriveRoutes(edges: Edge[]): void {
       for (const route of other.routes) {
         if (route.column !== otherColumn || alias.routes.some((r) => r.column === column && sameValues(r, route)))
           continue
-        const derived: Route = 'anyOf' in route ? { column, anyOf: route.anyOf } : { column, values: route.values }
+        const derived: Route =
+          'anyOf' in route
+            ? { column, anyOf: route.anyOf, derived: true }
+            : { column, values: route.values, derived: true }
         alias.routes.push(derived)
         if ('values' in derived) alias.condition = allOf([alias.condition, inListCondition(column, derived.values)])
         changed = true
@@ -420,7 +541,7 @@ function sameValues(a: Route, b: Route): boolean {
 // ── Result keys ──
 
 function readKind(select: Node): ReadShape['kind'] {
-  if (select.distinctClause || select.havingClause || select.windowClause) return 'other'
+  if (select.havingClause || select.windowClause) return 'other'
   let aggregates = select.groupClause ? 1 : 0
   let inexact = false
   walk(select.targetList, (key, value) => {
@@ -433,27 +554,63 @@ function readKind(select: Node): ReadShape['kind'] {
       if (!EXACT_AGGREGATES.has(name) || value.agg_distinct) inexact = true
     }
   })
-  if (inexact) return 'other'
+  if (inexact || (aggregates > 0 && select.distinctClause)) return 'other'
   return aggregates > 0 ? 'aggregate' : 'rows'
 }
 
-function addResultKeys(shape: ReadShape, select: Node, top: Scope): void {
-  const hidden = (alias: Alias, column: string) => {
-    const expression = `${quote(alias.name)}.${quote(column)}::text`
+function addResultKeys(shape: ReadShape, select: Node, top: Scope, distinct: Column[] | undefined): void {
+  const add = (expression: string) => {
     const known = shape.hiddenColumns.indexOf(expression)
     if (known !== -1) return known
     shape.hiddenColumns.push(expression)
     return shape.hiddenColumns.length - 1
   }
+  const hidden = (alias: Alias, column: string) => add(`${quote(alias.name)}.${quote(column)}::text`)
+  if (distinct) {
+    // A function of the distinct columns: it leaves which rows are distinct as it was.
+    const alias = shape.aliases[0]!
+    const partition = distinct.map((c) => `${quote(alias.name)}.${quote(c.name)}`).join(', ')
+    shape.distinct = {
+      columns: distinct,
+      hidden: distinct.map((c) => hidden(alias, c.name)),
+      countHidden: add(`count(*) OVER (PARTITION BY ${partition})::text`),
+    }
+  }
   for (const alias of top.aliases.values()) {
-    if (alias.table.primaryKey.length > 0) alias.primaryKeyHidden = alias.table.primaryKey.map((c) => hidden(alias, c))
+    if (!distinct && alias.table.primaryKey.length > 0)
+      alias.primaryKeyHidden = alias.table.primaryKey.map((c) => hidden(alias, c))
   }
   for (const alias of shape.aliases) {
     for (const c of [...alias.correlations, ...alias.partners]) c.hidden = hidden(c.parent, c.parentColumn.name)
+    if (alias.existsQuery)
+      alias.existsCountHidden = add(`(SELECT count(*) FROM ${alias.existsQuery} AS "__live_e")::text`)
+    for (const join of alias.joins) {
+      if (join.partner.role !== 'top') continue
+      join.hidden = hidden(join.partner, join.partnerColumn.name)
+      const routes = join.partner.routes.filter((r) => !r.derived)
+      if (routes.length > 0) join.seed = add(seedOf(join.partner, join.partnerColumn, routes))
+    }
   }
   shape.limit = limitValue(select.limitCount)
   shape.offset = limitValue(select.limitOffset)
   shape.sort = sortKeys(select, top, (alias, column) => hidden(alias, column.name))
+}
+
+/** The distinct `column` values of `alias`'s rows its `routes` allow, as a JSON array; up to `SEED_LIMIT + 1`. */
+function seedOf(alias: Alias, column: Column, routes: Route[]): string {
+  const name = quote(alias.name)
+  const value = (source: ValueSource) =>
+    source.kind === 'param'
+      ? `$${source.index + 1}`
+      : source.kind === 'const' && source.text !== null
+        ? `'${source.text.replace(/'/g, "''")}'`
+        : 'NULL'
+  const where = routes.map((route) =>
+    'anyOf' in route
+      ? `${name}.${quote(route.column.name)} = ANY($${route.anyOf + 1})`
+      : `${name}.${quote(route.column.name)} IN (${route.values.map(value).join(', ')})`,
+  )
+  return `(SELECT coalesce(to_json(array_agg("v")), '[]')::text FROM (SELECT DISTINCT ${name}.${quote(column.name)}::text AS "v" FROM ${alias.table.sqlName} AS ${name} WHERE ${where.join(' AND ')} LIMIT ${SEED_LIMIT + 1}) AS "__live_seed")`
 }
 
 function limitValue(node: Node | undefined): ValueSource | undefined {
@@ -530,8 +687,4 @@ function addAlsoReads(table: Table, analysis: Analysis, seen = new Set<string>()
 
 function readsEverything(analysis: Analysis): void {
   analysis.alsoReads = 'all'
-}
-
-function quote(identifier: string): string {
-  return `"${identifier.replace(/"/g, '""')}"`
 }

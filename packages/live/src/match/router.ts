@@ -123,7 +123,7 @@ function rowsOf(change: Change): Row[] {
     case 'delete':
       return [change.old]
     case 'unknown':
-      return change.row ? [change.row] : []
+      return []
   }
 }
 

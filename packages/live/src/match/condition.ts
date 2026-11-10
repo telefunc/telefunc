@@ -1,4 +1,4 @@
-export { compileCondition, inListCondition, allOf, mayBeTrue, ALWAYS }
+export { compileCondition, inListCondition, allOf, mayBeTrue, isTrue, ALWAYS }
 export type { Condition, Row, ValueSource }
 
 import type { Node } from '../sql.js'
@@ -130,6 +130,10 @@ function allOf(conditions: Condition[]): Condition {
 
 function mayBeTrue(truth: Truth): boolean {
   return (truth & TRUE) !== 0
+}
+
+function isTrue(truth: Truth): boolean {
+  return truth === TRUE
 }
 
 // ── Values ──

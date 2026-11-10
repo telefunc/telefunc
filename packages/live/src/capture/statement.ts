@@ -4,7 +4,7 @@ export type { Plan, ReadPlan, WritePlan, TransactionAction }
 import { scanSync } from 'libpg-query'
 import type { Catalog, Table, TableSet } from '../catalog.js'
 import { analyzeRead, type ReadShape } from '../match/readShape.js'
-import { functionNamesIn, parseStatements, walk, type Node } from '../sql.js'
+import { functionNamesIn, parseStatements, quote, walk, type Node } from '../sql.js'
 
 type TransactionAction = 'begin' | 'commit' | 'rollback' | 'savepoint' | 'release' | 'rollbackTo'
 
@@ -22,8 +22,9 @@ type WritePlan = {
   /** The statement with images of the written rows appended to its `RETURNING` list. */
   text: string
   hadReturning: boolean
-  /** Which hidden columns the rows carry, in order. */
-  images: ('new' | 'old')[]
+  /** Which hidden columns the rows carry, in order: row images, and whether an upsert inserted (Postgres < 18, which
+   *  has no `old` image). */
+  images: ('new' | 'old' | 'inserted')[]
   /** The columns an `UPDATE` (or an upsert's update) assigns. */
   assigned: string[]
   /** What the table's triggers write. */
@@ -93,7 +94,7 @@ function planOne(statement: Node, text: string | undefined, catalog: Catalog): P
 }
 
 function planRead(select: Node, text: string | undefined, catalog: Catalog): ReadPlan {
-  const shape = analyzeRead(select, catalog)
+  const shape = analyzeRead(select, catalog, (location) => (text ? parenthesizedAt(text, location) : undefined))
   if (shape.hiddenColumns.length === 0 || !text) return { kind: 'read', shape, liveText: undefined }
   const from = topLevelFrom(text)
   if (from === undefined) return { kind: 'read', shape, liveText: undefined }
@@ -112,12 +113,15 @@ function planWrite(kind: string, node: Node, text: string | undefined, catalog: 
   ) as Node[]
   const assigned = (assignments ?? []).map((t) => t.ResTarget.name as string)
   const hasOld = catalog.serverVersion >= 180000
-  const target = `"${(node.relation.alias?.aliasname ?? node.relation.relname).replace(/"/g, '""')}"`
-  const images: ('new' | 'old')[] = statement === 'delete' ? ['old'] : ['new']
+  const target = quote(node.relation.alias?.aliasname ?? node.relation.relname)
+  const images: WritePlan['images'] = statement === 'delete' ? ['old'] : ['new']
   if (hasOld && (statement === 'update' || upsert)) images.push('old')
+  if (!hasOld && upsert) images.push('inserted')
   const image = (source: string) =>
-    `to_json(ARRAY[${table.columns.map((c) => `${source}."${c.name.replace(/"/g, '""')}"::text`).join(', ')}])::text`
+    `to_json(ARRAY[${table.columns.map((c) => `${source}.${quote(c.name)}::text`).join(', ')}])::text`
   const hidden = images.map((which, i) => {
+    // A row an upsert inserted has no deleting transaction yet.
+    if (which === 'inserted') return `(${target}.xmax::text = '0')::text AS "${HIDDEN_PREFIX}${i}"`
     const source = which === 'old' && statement !== 'delete' ? 'old' : target
     return `${image(source)} AS "${HIDDEN_PREFIX}${i}"`
   })
@@ -189,6 +193,21 @@ function topLevelFrom(text: string): number | undefined {
     else if (token.text === ')') depth--
     else if (depth === 0 && keyword === 'select') seenSelect = true
     else if (depth === 0 && seenSelect && keyword === 'from') return token.start
+  }
+  return undefined
+}
+
+/** The text from the first `(` at or after byte `location` to its matching `)`. */
+function parenthesizedAt(text: string, location: number): string | undefined {
+  const tokens = scanSync(text).tokens
+  const open = tokens.findIndex((t) => t.start >= location && t.text === '(')
+  if (open === -1) return undefined
+  let depth = 0
+  for (const token of tokens.slice(open)) {
+    if (token.text === '(') depth++
+    else if (token.text === ')') depth--
+    if (depth === 0)
+      return new TextDecoder().decode(new TextEncoder().encode(text).subarray(tokens[open]!.start, token.end))
   }
   return undefined
 }

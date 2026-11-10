@@ -1,7 +1,7 @@
 // Differential oracle for @telefunc/live: after every write, each live read is run again; a result that changed
 // without an invalidation is a miss (exit 1). Extra invalidations (refetches that return the same result) are reported.
 //
-//   ORM=drizzle|kysely|prisma DB=pglite|pg PG_PORT=<port> SEED=1 STEPS=300 CHURN=1 SERVERS=2 node oracle.ts
+//   ORM=drizzle|kysely|prisma DB=pglite|pg PG_PORT=<port> SEED=1 STEPS=300 CHURN=1 SERVERS=2 SHAPES=byUser,recent node oracle.ts
 //
 // SERVERS=2 (pooled Postgres): the live reads are on one server, the writes on another, connected by a transport that
 // delivers out of order and twice.
@@ -25,6 +25,7 @@ const STEPS = Number(process.env.STEPS ?? 300)
 const CHURN = process.env.CHURN === '1' && DB !== 'pglite'
 const VERBOSE = process.env.VERBOSE === '1'
 const SERVERS = DB === 'pglite' ? 1 : Number(process.env.SERVERS ?? 1)
+const SHAPES = process.env.SHAPES?.split(',')
 
 const REQUEST_CONTEXT = Symbol.for('telefunc.requestContext')
 const LIVE_READS = Symbol.for('telefunc.liveReads')
@@ -133,7 +134,7 @@ async function subscribe(sub: Subscriber): Promise<void> {
 // ── The run ──
 
 const subscribers: Subscriber[] = []
-for (const shape of Object.keys(driver.reads)) {
+for (const shape of Object.keys(driver.reads).filter((s) => !SHAPES || SHAPES.includes(s))) {
   for (let i = 0; i < 3; i++) {
     const user = 1 + Math.floor(random() * USERS)
     const low = Math.floor(random() * 4)

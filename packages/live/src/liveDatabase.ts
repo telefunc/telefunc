@@ -135,16 +135,17 @@ class LiveDatabase {
   private changesOfWrite(plan: WritePlan, rows: (string | null)[][]): Change[] {
     const changes: Change[] = []
     for (const row of rows) {
-      const images = new Map(plan.images.map((which, i) => [which, imageOf(row[i], plan.table)]))
-      const now = images.get('new')
-      const old = images.get('old')
-      if (plan.statement === 'delete') changes.push({ table: plan.table.id, kind: 'delete', old: old! })
-      else if (plan.statement === 'insert' && plan.assigned.length === 0)
-        changes.push({ table: plan.table.id, kind: 'insert', new: now! })
+      const image = (which: WritePlan['images'][number]) => row[plan.images.indexOf(which)]
+      const now = imageOf(image('new'), plan.table)
+      const old = imageOf(image('old'), plan.table)
       // An upsert's `old` is all `NULL` when it inserted.
-      else if (old && plan.table.primaryKey.length > 0 && old[plan.table.primaryKey[0]!] === null) {
+      const inserted =
+        image('inserted') === 'true' ||
+        (old !== undefined && plan.table.primaryKey.length > 0 && old[plan.table.primaryKey[0]!] === null)
+      if (plan.statement === 'delete') changes.push({ table: plan.table.id, kind: 'delete', old: old! })
+      else if ((plan.statement === 'insert' && plan.assigned.length === 0) || inserted)
         changes.push({ table: plan.table.id, kind: 'insert', new: now! })
-      } else changes.push({ table: plan.table.id, kind: 'update', old: old ?? assumedOld(now!, plan), new: now! })
+      else changes.push({ table: plan.table.id, kind: 'update', old: old ?? assumedOld(now!, plan), new: now! })
     }
     return [...changes, ...cascades(plan, changes, this.catalog!), ...unknownChanges(plan.alsoWrites)]
   }
@@ -209,7 +210,8 @@ function cascades(plan: WritePlan, changes: Change[], catalog: Catalog): Change[
     if (plan.statement === 'delete' && key.onDelete === 'c' && key.column) {
       for (const change of changes) {
         if (change.kind !== 'delete') continue
-        result.push({ table: key.table, kind: 'unknown', row: { [key.column]: change.old[key.parentColumn!] ?? null } })
+        const old = { [key.column]: change.old[key.parentColumn!] ?? null }
+        result.push({ table: key.table, kind: 'delete', old, several: true })
       }
       for (const grandchild of catalog.tables.get(key.table)?.referencedBy ?? []) addWholeTable(grandchild.table)
     } else if (plan.statement === 'delete' && ['c', 'n', 'd'].includes(key.onDelete)) addWholeTable(key.table)

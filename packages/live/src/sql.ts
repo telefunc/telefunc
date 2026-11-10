@@ -1,4 +1,4 @@
-export { loadParser, parseStatements, names, walk, tablesIn, functionNamesIn }
+export { loadParser, parseStatements, names, walk, tablesIn, functionNamesIn, quote }
 export type { Node, RangeVar }
 
 import { loadModule, parseSync } from 'libpg-query'
@@ -57,4 +57,9 @@ function functionNamesIn(node: unknown): string[] {
     if (key === 'FuncCall') found.push(names(value.funcname).at(-1)!)
   })
   return found
+}
+
+/** `identifier` as a quoted SQL identifier. */
+function quote(identifier: string): string {
+  return `"${identifier.replace(/"/g, '""')}"`
 }
