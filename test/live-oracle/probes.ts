@@ -144,6 +144,15 @@ const probes: Record<string, () => void> = {
       this.catalog.searchPath = searchPath
     }
   },
+  /** The functions a trigger calls aren't followed: what they write is missed. */
+  'function-calls'() {
+    const loadCatalog = database.loadCatalog
+    database.loadCatalog = function (query: (text: string) => Promise<string>) {
+      return loadCatalog.call(this, async (text: string) =>
+        JSON.stringify({ ...JSON.parse(await query(text)), functions: [] }),
+      )
+    }
+  },
   /** A cascade only reaches the groups the counts have. */
   'tally-cascade'() {
     const dropAll = tally.dropAll

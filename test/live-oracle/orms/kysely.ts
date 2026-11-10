@@ -175,6 +175,14 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
           .orderBy('todos.id')
           .orderBy('tags.id')
           .execute(),
+      tagLog: async ({ low, high }) =>
+        (
+          await sql`select todo_id from tag_log where todo_id between ${low * 8} and ${high * 8 + 7} order by id`.execute(
+            db,
+          )
+        ).rows,
+      noteLog: async () =>
+        (await sql`select note, count(*)::int as n from note_log group by note order by note`.execute(db)).rows,
       publicNotes: async () => (await sql`select id, n from public.notes order by id`.execute(db)).rows,
       tenantNotes: async () => (await sql`select id, n from tenant.notes order by id`.execute(db)).rows,
       spelled: ({ spellings: [a] }) =>

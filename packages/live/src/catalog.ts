@@ -3,7 +3,7 @@ export type { Catalog, Table, TableSet, ForeignKey }
 
 import { parsePlPgSQLSync } from 'libpg-query'
 import type { Column } from './match/values.js'
-import { parseStatements, quote, tablesIn, walk, type Node, type RangeVar } from './sql.js'
+import { functionNamesIn, parseStatements, quote, tablesIn, walk, type Node, type RangeVar } from './sql.js'
 
 /** Tables by id (`schema.name`), or every table. */
 type TableSet = ReadonlySet<string> | 'all'
@@ -54,7 +54,14 @@ type CatalogRow = {
   searchPath: string[]
   serverVersion: number
   cOrdering: boolean
-  functions: [name: string, volatile: boolean][]
+  functions: [
+    name: string,
+    volatile: boolean,
+    language: string,
+    source: string | null,
+    argumentList: string,
+    result: string | null,
+  ][]
   tables: {
     schema: string
     name: string
@@ -85,8 +92,10 @@ const CATALOG_QUERY = `select json_build_object(
   'searchPath', current_schemas(false),
   'serverVersion', current_setting('server_version_num')::int,
   'cOrdering', (select datlocprovider in ('c', 'b') and datcollate in ('C', 'POSIX') from pg_database where datname = current_database()),
-  'functions', (select coalesce(json_agg(json_build_array(p.proname, p.provolatile = 'v')), '[]') from pg_proc p
-    join pg_namespace n on n.oid = p.pronamespace
+  'functions', (select coalesce(json_agg(json_build_array(p.proname, p.provolatile = 'v', l.lanname,
+      case when p.prosqlbody is null then p.prosrc end, pg_get_function_arguments(p.oid),
+      pg_get_function_result(p.oid))), '[]') from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace join pg_language l on l.oid = p.prolang
     where n.nspname not in ('pg_catalog', 'information_schema') and p.prorettype <> 'trigger'::regtype),
   'tables', (select coalesce(json_agg(json_build_object(
     'schema', n.nspname,
@@ -129,6 +138,20 @@ const CATALOG_QUERY = `select json_build_object(
 const TRIGGER_ROW = 1
 const TRIGGER_BEFORE = 2
 const TRIGGER_UPDATE = 16
+
+// `PLpgSQL_expr.parseMode`: a whole statement, an expression, an assignment (`target := value`).
+const PARSE_STATEMENT = 0
+const PARSE_EXPRESSION = 2
+
+/** Statements a function's body may run that change no table but those their nodes name (`WRITES`). */
+const KNOWN_STATEMENTS = new Set(['SelectStmt', 'InsertStmt', 'UpdateStmt', 'DeleteStmt', 'MergeStmt', 'NotifyStmt'])
+const WRITES = new Set(['InsertStmt', 'UpdateStmt', 'DeleteStmt', 'MergeStmt'])
+
+/** A function of the app's: its body (`null` when the catalog doesn't give it as text), and its header's parts. */
+type FunctionBody = { language: string; source: string | null; argumentList: string; result: string | null }
+
+/** How the bodies of the app's functions name what they write and call. */
+type Names = { tables: (table: RangeVar) => Table[]; functions: Map<string, FunctionBody[]> }
 
 async function loadCatalog(query: (text: string) => Promise<string>): Promise<Catalog> {
   const row = JSON.parse(await query(CATALOG_QUERY)) as CatalogRow
@@ -192,15 +215,19 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
     tables.set(table.id, table)
     byName.set(t.name, [...(byName.get(t.name) ?? []), table])
   }
+  const functions = new Map<string, FunctionBody[]>()
+  for (const [name, , language, source, argumentList, result] of row.functions)
+    functions.set(name, [...(functions.get(name) ?? []), { language, source, argumentList, result }])
+  // A function resolves names with the `search_path` of the session that calls it: any schema's table may be meant.
+  const names: Names = { tables: anySchema, functions }
   // Second pass: these name other tables, which must all be known first.
   for (const t of row.tables) {
     const table = tables.get(`${t.schema}.${t.name}`)!
     const reads = [...(t.view ? [t.view] : []), ...(t.rls ? (t.policies ?? []).map((p) => `select 1 where ${p}`) : [])]
     // Printed for the loading session: its `search_path` resolves them.
     table.alsoReads = union(reads.map((sql) => tablesOfStatements(parseStatements(sql), (t) => catalog.named(t))))
-    // A function resolves names with the `search_path` of the session that calls it: any schema's table may be meant.
     const triggerWrites = (t.triggers ?? []).map(([, language, source]) =>
-      tablesWrittenByFunction(language, source, anySchema),
+      tablesWrittenByFunction({ language, source, argumentList: '', result: 'trigger' }, names),
     )
     table.alsoWrites = union([table.alsoWrites, ...triggerWrites])
   }
@@ -213,28 +240,50 @@ function tablesOfStatements(statements: Node[] | null, named: (table: RangeVar) 
   return new Set(tablesIn(statements).flatMap((table) => named(table).map((found) => found.id)))
 }
 
-/** What a trigger function may write: the targets of its SQL statements, or every table when that can't be told. */
-function tablesWrittenByFunction(language: string, source: string, named: (table: RangeVar) => Table[]): TableSet {
-  if (language !== 'plpgsql') return 'all'
+/**
+ * What running a function of the app's may write: the tables its statements write, and what the functions of the app's
+ * they call write, and so on. Every table when that can't be told: a body run with `EXECUTE`, in a language other than
+ * SQL and PL/pgSQL, or that doesn't parse.
+ */
+function tablesWrittenByFunction(fn: FunctionBody, names: Names, seen = new Set<FunctionBody>()): TableSet {
+  if (seen.has(fn)) return new Set()
+  seen.add(fn)
+  const sql = fn.language === 'sql' ? fn.source && [fn.source] : fn.language === 'plpgsql' ? statementsOf(fn) : null
+  if (!sql) return 'all'
+  return union(sql.map((text) => tablesWrittenBySql(text, names, seen)))
+}
+
+/** The SQL a PL/pgSQL function runs, every expression as a `SELECT`; `null` when it runs SQL built at run time. */
+function statementsOf({ source, argumentList, result }: FunctionBody): string[] | null {
   let parsed: unknown
   try {
-    parsed = parsePlPgSQLSync(`create function f() returns trigger language plpgsql as $live$${source}$live$`)
+    parsed = parsePlPgSQLSync(
+      `create function f(${argumentList}) returns ${result} language plpgsql as $live$${source}$live$`,
+    )
   } catch {
-    return 'all'
+    return null
   }
   const statements: string[] = []
   let dynamic = false
   walk(parsed, (key, value) => {
-    if (key === 'PLpgSQL_stmt_dynexecute' || key === 'PLpgSQL_stmt_dynfors') dynamic = true
-    if (key === 'PLpgSQL_stmt_execsql') statements.push(value.sqlstmt.PLpgSQL_expr.query)
+    if (key === 'PLpgSQL_stmt_dynexecute' || key === 'PLpgSQL_stmt_dynfors' || key === 'dynquery') dynamic = true
+    if (key !== 'PLpgSQL_expr') return
+    const { query, parseMode } = value as { query: string; parseMode: number }
+    if (parseMode === PARSE_STATEMENT) statements.push(query)
+    else statements.push(`SELECT ${parseMode === PARSE_EXPRESSION ? query : query.replace(/^[^:=]*:?=/, '')}`)
   })
-  if (dynamic) return 'all'
-  const written: TableSet[] = statements.map((sql) => {
-    const parsedStatements = parseStatements(sql)
-    if (!parsedStatements) return 'all'
-    const writes = parsedStatements.filter((s) => s.InsertStmt || s.UpdateStmt || s.DeleteStmt || s.MergeStmt)
-    return tablesOfStatements(writes, named)
+  return dynamic ? null : statements
+}
+
+function tablesWrittenBySql(sql: string, names: Names, seen: Set<FunctionBody>): TableSet {
+  const statements = parseStatements(sql)
+  if (!statements || statements.some((s) => !KNOWN_STATEMENTS.has(Object.keys(s)[0]!))) return 'all'
+  const written: TableSet[] = []
+  walk(statements, (key, value) => {
+    if (WRITES.has(key)) written.push(new Set(names.tables(value.relation).map((table) => table.id)))
   })
+  for (const name of functionNamesIn(statements))
+    for (const fn of names.functions.get(name) ?? []) written.push(tablesWrittenByFunction(fn, names, seen))
   return union(written)
 }
 

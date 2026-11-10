@@ -196,6 +196,12 @@ function createDrizzle(
           .leftJoin(tags, eq(tags.todoId, todos.id))
           .where(eq(todos.userId, user))
           .orderBy(todos.id, tags.id),
+      tagLog: ({ low, high }) =>
+        db
+          .execute(sql`select todo_id from tag_log where todo_id between ${low * 8} and ${high * 8 + 7} order by id`)
+          .then(rowsOf),
+      noteLog: () =>
+        db.execute(sql`select note, count(*)::int as n from note_log group by note order by note`).then(rowsOf),
       publicNotes: () => db.execute(sql`select id, n from public.notes order by id`).then(rowsOf),
       tenantNotes: () => db.execute(sql`select id, n from tenant.notes order by id`).then(rowsOf),
       spelled: ({ spellings: [a] }) =>
