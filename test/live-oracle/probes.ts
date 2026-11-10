@@ -182,6 +182,19 @@ const probes: Record<string, () => void> = {
       return text === EVENT_TAG ? { ...statement, succeeded: () => [] } : statement
     }
   },
+  /** Whether PGlite started is read as false when it's wrapped: an already started database's first query is then taken
+   *  for one of its own, and isn't captured. */
+  'pglite-ready'() {
+    const ready = Object.getOwnPropertyDescriptor(PGlite.prototype, 'ready')!.get!
+    const askedOnce = new WeakSet<object>()
+    Object.defineProperty(PGlite.prototype, 'ready', {
+      get(this: PGlite) {
+        if (askedOnce.has(this)) return ready.call(this)
+        askedOnce.add(this)
+        return false
+      },
+    })
+  },
   /** A cascade only reaches the groups the counts have. */
   'tally-cascade'() {
     const dropAll = tally.dropAll

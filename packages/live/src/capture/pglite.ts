@@ -55,6 +55,8 @@ function capturePglite(pglite: Pglite, live: LiveDatabase): void {
 
 /** Whether a statement is one PGlite runs while it starts, through `query()` and `exec()` like the app's. */
 function startingStatements(pglite: Pglite): () => boolean {
+  // Decided now: a database that already started runs none, though `waitReady` tells so only a microtask later.
+  if (pglite.ready) return () => false
   let starting = true
   pglite.waitReady.then(
     () => {
@@ -77,8 +79,8 @@ function captureExecutor(
   const exec = executor.exec.bind(executor)
   const ready = async () => {
     if (live.isReady()) return
-    // A database just created starts first.
-    await connection.waitReady
+    // A database just created starts first; once its database runs, its `query()` doesn't wait for the rest.
+    if (!connection.ready) await connection.waitReady
     await live.ready(async (text) => firstValue(await query(text)))
   }
   /** Queued on the database now: it runs before anything the caller sends next. */

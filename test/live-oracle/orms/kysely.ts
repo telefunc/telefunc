@@ -340,6 +340,7 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
           .where('id', '=', todo)
           .execute(),
     },
+    liveRead: () => db.selectFrom('todos').selectAll().where('user_id', '=', 1).live(),
     async close() {},
   }
 }

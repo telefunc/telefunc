@@ -20,5 +20,7 @@ type WriteArgs = { todo: number; tag: number; user: number; otherUser: number; v
 type OrmDriver = {
   reads: Record<string, (args: ReadArgs) => Promise<unknown>>
   writes: Record<string, (args: WriteArgs) => Promise<unknown>>
+  /** A read ended with `.live()`, as an app writes it. */
+  liveRead?: () => Promise<unknown>
   close(): Promise<void>
 }

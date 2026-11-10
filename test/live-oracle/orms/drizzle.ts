@@ -328,6 +328,7 @@ function createDrizzle(
           .set({ code: CODES[value % CODES.length]!, ref: REFS[(value >> 2) % REFS.length]! })
           .where(eq(todos.id, todo)),
     },
+    liveRead: () => db.select().from(todos).where(eq(todos.userId, 1)).live(),
     async close() {},
   }
 }

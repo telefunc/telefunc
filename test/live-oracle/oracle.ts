@@ -154,10 +154,7 @@ async function connect(): Promise<{
   close: () => Promise<void>
 }> {
   if (DB === 'pglite') {
-    // Wrapped as it is created, before it started: the seed goes through the wrapper.
-    const pglite = new PGlite()
-    const driver = ORM === 'kysely' ? createKysely(pglite, 'pglite') : createDrizzle(pglite, 'pglite')
-    await pglite.exec(seed(random))
+    const { pglite, driver } = await wrappedPglite()
     return {
       driver,
       writer: driver,
@@ -208,6 +205,42 @@ async function connect(): Promise<{
       await admin.end()
     },
   }
+}
+
+/** A PGlite database wrapped at the moment `SEED` picks: as it is created (the seed then goes through the wrapper),
+ *  after it started (its first query is then a live read), or from inside its startup (`SET ROLE`, its first statement
+ *  of its own, then `_initArrayTypes()`'s query reaches the wrapper before `waitReady` resolves). */
+async function wrappedPglite(): Promise<{ pglite: PGlite; driver: OrmDriver }> {
+  const wrap = (pglite: PGlite) => (ORM === 'kysely' ? createKysely(pglite, 'pglite') : createDrizzle(pglite, 'pglite'))
+  const moment = ['created', 'started', 'starting'][SEED % 3]
+  console.log(`# PGlite wrapped when ${moment}`)
+  if (moment === 'created') {
+    const pglite = new PGlite()
+    const driver = wrap(pglite)
+    await pglite.exec(seed(random))
+    return { pglite, driver }
+  }
+  if (moment === 'started') {
+    const pglite = new PGlite()
+    await pglite.exec(seed(random))
+    const driver = wrap(pglite)
+    // As an app's first telefunction call does, with nothing in between.
+    const first = (await store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, driver.liveRead!)) as LiveCell<unknown>
+    first.send()
+    first.release()
+    return { pglite, driver }
+  }
+  const pglite = new PGlite({ username: 'postgres' })
+  const exec = pglite.exec
+  let driver: OrmDriver | undefined
+  pglite.exec = function (this: PGlite, ...args: Parameters<PGlite['exec']>) {
+    pglite.exec = exec
+    driver = wrap(pglite)
+    return exec.apply(this, args)
+  }
+  await pglite.waitReady
+  await pglite.exec(seed(random))
+  return { pglite, driver: driver! }
 }
 
 // ── Telefunction calls ──
