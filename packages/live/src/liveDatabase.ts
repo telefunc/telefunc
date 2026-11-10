@@ -1,4 +1,4 @@
-export { LiveDatabase }
+export { LiveDatabase, MAX_RESULT_ROWS }
 export type { Statement, LiveQueriesOptions }
 
 import type { BroadcastAdapter } from 'telefunc'
@@ -29,6 +29,8 @@ type Statement = {
 }
 
 const MAX_PLANS = 10_000
+/** A read returning more rows keeps no result keys: any change to a matching row counts. */
+const MAX_RESULT_ROWS = 10_000
 
 /** Everything one wrapped database shares between its connections: what it knows of the schema, the live reads,
  *  open transactions, and the other servers. */
@@ -86,7 +88,8 @@ class LiveDatabase {
       text: plan.liveText ?? text,
       hiddenColumns: plan.liveText ? plan.shape.hiddenColumns.length : 0,
       returnsRows: true,
-      succeeded: (hiddenRows) => read.resolve(plan.liveText ? hiddenRows : undefined),
+      succeeded: (hiddenRows) =>
+        read.resolve(plan.liveText && hiddenRows.length <= MAX_RESULT_ROWS ? hiddenRows : undefined),
       failed: () => {
         call.remove(read)
         this.transactions.failed(connection)

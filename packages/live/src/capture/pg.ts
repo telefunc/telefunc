@@ -1,7 +1,7 @@
 export { capturePg }
 export type { PgPool, PgClient }
 
-import type { LiveDatabase, Statement } from '../liveDatabase.js'
+import { MAX_RESULT_ROWS, type LiveDatabase, type Statement } from '../liveDatabase.js'
 import { takeHiddenFields, takeHiddenValues } from './hiddenColumns.js'
 import { HIDDEN_PREFIX } from './statement.js'
 
@@ -76,54 +76,65 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
   }
 
   function submit(submittable: Submittable): Submittable {
-    if (live.isReady()) return query(captureSubmittable(submittable))
+    // Wrapped now: the caller may read before the statement is planned, and rows only come after.
+    const begin = isCursor(submittable) ? captureCursor(submittable) : undefined
+    const send = () => {
+      const statement = live.statementFor(client, submittable.text, submittable.values ?? [])
+      if (statement.text !== submittable.text) {
+        submittable.text = statement.text
+        if (submittable.name) submittable.name += HIDDEN_PREFIX
+      }
+      if (begin) begin(statement)
+      // Rows reach the caller as events here: can't strip what the statement added.
+      else if (statement.hiddenColumns > 0)
+        throw new Error('Unreachable: a rewritten statement on a non-cursor submittable')
+      else statement.succeeded([])
+      return query(submittable)
+    }
+    if (live.isReady()) return send()
     // The schema isn't known yet: a `pg-cursor` queues reads until it is submitted.
-    void live.ready(runOurs).then(
-      () => query(captureSubmittable(submittable)),
-      (err) => submittable.handleError?.(err),
-    )
+    void live.ready(runOurs).then(send, (err) => submittable.handleError?.(err))
     return submittable
   }
 
-  function captureSubmittable(submittable: Submittable): Submittable {
-    const statement = live.statementFor(client, submittable.text, submittable.values ?? [])
-    if (statement.text !== submittable.text) {
-      submittable.text = statement.text
-      if (submittable.name) submittable.name += HIDDEN_PREFIX
-    }
-    const read = submittable.read?.bind(submittable)
-    const close = submittable.close?.bind(submittable)
-    if (!read || !close) {
-      // Rows reach the caller as events here: can't strip what the statement added.
-      if (statement.hiddenColumns > 0) throw new Error('Unreachable: a rewritten statement on a non-cursor submittable')
-      statement.succeeded([])
-      return submittable
-    }
+  /** Strips the hidden columns from the rows of a cursor as they are read; returns how to give it its statement. */
+  function captureCursor(cursor: Cursor): (statement: Statement) => void {
+    const read = cursor.read.bind(cursor)
+    const close = cursor.close.bind(cursor)
+    let statement: Statement | undefined
     const hiddenRows: (string | null)[][] = []
     let hidden: string[] | undefined
     let settled = false
     const settle = (err?: Error | null) => {
-      if (settled) return
+      if (settled || !statement) return
       settled = true
       if (err) statement.failed()
       else statement.succeeded(hiddenRows)
     }
-    submittable.read = (count, callback) =>
+    cursor.read = (count, callback) =>
       read(count, (err, rows, result) => {
         if (err) {
           settle(err)
           return callback(err, rows, result)
         }
-        hidden ??= takeHiddenFields(submittable._result?.fields ?? [], statement)
-        hiddenRows.push(...takeHiddenValues(rows, hidden, Array.isArray(rows[0])))
+        hidden ??= takeHiddenFields(cursor._result?.fields ?? [], statement!)
+        const values = takeHiddenValues(rows, hidden, Array.isArray(rows[0]))
+        // Past the limit they aren't kept: a cursor reads rows a batch at a time to keep memory low.
+        if (hiddenRows.length <= MAX_RESULT_ROWS) hiddenRows.push(...values)
         if (rows.length < count || rows.length === 0) settle()
-        callback(err, statement.returnsRows ? rows : [], result)
+        callback(err, statement!.returnsRows ? rows : [], result)
       })
-    submittable.close = (callback) => {
+    let closed = false
+    cursor.close = (callback) => {
+      closed = true
       settle()
       return close(callback)
     }
-    return submittable
+    return (s) => {
+      statement = s
+      // Closed before it was sent: it returns nothing.
+      if (closed) settle()
+    }
   }
 }
 
@@ -131,6 +142,12 @@ function sent(config: PgQueryConfig, statement: Statement): PgQueryConfig {
   if (statement.text === config.text) return config
   // A prepared statement's name is bound to its text on the connection.
   return { ...config, text: statement.text, ...(config.name ? { name: config.name + HIDDEN_PREFIX } : {}) }
+}
+
+type Cursor = Submittable & Required<Pick<Submittable, 'read' | 'close'>>
+
+function isCursor(submittable: Submittable): submittable is Cursor {
+  return typeof submittable.read === 'function' && typeof submittable.close === 'function'
 }
 
 function isSubmittable(value: unknown): value is Submittable {

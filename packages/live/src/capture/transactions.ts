@@ -9,7 +9,12 @@ type OpenTransaction = {
   savepoints: { name: string; changeCount: number }[]
   /** A statement failed: `COMMIT` will roll back, unless a `ROLLBACK TO SAVEPOINT` recovers it. */
   failed: boolean
+  /** The changes became changes to any row of their tables: a `ROLLBACK TO SAVEPOINT` keeps them. */
+  collapsed: boolean
 }
+
+/** Past this many changes, a statement's or a transaction's changes count as changes to any row of their tables. */
+const MAX_CHANGES = 10_000
 
 /** Holds each connection's changes until its transaction commits; drops them when it rolls back. */
 class Transactions {
@@ -23,8 +28,11 @@ class Transactions {
   record(connection: object, changes: Change[]): void {
     if (changes.length === 0) return
     const transaction = this.open.get(connection)
-    if (transaction) transaction.changes.push(...changes)
-    else this.announce(changes)
+    if (!transaction) return this.announce(collapse(changes))
+    transaction.changes.push(...changes)
+    if (transaction.changes.length <= MAX_CHANGES) return
+    transaction.changes = collapse(transaction.changes)
+    transaction.collapsed = true
   }
 
   /** After a transaction statement succeeded on `connection`. */
@@ -32,7 +40,7 @@ class Transactions {
     const transaction = this.open.get(connection)
     switch (action) {
       case 'begin':
-        if (!transaction) this.open.set(connection, { changes: [], savepoints: [], failed: false })
+        if (!transaction) this.open.set(connection, { changes: [], savepoints: [], failed: false, collapsed: false })
         return
       case 'commit':
         this.open.delete(connection)
@@ -49,7 +57,7 @@ class Transactions {
     else if (index === -1) return
     else if (action === 'release') transaction.savepoints.length = index
     else {
-      transaction.changes.length = transaction.savepoints[index]!.changeCount
+      if (!transaction.collapsed) transaction.changes.length = transaction.savepoints[index]!.changeCount
       transaction.savepoints.length = index + 1
       transaction.failed = false
     }
@@ -63,4 +71,9 @@ class Transactions {
   isOpen(connection: object): boolean {
     return this.open.has(connection)
   }
+}
+
+function collapse(changes: Change[]): Change[] {
+  if (changes.length <= MAX_CHANGES) return changes
+  return [...new Set(changes.map((c) => c.table))].map((table) => ({ table, kind: 'unknown' }))
 }
