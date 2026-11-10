@@ -13,6 +13,7 @@ import { EVENT_TAG } from './orms/eventQuery.ts'
 import Cursor from 'pg-cursor'
 import { LiveRead } from '../../packages/live/dist/match/liveRead.js'
 import { Operands } from '../../packages/live/dist/match/operands.js'
+import { Router } from '../../packages/live/dist/match/router.js'
 import { Tally } from '../../packages/live/dist/match/tally.js'
 import { Refetcher } from '../../packages/live/dist/refetcher.js'
 import { SharedReads, WatchedRead } from '../../packages/live/dist/sharedReads.js'
@@ -22,6 +23,7 @@ const live = LiveRead.prototype as any
 const database = LiveDatabase.prototype as any
 const tally = Tally.prototype as any
 const sharedReads = SharedReads.prototype as any
+const router = Router.prototype as any
 
 const probes: Record<string, () => void> = {
   /** A write's old image is ignored: an update counts as an insert of its new row, a delete as nothing. */
@@ -74,6 +76,13 @@ const probes: Record<string, () => void> = {
     const shareKey = database.shareKey
     database.shareKey = function (text: string, values: unknown[], ...rest: unknown[]) {
       return shareKey.call(this, text, JSON.parse(JSON.stringify(values)), ...rest)
+    }
+  },
+  /** An update reaches the reads filed under its new row's values only, not those of the row it changed. */
+  'route-old'() {
+    const readsReachedBy = router.readsReachedBy
+    router.readsReachedBy = function (change: any) {
+      return readsReachedBy.call(this, change.kind === 'update' ? { ...change, old: change.new } : change)
     }
   },
   /** A read that joins an identical one gets that read's rows themselves, rather than a copy. */
