@@ -10,6 +10,7 @@ import { getRawContext, REQUEST_CONTEXT } from 'telefunc'
 import { assertUsage } from './assert.js'
 import { LiveCell, type Live, type LiveSource } from './live.js'
 import type { WatchedRead } from './sharedReads.js'
+import { staleSignals } from './staleSignals.js'
 
 type RequestContext = { onClose(callback: () => void): void }
 
@@ -70,7 +71,9 @@ class LiveQuery implements LiveSource {
     this.isChanged = true
     // The client fetches again, and that query's reads replace these.
     this.release()
-    for (const listener of this.listeners) listener()
+    staleSignals.send(() => {
+      for (const listener of this.listeners) listener()
+    })
   }
 
   subscribe(onStale: () => void): () => void {
