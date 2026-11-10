@@ -277,7 +277,7 @@ function analyzeSelect(
     if (alias.role === 'top' && alias.nullable && other.role === 'top' && !other.nullable)
       alias.partners.push(correlation)
     if (alias.role === 'top' && !alias.nullable && other.role === 'top' && !other.nullable)
-      alias.joins.push(joinOf(column, other, otherColumn))
+      alias.joins.push(joinOf(alias.table, column, other, otherColumn))
   }
   return scope
 }
@@ -303,12 +303,13 @@ function analyzeExists(
   child.role = 'exists'
   child.existsQuery = text
   child.correlations.push({ column: edge!.column, parent: edge!.other, parentColumn: edge!.otherColumn })
-  edge!.other.joins.push(joinOf(edge!.otherColumn, child, edge!.column))
+  edge!.other.joins.push(joinOf(edge!.other.table, edge!.otherColumn, child, edge!.column))
 }
 
-function joinOf(column: Column, partner: Alias, partnerColumn: Column): Join {
+/** `table`'s `column` joined to `partnerColumn` of `partner`. */
+function joinOf(table: Table, column: Column, partner: Alias, partnerColumn: Column): Join {
   const referenced = partner.table.references.some(
-    (key) => key.column === partnerColumn.name && key.parentColumn === column.name,
+    (key) => key.parent === table.id && key.column === partnerColumn.name && key.parentColumn === column.name,
   )
   return { column, partner, partnerColumn, referenced }
 }

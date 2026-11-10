@@ -180,6 +180,19 @@ function createDrizzle(
             ),
           )
           .orderBy(users.id),
+      // `tags.todo_id` references `todos`, not `users`: a user just inserted may already have rows here.
+      usersByTagTodo: () =>
+        db
+          .select({ id: users.id, tag: tags.id })
+          .from(users)
+          .innerJoin(tags, eq(tags.todoId, users.id))
+          .orderBy(users.id, tags.id),
+      usersWithTagTodo: () =>
+        db
+          .select({ id: users.id })
+          .from(users)
+          .where(exists(db.select({ one: sql`1` }).from(tags).where(eq(tags.todoId, users.id))))
+          .orderBy(users.id),
       tagsOfUser: ({ user }) =>
         db
           .select({ id: tags.id, name: tags.name })

@@ -57,6 +57,18 @@ const probes: Record<string, () => void> = {
       for (const table of this.catalog.tables.values()) for (const column of table.columns) column.orderableText = true
     }
   },
+  /** A foreign key is taken to reference its parent column's name in every table, not only in its parent. */
+  'fk-target'() {
+    const loadCatalog = database.loadCatalog
+    database.loadCatalog = async function (query: unknown) {
+      await loadCatalog.call(this, query)
+      const tables = [...this.catalog.tables.values()]
+      for (const table of tables)
+        table.references = table.references.flatMap((key: any) =>
+          tables.map((parent) => ({ ...key, parent: parent.id })),
+        )
+    }
+  },
   /** Foreign key cascades change nothing in the child tables. */
   cascade() {
     const changesOfWrite = database.changesOfWrite

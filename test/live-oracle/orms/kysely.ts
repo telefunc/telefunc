@@ -152,6 +152,24 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
           )
           .orderBy('users.id')
           .execute(),
+      // `tags.todo_id` references `todos`, not `users`: a user just inserted may already have rows here.
+      usersByTagTodo: () =>
+        db
+          .selectFrom('users')
+          .innerJoin('tags', 'tags.todo_id', 'users.id')
+          .select(['users.id', 'tags.id as tag'])
+          .orderBy('users.id')
+          .orderBy('tags.id')
+          .execute(),
+      usersWithTagTodo: () =>
+        db
+          .selectFrom('users')
+          .select('users.id')
+          .where((eb) =>
+            eb.exists(eb.selectFrom('tags').select(sql`1`.as('one')).whereRef('tags.todo_id', '=', 'users.id')),
+          )
+          .orderBy('users.id')
+          .execute(),
       tagsOfUser: ({ user }) =>
         db
           .selectFrom('tags')
