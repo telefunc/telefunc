@@ -1,0 +1,56 @@
+{
+  "name": "@telefunc/webtransport",
+  "version": "0.1.0",
+  "description": "WebTransport for Telefunc channels — each channel on a stream of its own, so none waits behind another.",
+  "homepage": "https://github.com/telefunc/telefunc/tree/main/packages/webtransport#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/telefunc/telefunc.git",
+    "directory": "packages/webtransport"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "telefunc": {
+    "server": "@telefunc/webtransport/server",
+    "client": "@telefunc/webtransport/client"
+  },
+  "type": "module",
+  "sideEffects": [
+    "./dist/server.js",
+    "./dist/worker.js",
+    "./dist/client.js"
+  ],
+  "exports": {
+    "./package.json": "./package.json",
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "worker": "./dist/worker.js",
+      "default": "./dist/server.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "browser": "./dist/client.js",
+      "default": "./dist/client.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "quico": "0.8.0"
+  },
+  "peerDependencies": {
+    "telefunc": ">=0.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.4",
+    "telefunc": "workspace:*",
+    "typescript": "^7.0.2"
+  }
+}
