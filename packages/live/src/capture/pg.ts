@@ -41,7 +41,8 @@ type Submittable = {
   text: string
   values?: unknown[]
   name?: string
-  read?: (count: number, callback: (err: Error | null, rows: unknown[], result: unknown) => void) => void
+  /** Without `callback`, returns a promise of the rows. */
+  read?: (count: number, callback?: (err: Error | null, rows: unknown[], result: unknown) => void) => unknown
   close?: (callback?: (err?: Error) => void) => unknown
   _result?: { fields: { name: string }[] }
   handleError?: (err: Error, connection?: unknown) => void
@@ -297,8 +298,10 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
       if (err) return statement.failed()
       runFollowUps(statement.succeeded(hiddenRows))
     }
-    cursor.read = (count, callback) =>
-      read(count, (err, rows, result) => {
+    cursor.read = (count, callback) => {
+      if (!callback)
+        return new Promise((resolve, reject) => cursor.read(count, (err, rows) => (err ? reject(err) : resolve(rows))))
+      return read(count, (err, rows, result) => {
         if (err) {
           settle(err)
           return callback(err, rows, result)
@@ -310,6 +313,7 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
         if (rows.length < count || rows.length === 0) settle()
         callback(err, statement!.returnsRows ? rows : [], result)
       })
+    }
     let closed = false
     cursor.close = (callback) => {
       closed = true

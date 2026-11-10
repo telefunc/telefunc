@@ -39,6 +39,7 @@ import { drizzle as drizzlePostgresJs } from 'drizzle-orm/postgres-js'
 import { liveDrizzle } from '@telefunc/live/drizzle'
 import type { BroadcastAdapter } from 'telefunc'
 import { arrayOf, CODES, COLUMN_TYPES, REFS, type Spelling } from '../spellings.ts'
+import { cursorRead } from './cursorRead.ts'
 import { EVENT_TAG, eventQuery } from './eventQuery.ts'
 import type { OrmDriver } from './types.ts'
 
@@ -229,6 +230,10 @@ function createDrizzle(
         db.execute(sql`select kind, count(*)::int as n from event_log group by kind order by kind`).then(rowsOf),
       counters: () => db.execute(sql`select id, n from counters order by id`).then(rowsOf),
       chained: () => db.execute(sql`select n from chained`).then(rowsOf),
+      ...(kind === 'pg' && {
+        cursorTexts: ({ user }) =>
+          cursorRead(client as never, 'select id, text from todos where user_id = $1 order by id', [user]),
+      }),
       labelled: () =>
         db.select({ id: todos.id }).from(todos).where(sql`label_of(${todos.text}) like 'A%'`).orderBy(todos.id),
       measuresAtFloat: () =>

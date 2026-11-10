@@ -12,6 +12,7 @@
     "drizzle-orm": "0.45.4",
     "kysely": "0.29.8",
     "pg": "^8.23.1",
+    "pg-cursor": "2.22.1",
     "postgres": "3.4.7",
     "telefunc": "workspace:*"
   }

@@ -10,6 +10,7 @@ import '../../packages/live/dist/live.js'
 import { LiveDatabase } from '../../packages/live/dist/liveDatabase.js'
 import { UNNAMED_TABLES } from '../../packages/live/dist/capture/transactions.js'
 import { EVENT_TAG } from './orms/eventQuery.ts'
+import Cursor from 'pg-cursor'
 import { LiveRead } from '../../packages/live/dist/match/liveRead.js'
 import { Operands } from '../../packages/live/dist/match/operands.js'
 import { Tally } from '../../packages/live/dist/match/tally.js'
@@ -57,6 +58,23 @@ const probes: Record<string, () => void> = {
       await loadCatalog.call(this, query)
       for (const table of this.catalog.tables.values()) for (const column of table.columns) column.orderableText = true
     }
+  },
+  /** A cursor's `read()` given no callback returns nothing, rather than a promise of its rows. */
+  'cursor-promise'() {
+    // The capture sets each cursor's `read`: a setter on the prototype gets it.
+    const original = Cursor.prototype.read
+    Object.defineProperty(Cursor.prototype, 'read', {
+      configurable: true,
+      get() {
+        return this.liveRead ?? original
+      },
+      set(read) {
+        this.liveRead = (count: number, callback?: Function) => {
+          if (callback) return read(count, callback)
+          read(count, () => {})
+        }
+      },
+    })
   },
   /** A write is widened whatever role its session took: the catalog's privileges are taken as every session's. */
   'role-privilege'() {
