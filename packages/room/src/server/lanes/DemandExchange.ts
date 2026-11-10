@@ -4,7 +4,7 @@ export type { DemandExchangeOptions }
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import type { RoomCtrlEnvelope } from '../../shared/protocol.js'
 import { Slice } from '../../shared/Slice.js'
-import type { DemandEntry, RoomIncarnation } from '../protocol.js'
+import type { DemandEntry, RoomIncarnation, WatchEntry } from '../protocol.js'
 import { reportRoomError } from '../reportRoomError.js'
 import { GossipOutbox } from '../GossipOutbox.js'
 import { DemandReport, type DemandReportOwner } from './DemandReport.js'
@@ -42,6 +42,12 @@ class DemandExchange implements DemandReportOwner {
   tellDemand(entry: DemandEntry, on: boolean): void {
     this.gossip.push({ on, ...entry })
     this.incomingDemand.take(this.outgoingDemand.instance, entry, on)
+  }
+
+  /** A page here started watching: the owners of what it watches hear it, here and in the other processes. */
+  tellWatch(watch: WatchEntry): void {
+    this.gossip.push({ watch })
+    this.incomingDemand.watched(watch)
   }
 
   /** Renews this process's demand elsewhere with one page, and drops the reporters that lapsed, a slice at a time. */

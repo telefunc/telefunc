@@ -5,6 +5,7 @@ export type {
   RoomIncarnation,
   RoomMemberRecord,
   DemandEntry,
+  WatchEntry,
   RoomDemandPage,
   RoomDataEnvelope,
   RoomDmAckEnvelope,
@@ -55,14 +56,17 @@ type DemandEntry =
   | { track: string; except: readonly string[]; byMember?: true }
   | { track: string; member: string; except: true }
 
+/** A page started watching `track` of `member`, either absent for every one, once its lanes deliver. */
+type WatchEntry = { member?: string; track?: string }
+
 /** Demand between instances, on the demand lane: entries one instance starts or stops receiving, in the order it told
  *  them, at most `ROOM_DEMAND_PAGE_ENTRIES`, its `page`th page. Its entries from `{ again: true }` to
- *  `{ again: false }` are all it receives. */
+ *  `{ again: false }` are all it receives; a `watch` is told once, as it happens. */
 type RoomDemandPage = {
   __r: 'demand'
   instance: string
   page: number
-  wants: Array<({ on: boolean } & DemandEntry) | { again: boolean }>
+  wants: Array<({ on: boolean } & DemandEntry) | { again: boolean } | { watch: WatchEntry }>
 }
 
 /** A member's message on the lane; its order rides the transport frame. Stamped, so a receiver behind on the roster

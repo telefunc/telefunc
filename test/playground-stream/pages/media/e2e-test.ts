@@ -9,12 +9,31 @@ import type { MeetingResult } from './Meeting'
 /** `check`: the wire, in a lane that names none. */
 function testMedia(check?: WireCheck) {
   test(
-    'media: two pages publish and play each other, every frame whole, at the size that fits, with the tone',
+    'media: two pages publish and play each other, every frame whole, at the size that fits, with the tone; a page that publishes nothing sees them at once',
     async () => {
       const room = `two-${Date.now()}`
       const bob = await page.context().browser()!.newPage()
+      const carol = await page.context().browser()!.newPage()
       await join(page, room, 'Alice')
       await join(bob, room, 'Bob')
+
+      // Carol publishes nothing, and starts on the smallest size while Bob still watches it: only her watch, which
+      // Room tells its publisher, brings her a key frame before the next of every 2 s.
+      await autoRetry(async () => expect((await meeting(bob)).Alice?.frames.checked).greaterThan(0), {
+        timeout: 10_000,
+      })
+      await join(carol, room, 'Carol', { publish: false })
+      await autoRetry(
+        async () => {
+          for (const other of ['Alice', 'Bob']) {
+            const { firstMs } = (await meeting(carol))[other]!.frames
+            expect(firstMs).not.toBe(null)
+            expect(firstMs).lessThan(500)
+          }
+        },
+        { timeout: 10_000 },
+      )
+      await leave(carol)
 
       await autoRetry(
         async () => {
@@ -34,8 +53,8 @@ function testMedia(check?: WireCheck) {
         },
         { timeout: 30_000 },
       )
+      await leave(bob)
       allowSkips()
-      await bob.close()
     },
     check,
   )
@@ -73,7 +92,7 @@ function testMediaSlowLink(check: WireCheck) {
       )
       expectLog('fell behind and skipped frames of its lossy tracks')
       await cdp.detach()
-      await bob.close()
+      await leave(bob)
     },
     check,
   )
@@ -87,13 +106,24 @@ function allowSkips(): void {
   } catch {}
 }
 
-async function join(target: Page, room: string, name: string): Promise<void> {
-  await open(target, room, name, 360)
+async function join(target: Page, room: string, name: string, options: { publish?: boolean } = {}): Promise<void> {
+  await open(target, room, name, 360, options.publish ?? true)
   await target.click('#media-join')
 }
 
-async function open(target: Page, room: string, name: string, height: number): Promise<void> {
-  await navigate(`${getServerUrl()}/media?room=${room}&name=${name}&height=${height}`, undefined, target)
+async function open(target: Page, room: string, name: string, height: number, publish = true): Promise<void> {
+  await navigate(
+    `${getServerUrl()}/media?room=${room}&name=${name}&height=${height}&publish=${publish}`,
+    undefined,
+    target,
+  )
+}
+
+/** Leaves the call before the page closes, as an app's Leave button does: a page that just closes is a page away to the
+ *  server, which drops the frames on their way to it and logs that it fell behind. */
+async function leave(target: Page): Promise<void> {
+  await target.evaluate(() => (window as unknown as { meetingLeave(): Promise<void> }).meetingLeave())
+  await target.close()
 }
 
 async function meeting(target: Page): Promise<MeetingResult> {

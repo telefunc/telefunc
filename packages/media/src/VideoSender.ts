@@ -21,12 +21,10 @@ const LADDER = [
   { height: 360, bitrate: 450_000 },
   { height: 720, bitrate: 1_700_000 },
 ]
-/** A viewer that starts watching, or lost a frame, waits at most this long for a key frame: MoQ's group length
- *  (moq `publish/src/video/encoder.ts`). A key frame in realtime mode is 1.3 to 3.6 delta frames, so this costs at
- *  most 4 % of the bitrate. */
+/** A page that fell behind, which skips to the next key frame, or whose decoder failed waits at most this long for one:
+ *  MoQ's group length (moq `publish/src/video/encoder.ts`). A key frame in realtime mode is 1.3 to 3.6 delta frames, so
+ *  this costs at most 4 % of the bitrate. */
 const KEY_FRAME_INTERVAL_MS = 2_000
-/** A size answers requests for a key frame at most this often, as LiveKit's server asks for them (`receiver_base.go`). */
-const KEY_FRAME_REQUEST_GAP_MS = 1_000
 /** A size nobody watches any more stops this long after, as LiveKit's dynacast does (`config.go`). */
 const UNWATCHED_STOP_MS = 5_000
 /** A size whose share of the uplink is under this part of its bitrate stops, as the smaller ones look better; the
@@ -37,7 +35,7 @@ type SizeStats = VideoSize & { bitrate: number; frames: number; keyFrames: numbe
 type VideoSenderStats = { codec: string | null; sizes: SizeStats[] }
 
 /** One video source on its Room tracks, one per size: each frame is encoded in every size someone watches, within its
- *  share of the page's uplink, a key frame every `KEY_FRAME_INTERVAL_MS` and on request. */
+ *  share of the page's uplink, a key frame every `KEY_FRAME_INTERVAL_MS` and for each page that starts watching. */
 class VideoSender {
   private readonly sizes: SizeEncoder[]
   private readonly stopReading: () => void
@@ -63,8 +61,9 @@ class VideoSender {
     for (const size of this.sizes) if (track === null || track === size.track) size.setWanted(wanted)
   }
 
-  requestKeyFrame(track: string): void {
-    this.sizes.find((size) => size.track === track)?.requestKeyFrame()
+  /** A page starts watching `track`, `null`: every track: its next frame is a key frame. */
+  onWatch(track: string | null): void {
+    for (const size of this.sizes) if (track === null || track === size.track) size.requestKeyFrame()
   }
 
   /** Shares `bitsPerSecond` among the sizes someone watches, from the smallest; returns what they take. */
@@ -175,7 +174,7 @@ class SizeEncoder {
   }
 
   requestKeyFrame(): void {
-    if (performance.now() - this.lastKeyFrameAt >= KEY_FRAME_REQUEST_GAP_MS) this.keyFrameDue = true
+    this.keyFrameDue = true
   }
 
   setBitrate(bitrate: number): void {

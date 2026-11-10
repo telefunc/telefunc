@@ -73,8 +73,8 @@ this one too, applies the event to its model, and its views tell their listeners
   its timeout (`lifecycle/hold.ts`).
 - **roster**: the members as the authority lists them, read to correct a view that drifted (`store/roster.ts`,
   `RosterStream`).
-- **demand**: whether any process wants a member's track, exchanged on the demand lane so a publisher knows
-  (`RoomDemand`, `DemandExchange`, `GossipOutbox`).
+- **demand**: whether any process wants a member's track, exchanged on the demand lane so a publisher knows, and each
+  page that starts watching one, once its lanes deliver (`RoomDemand`, `DemandExchange`, `GossipOutbox`).
 - **horizon**: `ROOM_HORIZON_MS`, how long Room waits for a lane to be ready, a delivery handoff or a lost lane's read.
 - **plane**: what Room's server code calls instead of the driver: its writes' orderings checked, its subscriptions
   shared (`backend/RoomPlane.ts`). The **kit** is the lane keys and page sizes a driver is built with.

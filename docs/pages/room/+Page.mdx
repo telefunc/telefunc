@@ -437,6 +437,14 @@ me.publishBinary(stroke, { track: 'drawing' }) // a viewer never misses one
 
 A video frame needs the frames since its keyframe: publish each other frame with `delta: true`. A viewer that falls behind then skips to the newest keyframe and gets the frames after it in order, never one without those before it, and a viewer who arrives mid-stream starts at the next keyframe. `delta` needs `lossy: true`, and can't be `retain`ed.
 
+So that a viewer who arrives sees the picture at once, send a keyframe when `onWatch()` tells you a page started watching:
+
+```js
+// Environment: client
+
+me.onWatch((track) => track === 'camera' && encodeKeyframeNext()) // encodeKeyframeNext(): your encoder's next frame is a keyframe
+```
+
 > To fit your encoder's bitrate to what your connection carries, read `me.uplinkRate`, in bytes per ms (`Infinity` until measured): above it, your frames wait in the connection, and so does the audio beside them.
 
 To send frames only while someone watches, use `onDemand()`, which also fires, as you call it, for the tracks already watched:
@@ -624,6 +632,7 @@ Properties: `id`, `meta`, `count`.
 | `listen(cb)` | Receive private messages; return a value to reply. |
 | `setMeta(meta)` / `setAttributes(attributes)` | Replace / update your `meta`. |
 | `onDemand(cb)` | Whether anyone watches a track of yours. |
+| `onWatch(cb)` | A page started watching a binary track of yours. |
 | `leave()` / `onLeave(cb)` | Leave / you left, with `cause.type`: `'left'`, `'removed'`, `'closed'`, `'disconnected'`, or `'unknown'` (it left while nothing here listened to the room, too long ago to know why). |
 | `onDisconnect(cb)` / `onReconnect(cb)` | Your connection to the room dropped / is back. |
 

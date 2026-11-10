@@ -1,10 +1,10 @@
-export { publish, askKeyFrame, keyFrameAsked }
+export { publish }
 export type { Publication, PublicationStats }
 
 import type { LocalParticipant } from '@telefunc/room'
 import { AudioSender, AUDIO_BITRATE, type AudioSenderStats } from './AudioSender.js'
 import { VideoSender, type VideoSenderStats } from './VideoSender.js'
-import { MEDIA_TRACK, type Catalog, type KeyFrameRequest, type SourceCatalog } from './wire.js'
+import { MEDIA_TRACK, type Catalog, type SourceCatalog } from './wire.js'
 
 /** What of the path's rate the page offers, as GCC backs off from what arrived (draft-ietf-rmcat-gcc-02 §5.5). */
 const UPLINK_SHARE = 0.85
@@ -42,22 +42,11 @@ function publish(
   return { stop: () => publisher.remove(name, published), stats: () => published.stats(me) }
 }
 
-/** Asks member `to` for a key frame on `track`, through each member this page publishes, on its media track: `to`'s page
- *  hears it as it plays that member. A page that publishes nothing can't ask, and waits for the next key frame. */
-function askKeyFrame(to: string, track: string): void {
-  const request: KeyFrameRequest = { __media: 'key', to, track }
-  for (const publisher of publishers.values()) publisher.publishRequest(request)
-}
-
-/** Another page asks a member this page publishes for a key frame. */
-function keyFrameAsked({ to, track }: KeyFrameRequest): void {
-  publishers.get(to)?.requestKeyFrame(track)
-}
-
 /** This page's publishing members, by id. */
 const publishers = new Map<string, Publisher>()
 
-/** One member's sources: its catalog, its share of the uplink, and the demand for its tracks. */
+/** One member's sources: its catalog, its share of the uplink, and the demand for its tracks, whose new watchers each
+ *  get a key frame. */
 class Publisher {
   private readonly me: LocalParticipant
   private readonly sources = new Map<string, PublishedSource>()
@@ -70,6 +59,7 @@ class Publisher {
     this.me = me
     const { signal } = this.abort
     me.onDemand((track, wanted) => this.onDemand(track, wanted), { signal })
+    me.onWatch((track) => this.onWatch(track), { signal })
     me.onLeave(() => this.removeAll(), { signal })
     this.budgetTimer = setInterval(() => this.shareUplink(), BUDGET_INTERVAL_MS)
   }
@@ -92,14 +82,6 @@ class Publisher {
     void this.publishCatalog()
   }
 
-  requestKeyFrame(track: string): void {
-    for (const source of this.sources.values()) source.video?.requestKeyFrame(track)
-  }
-
-  publishRequest(request: KeyFrameRequest): void {
-    void this.me.publish(request, { track: MEDIA_TRACK }).catch(() => {})
-  }
-
   private removeAll(): void {
     for (const source of this.sources.values()) source.stop()
     this.sources.clear()
@@ -113,6 +95,11 @@ class Publisher {
     if (wanted) this.watched.add(track)
     else this.watched.delete(track)
     for (const source of this.sources.values()) source.onDemand(track, wanted)
+  }
+
+  /** A page starts watching `track`, `null`: every track; it shows nothing before the track's next key frame. */
+  private onWatch(track: string | null): void {
+    for (const source of this.sources.values()) source.video?.onWatch(track)
   }
 
   /** Audio always goes; the video gets what is left of the page's share of its uplink, a screen first. */

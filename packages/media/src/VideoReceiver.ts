@@ -45,7 +45,6 @@ type VideoReceiverOptions = {
   element: HTMLVideoElement
   /** The member's sound, whose buffer its picture waits as long as, and against which its offset is measured. */
   audio(): Pick<AudioReceiver, 'delayMs' | 'heardAfterMs'> | null
-  requestKeyFrame(track: string): void
 }
 
 /** One member's picture in `element`: the size that fits the element and comes on time, each frame checked against its
@@ -141,7 +140,6 @@ class VideoReceiver {
       size: wanted,
       codec: this.options.catalog.codec,
       member: this.options.member,
-      requestKeyFrame: () => this.options.requestKeyFrame(wanted.track),
       onUnit: (receiver, captured, skippedGroup) => this.onUnit(receiver, captured, skippedGroup),
       onFrame: (receiver, frame, captured) => this.onFrame(receiver, frame, captured),
     })
@@ -225,7 +223,6 @@ type SizeReceiverOptions = {
   size: VideoSize
   codec: string
   member: RemoteParticipant
-  requestKeyFrame(): void
   onUnit(receiver: SizeReceiver, captured: number, skippedGroup: boolean): void
   onFrame(receiver: SizeReceiver, frame: VideoFrame, captured: number): void
 }
@@ -247,10 +244,10 @@ class SizeReceiver {
   constructor(options: SizeReceiverOptions) {
     this.options = options
     this.size = options.size
+    // Its publisher hears that this page watches, and sends a key frame.
     this.unsubscribe = options.member.subscribeBinary((data, info) => this.receive(data, info.seq), {
       track: this.size.track,
     })
-    options.requestKeyFrame()
   }
 
   stop(): void {
@@ -273,8 +270,7 @@ class SizeReceiver {
     } else if (group === this.group && index === this.index + 1 && this.decoder !== null) {
       this.index = index
     } else {
-      // What follows a missing frame waits for the next key frame, which this page asks for.
-      if (this.group !== null) this.options.requestKeyFrame()
+      // What follows a missing frame, or a failed decoder, waits for the next key frame.
       this.group = null
       return
     }

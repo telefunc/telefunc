@@ -23,7 +23,7 @@ import type {
   RoomEnvelope,
   SenderStamp,
 } from '../shared/protocol.js'
-import type { RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope, RoomIncarnation } from './protocol.js'
+import type { RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope, RoomIncarnation, WatchEntry } from './protocol.js'
 import { RoomModel, type ServerModelOwner } from '../shared/RoomModel.js'
 import type { LeaveCause } from '../types.js'
 import { AuthoritySync, type AuthorityChange, type AuthoritySyncOwner } from './lifecycle/AuthoritySync.js'
@@ -371,6 +371,16 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
       // Past the horizon the held frames go out, and a retained frame the read returns later follows them.
       hold.flush()
     }
+  }
+
+  /** Once the lanes `change` covers deliver, the members it names hear that a page watches them (`onWatch()`): on a
+   *  `delta` track, the next frame without `delta` they send then reaches it. */
+  async tellWatch({ member, track }: BinaryWantChange): Promise<void> {
+    await (member === EVERY_MEMBER ? this.lanePlan.binaryReady() : this.lanePlan.pairsReady(member, track))
+    const watch: WatchEntry = {}
+    if (member !== EVERY_MEMBER) watch.member = member
+    if (track !== EVERY_TRACK) watch.track = track
+    this.demandExchange.tellWatch(watch)
   }
 
   private async readRetainedBinary(holder: LaneHolder, { member, track }: BinaryWantChange, hold: ReplayHold) {

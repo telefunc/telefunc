@@ -115,6 +115,7 @@ class RoomParticipantStub implements BroadcastEndOwner {
     const unlistenDemand = participant.onDemand((track, wanted) =>
       this.notify({ __r: 'demand', track: track ?? DEFAULT_TRACK, wanted }),
     )
+    const unlistenWatch = participant.onWatch((track) => this.notify({ __r: 'watch', track: track ?? DEFAULT_TRACK }))
 
     let left = false
     const unlistenLeave = participant.onLeave((cause) => {
@@ -129,6 +130,7 @@ class RoomParticipantStub implements BroadcastEndOwner {
     this.end.onClose(() => {
       unlistenMeta()
       unlistenDemand()
+      unlistenWatch()
       unlistenLeave()
       this.dmReplies.drop()
       if (!left) void participant._releaseHolder()

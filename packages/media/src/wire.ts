@@ -9,12 +9,11 @@ export {
   decodeAudioPayload,
   wallClock,
   ticksSince,
-  isMediaMessage,
+  isCatalog,
 }
-export type { UnitHeader, AudioPayload, Catalog, SourceCatalog, VideoSize, KeyFrameRequest, MediaMessage }
+export type { UnitHeader, AudioPayload, Catalog, SourceCatalog, VideoSize }
 
-/** The text track of a member's catalog, retained so a page that starts watching reads it first, and of the key
- *  frames its page asks other members for. */
+/** The text track of a member's catalog, retained so a page that starts watching reads it first. */
 const MEDIA_TRACK = 'media'
 
 /** Each frame's Room payload begins with this: whether a decoder can start at it, where it stands in its group, and when
@@ -121,12 +120,6 @@ type SourceCatalog = {
 /** A member's sources by name, as its page publishes them. */
 type Catalog = { __media: 'catalog'; sources: Record<string, SourceCatalog> }
 
-/** A page asks member `to` for a key frame on `track`: it starts watching it, or lost a frame of it. */
-type KeyFrameRequest = { __media: 'key'; to: string; track: string }
-
-type MediaMessage = Catalog | KeyFrameRequest
-
-function isMediaMessage(message: unknown): message is MediaMessage {
-  const kind = (message as { __media?: unknown } | null)?.__media
-  return kind === 'catalog' || kind === 'key'
+function isCatalog(message: unknown): message is Catalog {
+  return (message as { __media?: unknown } | null)?.__media === 'catalog'
 }

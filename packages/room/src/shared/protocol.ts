@@ -115,10 +115,12 @@ type RoomRosterEvent =
 type RoomJoinedEvent = { __r: 'joined'; reqId: number; id: string }
 
 /** Global demand for one of a member's own published tracks, pushed on aggregate state changes; a client that attaches
- *  again gets the member's whole wanted set, since its offline buffer may have dropped changes. */
+ *  again gets the member's whole wanted set, since its offline buffer may have dropped changes. `watch`: a page started
+ *  watching one of them. */
 type RoomDemandEvent =
   | { __r: 'demand'; member: string; track: TrackKey; wanted: boolean }
   | { __r: 'demand-state'; member: string; tracks: TrackKey[] }
+  | { __r: 'watch'; member: string; track: TrackKey }
 
 /** On the recipient's inbox lane, which only its owner subscribes. `ackId` asks for a reply on the sender's inbox. A
  *  room-authored one has no sender (`from: ''`, `fromMeta: null`); a client that names the sender gets it unstamped. */
@@ -184,6 +186,7 @@ type ParticipantStubNotice =
   | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown; ackId?: string }
   | { __r: 'demand'; track: TrackKey; wanted: boolean }
   | { __r: 'demand-state'; tracks: TrackKey[] }
+  | { __r: 'watch'; track: TrackKey }
 
 /** Which members' streams a holder wants on the text lane: `all` for room-level listeners, or a specific member set for
  *  participant-scoped ones. */

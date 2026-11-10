@@ -343,6 +343,9 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
 
   /** Watch whether any observer wants each published track. */
   onDemand(callback: (track: string | null, wanted: boolean) => void, options?: { signal?: AbortSignal }): () => void
+  /** A page started watching one of your binary tracks, `null` for the default track: on a `delta` track it gets no
+   *  frame before your next one without `delta`. */
+  onWatch(callback: (track: string | null) => void, options?: { signal?: AbortSignal }): () => void
   /** Replace your metadata wholesale. Propagates to all observers in real time. Takes a new object, or one built from
    *  the read-only meta Room handed you. */
   setMeta(meta: ReadonlyMeta<P>): Promise<void>

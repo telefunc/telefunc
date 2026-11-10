@@ -4,7 +4,7 @@ export type { RoomDemandOptions }
 import { EVERY_MEMBER, DEFAULT_TRACK, type EveryMember } from '../../shared/binary.js'
 import { getOrCreate } from 'telefunc/__internal'
 import { ROOM_DEMAND_TTL_MS } from '../constants.js'
-import type { DemandEntry, RoomDemandPage } from '../protocol.js'
+import type { DemandEntry, RoomDemandPage, WatchEntry } from '../protocol.js'
 import { hasEntry, runAll, toggle, toggleEntry } from '../../utils/sets.js'
 import { Slice } from '../../shared/Slice.js'
 import type { PublishedTracks } from './PublishedTracks.js'
@@ -26,8 +26,11 @@ type Report = { instance: string; on: boolean; generation: number }
 /** Whether a reporter's lease, last told in `generation`, is dropped. */
 type LeaseDropped = (instance: string, generation: number) => boolean
 
-/** The handle that owns a member, which hears whether a track of it is wanted. */
-type MemberOwner = { deliverDemand(member: string, track: string, wanted: boolean): void }
+/** The handle that owns a member, which hears whether a track of it is wanted, and each page that starts watching. */
+type MemberOwner = {
+  deliverDemand(member: string, track: string, wanted: boolean): void
+  deliverWatch(member: string, track: string): void
+}
 
 type RoomDemandOptions = {
   /** The members this process owns, by their owning handle, kept current by the replica. */
@@ -79,7 +82,9 @@ class RoomDemand {
     reporter.page = page.page
     let tellsAgain = false
     for (const want of page.wants) {
-      if (!('again' in want)) {
+      if ('watch' in want) {
+        this.watched(want.watch)
+      } else if (!('again' in want)) {
         this.take(instance, want, want.on)
       } else if (want.again) {
         tellsAgain = true
@@ -130,6 +135,15 @@ class RoomDemand {
       for (const track of this.everyTrackOf(entry.member)) this.queue(track, entry.member)
     }
     this.settle()
+  }
+
+  /** A page starts watching: each owned member it watches, on a track told wanted, hears it. */
+  watched({ member, track }: WatchEntry): void {
+    for (const told of track === undefined ? this.told.keys() : [track]) {
+      for (const id of this.told.get(told) ?? []) {
+        if (member === undefined || id === member) this.ownedMembers.get(id)?.deliverWatch(id, told)
+      }
+    }
   }
 
   /** A member this process owns from now on is wanted on each track reported of every member, unless excepted. */

@@ -72,6 +72,7 @@ function heldMemberOf(event: ClientRoomEvent): string | null {
       return event.to
     case 'demand':
     case 'demand-state':
+    case 'watch':
       return event.member
     case 'leave':
     case 'p-meta':
@@ -340,6 +341,9 @@ class ClientRoom extends RoomStateView implements Room {
         return
       case 'demand-state':
         this.localParticipants.get(event.member)?._applyDemandState(event.tracks)
+        return
+      case 'watch':
+        this.localParticipants.get(event.member)?._onWatch(event.track)
         return
       case 'dm': {
         // Relayed from this member's private inbox: only its own stub ever receives it.
@@ -759,6 +763,8 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
         return this._onDemand(msg.track, msg.wanted)
       case 'demand-state':
         return this._applyDemandState(msg.tracks)
+      case 'watch':
+        return this._onWatch(msg.track)
       case 'dm':
         if (msg.ackId === undefined) return this._deliverMessage(inboxMessageFromWire(msg))
         return sendDmReply(this.end, msg.ackId, this._deliverMessageAck(inboxMessageFromWire(msg)))

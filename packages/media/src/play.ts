@@ -4,9 +4,8 @@ export type { Playback, PlaybackStats }
 import type { RemoteParticipant } from '@telefunc/room'
 import { AudioReceiver, type AudioReceiverStats } from './AudioReceiver.js'
 import { audioContext, MemberClock } from './clock.js'
-import { askKeyFrame, keyFrameAsked } from './publish.js'
 import { VideoReceiver, type VideoReceiverStats } from './VideoReceiver.js'
-import { isMediaMessage, MEDIA_TRACK, type Catalog, type SourceCatalog } from './wire.js'
+import { isCatalog, MEDIA_TRACK, type Catalog, type SourceCatalog } from './wire.js'
 
 type PlaybackStats = { video: VideoReceiverStats | null; audio: AudioReceiverStats | null }
 
@@ -62,9 +61,7 @@ class MemberMedia {
   }
 
   private receive(message: unknown): void {
-    if (!isMediaMessage(message)) return
-    // A page that plays a member hears the key frames it asks this page's members for.
-    if (message.__media === 'key') return keyFrameAsked(message)
+    if (!isCatalog(message)) return
     this.catalog = message
     for (const listener of this.listeners) listener()
   }
@@ -150,7 +147,6 @@ class MemberPlayback {
         clock: this.media.clock,
         element: this.element,
         audio: () => audio,
-        requestKeyFrame: (track) => askKeyFrame(this.member.id, track),
       })
       tracks.push(this.video.track)
     }

@@ -58,6 +58,7 @@ abstract class ParticipantBase implements LocalParticipant {
   private leaveListeners: Listeners<(cause: LeaveCause) => unknown> | null = null
   private messageListeners: Listeners<(data: unknown, from: Sender | null) => unknown> | null = null
   private demandListeners: Listeners<(track: string | null, wanted: boolean) => unknown> | null = null
+  private watchListeners: Listeners<(track: string | null) => unknown> | null = null
   private disconnectListeners: Listeners<() => unknown> | null = null
   private reconnectListeners: Listeners<() => unknown> | null = null
   private listenerCleanups: Set<() => void> | null = null
@@ -246,6 +247,15 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal Room-wide demand for one of this member's tracks changed. */
   _onDemand(track: TrackKey, wanted: boolean): void {
     for (const cb of this.demandListeners?.list() ?? []) this.invoke(cb, publicTrack(track), wanted)
+  }
+
+  onWatch(callback: (track: string | null) => void, options?: ListenerOptions): () => void {
+    return this.register((this.watchListeners ??= new Listeners()), callback, options)
+  }
+
+  /** @internal A page started watching one of this member's binary tracks. */
+  _onWatch(track: TrackKey): void {
+    for (const cb of this.watchListeners?.list() ?? []) this.invoke(cb, publicTrack(track))
   }
 
   onDisconnect(callback: () => void, options?: ListenerOptions): () => void {

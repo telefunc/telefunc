@@ -469,10 +469,13 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     if (before) void this.replica.replayText(holder, before).catch(reportRoomError)
   }
 
-  /** One of a holder's binary wants changed: replan the pairs it covers, then replay what it now wants. */
+  /** One of a holder's binary wants changed: replan the pairs it covers, then replay what it now wants and tell its
+   *  members it watches them. */
   onHolderBinaryChanged(holder: LaneHolder, change: BinaryWantChange): void {
     if (this.holdsLanes(holder)) this.lanePlan.binaryChanged(holder, change)
-    if (change.on) void this.replica.replayBinary(holder, change).catch(reportRoomError)
+    if (!change.on) return
+    void this.replica.replayBinary(holder, change).catch(reportRoomError)
+    void this.replica.tellWatch(change).catch(reportRoomError)
   }
 
   /** A stub that is not attached holds no lanes. */
@@ -497,6 +500,12 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     const holder = this.holderOf(member)
     if (holder instanceof ServerLocalParticipant) holder._onDemand(track, wanted)
     else holder?.relayEvent({ __r: 'demand', member, track, wanted })
+  }
+
+  deliverWatch(member: string, track: string): void {
+    const holder = this.holderOf(member)
+    if (holder instanceof ServerLocalParticipant) holder._onWatch(track)
+    else holder?.relayEvent({ __r: 'watch', member, track })
   }
 }
 

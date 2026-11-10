@@ -6,15 +6,17 @@ import { play, publish, type Playback, type PlaybackStats } from '@telefunc/medi
 import type { RemoteParticipant } from '@telefunc/room'
 import { onJoinMeeting } from './Media.telefunc'
 
-type Frames = { checked: number; broken: number; jumps: number; last: number }
+/** `firstMs`: how long after `play()` the first frame showed. */
+type Frames = { checked: number; broken: number; jumps: number; last: number; firstMs: number | null }
 /** What this page shows of each member it plays, by name. */
 /** Whether the tone was heard; else what was loudest when last listened to, and the listening context's state, to tell
  *  why not. */
 type Tone = { heard: boolean; peakHz: number; peakDb: number; context: AudioContextState | null }
 type MeetingResult = Record<string, { stats: PlaybackStats; frames: Frames; tone: Tone }>
 
-/** `?room=…&name=…&height=…`: joins room `room` as `name`, publishes a test picture and tone, and plays every other
- *  member in a `<video>` `height` px tall, reading what each shown frame says. */
+/** `?room=…&name=…&height=…&publish=…`: joins room `room` as `name`, publishes a test picture and tone unless `publish`
+ *  is `false`, and plays every other member in a `<video>` `height` px tall, reading what each shown frame says, until
+ *  `meetingLeave()`. */
 function Meeting() {
   const [hydrated, setHydrated] = useState(false)
   const tiles = useRef<HTMLDivElement>(null)
@@ -23,9 +25,10 @@ function Meeting() {
   async function join() {
     const params = new URLSearchParams(location.search)
     const { room, me } = await onJoinMeeting(params.get('room')!, params.get('name')!)
-    publish(me, testSource())
+    const publication = params.get('publish') === 'false' ? null : publish(me, testSource())
     const shown: Record<string, { playback: Playback; frames: Frames; tone: Tone }> = {}
-    ;(window as unknown as { meetingResult(): MeetingResult }).meetingResult = () =>
+    const page = window as unknown as { meetingResult(): MeetingResult; meetingLeave(): Promise<void> }
+    page.meetingResult = () =>
       Object.fromEntries(
         Object.entries(shown).map(([name, { playback, frames, tone }]) => [
           name,
@@ -42,7 +45,13 @@ function Meeting() {
       shown[member.meta.name] = { playback: play(member, video), frames: readFrames(video), tone: hearTone(video) }
     }
     for (const member of await room.getParticipants()) show(member)
-    room.onJoin(show)
+    const stopShowing = room.onJoin(show)
+    page.meetingLeave = async () => {
+      stopShowing()
+      publication?.stop()
+      for (const { playback } of Object.values(shown)) playback.stop()
+      await me.leave()
+    }
   }
 
   return (
@@ -91,11 +100,13 @@ function testSource(): MediaStream {
 /** Reads each frame `video` shows: its number, and whether its complement agrees, as a frame decoded without the one
  *  before it smears what changed between them. */
 function readFrames(video: HTMLVideoElement): Frames {
-  const frames: Frames = { checked: 0, broken: 0, jumps: 0, last: -1 }
+  const frames: Frames = { checked: 0, broken: 0, jumps: 0, last: -1, firstMs: null }
+  const playedAt = performance.now()
   const canvas = document.createElement('canvas')
   const context = canvas.getContext('2d', { willReadFrequently: true })!
   const next = () =>
     video.requestVideoFrameCallback(() => {
+      frames.firstMs ??= Math.round(performance.now() - playedAt)
       const { videoWidth: width, videoHeight: height } = video
       canvas.width = width
       canvas.height = height
