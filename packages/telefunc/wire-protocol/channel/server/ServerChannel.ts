@@ -453,6 +453,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = null
     this.peer = peer
+    this._replayBuffer?.moving()
     this.receiveCredit.attach(peer.sender.sendWait())
     this.offlineBuffer.flush(peer)
     this.sendPendingAckRes(peer)
@@ -689,6 +690,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // The page sends CLOSE_ACK when the close request arrives, so it has everything sent before it, or takes no more of it.
     this.onPageHas(this.closeRequestSeq)
     this.lifecycle.closeAckReceived()
+  }
+
+  /** @internal The page began moving to another wire: an upgrade's PREPARE. */
+  _onPageMoving(): void {
+    this._replayBuffer?.moving()
   }
 
   /** @internal The wire of `peer` went away. A channel a later RECONCILE already moved to another wire stays there. */

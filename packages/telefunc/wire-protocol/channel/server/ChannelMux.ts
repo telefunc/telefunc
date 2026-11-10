@@ -546,8 +546,11 @@ class ChannelMux implements UpgradeStagesOwner {
   private handlePrepare(entry: WireEntry, payload: PreparePayload, rawByteLength: number): null {
     const { wire } = entry
     assertProtocol(!entry.transport.getSessionId(wire), 'PREPARE on a reconciled wire')
-    assertProtocol(this.sessions.peekSession(payload.sessionId), 'PREPARE for an unknown session')
+    const session = this.sessions.peekSession(payload.sessionId)
+    assertProtocol(session, 'PREPARE for an unknown session')
     this.stages.stage(wire, payload, rawByteLength)
+    // From the READY on, the page holds back what it would send on its old wire, its confirmations included.
+    for (const { channel } of session.values()) channel._onPageMoving()
     entry.sender.send(encode.ready({ upgradeId: payload.upgradeId }))
     return null
   }

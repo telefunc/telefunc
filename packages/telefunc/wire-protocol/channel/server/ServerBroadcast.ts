@@ -237,8 +237,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
    *  isn't: that comes within a round trip of an idle link, and it measures the round trip. */
   private isBehind(): boolean {
     const replay = this._replayBuffer
-    if (this.peer === null || !replay || replay.oldestPublishAt === undefined) return false
-    return performance.now() - replay.oldestPublishAt > this.peer.sender.behindAfter(replay.leastConfirmMs)
+    if (this.peer === null || !replay || replay.unconfirmedSince === undefined) return false
+    return performance.now() - replay.unconfirmedSince > this.peer.sender.behindAfter(replay.leastConfirmMs)
   }
 
   private sendHeld(): void {

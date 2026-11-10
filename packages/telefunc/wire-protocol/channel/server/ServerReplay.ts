@@ -16,6 +16,8 @@ class ServerReplay {
   private readonly holder: MemoryHolder
   private issuedSeq = 0
   private pushedSeq = 0
+  /** When its page last began moving to a wire: what it hadn't confirmed then is confirmed over that wire. */
+  private movedAt = 0
 
   constructor(holder: MemoryHolder) {
     this.holder = holder
@@ -56,7 +58,8 @@ class ServerReplay {
       newest = this.publishes.shift()
       this.letPublishGo(newest)
     }
-    if (newest === undefined) return
+    // Sent before the wire its confirmation came on: its page may have had it long before.
+    if (newest === undefined || newest.at < this.movedAt) return
     const confirmMs = performance.now() - newest.at
     this.leastConfirmMs = alone ? confirmMs : Math.min(this.leastConfirmMs, confirmMs)
   }
@@ -102,9 +105,15 @@ class ServerReplay {
     return waiting
   }
 
-  /** When the oldest publish its page hasn't confirmed was sent, `undefined` with none. */
-  get oldestPublishAt(): number | undefined {
-    return this.publishes.length > 0 ? this.publishes.at(0).at : undefined
+  /** Its page began moving to a wire, or attached one: what it hasn't confirmed is confirmed over that wire. */
+  moving(): void {
+    this.movedAt = performance.now()
+  }
+
+  /** Since when the oldest publish its page hasn't confirmed waits for that: since it was sent, or since its page began
+   *  moving to the wire that confirms it. `undefined` with none. */
+  get unconfirmedSince(): number | undefined {
+    return this.publishes.length > 0 ? Math.max(this.publishes.at(0).at, this.movedAt) : undefined
   }
 
   /** The body of the newest publish it holds. */
