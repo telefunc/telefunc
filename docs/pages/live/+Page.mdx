@@ -181,7 +181,7 @@ When many queries change at once, for example a public feed watched by thousands
 
 > Identical queries (same SQL, same parameters) refetching at the same time run once on the database. Your telefunction still runs for each client, with its permission checks.
 
-> After a statement changes a session setting (`SET`, `set_config()`), identical queries no longer share a run: a setting can change what a query returns.
+> After a statement that may change a session setting (`SET`, `set_config()`, a `DO` block, a procedure or a function of yours), identical queries no longer share a run: a setting can change what a query returns.
 
 > Bun and Deno don't report how busy the server is: there, clients are told right away.
 

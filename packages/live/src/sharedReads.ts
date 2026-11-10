@@ -52,8 +52,8 @@ type InFlight = { read: WatchedRead; joiners: ((answer: { result: unknown } | un
  * The live reads running now on one database, by what makes two of them return the same rows: the statement sent,
  * its parameters, and the form the driver returns rows in. Sessions are part of it too: two connections of one
  * wrapped database start alike, and every statement on them is seen, so a database stops sharing reads for good once
- * any statement changes a session (`SET`, `set_config()`, `DISCARD`). A read in a transaction never shares: it sees
- * the transaction's writes and snapshot.
+ * any statement may have changed a session (`SET`, `set_config()`, `DISCARD`, a `DO` block, a procedure, a function of
+ * the app's, `ALTER ROLE … SET`). A read in a transaction never shares: it sees the transaction's writes and snapshot.
  *
  * The first read runs; one arriving while it runs gets a copy of its result and watches it, so N clients refetching
  * one query send it once. Each telefunction still runs, with its own checks, for each client.

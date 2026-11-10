@@ -44,8 +44,8 @@ type Plan =
   | WritePlan
   | { kind: 'transaction'; action: TransactionAction; savepoint?: string }
   /** A statement whose changes aren't captured row by row: every listed table may have changed. `changesSession`: it
-   *  may also change settings of its session (`set_config()`, `DISCARD`). */
-  | { kind: 'unknownWrite'; tables: TableSet; schemaChange: boolean; changesSession?: true }
+   *  may also change settings of its session (`set_config()`, `DISCARD`), or those new sessions start with. */
+  | { kind: 'unknownWrite'; tables: TableSet; schemaChange: boolean; changesSession?: boolean }
   /** `SET`, `RESET`: the settings of its session change (a role, a `search_path`, what a row level security policy
    *  reads). */
   | { kind: 'session' }
@@ -53,6 +53,9 @@ type Plan =
   | { kind: 'several'; plans: Plan[] }
 
 const HIDDEN_PREFIX = '__live_'
+
+/** Statements that may set a session's settings (they run any code), or those new sessions start with. */
+const SETS_SESSIONS = new Set(['DoStmt', 'CallStmt', 'ExecuteStmt', 'AlterRoleSetStmt', 'AlterDatabaseSetStmt'])
 
 function planStatement(text: string, catalog: Catalog): Plan {
   const statements = parseStatements(text)
@@ -67,12 +70,12 @@ function planOne(statement: Node, text: string | undefined, catalog: Catalog): P
   const [kind, node] = Object.entries(statement)[0] as [string, Node]
   const functions = functionNamesIn(node)
   const volatile = functions.some((name) => catalog.volatileFunctions.has(name))
+  // `set_config()` sets a setting of the session; so may any function of the app's.
+  const changesSession = volatile || functions.includes('set_config')
   const writingCte = ((node.withClause?.ctes ?? []) as Node[]).some((c) => !c.CommonTableExpr.ctequery.SelectStmt)
-  if (volatile || writingCte) {
+  if (changesSession || writingCte) {
     const tables = volatile ? 'all' : writtenTables(node, catalog)
-    if (functions.includes('set_config'))
-      return { kind: 'unknownWrite', tables, schemaChange: false, changesSession: true }
-    return { kind: 'unknownWrite', tables, schemaChange: false }
+    return { kind: 'unknownWrite', tables, schemaChange: false, changesSession }
   }
   switch (kind) {
     case 'SelectStmt':
@@ -110,7 +113,7 @@ function planOne(statement: Node, text: string | undefined, catalog: Catalog): P
     }
     default:
       // Schema changes, `CALL`, `DO`, `EXECUTE`, `REFRESH MATERIALIZED VIEW`, ...: anything may have changed.
-      return { kind: 'unknownWrite', tables: 'all', schemaChange: true }
+      return { kind: 'unknownWrite', tables: 'all', schemaChange: true, changesSession: SETS_SESSIONS.has(kind) }
   }
 }
 
