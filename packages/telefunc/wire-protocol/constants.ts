@@ -161,6 +161,9 @@ export const WIRE_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
  *  list no more, and the control-frame byte cap below is derived from it. (The wire could address
  *  65 536 — a u16 index — but that is exhaustion, not a working limit.) */
 export const MAX_CHANNELS_PER_CONNECTION = 4_096
+/** The most domains (see `TAG.DOMAIN`) one channel opens: past it, a stream stays on the channel, so that a page with
+ *  many channels of many streams stays within `MAX_CHANNELS_PER_CONNECTION`. */
+export const MAX_DOMAINS_PER_CHANNEL = 256
 
 /** Largest wire control frame the server will decode, checked on the raw bytes. Derived, never picked:
  *  the biggest legitimate one lists every channel at the id cap, and a cap that refuses a legal

@@ -2,18 +2,24 @@ export { ServerBroadcastEnd }
 export type { BroadcastEndOwner }
 
 import { ServerChannel } from './ServerChannel.js'
-import { getChannelMux } from './ChannelMux.js'
+import { getChannelMux, type ChannelMux } from './ChannelMux.js'
 import { assert } from '../../../utils/assert.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import { maxPendingBytesOf, type MemoryHolder } from './channelMemory.js'
 import { LossyDelivery } from './LossyDelivery.js'
 import type { PublishBody } from './PublishBody.js'
-import { CHANNEL_RECONNECT_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
+import { CHANNEL_RECONNECT_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES, MAX_DOMAINS_PER_CHANNEL } from '../../constants.js'
 import { ChannelOverflowError, isChannelOverflowError } from '../channelErrors.js'
 import { isShieldValidationError } from '../../../shared/ShieldValidationError.js'
-import { ACK_STATUS, ERROR_REASON, type AckResultStatus } from '../../wire/frame.js'
-import type { BroadcastKind, AttachState } from '../../wire/payloads.js'
+import { ACK_STATUS, ERROR_REASON, encode, type AckResultStatus } from '../../wire/frame.js'
+import {
+  parseDomainRequest,
+  type BroadcastKind,
+  type AttachState,
+  type DomainAnnouncement,
+} from '../../wire/payloads.js'
 import type { ChannelCloseOptions, ChannelCloseResult } from '../channel.js'
+import { assertProtocol } from '../../wire/protocolViolation.js'
 
 const NOT_EVEN_NEWEST = 'the server could not hold even the newest message for its client'
 const FELL_BEHIND = 'its client fell behind what the server holds for it; `lossy: true` lets it skip to the newest'
@@ -40,6 +46,11 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   private lastPeer: IndexedPeer | null = null
   /** Why it ends, where `shed` couldn't tell its page yet: see `shed`. */
   private overflowed: string | null = null
+  /** Its streams' domains (see `TAG.DOMAIN`), by stream: each a channel to its page that carries the stream's
+   *  publishes, so that no other stream's loss delays them. */
+  private readonly domains = new Map<string, ServerBroadcastEnd>()
+  /** The end whose stream it carries, where it is a domain: it lives, overflows and takes page publishes as that end. */
+  private parent: ServerBroadcastEnd | null = null
   /** Its lossy streams' publishes on their way to its page. */
   private readonly lossy = new LossyDelivery({ holder: this, onSkip: () => this.owner?._onPublishesMissed?.() })
 
@@ -71,6 +82,10 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   deliver(body: PublishBody): void {
     this.endOverflowed()
     if (this._phase === 'ended') return
+    // A domain carries its stream's bodies itself.
+    const domain =
+      body.domain === null || this.parent !== null ? undefined : this.domainOf(body.domain, body.lossyStream !== null)
+    if (domain) return domain.deliver(body)
     if (body.lossyStream !== null) return this.deliverLossy(body, body.lossyStream)
     this.forward(body)
     const share = this.share()
@@ -86,6 +101,51 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   private forward(body: PublishBody): void {
     if (this.lastPeer) this.lastPeer.sendPublish(body)
     else this.offlineBuffer.pushPublish(body)
+  }
+
+  /** `stream`'s domain, opened and announced to its page the first time; undefined past `MAX_DOMAINS_PER_CHANNEL`, where
+   *  the stream stays on this channel. */
+  private domainOf(stream: string, lossy: boolean): ServerBroadcastEnd | undefined {
+    const open = this.domains.get(stream)
+    if (open !== undefined || this.domains.size >= MAX_DOMAINS_PER_CHANNEL) {
+      return open
+    }
+    const owner = this.owner
+    assert(owner)
+    const domain = new ServerBroadcastEnd()
+    domain.parent = this
+    domain.setOwner({
+      _onPagePublish: (serialized) => owner._onPagePublish(serialized),
+      _onPagePublishBinary: (data) => owner._onPagePublishBinary(data),
+      _onPublishesMissed: () => owner._onPublishesMissed?.(),
+    })
+    // One opened before this end registered registers with it.
+    if (this.didRegister) this.registerDomain(domain)
+    this.domains.set(stream, domain)
+    this.announce({ stream, channelId: domain.id, lossy })
+    return domain
+  }
+
+  /** On the mux, so the page that learns of it attaches it there. */
+  private registerDomain(domain: ServerBroadcastEnd): void {
+    if (this.mux) this.mux.registerChannel(domain)
+    else domain._registerChannel()
+  }
+
+  /** The page asks for the domain of a stream it publishes on. An open one was announced as it opened, before or after
+   *  the page asked; past the cap, an announcement of none answers. */
+  protected override onPeerDomainRequest(text: string): void {
+    // Else a page could open domains of domains, past every cap.
+    assertProtocol(this.parent === null, 'DOMAIN on a domain')
+    const { stream } = parseDomainRequest(text)
+    if (this.domainOf(stream, false) === undefined) this.announce({ stream, channelId: null, lossy: false })
+  }
+
+  /** Sequenced on its own channel, so its page learns of a domain in order with what this channel carries. */
+  private announce(announcement: DomainAnnouncement): void {
+    const text = JSON.stringify(announcement)
+    if (this.lastPeer) this.lastPeer.sendSequenced(encode.domain, text)
+    else this.offlineBuffer.pushDomain(text)
   }
 
   /** A graceful close goes behind every publish its page is due; an abort may drop them. */
@@ -146,6 +206,7 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   }
 
   private overflow(why: string): void {
+    if (this.parent) return this.parent.overflow(why)
     this.overflowed ??= why
     if (getChannelMux() === this.mux) this.endOverflowed()
   }
@@ -153,6 +214,12 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   private endOverflowed(): void {
     if (this.overflowed === null) return
     this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(`Broadcast closed: ${this.overflowed}`))
+  }
+
+  /** @internal Its domains that opened before it registered register with it. */
+  override _registerChannel(mux?: ChannelMux): void {
+    super._registerChannel(mux)
+    for (const domain of this.domains.values()) this.registerDomain(domain)
   }
 
   override _attachPeer(peer: IndexedPeer, state?: AttachState): void {
@@ -176,6 +243,8 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   }
 
   protected override shutdown(err?: Error, options?: { pageGone?: boolean }): void {
+    for (const domain of this.domains.values()) domain._end(err)
+    this.domains.clear()
     this.lossy.drop()
     this.lastPeer = null
     super.shutdown(err, options)

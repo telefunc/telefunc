@@ -61,6 +61,11 @@ class ServerChannelBuffer<TAck = never> {
     this.pushSend(TAG.BINARY_ACK_REQ, new Uint8Array(data), data.byteLength, { resolve, reject })
   }
 
+  /** A domain's announcement (`DomainAnnouncement`) to a page that never attached. */
+  pushDomain(announcement: string): void {
+    this.pushSend(TAG.DOMAIN, announcement, utf8ByteLength(announcement), null)
+  }
+
   /** A publish to a page that never attached: until it does, its channel has no index for the head. */
   pushPublish(body: PublishBody): void {
     this.pushSend(TAG.PUBLISH, body, body.frame.byteLength, null)

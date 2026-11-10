@@ -116,7 +116,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal `closing` once `close`, `abort` or the page's CLOSE starts the close; `ended` once `shutdown` ran. */
   _phase: 'open' | 'closing' | 'ended' = 'open'
-  private didRegister = false
+  protected didRegister = false
   protected peer: IndexedPeer | null = null
   private readonly listeners = new Listeners<ChannelListener<ClientToServer>>()
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
@@ -515,6 +515,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       case TAG.PUBLISH_BINARY_ACK_REQ:
         void this._onPeerPublishBinaryAckReqMessage(frame.data, frame.seq)
         return
+      case TAG.DOMAIN:
+        this.onPeerDomainRequest(frame.text)
+        return
       case TAG.PUBLISH:
       case TAG.PUBLISH_BINARY:
       case TAG.PUBLISH_TO:
@@ -568,6 +571,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
   protected onPeerSubscription(_kind: BroadcastKind, _on: boolean): void {
     throw new ProtocolViolationError('BROADCAST_SUB on a channel that is no broadcast')
+  }
+  protected onPeerDomainRequest(_text: string): void {
+    throw new ProtocolViolationError('DOMAIN on a channel that is no broadcast')
   }
 
   protected onPeerMessage(text: string, bytes: number): void {
@@ -819,6 +825,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       case TAG.PUBLISH:
         assert(data instanceof PublishBody)
         peer.sendPublish(data)
+        break
+      case TAG.DOMAIN:
+        assert(typeof data === 'string')
+        peer.sendSequenced(encode.domain, data)
         break
     }
   }

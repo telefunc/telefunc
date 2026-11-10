@@ -81,6 +81,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   readonly key: string | undefined
   readonly _maxFrameBytes: number
   protected connection: MuxConnection
+  /** What it joined its connection with, which a channel of the same page joins it with too. */
+  protected readonly connectionOptions: ConnectionOptions
   private readonly listeners = new Listeners<ChannelListener<ServerToClient>>()
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
   protected stopped = false
@@ -103,6 +105,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     connection,
   }: ClientChannelOptions) {
     this.id = channelId
+    this.connectionOptions = connection
     this.ack = ack
     this.key = key
     this._maxFrameBytes = maxFrameBytes

@@ -9,19 +9,28 @@ class PublishBody {
   readonly frame: Uint8Array<ArrayBuffer>
   /** The stream within which a newer body takes this one's place while no wire has it; null if its page may not miss it. */
   readonly lossyStream: string | null
+  /** The stream whose publishes reach a page on a channel of their own, its domain (see `TAG.DOMAIN`), so that no other
+   *  stream's loss delays them; null for those that travel on their subscriber's channel. */
+  readonly domain: string | null
   /** The holders of this body, which the ledger counts once. */
   refs = 0
 
-  constructor(frame: Uint8Array<ArrayBuffer>, lossyStream: string | null) {
+  constructor(frame: Uint8Array<ArrayBuffer>, lossyStream: string | null, domain: string | null) {
     this.frame = frame
     this.lossyStream = lossyStream
+    this.domain = domain
   }
 }
 
 /** The body of a publish at `info`, admitted before anyone holds it: one per delivery, whoever it goes to. */
-function publishBody(payload: string | Uint8Array, info: WirePublishInfo, lossyStream: string | null): PublishBody {
+function publishBody(
+  payload: string | Uint8Array,
+  info: WirePublishInfo,
+  lossyStream: string | null,
+  domain: string | null = null,
+): PublishBody {
   const frame = typeof payload === 'string' ? encode.publish(payload, info) : encode.publishBinary(payload, info)
-  const body = new PublishBody(frame, lossyStream)
+  const body = new PublishBody(frame, lossyStream, domain)
   admitPublish(body)
   return body
 }

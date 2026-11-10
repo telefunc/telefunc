@@ -23,8 +23,24 @@ import { classifyTelefuncError } from '../errorClassification.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { forListener } from '../listenerAnswer.js'
 import { ClientChannel, reportChannelError, type ClientChannelOptions } from './ClientChannel.js'
+import type { DomainAnnouncement, DomainRequest } from '../../wire/payloads.js'
+import { createDeferred, type Deferred } from '../../../utils/createDeferred.js'
 
-type ClientBroadcastOptions = ClientChannelOptions & { lossy?: boolean }
+type ClientBroadcastOptions = ClientChannelOptions & {
+  lossy?: boolean
+  /** The broadcast whose stream it carries, where it is a domain (see `TAG.DOMAIN`). */
+  parent?: ClientBroadcast<any>
+}
+
+/** A stream's domain: the broadcast that carries it, or null where it stays on its own channel. */
+type Domain = ClientBroadcast<any> | null
+
+/** A domain this page asked for, whether the server answered, and the newest publish of a lossy stream waiting for it. */
+type AskedDomain = {
+  answer: Deferred<Domain>
+  answered: boolean
+  newestLossy?: { data: Uint8Array; receipt: Promise<ChannelPublishAck> }
+}
 
 /** A publish of a lossy stream that may still wait to go, under its seq. */
 type NewestPublish = { seq: number; receipt: Promise<ChannelPublishAck> }
@@ -37,10 +53,17 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly lossy: boolean
   /** This page's newest publish of each lossy stream, while it isn't settled. */
   private readonly newestPublishes = new Map<string, NewestPublish>()
+  /** Its streams' domains, as the server announced them. */
+  private readonly domains = new Map<string, Domain>()
+  /** The domains this page asked for to publish on, till the server's answer is in `domains`. */
+  private readonly askedDomains = new Map<string, AskedDomain>()
+  /** Where it is a domain: the broadcast whose listeners get its publishes, and whose life it shares. */
+  private readonly parent: ClientBroadcast<any> | null
 
   constructor(options: ClientBroadcastOptions) {
     super(options)
     this.lossy = options.lossy === true
+    this.parent = options.parent ?? null
     // Nothing waits on a publish's credit, so the page grants the largest window from the start.
     this.receiveCredit.widenByteWindow()
     this._attach.declareSubscriptions(this.subscribed)
@@ -106,13 +129,77 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return reportingUnexpected(this._publishBinaryUnreported(data))
   }
 
-  /** @internal A publish that leaves reporting its rejection to the caller. */
+  /** @internal A publish that leaves reporting its rejection to the caller. With `domain`, it goes on that stream's
+   *  domain, once the server named it. */
   _publishBinaryUnreported(
     data: Uint8Array,
     lossyStream: string | null = this.lossy ? 'binary' : null,
+    domain: string | null = null,
   ): Promise<ChannelPublishAck> {
     if (this.stopped) throw new ChannelClosedError()
-    return this.sendPublish(encode.publishBinaryAckReq, data, lossyStream)
+    if (domain === null) return this.sendPublish(encode.publishBinaryAckReq, data, lossyStream)
+    const on = this.domainOf(domain)
+    if (!isPromise(on)) return (on ?? this)._publishBinaryUnreported(data, lossyStream)
+    // Publishes of a stream go in order, those that wait for its domain first.
+    if (lossyStream === null) return on.then((domain) => (domain ?? this)._publishBinaryUnreported(data, null))
+    // Of a lossy one only the newest waits: an older one gets the newer one's receipt.
+    const asked = this.askedDomains.get(domain)!
+    if (asked.newestLossy) {
+      asked.newestLossy.data = data
+      return asked.newestLossy.receipt
+    }
+    const newest: NonNullable<AskedDomain['newestLossy']> = {
+      data,
+      receipt: on.then((domain) => {
+        asked.newestLossy = undefined
+        return (domain ?? this)._publishBinaryUnreported(newest.data, lossyStream)
+      }),
+    }
+    asked.newestLossy = newest
+    return newest.receipt
+  }
+
+  /** `stream`'s domain, or the wait for the server's answer to this page's request for it. */
+  private domainOf(stream: string): Domain | Promise<Domain> {
+    if (this.domains.has(stream)) return this.domains.get(stream)!
+    const asked = this.askedDomains.get(stream)
+    if (asked) return asked.answer.promise
+    const answer = createDeferred<Domain>()
+    this.askedDomains.set(stream, { answer, answered: false })
+    // Its first reaction, so the publishes that wait for the answer go before any that finds the domain known.
+    answer.promise.then(
+      (domain) => this.knowDomain(stream, domain),
+      () => {},
+    )
+    const request: DomainRequest = { stream }
+    this.connection.sendSequenced(this, 'data', encode.domain, JSON.stringify(request))
+    return answer.promise
+  }
+
+  /** The server names `stream`'s domain. A replay names it again, which changes nothing. */
+  private onPeerDomain(text: string): void {
+    const { stream, channelId, lossy } = JSON.parse(text) as DomainAnnouncement
+    const asked = this.askedDomains.get(stream)
+    if (this.domains.has(stream) || asked?.answered) return
+    const domain =
+      channelId === null
+        ? null
+        : new ClientBroadcast({
+            channelId,
+            lossy,
+            parent: this,
+            maxFrameBytes: this._maxFrameBytes,
+            connection: this.connectionOptions,
+          })
+    if (asked === undefined) return this.knowDomain(stream, domain)
+    asked.answered = true
+    asked.answer.resolve(domain)
+  }
+
+  private knowDomain(stream: string, domain: Domain): void {
+    this.askedDomains.delete(stream)
+    if (this.stopped) return domain?._end()
+    this.domains.set(stream, domain)
   }
 
   /** Of `lossyStream`, once its uplink is behind, a publish that still waits to go takes the newer one's data in its
@@ -150,6 +237,10 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this.subscribers.text.clear()
     this.subscribers.binary.clear()
     this.newestPublishes.clear()
+    for (const domain of this.domains.values()) domain?._end(err)
+    this.domains.clear()
+    for (const { answer } of this.askedDomains.values()) answer.reject(err ?? new ChannelClosedError())
+    this.askedDomains.clear()
   }
 
   /** The first listener of a kind subscribes the wire, and the last one's removal unsubscribes it. */
@@ -168,11 +259,20 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     })
   }
 
+  /** The broadcast whose listeners get its publishes: itself, or the one whose domain it is. */
+  private get root(): ClientBroadcast<any> {
+    return this.parent ?? this
+  }
+
   private sendReplyData(data: unknown): void {
     this.sendCredit.countSent(this.connection.sendSequenced(this, 'data', encode.text, stringify(data)))
   }
 
   protected override dispatchDataFrame(frame: ChannelDataFrame): void {
+    if (frame.tag === TAG.DOMAIN) {
+      this.onPeerDomain(frame.text)
+      return
+    }
     if (frame.tag === TAG.PUBLISH) {
       this.onPeerPublish(frame.text, frame.info, frame.bytes)
       return
@@ -188,12 +288,12 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private onPeerPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
     const parsed = parse(data) as ChannelData<T>
-    this.deliverPublish(this.subscribers.text.list(), () => parsed, wireInfo, bytes)
+    this.deliverPublish(this.root.subscribers.text.list(), () => parsed, wireInfo, bytes)
   }
 
   private onPeerPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
-    const list = this.subscribers.binary.list()
+    const list = this.root.subscribers.binary.list()
     this.deliverPublish(list, (i) => forListener(data, list, i, HEADER + PUBLISH_BINARY_HEADER), wireInfo, bytes)
   }
 
@@ -205,13 +305,14 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     wireInfo: WirePublishInfo,
     bytes: number,
   ): void {
-    const info = { key: this.key!, seq: wireInfo.seq, timestamp: wireInfo.timestamp }
+    const { root } = this
+    const info = { key: root.key!, seq: wireInfo.seq, timestamp: wireInfo.timestamp }
     for (const [i, cb] of listeners.entries()) {
       try {
         const result = cb(valueFor(i), info)
-        if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
+        if (isPromise(result)) result.catch((err: unknown) => root.lifecycle.handleCallbackError(err))
       } catch (err) {
-        if (this.lifecycle.handleCallbackError(err)) return
+        if (root.lifecycle.handleCallbackError(err)) return
       }
     }
     this.receiveCredit.onPublishConsumed(bytes)

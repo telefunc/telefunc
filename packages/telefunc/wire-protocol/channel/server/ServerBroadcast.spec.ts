@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { ServerBroadcastEnd } from './ServerBroadcastEnd.js'
+import type { ChannelMux } from './ChannelMux.js'
 import { publishBody } from './PublishBody.js'
 import { ServerReplay } from './ServerReplay.js'
-import { ACK_STATUS, decode } from '../../wire/frame.js'
+import { ACK_STATUS, decode, encode, type ChannelFrame } from '../../wire/frame.js'
+import type { DomainAnnouncement } from '../../wire/payloads.js'
+import { MAX_DOMAINS_PER_CHANNEL } from '../../constants.js'
 import { TAG } from '../../wire/tags.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { configureBroadcastTransport, disposeBackend } from '../../backend/install.js'
@@ -266,7 +269,97 @@ describe('ServerBroadcastEnd', () => {
 
     expect(frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>).tag)).toEqual([TAG.PUBLISH_TO, TAG.PUBLISH])
   })
+  it('opens a domain per stream, announced in order with what its channel carries', () => {
+    const { end, frames } = attachedEnd()
+    end.deliver(publishBody(new Uint8Array([1]), { seq: 1, timestamp: 1 }, 'cam', 'cam'))
+    end.deliver(publishBody('"event"', { seq: 2, timestamp: 1 }, null))
+    end.deliver(publishBody(new Uint8Array([2]), { seq: 3, timestamp: 1 }, null, 'mic'))
+    end.deliver(publishBody(new Uint8Array([3]), { seq: 4, timestamp: 1 }, 'cam', 'cam'))
+
+    const decoded = frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>))
+    expect(decoded.map((frame) => frame.tag)).toEqual([TAG.DOMAIN, TAG.PUBLISH_TO, TAG.PUBLISH, TAG.DOMAIN])
+    const [cam, mic] = announcements(frames)
+    expect(cam).toMatchObject({ stream: 'cam', lossy: true })
+    expect(mic).toMatchObject({ stream: 'mic', lossy: false })
+    expect(typeof cam!.channelId).toBe('string')
+    expect(cam!.channelId).not.toBe(mic!.channelId)
+  })
+
+  it("answers its page's request for a domain, and past the cap with none", () => {
+    const { end, frames } = attachedEnd()
+    const ask = (stream: string, seq: number) =>
+      end._dispatchFrame(decode(encode.domain(7, JSON.stringify({ stream }), seq)) as ChannelFrame)
+
+    ask('mine', 1)
+    for (let i = 1; i < MAX_DOMAINS_PER_CHANNEL; i++) {
+      end.deliver(publishBody(new Uint8Array([i]), { seq: i, timestamp: 1 }, null, `track-${i}`))
+    }
+    // Asked again, an open domain isn't announced twice: the page has its first announcement.
+    ask('mine', 2)
+    ask('one too many', 3)
+
+    const asked = announcements(frames).filter(({ stream }) => stream === 'mine' || stream === 'one too many')
+    expect(asked.map(({ stream, channelId }) => ({ stream, named: channelId !== null }))).toEqual([
+      { stream: 'mine', named: true },
+      { stream: 'one too many', named: false },
+    ])
+  })
+
+  it('registers its domains on its mux, one opened before it registered as it registers', () => {
+    const registered: string[] = []
+    const mux = { registerChannel: (channel: ServerBroadcastEnd) => registered.push(channel.id) }
+    const end = new ServerBroadcastEnd()
+    end.setOwner({ _onPagePublish() {}, _onPagePublishBinary() {} })
+
+    end.deliver(publishBody(new Uint8Array([1]), { seq: 1, timestamp: 1 }, null, 'cam'))
+    expect(registered).toHaveLength(0)
+    end._registerChannel(mux as unknown as ChannelMux)
+    end.deliver(publishBody(new Uint8Array([2]), { seq: 2, timestamp: 1 }, null, 'mic'))
+
+    expect(new Set(registered).size).toBe(2)
+  })
 })
+
+/** An end attached on index 7, and the frames it sent. */
+function attachedEnd() {
+  const end = new ServerBroadcastEnd()
+  end.setOwner({ _onPagePublish() {}, _onPagePublishBinary() {} })
+  end._registerChannel()
+  const frames: Uint8Array[] = []
+  end._attachPeer(
+    new IndexedPeer({
+      sender: withLossyLane({
+        send: (frame) => {
+          frames.push(frame)
+        },
+        carry() {},
+        bufferedAmount: () => 0,
+        deliveredBefore: () => 0,
+        terminate() {},
+        sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+        queue: {
+          waitingPublishes: () => 0,
+          dropWaitingPublishes() {},
+          dropWaitingFromPublish() {},
+          drainRate: () => 0,
+          acknowledged: () => true,
+          unhandedBytes: 0,
+          path: new PathEstimate({ reportGap: 0 }),
+        },
+      }),
+      index: 7,
+      replay: new ServerReplay({ heldBytes: 0 }),
+    }),
+  )
+  return { end, frames }
+}
+
+function announcements(frames: Uint8Array[]): DomainAnnouncement[] {
+  return frames.flatMap((frame) => {
+    const decoded = decode(frame as Uint8Array<ArrayBuffer>)
+    return decoded.tag === TAG.DOMAIN ? [JSON.parse(decoded.text) as DomainAnnouncement] : []
+  })
+}
 
 // ───────────────────────────────────────────────────────────────────────────
 // Channel-method gating — the type hides send/listen/sendBinary/listenBinary,

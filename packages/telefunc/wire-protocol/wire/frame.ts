@@ -107,6 +107,7 @@ type ChannelDataFrame = { index: number; seq: number; bytes: number } & (
   | { tag: typeof TAG.PUBLISH_BINARY; data: Uint8Array; info: WirePublishInfo }
   | { tag: typeof TAG.PUBLISH_BINARY_ACK_REQ; data: Uint8Array }
   | { tag: typeof TAG.PUBLISH_TO }
+  | { tag: typeof TAG.DOMAIN; text: string }
 )
 
 type ChannelCtrlFrame =
@@ -208,6 +209,7 @@ const encode = {
     return frame
   },
   publishTo: (index: number, seq: number) => encodeBareFrame(TAG.PUBLISH_TO, index, seq),
+  domain: (index: number, text: string, seq: number) => encodeTextFrame(TAG.DOMAIN, index, text, seq),
   publishBinaryAckReq: (index: number, data: Uint8Array, seq: number) =>
     encodeBinaryFrame(TAG.PUBLISH_BINARY_ACK_REQ, index, data, seq),
   binaryAckReq: (index: number, data: Uint8Array, seq: number) =>
@@ -457,6 +459,8 @@ function decode(frame: Uint8Array): DecodedFrame {
       return { tag: TAG.BINARY, index, seq, bytes, data: payload }
     case TAG.TEXT_ACK_REQ:
       return { tag: TAG.TEXT_ACK_REQ, index, seq, bytes, text: textDecoder.decode(payload) }
+    case TAG.DOMAIN:
+      return { tag: TAG.DOMAIN, index, seq, bytes, text: textDecoder.decode(payload) }
     case TAG.BINARY_ACK_REQ:
       return { tag: TAG.BINARY_ACK_REQ, index, seq, bytes, data: payload }
     case TAG.PUBLISH: {
@@ -607,6 +611,7 @@ const CLIENT_TAGS: ReadonlySet<number> = new Set([
   TAG.ACK_RES,
   TAG.PUBLISH_ACK_REQ,
   TAG.PUBLISH_BINARY_ACK_REQ,
+  TAG.DOMAIN,
   TAG.CLOSE,
   TAG.CLOSE_ACK,
   TAG.ABORT,

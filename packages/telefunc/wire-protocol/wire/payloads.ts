@@ -1,4 +1,4 @@
-export { parseJsonPayload, parsePreparePayload, parseReconcilePayload, parseBarrierPayload }
+export { parseJsonPayload, parsePreparePayload, parseReconcilePayload, parseBarrierPayload, parseDomainRequest }
 export type {
   ReconcileOpenEntry,
   BroadcastKind,
@@ -9,6 +9,8 @@ export type {
   PreparePayload,
   ReadyPayload,
   ReconciledPayload,
+  DomainAnnouncement,
+  DomainRequest,
 }
 
 import { MAX_CHANNELS_PER_CONNECTION, type ChannelTransports } from '../constants.js'
@@ -78,6 +80,30 @@ type ReconciledPayload = {
   /** How the page reaches this process on each transport a package offers, by its name. */
   offers?: Record<string, unknown>
   upgradeId?: string
+}
+
+// ===== Domain payloads (a DOMAIN's JSON text) =====
+
+/** Server → client: `stream`'s domain, the channel that carries its publishes from now on, or null where the page holds
+ *  as many channels as it may, and the stream stays on its own channel. A lossy one's publishes give way to newer ones. */
+type DomainAnnouncement = { stream: string; channelId: string | null; lossy: boolean }
+
+/** Client → server: the page asks for `stream`'s domain, to publish on. */
+type DomainRequest = { stream: string }
+
+/** A stream's name is a Room lane key or the like, far below this. */
+const DOMAIN_STREAM_MAX_LENGTH = 1024
+
+function parseDomainRequest(text: string): DomainRequest {
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    throw new ProtocolViolationError('DOMAIN payload is not JSON')
+  }
+  const { stream } = asObject(value)
+  assertProtocol(isNonEmptyString(stream) && stream.length <= DOMAIN_STREAM_MAX_LENGTH, 'DOMAIN stream')
+  return { stream }
 }
 
 function parseJsonPayload(payload: Uint8Array): unknown {
