@@ -64,8 +64,8 @@ type Plan =
   /** `SET`, `RESET`: the settings of its session change (a role, a `search_path`, what a row level security policy
    *  reads). `changesRole`: its role may change, to `role` when the statement names it. */
   | { kind: 'session'; changesRole?: boolean; role?: string }
-  /** `SET LOCAL` is one too, until its transaction ends. */
-  | { kind: 'none'; changesRole?: boolean; role?: string }
+  /** `SET LOCAL` is one too, until its transaction ends. `changesPath`: it sets the `search_path`. */
+  | { kind: 'none'; changesRole?: boolean; role?: string; changesPath?: boolean }
   | { kind: 'several'; plans: Plan[] }
 
 const HIDDEN_PREFIX = '__live_'
@@ -129,8 +129,10 @@ function planOne(statement: Node, text: string | undefined, catalog: Catalog): P
     case 'VariableSetStmt': {
       const changesRole = node.kind === 'VAR_RESET_ALL' || ROLE_SETTINGS.has(node.name)
       const role = changesRole && node.kind === 'VAR_SET_VALUE' ? node.args?.[0]?.A_Const?.sval?.sval : undefined
-      // `SET LOCAL` ends with its transaction, whose reads never share.
-      return { kind: node.is_local ? 'none' : 'session', changesRole, ...(role ? { role } : {}) }
+      const sets = { changesRole, ...(role ? { role } : {}) }
+      // `SET LOCAL` ends with its transaction, whose reads never share; its `search_path` names tables meanwhile.
+      if (node.is_local) return { kind: 'none', ...sets, changesPath: node.name === 'search_path' }
+      return { kind: 'session', ...sets }
     }
     case 'DiscardStmt':
       return { kind: 'unknownWrite', tables: 'all', schemaChange: true, changesSession: true, changesRole: true }

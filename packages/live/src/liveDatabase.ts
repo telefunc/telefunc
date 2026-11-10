@@ -85,6 +85,9 @@ class LiveDatabase {
   private readonly shared = new SharedReads()
   /** A statement changed a session: connections may answer the same read differently from now on. */
   private sessionsDiffer = false
+  /** A statement may have changed a session's `search_path`, if only for its transaction: an unqualified name may mean
+   *  another table than the catalog's `search_path` resolves it to. */
+  private pathsDiffer = false
   /** A statement may have changed a session's role: the catalog's privileges (`Table.readable`) may not be its. */
   private rolesDiffer = false
   /** The values Postgres gave a read's operands, by its text and parameters: an identical read doesn't ask again. */
@@ -172,8 +175,11 @@ class LiveDatabase {
   ): Statement {
     let plan = this.planOf(text, this.catalog!)
     if (changesRole(plan, this.catalog!.role)) this.rolesDiffer = true
-    if (changesSession(plan) && !this.sessionsDiffer) {
-      this.sessionsStartDiffering()
+    const sessionsStart = changesSession(plan) && !this.sessionsDiffer
+    const pathsStart = (sessionsStart || changesPath(plan)) && !this.pathsDiffer
+    if (sessionsStart) this.sessionsStartDiffering()
+    if (pathsStart) {
+      this.pathsStartDiffering()
       // The text's other statements may name tables by a `search_path` it changes.
       plan = this.planOf(text, this.catalog!)
     }
@@ -433,7 +439,7 @@ class LiveDatabase {
       // A failure fails the statement waiting for it; the next one tries again.
       this.loadingCatalog = undefined
     }
-    if (this.sessionsDiffer) this.catalog.searchPath = undefined
+    if (this.pathsDiffer) this.catalog.searchPath = undefined
     if (this.transport && !this.feed) {
       this.feed = new ChangeFeed(this.transport, this.catalog.database, (changes) => this.receive(changes))
     }
@@ -443,11 +449,16 @@ class LiveDatabase {
     for (const change of changes) this.router.route(change)
   }
 
-  /** After a statement that may have changed its session: connections may answer the same read differently, and mean
-   *  different tables by one unqualified name. */
+  /** After a statement that may have changed its session: connections may answer the same read differently. */
   private sessionsStartDiffering(): void {
     this.sessionsDiffer = true
     this.knownOperands.clear()
+  }
+
+  /** After a statement that may have changed its session's `search_path`: connections may mean different tables by one
+   *  unqualified name, which then means that table in every schema. */
+  private pathsStartDiffering(): void {
+    this.pathsDiffer = true
     this.catalog!.searchPath = undefined
     this.plans = new Map()
   }
@@ -513,7 +524,6 @@ function assumedOld(now: Row, plan: WritePlan): Row {
   return Object.fromEntries(kept.filter((c) => !plan.assigned.includes(c)).map((c) => [c, now[c]!]))
 }
 
-/** A statement after which the connection it ran on may answer reads differently from the others. */
 /** Whether `plan` may give its session another role than `role` (`Plan.changesRole`). */
 function changesRole(plan: Plan, role: string): boolean {
   if (plan.kind === 'several') return plan.plans.some((p) => changesRole(p, role))
@@ -521,7 +531,14 @@ function changesRole(plan: Plan, role: string): boolean {
   return plan.kind === 'unknownWrite' && plan.changesRole === true
 }
 
+/** A statement after which the connection it ran on may answer reads differently from the others. */
 function changesSession(plan: Plan): boolean {
   if (plan.kind === 'several') return plan.plans.some(changesSession)
   return plan.kind === 'session' || (plan.kind === 'unknownWrite' && plan.changesSession === true)
+}
+
+/** A statement that may set its session's `search_path`, if only until its transaction ends. */
+function changesPath(plan: Plan): boolean {
+  if (plan.kind === 'several') return plan.plans.some(changesPath)
+  return plan.kind === 'none' && plan.changesPath === true
 }

@@ -400,6 +400,12 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
         }),
       resetEvents: () => sql`insert into resets default values`.execute(db),
       stampRead: () => sql`select stamp()`.execute(db),
+      // Per tenant, for its transaction only: the update names the table by that search_path.
+      notesLocalPath: ({ value }) =>
+        db.transaction().execute(async (tx) => {
+          await sql.raw(`set local search_path to ${schemaOf(value)}, public`).execute(tx)
+          await sql`update notes set n = n + 1 where id = ${1 + (value % 5)}`.execute(tx)
+        }),
       // One text: the update names the table by the search_path the statement before it sets.
       notesPath: ({ value }) =>
         sql

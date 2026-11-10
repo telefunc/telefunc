@@ -261,11 +261,19 @@ const probes: Record<string, () => void> = {
   },
   /** Unqualified names keep resolving by the loading session's `search_path` after a session may have changed it. */
   'search-path'() {
-    const sessionsStartDiffering = database.sessionsStartDiffering
-    database.sessionsStartDiffering = function () {
+    const pathsStartDiffering = database.pathsStartDiffering
+    database.pathsStartDiffering = function () {
       const { searchPath } = this.catalog
-      sessionsStartDiffering.call(this)
+      pathsStartDiffering.call(this)
       this.catalog.searchPath = searchPath
+    }
+  },
+  /** A `SET LOCAL search_path` counts as leaving the `search_path` as it was. */
+  'local-path'() {
+    const planOf = database.planOf
+    database.planOf = function (...args: unknown[]) {
+      const plan = planOf.apply(this, args)
+      return plan.kind === 'none' ? { ...plan, changesPath: false } : plan
     }
   },
   /** Deferred triggers fire after the transaction's locks are read: the tables they write go unannounced. */

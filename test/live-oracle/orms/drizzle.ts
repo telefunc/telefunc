@@ -392,6 +392,12 @@ function createDrizzle(
         }),
       resetEvents: () => db.execute(sql`insert into resets default values`),
       stampRead: () => db.execute(sql`select stamp()`),
+      // Per tenant, for its transaction only: the update names the table by that search_path.
+      notesLocalPath: ({ value }) =>
+        db.transaction(async (tx: any) => {
+          await tx.execute(sql.raw(`set local search_path to ${schemaOf(value)}, public`))
+          await tx.execute(sql`update notes set n = n + 1 where id = ${1 + (value % 5)}`)
+        }),
       // One text: the update names the table by the search_path the statement before it sets.
       notesPath: ({ value }) =>
         db.execute(
