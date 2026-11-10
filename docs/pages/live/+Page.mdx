@@ -1,0 +1,154 @@
+import { Link } from '@brillout/docpress'
+import { TelefuncStreamBeta, PoweredByTelefuncStream } from '../../components'
+
+**Environment**: server & client.
+
+<TelefuncStreamBeta />
+
+Live database queries — a client showing what a telefunction read from your database refetches it when a write changes those rows.
+
+<PoweredByTelefuncStream pkg="live" />
+
+## Install
+
+```bash
+npm install @telefunc/live
+```
+
+Pass your database client through `withLiveQueries()`, once, where your app creates it:
+
+```ts
+// database.ts
+// Environment: server
+
+import { drizzle } from 'drizzle-orm/node-postgres'
+import { withLiveQueries } from '@telefunc/live'
+import pg from 'pg'
+
+export const db = drizzle({ client: withLiveQueries(new pg.Pool({ connectionString })) })
+```
+
+```ts
+// database.ts
+// Environment: server
+
+import { Kysely, PostgresDialect } from 'kysely'
+import { withLiveQueries } from '@telefunc/live'
+import pg from 'pg'
+
+export const db = new Kysely<Database>({
+  dialect: new PostgresDialect({ pool: withLiveQueries(new pg.Pool({ connectionString })) }),
+})
+```
+
+```ts
+// database.ts
+// Environment: server
+
+import postgres from '@prisma/orm-postgres/runtime'
+import { withLiveQueries } from '@telefunc/live'
+import pg from 'pg'
+
+export const db = postgres({ contract, pg: withLiveQueries(new pg.Pool({ connectionString })) })
+```
+
+> `withLiveQueries()` takes a `pg.Pool` or a `pg.Client` (Postgres 17 and above), or a PGlite database, and returns it. Call it before the first query.
+
+> There isn't any other setup: Telefunc finds `@telefunc/*` packages in your `package.json` and auto-loads them.
+
+
+## Usage
+
+Read from the database in a telefunction, as usual:
+
+```ts
+// TodoList.telefunc.ts
+// Environment: server
+
+import { db } from './database'
+
+export async function onGetTodos(userId: number) {
+  return await db.select().from(todos).where(eq(todos.userId, userId)).orderBy(todos.id)
+}
+```
+
+### With TanStack Query
+
+Use a <Link href="/tanstack-query#local-vs-global-keys">global key</Link>:
+
+```tsx
+// TodoList.tsx
+// Environment: client
+
+const { data: todos } = useQuery({
+  queryKey: ['global:todos', userId],
+  queryFn: () => onGetTodos(userId),
+})
+```
+
+The query refetches when a write changes the rows `onGetTodos()` read.
+
+> Server-side rendered queries become live once the page hydrates: each one fetches once more in the browser.
+
+### Without a library
+
+```ts
+// TodoList.ts
+// Environment: client
+
+import { watch } from '@telefunc/live/client'
+
+const stop = watch(
+  () => onGetTodos(userId),
+  (todos) => render(todos),
+)
+```
+
+`watch()` calls the telefunction, passes its result to your callback, and calls it again each time the result changes. Call `stop()` when you no longer show it.
+
+> At most one call runs at a time: changes arriving while it runs lead to one more call after it.
+
+
+## What refetches
+
+A client refetches when a committed write, through the client you passed to `withLiveQueries()`, changes rows its query returned or could return:
+
+- A write to another user's rows doesn't refetch `onGetTodos(userId)`.
+- A row sorting past the last row of a `limit` doesn't refetch the page.
+- A rolled-back transaction refetches nothing; a committed one refetches once its `COMMIT` succeeds.
+
+When `@telefunc/live` can't tell whether a write changed the result (a function call in the query, a statement it doesn't follow), it refetches.
+
+> The refetch is an ordinary call of your telefunction: its <Link href="/permissions">permission checks</Link> run again, and no row is sent to a client otherwise.
+
+> Writes that don't go through your app — another app, a migration, `psql` — aren't seen.
+
+
+## Multiple servers
+
+On several servers, pass a transport that carries the changes to the other servers, for example Redis:
+
+```ts
+// database.ts
+// Environment: server
+
+import IORedis from 'ioredis'
+import pg from 'pg'
+import { DefaultBroadcastAdapter } from 'telefunc'
+import { RedisTransport } from '@telefunc/redis'
+import { withLiveQueries } from '@telefunc/live'
+
+const transport = new DefaultBroadcastAdapter(new RedisTransport({ redis: new IORedis(redisUrl) }))
+const pool = withLiveQueries(new pg.Pool({ connectionString }), { transport })
+```
+
+> Without `transport`, a write is seen by the server that made it only.
+
+> A message lost on the way refetches every query reading the table it was about.
+
+
+## See also
+
+- <Link href="/tanstack-query" />
+- <Link href="/stream/scale" />
+- <Link href="/permissions" />
