@@ -173,6 +173,19 @@ When `@telefunc/live` can't tell whether a write changed the result (a function 
 > Writes that don't go through your app — another app, a migration, `psql` — aren't seen.
 
 
+## Under load
+
+A query that keeps changing refetches at most every 100 ms, one refetch at a time, and its last change is always fetched.
+
+When many queries change at once, for example a public feed watched by thousands of clients, the server tells clients to refetch as fast as it can serve them: right away while it has time to spare, in turn while it's busy. Writes stay fast, and results update as often as the server can afford.
+
+> Identical queries (same SQL, same parameters) refetching at the same time run once on the database. Your telefunction still runs for each client, with its permission checks.
+
+> After a statement changes a session setting (`SET`, `set_config()`), identical queries no longer share a run: a setting can change what a query returns.
+
+> Bun and Deno don't report how busy the server is: there, clients are told right away.
+
+
 ## Multiple servers
 
 On several servers, pass a transport that carries the changes to the other servers, for example Redis:
