@@ -168,7 +168,8 @@ async function connect(): Promise<{
   await admin.query(seed(random))
   const transport = SERVERS === 2 ? new UnreliableTransport() : undefined
   if (DRIVER === 'postgres-js') {
-    const connectSql = () => postgres(url, { max: 8, onnotice: () => {} })
+    // One connection on even seeds: a `BEGIN` sent through `sql` then holds for the statements after it.
+    const connectSql = () => postgres(url, { max: SEED % 2 === 0 ? 1 : 8, onnotice: () => {} })
     const sql = connectSql()
     const writerSql = SERVERS === 2 ? connectSql() : sql
     const driver = createDrizzle(sql, 'postgres-js', transport)

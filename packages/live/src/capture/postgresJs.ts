@@ -32,6 +32,8 @@ type Query = Promise<Result> & {
   forEachFn?: unknown
   onlyDescribe?: boolean
   streaming?: boolean
+  /** `onexecute`: set on the `BEGIN` of `sql.begin()`, which gives its transaction the connection it runs on. */
+  options: { onexecute?: unknown }
   resolve(result: Result): void
   reject(err: Error): void
   handle(): Promise<void>
@@ -65,7 +67,6 @@ function capturePostgresJs(sql: PostgresJs, live: LiveDatabase): void {
     const callback = args.pop() as (scope: Scope) => unknown
     return begin(...args, (scope: Scope) => {
       const transaction = {}
-      // postgres.js sent its `BEGIN` through `sql`, before the transaction had a connection.
       control(live, transaction, 'BEGIN')
       captureScope(scope, transaction, live, targets)
       return callback(scope)
@@ -105,7 +106,8 @@ function captureQueries(query: Query): WeakMap<object, Target> {
   const handle = query.handle
   query.handle = function (this: Query) {
     const target = targets.get(this.handler)
-    if (!target || this.executed || OURS in this) return handle.call(this)
+    // `sql.begin()`'s `BEGIN` goes through `sql`, before its transaction has a connection: the transaction records it.
+    if (!target || this.executed || OURS in this || this.options.onexecute) return handle.call(this)
     this.executed = true
     return run(this, target)
   }
