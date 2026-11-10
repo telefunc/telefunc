@@ -4,7 +4,8 @@ const USERS = 6
 
 /** The same tables for every ORM; each run starts from them. */
 const SCHEMA = `
-drop table if exists tags, todos, users cascade;
+drop table if exists tags, todos, users, deleted_todos cascade;
+drop function if exists log_deleted_todo;
 create table users (id serial primary key, name text not null, team int not null);
 create table todos (
   id serial primary key,
@@ -16,6 +17,14 @@ create table todos (
   updated_at timestamptz not null default now()
 );
 create table tags (id serial primary key, todo_id int not null references todos (id) on delete cascade, name text not null);
+-- Written by a trigger, also when a user's deletion cascades to their todos.
+create table deleted_todos (id serial primary key, user_id int not null, todo_id int not null);
+create function log_deleted_todo() returns trigger language plpgsql as $$
+begin
+  insert into deleted_todos (user_id, todo_id) values (old.user_id, old.id);
+  return old;
+end $$;
+create trigger todos_deleted after delete on todos for each row execute function log_deleted_todo();
 `
 
 function seed(random: () => number): string {

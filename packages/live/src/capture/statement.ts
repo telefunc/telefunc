@@ -1,7 +1,7 @@
 export { planStatement, HIDDEN_PREFIX }
 export type { Plan, ReadPlan, WritePlan, TransactionAction }
 
-import type { Catalog, Table, TableSet } from '../catalog.js'
+import { tablesChangedWith, type Catalog, type Table, type TableSet } from '../catalog.js'
 import { analyzeRead, type ReadShape } from '../match/readShape.js'
 import {
   functionNamesIn,
@@ -35,7 +35,7 @@ type WritePlan = {
   images: ('new' | 'old' | 'inserted')[]
   /** The columns an `UPDATE` (or an upsert's update) assigns. */
   assigned: string[]
-  /** What the table's triggers write. */
+  /** What the table's triggers write, and what writing that changes in turn. */
   alsoWrites: TableSet
 }
 
@@ -150,7 +150,7 @@ function planWrite(kind: string, node: Node, text: string | undefined, catalog: 
     hadReturning,
     images,
     assigned,
-    alsoWrites: table.alsoWrites,
+    alsoWrites: tablesChangedWith(table.alsoWrites, catalog),
   }
 }
 
@@ -186,10 +186,7 @@ function writtenTables(node: Node, catalog: Catalog): TableSet {
   for (const target of targets) {
     const table = catalog.find(target as never)
     if (!table) return 'all'
-    if (table.alsoWrites === 'all') return 'all'
     ids.add(table.id)
-    for (const id of table.alsoWrites) ids.add(id)
-    for (const key of table.referencedBy) ids.add(key.table)
   }
-  return ids
+  return tablesChangedWith(ids, catalog)
 }

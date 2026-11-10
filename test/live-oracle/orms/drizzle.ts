@@ -43,6 +43,11 @@ const tags = pgTable('tags', {
   todoId: integer('todo_id').notNull(),
   name: text('name').notNull(),
 })
+const deletedTodos = pgTable('deleted_todos', {
+  id: serial('id').primaryKey(),
+  userId: integer('user_id').notNull(),
+  todoId: integer('todo_id').notNull(),
+})
 const usersRelations = relations(users, ({ many }) => ({ todos: many(todos) }))
 const todosRelations = relations(todos, ({ one }) => ({
   user: one(users, { fields: [todos.userId], references: [users.id] }),
@@ -55,6 +60,12 @@ function createDrizzle(client: unknown, kind: 'pg' | 'pglite' | 'postgres-js'): 
   return {
     reads: {
       byUser: ({ user }) => db.select().from(todos).where(eq(todos.userId, user)).orderBy(todos.id),
+      deletedTodos: ({ user }) =>
+        db
+          .select({ todoId: deletedTodos.todoId })
+          .from(deletedTodos)
+          .where(eq(deletedTodos.userId, user))
+          .orderBy(deletedTodos.todoId),
       recent: ({ user }) =>
         db.select().from(todos).where(eq(todos.userId, user)).orderBy(desc(todos.updatedAt), desc(todos.id)).limit(3),
       priorityTies: ({ user }) =>
@@ -229,6 +240,8 @@ function createDrizzle(client: unknown, kind: 'pg' | 'pglite' | 'postgres-js'): 
           sql`insert into tags (todo_id, name) select id, 'copied' from todos where user_id = ${user} order by id limit 1`,
         ),
       deleteUser: ({ user }) => db.delete(users).where(eq(users.id, user)),
+      // Two statements in one text: sent as written.
+      deleteUserRaw: ({ user }) => db.execute(sql.raw(`delete from users where id = ${Number(user)}; select 1`)),
       insertUser: ({ text, value }) => db.insert(users).values({ name: text, team: (value % 3) + 1 }),
     },
     async close() {},

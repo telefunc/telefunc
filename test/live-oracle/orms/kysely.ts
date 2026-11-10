@@ -23,6 +23,8 @@ function createKysely(client: any, kind: 'pg' | 'pglite'): OrmDriver {
   return {
     reads: {
       byUser: ({ user }) => db.selectFrom('todos').selectAll().where('user_id', '=', user).orderBy('id').execute(),
+      deletedTodos: ({ user }) =>
+        db.selectFrom('deleted_todos').select('todo_id').where('user_id', '=', user).orderBy('todo_id').execute(),
       firstTexts: () => db.selectFrom('todos').select(['id', 'text']).orderBy('text').orderBy('id').limit(3).execute(),
       recent: ({ user }) =>
         db
@@ -253,6 +255,8 @@ function createKysely(client: any, kind: 'pg' | 'pglite'): OrmDriver {
           )
           .execute(),
       deleteUser: ({ user }) => db.deleteFrom('users').where('id', '=', user).execute(),
+      // Two statements in one text: sent as written.
+      deleteUserRaw: ({ user }) => sql.raw(`delete from users where id = ${Number(user)}; select 1`).execute(db),
       insertUser: ({ text, value }) =>
         db
           .insertInto('users')

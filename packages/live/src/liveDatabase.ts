@@ -2,7 +2,7 @@ export { LiveDatabase, MAX_RESULT_ROWS }
 export type { Statement, FollowUp, LiveQueriesOptions }
 
 import type { BroadcastAdapter } from 'telefunc'
-import { loadCatalog, type Catalog, type Table, type TableSet } from './catalog.js'
+import { loadCatalog, tablesChangedWith, union, type Catalog, type Table, type TableSet } from './catalog.js'
 import { ChangeFeed } from './changeFeed.js'
 import { planStatement, type Plan, type WritePlan } from './capture/statement.js'
 import { Transactions } from './capture/transactions.js'
@@ -177,7 +177,7 @@ class LiveDatabase {
         if (plan.schemaChange) this.forgetSchema()
         return unknownChanges(plan.tables)
       case 'write':
-        return unknownChanges(new Set([plan.table.id, ...(plan.alsoWrites === 'all' ? ['*'] : plan.alsoWrites)]))
+        return unknownChanges(tablesChangedWith(new Set([plan.table.id]), this.catalog!))
       case 'several':
         // Applied in order, after the whole text succeeded.
         return plan.plans.flatMap((p) => {
@@ -255,30 +255,28 @@ class LiveDatabase {
 }
 
 /** What foreign key actions change in other tables. A deleted parent's children are found by its key; anything
- *  further (their own children, `SET NULL`, a key update) counts as a change to any row of the table. */
+ *  further (what deleting them changes, `SET NULL`, a key update) counts as a change to any row of the table. */
 function cascades(plan: WritePlan, changes: Change[], catalog: Catalog): Change[] {
   const result: Change[] = []
-  const wholeTables = new Set<string>()
-  const addWholeTable = (id: string) => {
-    if (wholeTables.has(id)) return
-    wholeTables.add(id)
-    for (const key of catalog.tables.get(id)?.referencedBy ?? []) addWholeTable(key.table)
-  }
+  const wholeTables: TableSet[] = []
   for (const key of plan.table.referencedBy) {
+    const child = catalog.tables.get(key.table)!
     if (plan.statement === 'delete' && key.onDelete === 'c' && key.column) {
       for (const change of changes) {
         if (change.kind !== 'delete') continue
         const old = { [key.column]: change.old[key.parentColumn!] ?? null }
         result.push({ table: key.table, kind: 'delete', old, several: true })
       }
-      for (const grandchild of catalog.tables.get(key.table)?.referencedBy ?? []) addWholeTable(grandchild.table)
-    } else if (plan.statement === 'delete' && ['c', 'n', 'd'].includes(key.onDelete)) addWholeTable(key.table)
+      // The deleted children fire their own triggers and foreign key actions.
+      wholeTables.push(child.alsoWrites, new Set(child.referencedBy.map((k) => k.table)))
+    } else if (plan.statement === 'delete' && ['c', 'n', 'd'].includes(key.onDelete))
+      wholeTables.push(new Set([child.id]))
     else if (plan.statement !== 'insert' || plan.assigned.length > 0) {
       const keyAssigned = !key.parentColumn || plan.assigned.includes(key.parentColumn)
-      if (['c', 'n', 'd'].includes(key.onUpdate) && keyAssigned) addWholeTable(key.table)
+      if (['c', 'n', 'd'].includes(key.onUpdate) && keyAssigned) wholeTables.push(new Set([child.id]))
     }
   }
-  return [...result, ...unknownChanges(wholeTables)]
+  return [...result, ...unknownChanges(tablesChangedWith(union(wholeTables), catalog))]
 }
 
 function unknownChanges(tables: TableSet): Change[] {

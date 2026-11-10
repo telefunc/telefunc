@@ -1,4 +1,4 @@
-export { loadCatalog }
+export { loadCatalog, tablesChangedWith, union }
 export type { Catalog, Table, TableSet, ForeignKey }
 
 import { parsePlPgSQLSync } from 'libpg-query'
@@ -220,6 +220,24 @@ function tablesWrittenByFunction(language: string, source: string, catalog: Cata
     return tablesOfStatements(writes, catalog)
   })
   return union(written)
+}
+
+/** `tables`, and every table a write to them may change too: what their triggers write and what their foreign key
+ *  actions change, then what writing those changes, and so on. */
+function tablesChangedWith(tables: TableSet, catalog: Catalog): TableSet {
+  if (tables === 'all') return 'all'
+  const reached = new Set<string>()
+  const pending = [...tables]
+  while (pending.length > 0) {
+    const id = pending.pop()!
+    if (reached.has(id)) continue
+    reached.add(id)
+    const table = catalog.tables.get(id)
+    if (!table) continue
+    if (table.alsoWrites === 'all') return 'all'
+    pending.push(...table.alsoWrites, ...table.referencedBy.map((key) => key.table))
+  }
+  return reached
 }
 
 function union(sets: TableSet[]): TableSet {
