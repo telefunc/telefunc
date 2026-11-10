@@ -40,6 +40,9 @@ const READS_EVERYTHING: ReadShape = { kind: 'other', aliases: [], alsoReads: 'al
 const MAX_PLANS = 10_000
 /** A read returning more rows keeps no result keys: any change to a matching row counts. */
 const MAX_RESULT_ROWS = 10_000
+/** A write changing more rows counts as changing any row of its table: matching each row against the live reads
+ *  would cost the writer more than the refetches it spares (a 100,000-row `UPDATE` took twice as long). */
+const MAX_CHANGED_ROWS = 10_000
 
 /** Everything one wrapped database shares between its connections: what it knows of the schema, the live reads,
  *  open transactions, and the other servers. */
@@ -191,6 +194,8 @@ class LiveDatabase {
   }
 
   private changesOfWrite(plan: WritePlan, rows: (string | null)[][]): Change[] {
+    if (rows.length > MAX_CHANGED_ROWS)
+      return unknownChanges(tablesChangedWith(new Set([plan.table.id]), this.catalog!))
     const changes: Change[] = []
     for (const row of rows) {
       const image = (which: WritePlan['images'][number]) => row[plan.images.indexOf(which)]
