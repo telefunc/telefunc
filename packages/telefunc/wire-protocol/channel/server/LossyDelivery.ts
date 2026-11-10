@@ -15,7 +15,8 @@ type LossyDeliveryOptions = {
 /** A channel's lossy publishes on their way to its page, held before the wire and handed as its path has room (see
  *  `PathEstimate`). While the path carries what the wire's lossy streams offer, they go in order, every one of them.
  *  Once it doesn't, or while the page has no wire, a newer publish of a stream (`PublishBody.lossyStream`) replaces
- *  that stream's waiting, and what waits goes at the path's pace, so that what reaches the page is young. */
+ *  that stream's waiting, and what waits goes at the path's pace, so that what reaches the page is young. A `delta`
+ *  publish replaces nothing: it waits behind its group, and goes only where its page is due the rest of that group. */
 class LossyDelivery implements RoomWaiter {
   private readonly holder: MemoryHolder
   private readonly onSkip: () => void
@@ -24,6 +25,8 @@ class LossyDelivery implements RoomWaiter {
   private attached = false
   /** In order, what the wire has yet to be handed. */
   private readonly waiting = new Fifo<PublishBody>()
+  /** The lossy streams whose newest group this page is due every publish of, so far. */
+  private readonly wholeGroups = new Set<string>()
 
   constructor({ holder, onSkip }: LossyDeliveryOptions) {
     this.holder = holder
@@ -39,10 +42,15 @@ class LossyDelivery implements RoomWaiter {
 
   /** `body` is of a lossy stream. */
   publish(body: PublishBody): void {
-    hold(this.holder, body)
+    const stream = body.lossyStream!
     const lane = this.attached ? this.peer!.sender.lossy : null
     lane?.offer(body.frame.byteLength, performance.now())
-    if (lane === null || lane.pathBound) this.skipWaiting(body.lossyStream!)
+    if (body.delta && !this.wholeGroups.has(stream)) return this.onSkip()
+    hold(this.holder, body)
+    if (!body.delta) {
+      if (lane === null || lane.pathBound) this.skipWaiting(stream)
+      this.wholeGroups.add(stream)
+    }
     this.waiting.push(body)
     if (this.attached) this.hand()
   }
@@ -79,7 +87,9 @@ class LossyDelivery implements RoomWaiter {
       skipped = true
       return true
     })
-    if (skipped) this.onSkip()
+    if (!skipped) return
+    this.wholeGroups.delete(stream)
+    this.onSkip()
   }
 
   /** What waits goes, unsent. */

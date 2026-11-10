@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { ServerBroadcastEnd } from './ServerBroadcastEnd.js'
-import type { ChannelMux } from './ChannelMux.js'
-import { publishBody } from './PublishBody.js'
+import { getChannelMux, type ChannelMux } from './ChannelMux.js'
+import { publishBody, type PublishBody } from './PublishBody.js'
 import { ServerReplay } from './ServerReplay.js'
 import { ACK_STATUS, decode, encode, type ChannelFrame } from '../../wire/frame.js'
 import type { DomainAnnouncement } from '../../wire/payloads.js'
 import { MAX_DOMAINS_PER_CHANNEL } from '../../constants.js'
 import { TAG } from '../../wire/tags.js'
-import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
+import { IndexedPeer, type LossyLane, type PeerSender, type RoomWaiter } from './IndexedPeer.js'
 import { configureBroadcastTransport, disposeBackend } from '../../backend/install.js'
 import type { BroadcastTransport } from '../../backend/broadcast/TransportBroadcastDriver.js'
 import { PathEstimate } from '../../flowControl/PathEstimate.js'
@@ -320,33 +320,106 @@ describe('ServerBroadcastEnd', () => {
   })
 })
 
+describe('lossy groups (`delta`)', () => {
+  const publish = (end: ServerBroadcastEnd, seq: number, delta: boolean) =>
+    end.deliver(publishBody(new Uint8Array([seq]), { seq, timestamp: 1 }, 'cam', null, delta))
+
+  it('a page behind its path skips whole groups, and gets the newest from its first publish on', () => {
+    const lane = gateLane()
+    const { end, frames } = attachedEnd(lane)
+    publish(end, 1, false)
+    publish(end, 2, true)
+    publish(end, 3, true)
+    publish(end, 4, false)
+    publish(end, 5, true)
+    lane.setOpen(true)
+
+    expect(publishedSeqs(frames)).toEqual([4, 5])
+  })
+
+  it("once a publish of a group is skipped, the page gets none of that group's later ones", () => {
+    const lane = gateLane()
+    // On the mux it runs on, as memory pressure skips waiting publishes only there.
+    const { end, frames } = attachedEnd(lane, getChannelMux())
+    lane.setOpen(true)
+    publish(end, 1, false)
+    lane.setOpen(false)
+    publish(end, 2, true)
+    end.replaceWaiting('cam')
+    publish(end, 3, true)
+    lane.setOpen(true)
+    publish(end, 4, false)
+
+    expect(publishedSeqs(frames)).toEqual([1, 4])
+  })
+
+  it('a page that starts within a group gets nothing of it', () => {
+    const lane = gateLane()
+    const { end, frames } = attachedEnd(lane)
+    lane.setOpen(true)
+    publish(end, 1, true)
+    publish(end, 2, false)
+    publish(end, 3, true)
+
+    expect(publishedSeqs(frames)).toEqual([2, 3])
+  })
+})
+
+/** A lossy lane whose path is the limit, which hands only while open. */
+function gateLane() {
+  let open = false
+  const waiters = new Set<RoomWaiter>()
+  return {
+    pathBound: true,
+    offer() {},
+    mayHand(_now: number, waiter: RoomWaiter) {
+      if (!open) waiters.add(waiter)
+      return open
+    },
+    hand: (peer: IndexedPeer, body: PublishBody) => peer.sendPublish(body),
+    setOpen(next: boolean) {
+      open = next
+      for (const waiter of waiters) waiter.roomMayHaveOpened()
+      waiters.clear()
+    },
+  }
+}
+
+function publishedSeqs(frames: Uint8Array[]): number[] {
+  return frames.flatMap((frame) => {
+    const decoded = decode(frame as Uint8Array<ArrayBuffer>)
+    return decoded.tag === TAG.PUBLISH_BINARY ? [decoded.info.seq] : []
+  })
+}
+
 /** An end attached on index 7, and the frames it sent. */
-function attachedEnd() {
+function attachedEnd(lossy?: LossyLane, mux?: ChannelMux) {
   const end = new ServerBroadcastEnd()
   end.setOwner({ _onPagePublish() {}, _onPagePublishBinary() {} })
-  end._registerChannel()
+  end._registerChannel(mux)
   const frames: Uint8Array[] = []
+  const sender = withLossyLane({
+    send: (frame) => {
+      frames.push(frame)
+    },
+    carry() {},
+    bufferedAmount: () => 0,
+    deliveredBefore: () => 0,
+    terminate() {},
+    sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+    queue: {
+      waitingPublishes: () => 0,
+      dropWaitingPublishes() {},
+      dropWaitingFromPublish() {},
+      drainRate: () => 0,
+      acknowledged: () => true,
+      unhandedBytes: 0,
+      path: new PathEstimate({ reportGap: 0 }),
+    },
+  })
   end._attachPeer(
     new IndexedPeer({
-      sender: withLossyLane({
-        send: (frame) => {
-          frames.push(frame)
-        },
-        carry() {},
-        bufferedAmount: () => 0,
-        deliveredBefore: () => 0,
-        terminate() {},
-        sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-        queue: {
-          waitingPublishes: () => 0,
-          dropWaitingPublishes() {},
-          dropWaitingFromPublish() {},
-          drainRate: () => 0,
-          acknowledged: () => true,
-          unhandedBytes: 0,
-          path: new PathEstimate({ reportGap: 0 }),
-        },
-      }),
+      sender: lossy ? { ...sender, lossy } : sender,
       index: 7,
       replay: new ServerReplay({ heldBytes: 0 }),
     }),

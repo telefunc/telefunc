@@ -92,9 +92,12 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     if (this.heldBytes > share) this.shed(share)
   }
 
-  /** A page back from a lost wire gets its stream's newest publish, not those the lost wire carried. */
+  /** A page back from a lost wire gets its stream's newest publish, not those the lost wire carried, or with `delta`
+   *  those of its group too. */
   private deliverLossy(body: PublishBody, stream: string): void {
-    if (this.peer === null && (this._replayBuffer?.dropPublishesOf(stream) ?? 0) > 0) this.owner?._onPublishesMissed?.()
+    if (this.peer === null && !body.delta && (this._replayBuffer?.dropPublishesOf(stream) ?? 0) > 0) {
+      this.owner?._onPublishesMissed?.()
+    }
     this.lossy.publish(body)
   }
 

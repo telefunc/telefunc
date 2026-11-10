@@ -43,7 +43,7 @@ type AskedDomain = {
 }
 
 /** A publish of a lossy stream that may still wait to go, under its seq. */
-type NewestPublish = { seq: number; receipt: Promise<ChannelPublishAck> }
+type NewestPublish = { seq: number; receipt: Promise<ChannelPublishAck>; delta: boolean }
 
 class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
@@ -130,20 +130,25 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   /** @internal A publish that leaves reporting its rejection to the caller. With `domain`, it goes on that stream's
-   *  domain, once the server named it. */
+   *  domain, once the server named it. With `delta`, it needs the publishes of its lossy stream since the newest one
+   *  without it, so it takes no waiting publish's place, and none takes its. */
   _publishBinaryUnreported(
     data: Uint8Array,
     lossyStream: string | null = this.lossy ? 'binary' : null,
     domain: string | null = null,
+    delta = false,
   ): Promise<ChannelPublishAck> {
     if (this.stopped) throw new ChannelClosedError()
-    if (domain === null) return this.sendPublish(encode.publishBinaryAckReq, data, lossyStream)
+    if (domain === null) return this.sendPublish(encode.publishBinaryAckReq, data, lossyStream, delta)
     const on = this.domainOf(domain)
-    if (!isPromise(on)) return (on ?? this)._publishBinaryUnreported(data, lossyStream)
-    // Publishes of a stream go in order, those that wait for its domain first.
-    if (lossyStream === null) return on.then((domain) => (domain ?? this)._publishBinaryUnreported(data, null))
-    // Of a lossy one only the newest waits: an older one gets the newer one's receipt.
+    if (!isPromise(on)) return (on ?? this)._publishBinaryUnreported(data, lossyStream, null, delta)
     const asked = this.askedDomains.get(domain)!
+    // Publishes of a stream go in order, those that wait for its domain first.
+    if (lossyStream === null || delta) {
+      asked.newestLossy = undefined
+      return on.then((domain) => (domain ?? this)._publishBinaryUnreported(data, lossyStream, null, delta))
+    }
+    // Of a lossy one only the newest waits: an older one gets the newer one's receipt.
     if (asked.newestLossy) {
       asked.newestLossy.data = data
       return asked.newestLossy.receipt
@@ -203,20 +208,21 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   /** Of `lossyStream`, once its uplink is behind, a publish that still waits to go takes the newer one's data in its
-   *  place, and both get its receipt. */
+   *  place, and both get its receipt; never where either is `delta`. */
   private sendPublish<D>(
     encodeFrame: SequencedEncoder<D>,
     data: D,
     lossyStream: string | null,
+    delta = false,
   ): Promise<ChannelPublishAck> {
     if (lossyStream === null) return this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data)
     const newest = this.newestPublishes.get(lossyStream)
-    if (newest !== undefined && this.connection.replaceWaiting(this, newest.seq, encodeFrame, data)) {
+    if (!delta && newest?.delta === false && this.connection.replaceWaiting(this, newest.seq, encodeFrame, data)) {
       return newest.receipt
     }
     let seq = 0
     const receipt = this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data, (queued) => (seq = queued))
-    const publish = { seq, receipt }
+    const publish = { seq, receipt, delta }
     this.newestPublishes.set(lossyStream, publish)
     void this.forgetOnceSettled(lossyStream, publish)
     return receipt
