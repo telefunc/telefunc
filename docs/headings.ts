@@ -170,6 +170,11 @@ const headings = [
     url: '/webtransport',
   },
   {
+    level: 2,
+    title: '`@telefunc/media`',
+    url: '/media',
+  },
+  {
     level: 4,
     title: 'Files',
   },

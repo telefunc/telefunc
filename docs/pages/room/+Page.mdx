@@ -416,7 +416,7 @@ Publish each source on its own track, and subscribe to the tracks you show:
 // encodeCamera(): your encoder, e.g. WebCodecs' VideoEncoder
 // live video: don't await, or each frame waits a round trip for the previous one
 encodeCamera((frame, isKeyframe) =>
-  me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe, lossy: true }),
+  me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, lossy: true, delta: !isKeyframe }),
 )
 
 // The participants who watch; showVideo(): your decoder, e.g. WebCodecs' VideoDecoder
@@ -425,8 +425,6 @@ const watch = (member) =>
 for (const member of await room.getParticipants()) watch(member)
 room.onJoin(watch)
 ```
-
-With `retain: isKeyframe`, a viewer who arrives mid-stream starts from the last keyframe, see <Link href="#give-late-joiners-the-current-state" />.
 
 On a track, `info.seq` counts its sender's frames on that track. A viewer that falls behind gets every frame, and gets `'disconnected'` where the server can't hold them for it. Where only the newest frame matters, such as a position or live audio and video, give the track `lossy: true` in its first publish, which it keeps: a newer frame then replaces one no connection has taken yet, and a viewer's `info.seq` jumps over what it skipped:
 
@@ -437,7 +435,9 @@ me.publishBinary(position, { track: 'cursor', lossy: true }) // a viewer that fa
 me.publishBinary(stroke, { track: 'drawing' }) // a viewer never misses one
 ```
 
-A lossy video track can skip a frame that later frames depend on, so number the frames in `meta` (a frame replaced on its way to the server never gets an `info.seq`) and, at a gap, drop frames until the next keyframe and restart your decoder from it.
+A video frame needs the frames since its keyframe: publish each other frame with `delta: true`. A viewer that falls behind then skips to the newest keyframe and gets the frames after it in order, never one without those before it, and a viewer who arrives mid-stream starts at the next keyframe. `delta` needs `lossy: true`, and can't be `retain`ed.
+
+> To fit your encoder's bitrate to what your connection carries, read `me.uplinkRate`, in bytes per ms (`Infinity` until measured): above it, your frames wait in the connection, and so does the audio beside them.
 
 To send frames only while someone watches, use `onDemand()`, which also fires, as you call it, for the tracks already watched:
 
@@ -449,14 +449,14 @@ me.onDemand((track, on) => (on ? wanted.add(track) : wanted.delete(track))) // n
 // live video: don't await, or each frame waits a round trip for the previous one
 encodeCamera((frame, isKeyframe) => {
   if (wanted.has('camera') || wanted.has(null)) {
-    me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe, lossy: true })
+    me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, lossy: true, delta: !isKeyframe })
   }
 })
 ```
 
 > Audio works the same way, on its own track such as `{ track: 'mic' }`.
 
-> For video calls with many participants, or video streamed to an audience, use a WebRTC SFU for the video, and a room for the chat and signaling. See [telefunc#449](https://github.com/telefunc/telefunc/issues/449).
+> For video calls, <Link href="/media" /> publishes each participant's camera, microphone and screen, and plays them at the size each viewer's screen and connection take.
 
 
 ## Give late joiners the current state
@@ -619,7 +619,7 @@ Properties: `id`, `meta`, `count`.
 | Method | Description |
 |---|---|
 | `publish(message, { track?, lossy?, retain? }?)` | Send to everyone. `lossy` needs `track`. |
-| `publishBinary(data, { track?, meta?, retain?, lossy? }?)` | Send binary to everyone. |
+| `publishBinary(data, { track?, meta?, retain?, lossy?, delta? }?)` | Send binary to everyone. `delta` needs `lossy`. |
 | `send(to, message, { ack? }?)` | Send to one participant. |
 | `listen(cb)` | Receive private messages; return a value to reply. |
 | `setMeta(meta)` / `setAttributes(attributes)` | Replace / update your `meta`. |
@@ -627,7 +627,7 @@ Properties: `id`, `meta`, `count`.
 | `leave()` / `onLeave(cb)` | Leave / you left, with `cause.type`: `'left'`, `'removed'`, `'closed'`, `'disconnected'`, or `'unknown'` (it left while nothing here listened to the room, too long ago to know why). |
 | `onDisconnect(cb)` / `onReconnect(cb)` | Your connection to the room dropped / is back. |
 
-Properties: `id`, `meta`, `identity`, `isConnected`.
+Properties: `id`, `meta`, `identity`, `isConnected`, `uplinkRate`.
 
 ### Other participants
 

@@ -1,0 +1,93 @@
+import { Link } from '@brillout/docpress'
+import { TelefuncStreamBeta } from '../../components'
+
+**Environment**: client.
+
+<TelefuncStreamBeta />
+
+The `@telefunc/media` package adds audio and video calls to a <Link href="/room">room</Link>: each participant's camera, microphone or screen, encoded and played in the page, at the size each viewer's screen and connection take.
+
+## Install
+
+```bash
+npm install @telefunc/media
+```
+
+That's it: it runs in the page, on `@telefunc/room`.
+
+## Make a call
+
+Return the room and your participant from a telefunction, as for any <Link href="/room#create-and-join-a-room">room</Link>:
+
+```ts
+// Meeting.telefunc.ts
+// Environment: server
+
+import { getContext } from 'telefunc'
+import { Room } from '@telefunc/room'
+
+export async function onJoinMeeting(id: string) {
+  const { user } = getContext()
+  const room = await Room.getOrCreate(id)
+  const me = await room.join({ meta: { name: user.name }, identity: user.id, selfDelivery: false })
+  return { room, me }
+}
+```
+
+Publish your camera and microphone, and play each other participant in a `<video>`:
+
+```ts
+// Meeting.ts
+// Environment: client
+
+import { publish, play } from '@telefunc/media'
+import { onJoinMeeting } from './Meeting.telefunc'
+
+const { room, me } = await onJoinMeeting('standup')
+
+const camera = await navigator.mediaDevices.getUserMedia({ audio: true, video: true })
+selfView.srcObject = camera // your own picture is the stream you already hold
+publish(me, camera)
+
+const show = (member) => play(member, tileOf(member)) // tileOf(): your <video> for this member
+for (const member of await room.getParticipants()) show(member)
+room.onJoin(show)
+```
+
+> A `<video>` plays its participant until they leave; `stop()`, on what `publish()` or `play()` returns, stops earlier.
+
+> To mute, disable the track: `camera.getAudioTracks()[0].enabled = false`.
+
+Each viewer gets the picture at the size its `<video>` shows on screen, smaller while their connection can't keep up, and none while the `<video>` is out of view. Your page sends no more than its connection to the server carries, so your sound never waits behind your picture.
+
+## Share your screen
+
+Publish it under a name of its own, and play that name:
+
+```ts
+// Environment: client
+
+const screen = await navigator.mediaDevices.getDisplayMedia()
+publish(me, screen, { name: 'screen' })
+
+// Each viewer:
+play(member, screenTile, { name: 'screen' })
+```
+
+## Show who speaks
+
+```ts
+// Environment: client
+
+const playback = play(member, tile)
+playback.onSpeakingChange((speaking) => tile.classList.toggle('speaking', speaking))
+```
+
+> It needs [WebCodecs](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API) in the browser.
+
+> With <Link href="/webtransport" />, each participant's sound and each size of their picture travel on a stream of their own, so a lost packet of one holds back none of the others. On a WebSocket, it holds back every one.
+
+## See also
+
+- <Link href="/room" />
+- <Link href="/webtransport" />
