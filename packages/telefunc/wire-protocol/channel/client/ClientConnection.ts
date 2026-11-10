@@ -121,8 +121,8 @@ type ClientChannelTransport = {
   readonly behindAfter: number
   /** Bytes of the frames it was handed that haven't gone out to the network. */
   bufferedAmount(): number
-  /** In bytes per ms, what the path to the server carries, from the server's acknowledgements: `Infinity` until
-   *  measured, or where the wire doesn't measure it. */
+  /** In bytes per ms, what the path to the server carried while something limited what the page sent, from the server's
+   *  acknowledgements: `Infinity` while nothing has lately, and where the wire doesn't measure it. */
   readonly uplinkRate: number
   abandonActiveTransport(): void
   closeAbandonedTransport(): void

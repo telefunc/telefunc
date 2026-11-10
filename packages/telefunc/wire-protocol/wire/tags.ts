@@ -63,8 +63,8 @@ const TAG = {
    *  for it: the body is the same bytes for every subscriber, so its own index and seq are 0. */
   PUBLISH_TO: 0x19 as const,
   /** A domain: a channel of the same page that carries one of this channel's streams, so that no other stream's loss
-   *  delays it. Text payload, a `DomainPayload`: server → client, the domain of a stream; client → server, a request for
-   *  one. Sequenced, as TEXT is, and uncounted. */
+   *  delays it. Text payload: server → client, a `DomainAnnouncement`, the domain of a stream; client → server, a
+   *  `DomainRequest` for one. Sequenced, as TEXT is, and uncounted. */
   DOMAIN: 0x1a as const,
 
   // ─── Per-channel control (carries ix) ───

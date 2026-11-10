@@ -92,7 +92,7 @@ type DomainAnnouncement = { stream: string; channelId: string | null; lossy: boo
  *  domain's announcement passes on to every page it carries `stream` to. */
 type DomainRequest = { stream: string; lossy: boolean }
 
-/** A stream's name is a Room lane key or the like, far below this. */
+/** A stream's name, which its broadcast picks, stays far below this: a page's request for its domain stays small. */
 const DOMAIN_STREAM_MAX_LENGTH = 1024
 
 function parseDomainRequest(text: string): DomainRequest {

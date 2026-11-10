@@ -49,10 +49,10 @@ type ParticipantBaseOptions = {
   rewinds: MetaRewinds
 }
 
-/** The private-message inbox and the leave lifecycle, identical on server and client; flavors supply the transport. */
 /** A track of a member's on its way up: its stream's name, and whether a newer frame replaces an older one waiting. */
 type TrackStream = { name: string; lossy: boolean }
 
+/** The private-message inbox and the leave lifecycle, identical on server and client; flavors supply the transport. */
 abstract class ParticipantBase implements LocalParticipant {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
