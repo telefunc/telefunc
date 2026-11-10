@@ -69,6 +69,14 @@ const probes: Record<string, () => void> = {
       return of.call(this, node, typed ? { ...comparison, as: undefined } : comparison)
     }
   },
+  /** A `char(n)` value is matched against a pattern without its padding. */
+  'char-padding'() {
+    const loadCatalog = database.loadCatalog
+    database.loadCatalog = async function (query: unknown) {
+      await loadCatalog.call(this, query)
+      for (const table of this.catalog.tables.values()) for (const column of table.columns) delete column.charLength
+    }
+  },
   /** A foreign key is taken to reference its parent column's name in every table, not only in its parent. */
   'fk-target'() {
     const loadCatalog = database.loadCatalog

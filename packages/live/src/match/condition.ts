@@ -230,9 +230,16 @@ function like(left: ValueSource, pattern: ValueSource, caseInsensitive: boolean,
     const ascii = /^[\x00-\x7f]*$/
     if (!column || column.category !== 'S' || !column.deterministic) return TRUE | FALSE
     if (caseInsensitive && (!ascii.test(value) || !ascii.test(text))) return TRUE | FALSE
-    const matches = likeToRegExp(text, caseInsensitive).test(value)
+    // A pattern sees a `char(n)` value padded to its length.
+    const padded = column.charLength === undefined ? value : padTo(value, column.charLength)
+    const matches = likeToRegExp(text, caseInsensitive).test(padded)
     return matches !== negated ? TRUE : FALSE
   }
+}
+
+/** `value` with spaces after it up to `length` characters. */
+function padTo(value: string, length: number): string {
+  return value + ' '.repeat(Math.max(0, length - [...value].length))
 }
 
 function likeToRegExp(pattern: string, caseInsensitive: boolean): RegExp {

@@ -13,6 +13,8 @@ type Column = {
   /** Its type after domains, `[schema, name]` (`['pg_catalog', 'numeric']`): a typed operand, a cast or a number, is
    *  compared with it only when it has this type. */
   base: readonly [schema: string, name: string]
+  /** A `char(n)`'s `n`. Postgres pads its values with spaces to that length, and their text form drops the padding. */
+  charLength?: number
   /** Text order is reproducible in JavaScript only under the `C` (or `POSIX`) collation. */
   orderableText: boolean
   /** A nondeterministic collation can call different strings equal. */

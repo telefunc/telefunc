@@ -15,6 +15,7 @@ import {
   lt,
   max,
   not,
+  notIlike,
   relations,
   sql,
   sum,
@@ -132,6 +133,9 @@ function createDrizzle(
           .from(todos)
           .where(and(inArray(todos.userId, [user, user2]), like(todos.text, 'a%')))
           .orderBy(todos.id),
+      // A pattern sees a `char(4)` value padded with spaces: 'ab' is 'ab  '.
+      codeLike: () => db.select({ id: todos.id }).from(todos).where(like(todos.code, 'ab__')).orderBy(todos.id),
+      codeNotIlike: () => db.select({ id: todos.id }).from(todos).where(notIlike(todos.code, 'X')).orderBy(todos.id),
       sumAmount: ({ user }) =>
         db
           .select({ total: sum(todos.amount) })

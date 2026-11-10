@@ -92,6 +92,9 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
           .where('text', 'like', 'a%')
           .orderBy('id')
           .execute(),
+      // A pattern sees a `char(4)` value padded with spaces: 'ab' is 'ab  '.
+      codeLike: () => db.selectFrom('todos').select('id').where('code', 'like', 'ab__').orderBy('id').execute(),
+      codeNotIlike: () => db.selectFrom('todos').select('id').where('code', 'not ilike', 'X').orderBy('id').execute(),
       sumAmount: ({ user }) =>
         db
           .selectFrom('todos')
