@@ -9,11 +9,11 @@
 // SERVERS=2 (pooled Postgres): the live reads are on one server, the writes on another, connected by a transport that
 // delivers out of order and twice.
 //
-// A telefunction call is simulated by running the read with a call context, as telefunc's server does.
+// A telefunction call is simulated by running the read with a call context, as telefunc's server does, and the
+// `Live` it returns is watched as the response sending it does.
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { PGlite } from '@electric-sql/pglite'
-import { withLiveQueries } from '@telefunc/live'
 import pg from 'pg'
 import postgres from 'postgres'
 import { createDrizzle } from './orms/drizzle.ts'
@@ -21,6 +21,8 @@ import { createKysely } from './orms/kysely.ts'
 import { createPrisma } from './orms/prisma.ts'
 import type { OrmDriver, ReadArgs, WriteArgs } from './orms/types.ts'
 import { seed, USERS } from './schema.ts'
+import type { LiveCell } from '../../packages/live/dist/live.js'
+import { readLive } from '../../packages/live/dist/liveQuery.js'
 
 const ORM = process.env.ORM ?? 'drizzle'
 const DB = process.env.DB ?? 'pglite'
@@ -33,8 +35,6 @@ const SERVERS = DB === 'pglite' ? 1 : Number(process.env.SERVERS ?? 1)
 const SHAPES = process.env.SHAPES?.split(',')
 
 const REQUEST_CONTEXT = Symbol.for('telefunc.requestContext')
-const LIVE_READS = Symbol.for('telefunc.liveReads')
-type LiveReads = { onChange(listener: () => void): () => void }
 
 const random = mulberry32(SEED)
 const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)]!
@@ -94,7 +94,7 @@ pg.Client.prototype.query = function (this: pg.Client, ...args: unknown[]) {
     .finally(() => inFlight--)
 } as never
 
-/** The same for postgres.js, on its query class: after `withLiveQueries()` patched it, so that a late read reaches
+/** The same for postgres.js, on its query class: after `liveDrizzle()` patched it, so that a late read reaches
  *  `@telefunc/live` late too. */
 function countQueries(sql: postgres.Sql): void {
   const prototype = Object.getPrototypeOf(sql.unsafe(''))
@@ -133,7 +133,6 @@ async function connect(): Promise<{
   if (DB === 'pglite') {
     const pglite = new PGlite()
     await pglite.exec(seed(random))
-    withLiveQueries(pglite)
     const driver = ORM === 'kysely' ? createKysely(pglite, 'pglite') : createDrizzle(pglite, 'pglite')
     return {
       driver,
@@ -148,14 +147,14 @@ async function connect(): Promise<{
   await admin.query(seed(random))
   const transport = SERVERS === 2 ? new UnreliableTransport() : undefined
   if (DRIVER === 'postgres-js') {
-    const connectSql = () => withLiveQueries(postgres(url, { max: 8, onnotice: () => {} }), { transport })
+    const connectSql = () => postgres(url, { max: 8, onnotice: () => {} })
     const sql = connectSql()
     const writerSql = SERVERS === 2 ? connectSql() : sql
+    const driver = createDrizzle(sql, 'postgres-js', transport)
     countQueries(sql)
-    const driver = createDrizzle(sql, 'postgres-js')
     return {
       driver,
-      writer: SERVERS === 2 ? createDrizzle(writerSql, 'postgres-js') : driver,
+      writer: SERVERS === 2 ? createDrizzle(writerSql, 'postgres-js', transport) : driver,
       query: async (text) => (await admin.query(text)).rows,
       close: async () => {
         await sql.end()
@@ -165,10 +164,13 @@ async function connect(): Promise<{
     }
   }
   const create = (pool: pg.Pool) =>
-    ORM === 'prisma' ? createPrisma(pool) : ORM === 'kysely' ? createKysely(pool, 'pg') : createDrizzle(pool, 'pg')
-  const pool = withLiveQueries(new pg.Pool({ connectionString: url, max: 8 }), { transport })
-  const writerPool =
-    SERVERS === 2 ? withLiveQueries(new pg.Pool({ connectionString: url, max: 8 }), { transport }) : pool
+    ORM === 'prisma'
+      ? createPrisma(pool, transport)
+      : ORM === 'kysely'
+        ? createKysely(pool, 'pg', transport)
+        : createDrizzle(pool, 'pg', transport)
+  const pool = new pg.Pool({ connectionString: url, max: 8 })
+  const writerPool = SERVERS === 2 ? new pg.Pool({ connectionString: url, max: 8 }) : pool
   const driver = create(pool)
   const writer = SERVERS === 2 ? create(writerPool) : driver
   return {
@@ -197,10 +199,15 @@ async function subscribe(sub: Subscriber, late = false): Promise<void> {
     [LATE]: late,
   }
   // A telefunction is an async function: the query runs (and is awaited) inside its call.
-  const result = await store.run(context, async () => await driver.reads[sub.shape]!(sub.args))
-  sub.result = canonical(sub.shape, result)
-  const reads = context[LIVE_READS] as LiveReads | undefined
-  sub.stop = reads?.onChange(() => (sub.invalidated = true)) ?? (() => {})
+  const live = (await store.run(context, () =>
+    readLive(() => driver.reads[sub.shape]!(sub.args), 'the oracle'),
+  )) as LiveCell<unknown>
+  sub.result = canonical(sub.shape, live.send())
+  const stop = live.onStale(() => (sub.invalidated = true))
+  sub.stop = () => {
+    stop()
+    live.release()
+  }
   for (const cb of closing) cb()
 }
 
@@ -291,9 +298,9 @@ for (const [shape, c] of byShape)
   console.log(
     `  ${shape.padEnd(16)} missed=${c.missed} changes=${c.changes} invalidations=${c.invalidations} extra=${c.extra} (${(c.extra / STEPS).toFixed(3)}/write)`,
   )
-if (VERBOSE)
-  for (const [write, c] of byWrite)
-    console.log(`  write ${write.padEnd(18)} missed=${c.missed} changes=${c.changes} extra=${c.extra}`)
+console.log('per write (the extra refetches it caused):')
+for (const [write, c] of [...byWrite].sort(([, a], [, b]) => b.extra - a.extra))
+  console.log(`  ${write.padEnd(18)} missed=${c.missed} changes=${c.changes} extra=${c.extra}`)
 for (const miss of misses.slice(0, 10)) console.log(`MISSED ${miss}`)
 process.exit(total.missed > 0 ? 1 : 0)
 

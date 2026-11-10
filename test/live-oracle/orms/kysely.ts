@@ -2,9 +2,11 @@ export { createKysely }
 
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { jsonArrayFrom } from 'kysely/helpers/postgres'
+import { liveKysely } from '@telefunc/live/kysely'
+import type { BroadcastAdapter } from 'telefunc'
 import type { OrmDriver } from './types.ts'
 
-function createKysely(client: any, kind: 'pg' | 'pglite'): OrmDriver {
+function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastAdapter): OrmDriver {
   // PGlite has one session: a "pool" of one connection over it.
   const pool =
     kind === 'pg'
@@ -19,7 +21,7 @@ function createKysely(client: any, kind: 'pg' | 'pglite'): OrmDriver {
           }),
           end: async () => {},
         }
-  const db = new Kysely<any>({ dialect: new PostgresDialect({ pool }) })
+  const db = liveKysely(new Kysely<any>({ dialect: new PostgresDialect({ pool }) }), client, { transport })
   return {
     reads: {
       byUser: ({ user }) => db.selectFrom('todos').selectAll().where('user_id', '=', user).orderBy('id').execute(),

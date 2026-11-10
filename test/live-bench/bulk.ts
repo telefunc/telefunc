@@ -1,4 +1,4 @@
-// What one bulk write costs: an `UPDATE` of ROWS rows over a plain `pg.Pool` and over `withLiveQueries(pool)`, while
+// What one bulk write costs: an `UPDATE` of ROWS rows over a plain `pg.Pool` and through `liveDrizzle()`, while
 // N clients each watch their own user's latest todos.
 //
 //   PG_PORT=<port> ROWS=10000 N=1000 RUNS=7 node --expose-gc bulk.ts
@@ -7,11 +7,12 @@
 // sent back, the heap the update left allocated before a collection, and the time spent matching its changes.
 
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { withLiveQueries } from '@telefunc/live'
+import { liveDrizzle } from '@telefunc/live/drizzle'
 import { desc, eq, lte, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { boolean, integer, pgTable, serial, text, timestamp } from 'drizzle-orm/pg-core'
 import pg from 'pg'
+import type { LiveCell } from '../../packages/live/dist/live.js'
 import { Router } from '../../packages/live/dist/match/router.js'
 
 const ROWS = Number(process.env.ROWS ?? 10_000)
@@ -51,27 +52,26 @@ function countingPool() {
 }
 const plain = countingPool()
 const live = countingPool()
-withLiveQueries(live.pool)
 const plainDb = drizzle({ client: plain.pool })
-const liveDb = drizzle({ client: live.pool })
+const liveDb = liveDrizzle(drizzle({ client: live.pool }))
 
 // ── Clients watching their own user's todos ──
 
 const store: AsyncLocalStorage<object> = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??=
   new AsyncLocalStorage())
 const REQUEST_CONTEXT = Symbol.for('telefunc.requestContext')
-const LIVE_READS = Symbol.for('telefunc.liveReads')
 
 let invalidations = 0
 /** Users whose read changed: they fetch again after the sample, so that their reads aren't timed with the write. */
 const stale: number[] = []
 async function watch(user: number): Promise<void> {
   const context: Record<symbol, unknown> = { [REQUEST_CONTEXT]: { onClose: () => {} } }
-  await store.run(context, async () => {
-    await liveDb.select().from(todos).where(eq(todos.userId, user)).orderBy(desc(todos.updatedAt)).limit(20)
-  })
-  const reads = context[LIVE_READS] as { onChange(cb: () => void): () => void }
-  reads.onChange(() => {
+  const live = (await store.run(context, () =>
+    liveDb.select().from(todos).where(eq(todos.userId, user)).orderBy(desc(todos.updatedAt)).limit(20).live(),
+  )) as unknown as LiveCell<unknown>
+  // As the response sending it does.
+  live.send()
+  live.onStale(() => {
     invalidations++
     stale.push(user)
   })

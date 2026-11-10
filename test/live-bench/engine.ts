@@ -8,12 +8,13 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { PGlite } from '@electric-sql/pglite'
-import { withLiveQueries } from '@telefunc/live'
+import { liveDrizzle } from '@telefunc/live/drizzle'
 import { count, desc, eq, sql } from 'drizzle-orm'
 import { boolean, integer, pgTable, serial, text, timestamp } from 'drizzle-orm/pg-core'
 import { drizzle } from 'drizzle-orm/pglite'
 import { Router } from '../../packages/live/dist/match/router.js'
 import { LiveRead } from '../../packages/live/dist/match/liveRead.js'
+import type { LiveCell } from '../../packages/live/dist/live.js'
 
 const N = Number(process.env.N ?? 1000)
 const VARIANT = process.env.VARIANT ?? 'topk'
@@ -38,8 +39,7 @@ await pglite.exec(`
   insert into todos (user_id, text, done, updated_at)
     select u, 'todo ' || t, t % 2 = 0, '2026-11-10'::timestamptz + (t || ' minutes')::interval from generate_series(1, ${N}) u, generate_series(1, 60) t;
 `)
-withLiveQueries(pglite)
-const db = drizzle({ client: pglite })
+const db = liveDrizzle(drizzle({ client: pglite }))
 
 const queries = {
   topk: (user: number) =>
@@ -62,14 +62,15 @@ const query = queries[VARIANT as keyof typeof queries]
 const store: AsyncLocalStorage<object> = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??=
   new AsyncLocalStorage())
 const REQUEST_CONTEXT = Symbol.for('telefunc.requestContext')
-const LIVE_READS = Symbol.for('telefunc.liveReads')
 let invalidations = 0
 const stale = new Set<number>()
 
 async function subscribe(user: number) {
   const context: Record<symbol, unknown> = { [REQUEST_CONTEXT]: { onClose() {} } }
-  await store.run(context, async () => await query(user))
-  ;(context[LIVE_READS] as { onChange(cb: () => void): () => void }).onChange(() => {
+  const live = (await store.run(context, () => query(user).live())) as unknown as LiveCell<unknown>
+  // As the response sending it does.
+  live.send()
+  live.onStale(() => {
     invalidations++
     stale.add(user)
   })

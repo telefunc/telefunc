@@ -1,4 +1,4 @@
-// What the user pays on Postgres: the same Drizzle app over a plain `pg.Pool` and over `withLiveQueries(pool)`, with
+// What the user pays on Postgres: the same Drizzle app over a plain `pg.Pool` and through `liveDrizzle()`, with
 // writes sent open-loop at a fixed rate, reads at a fixed rate, and N clients each keeping one live read fresh.
 //
 //   PG_PORT=<port> MODE=plain|live RATE=1000 READ_RATE=200 SECONDS=10 N=1000 FEED=0|1 node --expose-gc latency.ts
@@ -11,11 +11,12 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { readFileSync } from 'node:fs'
-import { withLiveQueries } from '@telefunc/live'
+import { liveDrizzle } from '@telefunc/live/drizzle'
 import { desc, eq, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { boolean, integer, pgTable, serial, text, timestamp } from 'drizzle-orm/pg-core'
 import pg from 'pg'
+import type { LiveCell } from '../../packages/live/dist/live.js'
 import { Router } from '../../packages/live/dist/match/router.js'
 
 const MODE = process.env.MODE ?? 'live'
@@ -51,8 +52,7 @@ await admin.query(`
 await admin.end()
 
 const pool = new pg.Pool({ connectionString: url, max: 20 })
-if (MODE === 'live') withLiveQueries(pool)
-const db = drizzle({ client: pool })
+const db = MODE === 'live' ? liveDrizzle(drizzle({ client: pool })) : drizzle({ client: pool })
 const latest = (user: number) =>
   FEED
     ? db.select().from(todos).orderBy(desc(todos.updatedAt)).limit(20)
@@ -63,17 +63,20 @@ const latest = (user: number) =>
 const store: AsyncLocalStorage<object> = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??=
   new AsyncLocalStorage())
 const REQUEST_CONTEXT = Symbol.for('telefunc.requestContext')
-const LIVE_READS = Symbol.for('telefunc.liveReads')
 
-/** Runs `read` as a telefunction call would; returns how to watch what it read, if anything. */
-async function call(read: () => Promise<unknown>) {
+/** Runs a read as a telefunction call would (ending with `.live()` in live mode); returns how to watch its `Live` as
+ *  the response sending it does. */
+async function call(user: number) {
   const closing: (() => void)[] = []
   const context: Record<symbol, unknown> = { [REQUEST_CONTEXT]: { onClose: (cb: () => void) => closing.push(cb) } }
-  await store.run(context, async () => await read())
-  const reads = context[LIVE_READS] as { onChange(cb: () => void): () => void } | undefined
-  if (MODE === 'live' && !reads) throw new Error('A live read ran outside its telefunction call')
+  const live = await store.run(context, async () =>
+    MODE === 'live' ? ((await (latest(user) as any).live()) as LiveCell<unknown>) : (await latest(user), undefined),
+  )
   return {
-    watch: (onChange: () => void) => reads?.onChange(onChange),
+    watch(onStale: () => void) {
+      live?.send()
+      live?.onStale(onStale)
+    },
     close: () => closing.forEach((cb) => cb()),
   }
 }
@@ -92,7 +95,7 @@ class Client {
   }
   async fetch(): Promise<void> {
     this.inFlight = true
-    const { watch } = await call(() => latest(this.user))
+    const { watch } = await call(this.user)
     watch(() => this.invalidated())
     this.inFlight = false
     if (this.queued) this.refetch()
@@ -162,7 +165,7 @@ async function write(i: number) {
 }
 
 async function read() {
-  const { close } = await call(() => latest(1 + Math.floor(random() * USERS)))
+  const { close } = await call(1 + Math.floor(random() * USERS))
   close()
 }
 
