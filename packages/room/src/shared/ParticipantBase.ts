@@ -17,7 +17,14 @@ import { makeDisposer, type ListenerOptions } from './disposer.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderSnapshot } from './arguments.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
-import { DEFAULT_TRACK, encodeBinaryFrame, encodeMessageFrame, publicTrack, type TrackKey } from './binary.js'
+import {
+  DEFAULT_TRACK,
+  encodeBinaryFrame,
+  encodeMessageFrame,
+  publicTrack,
+  trackStreamKey,
+  type TrackKey,
+} from './binary.js'
 import { assertUsage } from '../utils/assert.js'
 import type { MemberMetaUpdate, WholeMemberUpdate, RoomResult, InboxMessage } from './protocol.js'
 import type {
@@ -150,7 +157,7 @@ abstract class ParticipantBase implements LocalParticipant {
    *  `TAG.DOMAIN`), so no other track's loss delays them, and a newer frame of a lossy one replaces an older one. */
   protected trackStreamOf(track: string | undefined): TrackStream {
     const key = track ?? DEFAULT_TRACK
-    return { name: `${this.id}:${key}`, lossy: this.trackLossy.get(key) === true }
+    return { name: trackStreamKey(this.id, key), lossy: this.trackLossy.get(key) === true }
   }
 
   listen(callback: (data: unknown, from: Sender | null) => unknown, options?: ListenerOptions): () => void {

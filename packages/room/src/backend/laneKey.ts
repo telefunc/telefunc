@@ -8,6 +8,7 @@ export {
 }
 
 import { assert } from '../utils/assert.js'
+import { trackStreamKey } from '../shared/binary.js'
 import type { EveryMemberLane, EveryTrackLane, LaneId, RoomSubscriptionSource } from './contract.js'
 
 function encodeLaneKey(lane: LaneId | EveryTrackLane | EveryMemberLane): string {
@@ -15,12 +16,12 @@ function encodeLaneKey(lane: LaneId | EveryTrackLane | EveryMemberLane): string 
   if (lane.kind === 'inbox') return `inbox:${encodeURIComponent(lane.member)}`
   if (lane.kind === 'binary-all') return everyTrackLaneKey(lane.member)
   if (lane.kind === 'binary-track') return everyMemberLaneKey(lane.track)
-  return `${binaryLaneKeyPrefix(lane.member)}${encodeURIComponent(lane.track)}`
+  return trackStreamKey(lane.member, lane.track)
 }
 
 /** What the key of each binary lane of `member` starts with. */
 function binaryLaneKeyPrefix(member: string): string {
-  return `binary:${encodeURIComponent(member)}:`
+  return trackStreamKey(member, '')
 }
 
 /** The key of the lane that receives every binary commit of `member`. */

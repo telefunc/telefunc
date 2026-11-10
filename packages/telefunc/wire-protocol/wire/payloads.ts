@@ -88,8 +88,9 @@ type ReconciledPayload = {
  *  as many channels as it may, and the stream stays on its own channel. A lossy one's publishes give way to newer ones. */
 type DomainAnnouncement = { stream: string; channelId: string | null; lossy: boolean }
 
-/** Client → server: the page asks for `stream`'s domain, to publish on. */
-type DomainRequest = { stream: string }
+/** Client → server: the page asks for `stream`'s domain, to publish on, and says whether `stream` is lossy, which the
+ *  domain's announcement passes on to every page it carries `stream` to. */
+type DomainRequest = { stream: string; lossy: boolean }
 
 /** A stream's name is a Room lane key or the like, far below this. */
 const DOMAIN_STREAM_MAX_LENGTH = 1024
@@ -101,9 +102,10 @@ function parseDomainRequest(text: string): DomainRequest {
   } catch {
     throw new ProtocolViolationError('DOMAIN payload is not JSON')
   }
-  const { stream } = asObject(value)
+  const { stream, lossy } = asObject(value)
   assertProtocol(isNonEmptyString(stream) && stream.length <= DOMAIN_STREAM_MAX_LENGTH, 'DOMAIN stream')
-  return { stream }
+  assertProtocol(typeof lossy === 'boolean', 'DOMAIN lossy')
+  return { stream, lossy }
 }
 
 function parseJsonPayload(payload: Uint8Array): unknown {

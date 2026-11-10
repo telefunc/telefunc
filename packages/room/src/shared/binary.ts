@@ -10,6 +10,7 @@ export {
   publicTrack,
   isNamedTrack,
   isRoomTrack,
+  trackStreamKey,
 }
 export type { TrackKey, EveryMember, EveryTrack, BinaryWantChange, BinaryFrame }
 
@@ -28,6 +29,13 @@ for (let byte = 0; byte < 256; byte++) BYTE_TO_HEX.push(byte.toString(16).padSta
 
 function isMemberId(value: unknown): value is string {
   return typeof value === 'string' && UUID_REGEX.test(value)
+}
+
+/** The stream of `member`'s `track`, one name on the page and on the server: its lane's key, and the name of its domain
+ *  (see telefunc's `TAG.DOMAIN`). A member ID is a UUID and a track at most 255 UTF-8 bytes, so it stays under 810
+ *  characters. */
+function trackStreamKey(member: string, track: string): string {
+  return `binary:${encodeURIComponent(member)}:${encodeURIComponent(track)}`
 }
 
 /** Canonical UUID string → 16 bytes. */

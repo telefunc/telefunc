@@ -140,8 +140,8 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   protected override onPeerDomainRequest(text: string): void {
     // Else a page could open domains of domains, past every cap.
     assertProtocol(this.parent === null, 'DOMAIN on a domain')
-    const { stream } = parseDomainRequest(text)
-    if (this.domainOf(stream, false) === undefined) this.announce({ stream, channelId: null, lossy: false })
+    const { stream, lossy } = parseDomainRequest(text)
+    if (this.domainOf(stream, lossy) === undefined) this.announce({ stream, channelId: null, lossy })
   }
 
   /** Sequenced on its own channel, so its page learns of a domain in order with what this channel carries. */

@@ -3,7 +3,7 @@ export { unorderedEventBody, orderedBody, trackFrameBody, MemberMessageBodies }
 import { stringify } from '@brillout/json-serializer/stringify'
 import { publishBody, type OrderingInfo, type PublishBody } from 'telefunc/__internal'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
-import type { BinaryFrame } from '../shared/binary.js'
+import { trackStreamKey, type BinaryFrame } from '../shared/binary.js'
 import type {
   ParticipantStubNotice,
   RoomCtrlEnvelope,
@@ -13,7 +13,6 @@ import type {
   RoomRosterEvent,
 } from '../shared/protocol.js'
 import type { RoomDataEnvelope } from './protocol.js'
-import { encodeLaneKey } from '../backend/laneKey.js'
 assertIsNotBrowser()
 
 /** An event an instance originates, outside any lane's order, which a page never misses. */
@@ -33,7 +32,7 @@ function orderedBody(serialized: string, info: OrderingInfo): PublishBody {
  *  loss delays it. One published with `lossy: true` gives way to a newer one of its track that no wire has taken, and
  *  one with `delta: true` goes only behind the frames of its group. */
 function trackFrameBody(frame: BinaryFrame, framed: Uint8Array, info: OrderingInfo): PublishBody {
-  const stream = encodeLaneKey({ kind: 'binary', member: frame.from, track: frame.track })
+  const stream = trackStreamKey(frame.from, frame.track)
   return publishBody(framed, info, frame.lossy ? stream : null, stream, frame.delta)
 }
 

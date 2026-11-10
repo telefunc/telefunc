@@ -145,7 +145,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   ): Promise<ChannelPublishAck> {
     if (this.stopped) throw new ChannelClosedError()
     if (domain === null) return this.sendPublish(encode.publishBinaryAckReq, data, lossyStream, delta)
-    const on = this.domainOf(domain)
+    const on = this.domainOf(domain, lossyStream !== null)
     if (!isPromise(on)) return (on ?? this)._publishBinaryUnreported(data, lossyStream, null, delta)
     const asked = this.askedDomains.get(domain)!
     // Publishes of a stream go in order, those that wait for its domain first.
@@ -170,7 +170,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   /** `stream`'s domain, or the wait for the server's answer to this page's request for it. */
-  private domainOf(stream: string): Domain | Promise<Domain> {
+  private domainOf(stream: string, lossy: boolean): Domain | Promise<Domain> {
     if (this.domains.has(stream)) return this.domains.get(stream)!
     const asked = this.askedDomains.get(stream)
     if (asked) return asked.answer.promise
@@ -181,7 +181,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
       (domain) => this.knowDomain(stream, domain),
       () => {},
     )
-    const request: DomainRequest = { stream }
+    const request: DomainRequest = { stream, lossy }
     this.connection.sendSequenced(this, 'data', encode.domain, JSON.stringify(request))
     return answer.promise
   }

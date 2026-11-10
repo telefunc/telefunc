@@ -5,7 +5,7 @@ import { getChannelMux, type ChannelMux } from './ChannelMux.js'
 import { publishBody, type PublishBody } from './PublishBody.js'
 import { ServerReplay } from './ServerReplay.js'
 import { ACK_STATUS, decode, encode, type ChannelFrame } from '../../wire/frame.js'
-import type { DomainAnnouncement } from '../../wire/payloads.js'
+import type { DomainAnnouncement, DomainRequest } from '../../wire/payloads.js'
 import { MAX_DOMAINS_PER_CHANNEL } from '../../constants.js'
 import { TAG } from '../../wire/tags.js'
 import { IndexedPeer, type LossyLane, type PeerSender, type RoomWaiter } from './IndexedPeer.js'
@@ -287,8 +287,7 @@ describe('ServerBroadcastEnd', () => {
 
   it("answers its page's request for a domain, and past the cap with none", () => {
     const { end, frames } = attachedEnd()
-    const ask = (stream: string, seq: number) =>
-      end._dispatchFrame(decode(encode.domain(7, JSON.stringify({ stream }), seq)) as ChannelFrame)
+    const ask = (stream: string, seq: number) => askDomain(end, { stream, lossy: false }, seq)
 
     ask('mine', 1)
     for (let i = 1; i < MAX_DOMAINS_PER_CHANNEL; i++) {
@@ -303,6 +302,14 @@ describe('ServerBroadcastEnd', () => {
       { stream: 'mine', named: true },
       { stream: 'one too many', named: false },
     ])
+  })
+
+  it("opens the domain its page asked for as lossy as the page's stream, for the publishes that come back on it", () => {
+    const { end, frames } = attachedEnd()
+    askDomain(end, { stream: 'cam', lossy: true }, 1)
+    end.deliver(publishBody(new Uint8Array([1]), { seq: 1, timestamp: 1 }, 'cam', 'cam'))
+
+    expect(announcements(frames)).toEqual([{ stream: 'cam', channelId: expect.any(String), lossy: true }])
   })
 
   it('registers its domains on its mux, one opened before it registered as it registers', () => {
@@ -390,6 +397,11 @@ function publishedSeqs(frames: Uint8Array[]): number[] {
     const decoded = decode(frame as Uint8Array<ArrayBuffer>)
     return decoded.tag === TAG.PUBLISH_BINARY ? [decoded.info.seq] : []
   })
+}
+
+/** `end`'s page asks for a domain. */
+function askDomain(end: ServerBroadcastEnd, request: DomainRequest, seq: number): void {
+  end._dispatchFrame(decode(encode.domain(7, JSON.stringify(request), seq)) as ChannelFrame)
 }
 
 /** An end attached on index 7, and the frames it sent. */
