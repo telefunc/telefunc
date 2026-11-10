@@ -1,7 +1,7 @@
 export { WebTransportTest }
 export type { WtState }
 
-import React, { useCallback, useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { onWtLossy, onWtTwoChannels } from './WebTransport.telefunc'
 
 type WtState = {
@@ -15,6 +15,8 @@ const LOSSY_COUNT = 2000
 
 function WebTransportTest() {
   const [state, setState] = useState<WtState>({ twoChannels: null, lossy: null })
+  const [hydrated, setHydrated] = useState(false)
+  useEffect(() => setHydrated(true), [])
 
   const openTwoChannels = useCallback(async () => {
     const { stalled, ticks } = await onWtTwoChannels()
@@ -41,7 +43,7 @@ function WebTransportTest() {
   }, [])
 
   return (
-    <div>
+    <div id={hydrated ? 'hydrated' : undefined}>
       <button type="button" id="wt-two-channels" onClick={openTwoChannels}>
         Two channels
       </button>
