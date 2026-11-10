@@ -1,5 +1,5 @@
 export { IndexedPeer }
-export type { PeerSender, RoomWaiter }
+export type { LossyLane, PeerSender, RoomWaiter }
 
 import { ACK_STATUS, encode } from '../../wire/frame.js'
 import type { AckResultStatus, SequencedEncoder } from '../../wire/frame.js'
@@ -12,9 +12,9 @@ import type { PathLane } from './PathLane.js'
 
 interface PeerSender {
   /** What the wire holds back for its page. */
-  readonly queue: WireQueue
+  readonly queue: Pick<WireQueue, 'waitingPublishes' | 'dropWaitingFromPublish' | 'drainRate'>
   /** Where its lossy channels' publishes go. */
-  readonly lossy: PathLane
+  readonly lossy: LossyLane
   send(frame: Uint8Array): void
   /** Sends `frame` in the next message the wire sends, where it can carry one (see `PieceSender.carry`). */
   carry(frame: Uint8Array): void
@@ -25,6 +25,9 @@ interface PeerSender {
   /** The bytes the wire delivered in the `ms` before the frame it's handling arrived. */
   deliveredBefore(ms: number): number
 }
+
+/** Where a lossy channel hands its publishes: whether the path is their limit, and when the next may go. */
+type LossyLane = Pick<PathLane, 'offer' | 'pathBound' | 'mayHand' | 'hand'>
 
 interface RoomWaiter {
   roomMayHaveOpened(): void

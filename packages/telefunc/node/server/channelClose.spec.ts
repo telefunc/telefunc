@@ -8,9 +8,10 @@ import { IndexedPeer, type PeerSender } from '../../wire-protocol/channel/server
 import { ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
 import { PathEstimate } from '../../wire-protocol/flowControl/PathEstimate.js'
 import { PathLane } from '../../wire-protocol/channel/server/PathLane.js'
+import type { WireQueue } from '../../wire-protocol/flowControl/server/waitingPublishes.js'
 
 /** `sender` with the lossy lane of its own queue. */
-const withLossyLane = (sender: Omit<PeerSender, 'lossy'>): PeerSender => ({
+const withLossyLane = (sender: Omit<PeerSender, 'lossy' | 'queue'> & { queue: WireQueue }): PeerSender => ({
   ...sender,
   lossy: new PathLane(sender.queue),
 })

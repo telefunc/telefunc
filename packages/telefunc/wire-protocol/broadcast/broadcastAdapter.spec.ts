@@ -8,9 +8,10 @@ import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcast
 import type { BroadcastTransport } from './broadcastAdapter.js'
 import { PathEstimate } from '../flowControl/PathEstimate.js'
 import { PathLane } from '../channel/server/PathLane.js'
+import type { WireQueue } from '../flowControl/server/waitingPublishes.js'
 
 /** `sender` with the lossy lane of its own queue. */
-const withLossyLane = (sender: Omit<PeerSender, 'lossy'>): PeerSender => ({
+const withLossyLane = (sender: Omit<PeerSender, 'lossy' | 'queue'> & { queue: WireQueue }): PeerSender => ({
   ...sender,
   lossy: new PathLane(sender.queue),
 })

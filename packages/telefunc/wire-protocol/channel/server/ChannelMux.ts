@@ -25,7 +25,7 @@ import { textEncoder } from '../../wire/envelope.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type { BarrierPayload, PreparePayload, ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
-import { IndexedPeer } from './IndexedPeer.js'
+import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
 import { creditWindowOf } from '../../flowControl/credit.js'
@@ -60,6 +60,9 @@ type ServerTransport<TWire> = {
   /** What the wire holds back for its page, on a transport that isn't `wholeMessages`. */
   queueOf?(wire: TWire): WireQueue
   terminateWire(wire: TWire): void
+  /** A sender of channel `index`'s own, on a transport that carries each channel apart; it may share the delivery count
+   *  and send wait of `wireSender`, its wire's. Without this method, the channel sends on its wire's. */
+  peerSender?(wire: TWire, index: number, wireSender: PeerSender): PeerSender
 }
 
 /** What a RECONCILE or a barrier settled, which `sendReconciled` answers with the RECONCILED. */
@@ -796,12 +799,13 @@ class ChannelMux implements UpgradeStagesOwner {
   private attachChannel(
     channel: ServerChannel,
     open: ReconcileOpenEntry,
-    { sender, request }: WireEntry,
+    { wire, transport, sender: wireSender, request }: WireEntry,
     replay: boolean,
   ): ChannelHandle | null {
     const buffer = channel._replayBuffer
     if (buffer === null) return null
     channel._onPageAttach(open.lastSeq, request)
+    const sender = transport.peerSender?.(wire, open.ix, wireSender) ?? wireSender
     const peer = new IndexedPeer({ sender, index: open.ix, replay: buffer })
     if (replay) for (const frame of buffer.getAfter(open.lastSeq)) sender.send(frame)
     channel._attachPeer(peer, open)
