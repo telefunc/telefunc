@@ -57,12 +57,12 @@ const probes: Record<string, () => void> = {
       return changesOfWrite.call(this, plan, rows).filter((c: any) => c.table === plan.table.id)
     }
   },
-  /** A join seed that didn't come back (an empty result, too many values) is taken as empty. */
+  /** An empty result's join seeds are taken as empty: the row of seeds its follow-up query sent is ignored. */
   seed() {
     const resultOf = live.resultOf
-    live.resultOf = function (...args: unknown[]) {
-      const result = resultOf.apply(this, args)
-      for (const [hidden, keys] of result.seeds) if (!keys) result.seeds.set(hidden, new Set())
+    live.resultOf = function (rows: unknown[], _seedRow: unknown) {
+      const result = resultOf.call(this, rows, undefined)
+      if (rows.length === 0) for (const hidden of result.seeds.keys()) result.seeds.set(hidden, new Set())
       return result
     }
   },
