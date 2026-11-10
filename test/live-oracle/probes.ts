@@ -8,6 +8,9 @@ import { AsyncResource } from 'node:async_hooks'
 import { LiveDatabase } from '../../packages/live/dist/liveDatabase.js'
 import { LiveRead } from '../../packages/live/dist/match/liveRead.js'
 import { Tally } from '../../packages/live/dist/match/tally.js'
+import { Refetcher } from '../../packages/live/dist/refetcher.js'
+import { WatchedRead } from '../../packages/live/dist/sharedReads.js'
+import { staleSignals } from '../../packages/live/dist/staleSignals.js'
 
 const live = LiveRead.prototype as any
 const database = LiveDatabase.prototype as any
@@ -86,6 +89,33 @@ const probes: Record<string, () => void> = {
       const counted = of.apply(this, args)
       for (const [key, group] of counted?.groups ?? []) if (group.counts.size === 0) counted.groups.delete(key)
       return counted
+    }
+  },
+  /** A stale signal arriving while a refetch runs is dropped: the last change of a burst is never fetched. */
+  coalesce() {
+    const stale = (Refetcher.prototype as any).stale
+    ;(Refetcher.prototype as any).stale = function (this: { running: boolean }) {
+      if (!this.running) stale.call(this)
+    }
+  },
+  /** A stale signal held back while the server is busy is never sent. */
+  pace() {
+    const signals = staleSignals as any
+    const tick = signals.tick
+    signals.tick = function (this: { waiting: unknown[] }) {
+      this.waiting.length = 0
+      tick.call(this)
+    }
+  },
+  /** A read that joins an identical one running gets its result but isn't told when it goes stale. */
+  join() {
+    const watch = (WatchedRead.prototype as any).watch
+    ;(WatchedRead.prototype as any).watch = function (
+      this: { watchers: Set<unknown> },
+      query: { add(r: unknown): void },
+    ) {
+      if (this.watchers.size === 0) return watch.call(this, query)
+      query.add(this)
     }
   },
   /** A cascade only reaches the groups the counts have. */

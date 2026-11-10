@@ -1,8 +1,12 @@
 // Differential oracle for @telefunc/live: after every write, each live read is run again; a result that changed
 // without an invalidation is a miss (exit 1). Extra invalidations (refetches that return the same result) are reported.
+// Then bursts of writes run faster than the subscribers refetch, each subscriber refetching through `Refetcher` as a
+// client does: once a burst settles, a subscriber whose rows aren't the current ones is a miss too. Each shape has a
+// twin subscriber with the same arguments, so that identical reads run at once and share. Half the subscribers watch a
+// `derived()` value of their rows: at the end, no rows they read may still be held (exit 1).
 //
 //   ORM=drizzle|kysely|prisma DB=pglite|pg PG_PORT=<port> PG_DATABASE=postgres SEED=1 STEPS=300 CHURN=1 SERVERS=2
-//   SHAPES=byUser,recent DRIVER=pg|postgres-js node oracle.ts
+//   SHAPES=byUser,recent DRIVER=pg|postgres-js node --expose-gc oracle.ts
 //
 // DRIVER=postgres-js (with ORM=drizzle DB=pg): postgres.js instead of `pg`.
 //
@@ -21,8 +25,10 @@ import { createKysely } from './orms/kysely.ts'
 import { createPrisma } from './orms/prisma.ts'
 import type { OrmDriver, ReadArgs, WriteArgs } from './orms/types.ts'
 import { seed, USERS } from './schema.ts'
-import type { LiveCell } from '../../packages/live/dist/live.js'
+import { derived, type LiveCell } from '../../packages/live/dist/live.js'
 import { readLive } from '../../packages/live/dist/liveQuery.js'
+import { Refetcher } from '../../packages/live/dist/refetcher.js'
+import { staleSignals } from '../../packages/live/dist/staleSignals.js'
 
 const ORM = process.env.ORM ?? 'drizzle'
 const DB = process.env.DB ?? 'pglite'
@@ -33,6 +39,13 @@ const CHURN = process.env.CHURN === '1' && DB !== 'pglite'
 const VERBOSE = process.env.VERBOSE === '1'
 const SERVERS = DB === 'pglite' ? 1 : Number(process.env.SERVERS ?? 1)
 const SHAPES = process.env.SHAPES?.split(',')
+const BURSTS = 10
+const BURST_WRITES = 20
+/** Short, so that bursts outlast it: the signals arriving within it merge. */
+const BURST_WINDOW = 30
+/** How long a refetch's response takes to reach the client, in ms. */
+const RESPONSE_TRIP = 10
+if (!global.gc) throw new Error('Run the oracle with node --expose-gc: it checks that derived() holds no rows.')
 
 const REQUEST_CONTEXT = Symbol.for('telefunc.requestContext')
 
@@ -117,9 +130,14 @@ function countQueries(sql: postgres.Sql): void {
   }
 }
 
+/** Until no query runs and no stale signal waits for its turn (the server holds them back while it is busy). */
 async function queriesAnswered(): Promise<void> {
-  do await new Promise((resolve) => setImmediate(resolve))
-  while (inFlight > 0)
+  for (;;) {
+    await new Promise((resolve) => setImmediate(resolve))
+    if (inFlight > 0) continue
+    if ((staleSignals as unknown as { waiting: unknown[] }).waiting.length === 0) return
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
 }
 
 const { driver, writer, query, close } = await connect()
@@ -188,7 +206,18 @@ async function connect(): Promise<{
 
 // ── Telefunction calls ──
 
-type Subscriber = { shape: string; args: ReadArgs; result: string; invalidated: boolean; stop: () => void }
+type Subscriber = {
+  shape: string
+  args: ReadArgs
+  result: string
+  invalidated: boolean
+  stop: () => void
+  /** Watches a `derived()` value of its rows, and holds the rows' own `Live` weakly. */
+  derived: boolean
+  rows?: WeakRef<object>
+  /** Called when its value goes stale, in the bursts. */
+  onStale?: () => void
+}
 
 async function subscribe(sub: Subscriber, late = false): Promise<void> {
   sub.stop()
@@ -199,16 +228,27 @@ async function subscribe(sub: Subscriber, late = false): Promise<void> {
     [LATE]: late,
   }
   // A telefunction is an async function: the query runs (and is awaited) inside its call.
-  const live = (await store.run(context, () =>
+  const rows = (await store.run(context, () =>
     readLive(() => driver.reads[sub.shape]!(sub.args), 'the oracle'),
   )) as LiveCell<unknown>
-  sub.result = canonical(sub.shape, live.send())
-  const stop = live.onStale(() => (sub.invalidated = true))
+  const live = sub.derived ? derivedView(sub.shape, rows) : rows
+  sub.rows = sub.derived ? new WeakRef(rows) : undefined
+  const value = live.send()
+  sub.result = sub.derived ? (value as string) : canonical(sub.shape, value)
+  const stop = live.onStale(() => {
+    sub.invalidated = true
+    sub.onStale?.()
+  })
   sub.stop = () => {
     stop()
     live.release()
   }
   for (const cb of closing) cb()
+}
+
+/** Its own function: a closure keeps every variable its function's closures capture, and `subscribe()`'s outlive it. */
+function derivedView(shape: string, rows: LiveCell<unknown>): LiveCell<string> {
+  return derived(() => canonical(shape, rows.data)) as LiveCell<string>
 }
 
 // ── The run ──
@@ -225,8 +265,11 @@ for (const shape of Object.keys(driver.reads).filter((s) => !SHAPES || SHAPES.in
       low,
       high: low + 1,
     }
-    subscribers.push({ shape, args, result: '', invalidated: false, stop: () => {} })
+    subscribers.push({ shape, args, result: '', invalidated: false, stop: () => {}, derived: i % 2 === 1 })
   }
+  // The first one's twin: when both refetch at once, one joins the other's read.
+  const first = subscribers.at(-3)!
+  subscribers.push({ ...first, result: '', invalidated: false, stop: () => {}, derived: true })
 }
 // All at once, as clients do: more calls than the pool has connections, so some wait for one.
 await Promise.all(subscribers.map((sub) => subscribe(sub)))
@@ -275,6 +318,60 @@ for (let step = 0; step < STEPS; step++) {
   await Promise.all(stale.map((sub) => subscribe(sub)))
 }
 
+// ── Bursts ──
+
+let burstMisses = 0
+let burstRefetches = 0
+let refetching = 0
+let lastRefetch = 0
+const refetchers = subscribers.map((sub) => {
+  const refetcher = new Refetcher(async () => {
+    burstRefetches++
+    refetching++
+    lastRefetch = performance.now()
+    try {
+      await subscribe(sub)
+      // A write in the meantime makes the new result stale while the refetch still runs.
+      await new Promise((resolve) => setTimeout(resolve, RESPONSE_TRIP))
+    } finally {
+      refetching--
+    }
+  }, BURST_WINDOW)
+  sub.onStale = () => refetcher.stale()
+  return refetcher
+})
+for (let burst = 0; burst < BURSTS; burst++) {
+  for (let i = 0; i < BURST_WRITES; i++) {
+    const write = pick(writeNames)
+    const args = await writeArgs()
+    await writer.writes[write]!(args).catch(() => {})
+  }
+  await settled()
+  for (const sub of subscribers) {
+    const now = canonical(sub.shape, await driver.reads[sub.shape]!(sub.args))
+    if (now === sub.result) continue
+    burstMisses++
+    misses.push(`burst ${burst} → ${sub.shape}(${JSON.stringify(sub.args)})\n  shown  ${sub.result}\n  now    ${now}`)
+  }
+}
+for (const refetcher of refetchers) refetcher.stop()
+
+/** Until no refetch has run for longer than the window: a stale signal merged into a pending one has been fetched. */
+async function settled(): Promise<void> {
+  await queriesAnswered()
+  while (refetching > 0 || performance.now() - lastRefetch < BURST_WINDOW * 3) {
+    await new Promise((resolve) => setTimeout(resolve, BURST_WINDOW))
+    await queriesAnswered()
+  }
+}
+
+// ── derived() holds no rows ──
+
+// A `WeakRef` keeps its target until the current job ends.
+await new Promise((resolve) => setImmediate(resolve))
+global.gc!()
+const heldRows = subscribers.filter((sub) => sub.rows?.deref() !== undefined).length
+
 for (const sub of subscribers) sub.stop()
 await close()
 
@@ -301,8 +398,12 @@ for (const [shape, c] of byShape)
 console.log('per write (the extra refetches it caused):')
 for (const [write, c] of [...byWrite].sort(([, a], [, b]) => b.extra - a.extra))
   console.log(`  ${write.padEnd(18)} missed=${c.missed} changes=${c.changes} extra=${c.extra}`)
+console.log(
+  `bursts: missed=${burstMisses} (${BURSTS} bursts of ${BURST_WRITES} writes, refetch window ${BURST_WINDOW} ms, ${burstRefetches} refetches)`,
+)
+console.log(`derived: rows held=${heldRows} of ${subscribers.filter((s) => s.derived).length} derived subscribers`)
 for (const miss of misses.slice(0, 10)) console.log(`MISSED ${miss}`)
-process.exit(total.missed > 0 ? 1 : 0)
+process.exit(total.missed > 0 || burstMisses > 0 || heldRows > 0 ? 1 : 0)
 
 // ── Helpers ──
 
