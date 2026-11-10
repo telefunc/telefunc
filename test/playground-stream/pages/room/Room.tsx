@@ -102,6 +102,7 @@ import {
   onSeedAndChurn,
   onStopChurn,
   onPublishWhileEstablishing,
+  onCutWire,
 } from './Room.telefunc'
 
 type PollResult = { done: boolean; result?: unknown }
@@ -2181,6 +2182,9 @@ function Room() {
         const seen: number[] = []
         view.subscribeBinary((_data, info) => seen.push(info.meta!.n as number), { track: 'cursor' })
         const me = await view.join({ meta: { name: 'Me' } })
+        // A link that keeps up takes every frame: they wait while the page reconnects.
+        await onCutWire()
+        await new Promise((resolve) => setTimeout(resolve, 150))
         const receipts = await Promise.all(
           Array.from({ length: 20 }, (_, n) =>
             me.publishBinary(new Uint8Array(256 * 1024), { track: 'cursor', meta: { n }, lossy: true }),
