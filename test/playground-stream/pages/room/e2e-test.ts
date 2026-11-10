@@ -10,7 +10,8 @@ export {
   testRoomRedisSubscriberDropped,
   testRoomRedisPublishLimit,
 }
-import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { test } from '../../laneWire'
 import type { Response, WebSocket } from 'playwright-chromium'
 import {
   navigate,

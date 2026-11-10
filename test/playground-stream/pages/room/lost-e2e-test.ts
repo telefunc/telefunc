@@ -1,6 +1,7 @@
 export { testRoomLostFrames }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { test } from '../../laneWire'
 import { navigate, getResult } from '../../e2e-utils'
 
 type LostResult = { events: string[]; meta: Record<string, unknown>; count: number }

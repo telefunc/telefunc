@@ -1,6 +1,7 @@
 export { testVideoChat }
 
-import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { test } from '../../laneWire'
 import type { Page } from 'playwright-chromium'
 import { canCutWire, cutWire } from '../../e2e-utils'
 
