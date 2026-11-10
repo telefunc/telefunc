@@ -332,7 +332,11 @@ const count = (map: Map<string, Counts>, key: string) => {
   return map.get(key)!
 }
 const misses: string[] = []
-const writeNames = Object.keys(driver.writes)
+/** Writes in Postgres 18's syntax (`RETURNING WITH (OLD AS …)`): left out on older servers and PGlite. */
+const POSTGRES_18_WRITES = ['renamedOld']
+const writeNames = Object.keys(driver.writes).filter(
+  (name) => !POSTGRES_18_WRITES.includes(name) || (DB === 'pg' && process.env.PG === '18'),
+)
 /** After one of these, connections may differ (reads no longer share): they start halfway, so that sharing is checked.
  *  `stampRead` calls a function of the app's, which may set anything. */
 const SESSION_WRITES = ['setPath', 'notesPath', 'stampRead']

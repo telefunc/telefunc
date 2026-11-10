@@ -346,6 +346,13 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
           throw err
         }
       },
+      // The widened `RETURNING` must name the old row as the statement does. Refused, the app's own write fails.
+      renamedOld: ({ todo }) =>
+        sql`update todos set priority = priority + 1 where id = ${todo} returning with (old as prev) prev.priority`
+          .execute(db)
+          .catch((err: unknown) => {
+            throw new Error(`renamed old row refused: ${err}`)
+          }),
       insertSelect: ({ user }) =>
         db
           .insertInto('tags')

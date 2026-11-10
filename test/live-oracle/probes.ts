@@ -58,6 +58,14 @@ const probes: Record<string, () => void> = {
       for (const table of this.catalog.tables.values()) for (const column of table.columns) column.orderableText = true
     }
   },
+  /** The widened `RETURNING` names the old row `old`, even where the statement renamed it (the oracle's `prev`). */
+  'old-alias'() {
+    const planOf = database.planOf
+    database.planOf = function (...args: unknown[]) {
+      const plan = planOf.apply(this, args)
+      return plan.kind === 'write' ? { ...plan, text: plan.text.replaceAll('"prev".', 'old.') } : plan
+    }
+  },
   /** `COMMIT AND CHAIN` and `ROLLBACK AND CHAIN` end the transaction without starting the next: its writes are
    *  announced as they run. */
   chain() {

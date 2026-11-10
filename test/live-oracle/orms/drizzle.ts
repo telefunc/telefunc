@@ -346,6 +346,15 @@ function createDrizzle(
             })
             .catch(() => {})
         }),
+      // The widened `RETURNING` must name the old row as the statement does. Refused, the app's own write fails.
+      renamedOld: ({ todo }) =>
+        db
+          .execute(
+            sql`update todos set priority = priority + 1 where id = ${todo} returning with (old as prev) prev.priority`,
+          )
+          .catch((err: unknown) => {
+            throw new Error(`renamed old row refused: ${err}`)
+          }),
       insertSelect: ({ user }) =>
         db.execute(
           sql`insert into tags (todo_id, name) select id, 'copied' from todos where user_id = ${user} order by id limit 1`,

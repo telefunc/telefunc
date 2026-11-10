@@ -164,6 +164,10 @@ function planWrite(kind: string, node: Node, text: string | undefined, catalog: 
     return { kind: 'unknownWrite', tables: ofRows(writtenTables(node, catalog)), schemaChange: false }
   const hasOld = catalog.serverVersion >= 180000
   const target = quote(node.relation.alias?.aliasname ?? node.relation.relname)
+  // `RETURNING WITH (OLD AS o)` renames the old row: `old` no longer names it.
+  const options = (node.returningClause?.options ?? []) as Node[]
+  const oldName = options.find((o) => o.ReturningOption.option === 'RETURNING_OPTION_OLD')?.ReturningOption.value
+  const old = quote(oldName ?? 'old')
   const images: WritePlan['images'] = statement === 'delete' ? ['old'] : ['new']
   if (hasOld && (statement === 'update' || upsert)) images.push('old')
   if (!hasOld && upsert) images.push('inserted')
@@ -172,7 +176,7 @@ function planWrite(kind: string, node: Node, text: string | undefined, catalog: 
   const hidden = images.map((which, i) => {
     // A row an upsert inserted has no deleting transaction yet.
     if (which === 'inserted') return `(${target}.xmax::text = '0')::text AS "${HIDDEN_PREFIX}${i}"`
-    const source = which === 'old' && statement !== 'delete' ? 'old' : target
+    const source = which === 'old' && statement !== 'delete' ? old : target
     return `${image(source)} AS "${HIDDEN_PREFIX}${i}"`
   })
   const returning = node.returningClause?.exprs ?? node.returningList
