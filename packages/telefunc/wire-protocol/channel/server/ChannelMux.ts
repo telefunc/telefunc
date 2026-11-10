@@ -3,7 +3,11 @@ export type { WireEntry, ReconcileOutcome, ServerTransport, Wire }
 
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import { getAdapterMaxFrameBytes, getChannelConfig } from '../../../node/server/serverConfig.js'
+import {
+  getAdapterMaxFrameBytes,
+  getChannelConfig,
+  getChannelTransportOffers,
+} from '../../../node/server/serverConfig.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
@@ -253,6 +257,7 @@ class ChannelMux implements UpgradeStagesOwner {
         sseFlushThrottle: this.options.sseFlushThrottle,
         ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
         transports: this.options.transports,
+        offers: getChannelTransportOffers(),
       }),
     )
     // Sends are sync, so the FIN can't pass anything on the new wire.

@@ -35,6 +35,7 @@ import { pingDeadline } from '../../wire/pingDeadline.js'
 
 import { WsTransport } from './WsTransport.js'
 import { SseTransport } from './SseTransport.js'
+import { getPackageTransport } from './packageTransports.js'
 
 import type { ClientChannelTransport, ClientConnectionOptions, MuxChannel } from './ClientConnection.js'
 
@@ -113,6 +114,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   /** The transports the server allows, from the last settled RECONCILED: an upgrade may start once it came, whether
    *  before or after the SSE wire opened. */
   private serverTransports: ReconciledPayload['transports'] | null = null
+  /** How the page reaches the server on the transports a package adds, from the same RECONCILED. */
+  private serverOffers: ReconciledPayload['offers'] = undefined
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
   private idleTimeoutMs: number
   /** The largest credit window, each way, from the last RECONCILED. */
@@ -126,7 +129,20 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.upgrade = new Upgrade({ owner: this })
     this.allowsWebSocket = options.transports.includes(CHANNEL_TRANSPORT.WS)
     this.idleTimeoutMs = options.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS
-    this.transport = TRANSPORT_REGISTRY[options.transports[0]!](telefuncUrl, options, this)
+    this.transport = this.createTransport(options.transports[0]!)
+  }
+
+  /** A transport of `type`: a built-in one, or a package's, given the server's offer for it. */
+  private createTransport(type: ChannelTransport): ClientChannelTransport {
+    const { telefuncUrl, connectionOptions } = this
+    if (type === CHANNEL_TRANSPORT.SSE) {
+      const { fetchImpl, headers: userHeaders } = connectionOptions
+      return new SseTransport({ telefuncUrl, fetchImpl, userHeaders, owner: this })
+    }
+    if (type === CHANNEL_TRANSPORT.WS) return new WsTransport({ telefuncUrl, owner: this })
+    const create = getPackageTransport(type)
+    assertUsage(create, `config.channel.transports lists '${type}', which no installed package adds`)
+    return create({ telefuncUrl, owner: this, offer: this.serverOffers?.[type] })
   }
 
   private enterOpen(): void {
@@ -383,6 +399,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.releaseJoin(this.upgrade.tryComplete())
     if (outcome.reconcileComplete) {
       this.serverTransports = ctrl.transports
+      this.serverOffers = ctrl.offers
       this.startTtlIfIdle()
       this.maybeUpgrade()
     }
@@ -478,7 +495,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     }
     this.transport.abandonActiveTransport()
     this.transport.dispose()
-    this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.SSE](this.telefuncUrl, this.connectionOptions, this)
+    this.transport = this.createTransport(CHANNEL_TRANSPORT.SSE)
     this.handleTransportLoss(err, false)
   }
 
@@ -593,18 +610,6 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     }
     this.dispose()
   }
-}
-
-// ── Transport registry ──
-
-/** Maps each ChannelTransport to a factory that creates the corresponding ClientChannelTransport. */
-const TRANSPORT_REGISTRY: Record<
-  ChannelTransport,
-  (telefuncUrl: string, options: ClientConnectionOptions, owner: WireLifecycle) => ClientChannelTransport
-> = {
-  [CHANNEL_TRANSPORT.WS]: (telefuncUrl, _options, owner) => new WsTransport({ telefuncUrl, owner }),
-  [CHANNEL_TRANSPORT.SSE]: (telefuncUrl, options, owner) =>
-    new SseTransport({ telefuncUrl, fetchImpl: options.fetchImpl, userHeaders: options.headers, owner }),
 }
 
 /** What a channel the server ended with an ERROR of `reason` closes with. */

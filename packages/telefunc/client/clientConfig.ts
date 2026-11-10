@@ -20,6 +20,7 @@ import {
   type ChannelTransports,
   type StreamTransport,
 } from '../wire-protocol/constants.js'
+import { getPackageTransportNames } from '../wire-protocol/channel/client/packageTransports.js'
 
 type StreamConfigUser = {
   transport?: StreamTransport
@@ -128,7 +129,12 @@ function resolveClientConfig(): ConfigResolved {
     telefuncUrl: configState.telefuncUrl || '/_telefunc',
     fetch: configState.fetch ?? null,
     stream: configState.stream.transport ? { ...configState.stream } : undefined,
-    channel: { transports: configState.channel.transports ?? [...DEFAULT_CLIENT_CHANNEL_TRANSPORTS] },
+    channel: {
+      transports: configState.channel.transports ?? [
+        ...DEFAULT_CLIENT_CHANNEL_TRANSPORTS,
+        ...getPackageTransportNames(),
+      ],
+    },
     extensionResponseTypes: configState.extensions.flatMap((ext) => ext.responseTypes ?? []),
     extensionRequestTypes: configState.extensions.flatMap((ext) => ext.requestTypes ?? []),
   }
