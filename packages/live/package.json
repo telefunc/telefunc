@@ -1,0 +1,51 @@
+{
+  "name": "@telefunc/live",
+  "version": "0.1.0",
+  "description": "Live database queries for Telefunc: a client watching a telefunction's result refetches it when a write changes what it read.",
+  "homepage": "https://github.com/telefunc/telefunc/tree/main/packages/live#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/telefunc/telefunc.git",
+    "directory": "packages/live"
+  },
+  "license": "MIT",
+  "telefunc": {
+    "server": "@telefunc/live"
+  },
+  "type": "module",
+  "sideEffects": [
+    "./dist/index.js"
+  ],
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "browser": "./dist/browser.js",
+      "default": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "default": "./dist/client.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "libpg-query": "18.2.2"
+  },
+  "peerDependencies": {
+    "telefunc": ">=0.3.1"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.16",
+    "@types/pg": "^8.15.6",
+    "pg": "^8.23.1",
+    "telefunc": "workspace:*",
+    "typescript": "^7.0.2"
+  }
+}
