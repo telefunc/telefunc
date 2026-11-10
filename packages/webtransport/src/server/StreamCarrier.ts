@@ -18,7 +18,7 @@ type StreamCarrierOptions = {
 }
 
 /** One channel's frames on a WebTransport session: in order on a stream of its own, opened by its first frame and ended
- *  by its last; a lossy publish on a stream of its own (see `StreamLane`). */
+ *  by its last; a lossy publish on its group's stream (see `StreamLane`). */
 class StreamCarrier implements PeerSender {
   /** Nothing waits here: each frame goes to QUIC as it is sent, and QUIC schedules it among the session's streams. */
   readonly queue = { waitingPublishes: () => 0, dropWaitingFromPublish: () => {}, drainRate: () => 0 }
@@ -26,8 +26,8 @@ class StreamCarrier implements PeerSender {
   private readonly session: ListenerSession
   private readonly wireSender: PeerSender
   private stream: SendStream | null = null
-  /** The stream of the lossy publish being handed, which takes what is sent meanwhile. */
-  private unit: SendStream | null = null
+  /** The frames of the lossy publish being handed, which `sendOn` writes on its stream. */
+  private unit: Uint8Array[] | null = null
 
   constructor({ session, wireSender }: StreamCarrierOptions) {
     this.session = session
@@ -36,13 +36,14 @@ class StreamCarrier implements PeerSender {
   }
 
   send(frame: Uint8Array): void {
-    if (this.unit !== null) return writeFrame(this.unit, frame)
+    if (this.unit !== null) return void this.unit.push(frame)
     const stream = (this.stream ??= this.session.openStream())
     writeFrame(stream, frame)
     // The channel sends nothing after these, and the page's limit on the streams it lets the server open gets this back.
     if (frame[0] === TAG.CLOSE_ACK || frame[0] === TAG.ABORT || frame[0] === TAG.ERROR) {
       stream.end()
       this.stream = null
+      this.lossy.end()
     }
   }
 
@@ -67,23 +68,28 @@ class StreamCarrier implements PeerSender {
     this.wireSender.terminate()
   }
 
-  /** Sends what `write` sends on `unit`. */
-  sendOn(unit: SendStream, write: () => void): void {
-    this.unit = unit
+  /** Sends what `write` sends on `stream`; `onSent` runs once all of it left. */
+  sendOn(stream: SendStream, write: () => void, onSent: () => void): void {
+    const frames: Uint8Array[] = []
+    this.unit = frames
     try {
       write()
     } finally {
       this.unit = null
     }
+    for (const [i, frame] of frames.entries()) writeFrame(stream, frame, i === frames.length - 1 ? onSent : undefined)
   }
 }
 
-/** A carrier's lossy lane: each publish on a stream of its own, handed once the one before it left. While the path takes
- *  each before the next is published, every one goes; once it doesn't, the newest replaces the one waiting. QUIC's
- *  congestion controller is the path estimate. */
+/** A carrier's lossy lane: each group of publishes (see `PublishBody.delta`) on a stream of its own, so a lost packet
+ *  delays only its group, whose publishes the page gets in order. Each is handed once the one before it left. While the
+ *  path takes each before the next is published, every one goes; once it doesn't, the newest group replaces what waits.
+ *  QUIC's congestion controller is the path estimate. */
 class StreamLane implements LossyLane {
   private readonly carrier: StreamCarrier
   private readonly session: ListenerSession
+  /** The stream of the newest group handed, open for the rest of its group. */
+  private group: SendStream | null = null
   /** The publish handed before is still unsent. */
   private unsent = false
   private waiter: RoomWaiter | null = null
@@ -106,10 +112,22 @@ class StreamLane implements LossyLane {
   }
 
   hand(peer: IndexedPeer, body: PublishBody): void {
+    if (!body.delta || this.group === null) {
+      this.group?.end()
+      this.group = this.session.openStream({ unsentOnly: true })
+    }
     this.unsent = true
-    const unit = this.session.openStream({ unsentOnly: true })
-    this.carrier.sendOn(unit, () => peer.sendPublish(body))
-    unit.end(() => this.sent())
+    this.carrier.sendOn(
+      this.group,
+      () => peer.sendPublish(body),
+      () => this.sent(),
+    )
+  }
+
+  /** Its channel sends nothing more: the page's limit on the streams the server opens gets its group's back. */
+  end(): void {
+    this.group?.end()
+    this.group = null
   }
 
   private sent(): void {
@@ -120,7 +138,7 @@ class StreamLane implements LossyLane {
   }
 }
 
-function writeFrame(stream: SendStream, frame: Uint8Array): void {
+function writeFrame(stream: SendStream, frame: Uint8Array, onSent?: () => void): void {
   stream.write(lengthOf(frame))
-  stream.write(frame)
+  stream.write(frame, onSent)
 }

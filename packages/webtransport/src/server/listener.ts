@@ -2,9 +2,9 @@ export type { Listener, ListenOptions, ListenerSession, SendStream, SessionHandl
 
 /** A stream this side writes, in order. */
 interface SendStream {
-  write(bytes: Uint8Array): void
-  /** `onSent` runs once every byte it was handed left this process, on a stream opened `unsentOnly`. */
-  end(onSent?: () => void): void
+  /** `onSent` runs once `bytes` left this process, on a stream opened `unsentOnly`. */
+  write(bytes: Uint8Array, onSent?: () => void): void
+  end(): void
   /** Bytes it was handed that haven't left yet. */
   readonly unsentBytes: number
 }

@@ -71,8 +71,8 @@ function sendStream(stream: Writable, unsentOnly = false): SendStream {
   // QUICO calls a write back once its stream holds at most `writableHighWaterMark` unsent: at 0, once its bytes left.
   if (unsentOnly) Object.defineProperty(stream, 'writableHighWaterMark', { value: 0 })
   return {
-    write: (bytes) => void stream.write(bytes),
-    end: (onSent) => void stream.end(onSent),
+    write: (bytes, onSent) => void stream.write(bytes, onSent),
+    end: () => void stream.end(),
     get unsentBytes() {
       return stream.writableLength
     },
