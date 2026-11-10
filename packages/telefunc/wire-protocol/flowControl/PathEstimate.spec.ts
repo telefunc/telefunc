@@ -19,9 +19,9 @@ type Link = {
   pairedReports?: boolean
 }
 
-/** A lossy sender on a path that carries `link.rate` bytes per ms in order, a millisecond at a time: it hands the values
- *  published while `PathEstimate.room` and its pace allow, and once the path is the limit a newer value replaces those
- *  waiting. Its receiver reports as the page does: a gap after the first bytes since its last report, but no sooner
+/** A lossy sender on a path that carries `link.rate` bytes per ms in order, a millisecond at a time: at each value
+ *  published it hands those waiting while `PathEstimate.room` and its pace allow, and once the path is the limit a newer
+ *  value replaces those waiting. Its receiver reports as the page does: a gap after the first bytes since its last report, but no sooner
  *  than a gap after that report, and at once once `WIRE_PIECES_ACK_BYTES` arrived since it.
  *
  *  With `kernel`, the sender is instead a TCP sender in slow start with no window of ours: one that starts at the initial
@@ -45,6 +45,7 @@ class Sim {
   private firstUnreportedAt: number | null = null
   private readonly kernel: boolean
   private readonly valueBytes: number
+  private readonly reportsEveryGap: boolean
   /** With `kernel`: its window, and what its receiver acknowledged. */
   private window = WIRE_INITIAL_WINDOW_BYTES
   private acknowledged = 0
@@ -52,10 +53,11 @@ class Sim {
   private waiting: number[] = []
   private published = 0
 
-  constructor(link: Link, { kernel = false, valueBytes = VALUE_BYTES } = {}) {
+  constructor(link: Link, { kernel = false, valueBytes = VALUE_BYTES, reports = 'page' as 'page' | 'everyGap' } = {}) {
     this.link = link
     this.kernel = kernel
     this.valueBytes = valueBytes
+    this.reportsEveryGap = reports === 'everyGap'
   }
 
   /** `perMs` values a ms are published for `ms`, and those published after `lateFrom` count as late. */
@@ -104,6 +106,7 @@ class Sim {
         this.waiting = []
       }
       this.waiting.push(t)
+      this.hand(t, lateFrom)
     }
     this.hand(t, lateFrom)
   }
@@ -112,6 +115,7 @@ class Sim {
     const first = this.firstUnreportedAt
     if (first === null) return false
     if (this.kernel) return took - this.reported >= 2 * WIRE_SEGMENT_BYTES || this.arrivedAt < t
+    if (this.reportsEveryGap) return t - this.reportedAt >= REPORT_GAP_MS
     if (took - this.reported >= WIRE_PIECES_ACK_BYTES) return true
     return t >= (first >= this.reportedAt + REPORT_GAP_MS ? first : this.reportedAt) + REPORT_GAP_MS
   }
@@ -179,7 +183,26 @@ describe('PathEstimate', () => {
     const stalled = (t: number) => (t > 3000 && t <= 4000) || (t > 6000 && t <= 6300)
     expect(new Sim({ ...a, stalled }).run(10_000, 4).skipped).toBe(0)
     expect(new Sim({ ...a, delayAfter: { at: 1500, oneWay: 450 } }).run(10_000, 0.06).skipped).toBe(0)
+    // A path grown four times longer: its pause spaces one report, a queue every one. A receiver that reports every gap
+    // while bytes arrive brings the paused report sooner, and alone.
+    const rows = [
+      ['page', a, 2],
+      ['page', { ...a, pairedReports: true }, 2],
+      ['everyGap', a, 2],
+      ['everyGap', { ...a, pairedReports: true }, 2],
+      ['everyGap', c, 4],
+      ['everyGap', { ...c, pairedReports: true }, 4],
+      ['everyGap', c, 10],
+    ] as const
+    for (const [reports, link, perMs] of rows) {
+      const grown = { ...link, delayAfter: { at: 1500, oneWay: 4 * link.oneWay } }
+      expect(new Sim(grown, { reports }).run(8000, perMs).skipped).toBe(0)
+    }
   })
+
+  // Open (plan.md R3.3): once its slow start ended, a wire on a path grown longer is sized by the path's old least round
+  // trip, as c at 4 values a ms grown four times longer with the page's reports: it holds what the path would carry.
+  it.todo('lets a stream go whole on a path grown longer once the wire ended its slow start')
 
   it('keeps what reaches the receiver within two round trips and report gaps of young, on a path it outruns', () => {
     for (const link of [b, { ...b, pairedReports: true }]) {

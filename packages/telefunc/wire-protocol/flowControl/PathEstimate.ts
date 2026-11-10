@@ -41,16 +41,21 @@ class PathEstimate {
   private deliveredRate = 0
   private carriedRate = Number.POSITIVE_INFINITY
   /** Where the bytes of the next carried measure start: what a report said the receiver took, when the newest of them
-   *  was handed, when the report came less how long it was held, and the ms the bytes after it arrived over since. */
-  private span: { took: number; handedAt: number; reportedAt: number; ms: number } | null = null
+   *  was handed, when the report came less how long it was held, the ms the bytes after it arrived over since, and
+   *  whether every report since showed its bytes spaced by the path. */
+  private span: { took: number; handedAt: number; reportedAt: number; ms: number; spaced: boolean } | null = null
   /** The lossy bytes offered since the oldest byte in flight was handed, and those offered before it. */
   private readonly offered = new Fifo<Offered>()
   private newestOffered: Offered | null = null
   private offeredBefore = 0
   /** What a TCP sender's slow start under the wire would have grown its window to (RFC 5681 §3.1): the initial window
-   *  and every byte reported taken since. It ends, null, at the first report that shows a queue, as HyStart++ ends TCP's
-   *  (RFC 9406), so that the wire doesn't flood its path whether or not its lossy streams outrun it. */
+   *  and every byte reported taken since. It ends, null, once reports show a queue, as HyStart++ ends TCP's (RFC 9406),
+   *  so that the wire doesn't flood its path whether or not its lossy streams outrun it: two in a row, each its round
+   *  trip above the least by more than a gap and its bytes spaced by the path, as a queue spaces every report and a
+   *  path grown longer only one. */
   private slowStart: number | null = WIRE_INITIAL_WINDOW_BYTES
+  /** The newest report showed a queue, as `slowStart` reads one. */
+  private queueShown = false
   /** Bytes the wire may hand while the path is the limit: they come at its pace, and every byte handed takes some. */
   private tokens = 0
   private tokensAt = 0
@@ -142,7 +147,6 @@ class PathEstimate {
     const handedAt = newest?.end === took ? newest.at : this.sent.peek()!.at
     const roundTrip = Math.max(0, now - heldMs - handedAt)
     if (roundTrip < this.leastRoundTrip) this.leastRoundTrip = roundTrip
-    if (roundTrip > this.leastRoundTrip + this.reportGap) this.slowStart = null
     this.recentRoundTrips.add(roundTrip, now)
     const first = this.tookAt === 0
     const sinceReport = now - this.tookAt
@@ -153,16 +157,21 @@ class PathEstimate {
     // The receiver reports at least every gap while bytes arrive: bytes that arrived over more than two came across a
     // stall, which says nothing of the path's rate, so no measure spans it.
     const paused = spanMs > 2 * this.reportGap
+    // Its bytes arrived over longer than they took to hand: the path spaced them, not the sender.
+    const spaced = handedAt - this.tookHandedAt < spanMs
+    const queue = spaced && roundTrip > this.leastRoundTrip + this.reportGap
+    if (queue && this.queueShown) this.slowStart = null
+    this.queueShown = queue
     const deliveredMs = Math.max(sinceReport, handedAt - this.tookHandedAt, spanMs)
     if (!first && deliveredMs > 0) this.deliveredRates.add((took - this.took) / deliveredMs, now)
     if (paused) this.span = null
-    else this.measureCarried(took, handedAt, now, heldMs, spanMs)
+    else this.measureCarried(took, handedAt, now, heldMs, spanMs, spaced)
     if (this.slowStart !== null) this.slowStart += took - this.took
     this.took = took
     this.tookAt = now
     this.tookHandedAt = handedAt
     this.update(now)
-    if (!first && !paused) this.judge(roundTrip, handedAt, now)
+    if (!first && !paused) this.judge(roundTrip, handedAt, now, spaced)
     return true
   }
 
@@ -176,26 +185,37 @@ class PathEstimate {
     this.recentRoundTrip = this.recentRoundTrips.best(now - this.leastRoundTrip - this.reportGap, this.leastRoundTrip)
   }
 
-  /** Bytes of at least two segments arrived spaced by the path, not by the sender, where the sender handed them faster
-   *  than they arrived, while the byte before them still waited in the path's queue: over the span the receiver took
-   *  them in, they measure what the path carries. That byte waited there at least until its report came, less how long
-   *  it was held and the path's own round trip. */
-  private measureCarried(took: number, handedAt: number, now: number, heldMs: number, spanMs: number): void {
+  /** Bytes of at least two segments arrived spaced by the path, not by the sender, where every report of them showed
+   *  its bytes handed faster than they arrived, while the byte before them still waited in the path's queue: over the
+   *  span the receiver took them in, they measure what the path carries. A queue spaces every report; a pause, as a
+   *  path grown longer makes, spaces one. The byte before them waited at least until its report came, less how long it
+   *  was held and the path's own round trip. */
+  private measureCarried(
+    took: number,
+    handedAt: number,
+    now: number,
+    heldMs: number,
+    spanMs: number,
+    spaced: boolean,
+  ): void {
     const span = this.span
+    if (span !== null) span.spaced &&= spaced
+    // A report that came late, as Wi-Fi bunches them, came no later than the next one less their spacing on the
+    // receiver's clock.
+    if (span !== null && span.ms === 0) span.reportedAt = Math.min(span.reportedAt, now - heldMs - spanMs)
     if (span === null || took - span.took >= 2 * WIRE_SEGMENT_BYTES) {
-      const ms = span === null ? 0 : span.ms + spanMs
       const queued = span !== null && handedAt <= span.reportedAt - this.leastRoundTrip
-      if (queued && handedAt - span.handedAt < ms) this.carriedRates.add((took - span.took) / ms, now)
-      this.span = { took, handedAt, reportedAt: now - heldMs, ms: 0 }
+      if (queued && span.spaced) this.carriedRates.add((took - span.took) / (span.ms + spanMs), now)
+      this.span = { took, handedAt, reportedAt: now - heldMs, ms: 0, spaced: true }
       return
     }
     span.ms += spanMs
   }
 
   /** The path is the limit once a report shows the queue it holds, its round trip above the wire's least by more than
-   *  the most a late report adds, and that the lossy streams offered, over that round trip, more than the path carries.
-   *  It stays the limit until one shows they offered no more. */
-  private judge(roundTrip: number, handedAt: number, now: number): void {
+   *  the most a late report adds and its bytes spaced by the path, and that the lossy streams offered, over that round
+   *  trip, more than the path carries. It stays the limit until one shows they offered no more. */
+  private judge(roundTrip: number, handedAt: number, now: number, spaced: boolean): void {
     while (this.offered.length > 0 && this.offered.peek()!.at <= handedAt) {
       this.offeredBefore = this.offered.shift()!.total
     }
@@ -206,7 +226,7 @@ class PathEstimate {
       this.pathBound = offersMore
       return
     }
-    if (!offersMore || roundTrip <= this.leastRoundTrip + this.reportGap) return
+    if (!offersMore || !spaced || roundTrip <= this.leastRoundTrip + this.reportGap) return
     this.pathBound = true
     this.tokens = 0
     this.tokensAt = now
