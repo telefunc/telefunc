@@ -154,11 +154,13 @@ function widenedWrite(statement: Ast, text: string, table: Table, catalog: Catal
   if (update && where === undefined) return undefined
   const hadReturning = write.returning?.length > 0
   const appended = `${hadReturning ? ',' : ' RETURNING'} ${image}`
+  const sent = SQLITE.bindParams(SQLITE.splice(text, SQLITE.statementEnd(text), appended))
   return {
     kind: 'write',
     table,
     statement: written,
-    text: SQLITE.bindParams(SQLITE.splice(text, SQLITE.statementEnd(text), appended)).text,
+    text: sent.text,
+    params: sent.params,
     hadReturning,
     images: [written === 'delete' ? 'old' : 'new'],
     assigned,

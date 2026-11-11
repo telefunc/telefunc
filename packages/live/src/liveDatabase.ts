@@ -586,13 +586,15 @@ class LiveDatabase {
    *  sends `readsFirst`. */
   private widenedWrite(connection: object, plan: WritePlan, values: readonly unknown[]): Statement {
     let before: Rows | undefined
-    const statement = this.statement(connection, plan.text, plan.images.length, (rows) =>
-      this.changesOfWrite(plan, rows, before),
-    )
-    if (!plan.readsFirst) return { ...statement, returnsRows: plan.hadReturning }
+    const sent = {
+      ...this.statement(connection, plan.text, plan.images.length, (rows) => this.changesOfWrite(plan, rows, before)),
+      ...(plan.params && { values: plan.params.map((i) => values[i]) }),
+      returnsRows: plan.hadReturning,
+    }
+    if (!plan.readsFirst) return sent
     const { text, params } = plan.readsFirst
     const readsFirst = { text, values: params.map((i) => values[i]), done: (rows?: Rows) => void (before = rows) }
-    return { ...statement, returnsRows: plan.hadReturning, readsFirst }
+    return { ...sent, readsFirst }
   }
 
   /** `before`: what `readsFirst` read, when the driver sent it. */

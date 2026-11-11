@@ -35,6 +35,8 @@ type WritePlan = {
   statement: 'insert' | 'update' | 'delete'
   /** The statement with images of the written rows appended to its `RETURNING` list. */
   text: string
+  /** The app's parameter each of `text`'s takes, when they aren't the app's in order (`Dialect.bindParams()`). */
+  params?: number[]
   hadReturning: boolean
   /** Which hidden columns the rows carry, in order: row images, and whether an upsert inserted (Postgres < 18, which
    *  has no `old` image). */
