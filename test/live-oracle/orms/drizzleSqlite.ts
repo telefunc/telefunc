@@ -1,6 +1,5 @@
 export { createDrizzleSqlite }
 
-import type BetterSqlite3 from 'better-sqlite3'
 import {
   and,
   asc,
@@ -20,7 +19,6 @@ import {
   sql,
   sum,
 } from 'drizzle-orm'
-import { drizzle } from 'drizzle-orm/better-sqlite3'
 import { except, integer, real, sqliteTable, text, union } from 'drizzle-orm/sqlite-core'
 import { liveDrizzle } from '@telefunc/live/drizzle'
 import type { OrmDriver } from './types.ts'
@@ -64,8 +62,12 @@ const schema = { users, todos, tags, usersRelations, todosRelations }
 
 const NICKS = ['ann', 'ANN', 'Bob', 'bob', 'cy', 'Dee']
 
-function createDrizzleSqlite(client: BetterSqlite3.Database): OrmDriver {
-  const db = liveDrizzle(drizzle({ client, schema })) as any
+/** `client` is a better-sqlite3 or bun:sqlite database, `drizzle` the Drizzle driver for it. */
+function createDrizzleSqlite(
+  client: { exec(text: string): unknown },
+  drizzle: (config: { client: any; schema: typeof schema }) => object,
+): OrmDriver {
+  const db = liveDrizzle(drizzle({ client, schema }) as any) as any
   return {
     reads: {
       byUser: ({ user }) => db.select().from(todos).where(eq(todos.userId, user)).orderBy(todos.id),

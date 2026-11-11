@@ -10,6 +10,7 @@
 //   CHURN=1 SERVERS=2 ROLES=1 SHAPES=byUser,recent DRIVER=pg|postgres-js node --expose-gc oracle.ts
 //
 // DB=sqlite (ORM=drizzle or kysely): better-sqlite3, in memory, with the SQLite lane's own tables (sqliteSchema.ts).
+// DB=bun (ORM=drizzle, run by `bun oracle.ts`): bun:sqlite instead.
 //
 // DRIVER=postgres-js (with ORM=drizzle DB=pg): postgres.js instead of `pg`. PG=18 adds the writes in Postgres 18's
 // syntax. ROLES=1 adds writes by roles that can't read the table they write, or only some of its rows.
@@ -22,7 +23,6 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { PGlite } from '@electric-sql/pglite'
-import Database from 'better-sqlite3'
 import pg from 'pg'
 import postgres from 'postgres'
 import { createDrizzle } from './orms/drizzle.ts'
@@ -48,7 +48,7 @@ const DRIVER = process.env.DRIVER ?? 'pg'
 const SEED = Number(process.env.SEED ?? 1)
 const STEPS = Number(process.env.STEPS ?? 300)
 /** One connection, which runs each statement as it's called. */
-const ONE_CONNECTION = DB === 'pglite' || DB === 'sqlite'
+const ONE_CONNECTION = DB === 'pglite' || DB === 'sqlite' || DB === 'bun'
 const CHURN = process.env.CHURN === '1' && !ONE_CONNECTION
 const VERBOSE = process.env.VERBOSE === '1'
 const SERVERS = ONE_CONNECTION ? 1 : Number(process.env.SERVERS ?? 1)
@@ -61,7 +61,8 @@ const BURST_WRITES = 20
 const BURST_WINDOW = 30
 /** How long a refetch's response takes to reach the client, in ms. */
 const RESPONSE_TRIP = 10
-if (!global.gc) throw new Error('Run the oracle with node --expose-gc: it checks that derived() holds no rows.')
+const gc = global.gc ?? (globalThis as { Bun?: { gc(full: boolean): void } }).Bun?.gc.bind(null, true)
+if (!gc) throw new Error('Run the oracle with node --expose-gc: it checks that derived() holds no rows.')
 
 const REQUEST_CONTEXT = Symbol.for('telefunc.requestContext')
 
@@ -164,10 +165,26 @@ async function connect(): Promise<{
   query: (text: string) => Promise<any[]>
   close: () => Promise<void>
 }> {
-  if (DB === 'sqlite') {
+  if (DB === 'bun') {
+    // @ts-ignore: bun's own module, which Node's types don't declare.
+    const { Database } = await import('bun:sqlite')
+    const { drizzle } = await import('drizzle-orm/bun-sqlite')
     const sqlite = new Database(':memory:')
     sqlite.exec(sqliteSeed(random))
-    const driver = ORM === 'kysely' ? createKyselySqlite(sqlite) : createDrizzleSqlite(sqlite)
+    const driver = createDrizzleSqlite(sqlite, drizzle as never)
+    return {
+      driver,
+      writer: driver,
+      query: async (text) => sqlite.prepare(text).all(),
+      close: async () => sqlite.close(),
+    }
+  }
+  if (DB === 'sqlite') {
+    const { default: Database } = await import('better-sqlite3')
+    const { drizzle } = await import('drizzle-orm/better-sqlite3')
+    const sqlite = new Database(':memory:')
+    sqlite.exec(sqliteSeed(random))
+    const driver = ORM === 'kysely' ? createKyselySqlite(sqlite) : createDrizzleSqlite(sqlite, drizzle)
     return {
       driver,
       writer: driver,
@@ -319,7 +336,7 @@ function derivedView(derive: typeof derived, shape: string, rows: LiveCell<unkno
 
 // Values of the seeded todos in Postgres's text form, for the `spelled*` shapes to spell (not on SQLite).
 const seeded =
-  DB === 'sqlite'
+  DB === 'sqlite' || DB === 'bun'
     ? []
     : await query(
         `select ref::text, code::text, priority::text, amount::text, done::text, text,
@@ -492,7 +509,7 @@ async function settled(): Promise<void> {
 
 // A `WeakRef` keeps its target until the current job ends.
 await new Promise((resolve) => setImmediate(resolve))
-global.gc!()
+gc()
 const heldRows = subscribers.filter((sub) => sub.rows?.deref() !== undefined).length
 
 for (const sub of subscribers) sub.stop()
