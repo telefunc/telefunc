@@ -163,6 +163,15 @@ async function queriesAnswered(): Promise<void> {
 
 const { driver, writer, query, close } = await connect()
 
+/** A file in a directory of its own, removed when the process exits: a failed run's too. */
+async function temporaryFile(name: string): Promise<string> {
+  const { mkdtempSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const dir = mkdtempSync(`${tmpdir()}/live-oracle-`)
+  process.on('exit', () => rmSync(dir, { recursive: true, force: true }))
+  return `${dir}/${name}`
+}
+
 async function connect(): Promise<{
   driver: OrmDriver
   writer: OrmDriver
@@ -209,10 +218,7 @@ async function connect(): Promise<{
   }
   if (DB === 'node') {
     const { DatabaseSync } = await import('node:sqlite')
-    const { mkdtempSync, rmSync } = await import('node:fs')
-    const { tmpdir } = await import('node:os')
-    const dir = mkdtempSync(`${tmpdir()}/live-oracle-`)
-    const path = `${dir}/oracle.db`
+    const path = await temporaryFile('oracle.db')
     const sqlite = new DatabaseSync(path)
     sqlite.exec(sqliteSeed(random))
     const driver = createPrismaSqlite(path)
@@ -223,17 +229,13 @@ async function connect(): Promise<{
       close: async () => {
         await driver.close()
         sqlite.close()
-        rmSync(dir, { recursive: true })
       },
     }
   }
   if (DB === 'libsql') {
     const { createClient } = await import('@libsql/client')
     const { drizzle } = await import('drizzle-orm/libsql')
-    const { mkdtempSync, rmSync } = await import('node:fs')
-    const { tmpdir } = await import('node:os')
-    const dir = mkdtempSync(`${tmpdir()}/live-oracle-`)
-    const url = `file:${dir}/oracle.db`
+    const url = `file:${await temporaryFile('oracle.db')}`
     // The oracle's own client: its queries don't pass through the wrapped one.
     const oracle = createClient({ url })
     await oracle.executeMultiple(sqliteSeed(random))
@@ -246,7 +248,6 @@ async function connect(): Promise<{
       close: async () => {
         client.close()
         oracle.close()
-        rmSync(dir, { recursive: true })
       },
     }
   }
