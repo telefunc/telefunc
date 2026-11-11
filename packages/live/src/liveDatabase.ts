@@ -214,6 +214,7 @@ class LiveDatabase {
         if (plan.action === 'commit') return this.commit(connection, text, plan.chain)
         break
       case 'unknownWrite':
+        if (plan.unread && live) return this.readOfAnything(connection, text, plan, live)
         if (rewrite && isUnnamed(plan) && !this.transactions.isOpen(connection))
           return this.inOwnTransaction(connection, text, plan)
     }
@@ -343,6 +344,33 @@ class LiveDatabase {
       },
       leads: lead !== undefined,
       answered: (result, copy) => lead?.answered(result, copy),
+    }
+  }
+
+  /** A statement of a `.live()` query the parser can't read: watched as reading every table, so that any committed
+   *  write refetches it. It isn't announced as a write as well: its own change would refetch it, again and again. */
+  private readOfAnything(
+    connection: object,
+    text: string,
+    plan: Plan & { kind: 'unknownWrite' },
+    live: LiveQuery,
+  ): Statement {
+    const watched = this.watched(READS_EVERYTHING, '', [], live)
+    return {
+      text,
+      hiddenColumns: 0,
+      returnsRows: true,
+      succeeded: () => {
+        if (plan.role) this.roles!.changed(connection, plan.role)
+        watched.resolve(undefined)
+        return []
+      },
+      failed: () => {
+        watched.drop()
+        this.transactions.failed(connection)
+      },
+      leads: false,
+      answered: () => {},
     }
   }
 

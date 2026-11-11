@@ -56,7 +56,8 @@ type Plan =
   | { kind: 'transaction'; action: TransactionAction; savepoint?: string; chain?: boolean }
   /** A statement whose changes aren't captured row by row: every listed table may have changed. `changesSession`: it
    *  may also change settings of its session (`set_config()`, `DISCARD`), or those new sessions start with; `role`:
-   *  its role among them, or `setConfigs`: the settings its `set_config()` calls set, which may name it. */
+   *  its role among them, or `setConfigs`: the settings its `set_config()` calls set, which may name it. `unread`: the
+   *  parser couldn't read it, so it may be a read too. */
   | {
       kind: 'unknownWrite'
       tables: ChangedTables
@@ -64,6 +65,7 @@ type Plan =
       changesSession?: boolean
       role?: RoleChange
       setConfigs?: SettingName[]
+      unread?: true
     }
   /** `SET`, `RESET`: the settings of its session change (a role, a `search_path`, what a row level security policy
    *  reads). `role`: how its role changes. */
@@ -86,6 +88,7 @@ const ANYTHING: Plan = {
   schemaChange: true,
   changesSession: true,
   role: UNKNOWN_ROLE,
+  unread: true,
 }
 
 /** Statements that may set a session's settings (they run any code), or those new sessions start with. */
