@@ -12,7 +12,7 @@ import {
 } from '../catalog.js'
 import { analyzeRead, type ReadShape } from '../match/readShape.js'
 import { names, parseStatements, quote, spliceBytes, statementEnd, topLevelFrom, walk, type Node } from '../sql.js'
-import type { RoleChange } from './roles.js'
+import type { RoleChange, SetConfig } from './roles.js'
 
 type TransactionAction = 'begin' | 'commit' | 'rollback' | 'savepoint' | 'release' | 'rollbackTo'
 
@@ -54,13 +54,14 @@ type Plan =
   | { kind: 'transaction'; action: TransactionAction; savepoint?: string; chain?: boolean }
   /** A statement whose changes aren't captured row by row: every listed table may have changed. `changesSession`: it
    *  may also change settings of its session (`set_config()`, `DISCARD`), or those new sessions start with; `role`:
-   *  its role among them. */
+   *  its role among them, or `setConfigs`: the `set_config()` calls that may set it, by the values they're given. */
   | {
       kind: 'unknownWrite'
       tables: ChangedTables
       schemaChange: boolean
       changesSession?: boolean
       role?: RoleChange
+      setConfigs?: SetConfig[]
     }
   /** `SET`, `RESET`: the settings of its session change (a role, a `search_path`, what a row level security policy
    *  reads). `role`: how its role changes. */
@@ -100,6 +101,7 @@ function planOne(statement: Node, text: string | undefined, catalog: Catalog): P
   const writing = functions.some((name) => writers.has(name))
   // `set_config()` sets a setting of the session; so may a function of the app's that may write.
   const changesSession = writing || functions.includes('set_config')
+  const setConfigs = setConfigsOf(node)
   if (changesSession || writingCte) {
     const tables = writing ? 'all' : writtenTables(node, catalog)
     return {
@@ -107,7 +109,7 @@ function planOne(statement: Node, text: string | undefined, catalog: Catalog): P
       tables: DATA_STATEMENTS.has(kind) ? ofRows(tables) : 'all',
       schemaChange: false,
       changesSession,
-      ...(setsRole(node) ? { role: UNKNOWN_ROLE } : {}),
+      ...(setConfigs.length > 0 ? { setConfigs } : {}),
     }
   }
   switch (kind) {
@@ -283,15 +285,25 @@ function roleChangeOf(node: Node): RoleChange | undefined {
   return { kind, to: kind === 'role' && named === 'none' ? null : named, local: node.is_local === true }
 }
 
-/** Whether `node` calls `set_config()` with a role setting, or with a name that isn't written out. */
-function setsRole(node: Node): boolean {
-  let sets = false
+/** The `set_config()` calls `node` makes, their arguments as far as the text tells. */
+function setConfigsOf(node: Node): SetConfig[] {
+  const calls: SetConfig[] = []
   walk(node, (key, value) => {
     if (key !== 'FuncCall' || names(value.funcname).at(-1) !== 'set_config') return
-    const name = value.args?.[0]?.A_Const?.sval?.sval
-    if (typeof name !== 'string' || ROLE_SETTINGS.has(name.toLowerCase())) sets = true
+    const args = (value.args ?? []) as Node[]
+    calls.push([argumentOf(args[0]), argumentOf(args[1]), argumentOf(args[2])])
   })
-  return sets
+  return calls
+}
+
+function argumentOf(node: Node | undefined): SetConfig[number] {
+  const argument = node?.TypeCast?.arg ?? node
+  if (argument?.ParamRef) return { param: argument.ParamRef.number - 1 }
+  const constant = argument?.A_Const
+  if (!constant) return undefined
+  if (constant.isnull) return { constant: null }
+  if (constant.sval) return { constant: constant.sval.sval }
+  return constant.boolval ? { constant: constant.boolval.boolval === true } : undefined
 }
 
 /** What a statement that changes rows only may change: `'unnamed'` for every table. */

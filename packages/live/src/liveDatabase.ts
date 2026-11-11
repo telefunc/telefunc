@@ -14,7 +14,7 @@ import {
 } from './catalog.js'
 import { ChangeFeed } from './changeFeed.js'
 import { ofRows, planStatement, type ChangedTables, type Plan, type WritePlan } from './capture/statement.js'
-import { ConnectionRoles } from './capture/roles.js'
+import { ConnectionRoles, roleChangeOf } from './capture/roles.js'
 import { named, Transactions, UNNAMED_TABLES } from './capture/transactions.js'
 import { currentQuery, type LiveQuery } from './liveQuery.js'
 import type { Row } from './match/condition.js'
@@ -185,14 +185,14 @@ class LiveDatabase {
     live: LiveQuery | undefined,
     sharing: Sharing | undefined,
   ): Statement {
-    let plan = this.planOf(text, this.catalog!)
+    let plan = withRoleSet(this.planOf(text, this.catalog!), values)
     const sessionsStart = changesSession(plan) && !this.sessionsDiffer
     const pathsStart = (sessionsStart || changesPath(plan)) && !this.pathsDiffer
     if (sessionsStart) this.sessionsStartDiffering()
     if (pathsStart) {
       this.pathsStartDiffering()
       // The text's other statements may name tables by a `search_path` it changes.
-      plan = this.planOf(text, this.catalog!)
+      plan = withRoleSet(this.planOf(text, this.catalog!), values)
     }
     switch (plan.kind) {
       case 'read':
@@ -597,4 +597,13 @@ function changesSession(plan: Plan): boolean {
 function changesPath(plan: Plan): boolean {
   if (plan.kind === 'several') return plan.plans.some(changesPath)
   return plan.kind === 'none' && plan.changesPath === true
+}
+
+/** `plan` with the role its `set_config()` calls set, from the values they're given (`Plan.setConfigs`). */
+function withRoleSet(plan: Plan, values: readonly unknown[]): Plan {
+  // Several statements in one text take no parameters.
+  if (plan.kind === 'several') return { ...plan, plans: plan.plans.map((p) => withRoleSet(p, [])) }
+  if (plan.kind !== 'unknownWrite' || !plan.setConfigs) return plan
+  const role = roleChangeOf(plan.setConfigs, values)
+  return role ? { ...plan, role } : plan
 }

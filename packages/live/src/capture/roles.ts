@@ -1,5 +1,5 @@
-export { ConnectionRoles }
-export type { RoleChange }
+export { ConnectionRoles, roleChangeOf }
+export type { RoleChange, SetConfig }
 
 import type { TransactionAction } from './statement.js'
 
@@ -9,12 +9,26 @@ import type { TransactionAction } from './statement.js'
  * - `authorization`: `SET [LOCAL] SESSION AUTHORIZATION`, which sets the role too; to the login role when `null`
  *   (`DEFAULT`, `RESET`).
  * - `login`: back to the login role (`DISCARD ALL`).
- * - `unknown`: to a role it doesn't name (`DO`, `CALL`, `set_config()`).
+ * - `unknown`: to a role it doesn't name (`DO`, `CALL`, a `set_config()` of the role whose arguments aren't known).
  */
 type RoleChange =
   | { kind: 'role' | 'authorization'; to: string | null; local: boolean }
   | { kind: 'login' }
   | { kind: 'unknown' }
+
+/** An argument of a `set_config()` call: a constant, a parameter (its index in the values), or an expression
+ *  (`undefined`). */
+type SetConfigArgument = { constant: string | boolean | null } | { param: number } | undefined
+
+/** A `set_config(name, value, local)` call: the role it sets, if any, is known once its parameters' values are. */
+type SetConfig = [name: SetConfigArgument, value: SetConfigArgument, local: SetConfigArgument]
+
+const UNKNOWN: RoleChange = { kind: 'unknown' }
+/** The settings naming a session's role, by the change setting them makes. */
+const ROLE_SETTINGS = new Map<string, 'role' | 'authorization'>([
+  ['role', 'role'],
+  ['session_authorization', 'authorization'],
+])
 
 /** A session's role, and the authorization `SET ROLE NONE` goes back to; `null` when unknown. */
 type Session = { role: string | null; authorization: string | null }
@@ -101,4 +115,30 @@ class ConnectionRoles {
     }
     return state
   }
+}
+
+/** How a statement's `set_config()` calls, run with `values`, change its session's role; `undefined` when none sets
+ *  it. */
+function roleChangeOf(calls: SetConfig[], values: readonly unknown[]): RoleChange | undefined {
+  const changes = calls.map((call) => roleChangeOfCall(call, values)).filter((change) => change !== undefined)
+  if (changes.length === 0) return undefined
+  // Several, say a session's role then a local one: not followed.
+  return changes.length === 1 ? changes[0] : UNKNOWN
+}
+
+function roleChangeOfCall([name, value, local]: SetConfig, values: readonly unknown[]): RoleChange | undefined {
+  const setting = valueOf(name, values)
+  if (typeof setting !== 'string') return UNKNOWN
+  const kind = ROLE_SETTINGS.get(setting.toLowerCase())
+  if (!kind) return undefined
+  const to = valueOf(value, values)
+  const isLocal = valueOf(local, values)
+  if (typeof to !== 'string' || typeof isLocal !== 'boolean') return UNKNOWN
+  // `none` goes back to the session's authorization, as `SET ROLE NONE` does.
+  return { kind, to: kind === 'role' && to === 'none' ? null : to, local: isLocal }
+}
+
+function valueOf(argument: SetConfigArgument, values: readonly unknown[]): unknown {
+  if (!argument) return undefined
+  return 'constant' in argument ? argument.constant : values[argument.param]
 }
