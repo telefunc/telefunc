@@ -1,6 +1,7 @@
 export { testChannel, testChannelApi }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { startBlackHoleProxy } from '../../black-hole-proxy'
 import type { Request, Response, WebSocket, WebSocketRoute } from 'playwright-chromium'
 import {
   navigate,
@@ -1045,10 +1046,12 @@ function testChannel(isDev: boolean, inDocker = false) {
   // With two transports the page opens an SSE stream, then a WebSocket: wire-e2e-test.ts covers that lane.
   if (channelTransports.length === 1) {
     test('channel: a 1 MB message to the page, 8 s at 1 Mbit/s, arrives over the connection it left on', async () => {
-      await navigate(`${getServerUrl()}/channel`)
-      const connections = countConnections()
-      // 1 Mbit/s each way.
-      await withNetworkConditions({ downloadThroughput: 125_000, uploadThroughput: 125_000 }, async () => {
+      const proxy = await startBlackHoleProxy(getServerUrl())
+      try {
+        await navigate(`${proxy.url}/channel`)
+        const connections = countConnections()
+        // 1 Mbit/s each way.
+        proxy.pace({ downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 })
         await page.click('#channel-test-slow-link')
         await autoRetry(
           async () => {
@@ -1056,16 +1059,23 @@ function testChannel(isDev: boolean, inDocker = false) {
           },
           { timeout: 40_000 },
         )
-      })
-      expect(connections.stop()).toBe(1)
+        expect(connections.stop()).toBe(1)
+      } finally {
+        // The page leaves before the proxy closes, which would cut its connections.
+        await page.goto('about:blank')
+        await proxy.close()
+      }
     })
   }
 
   // Over SSE, a channel's registration and the message the page queued with it go in one request.
   if (channelTransports.length === 1 && channelTransport === 'sse') {
     test("channel: at 1 Mbit/s, a channel the page opens beside another's 4 MiB burst gets the message its server sends as it opens", async () => {
-      await navigate(`${getServerUrl()}/channel`)
-      await withNetworkConditions({ downloadThroughput: 125_000, uploadThroughput: 125_000 }, async () => {
+      const proxy = await startBlackHoleProxy(getServerUrl())
+      try {
+        await navigate(`${proxy.url}/channel`)
+        // 1 Mbit/s each way.
+        proxy.pace({ downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 })
         await page.click('#channel-test-hello-beside-burst')
         await autoRetry(
           async () => {
@@ -1073,7 +1083,11 @@ function testChannel(isDev: boolean, inDocker = false) {
           },
           { timeout: 50_000 },
         )
-      })
+      } finally {
+        // The page leaves before the proxy closes, which would cut its connections.
+        await page.goto('about:blank')
+        await proxy.close()
+      }
     })
   }
 
