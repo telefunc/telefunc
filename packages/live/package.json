@@ -63,6 +63,11 @@
     }
   },
   "imports": {
+    "#sqlparser": {
+      "types": "./src/sqlite/sqlparser.ts",
+      "workerd": "./dist/sqlite/sqlparser.workerd.js",
+      "default": "./dist/sqlite/sqlparser.js"
+    },
     "#libpg-query-wasm": {
       "types": "./src/postgres/wasm.ts",
       "workerd": "./dist/postgres/wasm.workerd.js",
@@ -73,7 +78,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node copySqlparser.js",
     "dev": "tsc --watch"
   },
   "dependencies": {
