@@ -1,7 +1,7 @@
 export { parseSqlite, offsetOf }
 export type { Ast, Span }
 
-import { assertUsage } from '../assert.js'
+import { builtin } from '../builtin.js'
 import { processWide } from '../processWide.js'
 import { tokensOf } from './dialect.js'
 
@@ -54,11 +54,6 @@ function bareConflictTargets(text: string): string | null {
 /** Loads the parser's WASM at once: better-sqlite3 and bun:sqlite plan a statement before it runs, without waiting.
  *  The package's `init()` reads the same file, asynchronously; its glue loads it synchronously. */
 function loadParser(): Parser {
-  const builtin = (globalThis as { process?: { getBuiltinModule?(name: string): any } }).process?.getBuiltinModule
-  assertUsage(
-    builtin,
-    'SQLite support needs Node.js 22.3+ or Bun: the SQL parser loads through process.getBuiltinModule().',
-  )
   const { createRequire } = builtin('node:module')
   const { readFileSync } = builtin('node:fs')
   const { fileURLToPath, pathToFileURL } = builtin('node:url')

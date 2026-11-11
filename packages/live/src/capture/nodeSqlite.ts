@@ -1,6 +1,6 @@
 export { captureNodeSqliteFile, wrappedFile }
 
-import { assertUsage } from '../assert.js'
+import { builtin } from '../builtin.js'
 import type { LiveDatabase, LiveOptions } from '../liveDatabase.js'
 import { processWide } from '../processWide.js'
 import { captureSyncSqlite, type RowsKind } from './syncSqlite.js'
@@ -144,11 +144,4 @@ function locationOf(path: string): string {
   } catch {
     return absolute
   }
-}
-
-function builtin(name: string): any {
-  const getBuiltinModule = (globalThis as { process?: { getBuiltinModule?(name: string): unknown } }).process
-    ?.getBuiltinModule
-  assertUsage(getBuiltinModule, 'node:sqlite support needs Node.js 22.3+: it loads through process.getBuiltinModule().')
-  return getBuiltinModule(name)
 }
