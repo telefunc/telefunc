@@ -327,6 +327,9 @@ importers:
       libpg-query:
         specifier: 18.2.2
         version: 18.2.2
+      sql-parser-cst:
+        specifier: 0.44.1
+        version: 0.44.1
     devDependencies:
       '@electric-sql/pglite':
         specifier: 0.5.16
@@ -345,7 +348,7 @@ importers:
         version: 8.20.4
       drizzle-orm:
         specifier: 0.45.4
-        version: 0.45.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.16)(@types/pg@8.20.4)(kysely@0.29.8)(pg@8.23.1)(postgres@3.4.7)
+        version: 0.45.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.16)(@types/better-sqlite3@9.6.0)(@types/pg@8.20.4)(better-sqlite3@13.0.3)(kysely@0.29.8)(pg@8.23.1)(postgres@3.4.7)
       kysely:
         specifier: 0.29.8
         version: 0.29.8
@@ -521,7 +524,7 @@ importers:
         version: link:../../packages/live
       drizzle-orm:
         specifier: 0.45.4
-        version: 0.45.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.16)(@types/pg@8.23.1)(kysely@0.29.8)(pg@8.23.1)(postgres@3.4.7)
+        version: 0.45.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.16)(@types/better-sqlite3@9.6.0)(@types/pg@8.23.1)(better-sqlite3@13.0.3)(kysely@0.29.8)(pg@8.23.1)(postgres@3.4.7)
       pg:
         specifier: ^8.23.1
         version: 8.23.1
@@ -540,9 +543,12 @@ importers:
       '@telefunc/live':
         specifier: workspace:*
         version: link:../../packages/live
+      better-sqlite3:
+        specifier: 13.0.3
+        version: 13.0.3
       drizzle-orm:
         specifier: 0.45.4
-        version: 0.45.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.16)(@types/pg@8.23.1)(kysely@0.29.8)(pg@8.23.1)(postgres@3.4.7)
+        version: 0.45.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.16)(@types/better-sqlite3@9.6.0)(@types/pg@8.23.1)(better-sqlite3@13.0.3)(kysely@0.29.8)(pg@8.23.1)(postgres@3.4.7)
       kysely:
         specifier: 0.29.8
         version: 0.29.8
@@ -558,6 +564,10 @@ importers:
       telefunc:
         specifier: link:../../packages/telefunc
         version: link:../../packages/telefunc
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^9.6.0
+        version: 9.6.0
 
   test/playground:
     dependencies:
@@ -653,7 +663,7 @@ importers:
         version: 6.0.2(vite@8.0.16(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0))
       drizzle-orm:
         specifier: 0.45.4
-        version: 0.45.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.16)(@types/pg@8.20.4)(kysely@0.29.8)(pg@8.23.1)(postgres@3.4.7)
+        version: 0.45.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.16)(@types/better-sqlite3@9.6.0)(@types/pg@8.20.4)(better-sqlite3@13.0.3)(kysely@0.29.8)(pg@8.23.1)(postgres@3.4.7)
       hono:
         specifier: ^4.10.4
         version: 4.10.4
@@ -3814,6 +3824,9 @@ packages:
   '@types/babel__traverse@7.14.2':
     resolution: {integrity: sha512-K2waXdXBi2302XUdcHcR1jCeU0LL4TD9HRs/gk0N2Xvrht+G/BfJa4QObBQZfhMdxiCpV3COl5Nfq4uKTeTnJA==}
 
+  '@types/better-sqlite3@9.6.0':
+    resolution: {integrity: sha512-ZEEwBSgMu7GYJOynoagg5X9JbxfL6dTJDsgViJIqh67jV44kyOr9RXfmFjLK5rzC4MWssP06t9hu/JwGDnUbCg==}
+
   '@types/body-parser@1.19.2':
     resolution: {integrity: sha512-ALYone6pm6QmwZoAgeyNksccT9Q4AWZQ6PvfwR37GT6r6FWUPguq6sUmNGSMV2Wr761oQoBxwGGa6DR5o1DC9g==}
 
@@ -4523,6 +4536,10 @@ packages:
     resolution: {integrity: sha512-girxaJ7WZssDOFhzCGZTDKoTa1gk6A1TbflaYTpykLJ4UU9Fz9kx1aREM8JCuoVHbL8X8T/mJg7w2oYSq72Oig==}
     engines: {node: '>=6.0.0'}
     hasBin: true
+
+  better-sqlite3@13.0.3:
+    resolution: {integrity: sha512-RbOBxmLBG8uvFUc15X9+9SFemKcQ0WBuISBVkpuiaUB2qblC8UWlHEjdWVoZ8AdhSwmoEgsiXKfopX0CQxaACQ==}
+    engines: {node: '>=22'}
 
   bindings@1.5.0:
     resolution: {integrity: sha512-p2q/t/mhvuOj/UeLlV6566GD/guowlr0hHxClI0W9m7MWYkL1F0hLo+0Aexs9HSPCtR1SXQ0TD3MMKrXZajbiQ==}
@@ -6420,6 +6437,10 @@ packages:
       sass:
         optional: true
 
+  node-addon-api@8.9.2:
+    resolution: {integrity: sha512-VijLXbi3UACN69I0JVXJsX4tjACjNoQDgv2gTF6sx2wWEi8tkSg2eX8p5gSIFi8z2+DL3oHmY6OyKce38SDolg==}
+    engines: {node: ^18 || ^20 || >= 21}
+
   node-fetch@2.6.7:
     resolution: {integrity: sha512-ZjMPFEfVx5j+y2yF35Kzx5sF7kDzxuDj6ziH4FFbOp87zKDZNx8yExJIb05OGF4Nlt9IHFIMBkRl41VdvcNdbQ==}
     engines: {node: 4.x || >=6.0.0}
@@ -7140,6 +7161,9 @@ packages:
   split2@4.2.0:
     resolution: {integrity: sha512-UcjcJOWknrNkF6PLX83qcHM6KHgVKNkV62Y8a5uYDVv9ydGQVwAHMKqHdJje1VTWpljG0WYpCDhrCdAOYH4TWg==}
     engines: {node: '>= 10.x'}
+
+  sql-parser-cst@0.44.1:
+    resolution: {integrity: sha512-hhvRcrtESchH3+xOjXB1OSHpef4jPxe5nAQ04HFhm18x4FGT6AaX+aRWMQdTSJYxXyBMbKhedWzhx/i+0NxM3w==}
 
   srvx@0.11.16:
     resolution: {integrity: sha512-bp07zRuycfTY43IjAvvTFnmnJi8ikW0VFiHwOhhYcVW/L4xQ1XY4PAd4Nuum1rsA17C39zL7x+CDhrn5AL32Rw==}
@@ -10831,6 +10855,10 @@ snapshots:
     dependencies:
       '@babel/types': 7.29.0
 
+  '@types/better-sqlite3@9.6.0':
+    dependencies:
+      '@types/node': 24.0.10
+
   '@types/body-parser@1.19.2':
     dependencies:
       '@types/connect': 3.4.38
@@ -11690,6 +11718,10 @@ snapshots:
 
   baseline-browser-mapping@2.10.37: {}
 
+  better-sqlite3@13.0.3:
+    dependencies:
+      node-addon-api: 8.9.2
+
   bindings@1.5.0:
     dependencies:
       file-uri-to-path: 1.0.0
@@ -12120,20 +12152,24 @@ snapshots:
 
   dotenv@17.4.2: {}
 
-  drizzle-orm@0.45.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.16)(@types/pg@8.20.4)(kysely@0.29.8)(pg@8.23.1)(postgres@3.4.7):
+  drizzle-orm@0.45.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.16)(@types/better-sqlite3@9.6.0)(@types/pg@8.20.4)(better-sqlite3@13.0.3)(kysely@0.29.8)(pg@8.23.1)(postgres@3.4.7):
     optionalDependencies:
       '@cloudflare/workers-types': 4.20260615.1
       '@electric-sql/pglite': 0.5.16
+      '@types/better-sqlite3': 9.6.0
       '@types/pg': 8.20.4
+      better-sqlite3: 13.0.3
       kysely: 0.29.8
       pg: 8.23.1
       postgres: 3.4.7
 
-  drizzle-orm@0.45.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.16)(@types/pg@8.23.1)(kysely@0.29.8)(pg@8.23.1)(postgres@3.4.7):
+  drizzle-orm@0.45.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.16)(@types/better-sqlite3@9.6.0)(@types/pg@8.23.1)(better-sqlite3@13.0.3)(kysely@0.29.8)(pg@8.23.1)(postgres@3.4.7):
     optionalDependencies:
       '@cloudflare/workers-types': 4.20260615.1
       '@electric-sql/pglite': 0.5.16
+      '@types/better-sqlite3': 9.6.0
       '@types/pg': 8.23.1
+      better-sqlite3: 13.0.3
       kysely: 0.29.8
       pg: 8.23.1
       postgres: 3.4.7
@@ -12467,8 +12503,8 @@ snapshots:
       '@typescript-eslint/parser': 8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3)
       eslint: 9.28.0(jiti@2.7.0)
       eslint-import-resolver-node: 0.3.9
-      eslint-import-resolver-typescript: 3.8.7(eslint-plugin-import@2.31.0)(eslint@9.28.0(jiti@2.7.0))
-      eslint-plugin-import: 2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3))(eslint-import-resolver-typescript@3.8.7)(eslint@9.28.0(jiti@2.7.0))
+      eslint-import-resolver-typescript: 3.8.7(eslint-plugin-import@2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3))(eslint@9.28.0(jiti@2.7.0)))(eslint@9.28.0(jiti@2.7.0))
+      eslint-plugin-import: 2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3))(eslint-import-resolver-typescript@3.8.7(eslint-plugin-import@2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3))(eslint@9.28.0(jiti@2.7.0)))(eslint@9.28.0(jiti@2.7.0)))(eslint@9.28.0(jiti@2.7.0))
       eslint-plugin-jsx-a11y: 6.10.2(eslint@9.28.0(jiti@2.7.0))
       eslint-plugin-react: 7.37.4(eslint@9.28.0(jiti@2.7.0))
       eslint-plugin-react-hooks: 5.2.0(eslint@9.28.0(jiti@2.7.0))
@@ -12487,7 +12523,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  eslint-import-resolver-typescript@3.8.7(eslint-plugin-import@2.31.0)(eslint@9.28.0(jiti@2.7.0)):
+  eslint-import-resolver-typescript@3.8.7(eslint-plugin-import@2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3))(eslint@9.28.0(jiti@2.7.0)))(eslint@9.28.0(jiti@2.7.0)):
     dependencies:
       '@nolyfill/is-core-module': 1.0.39
       debug: 4.4.3
@@ -12498,22 +12534,22 @@ snapshots:
       stable-hash: 0.0.4
       tinyglobby: 0.2.17
     optionalDependencies:
-      eslint-plugin-import: 2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3))(eslint-import-resolver-typescript@3.8.7)(eslint@9.28.0(jiti@2.7.0))
+      eslint-plugin-import: 2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3))(eslint-import-resolver-typescript@3.8.7(eslint-plugin-import@2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3))(eslint@9.28.0(jiti@2.7.0)))(eslint@9.28.0(jiti@2.7.0)))(eslint@9.28.0(jiti@2.7.0))
     transitivePeerDependencies:
       - supports-color
 
-  eslint-module-utils@2.12.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3))(eslint-import-resolver-node@0.3.9)(eslint-import-resolver-typescript@3.8.7)(eslint@9.28.0(jiti@2.7.0)):
+  eslint-module-utils@2.12.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3))(eslint-import-resolver-node@0.3.9)(eslint-import-resolver-typescript@3.8.7(eslint-plugin-import@2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3))(eslint@9.28.0(jiti@2.7.0)))(eslint@9.28.0(jiti@2.7.0)))(eslint@9.28.0(jiti@2.7.0)):
     dependencies:
       debug: 3.2.7
     optionalDependencies:
       '@typescript-eslint/parser': 8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3)
       eslint: 9.28.0(jiti@2.7.0)
       eslint-import-resolver-node: 0.3.9
-      eslint-import-resolver-typescript: 3.8.7(eslint-plugin-import@2.31.0)(eslint@9.28.0(jiti@2.7.0))
+      eslint-import-resolver-typescript: 3.8.7(eslint-plugin-import@2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3))(eslint@9.28.0(jiti@2.7.0)))(eslint@9.28.0(jiti@2.7.0))
     transitivePeerDependencies:
       - supports-color
 
-  eslint-plugin-import@2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3))(eslint-import-resolver-typescript@3.8.7)(eslint@9.28.0(jiti@2.7.0)):
+  eslint-plugin-import@2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3))(eslint-import-resolver-typescript@3.8.7(eslint-plugin-import@2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3))(eslint@9.28.0(jiti@2.7.0)))(eslint@9.28.0(jiti@2.7.0)))(eslint@9.28.0(jiti@2.7.0)):
     dependencies:
       '@rtsao/scc': 1.1.0
       array-includes: 3.1.8
@@ -12524,7 +12560,7 @@ snapshots:
       doctrine: 2.1.0
       eslint: 9.28.0(jiti@2.7.0)
       eslint-import-resolver-node: 0.3.9
-      eslint-module-utils: 2.12.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3))(eslint-import-resolver-node@0.3.9)(eslint-import-resolver-typescript@3.8.7)(eslint@9.28.0(jiti@2.7.0))
+      eslint-module-utils: 2.12.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3))(eslint-import-resolver-node@0.3.9)(eslint-import-resolver-typescript@3.8.7(eslint-plugin-import@2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.7.0))(typescript@6.0.3))(eslint@9.28.0(jiti@2.7.0)))(eslint@9.28.0(jiti@2.7.0)))(eslint@9.28.0(jiti@2.7.0))
       hasown: 2.0.2
       is-core-module: 2.16.1
       is-glob: 4.0.3
@@ -14131,6 +14167,8 @@ snapshots:
       - '@babel/core'
       - babel-plugin-macros
 
+  node-addon-api@8.9.2: {}
+
   node-fetch@2.6.7(encoding@0.1.13):
     dependencies:
       whatwg-url: 5.0.0
@@ -15048,6 +15086,8 @@ snapshots:
   spdx-license-ids@3.0.11: {}
 
   split2@4.2.0: {}
+
+  sql-parser-cst@0.44.1: {}
 
   srvx@0.11.16: {}
 

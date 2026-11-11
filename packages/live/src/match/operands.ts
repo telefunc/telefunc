@@ -2,6 +2,7 @@ export { Operands, operandValues, isOperand, postgresOperand }
 export type { Operand, OperandValue, Comparison }
 
 import type { Catalog } from '../catalog.js'
+import type { Dialect } from '../dialect.js'
 import { names, quote, type Node } from '../sql.js'
 import type { Column } from './values.js'
 
@@ -36,6 +37,11 @@ class Operands {
 
   constructor(catalog: Pick<Catalog, 'domainBases' | 'dialect'>) {
     this.catalog = catalog
+  }
+
+  /** How the statement's SQL reads. */
+  get dialect(): Dialect {
+    return this.catalog.dialect
   }
 
   /** The index of `node` as an operand compared as `comparison` says, or `undefined` when Postgres can't evaluate it

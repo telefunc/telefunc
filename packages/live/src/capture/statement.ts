@@ -1,4 +1,4 @@
-export { planStatement, ofRows, HIDDEN_PREFIX }
+export { planStatement, planRead, ofRows, HIDDEN_PREFIX, READS_EVERYTHING }
 export type { Plan, ReadPlan, WritePlan, TransactionAction, ChangedTables }
 
 import {
@@ -21,6 +21,8 @@ type ReadPlan = {
   shape: ReadShape
   /** The statement with the hidden columns appended to its select list; `undefined` when it has none. */
   liveText: string | undefined
+  /** The index of the caller's value each parameter of `liveText` takes, when they aren't the caller's values. */
+  liveValues?: number[]
   /** Identical reads may share one run: it calls no volatile function (`Catalog.volatileFunctions`). */
   shareable: boolean
   /** How its role changes: a function of the app's it calls may set it. */
@@ -73,8 +75,13 @@ type Plan =
   /** `SET LOCAL` is one too, until its transaction ends. `changesPath`: it sets the `search_path`. */
   | { kind: 'none'; role?: RoleChange; changesPath?: boolean }
   | { kind: 'several'; plans: Plan[] }
+  /** A write whose rows its connection's change log holds (SQLite); `also`: the tables it may change besides. */
+  | { kind: 'logged'; also: ChangedTables }
 
 const HIDDEN_PREFIX = '__live_'
+
+/** A read of every table, whose result can't be bounded. */
+const READS_EVERYTHING: ReadShape = { kind: 'other', aliases: [], alsoReads: 'all', hiddenColumns: [], operands: [] }
 
 /** Statements that change rows only, and can run in a transaction of ours. */
 const DATA_STATEMENTS = new Set(['SelectStmt', 'InsertStmt', 'UpdateStmt', 'DeleteStmt', 'MergeStmt'])

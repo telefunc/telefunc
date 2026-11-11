@@ -13,6 +13,7 @@ const POSTGRES: Dialect = {
   splice: spliceBytes,
   bindParams: renumberParams,
   param: (number) => `$${number}`,
+  likeEscape: '\\',
   text: (expression) => `${expression}::text`,
   jsonArray: (expressions) => `to_json(ARRAY[${expressions.join(', ')}])::text`,
   jsonAgg: (expression) => `coalesce(to_json(array_agg(${expression})), '[]')::text`,

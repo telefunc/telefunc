@@ -42,6 +42,10 @@ type Table = {
   references: { column: string; parent: string; parentColumn: string }[]
   /** An `UPDATE` can change columns its `SET` list doesn't name (`BEFORE` row triggers, generated columns). */
   updateChangesOtherColumns: boolean
+  /** SQLite: a constraint's conflict clause is `REPLACE`, so a write may delete the rows it conflicts with. */
+  conflictReplace?: boolean
+  /** SQLite: a virtual table, whose writes no trigger sees. */
+  virtual?: boolean
 }
 
 /** `table.column` references the parent's `parentColumn`; on a parent's delete or key update the child rows are
@@ -83,6 +87,9 @@ type Catalog = {
   find(table: RangeVar): Table | undefined
   /** Every table a name may mean: in any schema, unless qualified or resolved by `searchPath`. */
   named(table: RangeVar): Table[]
+  /** SQLite: the connection logs the rows its statements change (`LOGGED_SQLITE`); `ours`, the names of the log's
+   *  triggers it had when the catalog loaded. */
+  changeLog?: { ours: string[] }
 }
 
 type CatalogRow = {

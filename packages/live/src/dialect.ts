@@ -24,6 +24,8 @@ type Dialect = {
   bindParams(text: string): { text: string; params: number[] }
   /** How a query of ours names the read's parameter `number` (1-based): `bindParams()` reads it back. */
   param(number: number): string
+  /** The character escaping `%` and `_` in a `LIKE` pattern without `ESCAPE`, if any. */
+  likeEscape: string | undefined
   /** The text form of `expression`'s value, which the matcher compares (`compareValues()`). */
   text(expression: string): string
   /** The text form of each of `expressions`, as a JSON array, as text. */

@@ -273,8 +273,10 @@ class LiveRead {
     }
     const limitText =
       limit?.kind === 'param' ? paramText(this.params[limit.index]) : limit?.kind === 'const' ? limit.text : undefined
+    const count = Number(limitText)
+    // SQLite reads a negative `LIMIT` as no limit.
     const full =
-      limit !== undefined && (limitText === undefined || limitText === null || rows.length >= Number(limitText))
+      limit !== undefined && (limitText === undefined || limitText === null || (count >= 0 && rows.length >= count))
     const sortTexts = (row: (string | null)[] | undefined) =>
       row && sort ? sort.map((k) => row[k.hidden]!) : undefined
     const seeds: Result['seeds'] = new Map()

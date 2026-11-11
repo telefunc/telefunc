@@ -19,6 +19,8 @@ type Column = {
   orderableText: boolean
   /** A nondeterministic collation can call different strings equal. */
   deterministic: boolean
+  /** Text compares as if its ASCII letters were lower case (SQLite's `NOCASE`). */
+  fold?: 'ascii'
 }
 
 /** Compares two values in Postgres's text form the way Postgres compares them, or returns `undefined` when this can't
@@ -31,10 +33,12 @@ function compareValues(a: string, b: string, column: Column): -1 | 0 | 1 | undef
       return compareOrdered(parseBoolean(a), parseBoolean(b))
     case 'D':
       return compareDateTime(a, b, column.type)
-    case 'S':
+    case 'S': {
       if (!column.deterministic) return undefined
-      if (a === b) return 0
-      return column.orderableText ? compareCodePoints(a, b) : equalityOnly(a, b)
+      const [x, y] = column.fold ? [foldAscii(a), foldAscii(b)] : [a, b]
+      if (x === y) return 0
+      return column.orderableText ? compareCodePoints(x, y) : equalityOnly(x, y)
+    }
     case 'U':
       if (column.type !== 'uuid') return undefined
       return compareOrdered(a.toLowerCase(), b.toLowerCase())
@@ -62,7 +66,8 @@ function valueKey(text: string, column: Column): string | undefined {
       return microseconds(text, column.type === 'timestamptz', column.type === 'date')?.toString()
     }
     case 'S':
-      return column.deterministic ? text : undefined
+      if (!column.deterministic) return undefined
+      return column.fold ? foldAscii(text) : text
     case 'U':
       return column.type === 'uuid' ? text.toLowerCase() : undefined
     case 'E':
@@ -78,7 +83,7 @@ function hasCanonicalText(column: Column): boolean {
     case 'N':
       return ['int2', 'int4', 'int8'].includes(column.type)
     case 'S':
-      return column.deterministic
+      return column.deterministic && !column.fold
     case 'D':
       return ['timestamptz', 'timestamp', 'date'].includes(column.type)
     case 'U':
@@ -99,6 +104,10 @@ function paramText(value: unknown): string | null | undefined {
   if (typeof value === 'boolean') return value ? 'true' : 'false'
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? undefined : value.toISOString()
   return undefined
+}
+
+function foldAscii(text: string): string {
+  return text.replace(/[A-Z]/g, (c) => c.toLowerCase())
 }
 
 // Different text means different values only for types whose text form is canonical.

@@ -1,11 +1,10 @@
 export { LiveDatabase, MAX_RESULT_ROWS }
-export type { Statement, FollowUp, LiveOptions, Sharing, Reservation }
+export type { Statement, FollowUp, LiveOptions, Sharing, Reservation, Engine }
 
 import type { BroadcastAdapter } from 'telefunc'
 import {
   accessAnswered,
   ACCESS_QUERY,
-  loadCatalog,
   ROLE_QUERY,
   tablesChangedBy,
   type Access,
@@ -14,7 +13,7 @@ import {
   type TableSet,
 } from './catalog.js'
 import { ChangeFeed } from './changeFeed.js'
-import { ofRows, planStatement, type ChangedTables, type Plan, type WritePlan } from './capture/statement.js'
+import { ofRows, READS_EVERYTHING, type ChangedTables, type Plan, type WritePlan } from './capture/statement.js'
 import { ConnectionRoles, roleChangeOf } from './capture/roles.js'
 import { named, Transactions, UNNAMED_TABLES } from './capture/transactions.js'
 import { currentQuery, type LiveQuery } from './liveQuery.js'
@@ -24,7 +23,7 @@ import { operandValues, type OperandValue } from './match/operands.js'
 import type { ReadShape } from './match/readShape.js'
 import { Router } from './match/router.js'
 import { keyOfValues, SharedReads, WatchedRead, type Joined } from './sharedReads.js'
-import { loadParser } from './sql.js'
+import { changesOfLog, DRAIN_CHANGES } from './sqlite/catalog.js'
 
 type LiveOptions = {
   /** Carries changes to the other servers, e.g. `new DefaultBroadcastAdapter(new RedisTransport({ redis }))`.
@@ -37,6 +36,8 @@ type LiveOptions = {
  *  `succeeded` returns next, in order, on the same connection, before the caller can send anything else. */
 type Statement = {
   text: string
+  /** The values to send with `text`, when they aren't the caller's. */
+  values?: unknown[]
   hiddenColumns: number
   returnsRows: boolean
   /** `command`: the command tag Postgres answered, when the driver tells (a `COMMIT` that rolled back answers
@@ -72,7 +73,20 @@ type FollowUp = { text: string; values: unknown[]; done(rows: (string | null)[][
 
 type Rows = (string | null)[][]
 
-const READS_EVERYTHING: ReadShape = { kind: 'other', aliases: [], alsoReads: 'all', hiddenColumns: [], operands: [] }
+/** One kind of database: where its catalog comes from, and how its statements are planned. */
+type Engine = {
+  /** Runs the queries the catalog needs through `query`, on the connection about to be used. */
+  loadCatalog(query: (text: string) => Promise<string>): Promise<Catalog>
+  /** The same, on a driver that answers at once. */
+  loadCatalogSync?(query: (text: string) => string): Catalog
+  /** Statements to run on a connection once its catalog loaded. */
+  setup?(catalog: Catalog): string[]
+  plan(text: string, catalog: Catalog): Plan
+  /** A statement that fails inside a transaction makes it roll back (Postgres); on SQLite, it undoes its own
+   *  changes only. */
+  failureAbortsTransaction: boolean
+}
+
 /** The tables the transaction locked as a write does, or more strongly (`TRUNCATE`): an explicit `LOCK TABLE`, which
  *  writes nothing, lists its table too. */
 const LOCKED_TABLES = `select n.nspname || '.' || c.relname from pg_locks l
@@ -90,9 +104,9 @@ const MAX_CHANGED_ROWS = 10_000
 /** Everything one wrapped database shares between its connections: what it knows of the schema, the live reads,
  *  open transactions, and the other servers. */
 class LiveDatabase {
+  private readonly engine: Engine
   private catalog: Catalog | undefined
   private loadingCatalog: Promise<Catalog> | undefined
-  private parserReady = false
   private plans = new Map<string, Plan>()
   private readonly router = new Router()
   private readonly transactions = new Transactions((changes) => this.announce(changes))
@@ -110,20 +124,37 @@ class LiveDatabase {
   private access = new Map<string, Map<string, Access>>()
   /** The values Postgres gave a read's operands, by its text and parameters: an identical read doesn't ask again. */
   private knownOperands = new Map<string, OperandValue[]>()
+  /** Connections whose open transaction changed the schema: rolled back, the catalog loaded since is wrong. */
+  private schemaChangedIn = new WeakSet<object>()
 
-  constructor(options: LiveOptions) {
+  constructor(options: LiveOptions, engine: Engine) {
     this.transport = options.transport
+    this.engine = engine
   }
 
-  /** Whether `statementFor()` can run: the schema and the SQL parser are loaded. */
+  /** Whether `statementFor()` can run: the schema is loaded. */
   isReady(): boolean {
-    return this.catalog !== undefined && this.parserReady
+    return this.catalog !== undefined
   }
 
-  /** Loads what `statementFor()` needs; `query` runs our catalog query on the connection about to be used. */
-  async ready(query: (text: string) => Promise<string>): Promise<void> {
-    await Promise.all([this.loadCatalog(query), loadParser()])
-    this.parserReady = true
+  /** Loads what `statementFor()` needs; `query` runs our catalog query on the connection about to be used. Returns
+   *  the statements to run on that connection next (`Engine.setup`). */
+  async ready(query: (text: string) => Promise<string>): Promise<string[]> {
+    if (this.catalog) return []
+    this.loadingCatalog ??= this.engine.loadCatalog(query)
+    try {
+      this.loaded(await this.loadingCatalog)
+    } finally {
+      // A failure fails the statement waiting for it; the next one tries again.
+      this.loadingCatalog = undefined
+    }
+    return this.engine.setup?.(this.catalog!) ?? []
+  }
+
+  /** `ready()` on a driver that answers at once. */
+  readySync(query: (text: string) => string): string[] {
+    this.loaded(this.engine.loadCatalogSync!(query))
+    return this.engine.setup?.(this.catalog!) ?? []
   }
 
   /** Called before each statement, on the connection that runs it, once `isReady()`. Without `rewrite`, the text is
@@ -203,6 +234,11 @@ class LiveDatabase {
     switch (plan.kind) {
       case 'read':
         return this.read(rewrite ? plan : { ...plan, liveText: undefined }, text, values, connection, live, sharing)
+      case 'logged':
+        return this.drainingLog(
+          connection,
+          this.statement(connection, text, 0, () => unknownChanges(plan.also)),
+        )
       case 'write':
         // Sent as written, a write changes its table as a whole.
         if (!rewrite || !this.widens(plan, connection)) break
@@ -218,10 +254,9 @@ class LiveDatabase {
         if (rewrite && isUnnamed(plan) && !this.transactions.isOpen(connection))
           return this.inOwnTransaction(connection, text, plan)
     }
-    const statement = this.learningAccess(
-      connection,
-      this.statement(connection, text, 0, () => this.changesOf(plan, connection)),
-    )
+    const sent = this.statement(connection, text, 0, () => this.changesOf(plan, connection))
+    const writes = plan.kind === 'unknownWrite' || plan.kind === 'several'
+    const statement = this.learningAccess(connection, writes ? this.drainingLog(connection, sent) : sent)
     if (plan.kind !== 'write' || !rewrite || this.roles!.of(connection) !== null) return statement
     // The role, and what it sees unless known: one round trip.
     const known = JSON.stringify([...this.access.keys()])
@@ -231,6 +266,23 @@ class LiveDatabase {
       done: (rows: Rows | undefined) => this.roleAnswered(connection, rows),
     }
     return { ...statement, asks }
+  }
+
+  /** On a connection with a change log (SQLite), `statement` and then the query taking the rows it changed from the
+   *  log. */
+  private drainingLog(connection: object, statement: Statement): Statement {
+    if (!this.catalog!.changeLog) return statement
+    const catalog = this.catalog!
+    const drain: FollowUp = {
+      text: DRAIN_CHANGES,
+      values: [],
+      // Not drained, the changes it may hold are unknown.
+      done: (rows) => this.transactions.record(connection, rows ? changesOfLog(rows, catalog) : unknownChanges('all')),
+    }
+    return {
+      ...statement,
+      succeeded: (rows, command) => [...statement.succeeded(rows, command), drain],
+    }
   }
 
   /** Files `ROLE_QUERY`'s answer; nothing when it failed (the role stays unknown, and the next write asks again). */
@@ -327,6 +379,7 @@ class LiveDatabase {
     const lead = reservation?.lead ?? (key ? this.shared.lead(key, watched) : undefined)
     return {
       text: plan.liveText ?? text,
+      ...(plan.liveText && plan.liveValues ? { values: plan.liveValues.map((i) => values[i]) } : {}),
       hiddenColumns: plan.liveText ? plan.shape.hiddenColumns.length : 0,
       returnsRows: true,
       succeeded: (hiddenRows) => {
@@ -340,7 +393,7 @@ class LiveDatabase {
           watched.drop()
           lead?.failed()
         }
-        this.transactions.failed(connection)
+        this.statementFailed(connection)
       },
       leads: lead !== undefined,
       answered: (result, copy) => lead?.answered(result, copy),
@@ -367,7 +420,7 @@ class LiveDatabase {
       },
       failed: () => {
         watched.drop()
-        this.transactions.failed(connection)
+        this.statementFailed(connection)
       },
       leads: false,
       answered: () => {},
@@ -463,10 +516,14 @@ class LiveDatabase {
         this.transactions.record(connection, changesOf(rows))
         return []
       },
-      failed: () => this.transactions.failed(connection),
+      failed: () => this.statementFailed(connection),
       leads: false,
       answered: () => {},
     }
+  }
+
+  private statementFailed(connection: object): void {
+    if (this.engine.failureAbortsTransaction) this.transactions.failed(connection)
   }
 
   /** Changes of a statement that isn't a single captured write; applies transaction statements and role changes. */
@@ -482,7 +539,10 @@ class LiveDatabase {
         }
         return []
       case 'unknownWrite':
-        if (plan.schemaChange) this.forgetSchema()
+        if (plan.schemaChange) {
+          this.forgetSchema()
+          if (this.transactions.isOpen(connection)) this.schemaChangedIn.add(connection)
+        }
         return unknownChanges(plan.tables)
       case 'write':
         return unknownChanges(ofRows(tablesChangedBy([[plan.table.id, undefined]], this.catalog!)))
@@ -502,6 +562,10 @@ class LiveDatabase {
   private transactionEnded(connection: object, action: 'commit' | 'rollback', chain: boolean): void {
     // A `COMMIT` of a transaction a statement failed in rolls it back.
     const ended = this.transactions.hasFailed(connection) ? 'rollback' : action
+    if (this.schemaChangedIn.has(connection)) {
+      this.schemaChangedIn.delete(connection)
+      if (ended === 'rollback') this.forgetSchema()
+    }
     this.transactions.apply(connection, ended)
     this.roles!.transaction(connection, ended)
     if (!chain) return
@@ -538,21 +602,14 @@ class LiveDatabase {
     let plan = this.plans.get(text)
     if (!plan) {
       if (this.plans.size >= MAX_PLANS) this.plans.clear()
-      plan = planStatement(text, catalog)
+      plan = this.engine.plan(text, catalog)
       this.plans.set(text, plan)
     }
     return plan
   }
 
-  private async loadCatalog(query: (text: string) => Promise<string>): Promise<void> {
-    if (this.catalog) return
-    this.loadingCatalog ??= loadCatalog(query)
-    try {
-      this.catalog = await this.loadingCatalog
-    } finally {
-      // A failure fails the statement waiting for it; the next one tries again.
-      this.loadingCatalog = undefined
-    }
+  private loaded(catalog: Catalog): void {
+    this.catalog = catalog
     if (this.pathsDiffer) this.catalog.searchPath = undefined
     this.roles ??= new ConnectionRoles(this.catalog.role)
     this.access.set(this.catalog.role, this.catalog.access)

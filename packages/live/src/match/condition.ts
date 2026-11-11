@@ -67,11 +67,15 @@ function compileCondition(node: Node, resolve: (columnRef: Node) => Column | und
       return compareValues(value, 'true', column) === 0 ? TRUE : FALSE
     }
   }
-  if (n(node, 'A_Expr')) return compileExpression(node.A_Expr, scalar)
+  if (n(node, 'A_Expr')) return compileExpression(node.A_Expr, scalar, registry.dialect.likeEscape)
   return ALWAYS
 }
 
-function compileExpression(expr: Node, scalar: (n: Node, comparison?: Comparison) => ValueSource): Condition {
+function compileExpression(
+  expr: Node,
+  scalar: (n: Node, comparison?: Comparison) => ValueSource,
+  likeEscape: string | undefined,
+): Condition {
   const operator = names(expr.name)[0]!
   const left = scalar(expr.lexpr)
   // An operand compared with a column is read as the column's type.
@@ -113,7 +117,11 @@ function compileExpression(expr: Node, scalar: (n: Node, comparison?: Comparison
     }
     case 'AEXPR_LIKE':
     case 'AEXPR_ILIKE':
-      return like(left, scalar(expr.rexpr, { form: 'pattern' }), expr.kind === 'AEXPR_ILIKE', operator.startsWith('!'))
+      return like(left, scalar(expr.rexpr, { form: 'pattern' }), {
+        caseInsensitive: expr.kind === 'AEXPR_ILIKE',
+        negated: operator.startsWith('!'),
+        escape: likeEscape,
+      })
     default:
       return ALWAYS
   }
@@ -219,7 +227,11 @@ function truthOf(
   return COMPARISONS[operator]!(order) ? TRUE : FALSE
 }
 
-function like(left: ValueSource, pattern: ValueSource, caseInsensitive: boolean, negated: boolean): Condition {
+function like(
+  left: ValueSource,
+  pattern: ValueSource,
+  { caseInsensitive, negated, escape }: { caseInsensitive: boolean; negated: boolean; escape: string | undefined },
+): Condition {
   return (row, operands) => {
     const value = read(left, row, operands)
     const text = read(pattern, row, operands)
@@ -232,7 +244,7 @@ function like(left: ValueSource, pattern: ValueSource, caseInsensitive: boolean,
     if (caseInsensitive && (!ascii.test(value) || !ascii.test(text))) return TRUE | FALSE
     // A pattern sees a `char(n)` value padded to its length.
     const padded = column.charLength === undefined ? value : padTo(value, column.charLength)
-    const matches = likeToRegExp(text, caseInsensitive).test(padded)
+    const matches = likeToRegExp(text, caseInsensitive, escape).test(padded)
     return matches !== negated ? TRUE : FALSE
   }
 }
@@ -242,11 +254,11 @@ function padTo(value: string, length: number): string {
   return value + ' '.repeat(Math.max(0, length - [...value].length))
 }
 
-function likeToRegExp(pattern: string, caseInsensitive: boolean): RegExp {
+function likeToRegExp(pattern: string, caseInsensitive: boolean, escape: string | undefined): RegExp {
   let source = ''
   for (let i = 0; i < pattern.length; i++) {
     const c = pattern[i]!
-    if (c === '\\' && i + 1 < pattern.length) source += escapeRegExp(pattern[++i]!)
+    if (c === escape && i + 1 < pattern.length) source += escapeRegExp(pattern[++i]!)
     else if (c === '%') source += '[\\s\\S]*'
     else if (c === '_') source += '[\\s\\S]'
     else source += escapeRegExp(c)
