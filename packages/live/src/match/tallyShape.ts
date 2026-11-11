@@ -1,7 +1,8 @@
 export { analyzeTally, MAX_TALLY_ROWS }
 export type { TallyShape, TallyContext, ColumnAggregate, Comparison, SetTree }
 
-import { fromClauseAt, isAggregateCall, names, quote, splitAnd, walk, type Node } from '../sql.js'
+import type { Dialect } from '../dialect.js'
+import { isAggregateCall, names, quote, splitAnd, walk, type Node } from '../sql.js'
 import { COMPARISONS } from './condition.js'
 import { isOperand, type Operands } from './operands.js'
 import type { Alias } from './readShape.js'
@@ -53,6 +54,7 @@ type SetTree = number | { op: 'union' | 'intersect' | 'except'; left: SetTree; r
 /** What the analysis of the whole statement tells. */
 type TallyContext = {
   text: string
+  dialect: Dialect
   /** Every table occurrence in the statement. */
   aliases: Alias[]
   /** The one table a plain `SELECT` reads, without subqueries or functions in its `FROM`. */
@@ -112,8 +114,9 @@ function analyzeGroups(select: Node, context: TallyContext): TallyAnalysis | und
     return { kind, column: known !== -1 ? known : columns.push(c) - 1 }
   }
 
+  const { dialect } = context
   const qualified = (c: Column) => `${quote(alias.name)}.${quote(c.name)}`
-  const hiddenColumns = columns.map((c) => `${qualified(c)}::text`)
+  const hiddenColumns = columns.map((c) => dialect.text(qualified(c)))
   const outputs: GroupRule['outputs'] = []
   let otherOutputs = false
   for (const target of select.targetList as Node[]) {
@@ -122,7 +125,7 @@ function analyzeGroups(select: Node, context: TallyContext): TallyAnalysis | und
     if (aggregate && aggregate.kind !== 'count') {
       const c = qualified(columns[aggregate.column]!)
       const call = aggregate.kind === 'countDistinct' ? `count(DISTINCT ${c})` : `${aggregate.kind}(${c})`
-      outputs.push({ aggregate, hidden: hiddenColumns.push(`${call}::text`) - 1 })
+      outputs.push({ aggregate, hidden: hiddenColumns.push(dialect.text(call)) - 1 })
       continue
     }
     let window = false
@@ -149,7 +152,7 @@ function analyzeGroups(select: Node, context: TallyContext): TallyAnalysis | und
   // `count`, `sum` and `avg` alone change with any row of their group: the counts can't rule anything out.
   if (having.length === 0 && outputs.length === 0) return undefined
 
-  const from = fromClauseAt(context.text, select.fromClause[0].RangeVar.location)
+  const from = dialect.fromClauseAt(context.text, select.fromClause[0].RangeVar.location)
   if (!from) return undefined
   const source = { alias, columns, groupColumns }
   const groupHidden = columns.slice(0, groupColumns).map((_, i) => i)
@@ -159,7 +162,7 @@ function analyzeGroups(select: Node, context: TallyContext): TallyAnalysis | und
       rule: { kind: 'groups', grouped: groupColumns > 0, groupHidden, outputs, otherOutputs, having },
     },
     hiddenColumns,
-    query: countsQuery([source], [from.text]),
+    query: countsQuery([source], [from.text], dialect),
   }
 }
 
@@ -187,10 +190,11 @@ function analyzeSetOperation(select: Node, context: TallyContext): TallyAnalysis
       if (!c || !hasCanonicalText(c)) return undefined
       columns.push(c)
     }
-    const from = fromClauseAt(context.text, node.fromClause[0].RangeVar.location)
+    const from = context.dialect.fromClauseAt(context.text, node.fromClause[0].RangeVar.location)
     if (!from) return undefined
     fromClauses.push(from.text)
-    hiddenAt.push({ from: from.start, columns: columns.map((c) => `${quote(alias.name)}.${quote(c.name)}::text`) })
+    const hidden = columns.map((c) => context.dialect.text(`${quote(alias.name)}.${quote(c.name)}`))
+    hiddenAt.push({ from: from.start, columns: hidden })
     return sources.push({ alias, columns, groupColumns: columns.length }) - 1
   }
   const tree = treeOf(select)
@@ -200,14 +204,14 @@ function analyzeSetOperation(select: Node, context: TallyContext): TallyAnalysis
     shape: { sources, rule: { kind: 'set', tree } },
     hiddenColumns: hiddenAt[0]!.columns,
     hiddenAt,
-    query: countsQuery(sources, fromClauses),
+    query: countsQuery(sources, fromClauses, context.dialect),
   }
 }
 
-function countsQuery(sources: TallySource[], fromClauses: string[]): string {
+function countsQuery(sources: TallySource[], fromClauses: string[], dialect: Dialect): string {
   const counts = sources.map((source, i) => {
-    const texts = source.columns.map((c) => `${quote(source.alias.name)}.${quote(c.name)}::text`)
-    return `SELECT to_json(ARRAY[${[`'${i}'`, ...texts].join(', ')}])::text, count(*)::text ${fromClauses[i]} GROUP BY 1`
+    const texts = source.columns.map((c) => dialect.text(`${quote(source.alias.name)}.${quote(c.name)}`))
+    return `SELECT ${dialect.jsonArray([`'${i}'`, ...texts])}, ${dialect.text('count(*)')} ${fromClauses[i]} GROUP BY 1`
   })
   return `${counts.join(' UNION ALL ')} LIMIT ${MAX_TALLY_ROWS + 1}`
 }

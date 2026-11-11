@@ -2,7 +2,9 @@ export { loadCatalog, accessAnswered, actionOf, sideEffects, tablesChangedBy, un
 export type { Access, Catalog, Table, TableSet, ForeignKey, Written }
 
 import { parsePlPgSQLSync } from 'libpg-query'
+import type { Dialect } from './dialect.js'
 import type { Column } from './match/values.js'
+import { POSTGRES } from './postgres.js'
 import { names, parseStatements, quote, tablesIn, walk, type Node, type RangeVar } from './sql.js'
 
 /** Tables by id (`schema.name`), or every table. */
@@ -47,6 +49,8 @@ type Table = {
 type ForeignKey = { table: string; column?: string; parentColumn?: string; onDelete: string; onUpdate: string }
 
 type Catalog = {
+  /** How the matcher reads and writes the database's SQL. */
+  dialect: Dialect
   database: string
   /** The role that loaded the catalog, which connections start as, and what it sees of each table, by id. */
   role: string
@@ -290,6 +294,7 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
   for (const [schema, name, baseSchema, baseName] of row.domains)
     domains.set(name, [...(domains.get(name) ?? []), { schema, base: [baseSchema, baseName] }])
   const catalog: Catalog = {
+    dialect: POSTGRES,
     database: row.database,
     role: row.role,
     access: accessOf(row.access),

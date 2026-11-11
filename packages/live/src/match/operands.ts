@@ -1,8 +1,8 @@
-export { Operands, operandValues, isOperand }
+export { Operands, operandValues, isOperand, postgresOperand }
 export type { Operand, OperandValue, Comparison }
 
 import type { Catalog } from '../catalog.js'
-import { names, quote, renumberParams, type Node } from '../sql.js'
+import { names, quote, type Node } from '../sql.js'
 import type { Column } from './values.js'
 
 /**
@@ -32,17 +32,18 @@ type Comparison = { as?: Pick<Column, 'sqlType' | 'base'>; form?: 'pattern' | 'l
 /** The operands of one statement, each once. */
 class Operands {
   readonly list: Operand[] = []
-  private readonly catalog: Pick<Catalog, 'domainBases'>
+  private readonly catalog: Pick<Catalog, 'domainBases' | 'dialect'>
 
-  constructor(catalog: Pick<Catalog, 'domainBases'>) {
+  constructor(catalog: Pick<Catalog, 'domainBases' | 'dialect'>) {
     this.catalog = catalog
   }
 
   /** The index of `node` as an operand compared as `comparison` says, or `undefined` when Postgres can't evaluate it
    *  alone (it reads a column, calls a function, or its type isn't known) or it's compared as another type. */
   of(node: Node, comparison: Comparison): number | undefined {
-    const expression = sqlOf(node)
-    const evaluated = expression === undefined ? undefined : evaluation(expression, node, comparison, this.catalog)
+    const { dialect } = this.catalog
+    const expression = sqlOf(node, dialect.param)
+    const evaluated = expression === undefined ? undefined : dialect.operand(expression, node, comparison, this.catalog)
     if (evaluated === undefined) return undefined
     const known = this.list.findIndex((operand) => operand.evaluated === evaluated)
     if (known !== -1) return known
@@ -52,7 +53,7 @@ class Operands {
   /** The query giving every operand's value, with the read's parameters at `params`. */
   query(): { text: string; params: number[] } | undefined {
     if (this.list.length === 0) return undefined
-    return renumberParams(`SELECT ${this.list.map((operand) => operand.evaluated).join(', ')}`)
+    return this.catalog.dialect.bindParams(`SELECT ${this.list.map((operand) => operand.evaluated).join(', ')}`)
   }
 }
 
@@ -68,7 +69,8 @@ function operandValues(operands: Operand[], row: readonly (string | null)[]): Op
   }
 }
 
-function evaluation(
+/** `Dialect.operand()` on Postgres: the operand as the comparison casts it. */
+function postgresOperand(
   expression: string,
   node: Node,
   { as, form }: Comparison,
@@ -134,12 +136,12 @@ function isBigint(text: string): boolean {
   return /^-?\d+$/.test(text) && BigInt(text) >= -BIGINT_MAX - BigInt(1) && BigInt(text) <= BIGINT_MAX
 }
 
-/** `node` as SQL, when it's a parameter, a constant or a cast of one. */
-function sqlOf(node: Node): string | undefined {
-  if (node.ParamRef) return `$${node.ParamRef.number}`
+/** `node` as SQL, when it's a parameter, a constant or a cast of one; `param` names a parameter. */
+function sqlOf(node: Node, param: (number: number) => string): string | undefined {
+  if (node.ParamRef) return param(node.ParamRef.number)
   if (node.A_Const) return constantSql(node.A_Const)
   if (!node.TypeCast) return undefined
-  const value = sqlOf(node.TypeCast.arg)
+  const value = sqlOf(node.TypeCast.arg, param)
   const type = typeSql(node.TypeCast.typeName)
   return value === undefined || type === undefined ? undefined : `(${value})::${type}`
 }

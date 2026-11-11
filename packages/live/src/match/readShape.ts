@@ -2,17 +2,8 @@ export { analyzeRead, SEED_LIMIT }
 export type { ReadShape, Alias, Join, Route, SortKey }
 
 import type { Catalog, Table, TableSet } from '../catalog.js'
-import {
-  isAggregateCall,
-  names,
-  parenthesizedAt,
-  quote,
-  renumberParams,
-  splitAnd,
-  walk,
-  type Node,
-  type RangeVar,
-} from '../sql.js'
+import type { Dialect } from '../dialect.js'
+import { isAggregateCall, names, quote, splitAnd, walk, type Node, type RangeVar } from '../sql.js'
 import { allOf, ALWAYS, compileCondition, inListCondition, type Condition, type ValueSource } from './condition.js'
 import { isOperand, Operands, type Operand } from './operands.js'
 import { analyzeTally, type TallyContext, type TallyShape } from './tallyShape.js'
@@ -27,7 +18,7 @@ type ReadShape = {
   aliases: Alias[]
   /** Tables read without a known filter: views' tables, row-level security policies' tables, user functions. */
   alsoReads: TableSet
-  /** Expressions appended to the select list, each `::text`. */
+  /** Expressions appended to the select list, each in its text form (`Dialect.text()`). */
   hiddenColumns: string[]
   /** For a set operation: each branch's own hidden columns, inserted before its `FROM` (a byte offset). */
   hiddenAt?: { from: number; columns: string[] }[]
@@ -156,7 +147,7 @@ function shapeOf(select: Node, analysis: Analysis): ReadShape {
     operands: analysis.operands.list,
   }
   if (kind === 'rows' && top) {
-    addResultKeys(shape, select, top, distinct, analysis.operands)
+    addResultKeys(shape, select, top, distinct, analysis)
     return shape
   }
   for (const alias of shape.aliases) alias.role = 'other'
@@ -168,7 +159,7 @@ function shapeOf(select: Node, analysis: Analysis): ReadShape {
     tally: tally.shape,
     hiddenColumns: tally.hiddenColumns,
     hiddenAt: tally.hiddenAt,
-    state: { ...renumberParams(tally.query), onlyWhenEmpty: false },
+    state: { ...analysis.catalog.dialect.bindParams(tally.query), onlyWhenEmpty: false },
   }
 }
 
@@ -185,7 +176,8 @@ function tallyContext(analysis: Analysis, text: string): TallyContext {
     const found = alias && resolveColumn(ref, analysis.scopes.get(select)!)
     return alias && found?.alias === alias ? found.column : undefined
   }
-  return { text, aliases: analysis.aliases, tableOf, columnOf, operands: analysis.operands }
+  const { dialect } = analysis.catalog
+  return { text, dialect, aliases: analysis.aliases, tableOf, columnOf, operands: analysis.operands }
 }
 
 /** The columns of a plain `SELECT DISTINCT` listing only columns of its one table. */
@@ -297,7 +289,7 @@ function analyzeExists(
   const [edge] = outer
   if (outer.length !== 1 || scope.aliases.get(edge!.other.name) !== edge!.other) return
   if (edge!.other.role !== 'top' || edge!.other.nullable || outerReferences(subquery.whereClause, sub) !== 1) return
-  const text = analysis.text && parenthesizedAt(analysis.text, sublink.location)
+  const text = analysis.text && analysis.catalog.dialect.parenthesizedAt(analysis.text, sublink.location)
   if (!text) return
   child.role = 'exists'
   child.existsQuery = text
@@ -612,7 +604,7 @@ function addResultKeys(
   select: Node,
   top: Scope,
   distinct: Column[] | undefined,
-  operands: Operands,
+  { operands, catalog: { dialect } }: Analysis,
 ): void {
   const add = (expression: string) => {
     const known = shape.hiddenColumns.indexOf(expression)
@@ -620,7 +612,7 @@ function addResultKeys(
     shape.hiddenColumns.push(expression)
     return shape.hiddenColumns.length - 1
   }
-  const hidden = (alias: Alias, column: string) => add(`${quote(alias.name)}.${quote(column)}::text`)
+  const hidden = (alias: Alias, column: string) => add(dialect.text(`${quote(alias.name)}.${quote(column)}`))
   if (distinct) {
     // A function of the distinct columns: it leaves which rows are distinct as it was.
     const alias = shape.aliases[0]!
@@ -628,7 +620,7 @@ function addResultKeys(
     shape.distinct = {
       columns: distinct,
       hidden: distinct.map((c) => hidden(alias, c.name)),
-      countHidden: add(`count(*) OVER (PARTITION BY ${partition})::text`),
+      countHidden: add(dialect.text(`count(*) OVER (PARTITION BY ${partition})`)),
     }
   }
   for (const alias of top.aliases.values()) {
@@ -638,12 +630,12 @@ function addResultKeys(
   for (const alias of shape.aliases) {
     for (const c of [...alias.correlations, ...alias.partners]) c.hidden = hidden(c.parent, c.parentColumn.name)
     if (alias.existsQuery)
-      alias.existsCountHidden = add(`(SELECT count(*) FROM ${alias.existsQuery} AS "__live_e")::text`)
+      alias.existsCountHidden = add(dialect.text(`(SELECT count(*) FROM ${alias.existsQuery} AS "__live_e")`))
     for (const join of alias.joins) {
       if (join.partner.role !== 'top') continue
       join.hidden = hidden(join.partner, join.partnerColumn.name)
       const routes = join.partner.routes.filter((r) => !r.derived)
-      if (routes.length > 0) join.seed = add(seedOf(join.partner, join.partnerColumn, routes, operands.list))
+      if (routes.length > 0) join.seed = add(seedOf(join.partner, join.partnerColumn, routes, operands.list, dialect))
     }
   }
   shape.limit = limitValue(select.limitCount)
@@ -653,11 +645,11 @@ function addResultKeys(
   if (seeds.size === 0) return
   // The same row of hidden columns, with only the seeds.
   const seedRow = shape.hiddenColumns.map((expression, i) => (seeds.has(i) ? expression : 'NULL'))
-  shape.state = { ...renumberParams(`SELECT ${seedRow.join(', ')}`), onlyWhenEmpty: true }
+  shape.state = { ...dialect.bindParams(`SELECT ${seedRow.join(', ')}`), onlyWhenEmpty: true }
 }
 
 /** The distinct `column` values of `alias`'s rows its `routes` allow, as a JSON array; up to `SEED_LIMIT + 1`. */
-function seedOf(alias: Alias, column: Column, routes: Route[], operands: Operand[]): string {
+function seedOf(alias: Alias, column: Column, routes: Route[], operands: Operand[], dialect: Dialect): string {
   const name = quote(alias.name)
   const value = (source: ValueSource) => (source.kind === 'operand' ? operands[source.index]!.expression : 'NULL')
   const where = routes.map((route) =>
@@ -665,7 +657,8 @@ function seedOf(alias: Alias, column: Column, routes: Route[], operands: Operand
       ? `${name}.${quote(route.column.name)} = ANY(${operands[route.anyOf]!.expression})`
       : `${name}.${quote(route.column.name)} IN (${route.values.map(value).join(', ')})`,
   )
-  return `(SELECT coalesce(to_json(array_agg("v")), '[]')::text FROM (SELECT DISTINCT ${name}.${quote(column.name)}::text AS "v" FROM ${alias.table.sqlName} AS ${name} WHERE ${where.join(' AND ')} LIMIT ${SEED_LIMIT + 1}) AS "__live_seed")`
+  const values = `SELECT DISTINCT ${dialect.text(`${name}.${quote(column.name)}`)} AS "v" FROM ${alias.table.sqlName} AS ${name} WHERE ${where.join(' AND ')} LIMIT ${SEED_LIMIT + 1}`
+  return `(SELECT ${dialect.jsonAgg('"v"')} FROM (${values}) AS "__live_seed")`
 }
 
 function limitValue(node: Node | undefined): Bound | undefined {

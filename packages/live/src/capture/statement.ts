@@ -11,7 +11,7 @@ import {
   type Written,
 } from '../catalog.js'
 import { analyzeRead, type ReadShape } from '../match/readShape.js'
-import { names, parseStatements, quote, spliceBytes, statementEnd, topLevelFrom, walk, type Node } from '../sql.js'
+import { names, parseStatements, quote, spliceBytes, statementEnd, walk, type Node } from '../sql.js'
 import { ROLE_SETTINGS, type RoleChange, type SettingName } from './roles.js'
 
 type TransactionAction = 'begin' | 'commit' | 'rollback' | 'savepoint' | 'release' | 'rollbackTo'
@@ -184,13 +184,14 @@ function planRead(select: Node, text: string | undefined, catalog: Catalog): Rea
   const shape = analyzeRead(select, catalog, text)
   const shareable = !catalog.calls(select).some((name) => catalog.volatileFunctions.has(name))
   if (shape.hiddenColumns.length === 0 || !text) return { kind: 'read', shape, liveText: undefined, shareable }
-  const splices = shape.hiddenAt ?? [{ from: topLevelFrom(text), columns: shape.hiddenColumns }]
+  const { dialect } = catalog
+  const splices = shape.hiddenAt ?? [{ from: dialect.topLevelFrom(text), columns: shape.hiddenColumns }]
   if (splices.some((s) => s.from === undefined)) return { kind: 'read', shape, liveText: undefined, shareable }
   let liveText = text
   // From the last: a splice leaves the byte offsets before it as they were.
   for (const { from, columns } of splices.toSorted((a, b) => b.from! - a.from!)) {
     const hidden = columns.map((expression, i) => `${expression} AS "${HIDDEN_PREFIX}${i}"`)
-    liveText = spliceBytes(liveText, from!, `, ${hidden.join(', ')} `)
+    liveText = dialect.splice(liveText, from!, `, ${hidden.join(', ')} `)
   }
   return { kind: 'read', shape, liveText, shareable }
 }
