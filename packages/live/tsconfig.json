@@ -14,5 +14,6 @@
     "lib": ["DOM", "ESNext"],
     "types": ["node"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["**/*.spec.ts"]
 }
