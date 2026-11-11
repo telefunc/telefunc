@@ -24,7 +24,8 @@ function liveDrizzle<TDb extends DrizzleDatabase>(db: TDb, options: LiveOptions 
   )
   liveDatabaseOf(db.$client, options)
   // From the app's own copy of Drizzle (a package manager may install several): a select that is never run gives it.
-  const select = Object.getPrototypeOf(db.select({}).from({} as never))
+  const builder = db.select({}) as { from(source: never): object }
+  const select = Object.getPrototypeOf(builder.from({} as never))
   if (!('live' in select))
     Object.defineProperty(select, 'live', {
       value: function live(this: { execute(): Promise<unknown> }) {
