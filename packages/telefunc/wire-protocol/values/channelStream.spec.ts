@@ -109,6 +109,20 @@ describe('a value streamed over transport channel, larger than the 1 MiB parts i
   })
 })
 
+test('a stream over transport channel gets nothing of an empty chunk: one between two others arrives as two chunks', async () => {
+  const stream = returnOverChannel(
+    new ReadableStream({
+      start(controller) {
+        for (const text of ['aaa', '', 'bb']) controller.enqueue(new TextEncoder().encode(text))
+        controller.close()
+      },
+    }),
+  ) as ReadableStream<Uint8Array>
+  const chunks: string[] = []
+  for await (const received of stream) chunks.push(new TextDecoder().decode(received))
+  expect(chunks).toEqual(['aaa', 'bb'])
+})
+
 describe('a chunk sent in parts', () => {
   setFlagsFromString('--expose-gc')
   const gc: () => void = runInNewContext('gc')

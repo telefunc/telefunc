@@ -30,12 +30,11 @@ async function sendChunks(channel: ChunkChannel, producer: StreamingProducer, st
       channel.sendBinary(TAG_END)
       return
     }
-    for (let at = 0; ; at += STREAM_CHUNK_PART_BYTES) {
+    for (let at = 0; at < next.value.byteLength; at += STREAM_CHUNK_PART_BYTES) {
       const end = at + STREAM_CHUNK_PART_BYTES
-      const last = end >= next.value.byteLength
-      const pending = channel._sendBinary(concat(last ? TAG_DATA : TAG_PART, next.value.subarray(at, end)))
+      const tag = end >= next.value.byteLength ? TAG_DATA : TAG_PART
+      const pending = channel._sendBinary(concat(tag, next.value.subarray(at, end)))
       if (pending) await pending
-      if (last) break
     }
   }
 }
