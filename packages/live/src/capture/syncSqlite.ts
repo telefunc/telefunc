@@ -31,8 +31,7 @@ function captureSyncSqlite(driver: SyncSqlite, live: LiveDatabase) {
   assertUsage(!driver.inTransaction(), 'Wrap the SQLite database outside of a transaction.')
   const { db } = driver
   const ready = () => {
-    if (live.isReady()) return
-    for (const statement of live.readySync((text) => driver.rows(text, [])[0]![0]!)) driver.exec(statement)
+    for (const statement of live.readySync(db, (text) => driver.rows(text, [])[0]![0]!)) driver.exec(statement)
   }
   const runFollowUp = ({ text, values, done }: FollowUp) => {
     let rows: (string | null)[][] | undefined

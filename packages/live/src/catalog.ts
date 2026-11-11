@@ -87,9 +87,8 @@ type Catalog = {
   find(table: RangeVar): Table | undefined
   /** Every table a name may mean: in any schema, unless qualified or resolved by `searchPath`. */
   named(table: RangeVar): Table[]
-  /** SQLite: the connection logs the rows its statements change (`LOGGED_SQLITE`); `ours`, the names of the log's
-   *  triggers it had when the catalog loaded. */
-  changeLog?: { ours: string[] }
+  /** SQLite: each connection logs the rows its statements change (`LOGGED_SQLITE_ENGINE`). */
+  changeLog?: boolean
 }
 
 type CatalogRow = {

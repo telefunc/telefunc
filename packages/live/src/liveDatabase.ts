@@ -78,10 +78,14 @@ type Engine = {
   loadCatalog(query: (text: string) => Promise<string>): Promise<Catalog>
   /** The same, on a driver that answers at once. */
   loadCatalogSync?(query: (text: string) => string): Catalog
-  /** Statements to run on a connection once its catalog loaded. */
-  setup?(catalog: Catalog): string[]
-  /** The connection logs the rows its statements change (SQLite): `drain` takes them from the log. */
-  changeLog?: { drain: string; changesOf(rows: Rows, catalog: Catalog): Change[] }
+  /** Each connection logs the rows its statements change (SQLite), once `setup` ran on it for the loaded catalog:
+   *  `triggers` answers what a previous `setup` left there, `drain` takes the changes from the log. */
+  changeLog?: {
+    triggers: string
+    setup(catalog: Catalog, ours: string[]): string[]
+    drain: string
+    changesOf(rows: Rows, catalog: Catalog): Change[]
+  }
   plan(text: string, catalog: Catalog): Plan
   /** A statement that fails inside a transaction makes it roll back (Postgres); on SQLite, it undoes its own
    *  changes only. */
@@ -108,6 +112,8 @@ class LiveDatabase {
   private readonly engine: Engine
   private catalog: Catalog | undefined
   private loadingCatalog: Promise<Catalog> | undefined
+  /** Connections whose change log follows the loaded catalog (`Engine.changeLog`). */
+  private loggingConnections = new WeakSet<object>()
   private plans = new Map<string, Plan>()
   private readonly router = new Router()
   private readonly transactions = new Transactions((changes) => this.announce(changes))
@@ -138,10 +144,9 @@ class LiveDatabase {
     return this.catalog !== undefined
   }
 
-  /** Loads what `statementFor()` needs; `query` runs our catalog query on the connection about to be used. Returns
-   *  the statements to run on that connection next (`Engine.setup`). */
-  async ready(query: (text: string) => Promise<string>): Promise<string[]> {
-    if (this.catalog) return []
+  /** Loads what `statementFor()` needs; `query` runs our catalog query on the connection about to be used. */
+  async ready(query: (text: string) => Promise<string>): Promise<void> {
+    if (this.catalog) return
     this.loadingCatalog ??= this.engine.loadCatalog(query)
     try {
       this.loaded(await this.loadingCatalog)
@@ -149,13 +154,16 @@ class LiveDatabase {
       // A failure fails the statement waiting for it; the next one tries again.
       this.loadingCatalog = undefined
     }
-    return this.engine.setup?.(this.catalog!) ?? []
   }
 
-  /** `ready()` on a driver that answers at once. */
-  readySync(query: (text: string) => string): string[] {
-    this.loaded(this.engine.loadCatalogSync!(query))
-    return this.engine.setup?.(this.catalog!) ?? []
+  /** `ready()` on a driver that answers at once, before each statement on `connection`. Returns the statements that
+   *  set up its change log for the loaded catalog, to run on it next: once per connection and catalog. */
+  readySync(connection: object, query: (text: string) => string): string[] {
+    if (!this.catalog) this.loaded(this.engine.loadCatalogSync!(query))
+    const log = this.engine.changeLog
+    if (!log || this.loggingConnections.has(connection)) return []
+    this.loggingConnections.add(connection)
+    return log.setup(this.catalog!, JSON.parse(query(log.triggers)))
   }
 
   /** Called before each statement, on the connection that runs it, once `isReady()`. Without `rewrite`, the text is
@@ -640,6 +648,7 @@ class LiveDatabase {
 
   private forgetSchema(): void {
     this.catalog = undefined
+    this.loggingConnections = new WeakSet()
     this.plans = new Map()
     this.knownOperands = new Map()
     // The tables may be others: each role's access is learned again.

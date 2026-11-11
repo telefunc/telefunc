@@ -1,4 +1,4 @@
-export { catalogQuery, catalogOf, changeLogSetup, DRAIN_CHANGES, changesOfLog, hasConflictReplace }
+export { catalogQuery, catalogOf, changeLogSetup, CHANGE_LOG_TRIGGERS, DRAIN_CHANGES, changesOfLog, hasConflictReplace }
 
 import type { Access, Catalog, Table, TableSet } from '../catalog.js'
 import { tablesChangedBy, union } from '../catalog.js'
@@ -28,8 +28,6 @@ type CatalogRow = {
     ][]
   }[]
   triggers: [table: string, sql: string][]
-  /** The change log's triggers on this connection, from before (`changeLogSetup()`). */
-  ours: string[] | null
 }
 
 const TABLES = `(select json_group_array(json_object('name', m.name, 'type', m.type, 'sql', m.sql,
@@ -43,12 +41,14 @@ const catalogQuery = (withLog: boolean) => `select json_object(
   'file', ${withLog ? `(select file from pragma_database_list where name = 'main')` : 'null'},
   'foreignKeys', (select foreign_keys from pragma_foreign_keys),
   'tables', ${TABLES},
-  'triggers', (select json_group_array(json_array(tbl_name, sql)) from sqlite_schema where type = 'trigger'),
-  'ours', ${withLog ? `(select json_group_array(name) from temp.sqlite_schema where type = 'trigger' and name like '\\_\\_live\\_%' escape '\\')` : 'null'}
+  'triggers', (select json_group_array(json_array(tbl_name, sql)) from sqlite_schema where type = 'trigger')
 ) as catalog`
 
 /** The temporary table each connection's triggers log the rows its statements change into. */
 const CHANGES = 'temp."__live_changes"'
+
+/** The names of the change log's triggers on a connection, from a previous catalog, as JSON. */
+const CHANGE_LOG_TRIGGERS = `select json_group_array(name) from temp.sqlite_schema where type = 'trigger' and name like '\\_\\_live\\_%' escape '\\'`
 
 /** Empties the change log, giving the changes in the order they were made. */
 const DRAIN_CHANGES = `DELETE FROM ${CHANGES} RETURNING "id", "table", "kind", "old", "new"`
@@ -90,7 +90,8 @@ function columnOf(name: string, type: string, collation: string | undefined): Co
   }
 }
 
-function catalogOf(answer: string): Catalog {
+/** `changeLog`: the connections log the rows their statements change. */
+function catalogOf(answer: string, changeLog: boolean): Catalog {
   const row = JSON.parse(answer) as CatalogRow
   const tables = new Map<string, Table>()
   const catalog: Catalog = {
@@ -121,7 +122,7 @@ function catalogOf(answer: string): Catalog {
       const found = (!table.schemaname || table.schemaname === 'main') && tables.get(`main.${table.relname}`)
       return found ? [found] : []
     },
-    changeLog: row.ours !== null ? { ours: row.ours } : undefined,
+    changeLog,
   }
   const definitions = new Map<string, Definition>()
   for (const t of row.tables) {
@@ -274,11 +275,11 @@ function triggerOf(sql: string, catalog: Catalog): { events: ('insert' | 'update
   }
 }
 
-/** The statements creating the change log on a connection, and its triggers on every table but virtual ones (the
- *  triggers of a previous catalog are dropped first). A row's image names its columns: one the table no longer has, or
- *  doesn't have yet, is unknown. */
-function changeLogSetup(catalog: Catalog): string[] {
-  const drops = (catalog.changeLog?.ours ?? []).map((name) => `DROP TRIGGER IF EXISTS temp.${quote(name)}`)
+/** The statements creating the change log on a connection, and its triggers on every table but virtual ones; `ours`:
+ *  the connection's triggers of a previous catalog (`CHANGE_LOG_TRIGGERS`), dropped first. A row's image names its
+ *  columns: one the table no longer has, or doesn't have yet, is unknown. */
+function changeLogSetup(catalog: Catalog, ours: string[]): string[] {
+  const drops = ours.map((name) => `DROP TRIGGER IF EXISTS temp.${quote(name)}`)
   const creates = [...catalog.tables.values()].flatMap((table) => {
     if (table.isView || table.virtual) return []
     const image = (row: string) =>
