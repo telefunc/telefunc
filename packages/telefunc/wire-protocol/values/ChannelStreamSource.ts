@@ -34,8 +34,6 @@ type StreamSourceChannel = Pick<Channel, 'listenBinary' | 'onClose' | 'close' | 
  */
 class ChannelStreamSource {
   private readonly queue = new Fifo<{ frame: Uint8Array<ArrayBuffer>; onConsumed: () => void }>()
-  /** The parts of the chunk being read, before its last. */
-  private parts: Uint8Array<ArrayBuffer>[] = []
   private wake: (() => void) | null = null
   private closed = false
   private closeError: Error | null = null
@@ -97,6 +95,8 @@ class ChannelStreamSource {
 
   /** The producer's next chunk, its parts joined: a value's reviver parses a chunk as one serialized value. */
   private async readNextChunk(): Promise<Uint8Array<ArrayBuffer> | null> {
+    // Local, so a read that is cancelled, fails or ends keeps none of the parts it read.
+    const parts: Uint8Array<ArrayBuffer>[] = []
     while (true) {
       const frame = await this.readNextFrame()
       if (frame === null) return null
@@ -114,13 +114,11 @@ class ChannelStreamSource {
         throw new Error('Streaming error frame received')
       }
       if (tag === CHANNEL_PUMP_TAG_PART) {
-        this.parts.push(payload)
+        parts.push(payload)
         continue
       }
-      if (this.parts.length === 0) return payload
-      const chunk = concatAll([...this.parts, payload])
-      this.parts = []
-      return chunk
+      if (parts.length === 0) return payload
+      return concatAll([...parts, payload])
     }
   }
 
