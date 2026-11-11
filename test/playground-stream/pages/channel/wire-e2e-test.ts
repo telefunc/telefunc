@@ -19,7 +19,7 @@ import {
   refuseNextSsePost,
   releaseHeldSsePosts,
 } from '../../e2e-utils'
-import { sendRefusedWarning } from '../../../utils'
+import { sendRefusedWarning, withNetworkConditions } from '../../../utils'
 
 type Tally = { text: number; binary: number; inOrder: boolean }
 type WireState = {
@@ -353,8 +353,7 @@ function testWire(isDev: boolean) {
 
   if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['sse', 'ws'])) {
     test('channel: a 1 MB message the server sends at 1 Mbit/s as the page upgrades from SSE to WebSocket arrives, and the page moves to the WebSocket without opening another SSE stream', async () => {
-      const proxy = await startBlackHoleProxy(getServerUrl())
-      await navigate(`${proxy.url}/channel`)
+      await navigate(`${getServerUrl()}/channel`)
       let sseStreams = 0
       const onResponse = (response: Response) => {
         if (response.headers()['content-type']?.startsWith('text/event-stream')) sseStreams++
@@ -367,23 +366,21 @@ function testWire(isDev: boolean) {
       page.on('websocket', onWebSocket)
       try {
         // 1 Mbit/s each way.
-        proxy.pace({ downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 })
-        await page.click('#wire-large')
-        await autoRetry(
-          async () => {
-            const { large } = await getResult<WireState>('#wire-state')
-            expect(large).toBe(1_000_000)
-          },
-          { timeout: 30_000 },
-        )
-        expect(sseStreams).toBe(1)
-        expect(webSockets).toBe(1)
+        await withNetworkConditions({ downloadThroughput: 125_000, uploadThroughput: 125_000 }, async () => {
+          await page.click('#wire-large')
+          await autoRetry(
+            async () => {
+              const { large } = await getResult<WireState>('#wire-state')
+              expect(large).toBe(1_000_000)
+            },
+            { timeout: 30_000 },
+          )
+          expect(sseStreams).toBe(1)
+          expect(webSockets).toBe(1)
+        })
       } finally {
         page.off('response', onResponse)
         page.off('websocket', onWebSocket)
-        // The page leaves before the proxy closes, which would cut its connections.
-        await page.goto('about:blank')
-        await proxy.close()
       }
     })
   }

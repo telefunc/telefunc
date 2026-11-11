@@ -1043,8 +1043,9 @@ function testChannel(isDev: boolean, inDocker = false) {
     await cdp.detach()
   })
 
-  // With two transports the page opens an SSE stream, then a WebSocket: wire-e2e-test.ts covers that lane.
-  if (channelTransports.length === 1) {
+  // With two transports the page opens an SSE stream, then a WebSocket: wire-e2e-test.ts covers that lane. Preview
+  // only, as `testSlowLink`: the page loads through a proxy in the test process.
+  if (!isDev && !inDocker && channelTransports.length === 1) {
     test('channel: a 1 MB message to the page, 8 s at 1 Mbit/s, arrives over the connection it left on', async () => {
       const proxy = await startBlackHoleProxy(getServerUrl())
       try {
@@ -1069,7 +1070,7 @@ function testChannel(isDev: boolean, inDocker = false) {
   }
 
   // Over SSE, a channel's registration and the message the page queued with it go in one request.
-  if (channelTransports.length === 1 && channelTransport === 'sse') {
+  if (!isDev && !inDocker && channelTransports.length === 1 && channelTransport === 'sse') {
     test("channel: at 1 Mbit/s, a channel the page opens beside another's 4 MiB burst gets the message its server sends as it opens", async () => {
       const proxy = await startBlackHoleProxy(getServerUrl())
       try {
