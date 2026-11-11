@@ -18,6 +18,7 @@
     "telefunc": "workspace:*"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^9.6.0"
+    "@types/better-sqlite3": "^9.6.0",
+    "miniflare": "4.20260329.0"
   }
 }

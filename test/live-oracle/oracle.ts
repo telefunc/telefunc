@@ -10,7 +10,7 @@
 //   CHURN=1 SERVERS=2 ROLES=1 SHAPES=byUser,recent DRIVER=pg|postgres-js node --expose-gc oracle.ts
 //
 // DB=sqlite (ORM=drizzle or kysely): better-sqlite3, in memory, with the SQLite lane's own tables (sqliteSchema.ts).
-// DB=bun (ORM=drizzle, run by `bun oracle.ts`): bun:sqlite instead.
+// DB=bun (ORM=drizzle, run by `bun oracle.ts`): bun:sqlite instead. DB=d1 (ORM=drizzle): miniflare's D1.
 //
 // DRIVER=postgres-js (with ORM=drizzle DB=pg): postgres.js instead of `pg`. PG=18 adds the writes in Postgres 18's
 // syntax. ROLES=1 adds writes by roles that can't read the table they write, or only some of its rows.
@@ -48,7 +48,8 @@ const DRIVER = process.env.DRIVER ?? 'pg'
 const SEED = Number(process.env.SEED ?? 1)
 const STEPS = Number(process.env.STEPS ?? 300)
 /** One connection, which runs each statement as it's called. */
-const ONE_CONNECTION = DB === 'pglite' || DB === 'sqlite' || DB === 'bun'
+const SQLITE = DB === 'sqlite' || DB === 'bun' || DB === 'd1'
+const ONE_CONNECTION = DB === 'pglite' || SQLITE
 const CHURN = process.env.CHURN === '1' && !ONE_CONNECTION
 const VERBOSE = process.env.VERBOSE === '1'
 const SERVERS = ONE_CONNECTION ? 1 : Number(process.env.SERVERS ?? 1)
@@ -165,6 +166,30 @@ async function connect(): Promise<{
   query: (text: string) => Promise<any[]>
   close: () => Promise<void>
 }> {
+  if (DB === 'd1') {
+    const { Miniflare } = await import('miniflare')
+    const { drizzle } = await import('drizzle-orm/d1')
+    const mf = new Miniflare({ modules: true, script: 'export default {}', d1Databases: ['DB'] })
+    const binding = await mf.getD1Database('DB')
+    // In Node the binding is a stub that can't take properties: a plain object stands for the Worker's `env.DB`.
+    const d1 = {
+      prepare: (text: string) => binding.prepare(text),
+      batch: (statements: any[]) => binding.batch(statements),
+      exec: (text: string) => binding.exec(text),
+    }
+    // `exec()` runs one statement per line.
+    const seedLines = sqliteSeed(random)
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('--'))
+    await d1.exec(seedLines.join(' '))
+    const driver = createDrizzleSqlite(d1, ({ client, schema }) => drizzle(client, { schema }))
+    return {
+      driver,
+      writer: driver,
+      query: async (text) => (await binding.prepare(text).all()).results,
+      close: () => mf.dispose(),
+    }
+  }
   if (DB === 'bun') {
     // @ts-ignore: bun's own module, which Node's types don't declare.
     const { Database } = await import('bun:sqlite')
@@ -335,13 +360,12 @@ function derivedView(derive: typeof derived, shape: string, rows: LiveCell<unkno
 // ── The run ──
 
 // Values of the seeded todos in Postgres's text form, for the `spelled*` shapes to spell (not on SQLite).
-const seeded =
-  DB === 'sqlite' || DB === 'bun'
-    ? []
-    : await query(
-        `select ref::text, code::text, priority::text, amount::text, done::text, text,
+const seeded = SQLITE
+  ? []
+  : await query(
+      `select ref::text, code::text, priority::text, amount::text, done::text, text,
      (updated_at at time zone 'UTC')::text || '+00' as updated_at from todos`,
-      )
+    )
 const subscribers: Subscriber[] = []
 for (const shape of Object.keys(driver.reads).filter((s) => !SHAPES || SHAPES.includes(s))) {
   for (let i = 0; i < 3; i++) {
@@ -409,11 +433,12 @@ const writesBeforeHalf = writeNames.filter((name) => !SESSION_WRITES.includes(na
 const failedWrites: string[] = []
 
 /** A write the database refused (a deleted row's foreign key) changed nothing; any other failure is the wrapper's.
- *  Postgres tells why by an SQLSTATE, SQLite by a `SQLITE_` code. */
+ *  Postgres tells why by an SQLSTATE, SQLite by a `SQLITE_` code, D1 in its message. */
 function writeFailed(write: string, err: unknown): void {
   const { code, cause } = err as { code?: unknown; cause?: { code?: unknown } }
   const sqlState = code ?? cause?.code
-  if (typeof sqlState === 'string' && /^([0-9A-Z]{5}|SQLITE_\w+)$/.test(sqlState)) {
+  const d1 = [err, cause].some((e) => /D1_ERROR: .*SQLITE_\w+/.test(String(e)))
+  if (d1 || (typeof sqlState === 'string' && /^([0-9A-Z]{5}|SQLITE_\w+)$/.test(sqlState))) {
     if (VERBOSE) console.log(`write ${write} refused: ${String(err).slice(0, 120)}`)
   } else failedWrites.push(`${write}: ${String(err).slice(0, 200)}`)
 }

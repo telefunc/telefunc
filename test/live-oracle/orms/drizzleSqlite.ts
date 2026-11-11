@@ -62,13 +62,13 @@ const schema = { users, todos, tags, usersRelations, todosRelations }
 
 const NICKS = ['ann', 'ANN', 'Bob', 'bob', 'cy', 'Dee']
 
-/** `client` is a better-sqlite3 or bun:sqlite database, `drizzle` the Drizzle driver for it. */
+/** `client` is a better-sqlite3 or bun:sqlite database or a D1 binding, `drizzle` the Drizzle driver for it. */
 function createDrizzleSqlite(
   client: { exec(text: string): unknown },
   drizzle: (config: { client: any; schema: typeof schema }) => object,
 ): OrmDriver {
   const db = liveDrizzle(drizzle({ client, schema }) as any) as any
-  return {
+  const driver: OrmDriver = {
     reads: {
       byUser: ({ user }) => db.select().from(todos).where(eq(todos.userId, user)).orderBy(todos.id),
       deletedTodos: ({ user }) =>
@@ -338,5 +338,24 @@ function createDrizzleSqlite(
     },
     liveRead: () => db.select().from(todos).where(eq(todos.userId, 1)).live(),
     async close() {},
+  }
+  return db.batch ? withBatches(driver, db) : driver
+}
+
+/** D1 refuses `BEGIN`: its transaction is a `batch()`, which commits whole or not at all. */
+function withBatches(driver: OrmDriver, db: any): OrmDriver {
+  const { txCommit, txRollback, savepointRollback, txFailedStatement, ...writes } = driver.writes
+  const newTodo = (user: number, text: string) =>
+    db.insert(todos).values({ userId: user, text, done: false, priority: 1, amount: 1, updatedAt: '2026-11-12' })
+  return {
+    ...driver,
+    writes: {
+      ...writes,
+      txCommit: ({ todo, user, text }) =>
+        db.batch([newTodo(user, text), db.update(todos).set({ done: true }).where(eq(todos.id, todo))]),
+      // The second statement fails: the first is undone with it.
+      txRollback: ({ user, text }) =>
+        db.batch([newTodo(user, text), db.run(sql`insert into users (id, name, team) values (1, 'taken', 1)`)]),
+    },
   }
 }
