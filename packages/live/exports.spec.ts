@@ -14,7 +14,7 @@ const serverEntries = Object.entries(exports).filter(
 
 describe('@telefunc/live exports', () => {
   it('has server entries with a browser stub', () => {
-    expect(serverEntries.map(([path]) => path)).toEqual(['.', './drizzle', './kysely', './prisma'])
+    expect(serverEntries.map(([path]) => path)).toEqual(['.', './drizzle', './kysely', './prisma', './postgres'])
   })
   for (const [path, entry] of serverEntries) {
     it(`serves ${path} to workerd`, () => {

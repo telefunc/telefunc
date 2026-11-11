@@ -1,6 +1,7 @@
-export { liveDatabaseOf, liveDatabaseOfFile, isDatabaseClient }
+export { liveDatabaseOf, liveDatabaseOfFile, isDatabaseClient, usePostgres }
 export type { DatabaseClient }
 
+import { importPostgres } from '#postgres'
 import { assertUsage } from './assert.js'
 import { captureBetterSqlite3, isBetterSqlite3, type BetterSqlite3 } from './capture/betterSqlite3.js'
 import { captureBunSqlite, isBunSqlite, type BunSqlite } from './capture/bunSqlite.js'
@@ -18,13 +19,18 @@ import { D1_ENGINE, LOGGED_SQLITE_ENGINE, RETURNING_SQLITE_ENGINE } from './sqli
  *  better-sqlite3 or bun:sqlite database, a local libSQL client, a D1 binding. */
 type DatabaseClient = PgPool | PgClient | Pglite | PostgresJs | BetterSqlite3 | BunSqlite | Libsql | D1
 
-/** Postgres's planner, catalog and parser (libpg-query), imported once a Postgres client loads its catalog: an app on
+/** Postgres's planner, catalog and parser (libpg-query), loaded once a Postgres client loads its catalog: an app on
  *  SQLite doesn't load them. */
 let postgres: typeof import('./postgres/engine.js') | undefined
 const POSTGRES_ENGINE: Engine = {
-  loadCatalog: async (query) => (postgres ??= await import('./postgres/engine.js')).loadCatalog(query),
+  loadCatalog: async (query) => (postgres ??= await importPostgres()).loadCatalog(query),
   plan: (text, catalog) => postgres!.plan(text, catalog),
   failureAbortsTransaction: true,
+}
+
+/** Gives the Postgres engine where this package can't import it itself: `@telefunc/live/postgres`. */
+function usePostgres(engine: typeof import('./postgres/engine.js')): void {
+  postgres = engine
 }
 
 /** By client: a client one copy of this package wraps is captured once, whichever copies wrap it. */

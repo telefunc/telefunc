@@ -56,6 +56,8 @@ export const db = livePrisma(postgres({ contract, pg: pool }), pool)
 
 > The database client is a `pg.Pool` or `pg.Client`, a postgres.js `sql`, or a PGlite database, on Postgres 17 and above. Wrap it before its first query.
 
+> On Cloudflare Workers, set the `nodejs_compat` compatibility flag. A database on Postgres (through Hyperdrive) also needs `import '@telefunc/live/postgres'` in `database.ts`: a Worker on D1 then doesn't carry Postgres's parser.
+
 > There isn't any other setup: Telefunc finds `@telefunc/*` packages in your `package.json` and auto-loads them.
 
 
