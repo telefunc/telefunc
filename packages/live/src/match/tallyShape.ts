@@ -55,6 +55,8 @@ type SetTree = number | { op: 'union' | 'intersect' | 'except'; left: SetTree; r
 type TallyContext = {
   text: string
   dialect: Dialect
+  /** `Catalog.aggregates`. */
+  aggregates: ReadonlySet<string>
   /** Every table occurrence in the statement. */
   aliases: Alias[]
   /** The one table a plain `SELECT` reads, without subqueries or functions in its `FROM`. */
@@ -132,7 +134,7 @@ function analyzeGroups(select: Node, context: TallyContext): TallyAnalysis | und
     walk(value, (key, node) => {
       if (key !== 'FuncCall') return
       if (node.over) window = true
-      if (isAggregateCall(node)) otherOutputs = true
+      if (isAggregateCall(node, context.aggregates)) otherOutputs = true
     })
     if (window) return undefined
   }

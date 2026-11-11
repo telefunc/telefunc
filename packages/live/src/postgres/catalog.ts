@@ -35,6 +35,7 @@ type CatalogRow = {
     variadic: boolean,
   ][]
   volatileFunctions: string[]
+  aggregates: string[]
   domains: [schema: string, name: string, baseSchema: string, baseName: string][]
   tables: {
     schema: string
@@ -96,6 +97,7 @@ select json_build_object(
     join pg_namespace n on n.oid = p.pronamespace join pg_language l on l.oid = p.prolang
     where n.nspname not in ('pg_catalog', 'information_schema') and p.prorettype <> 'trigger'::regtype),
   'volatileFunctions', (select coalesce(json_agg(distinct p.proname), '[]') from pg_proc p where p.provolatile = 'v'),
+  'aggregates', (select coalesce(json_agg(distinct p.proname), '[]') from pg_proc p where p.prokind = 'a'),
   'domains', (select coalesce(json_agg(json_build_array(n.nspname, t.typname, bn.nspname, bt.typname)), '[]')
     from domain_bases db join pg_type t on t.oid = db.oid join pg_namespace n on n.oid = t.typnamespace
     join pg_type bt on bt.oid = db.base join pg_namespace bn on bn.oid = bt.typnamespace),
@@ -220,6 +222,7 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
       return callsIn(node, overloads)
     },
     volatileFunctions: new Set(row.volatileFunctions),
+    aggregates: new Set(row.aggregates),
     searchPath: row.searchPath,
     domainBases(typeNames) {
       const [schema, name] = typeNames.length === 2 ? typeNames : [undefined, typeNames[0]!]

@@ -63,11 +63,15 @@ const schema = { users, todos, tags, usersRelations, todosRelations }
 const NICKS = ['ann', 'ANN', 'Bob', 'bob', 'cy', 'Dee']
 
 /** `client` is a better-sqlite3 or bun:sqlite database, a libSQL client or a D1 binding, `drizzle` the Drizzle driver
- *  for it; `exec` runs text that may hold several statements. */
+ *  for it; `exec` runs text that may hold several statements; `product`: the connection has the app's aggregate
+ *  `product()`. */
 function createDrizzleSqlite(
   client: object,
   drizzle: (config: { client: any; schema: typeof schema }) => object,
-  exec: (text: string) => unknown = (text) => (client as { exec(text: string): unknown }).exec(text),
+  {
+    exec = (text) => (client as { exec(text: string): unknown }).exec(text),
+    product = false,
+  }: { exec?: (text: string) => unknown; product?: boolean } = {},
 ): OrmDriver {
   const db = liveDrizzle(drizzle({ client, schema }) as any) as any
   const driver: OrmDriver = {
@@ -130,6 +134,14 @@ function createDrizzleSqlite(
           .select({ total: sum(todos.amount) })
           .from(todos)
           .where(eq(todos.userId, user)),
+      // An aggregate of the app's, defined on the connection: the catalog lists it.
+      ...(product && {
+        productOf: ({ user }: { user: number }) =>
+          db
+            .select({ product: sql`product(${todos.amount})` })
+            .from(todos)
+            .where(eq(todos.userId, user)),
+      }),
       busyUsers: () =>
         db
           .select({ userId: todos.userId, n: count() })

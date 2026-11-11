@@ -12,7 +12,7 @@ import { capturePglite, type Pglite } from './capture/pglite.js'
 import { capturePostgresJs, isPostgresJs, type PostgresJs } from './capture/postgresJs.js'
 import { LiveDatabase, type Engine, type LiveOptions } from './liveDatabase.js'
 import { processWide } from './processWide.js'
-import { LOGGED_SQLITE_ENGINE, RETURNING_SQLITE_ENGINE } from './sqlite/engine.js'
+import { D1_ENGINE, LOGGED_SQLITE_ENGINE, RETURNING_SQLITE_ENGINE } from './sqlite/engine.js'
 
 /** What an ORM sends its SQL through: a `pg.Pool` or `pg.Client`, a postgres.js `sql`, a PGlite instance, a
  *  better-sqlite3 or bun:sqlite database, a local libSQL client, a D1 binding. */
@@ -72,7 +72,8 @@ function sameDatabase(known: { live: LiveDatabase; options: LiveOptions }, optio
 
 function engineOf(client: DatabaseClient): Engine {
   if (isBetterSqlite3(client) || isBunSqlite(client)) return LOGGED_SQLITE_ENGINE
-  return isD1(client) || isLibsql(client) ? RETURNING_SQLITE_ENGINE : POSTGRES_ENGINE
+  if (isD1(client)) return D1_ENGINE
+  return isLibsql(client) ? RETURNING_SQLITE_ENGINE : POSTGRES_ENGINE
 }
 
 function isDatabaseClient(value: unknown): value is DatabaseClient {

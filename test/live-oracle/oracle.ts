@@ -240,7 +240,7 @@ async function connect(): Promise<{
     const oracle = createClient({ url })
     await oracle.executeMultiple(sqliteSeed(random))
     const client = createClient({ url })
-    const driver = createDrizzleSqlite(client, drizzle, (text) => client.executeMultiple(text))
+    const driver = createDrizzleSqlite(client, drizzle, { exec: (text) => client.executeMultiple(text) })
     return {
       driver,
       writer: driver,
@@ -256,7 +256,9 @@ async function connect(): Promise<{
     const { drizzle } = await import('drizzle-orm/better-sqlite3')
     const sqlite = new Database(':memory:')
     sqlite.exec(sqliteSeed(random))
-    const driver = ORM === 'kysely' ? createKyselySqlite(sqlite) : createDrizzleSqlite(sqlite, drizzle)
+    sqlite.aggregate('product', { start: 1, step: (product: number, x: number) => product * x })
+    const driver =
+      ORM === 'kysely' ? createKyselySqlite(sqlite) : createDrizzleSqlite(sqlite, drizzle, { product: true })
     return {
       driver,
       writer: driver,

@@ -142,7 +142,9 @@ function isBigint(text: string): boolean {
   return /^-?\d+$/.test(text) && BigInt(text) >= -BIGINT_MAX - BigInt(1) && BigInt(text) <= BIGINT_MAX
 }
 
-/** `node` as SQL, when it's a parameter, a constant or a cast of one; `param` names a parameter. */
+/** `node` as SQL, when it's a parameter, a constant or a cast of one; `param` names a parameter. Printed here for both
+ *  dialects, not by a Postgres deparser (pgsql-deparser): a SQLite statement's tree is lowered into Postgres's nodes,
+ *  which a deparser prints as Postgres's SQL (`$1`, `::type`), not SQLite's (`?1`). */
 function sqlOf(node: Node, param: (number: number) => string): string | undefined {
   if (node.ParamRef) return param(node.ParamRef.number)
   if (node.A_Const) return constantSql(node.A_Const)
