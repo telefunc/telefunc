@@ -68,12 +68,13 @@ function captureBetterSqlite3(db: BetterSqlite3, live: LiveDatabase): void {
       text,
       prepare: (ours: string) => prepare(ours).raw(modes.raw).safeIntegers(modes.safeIntegers) as never,
     }
-    // Rows come back one column (`pluck`), nested (`expand`) or as they're read (`iterate`): no hidden columns.
+    // Rows come back one column (`pluck`) or nested (`expand`): no hidden columns.
     const rows = (): RowsKind => (modes.pluck || modes.expand ? 'other' : modes.raw ? 'arrays' : 'objects')
-    prepared.all = capture.method(statement, prepared.all.bind(prepared), 'all', rows) as Prepared['all']
+    const all = prepared.all.bind(prepared)
+    prepared.all = capture.method(statement, all, 'all', rows) as Prepared['all']
     prepared.get = capture.method(statement, prepared.get.bind(prepared), 'get', rows)
     prepared.run = capture.method(statement, prepared.run.bind(prepared), 'run', () => 'other')
-    prepared.iterate = capture.method(statement, prepared.iterate.bind(prepared), 'iterate', () => 'other') as never
+    prepared.iterate = capture.iterate(statement, all, rows)
     return prepared
   }
 

@@ -56,33 +56,35 @@ function captureSyncSqlite(driver: SyncSqlite, live: LiveDatabase) {
   }
   /** A transaction statement of ours, for one the driver runs without a statement of the app's. */
   const control = (text: string) => run(live.statementFor(db, text, []), () => undefined)
+  /** The app's statement method `name`, which returns rows as `rowsKind()` says when called. */
+  const method =
+    (statement: SyncStatement, native: (...params: unknown[]) => unknown, name: string, rowsKind: () => RowsKind) =>
+    (...params: unknown[]) => {
+      ready()
+      const values = positional(params)
+      const rows = rowsKind()
+      const rewrite = values !== undefined && rows !== 'other'
+      const planned = live.statementFor(db, statement.text, values ?? [], { rewrite })
+      if (planned.text === statement.text) return run(planned, () => native(...params))
+      const sent = statement.prepare(planned.text)
+      const hidden = Array.from({ length: planned.hiddenColumns }, (_, i) => `${HIDDEN_PREFIX}${i}`)
+      const hiddenRows = (result: unknown) => {
+        const list = Array.isArray(result) ? result : result === undefined || result === null ? [] : [result]
+        const taken = takeHiddenValues(list, hidden, rows === 'arrays')
+        if (!planned.returnsRows) list.length = 0
+        return taken
+      }
+      return run(planned, () => sent[name]!(...(planned.values ?? values!)), hiddenRows)
+    }
   ready()
 
   return {
-    /** The app's statement method `method`, which returns rows as `rowsKind()` says when called. */
-    method(
-      statement: SyncStatement,
-      native: (...params: unknown[]) => unknown,
-      method: string,
-      rowsKind: () => RowsKind,
-    ) {
-      return (...params: unknown[]) => {
-        ready()
-        const values = positional(params)
-        const rows = rowsKind()
-        const rewrite = values !== undefined && rows !== 'other'
-        const planned = live.statementFor(db, statement.text, values ?? [], { rewrite })
-        if (planned.text === statement.text) return run(planned, () => native(...params))
-        const sent = statement.prepare(planned.text)
-        const hidden = Array.from({ length: planned.hiddenColumns }, (_, i) => `${HIDDEN_PREFIX}${i}`)
-        const hiddenRows = (result: unknown) => {
-          const list = Array.isArray(result) ? result : result === undefined || result === null ? [] : [result]
-          const taken = takeHiddenValues(list, hidden, rows === 'arrays')
-          if (!planned.returnsRows) list.length = 0
-          return taken
-        }
-        return run(planned, () => sent[method]!(...(planned.values ?? values!)), hiddenRows)
-      }
+    method,
+    /** The app's statement method `iterate`, run to its end at once through its `all`: a write's changes are logged
+     *  when it returns, not once its rows are read. */
+    iterate(statement: SyncStatement, all: (...params: unknown[]) => unknown[], rowsKind: () => RowsKind) {
+      const runAll = method(statement, all, 'all', rowsKind)
+      return (...params: unknown[]) => (runAll(...params) as unknown[])[Symbol.iterator]()
     },
     /** Text that may hold several statements, run as written with the app's `params`. */
     exec(text: string, params: unknown[], send: () => unknown) {
