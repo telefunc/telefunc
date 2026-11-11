@@ -75,6 +75,7 @@
   },
   "peerDependencies": {
     "@prisma/orm-postgres": ">=8.0.0-rc.23",
+    "@prisma/orm-sqlite": ">=8.0.0-rc.23",
     "@tanstack/query-core": ">=5.0.0",
     "drizzle-orm": ">=0.45.0",
     "kysely": ">=0.28.0",
@@ -83,6 +84,7 @@
   "devDependencies": {
     "@electric-sql/pglite": "0.5.16",
     "@prisma/orm-postgres": "8.0.0-rc.23",
+    "@prisma/orm-sqlite": "8.0.0-rc.23",
     "@tanstack/query-core": "^5.66.0",
     "@types/node": "^24.0.4",
     "@types/pg": "8.20.4",
@@ -94,6 +96,9 @@
   },
   "peerDependenciesMeta": {
     "@prisma/orm-postgres": {
+      "optional": true
+    },
+    "@prisma/orm-sqlite": {
       "optional": true
     },
     "@tanstack/query-core": {

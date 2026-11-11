@@ -1,10 +1,11 @@
-export { liveDatabaseOf, isDatabaseClient }
+export { liveDatabaseOf, liveDatabaseOfFile, isDatabaseClient }
 export type { DatabaseClient }
 
 import { assertUsage } from './assert.js'
 import { captureBetterSqlite3, isBetterSqlite3, type BetterSqlite3 } from './capture/betterSqlite3.js'
 import { captureBunSqlite, isBunSqlite, type BunSqlite } from './capture/bunSqlite.js'
 import { captureD1, isD1, type D1 } from './capture/d1.js'
+import { captureNodeSqliteFile, wrappedFile } from './capture/nodeSqlite.js'
 import { capturePg, type PgClient, type PgPool } from './capture/pg.js'
 import { capturePglite, type Pglite } from './capture/pglite.js'
 import { capturePostgresJs, isPostgresJs, type PostgresJs } from './capture/postgresJs.js'
@@ -31,13 +32,7 @@ const databases = processWide('databases', () => new WeakMap<object, { live: Liv
 /** The live database of `client`, which captures its statements from now on. Several ORMs over one pool share it. */
 function liveDatabaseOf(client: DatabaseClient, options: LiveOptions): LiveDatabase {
   const known = databases.get(client)
-  if (known) {
-    assertUsage(
-      options.transport === undefined || options.transport === known.options.transport,
-      'Pass the same `transport` to every live*() wrapper of one database client.',
-    )
-    return known.live
-  }
+  if (known) return sameDatabase(known, options)
   const live = new LiveDatabase(options, engineOf(client))
   if (isBetterSqlite3(client)) captureBetterSqlite3(client, live)
   else if (isBunSqlite(client)) captureBunSqlite(client, live)
@@ -53,6 +48,24 @@ function liveDatabaseOf(client: DatabaseClient, options: LiveOptions): LiveDatab
   }
   databases.set(client, { live, options })
   return live
+}
+
+/** The live database of the SQLite file at `path`, which captures the statements of every node:sqlite connection on
+ *  it from now on, whoever opens it. */
+function liveDatabaseOfFile(path: string, options: LiveOptions): LiveDatabase {
+  const known = wrappedFile(path)
+  if (known) return sameDatabase(known, options)
+  const live = new LiveDatabase(options, LOGGED_SQLITE_ENGINE)
+  captureNodeSqliteFile(path, { live, options })
+  return live
+}
+
+function sameDatabase(known: { live: LiveDatabase; options: LiveOptions }, options: LiveOptions): LiveDatabase {
+  assertUsage(
+    options.transport === undefined || options.transport === known.options.transport,
+    'Pass the same `transport` to every live*() wrapper of one database.',
+  )
+  return known.live
 }
 
 function engineOf(client: DatabaseClient): Engine {

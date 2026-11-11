@@ -5,6 +5,8 @@ import { defineContract } from '@prisma/orm-postgres/contract-builder'
 import type { Collection } from '@prisma/orm-postgres/orm-client'
 import postgres from '@prisma/orm-postgres/runtime'
 import { contractFromJson } from '@prisma/orm-postgres/static'
+import { defineContract as defineSqliteContract } from '@prisma/orm-sqlite/contract-builder'
+import sqlite from '@prisma/orm-sqlite/runtime'
 import { eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { boolean, integer, pgTable, serial, text } from 'drizzle-orm/pg-core'
@@ -78,7 +80,7 @@ async function kyselyReads() {
 type PrismaModels = { orm: { public: { Todo: Collection<any, 'Todo', Todo> } } }
 declare const prisma: PrismaModels & {
   transaction<R>(run: (tx: PrismaModels) => PromiseLike<R>): Promise<R>
-  contract: { roots: Record<string, { model: string; namespace: string }> }
+  contract: { target: 'postgres'; roots: Record<string, { model: string; namespace: string }> }
 }
 const pdb = livePrisma(prisma, pool)
 async function prismaReads() {
@@ -163,6 +165,36 @@ async function prismaScope() {
   // @ts-expect-error `.live()` on a client that `livePrisma()` didn't wrap.
   await unwrappedPrisma.orm.public!.Todo!.where({}).live()
 }
+// On SQLite, `db.orm` holds the models, typed by `@prisma/orm-sqlite`'s own types.
+const sqliteNotes = defineSqliteContract({}, ({ field, model, type, rel }) => ({
+  models: {
+    Todo: model('Todo', {
+      fields: { id: field.column(type.Int()).id(), text: field.column(type.String()) },
+      relations: { notes: rel.hasMany('Note', { by: 'todoId' }) },
+    }).sql({ table: 'todos' }),
+    Note: model('Note', {
+      fields: {
+        id: field.column(type.Int()).id(),
+        todoId: field.column(type.Int()),
+        text: field.column(type.String()),
+      },
+      relations: { todo: rel.belongsTo('Todo', { from: 'todoId', to: 'id' }) },
+    }).sql({ table: 'notes' }),
+  },
+}))
+const rawSqlite = sqlite({ contract: sqliteNotes, path: 'app.db' })
+const liveSqlite = livePrisma(rawSqlite, 'app.db')
+async function prismaOnSqlite() {
+  const filtered = await liveSqlite.orm.Todo.where((t) => t.id.eq(1)).live()
+  same<typeof filtered, Live<{ id: number; text: string }[]>>(true)
+  // @ts-expect-error The rows are typed, not `any`.
+  same<typeof filtered, Live<{ id: string }[]>>(true)
+  const raw = await rawSqlite.orm.Todo.include('notes').select('id').all()
+  const included = await liveSqlite.orm.Todo.include('notes').select('id').live()
+  same<typeof included, Live<typeof raw>>(true)
+  const inTransaction = await liveSqlite.transaction((tx) => tx.orm.Note.where((n) => n.todoId.eq(1)).live())
+  same<typeof inTransaction, Live<{ id: number; todoId: number; text: string }[]>>(true)
+}
 
 // ── Composing on the server ──
 async function onGetSummary(userId: number) {
@@ -189,4 +221,4 @@ const stop: () => void = watch(onGetTodos, [1], (rows) => same<typeof rows, Todo
 // @ts-expect-error Forgetting `.live()`.
 watch(onGetTodosPlain, [1], () => {})
 
-void [drizzleReads, kyselyReads, prismaReads, prismaSteps, prismaScope, stop]
+void [drizzleReads, kyselyReads, prismaReads, prismaSteps, prismaSelectKeepsSteps, prismaScope, prismaOnSqlite, stop]
