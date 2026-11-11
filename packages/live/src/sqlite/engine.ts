@@ -1,0 +1,15 @@
+export { LOGGED_SQLITE_ENGINE }
+
+import type { Engine } from '../liveDatabase.js'
+import { catalogOf, catalogQuery, changeLogSetup } from './catalog.js'
+import { planSqlite } from './plan.js'
+
+/** SQLite on a connection of its own that logs the rows its statements change, those its triggers and foreign keys
+ *  change included (better-sqlite3, bun:sqlite, node:sqlite, a local libSQL file). */
+const LOGGED_SQLITE_ENGINE: Engine = {
+  loadCatalog: async (query) => catalogOf(await query(catalogQuery(true))),
+  loadCatalogSync: (query) => catalogOf(query(catalogQuery(true))),
+  setup: changeLogSetup,
+  plan: planSqlite,
+  failureAbortsTransaction: false,
+}

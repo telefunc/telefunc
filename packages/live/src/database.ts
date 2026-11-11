@@ -2,6 +2,7 @@ export { liveDatabaseOf, isDatabaseClient }
 export type { DatabaseClient }
 
 import { assertUsage } from './assert.js'
+import { captureBetterSqlite3, isBetterSqlite3, type BetterSqlite3 } from './capture/betterSqlite3.js'
 import { capturePg, type PgClient, type PgPool } from './capture/pg.js'
 import { capturePglite, type Pglite } from './capture/pglite.js'
 import { capturePostgresJs, isPostgresJs, type PostgresJs } from './capture/postgresJs.js'
@@ -10,9 +11,11 @@ import { loadCatalog } from './catalog.js'
 import { LiveDatabase, type Engine, type LiveOptions } from './liveDatabase.js'
 import { processWide } from './processWide.js'
 import { loadParser } from './sql.js'
+import { LOGGED_SQLITE_ENGINE } from './sqlite/engine.js'
 
-/** What an ORM sends its SQL through: a `pg.Pool` or `pg.Client`, a postgres.js `sql`, a PGlite instance. */
-type DatabaseClient = PgPool | PgClient | Pglite | PostgresJs
+/** What an ORM sends its SQL through: a `pg.Pool` or `pg.Client`, a postgres.js `sql`, a PGlite instance, a
+ *  better-sqlite3 database. */
+type DatabaseClient = PgPool | PgClient | Pglite | PostgresJs | BetterSqlite3
 
 const POSTGRES_ENGINE: Engine = {
   loadCatalog: async (query) => (await Promise.all([loadCatalog(query), loadParser()]))[0],
@@ -33,6 +36,12 @@ function liveDatabaseOf(client: DatabaseClient, options: LiveOptions): LiveDatab
     )
     return known.live
   }
+  if (isBetterSqlite3(client)) {
+    const live = new LiveDatabase(options, LOGGED_SQLITE_ENGINE)
+    captureBetterSqlite3(client, live)
+    databases.set(client, { live, options })
+    return live
+  }
   const live = new LiveDatabase(options, POSTGRES_ENGINE)
   if (isPostgresJs(client)) capturePostgresJs(client, live)
   else if (isPglite(client)) capturePglite(client, live)
@@ -49,9 +58,10 @@ function liveDatabaseOf(client: DatabaseClient, options: LiveOptions): LiveDatab
 
 function isDatabaseClient(value: unknown): value is DatabaseClient {
   if (typeof value === 'function') return isPostgresJs(value as never)
-  return typeof value === 'object' && value !== null && typeof (value as PgClient).query === 'function'
+  if (typeof value !== 'object' || value === null) return false
+  return typeof (value as PgClient).query === 'function' || isBetterSqlite3(value)
 }
 
-function isPglite(client: DatabaseClient): client is Pglite {
+function isPglite(client: Exclude<DatabaseClient, BetterSqlite3>): client is Pglite {
   return 'transaction' in client && 'exec' in client
 }
