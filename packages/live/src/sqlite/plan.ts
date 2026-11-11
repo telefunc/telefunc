@@ -40,14 +40,13 @@ function planSqlite(text: string, catalog: Catalog): Plan {
   const pragma = planPragma(text)
   if (pragma) return pragma
   const numbered = numberParams(text)
-  const statements = parseSqlite(numbered.text)
+  const statements = parseSqlite(numbered)
   // A statement the parser can't read may still run: it may have changed anything.
   if (!statements) return ANYTHING
-  const lowering = new Lowering(numbered.text)
+  const lowering = new Lowering(numbered)
   if (statements.length !== 1)
     return { kind: 'several', plans: statements.map((s) => planOne(s, undefined, lowering, catalog)) }
-  // A driver binds named parameters by name: the text sent with hidden columns would take them by position.
-  return planOne(statements[0]!, numbered.named ? undefined : numbered.text, lowering, catalog)
+  return planOne(statements[0]!, numbered, lowering, catalog)
 }
 
 /** A single `PRAGMA` statement, read from its tokens: the parser takes some of SQLite's spellings only (not
