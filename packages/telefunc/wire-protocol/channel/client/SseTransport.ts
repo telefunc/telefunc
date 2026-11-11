@@ -114,6 +114,8 @@ class SseTransport implements UpgradeSource {
   private postIdleFlushDelayMs = SSE_POST_IDLE_FLUSH_DELAY_MS
   private heartbeatFlushDelayMs = Math.floor(CHANNEL_PING_INTERVAL_MS / 2)
   private drainCallbacks: Array<() => void> = []
+  /** A barrier waiting for the POST out: it goes next, with the outbox. */
+  private barrierTurn: (() => void) | null = null
   /** The streaming upload POST. Once `failed`, it stays so, and frames go in batch POSTs from the outbox. */
   private streamRequest:
     | { tag: 'idle' }
@@ -159,12 +161,23 @@ class SseTransport implements UpgradeSource {
   }
 
   private async emitBarrierBatch(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission> {
-    if (this.flushing || this.outbox.length > 0) {
-      const drained = new Promise<void>((resolve) => this.drainCallbacks.push(resolve))
-      await Promise.race([drained, new Promise<void>((resolve) => setTimeout(resolve, UPGRADE_DRAIN_TIMEOUT_MS))])
+    // The outbox goes with the barrier, so it waits only for the POST out, whose frames the server must take first.
+    if (this.flushing) {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      await new Promise<void>((resolve) => {
+        this.barrierTurn = resolve
+        timer = setTimeout(resolve, UPGRADE_DRAIN_TIMEOUT_MS)
+      })
+      clearTimeout(timer)
+      this.barrierTurn = null
     }
     // A POST still out then is an upload, which the barrier would wait behind as long as it takes.
-    if (this.flushing || !this.hasWire() || signal.aborted) return 'not-emitted'
+    if (this.flushing) return 'not-emitted'
+    if (!this.hasWire() || signal.aborted) {
+      // The turn the POST's end handed it held the outbox back: it goes on as that end would have sent it.
+      this.flushNextOrDrain()
+      return 'not-emitted'
+    }
     this.flushScheduler.cancel()
     const queued = this.takeOutbox().map((entry) => entry.frame)
     queued.push(buildFrame().frame)
@@ -498,7 +511,8 @@ class SseTransport implements UpgradeSource {
       this.postWatch = null
       this.flushing = false
       this.postOutBytes = 0
-      this.flushNextOrDrain()
+      if (this.barrierTurn) this.barrierTurn()
+      else this.flushNextOrDrain()
       this.owner.onTransportHeadroom(this)
     }
   }

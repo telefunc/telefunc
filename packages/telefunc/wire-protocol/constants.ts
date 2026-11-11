@@ -128,7 +128,7 @@ export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
 
 // ===== SSE -> WS upgrade =====
 
-/** Batch mode: the barrier's wait for an outbox drain, before it flushes it or, with a POST out, defers the upgrade. */
+/** Batch mode: the barrier's wait for the POST out; one still out then is an upload, and the upgrade waits for the drain. */
 export const UPGRADE_DRAIN_TIMEOUT_MS = 2_000
 
 /** Post-flip wait: FIN on the old wire from the flip or its last delivery if later, RECONCILED on the new one. */

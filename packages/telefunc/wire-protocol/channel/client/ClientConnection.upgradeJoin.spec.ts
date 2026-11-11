@@ -82,13 +82,13 @@ class FakeWebSocket {
   }
 }
 
-function reconciled(extra: { ix: number; sessionId: string; upgradeId?: string }) {
+function reconciled(extra: { ix: number; sessionId: string; upgradeId?: string; pingInterval?: number }) {
   return encode.reconciled({
     sessionId: extra.sessionId,
     open: [{ ix: extra.ix, lastSeq: 0 }],
     reconnectTimeout: 60_000,
     idleTimeout: 60_000,
-    pingInterval: 100_000,
+    pingInterval: extra.pingInterval ?? 100_000,
     maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
     creditWindow: 1_000_000,
     sseFlushThrottle: 300,
@@ -281,4 +281,57 @@ describe('SSE→WS handoff join', () => {
     await settle()
     expect(h.dispatched, 'the join must still be waiting for its own RECONCILED').toEqual([])
   })
+})
+
+describe('SSE→WS barrier on batch POSTs', () => {
+  test('a barrier waiting for the POST out goes once it is answered, though a PING queued behind it', async () => {
+    const channel = createChannel([])
+    const downstream = makeDownstream()
+    const posts: Array<{ frames: DecodedFrame[]; answer: () => void }> = []
+    const fetchImpl = (async (_url: string, init: RequestInit) => {
+      // No streaming upload: its frames go in batch POSTs.
+      if (!(init.body instanceof Blob)) throw new TypeError('Failed to fetch')
+      const raw = parseLengthPrefixed(new Uint8Array(await init.body.arrayBuffer()))
+      const metadata = JSON.parse(new TextDecoder().decode(raw[0]!))
+      const frames = raw.slice(1).map((frame) => decode(bytes(frame)))
+      if (metadata.streamResponse) {
+        let ix = 0
+        for (const frame of frames) if (frame.tag === TAG.RECONCILE) ix = frame.payload.open[0]?.ix ?? 0
+        downstream.open()
+        downstream.push(reconciled({ ix, sessionId: crypto.randomUUID(), pingInterval: 1_000 }))
+        return new Response(downstream.stream as BodyInit, { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      return await new Promise<Response>((resolve) => posts.push({ frames, answer: () => resolve(new Response('')) }))
+    }) as unknown as typeof fetch
+    // The old wire keeps delivering, as it would the download the barrier waits behind.
+    const delivering = setInterval(() => downstream.push(encode.pong()), 200)
+    try {
+      ClientConnection.getOrCreate('http://test.local/_telefunc', channel as never, {
+        transports: ['sse', 'ws'],
+        fetchImpl,
+        connectionKey: crypto.randomUUID(),
+      })
+      const staged: { upgradeId?: string } = {}
+      await settle()
+      const probe = FakeWebSocket.last!
+      probe.answer((frame) => {
+        if (frame.tag === TAG.PING) probe.deliver(encode.pong())
+        if (frame.tag === TAG.PREPARE) staged.upgradeId = frame.payload.upgradeId
+      })
+      probe.deliver(encode.pong())
+      // The first PING's POST is out when the probe is READY: the barrier waits for it.
+      while (posts.length === 0 || staged.upgradeId === undefined) await delay(20)
+      probe.deliver(encode.ready({ upgradeId: staged.upgradeId }))
+      // The next PING queues behind that POST, which is answered within the drain timeout.
+      await delay(1_300)
+      posts[0]!.answer()
+      await delay(1_200)
+      const barrier = posts.slice(1).some(({ frames }) => frames.some((frame) => frame.tag === TAG.BARRIER))
+      expect(barrier, 'the barrier should have gone in the POST after the one it waited for').toBe(true)
+      expect(FakeWebSocket.last, 'the probe should be the WebSocket it upgrades to').toBe(probe)
+      expect(probe.readyState).toBe(1)
+    } finally {
+      clearInterval(delivering)
+    }
+  }, 10_000)
 })
