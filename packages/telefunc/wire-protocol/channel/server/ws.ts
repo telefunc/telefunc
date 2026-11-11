@@ -19,16 +19,13 @@ function getTelefuncChannelHooks({
   send = (peer, frame) => peer.send(frame),
   terminate = (peer) => peer.terminate(),
   bufferedAmount = (peer) => peer.websocket.bufferedAmount,
-  wireRequest = (peer) => peer.request,
 }: {
   upgrade?: Hooks['upgrade']
   send?: (peer: Peer, frame: Uint8Array<ArrayBuffer>) => void
   terminate?: (peer: Peer) => void
   bufferedAmount?: (peer: Peer) => number | undefined
-  wireRequest?: (peer: Peer) => Request
 } = {}) {
   enableChannelTransports(['ws'])
-  const mux = getChannelMux()
   const transport: ServerTransport<Peer> = {
     getSessionId: (peer) => peer.context.telefuncSessionId,
     setSessionId: (peer, sessionId) => {
@@ -42,6 +39,7 @@ function getTelefuncChannelHooks({
     bufferedAmount,
     // Closed at once: a Durable Object peer's terminate() is a close handshake a vanished client never answers.
     terminateWire: (peer) => {
+      const mux = getChannelMux()
       const permanent = mux.readPermanentTermination(peer)
       terminate(peer)
       mux.onWireClosed(peer, { permanent })
@@ -51,16 +49,16 @@ function getTelefuncChannelHooks({
   return defineHooks({
     upgrade,
     open: (peer) => {
-      const request = wireRequest(peer)
       // A page on another version reloads: none of its frames could be read.
-      if (!namesWireVersion(request)) return peer.close(WS_CLOSE_WIRE_VERSION, 'reload the page')
-      mux.onWireOpen(peer, transport, request)
+      if (!namesWireVersion(peer.request)) return peer.close(WS_CLOSE_WIRE_VERSION, 'reload the page')
+      getChannelMux().onWireOpen(peer, transport)
     },
-    message: (peer, message) => mux.onWireMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
+    message: (peer, message) => getChannelMux().onWireMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
     close: (peer, details) => {
+      const mux = getChannelMux()
       const isPermanent = mux.readPermanentTermination(peer) || details?.code === WS_CLOSE_PAGE_LEFT
       mux.onWireClosed(peer, { permanent: isPermanent })
     },
-    error: (peer) => mux.onWireClosed(peer, { permanent: false }),
+    error: (peer) => getChannelMux().onWireClosed(peer, { permanent: false }),
   })
 }

@@ -74,8 +74,7 @@ class SendCredit {
   /** Counts a frame of `bytes` against credit; a Promise where the sender waits for credit or yields. The frame already
    *  went (`sendSequenced`): awaiting the Promise throttles the sender's next send, not awaiting it bypasses credit. */
   decrement(bytes: number): void | Promise<void> {
-    this.sentBytes += bytes
-    this.sentMessages += 1
+    this.countSent(bytes)
     this.released = false
     if (this.isOutOfCredit()) return this.waitForCredit()
     if (this.waiters !== null && this.waiters.length > 0) {
@@ -87,6 +86,12 @@ class SendCredit {
       this.unyieldedBytes = 0
       return macrotaskYield.yield()
     }
+  }
+
+  /** Counts a frame that went out without a credit gate: a reply, which no sender waits on. */
+  countSent(bytes: number): void {
+    this.sentBytes += bytes
+    this.sentMessages += 1
   }
 
   /** Returns the bytes `limit` raised the byte limit by. A limit that doesn't raise the current one is stale, and

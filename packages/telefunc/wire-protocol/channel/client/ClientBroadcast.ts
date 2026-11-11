@@ -1,24 +1,31 @@
 export { ClientBroadcast }
 
-import type { BroadcastBinaryListener, BroadcastListener, ChannelData, ChannelPublishAck } from '../channel.js'
-import { makePublishInfo } from '../channel.js'
+import type {
+  BroadcastBinaryListener,
+  BroadcastListener,
+  BroadcastListenerByKind,
+  BroadcastListeners,
+  ChannelData,
+  ChannelPublishAck,
+} from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { encode, type ChannelDataFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
+import type { BroadcastKind, BroadcastSubscriptions } from '../../wire/payloads.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { CHANNEL_BUFFER_LIMIT_BINARY_BYTES, CHANNEL_BUFFER_LIMIT_BYTES } from '../../constants.js'
-import { ChannelClosedError } from '../channelErrors.js'
+import { ChannelClosedError, isExpectedChannelFailure } from '../channelErrors.js'
+import { classifyTelefuncError } from '../errorClassification.js'
 import { isPromise } from '../../../utils/isPromise.js'
-import { ClientChannel, type ClientChannelOptions } from './ClientChannel.js'
+import { ClientChannel, reportChannelError, type ClientChannelOptions } from './ClientChannel.js'
 
 class ClientBroadcast<T = unknown> extends ClientChannel {
-  private readonly broadcastListeners = new Listeners<BroadcastListener<T>>()
-  private readonly broadcastBinaryListeners = new Listeners<BroadcastBinaryListener>()
+  private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
   /** The subscriptions this page asks the server for. */
-  private readonly subscribed = { text: false, binary: false }
+  private readonly subscribed: BroadcastSubscriptions = { text: false, binary: false }
 
   constructor(options: ClientChannelOptions) {
     super(options)
@@ -27,12 +34,43 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this._attach.declareSubscriptions(this.subscribed)
   }
 
+  /** @internal Register a local listener without changing what it asks the server for. */
+  _subscribeLocal<K extends BroadcastKind>(kind: K, callback: BroadcastListenerByKind<T>[K]): () => void {
+    return this.subscribers[kind].add(callback)
+  }
+
+  /** @internal Sends what `reply` resolves to, also while closing: a graceful close waits for it, as for an ack's
+   *  answer. A reply it can't send is reported, and `failure` goes instead. */
+  _sendReply(reply: Promise<unknown>, failure: unknown): void {
+    void this.lifecycle.trackAck(this.sendSettledReply(reply, failure))
+  }
+
+  private async sendSettledReply(reply: Promise<unknown>, failure: unknown): Promise<void> {
+    const data = await reply
+    try {
+      this.sendReplyData(data)
+    } catch (err) {
+      this.lifecycle.handleCallbackError(err)
+      this.sendReplyData(failure)
+    }
+  }
+
+  /** @internal Declare what it asks the server for; a reconnect carries it in the RECONCILE entry. */
+  _setSubscribed(kind: BroadcastKind, on: boolean): void {
+    if (on === this.subscribed[kind] || this.stopped) return
+    this.subscribed[kind] = on
+    if (on) this.connection.sendBroadcastSubscribe(this, kind === 'binary')
+    else this.connection.sendBroadcastUnsubscribe(this, kind === 'binary')
+  }
+
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
+    return reportingUnexpected(this._publishUnreported(data))
+  }
+
+  /** @internal A publish that leaves reporting its rejection to the caller. */
+  _publishUnreported(data: ChannelData<T>): Promise<ChannelPublishAck> {
     if (this.stopped) throw new ChannelClosedError()
-    const serialized = stringify(data)
-    const ret = this.sendAckReq<ChannelPublishAck, string>(encode.publishAckReq, serialized)
-    ret.catch(() => {})
-    return ret
+    return this.sendAckReq<ChannelPublishAck, string>(encode.publishAckReq, stringify(data))
   }
 
   /** The page holds what its loop falls behind by within the server's default buffer limits. */
@@ -42,49 +80,48 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {
-    if (options.signal?.aborted) return () => {}
-    const remove = this.broadcastListeners.add(callback, {
-      ...options,
-      onRemove: () => {
-        if (this.broadcastListeners.size === 0) this.setSubscribed('text', false)
-      },
-    })
-    if (this.broadcastListeners.size === 1) this.setSubscribed('text', true)
-    return remove
+    return this.subscribeWired('text', callback, options)
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
+    return reportingUnexpected(this._publishBinaryUnreported(data))
+  }
+
+  /** @internal A publish that leaves reporting its rejection to the caller. */
+  _publishBinaryUnreported(data: Uint8Array): Promise<ChannelPublishAck> {
     if (this.stopped) throw new ChannelClosedError()
-    const ret = this.sendAckReq<ChannelPublishAck, Uint8Array>(encode.publishBinaryAckReq, data)
-    ret.catch(() => {})
-    return ret
+    return this.sendAckReq<ChannelPublishAck, Uint8Array>(encode.publishBinaryAckReq, data)
   }
 
   subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
-    if (options.signal?.aborted) return () => {}
-    const remove = this.broadcastBinaryListeners.add(callback, {
-      ...options,
-      onRemove: () => {
-        if (this.broadcastBinaryListeners.size === 0) this.setSubscribed('binary', false)
-      },
-    })
-    if (this.broadcastBinaryListeners.size === 1) this.setSubscribed('binary', true)
-    return remove
+    return this.subscribeWired('binary', callback, options)
   }
 
   override _end(err?: Error): void {
     super._end(err)
-    this.broadcastListeners.clear()
-    this.broadcastBinaryListeners.clear()
+    this.subscribers.text.clear()
+    this.subscribers.binary.clear()
   }
 
-  private setSubscribed(kind: 'text' | 'binary', on: boolean): void {
-    if (on === this.subscribed[kind] || this.stopped) return
-    this.subscribed[kind] = on
-    if (on) this.connection.sendBroadcastSubscribe(this, kind === 'binary')
-    else this.connection.sendBroadcastUnsubscribe(this, kind === 'binary')
+  /** The first listener of a kind subscribes the wire, and the last one's removal unsubscribes it. */
+  private subscribeWired<K extends BroadcastKind>(
+    kind: K,
+    callback: BroadcastListenerByKind<T>[K],
+    options: { signal?: AbortSignal },
+  ): () => void {
+    if (options.signal?.aborted) return () => {}
+    if (this.subscribers[kind].size === 0) this._setSubscribed(kind, true)
+    return this.subscribers[kind].add(callback, {
+      ...options,
+      onRemove: () => {
+        if (this.subscribers[kind].size === 0) this._setSubscribed(kind, false)
+      },
+    })
   }
 
+  private sendReplyData(data: unknown): void {
+    this.sendCredit.countSent(this.connection.sendSequenced(this, 'data', encode.text, stringify(data)))
+  }
   protected override dispatchDataFrame(frame: ChannelDataFrame): void {
     if (frame.tag === TAG.PUBLISH) {
       this.onPeerPublish(frame.text, frame.info, frame.bytes)
@@ -101,8 +138,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private onPeerPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
     const parsed = parse(data) as ChannelData<T>
-    const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of this.broadcastListeners.list()) {
+    const info = { key: this.key!, seq: wireInfo.seq, timestamp: wireInfo.timestamp }
+    for (const cb of this.subscribers.text.list()) {
       try {
         const result = cb(parsed, info)
         if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
@@ -115,8 +152,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   private onPeerPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
-    const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of this.broadcastBinaryListeners.list()) {
+    const info = { key: this.key!, seq: wireInfo.seq, timestamp: wireInfo.timestamp }
+    for (const cb of this.subscribers.binary.list()) {
       try {
         // Bytes of its own: a listener may write into them or transfer their buffer.
         const result = cb(new Uint8Array(data), info)
@@ -126,5 +163,19 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
       }
     }
     this.receiveCredit.onPublishConsumed(bytes)
+  }
+}
+
+/** Reports a publish rejection that is a bug; the caller still sees every rejection. */
+function reportingUnexpected(publish: Promise<ChannelPublishAck>): Promise<ChannelPublishAck> {
+  void reportIfBug(publish)
+  return publish
+}
+
+async function reportIfBug(publish: Promise<ChannelPublishAck>): Promise<void> {
+  try {
+    await publish
+  } catch (err) {
+    if (classifyTelefuncError(err, isExpectedChannelFailure).kind === 'bug') reportChannelError(err)
   }
 }

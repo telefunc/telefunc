@@ -16,11 +16,10 @@ export type { ShieldValidator, ShieldValidators } from './shield.js'
 export { onBug } from './runTelefunc/onBug.js'
 export { Channel } from '../../wire-protocol/channel/server/ServerChannel.js'
 export { Broadcast, BroadcastChannel } from '../../wire-protocol/channel/server/ServerBroadcast.js'
+export type { BroadcastTransport } from '../../wire-protocol/backend/broadcast/TransportBroadcastDriver.js'
 export { ChannelClosedError, ChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
 export { NetworkError } from '../../shared/NetworkError.js'
 export type { ChannelBase, ClientChannel } from '../../wire-protocol/channel/channel.js'
-export { DefaultBroadcastAdapter } from '../../wire-protocol/broadcast/broadcastAdapter.js'
-export type { BroadcastAdapter, BroadcastTransport } from '../../wire-protocol/broadcast/broadcastAdapter.js'
 export type { TelefuncServerExtension } from './extensions.js'
 export type {
   TypeContract,

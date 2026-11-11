@@ -7,22 +7,23 @@
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
-    "@vikejs/hono": "^0.2.0",
-    "hono": "^4.10.4",
+    "@telefunc/room": "workspace:*",
+    "@vikejs/hono": "^0.4.1",
+    "hono": "^4.13.13",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "telefunc": "0.3.1",
-    "vike": "^0.4.259",
+    "vike": "^0.4.268",
     "vike-react": "^0.6.21"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.30.3",
+    "@cloudflare/vite-plugin": "^1.67.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
     "typescript": "^7.0.2",
     "vite": "^8.0.16",
-    "wrangler": "^4.79.0"
+    "wrangler": "^4.157.0"
   },
   "type": "module"
 }

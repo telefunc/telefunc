@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
+import { OrderedStubs } from './OrderedStubs.js'
 
 const mocks = vi.hoisted(() => {
   const crosswsAdapter = {
@@ -17,15 +18,15 @@ const mocks = vi.hoisted(() => {
     }
   }
 
-  class MockCloudflareBroadcastTransport {
+  class MockCloudflareBroadcast {
     readonly options: unknown
-    readonly attachBinding = vi.fn()
-    readonly attachKV = vi.fn()
-    readonly attachIsolateInfo = vi.fn()
-    readonly attachRequest = vi.fn()
     readonly publishToSubscribers = vi.fn()
-    readonly deliverToLocal = vi.fn()
-
+    readonly members: Array<{ id: string; locate: Mock; deliver: Mock }> = []
+    readonly member = vi.fn((id: string) => {
+      const member = { id, locate: vi.fn(), deliver: vi.fn() }
+      this.members.push(member)
+      return member
+    })
     constructor(options: unknown) {
       this.options = options
       mocks.transportInstances.push(this)
@@ -44,11 +45,10 @@ const mocks = vi.hoisted(() => {
         return new ReadableStream()
       },
     })),
-    installBroadcastAdapter: vi.fn(<T>(factory: () => T): T => factory()),
-    transportInstances: [] as MockCloudflareBroadcastTransport[],
+    transportInstances: [] as MockCloudflareBroadcast[],
     authorityInstances: [] as MockCloudflareBroadcastAuthorityState[],
     MockCloudflareBroadcastAuthorityState,
-    MockCloudflareBroadcastTransport,
+    MockCloudflareBroadcast,
   }
 })
 
@@ -81,33 +81,16 @@ vi.mock('../../../node/server/telefunc.js', () => ({
   serve: mocks.telefuncMock,
 }))
 
-vi.mock('../../broadcast/broadcastAdapter.js', () => ({
-  installBroadcastAdapter: mocks.installBroadcastAdapter,
-}))
-
 vi.mock('./broadcast.js', () => ({
   CloudflareBroadcastAuthorityState: mocks.MockCloudflareBroadcastAuthorityState,
-  CloudflareBroadcastTransport: mocks.MockCloudflareBroadcastTransport,
+  CloudflareBroadcast: mocks.MockCloudflareBroadcast,
 }))
 
 import { Telefunc } from '../../../serve/cloudflare.js'
-
-function createMockKV(): KVNamespace {
-  const store = new Map<string, { value: string; expirationTtl?: number }>()
-  return {
-    async get(key: string, type?: string) {
-      const entry = store.get(key)
-      if (!entry) return null
-      return type === 'json' ? JSON.parse(entry.value) : entry.value
-    },
-    async put(key: string, value: string, options?: { expirationTtl?: number }) {
-      store.set(key, { value, expirationTtl: options?.expirationTtl })
-    },
-    async delete(key: string) {
-      store.delete(key)
-    },
-  } as unknown as KVNamespace
-}
+import { resolveSessionRoutingTarget } from './routing.js'
+import { disposeBackend } from '../../backend/install.js'
+import type { BroadcastPublishRequest } from './broadcast.js'
+import type { BroadcastDelivery } from './extensions.js'
 
 function createBinding() {
   const fetch = vi.fn(async (request: Request) => new Response(request.headers.get('x-telefunc-shard') ?? 'missing'))
@@ -144,9 +127,12 @@ beforeEach(() => {
       return new ReadableStream()
     },
   })
-  mocks.installBroadcastAdapter.mockClear()
   mocks.transportInstances.length = 0
   mocks.authorityInstances.length = 0
+})
+
+afterEach(async () => {
+  await disposeBackend()
 })
 
 describe('cloudflare adapter entrypoint', () => {
@@ -159,10 +145,9 @@ describe('cloudflare adapter entrypoint', () => {
 
     await tf.serve({
       request,
-      env: { TelefuncDurableObject: binding, TelefuncKV: createMockKV() } as unknown as Cloudflare.Env,
+      env: { TelefuncDurableObject: binding } as unknown as Cloudflare.Env,
     })
 
-    expect(mocks.installBroadcastAdapter).toHaveBeenCalledWith(expect.any(Function))
     expect(mocks.transportInstances).toHaveLength(1)
     expect(get).toHaveBeenCalledWith(expect.objectContaining({ name: 'telefunc-shard-oc-0' }), { locationHint: 'oc' })
     expect(fetch).toHaveBeenCalledTimes(1)
@@ -210,12 +195,11 @@ describe('cloudflare adapter entrypoint', () => {
 
   it('applies jurisdiction wrapping before binding lookups', async () => {
     const { binding, jurisdiction } = createBinding()
-    const kv = createMockKV()
     const tf = new Telefunc({ jurisdiction: 'eu' as DurableObjectJurisdiction })
 
     await tf.serve({
       request: new Request('https://telefunc.test/_telefunc'),
-      env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
+      env: { TelefuncDurableObject: binding } as unknown as Cloudflare.Env,
     })
 
     expect(jurisdiction).toHaveBeenCalledWith('eu')
@@ -240,11 +224,10 @@ describe('cloudflare adapter entrypoint', () => {
       fetch(request: Request): Promise<Response>
       webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void
       webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): void
-      telefuncBroadcastPublish(request: unknown): unknown
-      telefuncBroadcastDeliver(request: unknown): void
+      telefuncBroadcastPublish(request: BroadcastPublishRequest): unknown
+      telefuncBroadcastDeliver(delivery: BroadcastDelivery): void
     }
 
-    expect(mocks.transportInstances[0]?.attachBinding).toHaveBeenCalledWith(binding, 'TelefuncDurableObject')
     expect(mocks.crosswsAdapter.handleDurableInit).toHaveBeenCalledWith(instance, ctx, {
       TelefuncDurableObject: binding,
     })
@@ -263,7 +246,8 @@ describe('cloudflare adapter entrypoint', () => {
     )
     expect(mocks.telefuncMock).toHaveBeenCalled()
     expect(response.headers.get('x-telefunc-home')).toBe('weur')
-    expect(mocks.transportInstances[0]?.attachIsolateInfo).toHaveBeenCalledWith('telefunc-shard-weur-1', 'weur')
+    const member = mocks.transportInstances[0]!.members[0]!
+    expect(member.locate).toHaveBeenCalledWith('weur')
 
     instance.webSocketMessage({} as WebSocket, 'payload')
     expect(mocks.crosswsAdapter.handleDurableMessage).toHaveBeenCalledWith(instance, expect.anything(), 'payload')
@@ -277,28 +261,20 @@ describe('cloudflare adapter entrypoint', () => {
       true,
     )
 
-    instance.telefuncBroadcastPublish({
-      key: 'room:test',
-      locationBucket: 'weur',
-      serialized: '{"text":"hello"}',
-      forwarded: false,
-    })
-    expect(mocks.transportInstances[0]?.publishToSubscribers).toHaveBeenCalledWith(mocks.authorityInstances[0], {
-      key: 'room:test',
-      locationBucket: 'weur',
-      serialized: '{"text":"hello"}',
-      forwarded: false,
-    })
+    const publish = { key: 'room:test', kind: 'text' as const, payload: '{"text":"hello"}' }
+    instance.telefuncBroadcastPublish(publish)
+    expect(mocks.transportInstances[0]?.publishToSubscribers).toHaveBeenCalledWith(
+      mocks.authorityInstances[0],
+      expect.any(OrderedStubs),
+      publish,
+    )
 
-    instance.telefuncBroadcastDeliver({
-      key: 'room:test',
-      serialized: '{"text":"hello"}',
+    const delivery = {
+      routes: [{ key: 'room:test', kind: 'text' as const }],
+      payload: '{"text":"hello"}',
       info: { seq: 1, timestamp: Date.now() },
-    })
-    expect(mocks.transportInstances[0]?.deliverToLocal).toHaveBeenCalledWith({
-      key: 'room:test',
-      serialized: '{"text":"hello"}',
-      info: expect.any(Object),
-    })
+    }
+    instance.telefuncBroadcastDeliver(delivery)
+    expect(member.deliver).toHaveBeenCalledWith(delivery)
   })
 })

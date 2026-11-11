@@ -26,7 +26,6 @@ import {
   type SequencedEncoder,
 } from '../../wire/frame.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
-import { assert } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
@@ -42,7 +41,7 @@ import { ChannelAttach } from './ChannelAttach.js'
 import type { CreditOwner } from '../../flowControl/credit.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
 import type { MuxChannel, MuxConnection } from './ClientConnection.js'
-import { ChannelClosedError } from '../channelErrors.js'
+import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
 import { channelMessages } from '../channelMessages.js'
 import { forListener, listenerAnswer } from '../listenerAnswer.js'
 import { isPromise } from '../../../utils/isPromise.js'
@@ -146,11 +145,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.stopped
   }
 
+  get isConnected(): boolean {
+    return this.lifecycle.connected
+  }
+
   /** @internal The connection its frames go through. */
   get _connection(): MuxConnection {
     return this.connection
   }
-
   send(data: ChannelData<ClientToServer>): Promise<void>
   send(data: ChannelData<ClientToServer>, opts: { ack: true }): Promise<ChannelAck<ClientToServer>>
   send(data: ChannelData<ClientToServer>, opts: { ack: false }): Promise<void>
@@ -222,6 +224,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.lifecycle.onOpen(callback, options)
   }
 
+  onDisconnect(callback: () => void, options?: { signal?: AbortSignal }): void {
+    this.lifecycle.onDisconnect(callback, options)
+  }
+
+  onReconnect(callback: () => void, options?: { signal?: AbortSignal }): void {
+    this.lifecycle.onReconnect(callback, options)
+  }
+
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
     if (this.lifecycle.closing) return this.lifecycle.closing
     if (this.lifecycle.ended) return Promise.resolve(this.lifecycle.result)
@@ -249,11 +259,19 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   // ── Called by transport connection ──
 
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void {
-    if (this.stopped) return
+    if (this.stopped) {
+      this.lifecycle.fireReconnect()
+      return
+    }
     if (batched) this.receiveCredit.useBatchTransportInitial()
     else this.receiveCredit.undoBatchTransportInitial()
     this.receiveCredit.attach(uplink, uplink.roundTrips, downlink)
     this.lifecycle.fireOpen()
+  }
+
+  /** @internal Its wire went away, and the connection reconnects. */
+  _onTransportDisconnect(): void {
+    this.lifecycle.fireDisconnect()
   }
 
   protected onPeerMessage(data: string, bytes: number): void {
@@ -396,6 +414,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
           return
         case ACK_STATUS.SHIELD_ERROR:
           pending.reject(new ShieldValidationError(text))
+          return
+        case ACK_STATUS.OVERFLOW:
+          pending.reject(new ChannelOverflowError(text))
       }
     } catch (err) {
       pending.reject(err instanceof Error ? err : new Error(String(err)))

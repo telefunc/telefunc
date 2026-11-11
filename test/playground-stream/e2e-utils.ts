@@ -7,6 +7,7 @@ export {
   cutWire,
   dropNextWebSocket,
   runServerAction,
+  failBackend,
   holdNextSsePost,
   holdNextSseWire,
   holdNextSseOpen,
@@ -19,6 +20,16 @@ export {
   restartProxy,
   stopProxy,
   startProxy,
+  restartRedis,
+  killInstance,
+  startInstance,
+  dropRedisConnections,
+  getRedisChannels,
+  getRedisKeys,
+  snapshotRedis,
+  rewindRedis,
+  moveRedisSlot,
+  retryOnNetworkChange,
   countConnections,
   serverRuntime,
   setServerRuntime,
@@ -26,7 +37,8 @@ export {
 }
 
 import { page, getServerUrl } from '@brillout/test-e2e'
-import type { Response, WebSocket } from 'playwright-chromium'
+import type { Request, Response, WebSocket } from 'playwright-chromium'
+import type { BackendFault } from './failing-backend'
 import { execSync } from 'node:child_process'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -52,6 +64,65 @@ function stopProxy() {
 
 function startProxy() {
   execSync('docker compose start proxy', { cwd: playgroundDir, stdio: 'pipe' })
+}
+
+/** Restarts the stack's Redis, which keeps no data across a restart. */
+function restartRedis() {
+  execSync('docker compose restart redis', { cwd: playgroundDir, stdio: 'pipe' })
+}
+
+/** Kills a server instance at once, as a crash does: it leaves nothing behind cleanly. */
+function killInstance(instance: 'a' | 'b' | 'c' | 'd') {
+  execSync(`docker compose kill playground-${instance}`, { cwd: playgroundDir, stdio: 'pipe' })
+}
+
+function startInstance(instance: 'a' | 'b' | 'c' | 'd') {
+  execSync(`docker compose start playground-${instance}`, { cwd: playgroundDir, stdio: 'pipe' })
+}
+
+/** Drops every connection to the stack's Redis, as a failover or a network cut does. */
+async function dropRedisConnections() {
+  const resp = await fetch(`${getServerUrl()}/api/redis/drop-connections`, { method: 'POST' })
+  const { dropped } = (await resp.json()) as { dropped: number }
+  if (dropped === 0) throw new Error('dropRedisConnections() found no connection to drop')
+}
+
+/** The Pub/Sub channels some connection to the stack's Redis subscribes to, matching a glob pattern. */
+async function getRedisChannels(pattern: string): Promise<string[]> {
+  const resp = await fetch(`${getServerUrl()}/api/redis/channels?pattern=${encodeURIComponent(pattern)}`)
+  return ((await resp.json()) as { channels: string[] }).channels
+}
+
+/** The keys in the stack's Redis matching a glob pattern, each with its time to live in ms (-1: none). */
+async function getRedisKeys(pattern: string): Promise<{ key: string; ttl: number }[]> {
+  const resp = await fetch(`${getServerUrl()}/api/redis/keys?pattern=${encodeURIComponent(pattern)}`)
+  return ((await resp.json()) as { keys: { key: string; ttl: number }[] }).keys
+}
+
+type RedisSnapshot = unknown
+
+async function snapshotRedis(): Promise<RedisSnapshot> {
+  const resp = await fetch(`${getServerUrl()}/api/redis/snapshot`)
+  return ((await resp.json()) as { snapshot: RedisSnapshot }).snapshot
+}
+
+/** Rewinds the stack's Redis to a snapshot and drops every connection, as a failover onto a replica that missed the
+ *  writes since does. */
+async function rewindRedis(snapshot: RedisSnapshot) {
+  const resp = await fetch(`${getServerUrl()}/api/redis/restore`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ snapshot }),
+  })
+  if (!resp.ok) throw new Error(`rewindRedis() failed: ${await resp.text()}`)
+  await dropRedisConnections()
+}
+
+/** Redis Cluster: moves the slot of `key` to another master one key at a time, as a reshard does. */
+async function moveRedisSlot(key: string) {
+  const resp = await fetch(`${getServerUrl()}/api/redis/move-slot?key=${encodeURIComponent(key)}`, { method: 'POST' })
+  if (!resp.ok) throw new Error(`moveRedisSlot() failed: ${await resp.text()}`)
+  return (await resp.json()) as { moved: number }
 }
 
 type ServerRuntime = 'node' | 'bun' | 'deno'
@@ -117,6 +188,12 @@ function fetchFromPage(url: string, method: 'GET' | 'POST'): Promise<{ ok: boole
 async function runServerAction(key: string) {
   const resp = await fetch(`${getServerUrl()}/api/server-action?key=${encodeURIComponent(key)}`, { method: 'POST' })
   if (!resp.ok) throw new Error(`runServerAction() failed: ${await resp.text()}`)
+}
+
+/** The server's store fails the call, or drops the message, `fault` names (failing-backend.ts). */
+async function failBackend(fault: BackendFault) {
+  const resp = await fetch(`${getServerUrl()}/api/backend/fault`, { method: 'POST', body: JSON.stringify(fault) })
+  if (!resp.ok) throw new Error(`failBackend() failed: ${await resp.text()}`)
 }
 
 /** Drops the page's WebSocket and SSE connections at the server, as a failing network would. */
@@ -206,6 +283,30 @@ const NAVIGATE_ATTEMPTS = 4
 const HYDRATION_TIMEOUT = 5_000
 const NAVIGATE_RETRY_DELAY = 500
 
+/**
+ * Runs `attempt` again, as `navigate()` does a navigation, if the runner's network changes under one of the page's
+ * requests. Docker's last interfaces settle about two seconds after the stack starts, and Chromium then fails what is in
+ * flight with `ERR_NETWORK_CHANGED`, so a page call made at that moment never answers. `attempt` stops waiting for its
+ * answer once `cut()` is true.
+ */
+async function retryOnNetworkChange(attempt: (cut: () => boolean) => Promise<void>) {
+  for (let left = NAVIGATE_ATTEMPTS; left > 0; left--) {
+    let cut = false
+    const onFailed = (request: Request) => {
+      if (request.failure()?.errorText === 'net::ERR_NETWORK_CHANGED') cut = true
+    }
+    page.on('requestfailed', onFailed)
+    try {
+      await attempt(() => cut)
+    } finally {
+      page.off('requestfailed', onFailed)
+    }
+    if (!cut) return
+    await sleep(NAVIGATE_RETRY_DELAY)
+  }
+  throw new Error(`The network changed under each of ${NAVIGATE_ATTEMPTS} attempts`)
+}
+
 // Transient errors Chromium-in-Docker surfaces when the bridge interface state shifts. Mirrors
 // the connection-family errors `.testRun-docker.ts`'s `tolerateError()` already allows in logs.
 const transientNetworkErrors = [
@@ -214,7 +315,6 @@ const transientNetworkErrors = [
   'ERR_CONNECTION_RESET',
   'ERR_CONNECTION_REFUSED',
   'ERR_INTERNET_DISCONNECTED',
-  'ERR_ALPN_NEGOTIATION_FAILED',
   'ERR_SSL_PROTOCOL_ERROR',
   // Chromium aborts a navigation that starts just after a test's setOffline(false).
   'ERR_ABORTED',

@@ -3,6 +3,7 @@ export { Publish }
 import { prepareBroadcastApi } from './broadcastApiProbe'
 import { close } from 'telefunc/client'
 import React, { useEffect, useRef, useState } from 'react'
+import { keepReachable } from '../keepReachable'
 import {
   onTextBroadcast,
   onBroadcastApi,
@@ -12,6 +13,19 @@ import {
   onBinaryBroadcastPair,
   onBinaryBroadcast,
   onBroadcastShieldClient,
+  onBinaryBroadcastReusedBuffer,
+  onBroadcastRightAfterSubscribe,
+  onBroadcastAnswers,
+  onBroadcastAnsweringLoop,
+  onBroadcastWhileEstablishing,
+  onSubscribeRefused,
+  onDeliveredBeforeReady,
+  onJoinedBeforeReady,
+  onDeliveredWhileLost,
+  onChatLeaveOnClose,
+  onGetChatWatched,
+  onServerBroadcastChecks,
+  onBroadcastErrors,
   onBroadcastServerListener,
   onBroadcastOwnBytes,
   onBroadcastOnOpenPublish,
@@ -22,7 +36,7 @@ import {
   onBroadcastReconnect,
   onBroadcastWhileOffline,
   onBroadcastSeqAcrossSubscribers,
-  onBroadcastSeqWhileQueued,
+  onBroadcastJoinWhileQueued,
   onBroadcastManyKeys,
   onBroadcastThrowingListener,
   onJoinChat,
@@ -249,6 +263,8 @@ function Publish() {
         onClick={async () => {
           setResult('')
           const { publisher, subscriber, getReceived } = await onTextBroadcast()
+          // `subscriber` is a remote handle a GC pass would close, tearing down the server-side subscription mid-test.
+          const releaseSubscriber = keepReachable(subscriber)
           // Publish 3 messages from the publisher
           const acks = []
           for (let i = 0; i < 3; i++) {
@@ -264,10 +280,7 @@ function Publish() {
             if (received.length >= 3) break
             await new Promise((r) => setTimeout(r, 200))
           }
-          // `subscriber` is unused but must stay reachable until the scenario is over:
-          // it crosses the wire as a remote handle, and a GC pass would close it,
-          // tearing down the server-side subscription mid-test.
-          void subscriber
+          releaseSubscriber()
         }}
       >
         Text publish (3 messages)
@@ -280,6 +293,8 @@ function Publish() {
         onClick={async () => {
           setResult('')
           const { publisher, subscriber, getReceived } = await onBinaryBroadcastPair()
+          // Keep the unused remote handle, see the text broadcast above.
+          const releaseSubscriber = keepReachable(subscriber)
           // Publish 3 binary frames
           const acks = []
           for (let i = 0; i < 3; i++) {
@@ -294,8 +309,7 @@ function Publish() {
             if (received.length >= 3) break
             await new Promise((r) => setTimeout(r, 200))
           }
-          // Keep the unused remote handle reachable, see the text broadcast above.
-          void subscriber
+          releaseSubscriber()
         }}
       >
         Binary publish (3 frames)
@@ -308,16 +322,95 @@ function Publish() {
         onClick={async () => {
           setResult('')
           const room = await onBinaryBroadcast()
-          listenedRef.current = room
+          // A GC pass would close `room` and its subscription before the server's frames arrive.
+          const releaseRoom = keepReachable(room)
           const received: Array<{ size: number; firstByte: number }> = []
           room.subscribeBinary((data, info) => {
             received.push({ size: data.byteLength, firstByte: data[0]! })
             setResult(JSON.stringify({ received, done: received.length >= 5 }))
           })
           await room.publish({ start: true })
+          for (let poll = 0; poll < 50 && received.length < 5; poll++) await new Promise((r) => setTimeout(r, 200))
+          releaseRoom()
         }}
       >
         Server broadcasts 5 binary frames
+      </button>
+
+      <h2>Reused Buffer</h2>
+
+      <button
+        id="test-binary-broadcast-reused-buffer"
+        onClick={async () => {
+          setResult('')
+          const { room, getSeen } = await onBinaryBroadcastReusedBuffer()
+          const releaseRoom = keepReachable(room)
+          const received: number[][] = []
+          room.subscribeBinary((data) => received.push([...data]))
+          await room.publish({ start: true })
+          for (let poll = 0; poll < 50; poll++) {
+            const seen = await getSeen()
+            setResult(JSON.stringify({ received, seen }))
+            if (received.length >= 3 && seen.length >= 3) break
+            await new Promise((r) => setTimeout(r, 200))
+          }
+          releaseRoom()
+        }}
+      >
+        Server publishes from one reused buffer
+      </button>
+
+      <h2>Publish Right After Subscribe</h2>
+
+      <button
+        id="test-broadcast-right-after"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify({ seen: await onBroadcastRightAfterSubscribe() }))
+        }}
+      >
+        Subscribe, then publish at once
+      </button>
+
+      <h2>Answers</h2>
+
+      <button
+        id="test-broadcast-answers"
+        onClick={async () => {
+          setResult('')
+          const room = await onBroadcastAnswers()
+          const releaseRoom = keepReachable(room)
+          const received: string[] = []
+          room.subscribe((data) => received.push(data))
+          await room.publish('ping')
+          const loop = await onBroadcastAnsweringLoop()
+          for (let poll = 0; poll < 50 && received.length < 3; poll++) await new Promise((r) => setTimeout(r, 200))
+          setResult(JSON.stringify({ received, ...loop }))
+          releaseRoom()
+        }}
+      >
+        Listeners that answer
+      </button>
+
+      <h2>Held Past bufferLimit</h2>
+
+      <button
+        id="test-broadcast-hold-overflow"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onBroadcastWhileEstablishing(3, 1500)))
+        }}
+      >
+        Publishes held past bufferLimit
+      </button>
+      <button
+        id="test-broadcast-hold-alone"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onBroadcastWhileEstablishing(2, 5000)))
+        }}
+      >
+        One publish held, itself past bufferLimit
       </button>
 
       <h2>Broadcast Shield Validation</h2>
@@ -363,6 +456,93 @@ function Publish() {
       >
         Broadcast Shield
       </button>
+
+      <h2>Subscribe the store refuses</h2>
+
+      <button
+        id="test-subscribe-refused"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onSubscribeRefused()))
+        }}
+      >
+        Subscribe refused by the store
+      </button>
+
+      <button
+        id="test-delivered-before-ready"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify({ seen: await onDeliveredBeforeReady() }))
+        }}
+      >
+        Message delivered before the store acknowledges the subscription
+      </button>
+
+      <button
+        id="test-joined-before-ready"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onJoinedBeforeReady()))
+        }}
+      >
+        Listener joining between messages delivered before the store acknowledges the subscription
+      </button>
+
+      <button
+        id="test-delivered-while-lost"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify({ seen: await onDeliveredWhileLost() }))
+        }}
+      >
+        Messages delivered while the store restores a lost subscription
+      </button>
+
+      <h2>Leave message from onClose</h2>
+
+      <button
+        id="test-chat-leave-on-close"
+        onClick={async () => {
+          setResult('')
+          const { key, chat } = await onChatLeaveOnClose()
+          await chat.opened
+          await chat.close()
+          for (let poll = 0; poll < 50; poll++) {
+            const received = await onGetChatWatched(key)
+            setResult(JSON.stringify({ received }))
+            if (received.length > 0) break
+            await new Promise((r) => setTimeout(r, 200))
+          }
+        }}
+      >
+        Close a chat channel
+      </button>
+
+      <h2>Server-side subscriptions</h2>
+
+      <button
+        id="test-server-broadcast-checks"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onServerBroadcastChecks()))
+        }}
+      >
+        Abort, unsubscribe
+      </button>
+
+      <h2>Failing subscribers and publishes</h2>
+
+      <button
+        id="test-broadcast-errors"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onBroadcastErrors()))
+        }}
+      >
+        Subscribers throw, the store fails
+      </button>
+
       <h2>Binary Listeners Get Bytes of Their Own</h2>
 
       <button
@@ -526,13 +706,13 @@ function Publish() {
         Seqs across subscribers
       </button>
       <button
-        id="test-broadcast-seq-while-queued"
+        id="test-broadcast-join-while-queued"
         onClick={async () => {
           setResult('')
-          setResult(JSON.stringify(await onBroadcastSeqWhileQueued()))
+          setResult(JSON.stringify({ received: await onBroadcastJoinWhileQueued() }))
         }}
       >
-        Seqs while publishes queue
+        Subscribe while publishes queue
       </button>
       {([false, true] as const).map((subscribed) => (
         <button

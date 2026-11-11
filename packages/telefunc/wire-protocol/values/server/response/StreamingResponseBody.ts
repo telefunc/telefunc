@@ -18,7 +18,7 @@ import { restoreContext } from '../../../../node/server/context/context.js'
 import type { Context } from '../../../../node/server/context/context.js'
 import { createPushReadable } from '../../../../utils/pushReadable.js'
 import { createPushReadableStream } from '../../../../utils/pushReadableStream.js'
-import { afterEventLoopTurn } from '../../../../utils/afterEventLoopTurn.js'
+import { nextTurn } from '../../../flowControl/macrotaskYield.js'
 import { createDeferred } from '../../../../utils/createDeferred.js'
 import { StreamFlow } from './StreamFlow.js'
 
@@ -190,7 +190,7 @@ function buildInlineResponseBody(runContext: {
             // A socket that keeps up takes writes with no turn of the event loop, and the page's request needs one.
             if (flow && (bytesSinceTurn += result.value!.length) >= STREAM_FLOW_PAUSE_BYTES) {
               bytesSinceTurn = 0
-              await new Promise<void>(afterEventLoopTurn)
+              await new Promise<void>(nextTurn)
             }
             advance(entry)
             active.splice(active.indexOf(entry), 1)

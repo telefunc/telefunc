@@ -1,4 +1,5 @@
 export { pluginBuildEntry }
+export { getServerProductionEntryCode }
 
 import { serverProductionEntryPlugin } from '@brillout/vite-plugin-server-entry/plugin'
 import type { Plugin } from 'vite'

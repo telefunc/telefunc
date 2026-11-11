@@ -1,6 +1,8 @@
 export { parseJsonPayload, parsePreparePayload, parseReconcilePayload, parseBarrierPayload }
 export type {
   ReconcileOpenEntry,
+  BroadcastKind,
+  BroadcastSubscriptions,
   AttachState,
   ReconcilePayload,
   BarrierPayload,
@@ -22,10 +24,13 @@ type ReconcileOpenEntry = {
   /** First reconcile: the server awaits it up to `connectTtl`, then an ATTACH_RESULT settles it; others fail fast. */
   initial?: true
   /** A broadcast's subscriptions as of this (re)attach, applied before its `onOpen` fires. */
-  broadcast?: { text: boolean; binary: boolean }
+  broadcast?: BroadcastSubscriptions
   /** A BDP probe the RECONCILED answers: on a wire other than the last, it queues behind none of the channel's data. */
   probe?: number
 }
+
+type BroadcastKind = 'text' | 'binary'
+type BroadcastSubscriptions = Record<BroadcastKind, boolean>
 
 /** What a channel adds to its own RECONCILE entry. */
 type AttachState = Pick<ReconcileOpenEntry, 'broadcast' | 'probe'>

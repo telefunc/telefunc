@@ -61,12 +61,15 @@ type PongEntry = { ix: number; lastSeq: number | null }
  *  - `ERROR`: a generic listener/channel error; `text` is the user-facing message.
  *  - `ABORT`: `text` is the serialized abort value.
  *  - `SHIELD_ERROR`: a shield validator rejected the data/ack; `text` is the validator message.
- *    Kept distinct from `ERROR` so the receiving side can throw `ShieldValidationError`. */
+ *    Kept distinct from `ERROR` so the receiving side can throw `ShieldValidationError`.
+ *  - `OVERFLOW`: a full buffer refused a publish; `text` is the error message. The publisher throws
+ *    `ChannelOverflowError`. */
 const ACK_STATUS = {
   OK: 0x00 as const,
   ERROR: 0x01 as const,
   ABORT: 0x02 as const,
   SHIELD_ERROR: 0x03 as const,
+  OVERFLOW: 0x04 as const,
 }
 
 type AckResultStatus = (typeof ACK_STATUS)[keyof typeof ACK_STATUS]
@@ -75,7 +78,7 @@ type AckResultStatus = (typeof ACK_STATUS)[keyof typeof ACK_STATUS]
 const ERROR_REASON = {
   /** An unhandled server error. */
   BUG: 0x00 as const,
-  /** More was published to its broadcast while its page was offline than the server holds for it. */
+  /** More was published to its channel while its page was offline than the server holds for it. */
   OVERFLOW: 0x01 as const,
   /** A reconnect needed frames its sender's replay buffer had dropped to stay within its size. */
   LOST: 0x02 as const,
@@ -461,7 +464,8 @@ function decode(frame: Uint8Array): DecodedFrame {
         status === ACK_STATUS.OK ||
           status === ACK_STATUS.ERROR ||
           status === ACK_STATUS.ABORT ||
-          status === ACK_STATUS.SHIELD_ERROR,
+          status === ACK_STATUS.SHIELD_ERROR ||
+          status === ACK_STATUS.OVERFLOW,
         `ACK_RES unknown status ${status}`,
       )
       const text = textDecoder.decode(payload.subarray(ACK_RES_PREFIX))
@@ -599,13 +603,12 @@ const CLIENT_TAGS: ReadonlySet<number> = new Set([
 ])
 
 /** Server ingress: `decode` owns the frame's shape, this owns its direction and the upgrade frames'
- *  size cap. The cap is checked on the raw bytes because its job is to bound what an unauthenticated
- *  peer can make us parse — after `decode` it would be bounding nothing. */
+ *  size cap. Both are checked on the raw bytes because their job is to bound what an unauthenticated
+ *  peer can make us parse. After `decode` they would be bounding nothing. */
 function decodeClientFrame(raw: Uint8Array<ArrayBuffer>, maxUpgradeFrameBytes: number): DecodedFrame {
   const tag = peekTag(raw)
+  assertProtocol(tag !== undefined && CLIENT_TAGS.has(tag), `client sent a server-only frame ${tag}`)
   const isUpgradeFrame = tag === TAG.PREPARE || tag === TAG.BARRIER
   assertProtocol(!isUpgradeFrame || raw.byteLength <= maxUpgradeFrameBytes, 'upgrade frame over byte cap')
-  const frame = decode(raw)
-  assertProtocol(CLIENT_TAGS.has(frame.tag), `client sent a server-only frame ${frame.tag}`)
-  return frame
+  return decode(raw)
 }

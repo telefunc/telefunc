@@ -1,10 +1,13 @@
-export { ChannelMux, getChannelMux }
+export { ChannelMux, getChannelMux, hostLocal, CHANNEL_MUX }
 export type { WireEntry, ReconcileOutcome, ServerTransport, Wire }
 
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+import { getRawContext } from '../../../node/server/context/context.js'
 import { getAdapterMaxFrameBytes, getServerConfig, pingDeadlineOf } from '../../../node/server/serverConfig.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
+import { GcRegistry } from '../../../utils/GcRegistry.js'
+import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
   CHANNEL_PING_INTERVAL_MIN_MS,
@@ -27,7 +30,7 @@ import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type { BarrierPayload, PreparePayload, ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
-import { WireSender } from './WireSender.js'
+import { WireSender, type WireSenderOwner } from './WireSender.js'
 import { EndedChannels } from './EndedChannels.js'
 import { UpgradeStages, type UpgradeStagesOwner } from './UpgradeStages.js'
 import { SessionRegistry, type ChannelHandle } from './SessionRegistry.js'
@@ -115,19 +118,34 @@ type WireEntry = {
   transport: ServerTransport<unknown>
   /** One per wire: the peers of every reconcile on this wire share it. */
   sender: WireSender
-  /** The request that opened the wire, where one did. */
-  request: Request | undefined
 }
 
+/** The context key of a server that hosts its own channels: a Cloudflare session DO's end with it. */
+const CHANNEL_MUX = Symbol.for('telefunc.channelMux')
+
 function getChannelMux(): ChannelMux {
-  return getGlobals().mux
+  return (getRawContext()?.[CHANNEL_MUX] as ChannelMux | undefined) ?? getGlobals().mux
 }
+
+/** One value per host: one per process on Node/Bun/Deno, one per session Durable Object on Cloudflare. */
+function hostLocal<T>(key: symbol, init: (host: { id: string | null }) => T): T {
+  const mux = getChannelMux()
+  return getOrCreate(mux.hostLocals, key, () => init({ id: mux.hostId })) as T
+}
+
+type ChannelMuxOptions = { hostId?: string }
 
 /** The server's channel kernel: it owns the channels, the sessions and each wire's state. Transports report a wire
  *  through `onWireOpen` and name it by identity from then on; a deployment with several instances relies on sticky
  *  sessions at its load balancer. */
-class ChannelMux implements UpgradeStagesOwner {
+class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
+  /** Its session Durable Object's id on Cloudflare, else null. */
+  readonly hostId: string | null
+  readonly hostLocals = new Map<symbol, unknown>()
   private readonly channels = new Map<string, ServerChannel>()
+  /** Per mux, not per isolate: a session DO's scan timer must be made and cleared in its own calls. Not per request
+   *  either: a closure on the request context would pin the call's arguments, so a stub is never collected. */
+  readonly gcRegistry = new GcRegistry()
   /** The channels a reconcile named before they registered, which `registerChannel` attaches. */
   private readonly registrationWaits = new RegistrationWaits()
   private readonly sessions = new SessionRegistry()
@@ -149,6 +167,10 @@ class ChannelMux implements UpgradeStagesOwner {
   /** Resolved lazily so the mux can be constructed at module-load (the globalObject factory
    *  runs before `serverConfig` is initialized). */
   private resolvedOptions: MuxServerOptions | null = null
+
+  constructor({ hostId }: ChannelMuxOptions = {}) {
+    this.hostId = hostId ?? null
+  }
 
   private get options(): MuxServerOptions {
     return (this.resolvedOptions ??= resolveMuxServerOptions())
@@ -190,7 +212,7 @@ class ChannelMux implements UpgradeStagesOwner {
 
   // ── Wire lifecycle (transport-facing) ───────────────────────────────
 
-  onWireOpen<TWire>(wire: TWire, transport: ServerTransport<TWire>, request?: Request): void {
+  onWireOpen<TWire>(wire: TWire, transport: ServerTransport<TWire>): void {
     const recvBacklog = { bytes: 0, frames: 0 }
     const deliveries = new Deliveries()
     const attaching = new Set<ServerChannel>()
@@ -211,6 +233,7 @@ class ChannelMux implements UpgradeStagesOwner {
       },
       transport: transport as ServerTransport<unknown>,
       sender: new WireSender({
+        owner: this,
         wire,
         transport: transport as ServerTransport<unknown>,
         pingInterval: this.options.pingInterval,
@@ -218,7 +241,6 @@ class ChannelMux implements UpgradeStagesOwner {
         sessions: this.sessions,
         attaching,
       }),
-      request,
     }
     this.wires.set(wire, entry)
     const connId = transport.getConnId(wire)
@@ -441,8 +463,8 @@ class ChannelMux implements UpgradeStagesOwner {
     }
   }
 
-  /** `wire` may be a wire other than the one that sent the offending frame — a barrier's
-   *  violation is the staged probe's. */
+  /** `WireSenderOwner` and `UpgradeStagesOwner`: ends `wire` for good. It may be a wire other than the one that sent
+   *  the offending frame — a barrier's violation is the staged probe's. */
   terminateWire(wire: Wire): void {
     const entry = this.wires.get(wire)
     if (!entry) return
@@ -793,12 +815,12 @@ class ChannelMux implements UpgradeStagesOwner {
   private attachChannel(
     channel: ServerChannel,
     open: ReconcileOpenEntry,
-    { sender, request }: WireEntry,
+    { sender }: WireEntry,
     replay: boolean,
   ): ChannelHandle | null {
     const buffer = channel._replayBuffer
     if (buffer === null) return null
-    channel._onPageAttach(open.lastSeq, request)
+    channel._onPageHas(open.lastSeq)
     const peer = new IndexedPeer({ sender, index: open.ix, replay: buffer })
     const missed = replay ? buffer.getAfter(open.lastSeq) : []
     if (missed === null) {

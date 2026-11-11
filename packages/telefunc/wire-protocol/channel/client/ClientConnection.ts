@@ -48,6 +48,8 @@ interface MuxChannel {
    *  connection — they involve connection-side cleanup. */
   _dispatchFrame(frame: ChannelFrame): void
   _onEnded(err?: Error): void
+  /** The channel's wire went away, and the connection reconnects. */
+  _onTransportDisconnect(): void
   /** Its credits as the connection drives them across wires. */
   readonly _attach: ChannelAttach
 }

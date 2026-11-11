@@ -34,6 +34,9 @@ type ServerChannelBufferOptions = {
  * binary has its own queue, so it never evicts text. Past a budget the oldest entries go and their callbacks reject;
  * an entry larger than its budget clears its queue and is dropped, so what stays has no gap. `flush` sends the rest
  * in insertion order.
+ *
+ * An entry pushed as a `gap` is one its page would lack, if dropped, with nothing to tell it so: `droppedGap` says one
+ * was.
  */
 class ServerChannelBuffer<TAck = never> {
   private readonly text: BufferQueue
@@ -53,34 +56,34 @@ class ServerChannelBuffer<TAck = never> {
     return this.text.size + this.binary.size
   }
 
-  /** An entry was dropped to stay within the budget since the buffer was last flushed or cleared. */
-  get dropped(): boolean {
-    return this.text.dropped || this.binary.dropped
+  /** An entry pushed as a `gap` was dropped to stay within the budget since the last flush. */
+  get droppedGap(): boolean {
+    return this.text.droppedGap || this.binary.droppedGap
   }
 
   pushText(data: string, resolve: () => void, reject: (err: Error) => void): void {
-    this.text.push(TAG.TEXT, data, utf8ByteLength(data), { resolve, reject }, this.insertionSeq++)
+    this.text.push(TAG.TEXT, data, utf8ByteLength(data), { resolve, reject }, this.insertionSeq++, false)
   }
 
   pushTextAck(data: string, resolve: (value: TAck) => void, reject: (err: Error) => void): void {
-    this.text.push(TAG.TEXT_ACK_REQ, data, utf8ByteLength(data), { resolve, reject }, this.insertionSeq++)
+    this.text.push(TAG.TEXT_ACK_REQ, data, utf8ByteLength(data), { resolve, reject }, this.insertionSeq++, false)
   }
 
-  pushPublish(data: string): void {
-    this.text.push(TAG.PUBLISH, data, utf8ByteLength(data), null, this.insertionSeq++)
+  pushPublish(data: string, gap: boolean): void {
+    this.text.push(TAG.PUBLISH, data, utf8ByteLength(data), null, this.insertionSeq++, gap)
   }
 
   /** Holds a copy, as an attached send encodes the caller's bytes at once and the caller may then reuse them. */
   pushBinary(data: Uint8Array, resolve: () => void, reject: (err: Error) => void): void {
-    this.binary.pushCopy(TAG.BINARY, data, { resolve, reject }, this.insertionSeq++)
+    this.binary.pushCopy(TAG.BINARY, data, { resolve, reject }, this.insertionSeq++, false)
   }
 
   pushBinaryAck(data: Uint8Array, resolve: (value: unknown) => void, reject: (err: Error) => void): void {
-    this.binary.pushCopy(TAG.BINARY_ACK_REQ, data, { resolve, reject }, this.insertionSeq++)
+    this.binary.pushCopy(TAG.BINARY_ACK_REQ, data, { resolve, reject }, this.insertionSeq++, false)
   }
 
-  pushPublishBinary(data: Uint8Array): void {
-    this.binary.push(TAG.PUBLISH_BINARY, data, data.byteLength, null, this.insertionSeq++)
+  pushPublishBinary(data: Uint8Array, gap: boolean): void {
+    this.binary.push(TAG.PUBLISH_BINARY, data, data.byteLength, null, this.insertionSeq++, gap)
   }
 
   /** Sends every entry to `sender` in insertion order across both queues, then empties them; false where `sender`
@@ -133,10 +136,11 @@ class BufferQueue {
   private sizes: number[] = []
   private callbacks: (EntryCallback | null)[] = []
   private order: number[] = []
+  private gaps: boolean[] = []
   head = 0
   private totalBytes = 0
   private readonly maxBytes: number
-  dropped = false
+  droppedGap = false
 
   constructor(maxBytes: number) {
     this.maxBytes = maxBytes
@@ -170,15 +174,22 @@ class BufferQueue {
     return this.order[i]!
   }
 
-  push(tag: number, data: string | Uint8Array, bytes: number, callback: EntryCallback | null, order: number): void {
-    const counted = this.admit(bytes, callback)
-    if (counted !== null) this.append(tag, data, counted, callback, order)
+  push(
+    tag: number,
+    data: string | Uint8Array,
+    bytes: number,
+    callback: EntryCallback | null,
+    order: number,
+    gap: boolean,
+  ): void {
+    const counted = this.admit(bytes, callback, gap)
+    if (counted !== null) this.append(tag, data, counted, callback, order, gap)
   }
 
   /** Holds a copy of `data`, made only once the queue admits it. */
-  pushCopy(tag: number, data: Uint8Array, callback: EntryCallback, order: number): void {
-    const counted = this.admit(data.byteLength, callback)
-    if (counted !== null) this.append(tag, new Uint8Array(data), counted, callback, order)
+  pushCopy(tag: number, data: Uint8Array, callback: EntryCallback, order: number, gap: boolean): void {
+    const counted = this.admit(data.byteLength, callback, gap)
+    if (counted !== null) this.append(tag, new Uint8Array(data), counted, callback, order, gap)
   }
 
   clear(err?: Error): void {
@@ -192,9 +203,10 @@ class BufferQueue {
     this.sizes.length = 0
     this.callbacks.length = 0
     this.order.length = 0
+    this.gaps.length = 0
     this.head = 0
     this.totalBytes = 0
-    this.dropped = false
+    this.droppedGap = false
   }
 
   rejectAcks(err: Error): void {
@@ -208,13 +220,14 @@ class BufferQueue {
   // ── Private ──
 
   /** The bytes the entry counts as, or `null` once the queue is cleared for an entry larger than it. */
-  private admit(bytes: number, callback: EntryCallback | null): number | null {
+  private admit(bytes: number, callback: EntryCallback | null, gap: boolean): number | null {
     // An empty entry counts as 1 B, so a flood of them stays bounded.
     const counted = Math.max(bytes, 1)
     if (counted <= this.maxBytes) return counted
     const overflowErr = new ChannelOverflowError()
+    const dropsGap = gap || this.gaps.includes(true, this.head)
     this.clear(overflowErr)
-    this.dropped = true
+    if (dropsGap) this.droppedGap = true
     callback?.reject(overflowErr)
     return null
   }
@@ -225,12 +238,14 @@ class BufferQueue {
     bytes: number,
     callback: EntryCallback | null,
     order: number,
+    gap: boolean,
   ): void {
     this.tags.push(tag)
     this.data.push(data)
     this.sizes.push(bytes)
     this.callbacks.push(callback)
     this.order.push(order)
+    this.gaps.push(gap)
     this.totalBytes += bytes
     this.evict()
   }
@@ -241,7 +256,7 @@ class BufferQueue {
     // Safe to run after push: the oversized guard ensures the new entry has
     // bytes ≤ maxBytes, so eviction drains old entries and always leaves it.
     while (this.totalBytes > this.maxBytes && this.head < this.data.length) {
-      this.dropped = true
+      if (this.gaps[this.head]) this.droppedGap = true
       this.callbacks[this.head]?.reject((evictionErr ??= new ChannelOverflowError()))
       this.totalBytes -= this.sizes[this.head]!
       this.head++
@@ -254,6 +269,7 @@ class BufferQueue {
       this.sizes = this.sizes.slice(this.head)
       this.callbacks = this.callbacks.slice(this.head)
       this.order = this.order.slice(this.head)
+      this.gaps = this.gaps.slice(this.head)
       this.head = 0
     }
   }

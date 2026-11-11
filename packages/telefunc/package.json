@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@brillout/import": "^0.2.6",
-    "@brillout/json-serializer": "^0.5.25",
+    "@brillout/json-serializer": "^0.5.27",
     "@brillout/picocolors": "^1.0.28",
     "@brillout/vite-plugin-server-entry": "^0.7.20",
     "crossws": "^0.4.4",
@@ -107,6 +107,8 @@
       "default": "./dist/serve/cloudflare.js"
     },
     "./__internal": {
+      "worker": "./dist/node/server/__internal.js",
+      "browser": "./dist/client/__internal.js",
       "types": "./dist/node/server/__internal.d.ts",
       "default": "./dist/node/server/__internal.js"
     }
