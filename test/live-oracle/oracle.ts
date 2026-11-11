@@ -6,8 +6,10 @@
 // `derived()` value of their rows: at the end, no rows they read may still be held (exit 1). The twins derive it with a
 // second copy of the package, as an app with two versions installed does.
 //
-//   ORM=drizzle|kysely|prisma DB=pglite|pg PG=17|18 PG_PORT=<port> PG_DATABASE=postgres SEED=1 STEPS=300 CHURN=1
-//   SERVERS=2 ROLES=1 SHAPES=byUser,recent DRIVER=pg|postgres-js node --expose-gc oracle.ts
+//   ORM=drizzle|kysely|prisma DB=pglite|pg|sqlite PG=17|18 PG_PORT=<port> PG_DATABASE=postgres SEED=1 STEPS=300
+//   CHURN=1 SERVERS=2 ROLES=1 SHAPES=byUser,recent DRIVER=pg|postgres-js node --expose-gc oracle.ts
+//
+// DB=sqlite (ORM=drizzle or kysely): better-sqlite3, in memory, with the SQLite lane's own tables (sqliteSchema.ts).
 //
 // DRIVER=postgres-js (with ORM=drizzle DB=pg): postgres.js instead of `pg`. PG=18 adds the writes in Postgres 18's
 // syntax. ROLES=1 adds writes by roles that can't read the table they write, or only some of its rows.
@@ -20,13 +22,17 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { PGlite } from '@electric-sql/pglite'
+import Database from 'better-sqlite3'
 import pg from 'pg'
 import postgres from 'postgres'
 import { createDrizzle } from './orms/drizzle.ts'
+import { createDrizzleSqlite } from './orms/drizzleSqlite.ts'
 import { createKysely } from './orms/kysely.ts'
+import { createKyselySqlite } from './orms/kyselySqlite.ts'
 import { createPrisma } from './orms/prisma.ts'
 import type { OrmDriver, ReadArgs, WriteArgs } from './orms/types.ts'
 import { roles, seed, USERS } from './schema.ts'
+import { sqliteSeed } from './sqliteSchema.ts'
 import { arrayOf, SPELLED_COLUMNS, spell } from './spellings.ts'
 import { derived, type LiveCell } from '../../packages/live/dist/live.js'
 // The same file under another URL: a module of its own, as a second copy of the package is.
@@ -41,9 +47,11 @@ const DB = process.env.DB ?? 'pglite'
 const DRIVER = process.env.DRIVER ?? 'pg'
 const SEED = Number(process.env.SEED ?? 1)
 const STEPS = Number(process.env.STEPS ?? 300)
-const CHURN = process.env.CHURN === '1' && DB !== 'pglite'
+/** One connection, which runs each statement as it's called. */
+const ONE_CONNECTION = DB === 'pglite' || DB === 'sqlite'
+const CHURN = process.env.CHURN === '1' && !ONE_CONNECTION
 const VERBOSE = process.env.VERBOSE === '1'
-const SERVERS = DB === 'pglite' ? 1 : Number(process.env.SERVERS ?? 1)
+const SERVERS = ONE_CONNECTION ? 1 : Number(process.env.SERVERS ?? 1)
 const SHAPES = process.env.SHAPES?.split(',')
 /** A role that can't read `todos` whole writes too (`restrictedInsert`), from halfway. */
 const WITH_ROLES = process.env.ROLES === '1'
@@ -156,6 +164,17 @@ async function connect(): Promise<{
   query: (text: string) => Promise<any[]>
   close: () => Promise<void>
 }> {
+  if (DB === 'sqlite') {
+    const sqlite = new Database(':memory:')
+    sqlite.exec(sqliteSeed(random))
+    const driver = ORM === 'kysely' ? createKyselySqlite(sqlite) : createDrizzleSqlite(sqlite)
+    return {
+      driver,
+      writer: driver,
+      query: async (text) => sqlite.prepare(text).all(),
+      close: async () => sqlite.close(),
+    }
+  }
   if (DB === 'pglite') {
     const { pglite, driver } = await wrappedPglite()
     if (WITH_ROLES) await pglite.exec(roles(false))
@@ -298,11 +317,14 @@ function derivedView(derive: typeof derived, shape: string, rows: LiveCell<unkno
 
 // ── The run ──
 
-// Values of the seeded todos in Postgres's text form, for the `spelled*` shapes to spell.
-const seeded = await query(
-  `select ref::text, code::text, priority::text, amount::text, done::text, text,
+// Values of the seeded todos in Postgres's text form, for the `spelled*` shapes to spell (not on SQLite).
+const seeded =
+  DB === 'sqlite'
+    ? []
+    : await query(
+        `select ref::text, code::text, priority::text, amount::text, done::text, text,
      (updated_at at time zone 'UTC')::text || '+00' as updated_at from todos`,
-)
+      )
 const subscribers: Subscriber[] = []
 for (const shape of Object.keys(driver.reads).filter((s) => !SHAPES || SHAPES.includes(s))) {
   for (let i = 0; i < 3; i++) {
@@ -315,10 +337,13 @@ for (const shape of Object.keys(driver.reads).filter((s) => !SHAPES || SHAPES.in
       team: 1 + Math.floor(random() * 3),
       low,
       high: low + 1,
-      spellings: [spell(column, pick(seeded)[column], random), spell(column, pick(seeded)[column], random)],
+      spellings:
+        seeded.length === 0
+          ? []
+          : [spell(column, pick(seeded)[column], random), spell(column, pick(seeded)[column], random)],
       list: null,
     }
-    args.list = random() < 1 / 3 ? null : arrayOf(args.spellings)
+    args.list = random() < 1 / 3 || seeded.length === 0 ? null : arrayOf(args.spellings)
     const derive = i % 2 === 1 ? derived : undefined
     subscribers.push({ shape, args, result: '', invalidated: false, stop: () => {}, derive })
   }
@@ -366,11 +391,12 @@ const writesBeforeHalf = writeNames.filter((name) => !SESSION_WRITES.includes(na
 /** Writes that failed other than by the database's refusal. */
 const failedWrites: string[] = []
 
-/** A write the database refused (a deleted row's foreign key) changed nothing; any other failure is the wrapper's. */
+/** A write the database refused (a deleted row's foreign key) changed nothing; any other failure is the wrapper's.
+ *  Postgres tells why by an SQLSTATE, SQLite by a `SQLITE_` code. */
 function writeFailed(write: string, err: unknown): void {
   const { code, cause } = err as { code?: unknown; cause?: { code?: unknown } }
   const sqlState = code ?? cause?.code
-  if (typeof sqlState === 'string' && /^[0-9A-Z]{5}$/.test(sqlState)) {
+  if (typeof sqlState === 'string' && /^([0-9A-Z]{5}|SQLITE_\w+)$/.test(sqlState)) {
     if (VERBOSE) console.log(`write ${write} refused: ${String(err).slice(0, 120)}`)
   } else failedWrites.push(`${write}: ${String(err).slice(0, 200)}`)
 }
@@ -440,7 +466,8 @@ for (let burst = 0; burst < BURSTS; burst++) {
   for (let i = 0; i < BURST_WRITES; i++) {
     const write = pick(writeNames)
     const args = await writeArgs()
-    await Promise.resolve(writer.writes[write]!(args)).catch((err) => writeFailed(write, err))
+    // A synchronous driver throws at once.
+    await (async () => writer.writes[write]!(args))().catch((err) => writeFailed(write, err))
   }
   await settled()
   for (const sub of subscribers) {
