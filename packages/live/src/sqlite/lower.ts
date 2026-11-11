@@ -1,4 +1,4 @@
-export { Lowering, identifier, objectName, variant, writeTarget, CannotLower }
+export { Lowering, identifier, objectName, variant, writeTarget, CannotLower, AGGREGATES }
 
 import type { Node } from '../tree.js'
 import { offsetOf, type Ast, type Span } from './parser.js'
@@ -369,6 +369,7 @@ const JOINS: Record<string, string> = {
 
 const COMPARISONS: Record<string, string> = { Eq: '=', NotEq: '<>', Lt: '<', LtEq: '<=', Gt: '>', GtEq: '>=' }
 
+/** SQLite's aggregates the lowering calls by the name of the Postgres aggregate meaning the same. */
 const AGGREGATES: Record<string, string> = {
   total: 'sum',
   group_concat: 'string_agg',

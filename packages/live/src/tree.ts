@@ -35,30 +35,9 @@ function tablesIn(node: unknown): RangeVar[] {
   return tables
 }
 
-const AGGREGATES = new Set([
-  'count',
-  'sum',
-  'avg',
-  'min',
-  'max',
-  'array_agg',
-  'json_agg',
-  'jsonb_agg',
-  'string_agg',
-  'json_object_agg',
-  'jsonb_object_agg',
-  'bool_and',
-  'bool_or',
-  'every',
-  'bit_and',
-  'bit_or',
-  'stddev',
-  'variance',
-])
-
-/** Whether a `FuncCall` node calls an aggregate. */
-function isAggregateCall(call: Node): boolean {
-  return Boolean(call.agg_star) || AGGREGATES.has(names(call.funcname).at(-1)!)
+/** Whether a `FuncCall` node calls an aggregate: one of `aggregates` (`Catalog.aggregates`). */
+function isAggregateCall(call: Node, aggregates: ReadonlySet<string>): boolean {
+  return Boolean(call.agg_star) || aggregates.has(names(call.funcname).at(-1)!)
 }
 
 /** The conjuncts of `a AND b AND …`. */

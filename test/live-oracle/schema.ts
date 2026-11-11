@@ -92,6 +92,8 @@ create trigger resets_emptied after insert on resets for each statement execute 
 -- A STABLE function whose default argument writes \`counters\`: the caller evaluates it. A trigger on \`resets\` calls
 -- it, and so does a read.
 create function stamp(n int default next_event()) returns int language sql stable as $$ select n $$;
+-- An aggregate of the app's: a read calling one is an aggregate read, as with a built-in one.
+create aggregate product(numeric) (sfunc = numeric_mul, stype = numeric, initcond = '1');
 create function reset_stamped() returns trigger language plpgsql as $$
 begin
   perform stamp();

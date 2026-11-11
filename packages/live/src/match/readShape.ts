@@ -136,7 +136,7 @@ function analyzeRead(select: Node, catalog: Catalog, text?: string): ReadShape {
 function shapeOf(select: Node, analysis: Analysis): ReadShape {
   const { text } = analysis
   const top = analyzeSelect(select, undefined, { top: true, outputOnly: false }, analysis)
-  let kind = top ? readKind(select) : 'other'
+  let kind = top ? readKind(select, analysis.catalog) : 'other'
   const distinct = kind === 'rows' && select.distinctClause ? distinctColumns(select, top!, analysis) : undefined
   if (select.distinctClause && !distinct) kind = 'other'
   const shape: ReadShape = {
@@ -176,8 +176,8 @@ function tallyContext(analysis: Analysis, text: string): TallyContext {
     const found = alias && resolveColumn(ref, analysis.scopes.get(select)!)
     return alias && found?.alias === alias ? found.column : undefined
   }
-  const { dialect } = analysis.catalog
-  return { text, dialect, aliases: analysis.aliases, tableOf, columnOf, operands: analysis.operands }
+  const { dialect, aggregates } = analysis.catalog
+  return { text, dialect, aggregates, aliases: analysis.aliases, tableOf, columnOf, operands: analysis.operands }
 }
 
 /** The columns of a plain `SELECT DISTINCT` listing only columns of its one table. */
@@ -581,7 +581,7 @@ function sameValues(a: Route, b: Route): boolean {
 
 // ── Result keys ──
 
-function readKind(select: Node): ReadShape['kind'] {
+function readKind(select: Node, catalog: Pick<Catalog, 'aggregates'>): ReadShape['kind'] {
   if (select.havingClause || select.windowClause) return 'other'
   let aggregates = select.groupClause ? 1 : 0
   let inexact = false
@@ -590,7 +590,7 @@ function readKind(select: Node): ReadShape['kind'] {
     if (key !== 'FuncCall') return
     const name = names(value.funcname).at(-1)!
     if (value.over) inexact = true
-    if (isAggregateCall(value)) {
+    if (isAggregateCall(value, catalog.aggregates)) {
       aggregates++
       if (!EXACT_AGGREGATES.has(name) || value.agg_distinct) inexact = true
     }

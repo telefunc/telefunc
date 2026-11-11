@@ -104,6 +104,13 @@ function createDrizzle(
       // `LIMIT NULL` is no limit, and a computed one's value isn't known: a page neither is known to be full.
       limitNull: () => db.execute(sql`select id, text from todos order by id limit ${null}`).then(rowsOf),
       limitSum: () => db.execute(sql`select id, text from todos order by id limit 500 + 0`).then(rowsOf),
+      // Aggregates are the catalog's (`pg_proc.prokind = 'a'`): built-in ones of every kind, and the app's own.
+      otherAggregates: ({ user }) =>
+        db
+          .execute(
+            sql`select bit_xor(priority) as x, stddev_samp(amount) as s, product(amount) as p from todos where user_id = ${user}`,
+          )
+          .then(rowsOf),
       firstTexts: () =>
         db.select({ id: todos.id, text: todos.text }).from(todos).orderBy(todos.text, todos.id).limit(3),
       textsBelow: () =>

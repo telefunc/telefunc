@@ -7,7 +7,7 @@ import type { Change } from '../match/liveRead.js'
 import type { Column } from '../match/values.js'
 import { names, quote, tablesIn, walk } from '../tree.js'
 import { SQLITE, tokensOf } from './dialect.js'
-import { CannotLower, identifier, Lowering, objectName, variant, writeTarget } from './lower.js'
+import { AGGREGATES, CannotLower, identifier, Lowering, objectName, variant, writeTarget } from './lower.js'
 import { parseSqlite, type Ast } from './parser.js'
 
 type CatalogRow = {
@@ -28,6 +28,8 @@ type CatalogRow = {
     ][]
   }[]
   triggers: [table: string, sql: string][]
+  /** Aggregate and window functions: a window-only one (`row_number()`) is never called without `OVER`. `null` on D1. */
+  aggregates: string[] | null
 }
 
 const TABLES = `(select json_group_array(json_object('name', m.name, 'type', m.type, 'sql', m.sql,
@@ -35,14 +37,31 @@ const TABLES = `(select json_group_array(json_object('name', m.name, 'type', m.t
     'keys', (select json_group_array(json_array(f.id, f."table", f."from", f."to", f.on_update, f.on_delete)) from pragma_foreign_key_list(m.name) f)))
   from sqlite_schema m where m.type in ('table', 'view') and m.name not like 'sqlite\\_%' escape '\\' and m.name not like '\\_cf\\_%' escape '\\')`
 
-/** One query answering everything the catalog needs; `withLog`: on a connection with a change log, else on D1, which
- *  refuses `pragma_database_list`. */
-const catalogQuery = (withLog: boolean) => `select json_object(
-  'file', ${withLog ? `(select file from pragma_database_list where name = 'main')` : 'null'},
+/** One query answering everything the catalog needs; `introspects`: the database answers `pragma_database_list` and
+ *  `pragma_function_list`, which D1 refuses. */
+const catalogQuery = (introspects: boolean) => `select json_object(
+  'file', ${introspects ? `(select file from pragma_database_list where name = 'main')` : 'null'},
   'foreignKeys', (select foreign_keys from pragma_foreign_keys),
   'tables', ${TABLES},
-  'triggers', (select json_group_array(json_array(tbl_name, sql)) from sqlite_schema where type = 'trigger')
+  'triggers', (select json_group_array(json_array(tbl_name, sql)) from sqlite_schema where type = 'trigger'),
+  'aggregates', ${introspects ? `(select json_group_array(distinct name) from pragma_function_list where type in ('a', 'w'))` : 'null'}
 ) as catalog`
+
+/** SQLite's own aggregates, for D1, which doesn't tell its functions and runs none of the app's. */
+const BUILT_IN_AGGREGATES = [
+  'avg',
+  'count',
+  'group_concat',
+  'string_agg',
+  'max',
+  'min',
+  'sum',
+  'total',
+  'json_group_array',
+  'json_group_object',
+  'jsonb_group_array',
+  'jsonb_group_object',
+]
 
 /** The temporary table each connection's triggers log the rows its statements change into. */
 const CHANGES = 'temp."__live_changes"'
@@ -112,6 +131,8 @@ function catalogOf(answer: string, changeLog: boolean): Catalog {
       return called
     },
     volatileFunctions: new Set(VOLATILE_FUNCTIONS),
+    // By the names the lowering calls them, too.
+    aggregates: new Set((row.aggregates ?? BUILT_IN_AGGREGATES).flatMap((name) => [name, AGGREGATES[name] ?? name])),
     searchPath: ['main'],
     domainBases: () => [],
     find(table) {

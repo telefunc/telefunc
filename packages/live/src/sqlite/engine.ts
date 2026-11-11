@@ -1,14 +1,21 @@
-export { LOGGED_SQLITE_ENGINE, RETURNING_SQLITE_ENGINE }
+export { LOGGED_SQLITE_ENGINE, RETURNING_SQLITE_ENGINE, D1_ENGINE }
 
 import type { Engine } from '../liveDatabase.js'
 import { catalogOf, catalogQuery, CHANGE_LOG_TRIGGERS, changeLogSetup, changesOfLog, DRAIN_CHANGES } from './catalog.js'
 import { planSqlite } from './plan.js'
 
-/** SQLite whose writes give their rows through a `RETURNING` of ours (D1, which refuses temporary tables). */
+/** SQLite whose writes give their rows through a `RETURNING` of ours: its statements run on connections the capture
+ *  can't hold (a local libSQL client's pool). */
 const RETURNING_SQLITE_ENGINE: Engine = {
-  loadCatalog: async (query) => catalogOf(await query(catalogQuery(false)), false),
+  loadCatalog: async (query) => catalogOf(await query(catalogQuery(true)), false),
   plan: planSqlite,
   failureAbortsTransaction: false,
+}
+
+/** The same on D1, which refuses temporary tables, and the pragmas naming its file and functions. */
+const D1_ENGINE: Engine = {
+  ...RETURNING_SQLITE_ENGINE,
+  loadCatalog: async (query) => catalogOf(await query(catalogQuery(false)), false),
 }
 
 /** SQLite whose connections each log the rows their statements change, those their triggers and foreign keys change

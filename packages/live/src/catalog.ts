@@ -73,6 +73,9 @@ type Catalog = {
   /** The functions `node` calls, with those the defaults of the arguments they leave out call: the caller evaluates
    *  those. */
   calls(node: unknown): string[]
+  /** The aggregate functions of every schema, built-in ones and the app's, by name: a call of one makes a read an
+   *  aggregate. */
+  aggregates: Set<string>
   /** The volatile functions of every schema, built-in ones included (`random()`, `nextval()`, `clock_timestamp()`):
    *  two calls may return different values. */
   volatileFunctions: Set<string>
