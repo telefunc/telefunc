@@ -93,6 +93,8 @@ function planStatement(text: string, catalog: Catalog): Plan {
 /** `text` is set when the statement is the whole text, so that it can be rewritten. */
 function planOne(statement: Node, text: string | undefined, catalog: Catalog): Plan {
   const [kind, node] = Object.entries(statement)[0] as [string, Node]
+  // Without the catalog, which a schema change just before may have dropped: a driver's own `COMMIT` doesn't load it.
+  if (kind === 'TransactionStmt') return planTransaction(node)
   const functions = catalog.calls(node)
   const writingCte = ((node.withClause?.ctes ?? []) as Node[]).some((c) => !c.CommonTableExpr.ctequery.SelectStmt)
   // A read is judged by the volatility of what it calls as well (`Catalog.volatileWritingFunctions`).
@@ -126,8 +128,6 @@ function planOne(statement: Node, text: string | undefined, catalog: Catalog): P
     case 'UpdateStmt':
     case 'DeleteStmt':
       return planWrite(kind, node, text, catalog)
-    case 'TransactionStmt':
-      return planTransaction(node)
     case 'MergeStmt':
     case 'CopyStmt':
     case 'TruncateStmt':
