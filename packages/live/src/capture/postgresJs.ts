@@ -63,7 +63,9 @@ function capturePostgresJs(sql: PostgresJs, live: LiveDatabase): void {
   targets.set(handlerOf(sql), { live, sql, connection: sql.options.max === 1 ? sql : undefined, shared: true })
 
   const begin = sql.begin.bind(sql)
-  sql.begin = (...args) => {
+  sql.begin = async (...args) => {
+    // Its `BEGIN` is planned in the callback, before a statement of it would load the catalog.
+    await whenReady(live, sql)
     const callback = args.pop() as (scope: Scope) => unknown
     return begin(...args, (scope: Scope) => {
       const transaction = {}
@@ -119,7 +121,7 @@ async function run(query: Query, { live, sql, connection = {}, shared }: Target)
   // As postgres.js does: `.values()` and the like are called before it runs.
   await 1
   try {
-    if (!live.isReady()) await live.ready(async (text) => ((await ours(sql, text))[0] as string[])[0]!)
+    await whenReady(live, sql)
   } catch (err) {
     return query.reject(err as Error)
   }
@@ -162,6 +164,11 @@ async function run(query: Query, { live, sql, connection = {}, shared }: Target)
   done.answered(result, copyResult)
   resolve(result)
   for (const followUp of followUps) runFollowUp(sql, followUp)
+}
+
+/** Loads what capturing needs, through a query of ours on `sql`, unless loaded. */
+async function whenReady(live: LiveDatabase, sql: PostgresJs): Promise<void> {
+  if (!live.isReady()) await live.ready(async (text) => ((await ours(sql, text))[0] as string[])[0]!)
 }
 
 function rewritten(query: Query, known: { text: string; args: unknown[] }, live: LiveDatabase, connection: object) {
