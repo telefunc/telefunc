@@ -70,8 +70,8 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
-    "libpg-query": "18.2.2",
-    "sql-parser-cst": "0.44.1"
+    "@guanmingchiu/sqlparser-ts": "0.63.0",
+    "libpg-query": "18.2.2"
   },
   "peerDependencies": {
     "@prisma/orm-postgres": ">=8.0.0-rc.23",

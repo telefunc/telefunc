@@ -7,7 +7,8 @@ import type { Change } from '../match/liveRead.js'
 import type { Column } from '../match/values.js'
 import { names, quote, tablesIn, walk, type RangeVar } from '../sql.js'
 import { SQLITE, tokensOf } from './dialect.js'
-import { CannotLower, identifier, lowerSelect, parseSqlite, type Cst } from './lower.js'
+import { CannotLower, identifier, Lowering, objectName, variant, writeTarget } from './lower.js'
+import { parseSqlite, type Ast } from './parser.js'
 
 type CatalogRow = {
   file: string | null
@@ -201,16 +202,14 @@ function definitionOf(sql: string | null): Definition | undefined {
   const conflictReplace = words.some((word, i) => word === 'conflict' && words[i + 1] === 'replace')
   const deferred = words.includes('deferred')
   if (words[1] === 'virtual') return { virtual: true, conflictReplace, deferred }
-  const statement = parseSqlite(sql)?.[0]
-  if (statement?.type !== 'create_table_stmt' || statement.columns?.type !== 'paren_expr') return undefined
+  const table = parseSqlite(sql)?.[0]?.CreateTable
+  if (!table) return undefined
   const collations = new Map<string, string>()
   let generated = false
-  for (const item of statement.columns.expr.items as Cst[]) {
-    if (item.type !== 'column_definition') continue
-    for (const constraint of item.constraints as Cst[]) {
-      if (constraint.type === 'constraint_collate')
-        collations.set(identifier(item.name), identifier(constraint.collation))
-      if (constraint.type === 'constraint_generated') generated = true
+  for (const column of table.columns as Ast[]) {
+    for (const { option } of column.options as Ast[]) {
+      if (option.Collation) collations.set(identifier(column.name), objectName(option.Collation).join('.'))
+      if (option.Generated) generated = true
     }
   }
   return { collations, generated, conflictReplace, deferred }
@@ -241,10 +240,10 @@ function keysOf(rows: CatalogRow['tables'][number]['keys']): Key[] {
 }
 
 function tablesOfView(sql: string | null, catalog: Catalog): TableSet {
-  const statement = sql ? parseSqlite(sql)?.[0] : undefined
-  if (statement?.type !== 'create_view_stmt') return 'all'
+  const view = sql ? parseSqlite(sql)?.[0]?.CreateView : undefined
+  if (!view) return 'all'
   try {
-    const tables = tablesIn(lowerSelect(statement.expr)).map((t) => catalog.find(t))
+    const tables = tablesIn(new Lowering(sql!).query(view.query)).map((t) => catalog.find(t))
     return tables.every(Boolean) ? new Set(tables.map((t) => t!.id)) : 'all'
   } catch (error) {
     if (error instanceof CannotLower) return 'all'
@@ -254,35 +253,25 @@ function tablesOfView(sql: string | null, catalog: Catalog): TableSet {
 
 /** The writes that fire a trigger, and the tables its statements write (`'all'` when that can't be told). */
 function triggerOf(sql: string, catalog: Catalog): { events: ('insert' | 'update' | 'delete')[]; written: TableSet } {
-  const statement = parseSqlite(sql)?.[0]
-  if (statement?.type !== 'create_trigger_stmt') return { events: ['insert', 'update', 'delete'], written: 'all' }
-  const event = (statement.event.eventKw.name as string).toLowerCase() as 'insert' | 'update' | 'delete'
+  const trigger = parseSqlite(sql)?.[0]?.CreateTrigger
+  const statements = trigger?.statements?.BeginEnd?.statements as Ast[] | undefined
+  if (!statements) return { events: ['insert', 'update', 'delete'], written: 'all' }
+  const events = (trigger.events as Ast[]).map((e) => variant(e)[0].toLowerCase() as 'insert' | 'update' | 'delete')
   const written = new Set<string>()
-  for (const body of statement.body.program.statements as Cst[]) {
-    if (body.type === 'empty' || body.type === 'select_stmt') continue
+  for (const body of statements) {
+    if (body.Query) continue
     const target = writeTarget(body)
     const table = target && catalog.find(target)
-    if (!table) return { events: [event], written: 'all' }
+    if (!table) return { events, written: 'all' }
     written.add(table.id)
   }
   return {
-    events: [event],
+    events,
     written: tablesChangedBy(
       [...written].map((id) => [id, undefined]),
       catalog,
     ),
   }
-}
-
-/** The table an `INSERT`, `UPDATE` or `DELETE` writes. */
-function writeTarget(statement: Cst): RangeVar | undefined {
-  const clause = (statement.clauses as Cst[] | undefined)?.[0]
-  const target: Cst | undefined = clause?.table ?? clause?.tables?.items?.[0]
-  if (!target) return undefined
-  const named = target.type === 'alias' ? target.expr : target
-  if (named.type === 'identifier') return { relname: identifier(named) }
-  if (named.type === 'member_expr') return { schemaname: identifier(named.object), relname: identifier(named.property) }
-  return undefined
 }
 
 /** The statements creating the change log on a connection, and its triggers on every table but virtual ones (the
