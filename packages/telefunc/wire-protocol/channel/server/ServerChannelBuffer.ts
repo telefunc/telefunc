@@ -83,13 +83,13 @@ class ServerChannelBuffer<TAck = never> {
   }
 
   /** Decides anew, oldest first, as for a send made now: those `admit` takes stay, and the rest go and reject. */
-  admitAgain(admit: (held: number) => boolean, refusal: () => Error): void {
+  admitAgain(admit: (held: number) => boolean, refusal: (held: number) => Error): void {
     const entries = this.entries
     this.entries = []
     this.sendBytes = 0
     for (const entry of entries) {
       if (admit(entry.held)) this.keep(entry)
-      else entry.callback?.reject(refusal())
+      else entry.callback?.reject(refusal(entry.held))
     }
   }
 

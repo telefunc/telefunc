@@ -301,16 +301,22 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const overhead = HEADER + HELD_SEND_OVERHEAD_BYTES
     // A UTF-16 unit takes at most 3 UTF-8 bytes, so only text near the limit is counted.
     if (admit(this, (typeof data === 'string' ? data.length * 3 : data.byteLength) + overhead)) return null
-    if (typeof data === 'string' && admit(this, utf8ByteLength(data) + overhead)) return null
-    return this.refuseSend()
+    const bytes = (typeof data === 'string' ? utf8ByteLength(data) : data.byteLength) + overhead
+    if (typeof data === 'string' && admit(this, bytes)) return null
+    return this.refuseSend(bytes)
   }
 
-  private refuseSend(): ChannelOverflowError {
+  /** A send that would hold `bytes` wasn't admitted. */
+  private refuseSend(bytes: number): ChannelOverflowError {
     if (!this.refusalWarned) {
       this.refusalWarned = true
+      const limit =
+        this.heldBytes + bytes > maxPendingBytesOf()
+          ? `it would hold more than ${maxPendingBytesOf()} bytes, the most for one channel`
+          : `this server's channels hold nearly \`config.channel.maxMemory\`, ${getChannelConfig().maxMemory} bytes`
       assertWarning(
         false,
-        `A channel refused a \`send()\`: it holds ${maxPendingBytesOf()} bytes, the most for one channel, or this server's channels hold \`config.channel.maxMemory\`, so that message isn't delivered and its promise rejects with \`ChannelOverflowError\`. Later sends that fit still go. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next.`,
+        `A channel refused a \`send()\`: ${limit}, so that message isn't delivered and its promise rejects with \`ChannelOverflowError\`. Later sends that fit still go. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next.`,
         { onlyOnce: false },
       )
     }
@@ -424,7 +430,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // Each send was admitted by its channel alone; now they count with all this server's channels.
     this.offlineBuffer.admitAgain(
       (held) => admit(this, held),
-      () => this.refuseSend(),
+      (held) => this.refuseSend(held),
     )
     if (this._phase === 'ended') return // the mux lets an ended channel go
     if (this.ttlTimer) clearTimeout(this.ttlTimer)
