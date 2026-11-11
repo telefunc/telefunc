@@ -11,8 +11,6 @@ const FRAME_MS = 20
 const DELAYS_KEPT = 100
 /** NetEq sets its buffer at the 95th percentile of how late frames come (webrtc `delay_manager.cc`). */
 const DELAY_QUANTILE = 0.95
-/** A buffer deeper than its frames need halves the difference this often: one stalled frame never moves it for long. */
-const DEPTH_HALF_LIFE_MS = 2000
 /** How long the sound must stay more than a frame past its depth before a frame is left out to catch up. */
 const CATCH_UP_AFTER_MS = 1000
 /** A frame after a gap fades in over this, as a click would mark the gap. */
@@ -62,8 +60,6 @@ class AudioReceiver {
   private readonly unsubscribe: () => void
   private readonly delays: number[] = []
   private depthMs = FRAME_MS
-  /** `performance.now()` at the last delay noted. */
-  private notedAt = 0
   private lastFrame = 0
   /** In context seconds, where the newest scheduled frame ends. */
   private playedUntil = 0
@@ -153,19 +149,14 @@ class AudioReceiver {
     return decoder
   }
 
-  /** The buffer's depth: what most frames' delays reach, and a frame more, for a missing one's copy to come. It deepens
-   *  at once for a frame that comes later than it, by a frame past what most reach at most, and falls back over
-   *  seconds. */
+  /** The buffer's depth: what most frames' delays reach, and a frame more, for a missing one's copy to come. A frame
+   *  that comes later than most deepens it by a frame at most. */
   private noteDelay(delay: number): void {
     this.delays.push(delay)
     if (this.delays.length > DELAYS_KEPT) this.delays.shift()
     const sorted = [...this.delays].sort((a, b) => a - b)
     const most = sorted[Math.floor((sorted.length - 1) * DELAY_QUANTILE)]!
-    const reach = Math.min(Math.max(most, delay), most + FRAME_MS) + FRAME_MS
-    const now = performance.now()
-    const kept = 0.5 ** ((now - this.notedAt) / DEPTH_HALF_LIFE_MS)
-    this.depthMs = reach >= this.depthMs ? reach : reach + (this.depthMs - reach) * kept
-    this.notedAt = now
+    this.depthMs = Math.min(Math.max(most, delay), most + FRAME_MS) + FRAME_MS
   }
 
   private schedule(data: AudioData, captured: number): void {
