@@ -146,7 +146,10 @@ function captureLibsql(client: Libsql, live: LiveDatabase): void {
 
   client.executeMultiple = async (text) => {
     await ready()
-    await sendAsWritten(live.statementFor(client, text, [], { rewrite: false }), () => executeMultiple(text))
+    const statements = live.statementsOf(text)
+    if (!statements)
+      return await sendAsWritten(live.statementFor(client, text, [], { rewrite: false }), () => executeMultiple(text))
+    for (const statement of statements) await client.execute(statement)
   }
 
   client.transaction = async (mode) => {
@@ -194,7 +197,10 @@ function captureTransaction(tx: Transaction, live: LiveDatabase): void {
   }
   tx.executeMultiple = async (text) => {
     await ready()
-    await sendAsWritten(live.statementFor(tx, text, [], { rewrite: false }), () => executeMultiple(text))
+    const statements = live.statementsOf(text)
+    if (!statements)
+      return await sendAsWritten(live.statementFor(tx, text, [], { rewrite: false }), () => executeMultiple(text))
+    for (const statement of statements) await tx.execute(statement)
   }
   tx.commit = async () => {
     const statement = live.statementFor(tx, 'COMMIT', [])
