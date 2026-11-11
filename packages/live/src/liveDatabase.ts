@@ -23,7 +23,6 @@ import { operandValues, type OperandValue } from './match/operands.js'
 import type { ReadShape } from './match/readShape.js'
 import { Router } from './match/router.js'
 import { keyOfValues, SharedReads, WatchedRead, type Joined } from './sharedReads.js'
-import { changesOfLog, DRAIN_CHANGES } from './sqlite/catalog.js'
 
 type LiveOptions = {
   /** Carries changes to the other servers, e.g. `new DefaultBroadcastAdapter(new RedisTransport({ redis }))`.
@@ -81,6 +80,8 @@ type Engine = {
   loadCatalogSync?(query: (text: string) => string): Catalog
   /** Statements to run on a connection once its catalog loaded. */
   setup?(catalog: Catalog): string[]
+  /** The connection logs the rows its statements change (SQLite): `drain` takes them from the log. */
+  changeLog?: { drain: string; changesOf(rows: Rows, catalog: Catalog): Change[] }
   plan(text: string, catalog: Catalog): Plan
   /** A statement that fails inside a transaction makes it roll back (Postgres); on SQLite, it undoes its own
    *  changes only. */
@@ -271,13 +272,14 @@ class LiveDatabase {
   /** On a connection with a change log (SQLite), `statement` and then the query taking the rows it changed from the
    *  log. */
   private drainingLog(connection: object, statement: Statement): Statement {
-    if (!this.catalog!.changeLog) return statement
+    const log = this.engine.changeLog
+    if (!log) return statement
     const catalog = this.catalog!
     const drain: FollowUp = {
-      text: DRAIN_CHANGES,
+      text: log.drain,
       values: [],
       // Not drained, the changes it may hold are unknown.
-      done: (rows) => this.transactions.record(connection, rows ? changesOfLog(rows, catalog) : unknownChanges('all')),
+      done: (rows) => this.transactions.record(connection, rows ? log.changesOf(rows, catalog) : unknownChanges('all')),
     }
     return {
       ...statement,

@@ -1,7 +1,7 @@
 export { LOGGED_SQLITE_ENGINE, RETURNING_SQLITE_ENGINE }
 
 import type { Engine } from '../liveDatabase.js'
-import { catalogOf, catalogQuery, changeLogSetup } from './catalog.js'
+import { catalogOf, catalogQuery, changeLogSetup, changesOfLog, DRAIN_CHANGES } from './catalog.js'
 import { planSqlite } from './plan.js'
 
 /** SQLite whose writes give their rows through a `RETURNING` of ours (D1, which refuses temporary tables). */
@@ -17,6 +17,7 @@ const LOGGED_SQLITE_ENGINE: Engine = {
   loadCatalog: async (query) => catalogOf(await query(catalogQuery(true))),
   loadCatalogSync: (query) => catalogOf(query(catalogQuery(true))),
   setup: changeLogSetup,
+  changeLog: { drain: DRAIN_CHANGES, changesOf: changesOfLog },
   plan: planSqlite,
   failureAbortsTransaction: false,
 }
