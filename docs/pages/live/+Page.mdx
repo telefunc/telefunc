@@ -56,8 +56,6 @@ export const db = livePrisma(postgres({ contract, pg: pool }), pool)
 
 > The database client is a `pg.Pool` or `pg.Client`, a postgres.js `sql`, or a PGlite database, on Postgres 17 and above. Wrap it before its first query.
 
-> On Cloudflare Workers, set the `nodejs_compat` compatibility flag. A database on Postgres (through Hyperdrive) also needs `import '@telefunc/live/postgres'` in `database.ts`: a Worker on D1 then doesn't carry Postgres's parser.
-
 > There isn't any other setup: Telefunc finds `@telefunc/*` packages in your `package.json` and auto-loads them.
 
 ### SQLite
@@ -100,6 +98,64 @@ export const db = livePrisma(sqlite({ contract, path: 'app.db' }), 'app.db')
 > Prisma opens its own connections to the database file: pass the file's path as the second argument.
 
 > The database client is a better-sqlite3 or `bun:sqlite` database, or a libSQL client (`@libsql/client`) on a local file: a `file:` URL.
+
+### Cloudflare Workers
+
+On <Link href="/stream/cloudflare">Cloudflare Workers</Link>, wrap your D1 database:
+
+```ts
+// database.ts
+// Environment: server
+
+import { env } from 'cloudflare:workers'
+import { drizzle } from 'drizzle-orm/d1'
+import { liveDrizzle } from '@telefunc/live/drizzle'
+
+export const db = liveDrizzle(drizzle(env.DB))
+```
+
+{/* spellcheck-ignore:on */}
+```jsonc
+// wrangler.jsonc
+{
+  "compatibility_date": "2025-08-15", // or later
+  // nodejs_compat: @telefunc/live needs it.
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
+  "d1_databases": [{ "binding": "DB", "database_name": "app", "database_id": "<your database's id>" }],
+  "durable_objects": {
+    "bindings": [{ "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }]
+  },
+  // The Telefunc Durable Object is a SQLite class: live queries keep their subscriptions in its storage.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TelefuncDurableObject"] }]
+}
+```
+{/* spellcheck-ignore:off */}
+
+On Postgres through [Hyperdrive](https://developers.cloudflare.com/hyperdrive/), also import `@telefunc/live/postgres`, and create the pool in the first telefunction that uses it: a Worker can't read `env.HYPERDRIVE` at its top level.
+
+```ts
+// database.ts
+// Environment: server
+
+import '@telefunc/live/postgres'
+import { env } from 'cloudflare:workers'
+import { drizzle } from 'drizzle-orm/node-postgres'
+import { liveDrizzle } from '@telefunc/live/drizzle'
+import pg from 'pg'
+
+let db: ReturnType<typeof connect> | undefined
+
+// In a telefunction: `await getDb().select().from(todos).live()`
+export function getDb() {
+  return (db ??= connect())
+}
+
+function connect() {
+  return liveDrizzle(drizzle({ client: new pg.Pool({ connectionString: env.HYPERDRIVE.connectionString }) }))
+}
+```
+
+> `import '@telefunc/live/postgres'` adds Postgres's parser to your Worker, so a Worker on D1 goes without it. A Worker on Postgres still carries SQLite's parser: about 1 MB gzipped.
 
 
 ## Usage
@@ -207,11 +263,11 @@ A client refetches when a committed write, through a wrapped database, changes r
 - A write to another user's rows doesn't refetch `onGetTodos(userId)`.
 - A row sorting past the last row of a `limit` doesn't refetch the page.
 - A rolled-back transaction refetches nothing; a committed one refetches once its `COMMIT` succeeds.
-- A write also changes the tables its triggers, rules, column defaults and foreign key actions (`on delete cascade`) write to. When the schema doesn't say which (a rule, a call to a function written in SQL or PL/pgSQL, SQL built at run time), the tables the transaction locked do: they're read right before its `COMMIT` (a lone write runs in a transaction for it), and every query of those tables refetches.
+- A write also changes the tables its triggers, rules, column defaults and foreign key actions (`on delete cascade`) write to. On Postgres, when the schema doesn't say which (a rule, a call to a function written in SQL or PL/pgSQL, SQL built at run time), the tables the transaction locked do: they're read right before its `COMMIT` (a lone write runs in a transaction for it), and every query of those tables refetches.
 
 When `@telefunc/live` can't tell whether a write changed the result (a function call in the query, a statement it doesn't follow, a write of more than 10,000 rows), it refetches.
 
-> A write refetches every query of the tables it writes when its role can't `SELECT` the table in full, or when row-level security applies to its role and the write has no `.returning()`. On tables with row-level security, `.returning()` keeps row precision. After a `DO` block, a procedure, `set_config()` or a function of yours, which may switch the role, the next write first asks the database its role: one more round trip.
+> On Postgres, a write refetches every query of the tables it writes when its role can't `SELECT` the table in full, or when row-level security applies to its role and the write has no `.returning()`. On tables with row-level security, `.returning()` keeps row precision. After a `DO` block, a procedure, `set_config()` or a function of yours, which may switch the role, the next write first asks the database its role: one more round trip.
 
 > The refetch is an ordinary call of your telefunction: its <Link href="/permissions">permission checks</Link> run again, and no row is sent to a client otherwise.
 
