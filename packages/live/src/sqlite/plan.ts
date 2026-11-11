@@ -11,7 +11,7 @@ import {
   type WritePlan,
 } from '../capture/statement.js'
 import { quote } from '../sql.js'
-import { SQLITE, numberParams } from './dialect.js'
+import { SQLITE, numberParams, tokensOf } from './dialect.js'
 import { hasConflictReplace } from './catalog.js'
 import { CannotLower, identifier, Lowering, objectName, variant, writeTarget } from './lower.js'
 import { parseSqlite, type Ast } from './parser.js'
@@ -20,12 +20,25 @@ import { parseSqlite, type Ast } from './parser.js'
 const READING_PRAGMAS = new Set(['table_info', 'table_xinfo', 'table_list', 'index_list', 'index_info', 'index_xinfo'])
   .add('foreign_key_list')
   .add('database_list')
+/** Pragmas that set how a connection runs, changing no row and no statement's meaning; `foreign_keys` too, turned on:
+ *  the catalog of a connection without them knows no key, and every row a key's action changes is in the change log. */
+const SETTING_PRAGMAS = new Set([
+  'busy_timeout',
+  'cache_size',
+  'journal_mode',
+  'synchronous',
+  'temp_store',
+  'mmap_size',
+])
+const ON = new Set(['on', 'true', 'yes', '1'])
 
 /** What a statement the parser can't read may have changed: anything, a table or the schema. */
 const ANYTHING: Plan = { kind: 'unknownWrite', tables: 'all', schemaChange: true, unread: true }
 
 /** What a SQLite statement may change, and how to bound a read by its result. */
 function planSqlite(text: string, catalog: Catalog): Plan {
+  const pragma = planPragma(text)
+  if (pragma) return pragma
   const numbered = numberParams(text)
   const statements = parseSqlite(numbered.text)
   // A statement the parser can't read may still run: it may have changed anything.
@@ -35,6 +48,24 @@ function planSqlite(text: string, catalog: Catalog): Plan {
     return { kind: 'several', plans: statements.map((s) => planOne(s, undefined, lowering, catalog)) }
   // A driver binds named parameters by name: the text sent with hidden columns would take them by position.
   return planOne(statements[0]!, numbered.named ? undefined : numbered.text, lowering, catalog)
+}
+
+/** A single `PRAGMA` statement, read from its tokens: the parser takes some of SQLite's spellings only (not
+ *  `foreign_keys = ON`, nor `table_info(t)`). `undefined` for other text. */
+function planPragma(text: string): Plan | undefined {
+  const tokens = tokensOf(text).map((t) => t.word ?? t.text)
+  if (tokens[0] !== 'pragma') return undefined
+  if (tokens.at(-1) === ';') tokens.pop()
+  const [name, ...rest] = tokens[2] === '.' ? tokens.slice(3) : tokens.slice(1)
+  // `name`, `name = value` or `name(value)`.
+  const argument = /^(?:=([^;]+)|\(([^;]+)\))?$/.exec(rest.join(''))
+  if (!name || !argument) return undefined
+  const [, assigned, called] = argument
+  if (assigned === undefined && READING_PRAGMAS.has(name)) return { kind: 'none' }
+  if (SETTING_PRAGMAS.has(name)) return { kind: 'none' }
+  const value = assigned ?? called
+  if (name === 'foreign_keys' && (value === undefined || ON.has(value))) return { kind: 'none' }
+  return { kind: 'unknownWrite', tables: 'all', schemaChange: true }
 }
 
 /** `text`: the statement's whole text, its parameters numbered, when it can be sent rewritten. */
