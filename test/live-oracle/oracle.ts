@@ -481,15 +481,24 @@ const writesBeforeHalf = writeNames.filter((name) => !SESSION_WRITES.includes(na
 /** Writes that failed other than by the database's refusal. */
 const failedWrites: string[] = []
 
-/** A write the database refused (a deleted row's foreign key) changed nothing; any other failure is the wrapper's.
- *  Postgres tells why by an SQLSTATE, SQLite by a `SQLITE_` code, D1 in its message. */
+/** A write the database refused (a deleted row's foreign key) changed nothing; any other failure is the wrapper's. A
+ *  role's write may only be refused for its data: a refused privilege is what a widened write would cause. */
 function writeFailed(write: string, err: unknown): void {
-  const { code, cause } = err as { code?: unknown; cause?: { code?: unknown } }
-  const sqlState = code ?? cause?.code
-  const d1 = [err, cause].some((e) => /D1_ERROR: .*SQLITE_\w+/.test(String(e)))
-  if (d1 || (typeof sqlState === 'string' && /^([0-9A-Z]{5}|SQLITE_\w+)$/.test(sqlState))) {
+  const sqlState = sqlStateOf(err)
+  if (sqlState !== undefined && (!ROLE_WRITES.includes(write) || sqlState.startsWith('23'))) {
     if (VERBOSE) console.log(`write ${write} refused: ${String(err).slice(0, 120)}`)
   } else failedWrites.push(`${write}: ${String(err).slice(0, 200)}`)
+}
+
+/** The database's error code, found along the error's causes: an ORM wraps the driver's error, and so do the writes.
+ *  Postgres tells it by an SQLSTATE, SQLite by a `SQLITE_` code, D1 in its message. */
+function sqlStateOf(err: unknown): string | undefined {
+  for (let e = err as { code?: unknown; cause?: unknown } | undefined; e; e = e.cause as typeof e) {
+    if (typeof e.code === 'string' && /^([0-9A-Z]{5}|SQLITE_\w+)$/.test(e.code)) return e.code
+    const d1 = /D1_ERROR: .*(SQLITE_\w+)/.exec(String(e))
+    if (d1) return d1[1]
+  }
+  return undefined
 }
 
 /** Shapes counting todos in groups a user's deletion may empty: they race it. */

@@ -376,7 +376,7 @@ function createDrizzle(
             await tx.execute(sql`insert into todos (user_id, text) values (${user}, ${text})`)
           })
           .catch((err: unknown) => {
-            throw new Error(`restricted insert refused: ${err}`)
+            throw new Error(`restricted insert refused: ${err}`, { cause: err })
           }),
       // As a tenant row level security shows some todos only: a todo it may not see is still inserted.
       tenantInsert: ({ user, text }) =>
@@ -386,7 +386,7 @@ function createDrizzle(
             await tx.execute(sql`insert into todos (user_id, text) values (${user}, ${text})`)
           })
           .catch((err: unknown) => {
-            throw new Error(`tenant insert refused: ${err}`)
+            throw new Error(`tenant insert refused: ${err}`, { cause: err })
           }),
       // Every todo, those the tenant may not see included. The role is set by `set_config()`, which doesn't name it.
       tenantUpdate: ({ value }) =>
