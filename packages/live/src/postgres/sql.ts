@@ -1,12 +1,13 @@
 export { loadParser, parseStatements, topLevelFrom, fromClauseAt, parenthesizedAt, statementEnd, spliceBytes }
 export { renumberParams }
 
+import { wasm } from '#libpg-query-wasm'
 import { loadModule, parseSync, scanSync } from 'libpg-query'
 import type { Node } from '../tree.js'
 
 let parserLoaded: Promise<void> | undefined
 function loadParser(): Promise<void> {
-  parserLoaded ??= loadModule()
+  parserLoaded ??= loadModule({ wasm })
   return parserLoaded
 }
 

@@ -62,6 +62,13 @@
       "default": "./dist/wire/client.js"
     }
   },
+  "imports": {
+    "#libpg-query-wasm": {
+      "types": "./src/postgres/wasm.ts",
+      "workerd": "./dist/postgres/wasm.workerd.js",
+      "default": "./dist/postgres/wasm.js"
+    }
+  },
   "files": [
     "dist"
   ],
