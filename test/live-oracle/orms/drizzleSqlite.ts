@@ -62,10 +62,12 @@ const schema = { users, todos, tags, usersRelations, todosRelations }
 
 const NICKS = ['ann', 'ANN', 'Bob', 'bob', 'cy', 'Dee']
 
-/** `client` is a better-sqlite3 or bun:sqlite database or a D1 binding, `drizzle` the Drizzle driver for it. */
+/** `client` is a better-sqlite3 or bun:sqlite database, a libSQL client or a D1 binding, `drizzle` the Drizzle driver
+ *  for it; `exec` runs text that may hold several statements. */
 function createDrizzleSqlite(
-  client: { exec(text: string): unknown },
+  client: object,
   drizzle: (config: { client: any; schema: typeof schema }) => object,
+  exec: (text: string) => unknown = (text) => (client as { exec(text: string): unknown }).exec(text),
 ): OrmDriver {
   const db = liveDrizzle(drizzle({ client, schema }) as any) as any
   const driver: OrmDriver = {
@@ -288,7 +290,7 @@ function createDrizzleSqlite(
         ),
       deleteUser: ({ user }) => db.delete(users).where(eq(users.id, user)).run(),
       // Two statements in one text: run as written.
-      deleteUserRaw: ({ user }) => client.exec(`delete from users where id = ${Number(user)}; select 1`),
+      deleteUserRaw: ({ user }) => exec(`delete from users where id = ${Number(user)}; select 1`),
       insertUser: ({ text, value }) =>
         db
           .insert(users)
@@ -339,7 +341,60 @@ function createDrizzleSqlite(
     liveRead: () => db.select().from(todos).where(eq(todos.userId, 1)).live(),
     async close() {},
   }
-  return db.batch ? withBatches(driver, db) : driver
+  if (!db.batch) return driver
+  return 'executeMultiple' in client
+    ? withAsyncTransactions(withBatches(driver, db), driver, db)
+    : withBatches(driver, db)
+}
+
+/** libSQL's transactions are asynchronous: the same writes, awaited. Its batches stay, under names of their own. */
+function withAsyncTransactions(batches: OrmDriver, driver: OrmDriver, db: any): OrmDriver {
+  const {
+    txCommit: batchCommit,
+    txRollback: batchRollback,
+    ...writes
+  } = batches.writes as Required<OrmDriver['writes']>
+  const newTodo = (tx: any, user: number, text: string) =>
+    tx.insert(todos).values({ userId: user, text, done: false, priority: 1, amount: 1, updatedAt: '2026-11-12' })
+  return {
+    ...driver,
+    writes: {
+      ...writes,
+      batchCommit,
+      batchRollback,
+      txCommit: ({ todo, user, text }) =>
+        db.transaction(async (tx: any) => {
+          await newTodo(tx, user, text)
+          await tx.update(todos).set({ done: true }).where(eq(todos.id, todo))
+        }),
+      txRollback: ({ user, text }) =>
+        db
+          .transaction(async (tx: any) => {
+            await newTodo(tx, user, text)
+            tx.rollback()
+          })
+          .catch(() => {}),
+      savepointRollback: ({ todo, user, text }) =>
+        db.transaction(async (tx: any) => {
+          await tx.update(todos).set({ text }).where(eq(todos.id, todo))
+          await tx
+            .transaction(async (inner: any) => {
+              await newTodo(inner, user, `${text}!`)
+              inner.rollback()
+            })
+            .catch(() => {})
+        }),
+      // A statement that fails in a transaction undoes only itself: the transaction commits the rest.
+      txFailedStatement: ({ todo, value }) =>
+        db.transaction(async (tx: any) => {
+          await tx
+            .update(todos)
+            .set({ priority: value % 5 })
+            .where(eq(todos.id, todo))
+          await tx.run(sql`insert into users (id, name, team) values (1, 'taken', 1)`).catch(() => {})
+        }),
+    },
+  }
 }
 
 /** D1 refuses `BEGIN`: its transaction is a `batch()`, which commits whole or not at all. */

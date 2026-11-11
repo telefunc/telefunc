@@ -5,6 +5,7 @@ import { assertUsage } from './assert.js'
 import { captureBetterSqlite3, isBetterSqlite3, type BetterSqlite3 } from './capture/betterSqlite3.js'
 import { captureBunSqlite, isBunSqlite, type BunSqlite } from './capture/bunSqlite.js'
 import { captureD1, isD1, type D1 } from './capture/d1.js'
+import { captureLibsql, isLibsql, type Libsql } from './capture/libsql.js'
 import { captureNodeSqliteFile, wrappedFile } from './capture/nodeSqlite.js'
 import { capturePg, type PgClient, type PgPool } from './capture/pg.js'
 import { capturePglite, type Pglite } from './capture/pglite.js'
@@ -14,8 +15,8 @@ import { processWide } from './processWide.js'
 import { LOGGED_SQLITE_ENGINE, RETURNING_SQLITE_ENGINE } from './sqlite/engine.js'
 
 /** What an ORM sends its SQL through: a `pg.Pool` or `pg.Client`, a postgres.js `sql`, a PGlite instance, a
- *  better-sqlite3 or bun:sqlite database, a D1 binding. */
-type DatabaseClient = PgPool | PgClient | Pglite | PostgresJs | BetterSqlite3 | BunSqlite | D1
+ *  better-sqlite3 or bun:sqlite database, a local libSQL client, a D1 binding. */
+type DatabaseClient = PgPool | PgClient | Pglite | PostgresJs | BetterSqlite3 | BunSqlite | Libsql | D1
 
 /** Postgres's planner, catalog and parser (libpg-query), imported once a Postgres client loads its catalog: an app on
  *  SQLite doesn't load them. */
@@ -37,6 +38,7 @@ function liveDatabaseOf(client: DatabaseClient, options: LiveOptions): LiveDatab
   if (isBetterSqlite3(client)) captureBetterSqlite3(client, live)
   else if (isBunSqlite(client)) captureBunSqlite(client, live)
   else if (isD1(client)) captureD1(client, live)
+  else if (isLibsql(client)) captureLibsql(client, live)
   else if (isPostgresJs(client)) capturePostgresJs(client, live)
   else if (isPglite(client)) capturePglite(client, live)
   else {
@@ -70,15 +72,16 @@ function sameDatabase(known: { live: LiveDatabase; options: LiveOptions }, optio
 
 function engineOf(client: DatabaseClient): Engine {
   if (isBetterSqlite3(client) || isBunSqlite(client)) return LOGGED_SQLITE_ENGINE
-  return isD1(client) ? RETURNING_SQLITE_ENGINE : POSTGRES_ENGINE
+  return isD1(client) || isLibsql(client) ? RETURNING_SQLITE_ENGINE : POSTGRES_ENGINE
 }
 
 function isDatabaseClient(value: unknown): value is DatabaseClient {
   if (typeof value === 'function') return isPostgresJs(value as never)
   if (typeof value !== 'object' || value === null) return false
-  return typeof (value as PgClient).query === 'function' || isBetterSqlite3(value) || isBunSqlite(value) || isD1(value)
+  const sqlite = isBetterSqlite3(value) || isBunSqlite(value) || isLibsql(value) || isD1(value)
+  return sqlite || typeof (value as PgClient).query === 'function'
 }
 
-function isPglite(client: Exclude<DatabaseClient, BetterSqlite3 | BunSqlite | D1>): client is Pglite {
+function isPglite(client: Exclude<DatabaseClient, BetterSqlite3 | BunSqlite | Libsql | D1>): client is Pglite {
   return 'transaction' in client && 'exec' in client
 }

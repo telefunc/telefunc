@@ -12,6 +12,7 @@
 // DB=sqlite (ORM=drizzle or kysely): better-sqlite3, in memory, with the SQLite lane's own tables (sqliteSchema.ts).
 // DB=bun (ORM=drizzle, run by `bun oracle.ts`): bun:sqlite instead. DB=d1 (ORM=drizzle): miniflare's D1.
 // DB=node (ORM=prisma): Prisma 8 on node:sqlite, which opens its own connections on a file.
+// DB=libsql (ORM=drizzle): a local libSQL client on a file, whose pool runs each statement on any of its connections.
 //
 // DRIVER=postgres-js (with ORM=drizzle DB=pg): postgres.js instead of `pg`. PG=18 adds the writes in Postgres 18's
 // syntax. ROLES=1 adds writes by roles that can't read the table they write, or only some of its rows.
@@ -50,7 +51,7 @@ const DRIVER = process.env.DRIVER ?? 'pg'
 const SEED = Number(process.env.SEED ?? 1)
 const STEPS = Number(process.env.STEPS ?? 300)
 /** SQLite, which runs each statement as it's called. */
-const SQLITE = DB === 'sqlite' || DB === 'bun' || DB === 'd1' || DB === 'node'
+const SQLITE = DB === 'sqlite' || DB === 'bun' || DB === 'd1' || DB === 'node' || DB === 'libsql'
 const ONE_CONNECTION = DB === 'pglite' || SQLITE
 const CHURN = process.env.CHURN === '1' && !ONE_CONNECTION
 const VERBOSE = process.env.VERBOSE === '1'
@@ -222,6 +223,29 @@ async function connect(): Promise<{
       close: async () => {
         await driver.close()
         sqlite.close()
+        rmSync(dir, { recursive: true })
+      },
+    }
+  }
+  if (DB === 'libsql') {
+    const { createClient } = await import('@libsql/client')
+    const { drizzle } = await import('drizzle-orm/libsql')
+    const { mkdtempSync, rmSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const dir = mkdtempSync(`${tmpdir()}/live-oracle-`)
+    const url = `file:${dir}/oracle.db`
+    // The oracle's own client: its queries don't pass through the wrapped one.
+    const oracle = createClient({ url })
+    await oracle.executeMultiple(sqliteSeed(random))
+    const client = createClient({ url })
+    const driver = createDrizzleSqlite(client, drizzle, (text) => client.executeMultiple(text))
+    return {
+      driver,
+      writer: driver,
+      query: async (text) => (await oracle.execute(text)).rows,
+      close: async () => {
+        client.close()
+        oracle.close()
         rmSync(dir, { recursive: true })
       },
     }

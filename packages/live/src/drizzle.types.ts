@@ -33,7 +33,7 @@ import type { Live } from './live.js'
 // builder's `_.hkt` to the step's generics. A chain started from a select of `liveDrizzle(db)` carries an HKT whose
 // result is Drizzle's own `PgSelectBase` plus `live()`, so every step keeps `live()` and Drizzle still infers the rows.
 
-/** A Drizzle database: Postgres (node-postgres, postgres.js, PGlite) or SQLite (better-sqlite3, bun:sqlite, D1). */
+/** A Drizzle database: Postgres (node-postgres, postgres.js, PGlite) or SQLite (better-sqlite3, bun:sqlite, libSQL, D1). */
 type DrizzleDatabase = {
   select: (...args: any[]) => PgSelectBuilder<any> | SQLiteSelectBuilder<any, any, any>
   $client: unknown
@@ -123,7 +123,7 @@ type LiveSelect<
 
 // ── SQLite: the same, on Drizzle's SQLite select, whose steps also carry the driver's result kind ──
 
-/** What a SQLite driver's calls return: at once (better-sqlite3, bun:sqlite) or a promise (D1). */
+/** What a SQLite driver's calls return: at once (better-sqlite3, bun:sqlite) or a promise (libSQL, D1). */
 type Result<Kind extends 'sync' | 'async', T> = Kind extends 'sync' ? T : Promise<T>
 
 type WithLiveSqliteSelects<T, Kind extends 'sync' | 'async', RunResult> = Omit<
