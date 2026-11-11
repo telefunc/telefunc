@@ -41,6 +41,10 @@ type WritePlan = {
   images: ('new' | 'old' | 'inserted')[]
   /** The columns an `UPDATE` (or an upsert's update) assigns. */
   assigned: string[]
+  /** A query of ours reading the rows the write will change as they are before it, an `old` image each, sent right
+   *  before it in the same transaction; `params`: the write's parameter each of its own takes (`Dialect.bindParams()`).
+   *  SQLite's `RETURNING` has no old row. */
+  readsFirst?: { text: string; params: number[] }
   /** What the write changes besides the rows it returns and those a cascade deletes by key (`cascadedDeletes()`): what
    *  the table's triggers write and the rows its foreign key actions change, then what those changes change in turn. */
   alsoWrites: ReadonlySet<string>

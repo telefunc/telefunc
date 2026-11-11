@@ -81,6 +81,7 @@ function captureSession(session: D1Session, db: D1, live: LiveDatabase): () => P
       done(rows as (string | null)[][] | undefined)
     }
   }
+  const ours = ({ text, values }: FollowUp) => prepare(text).bind(...values)
   /** The statement `planned` as sent: our text, with the values it takes. */
   const sent = (planned: Statement, values: unknown[]) => prepare(planned.text).bind(...(planned.values ?? values))
   const send = async <T>(planned: Statement, request: () => Promise<T>): Promise<T> => {
@@ -91,11 +92,17 @@ function captureSession(session: D1Session, db: D1, live: LiveDatabase): () => P
       throw err
     }
   }
-  /** Runs `text` as `live` plans it, through `all()`; the caller's rows are objects. */
+  /** Runs `text` as `live` plans it, through `all()`; the caller's rows are objects. A query of ours it reads first
+   *  goes in one `batch()` with it: a transaction. */
   const all = async (text: string, values: unknown[]): Promise<D1Result> => {
     await ready()
     const planned = live.statementFor(db, text, values)
-    const result = await send(planned, () => sent(planned, values).all())
+    const result = await send(planned, async () => {
+      if (!planned.readsFirst) return await sent(planned, values).all()
+      const [first, result] = await batch([ours(planned.readsFirst), sent(planned, values)])
+      planned.readsFirst.done(rowsOf(first!))
+      return result!
+    })
     const hidden = hiddenNames(planned)
     const hiddenRows = takeHiddenValues(result.results, hidden, false)
     await runFollowUps(planned.succeeded(hiddenRows))
@@ -137,17 +144,23 @@ function captureSession(session: D1Session, db: D1, live: LiveDatabase): () => P
       assertUsage(app, 'Prepare the statements of a D1 batch() with the database live() wraps.')
       return { app, statement: live.statementFor(db, app.text, app.values) }
     })
+    // Each statement's query of ours right before it.
+    const sentStatements = planned.flatMap(({ app, statement }) => {
+      const own = sent(statement, app.values)
+      return statement.readsFirst ? [ours(statement.readsFirst), own] : [own]
+    })
     let results: D1Result[]
     try {
-      results = await batch(planned.map(({ app, statement }) => sent(statement, app.values)))
+      results = await batch(sentStatements)
     } catch (err) {
       for (const { statement } of planned) statement.failed()
       throw err
     }
     const followUps: FollowUp[] = []
     live.statementFor(db, 'BEGIN', []).succeeded([])
-    const answers = results.map((result, i) => {
-      const { statement } = planned[i]!
+    const answers = planned.map(({ statement }) => {
+      if (statement.readsFirst) statement.readsFirst.done(rowsOf(results.shift()!))
+      const result = results.shift()!
       followUps.push(...statement.succeeded(takeHiddenValues(result.results, hiddenNames(statement), false)))
       return statement.returnsRows ? result : { ...result, results: [] }
     })
@@ -156,6 +169,11 @@ function captureSession(session: D1Session, db: D1, live: LiveDatabase): () => P
     return answers
   }
   return ready
+}
+
+/** A result's rows as arrays of their values (a query of ours names each of its columns once). */
+function rowsOf(result: D1Result): (string | null)[][] {
+  return result.results.map((row) => Object.values(row as object))
 }
 
 function hiddenNames(statement: Statement): string[] {

@@ -131,24 +131,29 @@ function planWrite(statement: Ast, text: string | undefined, catalog: Catalog): 
 }
 
 /** `statement` with an image of each row it writes appended to its `RETURNING` list: the new row, or the deleted one.
- *  Without the old row, an `UPDATE`'s assigned columns had unknown values, as on Postgres 17. */
+ *  An `UPDATE`'s old rows, and the rows an upsert conflicts with, are read first when its rows can be named the same
+ *  way (`readsFirst`); otherwise an `UPDATE`'s assigned columns had unknown values, as on Postgres 17, and an upsert,
+ *  whose `RETURNING` doesn't tell an inserted row from an updated one, counts its table whole. */
 function widenedWrite(statement: Ast, text: string, table: Table, catalog: Catalog): WritePlan | undefined {
   const [kind, write] = variant(statement)
   const written = kind === 'Insert' ? 'insert' : kind === 'Update' ? 'update' : 'delete'
-  // An upsert's `RETURNING` doesn't tell an inserted row from an updated one.
-  if (write.on && write.on.OnConflict?.action !== 'DoNothing') return undefined
+  const update = write.on?.OnConflict?.action?.DoUpdate
+  if (write.on && !update && write.on.OnConflict?.action !== 'DoNothing') return undefined
   const assigned: string[] = []
-  for (const { target } of (write.assignments ?? []) as Ast[]) {
+  for (const { target } of (update ?? write).assignments ?? ([] as Ast[])) {
     const columns = target.ColumnName ? [target.ColumnName] : (target.Tuple as Ast[][] | undefined)
     if (!columns) return undefined
     for (const name of columns) assigned.push(objectName(name).at(-1)!)
   }
-  const also = alsoWrites(table, [written], assigned, catalog)
+  const also = alsoWrites(table, update ? ['insert', 'update'] : [written], assigned, catalog)
   if (also === 'all') return undefined
-  const hadReturning = write.returning?.length > 0
   // `UPDATE t AS a … RETURNING a.x` fails: the image names its columns bare.
-  const image = `json_array(${table.columns.map((c) => SQLITE.text(quote(c.name))).join(', ')})`
-  const appended = `${hadReturning ? ',' : ' RETURNING'} ${image} AS "${HIDDEN_PREFIX}0"`
+  const image = `json_array(${table.columns.map((c) => SQLITE.text(quote(c.name))).join(', ')}) AS "${HIDDEN_PREFIX}0"`
+  const where =
+    written === 'update' ? updatedRows(write, text, table, catalog) : update ? conflictingRows(write, table) : undefined
+  if (update && where === undefined) return undefined
+  const hadReturning = write.returning?.length > 0
+  const appended = `${hadReturning ? ',' : ' RETURNING'} ${image}`
   return {
     kind: 'write',
     table,
@@ -158,5 +163,58 @@ function widenedWrite(statement: Ast, text: string, table: Table, catalog: Catal
     images: [written === 'delete' ? 'old' : 'new'],
     assigned,
     alsoWrites: also,
+    ...(where !== undefined && { readsFirst: SQLITE.bindParams(`SELECT ${image} FROM ${where}`) }),
   }
+}
+
+/** The rows an `UPDATE` of `table` writes, named in its own words (`AS a WHERE …`), unless it has more than a `WHERE`
+ *  (`FROM`, `ORDER BY`, `LIMIT`) or its `WHERE` calls a volatile function, which a second read could answer otherwise. */
+function updatedRows(write: Ast, text: string, table: Table, catalog: Catalog): string | undefined {
+  if (write.from || write.limit || write.order_by?.length) return undefined
+  const tokens = tokensOf(text)
+  let depth = 0
+  let where: number | undefined
+  let end = tokens.length
+  for (const [i, token] of tokens.entries()) {
+    if (token.text === '(') depth++
+    else if (token.text === ')') depth--
+    else if (depth > 0) continue
+    else if (token.word === 'where') where = i
+    else if (where !== undefined && (token.text === ';' || token.word === 'returning')) {
+      end = i
+      break
+    }
+  }
+  const condition = where === undefined ? [] : tokens.slice(where, end)
+  if (condition.some((t, i) => t.word && catalog.volatileFunctions.has(t.word) && condition[i + 1]?.text === '('))
+    return undefined
+  const { alias } = write.table.relation.Table
+  const named = table.sqlName + (alias ? ` AS ${quote(identifier(alias.name))}` : '')
+  return where === undefined ? named : `${named} ${text.slice(condition[0]!.start, condition.at(-1)!.end)}`
+}
+
+/** The rows an upsert of `VALUES` conflicts with, by the columns of its conflict target: each value a parameter or a
+ *  literal. */
+function conflictingRows(write: Ast, table: Table): string | undefined {
+  const target = write.on.OnConflict.conflict_target?.Columns as Ast[] | undefined
+  const rows = write.source?.body?.Values?.rows as Ast[] | undefined
+  if (!target || !rows || write.source.order_by || write.source.limit_clause) return undefined
+  const columns = (write.columns as Ast[][]).map((name) => objectName(name).at(-1)!)
+  const at = target.map((column) => columns.indexOf(identifier(column)))
+  if (at.includes(-1)) return undefined
+  const values = rows.map((row) => at.map((i) => literalOf((row.content as Ast[])[i]!)))
+  if (values.flat().includes(undefined)) return undefined
+  const keys = target.map((column) => quote(identifier(column))).join(', ')
+  const tuples = values.map((row) => `(${row.join(', ')})`).join(', ')
+  return `${table.sqlName} WHERE (${keys}) IN (VALUES ${tuples})`
+}
+
+/** A parameter or a literal value, as written. */
+function literalOf(expression: Ast): string | undefined {
+  const value = expression.Value?.value
+  if (typeof value?.Placeholder === 'string') return value.Placeholder
+  if (value?.Number) return String(value.Number[0])
+  if (typeof value?.SingleQuotedString === 'string') return `'${value.SingleQuotedString.replace(/'/g, "''")}'`
+  if (value === 'Null') return 'NULL'
+  return undefined
 }

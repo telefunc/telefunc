@@ -42,6 +42,9 @@ type Statement = {
    *  `ROLLBACK`). */
   succeeded(hiddenRows: (string | null)[][], command?: string): FollowUp[]
   failed(): void
+  /** A query of ours to send right before `text`, in the same transaction with nothing between: its rows go to `done`
+   *  before `succeeded` (a write's rows before it). A driver that doesn't send it makes the write count less precisely. */
+  readsFirst?: FollowUp
   /** A write that runs as a role its connection doesn't know yet: run this query of ours on the connection first,
    *  then plan the statement again, which may then capture its rows. A driver that doesn't sends it as is. */
   asks?: FollowUp
@@ -250,10 +253,7 @@ class LiveDatabase {
       case 'write':
         // Sent as written, a write changes its table as a whole.
         if (!rewrite || !this.widens(plan, connection)) break
-        return {
-          ...this.statement(connection, plan.text, plan.images.length, (rows) => this.changesOfWrite(plan, rows)),
-          returnsRows: plan.hadReturning,
-        }
+        return this.widenedWrite(connection, plan, values)
       case 'transaction':
         if (plan.action === 'commit') return this.commit(connection, text, plan.chain)
         break
@@ -582,9 +582,31 @@ class LiveDatabase {
     this.roles!.transaction(connection, 'begin')
   }
 
-  private changesOfWrite(plan: WritePlan, rows: (string | null)[][]): Change[] {
-    if (rows.length > MAX_CHANGED_ROWS)
-      return unknownChanges(ofRows(tablesChangedBy([[plan.table.id, undefined]], this.catalog!)))
+  /** `plan`, sent with images of the rows it writes, and the rows it will write as they are before it when the driver
+   *  sends `readsFirst`. */
+  private widenedWrite(connection: object, plan: WritePlan, values: readonly unknown[]): Statement {
+    let before: Rows | undefined
+    const statement = this.statement(connection, plan.text, plan.images.length, (rows) =>
+      this.changesOfWrite(plan, rows, before),
+    )
+    if (!plan.readsFirst) return { ...statement, returnsRows: plan.hadReturning }
+    const { text, params } = plan.readsFirst
+    const readsFirst = { text, values: params.map((i) => values[i]), done: (rows?: Rows) => void (before = rows) }
+    return { ...statement, returnsRows: plan.hadReturning, readsFirst }
+  }
+
+  /** `before`: what `readsFirst` read, when the driver sent it. */
+  private changesOfWrite(plan: WritePlan, rows: Rows, before: Rows | undefined): Change[] {
+    const whole = () => unknownChanges(ofRows(tablesChangedBy([[plan.table.id, undefined]], this.catalog!)))
+    if (rows.length > MAX_CHANGED_ROWS || (before?.length ?? 0) > MAX_CHANGED_ROWS) return whole()
+    // An upsert's `RETURNING` doesn't tell an inserted row from an updated one: the rows it conflicted with do.
+    if (plan.readsFirst && plan.statement === 'insert' && !before) return whole()
+    const changes = before ? pairedChanges(plan, rows, before) : this.returnedChanges(plan, rows)
+    return [...changes, ...cascadedDeletes(plan, changes), ...unknownChanges(plan.alsoWrites)]
+  }
+
+  /** The changes of a write whose `RETURNING` gives all it knows of its rows. */
+  private returnedChanges(plan: WritePlan, rows: Rows): Change[] {
     const changes: Change[] = []
     for (const row of rows) {
       const image = (which: WritePlan['images'][number]) => row[plan.images.indexOf(which)]
@@ -599,7 +621,7 @@ class LiveDatabase {
         changes.push({ table: plan.table.id, kind: 'insert', new: now! })
       else changes.push({ table: plan.table.id, kind: 'update', old: old ?? assumedOld(now!, plan), new: now! })
     }
-    return [...changes, ...cascadedDeletes(plan, changes), ...unknownChanges(plan.alsoWrites)]
+    return changes
   }
 
   private announce(changes: Change[]): void {
@@ -701,6 +723,27 @@ function imageOf(text: string | null | undefined, table: Table): Row | undefined
   if (typeof text !== 'string') return undefined
   const values = JSON.parse(text) as (string | null)[]
   return Object.fromEntries(table.columns.map((c, i) => [c.name, values[i] ?? null]))
+}
+
+/** The changes of a write whose rows `before` it are known (`WritePlan.readsFirst`): each new row is an update of the
+ *  old row with its primary key, or an insert. An `UPDATE` changed every row it read first: an old row no new row has
+ *  the key of had its key changed. An upsert's update may have been skipped by its `WHERE`. */
+function pairedChanges(plan: WritePlan, rows: Rows, before: Rows): Change[] {
+  const { table } = plan
+  const keyOf = (row: Row) => (table.primaryKey.length > 0 ? JSON.stringify(table.primaryKey.map((c) => row[c])) : '')
+  const olds = new Map<string, Row[]>()
+  for (const [image] of before) {
+    const old = imageOf(image, table)!
+    olds.set(keyOf(old), [...(olds.get(keyOf(old)) ?? []), old])
+  }
+  const changes: Change[] = rows.map((row): Change => {
+    const now = imageOf(row[plan.images.indexOf('new')], table)!
+    const old = table.primaryKey.length > 0 ? olds.get(keyOf(now))?.pop() : undefined
+    return old ? { table: table.id, kind: 'update', old, new: now } : { table: table.id, kind: 'insert', new: now }
+  })
+  if (plan.statement === 'update')
+    for (const old of [...olds.values()].flat()) changes.push({ table: table.id, kind: 'delete', old })
+  return changes
 }
 
 /** The row before an `UPDATE`, as far as Postgres < 18 tells: the columns it didn't assign kept their value. */
