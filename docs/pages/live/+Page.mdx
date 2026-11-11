@@ -60,6 +60,47 @@ export const db = livePrisma(postgres({ contract, pg: pool }), pool)
 
 > There isn't any other setup: Telefunc finds `@telefunc/*` packages in your `package.json` and auto-loads them.
 
+### SQLite
+
+On SQLite, wrap your database the same way:
+
+```ts
+// database.ts
+// Environment: server
+
+import { drizzle } from 'drizzle-orm/better-sqlite3'
+import { liveDrizzle } from '@telefunc/live/drizzle'
+import SQLite from 'better-sqlite3'
+
+export const db = liveDrizzle(drizzle({ client: new SQLite('app.db') }))
+```
+
+```ts
+// database.ts
+// Environment: server
+
+import { Kysely, SqliteDialect } from 'kysely'
+import { liveKysely } from '@telefunc/live/kysely'
+import SQLite from 'better-sqlite3'
+
+const database = new SQLite('app.db')
+export const db = liveKysely(new Kysely<Database>({ dialect: new SqliteDialect({ database }) }), database)
+```
+
+```ts
+// database.ts
+// Environment: server
+
+import sqlite from '@prisma/orm-sqlite/runtime'
+import { livePrisma } from '@telefunc/live/prisma'
+
+export const db = livePrisma(sqlite({ contract, path: 'app.db' }), 'app.db')
+```
+
+> Prisma opens its own connections to the database file: pass the file's path as the second argument.
+
+> The database client is a better-sqlite3 or `bun:sqlite` database, or a libSQL client (`@libsql/client`) on a local file: a `file:` URL.
+
 
 ## Usage
 
