@@ -4,7 +4,7 @@ import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Page } from 'playwright-chromium'
 import { navigate } from '../../e2e-utils'
 
-const ORMS = ['drizzle', 'prisma', 'kysely'] as const
+const ORMS = ['drizzle', 'prisma', 'kysely', 'drizzle-sqlite'] as const
 const LISTS = ['todos', 'first-todos', 'todos-with-notes', 'notes-of-1', 'notes-of-2', 'watched-notes-of-1'] as const
 type List = (typeof LISTS)[number]
 type Fetches = Record<List, number>
