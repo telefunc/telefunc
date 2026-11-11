@@ -9,20 +9,20 @@ import { captureNodeSqliteFile, wrappedFile } from './capture/nodeSqlite.js'
 import { capturePg, type PgClient, type PgPool } from './capture/pg.js'
 import { capturePglite, type Pglite } from './capture/pglite.js'
 import { capturePostgresJs, isPostgresJs, type PostgresJs } from './capture/postgresJs.js'
-import { planStatement } from './capture/statement.js'
-import { loadCatalog } from './catalog.js'
 import { LiveDatabase, type Engine, type LiveOptions } from './liveDatabase.js'
 import { processWide } from './processWide.js'
-import { loadParser } from './sql.js'
 import { LOGGED_SQLITE_ENGINE, RETURNING_SQLITE_ENGINE } from './sqlite/engine.js'
 
 /** What an ORM sends its SQL through: a `pg.Pool` or `pg.Client`, a postgres.js `sql`, a PGlite instance, a
  *  better-sqlite3 or bun:sqlite database, a D1 binding. */
 type DatabaseClient = PgPool | PgClient | Pglite | PostgresJs | BetterSqlite3 | BunSqlite | D1
 
+/** Postgres's planner, catalog and parser (libpg-query), imported once a Postgres client loads its catalog: an app on
+ *  SQLite doesn't load them. */
+let postgres: typeof import('./postgres/engine.js') | undefined
 const POSTGRES_ENGINE: Engine = {
-  loadCatalog: async (query) => (await Promise.all([loadCatalog(query), loadParser()]))[0],
-  plan: planStatement,
+  loadCatalog: async (query) => (postgres ??= await import('./postgres/engine.js')).loadCatalog(query),
+  plan: (text, catalog) => postgres!.plan(text, catalog),
   failureAbortsTransaction: true,
 }
 

@@ -2,8 +2,8 @@ export { compileCondition, inListCondition, allOf, mayBeTrue, isTrue, ALWAYS, TR
 export { COMPARISONS }
 export type { Condition, Row, Truth, ValueSource }
 
-import type { Node } from '../sql.js'
-import { names } from '../sql.js'
+import type { Node } from '../tree.js'
+import { names } from '../tree.js'
 import { isOperand, type Comparison, type OperandValue, type Operands } from './operands.js'
 import { compareValues, type Column } from './values.js'
 

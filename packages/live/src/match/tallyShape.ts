@@ -2,7 +2,7 @@ export { analyzeTally, MAX_TALLY_ROWS }
 export type { TallyShape, TallyContext, ColumnAggregate, Comparison, SetTree }
 
 import type { Dialect } from '../dialect.js'
-import { isAggregateCall, names, quote, splitAnd, walk, type Node } from '../sql.js'
+import { isAggregateCall, names, quote, splitAnd, walk, type Node } from '../tree.js'
 import { COMPARISONS } from './condition.js'
 import { isOperand, type Operands } from './operands.js'
 import type { Alias } from './readShape.js'

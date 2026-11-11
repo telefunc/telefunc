@@ -1,7 +1,7 @@
 export { POSTGRES }
 
-import type { Dialect } from './dialect.js'
-import { postgresOperand } from './match/operands.js'
+import type { Dialect } from '../dialect.js'
+import { postgresOperand } from '../match/operands.js'
 import { fromClauseAt, parenthesizedAt, renumberParams, spliceBytes, statementEnd, topLevelFrom } from './sql.js'
 
 /** Postgres's SQL, read with libpg-query's scanner: offsets are UTF-8 byte offsets. */

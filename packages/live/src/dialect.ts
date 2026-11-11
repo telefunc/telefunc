@@ -2,7 +2,7 @@ export type { Dialect }
 
 import type { Catalog } from './catalog.js'
 import type { Comparison } from './match/operands.js'
-import type { Node } from './sql.js'
+import type { Node } from './tree.js'
 
 /**
  * What the matcher needs to know of the database's SQL: where to find the parts of a statement's text, and how to

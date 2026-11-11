@@ -1,6 +1,6 @@
 export { Lowering, identifier, objectName, variant, writeTarget, CannotLower }
 
-import type { Node } from '../sql.js'
+import type { Node } from '../tree.js'
 import { offsetOf, type Ast, type Span } from './parser.js'
 
 /** A construct the lowering doesn't know: the statement is read as reading, or writing, anything. */

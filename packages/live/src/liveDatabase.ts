@@ -10,7 +10,6 @@ import {
   type Access,
   type Catalog,
   type Table,
-  type TableSet,
 } from './catalog.js'
 import { ChangeFeed } from './changeFeed.js'
 import { ofRows, READS_EVERYTHING, type ChangedTables, type Plan, type WritePlan } from './capture/statement.js'

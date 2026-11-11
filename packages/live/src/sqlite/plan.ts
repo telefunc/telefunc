@@ -10,7 +10,7 @@ import {
   type Plan,
   type WritePlan,
 } from '../capture/statement.js'
-import { quote } from '../sql.js'
+import { quote } from '../tree.js'
 import { SQLITE, numberParams, tokensOf } from './dialect.js'
 import { hasConflictReplace } from './catalog.js'
 import { CannotLower, identifier, Lowering, objectName, variant, writeTarget } from './lower.js'

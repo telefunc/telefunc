@@ -3,7 +3,7 @@ export type { Operand, OperandValue, Comparison }
 
 import type { Catalog } from '../catalog.js'
 import type { Dialect } from '../dialect.js'
-import { names, quote, type Node } from '../sql.js'
+import { names, quote, type Node } from '../tree.js'
 import type { Column } from './values.js'
 
 /**

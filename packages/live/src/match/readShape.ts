@@ -3,7 +3,7 @@ export type { ReadShape, Alias, Join, Route, SortKey }
 
 import type { Catalog, Table, TableSet } from '../catalog.js'
 import type { Dialect } from '../dialect.js'
-import { isAggregateCall, names, quote, splitAnd, walk, type Node, type RangeVar } from '../sql.js'
+import { isAggregateCall, names, quote, splitAnd, walk, type Node, type RangeVar } from '../tree.js'
 import { allOf, ALWAYS, compileCondition, inListCondition, type Condition, type ValueSource } from './condition.js'
 import { isOperand, Operands, type Operand } from './operands.js'
 import { analyzeTally, type TallyContext, type TallyShape } from './tallyShape.js'
