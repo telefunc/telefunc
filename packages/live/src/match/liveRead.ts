@@ -21,6 +21,8 @@ type Change =
 type Result = {
   /** The page is full: a row sorting after its last row can't enter. */
   full: boolean
+  /** The limit may have left rows out: the page is full, or its limit's value isn't known. */
+  cut: boolean
   /** A hidden column's canonical keys of its values; `undefined` entries can't be keyed. Keyed when a change first
    *  asks: most results are replaced by a refetch before any change does. */
   values(hidden: number): Set<string | undefined>
@@ -155,8 +157,8 @@ class LiveRead {
   private mayEnter(alias: Alias, row: Row, inserted: boolean): boolean {
     const result = this.result!
     if (alias.nullable) {
-      // A row of the null-extended side only joins outer rows; every outer row is in an unlimited result.
-      if (alias.partners.length === 0 || result.full) return true
+      // A row of the null-extended side only joins outer rows; every outer row is in a result the limit didn't cut.
+      if (alias.partners.length === 0 || result.cut) return true
       return alias.partners.every((p) => this.inResult(row[p.column.name], p.column, p.hidden!))
     }
     if (!alias.joins.every((join) => this.mayHavePartner(join, row, inserted))) return false
@@ -273,10 +275,11 @@ class LiveRead {
     }
     const limitText =
       limit?.kind === 'param' ? paramText(this.params[limit.index]) : limit?.kind === 'const' ? limit.text : undefined
-    const count = Number(limitText)
-    // SQLite reads a negative `LIMIT` as no limit.
-    const full =
-      limit !== undefined && (limitText === undefined || limitText === null || (count >= 0 && rows.length >= count))
+    // `LIMIT NULL` is no limit, and so is a negative one on SQLite.
+    const count = limitText === null ? -1 : Number(limitText)
+    const known = limit !== undefined && !Number.isNaN(count)
+    const full = known && count >= 0 && rows.length >= count
+    const cut = full || (limit !== undefined && !known)
     const sortTexts = (row: (string | null)[] | undefined) =>
       row && sort ? sort.map((k) => row[k.hidden]!) : undefined
     const seeds: Result['seeds'] = new Map()
@@ -304,7 +307,7 @@ class LiveRead {
       )
       if (key !== undefined) tuples.set(key, Number(row[distinct!.countHidden]))
     }
-    return { full, values, first: sortTexts(rows[0]), last: sortTexts(rows.at(-1)), seeds, counts, tuples }
+    return { full, cut, values, first: sortTexts(rows[0]), last: sortTexts(rows.at(-1)), seeds, counts, tuples }
   }
 }
 

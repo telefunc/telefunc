@@ -101,6 +101,9 @@ function createDrizzle(
           .where(eq(todos.userId, user))
           .orderBy(desc(todos.priority))
           .limit(2),
+      // `LIMIT NULL` is no limit, and a computed one's value isn't known: a page neither is known to be full.
+      limitNull: () => db.execute(sql`select id, text from todos order by id limit ${null}`).then(rowsOf),
+      limitSum: () => db.execute(sql`select id, text from todos order by id limit 500 + 0`).then(rowsOf),
       firstTexts: () =>
         db.select({ id: todos.id, text: todos.text }).from(todos).orderBy(todos.text, todos.id).limit(3),
       textsBelow: () =>
