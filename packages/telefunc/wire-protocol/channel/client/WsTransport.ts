@@ -254,8 +254,9 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
 
   sendFrame(frame: OutboundFrame): void {
     assert(this.ws && this.pieces)
-    if (frame.kind === 'acknowledgement') this.pieces.sender.carry(() => frame.frame)
-    else this.pieces.headroom.send(frame.frame)
+    const { receiver } = this.pieces
+    if (frame.kind === 'acknowledgement') this.pieces.sender.carry(() => receiver.report(frame.frame))
+    else this.pieces.headroom.send(receiver.report(frame.frame))
   }
 
   /** Its frames wait behind the wire's queues, and for headroom that acknowledgements free. */
@@ -319,7 +320,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   sendPing(frame: Uint8Array<ArrayBuffer>): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
     assert(this.pieces)
-    this.pieces.sender.send(withTook(frame, this.pieces.receiver.took), 0)
+    this.pieces.sender.send(this.pieces.receiver.report(frame), 0)
   }
 
   dispose(): void {

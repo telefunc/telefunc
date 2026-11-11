@@ -18,7 +18,7 @@ import {
   WIRE_RECV_BACKLOG_BASE_FRAMES,
   type ChannelTransports,
 } from '../../constants.js'
-import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, withTook } from '../../wire/frame.js'
+import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, tookOf, withTook } from '../../wire/frame.js'
 import { TAG, isWireCtrlTag } from '../../wire/tags.js'
 import { pingDeadline } from '../../wire/pingDeadline.js'
 import { textEncoder } from '../../wire/envelope.js'
@@ -459,13 +459,14 @@ class ChannelMux implements UpgradeStagesOwner {
     rawFrame: Uint8Array<ArrayBuffer>,
   ): null | ReconcileOutcome | Promise<ReconcileOutcome | null> {
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CTRL_FRAME_BYTES)
+    const took = tookOf(rawFrame)
+    const pieces = entry.sender.pieces
+    // The bytes the page took off this wire: more than it was sent is a broken peer, and the wire ends.
+    if (took !== null && pieces) {
+      const known = pieces.headroom.heartbeat(took, performance.now())
+      assertProtocol(known, 'the page says it took more bytes than this wire sent it')
+    }
     if (frame.tag === TAG.PING) {
-      const pieces = entry.sender.pieces
-      // A PING counts the bytes the page took off this wire: more than it was sent is a broken peer, and the wire ends.
-      if (pieces) {
-        const known = pieces.headroom.heartbeat(frame.took, performance.now())
-        assertProtocol(known, 'PING says the page took more bytes than this wire sent it')
-      }
       this.resetPingTimer(entry)
       this.acknowledgeArrivals(entry)
       this.pong(entry, this.answerPing(entry, frame.ended))

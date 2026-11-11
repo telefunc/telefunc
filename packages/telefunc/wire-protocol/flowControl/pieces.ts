@@ -595,7 +595,7 @@ class PieceSender {
     }
   }
 
-  /** Takes a PING or PONG that arrived at `at`, saying the receiver took `bytes`; false if more than was sent. */
+  /** Takes a frame that arrived at `at` saying the receiver took `bytes` (`withTook`); false if more than was sent. */
   heartbeat(bytes: number, at: number): boolean {
     // The count may trail the acknowledged bytes if a PIECES_ACK overtook it while it waited behind a probe.
     const took = this.acknowledgedBytes + ((bytes - this.acknowledgedBytes) | 0)

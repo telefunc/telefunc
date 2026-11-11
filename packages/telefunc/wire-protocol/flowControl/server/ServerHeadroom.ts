@@ -137,12 +137,12 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   }
 
   /** `PieceSenderOwner`: past what copies may hold, stalled wires hold that till their ping deadline, so each wire keeps
-   *  the least any sender sends ahead, which is how it shows it reads. One that never did waits for that to arrive: room
-   *  freed by a stalled wire's close would otherwise go to the next stalled wire. */
+   *  the least any sender sends ahead of what its page said it took. One whose page never said waits for that to arrive:
+   *  room freed by a stalled wire's close would otherwise go to the next stalled wire. */
   copyRoom(): number {
     if (hasCopyRoom()) return Number.POSITIVE_INFINITY
-    const { transmittedBytes, acknowledgedBytes } = this.sender
-    const room = WIRE_SEND_AHEAD_MIN_BYTES - (transmittedBytes - acknowledgedBytes)
+    const { transmittedBytes, acknowledgedBytes, heartbeatBytes } = this.sender
+    const room = WIRE_SEND_AHEAD_MIN_BYTES - (transmittedBytes - Math.max(acknowledgedBytes, heartbeatBytes))
     if (room >= WIRE_PIECES_ACK_BYTES) return room
     this.awaitsCopyRoom = true
     return 0
@@ -152,7 +152,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   heartbeat(bytes: number, at: number): boolean {
     if (!this.sender.heartbeat(bytes, at)) return false
     this.releaseCopies(this.sender.heartbeatBytes)
-    // Small frames are never acknowledged: for their wire, this is what shows its page reads.
+    // A page taking small frames says what it took mostly here, in the frames it sends anyway.
     if (this.awaitsCopyRoom) this.sendWaiting()
     return true
   }
