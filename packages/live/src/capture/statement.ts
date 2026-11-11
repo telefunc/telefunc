@@ -79,13 +79,23 @@ const DATA_STATEMENTS = new Set(['SelectStmt', 'InsertStmt', 'UpdateStmt', 'Dele
 
 const UNKNOWN_ROLE: RoleChange = { kind: 'unknown' }
 
+/** What a statement whose changes can't be told may have changed. */
+const ANYTHING: Plan = {
+  kind: 'unknownWrite',
+  tables: 'all',
+  schemaChange: true,
+  changesSession: true,
+  role: UNKNOWN_ROLE,
+}
+
 /** Statements that may set a session's settings (they run any code), or those new sessions start with. */
 const SETS_SESSIONS = new Set(['DoStmt', 'CallStmt', 'ExecuteStmt', 'AlterRoleSetStmt', 'AlterDatabaseSetStmt'])
 
 function planStatement(text: string, catalog: Catalog): Plan {
   const statements = parseStatements(text)
-  // The database rejects it too, and runs nothing.
-  if (!statements) return { kind: 'none' }
+  // A statement the parser can't read may still run: the parser and the database can be of different versions. It may
+  // have changed anything, a table, the schema or its session.
+  if (!statements) return ANYTHING
   if (statements.length !== 1) return { kind: 'several', plans: statements.map((s) => planOne(s, undefined, catalog)) }
   return planOne(statements[0]!, text, catalog)
 }
