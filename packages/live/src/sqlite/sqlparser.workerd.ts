@@ -1,6 +1,6 @@
 export { loadParser }
 
-// TODO(upstream-sqlparser-ts): import both from the package once its `exports` reaches them; the build copies them.
+// The build copies both; import them from the package once https://github.com/guan404ming/sqlparser-ts/pull/29 exports them.
 import { initSync, parse_sql } from './sqlparser/sqlparser_rs_wasm.js'
 import module from './sqlparser/sqlparser_rs_wasm_bg.wasm'
 
