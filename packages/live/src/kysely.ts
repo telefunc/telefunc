@@ -39,7 +39,7 @@ declare module 'kysely' {
 function liveKysely<DB>(db: Kysely<DB>, pool: DatabaseClient, options: LiveOptions = {}): Kysely<DB & LiveTables> {
   assertUsage(
     isDatabaseClient(pool),
-    'liveKysely(db, pool) takes the pool its dialect uses: a pg.Pool, a postgres.js `sql` or a PGlite instance.',
+    'liveKysely(db, pool) takes the pool its dialect uses: a pg.Pool, a postgres.js `sql`, a PGlite instance, or a better-sqlite3, bun:sqlite or D1 database.',
   )
   liveDatabaseOf(pool, options)
   // The class isn't exported: a builder that is never run gives its prototype.

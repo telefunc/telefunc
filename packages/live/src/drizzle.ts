@@ -20,7 +20,7 @@ import { readLive } from './liveQuery.js'
 function liveDrizzle<TDb extends DrizzleDatabase>(db: TDb, options: LiveOptions = {}): LiveDrizzle<TDb> {
   assertUsage(
     isDatabaseClient(db.$client),
-    'liveDrizzle() takes a Drizzle database on node-postgres, postgres.js or PGlite, e.g. liveDrizzle(drizzle({ client: pool })).',
+    'liveDrizzle() takes a Drizzle database on node-postgres, postgres.js, PGlite, better-sqlite3, bun:sqlite or D1, e.g. liveDrizzle(drizzle({ client: pool })).',
   )
   liveDatabaseOf(db.$client, options)
   // From the app's own copy of Drizzle (a package manager may install several): a select that is never run gives it.

@@ -1,6 +1,6 @@
 export { catalogQuery, catalogOf, changeLogSetup, DRAIN_CHANGES, changesOfLog, hasConflictReplace }
 
-import type { Catalog, Table, TableSet } from '../catalog.js'
+import type { Access, Catalog, Table, TableSet } from '../catalog.js'
 import { tablesChangedBy, union } from '../catalog.js'
 import type { Row } from '../match/condition.js'
 import type { Change } from '../match/liveRead.js'
@@ -36,9 +36,10 @@ const TABLES = `(select json_group_array(json_object('name', m.name, 'type', m.t
     'keys', (select json_group_array(json_array(f.id, f."table", f."from", f."to", f.on_update, f.on_delete)) from pragma_foreign_key_list(m.name) f)))
   from sqlite_schema m where m.type in ('table', 'view') and m.name not like 'sqlite\\_%' escape '\\' and m.name not like '\\_cf\\_%' escape '\\')`
 
-/** One query answering everything the catalog needs; `withLog`: on a connection with a change log. */
+/** One query answering everything the catalog needs; `withLog`: on a connection with a change log, else on D1, which
+ *  refuses `pragma_database_list`. */
 const catalogQuery = (withLog: boolean) => `select json_object(
-  'file', (select file from pragma_database_list where name = 'main'),
+  'file', ${withLog ? `(select file from pragma_database_list where name = 'main')` : 'null'},
   'foreignKeys', (select foreign_keys from pragma_foreign_keys),
   'tables', ${TABLES},
   'triggers', (select json_group_array(json_array(tbl_name, sql)) from sqlite_schema where type = 'trigger'),
@@ -50,6 +51,9 @@ const CHANGES = 'temp."__live_changes"'
 
 /** Empties the change log, giving the changes in the order they were made. */
 const DRAIN_CHANGES = `DELETE FROM ${CHANGES} RETURNING "id", "table", "kind", "old", "new"`
+
+/** SQLite has no roles: a connection reads every table whole. */
+const READABLE: Access = { readable: 'table', rowSecurity: false }
 
 const VOLATILE_FUNCTIONS = ['random', 'randomblob', 'changes', 'total_changes', 'last_insert_rowid', 'date', 'time']
   .concat(['datetime', 'julianday', 'unixepoch', 'strftime', 'timediff', 'current_timestamp', 'current_date'])
@@ -149,6 +153,7 @@ function catalogOf(answer: string): Catalog {
       virtual: definition?.virtual === true,
     }
     tables.set(table.id, table)
+    catalog.access.set(table.id, READABLE)
   }
   // Second pass: these name other tables, which must all be known first.
   for (const t of row.tables) {

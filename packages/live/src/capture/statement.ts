@@ -1,4 +1,4 @@
-export { planStatement, planRead, ofRows, HIDDEN_PREFIX, READS_EVERYTHING }
+export { planStatement, planRead, alsoWrites, ofRows, HIDDEN_PREFIX, READS_EVERYTHING }
 export type { Plan, ReadPlan, WritePlan, TransactionAction, ChangedTables }
 
 import {
