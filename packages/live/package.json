@@ -24,21 +24,29 @@
     "./package.json": "./package.json",
     ".": {
       "types": "./dist/index.d.ts",
+      "workerd": "./dist/index.js",
+      "worker": "./dist/index.js",
       "browser": "./dist/browser.js",
       "default": "./dist/index.js"
     },
     "./drizzle": {
       "types": "./dist/drizzle.d.ts",
+      "workerd": "./dist/drizzle.js",
+      "worker": "./dist/drizzle.js",
       "browser": "./dist/browser.js",
       "default": "./dist/drizzle.js"
     },
     "./kysely": {
       "types": "./dist/kysely.d.ts",
+      "workerd": "./dist/kysely.js",
+      "worker": "./dist/kysely.js",
       "browser": "./dist/browser.js",
       "default": "./dist/kysely.js"
     },
     "./prisma": {
       "types": "./dist/prisma.d.ts",
+      "workerd": "./dist/prisma.js",
+      "worker": "./dist/prisma.js",
       "browser": "./dist/browser.js",
       "default": "./dist/prisma.js"
     },
