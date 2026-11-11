@@ -1,7 +1,14 @@
 export { ChangeFeed }
 
 import type { BroadcastTransport } from 'telefunc'
-import { getBroadcastPlane, hostLocal, markHandled, type BackendSubscription } from 'telefunc/__internal'
+import {
+  getBroadcastPlane,
+  getOrCreate,
+  hostLocal,
+  macrotaskYield,
+  markHandled,
+  type BackendSubscription,
+} from 'telefunc/__internal'
 import type { Change } from './match/liveRead.js'
 
 type Message = { origin: string; changes: Change[] }
@@ -24,6 +31,8 @@ class ChangeFeed {
   private readonly subscriptions = Symbol('@telefunc/live subscriptions')
   /** Per table: the last message's sequence number. */
   private readonly lastSeq = new Map<string, number>()
+  /** The changes committed in this turn, by table: sent at the next turn, one message per table. */
+  private queued = new Map<string, Change[]>()
 
   constructor(transport: BroadcastTransport | undefined, database: string, onRemote: (changes: Change[]) => void) {
     this.channel = transport ? channelOf(transport) : INSTALLED_BROADCAST
@@ -45,9 +54,17 @@ class ChangeFeed {
   }
 
   publish(changes: Change[]): void {
-    const byTable = Map.groupBy(changes, (change) => change.table)
-    for (const [table, batch] of byTable) {
-      const message: Message = { origin: this.origin, changes: batch }
+    const scheduled = this.queued.size > 0
+    for (const change of changes) getOrCreate(this.queued, change.table, () => []).push(change)
+    // A message, not a timer: workerd runs timers late while I/O keeps completing.
+    if (!scheduled && this.queued.size > 0) void macrotaskYield.yield().then(() => this.flush())
+  }
+
+  private flush(): void {
+    const queued = this.queued
+    this.queued = new Map()
+    for (const [table, changes] of queued) {
+      const message: Message = { origin: this.origin, changes }
       void this.send(this.key(table), JSON.stringify(message))
     }
   }
