@@ -1,6 +1,7 @@
 // Type checks of the public API, run by `pnpm run test:types`: each `.live()` is typed by its ORM's own rows, and
 // forgetting it is a compile error where the client consumes the telefunction.
 
+import { defineContract } from '@prisma/orm-postgres/contract-builder'
 import type { Collection } from '@prisma/orm-postgres/orm-client'
 import postgres from '@prisma/orm-postgres/runtime'
 import { contractFromJson } from '@prisma/orm-postgres/static'
@@ -119,6 +120,41 @@ async function prismaSteps() {
   same<typeof picked, Live<{ id: unknown; text: unknown }[]>>(true)
   const inTransaction = await pdb.transaction((tx) => tx.orm.public.Todo.where({ userId: 1 } as never).live())
   same<typeof inTransaction, Live<Todo[]>>(true)
+}
+// A real contract: `select()` keeps what the steps before it typed, an included relation and an order.
+const notesContract = defineContract({}, ({ field, model, type, rel }) => ({
+  models: {
+    Todo: model('Todo', {
+      fields: { id: field.column(type.Int()).id(), text: field.column(type.String()) },
+      relations: { notes: rel.hasMany('Note', { by: 'todoId' }) },
+    }).sql({ table: 'todos' }),
+    Note: model('Note', {
+      fields: {
+        id: field.column(type.Int()).id(),
+        todoId: field.column(type.Int()),
+        text: field.column(type.String()),
+      },
+      relations: { todo: rel.belongsTo('Todo', { from: 'todoId', to: 'id' }) },
+    }).sql({ table: 'notes' }),
+  },
+}))
+const rawNotes = postgres({ contract: notesContract, pg: pool })
+const liveNotes = livePrisma(rawNotes, pool)
+async function prismaSelectKeepsSteps() {
+  const raw = await rawNotes.orm.public.Todo.include('notes').select('id').all()
+  type Row = (typeof raw)[number]
+  same<Row['notes'][number]['text'], string>(true)
+  // Wrapping leaves ordinary reads typed as Prisma types them.
+  const all = await liveNotes.orm.public.Todo.include('notes').select('id').all()
+  same<typeof all, typeof raw>(true)
+  const included = await liveNotes.orm.public.Todo.include('notes').select('id').live()
+  same<typeof included, Live<Row[]>>(true)
+  // `cursor()` needs an order: `orderBy()` before `select()` still counts.
+  const after = await liveNotes.orm.public.Todo.orderBy((t) => t.id.asc())
+    .select('id')
+    .cursor({ id: 1 })
+    .live()
+  same<typeof after, Live<{ id: number }[]>>(true)
 }
 const unwrappedPrisma = postgres({ contract: contractFromJson({}), pg: pool })
 const wrappedPrisma = livePrisma(unwrappedPrisma, pool)

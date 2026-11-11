@@ -47,25 +47,39 @@ type LiveModels<Models> = Models extends (...args: any[]) => any
 /** A collection whose steps keep `live()`. */
 type LiveCollection<C> = Omit<C, 'select'> &
   LiveMethod & {
-    select<Fields extends FieldsOf<C>>(...fields: Fields): LiveCollection<Picked<C, Fields[number]>>
+    // Typed by the collection it's called on, as Prisma's own `select()` is: the steps before it (`include()`,
+    // `orderBy()`, …) typed its rows and its state.
+    select<Self extends HasRow, Fields extends FieldsOf<C>>(
+      this: Self,
+      ...fields: Fields
+    ): LiveCollection<Picked<Self, Fields[number]>>
   }
 type FieldsOf<C> = C extends { select(...fields: infer Fields): unknown } ? Fields : never
 
-/** What `select(...fields)` returns, as Prisma types it: the collection with the model's `fields` and its included
- *  relations. Spelled out because a generic method's result can't be read off its type for given arguments. */
+/** What `select(...fields)` on `C` returns, as Prisma types it: the collection with the model's `fields` and its
+ *  included relations. Spelled out because a generic method's result can't be read off its type for given arguments. */
 type Picked<C, Field> = C extends HasRow &
   HasTypeState & { ctx: CollectionContext<infer Contract>; modelName: infer Model extends string }
   ? Collection<
       Contract,
       Model,
-      Simplify<
+      SimplifyDeep<
         Pick<DefaultModelRow<Contract, Model>, Field & keyof DefaultModelRow<Contract, Model>> &
           Omit<CollectionRowOf<C>, keyof DefaultModelRow<Contract, Model>>
       >,
       CollectionTypeStateOf<C>
     >
   : never
-type Simplify<T> = { [K in keyof T]: T[K] }
+/** Prisma's own, which `@prisma/orm-postgres` doesn't export. */
+type SimplifyDeep<T> = T extends readonly (infer Element)[]
+  ? T extends unknown[]
+    ? SimplifyDeep<Element>[]
+    : readonly SimplifyDeep<Element>[]
+  : T extends string | number | boolean | bigint | symbol | Date | RegExp | Uint8Array | ((...args: never[]) => unknown)
+    ? T
+    : T extends object
+      ? { [K in keyof T]: SimplifyDeep<T[K]> }
+      : T
 
 /**
  * Lets a collection read of `db` end with `.live()`: the client fetches it again when a committed write changes what
