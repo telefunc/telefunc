@@ -24,6 +24,8 @@ class ChangeFeed {
   private readonly subscriptions = Symbol('@telefunc/live subscriptions')
   /** Per table: the last message's sequence number. */
   private readonly lastSeq = new Map<string, number>()
+  /** Per table, while a message is on the way: the changes committed since, sent together once it's through. */
+  private readonly waiting = new Map<string, Change[]>()
 
   constructor(transport: BroadcastTransport | undefined, database: string, onRemote: (changes: Change[]) => void) {
     this.channel = transport ? channelOf(transport) : INSTALLED_BROADCAST
@@ -45,11 +47,27 @@ class ChangeFeed {
   }
 
   publish(changes: Change[]): void {
-    const byTable = Map.groupBy(changes, (change) => change.table)
-    for (const [table, batch] of byTable) {
-      const message: Message = { origin: this.origin, changes: batch }
-      void this.send(this.key(table), JSON.stringify(message))
+    for (const [table, committed] of Map.groupBy(changes, (change) => change.table)) {
+      const waiting = this.waiting.get(table)
+      if (waiting) for (const change of committed) waiting.push(change)
+      else void this.send(table, committed)
     }
+  }
+
+  /** Sends `changes`, then those committed meanwhile, one message of `table` on the way at a time. */
+  private async send(table: string, changes: Change[]): Promise<void> {
+    const waiting: Change[] = []
+    this.waiting.set(table, waiting)
+    for (let next = changes; next.length > 0; next = waiting.splice(0)) {
+      const message: Message = { origin: this.origin, changes: next }
+      try {
+        await this.channel.publish(this.key(table), JSON.stringify(message))
+      } catch (err) {
+        // The write stands; the other servers see the gap at this table's next message.
+        console.error(err)
+      }
+    }
+    this.waiting.delete(table)
   }
 
   private subscribe(table: string, subscriptions: Map<string, BackendSubscription>): BackendSubscription {
@@ -66,15 +84,6 @@ class ChangeFeed {
       if (state === 'closed' && subscriptions.get(table) === subscription) subscriptions.delete(table)
     })
     return subscription
-  }
-
-  private async send(key: string, serialized: string): Promise<void> {
-    try {
-      await this.channel.publish(key, serialized)
-    } catch (err) {
-      // The write stands; the other servers see the gap at this table's next message.
-      console.error(err)
-    }
   }
 
   private receive(table: string, serialized: string, seq: number): void {
