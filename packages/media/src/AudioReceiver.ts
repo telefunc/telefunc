@@ -154,12 +154,14 @@ class AudioReceiver {
   }
 
   /** The buffer's depth: what most frames' delays reach, and a frame more, for a missing one's copy to come. It deepens
-   *  at once for a frame that comes later than it, and falls back over seconds. */
+   *  at once for a frame that comes later than it, by a frame past what most reach at most, and falls back over
+   *  seconds. */
   private noteDelay(delay: number): void {
     this.delays.push(delay)
     if (this.delays.length > DELAYS_KEPT) this.delays.shift()
     const sorted = [...this.delays].sort((a, b) => a - b)
-    const reach = Math.max(sorted[Math.floor((sorted.length - 1) * DELAY_QUANTILE)]!, delay) + FRAME_MS
+    const most = sorted[Math.floor((sorted.length - 1) * DELAY_QUANTILE)]!
+    const reach = Math.min(Math.max(most, delay), most + FRAME_MS) + FRAME_MS
     const now = performance.now()
     const kept = 0.5 ** ((now - this.notedAt) / DEPTH_HALF_LIFE_MS)
     this.depthMs = reach >= this.depthMs ? reach : reach + (this.depthMs - reach) * kept
