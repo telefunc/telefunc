@@ -1,0 +1,100 @@
+{
+  "name": "@telefunc/live",
+  "version": "0.1.0",
+  "description": "Live database queries for Telefunc: end a Drizzle, Kysely or Prisma 8 read with `.live()`, and the client fetches it again when a write changes what it read.",
+  "homepage": "https://github.com/telefunc/telefunc/tree/main/packages/live#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/telefunc/telefunc.git",
+    "directory": "packages/live"
+  },
+  "license": "MIT",
+  "telefunc": {
+    "server": "@telefunc/live",
+    "client": "@telefunc/live/wire"
+  },
+  "type": "module",
+  "sideEffects": [
+    "./dist/index.js",
+    "./dist/liveQuery.js",
+    "./dist/wire/server.js",
+    "./dist/wire/client.js"
+  ],
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "browser": "./dist/browser.js",
+      "default": "./dist/index.js"
+    },
+    "./drizzle": {
+      "types": "./dist/drizzle.d.ts",
+      "browser": "./dist/browser.js",
+      "default": "./dist/drizzle.js"
+    },
+    "./kysely": {
+      "types": "./dist/kysely.d.ts",
+      "browser": "./dist/browser.js",
+      "default": "./dist/kysely.js"
+    },
+    "./prisma": {
+      "types": "./dist/prisma.d.ts",
+      "browser": "./dist/browser.js",
+      "default": "./dist/prisma.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "default": "./dist/client.js"
+    },
+    "./tanstack-query": {
+      "types": "./dist/tanstack-query.d.ts",
+      "default": "./dist/tanstack-query.js"
+    },
+    "./wire": {
+      "default": "./dist/wire/client.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "libpg-query": "18.2.2"
+  },
+  "peerDependencies": {
+    "@prisma/orm-postgres": ">=8.0.0-rc.23",
+    "@tanstack/query-core": ">=5.0.0",
+    "drizzle-orm": ">=0.45.0",
+    "kysely": ">=0.28.0",
+    "telefunc": ">=0.3.1"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.16",
+    "@prisma/orm-postgres": "8.0.0-rc.23",
+    "@tanstack/query-core": "^5.66.0",
+    "@types/node": "^24.0.4",
+    "@types/pg": "8.20.4",
+    "drizzle-orm": "0.45.4",
+    "kysely": "0.29.8",
+    "pg": "^8.23.1",
+    "telefunc": "workspace:*",
+    "typescript": "^7.0.2"
+  },
+  "peerDependenciesMeta": {
+    "@prisma/orm-postgres": {
+      "optional": true
+    },
+    "@tanstack/query-core": {
+      "optional": true
+    },
+    "drizzle-orm": {
+      "optional": true
+    },
+    "kysely": {
+      "optional": true
+    }
+  }
+}
