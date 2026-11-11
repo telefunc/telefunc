@@ -16,7 +16,7 @@ type PgQueryConfig = {
   [RESERVATION]?: Reservation
   [key: string]: unknown
 }
-type PgResult = { rows: unknown[]; fields: { name: string }[]; [key: string]: unknown }
+type PgResult = { rows: unknown[]; fields: { name: string }[]; command?: string; [key: string]: unknown }
 /** `pg`'s `Result` class: it parses a row's text values with the type parsers it was given. */
 type PgResultClass = new (
   rowMode: 'array' | undefined,
@@ -198,6 +198,10 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
       // The read it joined failed: it runs on its own.
       statement = plan()
     }
+    if (statement.asks) {
+      await sendFollowUp(statement.asks)
+      statement = plan()
+    }
     const config = statement.leads ? { ...queryConfig, rowMode: 'array' as const, types: AS_TEXT } : queryConfig
     let result: PgResult | PgResult[]
     try {
@@ -212,7 +216,7 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
       return result
     }
     const hidden = takeHiddenFields(result.fields, statement)
-    runFollowUps(statement.succeeded(takeHiddenValues(result.rows, hidden, config.rowMode === 'array')))
+    runFollowUps(statement.succeeded(takeHiddenValues(result.rows, hidden, config.rowMode === 'array'), result.command))
     if (!statement.returnsRows) result.rows.length = 0
     if (!statement.leads) return result
     // Text values, parsed by each caller: nothing they parse is shared.
@@ -234,26 +238,33 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
 
   async function sendInOrder(previous: Promise<void> | undefined, followUps: FollowUp[]): Promise<void> {
     await previous
-    for (const { text, values, done } of followUps) {
-      try {
-        done(((await query({ text, values, rowMode: 'array' })) as PgResult).rows as (string | null)[][])
-      } catch {
-        done(undefined)
-      }
+    for (const followUp of followUps) await sendFollowUp(followUp)
+  }
+
+  /** Runs a query of ours: `done` gets its rows, or `undefined` when it failed. */
+  async function sendFollowUp({ text, values, done }: FollowUp): Promise<void> {
+    try {
+      done(((await query({ text, values, rowMode: 'array' })) as PgResult).rows as (string | null)[][])
+    } catch {
+      done(undefined)
     }
   }
 
   function submit(submittable: Submittable): Submittable {
     // Wrapped now: the caller may read before the statement is planned, and rows only come after.
     const begin = isCursor(submittable) ? captureCursor(submittable) : undefined
-    const send = () => {
+    const send = async () => {
       const values = submittable.values ?? []
       if (!begin) {
         // Rows reach the caller as events (an event-based `pg.Query`): run as written, nothing to strip.
         settleWhenDone(submittable, live.statementFor(client, submittable.text, values, { rewrite: false }))
         return query(submittable)
       }
-      const statement = live.statementFor(client, submittable.text, values)
+      let statement = live.statementFor(client, submittable.text, values)
+      if (statement.asks) {
+        await sendFollowUp(statement.asks)
+        statement = live.statementFor(client, submittable.text, values)
+      }
       if (statement.text !== submittable.text) {
         submittable.text = statement.text
         if (submittable.name) submittable.name += HIDDEN_PREFIX
@@ -261,9 +272,9 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
       begin(statement)
       return query(submittable)
     }
-    if (live.isReady() && !followingUp.has(client)) return send()
     // A `pg-cursor` queues reads until it is submitted.
-    void free().then(send, (err) => submittable.handleError?.(err))
+    const sending = live.isReady() && !followingUp.has(client) ? send() : free().then(send)
+    sending.catch((err) => submittable.handleError?.(err))
     return submittable
   }
 

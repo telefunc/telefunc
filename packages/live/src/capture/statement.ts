@@ -12,7 +12,7 @@ import {
 } from '../catalog.js'
 import { analyzeRead, type ReadShape } from '../match/readShape.js'
 import { names, parseStatements, quote, spliceBytes, statementEnd, topLevelFrom, walk, type Node } from '../sql.js'
-import type { RoleChange, SetConfig } from './roles.js'
+import { ROLE_SETTINGS, type RoleChange, type SettingName } from './roles.js'
 
 type TransactionAction = 'begin' | 'commit' | 'rollback' | 'savepoint' | 'release' | 'rollbackTo'
 
@@ -23,6 +23,8 @@ type ReadPlan = {
   liveText: string | undefined
   /** Identical reads may share one run: it calls no volatile function (`Catalog.volatileFunctions`). */
   shareable: boolean
+  /** How its role changes: a function of the app's it calls may set it. */
+  role?: RoleChange
 }
 
 type WritePlan = {
@@ -54,14 +56,14 @@ type Plan =
   | { kind: 'transaction'; action: TransactionAction; savepoint?: string; chain?: boolean }
   /** A statement whose changes aren't captured row by row: every listed table may have changed. `changesSession`: it
    *  may also change settings of its session (`set_config()`, `DISCARD`), or those new sessions start with; `role`:
-   *  its role among them, or `setConfigs`: the `set_config()` calls that may set it, by the values they're given. */
+   *  its role among them, or `setConfigs`: the settings its `set_config()` calls set, which may name it. */
   | {
       kind: 'unknownWrite'
       tables: ChangedTables
       schemaChange: boolean
       changesSession?: boolean
       role?: RoleChange
-      setConfigs?: SetConfig[]
+      setConfigs?: SettingName[]
     }
   /** `SET`, `RESET`: the settings of its session change (a role, a `search_path`, what a row level security policy
    *  reads). `role`: how its role changes. */
@@ -75,8 +77,6 @@ const HIDDEN_PREFIX = '__live_'
 /** Statements that change rows only, and can run in a transaction of ours. */
 const DATA_STATEMENTS = new Set(['SelectStmt', 'InsertStmt', 'UpdateStmt', 'DeleteStmt', 'MergeStmt'])
 
-/** The settings naming a session's role, which a write's widened `RETURNING` reads as (`Plan.role`). */
-const ROLE_SETTINGS = new Set(['role', 'session_authorization'])
 const UNKNOWN_ROLE: RoleChange = { kind: 'unknown' }
 
 /** Statements that may set a session's settings (they run any code), or those new sessions start with. */
@@ -99,23 +99,29 @@ function planOne(statement: Node, text: string | undefined, catalog: Catalog): P
   const read = kind === 'SelectStmt' && !node.intoClause && !writingCte
   const writers = read ? catalog.volatileWritingFunctions : catalog.writingFunctions
   const writing = functions.some((name) => writers.has(name))
+  // A function of the app's may set its session's role (`set_config()`), whatever it is declared to do. Only those the
+  // statement calls count: a trigger, a column default or a row level security policy that switched the session's
+  // role would be a bug of the app, and counting them would cost a round trip before every write after a write to a
+  // table with an `updated_at` trigger.
+  const roleOfCalls = functions.some((name) => catalog.writingFunctions.has(name)) ? { role: UNKNOWN_ROLE } : {}
   // `set_config()` sets a setting of the session; so may a function of the app's that may write.
   const changesSession = writing || functions.includes('set_config')
-  const setConfigs = setConfigsOf(node)
   if (changesSession || writingCte) {
     const tables = writing ? 'all' : writtenTables(node, catalog)
+    const setConfigs = setConfigsOf(node)
     return {
       kind: 'unknownWrite',
       tables: DATA_STATEMENTS.has(kind) ? ofRows(tables) : 'all',
       schemaChange: false,
       changesSession,
       ...(setConfigs.length > 0 ? { setConfigs } : {}),
+      ...roleOfCalls,
     }
   }
   switch (kind) {
     case 'SelectStmt':
       if (node.intoClause) return { kind: 'unknownWrite', tables: 'all', schemaChange: true }
-      return planRead(node, text, catalog)
+      return { ...planRead(node, text, catalog), ...roleOfCalls }
     case 'InsertStmt':
     case 'UpdateStmt':
     case 'DeleteStmt':
@@ -136,10 +142,8 @@ function planOne(statement: Node, text: string | undefined, catalog: Catalog): P
       if (node.is_local) return { kind: 'none', ...sets, changesPath: node.name === 'search_path' }
       return { kind: 'session', ...sets }
     }
-    case 'DiscardStmt': {
-      const sets = node.target === 'DISCARD_ALL' ? { role: { kind: 'login' } as const } : {}
-      return { kind: 'unknownWrite', tables: 'all', schemaChange: true, changesSession: true, ...sets }
-    }
+    case 'DiscardStmt':
+      return { kind: 'unknownWrite', tables: 'all', schemaChange: true, changesSession: true, role: UNKNOWN_ROLE }
     case 'VariableShowStmt':
     case 'ListenStmt':
     case 'UnlistenStmt':
@@ -274,36 +278,31 @@ function planTransaction(node: Node): Plan {
   }
 }
 
-/** How `SET` or `RESET` changes its session's role; `RESET ALL` leaves it as it is. */
+/** How `SET` or `RESET` changes its session's role: `SET [LOCAL] ROLE` names it. What `RESET ROLE`, `SET ROLE NONE`,
+ *  `SESSION AUTHORIZATION` and `RESET ALL` go back to depends on how the session started and what it ran since. */
 function roleChangeOf(node: Node): RoleChange | undefined {
+  if (node.kind === 'VAR_RESET_ALL') return UNKNOWN_ROLE
   if (!ROLE_SETTINGS.has(node.name)) return undefined
-  const kind = node.name === 'role' ? 'role' : 'authorization'
-  if (node.kind !== 'VAR_SET_VALUE') return { kind, to: null, local: node.is_local === true }
-  const named = node.args?.[0]?.A_Const?.sval?.sval
-  if (typeof named !== 'string') return UNKNOWN_ROLE
-  // `SET ROLE NONE` goes back to the session's authorization, as `RESET ROLE` does.
-  return { kind, to: kind === 'role' && named === 'none' ? null : named, local: node.is_local === true }
+  const named = node.name === 'role' && node.kind === 'VAR_SET_VALUE' ? node.args?.[0]?.A_Const?.sval?.sval : undefined
+  if (typeof named !== 'string' || named === 'none') return UNKNOWN_ROLE
+  return { kind: 'set', role: named, local: node.is_local === true }
 }
 
-/** The `set_config()` calls `node` makes, their arguments as far as the text tells. */
-function setConfigsOf(node: Node): SetConfig[] {
-  const calls: SetConfig[] = []
+/** The settings `node`'s `set_config()` calls set, as far as the text tells. */
+function setConfigsOf(node: Node): SettingName[] {
+  const settings: SettingName[] = []
   walk(node, (key, value) => {
-    if (key !== 'FuncCall' || names(value.funcname).at(-1) !== 'set_config') return
-    const args = (value.args ?? []) as Node[]
-    calls.push([argumentOf(args[0]), argumentOf(args[1]), argumentOf(args[2])])
+    if (key === 'FuncCall' && names(value.funcname).at(-1) === 'set_config') settings.push(settingOf(value.args?.[0]))
   })
-  return calls
+  return settings
 }
 
-function argumentOf(node: Node | undefined): SetConfig[number] {
+function settingOf(node: Node | undefined): SettingName {
   const argument = node?.TypeCast?.arg ?? node
   if (argument?.ParamRef) return { param: argument.ParamRef.number - 1 }
   const constant = argument?.A_Const
   if (!constant) return undefined
-  if (constant.isnull) return { constant: null }
-  if (constant.sval) return { constant: constant.sval.sval }
-  return constant.boolval ? { constant: constant.boolval.boolval === true } : undefined
+  return { constant: constant.isnull ? null : (constant.sval?.sval ?? null) }
 }
 
 /** What a statement that changes rows only may change: `'unnamed'` for every table. */

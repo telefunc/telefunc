@@ -100,13 +100,11 @@ function captureExecutor(
     await live.ready(async (text) => firstValue(await query(text)))
   }
   /** Queued on the database now: it runs before anything the caller sends next. */
-  const runFollowUp = ({ text, values, done }: FollowUp) => {
-    const answered = query(text, values, ARRAYS)
-    answered.then(
+  const runFollowUp = ({ text, values, done }: FollowUp): Promise<void> =>
+    query(text, values, ARRAYS).then(
       (result) => done(result.rows as (string | null)[][]),
       () => done(undefined),
     )
-  }
   executor.query = async (text, params = [], options) => {
     if (isStarting()) return query(text, params, options)
     await ready()
@@ -120,10 +118,15 @@ function captureExecutor(
       if (joined) return joined.result as Results
       statement = plan()
     }
+    if (statement.asks) {
+      await runFollowUp(statement.asks)
+      statement = plan()
+    }
     const sent = statement
     const result = await run(sent, () => withBeforeCommit(sent, (send) => send(sent.text, params, options)))
     const hidden = takeHiddenFields(result.fields, sent)
-    sent.succeeded(takeHiddenValues(result.rows, hidden, options?.rowMode === 'array')).forEach(runFollowUp)
+    for (const followUp of sent.succeeded(takeHiddenValues(result.rows, hidden, options?.rowMode === 'array')))
+      void runFollowUp(followUp)
     if (!sent.returnsRows) result.rows.length = 0
     sent.answered(result, (r) => ({ ...r, rows: copyRows(r.rows) }))
     return result

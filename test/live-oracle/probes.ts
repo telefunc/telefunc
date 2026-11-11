@@ -125,6 +125,14 @@ const probes: Record<string, () => void> = {
       return (this as any).login
     }
   },
+  /** A statement that may switch to a role it doesn't name (`set_config()`) leaves the role as it was, as if Postgres
+   *  had been asked and answered that one. */
+  'role-unknown'() {
+    const changed = ConnectionRoles.prototype.changed
+    ConnectionRoles.prototype.changed = function (connection: object, change: any) {
+      if (change.kind !== 'unknown') changed.call(this, connection, change)
+    }
+  },
   /** A write is widened on a table row level security filters for its role, as if it had a `RETURNING` of its own. */
   'row-security'() {
     const widens = database.widens

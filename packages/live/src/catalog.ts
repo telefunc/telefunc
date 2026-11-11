@@ -1,4 +1,4 @@
-export { loadCatalog, accessAnswered, actionOf, sideEffects, tablesChangedBy, union, ACCESS_QUERY }
+export { loadCatalog, accessAnswered, actionOf, sideEffects, tablesChangedBy, union, ACCESS_QUERY, ROLE_QUERY }
 export type { Access, Catalog, Table, TableSet, ForeignKey, Written }
 
 import { parsePlPgSQLSync } from 'libpg-query'
@@ -145,6 +145,10 @@ const ACCESS_ROWS = `select coalesce(json_agg(json_build_array(n.nspname || '.' 
 /** The current role, and what it sees of each table: run as the role it asks about (`row_security_active()` takes
  *  none). */
 const ACCESS_QUERY = `select json_build_object('role', current_user, 'access', (${ACCESS_ROWS}))::text`
+
+/** `ACCESS_QUERY`, without what the role sees when it's one of those its parameter lists (a JSON array): `null`. */
+const ROLE_QUERY = `select json_build_object('role', current_user, 'access', case when current_user::text in
+  (select json_array_elements_text($1::json)) then null else (${ACCESS_ROWS}) end)::text`
 
 /** Whether the function `p`, in language `l`, is one of `Catalog.writingFunctions`. */
 const WRITING = `l.lanname not in ('c', 'internal')`
@@ -492,10 +496,10 @@ function union(sets: TableSet[]): TableSet {
   return new Set(sets.flatMap((s) => [...s]))
 }
 
-/** The role `ACCESS_QUERY` ran as, and what it sees of each table, from its answer. */
-function accessAnswered(answer: string): { role: string; access: Map<string, Access> } {
-  const { role, access } = JSON.parse(answer) as { role: string; access: AccessRow[] }
-  return { role, access: accessOf(access) }
+/** The role `ACCESS_QUERY` or `ROLE_QUERY` ran as, and what it sees of each table, from its answer. */
+function accessAnswered(answer: string): { role: string; access: Map<string, Access> | undefined } {
+  const { role, access } = JSON.parse(answer) as { role: string; access: AccessRow[] | null }
+  return { role, access: access ? accessOf(access) : undefined }
 }
 
 /** `ACCESS_ROWS`' rows by table id. */

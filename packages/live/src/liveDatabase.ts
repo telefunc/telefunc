@@ -6,6 +6,7 @@ import {
   accessAnswered,
   ACCESS_QUERY,
   loadCatalog,
+  ROLE_QUERY,
   tablesChangedBy,
   type Access,
   type Catalog,
@@ -38,8 +39,13 @@ type Statement = {
   text: string
   hiddenColumns: number
   returnsRows: boolean
-  succeeded(hiddenRows: (string | null)[][]): FollowUp[]
+  /** `command`: the command tag Postgres answered, when the driver tells (a `COMMIT` that rolled back answers
+   *  `ROLLBACK`). */
+  succeeded(hiddenRows: (string | null)[][], command?: string): FollowUp[]
   failed(): void
+  /** A write that runs as a role its connection doesn't know yet: run this query of ours on the connection first,
+   *  then plan the statement again, which may then capture its rows. A driver that doesn't sends it as is. */
+  asks?: FollowUp
   /** Identical reads wait for this one's result: give it to them with `answered()`. */
   leads: boolean
   /** Gives the result to the identical reads that joined this one; `copy` makes each its own. */
@@ -211,10 +217,28 @@ class LiveDatabase {
         if (rewrite && isUnnamed(plan) && !this.transactions.isOpen(connection))
           return this.inOwnTransaction(connection, text, plan)
     }
-    return this.learningAccess(
+    const statement = this.learningAccess(
       connection,
       this.statement(connection, text, 0, () => this.changesOf(plan, connection)),
     )
+    if (plan.kind !== 'write' || !rewrite || this.roles!.of(connection) !== null) return statement
+    // The role, and what it sees unless known: one round trip.
+    const known = JSON.stringify([...this.access.keys()])
+    const asks = {
+      text: ROLE_QUERY,
+      values: [known],
+      done: (rows: Rows | undefined) => this.roleAnswered(connection, rows),
+    }
+    return { ...statement, asks }
+  }
+
+  /** Files `ROLE_QUERY`'s answer; nothing when it failed (the role stays unknown, and the next write asks again). */
+  private roleAnswered(connection: object, rows: Rows | undefined): void {
+    const answer = rows?.[0]?.[0]
+    if (!answer) return
+    const { role, access } = accessAnswered(answer)
+    this.roles!.answered(connection, role)
+    if (access) this.access.set(role, access)
   }
 
   /** Whether `plan`'s widened `RETURNING` gives the same answer as the write alone, run as its connection's role: the
@@ -246,7 +270,7 @@ class LiveDatabase {
     const answer = rows?.[0]?.[0]
     if (!answer) return
     const { role, access } = accessAnswered(answer)
-    this.access.set(role, access)
+    if (access) this.access.set(role, access)
   }
 
   /** A `COMMIT`: when its transaction changed tables the catalog can't name, queries of ours name them first. `chain`:
@@ -257,9 +281,9 @@ class LiveDatabase {
     return {
       ...this.statement(connection, text, 0, () => []),
       ...(queries ? { beforeCommit: { queries, ownTransaction: false } } : {}),
-      succeeded: () => {
+      succeeded: (_, command) => {
         if (locked) this.transactions.name(connection, locked)
-        this.transactionEnded(connection, 'commit', chain)
+        this.transactionEnded(connection, command === 'ROLLBACK' ? 'rollback' : 'commit', chain)
         return []
       },
       // The transaction is over: rolled back.
@@ -290,7 +314,7 @@ class LiveDatabase {
     sharing: Sharing | undefined,
   ): Statement {
     // A read outside `.live()` is sent as written.
-    if (!live) return this.statement(connection, text, 0, () => [])
+    if (!live) return this.statement(connection, text, 0, () => this.changesOf(plan, connection))
     const key =
       sharing && !sharing.reservation && plan.shareable
         ? this.shareKey(text, values, connection, sharing.rowForm)
@@ -305,6 +329,7 @@ class LiveDatabase {
       hiddenColumns: plan.liveText ? plan.shape.hiddenColumns.length : 0,
       returnsRows: true,
       succeeded: (hiddenRows) => {
+        if (plan.role) this.roles!.changed(connection, plan.role)
         const rows = plan.liveText && hiddenRows.length <= MAX_RESULT_ROWS ? hiddenRows : undefined
         return this.resolve(watched, plan.shape, rows, text, values, connection)
       },
@@ -447,8 +472,10 @@ class LiveDatabase {
 
   /** A transaction's end on `connection`; `chain`: the next one begins at once. */
   private transactionEnded(connection: object, action: 'commit' | 'rollback', chain: boolean): void {
-    this.transactions.apply(connection, action)
-    this.roles!.transaction(connection, action)
+    // A `COMMIT` of a transaction a statement failed in rolls it back.
+    const ended = this.transactions.hasFailed(connection) ? 'rollback' : action
+    this.transactions.apply(connection, ended)
+    this.roles!.transaction(connection, ended)
     if (!chain) return
     this.transactions.apply(connection, 'begin')
     this.roles!.transaction(connection, 'begin')
@@ -599,7 +626,7 @@ function changesPath(plan: Plan): boolean {
   return plan.kind === 'none' && plan.changesPath === true
 }
 
-/** `plan` with the role its `set_config()` calls set, from the values they're given (`Plan.setConfigs`). */
+/** `plan` with how its `set_config()` calls change the role, from the values they're given (`Plan.setConfigs`). */
 function withRoleSet(plan: Plan, values: readonly unknown[]): Plan {
   // Several statements in one text take no parameters.
   if (plan.kind === 'several') return { ...plan, plans: plan.plans.map((p) => withRoleSet(p, [])) }

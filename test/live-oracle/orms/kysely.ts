@@ -375,12 +375,12 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastA
           .catch((err: unknown) => {
             throw new Error(`tenant insert refused: ${err}`)
           }),
-      // Every todo, those the tenant may not see included.
+      // Every todo, those the tenant may not see included. The role is set by `set_config()`, which doesn't name it.
       tenantUpdate: ({ value }) =>
         db.transaction().execute(async (tx) => {
           await sql`lock table todos in exclusive mode`.execute(tx)
           const { rows } = await sql<{ n: number }>`select count(*)::int as n from todos`.execute(tx)
-          await sql`set local role live_tenant`.execute(tx)
+          await sql`select set_config('role', ${'live_tenant'}, true)`.execute(tx)
           const { numAffectedRows } = await sql`update todos set priority = ${value % 5}`.execute(tx)
           if (Number(numAffectedRows) !== rows[0]!.n)
             throw new Error(`tenant update changed ${numAffectedRows} of ${rows[0]!.n} todos`)

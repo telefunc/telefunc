@@ -16,7 +16,7 @@ type PostgresJs = {
 }
 /** A scope `begin()` and `savepoint()` give their callback: statements on the transaction's connection. */
 type Scope = PostgresJs & { savepoint(...args: unknown[]): Promise<unknown> }
-type Result = unknown[] & { columns?: { name: string }[] | null }
+type Result = unknown[] & { columns?: { name: string }[] | null; command?: string }
 /** postgres.js runs a query when it is first awaited: `handle()` sends it through `handler`, its connection's queue. */
 type Query = Promise<Result> & {
   handler: (query: Query) => void
@@ -132,6 +132,10 @@ async function run(query: Query, { live, sql, connection = {}, shared }: Target)
     if (joined) return query.resolve(joined.result as Result)
     statement = rewritten(query, known!, live, connection)
   }
+  if (statement && statement.asks) {
+    await runFollowUp(sql, statement.asks)
+    statement = rewritten(query, known!, live, connection)
+  }
   // A template with helpers: its text is known once built.
   const opaque = known ? undefined : live.statementWithTextLater(connection)
   const sent = () => statement || opaque!.sent(query.string ?? '', query.parameters ?? [])
@@ -160,10 +164,10 @@ async function run(query: Query, { live, sql, connection = {}, shared }: Target)
     reserved?.release()
   }
   const done = sent()
-  const followUps = done.succeeded(takeHidden(query, result, done))
+  const followUps = done.succeeded(takeHidden(query, result, done), result.command)
   done.answered(result, copyResult)
   resolve(result)
-  for (const followUp of followUps) runFollowUp(sql, followUp)
+  for (const followUp of followUps) void runFollowUp(sql, followUp)
 }
 
 /** Loads what capturing needs, through a query of ours on `sql`, unless loaded. */
@@ -220,8 +224,8 @@ function copyResult(result: Result): Result {
   return copy
 }
 
-function runFollowUp(sql: PostgresJs, { text, values, done }: FollowUp): void {
-  ours(sql, text, values).then(
+function runFollowUp(sql: PostgresJs, { text, values, done }: FollowUp): Promise<void> {
+  return ours(sql, text, values).then(
     (rows) => done(rows as (string | null)[][]),
     () => done(undefined),
   )

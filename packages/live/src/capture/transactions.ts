@@ -80,6 +80,11 @@ class Transactions {
     if (transaction) transaction.changes = named(transaction.changes, locked)
   }
 
+  /** Whether a statement failed in `connection`'s transaction, which its `COMMIT` then rolls back. */
+  hasFailed(connection: object): boolean {
+    return this.open.get(connection)?.failed === true
+  }
+
   failed(connection: object): void {
     const transaction = this.open.get(connection)
     if (transaction) transaction.failed = true

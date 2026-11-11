@@ -378,12 +378,12 @@ function createDrizzle(
           .catch((err: unknown) => {
             throw new Error(`tenant insert refused: ${err}`)
           }),
-      // Every todo, those the tenant may not see included.
+      // Every todo, those the tenant may not see included. The role is set by `set_config()`, which doesn't name it.
       tenantUpdate: ({ value }) =>
         db.transaction(async (tx: any) => {
           await tx.execute(sql`lock table todos in exclusive mode`)
           const [{ n }] = rowsOf(await tx.execute(sql`select count(*)::int as n from todos`))
-          await tx.execute(sql`set local role live_tenant`)
+          await tx.execute(sql`select set_config('role', ${'live_tenant'}, true)`)
           const changed = affectedRows(await tx.execute(sql`update todos set priority = ${value % 5}`))
           if (changed !== n) throw new Error(`tenant update changed ${changed} of ${n} todos`)
         }),
