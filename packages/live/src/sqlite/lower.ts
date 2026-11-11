@@ -18,6 +18,7 @@ class CannotLower extends Error {}
  * | `ORDER BY x [ASC]`, `ORDER BY x DESC` | `SortBy` with `SORTBY_NULLS_FIRST`, `SORTBY_NULLS_LAST` | SQLite sorts `NULL` first |
  * | `a op b op c` (compound) | `SelectStmt` nested to the left | SQLite runs compound operators from left to right |
  * | `total(x)`, `group_concat`, `json_group_array`, `json_group_object` | `sum`, `string_agg`, `json_agg`, `json_object_agg` | aggregates |
+ * | `f(x ORDER BY y)` | `FuncCall` with `agg_order` | an aggregate's own order |
  * | `max(a, b, …)`, `min(a, b, …)` | an unknown function | scalar functions on SQLite |
  * | `"name"`, `` `name` ``, `[name]`, `name` | `ColumnRef`, `RangeVar` with the name in ASCII lower case | SQLite names ignore ASCII case |
  */
@@ -290,10 +291,14 @@ class Lowering {
     if (call.parameters !== 'None' || call.null_treatment || call.within_group?.length) throw new CannotLower('call')
     if (call.filter) throw new CannotLower('filter')
     const list = call.args === 'None' ? { args: [] } : call.args.List
-    if (!list || list.clauses?.length) throw new CannotLower('function arguments')
+    // An aggregate's own `ORDER BY` (`json_group_array(x ORDER BY y)`) is the only clause SQLite has there.
+    const clauses = (list?.clauses ?? []) as Ast[]
+    if (!list || clauses.some((clause) => !clause.OrderBy)) throw new CannotLower('function arguments')
     const node = this.call(call.name, list.args as Ast[])
     if (list.duplicate_treatment === 'Distinct') node.FuncCall.agg_distinct = true
     else if (list.duplicate_treatment) throw new CannotLower('function arguments')
+    const order = clauses.flatMap((clause) => clause.OrderBy as Ast[])
+    if (order.length > 0) node.FuncCall.agg_order = order.map((o) => this.sortBy(o))
     if (call.over) node.FuncCall.over = {}
     return node
   }
