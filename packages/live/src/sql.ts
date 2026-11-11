@@ -1,4 +1,4 @@
-export { loadParser, parseStatements, names, walk, tablesIn, functionNamesIn, isAggregateCall, splitAnd, quote }
+export { loadParser, parseStatements, names, walk, tablesIn, isAggregateCall, splitAnd, quote }
 export { topLevelFrom, fromClauseAt, parenthesizedAt, statementEnd, spliceBytes, renumberParams }
 export type { Node, RangeVar }
 
@@ -49,15 +49,6 @@ function tablesIn(node: unknown): RangeVar[] {
     if (key === 'RangeVar' || key === 'relation') tables.push(value as RangeVar)
   })
   return tables
-}
-
-/** The last part of every function name called below `node`. */
-function functionNamesIn(node: unknown): string[] {
-  const found: string[] = []
-  walk(node, (key, value) => {
-    if (key === 'FuncCall') found.push(names(value.funcname).at(-1)!)
-  })
-  return found
 }
 
 const AGGREGATES = new Set([

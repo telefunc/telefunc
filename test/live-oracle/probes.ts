@@ -165,13 +165,19 @@ const probes: Record<string, () => void> = {
    *  counts as a write, and its `.live()` fails. */
   'read-language'() {
     catalogRow((row) => {
-      row.functions = row.functions.map(([name, writing, , defaults]: any[]) => [name, writing, true, defaults])
+      row.functions = row.functions.map(([name, writing, , ...rest]: any[]) => [name, writing, true, ...rest])
     })
   },
   /** A function's default arguments are taken to call nothing. */
   'default-calls'() {
     catalogRow((row) => {
-      row.functions = row.functions.map(([name, writing, volatile]: any[]) => [name, writing, volatile, null])
+      row.functions = row.functions.map(([name, writing, volatile, , ...rest]: any[]) => [
+        name,
+        writing,
+        volatile,
+        null,
+        ...rest,
+      ])
     })
   },
   /** A typed operand, a cast or a number, is compared with a column whatever its type, as if Postgres compared both

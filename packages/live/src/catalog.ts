@@ -3,7 +3,7 @@ export type { Access, Catalog, Table, TableSet, ForeignKey, Written }
 
 import { parsePlPgSQLSync } from 'libpg-query'
 import type { Column } from './match/values.js'
-import { functionNamesIn, parseStatements, quote, tablesIn, walk, type Node, type RangeVar } from './sql.js'
+import { names, parseStatements, quote, tablesIn, walk, type Node, type RangeVar } from './sql.js'
 
 /** Tables by id (`schema.name`), or every table. */
 type TableSet = ReadonlySet<string> | 'all'
@@ -63,7 +63,8 @@ type Catalog = {
   /** The volatile `writingFunctions`: a read calling one may write any table. Postgres refuses a write in a `STABLE`
    *  or `IMMUTABLE` function's own body, and a read calling one stays a read. */
   volatileWritingFunctions: Set<string>
-  /** The functions `node` calls, with those their default arguments call: the caller evaluates those. */
+  /** The functions `node` calls, with those the defaults of the arguments they leave out call: the caller evaluates
+   *  those. */
   calls(node: unknown): string[]
   /** The volatile functions of every schema, built-in ones included (`random()`, `nextval()`, `clock_timestamp()`):
    *  two calls may return different values. */
@@ -84,7 +85,16 @@ type CatalogRow = {
   searchPath: string[]
   serverVersion: number
   cOrdering: boolean
-  functions: [name: string, writing: boolean, volatile: boolean, defaults: string | null][]
+  functions: [
+    name: string,
+    writing: boolean,
+    volatile: boolean,
+    defaults: string | null,
+    argumentNames: string[] | null,
+    argumentModes: string[] | null,
+    inputCount: number,
+    variadic: boolean,
+  ][]
   volatileFunctions: string[]
   tables: {
     schema: string
@@ -117,6 +127,10 @@ type CatalogRow = {
   }[]
 }
 
+/** A function of the app's, among those of its name a call may mean: its input arguments' names (`''` for one without),
+ *  and the expressions of its defaults, those of its last arguments. */
+type Overload = { inputs: string[]; defaults: Node[]; variadic: boolean }
+
 type AccessRow = [table: string, readable: 'table' | 'columns' | null, rowSecurity: boolean]
 
 /** What the current role sees of each table (`AccessRow`). */
@@ -144,7 +158,7 @@ const CATALOG_QUERY = `select json_build_object(
   'serverVersion', current_setting('server_version_num')::int,
   'cOrdering', (select datlocprovider in ('c', 'b') and datcollate in ('C', 'POSIX') from pg_database where datname = current_database()),
   'functions', (select coalesce(json_agg(json_build_array(p.proname, ${WRITING}, p.provolatile = 'v',
-      pg_get_expr(p.proargdefaults, 0))), '[]') from pg_proc p
+      pg_get_expr(p.proargdefaults, 0), p.proargnames, p.proargmodes, p.pronargs, p.provariadic <> 0)), '[]') from pg_proc p
     join pg_namespace n on n.oid = p.pronamespace join pg_language l on l.oid = p.prolang
     where n.nspname not in ('pg_catalog', 'information_schema') and p.prorettype <> 'trigger'::regtype),
   'volatileFunctions', (select coalesce(json_agg(distinct p.proname), '[]') from pg_proc p where p.provolatile = 'v'),
@@ -214,6 +228,8 @@ const PARSE_EXPRESSION = 2
 /** Statements a trigger may run that change no table but those their nodes name (`WRITES`). */
 const KNOWN_STATEMENTS = new Set(['SelectStmt', 'InsertStmt', 'UpdateStmt', 'DeleteStmt', 'MergeStmt', 'NotifyStmt'])
 const WRITES = new Set(['InsertStmt', 'UpdateStmt', 'DeleteStmt', 'MergeStmt'])
+/** The argument modes (`pg_proc.proargmodes`) of input arguments: `IN`, `INOUT`, `VARIADIC`. */
+const INPUT_MODES = new Set(['i', 'b', 'v'])
 
 async function loadCatalog(query: (text: string) => Promise<string>): Promise<Catalog> {
   const row = JSON.parse(await query(CATALOG_QUERY)) as CatalogRow
@@ -228,24 +244,28 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
   const volatileWritingFunctions = new Set(
     row.functions.filter(([, writing, volatile]) => writing && volatile).map(([name]) => name),
   )
-  const defaultCalls = new Map<string, string[]>()
-  for (const [name, , , defaults] of row.functions) {
-    if (defaults === null) continue
-    const parsed = parseStatements(`SELECT ${defaults}`)
-    if (parsed) {
-      defaultCalls.set(name, [...(defaultCalls.get(name) ?? []), ...functionNamesIn(parsed)])
-      continue
-    }
+  const overloads = new Map<string, Overload[]>()
+  for (const [name, , , defaultsText, argumentNames, argumentModes, inputCount, variadic] of row.functions) {
+    const parsed = defaultsText === null ? [] : parseStatements(`SELECT ${defaultsText}`)
     // Defaults that don't parse may call anything.
-    writingFunctions.add(name)
-    volatileWritingFunctions.add(name)
+    if (!parsed) {
+      writingFunctions.add(name)
+      volatileWritingFunctions.add(name)
+    }
+    const defaults = ((parsed?.[0]?.SelectStmt.targetList ?? []) as Node[]).map((target) => target.ResTarget.val)
+    const inputs = argumentNames
+      ? argumentNames.filter((_, i) => !argumentModes || INPUT_MODES.has(argumentModes[i]!))
+      : Array<string>(inputCount).fill('')
+    overloads.set(name, [...(overloads.get(name) ?? []), { inputs, defaults, variadic }])
   }
-  /** `called`, with the functions their default arguments call, theirs too. */
-  const withDefaultCalls = (called: string[]): string[] => {
-    const all = new Set(called)
-    for (const name of all) for (const inner of defaultCalls.get(name) ?? []) all.add(inner)
-    return [...all]
-  }
+  /** `called`, with the functions the defaults of any of their overloads call: their calls aren't known. */
+  const withDefaultCalls = (called: string[]): string[] => [
+    ...called,
+    ...callsIn(
+      called.flatMap((name) => (overloads.get(name) ?? []).flatMap((overload) => overload.defaults)),
+      overloads,
+    ),
+  ]
   const catalog: Catalog = {
     database: row.database,
     role: row.role,
@@ -256,7 +276,7 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
     writingFunctions,
     volatileWritingFunctions,
     calls(node) {
-      return withDefaultCalls(functionNamesIn(node))
+      return callsIn(node, overloads)
     },
     volatileFunctions: new Set(row.volatileFunctions),
     searchPath: row.searchPath,
@@ -328,6 +348,43 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
     if (t.view) for (const write of WRITES_OF_ANY_KIND) alsoWrites[write] = 'all'
   }
   return catalog
+}
+
+/** The functions called below `node`, with those the defaults of the arguments they leave out call, theirs too. */
+function callsIn(node: unknown, overloads: Map<string, Overload[]>, walked = new Set<Node>()): string[] {
+  const called: string[] = []
+  walk(node, (key, call) => {
+    if (key !== 'FuncCall') return
+    const name = names(call.funcname).at(-1)!
+    called.push(name)
+    for (const fallback of defaultsEvaluated(call, overloads.get(name) ?? [])) {
+      if (walked.has(fallback)) continue
+      walked.add(fallback)
+      called.push(...callsIn(fallback, overloads, walked))
+    }
+  })
+  return called
+}
+
+/** The defaults `call` evaluates: those of the arguments it leaves out, when one overload of its name takes its
+ *  arguments and none is variadic; otherwise those of every overload, as the one it calls isn't known. */
+function defaultsEvaluated(call: Node, overloads: Overload[]): Node[] {
+  const args = (call.args ?? []) as Node[]
+  const named = args.flatMap((arg) => (arg.NamedArgExpr ? [arg.NamedArgExpr.name as string] : []))
+  const positional = args.length - named.length
+  const taking = overloads.filter((overload) => takes(overload, positional, named))
+  if (call.func_variadic || overloads.some((overload) => overload.variadic) || taking.length !== 1)
+    return overloads.flatMap((overload) => overload.defaults)
+  const { inputs, defaults } = taking[0]!
+  const firstDefault = inputs.length - defaults.length
+  return defaults.filter((_, i) => firstDefault + i >= positional && !named.includes(inputs[firstDefault + i]!))
+}
+
+/** Whether `overload` takes `positional` arguments followed by `named` ones: each named one is an argument after the
+ *  positional ones, and every argument without a default is given. */
+function takes({ inputs, defaults }: Overload, positional: number, named: string[]): boolean {
+  if (positional > inputs.length || named.some((name) => inputs.indexOf(name) < positional)) return false
+  return inputs.every((name, i) => i < positional || i >= inputs.length - defaults.length || named.includes(name))
 }
 
 /** The tables `statements` name, each name resolved by `named`. */
