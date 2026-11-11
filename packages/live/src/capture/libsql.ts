@@ -3,6 +3,7 @@ export type { Libsql }
 
 import { assertUsage } from '../assert.js'
 import type { FollowUp, LiveDatabase, Statement } from '../liveDatabase.js'
+import { paramValues } from '../sqlite/dialect.js'
 
 // The parts of `@libsql/client` used here, so that it stays the app's dependency.
 type Args = unknown[] | Record<string, unknown>
@@ -145,7 +146,10 @@ function captureLibsql(client: Libsql, live: LiveDatabase): void {
 
   client.executeMultiple = async (text) => {
     await ready()
-    await sendAsWritten(live.statementFor(client, text, [], { rewrite: false }), () => executeMultiple(text))
+    const statements = live.statementsOf(text)
+    if (!statements)
+      return await sendAsWritten(live.statementFor(client, text, [], { rewrite: false }), () => executeMultiple(text))
+    for (const statement of statements) await client.execute(statement)
   }
 
   client.transaction = async (mode) => {
@@ -193,7 +197,10 @@ function captureTransaction(tx: Transaction, live: LiveDatabase): void {
   }
   tx.executeMultiple = async (text) => {
     await ready()
-    await sendAsWritten(live.statementFor(tx, text, [], { rewrite: false }), () => executeMultiple(text))
+    const statements = live.statementsOf(text)
+    if (!statements)
+      return await sendAsWritten(live.statementFor(tx, text, [], { rewrite: false }), () => executeMultiple(text))
+    for (const statement of statements) await tx.execute(statement)
   }
   tx.commit = async () => {
     const statement = live.statementFor(tx, 'COMMIT', [])
@@ -225,12 +232,19 @@ function readyThrough(live: LiveDatabase, execute: (statement: InStatement) => P
   }
 }
 
-/** Plans the app's statements on `connection`; named parameters (an object) are sent as written. */
+/** Plans the app's statements on `connection`; named parameters (an object) by the number SQLite gives each. */
 function planOn(live: LiveDatabase, connection: object) {
-  return ({ sql, args }: Planned['app']) =>
-    Array.isArray(args)
-      ? live.statementFor(connection, sql, args)
+  return ({ sql, args }: Planned['app']) => {
+    const values = Array.isArray(args) ? args : paramValues(sql, [], unprefixed(args))
+    return values
+      ? live.statementFor(connection, sql, values)
       : live.statementFor(connection, sql, [], { rewrite: false })
+  }
+}
+
+/** Named parameters as libSQL binds them: by the name without its prefix, the last of a name winning. */
+function unprefixed(named: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(named).map(([name, value]) => [name.replace(/^[:@$]/, ''), value]))
 }
 
 /** Runs `planned` on one connection, with the queries of ours it needs on either side: `send` sends the app's

@@ -1,4 +1,4 @@
-export { SQLITE, numberParams, tokensOf }
+export { SQLITE, numberParams, paramValues, tokensOf }
 
 import type { Dialect } from '../dialect.js'
 
@@ -96,32 +96,62 @@ const AFTER_WHERE = new Set([
   'returning',
 ])
 
-/**
- * `text` with each parameter written `?NNN`, numbered as SQLite numbers them: `?` one more than the largest number
- * before it, `:name`, `@name` and `$name` the same number at each use. `named`: the text has a named one, whose value
- * a driver binds by name.
- */
-function numberParams(text: string): { text: string; named: boolean } {
+/** `text` with each parameter written `?NNN`, by its number (`paramsOf()`). */
+function numberParams(text: string): string {
   let numbered = ''
   let copied = 0
+  for (const { token, number } of paramsOf(text)) {
+    numbered += `${text.slice(copied, token.start)}?${number}`
+    copied = token.end
+  }
+  return numbered + text.slice(copied)
+}
+
+/**
+ * The values of `text`'s parameters by number, as SQLite binds the app's: a named one by its name, with or without
+ * its prefix, each other number the next of `anonymous`. `undefined` when `named` lacks a name.
+ */
+function paramValues(
+  text: string,
+  anonymous: readonly unknown[],
+  named: Record<string, unknown>,
+): unknown[] | undefined {
+  const names: (string | undefined)[] = []
+  for (const { token, number } of paramsOf(text)) {
+    names.length = Math.max(names.length, number)
+    if (token.text[0] !== '?') names[number - 1] = token.text
+  }
+  const values: unknown[] = []
+  let next = 0
+  for (const name of names) {
+    if (name === undefined) {
+      values.push(anonymous[next++])
+      continue
+    }
+    const key = [name, name.slice(1)].find((key) => Object.hasOwn(named, key))
+    if (key === undefined) return undefined
+    values.push(named[key])
+  }
+  return values
+}
+
+/** `text`'s parameters, each with the number SQLite gives it: `?` one more than the largest number before it, `?NNN`
+ *  its own, `:name`, `@name` and `$name` the same number at each use. */
+function* paramsOf(text: string): Generator<{ token: Token; number: number }> {
   let largest = 0
-  let named = false
   const names = new Map<string, number>()
   for (const token of tokensOf(text)) {
     if (!token.param) continue
     let number: number
-    if (token.text === '?') number = ++largest
+    if (token.text === '?') number = largest + 1
     else if (token.text[0] === '?') number = Number(token.text.slice(1))
     else {
-      named = true
-      number = names.get(token.text) ?? ++largest
+      number = names.get(token.text) ?? largest + 1
       names.set(token.text, number)
     }
     largest = Math.max(largest, number)
-    numbered += `${text.slice(copied, token.start)}?${number}`
-    copied = token.end
+    yield { token, number }
   }
-  return { text: numbered + text.slice(copied), named }
 }
 
 type Token = { text: string; start: number; end: number; word?: string; param?: true }

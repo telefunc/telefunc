@@ -68,6 +68,7 @@ class Lowering {
       const op = SET_OPERATIONS[operation.op]
       const quantifier = operation.set_quantifier
       if (!op || (quantifier !== 'None' && quantifier !== 'All')) throw new CannotLower(operation.op)
+      // spellcheck-ignore: `larg` and `rarg` are the parse tree's names
       tree = { op, all: quantifier === 'All', larg: tree, rarg: this.branch(branches[i + 1]!) }
     })
     return tree
@@ -115,6 +116,7 @@ class Lowering {
       const [kind, constraint] = variant(join.join_operator)
       const jointype = JOINS[kind]
       if (!jointype || join.global) throw new CannotLower(kind)
+      // spellcheck-ignore: `larg` and `rarg` are the parse tree's names
       const node: Node = { jointype, larg: tree, rarg: this.fromItem(join.relation) }
       if (constraint?.On) node.quals = this.expression(constraint.On)
       else if (constraint?.Using)

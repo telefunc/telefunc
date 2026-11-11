@@ -240,7 +240,10 @@ async function connect(): Promise<{
     const oracle = createClient({ url })
     await oracle.executeMultiple(sqliteSeed(random))
     const client = createClient({ url })
-    const driver = createDrizzleSqlite(client, drizzle, { exec: (text) => client.executeMultiple(text) })
+    const driver = createDrizzleSqlite(client, drizzle, {
+      exec: (text) => client.executeMultiple(text),
+      named: (text, args) => client.execute({ sql: text, args }),
+    })
     return {
       driver,
       writer: driver,
@@ -258,7 +261,9 @@ async function connect(): Promise<{
     sqlite.exec(sqliteSeed(random))
     sqlite.aggregate('product', { start: 1, step: (product: number, x: number) => product * x })
     const driver =
-      ORM === 'kysely' ? createKyselySqlite(sqlite) : createDrizzleSqlite(sqlite, drizzle, { product: true })
+      ORM === 'kysely'
+        ? createKyselySqlite(sqlite)
+        : createDrizzleSqlite(sqlite, drizzle, { named: (text, args) => sqlite.prepare(text).run(args), product: true })
     return {
       driver,
       writer: driver,

@@ -1,4 +1,4 @@
-export { parseSqlite, offsetOf }
+export { parseSqlite, splitSqlite, offsetOf }
 export type { Ast, Span }
 
 import { loadParser } from '#sqlparser'
@@ -19,6 +19,22 @@ function parseSqlite(text: string): Ast[] | null {
   if (statements) return statements
   const bare = bareConflictTargets(text)
   return bare === null ? null : parseWith(parser, bare)
+}
+
+/** The statements of `text`, each its own text, or `undefined` when the parser can't read it. A `;` ends one where the
+ *  text before it reads as one statement alone: a trigger's body holds `;` of its own. */
+function splitSqlite(text: string): string[] | undefined {
+  const count = parseSqlite(text)?.length
+  if (!count) return undefined
+  const statements: string[] = []
+  let start = 0
+  for (const token of tokensOf(text)) {
+    if (token.text !== ';' || parseSqlite(text.slice(start, token.start))?.length !== 1) continue
+    statements.push(text.slice(start, token.start))
+    start = token.end
+  }
+  if (tokensOf(text.slice(start)).length > 0) statements.push(text.slice(start))
+  return statements.length === count ? statements : undefined
 }
 
 function parseWith(parser: Parser, text: string): Ast[] | null {

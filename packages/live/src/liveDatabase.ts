@@ -89,6 +89,8 @@ type Engine = {
     changesOf(rows: Rows, catalog: Catalog): Change[]
   }
   plan(text: string, catalog: Catalog): Plan
+  /** The statements of text that may hold several, each its own text; `undefined` when the parser can't read it. */
+  split?(text: string): string[] | undefined
   /** A statement that fails inside a transaction makes it roll back (Postgres); on SQLite, it undoes its own
    *  changes only. */
   failureAbortsTransaction: boolean
@@ -166,6 +168,15 @@ class LiveDatabase {
     if (!log || this.loggingConnections.has(connection)) return []
     this.loggingConnections.add(connection)
     return log.setup(this.catalog!, JSON.parse(query(log.triggers)))
+  }
+
+  /** The statements of `text`, once `isReady()`, when sent one by one on any connection they do what `text` does: each
+   *  reads or writes rows, none begins a transaction, changes the schema or sets a `PRAGMA`. */
+  statementsOf(text: string): string[] | undefined {
+    const statements = this.engine.split?.(text)
+    return statements?.every((statement) => readsOrWritesRows(this.planOf(statement, this.catalog!)))
+      ? statements
+      : undefined
   }
 
   /** Called before each statement, on the connection that runs it, once `isReady()`. Without `rewrite`, the text is
@@ -585,13 +596,15 @@ class LiveDatabase {
    *  sends `readsFirst`. */
   private widenedWrite(connection: object, plan: WritePlan, values: readonly unknown[]): Statement {
     let before: Rows | undefined
-    const statement = this.statement(connection, plan.text, plan.images.length, (rows) =>
-      this.changesOfWrite(plan, rows, before),
-    )
-    if (!plan.readsFirst) return { ...statement, returnsRows: plan.hadReturning }
+    const sent = {
+      ...this.statement(connection, plan.text, plan.images.length, (rows) => this.changesOfWrite(plan, rows, before)),
+      ...(plan.params && { values: plan.params.map((i) => values[i]) }),
+      returnsRows: plan.hadReturning,
+    }
+    if (!plan.readsFirst) return sent
     const { text, params } = plan.readsFirst
     const readsFirst = { text, values: params.map((i) => values[i]), done: (rows?: Rows) => void (before = rows) }
-    return { ...statement, returnsRows: plan.hadReturning, readsFirst }
+    return { ...sent, readsFirst }
   }
 
   /** `before`: what `readsFirst` read, when the driver sent it. */
@@ -701,6 +714,10 @@ function namingQueries(named: (tables: string[]) => void): FollowUp[] {
     { text: 'SET CONSTRAINTS ALL IMMEDIATE', values: [], done: () => {} },
     { text: LOCKED_TABLES, values: [], done: (rows) => rows && named(rows.map((row) => row[0]!)) },
   ]
+}
+
+function readsOrWritesRows(plan: Plan): boolean {
+  return plan.kind === 'read' || plan.kind === 'write' || (plan.kind === 'unknownWrite' && !plan.schemaChange)
 }
 
 /** Whether `plan` changes rows of tables the catalog can't name: its transaction then reads its locks before it

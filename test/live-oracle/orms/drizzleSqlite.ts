@@ -63,15 +63,20 @@ const schema = { users, todos, tags, usersRelations, todosRelations }
 const NICKS = ['ann', 'ANN', 'Bob', 'bob', 'cy', 'Dee']
 
 /** `client` is a better-sqlite3 or bun:sqlite database, a libSQL client or a D1 binding, `drizzle` the Drizzle driver
- *  for it; `exec` runs text that may hold several statements; `product`: the connection has the app's aggregate
- *  `product()`. */
+ *  for it; `exec` runs text that may hold several statements; `named` runs a statement with named parameters;
+ *  `product`: the connection has the app's aggregate `product()`. */
 function createDrizzleSqlite(
   client: object,
   drizzle: (config: { client: any; schema: typeof schema }) => object,
   {
     exec = (text) => (client as { exec(text: string): unknown }).exec(text),
+    named,
     product = false,
-  }: { exec?: (text: string) => unknown; product?: boolean } = {},
+  }: {
+    exec?: (text: string) => unknown
+    named?: (text: string, args: Record<string, unknown>) => unknown
+    product?: boolean
+  } = {},
 ): OrmDriver {
   const db = liveDrizzle(drizzle({ client, schema }) as any) as any
   const driver: OrmDriver = {
@@ -291,6 +296,11 @@ function createDrizzleSqlite(
           .onConflictDoUpdate({ target: todos.id, set: { text } })
           .run(),
       rawBump: ({ user }) => db.run(sql`update todos set priority = priority + 1 where user_id = ${user}`),
+      // `:v` and `@v` are two parameters, both bound from `v`.
+      ...(named && {
+        namedUpdate: ({ todo, value }) =>
+          named('update todos set priority = :v, due = @v where id = $id', { v: value % 5, id: todo }),
+      }),
       // Deletes the setting of that name, then inserts it with a new id.
       replaceSetting: ({ value }) =>
         db.run(sql`replace into settings (name, value) values (${`s${value % 5}`}, ${value})`),

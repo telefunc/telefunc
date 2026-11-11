@@ -3,6 +3,7 @@ export type { RowsKind }
 
 import { assertUsage } from '../assert.js'
 import type { FollowUp, LiveDatabase, Statement } from '../liveDatabase.js'
+import { paramValues } from '../sqlite/dialect.js'
 import { takeHiddenValues } from './hiddenColumns.js'
 import { HIDDEN_PREFIX } from './statement.js'
 
@@ -61,7 +62,7 @@ function captureSyncSqlite(driver: SyncSqlite, live: LiveDatabase) {
     (statement: SyncStatement, native: (...params: unknown[]) => unknown, name: string, rowsKind: () => RowsKind) =>
     (...params: unknown[]) => {
       ready()
-      const values = positional(params)
+      const values = valuesOf(statement.text, params)
       const rows = rowsKind()
       const rewrite = values !== undefined && rows !== 'other'
       const planned = live.statementFor(db, statement.text, values ?? [], { rewrite })
@@ -89,7 +90,7 @@ function captureSyncSqlite(driver: SyncSqlite, live: LiveDatabase) {
     /** Text that may hold several statements, run as written with the app's `params`. */
     exec(text: string, params: unknown[], send: () => unknown) {
       ready()
-      return run(live.statementFor(db, text, positional(params) ?? [], { rewrite: false }), send)
+      return run(live.statementFor(db, text, valuesOf(text, params) ?? [], { rewrite: false }), send)
     },
     /** A transaction function: it runs `BEGIN` (or a savepoint, inside another) and its end past the statements the
      *  capture sees. */
@@ -112,15 +113,16 @@ function captureSyncSqlite(driver: SyncSqlite, live: LiveDatabase) {
   }
 }
 
-/** The values bound to `?` in order: an array among the arguments is spread. `undefined` for named parameters (an
- *  object). */
-function positional(params: unknown[]): unknown[] | undefined {
-  const values: unknown[] = []
+/** The values of `text`'s parameters by number, from the app's arguments: an array among them is spread, an object
+ *  holds the named ones (`paramValues()`). */
+function valuesOf(text: string, params: unknown[]): unknown[] | undefined {
+  const anonymous: unknown[] = []
+  let named: Record<string, unknown> | undefined
   for (const param of params) {
-    if (Array.isArray(param)) values.push(...param)
+    if (Array.isArray(param)) anonymous.push(...param)
     else if (param !== null && typeof param === 'object' && Object.getPrototypeOf(param) === Object.prototype)
-      return undefined
-    else values.push(param)
+      named = param as Record<string, unknown>
+    else anonymous.push(param)
   }
-  return values
+  return named ? paramValues(text, anonymous, named) : anonymous
 }

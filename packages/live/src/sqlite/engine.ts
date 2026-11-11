@@ -2,6 +2,7 @@ export { LOGGED_SQLITE_ENGINE, RETURNING_SQLITE_ENGINE, D1_ENGINE }
 
 import type { Engine } from '../liveDatabase.js'
 import { catalogOf, catalogQuery, CHANGE_LOG_TRIGGERS, changeLogSetup, changesOfLog, DRAIN_CHANGES } from './catalog.js'
+import { splitSqlite } from './parser.js'
 import { planSqlite } from './plan.js'
 
 /** SQLite whose writes give their rows through a `RETURNING` of ours: its statements run on connections the capture
@@ -9,6 +10,7 @@ import { planSqlite } from './plan.js'
 const RETURNING_SQLITE_ENGINE: Engine = {
   loadCatalog: async (query) => catalogOf(await query(catalogQuery(true)), false),
   plan: planSqlite,
+  split: splitSqlite,
   failureAbortsTransaction: false,
 }
 

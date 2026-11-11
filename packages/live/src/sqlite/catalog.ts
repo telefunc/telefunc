@@ -85,6 +85,7 @@ function affinityOf(type: string): 'integer' | 'text' | 'blob' | 'real' | 'numer
   if (t.includes('INT')) return 'integer'
   if (t.includes('CHAR') || t.includes('CLOB') || t.includes('TEXT')) return 'text'
   if (t === '' || t.includes('BLOB')) return 'blob'
+  // spellcheck-ignore: `DOUB` is in SQLite's rule
   if (t.includes('REAL') || t.includes('FLOA') || t.includes('DOUB')) return 'real'
   return 'numeric'
 }
