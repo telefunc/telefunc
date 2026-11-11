@@ -1,4 +1,4 @@
-// Every add-on: Room (`@telefunc/room`), `@telefunc/rxjs` and `@telefunc/redis`.
+// Every add-on: Room (`@telefunc/room`), `@telefunc/rxjs`, `@telefunc/redis` and `@telefunc/live`.
 export type { TELEFUNC_SHIELDS } from '../shared/transformer/generateShield/shieldKey.js'
 export type { OrderingInfo } from '../../wire-protocol/wire/orderingFrame.js'
 export { untether } from '../../utils/wrapProxy.js'
@@ -16,7 +16,7 @@ export { getOrCreate } from '../../utils/getOrCreate.js'
 export { isObject } from '../../utils/isObject.js'
 export { Listeners } from '../../utils/Listeners.js'
 export { markHandled } from '../../utils/markHandled.js'
-export { nextTurn } from '../../wire-protocol/flowControl/macrotaskYield.js'
+export { macrotaskYield, nextTurn } from '../../wire-protocol/flowControl/macrotaskYield.js'
 export { unrefTimer } from '../../utils/unrefTimer.js'
 export { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 
@@ -57,6 +57,10 @@ export { decodeOrderingFrame } from '../../wire-protocol/wire/orderingFrame.js'
 export { MemoryBackend } from '../../wire-protocol/backend/memory/MemoryBackend.js'
 export { MemoryPubSub, type Subscribers } from '../../wire-protocol/backend/memory/MemoryPubSub.js'
 export { ChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
+
+// An add-on that sends messages of its own over the installed Broadcast: `@telefunc/live`'s changes.
+export { getBroadcastPlane } from '../../wire-protocol/backend/install.js'
+export type { BroadcastPlane } from '../../wire-protocol/backend/broadcast/BroadcastPlane.js'
 
 // A Cloudflare extension: Room's session and authority Durable Objects.
 export {
