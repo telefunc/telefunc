@@ -83,6 +83,8 @@ function createDrizzle(
 ): OrmDriver {
   const connect = { pg: drizzlePg, pglite: drizzlePglite, 'postgres-js': drizzlePostgresJs }[kind]
   const db = liveDrizzle(connect({ client: client as never, schema }) as never, { transport }) as any
+  // Several statements in one text: PGlite runs them through `exec()` only, its `query()` prepares one.
+  const several = (text: string) => (kind === 'pglite' ? db.$client.exec(text) : db.execute(sql.raw(text)))
   return {
     reads: {
       byUser: ({ user }) => db.select().from(todos).where(eq(todos.userId, user)).orderBy(todos.id),
@@ -418,7 +420,7 @@ function createDrizzle(
         ),
       deleteUser: ({ user }) => db.delete(users).where(eq(users.id, user)),
       // Two statements in one text: sent as written.
-      deleteUserRaw: ({ user }) => db.execute(sql.raw(`delete from users where id = ${Number(user)}; select 1`)),
+      deleteUserRaw: ({ user }) => several(`delete from users where id = ${Number(user)}; select 1`),
       insertUser: ({ text, value }) => db.insert(users).values({ name: text, team: (value % 3) + 1 }),
       setPath: ({ value }) => db.execute(sql.raw(`set search_path to ${schemaOf(value)}, public`)),
       bumpNote: ({ value }) => db.execute(sql`update notes set n = n + 1 where id = ${1 + (value % 5)}`),
@@ -444,10 +446,8 @@ function createDrizzle(
         }),
       // One text: the update names the table by the search_path the statement before it sets.
       notesPath: ({ value }) =>
-        db.execute(
-          sql.raw(
-            `set search_path to ${schemaOf(value)}, public; update notes set n = n + 1 where id = ${1 + (value % 5)}`,
-          ),
+        several(
+          `set search_path to ${schemaOf(value)}, public; update notes set n = n + 1 where id = ${1 + (value % 5)}`,
         ),
       ...(kind === 'pg' && {
         eventTag: ({ todo, text }) => eventQuery(client as never, EVENT_TAG, [todo, text]),

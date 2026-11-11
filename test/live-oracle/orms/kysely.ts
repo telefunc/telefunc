@@ -25,6 +25,8 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastT
           end: async () => {},
         }
   const db = liveKysely(new Kysely<any>({ dialect: new PostgresDialect({ pool }) }), client, { transport })
+  // Several statements in one text: PGlite runs them through `exec()` only, its `query()` prepares one.
+  const several = (text: string) => (kind === 'pglite' ? client.exec(text) : sql.raw(text).execute(db))
   return {
     reads: {
       byUser: ({ user }) => db.selectFrom('todos').selectAll().where('user_id', '=', user).orderBy('id').execute(),
@@ -413,7 +415,7 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastT
           .execute(),
       deleteUser: ({ user }) => db.deleteFrom('users').where('id', '=', user).execute(),
       // Two statements in one text: sent as written.
-      deleteUserRaw: ({ user }) => sql.raw(`delete from users where id = ${Number(user)}; select 1`).execute(db),
+      deleteUserRaw: ({ user }) => several(`delete from users where id = ${Number(user)}; select 1`),
       insertUser: ({ text, value }) =>
         db
           .insertInto('users')
@@ -444,11 +446,9 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastT
         }),
       // One text: the update names the table by the search_path the statement before it sets.
       notesPath: ({ value }) =>
-        sql
-          .raw(
-            `set search_path to ${schemaOf(value)}, public; update notes set n = n + 1 where id = ${1 + (value % 5)}`,
-          )
-          .execute(db),
+        several(
+          `set search_path to ${schemaOf(value)}, public; update notes set n = n + 1 where id = ${1 + (value % 5)}`,
+        ),
       ...(kind === 'pg' && {
         eventTag: ({ todo, text }) => eventQuery(client, EVENT_TAG, [todo, text]),
       }),

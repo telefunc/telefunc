@@ -478,6 +478,15 @@ const writeNames = Object.keys(driver.writes).filter(
 const SESSION_WRITES = ['setPath', 'notesPath', 'stampRead']
 const writesBeforeHalf = writeNames.filter((name) => !SESSION_WRITES.includes(name))
 
+/** How often each write ran, and how often the database refused it: one it refuses every time tests nothing. */
+const writeRuns = new Map<string, { runs: number; refused: number }>()
+
+function ran(write: string): void {
+  const runs = writeRuns.get(write) ?? { runs: 0, refused: 0 }
+  runs.runs++
+  writeRuns.set(write, runs)
+}
+
 /** Writes that failed other than by the database's refusal. */
 const failedWrites: string[] = []
 
@@ -486,6 +495,7 @@ const failedWrites: string[] = []
 function writeFailed(write: string, err: unknown): void {
   const sqlState = sqlStateOf(err)
   if (sqlState !== undefined && (!ROLE_WRITES.includes(write) || sqlState.startsWith('23'))) {
+    writeRuns.get(write)!.refused++
     if (VERBOSE) console.log(`write ${write} refused: ${String(err).slice(0, 120)}`)
   } else failedWrites.push(`${write}: ${String(err).slice(0, 200)}`)
 }
@@ -511,6 +521,7 @@ for (let step = 0; step < STEPS; step++) {
   // Committed after one of these reads but before its counts query, it leaves groups the read returned uncounted.
   if (CHURN && write === 'deleteUser')
     racing.push(...subscribers.filter((sub) => EMPTIED_BY_DELETE_USER.includes(sub.shape) && !racing.includes(sub)))
+  ran(write)
   try {
     await Promise.all([...racing.map((sub) => subscribe(sub, true)), writer.writes[write]!(args)])
   } catch (err) {
@@ -566,6 +577,7 @@ for (let burst = 0; burst < BURSTS; burst++) {
   for (let i = 0; i < BURST_WRITES; i++) {
     const write = pick(writeNames)
     const args = await writeArgs()
+    ran(write)
     // A synchronous driver throws at once.
     await (async () => writer.writes[write]!(args))().catch((err) => writeFailed(write, err))
   }
@@ -625,6 +637,10 @@ console.log(
   `bursts: missed=${burstMisses} (${BURSTS} bursts of ${BURST_WRITES} writes, refetch window ${BURST_WINDOW} ms, ${burstRefetches} refetches)`,
 )
 console.log(`writes failed other than by the database: ${failedWrites.length}`)
+const runs = [...writeRuns].sort(([a], [b]) => a.localeCompare(b))
+console.log(`writes refused of run: ${runs.map(([write, r]) => `${write} ${r.refused}/${r.runs}`).join(', ')}`)
+const alwaysRefused = runs.filter(([, r]) => r.runs >= 5 && r.refused === r.runs).map(([write]) => write)
+console.log(`writes refused every time: ${alwaysRefused.length}${alwaysRefused.map((write) => ` ${write}`).join('')}`)
 console.log(`volatile reads shared: ${sharedVolatile.length} of ${volatile.length}`)
 console.log(`reads holding another read's rows: ${misshared.length}${misshared.map((s) => ` ${s.shape}`).join('')}`)
 console.log(`derived: rows held=${heldRows} of ${subscribers.filter((s) => s.derive).length} derived subscribers`)
@@ -635,6 +651,7 @@ const failed =
   burstMisses > 0 ||
   heldRows > 0 ||
   failedWrites.length > 0 ||
+  alwaysRefused.length > 0 ||
   sharedVolatile.length > 0 ||
   misshared.length > 0
 process.exit(failed ? 1 : 0)
