@@ -7,7 +7,8 @@ import type { Node } from './tree.js'
 /**
  * What the matcher needs to know of the database's SQL: where to find the parts of a statement's text, and how to
  * write the queries of its own that run next to it. A parse tree's `location` is an offset into the text in the form
- * this dialect's own functions read.
+ * this dialect's own functions read. The parts are cut out of the statement's own text, not printed from its tree: a
+ * SQLite statement's tree is lowered into Postgres's nodes, which a Postgres deparser can't print back as SQLite.
  */
 type Dialect = {
   /** Offset of the `FROM` keyword of the outermost `SELECT`. */
