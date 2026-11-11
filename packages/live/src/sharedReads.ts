@@ -14,6 +14,8 @@ type Joined = Promise<{ result: unknown } | undefined>
 /** A live read in the router and the `.live()` queries watching it: identical reads share one. */
 class WatchedRead {
   readonly read: LiveRead
+  /** Settles once the other servers' changes to its tables reach this one: until then its result may lack one. */
+  readonly unconfirmed: Promise<void> | undefined
   private readonly router: Router
   private readonly watchers = new Set<LiveQuery>()
   private isAffected = false
@@ -24,9 +26,11 @@ class WatchedRead {
     params: readonly unknown[],
     operands: readonly OperandValue[] | undefined,
     router: Router,
+    unconfirmed: Promise<void> | undefined,
   ) {
     this.read = new LiveRead(shape, params, operands, () => this.affected())
     this.router = router
+    this.unconfirmed = unconfirmed
     router.add(this.read)
   }
 

@@ -4,11 +4,11 @@ import postgres from '@prisma/orm-postgres/runtime'
 import { contractFromJson } from '@prisma/orm-postgres/static'
 import contractJson from './prisma-contract.json' with { type: 'json' }
 import { livePrisma } from '@telefunc/live/prisma'
-import type { BroadcastAdapter } from 'telefunc'
+import type { BroadcastTransport } from 'telefunc'
 import type { OrmDriver } from './types.ts'
 
 /** Prisma 8 connects through the app's `pg.Pool`. Shapes its API can't express are left out. */
-function createPrisma(pool: unknown, transport?: BroadcastAdapter): OrmDriver {
+function createPrisma(pool: unknown, transport?: BroadcastTransport): OrmDriver {
   const db = livePrisma(
     postgres({ contract: contractFromJson(contractJson as never), pg: pool as never }) as never,
     pool as never,

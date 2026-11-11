@@ -37,7 +37,7 @@ import {
 import { drizzle as drizzlePglite } from 'drizzle-orm/pglite'
 import { drizzle as drizzlePostgresJs } from 'drizzle-orm/postgres-js'
 import { liveDrizzle } from '@telefunc/live/drizzle'
-import type { BroadcastAdapter } from 'telefunc'
+import type { BroadcastTransport } from 'telefunc'
 import { arrayOf, CODES, COLUMN_TYPES, METRICS, REFS, type Spelling } from '../spellings.ts'
 import { cursorRead } from './cursorRead.ts'
 import { EVENT_TAG, eventQuery } from './eventQuery.ts'
@@ -79,7 +79,7 @@ const schema = { users, todos, tags, usersRelations, todosRelations }
 function createDrizzle(
   client: unknown,
   kind: 'pg' | 'pglite' | 'postgres-js',
-  transport?: BroadcastAdapter,
+  transport?: BroadcastTransport,
 ): OrmDriver {
   const connect = { pg: drizzlePg, pglite: drizzlePglite, 'postgres-js': drizzlePostgresJs }[kind]
   const db = liveDrizzle(connect({ client: client as never, schema }) as never, { transport }) as any

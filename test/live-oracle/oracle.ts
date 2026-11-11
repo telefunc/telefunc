@@ -75,7 +75,7 @@ const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.le
 
 // ── Database and ORM ──
 
-/** A `BroadcastAdapter` between the two servers of this process that delivers late, out of order, and some messages
+/** A `BroadcastTransport` between the two servers of this process that delivers late, out of order, and some messages
  *  twice. */
 class UnreliableTransport {
   private readonly listeners = new Map<
@@ -83,12 +83,12 @@ class UnreliableTransport {
     Set<(serialized: string, info: { seq: number; timestamp: number }) => void>
   >()
   private readonly seqs = new Map<string, number>()
-  subscribe(key: string, onMessage: (serialized: string, info: { seq: number; timestamp: number }) => void) {
+  listen(key: string, onMessage: (serialized: string, info: { seq: number; timestamp: number }) => void) {
     if (!this.listeners.has(key)) this.listeners.set(key, new Set())
     this.listeners.get(key)!.add(onMessage)
     return () => this.listeners.get(key)!.delete(onMessage)
   }
-  publish(key: string, serialized: string) {
+  send(key: string, serialized: string) {
     const info = { seq: (this.seqs.get(key) ?? 0) + 1, timestamp: Date.now() }
     this.seqs.set(key, info.seq)
     const deliver = () => this.listeners.get(key)?.forEach((onMessage) => onMessage(serialized, info))
@@ -97,10 +97,10 @@ class UnreliableTransport {
     if (random() < 0.1) setImmediate(deliver)
     return info
   }
-  subscribeBinary(): () => void {
+  listenBinary(): () => void {
     throw new Error('Unused')
   }
-  publishBinary(): never {
+  sendBinary(): never {
     throw new Error('Unused')
   }
 }

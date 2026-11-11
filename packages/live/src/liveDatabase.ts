@@ -1,7 +1,7 @@
 export { LiveDatabase, MAX_RESULT_ROWS }
 export type { Statement, FollowUp, LiveOptions, Sharing, Reservation, Engine }
 
-import type { BroadcastAdapter } from 'telefunc'
+import type { BroadcastTransport } from 'telefunc'
 import {
   accessAnswered,
   ACCESS_QUERY,
@@ -24,9 +24,9 @@ import { Router } from './match/router.js'
 import { keyOfValues, SharedReads, WatchedRead, type Joined } from './sharedReads.js'
 
 type LiveOptions = {
-  /** Carries changes to the other servers, e.g. `new DefaultBroadcastAdapter(new RedisTransport({ redis }))`.
-   *  @default process-local */
-  transport?: BroadcastAdapter
+  /** Carries changes to the other servers.
+   *  @default the installed Broadcast backend: Redis once installed, Cloudflare's on Workers, else this process */
+  transport?: BroadcastTransport
 }
 
 /** How a driver runs one statement: send `text`, give back each row's last `hiddenColumns` values (as text) to
@@ -119,7 +119,7 @@ class LiveDatabase {
   private plans = new Map<string, Plan>()
   private readonly router = new Router()
   private readonly transactions = new Transactions((changes) => this.announce(changes))
-  private readonly transport: BroadcastAdapter | undefined
+  private readonly transport: BroadcastTransport | undefined
   private feed: ChangeFeed | undefined
   private readonly shared = new SharedReads()
   /** A statement changed a session: connections may answer the same read differently from now on. */
@@ -440,8 +440,7 @@ class LiveDatabase {
   private watched(shape: ReadShape, text: string, values: readonly unknown[], live: LiveQuery): WatchedRead {
     const operandsKey = this.operandsKey(text, values)
     const operands = !shape.operandQuery ? [] : operandsKey ? this.knownOperands.get(operandsKey) : undefined
-    const read = new WatchedRead(shape, values, operands, this.router)
-    this.watchTables(shape)
+    const read = new WatchedRead(shape, values, operands, this.router, this.watchTables(shape))
     read.watch(live)
     return read
   }
@@ -626,7 +625,7 @@ class LiveDatabase {
 
   private announce(changes: Change[]): void {
     this.receive(changes)
-    this.feed?.publish(changes)
+    this.feed!.publish(changes)
   }
 
   private planOf(text: string, catalog: Catalog): Plan {
@@ -644,9 +643,7 @@ class LiveDatabase {
     if (this.pathsDiffer) this.catalog.searchPath = undefined
     this.roles ??= new ConnectionRoles(this.catalog.role)
     this.access.set(this.catalog.role, this.catalog.access)
-    if (this.transport && !this.feed) {
-      this.feed = new ChangeFeed(this.transport, this.catalog.database, (changes) => this.receive(changes))
-    }
+    this.feed ??= new ChangeFeed(this.transport, this.catalog.database, (changes) => this.receive(changes))
   }
 
   private receive(changes: Change[]): void {
@@ -676,11 +673,11 @@ class LiveDatabase {
     this.access = new Map()
   }
 
-  private watchTables(shape: ReadShape): void {
-    if (!this.feed) return
-    this.feed.watch('*')
-    for (const alias of shape.aliases) this.feed.watch(alias.table.id)
-    if (shape.alsoReads !== 'all') for (const table of shape.alsoReads) this.feed.watch(table)
+  /** Listens to the other servers' changes to the tables `shape` reads (`ChangeFeed.watch()`). */
+  private watchTables(shape: ReadShape): Promise<void> | undefined {
+    const tables = ['*', ...shape.aliases.map((alias) => alias.table.id)]
+    if (shape.alsoReads !== 'all') tables.push(...shape.alsoReads)
+    return this.feed!.watch(tables)
   }
 }
 

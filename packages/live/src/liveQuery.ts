@@ -29,7 +29,11 @@ async function readLive<T>(query: () => Promise<T>, wrapper: string): Promise<Li
   // Awaited inside the scope: an ORM's query (a Drizzle builder, a Prisma `all()`) runs when awaited.
   const value = await running.run(live, async () => await query())
   assertUsage(live.hasReads(), `.live() sent no query through a database wrapped by ${wrapper}`)
-  return new LiveCell(value, [live])
+  if (live.unconfirmed.size === 0) return new LiveCell(value, [live])
+  // A read may have missed another server's change: the query runs again once none can be missed.
+  live.release()
+  await Promise.all(live.unconfirmed)
+  return readLive(query, wrapper)
 }
 
 function currentQuery(): LiveQuery | undefined {
@@ -39,6 +43,8 @@ function currentQuery(): LiveQuery | undefined {
 /** The live reads of one `.live()` query: until its `Live` is sent, then while a client holds it. */
 class LiveQuery implements LiveSource {
   private readonly reads = new Set<WatchedRead>()
+  /** Its reads' `WatchedRead.unconfirmed`. */
+  readonly unconfirmed = new Set<Promise<void>>()
   private readonly listeners = new Set<() => void>()
   private recorded = false
   private isChanged = false
@@ -54,6 +60,7 @@ class LiveQuery implements LiveSource {
   /** Called by `read.watch()`. */
   add(read: WatchedRead): void {
     this.recorded = true
+    if (read.unconfirmed) this.unconfirmed.add(read.unconfirmed)
     if (this.isChanged) read.unwatch(this)
     else this.reads.add(read)
   }
@@ -88,7 +95,7 @@ class LiveQuery implements LiveSource {
     }
   }
 
-  private release(): void {
+  release(): void {
     for (const read of this.reads) read.unwatch(this)
     this.reads.clear()
   }

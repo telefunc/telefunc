@@ -3,13 +3,13 @@ export { createKysely }
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { jsonArrayFrom } from 'kysely/helpers/postgres'
 import { liveKysely } from '@telefunc/live/kysely'
-import type { BroadcastAdapter } from 'telefunc'
+import type { BroadcastTransport } from 'telefunc'
 import { arrayOf, CODES, COLUMN_TYPES, METRICS, REFS, type Spelling } from '../spellings.ts'
 import { EVENT_TAG, eventQuery } from './eventQuery.ts'
 import { exclaim } from './exclaim.ts'
 import type { OrmDriver } from './types.ts'
 
-function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastAdapter): OrmDriver {
+function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastTransport): OrmDriver {
   // PGlite has one session: a "pool" of one connection over it.
   const pool =
     kind === 'pg'

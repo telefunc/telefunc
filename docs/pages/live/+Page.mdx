@@ -190,26 +190,11 @@ When many queries change at once, for example a public feed, the server tells cl
 
 ## Multiple servers
 
-On several servers, pass a transport that carries the changes to the other servers, for example Redis:
+On several servers, a write refetches the queries on every server through the backend <Link href="/channel#broadcast">Broadcast</Link> uses: <Link href="/redis">install Redis</Link> on Node, and on Cloudflare Workers it's built in.
 
-```ts
-// database.ts
-// Environment: server
+> To carry the changes over another transport, pass a <Link href="/broadcast-config">`BroadcastTransport`</Link> as `transport`: `liveDrizzle(db, { transport })`, `liveKysely(db, pool, { transport })`, `livePrisma(prisma, pool, { transport })`.
 
-import IORedis from 'ioredis'
-import pg from 'pg'
-import { drizzle } from 'drizzle-orm/node-postgres'
-import { DefaultBroadcastAdapter } from 'telefunc'
-import { RedisTransport } from '@telefunc/redis'
-import { liveDrizzle } from '@telefunc/live/drizzle'
-
-const transport = new DefaultBroadcastAdapter(new RedisTransport({ redis: new IORedis(redisUrl) }))
-export const db = liveDrizzle(drizzle({ client: new pg.Pool({ connectionString }) }), { transport })
-```
-
-> `liveKysely()` and `livePrisma()` take it as their third argument: `liveKysely(db, pool, { transport })`.
-
-> Without `transport`, a write is seen by the server that made it only.
+> With neither, a write is seen by the server that made it only.
 
 > A message lost on the way refetches every query reading the table it was about.
 
