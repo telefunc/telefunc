@@ -229,7 +229,21 @@ class PieceSender {
     }
     if (this.open === null && !this.announces(frame)) return this.pass(frame)
     if (this.open === null && this.goesWhole(frame)) return this.sendWhole(frame)
+    // Before any rate, a frame too small to probe the path goes behind an announcement only within the headroom.
+    if (this.withinNoRate(frame)) return this.wait(frame, 0)
     this.sendBehindAnnouncement(frame)
+  }
+
+  /** Whether data `frame`, too small to probe, waits for headroom while no rate is measured. */
+  private withinNoRate(frame: Uint8Array<ArrayBuffer>): boolean {
+    const bytes = frame.byteLength
+    return (
+      !this.cutsData &&
+      this.pieceRate.fastest === 0 &&
+      isSequencedTag(frame[0]!) &&
+      bytes <= this.wholeUpTo &&
+      bytes > this.headroom
+    )
   }
 
   private copyRoom(): number {
