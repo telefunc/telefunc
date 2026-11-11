@@ -11,6 +11,7 @@
 //
 // DB=sqlite (ORM=drizzle or kysely): better-sqlite3, in memory, with the SQLite lane's own tables (sqliteSchema.ts).
 // DB=bun (ORM=drizzle, run by `bun oracle.ts`): bun:sqlite instead. DB=d1 (ORM=drizzle): miniflare's D1.
+// DB=node (ORM=prisma): Prisma 8 on node:sqlite, which opens its own connections on a file.
 //
 // DRIVER=postgres-js (with ORM=drizzle DB=pg): postgres.js instead of `pg`. PG=18 adds the writes in Postgres 18's
 // syntax. ROLES=1 adds writes by roles that can't read the table they write, or only some of its rows.
@@ -30,6 +31,7 @@ import { createDrizzleSqlite } from './orms/drizzleSqlite.ts'
 import { createKysely } from './orms/kysely.ts'
 import { createKyselySqlite } from './orms/kyselySqlite.ts'
 import { createPrisma } from './orms/prisma.ts'
+import { createPrismaSqlite } from './orms/prismaSqlite.ts'
 import type { OrmDriver, ReadArgs, WriteArgs } from './orms/types.ts'
 import { roles, seed, USERS } from './schema.ts'
 import { sqliteSeed } from './sqliteSchema.ts'
@@ -47,8 +49,8 @@ const DB = process.env.DB ?? 'pglite'
 const DRIVER = process.env.DRIVER ?? 'pg'
 const SEED = Number(process.env.SEED ?? 1)
 const STEPS = Number(process.env.STEPS ?? 300)
-/** One connection, which runs each statement as it's called. */
-const SQLITE = DB === 'sqlite' || DB === 'bun' || DB === 'd1'
+/** SQLite, which runs each statement as it's called. */
+const SQLITE = DB === 'sqlite' || DB === 'bun' || DB === 'd1' || DB === 'node'
 const ONE_CONNECTION = DB === 'pglite' || SQLITE
 const CHURN = process.env.CHURN === '1' && !ONE_CONNECTION
 const VERBOSE = process.env.VERBOSE === '1'
@@ -202,6 +204,26 @@ async function connect(): Promise<{
       writer: driver,
       query: async (text) => sqlite.prepare(text).all(),
       close: async () => sqlite.close(),
+    }
+  }
+  if (DB === 'node') {
+    const { DatabaseSync } = await import('node:sqlite')
+    const { mkdtempSync, rmSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const dir = mkdtempSync(`${tmpdir()}/live-oracle-`)
+    const path = `${dir}/oracle.db`
+    const sqlite = new DatabaseSync(path)
+    sqlite.exec(sqliteSeed(random))
+    const driver = createPrismaSqlite(path)
+    return {
+      driver,
+      writer: driver,
+      query: async (text) => sqlite.prepare(text).all(),
+      close: async () => {
+        await driver.close()
+        sqlite.close()
+        rmSync(dir, { recursive: true })
+      },
     }
   }
   if (DB === 'sqlite') {

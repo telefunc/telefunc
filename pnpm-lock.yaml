@@ -543,6 +543,9 @@ importers:
       '@prisma/orm-postgres':
         specifier: 8.0.0-rc.23
         version: 8.0.0-rc.23(@prisma/cli-engine@0.9.0(@prisma/management-api-sdk@1.96.0))(temporal-polyfill@1.0.8)(typanion@3.14.0)(typescript@7.0.2)(vite@8.0.16(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0))
+      '@prisma/orm-sqlite':
+        specifier: 8.0.0-rc.23
+        version: 8.0.0-rc.23(@prisma/cli-engine@0.9.0(@prisma/management-api-sdk@1.96.0))(temporal-polyfill@1.0.8)(typanion@3.14.0)(typescript@7.0.2)(vite@8.0.16(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0))
       '@telefunc/live':
         specifier: workspace:*
         version: link:../../packages/live
@@ -10316,6 +10319,24 @@ snapshots:
       - typanion
       - vite
 
+  '@prisma/orm-sqlite@8.0.0-rc.23(@prisma/cli-engine@0.9.0(@prisma/management-api-sdk@1.96.0))(temporal-polyfill@1.0.8)(typanion@3.14.0)(typescript@7.0.2)(vite@8.0.16(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0))':
+    dependencies:
+      '@prisma/orm-family-sql': 8.0.0-rc.23(@prisma/cli-engine@0.9.0(@prisma/management-api-sdk@1.96.0))(typanion@3.14.0)(typescript@7.0.2)(vite@8.0.16(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0))
+      '@prisma/orm-framework': 8.0.0-rc.23(typescript@7.0.2)
+      '@prisma/orm-target-sqlite': 8.0.0-rc.23(@prisma/cli-engine@0.9.0(@prisma/management-api-sdk@1.96.0))(temporal-polyfill@1.0.8)(typanion@3.14.0)(typescript@7.0.2)(vite@8.0.16(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0))
+      '@prisma/orm-toolchain': 8.0.0-rc.23(@prisma/cli-engine@0.9.0(@prisma/management-api-sdk@1.96.0))(typanion@3.14.0)(typescript@7.0.2)(vite@8.0.16(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0))
+      pathe: 2.0.3
+      temporal-polyfill: 1.0.8
+      temporal-spec: 1.0.1
+      tinyglobby: 0.2.17
+    optionalDependencies:
+      typescript: 7.0.2
+    transitivePeerDependencies:
+      - '@prisma/cli-engine'
+      - magicast
+      - typanion
+      - vite
+
   '@prisma/orm-target-postgres@8.0.0-rc.23(@prisma/cli-engine@0.9.0(@prisma/management-api-sdk@1.96.0))(temporal-polyfill@1.0.8)(typanion@3.14.0)(typescript@7.0.2)(vite@8.0.16(@types/node@24.0.10)(esbuild@0.28.2)(jiti@2.7.0))':
     dependencies:
       '@prisma/orm-family-sql': 8.0.0-rc.23(@prisma/cli-engine@0.9.0(@prisma/management-api-sdk@1.96.0))(typanion@3.14.0)(typescript@7.0.2)(vite@8.0.16(@types/node@24.0.10)(esbuild@0.28.2)(jiti@2.7.0))
@@ -10371,6 +10392,24 @@ snapshots:
       '@prisma/orm-family-sql': 8.0.0-rc.23(@prisma/cli-engine@0.9.0(@prisma/management-api-sdk@1.96.0))(typanion@3.14.0)(typescript@7.0.2)(vite@8.0.16(@types/node@24.0.10)(esbuild@0.28.2)(jiti@2.7.0))
       '@prisma/orm-framework': 8.0.0-rc.23(typescript@7.0.2)
       '@prisma/orm-toolchain': 8.0.0-rc.23(@prisma/cli-engine@0.9.0(@prisma/management-api-sdk@1.96.0))(typanion@3.14.0)(typescript@7.0.2)(vite@8.0.16(@types/node@24.0.10)(esbuild@0.28.2)(jiti@2.7.0))
+      '@standard-schema/spec': 1.1.0
+      arktype: 2.2.9
+      pathe: 2.0.3
+      temporal-polyfill: 1.0.8
+      temporal-spec: 1.0.1
+    optionalDependencies:
+      typescript: 7.0.2
+    transitivePeerDependencies:
+      - '@prisma/cli-engine'
+      - magicast
+      - typanion
+      - vite
+
+  '@prisma/orm-target-sqlite@8.0.0-rc.23(@prisma/cli-engine@0.9.0(@prisma/management-api-sdk@1.96.0))(temporal-polyfill@1.0.8)(typanion@3.14.0)(typescript@7.0.2)(vite@8.0.16(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0))':
+    dependencies:
+      '@prisma/orm-family-sql': 8.0.0-rc.23(@prisma/cli-engine@0.9.0(@prisma/management-api-sdk@1.96.0))(typanion@3.14.0)(typescript@7.0.2)(vite@8.0.16(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0))
+      '@prisma/orm-framework': 8.0.0-rc.23(typescript@7.0.2)
+      '@prisma/orm-toolchain': 8.0.0-rc.23(@prisma/cli-engine@0.9.0(@prisma/management-api-sdk@1.96.0))(typanion@3.14.0)(typescript@7.0.2)(vite@8.0.16(@types/node@26.1.2)(esbuild@0.28.2)(jiti@2.7.0))
       '@standard-schema/spec': 1.1.0
       arktype: 2.2.9
       pathe: 2.0.3

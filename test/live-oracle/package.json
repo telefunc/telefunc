@@ -8,6 +8,7 @@
   "dependencies": {
     "@electric-sql/pglite": "0.5.16",
     "@prisma/orm-postgres": "8.0.0-rc.23",
+    "@prisma/orm-sqlite": "8.0.0-rc.23",
     "@telefunc/live": "workspace:*",
     "better-sqlite3": "13.0.3",
     "drizzle-orm": "0.45.4",
