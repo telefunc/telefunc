@@ -135,7 +135,7 @@ function analyzeRead(select: Node, catalog: Catalog, text?: string): ReadShape {
     alsoReads: new Set(),
     text,
     scopes: new Map(),
-    operands: new Operands(),
+    operands: new Operands(catalog),
   }
   const shape = shapeOf(select, analysis)
   // Every operand is known once the whole statement is analyzed.

@@ -1,6 +1,7 @@
 export { Operands, operandValues, isOperand }
 export type { Operand, OperandValue, Comparison }
 
+import type { Catalog } from '../catalog.js'
 import { names, quote, renumberParams, type Node } from '../sql.js'
 import type { Column } from './values.js'
 
@@ -31,12 +32,17 @@ type Comparison = { as?: Pick<Column, 'sqlType' | 'base'>; form?: 'pattern' | 'l
 /** The operands of one statement, each once. */
 class Operands {
   readonly list: Operand[] = []
+  private readonly catalog: Pick<Catalog, 'domainBases'>
+
+  constructor(catalog: Pick<Catalog, 'domainBases'>) {
+    this.catalog = catalog
+  }
 
   /** The index of `node` as an operand compared as `comparison` says, or `undefined` when Postgres can't evaluate it
    *  alone (it reads a column, calls a function, or its type isn't known) or it's compared as another type. */
   of(node: Node, comparison: Comparison): number | undefined {
     const expression = sqlOf(node)
-    const evaluated = expression === undefined ? undefined : evaluation(expression, node, comparison)
+    const evaluated = expression === undefined ? undefined : evaluation(expression, node, comparison, this.catalog)
     if (evaluated === undefined) return undefined
     const known = this.list.findIndex((operand) => operand.evaluated === evaluated)
     if (known !== -1) return known
@@ -62,11 +68,16 @@ function operandValues(operands: Operand[], row: readonly (string | null)[]): Op
   }
 }
 
-function evaluation(expression: string, node: Node, { as, form }: Comparison): string | undefined {
+function evaluation(
+  expression: string,
+  node: Node,
+  { as, form }: Comparison,
+  catalog: Pick<Catalog, 'domainBases'>,
+): string | undefined {
   if (form === 'nullness') return `CASE WHEN (${expression}) IS NULL THEN NULL ELSE '' END`
   if (form === 'pattern') return `(${expression})::text`
   const type = typeOf(node)
-  if (type && as && !isTypeOf(type, as, form === 'list' ? 1 : 0)) return undefined
+  if (type && as && !isTypeOf(type, as, form === 'list' ? 1 : 0, catalog)) return undefined
   if (form === 'list') {
     if (!type && !as) return undefined
     const array = type ? `(${expression})` : `(${expression})::${as!.sqlType}[]`
@@ -101,11 +112,18 @@ function typeOf(node: Node): OperandType | undefined {
   return undefined
 }
 
-/** Whether `type` is `as`'s type (an array of it, for `dimensions` 1). An unqualified name is taken as the type of
- *  that name in any schema. */
-function isTypeOf(type: OperandType, as: Pick<Column, 'base'>, dimensions: number): boolean {
+/** Whether `type` is `as`'s type (an array of it, for `dimensions` 1), both after domains. An unqualified name is taken
+ *  as the type of that name in any schema. */
+function isTypeOf(
+  type: OperandType,
+  as: Pick<Column, 'base'>,
+  dimensions: number,
+  catalog: Pick<Catalog, 'domainBases'>,
+): boolean {
   const [schema, name] = as.base
   if (type.dimensions !== dimensions) return false
+  const bases = catalog.domainBases(type.names)
+  if (bases.length > 0) return bases.every((base) => base[0] === schema && base[1] === name)
   if (type.names.length === 1) return type.names[0] === name
   return type.names.length === 2 && type.names[0] === schema && type.names[1] === name
 }

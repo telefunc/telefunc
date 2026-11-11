@@ -12,6 +12,10 @@ drop sequence if exists tickets;
 drop schema if exists tenant cascade;
 drop function if exists log_deleted_todo, log_tag, tag_added, log_note, note_bumped, next_event, settle_event,
   event_inserted, empty_event_log, stamp, reset_stamped, label_of, settle_stably, measure_set;
+drop domain if exists todo_code, base_code;
+-- A todo's code is a domain over a domain over char(4), which pads its values.
+create domain base_code as char(4);
+create domain todo_code as base_code;
 create table users (id serial primary key, name text not null, team int not null);
 create table todos (
   id serial primary key,
@@ -22,7 +26,7 @@ create table todos (
   amount numeric(12, 2) not null default 0,
   updated_at timestamptz not null default now(),
   ref uuid not null default '${REFS[0]}',
-  code char(4) not null default '${CODES[0]}'
+  code todo_code not null default '${CODES[0]}'
 );
 create table tags (id serial primary key, todo_id int not null references todos (id) on delete cascade, name text not null);
 -- Written by a trigger, also when a user's deletion cascades to their todos.

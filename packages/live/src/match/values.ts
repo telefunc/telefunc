@@ -10,8 +10,8 @@ type Column = {
   /** Its type as SQL, schema-qualified, without modifiers (`pg_catalog.bpchar`): what an untyped value compared
    *  with it is read as. */
   sqlType: string
-  /** Its type after domains, `[schema, name]` (`['pg_catalog', 'numeric']`): a typed operand, a cast or a number, is
-   *  compared with it only when it has this type. */
+  /** Its type after domains, through domains over domains, `[schema, name]` (`['pg_catalog', 'numeric']`): a typed
+   *  operand, a cast or a number, is compared with it only when it has this type after domains too. */
   base: readonly [schema: string, name: string]
   /** A `char(n)`'s `n`. Postgres pads its values with spaces to that length, and their text form drops the padding. */
   charLength?: number

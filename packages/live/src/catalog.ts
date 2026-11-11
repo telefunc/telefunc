@@ -72,6 +72,9 @@ type Catalog = {
   /** The `search_path` of the session that loaded the catalog, which unqualified names resolve against while every
    *  session has it; `undefined` once a statement may have changed a session's (`LiveDatabase`). */
   searchPath: string[] | undefined
+  /** The types the domains a type name may mean are over, through domains over domains: of the domain of that name in
+   *  every schema when it's unqualified; none when no domain has it. */
+  domainBases(typeNames: string[]): (readonly [schema: string, name: string])[]
   /** The table a name means; `undefined` when unknown, or when it may mean several (`named()`). */
   find(table: RangeVar): Table | undefined
   /** Every table a name may mean: in any schema, unless qualified or resolved by `searchPath`. */
@@ -96,6 +99,7 @@ type CatalogRow = {
     variadic: boolean,
   ][]
   volatileFunctions: string[]
+  domains: [schema: string, name: string, baseSchema: string, baseName: string][]
   tables: {
     schema: string
     name: string
@@ -153,8 +157,17 @@ const ROLE_QUERY = `select json_build_object('role', current_user, 'access', cas
 /** Whether the function `p`, in language `l`, is one of `Catalog.writingFunctions`. */
 const WRITING = `l.lanname not in ('c', 'internal')`
 
-// One round trip: everything the matcher needs to know about the database's tables.
-const CATALOG_QUERY = `select json_build_object(
+// One round trip: everything the matcher needs to know about the database's tables. `domain_bases`: each domain, the
+// type it is over through domains over domains, and the innermost modifier on the way (`char(4)` under two domains).
+const CATALOG_QUERY = `with recursive domains (oid, base, typmod) as (
+    select t.oid, t.typbasetype, t.typtypmod from pg_type t where t.typtype = 'd'
+  union all
+    select d.oid, t.typbasetype, case when t.typtypmod <> -1 then t.typtypmod else d.typmod end
+    from domains d join pg_type t on t.oid = d.base where t.typtype = 'd'
+), domain_bases as (
+  select d.oid, d.base, d.typmod from domains d join pg_type b on b.oid = d.base where b.typtype <> 'd'
+)
+select json_build_object(
   'database', current_database(),
   'role', current_user,
   'access', (${ACCESS_ROWS}),
@@ -166,6 +179,9 @@ const CATALOG_QUERY = `select json_build_object(
     join pg_namespace n on n.oid = p.pronamespace join pg_language l on l.oid = p.prolang
     where n.nspname not in ('pg_catalog', 'information_schema') and p.prorettype <> 'trigger'::regtype),
   'volatileFunctions', (select coalesce(json_agg(distinct p.proname), '[]') from pg_proc p where p.provolatile = 'v'),
+  'domains', (select coalesce(json_agg(json_build_array(n.nspname, t.typname, bn.nspname, bt.typname)), '[]')
+    from domain_bases db join pg_type t on t.oid = db.oid join pg_namespace n on n.oid = t.typnamespace
+    join pg_type bt on bt.oid = db.base join pg_namespace bn on bn.oid = bt.typnamespace),
   'tables', (select coalesce(json_agg(json_build_object(
     'schema', n.nspname,
     'name', c.relname,
@@ -174,9 +190,9 @@ const CATALOG_QUERY = `select json_build_object(
     'columns', (select json_agg(json_build_array(a.attname, t.typcategory, t.typname,
         quote_ident(tn.nspname) || '.' || quote_ident(t.typname), coalesce(co.collname, ''),
         coalesce(co.collisdeterministic, true), a.attgenerated <> '', bn.nspname, bt.typname,
-        case when t.typtype = 'd' then t.typtypmod else a.atttypmod end) order by a.attnum)
+        case when t.typtype = 'd' then db.typmod else a.atttypmod end) order by a.attnum)
       from pg_attribute a join pg_type t on t.oid = a.atttypid join pg_namespace tn on tn.oid = t.typnamespace
-      join pg_type bt on bt.oid = case when t.typtype = 'd' then t.typbasetype else t.oid end
+      left join domain_bases db on db.oid = t.oid join pg_type bt on bt.oid = coalesce(db.base, t.oid)
       join pg_namespace bn on bn.oid = bt.typnamespace
       left join pg_collation co on co.oid = a.attcollation
       where a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped),
@@ -270,6 +286,9 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
       overloads,
     ),
   ]
+  const domains = new Map<string, { schema: string; base: readonly [string, string] }[]>()
+  for (const [schema, name, baseSchema, baseName] of row.domains)
+    domains.set(name, [...(domains.get(name) ?? []), { schema, base: [baseSchema, baseName] }])
   const catalog: Catalog = {
     database: row.database,
     role: row.role,
@@ -284,6 +303,10 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
     },
     volatileFunctions: new Set(row.volatileFunctions),
     searchPath: row.searchPath,
+    domainBases(typeNames) {
+      const [schema, name] = typeNames.length === 2 ? typeNames : [undefined, typeNames[0]!]
+      return (domains.get(name!) ?? []).filter((d) => schema === undefined || d.schema === schema).map((d) => d.base)
+    },
     find(table) {
       const named = this.named(table)
       return named.length === 1 ? named[0] : undefined
