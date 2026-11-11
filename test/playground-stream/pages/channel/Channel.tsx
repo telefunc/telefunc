@@ -248,7 +248,16 @@ type ChannelState = {
   manyListenersMs: { page: number; server: number | null } | null
   linkShare: { pingMs: number[]; downloaded: number } | null
   slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
-  publishesBehind: { pingMs: number; closed: string; closeMs: number } | null
+  publishesBehind: {
+    pingMs: number
+    publishesAhead: number
+    closed: string
+    received: number
+    closeErr: string
+    abortReceived: number
+    abortErr: string
+    abortMs: number
+  } | null
   broadcastOverflow: { received: number; closeErr: string } | null
   broadcastBehind: {
     seqsAhead: number[]
@@ -1510,29 +1519,56 @@ function ChannelDemo() {
 
   const testPublishesBehind = useCallback(async () => {
     setChannelState((s) => ({ ...s, publishesBehind: null }))
-    const { broadcast, control } = await openChannel(onChannelPublishesBehind)
-    let firstSeq = 0
-    let bodies = 0
-    let resolveSecond!: () => void
-    const second = new Promise<void>((resolve) => (resolveSecond = resolve))
-    broadcast.subscribeBinary((_, info) => {
-      firstSeq ||= info.seq
-      if (++bodies === 2) resolveSecond()
-    })
-    void control.send(1)
+    /** A broadcast of 4 MiB bodies, how many of them the page got, and once it closed, why. */
+    const openBehind = async () => {
+      const { broadcast, control } = await openChannel(onChannelPublishesBehind)
+      const got = { firstSeq: 0, received: 0 }
+      const waiting: { count: number; resolve: () => void }[] = []
+      broadcast.subscribeBinary((_, info) => {
+        got.firstSeq ||= info.seq
+        got.received++
+        for (const { count, resolve } of waiting) if (got.received === count) resolve()
+      })
+      const ended = new Promise<string>((resolve) => broadcast.onClose((err) => resolve(err?.name ?? 'none')))
+      const received = (count: number) => new Promise<void>((resolve) => waiting.push({ count, resolve }))
+      return { broadcast, control, got, ended, received }
+    }
+
+    const closing = await openBehind()
+    void closing.control.send(1)
     // Its answer meets that body on the wire, with its head gone and no later head of this channel ahead.
-    const { seq: ownSeq } = await broadcast.publish('answered behind the body')
-    void control.send(4)
-    await second
+    const { seq: ownSeq } = await closing.broadcast.publish('answered behind the body')
+    void closing.control.send(4)
+    await closing.received(2)
     const pinged = performance.now()
-    await control.send('ping', { ack: true })
+    await closing.control.send('ping', { ack: true })
     const pingMs = Math.round(performance.now() - pinged)
-    const closing = performance.now()
-    const closed = await control.send('close', { ack: true })
-    const closeMs = Math.round(performance.now() - closing)
-    const publishesBehind = { pingMs, publishesAhead: ownSeq - firstSeq, closed, closeMs }
+    const closed = await closing.control.send('close', { ack: true })
+    const closeErr = await closing.ended
+    const { received, firstSeq } = closing.got
+    closing.control.close()
+
+    const aborting = await openBehind()
+    void aborting.control.send(3)
+    await aborting.received(1)
+    const abortAt = performance.now()
+    await aborting.control.send('abort', { ack: true })
+    const abortErr = await aborting.ended
+    const abortMs = Math.round(performance.now() - abortAt)
+    const abortReceived = aborting.got.received
+    aborting.control.close()
+
+    const publishesBehind = {
+      pingMs,
+      publishesAhead: ownSeq - firstSeq,
+      closed,
+      received,
+      closeErr,
+      abortReceived,
+      abortErr,
+      abortMs,
+    }
     setChannelState((s) => ({ ...s, publishesBehind }))
-    control.close()
   }, [])
 
   const testBroadcastOverflow = useCallback(async () => {

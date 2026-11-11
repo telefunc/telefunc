@@ -8,7 +8,16 @@ import { withNetworkConditions } from '../../../utils'
 type SlowLinkState = {
   linkShare: { pingMs: number[]; downloaded: number } | null
   slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
-  publishesBehind: { pingMs: number; publishesAhead: number; closed: string; closeMs: number } | null
+  publishesBehind: {
+    pingMs: number
+    publishesAhead: number
+    closed: string
+    received: number
+    closeErr: string
+    abortReceived: number
+    abortErr: string
+    abortMs: number
+  } | null
   lossyTicker: { received: number; last: number | undefined; worstMs: number; closed: string | null } | null
 }
 
@@ -98,8 +107,8 @@ function testSlowLink(isDev: boolean) {
     }
   })
 
-  // The four bodies still to cross take at least 16 s, and 22 s on SSE.
-  test("channel: on a 1 MB/s link, publishes falling behind hold up neither another channel's answer nor the server's close, and the answer to the page's own publish costs it none of them", async () => {
+  // Up to three bodies still wait when the server closes: about 12.6 s, and 16.8 s on SSE.
+  test("channel: on a 1 MB/s link, publishes falling behind don't hold up another channel's answer, the answer to the page's own publish costs it none of them, a graceful close delivers them all, and an abort ends at once without them", async () => {
     const proxy = await startBlackHoleProxy(getServerUrl())
     try {
       await navigate(`${proxy.url}/channel`)
@@ -111,14 +120,16 @@ function testSlowLink(isDev: boolean) {
           behind = (await getResult<SlowLinkState>('#channel-state')).publishesBehind
           expect(behind).not.toBe(null)
         },
-        { timeout: 45_000 },
+        { timeout: 55_000 },
       )
       // An event goes whole: 4 MiB in base64 takes about 5.6 s here.
       const upToMs = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!).includes('sse') ? 14_000 : 4000
       expect(behind!.pingMs).lessThan(upToMs)
       expect(behind!.publishesAhead).toBe(1)
-      expect(behind!.closed).toBe('0')
-      expect(behind!.closeMs).lessThan(upToMs)
+      expect(behind).deep.equal({ ...behind!, closed: '0', received: 5, closeErr: 'none' })
+      expect(behind!.abortErr).not.toBe('none')
+      expect(behind!.abortReceived).lessThan(3)
+      expect(behind!.abortMs).lessThan(upToMs)
     } finally {
       // The page leaves before the proxy closes, which would cut its connections.
       await page.goto('about:blank')

@@ -227,10 +227,21 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.lastPeer!.sendPublish(body)
   }
 
-  /** A graceful close goes behind the newest its page is due; an abort may drop it. */
+  /** A graceful close goes behind what waits for its page, so a lossy one first replaces that with the newest; an abort
+   *  drops it. */
   override close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
-    if (this._phase === 'open') this.sendHeld()
+    if (this._phase === 'open' && this.lossy) this.sendNewestOnly()
     return super.close(opts)
+  }
+
+  /** Leaves its page only the newest publish to wait for: what waits for its wire goes, and the newest is sent again. */
+  private sendNewestOnly(): void {
+    if (this.peer !== null && this.newestHeld === null && this.unhanded() > 1) {
+      const newest = this._replayBuffer!.newestPublish()!
+      this.letWaitingGo()
+      this.peer.sendPublish(newest)
+    }
+    this.sendHeld()
   }
 
   /** Whether its page has an older publish to confirm than a page that keeps up would. Before its first confirmation it
