@@ -1,8 +1,8 @@
 export { ChannelStreamSource }
 
 import { parse } from '@brillout/json-serializer/parse'
-import { textDecoder } from '../wire/envelope.js'
-import { CHANNEL_PUMP_TAG_END, CHANNEL_PUMP_TAG_ERROR } from '../constants.js'
+import { concatAll, textDecoder } from '../wire/envelope.js'
+import { CHANNEL_PUMP_TAG_END, CHANNEL_PUMP_TAG_ERROR, CHANNEL_PUMP_TAG_PART } from '../constants.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { isObject } from '../../utils/isObject.js'
 import { assert } from '../../utils/assert.js'
@@ -18,8 +18,8 @@ type StreamSourceChannel = Pick<Channel, 'listenBinary' | 'onClose' | 'close' | 
 /**
  * Receives tagged binary frames from a channel with credit-based backpressure.
  *
- * Each binary frame is tagged: `[TAG_DATA (0x00)][payload]`,
- * `[TAG_ERROR (0x01)][JSON error payload]`, or `[TAG_END (0x02)]` at the producer's end.
+ * Each binary frame is tagged: `[TAG_DATA (0x00)][payload]`, `[TAG_PART (0x03)][payload]` where more of the chunk
+ * follows, `[TAG_ERROR (0x01)][JSON error payload]`, or `[TAG_END (0x02)]` at the producer's end.
  *
  * Used by both directions:
  * - Client response: receives chunks from server-side channel pump
@@ -34,6 +34,8 @@ type StreamSourceChannel = Pick<Channel, 'listenBinary' | 'onClose' | 'close' | 
  */
 class ChannelStreamSource {
   private readonly queue = new Fifo<{ frame: Uint8Array<ArrayBuffer>; onConsumed: () => void }>()
+  /** The parts of the chunk being read, before its last. */
+  private parts: Uint8Array<ArrayBuffer>[] = []
   private wake: (() => void) | null = null
   private closed = false
   private closeError: Error | null = null
@@ -93,7 +95,36 @@ class ChannelStreamSource {
     }
   }
 
+  /** The producer's next chunk, its parts joined: a value's reviver parses a chunk as one serialized value. */
   private async readNextChunk(): Promise<Uint8Array<ArrayBuffer> | null> {
+    while (true) {
+      const frame = await this.readNextFrame()
+      if (frame === null) return null
+      // Tag is the first byte: 0x00 = data, 0x01 = error, 0x02 = end, 0x03 = a part with more to follow.
+      const tag = frame[0]
+      if (tag === CHANNEL_PUMP_TAG_END) {
+        this.ended = true
+        return null
+      }
+      const payload = frame.subarray(1)
+      if (tag === CHANNEL_PUMP_TAG_ERROR) {
+        const errorPayload: unknown = parse(textDecoder.decode(payload))
+        assert(isObject(errorPayload))
+        if (this.throwError) this.throwError(errorPayload)
+        throw new Error('Streaming error frame received')
+      }
+      if (tag === CHANNEL_PUMP_TAG_PART) {
+        this.parts.push(payload)
+        continue
+      }
+      if (this.parts.length === 0) return payload
+      const chunk = concatAll([...this.parts, payload])
+      this.parts = []
+      return chunk
+    }
+  }
+
+  private async readNextFrame(): Promise<Uint8Array<ArrayBuffer> | null> {
     while (this.queue.length === 0) {
       if (this.ended) return null
       if (this.closed) return this.endOfClosed()
@@ -104,20 +135,7 @@ class ChannelStreamSource {
     const entry = this.queue.shift()!
     // Signal the channel that this frame has been consumed — drives window updates.
     entry.onConsumed()
-    // Tag is the first byte: 0x00 = data, 0x01 = error, 0x02 = end.
-    const tag = entry.frame[0]
-    if (tag === CHANNEL_PUMP_TAG_END) {
-      this.ended = true
-      return null
-    }
-    const payload = entry.frame.subarray(1)
-    if (tag === CHANNEL_PUMP_TAG_ERROR) {
-      const errorPayload: unknown = parse(textDecoder.decode(payload))
-      assert(isObject(errorPayload))
-      if (this.throwError) this.throwError(errorPayload)
-      throw new Error('Streaming error frame received')
-    }
-    return payload
+    return entry.frame
   }
 
   /** A read of the stream once its channel closed with nothing left queued: the end only if the reader cancelled. */

@@ -30,7 +30,7 @@ type ChannelPumpRunContext = {
  * Creates the channel, registers it, waits for client connection, then streams
  * chunks with proper context restoration and cleanup.
  *
- * Each binary send is tagged: `[TAG_DATA][payload]` for data, `[TAG_ERROR][errorPayload]`
+ * Each binary send is tagged: `[TAG_DATA][payload]` for data (`[TAG_PART]` for a chunk's part before its last), `[TAG_ERROR][errorPayload]`
  * for errors, `[TAG_END]` at the producer's end. Tags are defined in constants.ts and shared with the client's
  * ChannelStreamSource. Errors are encoded with `encodeErrorPayload` — the same
  * payload format as inline streaming.

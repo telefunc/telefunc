@@ -24,6 +24,8 @@ export const CHANNEL_PUMP_TAG_DATA = 0x00
 export const CHANNEL_PUMP_TAG_ERROR = 0x01
 /** The producer's end, before its close: a stream whose channel closes without it was cut short. */
 export const CHANNEL_PUMP_TAG_END = 0x02
+/** A chunk's part that more of it follows: the reader joins the parts up to the chunk's last, its `TAG_DATA`. */
+export const CHANNEL_PUMP_TAG_PART = 0x03
 
 // ===== Streaming error frames =====
 
@@ -262,7 +264,7 @@ export const PUBLISH_HOLD_BYTES = 2 * 1024 * 1024
  *  send holds one, so only sends nobody awaits reach it. */
 export const CHANNEL_HOLD_MAX_BYTES = 320 * 1024 * 1024
 /** A stream's chunk larger than this goes in parts, each a message under every channel's frame limit (32 MiB on
- *  Cloudflare) and under the smallest `maxMemory`. */
+ *  Cloudflare) and under the smallest `maxMemory`; its reader gets the chunk whole. */
 export const STREAM_CHUNK_PART_BYTES = 1024 * 1024
 
 // Client-side channel reconnect defaults
