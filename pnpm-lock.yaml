@@ -616,6 +616,9 @@ importers:
       standaloner:
         specifier: ^0.3.3
         version: 0.3.3(encoding@0.1.13)(rollup@4.44.0)
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
       vite:
         specifier: ^8.0.16
         version: 8.0.16(@types/node@24.0.10)(esbuild@0.27.3)(jiti@2.7.0)
