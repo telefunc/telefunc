@@ -1,8 +1,12 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { PGlite } from '@electric-sql/pglite'
 import { sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/pglite'
+import { REQUEST_CONTEXT } from 'telefunc'
 import { describe, expect, it } from 'vitest'
 import { liveDrizzle } from '@telefunc/live/drizzle'
+import { liveDatabaseOf } from '../database.js'
+import { readLive } from '../liveQuery.js'
 
 describe('PGlite capture', () => {
   // The tenant sees only row 1, so a write captured with a widened `RETURNING` would update row 1 only.
@@ -28,6 +32,58 @@ describe('PGlite capture', () => {
       { id: 1, value: 'after' },
       { id: 2, value: 'after' },
     ])
+    await pglite.close()
+  })
+})
+
+describe('identical live reads on one PGlite', () => {
+  const READ = 'select id, done from todos order by id'
+
+  /** A wrapped PGlite counting the reads of `todos` that reach it; `hold()` delays the results of those after it. */
+  async function counting() {
+    const pglite = new PGlite()
+    await pglite.exec('create table todos (id int primary key, done bool); insert into todos values (1, false)')
+    let reads = 0
+    let held: Promise<void> | undefined
+    const query = pglite.query.bind(pglite)
+    pglite.query = (async (...args: Parameters<typeof query>) => {
+      const reading = /from todos/.test(args[0])
+      if (reading) reads++
+      const until = reading ? held : undefined
+      const result = await query(...args)
+      await until
+      return result
+    }) as typeof query
+    liveDatabaseOf(pglite, {})
+    // A telefunction call, as telefunc's server runs one: the response sends the `Live`.
+    const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
+    const live = () =>
+      store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () => readLive(() => pglite.query(READ), 'the spec'))
+    return { pglite, live, reads: () => reads, hold: (until: Promise<void> | undefined) => (held = until) }
+  }
+
+  it('share one read', async () => {
+    const { pglite, live, reads } = await counting()
+    const lives = await Promise.all(Array.from({ length: 10 }, live))
+    expect(reads()).toBe(1)
+    for (const each of lives) expect(each.send().rows).toEqual([{ id: 1, done: false }])
+    await pglite.close()
+  })
+
+  it("don't share across a write between them", async () => {
+    const { pglite, live, reads, hold } = await counting()
+    let release!: () => void
+    hold(new Promise((resolve) => (release = resolve)))
+    const first = live()
+    while (reads() === 0) await new Promise((resolve) => setTimeout(resolve, 1))
+    hold(undefined)
+    await pglite.query('update todos set done = true where id = 1')
+    const next = live()
+    // Joined, it would wait for the first one's result.
+    setTimeout(release, 50)
+    expect((await next).send().rows).toEqual([{ id: 1, done: true }])
+    expect(reads()).toBe(2)
+    expect((await first).send().rows).toEqual([{ id: 1, done: false }])
     await pglite.close()
   })
 })

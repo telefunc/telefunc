@@ -185,17 +185,24 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
       typeof config === 'string' ? { text: config } : { ...(config as PgQueryConfig) }
     if (Array.isArray(values)) queryConfig.values = values
     return answer(
-      turns.take(client, () => run(queryConfig, reservation)),
+      turns.take(client, (planned) => run(queryConfig, reservation, planned)),
       callback,
     )
   }
 
-  async function run(queryConfig: PgQueryConfig, reservation: Reservation | undefined): Promise<PgResult | PgResult[]> {
+  async function run(
+    queryConfig: PgQueryConfig,
+    reservation: Reservation | undefined,
+    planned: (statement: Statement) => void,
+  ): Promise<PgResult | PgResult[]> {
     await free()
-    const plan = () =>
-      live.statementFor(client, queryConfig.text, queryConfig.values ?? [], {
+    const plan = () => {
+      const statement = live.statementFor(client, queryConfig.text, queryConfig.values ?? [], {
         sharing: isShareable(queryConfig) ? { rowForm: ROW_FORM, reservation } : undefined,
       })
+      planned(statement)
+      return statement
+    }
     let statement = plan()
     while (statement.joined) {
       const joined = await statement.joined

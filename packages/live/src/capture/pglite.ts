@@ -114,14 +114,23 @@ function captureExecutor(
     )
   executor.query = (text, params = [], options) => {
     if (isStarting()) return query(text, params, options)
-    return turns.take(executor, () => runQuery(text, params, options))
+    return turns.take(executor, (planned) => runQuery(text, params, options, planned))
   }
-  async function runQuery(text: string, params: unknown[], options: QueryOptions | undefined): Promise<Results> {
+  async function runQuery(
+    text: string,
+    params: unknown[],
+    options: QueryOptions | undefined,
+    planned: (statement: Statement) => void,
+  ): Promise<Results> {
     await ready()
     // Other options (parsers, serializers) make rows only this caller can be given.
     const rowForm =
       Object.keys(options ?? {}).every((key) => key === 'rowMode') && `pglite:${options?.rowMode ?? 'object'}`
-    const plan = () => live.statementFor(connection, text, params, { sharing: rowForm ? { rowForm } : undefined })
+    const plan = () => {
+      const statement = live.statementFor(connection, text, params, { sharing: rowForm ? { rowForm } : undefined })
+      planned(statement)
+      return statement
+    }
     let statement = plan()
     while (statement.joined) {
       const joined = await statement.joined

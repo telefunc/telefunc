@@ -68,7 +68,12 @@ class WatchedRead {
   }
 }
 
-type InFlight = { read: WatchedRead; joiners: ((answer: { result: unknown } | undefined) => void)[] }
+/** `connection`: the one it runs on, once it has one. */
+type InFlight = {
+  read: WatchedRead
+  connection: object | undefined
+  joiners: ((answer: { result: unknown } | undefined) => void)[]
+}
 
 /**
  * The live reads running now on one database, by what makes two of them return the same rows: the statement sent,
@@ -78,7 +83,8 @@ type InFlight = { read: WatchedRead; joiners: ((answer: { result: unknown } | un
  * the app's, `ALTER ROLE … SET`). A read in a transaction never shares: it sees the transaction's writes and snapshot.
  *
  * The first read runs; one arriving while it runs gets a copy of its result and watches it, so N clients refetching
- * one query send it once. Each telefunction still runs, with its own checks, for each client.
+ * one query send it once. Each telefunction still runs, with its own checks, for each client. A read that something
+ * else was planned after on its connection takes no more: what comes after runs after that.
  */
 class SharedReads {
   private readonly inFlight = new Map<string, InFlight>()
@@ -91,9 +97,14 @@ class SharedReads {
     return new Promise((resolve) => running.joiners.push(resolve))
   }
 
-  /** `read` runs now with `key`: reads arriving until `answered()` or `failed()` join it. */
-  lead(key: string, read: WatchedRead): { answered<R>(result: R, copy: (result: R) => R): void; failed(): void } {
-    const running: InFlight = { read, joiners: [] }
+  /** `read` runs now with `key`, on `connection`: reads arriving until `answered()`, `failed()` or `stopJoining()` join
+   *  it. */
+  lead(
+    key: string,
+    read: WatchedRead,
+    connection?: object,
+  ): { answered<R>(result: R, copy: (result: R) => R): void; failed(): void } {
+    const running: InFlight = { read, connection, joiners: [] }
     this.inFlight.set(key, running)
     const settle = () => {
       if (this.inFlight.get(key) === running) this.inFlight.delete(key)
@@ -109,6 +120,11 @@ class SharedReads {
         for (const resolve of running.joiners) resolve(undefined)
       },
     }
+  }
+
+  /** A statement that may change what reads see was planned on `connection`: the reads running there take no more. */
+  stopJoining(connection: object): void {
+    for (const [key, running] of this.inFlight) if (running.connection === connection) this.inFlight.delete(key)
   }
 }
 

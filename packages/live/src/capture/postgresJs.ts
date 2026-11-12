@@ -114,13 +114,18 @@ function captureQueries(query: Query): WeakMap<object, Target> {
     if (!target || this.executed || OURS in this || this.options.onexecute) return handle.call(this)
     this.executed = true
     const { connection } = target
-    return connection ? turns.take(connection, () => run(this, target)) : run(this, target)
+    return connection ? turns.take(connection, (planned) => run(this, target, planned)) : run(this, target)
   }
   Object.defineProperty(query, TARGETS, { value: targets })
   return targets
 }
 
-async function run(query: Query, { live, sql, connection = {}, shared }: Target): Promise<void> {
+/** `planned` is told each statement it plans. */
+async function run(
+  query: Query,
+  { live, sql, connection = {}, shared }: Target,
+  planned: (statement: Statement) => void = () => {},
+): Promise<void> {
   // As postgres.js does: `.values()` and the like are called before it runs.
   await 1
   try {
@@ -129,15 +134,20 @@ async function run(query: Query, { live, sql, connection = {}, shared }: Target)
     return query.reject(err as Error)
   }
   const known = textOf(query)
-  let statement = known && rewritten(query, known, live, connection)
+  const plan = (text: NonNullable<typeof known>) => {
+    const statement = rewritten(query, text, live, connection)
+    planned(statement)
+    return statement
+  }
+  let statement = known && plan(known)
   while (statement && statement.joined) {
     const joined = await statement.joined
     if (joined) return query.resolve(joined.result as Result)
-    statement = rewritten(query, known!, live, connection)
+    statement = plan(known!)
   }
   if (statement && statement.asks) {
     await runFollowUp(sql, statement.asks)
-    statement = rewritten(query, known!, live, connection)
+    statement = plan(known!)
   }
   // A template with helpers: its text is known once built.
   const opaque = known ? undefined : live.statementWithTextLater(connection)
