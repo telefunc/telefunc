@@ -81,6 +81,8 @@ const FRAMES = 1500
 function run(amplitude: (frame: number) => number, arrival: (captured: number, jitter: number) => number = stall) {
   let now = 0
   vi.spyOn(performance, 'now').mockImplementation(() => now)
+  // A whole millisecond: the process's own start has a fraction, which shifts every 0.1 ms tick by up to half of one.
+  vi.spyOn(performance, 'timeOrigin', 'get').mockReturnValue(1_700_000_000_000)
   const random = seeded(7)
   const amplitudes = new Map<number, number>()
   const samplesOf = new Map<Float32Array, number>()
