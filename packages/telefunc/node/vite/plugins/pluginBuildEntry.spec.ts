@@ -49,6 +49,17 @@ it("the production entry keeps the nested log settings of the app's server code"
   expect(config.log).toEqual({ shieldErrors: { dev: false, prod: false } })
 })
 
+it("the production entry leaves alone what the app's server code set itself", () => {
+  config.telefuncUrl = '/build-tf'
+  config.channel.transports = ['sse']
+  const manifest = getManifest()
+  config.telefuncUrl = '/server-tf'
+  config.channel.transports = ['sse', 'ws']
+  setTelefuncLoaders({ loadTelefuncFiles: async () => ({}), loadManifest: () => manifest })
+  expect(config.telefuncUrl).toBe('/server-tf')
+  expect(config.channel.transports).toEqual(['sse', 'ws'])
+})
+
 function getManifest() {
   pluginBuildEntry()
   const entryCode = mocks.getServerProductionEntry!()

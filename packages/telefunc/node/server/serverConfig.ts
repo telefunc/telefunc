@@ -385,19 +385,19 @@ function getManifestConfig(): Record<string, unknown> {
   return manifestConfig
 }
 
-/** Nested settings are merged key by key: production may apply the manifest after the app's server code set some. */
+/** The app's server code wins: the manifest fills only the settings it left unset, whichever of the two runs first. */
 function applyManifestConfig(manifestConfig: Record<string, unknown>): void {
   for (const [prop, val] of Object.entries(manifestConfig)) {
-    const current = configState[prop as keyof ConfigUser]
-    applyUserConfig(prop, mergeConfig(current, val))
+    applyUserConfig(prop, fillUnset(configState[prop as keyof ConfigUser], val))
   }
 }
 
-function mergeConfig(current: unknown, val: unknown): unknown {
-  if (!isPlainObject(val) || !isPlainObject(current)) return val
-  const merged = { ...current }
-  for (const [key, valNested] of Object.entries(val)) merged[key] = mergeConfig(current[key], valNested)
-  return merged
+function fillUnset(current: unknown, val: unknown): unknown {
+  if (current === undefined) return val
+  if (!isPlainObject(val) || !isPlainObject(current)) return current
+  const filled = { ...current }
+  for (const [key, valNested] of Object.entries(val)) filled[key] = fillUnset(current[key], valNested)
+  return filled
 }
 
 /** How long a wire may deliver nothing before it is taken for dead: two ping intervals, each of at least a second. */
