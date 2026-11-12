@@ -494,11 +494,12 @@ const writeNames = Object.keys(driver.writes).filter(
 const SESSION_WRITES = ['setPath', 'notesPath', 'stampRead']
 const writesBeforeHalf = writeNames.filter((name) => !SESSION_WRITES.includes(name))
 
-/** How often each write ran, and how often the database refused it: one it refuses every time tests nothing. */
-const writeRuns = new Map<string, { runs: number; refused: number }>()
+/** How often each write ran, how often the database refused it, and how often for anything but its data (a racing
+ *  delete's foreign key): one refused every time for that tests nothing. */
+const writeRuns = new Map<string, { runs: number; refused: number; refusedNotForData: number }>()
 
 function ran(write: string): void {
-  const runs = writeRuns.get(write) ?? { runs: 0, refused: 0 }
+  const runs = writeRuns.get(write) ?? { runs: 0, refused: 0, refusedNotForData: 0 }
   runs.runs++
   writeRuns.set(write, runs)
 }
@@ -511,7 +512,9 @@ const failedWrites: string[] = []
 function writeFailed(write: string, err: unknown): void {
   const sqlState = sqlStateOf(err)
   if (sqlState !== undefined && (!ROLE_WRITES.includes(write) || sqlState.startsWith('23'))) {
-    writeRuns.get(write)!.refused++
+    const runs = writeRuns.get(write)!
+    runs.refused++
+    if (!sqlState.startsWith('23')) runs.refusedNotForData++
     if (VERBOSE) console.log(`write ${write} refused: ${String(err).slice(0, 120)}`)
   } else failedWrites.push(`${write}: ${String(err).slice(0, 200)}`)
 }
@@ -664,7 +667,7 @@ const runs = [...writeRuns].sort(([a], [b]) => a.localeCompare(b))
 console.log(`writes refused of run: ${runs.map(([write, r]) => `${write} ${r.refused}/${r.runs}`).join(', ')}`)
 const scripted = [...SCRIPTED_WRITES.values()]
 const alwaysRefused = runs
-  .filter(([write, r]) => !scripted.includes(write) && r.runs >= 5 && r.refused === r.runs)
+  .filter(([write, r]) => !scripted.includes(write) && r.runs >= 5 && r.refusedNotForData === r.runs)
   .map(([write]) => write)
 console.log(`writes refused every time: ${alwaysRefused.length}${alwaysRefused.map((write) => ` ${write}`).join('')}`)
 console.log(
