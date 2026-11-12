@@ -516,6 +516,11 @@ function sqlStateOf(err: unknown): string | undefined {
   return undefined
 }
 
+/** Writes that roll back all they wrote: no read may change. */
+const ROLLED_BACK_WRITES = ['txRollback', 'batchRollback']
+/** Reads a write of `ROLLED_BACK_WRITES` changed. */
+const rolledBackChanges: string[] = []
+
 /** Shapes counting todos in groups a user's deletion may empty: they race it. */
 const EMPTIED_BY_DELETE_USER = ['countByDone', 'busyUsers', 'topPriority']
 
@@ -551,6 +556,7 @@ for (let step = 0; step < STEPS; step++) {
         `step ${step} ${write}(${JSON.stringify(args)}) → ${sub.shape}(${JSON.stringify(sub.args)})\n  before ${sub.result}\n  after  ${now}`,
       )
     }
+    if (changed && ROLLED_BACK_WRITES.includes(write)) rolledBackChanges.push(`step ${step} ${write} → ${sub.shape}`)
     if (changed || sub.invalidated) stale.push(sub)
   }
   await Promise.all(stale.map((sub) => subscribe(sub)))
@@ -646,6 +652,12 @@ const runs = [...writeRuns].sort(([a], [b]) => a.localeCompare(b))
 console.log(`writes refused of run: ${runs.map(([write, r]) => `${write} ${r.refused}/${r.runs}`).join(', ')}`)
 const alwaysRefused = runs.filter(([, r]) => r.runs >= 5 && r.refused === r.runs).map(([write]) => write)
 console.log(`writes refused every time: ${alwaysRefused.length}${alwaysRefused.map((write) => ` ${write}`).join('')}`)
+console.log(
+  `reads a rolled-back write changed: ${rolledBackChanges.length}${rolledBackChanges
+    .slice(0, 3)
+    .map((c) => `\n  ${c}`)
+    .join('')}`,
+)
 console.log(`volatile reads shared: ${sharedVolatile.length} of ${volatile.length}`)
 console.log(`reads holding another read's rows: ${misshared.length}${misshared.map((s) => ` ${s.shape}`).join('')}`)
 console.log(`derived: rows held=${heldRows} of ${subscribers.filter((s) => s.derive).length} derived subscribers`)
@@ -657,6 +669,7 @@ const failed =
   heldRows > 0 ||
   failedWrites.length > 0 ||
   alwaysRefused.length > 0 ||
+  rolledBackChanges.length > 0 ||
   sharedVolatile.length > 0 ||
   misshared.length > 0
 process.exit(failed ? 1 : 0)
