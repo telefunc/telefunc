@@ -1,4 +1,4 @@
-export { capturePostgresJs, isPostgresJs }
+export { capturePostgresJs, isPostgresJs, postgresJsConnectionTarget }
 export type { PostgresJs }
 
 import type { FollowUp, LiveDatabase, Statement } from '../liveDatabase.js'
@@ -13,7 +13,8 @@ type PostgresJs = {
   unsafe(text: string, args?: unknown[]): Query
   begin(...args: unknown[]): Promise<unknown>
   reserve(): Promise<PostgresJs & { release(): void }>
-  options: { max: number }
+  /** As postgres.js resolved them: the connection string, else its options, `PG*` variables, defaults. */
+  options: { max: number; user: string; host: string[]; port: number[]; database: string }
 }
 /** A scope `begin()` and `savepoint()` give their callback: statements on the transaction's connection. */
 type Scope = PostgresJs & { savepoint(...args: unknown[]): Promise<unknown> }
@@ -53,6 +54,11 @@ const OURS = Symbol.for('@telefunc/live/ours')
 
 function isPostgresJs(database: object): database is PostgresJs {
   return typeof database === 'function' && 'unsafe' in database && 'begin' in database
+}
+
+/** What `sql` connects to: its user, hosts, ports and database. */
+function postgresJsConnectionTarget({ options }: PostgresJs): string {
+  return `${options.user}@${options.host.join(',')}:${options.port.join(',')}/${options.database}`
 }
 
 /** Captures every statement of a postgres.js `sql`: its own, and those of its transactions and reserved connections. */

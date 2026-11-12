@@ -131,7 +131,7 @@ export const db = liveDrizzle(drizzle(env.DB))
 ```
 {/* spellcheck-ignore:off */}
 
-On Postgres through [Hyperdrive](https://developers.cloudflare.com/hyperdrive/), also import `@telefunc/live/postgres`, and create the pool in the first telefunction that uses it: a Worker can't read `env.HYPERDRIVE` at its top level.
+On Postgres through [Hyperdrive](https://developers.cloudflare.com/hyperdrive/), also import `@telefunc/live/postgres`, and create a pool in each telefunction call that uses it: a Worker can't use a connection of another request.
 
 ```ts
 // database.ts
@@ -143,17 +143,13 @@ import { drizzle } from 'drizzle-orm/node-postgres'
 import { liveDrizzle } from '@telefunc/live/drizzle'
 import pg from 'pg'
 
-let db: ReturnType<typeof connect> | undefined
-
 // In a telefunction: `await getDb().select().from(todos).live()`
 export function getDb() {
-  return (db ??= connect())
-}
-
-function connect() {
   return liveDrizzle(drizzle({ client: new pg.Pool({ connectionString: env.HYPERDRIVE.connectionString }) }))
 }
 ```
+
+> The pools of one database share what `@telefunc/live` knows about it: its schema is read once, not on each request.
 
 > `import '@telefunc/live/postgres'` adds Postgres's parser to your Worker, so a Worker on D1 goes without it. A Worker on Postgres still carries SQLite's parser: about 1 MB gzipped.
 

@@ -1,4 +1,4 @@
-export { capturePg }
+export { capturePg, pgConnectionTarget }
 export type { PgPool, PgClient }
 
 import { AsyncResource } from 'node:async_hooks'
@@ -27,7 +27,9 @@ type PgResultClass = new (
  *  ran on, for the callers that don't bring their own. */
 type SharedPgResult = { result: PgResult; types: unknown }
 type PgCallback = (err: Error | null, result?: PgResult | PgResult[]) => void
-type PgClient = { query: (...args: any[]) => any }
+type PgClient = { query: (...args: any[]) => any; connectionParameters?: ConnectionParameters }
+/** What `pg` resolved a client's configuration to: the connection string, else its options, `PG*` variables, defaults. */
+type ConnectionParameters = { user: string; host: string; port: number; database: string }
 /** A client checked out of a `pg.Pool`, until it calls `release()`. */
 type CheckedOut = PgClient & { release: (err?: Error | boolean) => void }
 type PgPool = {
@@ -35,6 +37,11 @@ type PgPool = {
   connect: (callback?: (...args: any[]) => void) => any
   query: (...args: any[]) => any
   totalCount: number
+  /** The class of the clients it opens, given `options`. */
+  Client?: new (
+    options: unknown,
+  ) => PgClient
+  options?: unknown
 }
 /** A `pg-cursor` (Prisma reads and writes through one), or another object `pg` submits. */
 type Submittable = {
@@ -64,6 +71,14 @@ function capturePg(database: PgPool | PgClient, live: LiveDatabase): void {
   database.on('connect', (client) => captureClient(client, live))
   checkOutForCaller(database)
   shareReadsBeforeConnecting(database, live)
+}
+
+/** What `database` connects to: its user, host, port and database. A pool tells through a client it would open, not
+ *  connected. */
+function pgConnectionTarget(database: PgPool | PgClient): string | undefined {
+  const client = 'totalCount' in database ? database.Client && new database.Client(database.options) : database
+  const parameters = client?.connectionParameters
+  return parameters && `${parameters.user}@${parameters.host}:${parameters.port}/${parameters.database}`
 }
 
 /** A live read sent with `pool.query()` joins an identical one before waiting for a connection: N clients refetching

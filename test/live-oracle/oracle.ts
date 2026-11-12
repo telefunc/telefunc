@@ -282,6 +282,9 @@ async function connect(): Promise<{
     }
   }
   const url = `postgres://postgres:postgres@127.0.0.1:${process.env.PG_PORT}/${process.env.PG_DATABASE ?? 'postgres'}`
+  // The writing server: the same database by another host name, so that it has a live database of its own, as a
+  // server in another process does (the clients of one database in one process share theirs).
+  const writerUrl = url.replace('@127.0.0.1:', '@localhost:')
   const admin = new pg.Client({ connectionString: url })
   await admin.connect()
   await admin.query(seed(random))
@@ -289,9 +292,10 @@ async function connect(): Promise<{
   const transport = SERVERS === 2 ? new UnreliableTransport() : undefined
   if (DRIVER === 'postgres-js') {
     // One connection on even seeds: a `BEGIN` sent through `sql` then holds for the statements after it.
-    const connectSql = () => postgres(url, { max: SEED % 2 === 0 ? 1 : 8, onnotice: () => {} })
-    const sql = connectSql()
-    const writerSql = SERVERS === 2 ? connectSql() : sql
+    const connectSql = (connectionString: string) =>
+      postgres(connectionString, { max: SEED % 2 === 0 ? 1 : 8, onnotice: () => {} })
+    const sql = connectSql(url)
+    const writerSql = SERVERS === 2 ? connectSql(writerUrl) : sql
     const driver = createDrizzle(sql, 'postgres-js', transport)
     countQueries(sql)
     return {
@@ -312,7 +316,7 @@ async function connect(): Promise<{
         ? createKysely(pool, 'pg', transport)
         : createDrizzle(pool, 'pg', transport)
   const pool = new pg.Pool({ connectionString: url, max: 8 })
-  const writerPool = SERVERS === 2 ? new pg.Pool({ connectionString: url, max: 8 }) : pool
+  const writerPool = SERVERS === 2 ? new pg.Pool({ connectionString: writerUrl, max: 8 }) : pool
   const driver = create(pool)
   const writer = SERVERS === 2 ? create(writerPool) : driver
   return {
