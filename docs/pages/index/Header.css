@@ -8,6 +8,37 @@
 #tagline-secondary {
   font-size: 27px;
   margin-bottom: 53px;
+  color: #878787;
+}
+
+#hero-badge {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  border: 1px solid #d1d5db;
+}
+#hero-badge-label {
+  background-color: #eee;
+}
+#hero-badge-value {
+  background-color: #8d8d8d;
+  color: white;
+}
+/* DocPress `darkMode` */
+:root.dark {
+  #tagline-secondary {
+    color: var(--dp-color-muted);
+  }
+  #hero-badge {
+    box-shadow: none;
+    border-color: var(--dp-color-border-strong);
+  }
+  #hero-badge-label {
+    background-color: var(--dp-color-surface-elevated);
+    color: var(--dp-color-muted);
+  }
+  #hero-badge-value {
+    background-color: var(--dp-color-border-strong);
+    color: var(--dp-color-text);
+  }
 }
 
 @media screen and (max-width: 700px) {
