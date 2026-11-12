@@ -166,6 +166,7 @@ function widenedWrite(statement: Ast, text: string, table: Table, catalog: Catal
   const hadReturning = write.returning?.length > 0
   const appended = `${hadReturning ? ',' : ' RETURNING'} ${image}`
   const sent = SQLITE.bindParams(SQLITE.splice(text, SQLITE.statementEnd(text), appended))
+  const positional = positionally(write, text, table, image)
   return {
     kind: 'write',
     table,
@@ -177,8 +178,54 @@ function widenedWrite(statement: Ast, text: string, table: Table, catalog: Catal
     assigned,
     alsoWrites: also,
     alsoWritesPerRow: true,
+    ...(positional && { positional }),
     ...(where !== undefined && { readsFirst: SQLITE.bindParams(`SELECT ${image} FROM ${where}`) }),
   }
+}
+
+/** `write` with each column of its own `RETURNING` aliased by its position (a `*` spelled out, an alias dropped), then
+ *  `image`, and a read of no rows giving the names SQLite gives those columns; `undefined` when the list can't be cut
+ *  into its items. */
+function positionally(write: Ast, text: string, table: Table, image: string): WritePlan['positional'] {
+  const items = (write.returning ?? []) as Ast[]
+  const end = SQLITE.statementEnd(text)
+  const pieces: string[] = []
+  let clause: number | undefined
+  let from: number | undefined
+  let depth = 0
+  for (const token of tokensOf(text.slice(0, end))) {
+    if (token.text === '(') depth++
+    else if (token.text === ')') depth--
+    else if (depth > 0) continue
+    else if (token.word === 'returning') {
+      clause = token.start
+      from = token.end
+      pieces.length = 0
+    } else if (from !== undefined && token.text === ',') {
+      pieces.push(text.slice(from, token.start).trim())
+      from = token.end
+    }
+  }
+  if (from !== undefined) pieces.push(text.slice(from, end).trim())
+  if (pieces.length !== items.length) return undefined
+  const columns = items.flatMap((item, i) =>
+    item.Wildcard || item.QualifiedWildcard
+      ? table.columns.map((c) => quote(c.name))
+      : [item.ExprWithAlias ? withoutAlias(pieces[i]!) : pieces[i]!],
+  )
+  const keys = columns.map((_, i) => `${HIDDEN_PREFIX}r${i}`)
+  const list = [...columns.map((column, i) => `${column} AS "${keys[i]}"`), image].join(', ')
+  const before = clause === undefined ? `${text.slice(0, end)} ` : text.slice(0, clause)
+  const names =
+    pieces.length > 0 ? SQLITE.bindParams(`SELECT ${pieces.join(', ')} FROM ${table.sqlName} LIMIT 0`) : undefined
+  return { ...SQLITE.bindParams(`${before}RETURNING ${list}${text.slice(end)}`), keys, ...(names && { names }) }
+}
+
+/** An aliased item's expression: its text without its alias, nor the `AS` before it. */
+function withoutAlias(item: string): string {
+  const tokens = tokensOf(item)
+  const alias = tokens.length - 1
+  return item.slice(0, tokens[tokens[alias - 1]?.word === 'as' ? alias - 1 : alias]!.start).trim()
 }
 
 /** The rows an `UPDATE` of `table` writes, named in its own words (`AS a WHERE …`), unless it has more than a `WHERE`

@@ -43,6 +43,10 @@ type Statement = {
   /** A query of ours to send right before `text`, in the same transaction with nothing between: its rows go to `done`
    *  before `succeeded` (a write's rows before it). A driver that doesn't send it makes the write count less precisely. */
   readsFirst?: FollowUp
+  /** The statement as a driver whose rows come as objects with `readsFirst` sends it (D1's `batch()`): each column the
+   *  caller gets aliased by its position, `keys`, which rebuild its arrays, then the hidden ones; `names`: a query of
+   *  ours reading no rows, which gives those columns' names. */
+  positional?: { text: string; values: unknown[]; keys: string[]; names?: { text: string; values: unknown[] } }
   /** A write that runs as a role its connection doesn't know yet: run this query of ours on the connection first,
    *  then plan the statement again, which may then capture its rows. A driver that doesn't sends it as is. */
   asks?: FollowUp
@@ -683,6 +687,7 @@ class LiveDatabase {
       ),
       ...(plan.params && { values: plan.params.map((i) => values[i]) }),
       returnsRows: plan.hadReturning,
+      ...(plan.positional && { positional: bound(plan.positional, values) }),
     }
     if (!plan.readsFirst) return sent
     const { text, params } = plan.readsFirst
@@ -796,6 +801,13 @@ function cascadedDeletes(plan: WritePlan, changes: Change[]): Change[] {
       return [{ table: key.table, kind: 'delete', old, several: true }]
     }),
   )
+}
+
+/** `positional` with the app's `values` its texts take. */
+function bound(positional: NonNullable<WritePlan['positional']>, values: readonly unknown[]): Statement['positional'] {
+  const { text, params, keys, names } = positional
+  const of = (params: number[]) => params.map((i) => values[i])
+  return { text, values: of(params), keys, ...(names && { names: { text: names.text, values: of(names.params) } }) }
 }
 
 /** Queries naming the tables a transaction changed, for `Statement.beforeCommit`: `named` gets them. */

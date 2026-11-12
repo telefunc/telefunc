@@ -38,6 +38,10 @@ type WritePlan = {
   /** The app's parameter each of `text`'s takes, when they aren't the app's in order (`Dialect.bindParams()`). */
   params?: number[]
   hadReturning: boolean
+  /** The write as a driver whose rows come as objects sends it with `readsFirst` (D1's `batch()`): each column of its
+   *  own `RETURNING` aliased `keys[i]` by its position, then the hidden ones; `names`: a read of no rows giving those
+   *  columns' names as SQLite gives them. */
+  positional?: { text: string; params: number[]; keys: string[]; names?: { text: string; params: number[] } }
   /** Which hidden columns the rows carry, in order: row images, and whether an upsert inserted (Postgres < 18, which
    *  has no `old` image). */
   images: ('new' | 'old' | 'inserted')[]

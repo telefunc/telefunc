@@ -3,6 +3,9 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
+import { eq, sql } from 'drizzle-orm'
+import { drizzle } from 'drizzle-orm/d1'
+import { integer, sqliteTable } from 'drizzle-orm/sqlite-core'
 import { REQUEST_CONTEXT } from 'telefunc'
 import { describe, expect, it } from 'vitest'
 import { liveDatabaseOf } from '../database.js'
@@ -160,4 +163,48 @@ describe('a write that changed no row', () => {
       expect(stale.map((count) => count())).toEqual(signals)
     },
   )
+})
+
+describe("a write's own RETURNING, which Drizzle reads through raw()", () => {
+  const todos = sqliteTable('todos', { id: integer('id').primaryKey(), userId: integer('user_id').notNull() })
+  const schema =
+    'create table todos (id integer primary key, user_id int not null); insert into todos values (1, 1), (2, 3)'
+  const moved = eq(todos.id, 1)
+  const forms: Record<string, (db: any) => Promise<unknown>> = {
+    'its columns': (db) => db.update(todos).set({ userId: 2 }).where(moved).returning().all(),
+    'a field of sql': (db) =>
+      db
+        .update(todos)
+        .set({ userId: 2 })
+        .where(moved)
+        .returning({ x: sql`${todos.id} * 10` })
+        .all(),
+    'a field twice': (db) =>
+      db.update(todos).set({ userId: 2 }).where(moved).returning({ a: todos.id, b: todos.id }).all(),
+    'sql through values()': (db) => db.values(sql`update todos set user_id = 2 where id = 1 returning id, id * 10`),
+  }
+
+  it.each([
+    { form: 'its columns', rows: [{ id: 1, userId: 2 }] },
+    { form: 'a field of sql', rows: [{ x: 10 }] },
+    { form: 'a field twice', rows: [{ a: 1, b: 1 }] },
+    { form: 'sql through values()', rows: [[1, 10]] },
+  ])("$form: moving a todo refetches its old user's read, not an unrelated user's", async ({ form, rows }) => {
+    const d1 = d1Database(schema)
+    liveDatabaseOf(d1, { name: `moves, ${form}` })
+    // A count: unlike a list of rows, its result can't tell whether the moved todo was the user's.
+    const countOf = (user: number) => async () =>
+      (await d1.prepare('select count(*) as n from todos where user_id = ?').bind(user).all()).results
+    const [oldUser, unrelated] = [await staleSignals(countOf(1)), await staleSignals(countOf(3))]
+    expect(await forms[form]!(drizzle(d1 as never))).toEqual(rows)
+    await settled()
+    expect([oldUser(), unrelated()]).toEqual([1, 0])
+  })
+
+  it('gives the column names asked for, though no row came back', async () => {
+    const d1 = d1Database(schema)
+    liveDatabaseOf(d1, { name: 'names of nothing' })
+    const update = d1.prepare('update todos set user_id = ? where id = ? returning id, user_id as owner')
+    expect(await update.bind(2, 9).raw({ columnNames: true })).toEqual([['id', 'owner']])
+  })
 })
