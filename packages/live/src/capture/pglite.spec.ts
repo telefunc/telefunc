@@ -133,3 +133,58 @@ describe('identical live reads on one PGlite', () => {
     await pglite.close()
   })
 })
+
+describe('a delete cascading two levels on PGlite', () => {
+  const SCHEMA = `create table users (id int primary key);
+    create table todos (id int primary key, user_id int references users on delete cascade);
+    create table tags (id int primary key, todo_id int references todos on delete cascade);
+    insert into users values (1), (2);
+    insert into todos values (10, 1), (11, 1), (20, 2);
+    insert into tags values (100, 10), (101, 11), (200, 20);`
+
+  /** A live PGlite with `SCHEMA`, the texts sent to it, and how many stale signals each of `reads` gets. */
+  async function cascading(reads: string[]) {
+    const pglite = new PGlite()
+    await pglite.exec(SCHEMA)
+    const sent: string[] = []
+    const query = pglite.query.bind(pglite)
+    pglite.query = ((text: string, ...rest: []) => {
+      sent.push(text)
+      return query(text, ...rest)
+    }) as typeof query
+    liveDatabaseOf(pglite, {})
+    const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
+    const counts = await Promise.all(
+      reads.map(async (read) => {
+        const cell = await store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
+          readLive(() => pglite.query(read), 'the spec'),
+        )
+        let stale = 0
+        cell.onStale(() => stale++)
+        cell.send()
+        return () => stale
+      }),
+    )
+    return { pglite, sent, stale: () => counts.map((count) => count()) }
+  }
+
+  it('stales only the reads of the rows it deletes', async () => {
+    const { pglite, stale } = await cascading([
+      'select * from tags where id = 100',
+      'select * from tags where id = 200',
+    ])
+    await pglite.query('delete from users where id = $1', [1])
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(stale()).toEqual([1, 0])
+    await pglite.close()
+  })
+
+  it('is sent as without cascades while no live read reads their tables', async () => {
+    const { pglite, sent } = await cascading(['select * from users where id = 2'])
+    await pglite.query('delete from users where id = $1', [1])
+    expect(sent.filter((text) => text.startsWith('delete'))).toEqual([
+      'delete from users where id = $1 RETURNING to_json(ARRAY["users"."id"::text])::text AS "__live_0"',
+    ])
+    await pglite.close()
+  })
+})

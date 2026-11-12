@@ -208,3 +208,66 @@ describe("a write's own RETURNING, which Drizzle reads through raw()", () => {
     expect(await update.bind(2, 9).raw({ columnNames: true })).toEqual([['id', 'owner']])
   })
 })
+
+describe('a D1 delete cascading two levels', () => {
+  const SCHEMA = `pragma foreign_keys = on;
+    create table users (id integer primary key);
+    create table todos (id integer primary key, user_id integer references users on delete cascade);
+    create table tags (id integer primary key, todo_id integer references todos on delete cascade);
+    insert into users values (1), (2);
+    insert into todos values (10, 1), (11, 1), (20, 2);
+    insert into tags values (100, 10), (101, 11), (200, 20);`
+
+  /** A live D1 stand-in with `SCHEMA`, and the texts prepared on it. */
+  function cascading() {
+    const d1 = d1Database(SCHEMA)
+    const sent: string[] = []
+    const prepare = d1.prepare
+    d1.prepare = (text) => {
+      sent.push(text)
+      return prepare(text)
+    }
+    liveDatabaseOf(d1, {})
+    const read = (text: string, id: number) => staleSignals(async () => (await d1.prepare(text).bind(id).all()).results)
+    return { d1, sent, read }
+  }
+
+  it('stales only the reads of the rows it deletes', async () => {
+    const { d1, read } = cascading()
+    const [deleted, kept] = [
+      await read('select * from tags where id = ?', 100),
+      await read('select * from tags where id = ?', 200),
+    ]
+    await d1.prepare('delete from users where id = ?').bind(1).run()
+    await settled()
+    expect([deleted(), kept()]).toEqual([1, 0])
+  })
+
+  it('is sent as without cascades while no live read reads their tables', async () => {
+    const { d1, sent, read } = cascading()
+    await read('select * from users where id = ?', 2)
+    sent.length = 0
+    await d1.prepare('delete from users where id = ?').bind(1).run()
+    expect(sent).toEqual([
+      'delete from users where id = ? RETURNING json_array(CASE WHEN typeof("id") IN (\'null\', \'integer\', \'real\') THEN CAST("id" AS TEXT) ELSE 0 END) AS "__live_0"',
+    ])
+  })
+  it('sets the key of the rows a SET NULL changes, past a cascade', async () => {
+    const d1 = d1Database(`pragma foreign_keys = on;
+      create table users (id integer primary key);
+      create table todos (id integer primary key, user_id integer references users on delete cascade);
+      create table notes (id integer primary key, todo_id integer references todos on delete set null);
+      insert into users values (1), (2);
+      insert into todos values (10, 1), (20, 2);
+      insert into notes values (1000, 10), (2000, 20);`)
+    liveDatabaseOf(d1, {})
+    const read = (text: string, id: number) => staleSignals(async () => (await d1.prepare(text).bind(id).all()).results)
+    const [changed, kept] = [
+      await read('select * from notes where todo_id = ?', 10),
+      await read('select * from notes where id = ?', 2000),
+    ]
+    await d1.prepare('delete from users where id = ?').bind(1).run()
+    await settled()
+    expect([changed(), kept()]).toEqual([1, 0])
+  })
+})

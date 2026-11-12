@@ -4,7 +4,15 @@ export type { Statement, FollowUp, LiveOptions, Sharing, Reservation, Engine }
 import type { BroadcastTransport } from 'telefunc'
 import { accessAnswered, tablesChangedBy, type Access, type Catalog, type Table } from './catalog.js'
 import { ChangeFeed } from './changeFeed.js'
-import { ofRows, READS_EVERYTHING, type ChangedTables, type Plan, type WritePlan } from './capture/statement.js'
+import {
+  ofRows,
+  HIDDEN_PREFIX,
+  READS_EVERYTHING,
+  type Cascade,
+  type ChangedTables,
+  type Plan,
+  type WritePlan,
+} from './capture/statement.js'
 import { ConnectionRoles, roleChangeOf } from './capture/roles.js'
 import { named, Transactions, UNNAMED_TABLES } from './capture/transactions.js'
 import { currentQuery, type LiveQuery } from './liveQuery.js'
@@ -674,37 +682,68 @@ class LiveDatabase {
   }
 
   /** `plan`, sent with images of the rows it writes, and the rows it will write as they are before it when the driver
-   *  sends `readsFirst`. */
+   *  sends `readsFirst`; a delete with the rows of the cascades a live read here reads (`WritePlan.cascades`). */
   private widenedWrite(connection: object, plan: WritePlan, values: readonly unknown[]): Statement {
+    const cascades = plan.cascades ? this.cascadesRead(plan.cascades.of, connection) : []
+    const inReturning = plan.cascades?.at === undefined ? [] : cascades
     let before: Rows | undefined
+    let cascaded: unknown[][][] | undefined
     const sent = {
       ...this.statement(
         connection,
-        plan.text,
-        plan.images.length,
-        (rows) => this.changesOfWrite(plan, rows, before),
+        withColumns(plan, inReturning),
+        plan.images.length + inReturning.length,
+        (rows) => {
+          // An array of images for each row deleted, in the columns past the write's own images.
+          if (inReturning.length > 0)
+            cascaded = inReturning.map((_, i) => rows.flatMap((row) => JSON.parse(row[plan.images.length + i] ?? '[]')))
+          return this.changesOfWrite(plan, rows, before, cascaded && { of: cascades, rows: cascaded })
+        },
         () => this.keptChanges(plan, connection),
       ),
       ...(plan.params && { values: plan.params.map((i) => values[i]) }),
       returnsRows: plan.hadReturning,
       ...(plan.positional && { positional: bound(plan.positional, values) }),
     }
-    if (!plan.readsFirst) return sent
-    const { text, params } = plan.readsFirst
-    const readsFirst = { text, values: params.map((i) => values[i]), done: (rows?: Rows) => void (before = rows) }
-    return { ...sent, readsFirst }
+    if (plan.readsFirst) {
+      const { text, params } = plan.readsFirst
+      const readsFirst = { text, values: params.map((i) => values[i]), done: (rows?: Rows) => void (before = rows) }
+      return { ...sent, readsFirst }
+    }
+    if (cascades.length === inReturning.length) return sent
+    return { ...sent, readsFirst: cascadesFirst(cascades, values, (images) => (cascaded = images)) }
   }
 
-  /** `before`: what `readsFirst` read, when the driver sent it. */
-  private changesOfWrite(plan: WritePlan, rows: Rows, before: Rows | undefined): Change[] {
+  /** Of `cascades`, those to read: a live read here reads their table or one past it, and the connection's role reads
+   *  their rows unfiltered, as the cascades before them, which they're read through. */
+  private cascadesRead(cascades: Cascade[], connection: object): Cascade[] {
+    const role = this.roles!.of(connection)
+    const access = role === null ? undefined : this.access.get(role)
+    return cascades.flatMap((cascade) => {
+      const seen = access?.get(cascade.table.id)
+      if (!seen?.readable || seen.rowSecurity || !cascade.reach.some((table) => this.router.watches(table))) return []
+      return [cascade, ...this.cascadesRead(cascade.next, connection)]
+    })
+  }
+
+  /** `before`: what `readsFirst` read, when the driver sent it; `cascaded`: the images of the rows of each cascade
+   *  read, when they were. */
+  private changesOfWrite(
+    plan: WritePlan,
+    rows: Rows,
+    before: Rows | undefined,
+    cascaded?: { of: Cascade[]; rows: unknown[][][] },
+  ): Change[] {
     const whole = () => unknownChanges(ofRows(tablesChangedBy([[plan.table.id, undefined]], this.catalog!)))
     if (rows.length > MAX_CHANGED_ROWS || (before?.length ?? 0) > MAX_CHANGED_ROWS) return whole()
     // An upsert's `RETURNING` doesn't tell an inserted row from an updated one: the rows it conflicted with do.
     if (plan.readsFirst && plan.statement === 'insert' && !before) return whole()
     const changes = before ? pairedChanges(plan, rows, before) : this.returnedChanges(plan, rows)
     // A write that changed no row fired no row trigger and no foreign key action.
-    const also = plan.alsoWritesPerRow && rows.length === 0 ? [] : unknownChanges(plan.alsoWrites)
-    return [...changes, ...cascadedDeletes(plan, changes), ...also]
+    if (plan.alsoWritesPerRow && rows.length === 0) return changes
+    const read = cascaded && cascaded.rows.flat().length <= MAX_CHANGED_ROWS ? cascaded : undefined
+    if (!read) return [...changes, ...cascadedDeletes(plan, changes), ...unknownChanges(plan.alsoWrites)]
+    return [...changes, ...cascadeChanges(plan.cascades!, read), ...cascadedDeletes(plan, changes, read.of)]
   }
 
   /** The changes of a write whose `RETURNING` gives all it knows of its rows. */
@@ -791,9 +830,12 @@ class LiveDatabase {
 }
 
 /** The rows a foreign key's `ON DELETE CASCADE` deletes, found by the key of each deleted parent (what deleting them
- *  changes in turn is in `WritePlan.alsoWrites`). */
-function cascadedDeletes(plan: WritePlan, changes: Change[]): Change[] {
-  const keys = plan.statement === 'delete' ? plan.table.referencedBy.filter((k) => k.onDelete === 'c' && k.column) : []
+ *  changes in turn is in `WritePlan.alsoWrites`), but those of the cascades `read`. */
+function cascadedDeletes(plan: WritePlan, changes: Change[], read: Cascade[] = []): Change[] {
+  const keys =
+    plan.statement === 'delete'
+      ? plan.table.referencedBy.filter((k) => k.onDelete === 'c' && k.column && !read.some((c) => c.key === k))
+      : []
   return keys.flatMap((key) =>
     changes.flatMap((change): Change[] => {
       if (change.kind !== 'delete') return []
@@ -801,6 +843,68 @@ function cascadedDeletes(plan: WritePlan, changes: Change[]): Change[] {
       return [{ table: key.table, kind: 'delete', old, several: true }]
     }),
   )
+}
+
+/** The changes of the cascades `read`, from the images of their rows: each deleted, or its key set to `NULL` or to its
+ *  default (unknown); and what the delete changes besides, as a whole: what their rows' triggers write, and the
+ *  cascades not read. */
+function cascadeChanges(
+  cascades: NonNullable<WritePlan['cascades']>,
+  read: { of: Cascade[]; rows: unknown[][][] },
+): Change[] {
+  const changes: Change[] = []
+  const also = new Set(cascades.alsoWrites)
+  const add = (tables: ReadonlySet<string>) => tables.forEach((table) => also.add(table))
+  const walk = (of: Cascade[]) => {
+    for (const cascade of of) {
+      const at = read.of.indexOf(cascade)
+      if (at === -1) {
+        add(cascade.whole)
+        continue
+      }
+      add(cascade.alsoWrites)
+      walk(cascade.next)
+      const { table, key, write } = cascade
+      for (const image of read.rows[at]!) {
+        const old = rowOf(table.columns.map((c, i) => [c.name, (image as unknown[])[i] ?? null]))
+        if (write === 'delete') changes.push({ table: table.id, kind: 'delete', old })
+        else {
+          const { [key.column!]: _, ...kept } = old
+          changes.push({
+            table: table.id,
+            kind: 'update',
+            old,
+            new: key.onDelete === 'n' ? { ...kept, [key.column!]: null } : kept,
+          })
+        }
+      }
+    }
+  }
+  walk(cascades.of)
+  return [...changes, ...unknownChanges(also)]
+}
+
+/** `plan`'s text with a column of each of `cascades` after its images (Postgres: `WritePlan.cascades`). */
+function withColumns(plan: WritePlan, cascades: Cascade[]): string {
+  if (cascades.length === 0) return plan.text
+  const at = plan.cascades!.at!
+  const columns = cascades.map((c, i) => `, ${c.read.text} AS "${HIDDEN_PREFIX}${plan.images.length + i}"`)
+  return plan.text.slice(0, at) + columns.join('') + plan.text.slice(at)
+}
+
+/** A query of ours reading the rows of `cascades` (SQLite: `WritePlan.cascades`), each with its cascade's index:
+ *  `done` gets the images of each one's. */
+function cascadesFirst(
+  cascades: Cascade[],
+  values: readonly unknown[],
+  done: (images: unknown[][][] | undefined) => void,
+): FollowUp {
+  return {
+    text: cascades.map((c, i) => `SELECT ${i} AS "${HIDDEN_PREFIX}c", ${c.read.text}`).join(' UNION ALL '),
+    values: cascades.flatMap((c) => c.read.params.map((i) => values[i])),
+    done: (rows) =>
+      done(rows && cascades.map((_, i) => rows.filter((r) => Number(r[0]) === i).map((r) => JSON.parse(r[1]!)))),
+  }
 }
 
 /** `positional` with the app's `values` its texts take. */

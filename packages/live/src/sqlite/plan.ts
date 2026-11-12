@@ -3,6 +3,7 @@ export { planSqlite }
 import { tablesChangedBy, type Catalog, type Table, type TableSet } from '../catalog.js'
 import {
   alsoWrites,
+  cascadesOf,
   HIDDEN_PREFIX,
   planRead,
   READS_EVERYTHING,
@@ -161,8 +162,25 @@ function widenedWrite(statement: Ast, text: string, table: Table, catalog: Catal
   // `UPDATE t AS a … RETURNING a.x` fails: the image names its columns bare.
   const image = `json_array(${table.columns.map((c) => SQLITE.text(quote(c.name), c)).join(', ')}) AS "${HIDDEN_PREFIX}0"`
   const where =
-    written === 'update' ? updatedRows(write, text, table, catalog) : update ? conflictingRows(write, table) : undefined
+    written !== 'insert'
+      ? writtenRows(kind, write, text, table, catalog)
+      : update
+        ? conflictingRows(write, table)
+        : undefined
   if (update && where === undefined) return undefined
+  // A delete's cascades, read first: SQLite runs its `RETURNING` subqueries after them.
+  const cascades =
+    written === 'delete' &&
+    where !== undefined &&
+    cascadesOf(
+      table,
+      catalog,
+      (column) => `IN (SELECT ${quote(column)} FROM ${where})`,
+      (child, alias, from) => {
+        const columns = child.columns.map((c) => SQLITE.text(`${alias}.${quote(c.name)}`, c))
+        return SQLITE.bindParams(`json_array(${columns.join(', ')}) AS "${HIDDEN_PREFIX}i" ${from}`)
+      },
+    )
   const hadReturning = write.returning?.length > 0
   const appended = `${hadReturning ? ',' : ' RETURNING'} ${image}`
   const sent = SQLITE.bindParams(SQLITE.splice(text, SQLITE.statementEnd(text), appended))
@@ -179,7 +197,9 @@ function widenedWrite(statement: Ast, text: string, table: Table, catalog: Catal
     alsoWrites: also,
     alsoWritesPerRow: true,
     ...(positional && { positional }),
-    ...(where !== undefined && { readsFirst: SQLITE.bindParams(`SELECT ${image} FROM ${where}`) }),
+    ...(where !== undefined &&
+      written !== 'delete' && { readsFirst: SQLITE.bindParams(`SELECT ${image} FROM ${where}`) }),
+    ...(cascades && cascades.of.length > 0 && { cascades }),
   }
 }
 
@@ -228,10 +248,11 @@ function withoutAlias(item: string): string {
   return item.slice(0, tokens[tokens[alias - 1]?.word === 'as' ? alias - 1 : alias]!.start).trim()
 }
 
-/** The rows an `UPDATE` of `table` writes, named in its own words (`AS a WHERE …`), unless it has more than a `WHERE`
- *  (`FROM`, `ORDER BY`, `LIMIT`) or its `WHERE` calls a volatile function, which a second read could answer otherwise. */
-function updatedRows(write: Ast, text: string, table: Table, catalog: Catalog): string | undefined {
-  if (write.from || write.limit || write.order_by?.length) return undefined
+/** The rows an `UPDATE` or a `DELETE` of `table` writes, named in its own words (`AS a WHERE …`), unless it has more
+ *  than a `WHERE` (an update's `FROM`, `ORDER BY`, `LIMIT`) or its `WHERE` calls a volatile function, which a second
+ *  read could answer otherwise. */
+function writtenRows(kind: string, write: Ast, text: string, table: Table, catalog: Catalog): string | undefined {
+  if ((kind === 'Update' && write.from) || write.limit || write.order_by?.length) return undefined
   const tokens = tokensOf(text)
   let depth = 0
   let where: number | undefined
@@ -249,7 +270,8 @@ function updatedRows(write: Ast, text: string, table: Table, catalog: Catalog): 
   const condition = where === undefined ? [] : tokens.slice(where, end)
   if (condition.some((t, i) => t.word && catalog.volatileFunctions.has(t.word) && condition[i + 1]?.text === '('))
     return undefined
-  const { alias } = write.table.relation.Table
+  const { alias } = (kind === 'Update' ? write.table : (write.from.WithFromKeyword ?? write.from.WithoutKeyword)[0])
+    .relation.Table
   const named = table.sqlName + (alias ? ` AS ${quote(identifier(alias.name))}` : '')
   return where === undefined ? named : `${named} ${text.slice(condition[0]!.start, condition.at(-1)!.end)}`
 }

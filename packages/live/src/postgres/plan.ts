@@ -1,7 +1,15 @@
 export { planStatement }
 
 import { tablesChangedBy, type Catalog, type TableSet } from '../catalog.js'
-import { alsoWrites, HIDDEN_PREFIX, ofRows, planRead, type Plan, type WritePlan } from '../capture/statement.js'
+import {
+  alsoWrites,
+  cascadesOf,
+  HIDDEN_PREFIX,
+  ofRows,
+  planRead,
+  type Plan,
+  type WritePlan,
+} from '../capture/statement.js'
 import { ROLE_SETTINGS, type RoleChange, type SettingName } from '../capture/roles.js'
 import { names, quote, walk, type Node } from '../tree.js'
 import { parseStatements, spliceBytes, statementEnd } from './sql.js'
@@ -142,7 +150,20 @@ function planWrite(kind: string, node: Node, text: string | undefined, catalog: 
   const returning = node.returningClause?.exprs ?? node.returningList
   const hadReturning = Array.isArray(returning) && returning.length > 0
   const end = statementEnd(text)
-  const widened = spliceBytes(text, end, `${hadReturning ? ',' : ' RETURNING'} ${hidden.join(', ')}`)
+  const appended = `${hadReturning ? ',' : ' RETURNING'} ${hidden.join(', ')}`
+  const widened = spliceBytes(text, end, appended)
+  // A cascade's rows, aggregated for each deleted row: a column of their images, or `NULL`.
+  const cascades =
+    statement === 'delete' &&
+    cascadesOf(
+      table,
+      catalog,
+      (column) => `= ${target}.${quote(column)}`,
+      (child, alias, from) => {
+        const columns = child.columns.map((c) => `${alias}.${quote(c.name)}::text`)
+        return { text: `(SELECT json_agg(ARRAY[${columns.join(', ')}]) ${from})::text`, params: [] }
+      },
+    )
   return {
     kind: 'write',
     table,
@@ -152,6 +173,14 @@ function planWrite(kind: string, node: Node, text: string | undefined, catalog: 
     images,
     assigned,
     alsoWrites: also,
+    // The cascades' columns go after the images: at the end of `appended`, counted in characters (`end` counts bytes).
+    ...(cascades &&
+      cascades.of.length > 0 && {
+        cascades: {
+          ...cascades,
+          at: new TextDecoder().decode(new TextEncoder().encode(text).subarray(0, end)).length + appended.length,
+        },
+      }),
   }
 }
 

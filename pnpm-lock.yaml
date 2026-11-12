@@ -343,6 +343,9 @@ importers:
       '@electric-sql/pglite':
         specifier: 0.5.16
         version: 0.5.16
+      '@libsql/client':
+        specifier: 0.18.0
+        version: 0.18.0
       '@prisma/orm-postgres':
         specifier: 8.0.0-rc.23
         version: 8.0.0-rc.23(@prisma/cli-engine@0.9.0(@prisma/management-api-sdk@1.96.0))(temporal-polyfill@1.0.8)(typanion@3.14.0)(typescript@7.0.2)(vite@8.0.16(@types/node@24.0.10)(esbuild@0.28.2)(jiti@2.7.0))

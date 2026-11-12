@@ -154,7 +154,7 @@ function sideEffects(table: Table, write: Write | undefined): Written[] | 'all' 
 
 /** What a foreign key's action does to the referencing rows when their parent gets `write` (`assigned`: the columns
  *  an update assigns, when known). */
-function actionOf(key: ForeignKey, write: Write, assigned?: string[]): Write | undefined {
+function actionOf(key: ForeignKey, write: Write, assigned?: string[]): 'delete' | 'update' | undefined {
   if (write === 'delete')
     return key.onDelete === 'c' ? 'delete' : ['n', 'd'].includes(key.onDelete) ? 'update' : undefined
   const keyAssigned = !assigned || !key.parentColumn || assigned.includes(key.parentColumn)

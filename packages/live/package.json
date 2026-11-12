@@ -115,6 +115,7 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.16",
+    "@libsql/client": "0.18.0",
     "@prisma/orm-postgres": "8.0.0-rc.23",
     "@prisma/orm-sqlite": "8.0.0-rc.23",
     "@tanstack/query-core": "^5.66.0",

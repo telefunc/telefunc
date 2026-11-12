@@ -73,6 +73,13 @@ class Router {
     this.filings.delete(read)
   }
 
+  /** Whether a live read reads `table`. */
+  watches(table: string): boolean {
+    if (this.everyTable.size > 0) return true
+    const index = this.tables.get(table)
+    return !!index && (index.unrouted.size > 0 || [...index.byColumn.values()].some((c) => c.byValue.size > 0))
+  }
+
   route(change: Change): void {
     for (const read of this.readsReachedBy(change)) read.consider(change)
   }
