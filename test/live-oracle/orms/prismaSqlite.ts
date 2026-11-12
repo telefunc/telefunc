@@ -3,7 +3,7 @@ export { createPrismaSqlite }
 import sqlite from '@prisma/orm-sqlite/runtime'
 import { contractFromJson } from '@prisma/orm-sqlite/static'
 import contractJson from './prisma-sqlite-contract.json' with { type: 'json' }
-import { livePrisma } from '@telefunc/live/prisma'
+import { livePrisma } from '@telefunc/live/prisma-sqlite'
 import type { OrmDriver } from './types.ts'
 
 const NICKS = ['ann', 'ANN', 'Bob', 'bob', 'cy', 'Dee']

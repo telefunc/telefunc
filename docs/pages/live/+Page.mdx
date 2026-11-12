@@ -90,7 +90,7 @@ export const db = liveKysely(new Kysely<Database>({ dialect: new SqliteDialect({
 // Environment: server
 
 import sqlite from '@prisma/orm-sqlite/runtime'
-import { livePrisma } from '@telefunc/live/prisma'
+import { livePrisma } from '@telefunc/live/prisma-sqlite'
 
 export const db = livePrisma(sqlite({ contract, path: 'app.db' }), 'app.db')
 ```

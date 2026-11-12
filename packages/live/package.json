@@ -51,6 +51,13 @@
       "browser": "./dist/browser.js",
       "default": "./dist/prisma.js"
     },
+    "./prisma-sqlite": {
+      "types": "./dist/prismaSqlite.d.ts",
+      "workerd": "./dist/prismaSqlite.js",
+      "worker": "./dist/prismaSqlite.js",
+      "browser": "./dist/browser.js",
+      "default": "./dist/prismaSqlite.js"
+    },
     "./postgres": {
       "types": "./dist/postgres.d.ts",
       "workerd": "./dist/postgres.js",

@@ -17,6 +17,7 @@ import { watch } from '../src/client.js'
 import { liveDrizzle } from '../src/drizzle.js'
 import { liveKysely } from '../src/kysely.js'
 import { livePrisma } from '../src/prisma.js'
+import * as onSqlite from '../src/prismaSqlite.js'
 import { live } from '../src/tanstack-query.js'
 
 type Todo = { id: number; userId: number; text: string; done: boolean }
@@ -183,7 +184,9 @@ const sqliteNotes = defineSqliteContract({}, ({ field, model, type, rel }) => ({
   },
 }))
 const rawSqlite = sqlite({ contract: sqliteNotes, path: 'app.db' })
-const liveSqlite = livePrisma(rawSqlite, 'app.db')
+const liveSqlite = onSqlite.livePrisma(rawSqlite, 'app.db')
+// @ts-expect-error On SQLite, `livePrisma()` comes from `@telefunc/live/prisma-sqlite`.
+livePrisma(rawSqlite, 'app.db')
 async function prismaOnSqlite() {
   const filtered = await liveSqlite.orm.Todo.where((t) => t.id.eq(1)).live()
   same<typeof filtered, Live<{ id: number; text: string }[]>>(true)
