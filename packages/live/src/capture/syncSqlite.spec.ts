@@ -125,4 +125,23 @@ describe('SQLite capture', () => {
     expect(() => db.prepare("insert or rollback into t values (2, 'e')").run()).toThrow()
     expect(await first()).toBe(0)
   })
+
+  it('announces a value of a STRICT ANY column, which compares by its own type', async () => {
+    const { db } = open('create table t (id integer primary key, x any) strict')
+    const stale = await watch(db, "select * from t where x < '3'")
+    db.prepare('insert into t values (1, 10)').run()
+    expect(db.prepare("select id from t where x < '3'").all()).toEqual([{ id: 1 }])
+    expect(await stale()).toBe(1)
+  })
+
+  it("announces a value stored as another type than its column's, which compares by type first", async () => {
+    const { db } = open('create table t (id integer primary key, x text, n integer)')
+    const text = await watch(db, "select id from t where x <> 'a'")
+    const number = await watch(db, 'select id from t where n <> 0')
+    db.prepare("insert into t values (1, x'61', '')").run()
+    expect(db.prepare("select typeof(x) as x, typeof(n) as n from t where x <> 'a' and n <> 0").all()).toEqual([
+      { x: 'blob', n: 'text' },
+    ])
+    expect([await text(), await number()]).toEqual([1, 1])
+  })
 })

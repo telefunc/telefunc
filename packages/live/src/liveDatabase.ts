@@ -16,7 +16,7 @@ import { ofRows, READS_EVERYTHING, type ChangedTables, type Plan, type WritePlan
 import { ConnectionRoles, roleChangeOf } from './capture/roles.js'
 import { named, Transactions, UNNAMED_TABLES } from './capture/transactions.js'
 import { currentQuery, type LiveQuery } from './liveQuery.js'
-import type { Row } from './match/condition.js'
+import { rowOf, type Row } from './match/condition.js'
 import type { Change } from './match/liveRead.js'
 import { operandValues, type OperandValue } from './match/operands.js'
 import type { ReadShape } from './match/readShape.js'
@@ -780,8 +780,8 @@ function unknownChanges(tables: ChangedTables): Change[] {
 
 function imageOf(text: string | null | undefined, table: Table): Row | undefined {
   if (typeof text !== 'string') return undefined
-  const values = JSON.parse(text) as (string | null)[]
-  return Object.fromEntries(table.columns.map((c, i) => [c.name, values[i] ?? null]))
+  const values = JSON.parse(text) as unknown[]
+  return rowOf(table.columns.map((c, i) => [c.name, values[i] ?? null]))
 }
 
 /** The changes of a write whose rows `before` it are known (`WritePlan.readsFirst`): each new row is an update of the
