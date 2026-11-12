@@ -171,7 +171,7 @@ room.onJoin(follow)
 
 > You also receive your own messages. To not receive them, join with `room.join({ meta, selfDelivery: false })`.
 
-> `info.seq` numbers everyone's messages and the room's announcements in one order for the whole room, so it jumps over the ones this page doesn't receive: its own with `selfDelivery: false`, or those of participants it doesn't subscribe to. It never jumps over a lost message: a page never misses one (see <Link href="#remove-a-participant" />).
+> `info.seq` numbers everyone's messages and the room's announcements in one order for the whole room, so it jumps over the ones this page doesn't receive: its own with `selfDelivery: false`, or those of participants it doesn't subscribe to. A page that falls behind never skips a message: it gets `'disconnected'` instead (see <Link href="#remove-a-participant" />).
 
 > Each participant's messages arrive in the order it sent them. `from` is that participant as the room knows it when the message arrives, so `from.meta` is its meta then, not when it sent the message. Joins, leaves and meta changes arrive in the same order everywhere, but two pages can see a message and someone else's join in a different order.
 
@@ -236,7 +236,7 @@ console.log(response) // 'ok'
 
 A callback that returns `undefined` only observes, so it can stand beside the one that replies. If two callbacks return a value, `send()` rejects.
 
-For updates that change many times per second, such as your position sent to the one participant who follows you, pass `{ lossy: true }`: a newer one replaces one the recipient hasn't taken yet.
+For updates that change many times per second, such as your position sent to the one participant who follows you, pass `{ lossy: true }`: a newer lossy message of yours to that participant replaces the one they haven't taken yet.
 
 ```js
 // Environment: client
@@ -244,7 +244,9 @@ For updates that change many times per second, such as your position sent to the
 onMove((position) => me.send(follower, position, { lossy: true }))
 ```
 
-> A private message is delivered at most once: when it can't be handed on to the recipient, `send()` rejects, and the message isn't sent again. `publish()` is at most once too, <Link href="/channel#delivery">like Broadcast's</Link>. Room tells your server of a message, join or leave it knows it couldn't hand on, through <Link href="/room-config">`roomConfig.onDeliveryLost`</Link>, which logs it by default.
+> Your lossy messages to one participant replace each other whatever they hold, so send the values that change together as one message. A lossy message can't ask for a reply with `ack`.
+
+> A private message is delivered at most once: when it can't be handed on to the recipient, `send()` rejects, and the message isn't sent again. `publish()` is at most once too, <Link href="/channel#delivery">like Broadcast's</Link>. Your server logs a message, join or leave Room knows it couldn't hand on.
 
 
 ## Send from the server
@@ -353,7 +355,7 @@ me.onLeave((cause) => {
 })
 ```
 
-A page that falls behind what the server can hold for it gets `'disconnected'`. It never misses a message, a join, a leave, a `meta` change or a frame, except on a track published with `lossy: true`, where it skips to the newest frame (see <Link href="#stream-audio-or-video" />).
+A page that falls behind what the server can hold for it (<Link href="/channel-config">`config.channel.maxMemory`</Link>) gets `'disconnected'`. It never misses a message, a join, a leave, a `meta` change or a frame, except on a track published with `lossy: true`, where it skips to the newest frame (see <Link href="#stream-audio-or-video" />).
 
 
 ## Run a game loop or a bot on the server
@@ -423,7 +425,7 @@ With your own encoder, publish each source on its own track, and subscribe to th
 // Environment: client
 
 // The participant who films
-// encodeCamera(): your encoder, e.g. WebCodecs' VideoEncoder
+// encodeCamera(): your encoder, e.g. WebCodecs' VideoEncoder; frame: a Uint8Array of one encoded frame
 // live video: don't await, or each frame waits a round trip for the previous one
 encodeCamera((frame, isKeyframe) =>
   me.publishBinary(frame, { track: 'camera', lossy: true, key: isKeyframe }),
@@ -449,7 +451,7 @@ A video frame needs the frames since its keyframe: say which frames are keyframe
 
 > `key` is `true` unless you say otherwise, as a position or an audio frame stands alone. `key: false` needs `lossy: true`, and can't be `retain`ed.
 
-`onDemand()` tells you who watches. It fires with `true` each time a page starts watching a track of yours, once what you publish next reaches that page, and with `false` when the last one stops. So you send frames only while someone watches, and a keyframe to each page that arrives, which then sees the picture at once:
+`onDemand()` tells you whether anyone watches. It fires with `true` each time a page starts watching a track of yours, and with `false` when the last one stops. What you publish after it fired reaches that page. So you send frames only while someone watches, and a keyframe to each page that arrives, which then sees the picture at once:
 
 ```js
 // Environment: client

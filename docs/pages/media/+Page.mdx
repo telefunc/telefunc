@@ -5,12 +5,14 @@ import { TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
-The `@telefunc/media` package adds audio and video to a <Link href="/room">room</Link>: each participant's camera, microphone or screen, encoded and played in the page, at the size each viewer's screen and connection take, and audio or video your server sends or reads.
+The `@telefunc/media` package adds calls to a <Link href="/room">room</Link>: participants publish their camera, microphone or screen and play each other's, and your server can send and read audio and video too.
 
 ## Install
 
+Media builds on <Link href="/room#install">Room</Link>, so install both:
+
 ```bash
-npm install @telefunc/media
+npm install @telefunc/room @telefunc/media
 ```
 
 That's it: your participants get `publishMedia()`, `sendMedia()` and `subscribeMedia()`.
@@ -60,7 +62,7 @@ room.onJoin(show)
 
 > To mute, disable the track: `camera.getAudioTracks()[0].enabled = false`.
 
-Each viewer gets the picture at the size its `<video>` shows on screen, smaller while their connection can't keep up, and none while the `<video>` is out of view. Your page sends no more than its connection to the server carries, so your sound never waits behind your picture.
+Each viewer receives the picture at the resolution its `<video>` shows on screen, a lower one while their connection can't keep up, and no picture while the `<video>` is out of view. Your page sends no more than its connection to the server carries, so your sound never waits behind your picture.
 
 ## Share your screen
 
@@ -119,17 +121,22 @@ export async function onStartAssistant(id: string) {
   const room = await Room.get(id)
   const assistant = await room.join({ identity: 'assistant', meta: { name: 'Assistant' } })
 
+  // speechModel: your own, audio in and audio out
   const voice = assistant.publishMedia({ codec: 'opus' })
-  speechModel.onSpeech((packet) => voice.write(packet)) // speechModel: your own, audio in and audio out
+  speechModel.onSpeech((opus, startMs) => voice.write({ data: opus, timestamp: startMs * 1000 }))
 
-  // What the others say, as encoded frames: { data, timestamp, key, codec, kind }
-  room.onJoin(async (member) => {
-    for await (const frame of member.subscribeMedia()) speechModel.hear(frame)
-  })
+  // What the others say, as encoded frames
+  const hear = async (member) => {
+    for await (const frame of member.subscribeMedia()) speechModel.hear(frame.data, frame.timestamp)
+  }
+  for (const member of await room.getParticipants()) hear(member)
+  room.onJoin(hear)
 }
 ```
 
-Every frame you write arrives, in order. To stop mid-sentence, `voice.clear()` drops what the listeners haven't played yet, and `voice.onPlayout(({ playedUntil }) => …)` tells you how far they have heard.
+> A frame is `{ data, timestamp, key }`: `data` is a `Uint8Array` holding one encoded frame (here, one Opus packet), `timestamp` is where it starts, in microseconds as in WebCodecs, and `key: false` marks a video frame that needs the frames before it. A frame you read also has its `codec` and its `kind`, `'audio'` or `'video'`.
+
+Every frame you write arrives, in order. To stop mid-sentence, `voice.clear()` drops what the listeners haven't played yet, and `voice.onPlayout(({ member, playedUntil }) => …)` tells you how far each listener has heard: `playedUntil` is the `timestamp` of the last frame their page played.
 
 > For a source whose newest moment matters more than every frame, such as a camera your server relays, publish with `{ codec: 'h264', lossy: true }`: a listener that falls behind skips to the newest keyframe. What a page publishes from a `MediaStream` is always sent that way.
 
