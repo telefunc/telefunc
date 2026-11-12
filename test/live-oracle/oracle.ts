@@ -703,7 +703,9 @@ async function writeArgs(): Promise<WriteArgs> {
 /** The result as text; for a top-k with ties, which tied rows come back isn't defined, so only their values count. */
 function canonical(shape: string, result: unknown): string {
   const text = (value: unknown) => JSON.stringify(value, (_key, v) => (typeof v === 'bigint' ? String(v) : v))
-  if (shape !== 'priorityTies' || !Array.isArray(result)) return text(result)
+  // Every read gives rows: anything else, the same each time, would hide every change.
+  if (!Array.isArray(result)) throw new Error(`${shape} gave ${text(result)}, not rows`)
+  if (shape !== 'priorityTies') return text(result)
   const rows = result as { id: number; priority: number }[]
   const last = rows.at(-1)?.priority
   return text({

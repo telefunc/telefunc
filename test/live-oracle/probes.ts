@@ -161,11 +161,11 @@ const probes: Record<string, () => void> = {
    *  as computing a value. */
   'write-volatility'() {
     catalogRow((row) => {
-      row.functions = row.functions.map(([name, writing, volatile, defaults]: any[]) => [
+      row.functions = row.functions.map(([name, writing, volatile, ...rest]: any[]) => [
         name,
         writing && volatile,
         volatile,
-        defaults,
+        ...rest,
       ])
     })
   },
@@ -213,10 +213,13 @@ const probes: Record<string, () => void> = {
     database.loadCatalog = async function (query: unknown) {
       await loadCatalog.call(this, query)
       const tables = [...this.catalog.tables.values()]
-      for (const table of tables)
-        table.references = table.references.flatMap((key: any) =>
+      // Each key once, whatever table it names: a table loaded before keeps the keys this gave it.
+      for (const table of tables) {
+        const keys = new Map(table.references.map((key: any) => [`${key.column}\0${key.parentColumn}`, key]))
+        table.references = [...keys.values()].flatMap((key: any) =>
           tables.map((parent) => ({ ...key, parent: parent.id })),
         )
+      }
     }
   },
   /** Foreign key cascades change nothing in the child tables. */
@@ -401,8 +404,9 @@ function catalogRow(change: (row: any) => void) {
   database.loadCatalog = async function (query: (text: string) => Promise<string>) {
     await loadCatalog.call(this, async (text: string) => {
       const answer = await query(text)
-      if (!text.startsWith('select json_build_object(')) return answer
-      const row = JSON.parse(answer)
+      // The catalog's answer, told by its shape: the query's text changes with what it reads.
+      const row = answer.startsWith('{') ? JSON.parse(answer) : undefined
+      if (!Array.isArray(row?.functions)) return answer
       change(row)
       return JSON.stringify(row)
     })
