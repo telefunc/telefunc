@@ -234,6 +234,10 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastT
         (await sql`select id from measures where value = ${String(2 ** 53)}::float8 order by id`.execute(db)).rows,
       measuresOffFloat: async () =>
         (await sql`select id from measures where value <> ${String(2 ** 53)}::float8 order by id`.execute(db)).rows,
+      gaugesAtFloat: async () =>
+        (await sql`select id from gauges where value = ${String(2 ** 53)}::float8 order by id`.execute(db)).rows,
+      gaugesOffFloat: async () =>
+        (await sql`select id from gauges where value <> ${String(2 ** 53)}::float8 order by id`.execute(db)).rows,
       settled: async () => (await sql`select n from settled`.execute(db)).rows,
       spelled: ({ spellings: [a] }) =>
         db
@@ -323,6 +327,10 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastT
       // 2^53, 2^53 + 1 or 2^53 + 2: the first two are one float8.
       setMeasure: ({ value }) =>
         sql`update measures set value = ${String(2 ** 53)}::numeric + ${value % 3} where id = ${(value % 2) + 1}`.execute(
+          db,
+        ),
+      setGauge: ({ value }) =>
+        sql`update gauges set value = ${String(2 ** 53)}::numeric + ${value % 3} where id = ${(value % 2) + 1}`.execute(
           db,
         ),
       // The update runs in the transaction `COMMIT AND CHAIN` starts: it's announced when that one commits. A refetch
@@ -428,6 +436,17 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastT
           .insertInto('users')
           .values({ name: text, team: (value % 3) + 1 })
           .execute(),
+      // A todo with an id neither sequence reaches, so no user has it, and a tag on it; a new user owns it, as a racing
+      // delete may have left none. `insertTaggedUser` then inserts a user with that id.
+      insertOrphanTag: ({ text }) =>
+        sql`with owner as (insert into users (name, team) values (${text}, 1) returning id), todo as (insert into todos (id, user_id, text) select 1000000, id, ${text} from owner returning id) insert into tags (todo_id, name) select id, ${text} from todo`.execute(
+          db,
+        ),
+      // A user with the id some tags' `todo_id` holds: it joins rows of `usersByTagTodo` as it's inserted.
+      insertTaggedUser: ({ text }) =>
+        sql`insert into users (id, name, team) select g.todo_id, ${text}, 1 from tags g where not exists (select 1 from users u where u.id = g.todo_id) order by g.todo_id desc limit 1`.execute(
+          db,
+        ),
       setPath: ({ value }) => sql.raw(`set search_path to ${schemaOf(value)}, public`).execute(db),
       bumpNote: ({ value }) => sql`update notes set n = n + 1 where id = ${1 + (value % 5)}`.execute(db),
       addEvent: ({ text }) => sql`insert into events (kind) values (${text.slice(0, 1)})`.execute(db),

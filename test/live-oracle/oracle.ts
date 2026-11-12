@@ -477,10 +477,17 @@ const misses: string[] = []
 const POSTGRES_18_WRITES = ['renamedOld']
 /** Writes as another role (`roles()`): only on `ROLES=1` runs. */
 const ROLE_WRITES = ['restrictedInsert', 'tenantInsert', 'tenantUpdate', 'tenantUpdateReturning']
+/** Writes run in turn at a set step of every run, not picked: the case they make is rare in a random walk. A tag on a
+ *  todo whose id no user has, then a user with that id. */
+const SCRIPTED_WRITES = new Map([
+  [Math.floor(STEPS / 4), 'insertOrphanTag'],
+  [Math.floor(STEPS / 4) + 1, 'insertTaggedUser'],
+])
 const writeNames = Object.keys(driver.writes).filter(
   (name) =>
     (!POSTGRES_18_WRITES.includes(name) || (DB === 'pg' && process.env.PG === '18')) &&
-    (!ROLE_WRITES.includes(name) || WITH_ROLES),
+    (!ROLE_WRITES.includes(name) || WITH_ROLES) &&
+    ![...SCRIPTED_WRITES.values()].includes(name),
 )
 /** After one of these, connections may differ (reads no longer share): they start halfway, so that sharing is checked.
  *  `stampRead` calls a function of the app's, which may set anything. */
@@ -530,7 +537,7 @@ const rolledBackChanges: string[] = []
 const EMPTIED_BY_DELETE_USER = ['countByDone', 'busyUsers', 'topPriority']
 
 for (let step = 0; step < STEPS; step++) {
-  const write = pick(step < STEPS / 2 ? writesBeforeHalf : writeNames)
+  const write = SCRIPTED_WRITES.get(step) ?? pick(step < STEPS / 2 ? writesBeforeHalf : writeNames)
   const args = await writeArgs()
   const racing = CHURN && random() < 0.3 ? [pick(subscribers)] : []
   // Committed after one of these reads but before its counts query, it leaves groups the read returned uncounted.
@@ -655,7 +662,10 @@ console.log(
 console.log(`writes failed other than by the database: ${failedWrites.length}`)
 const runs = [...writeRuns].sort(([a], [b]) => a.localeCompare(b))
 console.log(`writes refused of run: ${runs.map(([write, r]) => `${write} ${r.refused}/${r.runs}`).join(', ')}`)
-const alwaysRefused = runs.filter(([, r]) => r.runs >= 5 && r.refused === r.runs).map(([write]) => write)
+const scripted = [...SCRIPTED_WRITES.values()]
+const alwaysRefused = runs
+  .filter(([write, r]) => !scripted.includes(write) && r.runs >= 5 && r.refused === r.runs)
+  .map(([write]) => write)
 console.log(`writes refused every time: ${alwaysRefused.length}${alwaysRefused.map((write) => ` ${write}`).join('')}`)
 console.log(
   `reads a rolled-back write changed: ${rolledBackChanges.length}${rolledBackChanges
@@ -663,6 +673,11 @@ console.log(
     .map((c) => `\n  ${c}`)
     .join('')}`,
 )
+// The scripted writes make their case once: one refused, or the last changing no read, they made none.
+const noCase = scripted.filter(
+  (write, i) => writeRuns.get(write)?.refused || (i === scripted.length - 1 && !byWrite.get(write)?.changes),
+)
+console.log(`scripted writes that made no case: ${noCase.length}${noCase.map((write) => ` ${write}`).join('')}`)
 console.log(`volatile reads shared: ${sharedVolatile.length} of ${volatile.length}`)
 console.log(`reads holding another read's rows: ${misshared.length}${misshared.map((s) => ` ${s.shape}`).join('')}`)
 console.log(`derived: rows held=${heldRows} of ${subscribers.filter((s) => s.derive).length} derived subscribers`)
@@ -675,6 +690,7 @@ const failed =
   failedWrites.length > 0 ||
   alwaysRefused.length > 0 ||
   rolledBackChanges.length > 0 ||
+  noCase.length > 0 ||
   sharedVolatile.length > 0 ||
   misshared.length > 0
 process.exit(failed ? 1 : 0)

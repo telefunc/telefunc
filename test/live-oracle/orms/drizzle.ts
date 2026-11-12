@@ -265,6 +265,10 @@ function createDrizzle(
         db.execute(sql`select id from measures where value = ${String(2 ** 53)}::float8 order by id`).then(rowsOf),
       measuresOffFloat: () =>
         db.execute(sql`select id from measures where value <> ${String(2 ** 53)}::float8 order by id`).then(rowsOf),
+      gaugesAtFloat: () =>
+        db.execute(sql`select id from gauges where value = ${String(2 ** 53)}::float8 order by id`).then(rowsOf),
+      gaugesOffFloat: () =>
+        db.execute(sql`select id from gauges where value <> ${String(2 ** 53)}::float8 order by id`).then(rowsOf),
       settled: () => db.execute(sql`select n from settled`).then(rowsOf),
       spelled: ({ spellings: [a] }) =>
         db
@@ -345,6 +349,10 @@ function createDrizzle(
       setMeasure: ({ value }) =>
         db.execute(
           sql`update measures set value = ${String(2 ** 53)}::numeric + ${value % 3} where id = ${(value % 2) + 1}`,
+        ),
+      setGauge: ({ value }) =>
+        db.execute(
+          sql`update gauges set value = ${String(2 ** 53)}::numeric + ${value % 3} where id = ${(value % 2) + 1}`,
         ),
       // The update runs in the transaction `COMMIT AND CHAIN` starts: it's announced when that one commits. A refetch
       // in the pause would see the row as it was.
@@ -428,6 +436,17 @@ function createDrizzle(
       // Two statements in one text: sent as written.
       deleteUserRaw: ({ user }) => several(`delete from users where id = ${Number(user)}; select 1`),
       insertUser: ({ text, value }) => db.insert(users).values({ name: text, team: (value % 3) + 1 }),
+      // A todo with an id neither sequence reaches, so no user has it, and a tag on it; a new user owns it, as a racing
+      // delete may have left none. `insertTaggedUser` then inserts a user with that id.
+      insertOrphanTag: ({ text }) =>
+        db.execute(
+          sql`with owner as (insert into users (name, team) values (${text}, 1) returning id), todo as (insert into todos (id, user_id, text) select 1000000, id, ${text} from owner returning id) insert into tags (todo_id, name) select id, ${text} from todo`,
+        ),
+      // A user with the id some tags' `todo_id` holds: it joins rows of `usersByTagTodo` as it's inserted.
+      insertTaggedUser: ({ text }) =>
+        db.execute(
+          sql`insert into users (id, name, team) select g.todo_id, ${text}, 1 from tags g where not exists (select 1 from users u where u.id = g.todo_id) order by g.todo_id desc limit 1`,
+        ),
       setPath: ({ value }) => db.execute(sql.raw(`set search_path to ${schemaOf(value)}, public`)),
       bumpNote: ({ value }) => db.execute(sql`update notes set n = n + 1 where id = ${1 + (value % 5)}`),
       addEvent: ({ text }) => db.execute(sql`insert into events (kind) values (${text.slice(0, 1)})`),

@@ -18,6 +18,31 @@ function createPrisma(pool: unknown, transport?: BroadcastTransport): OrmDriver 
   const { Todo, User, Tag } = orm(db)
   return {
     reads: {
+      gaugesAtFloat: () =>
+        db
+          .query(
+            db.raw.sql`select id from gauges where value = ${String(2 ** 53)}::float8 order by id`
+              .returnsRow({ id: 'pg/int4@1' })
+              .build(),
+          )
+          .toArray(),
+      gaugesOffFloat: () =>
+        db
+          .query(
+            db.raw.sql`select id from gauges where value <> ${String(2 ** 53)}::float8 order by id`
+              .returnsRow({ id: 'pg/int4@1' })
+              .build(),
+          )
+          .toArray(),
+      // `tags.todo_id` references `todos`, not `users`: a user just inserted may already have rows here.
+      usersByTagTodo: () =>
+        db
+          .query(
+            db.raw.sql`select u.id, g.id as tag from users u join tags g on g.todo_id = u.id order by u.id, g.id`
+              .returnsRow({ id: 'pg/int4@1', tag: 'pg/int4@1' })
+              .build(),
+          )
+          .toArray(),
       byUser: ({ user }) =>
         Todo.where((t: any) => t.userId.eq(user))
           .orderBy((t: any) => t.id.asc())
@@ -100,6 +125,13 @@ function createPrisma(pool: unknown, transport?: BroadcastTransport): OrmDriver 
         db.execute(
           db.raw.sql`update todos set priority = priority + 1 where user_id = ${user}`.affectedCount().build(),
         ),
+      // 2^53, 2^53 + 1 or 2^53 + 2: the first two are one float8.
+      setGauge: ({ value }) =>
+        db.execute(
+          db.raw.sql`update gauges set value = ${String(2 ** 53)}::numeric + ${value % 3} where id = ${(value % 2) + 1}`
+            .affectedCount()
+            .build(),
+        ),
       txCommit: ({ todo, user, text }) =>
         db.transaction(async (tx: any) => {
           await orm(tx).Todo.create({ userId: user, text })
@@ -121,6 +153,23 @@ function createPrisma(pool: unknown, transport?: BroadcastTransport): OrmDriver 
         ),
       deleteUser: ({ user }) => User.where({ id: user }).deleteAll(),
       insertUser: ({ text, value }) => User.create({ name: text, team: (value % 3) + 1 }),
+      // A todo with an id neither sequence reaches, so no user has it, and a tag on it; a new user owns it, as a racing
+      // delete may have left none. `insertTaggedUser` then inserts a user with that id.
+      insertOrphanTag: ({ text }) =>
+        db.execute(
+          db.raw
+            .sql`with owner as (insert into users (name, team) values (${text}, 1) returning id), todo as (insert into todos (id, user_id, text) select 1000000, id, ${text} from owner returning id) insert into tags (todo_id, name) select id, ${text} from todo`
+            .affectedCount()
+            .build(),
+        ),
+      // A user with the id some tags' `todo_id` holds: it joins rows of `usersByTagTodo` as it's inserted.
+      insertTaggedUser: ({ text }) =>
+        db.execute(
+          db.raw
+            .sql`insert into users (id, name, team) select g.todo_id, ${text}, 1 from tags g where not exists (select 1 from users u where u.id = g.todo_id) order by g.todo_id desc limit 1`
+            .affectedCount()
+            .build(),
+        ),
     },
     async close() {
       await db.close?.()

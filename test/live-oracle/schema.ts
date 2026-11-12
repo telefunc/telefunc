@@ -7,7 +7,7 @@ const USERS = 6
 /** The same tables for every ORM; each run starts from them. */
 const SCHEMA = `
 drop table if exists tags, todos, users, deleted_todos, notes, tag_log, note_log, events, event_log, counters, settled,
-  resets, measures, chained, brands, products, metrics cascade;
+  resets, measures, gauges, chained, brands, products, metrics cascade;
 drop sequence if exists tickets;
 drop schema if exists tenant cascade;
 drop function if exists log_deleted_todo, log_tag, tag_added, log_note, note_bumped, next_event, settle_event,
@@ -128,6 +128,9 @@ begin
   return null;
 end $$;
 create trigger measures_set after update on measures for each statement execute function measure_set();
+-- The same values without a trigger: a write changes its rows only, so a read compared as another type is matched.
+create table gauges (id int primary key, value numeric not null);
+insert into gauges values (1, 9007199254740992), (2, 9007199254740994);
 `
 
 /** Roles of `ROLES=1` runs, which a write switches to for its transaction: `live_restricted` may write `todos` but not
