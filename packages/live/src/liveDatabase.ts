@@ -19,6 +19,12 @@ type LiveOptions = {
   /** Carries changes to the other servers.
    *  @default the installed Broadcast backend: Redis once installed, Cloudflare's on Workers, else this process */
   transport?: BroadcastTransport
+  /** The name the database's changes go to the other servers under. Set it when several databases with the same
+   *  tables share one transport, for example a D1 database per tenant, and give it the same on every server that writes
+   *  the database.
+   *  @default the database's own: its name on Postgres, its file's path on SQLite, `main` on D1; a database in memory
+   *  has one of its own */
+  name?: string
 }
 
 /** How a driver runs one statement: send `text`, give back each row's last `hiddenColumns` values (as text) to
@@ -124,6 +130,7 @@ class LiveDatabase {
   private readonly router = new Router()
   private readonly transactions = new Transactions((changes) => this.announce(changes))
   private readonly transport: BroadcastTransport | undefined
+  private readonly name: string | undefined
   private feed: ChangeFeed | undefined
   private readonly shared = new SharedReads()
   /** A statement changed a session: connections may answer the same read differently from now on. */
@@ -142,6 +149,7 @@ class LiveDatabase {
 
   constructor(options: LiveOptions, engine: Engine) {
     this.transport = options.transport
+    this.name = options.name
     this.engine = engine
   }
 
@@ -729,8 +737,10 @@ class LiveDatabase {
     if (this.pathsDiffer) this.catalog.searchPath = undefined
     this.roles ??= new ConnectionRoles(this.catalog.role)
     this.access.set(this.catalog.role, this.catalog.access)
-    // A database no other process opens is a channel of its own: another one in this process is another database.
-    const database = (!this.engine.inProcess && this.catalog.database) || `in-process ${crypto.randomUUID()}`
+    // The app's name for the database, or its own. One no other process opens is a channel of its own: another one in
+    // this process is another database.
+    const database =
+      this.name ?? ((!this.engine.inProcess && this.catalog.database) || `in-process ${crypto.randomUUID()}`)
     this.feed ??= new ChangeFeed(this.transport, database, (changes) => this.receive(changes))
   }
 

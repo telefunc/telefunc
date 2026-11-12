@@ -106,6 +106,10 @@ function sameDatabase(known: Known, options: LiveOptions): LiveDatabase {
     options.transport === undefined || options.transport === known.options.transport,
     'Pass the same `transport` to every live*() wrapper of one database.',
   )
+  assertUsage(
+    options.name === undefined || options.name === known.options.name,
+    'Pass the same `name` to every live*() wrapper of one database.',
+  )
   return known.live
 }
 
