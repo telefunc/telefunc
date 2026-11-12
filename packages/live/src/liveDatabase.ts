@@ -99,6 +99,8 @@ type Engine = {
   plan(text: string, catalog: Catalog): Plan
   /** The statements of text that may hold several, each its own text; `undefined` when the parser can't read it. */
   split?(text: string): string[] | undefined
+  /** The database lives in this process alone (PGlite): no other process hears of its changes. */
+  inProcess?: boolean
   /** A statement that fails inside a transaction makes it roll back (Postgres). On SQLite, the transaction goes on,
    *  and what the statement changed before failing may stay (`OR FAIL`, the statements before it in a text). */
   failureAbortsTransaction: boolean
@@ -725,7 +727,9 @@ class LiveDatabase {
     if (this.pathsDiffer) this.catalog.searchPath = undefined
     this.roles ??= new ConnectionRoles(this.catalog.role)
     this.access.set(this.catalog.role, this.catalog.access)
-    this.feed ??= new ChangeFeed(this.transport, this.catalog.database, (changes) => this.receive(changes))
+    // A database no other process opens is a channel of its own: another one in this process is another database.
+    const database = (!this.engine.inProcess && this.catalog.database) || `in-process ${crypto.randomUUID()}`
+    this.feed ??= new ChangeFeed(this.transport, database, (changes) => this.receive(changes))
   }
 
   private receive(changes: Change[]): void {

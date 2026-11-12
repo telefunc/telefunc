@@ -57,6 +57,31 @@ describe('PGlite capture', () => {
   })
 })
 
+describe('two in-memory PGlite databases', () => {
+  it("announce a write to one to the other's reads", async () => {
+    const [one, other] = [new PGlite(), new PGlite()]
+    for (const pglite of [one, other]) {
+      await pglite.exec("create table t (id int primary key, x text); insert into t values (1, 'a')")
+      liveDatabaseOf(pglite, {})
+    }
+    const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
+    const cell = await store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
+      readLive(() => one.query('select * from t where id = 1'), 'the spec'),
+    )
+    let stale = 0
+    cell.onStale(() => stale++)
+    cell.send()
+    const settled = () => new Promise((resolve) => setTimeout(resolve, 50))
+    await other.query("update t set x = 'b' where id = 1")
+    await settled()
+    expect(stale).toBe(0)
+    await one.query("update t set x = 'b' where id = 1")
+    await settled()
+    expect(stale).toBe(1)
+    await Promise.all([one.close(), other.close()])
+  })
+})
+
 describe('identical live reads on one PGlite', () => {
   const READ = 'select id, done from todos order by id'
 

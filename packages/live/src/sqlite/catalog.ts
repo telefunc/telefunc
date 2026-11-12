@@ -129,7 +129,8 @@ function catalogOf(answer: string, changeLog: boolean): Catalog {
   const tables = new Map<string, Table>()
   const catalog: Catalog = {
     dialect: SQLITE,
-    database: row.file || 'main',
+    // `file` is '' for a database in memory or in a temporary file, and `null` on D1, which doesn't tell.
+    database: row.file === '' ? undefined : (row.file ?? 'main'),
     role: '',
     access: new Map(),
     serverVersion: 0,

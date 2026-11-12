@@ -54,7 +54,9 @@ type ForeignKey = { table: string; column?: string; parentColumn?: string; onDel
 type Catalog = {
   /** How the matcher reads and writes the database's SQL. */
   dialect: Dialect
-  database: string
+  /** The name the database's changes go to the other servers under; `undefined` for a database no other process can
+   *  open (in memory, or a temporary file): two of those are two databases. */
+  database: string | undefined
   /** The role that loaded the catalog, which connections start as, and what it sees of each table, by id. */
   role: string
   access: Map<string, Access>

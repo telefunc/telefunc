@@ -28,6 +28,8 @@ const POSTGRES_ENGINE: Engine = {
   failureAbortsTransaction: true,
 }
 
+const PGLITE_ENGINE: Engine = { ...POSTGRES_ENGINE, inProcess: true }
+
 /** Gives the Postgres engine where this package can't import it itself: `@telefunc/live/postgres`. */
 function usePostgres(engine: typeof import('./postgres/engine.js')): void {
   postgres = engine
@@ -103,7 +105,8 @@ function sameDatabase(known: Known, options: LiveOptions): LiveDatabase {
 function engineOf(client: DatabaseClient): Engine {
   if (isBetterSqlite3(client) || isBunSqlite(client)) return LOGGED_SQLITE_ENGINE
   if (isD1(client)) return D1_ENGINE
-  return isLibsql(client) ? RETURNING_SQLITE_ENGINE : POSTGRES_ENGINE
+  if (isLibsql(client)) return RETURNING_SQLITE_ENGINE
+  return isPglite(client) ? PGLITE_ENGINE : POSTGRES_ENGINE
 }
 
 function isDatabaseClient(value: unknown): value is DatabaseClient {
