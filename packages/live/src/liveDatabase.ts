@@ -187,6 +187,15 @@ class LiveDatabase {
       : undefined
   }
 
+  /** The statements of `text`, once `isReady()`, when it holds both writes and transaction statements: run one by one,
+   *  each write's changes go to the transaction and the savepoint it was made in. */
+  transactionSteps(text: string): string[] | undefined {
+    const plan = this.planOf(text, this.catalog!)
+    if (plan.kind !== 'several' || !plan.plans.some((p) => p.kind === 'transaction')) return undefined
+    const writes = plan.plans.some((p) => p.kind === 'logged' || p.kind === 'write' || p.kind === 'unknownWrite')
+    return writes ? this.engine.split?.(text) : undefined
+  }
+
   /** Called before each statement, on the connection that runs it, once `isReady()`. Without `rewrite`, the text is
    *  sent as is: its writes count as changes to their whole tables, its reads can't be bounded by their result. With
    *  `sharing`, a live read may join an identical one running (`Statement.joined`). */

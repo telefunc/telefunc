@@ -88,7 +88,7 @@ function captureBetterSqlite3(db: BetterSqlite3, live: LiveDatabase): void {
   }
 
   db.exec = (text: string) => {
-    capture.exec(text, [], () => exec(text))
+    capture.exec(text, [], exec)
     return db
   }
 

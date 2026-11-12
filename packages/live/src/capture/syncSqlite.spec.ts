@@ -247,6 +247,41 @@ describe('SQLite capture', () => {
     expect([await first(), await second()]).toEqual([1, 0])
   })
 
+  it.each([
+    ["begin; update t set x = 'c' where id = 2; savepoint s", 'rollback to s; release s; commit'],
+    ["update t set x = 'c' where id = 2; begin", 'rollback'],
+  ])('announces a write in a text with transaction statements: %s, then %s', async (text, end) => {
+    const { db } = open(TWO_ROWS)
+    const stale = await watch(db, 'select * from t where id = 2')
+    db.exec(text)
+    db.exec(end)
+    expect(db.prepare('select x from t where id = 2').get()).toEqual({ x: 'c' })
+    expect(await stale()).toBe(1)
+  })
+
+  it('runs a text with transaction statements up to its first failing statement, as node:sqlite does', () => {
+    const text =
+      "begin; update t set x = 'c' where id = 1; insert into t values (2, 'z'); update t set x = 'd' where id = 2"
+    const [captured, native] = [open(TWO_ROWS), open(TWO_ROWS, 'later')].map(({ db }) => {
+      let error: unknown
+      try {
+        db.exec(text)
+      } catch (err) {
+        error = (err as Error).message
+      }
+      return { error, transaction: db.isTransaction, rows: db.prepare('select * from t order by id').all() }
+    })
+    expect(captured).toEqual(native)
+    expect(captured).toEqual({
+      error: 'UNIQUE constraint failed: t.id',
+      transaction: true,
+      rows: [
+        { id: 1, x: 'c' },
+        { id: 2, x: 'b' },
+      ],
+    })
+  })
+
   it('announces no change twice once a transaction rolled back', async () => {
     const { db } = open(TWO_ROWS)
     db.prepare("update t set x = 'c' where id = 1").run()

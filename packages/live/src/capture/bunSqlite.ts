@@ -92,7 +92,7 @@ function captureBunSqlite(db: BunSqlite, live: LiveDatabase): void {
   }
   db.prepare = (text, ...params) => captured(prepare(text, ...params), text)
   db.query = (text) => captured(query(text), text)
-  db.run = db.exec = (text, ...params) => capture.exec(text, params, () => run(text, ...params))
+  db.run = db.exec = (text, ...params) => capture.exec(text, params, (text) => run(text, ...params))
 
   // `db.transaction(fn)` runs `BEGIN` (or a savepoint, inside another) and its end past `prepare()`.
   db.transaction = (fn) => {

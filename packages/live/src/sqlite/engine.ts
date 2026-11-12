@@ -41,5 +41,6 @@ const LOGGED_SQLITE_ENGINE: Engine = {
     changesOf: changesOfLog,
   },
   plan: planSqlite,
+  split: splitSqlite,
   failureAbortsTransaction: false,
 }

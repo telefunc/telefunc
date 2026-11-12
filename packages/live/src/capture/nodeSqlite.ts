@@ -74,7 +74,7 @@ function hookDatabaseSync(): true {
   proto.exec = function (this: DatabaseSync, text: string) {
     const capture = captureOf(this)
     if (!capture) return exec.call(this, text)
-    capture.exec(text, [], () => exec.call(this, text))
+    capture.exec(text, [], (text) => exec.call(this, text))
   }
   return true
 }

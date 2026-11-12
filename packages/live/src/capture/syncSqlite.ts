@@ -87,6 +87,18 @@ function captureSyncSqlite(driver: SyncSqlite, live: LiveDatabase) {
       },
     }
   }
+  /** Text of the app's that may hold several statements, run as written with its `params` through `send`. One that holds
+   *  both writes and transaction statements runs a statement at a time, as `send` would run them: the change log is
+   *  read after each write, before the transaction statements after it. */
+  const exec = (text: string, params: unknown[], send: (text: string) => unknown): unknown => {
+    ready()
+    const steps = params.length === 0 ? live.transactionSteps(text) : undefined
+    if (!steps)
+      return run(live.statementFor(db, text, valuesOf(text, params) ?? [], { rewrite: false }), () => send(text))
+    let result: unknown
+    for (const step of steps) result = exec(step, [], send)
+    return result
+  }
   /** The app's statement method `name`, which returns rows as `rowsKind()` says when called. */
   const method =
     (statement: SyncStatement, native: (...params: unknown[]) => unknown, name: string, rowsKind: () => RowsKind) =>
@@ -123,11 +135,7 @@ function captureSyncSqlite(driver: SyncSqlite, live: LiveDatabase) {
         })
       }
     },
-    /** Text that may hold several statements, run as written with the app's `params`. */
-    exec(text: string, params: unknown[], send: () => unknown) {
-      ready()
-      return run(live.statementFor(db, text, valuesOf(text, params) ?? [], { rewrite: false }), send)
-    },
+    exec,
     /** A transaction function: it runs `BEGIN` (or a savepoint, inside another) and its end past the statements the
      *  capture sees. */
     transaction(call: (...args: unknown[]) => unknown) {
