@@ -12,7 +12,7 @@
 // faithfully mirroring server/sse.ts runStreamResponse + server/ChannelMux.ts (RECONCILED.lastSeq is
 // captured from _lastClientSeq at reconcile time, before the initial-batch data frames dispatch).
 
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 
 import { ClientConnection } from './ClientConnection.js'
@@ -23,7 +23,8 @@ import { decodeU32, concat } from '../../wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
 
-const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
+/** Polls until `check` passes: a step waits for the event it needs, however loaded the machine. */
+const until = (check: () => void) => vi.waitFor(check, { timeout: 10_000, interval: 5 })
 
 function createChannel(id = crypto.randomUUID()) {
   return {
@@ -112,6 +113,7 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
   serverCh.listen((n) => void received.push(n))
 
   const upstreamSeqsByPost: number[][] = []
+  const upstreamEnded: boolean[] = []
   let streamReqCount = 0
   let dropUpstream = loseSeq1 // wire 1's upstream is "lost" only in the lost-frame case
   let wire = 0 // count of SSE downstream POSTs (connect attempts)
@@ -172,7 +174,14 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
     upstreamSeqsByPost[postIx] = seen
     const stream = body as ReadableStream<Uint8Array>
     return await new Promise<Response>((resolve, reject) => {
-      init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
+      init.signal?.addEventListener(
+        'abort',
+        () => {
+          upstreamEnded[postIx] = true
+          reject(new DOMException('aborted', 'AbortError'))
+        },
+        { once: true },
+      )
       ;(async () => {
         let first = true
         for await (const chunk of readLengthPrefixed(stream)) {
@@ -186,6 +195,7 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
             if (!dropUpstream) serverCh._dispatchFrame(f) // wire 1 dropped in the lost-frame case
           }
         }
+        upstreamEnded[postIx] = true
         resolve(new Response('', { status: 200 }))
       })().catch(reject)
     })
@@ -198,27 +208,25 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
     connectionKey: crypto.randomUUID(),
   })
 
-  // 1) First connect + reconcile.
-  await delay(120)
+  // 1) First connect + reconcile, which opens wire 1's streamRequest.
+  await until(() => expect(upstreamSeqsByPost[1]).toBeDefined())
   expect(wire).toBe(1)
 
   // 2) Send seq 1 — goes onto wire 1's streamRequest (delivered, or "lost" in flight).
   conn.sendSequenced(channel as never, 'data', encode.text, stringify(1))
-  await delay(40)
-  expect(upstreamSeqsByPost[1]).toContain(1) // client always emits seq 1 on wire 1
+  await until(() => expect(upstreamSeqsByPost[1]).toContain(1)) // client always emits seq 1 on wire 1
 
   // 3) Sever wire 1 → client reconnects. From here upstream is delivered to the server.
   dropUpstream = false
   downstream!.close()
-  await delay(20)
+  await until(() => expect(upstreamEnded[1]).toBe(true))
 
   // 4) Send seq 2 while reconnecting → buffered, picked up by the reconnect.
   conn.sendSequenced(channel as never, 'data', encode.text, stringify(2))
 
-  // 5) Wait out the reconnect (CHANNEL_RECONNECT_INITIAL_DELAY_MS = 500ms) + settle.
-  await delay(900)
+  // 5) Wait out the reconnect (CHANNEL_RECONNECT_INITIAL_DELAY_MS = 500ms) until the server has taken seq 2.
+  await until(() => expect(serverCh._lastClientSeq).toBe(2))
   expect(wire).toBe(2)
-  await delay(50)
 
   return { received, wire2Upstream: upstreamSeqsByPost[2] ?? [] }
 }
