@@ -13,8 +13,16 @@ type PostgresJs = {
   unsafe(text: string, args?: unknown[]): Query
   begin(...args: unknown[]): Promise<unknown>
   reserve(): Promise<PostgresJs & { release(): void }>
-  /** As postgres.js resolved them: the connection string, else its options, `PG*` variables, defaults. */
-  options: { max: number; user: string; host: string[]; port: number[]; database: string }
+  /** As postgres.js resolved them: the connection string, else its options, `PG*` variables, defaults. `connection`:
+   *  the settings its sessions start with besides user and database (`search_path`, `application_name`, …). */
+  options: {
+    max: number
+    user: string
+    host: string[]
+    port: number[]
+    database: string
+    connection: Record<string, unknown>
+  }
 }
 /** A scope `begin()` and `savepoint()` give their callback: statements on the transaction's connection. */
 type Scope = PostgresJs & { savepoint(...args: unknown[]): Promise<unknown> }
@@ -56,9 +64,10 @@ function isPostgresJs(database: object): database is PostgresJs {
   return typeof database === 'function' && 'unsafe' in database && 'begin' in database
 }
 
-/** What `sql` connects to: its user, hosts, ports and database. */
+/** What `sql` connects to, and how its sessions start. */
 function postgresJsConnectionTarget({ options }: PostgresJs): string {
-  return `${options.user}@${options.host.join(',')}:${options.port.join(',')}/${options.database}`
+  const { host, port, user, database, connection } = options
+  return `${host.join(',')}:${port.join(',')} ${JSON.stringify({ user, database, ...connection })}`
 }
 
 /** Captures every statement of a postgres.js `sql`: its own, and those of its transactions and reserved connections. */

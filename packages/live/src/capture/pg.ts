@@ -27,9 +27,14 @@ type PgResultClass = new (
  *  ran on, for the callers that don't bring their own. */
 type SharedPgResult = { result: PgResult; types: unknown }
 type PgCallback = (err: Error | null, result?: PgResult | PgResult[]) => void
-type PgClient = { query: (...args: any[]) => any; connectionParameters?: ConnectionParameters }
-/** What `pg` resolved a client's configuration to: the connection string, else its options, `PG*` variables, defaults. */
-type ConnectionParameters = { user: string; host: string; port: number; database: string }
+type PgClient = {
+  query: (...args: any[]) => any
+  /** Where it connects, as `pg` resolved its configuration: the connection string, else its options, `PG*` variables,
+   *  defaults. */
+  connectionParameters?: { host: string; port: number }
+  /** What it starts its session with: user, database, `options` (`-c role=…`), application name, timeouts. */
+  getStartupConf?: () => Record<string, string>
+}
 /** A client checked out of a `pg.Pool`, until it calls `release()`. */
 type CheckedOut = PgClient & { release: (err?: Error | boolean) => void }
 type PgPool = {
@@ -73,12 +78,13 @@ function capturePg(database: PgPool | PgClient, live: LiveDatabase): void {
   shareReadsBeforeConnecting(database, live)
 }
 
-/** What `database` connects to: its user, host, port and database. A pool tells through a client it would open, not
+/** What `database` connects to, and how its sessions start. A pool tells through a client it would open, not
  *  connected. */
 function pgConnectionTarget(database: PgPool | PgClient): string | undefined {
   const client = 'totalCount' in database ? database.Client && new database.Client(database.options) : database
   const parameters = client?.connectionParameters
-  return parameters && `${parameters.user}@${parameters.host}:${parameters.port}/${parameters.database}`
+  const startup = client?.getStartupConf?.()
+  return parameters && startup && `${parameters.host}:${parameters.port} ${JSON.stringify(startup)}`
 }
 
 /** A live read sent with `pool.query()` joins an identical one before waiting for a connection: N clients refetching

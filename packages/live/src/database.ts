@@ -37,12 +37,13 @@ type Known = { live: LiveDatabase; options: LiveOptions }
 
 /** By client: a client one copy of this package wraps is captured once, whichever copies wrap it. */
 const databases = processWide('databases', () => new WeakMap<object, Known>())
-/** By what a Postgres client connects to: a client of a database joins the live database of the clients before it (a
- *  pool per request, as a Worker needs). */
+/** By what a Postgres client connects to and how its sessions start: a client joins the live database of the clients
+ *  before it that start alike (a pool per request, as a Worker needs). Its role and `search_path` are its own from the
+ *  start, so a client starting otherwise has a live database of its own. */
 const targets = processWide('databaseTargets', () => new Map<string, Known>())
 
 /** The live database of `client`, which captures its statements from now on. Several ORMs over one pool share it, and
- *  so do the clients of one database. */
+ *  so do the clients of one database whose sessions start alike. */
 function liveDatabaseOf(client: DatabaseClient, options: LiveOptions): LiveDatabase {
   const wrapped = databases.get(client)
   if (wrapped) return sameDatabase(wrapped, options)
@@ -74,7 +75,7 @@ function capture(client: DatabaseClient, live: LiveDatabase): void {
   }
 }
 
-/** What a Postgres client connects to: its user, host, port and database. A PGlite database is its own. */
+/** What a Postgres client connects to and how its sessions start. A PGlite database is its own. */
 function connectionTarget(client: DatabaseClient): string | undefined {
   if (isBetterSqlite3(client) || isBunSqlite(client) || isD1(client) || isLibsql(client)) return undefined
   if (isPostgresJs(client)) return postgresJsConnectionTarget(client)
