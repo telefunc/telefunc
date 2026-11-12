@@ -12,7 +12,7 @@ import {
 } from '../capture/statement.js'
 import { quote } from '../tree.js'
 import { SQLITE, numberParams, tokensOf } from './dialect.js'
-import { hasConflictReplace, imageValue } from './catalog.js'
+import { hasConflictReplace } from './catalog.js'
 import { CannotLower, identifier, Lowering, objectName, variant, writeTarget } from './lower.js'
 import { parseSqlite, type Ast } from './parser.js'
 
@@ -147,7 +147,7 @@ function widenedWrite(statement: Ast, text: string, table: Table, catalog: Catal
   const also = alsoWrites(table, update ? ['insert', 'update'] : [written], assigned, catalog)
   if (also === 'all') return undefined
   // `UPDATE t AS a … RETURNING a.x` fails: the image names its columns bare.
-  const image = `json_array(${table.columns.map((c) => imageValue(quote(c.name), c)).join(', ')}) AS "${HIDDEN_PREFIX}0"`
+  const image = `json_array(${table.columns.map((c) => SQLITE.text(quote(c.name), c)).join(', ')}) AS "${HIDDEN_PREFIX}0"`
   const where =
     written === 'update' ? updatedRows(write, text, table, catalog) : update ? conflictingRows(write, table) : undefined
   if (update && where === undefined) return undefined

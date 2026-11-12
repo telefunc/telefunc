@@ -1,5 +1,5 @@
 export { catalogQuery, catalogOf, changeLogSetup, CHANGE_LOG_TRIGGERS, READ_CHANGES, EMPTY_CHANGES, changesOfLog }
-export { hasConflictReplace, imageValue }
+export { hasConflictReplace }
 
 import type { Access, Catalog, Table, TableSet } from '../catalog.js'
 import { tablesChangedBy, union } from '../catalog.js'
@@ -79,14 +79,6 @@ const READABLE: Access = { readable: 'table', rowSecurity: false }
 const VOLATILE_FUNCTIONS = ['random', 'randomblob', 'changes', 'total_changes', 'last_insert_rowid', 'date', 'time']
   .concat(['datetime', 'julianday', 'unixepoch', 'strftime', 'timediff', 'current_timestamp', 'current_date'])
   .concat(['current_time'])
-
-/** The storage classes of the values a column's affinity gives; `blob` gives any. */
-const STORAGE_CLASSES: Record<string, string> = {
-  text: `'text'`,
-  integer: `'integer', 'real'`,
-  real: `'integer', 'real'`,
-  numeric: `'integer', 'real'`,
-}
 
 /** SQLite's names for a column's affinity: its type name decides it, and `ANY` in a `STRICT` table has none (`blob`). */
 function affinityOf(type: string, strict: boolean): 'integer' | 'text' | 'blob' | 'real' | 'numeric' {
@@ -319,7 +311,7 @@ function changeLogSetup(catalog: Catalog, ours: string[]): string[] {
   const creates = [...catalog.tables.values()].flatMap((table) => {
     if (table.isView || table.virtual) return []
     const image = (row: string) =>
-      `json_object(${table.columns.map((c) => `${sqlString(c.name)}, ${imageValue(`${row}.${quote(c.name)}`, c)}`).join(', ')})`
+      `json_object(${table.columns.map((c) => `${sqlString(c.name)}, ${SQLITE.text(`${row}.${quote(c.name)}`, c)}`).join(', ')})`
     const images = {
       insert: ['NULL', image('NEW')],
       update: [image('OLD'), image('NEW')],
@@ -355,15 +347,6 @@ function changesOfLog(rows: (string | null)[][], catalog: Catalog): Change[] {
  *  `RETURNING` reports. */
 function hasConflictReplace(table: Table): boolean {
   return table.conflictReplace === true
-}
-
-/** A row image's value of `column`, as SQL: its text form, or `0` when SQLite stores it as another class than the
- *  column's affinity gives (a BLOB in a `TEXT` column, text that isn't a number in an `INTEGER` one), which compares
- *  with the column's other values by its class first: the matcher takes it as unknown (`rowOf()`). */
-function imageValue(expression: string, column: Column): string {
-  const classes = STORAGE_CLASSES[column.sqlType]
-  const text = SQLITE.text(expression)
-  return classes ? `CASE WHEN typeof(${expression}) IN ('null', ${classes}) THEN ${text} ELSE 0 END` : text
 }
 
 function sqlString(text: string): string {

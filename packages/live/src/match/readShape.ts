@@ -612,35 +612,36 @@ function addResultKeys(
     shape.hiddenColumns.push(expression)
     return shape.hiddenColumns.length - 1
   }
-  const hidden = (alias: Alias, column: string) => add(dialect.text(`${quote(alias.name)}.${quote(column)}`))
+  const hidden = (alias: Alias, column: Column) =>
+    add(dialect.text(`${quote(alias.name)}.${quote(column.name)}`, column))
   if (distinct) {
     // A function of the distinct columns: it leaves which rows are distinct as it was.
     const alias = shape.aliases[0]!
     const partition = distinct.map((c) => `${quote(alias.name)}.${quote(c.name)}`).join(', ')
     shape.distinct = {
       columns: distinct,
-      hidden: distinct.map((c) => hidden(alias, c.name)),
+      hidden: distinct.map((c) => hidden(alias, c)),
       countHidden: add(dialect.text(`count(*) OVER (PARTITION BY ${partition})`)),
     }
   }
   for (const alias of top.aliases.values()) {
     if (!distinct && alias.table.primaryKey.length > 0)
-      alias.primaryKeyHidden = alias.table.primaryKey.map((c) => hidden(alias, c))
+      alias.primaryKeyHidden = alias.table.primaryKey.map((c) => hidden(alias, alias.table.column.get(c)!))
   }
   for (const alias of shape.aliases) {
-    for (const c of [...alias.correlations, ...alias.partners]) c.hidden = hidden(c.parent, c.parentColumn.name)
+    for (const c of [...alias.correlations, ...alias.partners]) c.hidden = hidden(c.parent, c.parentColumn)
     if (alias.existsQuery)
       alias.existsCountHidden = add(dialect.text(`(SELECT count(*) FROM ${alias.existsQuery} AS "__live_e")`))
     for (const join of alias.joins) {
       if (join.partner.role !== 'top') continue
-      join.hidden = hidden(join.partner, join.partnerColumn.name)
+      join.hidden = hidden(join.partner, join.partnerColumn)
       const routes = join.partner.routes.filter((r) => !r.derived)
       if (routes.length > 0) join.seed = add(seedOf(join.partner, join.partnerColumn, routes, operands.list, dialect))
     }
   }
   shape.limit = limitValue(select.limitCount)
   shape.offset = limitValue(select.limitOffset)
-  shape.sort = sortKeys(select, top, (alias, column) => hidden(alias, column.name))
+  shape.sort = sortKeys(select, top, hidden)
   const seeds = new Set(shape.aliases.flatMap((a) => a.joins.flatMap((j) => (j.seed === undefined ? [] : [j.seed]))))
   if (seeds.size === 0) return
   // The same row of hidden columns, with only the seeds.
@@ -657,7 +658,7 @@ function seedOf(alias: Alias, column: Column, routes: Route[], operands: Operand
       ? `${name}.${quote(route.column.name)} = ANY(${operands[route.anyOf]!.expression})`
       : `${name}.${quote(route.column.name)} IN (${route.values.map(value).join(', ')})`,
   )
-  const values = `SELECT DISTINCT ${dialect.text(`${name}.${quote(column.name)}`)} AS "v" FROM ${alias.table.sqlName} AS ${name} WHERE ${where.join(' AND ')} LIMIT ${SEED_LIMIT + 1}`
+  const values = `SELECT DISTINCT ${dialect.text(`${name}.${quote(column.name)}`, column)} AS "v" FROM ${alias.table.sqlName} AS ${name} WHERE ${where.join(' AND ')} LIMIT ${SEED_LIMIT + 1}`
   return `(SELECT ${dialect.jsonAgg('"v"')} FROM (${values}) AS "__live_seed")`
 }
 

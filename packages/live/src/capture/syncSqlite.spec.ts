@@ -167,4 +167,12 @@ describe('SQLite capture', () => {
     ])
     expect([await text(), await number()]).toEqual([1, 1])
   })
+
+  it("announces a row sorting before a page's last row, stored as another type than its column's", async () => {
+    const { db } = open("create table t (id integer primary key, n integer); insert into t values (1, '')")
+    const stale = await watch(db, 'select id, n from t order by n limit 1')
+    db.prepare('insert into t values (2, 5)').run()
+    expect(db.prepare('select id from t order by n limit 1').all()).toEqual([{ id: 2 }])
+    expect(await stale()).toBe(1)
+  })
 })

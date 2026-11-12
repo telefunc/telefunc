@@ -1,6 +1,7 @@
 export { SQLITE, numberParams, paramValues, tokensOf }
 
 import type { Dialect } from '../dialect.js'
+import type { Column } from '../match/values.js'
 
 /**
  * SQLite's SQL. Offsets are JavaScript string offsets into the text with its parameters numbered (`numberParams()`),
@@ -70,7 +71,13 @@ const SQLITE: Dialect = {
   },
   param: (number) => `?${number}`,
   likeEscape: undefined,
-  text: (expression) => `CAST(${expression} AS TEXT)`,
+  // A value SQLite stores as another class than its column's affinity gives (a BLOB in a `TEXT` column, text that isn't
+  // a number in an `INTEGER` one) compares with the column's other values by its class first: it comes as `0`.
+  text: (expression, column) => {
+    const classes = column && STORAGE_CLASSES[column.sqlType]
+    const text = `CAST(${expression} AS TEXT)`
+    return classes ? `CASE WHEN typeof(${expression}) IN ('null', ${classes}) THEN ${text} ELSE 0 END` : text
+  },
   jsonArray: (expressions) => `json_array(${expressions.join(', ')})`,
   jsonAgg: (expression) => `coalesce(json_group_array(${expression}), '[]')`,
   // SQLite converts an operand to the affinity of the column it's compared with as it compares: the value it ends up
@@ -81,6 +88,14 @@ const SQLITE: Dialect = {
       : form === 'nullness'
         ? `CASE WHEN (${expression}) IS NULL THEN NULL ELSE '' END`
         : `CAST((${expression}) AS TEXT)`,
+}
+
+/** The storage classes of the values a column's affinity gives; `blob` gives any. */
+const STORAGE_CLASSES: Record<string, string> = {
+  text: `'text'`,
+  integer: `'integer', 'real'`,
+  real: `'integer', 'real'`,
+  numeric: `'integer', 'real'`,
 }
 
 /** Keywords ending a `FROM … WHERE …` at its own depth. */
