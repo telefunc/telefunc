@@ -227,3 +227,50 @@ describe('a live read calling a SQL function of the app', () => {
     await pglite.close()
   })
 })
+
+describe('a transaction writing through a rule, a default and a trigger of the app', () => {
+  it('stales the reads of what they and a trigger calling one write, not every read', async () => {
+    const pglite = new PGlite()
+    await pglite.exec(`
+      create table t (id int primary key, x text);
+      insert into t values (1, 'a'), (2, 'a');
+      create table audit (id serial primary key, what text);
+      create table counters (id int primary key, n int);
+      insert into counters values (1, 0);
+      create function next_n() returns int language sql as 'update counters set n = n + 1 where id = 1 returning n';
+      create table events (id serial primary key, kind text, seq int default next_n());
+      create rule audited as on insert to events do also insert into audit (what) values ('event ' || new.kind);
+      create table settled (n int);
+      insert into settled values (0);
+      create function settle() returns void language sql as 'update settled set n = n + 1';
+      create function settled_event() returns trigger language plpgsql as 'begin perform settle(); return null; end';
+      create trigger settles after insert on events for each row execute function settled_event();`)
+    liveDatabaseOf(pglite, {})
+    const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
+    const live = async (text: string) => {
+      const cell = await store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
+        readLive(() => pglite.query(text), 'the spec'),
+      )
+      let stale = 0
+      cell.onStale(() => stale++)
+      cell.send()
+      return () => stale
+    }
+    const reads = await Promise.all([
+      live('select x from t where id = 1'),
+      live('select x from t where id = 2'),
+      // The app inserts into audit too: its row doesn't stand for the rule's.
+      live(`select what from audit where what like 'event%'`),
+      live('select n from counters'),
+      live('select n from settled'),
+    ])
+    await pglite.transaction(async (tx) => {
+      await tx.query(`insert into events (kind) values ('signup')`)
+      await tx.query(`update t set x = 'b' where id = 1`)
+      await tx.query(`insert into audit (what) values ('app')`)
+    })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(reads.map((stale) => stale())).toEqual([1, 0, 1, 1, 1])
+    await pglite.close()
+  })
+})
