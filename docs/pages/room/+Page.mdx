@@ -449,23 +449,18 @@ A video frame needs the frames since its keyframe: say which frames are keyframe
 
 > `key` is `true` unless you say otherwise, as a position or an audio frame stands alone. `key: false` needs `lossy: true`, and can't be `retain`ed.
 
-So that a viewer who arrives sees the picture at once, send a keyframe when `onWatch()` tells you a page started watching:
-
-```js
-// Environment: client
-
-me.onWatch((track) => track === 'camera' && encodeKeyframeNext()) // encodeKeyframeNext(): your encoder's next frame is a keyframe
-```
-
-> To fit your encoder's bitrate to what your connection carries, read `me.uplinkRate`, in bytes per ms (`Infinity` while nothing has held back what you send lately): above it, your frames wait in the connection, and so does the audio beside them.
-
-To send frames only while someone watches, use `onDemand()`, which also fires, as you call it, for the tracks already watched:
+`onDemand()` tells you who watches. It fires with `true` each time a page starts watching a track of yours, once what you publish next reaches that page, and with `false` when the last one stops. So you send frames only while someone watches, and a keyframe to each page that arrives, which then sees the picture at once:
 
 ```js
 // Environment: client
 
 const wanted = new Set()
-me.onDemand((track, on) => (on ? wanted.add(track) : wanted.delete(track))) // null: also wanted by a viewer of every track
+me.onDemand((track, on) => {
+  // track is null for a viewer of every track
+  if (!on) return wanted.delete(track)
+  wanted.add(track)
+  encodeKeyframeNext() // your encoder's next frame is a keyframe
+})
 // live video: don't await, or each frame waits a round trip for the previous one
 encodeCamera((frame, isKeyframe) => {
   if (wanted.has('camera') || wanted.has(null)) {
@@ -473,6 +468,10 @@ encodeCamera((frame, isKeyframe) => {
   }
 })
 ```
+
+> As you call it, `onDemand()` also fires for the tracks already watched.
+
+> To fit your encoder's bitrate to what your connection carries, read `me.uplinkRate`, in bytes per ms (`Infinity` while nothing has held back what you send lately): above it, your frames wait in the connection, and so does the audio beside them.
 
 > Audio works the same way, on its own track such as `{ track: 'mic' }`.
 
@@ -485,7 +484,7 @@ Publish with `retain: true`, and a room that starts listening later receives tha
 // Environment: client
 
 await me.publish({ phase: 'voting' }, { retain: true })
-await me.publishBinary(keyframe, { track: 'camera', meta: { isKeyframe: true }, retain: true, lossy: true })
+await me.publishBinary(snapshot, { track: 'whiteboard', retain: true }) // snapshot: the drawing so far, as an image
 ```
 
 A late joiner gets the last retained message, and each participant's last retained frame on each track, as long as its publisher is in the room. For state that outlives the participants, such as a game phase, publish it from a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>.
@@ -642,8 +641,7 @@ Properties: `id`, `meta`, `count`.
 | `publishMedia(stream, { track? }?)` / `sendMedia(to, stream, { track? }?)` | With <Link href="/media" />: send your camera, microphone or screen to everyone / to one participant. |
 | `listen(cb)` | Receive private messages; return a value to reply. |
 | `setMeta(meta)` / `setAttributes(attributes)` | Replace / update your `meta`. |
-| `onDemand(cb)` | Whether anyone watches a track of yours. |
-| `onWatch(cb)` | A page started watching a binary track of yours. |
+| `onDemand(cb)` | `cb(track, on)`: a page started watching a track of yours / the last one stopped. |
 | `leave()` / `onLeave(cb)` | Leave / you left, with `cause.type`: `'left'`, `'removed'`, `'closed'`, `'disconnected'`, or `'unknown'` (it left while nothing here listened to the room, too long ago to know why). |
 | `onDisconnect(cb)` / `onReconnect(cb)` | Your connection to the room dropped / is back. |
 
