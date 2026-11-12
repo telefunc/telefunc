@@ -118,7 +118,7 @@ function analyzeGroups(select: Node, context: TallyContext): TallyAnalysis | und
 
   const { dialect } = context
   const qualified = (c: Column) => `${quote(alias.name)}.${quote(c.name)}`
-  const hiddenColumns = columns.map((c) => dialect.text(qualified(c)))
+  const hiddenColumns = columns.map((c) => dialect.text(qualified(c), c))
   const outputs: GroupRule['outputs'] = []
   let otherOutputs = false
   for (const target of select.targetList as Node[]) {
@@ -195,7 +195,7 @@ function analyzeSetOperation(select: Node, context: TallyContext): TallyAnalysis
     const from = context.dialect.fromClauseAt(context.text, node.fromClause[0].RangeVar.location)
     if (!from) return undefined
     fromClauses.push(from.text)
-    const hidden = columns.map((c) => context.dialect.text(`${quote(alias.name)}.${quote(c.name)}`))
+    const hidden = columns.map((c) => context.dialect.text(`${quote(alias.name)}.${quote(c.name)}`, c))
     hiddenAt.push({ from: from.start, columns: hidden })
     return sources.push({ alias, columns, groupColumns: columns.length }) - 1
   }
@@ -212,7 +212,7 @@ function analyzeSetOperation(select: Node, context: TallyContext): TallyAnalysis
 
 function countsQuery(sources: TallySource[], fromClauses: string[], dialect: Dialect): string {
   const counts = sources.map((source, i) => {
-    const texts = source.columns.map((c) => dialect.text(`${quote(source.alias.name)}.${quote(c.name)}`))
+    const texts = source.columns.map((c) => dialect.text(`${quote(source.alias.name)}.${quote(c.name)}`, c))
     return `SELECT ${dialect.jsonArray([`'${i}'`, ...texts])}, ${dialect.text('count(*)')} ${fromClauses[i]} GROUP BY 1`
   })
   return `${counts.join(' UNION ALL ')} LIMIT ${MAX_TALLY_ROWS + 1}`

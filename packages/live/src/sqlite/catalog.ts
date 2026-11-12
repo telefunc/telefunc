@@ -1,8 +1,9 @@
-export { catalogQuery, catalogOf, changeLogSetup, CHANGE_LOG_TRIGGERS, DRAIN_CHANGES, changesOfLog, hasConflictReplace }
+export { catalogQuery, catalogOf, changeLogSetup, CHANGE_LOG_TRIGGERS, READ_CHANGES, EMPTY_CHANGES, changesOfLog }
+export { hasConflictReplace }
 
 import type { Access, Catalog, Table, TableSet } from '../catalog.js'
 import { tablesChangedBy, union } from '../catalog.js'
-import type { Row } from '../match/condition.js'
+import { rowOf } from '../match/condition.js'
 import type { Change } from '../match/liveRead.js'
 import type { Column } from '../match/values.js'
 import { names, quote, tablesIn, walk } from '../tree.js'
@@ -69,8 +70,8 @@ const CHANGES = 'temp."__live_changes"'
 /** The names of the change log's triggers on a connection, from a previous catalog, as JSON. */
 const CHANGE_LOG_TRIGGERS = `select json_group_array(name) from temp.sqlite_schema where type = 'trigger' and name like '\\_\\_live\\_%' escape '\\'`
 
-/** Empties the change log, giving the changes in the order they were made. */
-const DRAIN_CHANGES = `DELETE FROM ${CHANGES} RETURNING "id", "table", "kind", "old", "new"`
+const READ_CHANGES = `SELECT "id", "table", "kind", "old", "new" FROM ${CHANGES}`
+const EMPTY_CHANGES = `DELETE FROM ${CHANGES}`
 
 /** SQLite has no roles: a connection reads every table whole. */
 const READABLE: Access = { readable: 'table', rowSecurity: false }
@@ -79,9 +80,10 @@ const VOLATILE_FUNCTIONS = ['random', 'randomblob', 'changes', 'total_changes', 
   .concat(['datetime', 'julianday', 'unixepoch', 'strftime', 'timediff', 'current_timestamp', 'current_date'])
   .concat(['current_time'])
 
-/** SQLite's names for a column's affinity: its type name decides it. */
-function affinityOf(type: string): 'integer' | 'text' | 'blob' | 'real' | 'numeric' {
+/** SQLite's names for a column's affinity: its type name decides it, and `ANY` in a `STRICT` table has none (`blob`). */
+function affinityOf(type: string, strict: boolean): 'integer' | 'text' | 'blob' | 'real' | 'numeric' {
   const t = type.toUpperCase()
+  if (strict && t === 'ANY') return 'blob'
   if (t.includes('INT')) return 'integer'
   if (t.includes('CHAR') || t.includes('CLOB') || t.includes('TEXT')) return 'text'
   if (t === '' || t.includes('BLOB')) return 'blob'
@@ -91,8 +93,8 @@ function affinityOf(type: string): 'integer' | 'text' | 'blob' | 'real' | 'numer
 }
 
 /** A column's values as the matcher compares them: by its affinity, and for text by its collation. */
-function columnOf(name: string, type: string, collation: string | undefined): Column {
-  const affinity = affinityOf(type)
+function columnOf(name: string, type: string, collation: string | undefined, strict: boolean): Column {
+  const affinity = affinityOf(type, strict)
   const nocase = collation === 'nocase'
   const text = affinity === 'text'
   return {
@@ -156,6 +158,8 @@ function catalogOf(answer: string, changeLog: boolean): Catalog {
         lowerCase(column),
         type,
         definition ? (definition.collations?.get(lowerCase(column)) ?? 'binary') : 'unknown',
+        // A table whose definition can't be read may be `STRICT`.
+        definition?.strict !== false,
       ),
     )
     const table: Table = {
@@ -216,6 +220,8 @@ type Definition = {
   virtual?: boolean
   /** A foreign key may be `DEFERRABLE INITIALLY DEFERRED`. */
   deferred?: boolean
+  /** `STRICT`: an `ANY` column has no affinity. */
+  strict?: boolean
 }
 
 /** What a table's `CREATE TABLE` tells beyond the pragmas; `undefined` when it can't be read. */
@@ -235,7 +241,7 @@ function definitionOf(sql: string | null): Definition | undefined {
       if (option.Generated) generated = true
     }
   }
-  return { collations, generated, conflictReplace, deferred }
+  return { collations, generated, conflictReplace, deferred, strict: table.strict === true }
 }
 
 /** `column` and `parentColumn` only for a key of one column. */
@@ -305,7 +311,7 @@ function changeLogSetup(catalog: Catalog, ours: string[]): string[] {
   const creates = [...catalog.tables.values()].flatMap((table) => {
     if (table.isView || table.virtual) return []
     const image = (row: string) =>
-      `json_object(${table.columns.map((c) => `${sqlString(c.name)}, ${SQLITE.text(`${row}.${quote(c.name)}`)}`).join(', ')})`
+      `json_object(${table.columns.map((c) => `${sqlString(c.name)}, ${SQLITE.text(`${row}.${quote(c.name)}`, c)}`).join(', ')})`
     const images = {
       insert: ['NULL', image('NEW')],
       update: [image('OLD'), image('NEW')],
@@ -324,12 +330,12 @@ function changeLogSetup(catalog: Catalog, ours: string[]): string[] {
   ]
 }
 
-/** The changes `DRAIN_CHANGES` gave, in the order they were made. */
+/** The changes `READ_CHANGES` gave, in the order they were made. */
 function changesOfLog(rows: (string | null)[][], catalog: Catalog): Change[] {
   return rows
     .toSorted((a, b) => Number(a[0]) - Number(b[0]))
     .map(([, table, kind, old, now]): Change => {
-      const image = (text: string | null | undefined) => JSON.parse(text!) as Row
+      const image = (text: string | null | undefined) => rowOf(Object.entries(JSON.parse(text!)))
       if (!catalog.tables.has(table!)) return { table: table!, kind: 'unknown' }
       if (kind === 'insert') return { table: table!, kind: 'insert', new: image(now) }
       if (kind === 'delete') return { table: table!, kind: 'delete', old: image(old) }

@@ -26,6 +26,8 @@ type Capture = ReturnType<typeof captureConnection>
 
 /** The live database of each file whose connections are captured, by the path `location()` gives. */
 const files = processWide('nodeSqliteFiles', () => new Map<string, Wrapped>())
+/** The connections seen on none of `files`, since a file was last wrapped. */
+const unwrapped = processWide('nodeSqliteUnwrapped', () => ({ connections: new WeakSet<object>() }))
 
 /** The live database following the connections on `path`, if one does. */
 function wrappedFile(path: string): Wrapped | undefined {
@@ -39,6 +41,8 @@ function wrappedFile(path: string): Wrapped | undefined {
  */
 function captureNodeSqliteFile(path: string, wrapped: Wrapped): void {
   files.set(locationOf(path), wrapped)
+  // A connection already open on the file is captured from its next statement.
+  unwrapped.connections = new WeakSet()
   processWide('nodeSqliteHook', hookDatabaseSync)
 }
 
@@ -46,17 +50,20 @@ function hookDatabaseSync(): true {
   const { DatabaseSync } = builtin('node:sqlite') as { DatabaseSync: { prototype: DatabaseSync } }
   const proto = DatabaseSync.prototype
   const { prepare, exec } = proto
-  /** By connection, seen at its first statement: its capture, or `null` on a file no live database follows. */
-  const connections = new WeakMap<DatabaseSync, Capture | null>()
+  /** The capture of each connection on a file a live database follows, made at its first statement. */
+  const connections = new WeakMap<DatabaseSync, Capture>()
   const captureOf = (db: DatabaseSync): Capture | null => {
     // A closed connection fails as it would.
-    if (!db.isOpen) return null
+    if (!db.isOpen || unwrapped.connections.has(db)) return null
     let capture = connections.get(db)
-    if (capture === undefined) {
-      const wrapped = files.get(db.location() ?? '')
-      capture = wrapped ? captureConnection(db, wrapped.live, prepare, exec) : null
-      connections.set(db, capture)
+    if (capture) return capture
+    const wrapped = files.get(db.location() ?? '')
+    if (!wrapped) {
+      unwrapped.connections.add(db)
+      return null
     }
+    capture = captureConnection(db, wrapped.live, prepare, exec)
+    connections.set(db, capture)
     return capture
   }
   proto.prepare = function (this: DatabaseSync, text: string, ...options: unknown[]) {

@@ -80,7 +80,12 @@ function captureLibsql(client: Libsql, live: LiveDatabase): void {
       const tx = await transaction('write')
       try {
         before = planned.readsFirst && (await readRows(tx.execute.bind(tx), planned.readsFirst))
-        result = await sent(planned, app, tx.execute.bind(tx))
+        result = await sent(planned, app, tx.execute.bind(tx)).catch(async (err) => {
+          // What SQLite kept of a statement that failed (`OR FAIL`) commits, as without a transaction of ours; one
+          // that rolled the transaction back (`OR ROLLBACK`) left nothing to commit.
+          await tx.commit().catch(() => {})
+          throw err
+        })
         await tx.commit()
       } finally {
         tx.close()
@@ -104,7 +109,10 @@ function captureLibsql(client: Libsql, live: LiveDatabase): void {
     try {
       results = await batch(sentStatements, mode)
     } catch (err) {
+      // It rolled back whole.
+      live.statementFor(client, 'BEGIN', []).succeeded([])
       for (const { statement } of planned) statement.failed()
+      live.statementFor(client, 'ROLLBACK', []).succeeded([])
       throw withAppIndex(err, appIndex)
     }
     const followUps: FollowUp[] = []
@@ -135,7 +143,9 @@ function captureLibsql(client: Libsql, live: LiveDatabase): void {
     try {
       results = await migrate(statements)
     } catch (err) {
+      live.statementFor(client, 'BEGIN', []).succeeded([])
       for (const statement of planned) statement.failed()
+      live.statementFor(client, 'ROLLBACK', []).succeeded([])
       throw err
     }
     live.statementFor(client, 'BEGIN', []).succeeded([])

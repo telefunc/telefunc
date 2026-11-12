@@ -1,4 +1,4 @@
-export { compileCondition, inListCondition, allOf, mayBeTrue, isTrue, ALWAYS, TRUE, FALSE, NULL, and, or, not }
+export { compileCondition, inListCondition, allOf, mayBeTrue, isTrue, ALWAYS, TRUE, FALSE, NULL, and, or, not, rowOf }
 export { COMPARISONS }
 export type { Condition, Row, Truth, ValueSource }
 
@@ -10,6 +10,13 @@ import { compareValues, type Column } from './values.js'
 /** A row image: each column's value in Postgres's text form, `null` for SQL `NULL`. A column absent from the object
  *  has an unknown value. */
 type Row = Readonly<Record<string, string | null>>
+
+/** A row image from its `[column, value]` pairs: a value other than text or `null` is unknown, left out. */
+function rowOf(values: [string, unknown][]): Row {
+  return Object.fromEntries(
+    values.filter((entry): entry is [string, string | null] => entry[1] === null || typeof entry[1] === 'string'),
+  )
+}
 
 /** The SQL truth values a condition may take on a row, as bits: `TRUE`, `FALSE`, `NULL`. Several bits are set when
  *  the outcome can't be told from the row (an unknown column, an operator not reproduced here). */

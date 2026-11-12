@@ -4,7 +4,7 @@ import { and, COMPARISONS, FALSE, isTrue, mayBeTrue, not, NULL, or, TRUE, type R
 import type { Alias } from './readShape.js'
 import { MAX_TALLY_ROWS, type ColumnAggregate, type Comparison, type SetTree, type TallyShape } from './tallyShape.js'
 import type { OperandValue } from './operands.js'
-import { compareValues, valueKey, type Column } from './values.js'
+import { compareValues, valueKey, type Column, type HiddenValue } from './values.js'
 
 /** How many matching rows of `source` have some values (`texts`, the source's columns): at least `lo`, at most `hi`.
  *  A change may be counted already, by the counts query that ran after the read, or not: an insert raises `hi`, a
@@ -13,7 +13,7 @@ type Count = { source: number; texts: (string | null)[]; lo: number; hi: number 
 
 /** A group of an aggregate, or an output row of a set operation: its values, its counts by source and the other
  *  columns, and its hidden columns when the read returned it. */
-type Group = { texts: (string | null)[]; counts: Map<string, Count>; shown?: (string | null)[] }
+type Group = { texts: (string | null)[]; counts: Map<string, Count>; shown?: HiddenValue[] }
 
 /** Where a row is counted. */
 type Place = { group: string; entry: string; source: number; texts: (string | null)[] }
@@ -38,14 +38,18 @@ class Tally {
   static of(
     shape: TallyShape,
     operands: readonly OperandValue[],
-    hiddenRows: (string | null)[][],
+    hiddenRows: HiddenValue[][],
     countRows: (string | null)[][],
   ): Tally | undefined {
     if (countRows.length > MAX_TALLY_ROWS) return undefined
     const tally = new Tally(shape, operands)
     for (const [json, count] of countRows) {
-      const [source, ...texts] = JSON.parse(json!) as [string, ...(string | null)[]]
-      const place = tally.placeOf(Number(source), texts)
+      const [source, ...values] = JSON.parse(json!) as [string, ...(string | number | null)[]]
+      // A number is a value of another class than its column's (`Dialect.text()`): unknown.
+      const place = tally.placeOf(
+        Number(source),
+        values.map((v) => (typeof v === 'number' ? undefined : v)),
+      )
       if (!place) return undefined
       const counted = tally.countAt(place)
       counted.lo += Number(count)
@@ -55,10 +59,11 @@ class Tally {
     const { columns, groupColumns } = shape.sources[0]!
     const shownHidden = shape.rule.kind === 'set' ? columns.map((_, i) => i) : shape.rule.groupHidden
     for (const row of hiddenRows) {
-      const texts = shownHidden.map((i) => row[i]!)
+      const texts = shownHidden.map((i) => row[i])
       const key = keyOf(columns.slice(0, groupColumns), texts)
       if (key === undefined) return undefined
-      tally.groupAt(key, texts).shown = row
+      // `keyOf()` keyed each: none is unknown.
+      tally.groupAt(key, texts as (string | null)[]).shown = row
     }
     return tally
   }
@@ -214,11 +219,11 @@ class Tally {
     return this.shape.sources[0]!.columns[aggregate.column]!
   }
 
-  private placeOf(source: number, texts: (string | null | undefined)[]): Place | undefined {
+  private placeOf(source: number, texts: HiddenValue[]): Place | undefined {
     if (texts.some((t) => t === undefined)) return undefined
     const { columns, groupColumns } = this.shape.sources[source]!
-    const group = keyOf(columns.slice(0, groupColumns), texts.slice(0, groupColumns) as (string | null)[])
-    const rest = keyOf(columns.slice(groupColumns), texts.slice(groupColumns) as (string | null)[])
+    const group = keyOf(columns.slice(0, groupColumns), texts.slice(0, groupColumns))
+    const rest = keyOf(columns.slice(groupColumns), texts.slice(groupColumns))
     if (group === undefined || rest === undefined) return undefined
     return { group, entry: `${source}:${rest}`, source, texts: texts as (string | null)[] }
   }
@@ -271,11 +276,11 @@ function mayHave(row: Row, columns: Column[], texts: (string | null)[]): boolean
 }
 
 /** A key equal for two rows exactly when Postgres calls their values equal; `undefined` when it can't be told. */
-function keyOf(columns: Column[], texts: (string | null)[]): string | undefined {
+function keyOf(columns: Column[], texts: HiddenValue[]): string | undefined {
   const keys: (string | null)[] = []
   for (const [i, column] of columns.entries()) {
-    const text = texts[i]!
-    const key = text === null ? null : valueKey(text, column)
+    const text = texts[i]
+    const key = text === null ? null : text === undefined ? undefined : valueKey(text, column)
     if (key === undefined) return undefined
     keys.push(key)
   }

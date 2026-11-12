@@ -1,7 +1,10 @@
 export { compareValues, valueKey, hasCanonicalText, paramText }
-export type { Column }
+export type { Column, HiddenValue }
 
 /** A column as the catalog describes it: how Postgres compares its values. */
+/** A value of a read's hidden column: its text, `null`, or `undefined` when unknown. */
+type HiddenValue = string | null | undefined
+
 type Column = {
   name: string
   /** `pg_type.typcategory`: N numeric, S string, B boolean, D date/time, U user-defined, E enum, ... */

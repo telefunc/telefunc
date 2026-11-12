@@ -147,7 +147,7 @@ function widenedWrite(statement: Ast, text: string, table: Table, catalog: Catal
   const also = alsoWrites(table, update ? ['insert', 'update'] : [written], assigned, catalog)
   if (also === 'all') return undefined
   // `UPDATE t AS a … RETURNING a.x` fails: the image names its columns bare.
-  const image = `json_array(${table.columns.map((c) => SQLITE.text(quote(c.name))).join(', ')}) AS "${HIDDEN_PREFIX}0"`
+  const image = `json_array(${table.columns.map((c) => SQLITE.text(quote(c.name), c)).join(', ')}) AS "${HIDDEN_PREFIX}0"`
   const where =
     written === 'update' ? updatedRows(write, text, table, catalog) : update ? conflictingRows(write, table) : undefined
   if (update && where === undefined) return undefined

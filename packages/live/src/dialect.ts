@@ -2,6 +2,7 @@ export type { Dialect }
 
 import type { Catalog } from './catalog.js'
 import type { Comparison } from './match/operands.js'
+import type { Column } from './match/values.js'
 import type { Node } from './tree.js'
 
 /**
@@ -27,8 +28,9 @@ type Dialect = {
   param(number: number): string
   /** The character escaping `%` and `_` in a `LIKE` pattern without `ESCAPE`, if any. */
   likeEscape: string | undefined
-  /** The text form of `expression`'s value, which the matcher compares (`compareValues()`). */
-  text(expression: string): string
+  /** The text form of `expression`'s value, which the matcher compares (`compareValues()`). A value of `column` the
+   *  matcher can't compare as the column's other values comes as another value than text, which it takes as unknown. */
+  text(expression: string, column?: Column): string
   /** The text form of each of `expressions`, as a JSON array, as text. */
   jsonArray(expressions: string[]): string
   /** The values of `expression` over the rows of a query, as a JSON array (`[]` without rows), as text. */

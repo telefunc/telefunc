@@ -5,7 +5,7 @@ import { isTrue, mayBeTrue, type Row } from './condition.js'
 import { SEED_LIMIT, type Alias, type Join, type ReadShape } from './readShape.js'
 import { Tally } from './tally.js'
 import type { OperandValue } from './operands.js'
-import { compareValues, paramText, valueKey, type Column } from './values.js'
+import { compareValues, paramText, valueKey, type Column, type HiddenValue } from './values.js'
 
 /** A committed change to a table, with the images of the rows it wrote. `old` may lack columns: an `UPDATE` on
  *  Postgres < 18 only tells which columns it assigned. */
@@ -26,8 +26,8 @@ type Result = {
   /** A hidden column's canonical keys of its values; `undefined` entries can't be keyed. Keyed when a change first
    *  asks: most results are replaced by a refetch before any change does. */
   values(hidden: number): Set<string | undefined>
-  first: (string | null)[] | undefined
-  last: (string | null)[] | undefined
+  first: HiddenValue[] | undefined
+  last: HiddenValue[] | undefined
   /** Per join seed: the keys of its values, plus those of matching rows written since; `undefined`: unknown. */
   seeds: Map<number, Set<string | undefined> | undefined>
   /** Per `EXISTS` count: how many rows it found for each outer row, by correlation key; it only goes down (a row
@@ -62,17 +62,15 @@ class LiveRead {
     this.onAffected = onAffected
   }
 
-  /** The statement's result: its rows' hidden columns as text, one array per row; the rows of the shape's `state`
-   *  query, when it ran; and its operands' values, when they weren't known. */
-  resolve(
-    hiddenRows: (string | null)[][] | undefined,
-    state?: (string | null)[][],
-    operands?: readonly OperandValue[],
-  ): void {
+  /** The statement's result: its rows' hidden columns as text, one array per row (another value is unknown:
+   *  `Dialect.text()`); the rows of the shape's `state` query, when it ran; and its operands' values, when they weren't
+   *  known. */
+  resolve(hiddenRows: unknown[][] | undefined, state?: (string | null)[][], operands?: readonly OperandValue[]): void {
     this.operands ??= operands
     const { tally } = this.shape
-    if (hiddenRows && tally) this.tally = state && Tally.of(tally, this.operands ?? [], hiddenRows, state)
-    else if (hiddenRows) this.result = this.resultOf(hiddenRows, state?.[0])
+    const rows = hiddenRows?.map((row) => row.map(textOf))
+    if (rows && tally) this.tally = state && Tally.of(tally, this.operands ?? [], rows, state)
+    else if (rows) this.result = this.resultOf(rows, state?.[0])
     const pending = this.pending!
     this.pending = undefined
     for (const change of pending) this.consider(change)
@@ -235,7 +233,7 @@ class LiveRead {
   }
 
   /** Whether `row` sorts before the boundary row (or ties with it, when `orEqual`). Unknown order counts as before. */
-  private sortsBefore(alias: Alias, row: Row, boundary: (string | null)[] | undefined, orEqual = false): boolean {
+  private sortsBefore(alias: Alias, row: Row, boundary: HiddenValue[] | undefined, orEqual = false): boolean {
     const keys = this.shape.sort
     if (!keys || !boundary || keys.some((k) => k.alias !== alias)) return true
     for (let i = 0; i < keys.length; i++) {
@@ -265,7 +263,7 @@ class LiveRead {
   }
 
   /** `seedRow`: the seeds, when no row carries them. */
-  private resultOf(rows: (string | null)[][], seedRow: (string | null)[] | undefined): Result {
+  private resultOf(rows: HiddenValue[][], seedRow: (string | null)[] | undefined): Result {
     const { sort, limit } = this.shape
     const keyed = new Map<number, Set<string | undefined>>()
     const values = (hidden: number) => {
@@ -280,8 +278,7 @@ class LiveRead {
     const known = limit !== undefined && !Number.isNaN(count)
     const full = known && count >= 0 && rows.length >= count
     const cut = full || (limit !== undefined && !known)
-    const sortTexts = (row: (string | null)[] | undefined) =>
-      row && sort ? sort.map((k) => row[k.hidden]!) : undefined
+    const sortTexts = (row: HiddenValue[] | undefined) => (row && sort ? sort.map((k) => row[k.hidden]!) : undefined)
     const seeds: Result['seeds'] = new Map()
     const counts: Result['counts'] = new Map()
     for (const alias of this.shape.aliases) {
@@ -324,7 +321,7 @@ function tupleKey(columns: Column[], row: Row): string | undefined {
 }
 
 /** The keys of one hidden column's values in `rows`. */
-function keysOf(rows: (string | null)[][], hidden: number, column: Column | undefined): Set<string | undefined> {
+function keysOf(rows: HiddenValue[][], hidden: number, column: Column | undefined): Set<string | undefined> {
   const keys = new Set<string | undefined>()
   for (const row of rows) {
     const text = row[hidden]
@@ -333,11 +330,17 @@ function keysOf(rows: (string | null)[][], hidden: number, column: Column | unde
   return keys
 }
 
+function textOf(value: unknown): HiddenValue {
+  return typeof value === 'string' || value === null ? value : undefined
+}
+
 /** A seed column's JSON array as keys; `undefined` when there was no row to carry it, or too many values. */
 function seedKeys(text: string | null | undefined, column: Column): Set<string | undefined> | undefined {
   if (typeof text !== 'string') return undefined
-  const values = JSON.parse(text) as string[]
-  return values.length > SEED_LIMIT ? undefined : new Set(values.map((v) => valueKey(v, column)))
+  const values = JSON.parse(text) as (string | number)[]
+  if (values.length > SEED_LIMIT) return undefined
+  // A number is a value of another class than the column's (`Dialect.text()`): no value known as text equals it.
+  return new Set(values.map((v) => (typeof v === 'number' ? undefined : valueKey(v, column))))
 }
 
 /** The column each hidden column reads, to key its values. */

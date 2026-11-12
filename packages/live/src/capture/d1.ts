@@ -153,7 +153,10 @@ function captureSession(session: D1Session, db: D1, live: LiveDatabase): () => P
     try {
       results = await batch(sentStatements)
     } catch (err) {
+      // It rolled back whole.
+      live.statementFor(db, 'BEGIN', []).succeeded([])
       for (const { statement } of planned) statement.failed()
+      live.statementFor(db, 'ROLLBACK', []).succeeded([])
       throw err
     }
     const followUps: FollowUp[] = []

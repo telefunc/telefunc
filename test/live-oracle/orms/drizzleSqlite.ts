@@ -430,9 +430,15 @@ function withBatches(driver: OrmDriver, db: any): OrmDriver {
       ...writes,
       txCommit: ({ todo, user, text }) =>
         db.batch([newTodo(user, text), db.update(todos).set({ done: true }).where(eq(todos.id, todo))]),
-      // The second statement fails: the first is undone with it.
-      txRollback: ({ user, text }) =>
-        db.batch([newTodo(user, text), db.run(sql`insert into users (id, name, team) values (1, 'taken', 1)`)]),
+      // The second statement always fails (`name` is `NOT NULL`): the batch is refused, and the first undone with it.
+      txRollback: async ({ user, text }) => {
+        try {
+          await db.batch([newTodo(user, text), db.run(sql`insert into users (name, team) values (null, 1)`)])
+        } catch {
+          return
+        }
+        throw new Error('A batch committed although one of its statements failed')
+      },
     },
   }
 }

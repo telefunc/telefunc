@@ -6,6 +6,7 @@ import { captureSyncSqlite, type RowsKind } from './syncSqlite.js'
 
 // The parts of better-sqlite3 used here, so that `better-sqlite3` stays the app's dependency.
 type Prepared = {
+  readonly reader: boolean
   run(...params: unknown[]): unknown
   get(...params: unknown[]): unknown
   all(...params: unknown[]): unknown[]
@@ -21,6 +22,7 @@ type BetterSqlite3 = {
   prepare(text: string): Prepared
   exec(text: string): unknown
   transaction(fn: (...args: unknown[]) => unknown): TransactionFunction
+  defaultSafeIntegers(toggle?: boolean): BetterSqlite3
   readonly inTransaction: boolean
   readonly memory: boolean
 }
@@ -39,14 +41,20 @@ function captureBetterSqlite3(db: BetterSqlite3, live: LiveDatabase): void {
   const prepare = db.prepare.bind(db)
   const exec = db.exec.bind(db)
   const transaction = db.transaction.bind(db)
+  const defaultSafeIntegers = db.defaultSafeIntegers.bind(db)
+  // The mode a statement gets as it's prepared: `new Database()` or `defaultSafeIntegers()` set it.
+  let safeByDefault = typeof prepare('SELECT 1').pluck().get() === 'bigint'
   const capture = captureSyncSqlite(
     {
       db,
       inTransaction: () => db.inTransaction,
-      rows: (text, values) =>
-        prepare(text)
-          .raw()
-          .all(...values) as (string | null)[][],
+      rows: (text, values) => {
+        const statement = prepare(text)
+        // `raw()` throws on a statement that returns no rows (`DELETE` without `RETURNING`).
+        if (statement.reader) return statement.raw().all(...values) as (string | null)[][]
+        statement.run(...values)
+        return []
+      },
       exec,
     },
     live,
@@ -55,7 +63,7 @@ function captureBetterSqlite3(db: BetterSqlite3, live: LiveDatabase): void {
 
   db.prepare = (text: string) => {
     const prepared = prepare(text)
-    const modes = { raw: false, pluck: false, expand: false, safeIntegers: false }
+    const modes = { raw: false, pluck: false, expand: false, safeIntegers: safeByDefault }
     for (const mode of MODES) {
       const toggle = prepared[mode].bind(prepared)
       prepared[mode] = (on = true) => {
@@ -76,6 +84,12 @@ function captureBetterSqlite3(db: BetterSqlite3, live: LiveDatabase): void {
     prepared.run = capture.method(statement, prepared.run.bind(prepared), 'run', () => 'other')
     prepared.iterate = capture.iterate(statement, all, rows)
     return prepared
+  }
+
+  db.defaultSafeIntegers = (on = true) => {
+    safeByDefault = on
+    defaultSafeIntegers(on)
+    return db
   }
 
   db.exec = (text: string) => {
