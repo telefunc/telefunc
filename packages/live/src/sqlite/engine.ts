@@ -1,7 +1,15 @@
 export { LOGGED_SQLITE_ENGINE, RETURNING_SQLITE_ENGINE, D1_ENGINE }
 
 import type { Engine } from '../liveDatabase.js'
-import { catalogOf, catalogQuery, CHANGE_LOG_TRIGGERS, changeLogSetup, changesOfLog, DRAIN_CHANGES } from './catalog.js'
+import {
+  catalogOf,
+  catalogQuery,
+  CHANGE_LOG_TRIGGERS,
+  changeLogSetup,
+  changesOfLog,
+  EMPTY_CHANGES,
+  READ_CHANGES,
+} from './catalog.js'
 import { splitSqlite } from './parser.js'
 import { planSqlite } from './plan.js'
 
@@ -25,7 +33,13 @@ const D1_ENGINE: Engine = {
 const LOGGED_SQLITE_ENGINE: Engine = {
   loadCatalog: async (query) => catalogOf(await query(catalogQuery(true)), true),
   loadCatalogSync: (query) => catalogOf(query(catalogQuery(true)), true),
-  changeLog: { triggers: CHANGE_LOG_TRIGGERS, setup: changeLogSetup, drain: DRAIN_CHANGES, changesOf: changesOfLog },
+  changeLog: {
+    triggers: CHANGE_LOG_TRIGGERS,
+    setup: changeLogSetup,
+    read: READ_CHANGES,
+    empty: EMPTY_CHANGES,
+    changesOf: changesOfLog,
+  },
   plan: planSqlite,
   failureAbortsTransaction: false,
 }

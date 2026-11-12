@@ -1,4 +1,5 @@
-export { catalogQuery, catalogOf, changeLogSetup, CHANGE_LOG_TRIGGERS, DRAIN_CHANGES, changesOfLog, hasConflictReplace }
+export { catalogQuery, catalogOf, changeLogSetup, CHANGE_LOG_TRIGGERS, READ_CHANGES, EMPTY_CHANGES, changesOfLog }
+export { hasConflictReplace }
 
 import type { Access, Catalog, Table, TableSet } from '../catalog.js'
 import { tablesChangedBy, union } from '../catalog.js'
@@ -69,8 +70,8 @@ const CHANGES = 'temp."__live_changes"'
 /** The names of the change log's triggers on a connection, from a previous catalog, as JSON. */
 const CHANGE_LOG_TRIGGERS = `select json_group_array(name) from temp.sqlite_schema where type = 'trigger' and name like '\\_\\_live\\_%' escape '\\'`
 
-/** Empties the change log, giving the changes in the order they were made. */
-const DRAIN_CHANGES = `DELETE FROM ${CHANGES} RETURNING "id", "table", "kind", "old", "new"`
+const READ_CHANGES = `SELECT "id", "table", "kind", "old", "new" FROM ${CHANGES}`
+const EMPTY_CHANGES = `DELETE FROM ${CHANGES}`
 
 /** SQLite has no roles: a connection reads every table whole. */
 const READABLE: Access = { readable: 'table', rowSecurity: false }
@@ -324,7 +325,7 @@ function changeLogSetup(catalog: Catalog, ours: string[]): string[] {
   ]
 }
 
-/** The changes `DRAIN_CHANGES` gave, in the order they were made. */
+/** The changes `READ_CHANGES` gave, in the order they were made. */
 function changesOfLog(rows: (string | null)[][], catalog: Catalog): Change[] {
   return rows
     .toSorted((a, b) => Number(a[0]) - Number(b[0]))

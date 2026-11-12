@@ -99,6 +99,8 @@ export const db = livePrisma(sqlite({ contract, path: 'app.db' }), 'app.db')
 
 > The database client is a better-sqlite3 or `bun:sqlite` database, or a libSQL client (`@libsql/client`) on a local file: a `file:` URL.
 
+> On better-sqlite3, `bun:sqlite` and Prisma, the rows your writes change are copied to a temporary table of the connection, which SQLite's `total_changes()` counts too.
+
 ### Cloudflare Workers
 
 On <Link href="/stream/cloudflare">Cloudflare Workers</Link>, wrap your D1 database:

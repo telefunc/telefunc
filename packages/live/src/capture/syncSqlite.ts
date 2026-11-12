@@ -45,6 +45,7 @@ function captureSyncSqlite(driver: SyncSqlite, live: LiveDatabase) {
   }
   /** Runs a statement of the app's through `send` once `statement` planned it, then what it needs next. */
   const run = <T>(statement: Statement, send: () => T, hiddenRows: (result: T) => (string | null)[][] = () => []) => {
+    if (statement.readsFirst) runFollowUp(statement.readsFirst)
     let result: T
     try {
       result = send()
@@ -61,7 +62,11 @@ function captureSyncSqlite(driver: SyncSqlite, live: LiveDatabase) {
     for (const followUp of followUps) runFollowUp(followUp)
   }
   /** A transaction statement of ours, for one the driver runs without a statement of the app's: told as it runs. */
-  const control = (text: string) => void live.statementFor(db, text, []).succeeded([])
+  const control = (text: string) => {
+    const statement = live.statementFor(db, text, [])
+    if (statement.readsFirst) runFollowUp(statement.readsFirst)
+    statement.succeeded([])
+  }
   /** The app's statement method `name`, which returns rows as `rowsKind()` says when called. */
   const method =
     (statement: SyncStatement, native: (...params: unknown[]) => unknown, name: string, rowsKind: () => RowsKind) =>

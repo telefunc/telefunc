@@ -106,4 +106,23 @@ describe('SQLite capture', () => {
     db.prepare("update t set x = 'c' where id = 1").run()
     expect(await committed()).toBe(1)
   })
+
+  it("leaves changes() to the app's statements", () => {
+    const { db } = open(
+      `${TWO_ROWS}; create table audit (id integer);
+      create trigger audited after insert on t begin insert into audit values (1); insert into audit values (2); end`,
+    )
+    db.prepare("insert into t values (3, 'c')").run()
+    expect(db.prepare('select changes() as changes').get()).toEqual({ changes: 1 })
+  })
+
+  it('announces no change twice once a transaction rolled back', async () => {
+    const { db } = open(TWO_ROWS)
+    db.prepare("update t set x = 'c' where id = 1").run()
+    const first = await watch(db, 'select * from t where id = 1')
+    db.exec('begin')
+    db.prepare("update t set x = 'd' where id = 2").run()
+    expect(() => db.prepare("insert or rollback into t values (2, 'e')").run()).toThrow()
+    expect(await first()).toBe(0)
+  })
 })

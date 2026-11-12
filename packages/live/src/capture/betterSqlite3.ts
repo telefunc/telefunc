@@ -6,6 +6,7 @@ import { captureSyncSqlite, type RowsKind } from './syncSqlite.js'
 
 // The parts of better-sqlite3 used here, so that `better-sqlite3` stays the app's dependency.
 type Prepared = {
+  readonly reader: boolean
   run(...params: unknown[]): unknown
   get(...params: unknown[]): unknown
   all(...params: unknown[]): unknown[]
@@ -43,10 +44,13 @@ function captureBetterSqlite3(db: BetterSqlite3, live: LiveDatabase): void {
     {
       db,
       inTransaction: () => db.inTransaction,
-      rows: (text, values) =>
-        prepare(text)
-          .raw()
-          .all(...values) as (string | null)[][],
+      rows: (text, values) => {
+        const statement = prepare(text)
+        // `raw()` throws on a statement that returns no rows (`DELETE` without `RETURNING`).
+        if (statement.reader) return statement.raw().all(...values) as (string | null)[][]
+        statement.run(...values)
+        return []
+      },
       exec,
     },
     live,

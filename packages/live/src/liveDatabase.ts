@@ -43,7 +43,8 @@ type Statement = {
   succeeded(hiddenRows: (string | null)[][], command?: string): FollowUp[]
   failed(): FollowUp[]
   /** A query of ours to send right before `text`, in the same transaction with nothing between: its rows go to `done`
-   *  before `succeeded` (a write's rows before it). A driver that doesn't send it makes the write count less precisely. */
+   *  before `succeeded`. A write's rows before it: a driver that doesn't send it makes the write count less precisely.
+   *  Or a change log emptied: its drivers send it. */
   readsFirst?: FollowUp
   /** A write that runs as a role its connection doesn't know yet: run this query of ours on the connection first,
    *  then plan the statement again, which may then capture its rows. A driver that doesn't sends it as is. */
@@ -81,11 +82,12 @@ type Engine = {
   /** The same, on a driver that answers at once. */
   loadCatalogSync?(query: (text: string) => string): Catalog
   /** Each connection logs the rows its statements change (SQLite), once `setup` ran on it for the loaded catalog:
-   *  `triggers` answers what a previous `setup` left there, `drain` takes the changes from the log. */
+   *  `triggers` answers what a previous `setup` left there, `read` gives the changes in the log, `empty` empties it. */
   changeLog?: {
     triggers: string
     setup(catalog: Catalog, ours: string[]): string[]
-    drain: string
+    read: string
+    empty: string
     changesOf(rows: Rows, catalog: Catalog): Change[]
   }
   plan(text: string, catalog: Catalog): Plan
@@ -284,8 +286,7 @@ class LiveDatabase {
       () => this.changesOf(plan, connection),
       () => this.keptChanges(plan, connection),
     )
-    const writes = plan.kind === 'logged' || plan.kind === 'unknownWrite' || plan.kind === 'several'
-    const statement = this.learningAccess(connection, writes ? this.drainingLog(connection, sent) : sent)
+    const statement = this.learningAccess(connection, this.withChangeLog(connection, sent, plan))
     if (plan.kind !== 'write' || !rewrite || this.roles!.of(connection) !== null) return statement
     // The role, and what it sees unless known: one round trip.
     const known = JSON.stringify([...this.access.keys()])
@@ -297,22 +298,28 @@ class LiveDatabase {
     return { ...statement, asks }
   }
 
-  /** On a connection with a change log (SQLite), `statement` and then the query taking the rows it changed from the
-   *  log, whether it succeeded or failed. */
-  private drainingLog(connection: object, statement: Statement): Statement {
+  /** On a connection with a change log (SQLite): a write empties the log right before it, so that `changes()` still
+   *  tells the app's last write once it ran, and reads the rows it changed from it after, whether it succeeded or
+   *  failed. A transaction or savepoint empties it as it begins: rolling one back brings back the rows emptied in it. */
+  private withChangeLog(connection: object, statement: Statement, plan: Plan): Statement {
     const log = this.engine.changeLog
-    if (!log) return statement
+    const writes = plan.kind === 'logged' || plan.kind === 'unknownWrite' || plan.kind === 'several'
+    const begins = plan.kind === 'transaction' && (plan.action === 'begin' || plan.action === 'savepoint')
+    if (!log || !(writes || begins)) return statement
+    const empty: FollowUp = { text: log.empty, values: [], done: () => {} }
+    if (!writes) return { ...statement, readsFirst: empty }
     const catalog = this.catalog!
-    const drain: FollowUp = {
-      text: log.drain,
+    const read: FollowUp = {
+      text: log.read,
       values: [],
-      // Not drained, the changes it may hold are unknown.
+      // Not read, the changes it may hold are unknown.
       done: (rows) => this.transactions.record(connection, rows ? log.changesOf(rows, catalog) : unknownChanges('all')),
     }
     return {
       ...statement,
-      succeeded: (rows, command) => [...statement.succeeded(rows, command), drain],
-      failed: () => [...statement.failed(), drain],
+      readsFirst: empty,
+      succeeded: (rows, command) => [...statement.succeeded(rows, command), read],
+      failed: () => [...statement.failed(), read],
     }
   }
 
