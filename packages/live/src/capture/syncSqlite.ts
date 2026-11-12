@@ -49,14 +49,16 @@ function captureSyncSqlite(driver: SyncSqlite, live: LiveDatabase) {
     try {
       result = send()
     } catch (err) {
-      statement.failed()
-      live.transactionIs(db, driver.inTransaction(), 'rollback')
+      settle(statement.failed(), 'rollback')
       throw err
     }
-    const followUps = statement.succeeded(hiddenRows(result))
-    live.transactionIs(db, driver.inTransaction(), 'commit')
-    for (const followUp of followUps) runFollowUp(followUp)
+    settle(statement.succeeded(hiddenRows(result)), 'commit')
     return result
+  }
+  /** After a statement of the app's: the transaction the driver is in, then the queries of ours the statement needs. */
+  const settle = (followUps: FollowUp[], ended: 'commit' | 'rollback') => {
+    live.transactionIs(db, driver.inTransaction(), ended)
+    for (const followUp of followUps) runFollowUp(followUp)
   }
   /** A transaction statement of ours, for one the driver runs without a statement of the app's: told as it runs. */
   const control = (text: string) => void live.statementFor(db, text, []).succeeded([])

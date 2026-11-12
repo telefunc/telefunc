@@ -31,7 +31,7 @@ type LiveOptions = {
 
 /** How a driver runs one statement: send `text`, give back each row's last `hiddenColumns` values (as text) to
  *  `succeeded` and the rest to the caller (no rows at all unless `returnsRows`), or call `failed`. Run the follow-ups
- *  `succeeded` returns next, in order, on the same connection, before the caller can send anything else. */
+ *  either returns next, in order, on the same connection, before the caller can send anything else. */
 type Statement = {
   text: string
   /** The values to send with `text`, when they aren't the caller's. */
@@ -41,7 +41,7 @@ type Statement = {
   /** `command`: the command tag Postgres answered, when the driver tells (a `COMMIT` that rolled back answers
    *  `ROLLBACK`). */
   succeeded(hiddenRows: (string | null)[][], command?: string): FollowUp[]
-  failed(): void
+  failed(): FollowUp[]
   /** A query of ours to send right before `text`, in the same transaction with nothing between: its rows go to `done`
    *  before `succeeded` (a write's rows before it). A driver that doesn't send it makes the write count less precisely. */
   readsFirst?: FollowUp
@@ -91,8 +91,8 @@ type Engine = {
   plan(text: string, catalog: Catalog): Plan
   /** The statements of text that may hold several, each its own text; `undefined` when the parser can't read it. */
   split?(text: string): string[] | undefined
-  /** A statement that fails inside a transaction makes it roll back (Postgres); on SQLite, it undoes its own
-   *  changes only. */
+  /** A statement that fails inside a transaction makes it roll back (Postgres). On SQLite, the transaction goes on,
+   *  and what the statement changed before failing may stay (`OR FAIL`, the statements before it in a text). */
   failureAbortsTransaction: boolean
 }
 
@@ -265,11 +265,6 @@ class LiveDatabase {
     switch (plan.kind) {
       case 'read':
         return this.read(rewrite ? plan : { ...plan, liveText: undefined }, text, values, connection, live, sharing)
-      case 'logged':
-        return this.drainingLog(
-          connection,
-          this.statement(connection, text, 0, () => unknownChanges(plan.also)),
-        )
       case 'write':
         // Sent as written, a write changes its table as a whole.
         if (!rewrite || !this.widens(plan, connection)) break
@@ -282,8 +277,14 @@ class LiveDatabase {
         if (rewrite && isUnnamed(plan) && !this.transactions.isOpen(connection))
           return this.inOwnTransaction(connection, text, plan)
     }
-    const sent = this.statement(connection, text, 0, () => this.changesOf(plan, connection))
-    const writes = plan.kind === 'unknownWrite' || plan.kind === 'several'
+    const sent = this.statement(
+      connection,
+      text,
+      0,
+      () => this.changesOf(plan, connection),
+      () => this.keptChanges(plan, connection),
+    )
+    const writes = plan.kind === 'logged' || plan.kind === 'unknownWrite' || plan.kind === 'several'
     const statement = this.learningAccess(connection, writes ? this.drainingLog(connection, sent) : sent)
     if (plan.kind !== 'write' || !rewrite || this.roles!.of(connection) !== null) return statement
     // The role, and what it sees unless known: one round trip.
@@ -297,7 +298,7 @@ class LiveDatabase {
   }
 
   /** On a connection with a change log (SQLite), `statement` and then the query taking the rows it changed from the
-   *  log. */
+   *  log, whether it succeeded or failed. */
   private drainingLog(connection: object, statement: Statement): Statement {
     const log = this.engine.changeLog
     if (!log) return statement
@@ -311,6 +312,7 @@ class LiveDatabase {
     return {
       ...statement,
       succeeded: (rows, command) => [...statement.succeeded(rows, command), drain],
+      failed: () => [...statement.failed(), drain],
     }
   }
 
@@ -369,7 +371,10 @@ class LiveDatabase {
         return []
       },
       // The transaction is over: rolled back.
-      failed: () => this.transactionEnded(connection, 'rollback', false),
+      failed: () => {
+        this.transactionEnded(connection, 'rollback', false)
+        return []
+      },
     }
   }
 
@@ -423,6 +428,7 @@ class LiveDatabase {
           lead?.failed()
         }
         this.statementFailed(connection)
+        return []
       },
       leads: lead !== undefined,
       answered: (result, copy) => lead?.answered(result, copy),
@@ -450,6 +456,7 @@ class LiveDatabase {
       failed: () => {
         watched.drop()
         this.statementFailed(connection)
+        return []
       },
       leads: false,
       answered: () => {},
@@ -530,11 +537,13 @@ class LiveDatabase {
     return valuesKey === undefined ? undefined : `${rowForm}\0${valuesKey}\0${text}`
   }
 
+  /** `kept`: what the statement may have changed when it failed on SQLite (`keptChanges()`). */
   private statement(
     connection: object,
     text: string,
     hiddenColumns: number,
     changesOf: (rows: (string | null)[][]) => Change[],
+    kept: () => Change[] = () => [],
   ): Statement {
     return {
       text,
@@ -544,14 +553,26 @@ class LiveDatabase {
         this.transactions.record(connection, changesOf(rows))
         return []
       },
-      failed: () => this.statementFailed(connection),
+      failed: () => {
+        this.statementFailed(connection, kept)
+        return []
+      },
       leads: false,
       answered: () => {},
     }
   }
 
-  private statementFailed(connection: object): void {
+  private statementFailed(connection: object, kept: () => Change[] = () => []): void {
     if (this.engine.failureAbortsTransaction) this.transactions.failed(connection)
+    else this.transactions.record(connection, kept())
+  }
+
+  /** What a statement that failed on SQLite may still have changed: SQLite keeps the rows an `OR FAIL` statement
+   *  changed before its conflict, and what the statements before the one that failed in a text did. */
+  private keptChanges(plan: Plan, connection: object): Change[] {
+    if (plan.kind === 'several') return plan.plans.flatMap((p) => this.keptChanges(p, connection))
+    const writes = plan.kind === 'logged' || plan.kind === 'write' || plan.kind === 'unknownWrite'
+    return writes ? this.changesOf(plan, connection) : []
   }
 
   /** Changes of a statement that isn't a single captured write; applies transaction statements and role changes. */
@@ -574,6 +595,8 @@ class LiveDatabase {
         return unknownChanges(plan.tables)
       case 'write':
         return unknownChanges(ofRows(tablesChangedBy([[plan.table.id, undefined]], this.catalog!)))
+      case 'logged':
+        return unknownChanges(plan.also)
       case 'several':
         // Applied in order, after the whole text succeeded.
         return plan.plans.flatMap((p) => {
@@ -606,7 +629,13 @@ class LiveDatabase {
   private widenedWrite(connection: object, plan: WritePlan, values: readonly unknown[]): Statement {
     let before: Rows | undefined
     const sent = {
-      ...this.statement(connection, plan.text, plan.images.length, (rows) => this.changesOfWrite(plan, rows, before)),
+      ...this.statement(
+        connection,
+        plan.text,
+        plan.images.length,
+        (rows) => this.changesOfWrite(plan, rows, before),
+        () => this.changesOf(plan, connection),
+      ),
       ...(plan.params && { values: plan.params.map((i) => values[i]) }),
       returnsRows: plan.hadReturning,
     }

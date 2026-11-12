@@ -43,6 +43,29 @@ async function watch(db: DatabaseSync, text: string): Promise<() => Promise<numb
 const TWO_ROWS = "create table t (id integer primary key, x text unique); insert into t values (1, 'a'), (2, 'b')"
 
 describe('SQLite capture', () => {
+  it('announces what a text kept before its statement that failed', async () => {
+    const { db } = open(TWO_ROWS)
+    const stale = await watch(db, 'select * from t')
+    expect(() => db.exec("update t set x = 'c' where id = 1; insert into t values (2, 'd')")).toThrow()
+    expect(await stale()).toBe(1)
+  })
+
+  it('announces the rows an OR FAIL statement changed before its conflict', async () => {
+    const { db } = open(TWO_ROWS)
+    const stale = await watch(db, 'select * from t')
+    expect(() => db.prepare("update or fail t set x = 'c'").run()).toThrow()
+    expect(db.prepare('select x from t where id = 1').get()).toEqual({ x: 'c' })
+    expect(await stale()).toBe(1)
+  })
+
+  it('announces the row a REPLACE in a text deleted', async () => {
+    const { db } = open("create table t (id integer primary key, x text unique); insert into t values (1, 'a')")
+    const stale = await watch(db, 'select * from t where id = 1')
+    db.exec("replace into t (x) values ('a'); select 1")
+    expect(db.prepare('select * from t where id = 1').all()).toEqual([])
+    expect(await stale()).toBe(1)
+  })
+
   it('announces a savepoint outside a transaction once released, and nothing it rolled back', async () => {
     const { db } = open(TWO_ROWS)
     const stale = await watch(db, 'select * from t')

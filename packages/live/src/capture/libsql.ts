@@ -104,7 +104,10 @@ function captureLibsql(client: Libsql, live: LiveDatabase): void {
     try {
       results = await batch(sentStatements, mode)
     } catch (err) {
+      // It rolled back whole.
+      live.statementFor(client, 'BEGIN', []).succeeded([])
       for (const { statement } of planned) statement.failed()
+      live.statementFor(client, 'ROLLBACK', []).succeeded([])
       throw withAppIndex(err, appIndex)
     }
     const followUps: FollowUp[] = []
@@ -135,7 +138,9 @@ function captureLibsql(client: Libsql, live: LiveDatabase): void {
     try {
       results = await migrate(statements)
     } catch (err) {
+      live.statementFor(client, 'BEGIN', []).succeeded([])
       for (const statement of planned) statement.failed()
+      live.statementFor(client, 'ROLLBACK', []).succeeded([])
       throw err
     }
     live.statementFor(client, 'BEGIN', []).succeeded([])
