@@ -74,11 +74,10 @@ function captureBetterSqlite3(db: BetterSqlite3, live: LiveDatabase): void {
     }
     // Rows come back one column (`pluck`) or nested (`expand`): no hidden columns.
     const rows = (): RowsKind => (modes.pluck || modes.expand ? 'other' : modes.raw ? 'arrays' : 'objects')
-    const all = prepared.all.bind(prepared)
-    prepared.all = capture.method(statement, all, 'all', rows) as Prepared['all']
+    prepared.all = capture.method(statement, prepared.all.bind(prepared), 'all', rows) as Prepared['all']
     prepared.get = capture.method(statement, prepared.get.bind(prepared), 'get', rows)
     prepared.run = capture.method(statement, prepared.run.bind(prepared), 'run', () => 'other')
-    prepared.iterate = capture.iterate(statement, all, rows)
+    prepared.iterate = capture.iterate(statement, prepared.iterate.bind(prepared), rows) as Prepared['iterate']
     return prepared
   }
 

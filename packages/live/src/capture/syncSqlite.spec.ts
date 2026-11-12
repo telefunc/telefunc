@@ -204,6 +204,49 @@ describe('SQLite capture', () => {
     expect([await first(), await second()]).toEqual([0, 1])
   })
 
+  it("runs an iterator's statement as its rows are read, and closes it", () => {
+    const { db } = open(TWO_ROWS)
+    let evaluated = 0
+    db.function('observed', (id) => {
+      evaluated++
+      return id
+    })
+    const rows = db.prepare('select observed(id) as id from t').iterate()
+    expect(evaluated).toBe(0)
+    expect(rows.next()).toEqual({ done: false, value: { id: 1 } })
+    expect(evaluated).toBe(1)
+    expect(rows.return!().done).toBe(true)
+    expect(evaluated).toBe(1)
+  })
+
+  // The page's last row, a hidden column, tells that row 2 sorts after it.
+  it('reads a live query through an iterator row by row, without its hidden columns', async () => {
+    const { db } = open(TWO_ROWS)
+    const cell = await calls.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
+      readLive(async () => [...db.prepare('select * from t order by id limit 1').iterate()], 'liveDatabaseOfFile()'),
+    )
+    let stale = 0
+    cell.onStale(() => stale++)
+    expect(cell.send()).toEqual([{ id: 1, x: 'a' }])
+    db.prepare("update t set x = 'c' where id = 2").run()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(stale).toBe(0)
+    db.prepare("update t set x = 'd' where id = 1").run()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(stale).toBe(1)
+  })
+
+  it.each(['read to its end', 'closed'])('announces a write whose iterator was %s', async (end) => {
+    const { db } = open(TWO_ROWS)
+    const first = await watch(db, 'select * from t where id = 1')
+    const second = await watch(db, 'select * from t where id = 2')
+    const rows = db.prepare("update t set x = 'c' where id = 1 returning id").iterate()
+    expect(rows.next()).toEqual({ done: false, value: { id: 1 } })
+    if (end === 'closed') rows.return!()
+    else expect(rows.next().done).toBe(true)
+    expect([await first(), await second()]).toEqual([1, 0])
+  })
+
   it('announces no change twice once a transaction rolled back', async () => {
     const { db } = open(TWO_ROWS)
     db.prepare("update t set x = 'c' where id = 1").run()

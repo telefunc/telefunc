@@ -57,6 +57,8 @@ type Statement = {
   /** A read outside a transaction that sets no role: what is planned after it on its connection may be planned before
    *  it ran. */
   keepsSession?: boolean
+  /** A read outside `.live()`: sent as written, and `succeeded()` may come before its rows (as an iterator gives them). */
+  unwatched?: boolean
   /** Queries of ours naming the tables a transaction changed without the catalog naming them, sent on the same
    *  connection right before it commits, with nothing else between: when one fails, the transaction rolls back and the
    *  caller gets its error. `ownTransaction`: the statement runs in a transaction of ours (`BEGIN`, the statement, the
@@ -415,7 +417,12 @@ class LiveDatabase {
   ): Statement {
     const keepsSession = !plan.role && !this.transactions.isOpen(connection)
     // A read outside `.live()` is sent as written.
-    if (!live) return { ...this.statement(connection, text, 0, () => this.changesOf(plan, connection)), keepsSession }
+    if (!live)
+      return {
+        ...this.statement(connection, text, 0, () => this.changesOf(plan, connection)),
+        keepsSession,
+        unwatched: true,
+      }
     const key =
       sharing && !sharing.reservation && plan.shareable
         ? this.shareKey(text, values, connection, sharing.rowForm)

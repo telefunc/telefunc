@@ -78,12 +78,15 @@ function captureBunSqlite(db: BunSqlite, live: LiveDatabase): void {
     // Rows come back as bytes (`raw`): no hidden columns.
     const method = (name: keyof Prepared, rows: RowsKind) =>
       capture.method(statement, (prepared[name] as (...params: unknown[]) => unknown).bind(prepared), name, () => rows)
-    const all = prepared.all.bind(prepared)
     prepared.all = method('all', 'objects') as Prepared['all']
     prepared.get = method('get', 'objects')
     prepared.values = method('values', 'arrays') as Prepared['values']
     prepared.raw = method('raw', 'other') as Prepared['raw']
-    prepared.iterate = capture.iterate(statement, all, () => 'objects')
+    prepared.iterate = capture.iterate(
+      statement,
+      prepared.iterate.bind(prepared),
+      () => 'objects',
+    ) as Prepared['iterate']
     prepared.run = method('run', 'other')
     return prepared
   }

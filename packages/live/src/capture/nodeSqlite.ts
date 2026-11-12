@@ -128,11 +128,10 @@ function captureConnection(
         },
       }
       const rows = (): RowsKind => (modes.arrays ? 'arrays' : 'objects')
-      const all = prepared.all.bind(prepared)
-      prepared.all = capture.method(statement, all, 'all', rows) as Prepared['all']
+      prepared.all = capture.method(statement, prepared.all.bind(prepared), 'all', rows) as Prepared['all']
       prepared.get = capture.method(statement, prepared.get.bind(prepared), 'get', rows)
       prepared.run = capture.method(statement, prepared.run.bind(prepared), 'run', () => 'other')
-      prepared.iterate = capture.iterate(statement, all, rows)
+      prepared.iterate = capture.iterate(statement, prepared.iterate.bind(prepared), rows)
       return prepared
     },
   }

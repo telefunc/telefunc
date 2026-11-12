@@ -43,16 +43,19 @@ function captureSyncSqlite(driver: SyncSqlite, live: LiveDatabase) {
     }
     done(rows)
   }
-  /** Runs a statement of the app's through `send` once `statement` planned it, then what it needs next. */
-  const run = <T>(statement: Statement, send: () => T, hiddenRows: (result: T) => (string | null)[][] = () => []) => {
+  /** Sends a statement of the app's through `send` once `statement` planned it; what it needs next if it failed. */
+  const sent = <T>(statement: Statement, send: () => T): T => {
     if (statement.readsFirst) runFollowUp(statement.readsFirst)
-    let result: T
     try {
-      result = send()
+      return send()
     } catch (err) {
       settle(statement.failed(), 'rollback')
       throw err
     }
+  }
+  /** Runs a statement of the app's through `send` once `statement` planned it, then what it needs next. */
+  const run = <T>(statement: Statement, send: () => T, hiddenRows: (result: T) => (string | null)[][] = () => []) => {
+    const result = sent(statement, send)
     settle(statement.succeeded(hiddenRows(result)), 'commit')
     return result
   }
@@ -65,35 +68,60 @@ function captureSyncSqlite(driver: SyncSqlite, live: LiveDatabase) {
   const control = (text: string) => {
     live.statementFor(db, text, []).succeeded([])
   }
+  /** Plans a statement of the app's, called with `params` through a method that returns rows as `rows`. */
+  const plan = (statement: SyncStatement, params: unknown[], rows: RowsKind) => {
+    ready()
+    const values = valuesOf(statement.text, params)
+    const rewrite = values !== undefined && rows !== 'other'
+    const planned = live.statementFor(db, statement.text, values ?? [], { rewrite })
+    const hidden = Array.from({ length: planned.hiddenColumns }, (_, i) => `${HIDDEN_PREFIX}${i}`)
+    return {
+      planned,
+      /** Sends what was planned, unless it's the app's statement, through our statement's method `name`. */
+      sendOurs: (name: string) => statement.prepare(planned.text)[name]!(...(planned.values ?? values!)),
+      /** Takes the hidden columns off `list`'s rows, and the rows too when the app's statement returns none. */
+      takeHidden: (list: unknown[]) => {
+        const taken = takeHiddenValues(list, hidden, rows === 'arrays')
+        if (!planned.returnsRows) list.length = 0
+        return taken
+      },
+    }
+  }
   /** The app's statement method `name`, which returns rows as `rowsKind()` says when called. */
   const method =
     (statement: SyncStatement, native: (...params: unknown[]) => unknown, name: string, rowsKind: () => RowsKind) =>
     (...params: unknown[]) => {
-      ready()
-      const values = valuesOf(statement.text, params)
-      const rows = rowsKind()
-      const rewrite = values !== undefined && rows !== 'other'
-      const planned = live.statementFor(db, statement.text, values ?? [], { rewrite })
+      const { planned, sendOurs, takeHidden } = plan(statement, params, rowsKind())
       if (planned.text === statement.text) return run(planned, () => native(...params))
-      const sent = statement.prepare(planned.text)
-      const hidden = Array.from({ length: planned.hiddenColumns }, (_, i) => `${HIDDEN_PREFIX}${i}`)
-      const hiddenRows = (result: unknown) => {
-        const list = Array.isArray(result) ? result : result === undefined || result === null ? [] : [result]
-        const taken = takeHiddenValues(list, hidden, rows === 'arrays')
-        if (!planned.returnsRows) list.length = 0
-        return taken
-      }
-      return run(planned, () => sent[name]!(...(planned.values ?? values!)), hiddenRows)
+      const listOf = (result: unknown) =>
+        Array.isArray(result) ? result : result === undefined || result === null ? [] : [result]
+      return run(
+        planned,
+        () => sendOurs(name),
+        (result) => takeHidden(listOf(result)),
+      )
     }
   ready()
 
   return {
     method,
-    /** The app's statement method `iterate`, run to its end at once through its `all`: a write's changes are logged
-     *  when it returns, not once its rows are read. */
-    iterate(statement: SyncStatement, all: (...params: unknown[]) => unknown[], rowsKind: () => RowsKind) {
-      const runAll = method(statement, all, 'all', rowsKind)
-      return (...params: unknown[]) => (runAll(...params) as unknown[])[Symbol.iterator]()
+    /** The app's statement method `iterate`, which runs its statement as its rows are read: a read outside `.live()`
+     *  gets the driver's own iterator. Any other statement is done once its iterator ran out, was closed or failed
+     *  (a write's changes stay its own until then); its rows come without their hidden columns. */
+    iterate(statement: SyncStatement, native: (...params: unknown[]) => Iterator<unknown>, rowsKind: () => RowsKind) {
+      return (...params: unknown[]) => {
+        const { planned, sendOurs, takeHidden } = plan(statement, params, rowsKind())
+        if (planned.unwatched) return run(planned, () => native(...params))
+        const rows = sent(planned, () =>
+          planned.text === statement.text ? native(...params) : (sendOurs('iterate') as Iterator<unknown>),
+        )
+        const hiddenRows: (string | null)[][] = []
+        return whenDone(rows, {
+          row: (row) => hiddenRows.push(...takeHidden([row])),
+          succeeded: () => settle(planned.succeeded(hiddenRows), 'commit'),
+          failed: () => settle(planned.failed(), 'rollback'),
+        })
+      }
     },
     /** Text that may hold several statements, run as written with the app's `params`. */
     exec(text: string, params: unknown[], send: () => unknown) {
@@ -119,6 +147,39 @@ function captureSyncSqlite(driver: SyncSqlite, live: LiveDatabase) {
       }
     },
   }
+}
+
+/** `iterator`, telling `done` of each row it gives, and once, of how it ended: it ran out, was closed or failed. */
+function whenDone<T>(
+  iterator: Iterator<T>,
+  done: { row: (row: T) => void; succeeded: () => void; failed: () => void },
+): Iterator<T> {
+  let running = true
+  const end = (then: () => void) => {
+    if (!running) return
+    running = false
+    then()
+  }
+  const { next, return: close } = iterator
+  iterator.next = (...args: [] | [unknown]) => {
+    let result: IteratorResult<T>
+    try {
+      result = next.apply(iterator, args)
+    } catch (err) {
+      end(done.failed)
+      throw err
+    }
+    if (result.done) end(done.succeeded)
+    else done.row(result.value)
+    return result
+  }
+  if (close)
+    iterator.return = (value?: unknown) => {
+      const result = close.call(iterator, value)
+      end(done.succeeded)
+      return result
+    }
+  return iterator
 }
 
 /** The values of `text`'s parameters by number, from the app's arguments: an array among them is spread, an object
