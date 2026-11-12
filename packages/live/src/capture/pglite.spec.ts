@@ -34,6 +34,27 @@ describe('PGlite capture', () => {
     ])
     await pglite.close()
   })
+
+  it('announces nothing a ROLLBACK TO undid, past 10,000 changes', async () => {
+    const pglite = new PGlite()
+    await pglite.exec(
+      'create table t (id int primary key, x int); insert into t select i, 0 from generate_series(1, 10002) i',
+    )
+    liveDatabaseOf(pglite, {})
+    const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
+    const cell = await store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
+      readLive(() => pglite.query('select * from t where id = 1'), 'the spec'),
+    )
+    let stale = 0
+    cell.onStale(() => stale++)
+    cell.send()
+    // Two statements: one changing more than 10,000 rows changes its table whole on its own.
+    const updates = ['update t set x = 1 where id between 2 and 5002', 'update t set x = 1 where id > 5002']
+    for (const text of ['begin', 'savepoint s', ...updates, 'rollback to s', 'commit']) await pglite.query(text)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(stale).toBe(0)
+    await pglite.close()
+  })
 })
 
 describe('identical live reads on one PGlite', () => {

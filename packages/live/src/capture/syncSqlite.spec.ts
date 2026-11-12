@@ -163,6 +163,33 @@ describe('SQLite capture', () => {
     expect([await first(), await second()]).toEqual([0, 1])
   })
 
+  it.each([9_999, 10_000, 10_001])(
+    'announces nothing a ROLLBACK TO undid after %i updates, and the write before its savepoint',
+    async (count) => {
+      const { db } = open(TWO_ROWS)
+      const first = await watch(db, 'select * from t where id = 1')
+      const second = await watch(db, 'select * from t where id = 2')
+      db.exec('begin')
+      db.prepare("update t set x = 'c' where id = 2").run()
+      db.exec('savepoint s')
+      const update = db.prepare('update t set x = ? where id = 1')
+      for (let i = 0; i < count; i++) update.run(`${i}`)
+      db.exec('rollback to s; release s; commit')
+      expect(db.prepare('select x from t where id = 1').get()).toEqual({ x: 'a' })
+      expect([await first(), await second()]).toEqual([0, 1])
+    },
+  )
+
+  it('announces the 10,001 updates of a savepoint its transaction kept', async () => {
+    const { db } = open(TWO_ROWS)
+    const stale = await watch(db, 'select * from t where id = 1')
+    db.exec('begin; savepoint s')
+    const update = db.prepare('update t set x = ? where id = 1')
+    for (let i = 0; i < 10_001; i++) update.run(`${i}`)
+    db.exec('release s; commit')
+    expect(await stale()).toBe(1)
+  })
+
   it("announces a write after a ROLLBACK TO the parser can't read", async () => {
     const { db } = open(TWO_ROWS)
     const first = await watch(db, 'select * from t where id = 1')
