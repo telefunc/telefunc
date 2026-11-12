@@ -377,9 +377,9 @@ class LiveDatabase {
         this.transactionEnded(connection, command === 'ROLLBACK' ? 'rollback' : 'commit', chain)
         return []
       },
-      // The transaction is over: rolled back.
+      // On Postgres, the transaction is over: rolled back. SQLite keeps it open (a deferred foreign key failed).
       failed: () => {
-        this.transactionEnded(connection, 'rollback', false)
+        if (this.engine.failureAbortsTransaction) this.transactionEnded(connection, 'rollback', false)
         return []
       },
     }

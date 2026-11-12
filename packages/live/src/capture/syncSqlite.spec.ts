@@ -93,6 +93,19 @@ describe('SQLite capture', () => {
     expect([await second(), await all()]).toEqual([0, 1])
   })
 
+  it('announces a transaction committed after its first COMMIT failed', async () => {
+    const { db } = open(`pragma foreign_keys = on; create table p (id integer primary key);
+      create table c (id integer primary key, p int references p (id) deferrable initially deferred)`)
+    const stale = await watch(db, 'select * from c')
+    db.exec('begin')
+    db.prepare('insert into c values (1, 5)').run()
+    expect(() => db.exec('commit')).toThrow()
+    expect(db.isTransaction).toBe(true)
+    db.prepare('insert into p values (5)').run()
+    db.exec('commit')
+    expect(await stale()).toBe(1)
+  })
+
   it("follows the transaction state SQLite tells after a text the parser can't read", async () => {
     const { db } = open(TWO_ROWS)
     db.exec('begin; reindex')
