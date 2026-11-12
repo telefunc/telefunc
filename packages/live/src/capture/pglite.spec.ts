@@ -228,6 +228,38 @@ describe('a live read calling a SQL function of the app', () => {
   })
 })
 
+describe('a live read calling an aggregate of the app', () => {
+  it.each([
+    ["Postgres's own", 'numeric_mul'],
+    ['a SQL function reading no table', 'times'],
+  ])('watches the table it aggregates, through %s as its transition function', async (_, transition) => {
+    const pglite = new PGlite()
+    await pglite.exec(`
+      create table a (n numeric);
+      create table c (id int);
+      create function times(numeric, numeric) returns numeric language sql immutable as 'select $1 * $2';
+      create aggregate product(numeric) (sfunc = ${transition}, stype = numeric, initcond = '1');`)
+    liveDatabaseOf(pglite, {})
+    const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
+    const cell = await store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
+      readLive(() => pglite.query('select product(n) from a'), 'the spec'),
+    )
+    let stale = 0
+    cell.onStale(() => stale++)
+    cell.send()
+    const write = async (text: string) => {
+      await pglite.query(text)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    // A read goes stale once: each count is read after the write that may make it stale.
+    await write('insert into c values (1)')
+    expect(stale).toBe(0)
+    await write('insert into a values (2)')
+    expect(stale).toBe(1)
+    await pglite.close()
+  })
+})
+
 describe('a transaction writing through a rule, a default and a trigger of the app', () => {
   it('stales the reads of what they and a trigger calling one write, not every read', async () => {
     const pglite = new PGlite()

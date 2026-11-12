@@ -35,6 +35,8 @@ type CatalogRow = {
     variadic: boolean,
     /** A SQL function's `CREATE FUNCTION`. */
     definition: string | null,
+    /** An aggregate's support functions (`pg_aggregate`): each one's name, and whether it is Postgres's own, in C. */
+    support: [name: string, ownC: boolean][] | null,
   ][]
   volatileFunctions: string[]
   aggregates: string[]
@@ -96,7 +98,14 @@ select json_build_object(
   'cOrdering', (select datlocprovider in ('c', 'b') and datcollate in ('C', 'POSIX') from pg_database where datname = current_database()),
   'functions', (select coalesce(json_agg(json_build_array(p.proname, ${WRITING}, p.provolatile = 'v',
       pg_get_expr(p.proargdefaults, 0), p.proargnames, p.proargmodes, p.pronargs, p.provariadic <> 0,
-      case when l.lanname = 'sql' and p.prokind = 'f' then pg_get_functiondef(p.oid) end)), '[]') from pg_proc p
+      case when l.lanname = 'sql' and p.prokind = 'f' then pg_get_functiondef(p.oid) end,
+      (select json_agg(json_build_array(s.proname, sn.nspname = 'pg_catalog' and sl.lanname in ('internal', 'c')))
+        from pg_aggregate a
+        cross join unnest(array[a.aggtransfn, a.aggfinalfn, a.aggcombinefn, a.aggmtransfn, a.aggminvtransfn,
+          a.aggmfinalfn]) f (oid)
+        join pg_proc s on s.oid = f.oid join pg_namespace sn on sn.oid = s.pronamespace
+        join pg_language sl on sl.oid = s.prolang
+        where a.aggfnoid = p.oid))), '[]') from pg_proc p
     join pg_namespace n on n.oid = p.pronamespace join pg_language l on l.oid = p.prolang
     where n.nspname not in ('pg_catalog', 'information_schema') and p.prorettype <> 'trigger'::regtype),
   'volatileFunctions', (select coalesce(json_agg(distinct p.proname), '[]') from pg_proc p where p.provolatile = 'v'),
@@ -315,18 +324,25 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
 
 /** What a call of each function of the app's reads (`Catalog.functionReads`): the tables the bodies of the functions of
  *  its name name. Any table when one isn't in SQL, calls a function of the app's, or names a table the catalog doesn't
- *  know (or a `WITH` query's name). */
+ *  know (or a `WITH` query's name). An aggregate reads what its support functions read; Postgres's own C functions read
+ *  nothing. */
 function readsOfFunctions(
   functions: CatalogRow['functions'],
   named: (table: RangeVar) => Table[],
   catalog: Catalog,
 ): Map<string, TableSet> {
   const reads = new Map<string, TableSet>()
-  for (const [name, , , , , , , , definition] of functions) {
+  for (const [name, , , , , , , , definition, support] of functions) {
+    if (support) continue
     const body = definition === null ? null : bodyOf(definition)
     const tables =
       body && !catalog.calls(body).some((called) => catalog.functions.has(called)) && tablesIn(body).map(named)
     const read = tables && !tables.some((found) => found.length === 0) ? new Set(tables.flat().map((t) => t.id)) : 'all'
+    reads.set(name, union([reads.get(name) ?? new Set(), read]))
+  }
+  for (const [name, , , , , , , , , support] of functions) {
+    if (!support) continue
+    const read = union(support.map(([called, ownC]) => (ownC ? new Set<string>() : (reads.get(called) ?? 'all'))))
     reads.set(name, union([reads.get(name) ?? new Set(), read]))
   }
   return reads
