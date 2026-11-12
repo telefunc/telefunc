@@ -126,6 +126,16 @@ describe('SQLite capture', () => {
     expect(await first()).toBe(0)
   })
 
+  it('captures a connection that ran statements before its file was wrapped', async () => {
+    // Another file wrapped first: every connection's statements pass through the capture.
+    open(TWO_ROWS)
+    const { db, path } = open(TWO_ROWS, 'later')
+    liveDatabaseOfFile(path, {})
+    const stale = await watch(db, 'select * from t')
+    db.prepare("update t set x = 'c' where id = 1").run()
+    expect(await stale()).toBe(1)
+  })
+
   it('announces a value of a STRICT ANY column, which compares by its own type', async () => {
     const { db } = open('create table t (id integer primary key, x any) strict')
     const stale = await watch(db, "select * from t where x < '3'")
