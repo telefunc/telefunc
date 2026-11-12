@@ -11,6 +11,8 @@ type OpenTransaction = {
   failed: boolean
   /** The changes became changes to any row of their tables: a `ROLLBACK TO SAVEPOINT` keeps them. */
   collapsed: boolean
+  /** A `SAVEPOINT` outside a transaction began it (SQLite): releasing that savepoint commits it. */
+  savepointBegan: boolean
 }
 
 /** Past this many changes, a statement's or a transaction's changes count as changes to any row of their tables. */
@@ -44,7 +46,7 @@ class Transactions {
     const transaction = this.open.get(connection)
     switch (action) {
       case 'begin':
-        if (!transaction) this.open.set(connection, { changes: [], savepoints: [], failed: false, collapsed: false })
+        if (!transaction) this.open.set(connection, opened())
         return
       case 'commit':
         this.open.delete(connection)
@@ -54,13 +56,18 @@ class Transactions {
         this.open.delete(connection)
         return
     }
-    if (!transaction) return
+    if (!transaction) {
+      if (action === 'savepoint') this.open.set(connection, opened(savepoint))
+      return
+    }
     const index = transaction.savepoints.findLastIndex((s) => s.name === savepoint)
     if (action === 'savepoint')
       transaction.savepoints.push({ name: savepoint!, changeCount: transaction.changes.length })
     else if (index === -1) return
-    else if (action === 'release') transaction.savepoints.length = index
-    else {
+    else if (action === 'release') {
+      if (index === 0 && transaction.savepointBegan) return this.apply(connection, 'commit')
+      transaction.savepoints.length = index
+    } else {
       if (!transaction.collapsed) transaction.changes.length = transaction.savepoints[index]!.changeCount
       transaction.savepoints.length = index + 1
       transaction.failed = false
@@ -93,6 +100,12 @@ class Transactions {
   isOpen(connection: object): boolean {
     return this.open.has(connection)
   }
+}
+
+/** A transaction begun by `BEGIN`, or by a `SAVEPOINT` named `savepoint`. */
+function opened(savepoint?: string): OpenTransaction {
+  const savepoints = savepoint === undefined ? [] : [{ name: savepoint, changeCount: 0 }]
+  return { changes: [], savepoints, failed: false, collapsed: false, savepointBegan: savepoint !== undefined }
 }
 
 /** `changes`, with the tables its transaction locked (`locked`) for `UNNAMED_TABLES`: every row of each may have
