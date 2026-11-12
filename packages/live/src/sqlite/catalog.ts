@@ -33,19 +33,20 @@ type CatalogRow = {
   aggregates: string[] | null
 }
 
-const TABLES = `(select json_group_array(json_object('name', m.name, 'type', m.type, 'sql', m.sql,
-    'columns', (select json_group_array(json_array(c.name, c.type, c.pk)) from pragma_table_xinfo(m.name) c where c.hidden <> 1),
-    'keys', (select json_group_array(json_array(f.id, f."table", f."from", f."to", f.on_update, f.on_delete)) from pragma_foreign_key_list(m.name) f)))
-  from sqlite_schema m where m.type in ('table', 'view') and m.name not like 'sqlite\\_%' escape '\\' and m.name not like '\\_cf\\_%' escape '\\')`
+const TABLES = `json((select json_group_array(json_object('name', m.name, 'type', m.type, 'sql', m.sql,
+    'columns', json((select json_group_array(json_array(c.name, c.type, c.pk)) from pragma_table_xinfo(m.name) c where c.hidden <> 1)),
+    'keys', json((select json_group_array(json_array(f.id, f."table", f."from", f."to", f.on_update, f.on_delete)) from pragma_foreign_key_list(m.name) f))))
+  from sqlite_schema m where m.type in ('table', 'view') and m.name not like 'sqlite\\_%' escape '\\' and m.name not like '\\_cf\\_%' escape '\\'))`
 
 /** One query answering everything the catalog needs; `introspects`: the database answers `pragma_database_list` and
- *  `pragma_function_list`, which D1 refuses. */
+ *  `pragma_function_list`, which D1 refuses. A subquery's JSON is embedded through `json()`: SQLite 3.54 embeds it as a
+ *  string otherwise. */
 const catalogQuery = (introspects: boolean) => `select json_object(
   'file', ${introspects ? `(select file from pragma_database_list where name = 'main')` : 'null'},
   'foreignKeys', (select foreign_keys from pragma_foreign_keys),
   'tables', ${TABLES},
-  'triggers', (select json_group_array(json_array(tbl_name, sql)) from sqlite_schema where type = 'trigger'),
-  'aggregates', ${introspects ? `(select json_group_array(distinct name) from pragma_function_list where type in ('a', 'w'))` : 'null'}
+  'triggers', json((select json_group_array(json_array(tbl_name, sql)) from sqlite_schema where type = 'trigger')),
+  'aggregates', ${introspects ? `json((select json_group_array(distinct name) from pragma_function_list where type in ('a', 'w')))` : 'null'}
 ) as catalog`
 
 /** SQLite's own aggregates, for D1, which doesn't tell its functions and runs none of the app's. */
