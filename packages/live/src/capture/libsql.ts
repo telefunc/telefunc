@@ -80,7 +80,12 @@ function captureLibsql(client: Libsql, live: LiveDatabase): void {
       const tx = await transaction('write')
       try {
         before = planned.readsFirst && (await readRows(tx.execute.bind(tx), planned.readsFirst))
-        result = await sent(planned, app, tx.execute.bind(tx))
+        result = await sent(planned, app, tx.execute.bind(tx)).catch(async (err) => {
+          // What SQLite kept of a statement that failed (`OR FAIL`) commits, as without a transaction of ours; one
+          // that rolled the transaction back (`OR ROLLBACK`) left nothing to commit.
+          await tx.commit().catch(() => {})
+          throw err
+        })
         await tx.commit()
       } finally {
         tx.close()
