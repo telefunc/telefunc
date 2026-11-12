@@ -8,9 +8,9 @@ import { captureBunSqlite, isBunSqlite, type BunSqlite } from './capture/bunSqli
 import { captureD1, isD1, type D1 } from './capture/d1.js'
 import { captureLibsql, isLibsql, type Libsql } from './capture/libsql.js'
 import { captureNodeSqliteFile, wrappedFile } from './capture/nodeSqlite.js'
-import { capturePg, type PgClient, type PgPool } from './capture/pg.js'
+import { capturePg, pgConnectionTarget, type PgClient, type PgPool } from './capture/pg.js'
 import { capturePglite, type Pglite } from './capture/pglite.js'
-import { capturePostgresJs, isPostgresJs, type PostgresJs } from './capture/postgresJs.js'
+import { capturePostgresJs, isPostgresJs, postgresJsConnectionTarget, type PostgresJs } from './capture/postgresJs.js'
 import { LiveDatabase, type Engine, type LiveOptions } from './liveDatabase.js'
 import { processWide } from './processWide.js'
 import { D1_ENGINE, LOGGED_SQLITE_ENGINE, RETURNING_SQLITE_ENGINE } from './sqlite/engine.js'
@@ -33,14 +33,32 @@ function usePostgres(engine: typeof import('./postgres/engine.js')): void {
   postgres = engine
 }
 
-/** By client: a client one copy of this package wraps is captured once, whichever copies wrap it. */
-const databases = processWide('databases', () => new WeakMap<object, { live: LiveDatabase; options: LiveOptions }>())
+type Known = { live: LiveDatabase; options: LiveOptions }
 
-/** The live database of `client`, which captures its statements from now on. Several ORMs over one pool share it. */
+/** By client: a client one copy of this package wraps is captured once, whichever copies wrap it. */
+const databases = processWide('databases', () => new WeakMap<object, Known>())
+/** By what a Postgres client connects to: a client of a database joins the live database of the clients before it (a
+ *  pool per request, as a Worker needs). */
+const targets = processWide('databaseTargets', () => new Map<string, Known>())
+
+/** The live database of `client`, which captures its statements from now on. Several ORMs over one pool share it, and
+ *  so do the clients of one database. */
 function liveDatabaseOf(client: DatabaseClient, options: LiveOptions): LiveDatabase {
-  const known = databases.get(client)
-  if (known) return sameDatabase(known, options)
-  const live = new LiveDatabase(options, engineOf(client))
+  const wrapped = databases.get(client)
+  if (wrapped) return sameDatabase(wrapped, options)
+  const target = connectionTarget(client)
+  let database = target === undefined ? undefined : targets.get(target)
+  if (database) sameDatabase(database, options)
+  else {
+    database = { live: new LiveDatabase(options, engineOf(client)), options }
+    if (target !== undefined) targets.set(target, database)
+  }
+  capture(client, database.live)
+  databases.set(client, database)
+  return database.live
+}
+
+function capture(client: DatabaseClient, live: LiveDatabase): void {
   if (isBetterSqlite3(client)) captureBetterSqlite3(client, live)
   else if (isBunSqlite(client)) captureBunSqlite(client, live)
   else if (isD1(client)) captureD1(client, live)
@@ -54,8 +72,13 @@ function liveDatabaseOf(client: DatabaseClient, options: LiveOptions): LiveDatab
     )
     capturePg(client, live)
   }
-  databases.set(client, { live, options })
-  return live
+}
+
+/** What a Postgres client connects to: its user, host, port and database. A PGlite database is its own. */
+function connectionTarget(client: DatabaseClient): string | undefined {
+  if (isBetterSqlite3(client) || isBunSqlite(client) || isD1(client) || isLibsql(client)) return undefined
+  if (isPostgresJs(client)) return postgresJsConnectionTarget(client)
+  return isPglite(client) ? undefined : pgConnectionTarget(client)
 }
 
 /** The live database of the SQLite file at `path`, which captures the statements of every node:sqlite connection on
@@ -68,7 +91,7 @@ function liveDatabaseOfFile(path: string, options: LiveOptions): LiveDatabase {
   return live
 }
 
-function sameDatabase(known: { live: LiveDatabase; options: LiveOptions }, options: LiveOptions): LiveDatabase {
+function sameDatabase(known: Known, options: LiveOptions): LiveDatabase {
   assertUsage(
     options.transport === undefined || options.transport === known.options.transport,
     'Pass the same `transport` to every live*() wrapper of one database.',

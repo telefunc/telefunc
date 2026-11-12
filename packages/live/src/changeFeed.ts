@@ -1,12 +1,20 @@
 export { ChangeFeed }
 
 import type { BroadcastTransport } from 'telefunc'
-import { getBroadcastPlane, hostLocal, markHandled, type BackendSubscription } from 'telefunc/__internal'
+import { getBroadcastPlane, hostLocal, markHandled, unrefTimer, type BackendSubscription } from 'telefunc/__internal'
 import type { Change } from './match/liveRead.js'
 
 type Message = { origin: string; changes: Change[] }
 
 type Listener = (payload: string, ordering: { seq: number }) => void
+
+/** A message not through by then counts as lost: it's sent again (a duplicate only refetches twice). */
+const PUBLISH_DEADLINE_MS = 10_000
+/** After a message was lost, the pause before it's sent again: it doubles on each loss in a row, up to the last. */
+const RETRY_FIRST_MS = 100
+const RETRY_LAST_MS = 10_000
+/** Past this many changes of a table waiting to be sent, they're sent as a change to any of its rows. */
+const MAX_WAITING_CHANGES = 10_000
 
 /** What the feed publishes and subscribes through: the installed Broadcast backend, or the app's `transport`. */
 type Channel = {
@@ -24,7 +32,8 @@ class ChangeFeed {
   private readonly subscriptions = Symbol('@telefunc/live subscriptions')
   /** Per table: the last message's sequence number. */
   private readonly lastSeq = new Map<string, number>()
-  /** Per table, while a message is on the way: the changes committed since, sent together once it's through. */
+  /** Per table, while a message is on the way: the changes committed since, sent together once it's through, or
+   *  with its own if it was lost. */
   private readonly waiting = new Map<string, Change[]>()
 
   constructor(transport: BroadcastTransport | undefined, database: string, onRemote: (changes: Change[]) => void) {
@@ -49,25 +58,50 @@ class ChangeFeed {
   publish(changes: Change[]): void {
     for (const [table, committed] of Map.groupBy(changes, (change) => change.table)) {
       const waiting = this.waiting.get(table)
-      if (waiting) for (const change of committed) waiting.push(change)
+      if (waiting) enqueue(waiting, committed)
       else void this.send(table, committed)
     }
   }
 
-  /** Sends `changes`, then those committed meanwhile, one message of `table` on the way at a time. */
+  /** Sends `changes`, then those committed meanwhile, one message of `table` on the way at a time, until all got
+   *  through. */
   private async send(table: string, changes: Change[]): Promise<void> {
-    const waiting: Change[] = []
+    const waiting = [...changes]
     this.waiting.set(table, waiting)
-    for (let next = changes; next.length > 0; next = waiting.splice(0)) {
-      const message: Message = { origin: this.origin, changes: next }
-      try {
-        await this.channel.publish(this.key(table), JSON.stringify(message))
-      } catch (err) {
-        // The write stands; the other servers see the gap at this table's next message.
-        console.error(err)
+    for (let lost = 0; waiting.length > 0; ) {
+      const next = waiting.splice(0)
+      if (await this.sent(table, next)) lost = 0
+      else {
+        // Before those committed since, in the order they committed.
+        enqueue(waiting, [...next, ...waiting.splice(0)])
+        await pause(Math.min(RETRY_FIRST_MS * 2 ** lost++, RETRY_LAST_MS))
       }
     }
     this.waiting.delete(table)
+  }
+
+  /** Whether the message of `changes` got through by `PUBLISH_DEADLINE_MS`. */
+  private async sent(table: string, changes: Change[]): Promise<boolean> {
+    const message: Message = { origin: this.origin, changes }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<never>((_, reject) => {
+      const overdue = () =>
+        reject(
+          new Error(
+            `@telefunc/live: ${table}'s changes weren't published within ${PUBLISH_DEADLINE_MS / 1000} s: sending them again.`,
+          ),
+        )
+      timer = unrefTimer(setTimeout(overdue, PUBLISH_DEADLINE_MS))
+    })
+    try {
+      await Promise.race([this.channel.publish(this.key(table), JSON.stringify(message)), deadline])
+      return true
+    } catch (err) {
+      console.error(err)
+      return false
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   private subscribe(table: string, subscriptions: Map<string, BackendSubscription>): BackendSubscription {
@@ -100,6 +134,17 @@ class ChangeFeed {
   private key(table: string): string {
     return `@telefunc/live:${this.database}:${table}`
   }
+}
+
+/** Adds `changes` to those of a table waiting to be sent; past `MAX_WAITING_CHANGES`, any row of it may have changed. */
+function enqueue(waiting: Change[], changes: Change[]): void {
+  for (const change of changes) waiting.push(change)
+  if (waiting.length > MAX_WAITING_CHANGES)
+    waiting.splice(0, waiting.length, { table: waiting[0]!.table, kind: 'unknown' })
+}
+
+function pause(ms: number): Promise<void> {
+  return new Promise((resolve) => unrefTimer(setTimeout(resolve, ms)))
 }
 
 const INSTALLED_BROADCAST: Channel = {

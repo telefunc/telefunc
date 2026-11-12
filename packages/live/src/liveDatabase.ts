@@ -54,6 +54,9 @@ type Statement = {
   answered<R>(result: R, copy: (result: R) => R): void
   /** An identical read is running: don't send this one, give the caller a copy of that one's result. */
   joined?: Joined
+  /** A read outside a transaction that sets no role: what is planned after it on its connection may be planned before
+   *  it ran. */
+  keepsSession?: boolean
   /** Queries of ours naming the tables a transaction changed without the catalog naming them, sent on the same
    *  connection right before it commits, with nothing else between: when one fails, the transaction rolls back and the
    *  caller gets its error. `ownTransaction`: the statement runs in a transaction of ours (`BEGIN`, the statement, the
@@ -245,6 +248,8 @@ class LiveDatabase {
     sharing: Sharing | undefined,
   ): Statement {
     let plan = withRoleSet(this.planOf(text, this.catalog!), values)
+    // A read planned after it on its connection runs after it: it doesn't join a read running before it.
+    if (plan.kind !== 'read' || plan.role) this.shared.stopJoining(connection)
     const sessionsStart = changesSession(plan) && !this.sessionsDiffer
     const pathsStart = (sessionsStart || changesPath(plan)) && !this.pathsDiffer
     if (sessionsStart) this.sessionsStartDiffering()
@@ -386,17 +391,18 @@ class LiveDatabase {
     live: LiveQuery | undefined,
     sharing: Sharing | undefined,
   ): Statement {
+    const keepsSession = !plan.role && !this.transactions.isOpen(connection)
     // A read outside `.live()` is sent as written.
-    if (!live) return this.statement(connection, text, 0, () => this.changesOf(plan, connection))
+    if (!live) return { ...this.statement(connection, text, 0, () => this.changesOf(plan, connection)), keepsSession }
     const key =
       sharing && !sharing.reservation && plan.shareable
         ? this.shareKey(text, values, connection, sharing.rowForm)
         : undefined
     const joined = key ? this.shared.join(key, live) : undefined
-    if (joined) return { ...this.statement(connection, text, 0, () => []), joined }
+    if (joined) return { ...this.statement(connection, text, 0, () => []), joined, keepsSession }
     const reservation = sharing?.reservation
     const watched = reservation?.read ?? this.watched(plan.shape, text, values, live)
-    const lead = reservation?.lead ?? (key ? this.shared.lead(key, watched) : undefined)
+    const lead = reservation?.lead ?? (key ? this.shared.lead(key, watched, connection) : undefined)
     return {
       text: plan.liveText ?? text,
       ...(plan.liveText && plan.liveValues ? { values: plan.liveValues.map((i) => values[i]) } : {}),
@@ -417,6 +423,7 @@ class LiveDatabase {
       },
       leads: lead !== undefined,
       answered: (result, copy) => lead?.answered(result, copy),
+      keepsSession,
     }
   }
 
@@ -686,11 +693,13 @@ class LiveDatabase {
     this.access = new Map()
   }
 
-  /** Listens to the other servers' changes to the tables `shape` reads (`ChangeFeed.watch()`). */
+  /** Listens to the other servers' changes to the tables `shape` reads (`ChangeFeed.watch()`): a row's change goes to
+   *  its table only, a change to any row of any table to `*`. */
   private watchTables(shape: ReadShape): Promise<void> | undefined {
-    const tables = ['*', ...shape.aliases.map((alias) => alias.table.id)]
-    if (shape.alsoReads !== 'all') tables.push(...shape.alsoReads)
-    return this.feed!.watch(tables)
+    const { aliases, alsoReads } = shape
+    const tables =
+      alsoReads === 'all' ? this.catalog!.tables.keys() : [...aliases.map((alias) => alias.table.id), ...alsoReads]
+    return this.feed!.watch(['*', ...tables])
   }
 }
 

@@ -1,4 +1,4 @@
-export { capturePg }
+export { capturePg, pgConnectionTarget }
 export type { PgPool, PgClient }
 
 import { AsyncResource } from 'node:async_hooks'
@@ -6,6 +6,7 @@ import { MAX_RESULT_ROWS, type FollowUp, type LiveDatabase, type Reservation, ty
 import { sendWithBeforeCommit } from './beforeCommit.js'
 import { takeHiddenFields, takeHiddenValues } from './hiddenColumns.js'
 import { HIDDEN_PREFIX } from './statement.js'
+import { Turns } from './turns.js'
 
 // The parts of `pg` (node-postgres) used here, so that `pg` stays the app's dependency.
 type PgQueryConfig = {
@@ -26,7 +27,9 @@ type PgResultClass = new (
  *  ran on, for the callers that don't bring their own. */
 type SharedPgResult = { result: PgResult; types: unknown }
 type PgCallback = (err: Error | null, result?: PgResult | PgResult[]) => void
-type PgClient = { query: (...args: any[]) => any }
+type PgClient = { query: (...args: any[]) => any; connectionParameters?: ConnectionParameters }
+/** What `pg` resolved a client's configuration to: the connection string, else its options, `PG*` variables, defaults. */
+type ConnectionParameters = { user: string; host: string; port: number; database: string }
 /** A client checked out of a `pg.Pool`, until it calls `release()`. */
 type CheckedOut = PgClient & { release: (err?: Error | boolean) => void }
 type PgPool = {
@@ -34,6 +37,11 @@ type PgPool = {
   connect: (callback?: (...args: any[]) => void) => any
   query: (...args: any[]) => any
   totalCount: number
+  /** The class of the clients it opens, given `options`. */
+  Client?: new (
+    options: unknown,
+  ) => PgClient
+  options?: unknown
 }
 /** A `pg-cursor` (Prisma reads and writes through one), or another object `pg` submits. */
 type Submittable = {
@@ -63,6 +71,14 @@ function capturePg(database: PgPool | PgClient, live: LiveDatabase): void {
   database.on('connect', (client) => captureClient(client, live))
   checkOutForCaller(database)
   shareReadsBeforeConnecting(database, live)
+}
+
+/** What `database` connects to: its user, host, port and database. A pool tells through a client it would open, not
+ *  connected. */
+function pgConnectionTarget(database: PgPool | PgClient): string | undefined {
+  const client = 'totalCount' in database ? database.Client && new database.Client(database.options) : database
+  const parameters = client?.connectionParameters
+  return parameters && `${parameters.user}@${parameters.host}:${parameters.port}/${parameters.database}`
 }
 
 /** A live read sent with `pool.query()` joins an identical one before waiting for a connection: N clients refetching
@@ -163,6 +179,7 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
   if (CAPTURED in client) return
   Object.defineProperty(client, CAPTURED, { value: true, configurable: true })
   const query = client.query.bind(client)
+  const turns = new Turns()
   const runOurs = async (text: string) =>
     ((await query(text)) as PgResult).rows.map((row: any) => row.catalog)[0] as string
   /** A query of ours: its rows, as arrays of text. */
@@ -182,15 +199,25 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
     const { [RESERVATION]: reservation, ...queryConfig }: PgQueryConfig =
       typeof config === 'string' ? { text: config } : { ...(config as PgQueryConfig) }
     if (Array.isArray(values)) queryConfig.values = values
-    return answer(run(queryConfig, reservation), callback)
+    return answer(
+      turns.take(client, (planned) => run(queryConfig, reservation, planned)),
+      callback,
+    )
   }
 
-  async function run(queryConfig: PgQueryConfig, reservation: Reservation | undefined): Promise<PgResult | PgResult[]> {
+  async function run(
+    queryConfig: PgQueryConfig,
+    reservation: Reservation | undefined,
+    planned: (statement: Statement) => void,
+  ): Promise<PgResult | PgResult[]> {
     await free()
-    const plan = () =>
-      live.statementFor(client, queryConfig.text, queryConfig.values ?? [], {
+    const plan = () => {
+      const statement = live.statementFor(client, queryConfig.text, queryConfig.values ?? [], {
         sharing: isShareable(queryConfig) ? { rowForm: ROW_FORM, reservation } : undefined,
       })
+      planned(statement)
+      return statement
+    }
     let statement = plan()
     while (statement.joined) {
       const joined = await statement.joined
@@ -252,10 +279,10 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
 
   function submit(submittable: Submittable): Submittable {
     // Wrapped now: the caller may read before the statement is planned, and rows only come after.
-    const begin = isCursor(submittable) ? captureCursor(submittable) : undefined
+    const cursor = isCursor(submittable) ? captureCursor(submittable) : undefined
     const send = async () => {
       const values = submittable.values ?? []
-      if (!begin) {
+      if (!cursor) {
         // Rows reach the caller as events (an event-based `pg.Query`): run as written, nothing to strip.
         settleWhenDone(submittable, live.statementFor(client, submittable.text, values, { rewrite: false }))
         return query(submittable)
@@ -269,13 +296,27 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
         submittable.text = statement.text
         if (submittable.name) submittable.name += HIDDEN_PREFIX
       }
-      begin(statement)
+      cursor.begin(statement)
       return query(submittable)
     }
-    // A `pg-cursor` queues reads until it is submitted.
-    const sending = live.isReady() && !followingUp.has(client) ? send() : free().then(send)
-    sending.catch((err) => submittable.handleError?.(err))
+    void turns.take(client, () => sendInTurn(submittable, send, cursor?.settled))
     return submittable
+  }
+
+  /** Sends `submittable` with `send`; its turn ends once its statement `settled`, else once the client is done with it. */
+  async function sendInTurn(
+    submittable: Submittable,
+    send: () => Promise<unknown>,
+    settled = doneWith(submittable),
+  ): Promise<void> {
+    try {
+      // A `pg-cursor` queues reads until it is submitted.
+      await free()
+      await send()
+    } catch (err) {
+      return submittable.handleError?.(err as Error)
+    }
+    await settled
   }
 
   /** Tells `statement` how a submittable that isn't a cursor ended: the client calls `handleReadyForQuery()` once it
@@ -295,17 +336,22 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
     }
   }
 
-  /** Strips the hidden columns from the rows of a cursor as they are read; returns how to give it its statement. */
-  function captureCursor(cursor: Cursor): (statement: Statement) => void {
+  /** Strips the hidden columns from the rows of a cursor as they are read; returns how to give it its statement, and
+   *  when the statement settled: once its last rows were read (`pg` is ready for the next query before they are), it
+   *  was closed, or it failed. */
+  function captureCursor(cursor: Cursor): { begin: (statement: Statement) => void; settled: Promise<void> } {
     const read = cursor.read.bind(cursor)
     const close = cursor.close.bind(cursor)
+    const handleError = cursor.handleError?.bind(cursor)
     let statement: Statement | undefined
     const hiddenRows: (string | null)[][] = []
     let hidden: string[] | undefined
-    let settled = false
+    let ended: (() => void) | undefined
+    const settled = new Promise<void>((resolve) => (ended = resolve))
     const settle = (err?: Error | null) => {
-      if (settled || !statement) return
-      settled = true
+      if (!ended || !statement) return
+      ended()
+      ended = undefined
       if (err) return statement.failed()
       runFollowUps(statement.succeeded(hiddenRows))
     }
@@ -331,12 +377,33 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
       settle()
       return close(callback)
     }
-    return (s) => {
+    // Also when no read waits for its rows.
+    cursor.handleError = (err, connection) => {
+      settle(err)
+      handleError?.(err, connection)
+    }
+    const begin = (s: Statement) => {
       statement = s
       // Closed before it was sent: it returns nothing.
       if (closed) settle()
     }
+    return { begin, settled }
   }
+}
+
+/** Settles once the client is done with `submittable`: it's ready for the next query, or its connection failed. */
+function doneWith(submittable: Submittable): Promise<void> {
+  return new Promise((resolve) => {
+    const { handleReadyForQuery, handleError } = submittable
+    submittable.handleReadyForQuery = (connection) => {
+      resolve()
+      handleReadyForQuery?.call(submittable, connection)
+    }
+    submittable.handleError = (err, connection) => {
+      resolve()
+      handleError?.call(submittable, err, connection)
+    }
+  })
 }
 
 function sent(config: PgQueryConfig, statement: Statement): PgQueryConfig {

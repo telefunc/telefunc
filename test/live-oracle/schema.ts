@@ -11,7 +11,7 @@ drop table if exists tags, todos, users, deleted_todos, notes, tag_log, note_log
 drop sequence if exists tickets;
 drop schema if exists tenant cascade;
 drop function if exists log_deleted_todo, log_tag, tag_added, log_note, note_bumped, next_event, settle_event,
-  event_inserted, empty_event_log, stamp, reset_stamped, label_of, settle_stably, measure_set;
+  event_inserted, empty_event_log, stamp, reset_stamped, label_of, tag_count, settle_stably, measure_set;
 drop domain if exists todo_code, base_code;
 -- A todo's code is a domain over a domain over char(4), which pads its values.
 create domain base_code as char(4);
@@ -115,6 +115,8 @@ insert into brands (id, name) values (1, 'Acme'), (2, 'Globex'), (3, 'Initech');
 insert into products values (1, 'acme'), (2, 'acme'), (3, 'globex'), (4, 'initech');
 -- A STABLE helper a live read calls: the read stays a read.
 create function label_of(t text) returns text language sql stable as $$ select upper(t) $$;
+-- One that reads another table than the read names.
+create function tag_count(todo int) returns int language sql stable as $$ select count(*)::int from tags where todo_id = todo $$;
 -- Whole numbers past a float8's precision: compared with a float8, they compare as float8s, rounded.
 create table measures (id int primary key, value numeric not null);
 insert into measures values (1, 9007199254740992), (2, 9007199254740994);

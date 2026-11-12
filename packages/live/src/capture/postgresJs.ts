@@ -1,4 +1,4 @@
-export { capturePostgresJs, isPostgresJs }
+export { capturePostgresJs, isPostgresJs, postgresJsConnectionTarget }
 export type { PostgresJs }
 
 import type { FollowUp, LiveDatabase, Statement } from '../liveDatabase.js'
@@ -6,13 +6,15 @@ import { copyRows } from '../sharedReads.js'
 import { sendWithBeforeCommit } from './beforeCommit.js'
 import { takeHiddenFields, takeHiddenValues } from './hiddenColumns.js'
 import { HIDDEN_PREFIX } from './statement.js'
+import { Turns } from './turns.js'
 
 // The parts of postgres.js used here, so that `postgres` stays the app's dependency.
 type PostgresJs = {
   unsafe(text: string, args?: unknown[]): Query
   begin(...args: unknown[]): Promise<unknown>
   reserve(): Promise<PostgresJs & { release(): void }>
-  options: { max: number }
+  /** As postgres.js resolved them: the connection string, else its options, `PG*` variables, defaults. */
+  options: { max: number; user: string; host: string[]; port: number[]; database: string }
 }
 /** A scope `begin()` and `savepoint()` give their callback: statements on the transaction's connection. */
 type Scope = PostgresJs & { savepoint(...args: unknown[]): Promise<unknown> }
@@ -52,6 +54,11 @@ const OURS = Symbol.for('@telefunc/live/ours')
 
 function isPostgresJs(database: object): database is PostgresJs {
   return typeof database === 'function' && 'unsafe' in database && 'begin' in database
+}
+
+/** What `sql` connects to: its user, hosts, ports and database. */
+function postgresJsConnectionTarget({ options }: PostgresJs): string {
+  return `${options.user}@${options.host.join(',')}:${options.port.join(',')}/${options.database}`
 }
 
 /** Captures every statement of a postgres.js `sql`: its own, and those of its transactions and reserved connections. */
@@ -105,19 +112,26 @@ function captureQueries(query: Query): WeakMap<object, Target> {
   const known = (query as unknown as Record<symbol, WeakMap<object, Target>>)[TARGETS]
   if (known) return known
   const targets = new WeakMap<object, Target>()
+  const turns = new Turns()
   const handle = query.handle
   query.handle = function (this: Query) {
     const target = targets.get(this.handler)
     // `sql.begin()`'s `BEGIN` goes through `sql`, before its transaction has a connection: the transaction records it.
     if (!target || this.executed || OURS in this || this.options.onexecute) return handle.call(this)
     this.executed = true
-    return run(this, target)
+    const { connection } = target
+    return connection ? turns.take(connection, (planned) => run(this, target, planned)) : run(this, target)
   }
   Object.defineProperty(query, TARGETS, { value: targets })
   return targets
 }
 
-async function run(query: Query, { live, sql, connection = {}, shared }: Target): Promise<void> {
+/** `planned` is told each statement it plans. */
+async function run(
+  query: Query,
+  { live, sql, connection = {}, shared }: Target,
+  planned: (statement: Statement) => void = () => {},
+): Promise<void> {
   // As postgres.js does: `.values()` and the like are called before it runs.
   await 1
   try {
@@ -126,15 +140,20 @@ async function run(query: Query, { live, sql, connection = {}, shared }: Target)
     return query.reject(err as Error)
   }
   const known = textOf(query)
-  let statement = known && rewritten(query, known, live, connection)
+  const plan = (text: NonNullable<typeof known>) => {
+    const statement = rewritten(query, text, live, connection)
+    planned(statement)
+    return statement
+  }
+  let statement = known && plan(known)
   while (statement && statement.joined) {
     const joined = await statement.joined
     if (joined) return query.resolve(joined.result as Result)
-    statement = rewritten(query, known!, live, connection)
+    statement = plan(known!)
   }
   if (statement && statement.asks) {
     await runFollowUp(sql, statement.asks)
-    statement = rewritten(query, known!, live, connection)
+    statement = plan(known!)
   }
   // A template with helpers: its text is known once built.
   const opaque = known ? undefined : live.statementWithTextLater(connection)
