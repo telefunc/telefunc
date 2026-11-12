@@ -50,12 +50,14 @@ function captureBunSqlite(db: BunSqlite, live: LiveDatabase): void {
     live,
   )
   Object.defineProperty(db, CAPTURED, { value: true, configurable: true })
+  // The mode a statement gets as it's prepared: `new Database(path, { safeIntegers })` set it.
+  const safeByDefault = typeof prepare('SELECT 1').values()[0]![0] === 'bigint'
 
   const captured = (prepared: Prepared, text: string) => {
     // `query()` returns the statement it cached for the same text.
     if (CAPTURED in prepared) return prepared
     Object.defineProperty(prepared, CAPTURED, { value: true })
-    const modes: { as?: new () => unknown; safeIntegers: boolean } = { safeIntegers: false }
+    const modes: { as?: new () => unknown; safeIntegers: boolean } = { safeIntegers: safeByDefault }
     const as = prepared.as.bind(prepared)
     const safeIntegers = prepared.safeIntegers.bind(prepared)
     prepared.as = (Class) => {

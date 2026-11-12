@@ -22,6 +22,7 @@ type BetterSqlite3 = {
   prepare(text: string): Prepared
   exec(text: string): unknown
   transaction(fn: (...args: unknown[]) => unknown): TransactionFunction
+  defaultSafeIntegers(toggle?: boolean): BetterSqlite3
   readonly inTransaction: boolean
   readonly memory: boolean
 }
@@ -40,6 +41,9 @@ function captureBetterSqlite3(db: BetterSqlite3, live: LiveDatabase): void {
   const prepare = db.prepare.bind(db)
   const exec = db.exec.bind(db)
   const transaction = db.transaction.bind(db)
+  const defaultSafeIntegers = db.defaultSafeIntegers.bind(db)
+  // The mode a statement gets as it's prepared: `new Database()` or `defaultSafeIntegers()` set it.
+  let safeByDefault = typeof prepare('SELECT 1').pluck().get() === 'bigint'
   const capture = captureSyncSqlite(
     {
       db,
@@ -59,7 +63,7 @@ function captureBetterSqlite3(db: BetterSqlite3, live: LiveDatabase): void {
 
   db.prepare = (text: string) => {
     const prepared = prepare(text)
-    const modes = { raw: false, pluck: false, expand: false, safeIntegers: false }
+    const modes = { raw: false, pluck: false, expand: false, safeIntegers: safeByDefault }
     for (const mode of MODES) {
       const toggle = prepared[mode].bind(prepared)
       prepared[mode] = (on = true) => {
@@ -80,6 +84,12 @@ function captureBetterSqlite3(db: BetterSqlite3, live: LiveDatabase): void {
     prepared.run = capture.method(statement, prepared.run.bind(prepared), 'run', () => 'other')
     prepared.iterate = capture.iterate(statement, all, rows)
     return prepared
+  }
+
+  db.defaultSafeIntegers = (on = true) => {
+    safeByDefault = on
+    defaultSafeIntegers(on)
+    return db
   }
 
   db.exec = (text: string) => {
