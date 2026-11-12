@@ -190,6 +190,7 @@ function catalogOf(answer: string, changeLog: boolean): Catalog {
       references: [],
       updateChangesOtherColumns: columns.length !== t.columns.length || definition?.generated === true,
       conflictReplace: definition?.conflictReplace !== false,
+      failKeepsChanges: definition?.conflictFail !== false,
       virtual: definition?.virtual === true,
     }
     tables.set(table.id, table)
@@ -218,6 +219,7 @@ function catalogOf(answer: string, changeLog: boolean): Catalog {
     const table = tables.get(`main.${lowerCase(tableName)}`)
     if (!table) continue
     const { events, written } = triggerOf(sql, catalog)
+    if (wordsAfter(wordsOf(sql), 'raise').includes('fail')) table.failKeepsChanges = true
     for (const write of events) table.alsoWrites[write] = union([table.alsoWrites[write], written])
     if (events.includes('update') && written !== 'all' && written.has(table.id)) table.updateChangesOtherColumns = true
   }
@@ -229,6 +231,8 @@ type Definition = {
   generated?: boolean
   /** A constraint's conflict clause is `REPLACE`: an `INSERT` or `UPDATE` may delete the rows it conflicts with. */
   conflictReplace?: boolean
+  /** A constraint's conflict clause is `FAIL`: a write that fails keeps the rows it changed before. */
+  conflictFail?: boolean
   virtual?: boolean
   /** A foreign key may be `DEFERRABLE INITIALLY DEFERRED`. */
   deferred?: boolean
@@ -239,10 +243,12 @@ type Definition = {
 /** What a table's `CREATE TABLE` tells beyond the pragmas; `undefined` when it can't be read. */
 function definitionOf(sql: string | null): Definition | undefined {
   if (!sql) return undefined
-  const words = tokensOf(sql).flatMap((t) => (t.word ? [t.word] : []))
-  const conflictReplace = words.some((word, i) => word === 'conflict' && words[i + 1] === 'replace')
+  const words = wordsOf(sql)
+  const conflicts = wordsAfter(words, 'conflict')
+  const conflictReplace = conflicts.includes('replace')
+  const conflictFail = conflicts.includes('fail')
   const deferred = words.includes('deferred')
-  if (words[1] === 'virtual') return { virtual: true, conflictReplace, deferred }
+  if (words[1] === 'virtual') return { virtual: true, conflictReplace, conflictFail, deferred }
   const table = parseSqlite(sql)?.[0]?.CreateTable
   if (!table) return undefined
   const collations = new Map<string, string>()
@@ -253,7 +259,17 @@ function definitionOf(sql: string | null): Definition | undefined {
       if (option.Generated) generated = true
     }
   }
-  return { collations, generated, conflictReplace, deferred, strict: table.strict === true }
+  return { collations, generated, conflictReplace, conflictFail, deferred, strict: table.strict === true }
+}
+
+/** The words of `sql`, in lower case. */
+function wordsOf(sql: string): string[] {
+  return tokensOf(sql).flatMap((t) => (t.word ? [t.word] : []))
+}
+
+/** The word right after each `word` (`ON CONFLICT FAIL`, `RAISE(FAIL, …)`). */
+function wordsAfter(words: string[], word: string): string[] {
+  return words.flatMap((w, i) => (w === word && words[i + 1] ? [words[i + 1]!] : []))
 }
 
 /** `column` and `parentColumn` only for a key of one column. */

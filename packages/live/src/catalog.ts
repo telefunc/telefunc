@@ -53,6 +53,9 @@ type Table = {
   updateChangesOtherColumns: boolean
   /** SQLite: a constraint's conflict clause is `REPLACE`, so a write may delete the rows it conflicts with. */
   conflictReplace?: boolean
+  /** SQLite: a constraint's conflict clause is `FAIL`, or a trigger on the table calls `RAISE(FAIL)`, so a write that
+   *  fails may keep the rows it changed before. */
+  failKeepsChanges?: boolean
   /** SQLite: a virtual table, whose writes no trigger sees. */
   virtual?: boolean
 }

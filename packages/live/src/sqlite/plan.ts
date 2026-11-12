@@ -1,6 +1,6 @@
 export { planSqlite }
 
-import { tablesChangedBy, type Catalog, type Table } from '../catalog.js'
+import { tablesChangedBy, type Catalog, type Table, type TableSet } from '../catalog.js'
 import {
   alsoWrites,
   HIDDEN_PREFIX,
@@ -126,7 +126,19 @@ function planWrite(statement: Ast, text: string | undefined, catalog: Catalog): 
   if (catalog.changeLog) return { kind: 'logged', tables: whole, also: replaces || table?.virtual ? whole : new Set() }
   const widened =
     !replaces && table && text && !table.virtual && !table.isView && widenedWrite(statement, text, table, catalog)
-  return widened || { kind: 'unknownWrite', tables: whole, schemaChange: false }
+  const plan = widened || { kind: 'unknownWrite' as const, tables: whole, schemaChange: false }
+  return failureKeeps(write, whole, catalog) ? plan : { ...plan, undoneByFailure: true }
+}
+
+/** Whether `write`, failing, may keep the rows it changed before: under an `OR FAIL` of its own, a `FAIL` conflict
+ *  clause or a `RAISE(FAIL)` of a table it may write, or in a table whose writes aren't undone with it (a virtual
+ *  table's). Any other failure undoes the statement. */
+function failureKeeps(write: Ast, tables: TableSet, catalog: Catalog): boolean {
+  if (write.or === 'Fail' || tables === 'all') return true
+  return [...tables].some((id) => {
+    const table = catalog.tables.get(id)
+    return !table || table.virtual === true || table.failKeepsChanges === true
+  })
 }
 
 /** `statement` with an image of each row it writes appended to its `RETURNING` list: the new row, or the deleted one.

@@ -610,12 +610,14 @@ class LiveDatabase {
     else this.transactions.record(connection, kept())
   }
 
-  /** What a statement that failed on SQLite may still have changed: SQLite keeps the rows an `OR FAIL` statement
-   *  changed before its conflict, and what the statements before the one that failed in a text did. */
-  private keptChanges(plan: Plan, connection: object): Change[] {
-    if (plan.kind === 'several') return plan.plans.flatMap((p) => this.keptChanges(p, connection))
+  /** What a statement that failed on SQLite may still have changed: what the statements before the one that failed in
+   *  a text did, and the rows a statement changed before its conflict when an `OR FAIL` kept them. Any other failure
+   *  undid the statement (`undoneByFailure`). */
+  private keptChanges(plan: Plan, connection: object, inText = false): Change[] {
+    if (plan.kind === 'several') return plan.plans.flatMap((p) => this.keptChanges(p, connection, true))
     const writes = plan.kind === 'logged' || plan.kind === 'write' || plan.kind === 'unknownWrite'
-    return writes ? this.changesOf(plan, connection) : []
+    const undone = !inText && 'undoneByFailure' in plan
+    return writes && !undone ? this.changesOf(plan, connection) : []
   }
 
   /** Changes of a statement that isn't a single captured write; applies transaction statements and role changes. */
@@ -677,7 +679,7 @@ class LiveDatabase {
         plan.text,
         plan.images.length,
         (rows) => this.changesOfWrite(plan, rows, before),
-        () => this.changesOf(plan, connection),
+        () => this.keptChanges(plan, connection),
       ),
       ...(plan.params && { values: plan.params.map((i) => values[i]) }),
       returnsRows: plan.hadReturning,

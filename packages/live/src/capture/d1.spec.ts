@@ -1,5 +1,5 @@
-// Two D1 databases with the same tables, on this process's broadcast: a write to one refetches the other's reads
-// unless each has a `name` of its own.
+// D1 through a stand-in for its binding: what a write tells the live reads of its database, and of another one with
+// the same tables.
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
@@ -13,9 +13,9 @@ const calls: AsyncLocalStorage<object> = (telefunc['getContext/async.ts'].asyncS
 
 /** A stand-in for a Worker's D1 binding (`env.DB`), on a node:sqlite database in memory: the parts `@telefunc/live`
  *  calls. */
-function d1Database() {
+function d1Database(schema = "create table t (id integer primary key, x text); insert into t values (1, 'a')") {
   const db = new DatabaseSync(':memory:')
-  db.exec("create table t (id integer primary key, x text); insert into t values (1, 'a')")
+  db.exec(schema)
   const statements = new WeakMap<object, (arrays: boolean) => { names: string[]; rows: unknown[] }>()
   const statementOf = (text: string, values: unknown[]) => {
     const rowsOf = (arrays: boolean) => {
@@ -53,6 +53,17 @@ function d1Database() {
   }
 }
 
+/** How many stale signals `read`, run in `.live()`, gets from now on. */
+async function staleSignals(read: () => Promise<unknown>): Promise<() => number> {
+  const cell = await calls.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () => readLive(read, 'the spec'))
+  let stale = 0
+  cell.onStale(() => stale++)
+  cell.send()
+  return () => stale
+}
+
+const settled = () => new Promise((resolve) => setTimeout(resolve, 50))
+
 describe('two D1 databases with the same tables', () => {
   it.each([
     { label: 'without names', one: undefined, other: undefined, signals: 1 },
@@ -62,14 +73,63 @@ describe('two D1 databases with the same tables', () => {
     const [a, b] = [d1Database(), d1Database()]
     liveDatabaseOf(a, { name: one })
     liveDatabaseOf(b, { name: other })
-    const cell = await calls.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
-      readLive(async () => (await b.prepare('select * from t where id = ?').bind(1).all()).results, 'the spec'),
+    const stale = await staleSignals(
+      async () => (await b.prepare('select * from t where id = ?').bind(1).all()).results,
     )
-    let stale = 0
-    cell.onStale(() => stale++)
-    cell.send()
     await a.prepare("update t set x = 'b' where id = ?").bind(1).run()
-    await new Promise((resolve) => setTimeout(resolve, 50))
-    expect(stale).toBe(signals)
+    await settled()
+    expect(stale()).toBe(signals)
+  })
+})
+
+describe('a write the database refused', () => {
+  const refuse = "create trigger refuse before insert on t when new.x = 'z' begin select raise(fail, 'refused'); end;"
+  it.each([
+    {
+      label: 'under the default ABORT',
+      clause: '',
+      trigger: '',
+      write: "insert into t values (2, 'b'), (3, 'a')",
+      kept: false,
+    },
+    {
+      label: 'under OR FAIL',
+      clause: '',
+      trigger: '',
+      write: "insert or fail into t values (2, 'b'), (3, 'a')",
+      kept: true,
+    },
+    {
+      label: 'under ON CONFLICT FAIL',
+      clause: ' on conflict fail',
+      trigger: '',
+      write: "insert into t values (2, 'b'), (3, 'a')",
+      kept: true,
+    },
+    {
+      label: 'by RAISE(FAIL)',
+      clause: '',
+      trigger: refuse,
+      write: "insert into t values (2, 'b'), (3, 'z')",
+      kept: true,
+    },
+    {
+      label: 'after a statement in its text',
+      clause: '',
+      trigger: '',
+      write: "insert into t values (2, 'b'); insert into t values (3, 'a')",
+      kept: true,
+    },
+  ])('$label: the reads go stale when it kept a row ($kept)', async ({ label, clause, trigger, write, kept }) => {
+    const d1 = d1Database(
+      `create table t (id integer primary key, x text unique${clause}); insert into t values (1, 'a'); ${trigger}`,
+    )
+    liveDatabaseOf(d1, { name: label })
+    const read = async () => (await d1.prepare('select id from t order by id').all()).results
+    const stale = await staleSignals(read)
+    await expect(write.includes(';') ? d1.exec(write) : d1.prepare(write).run()).rejects.toThrow()
+    await settled()
+    expect(await read()).toEqual(kept ? [{ id: 1 }, { id: 2 }] : [{ id: 1 }])
+    expect(stale()).toBe(kept ? 1 : 0)
   })
 })

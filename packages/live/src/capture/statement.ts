@@ -50,6 +50,8 @@ type WritePlan = {
   /** What the write changes besides the rows it returns and those a cascade deletes by key (`cascadedDeletes()`): what
    *  the table's triggers write and the rows its foreign key actions change, then what those changes change in turn. */
   alsoWrites: ReadonlySet<string>
+  /** SQLite: a failure undoes all the write changed, since no `OR FAIL` can apply to it. */
+  undoneByFailure?: true
 }
 
 /** What a statement may have changed: rows of these tables, or anything (`'all'`, schema changes included).
@@ -74,6 +76,8 @@ type Plan =
       role?: RoleChange
       setConfigs?: SettingName[]
       unread?: true
+      /** As `WritePlan.undoneByFailure`. */
+      undoneByFailure?: true
     }
   /** `SET`, `RESET`: the settings of its session change (a role, a `search_path`, what a row level security policy
    *  reads). `role`: how its role changes. */
