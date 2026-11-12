@@ -188,3 +188,42 @@ describe('a delete cascading two levels on PGlite', () => {
     await pglite.close()
   })
 })
+
+describe('a live read calling a SQL function of the app', () => {
+  it.each([
+    ['its AS text', (table: string) => `as 'select count(*)::int from ${table}'`],
+    ['its SQL-standard body', (table: string) => `return (select count(*)::int from ${table})`],
+  ])('watches the tables %s reads, as defined now', async (_, body) => {
+    const define = (table: string) => `create or replace function n() returns int language sql stable ${body(table)}`
+    const pglite = new PGlite()
+    await pglite.exec(`create table a (id int); create table b (id int); create table c (id int); ${define('a')}`)
+    liveDatabaseOf(pglite, {})
+    const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
+    const live = async () => {
+      const cell = await store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
+        readLive(() => pglite.query('select n()'), 'the spec'),
+      )
+      let stale = 0
+      cell.onStale(() => stale++)
+      cell.send()
+      return () => stale
+    }
+    const write = async (text: string) => {
+      await pglite.query(text)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    // A read goes stale once: each count is read after the write that may make it stale.
+    const before = await live()
+    await write('insert into c values (1)')
+    expect(before()).toBe(0)
+    await write('insert into a values (1)')
+    expect(before()).toBe(1)
+    await write(define('b'))
+    const after = await live()
+    await write('insert into a values (2)')
+    expect(after()).toBe(0)
+    await write('insert into b values (1)')
+    expect(after()).toBe(1)
+    await pglite.close()
+  })
+})

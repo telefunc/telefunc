@@ -33,6 +33,8 @@ type CatalogRow = {
     argumentModes: string[] | null,
     inputCount: number,
     variadic: boolean,
+    /** A SQL function's `CREATE FUNCTION`. */
+    definition: string | null,
   ][]
   volatileFunctions: string[]
   aggregates: string[]
@@ -93,7 +95,8 @@ select json_build_object(
   'serverVersion', current_setting('server_version_num')::int,
   'cOrdering', (select datlocprovider in ('c', 'b') and datcollate in ('C', 'POSIX') from pg_database where datname = current_database()),
   'functions', (select coalesce(json_agg(json_build_array(p.proname, ${WRITING}, p.provolatile = 'v',
-      pg_get_expr(p.proargdefaults, 0), p.proargnames, p.proargmodes, p.pronargs, p.provariadic <> 0)), '[]') from pg_proc p
+      pg_get_expr(p.proargdefaults, 0), p.proargnames, p.proargmodes, p.pronargs, p.provariadic <> 0,
+      case when l.lanname = 'sql' and p.prokind = 'f' then pg_get_functiondef(p.oid) end)), '[]') from pg_proc p
     join pg_namespace n on n.oid = p.pronamespace join pg_language l on l.oid = p.prolang
     where n.nspname not in ('pg_catalog', 'information_schema') and p.prorettype <> 'trigger'::regtype),
   'volatileFunctions', (select coalesce(json_agg(distinct p.proname), '[]') from pg_proc p where p.provolatile = 'v'),
@@ -295,7 +298,39 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
     // A write to a view writes its tables, or what its rules and `INSTEAD OF` triggers write.
     if (t.view) for (const write of WRITES_OF_ANY_KIND) alsoWrites[write] = 'all'
   }
+  // A function's body resolves names by the `search_path` of the session that calls it: any schema's table may be meant.
+  catalog.functionReads = readsOfFunctions(row.functions, anySchema, catalog)
   return catalog
+}
+
+/** What a call of each function of the app's reads (`Catalog.functionReads`): the tables the bodies of the functions of
+ *  its name name. Any table when one isn't in SQL, calls a function of the app's, or names a table the catalog doesn't
+ *  know (or a `WITH` query's name). */
+function readsOfFunctions(
+  functions: CatalogRow['functions'],
+  named: (table: RangeVar) => Table[],
+  catalog: Catalog,
+): Map<string, TableSet> {
+  const reads = new Map<string, TableSet>()
+  for (const [name, , , , , , , , definition] of functions) {
+    const body = definition === null ? null : bodyOf(definition)
+    const tables =
+      body && !catalog.calls(body).some((called) => catalog.functions.has(called)) && tablesIn(body).map(named)
+    const read = tables && !tables.some((found) => found.length === 0) ? new Set(tables.flat().map((t) => t.id)) : 'all'
+    reads.set(name, union([reads.get(name) ?? new Set(), read]))
+  }
+  return reads
+}
+
+/** The statements of a SQL function's `CREATE FUNCTION`: its SQL-standard body (`RETURN …`, `BEGIN ATOMIC …`), or
+ *  those of its `AS` text. */
+function bodyOf(definition: string): Node[] | null {
+  const create = parseStatements(definition)?.[0]?.CreateFunctionStmt
+  if (!create) return null
+  if (create.sql_body) return [create.sql_body]
+  const as = ((create.options ?? []) as Node[]).find((option) => option.DefElem.defname === 'as')
+  const source = as?.DefElem.arg.List.items[0]?.String?.sval
+  return typeof source === 'string' ? parseStatements(source) : null
 }
 
 /** The functions called below `node`, with those the defaults of the arguments they leave out call, theirs too. */

@@ -75,9 +75,12 @@ type Catalog = {
   access: Map<string, Access>
   serverVersion: number
   tables: Map<string, Table>
-  /** User-defined functions: a statement calling one may read any table, and write any table when it's one of
-   *  `writingFunctions`. */
+  /** User-defined functions: a statement calling one may read any table (but those `functionReads` names), and write
+   *  any table when it's one of `writingFunctions`. */
   functions: Set<string>
+  /** The tables a call of a function of `functions` reads, when its body tells (Postgres: every function of that name
+   *  is in SQL, calling none of the app's). */
+  functionReads?: Map<string, TableSet>
   /** The functions in SQL or a procedural language: a write calling one, or firing a trigger, rule or default that
    *  calls one, may write any table, whatever the function's volatility (a `STABLE` function's body may call a
    *  volatile one). A function in C (`internal` included: `uuid_generate_v4()`) is taken to compute a value. */
