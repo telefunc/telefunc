@@ -282,6 +282,17 @@ describe('SQLite capture', () => {
     })
   })
 
+  it('announces a write to a grouped read with HAVING only when its group may cross the bound', async () => {
+    const { db } = open(
+      'create table t (id integer primary key, g integer); insert into t (g) values (1), (1), (2), (2), (2), (2), (2)',
+    )
+    const stale = await watch(db, 'select g, count(*) as n from t group by g having count(*) > 3')
+    db.prepare('insert into t (g) values (1)').run()
+    expect(await stale()).toBe(0)
+    db.prepare('insert into t (g) values (1)').run()
+    expect(await stale()).toBe(1)
+  })
+
   it('announces no change twice once a transaction rolled back', async () => {
     const { db } = open(TWO_ROWS)
     db.prepare("update t set x = 'c' where id = 1").run()

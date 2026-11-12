@@ -151,8 +151,9 @@ class Tally {
       const { lo, hi } = aggregate.kind === 'count' ? total(counts) : this.distinct(aggregate.column, counts)
       const n = Number(text)
       if (!Number.isFinite(n)) return UNKNOWN
-      // Every count in between compares the same way when both ends do.
-      return Math.sign(lo - n) === Math.sign(hi - n) ? holds(Math.sign(lo - n)) : TRUE | FALSE
+      // How the counts from `lo` to `hi` compare with `n`: as the ends do, or as `n` itself when it's between them.
+      const orders = [Math.sign(lo - n), Math.sign(hi - n), ...(lo < n && n < hi && Number.isInteger(n) ? [0] : [])]
+      return orders.reduce<Truth>((truth, order) => truth | holds(order), 0)
     }
     const extreme = this.extreme(aggregate, counts)
     if (!extreme) return UNKNOWN
