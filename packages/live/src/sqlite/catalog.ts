@@ -1,4 +1,4 @@
-export { catalogQuery, catalogOf, changeLogSetup, CHANGE_LOG_TRIGGERS, READ_CHANGES, EMPTY_CHANGES, changesOfLog }
+export { catalogQuery, catalogOf, changeLogSetup, CHANGE_LOG_TRIGGERS, CHANGE_COUNT, READ_CHANGES, changesOfLog }
 export { hasConflictReplace }
 
 import type { Access, Catalog, Table, TableSet } from '../catalog.js'
@@ -71,8 +71,18 @@ const CHANGES = 'temp."__live_changes"'
 /** The names of the change log's triggers on a connection, from a previous catalog, as JSON. */
 const CHANGE_LOG_TRIGGERS = `select json_group_array(name) from temp.sqlite_schema where type = 'trigger' and name like '\\_\\_live\\_%' escape '\\'`
 
-const READ_CHANGES = `SELECT "id", "table", "kind", "old", "new" FROM ${CHANGES}`
-const EMPTY_CHANGES = `DELETE FROM ${CHANGES}`
+/** The connection's count of changes, which keys the log's rows (the count once a row is logged): a rollback doesn't
+ *  take it back. */
+const CHANGE_COUNT = 'SELECT total_changes()'
+/** The rows logged after a count, and the count now: a `SELECT`, which leaves `changes()` to the app's statements. */
+const READ_CHANGES = `SELECT "id", "table", "kind", "old", "new", total_changes() FROM ${CHANGES} WHERE "id" > ? ORDER BY "id"`
+/** A write changing more rows counts as changing its tables whole. Fewer than `MAX_CHANGES`: the log holds about as many
+ *  at rest, and its size slows every write (10,000 rows cost a write 20 to 30 %). */
+const LOGGED_ROWS = 1_000
+/** The log keeps the rows logged within the connection's last this many changes: each trigger deletes the older ones,
+ *  a change of its own that `changes()` doesn't count. A logged row takes up to three: its change, its log row and the
+ *  log row it deletes. */
+const LOGGED_CHANGES = 3 * LOGGED_ROWS
 
 /** SQLite has no roles: a connection reads every table whole. */
 const READABLE: Access = { readable: 'table', rowSecurity: false }
@@ -321,7 +331,8 @@ function changeLogSetup(catalog: Catalog, ours: string[]): string[] {
     return Object.entries(images).map(
       ([kind, [old, now]]) =>
         `CREATE TEMP TRIGGER ${quote(`__live_${table.id}_${kind}`)} AFTER ${kind.toUpperCase()} ON ${table.sqlName} BEGIN ` +
-        `INSERT INTO ${CHANGES} ("table", "kind", "old", "new") VALUES (${sqlString(table.id)}, '${kind}', ${old}, ${now}); END`,
+        `INSERT INTO ${CHANGES} ("id", "table", "kind", "old", "new") VALUES (total_changes() + 1, ${sqlString(table.id)}, '${kind}', ${old}, ${now}); ` +
+        `DELETE FROM ${CHANGES} WHERE "id" <= total_changes() - ${LOGGED_CHANGES}; END`,
     )
   })
   return [
@@ -331,17 +342,18 @@ function changeLogSetup(catalog: Catalog, ours: string[]): string[] {
   ]
 }
 
-/** The changes `READ_CHANGES` gave, in the order they were made. */
-function changesOfLog(rows: (string | null)[][], catalog: Catalog): Change[] {
-  return rows
-    .toSorted((a, b) => Number(a[0]) - Number(b[0]))
-    .map(([, table, kind, old, now]): Change => {
-      const image = (text: string | null | undefined) => rowOf(Object.entries(JSON.parse(text!)))
-      if (!catalog.tables.has(table!)) return { table: table!, kind: 'unknown' }
-      if (kind === 'insert') return { table: table!, kind: 'insert', new: image(now) }
-      if (kind === 'delete') return { table: table!, kind: 'delete', old: image(old) }
-      return { table: table!, kind: 'update', old: image(old), new: image(now) }
-    })
+/** The changes `READ_CHANGES` gave after the count `after`; `undefined` past `LOGGED_ROWS`, or when the log may no
+ *  longer hold some of them. */
+function changesOfLog(rows: (string | null)[][], after: number, catalog: Catalog): Change[] | undefined {
+  const last = rows.at(-1)
+  if (rows.length > LOGGED_ROWS || (last && Number(last[0]) - after > LOGGED_CHANGES)) return undefined
+  return rows.map(([, table, kind, old, now]): Change => {
+    const image = (text: string | null | undefined) => rowOf(Object.entries(JSON.parse(text!)))
+    if (!catalog.tables.has(table!)) return { table: table!, kind: 'unknown' }
+    if (kind === 'insert') return { table: table!, kind: 'insert', new: image(now) }
+    if (kind === 'delete') return { table: table!, kind: 'delete', old: image(old) }
+    return { table: table!, kind: 'update', old: image(old), new: image(now) }
+  })
 }
 
 /** Whether a write to `table` may delete rows it conflicts with (`REPLACE`), which neither the change log nor

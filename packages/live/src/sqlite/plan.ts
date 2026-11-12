@@ -123,7 +123,7 @@ function planWrite(statement: Ast, text: string | undefined, catalog: Catalog): 
   const [, write] = variant(statement)
   const replaces = write.or === 'Replace' || !table || hasConflictReplace(table)
   const whole: ChangedTables = table ? tablesChangedBy([[table.id, undefined]], catalog) : 'all'
-  if (catalog.changeLog) return { kind: 'logged', also: replaces || table?.virtual ? whole : new Set() }
+  if (catalog.changeLog) return { kind: 'logged', tables: whole, also: replaces || table?.virtual ? whole : new Set() }
   const widened =
     !replaces && table && text && !table.virtual && !table.isView && widenedWrite(statement, text, table, catalog)
   return widened || { kind: 'unknownWrite', tables: whole, schemaChange: false }

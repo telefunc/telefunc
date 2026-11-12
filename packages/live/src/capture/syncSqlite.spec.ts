@@ -127,6 +127,54 @@ describe('SQLite capture', () => {
     )
     db.prepare("insert into t values (3, 'c')").run()
     expect(db.prepare('select changes() as changes').get()).toEqual({ changes: 1 })
+    db.prepare("update t set x = 'd' where id = 3 and changes() = 1").run()
+    expect(db.prepare('select x from t where id = 3').get()).toEqual({ x: 'd' })
+  })
+
+  it('announces a write of up to 1,000 rows row by row, and a larger one as changing its tables', async () => {
+    const { db } = open(`create table t (id integer primary key, x int);
+      with recursive n (i) as (select 1 union all select i + 1 from n where i < 1002) insert into t select i, 0 from n`)
+    const last = await watch(db, 'select * from t where id = 1002')
+    db.prepare('update t set x = 1 where id <= 1000').run()
+    expect(await last()).toBe(0)
+    db.prepare('update t set x = 2 where id <= 1001').run()
+    expect(await last()).toBe(1)
+  })
+
+  it('announces a write whose first rows the change log no longer holds', async () => {
+    // Each row also changes four rows of a temporary table, which isn't logged: the log keeps the last of its rows only.
+    const { db } = open(`create table t (id integer primary key, x int); create temp table scratch (x int);
+      create temp trigger copied after update on t begin insert into scratch values (1), (2), (3), (4); end;
+      with recursive n (i) as (select 1 union all select i + 1 from n where i < 900) insert into t select i, 0 from n`)
+    const first = await watch(db, 'select * from t where id = 1')
+    db.prepare('update t set x = 1').run()
+    expect(await first()).toBe(1)
+  })
+
+  it('announces nothing a ROLLBACK TO undid, and the writes after it', async () => {
+    const { db } = open(TWO_ROWS)
+    const first = await watch(db, 'select * from t where id = 1')
+    const second = await watch(db, 'select * from t where id = 2')
+    db.exec('begin; savepoint s')
+    db.prepare("update t set x = 'c' where id = 1").run()
+    db.exec('rollback to s')
+    db.prepare("update t set x = 'd' where id = 2").run()
+    db.exec('commit')
+    expect([await first(), await second()]).toEqual([0, 1])
+  })
+
+  it("announces a write after a ROLLBACK TO the parser can't read", async () => {
+    const { db } = open(TWO_ROWS)
+    const first = await watch(db, 'select * from t where id = 1')
+    const second = await watch(db, 'select * from t where id = 2')
+    db.exec('begin; savepoint s')
+    db.prepare("update t set x = 'c' where id = 1").run()
+    // Read as a write of any table, until the next ROLLBACK TO undoes it too.
+    db.exec('rollback to s; select 1 from t not indexed')
+    db.exec('rollback to s')
+    db.prepare("update t set x = 'd' where id = 2").run()
+    db.exec('commit')
+    expect([await first(), await second()]).toEqual([0, 1])
   })
 
   it('announces no change twice once a transaction rolled back', async () => {

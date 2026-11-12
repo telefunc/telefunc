@@ -7,7 +7,7 @@ import {
   CHANGE_LOG_TRIGGERS,
   changeLogSetup,
   changesOfLog,
-  EMPTY_CHANGES,
+  CHANGE_COUNT,
   READ_CHANGES,
 } from './catalog.js'
 import { splitSqlite } from './parser.js'
@@ -36,8 +36,8 @@ const LOGGED_SQLITE_ENGINE: Engine = {
   changeLog: {
     triggers: CHANGE_LOG_TRIGGERS,
     setup: changeLogSetup,
+    count: CHANGE_COUNT,
     read: READ_CHANGES,
-    empty: EMPTY_CHANGES,
     changesOf: changesOfLog,
   },
   plan: planSqlite,
