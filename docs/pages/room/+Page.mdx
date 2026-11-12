@@ -236,6 +236,14 @@ console.log(response) // 'ok'
 
 A callback that returns `undefined` only observes, so it can stand beside the one that replies. If two callbacks return a value, `send()` rejects.
 
+For updates that change many times per second, such as your position sent to the one participant who follows you, pass `{ lossy: true }`: a newer one replaces one the recipient hasn't taken yet.
+
+```js
+// Environment: client
+
+onMove((position) => me.send(follower, position, { lossy: true }))
+```
+
 > A private message is delivered at most once: when it can't be handed on to the recipient, `send()` rejects, and the message isn't sent again. `publish()` is at most once too, <Link href="/channel#delivery">like Broadcast's</Link>. Room tells your server of a message, join or leave it knows it couldn't hand on, through <Link href="/room-config">`roomConfig.onDeliveryLost`</Link>, which logs it by default.
 
 
@@ -407,7 +415,9 @@ await me.send(host, { type: 'move', to: 'e4' })
 
 ## Stream audio or video
 
-Publish each source on its own track, and subscribe to the tracks you show:
+> For calls, use <Link href="/media" />: `me.publishMedia(stream)` sends your camera, microphone or screen, and `member.subscribeMedia(video)` plays a participant's. It does the encoding, the keyframes and the playing that this section leaves to you.
+
+With your own encoder, publish each source on its own track, and subscribe to the tracks you show:
 
 ```js
 // Environment: client
@@ -416,12 +426,12 @@ Publish each source on its own track, and subscribe to the tracks you show:
 // encodeCamera(): your encoder, e.g. WebCodecs' VideoEncoder
 // live video: don't await, or each frame waits a round trip for the previous one
 encodeCamera((frame, isKeyframe) =>
-  me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, lossy: true, delta: !isKeyframe }),
+  me.publishBinary(frame, { track: 'camera', lossy: true, key: isKeyframe }),
 )
 
 // The participants who watch; showVideo(): your decoder, e.g. WebCodecs' VideoDecoder
 const watch = (member) =>
-  member.subscribeBinary((frame, info) => showVideo(member.id, frame, info.meta.isKeyframe), { track: 'camera' })
+  member.subscribeBinary((frame, info) => showVideo(member.id, frame, info.key), { track: 'camera' })
 for (const member of await room.getParticipants()) watch(member)
 room.onJoin(watch)
 ```
@@ -435,7 +445,9 @@ me.publishBinary(position, { track: 'cursor', lossy: true }) // a viewer that fa
 me.publishBinary(stroke, { track: 'drawing' }) // a viewer never misses one
 ```
 
-A video frame needs the frames since its keyframe: publish each other frame with `delta: true`. A viewer that falls behind then skips to the newest keyframe and gets the frames after it in order, never one without those before it, and a viewer who arrives mid-stream starts at the next keyframe. `delta` needs `lossy: true`, and can't be `retain`ed.
+A video frame needs the frames since its keyframe: say which frames are keyframes with `key`, which the viewer reads as `info.key`. A viewer that falls behind then skips to the newest keyframe and gets the frames after it in order, never one without those before it, and a viewer who arrives mid-stream starts at the next keyframe.
+
+> `key` is `true` unless you say otherwise, as a position or an audio frame stands alone. `key: false` needs `lossy: true`, and can't be `retain`ed.
 
 So that a viewer who arrives sees the picture at once, send a keyframe when `onWatch()` tells you a page started watching:
 
@@ -457,14 +469,12 @@ me.onDemand((track, on) => (on ? wanted.add(track) : wanted.delete(track))) // n
 // live video: don't await, or each frame waits a round trip for the previous one
 encodeCamera((frame, isKeyframe) => {
   if (wanted.has('camera') || wanted.has(null)) {
-    me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, lossy: true, delta: !isKeyframe })
+    me.publishBinary(frame, { track: 'camera', lossy: true, key: isKeyframe })
   }
 })
 ```
 
 > Audio works the same way, on its own track such as `{ track: 'mic' }`.
-
-> For video calls, <Link href="/media" /> publishes each participant's camera, microphone and screen, and plays them at the size each viewer's screen and connection take.
 
 
 ## Give late joiners the current state
@@ -616,7 +626,7 @@ Server-side.
 | `getParticipants()` / `getParticipant(id)` | The participants / one participant. |
 | `getParticipants({ hidden: true })` | Server-side: the hidden participants. |
 | `onJoin(cb)` / `onLeave(cb)` / `onParticipantUpdate(cb)` | Someone joined / left / changed their `meta`. |
-| `subscribe(cb, { track? }?)` / `subscribeBinary(cb, { track? }?)` | Everyone's messages, or those on `track` / binary frames: `cb(message, info, from)`, with `info` `{ seq, timestamp }`, plus `{ track, meta }` on a track. |
+| `subscribe(cb, { track? }?)` / `subscribeBinary(cb, { track? }?)` | Everyone's messages, or those on `track` / binary frames: `cb(message, info, from)`, with `info` `{ seq, timestamp }`, plus `{ track, meta }` on a track and `key` on a binary frame. |
 | `onAnnounce(cb)` | `Room.announce()` messages: `cb(message, info)`. |
 | `onUpdate(cb)` / `onEmpty(cb)` / `onClose(cb)` | The room's `meta` changed: `(meta, prev)` / the last participant left / the room closed. |
 
@@ -627,8 +637,9 @@ Properties: `id`, `meta`, `count`.
 | Method | Description |
 |---|---|
 | `publish(message, { track?, lossy?, retain? }?)` | Send to everyone. `lossy` needs `track`. |
-| `publishBinary(data, { track?, meta?, retain?, lossy?, delta? }?)` | Send binary to everyone. `delta` needs `lossy`. |
-| `send(to, message, { ack? }?)` | Send to one participant. |
+| `publishBinary(data, { track?, meta?, retain?, lossy?, key? }?)` | Send binary to everyone. `key: false` needs `lossy`. |
+| `send(to, message, { ack?, lossy? }?)` | Send to one participant. |
+| `publishMedia(stream, { track? }?)` / `sendMedia(to, stream, { track? }?)` | With <Link href="/media" />: send your camera, microphone or screen to everyone / to one participant. |
 | `listen(cb)` | Receive private messages; return a value to reply. |
 | `setMeta(meta)` / `setAttributes(attributes)` | Replace / update your `meta`. |
 | `onDemand(cb)` | Whether anyone watches a track of yours. |
@@ -643,6 +654,7 @@ Properties: `id`, `meta`, `identity`, `isConnected`, `uplinkRate`.
 | Method | Description |
 |---|---|
 | `subscribe(cb, { track? }?)` / `subscribeBinary(cb, { track? }?)` | This participant's messages, or those on `track` / binary frames: `cb(message, info)`. |
+| `subscribeMedia(video, { track? }?)` | With <Link href="/media" />: play this participant's audio and video. |
 | `onUpdate(cb)` / `onLeave(cb)` | This participant changed their `meta` / left. |
 | `onDisconnect(cb)` / `onReconnect(cb)` | This participant's connection dropped / is back. |
 
@@ -656,6 +668,7 @@ Properties: `id`, `meta`, `identity`, `isConnected`.
 | `onBeforeJoin(member)` | Before a join. Throw `Abort()` to reject it. |
 | `onBeforePublish(from, message, { track })` | Before a message or a binary frame to everyone, `track` being `null` off a track. Throw `Abort()` to reject it. |
 | `onBeforeSend(from, to, message)` | Before a private message. Throw `Abort()` to reject it. |
+| `onBeforeDirect(from, to)` | With `@telefunc/webrtc`: before two participants are linked directly. Throw `Abort()` to keep them on your server. |
 | `onAfterJoin(member, { joinedAt })` | After a join. |
 | `onAfterPublish(from, message, { seq, timestamp, track })` | After a message or a binary frame to everyone. |
 | `onAfterSend(from, to, message, { seq, timestamp })` | After a private message. |

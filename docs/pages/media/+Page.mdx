@@ -1,11 +1,11 @@
 import { Link } from '@brillout/docpress'
 import { TelefuncStreamBeta } from '../../components'
 
-**Environment**: client.
+**Environment**: server & client.
 
 <TelefuncStreamBeta />
 
-The `@telefunc/media` package adds audio and video calls to a <Link href="/room">room</Link>: each participant's camera, microphone or screen, encoded and played in the page, at the size each viewer's screen and connection take.
+The `@telefunc/media` package adds audio and video to a <Link href="/room">room</Link>: each participant's camera, microphone or screen, encoded and played in the page, at the size each viewer's screen and connection take, and audio or video your server sends or reads.
 
 ## Install
 
@@ -13,7 +13,9 @@ The `@telefunc/media` package adds audio and video calls to a <Link href="/room"
 npm install @telefunc/media
 ```
 
-That's it: it runs in the page, on `@telefunc/room`.
+That's it: your participants get `publishMedia()`, `sendMedia()` and `subscribeMedia()`.
+
+> Telefunc finds `@telefunc/*` packages in your `package.json` and auto-loads them. For TypeScript to know the methods, import the package in one file of your app: `import '@telefunc/media'`.
 
 ## Make a call
 
@@ -40,21 +42,21 @@ Publish your camera and microphone, and play each other participant in a `<video
 // Meeting.ts
 // Environment: client
 
-import { publish, play } from '@telefunc/media'
+import '@telefunc/media'
 import { onJoinMeeting } from './Meeting.telefunc'
 
 const { room, me } = await onJoinMeeting('standup')
 
 const camera = await navigator.mediaDevices.getUserMedia({ audio: true, video: true })
 selfView.srcObject = camera // your own picture is the stream you already hold
-publish(me, camera)
+me.publishMedia(camera)
 
-const show = (member) => play(member, tileOf(member)) // tileOf(): your <video> for this member
+const show = (member) => member.subscribeMedia(tileOf(member)) // tileOf(): your <video> for this member
 for (const member of await room.getParticipants()) show(member)
 room.onJoin(show)
 ```
 
-> A `<video>` plays its participant until they leave; `stop()`, on what `publish()` or `play()` returns, stops earlier.
+> A `<video>` plays its participant until they leave; `stop()`, on what `publishMedia()` or `subscribeMedia()` returns, stops earlier.
 
 > To mute, disable the track: `camera.getAudioTracks()[0].enabled = false`.
 
@@ -62,16 +64,24 @@ Each viewer gets the picture at the size its `<video>` shows on screen, smaller 
 
 ## Share your screen
 
-Publish it under a name of its own, and play that name:
+Publish it on a track of its own, and play that track:
 
 ```ts
 // Environment: client
 
 const screen = await navigator.mediaDevices.getDisplayMedia()
-publish(me, screen, { name: 'screen' })
+me.publishMedia(screen, { track: 'screen' })
 
 // Each viewer:
-play(member, screenTile, { name: 'screen' })
+member.subscribeMedia(screenTile, { track: 'screen' })
+```
+
+To show it to one participant only, send it as you <Link href="/room#send-a-private-message">send a private message</Link>:
+
+```ts
+// Environment: client
+
+me.sendMedia(member, screen, { track: 'screen' })
 ```
 
 ## Show who speaks
@@ -79,11 +89,42 @@ play(member, screenTile, { name: 'screen' })
 ```ts
 // Environment: client
 
-const playback = play(member, tile)
+const playback = member.subscribeMedia(tile)
 playback.onSpeakingChange((speaking) => tile.classList.toggle('speaking', speaking))
 ```
 
-> It needs [WebCodecs](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API) in the browser.
+## Publish from the server
+
+A participant your server joined, such as a voice assistant, publishes frames that are already encoded: say their `codec`, and write each frame.
+
+```ts
+// Assistant.telefunc.ts
+// Environment: server
+
+import '@telefunc/media'
+import { Room } from '@telefunc/room'
+
+export async function onStartAssistant(id: string) {
+  const room = await Room.get(id)
+  const assistant = await room.join({ identity: 'assistant', meta: { name: 'Assistant' } })
+
+  const voice = assistant.publishMedia({ codec: 'opus' })
+  speechModel.onSpeech((packet) => voice.write(packet)) // speechModel: your own, audio in and audio out
+
+  // What the others say, as encoded frames: { data, timestamp, key, codec, kind }
+  room.onJoin(async (member) => {
+    for await (const frame of member.subscribeMedia()) speechModel.hear(frame)
+  })
+}
+```
+
+Every frame you write arrives, in order. To stop mid-sentence, `voice.clear()` drops what the listeners haven't played yet, and `voice.onPlayout(({ playedUntil }) => …)` tells you how far they have heard.
+
+> For a source whose newest moment matters more than every frame, such as a camera your server relays, publish with `{ codec: 'h264', lossy: true }`: a listener that falls behind skips to the newest keyframe. What a page publishes from a `MediaStream` is always sent that way.
+
+> In the page, it needs [WebCodecs](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API) in the browser.
+
+> With `@telefunc/webrtc` installed, a call of two goes over a direct link between the two pages, and through your server again once a third participant or your server's own code joins the call. To refuse a pair a direct link, throw in the room's <Link href="/room#room-guard-hooks">`onBeforeDirect()`</Link> hook.
 
 > With <Link href="/webtransport" />, each participant's sound and each size of their picture travel on a stream of their own, so a lost packet of one holds back none of the others. On a WebSocket, it holds back every one.
 
