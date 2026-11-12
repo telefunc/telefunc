@@ -137,6 +137,15 @@ function createKyselySqlite(client: BetterSqlite3.Database): OrmDriver {
           )
           .orderBy('users.id')
           .execute(),
+      // `tags.todo_id` references `todos`, not `users`: a user just inserted may already have rows here.
+      usersByTagTodo: () =>
+        db
+          .selectFrom('users')
+          .innerJoin('tags', 'tags.todo_id', 'users.id')
+          .select(['users.id', 'tags.id as tag'])
+          .orderBy('users.id')
+          .orderBy('tags.id')
+          .execute(),
       tagsOfUser: ({ user }) =>
         db
           .selectFrom('tags')

@@ -78,6 +78,15 @@ function createPrismaSqlite(path: string): OrmDriver {
           .where((u: any) => u.todos.some((t: any) => t.done.eq(0)))
           .orderBy((u: any) => u.id.asc())
           .all(),
+      // `tags.todo_id` references `todos`, not `users`: a user just inserted may already have rows here.
+      usersByTagTodo: () =>
+        db
+          .query(
+            db.raw.sql`select u.id, g.id as tag from users u join tags g on g.todo_id = u.id order by u.id, g.id`
+              .returnsRow({ id: 'sqlite/integer@1', tag: 'sqlite/integer@1' })
+              .build(),
+          )
+          .toArray(),
       priorityRange: ({ low, high }) =>
         Todo.select('id')
           .where((t: any) => t.priority.gte(low))

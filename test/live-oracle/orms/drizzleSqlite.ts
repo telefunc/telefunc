@@ -63,11 +63,20 @@ const schema = { users, todos, tags, usersRelations, todosRelations }
 const NICKS = ['ann', 'ANN', 'Bob', 'bob', 'cy', 'Dee']
 
 /** A todo with an id neither sequence reaches, so no user has it, and a tag on it; a new user owns it, as a racing
- *  delete may have left none. `insertTaggedUser` then inserts a user with that id. */
-const orphanTag = (text: string) => [
-  sql`insert into users (name, team) values (${text}, 1)`,
-  sql`insert into todos (id, user_id, text) values (1000000, last_insert_rowid(), ${text})`,
-  sql`insert into tags (todo_id, name) values (1000000, ${text})`,
+ *  delete may have left none. `insertTaggedUser` then inserts a user with that id. Query builders, since Drizzle's D1
+ *  `batch()` can't bind a `db.run(sql)` that has parameters. */
+const orphanTag = (db: any, text: string) => [
+  db.insert(users).values({ name: text, team: 1 }),
+  db.insert(todos).values({
+    id: 1000000,
+    userId: sql`last_insert_rowid()`,
+    text,
+    done: false,
+    priority: 1,
+    amount: 1,
+    updatedAt: '2026-11-12',
+  }),
+  db.insert(tags).values({ todoId: 1000000, name: text }),
 ]
 
 /** `client` is a better-sqlite3 or bun:sqlite database, a libSQL client or a D1 binding, `drizzle` the Drizzle driver
@@ -321,7 +330,7 @@ function createDrizzleSqlite(
       deleteUser: ({ user }) => db.delete(users).where(eq(users.id, user)).run(),
       insertOrphanTag: ({ text }) =>
         db.transaction((tx: any) => {
-          for (const statement of orphanTag(text)) tx.run(statement)
+          for (const insert of orphanTag(tx, text)) insert.run()
         }),
       // A user with the id some tags' `todo_id` holds: it joins rows of `usersByTagTodo` as it's inserted.
       insertTaggedUser: ({ text }) =>
@@ -447,7 +456,7 @@ function withBatches(driver: OrmDriver, db: any): OrmDriver {
       ...writes,
       txCommit: ({ todo, user, text }) =>
         db.batch([newTodo(user, text), db.update(todos).set({ done: true }).where(eq(todos.id, todo))]),
-      insertOrphanTag: ({ text }) => db.batch(orphanTag(text).map((statement) => db.run(statement))),
+      insertOrphanTag: ({ text }) => db.batch(orphanTag(db, text)),
       // The second statement always fails (`name` is `NOT NULL`): the batch is refused, and the first undone with it.
       txRollback: async ({ user, text }) => {
         try {
