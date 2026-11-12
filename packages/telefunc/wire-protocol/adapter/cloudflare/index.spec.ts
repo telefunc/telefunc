@@ -83,6 +83,11 @@ vi.mock('../../../node/server/telefunc.js', () => ({
   serve: mocks.telefuncMock,
 }))
 
+vi.mock('../../../node/server/runTelefunc/loadTelefuncFilesUsingVite.js', () => ({
+  importBundledEntry: vi.fn(async () => {}),
+  loadServerProductionEntry: vi.fn(async () => {}),
+}))
+
 vi.mock('./broadcast.js', () => ({
   CloudflareBroadcastAuthorityState: mocks.MockCloudflareBroadcastAuthorityState,
   CloudflareBroadcast: mocks.MockCloudflareBroadcast,

@@ -8,6 +8,7 @@ import { hasProp } from '../../utils/hasProp.js'
 import { Telefunc, PROVIDED_CONTEXT } from './context/getContext.js'
 import { REQUEST_CONTEXT } from './context/requestContext.js'
 import { loadTelefuncFiles } from './runTelefunc/loadTelefuncFiles.js'
+import { loadServerProductionEntry } from './runTelefunc/loadTelefuncFilesUsingVite.js'
 import { parseHttpRequest } from './runTelefunc/parseHttpRequest.js'
 // import { getEtag } from './runTelefunc/getEtag.js'
 import { executeTelefunction } from './runTelefunc/executeTelefunction.js'
@@ -283,6 +284,8 @@ async function runTelefunc_({
 }): Promise<HttpResponse> {
   const requestContext = createRequestContext(request)
   const runContext = { requestContext }
+
+  await loadServerProductionEntry()
 
   {
     // TO-DO/eventually: remove? Since `serverConfig` is global I don't think we need to set it to `runContext`, see for example https://github.com/telefunc/telefunc/commit/5e3367d2d463b72e805e75ddfc68ef7f177a35c0
