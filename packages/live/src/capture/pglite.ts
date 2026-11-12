@@ -5,6 +5,7 @@ import type { FollowUp, LiveDatabase, Statement } from '../liveDatabase.js'
 import { copyRows } from '../sharedReads.js'
 import { runInOrder, sendWithBeforeCommit } from './beforeCommit.js'
 import { takeHiddenFields, takeHiddenValues } from './hiddenColumns.js'
+import { Turns } from './turns.js'
 
 // The parts of PGlite used here, so that `@electric-sql/pglite` stays the app's dependency.
 type Results = { rows: unknown[]; fields: { name: string }[]; [key: string]: unknown }
@@ -29,10 +30,14 @@ function capturePglite(pglite: Pglite, live: LiveDatabase): void {
   if (CAPTURED in pglite) return
   Object.defineProperty(pglite, CAPTURED, { value: true, configurable: true })
   const transaction: TransactionOf = pglite.transaction.bind(pglite)
-  const ready = captureExecutor(pglite, pglite, live, startingStatements(pglite), transaction)
+  // A transaction holds the database: `pglite.query()` waits for it, its own statements don't.
+  const turns = new Turns()
+  const ready = captureExecutor(pglite, pglite, live, startingStatements(pglite), transaction, turns)
   // PGlite sends its own `BEGIN` and `COMMIT`, past `query()`.
   const control = (text: string) => live.statementFor(pglite, text, []).succeeded([])
-  pglite.transaction = async <T>(callback: (tx: Transaction) => Promise<T>): Promise<T> => {
+  pglite.transaction = <T>(callback: (tx: Transaction) => Promise<T>): Promise<T> =>
+    turns.take(pglite, () => runTransaction(callback))
+  async function runTransaction<T>(callback: (tx: Transaction) => Promise<T>): Promise<T> {
     await ready()
     let commit: Statement | undefined
     let result: T
@@ -41,7 +46,7 @@ function capturePglite(pglite: Pglite, live: LiveDatabase): void {
         const query = tx.query.bind(tx)
         let rolledBack = false
         control('BEGIN')
-        captureExecutor(tx, pglite, live, () => false, transaction)
+        captureExecutor(tx, pglite, live, () => false, transaction, turns)
         const rollback = tx.rollback.bind(tx)
         tx.rollback = async () => {
           await rollback()
@@ -83,13 +88,15 @@ function startingStatements(pglite: Pglite): () => boolean {
 
 /** Returns how to load what capturing needs, through `executor`'s own `query()`. `isStarting`: the statement is one
  *  PGlite runs while it starts, sent as it is (ours wait for it to have started). `transaction`: PGlite's own, which
- *  holds the database while a statement and ours run in a transaction of ours. */
+ *  holds the database while a statement and ours run in a transaction of ours. `turns`: a call through `executor`
+ *  starts once the one before it ended. */
 function captureExecutor(
   executor: Executor,
   connection: Pglite,
   live: LiveDatabase,
   isStarting: () => boolean,
   transaction: TransactionOf,
+  turns: Turns,
 ): () => Promise<void> {
   const query = executor.query.bind(executor)
   const exec = executor.exec.bind(executor)
@@ -105,8 +112,11 @@ function captureExecutor(
       (result) => done(result.rows as (string | null)[][]),
       () => done(undefined),
     )
-  executor.query = async (text, params = [], options) => {
+  executor.query = (text, params = [], options) => {
     if (isStarting()) return query(text, params, options)
+    return turns.take(executor, () => runQuery(text, params, options))
+  }
+  async function runQuery(text: string, params: unknown[], options: QueryOptions | undefined): Promise<Results> {
     await ready()
     // Other options (parsers, serializers) make rows only this caller can be given.
     const rowForm =
@@ -131,8 +141,11 @@ function captureExecutor(
     sent.answered(result, (r) => ({ ...r, rows: copyRows(r.rows) }))
     return result
   }
-  executor.exec = async (text, options) => {
+  executor.exec = (text, options) => {
     if (isStarting()) return exec(text, options)
+    return turns.take(executor, () => runExec(text, options))
+  }
+  async function runExec(text: string, options: unknown): Promise<Results[]> {
     await ready()
     // Several statements, possibly: run as written, and count every write as a change to its whole table.
     const statement = live.statementFor(connection, text, [], { rewrite: false })

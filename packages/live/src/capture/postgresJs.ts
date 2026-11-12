@@ -6,6 +6,7 @@ import { copyRows } from '../sharedReads.js'
 import { sendWithBeforeCommit } from './beforeCommit.js'
 import { takeHiddenFields, takeHiddenValues } from './hiddenColumns.js'
 import { HIDDEN_PREFIX } from './statement.js'
+import { Turns } from './turns.js'
 
 // The parts of postgres.js used here, so that `postgres` stays the app's dependency.
 type PostgresJs = {
@@ -105,13 +106,15 @@ function captureQueries(query: Query): WeakMap<object, Target> {
   const known = (query as unknown as Record<symbol, WeakMap<object, Target>>)[TARGETS]
   if (known) return known
   const targets = new WeakMap<object, Target>()
+  const turns = new Turns()
   const handle = query.handle
   query.handle = function (this: Query) {
     const target = targets.get(this.handler)
     // `sql.begin()`'s `BEGIN` goes through `sql`, before its transaction has a connection: the transaction records it.
     if (!target || this.executed || OURS in this || this.options.onexecute) return handle.call(this)
     this.executed = true
-    return run(this, target)
+    const { connection } = target
+    return connection ? turns.take(connection, () => run(this, target)) : run(this, target)
   }
   Object.defineProperty(query, TARGETS, { value: targets })
   return targets
