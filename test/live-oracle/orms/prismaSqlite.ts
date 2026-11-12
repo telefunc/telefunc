@@ -134,6 +134,20 @@ function createPrismaSqlite(path: string): OrmDriver {
             .sql`insert into tags (todo_id, name) select id, 'copied' from todos where user_id = ${user} order by id limit 1`,
         ),
       deleteUser: ({ user }) => User.where({ id: user }).deleteAll(),
+      // A todo with an id neither sequence reaches, so no user has it, and a tag on it; a new user owns it, as a racing
+      // delete may have left none. `insertTaggedUser` then inserts a user with that id.
+      insertOrphanTag: ({ text }) =>
+        db.transaction(async (tx: any) => {
+          const owner = await tx.orm.User.create({ name: text, team: 1 })
+          await tx.orm.Todo.create({ id: 1000000, userId: owner.id, text, updatedAt: '2026-11-12T00:00:00.000Z' })
+          await tx.orm.Tag.create({ todoId: 1000000, name: text })
+        }),
+      // A user with the id some tags' `todo_id` holds: it joins rows of `usersByTagTodo` as it's inserted.
+      insertTaggedUser: ({ text }) =>
+        raw(
+          db.raw
+            .sql`insert into users (id, name, team) select g.todo_id, ${text}, 1 from tags g where not exists (select 1 from users u where u.id = g.todo_id) order by g.todo_id desc limit 1`,
+        ),
       insertUser: ({ text, value }) =>
         User.create({ name: text, team: (value % 3) + 1, nick: NICKS[value % NICKS.length] }),
       txCommit: ({ todo, user, text }) =>

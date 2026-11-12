@@ -236,6 +236,23 @@ function createKyselySqlite(client: BetterSqlite3.Database): OrmDriver {
           .where('users.id', '=', user)
           .execute(),
       deleteUser: ({ user }) => db.deleteFrom('users').where('id', '=', user).execute(),
+      // A todo with an id neither sequence reaches, so no user has it, and a tag on it; a new user owns it, as a racing
+      // delete may have left none. `insertTaggedUser` then inserts a user with that id.
+      insertOrphanTag: ({ text }) =>
+        db.transaction().execute(async (tx) => {
+          const { id } = await tx
+            .insertInto('users')
+            .values({ name: text, team: 1 })
+            .returning('id')
+            .executeTakeFirstOrThrow()
+          await tx.insertInto('todos').values({ id: 1000000, user_id: id, text }).execute()
+          await tx.insertInto('tags').values({ todo_id: 1000000, name: text }).execute()
+        }),
+      // A user with the id some tags' `todo_id` holds: it joins rows of `usersByTagTodo` as it's inserted.
+      insertTaggedUser: ({ text }) =>
+        sql`insert into users (id, name, team) select g.todo_id, ${text}, 1 from tags g where not exists (select 1 from users u where u.id = g.todo_id) order by g.todo_id desc limit 1`.execute(
+          db,
+        ),
       insertUser: ({ text, value }) =>
         db
           .insertInto('users')
