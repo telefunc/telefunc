@@ -25,12 +25,13 @@ type RedisBroadcastOptions = {
   prefix?: string
 }
 
-// Wire frame: [u32 BE seq][u32 BE ts_hi][u32 BE ts_lo][payload bytes]. `ts` split into two
-// u32s to keep ms-Unix accurate beyond ~50 days. `INCR` + `PUBLISH` happen in one Lua call;
-// `TIME` from the single Redis clock orders concurrent publishers across instances.
+// Wire frame: [u32 BE seq_hi][u32 BE seq_lo][u32 BE ts_hi][u32 BE ts_lo][payload bytes]. `seq` and `ts` each split
+// into two u32s, so the seq doesn't wrap past 2^32 publishes on a key and ms-Unix stays accurate beyond ~50 days.
+// `INCR` + `PUBLISH` happen in one Lua call; `TIME` from the single Redis clock orders concurrent publishers across
+// instances.
 
 const DEFAULT_PREFIX = 'tf:'
-const HEADER_BYTES = 12
+const HEADER_BYTES = 16
 const U32_RANGE = 0x1_0000_0000
 
 /** KEYS[1]=seq counter, KEYS[2]=broadcast channel, ARGV[1]=payload bytes; returns [seq,ts]. */
@@ -38,9 +39,11 @@ const PUBLISH_LUA = `
 local seq = redis.call('INCR', KEYS[1])
 local t = redis.call('TIME')
 local ts = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local seq_hi = math.floor(seq / 4294967296)
+local seq_lo = seq - seq_hi * 4294967296
 local ts_hi = math.floor(ts / 4294967296)
 local ts_lo = ts - ts_hi * 4294967296
-local header = struct.pack('>I4I4I4', seq, ts_hi, ts_lo)
+local header = struct.pack('>I4I4I4I4', seq_hi, seq_lo, ts_hi, ts_lo)
 redis.call('PUBLISH', KEYS[2], header .. ARGV[1])
 return {seq, ts}
 `.trim()
@@ -53,31 +56,40 @@ class RedisTransport implements BroadcastTransport {
   private readonly prefix: string
   private readonly textCallbacks = new Map<string, TextOnMessage>()
   private readonly binaryCallbacks = new Map<string, BinaryOnMessage>()
+  /** Each listener's SUBSCRIBE until Redis acknowledges it, in the order they were sent. */
+  private readonly subscribing = new Map<string, { ack: Promise<unknown>; order: number }>()
+  private subscribesSent = 0
+  /** A failed SUBSCRIBE fails publishes while its listener remains registered. */
+  private readonly failedSubscribes = new Map<string, unknown>()
+  /** Publishes waiting for the SUBSCRIBEs sent before them, oldest first. */
+  private readonly waiters: { upTo: number; resolve: () => void; reject: (err: unknown) => void }[] = []
+  /** Publishes waiting or about to resume, so a later one keeps its place behind them. */
+  private waiting = 0
 
   constructor(options: RedisBroadcastOptions) {
     this.publisher = options.redis
     this.subscriber = options.redis.duplicate()
     this.prefix = options.prefix ?? DEFAULT_PREFIX
     this.publisher.defineCommand(PUBLISH_CMD, { numberOfKeys: 2, lua: PUBLISH_LUA })
-    this.subscriber.on('messageBuffer', this._onMessage)
+    this.subscriber.on('messageBuffer', this.onMessage)
   }
 
   async send(key: string, payload: string): Promise<{ seq: number; timestamp: number }> {
-    return this._publish(this.channelKey(key, 't'), this.seqKey(key), textEncoder.encode(payload))
+    return this.publish(this.channelKey(key, 't'), this.seqKey(key), textEncoder.encode(payload))
   }
 
   async sendBinary(key: string, payload: Uint8Array): Promise<{ seq: number; timestamp: number }> {
-    return this._publish(this.channelKey(key, 'b'), this.seqKey(key), payload)
+    return this.publish(this.channelKey(key, 'b'), this.seqKey(key), payload)
   }
 
   listen(key: string, onMessage: TextOnMessage): () => void {
     const channel = this.channelKey(key, 't')
     assert(!this.textCallbacks.has(channel), `Duplicate text listener for key "${key}"`)
     this.textCallbacks.set(channel, onMessage)
-    void this.subscriber.subscribe(channel)
+    this.subscribe(channel)
     return () => {
       this.textCallbacks.delete(channel)
-      void this.subscriber.unsubscribe(channel)
+      this.unsubscribe(channel)
     }
   }
 
@@ -85,18 +97,58 @@ class RedisTransport implements BroadcastTransport {
     const channel = this.channelKey(key, 'b')
     assert(!this.binaryCallbacks.has(channel), `Duplicate binary listener for key "${key}"`)
     this.binaryCallbacks.set(channel, onMessage)
-    void this.subscriber.subscribe(channel)
+    this.subscribe(channel)
     return () => {
       this.binaryCallbacks.delete(channel)
-      void this.subscriber.unsubscribe(channel)
+      this.unsubscribe(channel)
     }
   }
 
-  private readonly _onMessage = (channelBytes: Uint8Array, frame: Uint8Array): void => {
+  private subscribe(channel: string): void {
+    const ack = this.subscriber.subscribe(channel)
+    this.subscribing.set(channel, { ack, order: ++this.subscribesSent })
+    void this.settleSubscribe(channel, ack)
+  }
+
+  private async settleSubscribe(channel: string, ack: Promise<unknown>): Promise<void> {
+    let failure: { err: unknown } | null = null
+    try {
+      await ack
+    } catch (err) {
+      failure = { err }
+    }
+    const subscription = this.subscribing.get(channel)
+    // Its listener was removed meanwhile, or removed and added again with a SUBSCRIBE of its own.
+    if (subscription?.ack !== ack) return
+    this.subscribing.delete(channel)
+    if (failure) {
+      this.failedSubscribes.set(channel, failure.err)
+      // The publishes sent after it waited for it: they fail with it.
+      while (this.waiters.length > 0 && this.waiters.at(-1)!.upTo >= subscription.order) {
+        this.waiters.pop()!.reject(failure.err)
+      }
+    }
+    this.releaseWaiters()
+  }
+
+  private unsubscribe(channel: string): void {
+    this.subscribing.delete(channel)
+    this.failedSubscribes.delete(channel)
+    this.releaseWaiters()
+    void this.subscriber.unsubscribe(channel).catch(() => {})
+  }
+
+  /** Lets each publish go, in order, once every SUBSCRIBE sent before it is acknowledged. */
+  private releaseWaiters(): void {
+    const oldest = this.subscribing.values().next().value?.order ?? Number.POSITIVE_INFINITY
+    while (this.waiters.length > 0 && this.waiters[0]!.upTo < oldest) this.waiters.shift()!.resolve()
+  }
+
+  private readonly onMessage = (channelBytes: Uint8Array, frame: Uint8Array): void => {
     assert(frame.byteLength >= HEADER_BYTES, 'Malformed publish frame: header too short')
     const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
-    const seq = view.getUint32(0, false)
-    const timestamp = view.getUint32(4, false) * U32_RANGE + view.getUint32(8, false)
+    const seq = view.getUint32(0, false) * U32_RANGE + view.getUint32(4, false)
+    const timestamp = view.getUint32(8, false) * U32_RANGE + view.getUint32(12, false)
     const payload = frame.subarray(HEADER_BYTES)
     const channel = utf8.decode(channelBytes)
     const text = this.textCallbacks.get(channel)
@@ -110,16 +162,29 @@ class RedisTransport implements BroadcastTransport {
 
   // ── Publish (private) ─────────────────────────────────────────────────
 
-  private async _publish(
+  private async publish(
     channelKey: string,
     seqKey: string,
     payload: Uint8Array,
   ): Promise<{ seq: number; timestamp: number }> {
     // ioredis 5.x checks `arg instanceof Buffer` to pick its binary path; a raw
     // `Uint8Array` falls into `String(arg)` and gets serialised as a comma-joined
-    // string of byte values, corrupting the bytes. `Buffer.from(buf, off, len)`
-    // constructs a zero-copy Buffer view over the same ArrayBuffer.
-    const buf = Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength)
+    // string of byte values, corrupting the bytes. A copy, as ioredis may hold the
+    // command past the call (connecting, auto-pipelining, a NOSCRIPT retry).
+    const buf = Buffer.from(payload)
+    if (this.failedSubscribes.size > 0) throw this.failedSubscribes.values().next().value
+    // Publishes keep their order: one waits while an earlier one does.
+    if (this.subscribing.size > 0 || this.waiting > 0) {
+      this.waiting++
+      try {
+        await new Promise<void>((resolve, reject) => {
+          this.waiters.push({ upTo: this.subscribesSent, resolve, reject })
+          this.releaseWaiters()
+        })
+      } finally {
+        this.waiting--
+      }
+    }
     const reply = await callDefinedCommand(this.publisher, PUBLISH_CMD, [seqKey, channelKey, buf])
     assert(Array.isArray(reply) && reply.length === 2, 'Publish script returned an unexpected shape')
     const [seq, timestamp] = reply

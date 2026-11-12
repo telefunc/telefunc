@@ -11,29 +11,37 @@ import { ConfigWhereServer, TelefuncStreamBeta } from '../../components'
 import { config } from 'telefunc'
 
 config.channel = {
-  reconnectTimeout: 60_000,             // Hold channels open after disconnect (ms)
-  idleTimeout: 60_000,                  // Keep connection alive after last channel closes (ms)
-  pingInterval: 5_000,                  // Client ping interval (ms)
-  connectTtl: 5_000,                    // Wait for client to connect to new channel (ms)
+  reconnectTimeout: 60_000,               // Hold channels open after disconnect (ms)
+  idleTimeout: 60_000,                    // Keep connection alive after last channel closes (ms)
+  pingInterval: 5_000,                    // Client ping interval (ms)
+  connectTtl: 15_000,                     // Wait for client to connect to new channel (ms)
+
+  maxPendingBytes: 268_435_456,           // Sends ahead of the client and unanswered acknowledgements (bytes)
+  maxPendingAcks: 16_384,                 // Unanswered acknowledgement requests (count)
 
   // Text buffers
-  serverReplayBuffer: 262_144,          // Server replay buffer for text frames (bytes)
-  clientReplayBuffer: 1_048_576,        // Client replay buffer for text frames (bytes)
-  bufferLimit: 524_288,                 // Per-peer buffer for text messages (bytes)
+  serverReplayBuffer: 335_544_320,        // Server replay buffer for text messages (bytes)
+  clientReplayBuffer: 134_217_728,        // Client replay buffer for text messages (bytes)
+  bufferLimit: 524_288,                   // Per-peer buffer for text messages (bytes)
 
   // Binary buffers — separate budget so binary can never evict text
-  serverReplayBufferBinary: 2_097_152,  // Server replay buffer for binary frames (bytes)
-  clientReplayBufferBinary: 2_097_152,  // Client replay buffer for binary frames (bytes)
-  bufferLimitBinary: 2_097_152,         // Per-peer buffer for binary messages (bytes)
+  serverReplayBufferBinary: 335_544_320,  // Server replay buffer for binary messages (bytes)
+  clientReplayBufferBinary: 134_217_728,  // Client replay buffer for binary messages (bytes)
+  bufferLimitBinary: 2_097_152,           // Per-peer buffer for binary messages (bytes)
 }
 ```
+
+> `maxPendingBytes` covers text and binary sends beyond what the client is ready to take, plus unanswered acknowledgement requests. Both limits apply per channel.
 
 > This is the **server-side** `config.channel` — a separate object from the **client-side** <Link href="/transport"><code>config.channel.transports</code></Link> (`telefunc/client`).
 
 > **What to tune**: the defaults suit typical stream use cases; tune these only if you run into one of the issues below:
 > - Slow/flaky clients dropping with `NetworkError` (`isChannel: true`) → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
-> - `ChannelOverflowError` while a peer is briefly offline → raise `bufferLimit`/`bufferLimitBinary`, or apply backpressure by `await`-ing your `send()`s.
-> - Want reconnects to replay more history → raise the replay buffers; lower them to cap memory.
+> - `ChannelOverflowError` while a client is briefly offline → raise `bufferLimit`/`bufferLimitBinary` above your largest message and `await` your sends.
+> - `ChannelOverflowError` while the client is connected → `await` the server's sends or raise `maxPendingBytes`/`maxPendingAcks`, then recreate the channel.
+> - A warning that a channel's sends outrun its client → `await` your `send()`s, or send slower (see <Link href="/channel#backpressure" />); otherwise the channel closes with that `ChannelOverflowError`.
+> - `NetworkError` (`isChannel: true`) right after a reconnect, having missed more messages than the replay buffer holds → `await` your `send()`s, or raise the replay buffer that the error message names.
+> - Too much server memory per channel → `await` your `send()`s and lower the replay buffers. Smaller replay buffers can slow sends to distant clients.
 
 <ConfigWhereServer />
 
