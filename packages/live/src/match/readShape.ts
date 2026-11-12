@@ -512,11 +512,18 @@ function equalityEdges(conjunct: Node, scope: Scope): Edge[] {
   if (!expr.lexpr.ColumnRef || !expr.rexpr.ColumnRef) return []
   const left = resolveColumn(expr.lexpr, scope)
   const right = resolveColumn(expr.rexpr, scope)
-  if (!left || !right || left.alias === right.alias) return []
+  if (!left || !right || left.alias === right.alias || !compareAlike(left.column, right.column)) return []
   return [
     { alias: left.alias, column: left.column, other: right.alias, otherColumn: right.column },
     { alias: right.alias, column: right.column, other: left.alias, otherColumn: left.column },
   ]
+}
+
+/** Whether `a = b` compares the values as each column compares its own: then a value of one is a value of the other
+ *  (`numeric` and `float8` compare as `float8`; SQLite compares with the left column's collation). */
+function compareAlike(a: Column, b: Column): boolean {
+  const sameBase = a.base[0] === b.base[0] && a.base[1] === b.base[1]
+  return sameBase && a.fold === b.fold && a.deterministic === b.deterministic
 }
 
 function usingEquality(column: string, left: Alias[], right: Alias[]): Node | undefined {
