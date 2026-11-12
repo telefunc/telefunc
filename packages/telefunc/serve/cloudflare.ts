@@ -106,6 +106,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     async fetch(request: Request) {
+      await loadServerProductionEntry()
       broadcast.attachRequest(request, this.instanceName)
       const target = readForwardedTarget(request)
       if (target) broadcast.attachIsolateInfo(target.sessionInstanceName, target.locationBucket)

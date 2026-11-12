@@ -80,7 +80,8 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
     if (registeredServers.has(httpServer)) return
     registeredServers.add(httpServer)
 
-    httpServer.on('upgrade', (req, socket, head) => {
+    httpServer.on('upgrade', async (req, socket, head) => {
+      await loadServerProductionEntry()
       const config = getServerConfig()
       if (getRequestPathname(req.url ?? '') !== config.telefuncUrl) return
       if (!config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) {
