@@ -235,6 +235,8 @@ type ConfigResolved = {
 
 const globalObject = getGlobalObject('serverConfig.ts', {
   config: { stream: {}, channel: {}, broadcast: {}, extensions: [] } as ConfigUser,
+  /** The Vite plugin's settings, from the production manifest: kept so they fill again what a later assignment of the app's server code leaves unset. */
+  manifestConfig: {} as Record<string, unknown>,
   /** Transports a server adapter enables: kept apart from the user's config, which a later assignment replaces. */
   adapterChannelTransports: new Set<ChannelTransports[number]>(),
   /** The largest frame the adapter's runtime takes, where that is less than the server reads. */
@@ -309,6 +311,7 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
   },
   set(_target, prop, val) {
     applyUserConfig(prop, val)
+    fillFromManifest()
     return true
   },
 })
@@ -385,9 +388,14 @@ function getManifestConfig(): Record<string, unknown> {
   return manifestConfig
 }
 
-/** The app's server code wins: the manifest fills only the settings it left unset, whichever of the two runs first. */
+/** The app's server code wins: the manifest fills only the settings it leaves unset, whichever of the two runs first. */
 function applyManifestConfig(manifestConfig: Record<string, unknown>): void {
-  for (const [prop, val] of Object.entries(manifestConfig)) {
+  globalObject.manifestConfig = manifestConfig
+  fillFromManifest()
+}
+
+function fillFromManifest(): void {
+  for (const [prop, val] of Object.entries(globalObject.manifestConfig)) {
     applyUserConfig(prop, fillUnset(configState[prop as keyof ConfigUser], val))
   }
 }
