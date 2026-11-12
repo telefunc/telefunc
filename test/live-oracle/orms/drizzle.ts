@@ -255,6 +255,12 @@ function createDrizzle(
       }),
       labelled: () =>
         db.select({ id: todos.id }).from(todos).where(sql`label_of(${todos.text}) like 'A%'`).orderBy(todos.id),
+      tagCounts: ({ user }) =>
+        db
+          .select({ id: todos.id, n: sql<number>`tag_count(${todos.id})` })
+          .from(todos)
+          .where(eq(todos.userId, user))
+          .orderBy(todos.id),
       measuresAtFloat: () =>
         db.execute(sql`select id from measures where value = ${String(2 ** 53)}::float8 order by id`).then(rowsOf),
       measuresOffFloat: () =>

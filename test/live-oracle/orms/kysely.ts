@@ -223,6 +223,13 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastT
       ticket: async () => (await sql`select nextval('tickets') as n`.execute(db)).rows,
       labelled: () =>
         db.selectFrom('todos').select('id').where(sql<boolean>`label_of(text) like 'A%'`).orderBy('id').execute(),
+      tagCounts: ({ user }) =>
+        db
+          .selectFrom('todos')
+          .select(['id', sql<number>`tag_count(id)`.as('n')])
+          .where('user_id', '=', user)
+          .orderBy('id')
+          .execute(),
       measuresAtFloat: async () =>
         (await sql`select id from measures where value = ${String(2 ** 53)}::float8 order by id`.execute(db)).rows,
       measuresOffFloat: async () =>

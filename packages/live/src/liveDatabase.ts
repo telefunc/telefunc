@@ -686,11 +686,13 @@ class LiveDatabase {
     this.access = new Map()
   }
 
-  /** Listens to the other servers' changes to the tables `shape` reads (`ChangeFeed.watch()`). */
+  /** Listens to the other servers' changes to the tables `shape` reads (`ChangeFeed.watch()`): a row's change goes to
+   *  its table only, a change to any row of any table to `*`. */
   private watchTables(shape: ReadShape): Promise<void> | undefined {
-    const tables = ['*', ...shape.aliases.map((alias) => alias.table.id)]
-    if (shape.alsoReads !== 'all') tables.push(...shape.alsoReads)
-    return this.feed!.watch(tables)
+    const { aliases, alsoReads } = shape
+    const tables =
+      alsoReads === 'all' ? this.catalog!.tables.keys() : [...aliases.map((alias) => alias.table.id), ...alsoReads]
+    return this.feed!.watch(['*', ...tables])
   }
 }
 
