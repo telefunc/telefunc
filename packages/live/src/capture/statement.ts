@@ -81,8 +81,9 @@ type Plan =
   /** `SET LOCAL` is one too, until its transaction ends. `changesPath`: it sets the `search_path`. */
   | { kind: 'none'; role?: RoleChange; changesPath?: boolean }
   | { kind: 'several'; plans: Plan[] }
-  /** A write whose rows its connection's change log holds (SQLite); `also`: the tables it may change besides. */
-  | { kind: 'logged'; also: ChangedTables }
+  /** A write whose rows its connection's change log holds (SQLite): those of `tables`; `also`: the tables it may
+   *  change besides. */
+  | { kind: 'logged'; tables: ChangedTables; also: ChangedTables }
 
 const HIDDEN_PREFIX = '__live_'
 

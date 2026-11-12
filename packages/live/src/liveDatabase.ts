@@ -43,8 +43,7 @@ type Statement = {
   succeeded(hiddenRows: (string | null)[][], command?: string): FollowUp[]
   failed(): FollowUp[]
   /** A query of ours to send right before `text`, in the same transaction with nothing between: its rows go to `done`
-   *  before `succeeded`. A write's rows before it: a driver that doesn't send it makes the write count less precisely.
-   *  Or a change log emptied: its drivers send it. */
+   *  before `succeeded` (a write's rows before it). A driver that doesn't send it makes the write count less precisely. */
   readsFirst?: FollowUp
   /** A write that runs as a role its connection doesn't know yet: run this query of ours on the connection first,
    *  then plan the statement again, which may then capture its rows. A driver that doesn't sends it as is. */
@@ -82,13 +81,15 @@ type Engine = {
   /** The same, on a driver that answers at once. */
   loadCatalogSync?(query: (text: string) => string): Catalog
   /** Each connection logs the rows its statements change (SQLite), once `setup` ran on it for the loaded catalog:
-   *  `triggers` answers what a previous `setup` left there, `read` gives the changes in the log, `empty` empties it. */
+   *  `triggers` answers what a previous `setup` left there, `count` the connection's count of changes, which keys the
+   *  log's rows, `read` the rows after a count, whose changes `changesOf` tells (`undefined` when the log may no longer
+   *  hold some of them). */
   changeLog?: {
     triggers: string
     setup(catalog: Catalog, ours: string[]): string[]
+    count: string
     read: string
-    empty: string
-    changesOf(rows: Rows, catalog: Catalog): Change[]
+    changesOf(rows: Rows, after: number, catalog: Catalog): Change[] | undefined
   }
   plan(text: string, catalog: Catalog): Plan
   /** The statements of text that may hold several, each its own text; `undefined` when the parser can't read it. */
@@ -118,8 +119,8 @@ class LiveDatabase {
   private readonly engine: Engine
   private catalog: Catalog | undefined
   private loadingCatalog: Promise<Catalog> | undefined
-  /** Connections whose change log follows the loaded catalog (`Engine.changeLog`). */
-  private loggingConnections = new WeakSet<object>()
+  /** Connections whose change log follows the loaded catalog (`Engine.changeLog`): the count its rows were read up to. */
+  private loggedUpTo = new WeakMap<object, number>()
   private plans = new Map<string, Plan>()
   private readonly router = new Router()
   private readonly transactions = new Transactions((changes) => this.announce(changes))
@@ -167,8 +168,8 @@ class LiveDatabase {
   readySync(connection: object, query: (text: string) => string): string[] {
     if (!this.catalog) this.loaded(this.engine.loadCatalogSync!(query))
     const log = this.engine.changeLog
-    if (!log || this.loggingConnections.has(connection)) return []
-    this.loggingConnections.add(connection)
+    if (!log || this.loggedUpTo.has(connection)) return []
+    this.loggedUpTo.set(connection, Number(query(log.count)))
     return log.setup(this.catalog!, JSON.parse(query(log.triggers)))
   }
 
@@ -298,28 +299,28 @@ class LiveDatabase {
     return { ...statement, asks }
   }
 
-  /** On a connection with a change log (SQLite): a write empties the log right before it, so that `changes()` still
-   *  tells the app's last write once it ran, and reads the rows it changed from it after, whether it succeeded or
-   *  failed. A transaction or savepoint empties it as it begins: rolling one back brings back the rows emptied in it. */
+  /** On a connection with a change log (SQLite): a write reads the rows logged since the last ones read, once it ran,
+   *  whether it succeeded or failed. Not read, the write changed what it may have changed. */
   private withChangeLog(connection: object, statement: Statement, plan: Plan): Statement {
     const log = this.engine.changeLog
-    const writes = plan.kind === 'logged' || plan.kind === 'unknownWrite' || plan.kind === 'several'
-    const begins = plan.kind === 'transaction' && (plan.action === 'begin' || plan.action === 'savepoint')
-    if (!log || !(writes || begins)) return statement
-    const empty: FollowUp = { text: log.empty, values: [], done: () => {} }
-    if (!writes) return { ...statement, readsFirst: empty }
+    if (!log || !(plan.kind === 'logged' || plan.kind === 'unknownWrite' || plan.kind === 'several')) return statement
     const catalog = this.catalog!
-    const read: FollowUp = {
-      text: log.read,
-      values: [],
-      // Not read, the changes it may hold are unknown.
-      done: (rows) => this.transactions.record(connection, rows ? log.changesOf(rows, catalog) : unknownChanges('all')),
+    const read = (): FollowUp => {
+      const after = this.loggedUpTo.get(connection) ?? 0
+      return {
+        text: log.read,
+        values: [after],
+        done: (rows) => {
+          this.transactions.record(connection, (rows && log.changesOf(rows, after, catalog)) ?? unloggedChanges(plan))
+          // Unless the write changed the schema: the log is set up again, from the count then.
+          if (rows?.length && this.loggedUpTo.has(connection)) this.loggedUpTo.set(connection, Number(rows.at(-1)![5]))
+        },
+      }
     }
     return {
       ...statement,
-      readsFirst: empty,
-      succeeded: (rows, command) => [...statement.succeeded(rows, command), read],
-      failed: () => [...statement.failed(), read],
+      succeeded: (rows, command) => [...statement.succeeded(rows, command), read()],
+      failed: () => [...statement.failed(), read()],
     }
   }
 
@@ -724,7 +725,7 @@ class LiveDatabase {
 
   private forgetSchema(): void {
     this.catalog = undefined
-    this.loggingConnections = new WeakSet()
+    this.loggedUpTo = new WeakMap()
     this.plans = new Map()
     this.knownOperands = new Map()
     // The tables may be others: each role's access is learned again.
@@ -772,6 +773,12 @@ function isUnnamed(plan: Plan): boolean {
 }
 
 /** Changes to any row of each of `tables`: of the tables the transaction locked, once known, for `'unnamed'`. */
+/** The changes of a write whose rows in the change log weren't read: any row of the tables it may change. */
+function unloggedChanges(plan: Plan): Change[] {
+  if (plan.kind === 'several') return plan.plans.flatMap(unloggedChanges)
+  return plan.kind === 'logged' || plan.kind === 'unknownWrite' ? unknownChanges(plan.tables) : []
+}
+
 function unknownChanges(tables: ChangedTables): Change[] {
   if (tables === 'unnamed') return [UNNAMED_TABLES]
   if (tables === 'all') return [{ table: '*', kind: 'unknown' }]

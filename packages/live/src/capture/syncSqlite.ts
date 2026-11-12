@@ -63,9 +63,7 @@ function captureSyncSqlite(driver: SyncSqlite, live: LiveDatabase) {
   }
   /** A transaction statement of ours, for one the driver runs without a statement of the app's: told as it runs. */
   const control = (text: string) => {
-    const statement = live.statementFor(db, text, [])
-    if (statement.readsFirst) runFollowUp(statement.readsFirst)
-    statement.succeeded([])
+    live.statementFor(db, text, []).succeeded([])
   }
   /** The app's statement method `name`, which returns rows as `rowsKind()` says when called. */
   const method =
