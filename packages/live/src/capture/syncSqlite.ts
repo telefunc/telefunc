@@ -50,13 +50,16 @@ function captureSyncSqlite(driver: SyncSqlite, live: LiveDatabase) {
       result = send()
     } catch (err) {
       statement.failed()
+      live.transactionIs(db, driver.inTransaction(), 'rollback')
       throw err
     }
-    for (const followUp of statement.succeeded(hiddenRows(result))) runFollowUp(followUp)
+    const followUps = statement.succeeded(hiddenRows(result))
+    live.transactionIs(db, driver.inTransaction(), 'commit')
+    for (const followUp of followUps) runFollowUp(followUp)
     return result
   }
-  /** A transaction statement of ours, for one the driver runs without a statement of the app's. */
-  const control = (text: string) => run(live.statementFor(db, text, []), () => undefined)
+  /** A transaction statement of ours, for one the driver runs without a statement of the app's: told as it runs. */
+  const control = (text: string) => void live.statementFor(db, text, []).succeeded([])
   /** The app's statement method `name`, which returns rows as `rowsKind()` says when called. */
   const method =
     (statement: SyncStatement, native: (...params: unknown[]) => unknown, name: string, rowsKind: () => RowsKind) =>

@@ -235,6 +235,15 @@ class LiveDatabase {
     }
   }
 
+  /** After each statement on `connection`, for a driver that tells whether the connection is in a transaction
+   *  (`open`): SQLite rolls one back by itself when some statements fail (`INSERT OR ROLLBACK`, a full disk), and a
+   *  statement the parser can't read may begin or end one. `ended`: how it ended, if it did. */
+  transactionIs(connection: object, open: boolean, ended: 'commit' | 'rollback'): void {
+    if (open === this.transactions.isOpen(connection)) return
+    if (open) this.transactions.apply(connection, 'begin')
+    else this.transactionEnded(connection, ended, false)
+  }
+
   /** `live`: the `.live()` query the statement runs in. */
   private planned(
     connection: object,
