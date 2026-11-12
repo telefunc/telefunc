@@ -1,6 +1,6 @@
-export { sendWithBeforeCommit, runInOrder }
+export { sendWithBeforeCommit, runInOrder, inOneTransaction }
 
-import type { FollowUp, Statement } from '../liveDatabase.js'
+import type { FollowUp, LiveDatabase, Statement } from '../liveDatabase.js'
 
 type Rows = (string | null)[][]
 
@@ -28,6 +28,29 @@ async function sendWithBeforeCommit<R>(
   }, sendOurs)
   await sendOurs('COMMIT')
   return result
+}
+
+/** Sends the statements of a text of several (`LiveDatabase.oneTransactionSteps()`) one by one through `send`, which
+ *  captures each as on its own: in a transaction of ours unless `connection` is in one, as Postgres runs the text in
+ *  one. Gives each statement's result; when one fails, rolls ours back and throws its error. */
+async function inOneTransaction<R>(
+  live: LiveDatabase,
+  connection: object,
+  steps: string[],
+  send: (text: string) => Promise<R>,
+): Promise<R[]> {
+  const own = !live.inTransaction(connection)
+  const results: R[] = []
+  try {
+    if (own) await send('BEGIN')
+    for (const step of steps) results.push(await send(step))
+    if (own) await send('COMMIT')
+  } catch (err) {
+    // A connection that broke ended the transaction already.
+    if (own) await send('ROLLBACK').catch(() => {})
+    throw err
+  }
+  return results
 }
 
 /** Runs `queries` one after the other through `sendOurs`; throws the first error. */

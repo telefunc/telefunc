@@ -343,6 +343,9 @@ importers:
       '@electric-sql/pglite':
         specifier: 0.5.16
         version: 0.5.16
+      '@electric-sql/pglite-socket':
+        specifier: 0.2.19
+        version: 0.2.19(@electric-sql/pglite-age@0.0.17(@electric-sql/pglite@0.5.16))(@electric-sql/pglite-pg_hashids@0.0.17(@electric-sql/pglite@0.5.16))(@electric-sql/pglite-pg_ivm@0.0.17(@electric-sql/pglite@0.5.16))(@electric-sql/pglite-pg_textsearch@0.0.18(@electric-sql/pglite@0.5.16))(@electric-sql/pglite-pg_uuidv7@0.0.17(@electric-sql/pglite@0.5.16))(@electric-sql/pglite-pgtap@0.0.17(@electric-sql/pglite@0.5.16))(@electric-sql/pglite-pgvector@0.0.17(@electric-sql/pglite@0.5.16))(@electric-sql/pglite@0.5.16)
       '@libsql/client':
         specifier: 0.18.0
         version: 0.18.0
@@ -370,6 +373,9 @@ importers:
       pg:
         specifier: ^8.23.1
         version: 8.23.1
+      postgres:
+        specifier: 3.4.7
+        version: 3.4.7
       telefunc:
         specifier: link:../telefunc
         version: link:../telefunc

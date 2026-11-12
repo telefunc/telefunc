@@ -3,7 +3,7 @@ export type { PostgresJs }
 
 import type { FollowUp, LiveDatabase, Statement } from '../liveDatabase.js'
 import { copyRows } from '../sharedReads.js'
-import { sendWithBeforeCommit } from './beforeCommit.js'
+import { inOneTransaction, sendWithBeforeCommit } from './beforeCommit.js'
 import { takeHiddenFields, takeHiddenValues } from './hiddenColumns.js'
 import { HIDDEN_PREFIX } from './statement.js'
 import { Turns } from './turns.js'
@@ -26,7 +26,7 @@ type PostgresJs = {
 }
 /** A scope `begin()` and `savepoint()` give their callback: statements on the transaction's connection. */
 type Scope = PostgresJs & { savepoint(...args: unknown[]): Promise<unknown> }
-type Result = unknown[] & { columns?: { name: string }[] | null; command?: string }
+type Result = unknown[] & { columns?: { name: string }[] | null; command?: string; count?: number | null }
 /** postgres.js runs a query when it is first awaited: `handle()` sends it through `handler`, its connection's queue. */
 type Query = Promise<Result> & {
   handler: (query: Query) => void
@@ -42,8 +42,9 @@ type Query = Promise<Result> & {
   forEachFn?: unknown
   onlyDescribe?: boolean
   streaming?: boolean
-  /** `onexecute`: set on the `BEGIN` of `sql.begin()`, which gives its transaction the connection it runs on. */
-  options: { onexecute?: unknown }
+  /** `onexecute`: set on the `BEGIN` of `sql.begin()`, which gives its transaction the connection it runs on.
+   *  `simple`: sent by the simple protocol, which takes several statements. */
+  options: { onexecute?: unknown; simple?: boolean }
   resolve(result: Result): void
   reject(err: Error): void
   handle(): Promise<void>
@@ -57,6 +58,8 @@ type Target = { live: LiveDatabase; sql: PostgresJs; connection: object | undefi
 
 const CAPTURED = Symbol.for('@telefunc/live/captured')
 const TARGETS = Symbol.for('@telefunc/live/postgresJsTargets')
+/** A statement of a text of several, run in its text's turn (`runSteps()`). */
+const STEP = Symbol('step')
 /** A query of ours: it runs as written. */
 const OURS = Symbol.for('@telefunc/live/ours')
 
@@ -129,7 +132,9 @@ function captureQueries(query: Query): WeakMap<object, Target> {
     if (!target || this.executed || OURS in this || this.options.onexecute) return handle.call(this)
     this.executed = true
     const { connection } = target
-    return connection ? turns.take(connection, (planned) => run(this, target, planned)) : run(this, target)
+    return connection && !(STEP in this)
+      ? turns.take(connection, (planned) => run(this, target, planned))
+      : run(this, target)
   }
   Object.defineProperty(query, TARGETS, { value: targets })
   return targets
@@ -149,6 +154,8 @@ async function run(
     return query.reject(err as Error)
   }
   const known = textOf(query)
+  const steps = known && query.options.simple && live.oneTransactionSteps(known.text)
+  if (steps) return runSteps(query, steps, { live, sql, connection, shared })
   const plan = (text: NonNullable<typeof known>) => {
     const statement = rewritten(query, text, live, connection)
     planned(statement)
@@ -227,6 +234,36 @@ function textOf(query: Query): { text: string; args: unknown[] } | undefined {
 function isFragment(value: unknown): boolean {
   const first = Array.isArray(value) ? value[0] : value
   return typeof first === 'object' && first !== null && 'then' in first && !('type' in first)
+}
+
+/** A text of several statements, run one by one (`inOneTransaction()`) on one connection: one reserved from the pool
+ *  when it's shared. */
+async function runSteps(query: Query, steps: string[], { live, sql, connection, shared }: Target): Promise<void> {
+  const on = shared ? await sql.reserve() : sql
+  try {
+    const results = await inOneTransaction(live, shared ? on : connection!, steps, (text) => {
+      const step = on.unsafe(text)
+      Object.defineProperty(step, STEP, { value: true })
+      return step
+    })
+    query.resolve(asOneText(results))
+  } catch (err) {
+    query.reject(err as Error)
+  } finally {
+    if (shared) (on as Awaited<ReturnType<PostgresJs['reserve']>>).release()
+  }
+}
+
+/** The results of a text's statements as postgres.js gives them: a new result for each statement with rows after
+ *  another; one without rows sets its command and count on the result before it. A captured write's result keeps an
+ *  empty list of columns once its hidden ones are taken. */
+function asOneText(results: Result[]): Result {
+  const merged = [results[0]!]
+  for (const result of results.slice(1)) {
+    if (result.columns?.length) merged.push(result)
+    else Object.assign(merged.at(-1)!, { command: result.command, count: result.count })
+  }
+  return (merged.length === 1 ? merged[0] : merged) as Result
 }
 
 function takeHidden(query: Query, result: Result, statement: Statement): (string | null)[][] {

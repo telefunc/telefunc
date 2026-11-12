@@ -210,6 +210,22 @@ class LiveDatabase {
     return writes ? this.engine.split?.(text) : undefined
   }
 
+  /** The statements of a text of several that writes rows, once `isReady()`, when one by one in a transaction they do
+   *  what the text does (Postgres runs it as one transaction): none begins or ends a transaction, or changes the
+   *  schema, which some statements can't do in one. */
+  oneTransactionSteps(text: string): string[] | undefined {
+    const plan = this.planOf(text, this.catalog!)
+    if (plan.kind !== 'several' || !plan.plans.some((p) => p.kind === 'write' || p.kind === 'unknownWrite'))
+      return undefined
+    const inOne = plan.plans.every((p) => readsOrWritesRows(p) || p.kind === 'session' || p.kind === 'none')
+    return inOne ? this.engine.split?.(text) : undefined
+  }
+
+  /** Whether `connection` is in a transaction, as its statements told. */
+  inTransaction(connection: object): boolean {
+    return this.transactions.isOpen(connection)
+  }
+
   /** Called before each statement, on the connection that runs it, once `isReady()`. Without `rewrite`, the text is
    *  sent as is: its writes count as changes to their whole tables, its reads can't be bounded by their result. With
    *  `sharing`, a live read may join an identical one running (`Statement.joined`). */

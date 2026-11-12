@@ -1,4 +1,13 @@
-export { loadParser, parseStatements, topLevelFrom, fromClauseAt, parenthesizedAt, statementEnd, spliceBytes }
+export {
+  loadParser,
+  parseStatements,
+  splitPostgres,
+  topLevelFrom,
+  fromClauseAt,
+  parenthesizedAt,
+  statementEnd,
+  spliceBytes,
+}
 export { renumberParams }
 
 import { wasm } from '#libpg-query-wasm'
@@ -90,6 +99,21 @@ function parenthesizedAt(text: string, location: number): string | undefined {
 function statementEnd(text: string): number {
   const tokens = scanSync(text).tokens.filter((t) => t.text !== ';' && !/COMMENT/.test(t.tokenName))
   return tokens.at(-1)!.end
+}
+
+/** The statements of `text`, each its own text; `undefined` when Postgres's parser rejects it. */
+function splitPostgres(text: string): string[] | undefined {
+  let statements
+  try {
+    statements = parseSync(text).stmts ?? []
+  } catch {
+    return undefined
+  }
+  const bytes = new TextEncoder().encode(text)
+  // A statement's length is 0 when it runs to the end of the text.
+  return statements.map(({ stmt_location: at = 0, stmt_len: length }) =>
+    new TextDecoder().decode(bytes.subarray(at, length ? at + length : undefined)).trim(),
+  )
 }
 
 function spliceBytes(text: string, at: number, insert: string): string {

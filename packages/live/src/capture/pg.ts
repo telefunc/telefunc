@@ -3,7 +3,7 @@ export type { PgPool, PgClient }
 
 import { AsyncResource } from 'node:async_hooks'
 import { MAX_RESULT_ROWS, type FollowUp, type LiveDatabase, type Reservation, type Statement } from '../liveDatabase.js'
-import { sendWithBeforeCommit } from './beforeCommit.js'
+import { inOneTransaction, sendWithBeforeCommit } from './beforeCommit.js'
 import { takeHiddenFields, takeHiddenValues } from './hiddenColumns.js'
 import { HIDDEN_PREFIX } from './statement.js'
 import { Turns } from './turns.js'
@@ -217,6 +217,15 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
     planned: (statement: Statement) => void,
   ): Promise<PgResult | PgResult[]> {
     await free()
+    // Its steps run on this client, in this turn: nothing the caller sends next comes between them.
+    const steps = !queryConfig.values?.length && live.oneTransactionSteps(queryConfig.text)
+    if (steps)
+      return inOneTransaction(
+        live,
+        client,
+        steps,
+        (text) => run({ ...queryConfig, text }, undefined, () => {}) as Promise<PgResult>,
+      )
     const plan = () => {
       const statement = live.statementFor(client, queryConfig.text, queryConfig.values ?? [], {
         sharing: isShareable(queryConfig) ? { rowForm: ROW_FORM, reservation } : undefined,

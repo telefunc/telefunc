@@ -26,6 +26,7 @@ let postgres: typeof import('./postgres/engine.js') | undefined
 const POSTGRES_ENGINE: Engine = {
   loadCatalog: async (query) => (postgres ??= await importPostgres()).loadCatalog(query),
   plan: (text, catalog) => postgres!.plan(text, catalog),
+  split: (text) => postgres!.split(text),
   session: {
     access: ACCESS_QUERY,
     role: ROLE_QUERY,

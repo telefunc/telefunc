@@ -115,6 +115,7 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.16",
+    "@electric-sql/pglite-socket": "0.2.19",
     "@libsql/client": "0.18.0",
     "@prisma/orm-postgres": "8.0.0-rc.23",
     "@prisma/orm-sqlite": "8.0.0-rc.23",
@@ -124,6 +125,7 @@
     "drizzle-orm": "0.45.4",
     "kysely": "0.29.8",
     "pg": "^8.23.1",
+    "postgres": "3.4.7",
     "telefunc": "workspace:*",
     "typescript": "^7.0.2"
   },
