@@ -275,11 +275,16 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   /** A lossy page's publishes that no wire has taken go, as a newer one takes their place. */
   private letWaitingGo(): void {
-    const replay = this._replayBuffer
-    if (this._phase === 'ended' || !replay) return
-    const dropped = replay.dropNewestPublishes(this.unhanded())
-    if (dropped > 0) this.peer?.sender.queue.dropWaitingPublishes(this.peer.index, dropped)
+    if (this._phase === 'ended' || !this._replayBuffer) return
+    const dropped = this.dropUnhanded()
     if (this.dropHeld() || dropped > 0) this.warnMissed()
+  }
+
+  /** Its publishes that no wire has taken go. Returns how many. */
+  private dropUnhanded(): number {
+    const dropped = this._replayBuffer?.dropNewestPublishes(this.unhanded()) ?? 0
+    if (dropped > 0) this.peer?.sender.queue.dropWaitingPublishes(this.peer.index, dropped)
+    return dropped
   }
 
   /** Where `holder` is a lossy page this publish reaches (its key, on its object), it lets go of what the publish
@@ -361,7 +366,11 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   protected override onPeerSubscription({ binary, subscribed }: { binary: boolean; subscribed: boolean }): void {
     if (binary) this.peerSubscribedBinary = subscribed
     else this.peerSubscribedText = subscribed
-    if (!subscribed) return this.unsubscribeUnusedBroadcasts()
+    if (!subscribed) {
+      // A page that reads none of its publishes any more would only drop those still waiting for its wire.
+      if (!this.peerSubscribedText && !this.peerSubscribedBinary && this._phase !== 'ended') this.dropUnhanded()
+      return this.unsubscribeUnusedBroadcasts()
+    }
     if (binary) this.subscribeBinaryBroadcast()
     else this.subscribeBroadcast()
   }
