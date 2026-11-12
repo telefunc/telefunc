@@ -2,15 +2,7 @@ export { LiveDatabase, MAX_RESULT_ROWS }
 export type { Statement, FollowUp, LiveOptions, Sharing, Reservation, Engine }
 
 import type { BroadcastTransport } from 'telefunc'
-import {
-  accessAnswered,
-  ACCESS_QUERY,
-  ROLE_QUERY,
-  tablesChangedBy,
-  type Access,
-  type Catalog,
-  type Table,
-} from './catalog.js'
+import { accessAnswered, tablesChangedBy, type Access, type Catalog, type Table } from './catalog.js'
 import { ChangeFeed } from './changeFeed.js'
 import { ofRows, READS_EVERYTHING, type ChangedTables, type Plan, type WritePlan } from './capture/statement.js'
 import { ConnectionRoles, roleChangeOf } from './capture/roles.js'
@@ -101,17 +93,17 @@ type Engine = {
   split?(text: string): string[] | undefined
   /** The database lives in this process alone (PGlite): no other process hears of its changes. */
   inProcess?: boolean
+  /** Queries about a connection's session (Postgres): `access` the role it runs as and what that role sees, `role` the
+   *  same unless the role is one of those whose access is known (a JSON array), and `locked` the tables its
+   *  transaction locked, once `immediate` fired its deferred triggers. Without them (SQLite), every connection runs as
+   *  the catalog's role, the catalog tells what it sees, and a change to tables the catalog can't name changes every
+   *  table. */
+  session?: { access: string; role: string; immediate: string; locked: string }
   /** A statement that fails inside a transaction makes it roll back (Postgres). On SQLite, the transaction goes on,
    *  and what the statement changed before failing may stay (`OR FAIL`, the statements before it in a text). */
   failureAbortsTransaction: boolean
 }
 
-/** The tables the transaction locked as a write does, or more strongly (`TRUNCATE`): an explicit `LOCK TABLE`, which
- *  writes nothing, lists its table too. */
-const LOCKED_TABLES = `select n.nspname || '.' || c.relname from pg_locks l
-  join pg_class c on c.oid = l.relation join pg_namespace n on n.oid = c.relnamespace
-  where l.locktype = 'relation' and l.pid = pg_backend_pid() and c.relkind in ('r', 'p', 'v', 'm', 'f')
-    and l.mode in ('RowExclusiveLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')`
 const MAX_PLANS = 10_000
 const MAX_KNOWN_OPERANDS = 10_000
 /** A read returning more rows keeps no result keys: any change to a matching row counts. */
@@ -295,7 +287,7 @@ class LiveDatabase {
         break
       case 'unknownWrite':
         if (plan.unread && live) return this.readOfAnything(connection, text, plan, live)
-        if (rewrite && isUnnamed(plan) && !this.transactions.isOpen(connection))
+        if (rewrite && isUnnamed(plan) && this.engine.session && !this.transactions.isOpen(connection))
           return this.inOwnTransaction(connection, text, plan)
     }
     const sent = this.statement(
@@ -306,11 +298,12 @@ class LiveDatabase {
       () => this.keptChanges(plan, connection),
     )
     const statement = this.learningAccess(connection, this.withChangeLog(connection, sent, plan))
-    if (plan.kind !== 'write' || !rewrite || this.roles!.of(connection) !== null) return statement
+    const session = this.engine.session
+    if (!session || plan.kind !== 'write' || !rewrite || this.roles!.of(connection) !== null) return statement
     // The role, and what it sees unless known: one round trip.
     const known = JSON.stringify([...this.access.keys()])
     const asks = {
-      text: ROLE_QUERY,
+      text: session.role,
       values: [known],
       done: (rows: Rows | undefined) => this.roleAnswered(connection, rows),
     }
@@ -364,13 +357,15 @@ class LiveDatabase {
 
   /** Learns what its connection's role sees of the tables, right after `statement`, when that isn't known yet. */
   private learningAccess(connection: object, statement: Statement): Statement {
+    const session = this.engine.session
+    if (!session) return statement
     return {
       ...statement,
       succeeded: (rows) => {
         const followUps = statement.succeeded(rows)
         const role = this.roles!.of(connection)
         if (role === null || this.access.has(role)) return followUps
-        return [...followUps, { text: ACCESS_QUERY, values: [], done: (rows) => this.learnAccess(rows) }]
+        return [...followUps, { text: session.access, values: [], done: (rows) => this.learnAccess(rows) }]
       },
     }
   }
@@ -387,7 +382,11 @@ class LiveDatabase {
    *  the next transaction starts once it succeeds (a `COMMIT AND CHAIN` that fails ends without one). */
   private commit(connection: object, text: string, chain = false): Statement {
     let locked: string[] | undefined
-    const queries = this.transactions.hasUnnamed(connection) ? namingQueries((tables) => (locked = tables)) : undefined
+    const { session } = this.engine
+    const queries =
+      session && this.transactions.hasUnnamed(connection)
+        ? namingQueries(session, (tables) => (locked = tables))
+        : undefined
     return {
       ...this.statement(connection, text, 0, () => []),
       ...(queries ? { beforeCommit: { queries, ownTransaction: false } } : {}),
@@ -414,7 +413,10 @@ class LiveDatabase {
     })
     return {
       ...statement,
-      beforeCommit: { queries: namingQueries((tables) => (locked = tables)), ownTransaction: true },
+      beforeCommit: {
+        queries: namingQueries(this.engine.session!, (tables) => (locked = tables)),
+        ownTransaction: true,
+      },
     }
   }
 
@@ -783,11 +785,11 @@ function cascadedDeletes(plan: WritePlan, changes: Change[]): Change[] {
 }
 
 /** Queries naming the tables a transaction changed, for `Statement.beforeCommit`: `named` gets them. */
-function namingQueries(named: (tables: string[]) => void): FollowUp[] {
+function namingQueries(session: NonNullable<Engine['session']>, named: (tables: string[]) => void): FollowUp[] {
   return [
     // Its deferred triggers fire now: the tables they write are locked before the locks are read.
-    { text: 'SET CONSTRAINTS ALL IMMEDIATE', values: [], done: () => {} },
-    { text: LOCKED_TABLES, values: [], done: (rows) => rows && named(rows.map((row) => row[0]!)) },
+    { text: session.immediate, values: [], done: () => {} },
+    { text: session.locked, values: [], done: (rows) => rows && named(rows.map((row) => row[0]!)) },
   ]
 }
 

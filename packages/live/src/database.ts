@@ -3,6 +3,7 @@ export type { DatabaseClient }
 
 import { importPostgres } from '#postgres'
 import { assertUsage } from './assert.js'
+import { ACCESS_QUERY, LOCKED_TABLES, ROLE_QUERY } from './catalog.js'
 import { captureBetterSqlite3, isBetterSqlite3, type BetterSqlite3 } from './capture/betterSqlite3.js'
 import { captureBunSqlite, isBunSqlite, type BunSqlite } from './capture/bunSqlite.js'
 import { captureD1, isD1, type D1 } from './capture/d1.js'
@@ -25,6 +26,12 @@ let postgres: typeof import('./postgres/engine.js') | undefined
 const POSTGRES_ENGINE: Engine = {
   loadCatalog: async (query) => (postgres ??= await importPostgres()).loadCatalog(query),
   plan: (text, catalog) => postgres!.plan(text, catalog),
+  session: {
+    access: ACCESS_QUERY,
+    role: ROLE_QUERY,
+    immediate: 'SET CONSTRAINTS ALL IMMEDIATE',
+    locked: LOCKED_TABLES,
+  },
   failureAbortsTransaction: true,
 }
 

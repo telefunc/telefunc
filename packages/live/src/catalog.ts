@@ -1,4 +1,14 @@
-export { accessAnswered, accessOf, actionOf, sideEffects, tablesChangedBy, union, ACCESS_QUERY, ROLE_QUERY }
+export {
+  accessAnswered,
+  accessOf,
+  actionOf,
+  sideEffects,
+  tablesChangedBy,
+  union,
+  ACCESS_QUERY,
+  ROLE_QUERY,
+  LOCKED_TABLES,
+}
 export { ACCESS_ROWS, WRITES_OF_ANY_KIND }
 export type { Access, AccessRow, Catalog, Table, TableSet, ForeignKey, Write, Written }
 
@@ -113,6 +123,13 @@ const ACCESS_QUERY = `select json_build_object('role', current_user, 'access', (
 /** `ACCESS_QUERY`, without what the role sees when it's one of those its parameter lists (a JSON array): `null`. */
 const ROLE_QUERY = `select json_build_object('role', current_user, 'access', case when current_user::text in
   (select json_array_elements_text($1::json)) then null else (${ACCESS_ROWS}) end)::text`
+
+/** The tables the transaction locked as a write does, or more strongly (`TRUNCATE`): an explicit `LOCK TABLE`, which
+ *  writes nothing, lists its table too. */
+const LOCKED_TABLES = `select n.nspname || '.' || c.relname from pg_locks l
+  join pg_class c on c.oid = l.relation join pg_namespace n on n.oid = c.relnamespace
+  where l.locktype = 'relation' and l.pid = pg_backend_pid() and c.relkind in ('r', 'p', 'v', 'm', 'f')
+    and l.mode in ('RowExclusiveLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')`
 
 const WRITES_OF_ANY_KIND: Write[] = ['insert', 'update', 'delete', 'truncate']
 
