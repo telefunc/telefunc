@@ -64,19 +64,30 @@ Each viewer gets the picture at the size its `<video>` shows on screen, smaller 
 
 ## Share your screen
 
-Publish it on a track of its own, and play that track:
+Publish it on a track of its own:
 
 ```ts
 // Environment: client
 
 const screen = await navigator.mediaDevices.getDisplayMedia()
 me.publishMedia(screen, { track: 'screen' })
-
-// Each viewer:
-member.subscribeMedia(screenTile, { track: 'screen' })
 ```
 
-To show it to one participant only, send it as you <Link href="/room#send-a-private-message">send a private message</Link>:
+Each viewer hears of a participant's tracks with `onMedia()`. It fires for the tracks the participant publishes already, as you call it, and whenever one starts or stops:
+
+```ts
+// Environment: client
+
+member.onMedia((track, on) => {
+  if (track !== 'screen') return
+  if (on) member.subscribeMedia(showScreenTile(member), { track }) // showScreenTile(): your <video> for this screen
+  else hideScreenTile(member)
+})
+```
+
+> `track` is `null` for what a participant published without a track, such as the camera above.
+
+To show it to one participant only, send it as you <Link href="/room#send-a-private-message">send a private message</Link>. Only that participant's `onMedia()` hears of it, and they play it the same way:
 
 ```ts
 // Environment: client

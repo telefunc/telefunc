@@ -652,7 +652,7 @@ Properties: `id`, `meta`, `identity`, `isConnected`, `uplinkRate`.
 | Method | Description |
 |---|---|
 | `subscribe(cb, { track? }?)` / `subscribeBinary(cb, { track? }?)` | This participant's messages, or those on `track` / binary frames: `cb(message, info)`. |
-| `subscribeMedia(video, { track? }?)` | With <Link href="/media" />: play this participant's audio and video. |
+| `subscribeMedia(video, { track? }?)` / `onMedia(cb)` | With <Link href="/media" />: play this participant's audio and video / `cb(track, on)`: this participant started or stopped publishing a track you can play. |
 | `onUpdate(cb)` / `onLeave(cb)` | This participant changed their `meta` / left. |
 | `onDisconnect(cb)` / `onReconnect(cb)` | This participant's connection dropped / is back. |
 
