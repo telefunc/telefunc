@@ -697,7 +697,9 @@ class LiveDatabase {
     // An upsert's `RETURNING` doesn't tell an inserted row from an updated one: the rows it conflicted with do.
     if (plan.readsFirst && plan.statement === 'insert' && !before) return whole()
     const changes = before ? pairedChanges(plan, rows, before) : this.returnedChanges(plan, rows)
-    return [...changes, ...cascadedDeletes(plan, changes), ...unknownChanges(plan.alsoWrites)]
+    // A write that changed no row fired no row trigger and no foreign key action.
+    const also = plan.alsoWritesPerRow && rows.length === 0 ? [] : unknownChanges(plan.alsoWrites)
+    return [...changes, ...cascadedDeletes(plan, changes), ...also]
   }
 
   /** The changes of a write whose `RETURNING` gives all it knows of its rows. */

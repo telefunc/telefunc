@@ -176,6 +176,7 @@ function widenedWrite(statement: Ast, text: string, table: Table, catalog: Catal
     images: [written === 'delete' ? 'old' : 'new'],
     assigned,
     alsoWrites: also,
+    alsoWritesPerRow: true,
     ...(where !== undefined && { readsFirst: SQLITE.bindParams(`SELECT ${image} FROM ${where}`) }),
   }
 }

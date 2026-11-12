@@ -133,3 +133,31 @@ describe('a write the database refused', () => {
     expect(stale()).toBe(kept ? 1 : 0)
   })
 })
+
+describe('a write that changed no row', () => {
+  const schema = `
+    create table users (id integer primary key);
+    create table todos (id integer primary key, user_id int not null references users (id) on delete cascade);
+    create table tags (id integer primary key, todo_id int not null references todos (id) on delete cascade);
+    create table deleted_todos (id integer primary key, todo_id int not null);
+    create trigger todos_deleted after delete on todos begin insert into deleted_todos (todo_id) values (old.id); end;
+    insert into users values (1); insert into todos values (1, 1); insert into tags values (1, 1);`
+
+  it.each([
+    { label: "a user who doesn't exist", user: 9, signals: [0, 0, 0] },
+    { label: 'a user with a tagged todo', user: 1, signals: [1, 1, 1] },
+  ])(
+    'deleting $label stales the reads of what its cascades and triggers write: $signals',
+    async ({ label, user, signals }) => {
+      const d1 = d1Database(schema)
+      liveDatabaseOf(d1, { name: label })
+      const reads = ['select id from todos', 'select id from tags', 'select todo_id from deleted_todos']
+      const stale = await Promise.all(
+        reads.map((text) => staleSignals(async () => (await d1.prepare(text).all()).results)),
+      )
+      await d1.prepare('delete from users where id = ?').bind(user).run()
+      await settled()
+      expect(stale.map((count) => count())).toEqual(signals)
+    },
+  )
+})
