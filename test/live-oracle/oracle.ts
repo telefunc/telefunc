@@ -506,10 +506,11 @@ function writeFailed(write: string, err: unknown): void {
 }
 
 /** The database's error code, found along the error's causes: an ORM wraps the driver's error, and so do the writes.
- *  Postgres tells it by an SQLSTATE, SQLite by a `SQLITE_` code, D1 in its message. */
+ *  Postgres tells it by an SQLSTATE, SQLite by a `SQLITE_` code, node:sqlite by a number, D1 in its message. */
 function sqlStateOf(err: unknown): string | undefined {
-  for (let e = err as { code?: unknown; cause?: unknown } | undefined; e; e = e.cause as typeof e) {
+  for (let e = err as { code?: unknown; errcode?: unknown; cause?: unknown } | undefined; e; e = e.cause as typeof e) {
     if (typeof e.code === 'string' && /^([0-9A-Z]{5}|SQLITE_\w+)$/.test(e.code)) return e.code
+    if (e.code === 'ERR_SQLITE_ERROR' && typeof e.errcode === 'number') return `SQLITE_${e.errcode}`
     const d1 = /D1_ERROR: .*(SQLITE_\w+)/.exec(String(e))
     if (d1) return d1[1]
   }
