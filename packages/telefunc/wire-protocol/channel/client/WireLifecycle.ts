@@ -61,12 +61,7 @@ interface TransportOwner {
 type ConnectionState =
   | { tag: 'fresh' }
   | { tag: 'open' }
-  | {
-      tag: 'reconnecting'
-      attempt: number
-      startedAt: number
-      timer: ReturnType<typeof setTimeout>
-    }
+  | { tag: 'reconnecting'; timer: ReturnType<typeof setTimeout> }
   | { tag: 'closed' }
 
 /** The connection, which a disposed wire lifecycle's next `getOrCreate` replaces. */
@@ -89,6 +84,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   transport: ClientChannelTransport
 
   private state: ConnectionState = { tag: 'fresh' }
+  /** The wires lost since the last RECONCILED, and when the first was: a wire that opens and never reconciles counts. */
+  private reconnects: { attempt: number; startedAt: number } | null = null
   private ttl: ReturnType<typeof setTimeout> | null = null
   get closed(): boolean {
     return this.state.tag === 'closed'
@@ -133,10 +130,10 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 
   /** Owns the reconnect timer's lifecycle so callers can't forget to cancel a prior one. */
-  private enterReconnecting(attempt: number, startedAt: number, delay: number): void {
+  private enterReconnecting(delay: number): void {
     if (this.state.tag === 'reconnecting') clearTimeout(this.state.timer)
     const timer = setTimeout(() => this.transport.start(), delay)
-    this.state = { tag: 'reconnecting', attempt, startedAt, timer }
+    this.state = { tag: 'reconnecting', timer }
     this.upgrade.forget()
   }
 
@@ -365,6 +362,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   private handleReconciled(ctrl: ReconciledPayload): void {
     if (!this.upgrade.onReconciled(ctrl)) return
+    this.reconnects = null
     this.transport.applyReconciledSettings(ctrl)
     this.takeServerSettings(ctrl)
     const outcome = this.exchange.applyReconciled(ctrl, {
@@ -500,10 +498,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.ttl = null
     }
 
-    const { attempt: prevAttempt, startedAt: prevStartedAt } =
-      this.state.tag === 'reconnecting' ? this.state : { attempt: 0, startedAt: 0 }
-
-    if (rejected && prevAttempt === 0) {
+    const { attempt, startedAt } = this.reconnects ?? { attempt: 0, startedAt: performance.now() }
+    if (rejected && attempt === 0) {
       this.closeAll(err)
       this.dispose()
       return
@@ -516,14 +512,13 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.dispose()
       return
     }
-    const startedAt = prevStartedAt || performance.now()
     if (performance.now() - startedAt > this.reconnectTimeoutMs) {
       this.closeAll(err)
       this.dispose()
       return
     }
-    const delay = Math.min(CHANNEL_RECONNECT_INITIAL_DELAY_MS * 2 ** prevAttempt, CHANNEL_RECONNECT_MAX_DELAY_MS)
-    this.enterReconnecting(prevAttempt + 1, startedAt, delay)
+    this.reconnects = { attempt: attempt + 1, startedAt }
+    this.enterReconnecting(Math.min(CHANNEL_RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, CHANNEL_RECONNECT_MAX_DELAY_MS))
   }
 
   /** Starts the idle timer on a live wire with no channel open and nothing queued; the transport drains first. */

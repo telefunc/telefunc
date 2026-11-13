@@ -2,10 +2,13 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import {
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
+  CHANNEL_RECONNECT_MAX_DELAY_MS,
+  CHANNEL_RECONNECT_TIMEOUT_MS,
   CHANNEL_TRANSPORT,
   RECONCILE_TIMEOUT_MS,
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../../constants.js'
+import { NetworkError } from '../../../shared/NetworkError.js'
 import { ClientConnection } from './ClientConnection.js'
 
 /** Minimal `MuxChannel` — registering one is enough to make the connection open a wire. */
@@ -67,5 +70,26 @@ describe('SSE reconcile watchdog', () => {
     // instead time out the reconcile and reconnect.
     await vi.advanceTimersByTimeAsync(RECONCILE_TIMEOUT_MS + CHANNEL_RECONNECT_INITIAL_DELAY_MS + 500)
     expect(getSseDownstreamOpens()).toBeGreaterThanOrEqual(2)
+  })
+
+  test('ends the channels at the reconnect timeout when wires open and none reconciles', async () => {
+    vi.useFakeTimers()
+    const { fetchImpl } = createStalledTransport()
+    const ended: unknown[] = []
+    const channel = { ...createChannel(), _onEnded: (err: unknown) => ended.push(err) }
+
+    ClientConnection.getOrCreate('http://test.local/_telefunc', channel as never, {
+      transports: [CHANNEL_TRANSPORT.SSE],
+      fetchImpl,
+      connectionKey: crypto.randomUUID(),
+    })
+
+    // Each wire opens, its RECONCILE deadline drops it, and the page reconnects.
+    await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_TIMEOUT_MS)
+    expect(ended).toEqual([])
+    // The timeout runs from the first loss, one deadline in; the first loss past it, a delay and a deadline on, ends them.
+    await vi.advanceTimersByTimeAsync(RECONCILE_TIMEOUT_MS + CHANNEL_RECONNECT_MAX_DELAY_MS + RECONCILE_TIMEOUT_MS)
+    expect(ended).toHaveLength(1)
+    expect(ended[0]).toBeInstanceOf(NetworkError)
   })
 })
