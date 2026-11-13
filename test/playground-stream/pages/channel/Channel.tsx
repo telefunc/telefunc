@@ -266,6 +266,7 @@ type ChannelState = {
     isClosed: boolean
     receiptAhead: number
     opening: { receipts: number; last: string }
+    attached: { receipts: number; last: string }
     reconnected: { receipts: number; last: string }
   } | null
   lossyKeepsUp: { fromServer: number; fromPage: number; last: string } | null
@@ -1597,8 +1598,7 @@ function ChannelDemo() {
   const testBroadcastBehind = useCallback(async () => {
     setChannelState((s) => ({ ...s, broadcastBehind: null }))
     const { broadcast, control } = await openChannel(() => onChannelPublishesBehind(256 * 1024, true))
-    // The page's own 20 publishes at once, each its ordinal at the same size: on a link that keeps up each goes with a
-    // receipt of its own, and the server's subscription gets the last.
+    // The page's own 20 publishes at once, each its ordinal at the same size, and the last the server's subscription got.
     const publishOrdinals = async (from: number) => {
       const receipts = await Promise.all(
         Array.from({ length: 20 }, (_, n) => broadcast.publish(`${from + n}:`.padEnd(256 * 1024, 'x'))),
@@ -1608,8 +1608,10 @@ function ChannelDemo() {
         last: await control.send('last', { ack: true }),
       }
     }
-    // As it opens, faster than its uplink takes them, they wait for its headroom.
+    // Before the first attach no wire takes them: only the newest waits, and all 20 settle with its receipt.
     const opening = await publishOrdinals(0)
+    // Attached, on a link that keeps up: each goes, with a receipt of its own.
+    const attached = await publishOrdinals(200)
     const { seq: before } = await broadcast.publish('before the burst')
     const seqsAhead: number[] = []
     broadcast.subscribeBinary((_, info) => seqsAhead.push(info.seq - before))
@@ -1632,6 +1634,7 @@ function ChannelDemo() {
       isClosed: broadcast.isClosed,
       receiptAhead: seq - before,
       opening,
+      attached,
       reconnected,
     }
     setChannelState((s) => ({ ...s, broadcastBehind }))
