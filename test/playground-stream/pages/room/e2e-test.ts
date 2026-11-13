@@ -1335,7 +1335,7 @@ function testRoom() {
 
 /** Tests that need the failing backend (failing-backend.ts), which a server without Redis installs. */
 function testRoomFailingBackend() {
-  test("room: a store write that fails once heals: a failed leave can be retried, a failed join leaves no member, a leave whose event and reply are lost ends once with 'left', a DM whose handoff is lost rejects its send, and a lane the store ends is replaced", async () => {
+  test("room: a store write that fails once heals: a failed leave can be retried, a failed join leaves no member, a leave whose event and reply are lost ends once with 'left', a DM whose handoff is lost rejects its send, and a lane the store drops delivers again", async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-hiccups')
     await autoRetry(async () => {
@@ -1354,7 +1354,7 @@ function testRoomFailingBackend() {
           dm: "Message may not be delivered: its handoff to the recipient failed, and it isn't sent again",
           dms: ['after'],
         },
-        lane: { ended: true, got: ['before', 'after'] },
+        lane: { dropped: true, got: ['before', 'after'] },
       })
     })
   })

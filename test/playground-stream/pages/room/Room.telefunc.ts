@@ -45,7 +45,7 @@ export {
   onGetWatchedCount,
   onRoomRelease,
   onFailBackend,
-  onEndBackendSubscriptions,
+  onDropBackendSubscriptions,
   onListParticipantNames,
   onCreateRoomClosingAfter,
   onSeedRoom,
@@ -113,7 +113,7 @@ import { onServerAction } from '../../server-actions'
 import { cutWireSockets } from '../../wire-sockets'
 import {
   addBackendFault,
-  endBackendSubscriptions,
+  dropBackendSubscriptions,
   holdCellPages,
   holdRetainedReads,
   type BackendFault,
@@ -633,8 +633,8 @@ async function onFailBackend(fault: BackendFault) {
   addBackendFault(fault)
 }
 
-async function onEndBackendSubscriptions(roomId: string) {
-  return endBackendSubscriptions({ roomId })
+async function onDropBackendSubscriptions(roomId: string) {
+  return dropBackendSubscriptions({ roomId })
 }
 
 async function onListParticipantNames(roomId: string) {

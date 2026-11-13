@@ -50,7 +50,7 @@ import {
   onGetWatchedCount,
   onRoomRelease,
   onFailBackend,
-  onEndBackendSubscriptions,
+  onDropBackendSubscriptions,
   onListParticipantNames,
   onCreateRoomClosingAfter,
   onSeedRoom,
@@ -2316,7 +2316,7 @@ function Room() {
         const speaker = await laneView.join({ meta: { name: 'Speaker' } })
         await speaker.publish('before')
         await pollUntil(() => ({ done: got.includes('before') }))
-        const ended = await onEndBackendSubscriptions(laneRoomId)
+        const dropped = await onDropBackendSubscriptions(laneRoomId)
         await speaker.publish('after')
         await pollUntil(() => ({ done: got.includes('after') }))
 
@@ -2325,7 +2325,7 @@ function Room() {
             leave: { firstLeave, publishAfter, secondLeave, leaves, count: leaveView.count },
             join: { firstJoin, count: joinView.count, listed },
             lost: { leave: lostLeave, leaves: lostLeaves, dm: lostDm, dms },
-            lane: { ended: ended > 0, got },
+            lane: { dropped: dropped > 0, got },
           }),
         )
       })}
