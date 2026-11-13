@@ -363,6 +363,50 @@ describe('a read calling a SQL function of the app that writes', () => {
   })
 })
 
+describe('a live read reaching a PL/pgSQL function of the app that only reads', () => {
+  it.each([
+    ['called in the statement', 'select read_n() as n'],
+    ['through a view', 'select * from readable'],
+  ])('watches what it reads, %s', async (_, text) => {
+    const pglite = new PGlite()
+    await pglite.exec(`
+      create table counters (id int primary key, n int);
+      insert into counters values (1, 0);
+      create function read_n() returns int language plpgsql as
+        'begin return (select n from counters where id = 1); end';
+      create view readable as select read_n() as n;`)
+    liveDatabaseOf(pglite, {})
+    const read = await watched(pglite, text)
+    expect(read.rows).toEqual([{ n: 0 }])
+    await written(pglite, 'update counters set n = 5')
+    expect(read.stale()).toBe(1)
+    await pglite.close()
+  })
+
+  it('watches what it reads, through a row-level security policy calling a security definer one', async () => {
+    const pglite = new PGlite()
+    await pglite.exec(`
+      create table members (uid int);
+      insert into members values (1);
+      create table items (id int, owner int);
+      insert into items values (7, 1);
+      create function is_member(o int) returns bool language plpgsql security definer as
+        'begin return exists (select 1 from members where uid = o); end';
+      alter table items enable row level security;
+      create policy members_only on items for select using (is_member(owner));
+      create role tenant;
+      grant select on items to tenant;`)
+    liveDatabaseOf(pglite, {})
+    await pglite.query('set role tenant')
+    const read = await watched(pglite, 'select id from items')
+    await pglite.query('reset role')
+    expect(read.rows).toEqual([{ id: 7 }])
+    await written(pglite, 'delete from members')
+    expect(read.stale()).toBe(1)
+    await pglite.close()
+  })
+})
+
 describe('a live read calling an aggregate of the app', () => {
   it.each([
     ["Postgres's own", 'numeric_mul'],

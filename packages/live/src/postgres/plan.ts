@@ -1,6 +1,6 @@
 export { planStatement }
 
-import { tablesChangedBy, type Catalog, type TableSet } from '../catalog.js'
+import { tablesChangedBy, writesOfCalls, type Catalog, type TableSet } from '../catalog.js'
 import {
   alsoWrites,
   cascadesOf,
@@ -49,19 +49,21 @@ function planOne(statement: Node, text: string | undefined, catalog: Catalog): P
   if (kind === 'TransactionStmt') return planTransaction(node)
   const functions = catalog.calls(node)
   const writingCte = ((node.withClause?.ctes ?? []) as Node[]).some((c) => !c.CommonTableExpr.ctequery.SelectStmt)
-  // A read is judged by the volatility of what it calls as well (`Catalog.volatileWritingFunctions`).
+  // A read writes what the volatile functions of the app's it calls write (`writesOfCalls()`). Any other statement
+  // calling a writing function may write any table.
   const read = kind === 'SelectStmt' && !node.intoClause && !writingCte
-  const writers = read ? catalog.volatileWritingFunctions : catalog.writingFunctions
-  const writing = functions.some((name) => writers.has(name))
+  const anyWriter = functions.some((name) => catalog.writingFunctions.has(name))
+  const written: TableSet = read ? writesOfCalls(node, catalog) : anyWriter ? 'all' : new Set()
+  const writing = written === 'all' || written.size > 0
   // A function of the app's may set its session's role (`set_config()`), whatever it is declared to do. Only those the
   // statement calls count: a trigger, a column default or a row level security policy that switched the session's
   // role would be a bug of the app, and counting them would cost a round trip before every write after a write to a
   // table with an `updated_at` trigger.
-  const roleOfCalls = functions.some((name) => catalog.writingFunctions.has(name)) ? { role: UNKNOWN_ROLE } : {}
+  const roleOfCalls = anyWriter ? { role: UNKNOWN_ROLE } : {}
   // `set_config()` sets a setting of the session; so may a function of the app's that may write.
   const changesSession = writing || functions.includes('set_config')
   if (changesSession || writingCte) {
-    const tables = writing ? 'all' : writtenTables(node, catalog)
+    const tables = writing ? written : writtenTables(node, catalog)
     const setConfigs = setConfigsOf(node)
     return {
       kind: 'unknownWrite',

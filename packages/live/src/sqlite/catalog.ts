@@ -136,7 +136,6 @@ function catalogOf(answer: string, changeLog: boolean): Catalog {
     tables,
     functions: new Set(),
     writingFunctions: new Set(),
-    volatileWritingFunctions: new Set(),
     calls: (node) => {
       const called: string[] = []
       walk(node, (key, call) => {

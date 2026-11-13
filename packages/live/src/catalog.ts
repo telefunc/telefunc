@@ -4,6 +4,7 @@ export {
   actionOf,
   callsVolatile,
   readsOfCalls,
+  writesOfCalls,
   sideEffects,
   tablesChangedBy,
   union,
@@ -45,8 +46,8 @@ type Table = {
   /** A read of it may call a volatile function (`Catalog.volatileFunctions`): its view or its row-level security
    *  policies call one, or can't be read. */
   volatile?: boolean
-  /** A read of it writes these: its view or its row-level security policies call a volatile function that writes
-   *  (`Catalog.volatileWritingFunctions`), or can't be read. */
+  /** A read of it writes these: what the volatile functions its view or its row-level security policies call write
+   *  (`writesOfCalls()`), every table when those can't be read. */
   writes?: TableSet
   /** What each kind of write to this table also changes: the tables its triggers write. Every table (`'all'`) when the
    *  catalog can't name them: a rule, a column default or a trigger calling a function of the app's, SQL a trigger
@@ -93,9 +94,9 @@ type Catalog = {
    *  calls one, may write any table, whatever the function's volatility (a `STABLE` function's body may call a
    *  volatile one). A function in C (`internal` included: `uuid_generate_v4()`) is taken to compute a value. */
   writingFunctions: Set<string>
-  /** The volatile `writingFunctions`: a read calling one may write any table. Postgres refuses a write in a `STABLE`
-   *  or `IMMUTABLE` function's own body, and a read calling one stays a read. */
-  volatileWritingFunctions: Set<string>
+  /** The tables a call of a function of `writingFunctions` writes, when its body tells (Postgres: every function of
+   *  that name is in SQL or PL/pgSQL, building no SQL at run time). */
+  functionWrites?: Map<string, TableSet>
   /** The functions `node` calls, with those the defaults of the arguments they leave out call: the caller evaluates
    *  those. */
   calls(node: unknown): string[]
@@ -207,6 +208,16 @@ function callsVolatile(node: unknown, catalog: Catalog): boolean {
 function readsOfCalls(node: unknown, catalog: Catalog): TableSet {
   const called = catalog.calls(node).filter((name) => catalog.functions.has(name))
   return union(called.map((name) => catalog.functionReads?.get(name) ?? 'all'))
+}
+
+/** What the volatile functions of the app's `node` calls write (`Catalog.functionWrites`): every table for one whose
+ *  body doesn't tell. Postgres refuses a write in a `STABLE` or `IMMUTABLE` function's own body: a read calling one
+ *  stays a read. */
+function writesOfCalls(node: unknown, catalog: Catalog): TableSet {
+  const called = catalog
+    .calls(node)
+    .filter((name) => catalog.writingFunctions.has(name) && catalog.volatileFunctions.has(name))
+  return union(called.map((name) => catalog.functionWrites?.get(name) ?? 'all'))
 }
 
 /** The role `ACCESS_QUERY` or `ROLE_QUERY` ran as, and what it sees of each table, from its answer. */
