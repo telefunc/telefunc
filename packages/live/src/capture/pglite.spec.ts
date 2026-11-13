@@ -8,6 +8,25 @@ import { liveDrizzle } from '@telefunc/live/drizzle'
 import { liveDatabaseOf } from '../database.js'
 import { readLive } from '../liveQuery.js'
 
+const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
+
+/** A live read of `text`, as a telefunction runs one: its rows, and how many stale signals it got since. */
+async function watched(pglite: PGlite, text: string) {
+  const cell = await store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
+    readLive(() => pglite.query(text), 'the spec'),
+  )
+  let stale = 0
+  cell.onStale(() => stale++)
+  return { rows: cell.send().rows as unknown[], stale: () => stale }
+}
+
+/** Runs `text`, then waits for the stale signals it sends. A read goes stale once: count its signals after each write
+ *  that may make it stale. */
+async function written(pglite: PGlite, text: string): Promise<void> {
+  await pglite.query(text)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+}
+
 describe('PGlite capture', () => {
   // The tenant sees only row 1, so a write captured with a widened `RETURNING` would update row 1 only.
   it('plans a write after the role change queued before it', async () => {
@@ -41,7 +60,6 @@ describe('PGlite capture', () => {
       'create table t (id int primary key, x int); insert into t select i, 0 from generate_series(1, 10002) i',
     )
     liveDatabaseOf(pglite, {})
-    const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
     const cell = await store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
       readLive(() => pglite.query('select * from t where id = 1'), 'the spec'),
     )
@@ -64,7 +82,6 @@ describe('two in-memory PGlite databases', () => {
       await pglite.exec("create table t (id int primary key, x text); insert into t values (1, 'a')")
       liveDatabaseOf(pglite, {})
     }
-    const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
     const cell = await store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
       readLive(() => one.query('select * from t where id = 1'), 'the spec'),
     )
@@ -102,7 +119,6 @@ describe('identical live reads on one PGlite', () => {
     }) as typeof query
     liveDatabaseOf(pglite, {})
     // A telefunction call, as telefunc's server runs one: the response sends the `Live`.
-    const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
     const live = () =>
       store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () => readLive(() => pglite.query(READ), 'the spec'))
     return { pglite, live, reads: () => reads, hold: (until: Promise<void> | undefined) => (held = until) }
@@ -153,7 +169,6 @@ describe('a delete cascading two levels on PGlite', () => {
       return query(text, ...rest)
     }) as typeof query
     liveDatabaseOf(pglite, {})
-    const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
     const counts = await Promise.all(
       reads.map(async (read) => {
         const cell = await store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
@@ -198,32 +213,65 @@ describe('a live read calling a SQL function of the app', () => {
     const pglite = new PGlite()
     await pglite.exec(`create table a (id int); create table b (id int); create table c (id int); ${define('a')}`)
     liveDatabaseOf(pglite, {})
-    const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
-    const live = async () => {
-      const cell = await store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
-        readLive(() => pglite.query('select n()'), 'the spec'),
-      )
-      let stale = 0
-      cell.onStale(() => stale++)
-      cell.send()
-      return () => stale
-    }
-    const write = async (text: string) => {
-      await pglite.query(text)
-      await new Promise((resolve) => setTimeout(resolve, 50))
-    }
-    // A read goes stale once: each count is read after the write that may make it stale.
-    const before = await live()
-    await write('insert into c values (1)')
-    expect(before()).toBe(0)
-    await write('insert into a values (1)')
-    expect(before()).toBe(1)
-    await write(define('b'))
-    const after = await live()
-    await write('insert into a values (2)')
-    expect(after()).toBe(0)
-    await write('insert into b values (1)')
-    expect(after()).toBe(1)
+    const before = await watched(pglite, 'select n()')
+    await written(pglite, 'insert into c values (1)')
+    expect(before.stale()).toBe(0)
+    await written(pglite, 'insert into a values (1)')
+    expect(before.stale()).toBe(1)
+    await written(pglite, define('b'))
+    const after = await watched(pglite, 'select n()')
+    await written(pglite, 'insert into a values (2)')
+    expect(after.stale()).toBe(0)
+    await written(pglite, 'insert into b values (1)')
+    expect(after.stale()).toBe(1)
+    await pglite.close()
+  })
+})
+
+describe("a live read of a view or a table whose policy calls the app's SQL function", () => {
+  it('watches the tables a view calls it to read', async () => {
+    const pglite = new PGlite()
+    await pglite.exec(`
+      create table source (id int);
+      create table c (id int);
+      insert into source values (1);
+      create function n() returns int language sql stable as 'select count(*)::int from source';
+      create view v as select n() as n;`)
+    liveDatabaseOf(pglite, {})
+    const read = await watched(pglite, 'select * from v')
+    expect(read.rows).toEqual([{ n: 1 }])
+    await written(pglite, 'insert into c values (1)')
+    expect(read.stale()).toBe(0)
+    await written(pglite, 'insert into source values (2)')
+    expect(read.stale()).toBe(1)
+    expect((await pglite.query('select * from v')).rows).toEqual([{ n: 2 }])
+    await pglite.close()
+  })
+
+  it('watches the tables a row-level security policy calls a security definer function to read', async () => {
+    const pglite = new PGlite()
+    await pglite.exec(`
+      create table items (id int);
+      create table flags (ok bool);
+      create table c (id int);
+      insert into items values (1);
+      insert into flags values (true);
+      create function allowed() returns bool language sql stable security definer as 'select ok from flags';
+      alter table items enable row level security;
+      create policy tenant_reads on items for select using (allowed());
+      create role tenant;
+      grant select on items to tenant;`)
+    liveDatabaseOf(pglite, {})
+    await pglite.query('set role tenant')
+    const read = await watched(pglite, 'select * from items')
+    expect(read.rows).toEqual([{ id: 1 }])
+    await pglite.query('reset role')
+    await written(pglite, 'insert into c values (1)')
+    expect(read.stale()).toBe(0)
+    await written(pglite, 'update flags set ok = false')
+    expect(read.stale()).toBe(1)
+    await pglite.query('set role tenant')
+    expect((await pglite.query('select * from items')).rows).toEqual([])
     await pglite.close()
   })
 })
@@ -240,22 +288,11 @@ describe('a live read calling an aggregate of the app', () => {
       create function times(numeric, numeric) returns numeric language sql immutable as 'select $1 * $2';
       create aggregate product(numeric) (sfunc = ${transition}, stype = numeric, initcond = '1');`)
     liveDatabaseOf(pglite, {})
-    const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
-    const cell = await store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
-      readLive(() => pglite.query('select product(n) from a'), 'the spec'),
-    )
-    let stale = 0
-    cell.onStale(() => stale++)
-    cell.send()
-    const write = async (text: string) => {
-      await pglite.query(text)
-      await new Promise((resolve) => setTimeout(resolve, 50))
-    }
-    // A read goes stale once: each count is read after the write that may make it stale.
-    await write('insert into c values (1)')
-    expect(stale).toBe(0)
-    await write('insert into a values (2)')
-    expect(stale).toBe(1)
+    const read = await watched(pglite, 'select product(n) from a')
+    await written(pglite, 'insert into c values (1)')
+    expect(read.stale()).toBe(0)
+    await written(pglite, 'insert into a values (2)')
+    expect(read.stale()).toBe(1)
     await pglite.close()
   })
 })
@@ -278,7 +315,6 @@ describe('a transaction writing through a rule, a default and a trigger of the a
       create function settled_event() returns trigger language plpgsql as 'begin perform settle(); return null; end';
       create trigger settles after insert on events for each row execute function settled_event();`)
     liveDatabaseOf(pglite, {})
-    const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
     const live = async (text: string) => {
       const cell = await store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
         readLive(() => pglite.query(text), 'the spec'),

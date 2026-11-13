@@ -1,7 +1,7 @@
 export { analyzeRead, SEED_LIMIT }
 export type { ReadShape, Alias, Join, Route, SortKey }
 
-import type { Catalog, Table, TableSet } from '../catalog.js'
+import { readsOfCalls, type Catalog, type Table, type TableSet } from '../catalog.js'
 import type { Dialect } from '../dialect.js'
 import { isAggregateCall, names, quote, splitAnd, walk, type Node, type RangeVar } from '../tree.js'
 import { allOf, ALWAYS, compileCondition, inListCondition, type Condition, type ValueSource } from './condition.js'
@@ -231,17 +231,13 @@ function analyzeSelect(
     else readsEverything(analysis)
     scope.ctes.add(cte.CommonTableExpr.ctename)
   }
-  for (const name of analysis.catalog.calls(stmt)) {
-    if (!analysis.catalog.functions.has(name)) continue
-    // What the function reads, when its body tells.
-    const reads = analysis.catalog.functionReads?.get(name) ?? 'all'
-    if (reads === 'all') readsEverything(analysis)
-    else
-      for (const id of reads) {
-        if (analysis.alsoReads !== 'all') analysis.alsoReads.add(id)
-        addAlsoReads(analysis.catalog.tables.get(id)!, analysis)
-      }
-  }
+  const called = readsOfCalls(stmt, analysis.catalog)
+  if (called === 'all') readsEverything(analysis)
+  else
+    for (const id of called) {
+      if (analysis.alsoReads !== 'all') analysis.alsoReads.add(id)
+      addAlsoReads(analysis.catalog.tables.get(id)!, analysis)
+    }
 
   // This scope's own tables first: subqueries below derive their routes from them.
   const filters: Filter[] = []

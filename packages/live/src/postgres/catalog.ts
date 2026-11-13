@@ -4,6 +4,7 @@ import { parsePlPgSQLSync } from 'libpg-query'
 import {
   ACCESS_ROWS,
   accessOf,
+  readsOfCalls,
   union,
   WRITES_OF_ANY_KIND,
   type AccessRow,
@@ -293,11 +294,12 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
   // Second pass: these name other tables, which must all be known first. A function's body resolves names by the
   // `search_path` of the session that calls it: any schema's table may be meant.
   const functionWrites = writesOfFunctions(row.functions, anySchema, catalog)
+  catalog.functionReads = readsOfFunctions(row.functions, anySchema, catalog)
   for (const t of row.tables) {
     const table = tables.get(`${t.schema}.${t.name}`)!
     const reads = [...(t.view ? [t.view] : []), ...(t.rls ? (t.policies ?? []).map((p) => `select 1 where ${p}`) : [])]
     // Printed for the loading session: its `search_path` resolves them.
-    table.alsoReads = union(reads.map((sql) => tablesOfStatements(parseStatements(sql), (t) => catalog.named(t))))
+    table.alsoReads = union(reads.map((sql) => tablesReadBy(parseStatements(sql), (t) => catalog.named(t), catalog)))
     const { alsoWrites } = table
     for (const [type, language, source] of t.triggers ?? []) {
       // A trigger resolves names with the `search_path` of the session that fires it: any schema's table may be meant.
@@ -317,8 +319,6 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
     // A write to a view writes its tables, or what its rules and `INSTEAD OF` triggers write.
     if (t.view) for (const write of WRITES_OF_ANY_KIND) alsoWrites[write] = 'all'
   }
-  // A function's body resolves names by the `search_path` of the session that calls it: any schema's table may be meant.
-  catalog.functionReads = readsOfFunctions(row.functions, anySchema, catalog)
   return catalog
 }
 
@@ -420,10 +420,12 @@ function takes({ inputs, defaults }: Overload, positional: number, named: string
   return inputs.every((name, i) => i < positional || i >= inputs.length - defaults.length || named.includes(name))
 }
 
-/** The tables `statements` name, each name resolved by `named`. */
-function tablesOfStatements(statements: Node[] | null, named: (table: RangeVar) => Table[]): TableSet {
+/** The tables `statements` read: those they name, each name resolved by `named`, and those the app's functions they
+ *  call read. */
+function tablesReadBy(statements: Node[] | null, named: (table: RangeVar) => Table[], catalog: Catalog): TableSet {
   if (!statements) return 'all'
-  return new Set(tablesIn(statements).flatMap((table) => named(table).map((found) => found.id)))
+  const tables = new Set(tablesIn(statements).flatMap((table) => named(table).map((found) => found.id)))
+  return union([tables, readsOfCalls(statements, catalog)])
 }
 
 /**

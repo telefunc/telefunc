@@ -2,6 +2,7 @@ export {
   accessAnswered,
   accessOf,
   actionOf,
+  readsOfCalls,
   sideEffects,
   tablesChangedBy,
   union,
@@ -188,6 +189,12 @@ function tablesChangedBy(written: Written[], catalog: Catalog): TableSet {
 function union(sets: TableSet[]): TableSet {
   if (sets.includes('all')) return 'all'
   return new Set(sets.flatMap((s) => [...s]))
+}
+
+/** What the app's functions `node` calls read (`Catalog.functionReads`): every table for one whose body doesn't tell. */
+function readsOfCalls(node: unknown, catalog: Catalog): TableSet {
+  const called = catalog.calls(node).filter((name) => catalog.functions.has(name))
+  return union(called.map((name) => catalog.functionReads?.get(name) ?? 'all'))
 }
 
 /** The role `ACCESS_QUERY` or `ROLE_QUERY` ran as, and what it sees of each table, from its answer. */
