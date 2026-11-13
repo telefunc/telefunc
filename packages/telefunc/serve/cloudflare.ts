@@ -10,7 +10,10 @@ import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
 import { ChannelMux } from '../wire-protocol/channel/server/ChannelMux.js'
 import { getServerConfig, setAdapterMaxFrameBytes, setAdapterMaxMemory } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
-import { importBundledEntry, loadServerProductionEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
+import {
+  importBundledEntry,
+  preloadServerProductionEntry,
+} from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
 import { installBackend } from '../wire-protocol/backend/install.js'
 import {
   CloudflareBroadcastAuthorityState,
@@ -149,7 +152,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     async fetch(request: Request) {
-      await loadServerProductionEntry()
+      await preloadServerProductionEntry()
       return this.#runInSession(async () => {
         const target = readForwardedTarget(request)
         if (target) this.session.broadcast.locate(target.locationBucket)
@@ -248,7 +251,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
   return {
     async serve({ request, env }: ServeInput): Promise<Response | undefined> {
-      await loadServerProductionEntry()
+      await preloadServerProductionEntry()
       if (!isTelefuncRequest(request)) return undefined
       const config = getServerConfig()
 
