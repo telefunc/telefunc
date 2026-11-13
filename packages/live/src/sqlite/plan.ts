@@ -13,7 +13,6 @@ import {
 } from '../capture/statement.js'
 import { quote } from '../tree.js'
 import { SQLITE, numberParams, tokensOf } from './dialect.js'
-import { hasConflictReplace } from './catalog.js'
 import { CannotLower, identifier, Lowering, objectName, variant, writeTarget } from './lower.js'
 import { parseSqlite, type Ast } from './parser.js'
 
@@ -122,7 +121,7 @@ function planWrite(statement: Ast, text: string | undefined, catalog: Catalog): 
   const target = writeTarget(statement)
   const table = target && catalog.find(target)
   const [, write] = variant(statement)
-  const replaces = write.or === 'Replace' || !table || hasConflictReplace(table)
+  const replaces = write.or === 'Replace' || !table || table.conflictReplace === true
   const whole: ChangedTables = table ? tablesChangedBy([[table.id, undefined]], catalog) : 'all'
   if (catalog.changeLog) return { kind: 'logged', tables: whole, also: replaces || table?.virtual ? whole : new Set() }
   const widened =

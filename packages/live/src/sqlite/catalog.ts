@@ -1,5 +1,4 @@
 export { catalogQuery, catalogOf, changeLogSetup, CHANGE_LOG_TRIGGERS, CHANGE_COUNT, READ_CHANGES, changesOfLog }
-export { hasConflictReplace }
 
 import type { Access, Catalog, Table, TableSet } from '../catalog.js'
 import { callsVolatile, tablesChangedBy, union } from '../catalog.js'
@@ -374,12 +373,6 @@ function changesOfLog(rows: (string | null)[][], after: number, catalog: Catalog
     if (kind === 'delete') return { table: table!, kind: 'delete', old: image(old) }
     return { table: table!, kind: 'update', old: image(old), new: image(now) }
   })
-}
-
-/** Whether a write to `table` may delete rows it conflicts with (`REPLACE`), which neither the change log nor
- *  `RETURNING` reports. */
-function hasConflictReplace(table: Table): boolean {
-  return table.conflictReplace === true
 }
 
 function sqlString(text: string): string {
