@@ -321,10 +321,10 @@ import { Channel } from 'telefunc'
 type Position = { x: number; y: number }
 type PointerMove = (position: Position) => void
 
-export async function onPointer() {
+export async function onFollowPointer(userId: string) {
   const channel = new Channel<PointerMove, PointerMove>()
   channel.listen((position) => moveMyPointer(position))
-  onOthersPointerMove((position) => channel.send(position, { lossy: true }))
+  onPointerMove(userId, (position) => channel.send(position, { lossy: true }))
   return { channel: channel.client }
 }
 ```
@@ -333,16 +333,19 @@ export async function onPointer() {
 // Pointer.tsx
 // Environment: client
 
-import { onPointer } from './Pointer.telefunc'
+import { onFollowPointer } from './Pointer.telefunc'
 
-const { channel } = await onPointer()
-channel.listen((position) => drawOthersPointer(position))
+const userId = 'alice'
+const { channel } = await onFollowPointer(userId)
+channel.listen((position) => drawPointer(userId, position))
 window.addEventListener('pointermove', (e) => channel.send({ x: e.clientX, y: e.clientY }, { lossy: true }))
 ```
 
+> A channel's lossy sends in one direction replace each other whatever they hold, so send the values that change together as one message, such as one pointer's `x` and `y`.
+
 > A send without `lossy` is never skipped, and nothing passes it: the lossy sends that arrive stay on the side of it they were sent on. A graceful `close()` delivers the newest first, and `abort()` drops it.
 
-> A lossy call returns what it returns without `lossy`, and never waits for the receiver: `send()` resolves at once, and `publish()` on a lossy `BroadcastChannel` resolves with the server's receipt, and a client's publish that a newer one skipped before it went up resolves with the newer one's. `lossy` can't be combined with `ack: true`: a skipped message has no answer.
+> Awaiting a lossy call never waits for the receiver. A lossy `send()` resolves at once. `lossy` can't be combined with `ack: true`: a skipped message has no answer.
 
 > A receiver skips only what its connection hasn't carried yet: a slow `for await` loop over `messages()` still reads every message that arrived.
 
@@ -542,6 +545,8 @@ price.subscribe((value, info) => showPrice(value, info.seq))
 > `lossy` is a constructor option because a `BroadcastChannel` is one client's subscription: it lets that client skip, whoever publishes, while a client of the same key without it gets every message.
 
 > `info.seq` jumps over the messages a client skipped. A client skips to the newest of the whole key, so give each value its own key, such as one per pointer.
+
+> `publish()` resolves with the server's receipt. A client's `publish()` that a newer one replaced before it left resolves with the newer one's receipt.
 
 > Without `lossy`, a client gets every message, and past what the server holds for it the channel closes with `ChannelOverflowError` (see <Link href="#broadcast" />). To catch up, load the state again and call the telefunction for a new channel.
 
