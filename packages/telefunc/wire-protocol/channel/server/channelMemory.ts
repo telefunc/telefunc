@@ -4,6 +4,7 @@ export {
   admit,
   admitPublish,
   dropWireCopies,
+  fits,
   hasCopyRoom,
   hold,
   holdsEnough,
@@ -55,6 +56,15 @@ function admit(holder: MemoryHolder, bytes: number): boolean {
   if (holder.heldBytes + bytes > Math.min(maxPendingBytesOf(), maxMemory)) return false
   if (memory.total + bytes <= target) return true
   return holder.heldBytes + bytes <= maxMemory / memory.holders.size && memory.total + bytes <= maxMemory
+}
+
+/** Whether `bytes` for `holder` may be held with nothing let go to make room for them: `admit` then admits them as well. */
+function fits(holder: MemoryHolder, bytes: number): boolean {
+  const maxMemory = maxMemoryOf()
+  return (
+    holder.heldBytes + bytes <= Math.min(maxPendingBytesOf(), maxMemory) &&
+    memory.total + bytes <= shedTarget(maxMemory)
+  )
 }
 
 /** Makes room for a delivery to `owner`'s pages, which nobody can refuse. Near the budget, each page whose waiting

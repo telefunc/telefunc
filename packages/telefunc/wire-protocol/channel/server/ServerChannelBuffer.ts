@@ -61,6 +61,12 @@ class ServerChannelBuffer<TAck = never> {
     this.pushSend(TAG.BINARY_ACK_REQ, new Uint8Array(data), data.byteLength, { resolve, reject })
   }
 
+  /** What the next lossy send takes the place of: the last entry's, where that is a lossy send. */
+  get replaceableHeld(): number {
+    const last = this.entries.at(-1)
+    return last?.lossy ? last.held : 0
+  }
+
   /** A lossy send of `bytes`, which takes the place of the last entry where that is a lossy send too: between two sends
    *  that must arrive, a page that was away gets only the newest. Holds a copy of binary data, as `pushBinary` does. */
   pushLossy(tag: typeof TAG.TEXT | typeof TAG.BINARY, data: EntryData, bytes: number): void {

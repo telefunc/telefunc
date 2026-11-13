@@ -340,6 +340,61 @@ describe('a page away for 5 s, with 30 lossy sends and one plain send a second',
   }
 })
 
+describe('a large lossy send near the memory budget', () => {
+  const size = 256 * 1024
+  /** Holds the budget down to `room` bytes, until `free()`. */
+  function leaveRoom(room: number) {
+    const filler: MemoryHolder = { heldBytes: 0 }
+    hold(filler, getChannelConfig().maxMemory - ledgerTotal() - room)
+    return () => {
+      letGo(filler, filler.heldBytes)
+      releaseHolder(filler)
+    }
+  }
+  /** The first two characters of what the page read: whether lossy, and which value. */
+  const firstChars = (page: Page) => page.read.map((value) => value.slice(0, 2))
+
+  test('before the first attach, a newest as large as the one waiting takes its place where both would not fit, and one too large is refused', async () => {
+    const channel = new ServerChannel<never, string>()
+    channel._registerChannel()
+    const free = leaveRoom(1.5 * size)
+    try {
+      await expect(channel.send('a'.repeat(size), { lossy: true })).resolves.toBeUndefined()
+      await expect(channel.send('b'.repeat(size), { lossy: true })).resolves.toBeUndefined()
+      await expect(channel.send('c'.repeat(2 * size), { lossy: true })).rejects.toThrow('Send refused')
+      const page = newPage()
+      wire(channel, page).attach()
+      expect(firstChars(page)).toEqual(['~b'])
+    } finally {
+      free()
+      channel._end()
+      channel._release()
+    }
+  })
+
+  test('attached and behind, a newest as large as the one waiting takes its place where both would not fit beside what the page has yet to confirm', async () => {
+    const channel = new ServerChannel<never, string>()
+    channel._registerChannel()
+    const page = newPage()
+    const w = wire(channel, page, { behindAfter: 0 })
+    w.attach()
+    const free = leaveRoom(2.5 * size)
+    try {
+      void channel.send('a'.repeat(size), { lossy: true })
+      await new Promise((resolve) => setTimeout(resolve, 2))
+      // Unconfirmed past `behindAfter`: the page is behind, so the newest waits.
+      void channel.send('b'.repeat(size), { lossy: true })
+      await expect(channel.send('c'.repeat(size), { lossy: true })).resolves.toBeUndefined()
+      w.confirm()
+      expect(firstChars(page)).toEqual(['~a', '~c'])
+    } finally {
+      free()
+      channel._end()
+      channel._release()
+    }
+  })
+})
+
 describe("the server's memory after a lossy send", () => {
   test('a held newest lets go at abort()', async () => {
     const before = ledgerTotal()
