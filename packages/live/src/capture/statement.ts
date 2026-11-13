@@ -3,6 +3,7 @@ export type { Cascade, Plan, ReadPlan, WritePlan, TransactionAction, ChangedTabl
 
 import {
   actionOf,
+  callsVolatile,
   sideEffects,
   tablesChangedBy,
   type Catalog,
@@ -127,7 +128,7 @@ const READS_EVERYTHING: ReadShape = { kind: 'other', aliases: [], alsoReads: 'al
 
 function planRead(select: Node, text: string | undefined, catalog: Catalog): ReadPlan {
   const shape = analyzeRead(select, catalog, text)
-  const shareable = !catalog.calls(select).some((name) => catalog.volatileFunctions.has(name))
+  const shareable = !callsVolatile(select, catalog) && !reachesVolatile(shape, catalog)
   if (shape.hiddenColumns.length === 0 || !text) return { kind: 'read', shape, liveText: undefined, shareable }
   const { dialect } = catalog
   const splices = shape.hiddenAt ?? [{ from: dialect.topLevelFrom(text), columns: shape.hiddenColumns }]
@@ -139,6 +140,14 @@ function planRead(select: Node, text: string | undefined, catalog: Catalog): Rea
     liveText = dialect.splice(liveText, from!, `, ${hidden.join(', ')} `)
   }
   return { kind: 'read', shape, liveText, shareable }
+}
+
+/** Whether a read may call a volatile function through what it reads: a view or a policy calling one (`Table.volatile`),
+ *  among its tables, or among any table when what it reads isn't known. */
+function reachesVolatile(shape: ReadShape, catalog: Catalog): boolean {
+  if (shape.alsoReads === 'all') return [...catalog.tables.values()].some((table) => table.volatile)
+  const reached = [...shape.aliases.map((alias) => alias.table.id), ...shape.alsoReads]
+  return reached.some((id) => catalog.tables.get(id)?.volatile)
 }
 
 /** What `writes` to `table` change besides their rows: `WritePlan.alsoWrites`. */

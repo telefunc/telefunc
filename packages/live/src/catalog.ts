@@ -2,6 +2,7 @@ export {
   accessAnswered,
   accessOf,
   actionOf,
+  callsVolatile,
   readsOfCalls,
   sideEffects,
   tablesChangedBy,
@@ -41,6 +42,9 @@ type Table = {
   isView: boolean
   /** A read of this table also reads these: a view's tables, the tables its row-level security policies read. */
   alsoReads: TableSet
+  /** A read of it may call a volatile function (`Catalog.volatileFunctions`): its view or its row-level security
+   *  policies call one, or can't be read. */
+  volatile?: boolean
   /** What each kind of write to this table also changes: the tables its triggers write. Every table (`'all'`) when the
    *  catalog can't name them: a rule, a column default or a trigger calling a function of the app's, SQL a trigger
    *  builds at run time, a view's tables. */
@@ -189,6 +193,11 @@ function tablesChangedBy(written: Written[], catalog: Catalog): TableSet {
 function union(sets: TableSet[]): TableSet {
   if (sets.includes('all')) return 'all'
   return new Set(sets.flatMap((s) => [...s]))
+}
+
+/** Whether `node` calls one of `Catalog.volatileFunctions`. */
+function callsVolatile(node: unknown, catalog: Catalog): boolean {
+  return catalog.calls(node).some((name) => catalog.volatileFunctions.has(name))
 }
 
 /** What the app's functions `node` calls read (`Catalog.functionReads`): every table for one whose body doesn't tell. */

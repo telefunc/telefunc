@@ -1,9 +1,12 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { PGlite } from '@electric-sql/pglite'
 import { sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/pglite'
 import { REQUEST_CONTEXT } from 'telefunc'
-import { describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it } from 'vitest'
 import { liveDrizzle } from '@telefunc/live/drizzle'
 import { liveDatabaseOf } from '../database.js'
 import { readLive } from '../liveQuery.js'
@@ -105,12 +108,15 @@ describe('identical live reads on one PGlite', () => {
   /** A wrapped PGlite counting the reads of `todos` that reach it; `hold()` delays the results of those after it. */
   async function counting() {
     const pglite = new PGlite()
-    await pglite.exec('create table todos (id int primary key, done bool); insert into todos values (1, false)')
+    await pglite.exec(`
+      create table todos (id int primary key, done bool);
+      insert into todos values (1, false);
+      create view every_todo as select * from todos;`)
     let reads = 0
     let held: Promise<void> | undefined
     const query = pglite.query.bind(pglite)
     pglite.query = (async (...args: Parameters<typeof query>) => {
-      const reading = /from todos/.test(args[0])
+      const reading = /from (todos|every_todo)/.test(args[0])
       if (reading) reads++
       const until = reading ? held : undefined
       const result = await query(...args)
@@ -119,14 +125,17 @@ describe('identical live reads on one PGlite', () => {
     }) as typeof query
     liveDatabaseOf(pglite, {})
     // A telefunction call, as telefunc's server runs one: the response sends the `Live`.
-    const live = () =>
-      store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () => readLive(() => pglite.query(READ), 'the spec'))
+    const live = (text = READ) =>
+      store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () => readLive(() => pglite.query(text), 'the spec'))
     return { pglite, live, reads: () => reads, hold: (until: Promise<void> | undefined) => (held = until) }
   }
 
-  it('share one read', async () => {
+  it.each([
+    ['a table', READ],
+    ['a view', 'select id, done from every_todo order by id'],
+  ])('share one read of %s', async (_, text) => {
     const { pglite, live, reads } = await counting()
-    const lives = await Promise.all(Array.from({ length: 10 }, live))
+    const lives = await Promise.all(Array.from({ length: 10 }, () => live(text)))
     expect(reads()).toBe(1)
     for (const each of lives) expect(each.send().rows).toEqual([{ id: 1, done: false }])
     await pglite.close()
@@ -272,6 +281,57 @@ describe("a live read of a view or a table whose policy calls the app's SQL func
     expect(read.stale()).toBe(1)
     await pglite.query('set role tenant')
     expect((await pglite.query('select * from items')).rows).toEqual([])
+    await pglite.close()
+  })
+})
+
+describe('identical live reads reaching a volatile function', () => {
+  const folder = mkdtempSync(join(tmpdir(), 'live-pglite-'))
+  afterAll(() => rmSync(folder, { recursive: true, force: true }))
+  /** A PGlite holding `schema`, connected as `role` when given: the app's role from the start, as a `SET ROLE` would
+   *  keep identical reads from sharing anyway. */
+  async function database(schema: string, role: string | undefined): Promise<PGlite> {
+    if (!role) {
+      const pglite = new PGlite()
+      await pglite.exec(schema)
+      return pglite
+    }
+    const dataDir = mkdtempSync(join(folder, 'db-'))
+    const owner = new PGlite(dataDir)
+    await owner.exec(schema)
+    await owner.close()
+    return new PGlite(dataDir, { username: role })
+  }
+
+  it.each([
+    ['through a view', "create view tick as select nextval('seq')::int as n", 'select * from tick', undefined],
+    [
+      "through an aggregate's transition function",
+      `create function step(int, int) returns int language sql volatile as 'select $1 + nextval(''seq'')::int';
+       create aggregate total(int) (sfunc = step, stype = int, initcond = '0');
+       create table one (id int);
+       insert into one values (1);`,
+      'select total(id) from one',
+      undefined,
+    ],
+    [
+      'through a row-level security policy',
+      `create table items (id int);
+       insert into items values (1);
+       alter table items enable row level security;
+       create policy counted on items for select using (nextval('seq') > 0);
+       create role tenant;
+       grant select on items to tenant;
+       grant usage, select on sequence seq to tenant;`,
+      'select * from items',
+      // Postgres applies a policy to a role that isn't the table's owner.
+      'tenant',
+    ],
+  ])('run each, %s', async (_, schema, text, role) => {
+    const pglite = await database(`create sequence seq; ${schema}`, role)
+    liveDatabaseOf(pglite, {})
+    await Promise.all([watched(pglite, text), watched(pglite, text)])
+    expect((await pglite.query('select last_value::int as n from seq')).rows).toEqual([{ n: 2 }])
     await pglite.close()
   })
 })

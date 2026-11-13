@@ -2,7 +2,7 @@ export { catalogQuery, catalogOf, changeLogSetup, CHANGE_LOG_TRIGGERS, CHANGE_CO
 export { hasConflictReplace }
 
 import type { Access, Catalog, Table, TableSet } from '../catalog.js'
-import { tablesChangedBy, union } from '../catalog.js'
+import { callsVolatile, tablesChangedBy, union } from '../catalog.js'
 import { rowOf } from '../match/condition.js'
 import type { Change } from '../match/liveRead.js'
 import type { Column } from '../match/values.js'
@@ -200,7 +200,7 @@ function catalogOf(answer: string, changeLog: boolean): Catalog {
   for (const t of row.tables) {
     const table = tables.get(`main.${lowerCase(t.name)}`)!
     if (t.type === 'view') {
-      table.alsoReads = tablesOfView(t.sql, catalog)
+      Object.assign(table, readOfView(t.sql, catalog))
       for (const write of ['insert', 'update', 'delete'] as const) table.alsoWrites[write] = 'all'
     }
     // Foreign keys act only while `PRAGMA foreign_keys` is on.
@@ -296,14 +296,17 @@ function keysOf(rows: CatalogRow['tables'][number]['keys']): Key[] {
   })
 }
 
-function tablesOfView(sql: string | null, catalog: Catalog): TableSet {
+/** What a read of a view also reads (`Table.alsoReads`), and whether it calls a volatile function (`Table.volatile`). */
+function readOfView(sql: string | null, catalog: Catalog): { alsoReads: TableSet; volatile: boolean } {
   const view = sql ? parseSqlite(sql)?.[0]?.CreateView : undefined
-  if (!view) return 'all'
+  if (!view) return { alsoReads: 'all', volatile: true }
   try {
-    const tables = tablesIn(new Lowering(sql!).query(view.query)).map((t) => catalog.find(t))
-    return tables.every(Boolean) ? new Set(tables.map((t) => t!.id)) : 'all'
+    const query = new Lowering(sql!).query(view.query)
+    const tables = tablesIn(query).map((t) => catalog.find(t))
+    const alsoReads = tables.every(Boolean) ? new Set(tables.map((t) => t!.id)) : 'all'
+    return { alsoReads, volatile: callsVolatile(query, catalog) }
   } catch (error) {
-    if (error instanceof CannotLower) return 'all'
+    if (error instanceof CannotLower) return { alsoReads: 'all', volatile: true }
     throw error
   }
 }

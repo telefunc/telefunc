@@ -4,6 +4,7 @@ import { parsePlPgSQLSync } from 'libpg-query'
 import {
   ACCESS_ROWS,
   accessOf,
+  callsVolatile,
   readsOfCalls,
   union,
   WRITES_OF_ANY_KIND,
@@ -36,8 +37,9 @@ type CatalogRow = {
     variadic: boolean,
     /** A SQL function's `CREATE FUNCTION`. */
     definition: string | null,
-    /** An aggregate's support functions (`pg_aggregate`): each one's name, and whether it is Postgres's own, in C. */
-    support: [name: string, ownC: boolean][] | null,
+    /** An aggregate's support functions (`pg_aggregate`): each one's name, whether it is Postgres's own, in C, and
+     *  whether it is volatile. */
+    support: [name: string, ownC: boolean, volatile: boolean][] | null,
   ][]
   volatileFunctions: string[]
   aggregates: string[]
@@ -100,7 +102,8 @@ select json_build_object(
   'functions', (select coalesce(json_agg(json_build_array(p.proname, ${WRITING}, p.provolatile = 'v',
       pg_get_expr(p.proargdefaults, 0), p.proargnames, p.proargmodes, p.pronargs, p.provariadic <> 0,
       case when l.lanname = 'sql' and p.prokind = 'f' then pg_get_functiondef(p.oid) end,
-      (select json_agg(json_build_array(s.proname, sn.nspname = 'pg_catalog' and sl.lanname in ('internal', 'c')))
+      (select json_agg(json_build_array(s.proname, sn.nspname = 'pg_catalog' and sl.lanname in ('internal', 'c'),
+          s.provolatile = 'v'))
         from pg_aggregate a
         cross join unnest(array[a.aggtransfn, a.aggfinalfn, a.aggcombinefn, a.aggmtransfn, a.aggminvtransfn,
           a.aggmfinalfn]) f (oid)
@@ -235,7 +238,13 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
     calls(node) {
       return callsIn(node, overloads)
     },
-    volatileFunctions: new Set(row.volatileFunctions),
+    // An aggregate is as volatile as its support functions: Postgres records every one as immutable.
+    volatileFunctions: new Set([
+      ...row.volatileFunctions,
+      ...row.functions
+        .filter(([, , , , , , , , , support]) => support?.some(([, , volatile]) => volatile))
+        .map(([name]) => name),
+    ]),
     aggregates: new Set(row.aggregates),
     searchPath: row.searchPath,
     domainBases(typeNames) {
@@ -299,7 +308,9 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
     const table = tables.get(`${t.schema}.${t.name}`)!
     const reads = [...(t.view ? [t.view] : []), ...(t.rls ? (t.policies ?? []).map((p) => `select 1 where ${p}`) : [])]
     // Printed for the loading session: its `search_path` resolves them.
-    table.alsoReads = union(reads.map((sql) => tablesReadBy(parseStatements(sql), (t) => catalog.named(t), catalog)))
+    const parsed = reads.map((sql) => parseStatements(sql))
+    table.alsoReads = union(parsed.map((statements) => tablesReadBy(statements, (t) => catalog.named(t), catalog)))
+    table.volatile = parsed.some((statements) => !statements || callsVolatile(statements, catalog))
     const { alsoWrites } = table
     for (const [type, language, source] of t.triggers ?? []) {
       // A trigger resolves names with the `search_path` of the session that fires it: any schema's table may be meant.
