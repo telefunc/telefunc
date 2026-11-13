@@ -431,6 +431,7 @@ type BroadcastChannel<T = unknown> = {
     data: ChannelData<T>
     ack: unknown
   }
+  /** Serializes `data` as JSON: bytes go through `publishBinary()`. */
   publish<D>(data: ChannelJson<T, D, 'publish'>): Promise<ChannelPublishAck>
   subscribe(callback: BroadcastListener<T>, options?: { signal?: AbortSignal }): () => void
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
@@ -500,6 +501,7 @@ function receiptOf(
 }
 
 const Broadcast = {
+  /** Serializes `data` as JSON: bytes go through `publishBinary()`. */
   publish<U = unknown, D = unknown>(
     key: string,
     data: ChannelJson<U, D, 'publish'>,

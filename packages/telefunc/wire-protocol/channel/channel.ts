@@ -92,7 +92,8 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
   messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<
     { type: 'text'; data: ChannelData<TIn> } | { type: 'binary'; data: Uint8Array }
   >
-  /** Default send. Returns `Promise<ack>` when `TDefault = true`, otherwise `Promise<void>`. */
+  /** Default send. Returns `Promise<ack>` when `TDefault = true`, otherwise `Promise<void>`.
+   *  Serializes `data` as JSON: bytes go through `sendBinary()`. */
   send<D>(data: ChannelJson<TOut, D, 'send'>): TDefault extends true ? Promise<ChannelAck<TOut>> : Promise<void>
   /** Per-send ack opt-in — always returns `Promise<ack>`. */
   send<D>(data: ChannelJson<TOut, D, 'send'>, opts: { ack: true }): Promise<ChannelAck<TOut>>
