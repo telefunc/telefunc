@@ -53,4 +53,15 @@ describe('live()', () => {
     expect(values).toHaveLength(2)
     stop()
   })
+
+  it('closes the previous value of a query that another copy of the package fetched', async () => {
+    client = new QueryClient()
+    const { live: liveOfCopy } = await import('./tanstack-query.js?copy')
+    const { call, values } = telefunction()
+    await client.fetchQuery({ queryKey: ['todos'], queryFn: live(call) })
+    await client.fetchQuery({ queryKey: ['todos'], queryFn: liveOfCopy(call) })
+    expect(values.map((value) => value.closed)).toEqual([1, 0])
+    client.clear()
+    expect(values.map((value) => value.closed)).toEqual([1, 1])
+  })
 })

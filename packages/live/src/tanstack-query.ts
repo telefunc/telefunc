@@ -4,6 +4,7 @@ import { hashKey, type QueryClient, type QueryFunctionContext, type QueryKey } f
 import { withContext } from 'telefunc/client'
 import { assertUsage } from './assert.js'
 import type { Live } from './live.js'
+import { processWide } from './processWide.js'
 import { Refetcher } from './refetcher.js'
 import { closeSubscription, subscriptionOf, type Subscription } from './wire/shared.js'
 
@@ -12,7 +13,7 @@ import { closeSubscription, subscriptionOf, type Subscription } from './wire/sha
 type Registry = { queries: Map<string, Watched>; stopWatchingCache: (() => void) | undefined }
 /** A query's `Live` (holding it keeps its channel open) and when to refetch it. */
 type Watched = { value: Live<unknown> | undefined; refetcher: Refetcher }
-const registries = new WeakMap<QueryClient, Registry>()
+const registries = processWide('tanstackRegistries', () => new WeakMap<QueryClient, Registry>())
 
 /**
  * Makes a TanStack Query `queryFn` of a telefunction returning a `Live`: the query refetches when the value goes stale
