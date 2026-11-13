@@ -108,8 +108,6 @@ class SseTransport implements UpgradeSource {
   private postOutBytes = 0
   /** The frames in `outbox`. */
   private outboxBytes = 0
-  /** The batch POST out is lost if this passes. */
-  private postWatch: ReturnType<typeof setTimeout> | null = null
   private flushThrottleMs = SSE_FLUSH_THROTTLE_MS
   private postIdleFlushDelayMs = SSE_POST_IDLE_FLUSH_DELAY_MS
   private heartbeatFlushDelayMs = Math.floor(CHANNEL_PING_INTERVAL_MS / 2)
@@ -492,8 +490,7 @@ class SseTransport implements UpgradeSource {
         head?.blob,
       )
       this.postOutBytes = body.size
-      this.watchPost(wire, SSE_POST_FLOOR_MS + (body.size * 1000) / SSE_POST_MIN_BYTES_PER_S)
-      const response = await this.postAndRead(body, wire.signal)
+      const response = await this.postWithDeadline(body, wire.signal)
       if (!response.ok) throw new Error('POST failed')
       this.sizePosts(body.size, performance.now() - now)
       this.uplink.roundTrips.postAnswered(performance.now() - oldestQueuedAt(queued))
@@ -507,8 +504,6 @@ class SseTransport implements UpgradeSource {
       this.abandonActiveTransport()
       this.owner.onTransportClosed(this)
     } finally {
-      if (this.postWatch) clearTimeout(this.postWatch)
-      this.postWatch = null
       this.flushing = false
       this.postOutBytes = 0
       if (this.barrierTurn) this.barrierTurn()
@@ -536,12 +531,19 @@ class SseTransport implements UpgradeSource {
     return this.batched ? this.postBytes - this.postOutBytes - this.outboxBytes : Infinity
   }
 
-  /** The wire is lost with the POST out for `ms`, as one that missed its pong: a reconnect resends what it carried. */
-  private watchPost(wire: AbortController, ms: number): void {
-    this.postWatch = setTimeout(() => {
-      this.owner.onWireLate(this)
-      if (this.transportAbort === wire) this.watchPost(wire, SSE_POST_FLOOR_MS)
-    }, ms)
+  /** A batch POST out past its deadline is given up, as a wire that missed its pong: its wire reconnects, resending what
+   *  it carried. */
+  private async postWithDeadline(body: Blob, wireSignal: AbortSignal): Promise<Response> {
+    const post = new AbortController()
+    const abort = () => post.abort()
+    const deadline = setTimeout(abort, SSE_POST_FLOOR_MS + (body.size * 1000) / SSE_POST_MIN_BYTES_PER_S)
+    wireSignal.addEventListener('abort', abort, { once: true })
+    try {
+      return await this.postAndRead(body, post.signal)
+    } finally {
+      clearTimeout(deadline)
+      wireSignal.removeEventListener('abort', abort)
+    }
   }
 
   /** After a POST: the outbox goes next, or those waiting for the drain are told it's empty. */

@@ -54,8 +54,6 @@ interface TransportOwner {
   onTransportBatched(transport: ClientChannelTransport): void
   /** An SSE wire's RECONCILE went out with the request that opens it, before the wire opens (see `beatFromReconcile`). */
   onTransportReconcileSent(transport: ClientChannelTransport): void
-  /** A batch POST has been out longer than its upload takes at the slowest rate a wire is held to. */
-  onWireLate(transport: ClientChannelTransport): void
   /** What a transport's wire carries as it opens: the RECONCILE, and the frames buffered behind it. */
   stageInitialReconcileBatch(): ReconcileBatch
 }
@@ -336,8 +334,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.onTransportClosed(transport)
   }
 
-  /** Its PONG or a batch POST came late. Until a wire's first RECONCILED, the RECONCILE deadline bounds it: the wait
-   *  may outlast the pong deadline. */
+  /** Its PONG came late. Until a wire's first RECONCILED, the RECONCILE deadline bounds it: the wait may outlast the
+   *  pong deadline. */
   onWireLate(transport: ClientChannelTransport): void {
     if (this.exchange.boundsWire) return
     this.dropWire(transport)
