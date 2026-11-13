@@ -82,7 +82,7 @@ vi.mock('../../../node/server/telefunc.js', () => ({
 }))
 
 vi.mock('../../../node/server/runTelefunc/loadTelefuncFilesUsingVite.js', () => ({
-  loadServerProductionEntry: vi.fn(async () => {}),
+  preloadServerProductionEntry: vi.fn(async () => {}),
 }))
 
 vi.mock('../../broadcast/broadcastAdapter.js', () => ({

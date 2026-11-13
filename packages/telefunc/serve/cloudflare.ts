@@ -8,7 +8,7 @@ import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
 import { getServerConfig, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
-import { loadServerProductionEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
+import { preloadServerProductionEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
 import { installBroadcastAdapter } from '../wire-protocol/broadcast/broadcastAdapter.js'
 import {
   CloudflareBroadcastAuthorityState,
@@ -106,7 +106,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     async fetch(request: Request) {
-      await loadServerProductionEntry()
+      await preloadServerProductionEntry()
       broadcast.attachRequest(request, this.instanceName)
       const target = readForwardedTarget(request)
       if (target) broadcast.attachIsolateInfo(target.sessionInstanceName, target.locationBucket)
@@ -151,7 +151,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
   return {
     async serve({ request, env }: ServeInput): Promise<Response | undefined> {
-      await loadServerProductionEntry()
+      await preloadServerProductionEntry()
       if (!isTelefuncRequest(request)) return undefined
       const config = getServerConfig()
 

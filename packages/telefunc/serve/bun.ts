@@ -5,7 +5,7 @@ import type { Peer } from 'crossws'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig } from '../node/server/serverConfig.js'
-import { loadServerProductionEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
+import { preloadServerProductionEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
 import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
 import { CHANNEL_TRANSPORT, WIRE_MAX_RAW_FRAME_BYTES } from '../wire-protocol/constants.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
@@ -53,7 +53,7 @@ function telefunc(): TelefuncServe {
       },
     },
     async serve({ request, server, context }: ServeInput): Promise<Response | undefined> {
-      await loadServerProductionEntry()
+      await preloadServerProductionEntry()
       const url = new URL(request.url)
       const config = getServerConfig()
       if (url.pathname === config.telefuncUrl && request.headers.get('upgrade') === 'websocket') {
