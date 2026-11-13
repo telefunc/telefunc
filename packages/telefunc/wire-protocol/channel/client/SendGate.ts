@@ -79,7 +79,7 @@ class SendGate {
 
   /** Puts `frame` in the place of channel `ix`'s frame `seq` while that waits and the page is behind, and returns the
    *  bytes it adds over that one: null once it went, as the wire then has it, or while the link keeps up. A page with no
-   *  wire has no link to keep up with. */
+   *  wire, and a channel no wire has opened yet, have no link to keep up with. */
   replaceWaiting(ix: number, seq: number, frame: Uint8Array<ArrayBuffer>): number | null {
     for (const entry of this.waitingForHeadroom) {
       if (entry.channelIx !== ix || entry.seq !== seq) continue
@@ -92,7 +92,8 @@ class SendGate {
     const sendBuffer = this.settleQueue()
     const held = sendBuffer.find((entry) => entry.channelIx === ix && entry.seq === seq)
     if (held === undefined) return null
-    if (!this.owner.reconnecting && !this.isBehind(sendBuffer.find((entry) => entry.channelIx === ix)!)) return null
+    const away = this.owner.reconnecting || this.channels.get(ix)?.state.tag === 'pending'
+    if (!away && !this.isBehind(sendBuffer.find((entry) => entry.channelIx === ix)!)) return null
     const added = frame.byteLength - held.frame.byteLength
     held.frame = frame
     return added

@@ -1,8 +1,8 @@
 // A page's `send(data, { lossy: true })`: the REAL ClientChannel on the REAL ClientConnection and SendGate, over an SSE
 // wire that never reconciles, so the gate holds every frame the page sends and the test reads them in order. The clock
 // is faked, and the wire measured a 50 ms round trip: a frame held past its `behindAfter`, 650 ms, is behind, and a newer
-// lossy send may take its place. The reconnect, with what the server then reads, is in
-// ClientConnection.reconnectOrdering.spec.ts.
+// lossy send may take its place. Its channel is open, as after its first attach, unless a test says otherwise. The
+// reconnect, with what the server then reads, is in ClientConnection.reconnectOrdering.spec.ts.
 
 import { afterEach, beforeEach, describe, expect, expectTypeOf, test, vi } from 'vitest'
 
@@ -25,10 +25,23 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-/** A channel whose wire opened and measured its round trip: what it sends from then on waits in the gate for the
- *  RECONCILED. */
+/** A channel whose wire opened and measured its round trip, and which a RECONCILED opened: what it sends from then on
+ *  waits in the gate for the next RECONCILED. */
 function newChannel(ack = false) {
-  const channel = new ClientChannel<string, never>({
+  const channel = unopenedChannel(ack)
+  // The wire opens one reconcile window after the first channel, carrying what the gate held till then.
+  vi.advanceTimersByTime(200)
+  // As a BDP probe's answer does: until a round trip is measured, the page is never behind.
+  ;(channel as any).connection.transport.uplink.roundTrips.measured(50)
+  // As a RECONCILED that lists it does.
+  const { channels } = (channel as any).connection
+  channels.open(channels.of(channel))
+  return channel
+}
+
+/** A channel no RECONCILED opened yet, as it is before its first attach. */
+function unopenedChannel(ack = false) {
+  return new ClientChannel<string, never>({
     channelId: crypto.randomUUID(),
     ack,
     connection: {
@@ -37,11 +50,6 @@ function newChannel(ack = false) {
       connectionKey: crypto.randomUUID(),
     },
   })
-  // The wire opens one reconcile window after the first channel, carrying what the gate held till then.
-  vi.advanceTimersByTime(200)
-  // As a BDP probe's answer does: until a round trip is measured, the page is never behind.
-  ;(channel as any).connection.transport.uplink.roundTrips.measured(50)
-  return channel
 }
 
 /** The frames the gate holds of the page's sends, in order. */
@@ -87,6 +95,14 @@ function grant(channel: ClientChannel<string, never>, limit: { count: number } |
 const behind = () => vi.advanceTimersByTime(1_000)
 
 describe('a lossy send from the page, while the gate holds it', () => {
+  test('before the first attach, only the newest waits, up to a plain send', () => {
+    // Before its wire opens, which sends what the gate holds: no round trip is measured yet.
+    const channel = unopenedChannel()
+    send(channel, 'L1 L2 R1 L3 L4')
+    expect(held(channel)).toEqual(['L2', 'R1', 'L4'])
+    expect(miscounted(channel)).toBe(0)
+  })
+
   test('on a link that is not behind, each one waits to go', () => {
     const channel = newChannel()
     send(channel, 'L1 L2')
