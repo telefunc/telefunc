@@ -4,12 +4,12 @@ import type {
   BroadcastBinaryListener,
   BroadcastListener,
   ChannelData,
+  ChannelJson,
   ChannelPublishAck,
   ChannelPublishInfo,
 } from '../channel.js'
-import { makePublishInfo } from '../channel.js'
+import { makePublishInfo, stringifyMessage } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
-import { stringify } from '@brillout/json-serializer/stringify'
 import { encode, type ChannelDataFrame, type SequencedEncoder } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { PUBLISH_BINARY_HEADER, type WirePublishInfo } from '../../wire/publishInfo.js'
@@ -39,9 +39,9 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this._attach.declareSubscriptions(this.subscribed)
   }
 
-  publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
+  publish<D>(data: ChannelJson<T, D, 'publish'>): Promise<ChannelPublishAck> {
     if (this.stopped) throw new ChannelClosedError()
-    const ret = this.sendPublish(encode.publishAckReq, stringify(data))
+    const ret = this.sendPublish(encode.publishAckReq, stringifyMessage(data, 'publish'))
     ret.catch(() => {})
     return ret
   }

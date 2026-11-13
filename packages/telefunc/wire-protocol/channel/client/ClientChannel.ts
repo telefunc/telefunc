@@ -8,10 +8,11 @@ import type {
   ChannelCloseOptions,
   ChannelCloseResult,
   ChannelData,
+  ChannelJson,
   ChannelListener,
   ChannelBinaryListener,
 } from '../channel.js'
-import { LOSSY_WITH_ACK_TEXT } from '../channel.js'
+import { LOSSY_WITH_ACK_TEXT, stringifyMessage } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -160,14 +161,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.connection
   }
 
-  send(data: ChannelData<ClientToServer>): Promise<void>
-  send(data: ChannelData<ClientToServer>, opts: { ack: true }): Promise<ChannelAck<ClientToServer>>
-  send(data: ChannelData<ClientToServer>, opts: { ack: false }): Promise<void>
-  send(data: ChannelData<ClientToServer>, opts: { lossy: true; ack?: false }): Promise<void>
-  send(
-    data: ChannelData<ClientToServer>,
-    opts?: { ack?: boolean; lossy?: boolean },
-  ): Promise<ChannelAck<ClientToServer>> | Promise<void> {
+  send<D>(data: ChannelJson<ClientToServer, D, 'send'>): Promise<void>
+  send<D>(data: ChannelJson<ClientToServer, D, 'send'>, opts: { ack: true }): Promise<ChannelAck<ClientToServer>>
+  send<D>(data: ChannelJson<ClientToServer, D, 'send'>, opts: { ack: false }): Promise<void>
+  send<D>(data: ChannelJson<ClientToServer, D, 'send'>, opts: { lossy: true; ack?: false }): Promise<void>
+  send(data: unknown, opts?: { ack?: boolean; lossy?: boolean }): Promise<ChannelAck<ClientToServer>> | Promise<void> {
     const t0 = performance.now()
     try {
       const ret = this.sendData(data, opts) ?? Promise.resolve()
@@ -179,17 +177,17 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private sendData(
-    data: ChannelData<ClientToServer>,
+    data: unknown,
     opts?: { ack?: boolean; lossy?: boolean },
   ): void | Promise<ChannelAck<ClientToServer>> | Promise<void> {
     if (this.stopped) throw new ChannelClosedError()
+    const serialized = stringifyMessage(data, 'send')
     if (opts?.lossy) {
       assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
-      return this.sendNewest(encode.text, stringify(data))
+      return this.sendNewest(encode.text, serialized)
     }
     this.flushLossy()
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ack === true)
-    const serialized = stringify(data)
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
     // Promise already serializes the next send, so credit would add nothing.
     if (needsAck) {

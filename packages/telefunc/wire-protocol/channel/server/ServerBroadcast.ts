@@ -2,6 +2,7 @@ export { Broadcast, BroadcastChannel, ServerBroadcast }
 
 import type {
   ChannelData,
+  ChannelJson,
   ChannelPublishAck,
   ChannelPublishInfo,
   BroadcastBinaryListener,
@@ -11,7 +12,7 @@ import type {
   ChannelCloseResult,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
-import { makePublishInfo } from '../channel.js'
+import { makePublishInfo, stringifyMessage } from '../channel.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { ServerChannel } from './ServerChannel.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
@@ -113,8 +114,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     assertUsage(false, '`listenBinary()` is not available on a `BroadcastChannel` — use `subscribeBinary()`.')
   }
 
-  publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
-    const serialized = stringify(data)
+  publish<D>(data: ChannelJson<T, D, 'publish'>): Promise<ChannelPublishAck> {
+    const serialized = stringifyMessage(data, 'publish')
     const ret = this.lifecycle.trackAck(Promise.resolve(this.publishBroadcast(serialized)))
     ret.catch(() => {})
     return ret
@@ -430,7 +431,7 @@ type BroadcastChannel<T = unknown> = {
     data: ChannelData<T>
     ack: unknown
   }
-  publish(data: ChannelData<T>): Promise<ChannelPublishAck>
+  publish<D>(data: ChannelJson<T, D, 'publish'>): Promise<ChannelPublishAck>
   subscribe(callback: BroadcastListener<T>, options?: { signal?: AbortSignal }): () => void
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
   subscribeBinary(callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): () => void
@@ -499,9 +500,12 @@ function receiptOf(
 }
 
 const Broadcast = {
-  publish<U = unknown>(key: string, data: ChannelData<U>): ChannelPublishAck | Promise<ChannelPublishAck> {
+  publish<U = unknown, D = unknown>(
+    key: string,
+    data: ChannelJson<U, D, 'publish'>,
+  ): ChannelPublishAck | Promise<ChannelPublishAck> {
     const adapter = getBroadcastAdapter()
-    const serialized = stringify(data)
+    const serialized = stringifyMessage(data, 'publish')
     return receiptOf(key, adapter.publish(key, serialized))
   },
   subscribe<U = unknown>(

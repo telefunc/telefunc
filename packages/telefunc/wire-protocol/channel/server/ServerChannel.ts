@@ -13,10 +13,11 @@ import type {
   ChannelCloseOptions,
   ChannelCloseResult,
   ChannelData,
+  ChannelJson,
   ChannelListener,
   ChannelBinaryListener,
 } from '../channel.js'
-import { LOSSY_WITH_ACK_TEXT } from '../channel.js'
+import { LOSSY_WITH_ACK_TEXT, stringifyMessage } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 
 import type { IndexedPeer } from './IndexedPeer.js'
@@ -221,14 +222,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this._phase !== 'open'
   }
 
-  send(data: ChannelData<ServerToClient>): Promise<void>
-  send(data: ChannelData<ServerToClient>, opts: { ack: true }): Promise<ChannelAck<ServerToClient>>
-  send(data: ChannelData<ServerToClient>, opts: { ack: false }): Promise<void>
-  send(data: ChannelData<ServerToClient>, opts: { lossy: true; ack?: false }): Promise<void>
-  send(
-    data: ChannelData<ServerToClient>,
-    opts?: { ack?: boolean; lossy?: boolean },
-  ): Promise<ChannelAck<ServerToClient>> | Promise<void> {
+  send<D>(data: ChannelJson<ServerToClient, D, 'send'>): Promise<void>
+  send<D>(data: ChannelJson<ServerToClient, D, 'send'>, opts: { ack: true }): Promise<ChannelAck<ServerToClient>>
+  send<D>(data: ChannelJson<ServerToClient, D, 'send'>, opts: { ack: false }): Promise<void>
+  send<D>(data: ChannelJson<ServerToClient, D, 'send'>, opts: { lossy: true; ack?: false }): Promise<void>
+  send(data: unknown, opts?: { ack?: boolean; lossy?: boolean }): Promise<ChannelAck<ServerToClient>> | Promise<void> {
     const t0 = performance.now()
     try {
       const ret = this.sendData(data, opts) ?? Promise.resolve()
@@ -240,13 +238,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private sendData(
-    data: ChannelData<ServerToClient>,
+    data: unknown,
     opts?: { ack?: boolean; lossy?: boolean },
   ): void | Promise<ChannelAck<ServerToClient>> | Promise<void> {
     if (this._phase !== 'open') throw new ChannelClosedError()
     if (opts?.lossy) assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ack === true)
-    const serialized = stringify(data)
+    const serialized = stringifyMessage(data, 'send')
     if (opts?.lossy) return this.sendLossy(TAG.TEXT, serialized, utf8ByteLength(serialized))
     const refusal = this.textRefusal(serialized)
     if (refusal) return Promise.reject<void>(refusal)

@@ -1,4 +1,4 @@
-export { makePublishInfo, LOSSY_WITH_ACK_TEXT }
+export { makePublishInfo, stringifyMessage, LOSSY_WITH_ACK_TEXT }
 export type {
   ChannelBase,
   ChannelShield,
@@ -7,6 +7,7 @@ export type {
   ChannelCloseOptions,
   ChannelCloseResult,
   ChannelData,
+  ChannelJson,
   ChannelAck,
   ChannelPublishAck,
   ChannelPublishInfo,
@@ -19,8 +20,17 @@ export type {
 }
 
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shieldKey.js'
+import { stringify } from '@brillout/json-serializer/stringify'
+import { assertUsage } from '../../utils/assert.js'
 
 type ChannelData<T> = [T] extends [never] ? never : T extends (data: infer D) => any ? D : T
+/** What `send()` and `publish()` take: the channel's data, on an untyped channel the argument's type; never bytes. */
+type ChannelJson<T, D, Method extends 'send' | 'publish'> = unknown extends ChannelData<T>
+  ? RefuseBytes<D, Method>
+  : RefuseBytes<ChannelData<T>, Method>
+type RefuseBytes<D, Method extends 'send' | 'publish'> = D extends ArrayBuffer | ArrayBufferView
+  ? `${Method}() serializes its data as JSON: bytes go through ${Method}Binary()`
+  : D
 type ChannelAck<T> = [T] extends [never] ? never : T extends (data: any) => infer R ? Awaited<R> : unknown
 type ChannelPublishMeta = Record<string, unknown>
 /** Metadata delivered to broadcast subscribers alongside each message. */
@@ -40,6 +50,18 @@ function makePublishInfo(key: string, seq: number, timestamp: number): ChannelPu
 /** What `send(data, { lossy: true, ack: true })` throws, on either end. */
 const LOSSY_WITH_ACK_TEXT =
   "`lossy` can't be combined with `ack: true`: a newer send may take this one's place, so it gets no answer. Send it without `lossy` to get its answer."
+
+/** `data` as JSON, for `send()` and `publish()` on either end. Bytes are refused: JSON turns them into an object. */
+function stringifyMessage(data: unknown, method: 'send' | 'publish'): string {
+  if (ArrayBuffer.isView(data) || data instanceof ArrayBuffer) {
+    assertUsage(
+      false,
+      `\`${method}()\` serializes its data as JSON, which turns this \`${data.constructor.name}\` into a plain object. Bytes go through \`${method}Binary()\`, which takes a \`Uint8Array\`.`,
+    )
+  }
+  return stringify(data)
+}
+
 type ChannelListenReturn<T> = [T] extends [never]
   ? void
   : T extends (data: any) => infer R
@@ -71,16 +93,16 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
     { type: 'text'; data: ChannelData<TIn> } | { type: 'binary'; data: Uint8Array }
   >
   /** Default send. Returns `Promise<ack>` when `TDefault = true`, otherwise `Promise<void>`. */
-  send(data: ChannelData<TOut>): TDefault extends true ? Promise<ChannelAck<TOut>> : Promise<void>
+  send<D>(data: ChannelJson<TOut, D, 'send'>): TDefault extends true ? Promise<ChannelAck<TOut>> : Promise<void>
   /** Per-send ack opt-in — always returns `Promise<ack>`. */
-  send(data: ChannelData<TOut>, opts: { ack: true }): Promise<ChannelAck<TOut>>
+  send<D>(data: ChannelJson<TOut, D, 'send'>, opts: { ack: true }): Promise<ChannelAck<TOut>>
   /** Per-send ack opt-out — always returns `Promise<void>`. */
-  send(data: ChannelData<TOut>, opts: { ack: false }): Promise<void>
+  send<D>(data: ChannelJson<TOut, D, 'send'>, opts: { ack: false }): Promise<void>
   /** Send where only the newest matters: a receiver that keeps up gets every message, and one that falls behind skips to
    *  the newest. It resolves at once, and can't be combined with `ack: true`.
    *
    *  https://telefunc.com/channel#skip-to-the-newest */
-  send(data: ChannelData<TOut>, opts: { lossy: true; ack?: false }): Promise<void>
+  send<D>(data: ChannelJson<TOut, D, 'send'>, opts: { lossy: true; ack?: false }): Promise<void>
   sendBinary(data: Uint8Array): Promise<void>
   sendBinary(data: Uint8Array, opts: { ack: true }): Promise<unknown>
   sendBinary(data: Uint8Array, opts: { ack: false }): Promise<void>
