@@ -131,3 +131,59 @@ describe('SSE reconcile watchdog', () => {
     expect(downstreams).toHaveLength(3)
   })
 })
+
+/** A WebSocket that opens and delivers only what a test hands it: no RECONCILED ever comes. */
+class SilentWebSocket {
+  static OPEN = 1
+  static opened: SilentWebSocket[] = []
+  onopen: (() => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: (() => void) | null = null
+  onmessage: ((event: { data: ArrayBuffer }) => void) | null = null
+  binaryType = 'blob'
+  readyState = 1
+  bufferedAmount = 0
+
+  constructor() {
+    SilentWebSocket.opened.push(this)
+    queueMicrotask(() => this.onopen?.())
+  }
+  send(): void {}
+  close(): void {
+    this.readyState = 3
+  }
+  deliver(frame: Uint8Array<ArrayBuffer>): void {
+    this.onmessage?.({ data: frame.slice().buffer })
+  }
+}
+
+describe('WebSocket reconcile watchdog', () => {
+  const realWebSocket = globalThis.WebSocket
+  afterEach(() => {
+    vi.clearAllTimers()
+    vi.useRealTimers()
+    globalThis.WebSocket = realWebSocket
+    SilentWebSocket.opened = []
+  })
+
+  test('drops a wire that never reconciles while the socket it replaced still delivers', async () => {
+    vi.useFakeTimers()
+    globalThis.WebSocket = SilentWebSocket as unknown as typeof WebSocket
+
+    ClientConnection.getOrCreate('http://test.local/_telefunc', createChannel() as never, {
+      transports: [CHANNEL_TRANSPORT.WS],
+      fetchImpl: createStalledTransport().fetchImpl,
+      connectionKey: crypto.randomUUID(),
+    })
+
+    // The first wire's RECONCILE deadline drops it, and the page opens a second.
+    await vi.advanceTimersByTimeAsync(RECONCILE_TIMEOUT_MS + CHANNEL_RECONNECT_INITIAL_DELAY_MS + 500)
+    expect(SilentWebSocket.opened).toHaveLength(2)
+
+    // The first socket still delivers a PONG each second, which says nothing of the second wire.
+    const trickle = setInterval(() => SilentWebSocket.opened[0]!.deliver(encode.pong()), 1000)
+    await vi.advanceTimersByTimeAsync(RECONCILE_TIMEOUT_MS + 2 * CHANNEL_RECONNECT_INITIAL_DELAY_MS + 500)
+    clearInterval(trickle)
+    expect(SilentWebSocket.opened).toHaveLength(3)
+  })
+})
