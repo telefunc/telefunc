@@ -96,6 +96,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected receiveCredit: ReceiveCredit
   /** @internal Its credits as its connection drives them across wires. */
   readonly _attach: ChannelAttach
+  /** This page's newest lossy send, which may still wait to go, and what it settles with. */
+  private newestLossy: { seq: number; settled: Promise<any> } | null = null
 
   constructor({
     channelId,
@@ -456,6 +458,21 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       return
     }
     this.connection.sendAckRes(this, seq, answer)
+  }
+
+  /** A send a newer one may replace: once the uplink is behind, the newest lossy send that still waits to go takes
+   *  `data` in its place, and both settle as it does. Else `start` sends it and tells its seq. */
+  protected sendLossy<D, R>(
+    encodeFrame: SequencedEncoder<D>,
+    data: D,
+    start: (onQueued: (seq: number) => void) => Promise<R>,
+  ): Promise<R> {
+    const newest = this.newestLossy
+    if (newest !== null && this.connection.replaceWaiting(this, newest.seq, encodeFrame, data)) return newest.settled
+    let seq = 0
+    const settled = start((queued) => (seq = queued))
+    this.newestLossy = { seq, settled }
+    return settled
   }
 
   /** An ack-bearing send: what refuses it throws here, as it does for a send without an ack. */

@@ -28,10 +28,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly broadcastBinaryListeners = new Listeners<BroadcastBinaryListener>()
   /** The subscriptions this page asks the server for. */
   private readonly subscribed = { text: false, binary: false }
-  /** A newer publish replaces this page's own that no wire has taken yet: see `sendPublish`. */
+  /** A newer publish replaces this page's own that no wire has taken yet: see `sendLossy`. */
   private readonly lossy: boolean
-  /** This page's newest publish on a lossy broadcast, which may still wait to go. */
-  private newestPublish: { seq: number; receipt: Promise<ChannelPublishAck> } | null = null
 
   constructor(options: ClientBroadcastOptions) {
     super(options)
@@ -71,15 +69,11 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return ret
   }
 
-  /** On a lossy broadcast, once its uplink is behind, a publish that still waits to go takes the newer one's data in its
-   *  place, and both get its receipt. */
+  /** On a lossy broadcast, a publish that takes the place of one still waiting gets that one's receipt. */
   private sendPublish<D>(encodeFrame: SequencedEncoder<D>, data: D): Promise<ChannelPublishAck> {
-    const newest = this.newestPublish
-    if (newest !== null && this.connection.replaceWaiting(this, newest.seq, encodeFrame, data)) return newest.receipt
-    let seq = 0
-    const receipt = this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data, (queued) => (seq = queued))
-    if (this.lossy) this.newestPublish = { seq, receipt }
-    return receipt
+    const start = (onQueued?: (seq: number) => void) =>
+      this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data, onQueued)
+    return this.lossy ? this.sendLossy(encodeFrame, data, start) : start()
   }
 
   subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
