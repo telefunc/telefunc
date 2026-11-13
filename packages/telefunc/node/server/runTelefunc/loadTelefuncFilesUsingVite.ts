@@ -1,6 +1,5 @@
 export { loadTelefuncFilesUsingVite }
 export { loadServerProductionEntry }
-export { importBundledEntry }
 export { preloadServerProductionEntry }
 
 import { importServerProductionEntry } from '@brillout/vite-plugin-server-entry/runtime'
@@ -47,7 +46,13 @@ async function preloadServerProductionEntry(): Promise<void> {
 }
 
 function getServerProductionEntry() {
-  if (globalThis.__TELEFUNC__IS_NON_RUNNABLE_DEV || getViteDevServer()) return null
+  if (getViteDevServer()) return null
+  // Where Vite bundles Telefunc, the bundle has the entry, in dev too as the extensions' server entries (pluginBundledEntry.ts)
+  if (globalThis.__TELEFUNC__IS_BUNDLED) {
+    globalObject.serverProductionEntry ??= { loaded: importBundledEntry() }
+    return globalObject.serverProductionEntry
+  }
+  if (globalThis.__TELEFUNC__IS_NON_RUNNABLE_DEV) return null
   // Like loadTelefuncFiles(), the server's `config.telefuncFiles` take precedence over the build
   if (config.telefuncFiles) return null
   globalObject.serverProductionEntry ??= { loaded: loadVirtualFile(false) }

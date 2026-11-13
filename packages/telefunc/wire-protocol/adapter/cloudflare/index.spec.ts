@@ -84,7 +84,6 @@ vi.mock('../../../node/server/telefunc.js', () => ({
 }))
 
 vi.mock('../../../node/server/runTelefunc/loadTelefuncFilesUsingVite.js', () => ({
-  importBundledEntry: vi.fn(async () => {}),
   preloadServerProductionEntry: vi.fn(async () => {}),
 }))
 

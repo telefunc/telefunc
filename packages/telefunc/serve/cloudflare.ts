@@ -10,10 +10,7 @@ import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
 import { ChannelMux } from '../wire-protocol/channel/server/ChannelMux.js'
 import { getServerConfig, setAdapterMaxFrameBytes, setAdapterMaxMemory } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
-import {
-  importBundledEntry,
-  preloadServerProductionEntry,
-} from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
+import { preloadServerProductionEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
 import { installBackend } from '../wire-protocol/backend/install.js'
 import {
   CloudflareBroadcastAuthorityState,
@@ -58,8 +55,9 @@ const asyncHooks: typeof import('node:async_hooks') | null = await import(/* @vi
 )
 if (asyncHooks) installAsyncContext(asyncHooks.AsyncLocalStorage)
 
-// At Worker start, so that the extensions' server entries run before a Durable Object's first call
-await importBundledEntry()
+// At Worker start, so that the server entry (the build's config, the extensions' server entries) runs before the first
+// request and before a Durable Object's first call, which may be an alarm()
+await preloadServerProductionEntry()
 
 /** The extension a Durable Object belongs to, kept in its storage so that its alarm() finds the extension after an
  *  eviction. */
@@ -152,7 +150,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     async fetch(request: Request) {
-      await preloadServerProductionEntry()
       return this.#runInSession(async () => {
         const target = readForwardedTarget(request)
         if (target) this.session.broadcast.locate(target.locationBucket)
@@ -251,7 +248,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
   return {
     async serve({ request, env }: ServeInput): Promise<Response | undefined> {
-      await preloadServerProductionEntry()
       if (!isTelefuncRequest(request)) return undefined
       const config = getServerConfig()
 
