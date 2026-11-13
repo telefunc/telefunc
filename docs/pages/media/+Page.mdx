@@ -142,7 +142,7 @@ Every frame you write arrives, in order. To stop mid-sentence, `voice.clear()` d
 
 > In the page, it needs [WebCodecs](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API) in the browser.
 
-> With `@telefunc/webrtc` installed, a call of two goes over a direct link between the two pages, and through your server again once a third participant or your server's own code joins the call. To refuse a pair a direct link, throw in the room's <Link href="/room#room-guard-hooks">`onBeforeDirect()`</Link> hook.
+> A call's sound and picture go through your server, also when the call has two participants. With `@telefunc/webrtc` installed, a room of two pages can send its <Link href="/room#send-a-private-message">private messages over a direct link</Link>.
 
 > With <Link href="/webtransport" />, each participant's sound and each size of their picture travel on a stream of their own, so a lost packet of one holds back none of the others. On a WebSocket, it holds back every one.
 

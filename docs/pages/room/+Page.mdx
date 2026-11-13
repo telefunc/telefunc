@@ -246,6 +246,10 @@ onMove((position) => me.send(follower, position, { lossy: true }))
 
 > Your lossy messages to one participant replace each other whatever they hold, so send the values that change together as one message. A lossy message can't ask for a reply with `ack`.
 
+> With `@telefunc/webrtc` installed, private messages in a room of two pages take a direct link between the two when its round trip is shorter than the one through your server. Otherwise, they go through your server.
+
+> A direct link shows each page the other's address. To keep two participants on your server, throw `Abort()` in the room's <Link href="#room-guard-hooks">`onBeforeDirect()`</Link> hook. A guard with `onBeforeSend()` keeps every private message on your server.
+
 > A private message is delivered at most once: when it can't be handed on to the recipient, `send()` rejects, and the message isn't sent again. `publish()` is at most once too, <Link href="/channel#delivery">like Broadcast's</Link>. Your server logs a message, join or leave Room knows it couldn't hand on.
 
 
