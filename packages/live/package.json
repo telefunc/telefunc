@@ -103,7 +103,7 @@
   },
   "dependencies": {
     "@guanmingchiu/sqlparser-ts": "0.63.0",
-    "libpg-query": "18.2.2"
+    "libpg-query": "18.2.4"
   },
   "peerDependencies": {
     "@prisma/orm-postgres": ">=8.0.0-rc.23",
