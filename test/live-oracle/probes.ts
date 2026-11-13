@@ -9,7 +9,7 @@ import { PGlite } from '@electric-sql/pglite'
 import '../../packages/live/dist/live.js'
 import { LiveDatabase } from '../../packages/live/dist/liveDatabase.js'
 import { ConnectionRoles } from '../../packages/live/dist/capture/roles.js'
-import { UNNAMED_TABLES } from '../../packages/live/dist/capture/transactions.js'
+import { Transactions, UNNAMED_TABLES } from '../../packages/live/dist/capture/transactions.js'
 import { EVENT_TAG } from './orms/eventQuery.ts'
 import Cursor from 'pg-cursor'
 import { LiveRead } from '../../packages/live/dist/match/liveRead.js'
@@ -379,6 +379,17 @@ const probes: Record<string, () => void> = {
         return false
       },
     })
+  },
+  /** A transaction that rolls back announces what it wrote, as if it had committed. */
+  'rollback-announced'() {
+    const transactions = Transactions.prototype as any
+    const apply = transactions.apply
+    transactions.apply = function (connection: object, action: string, ...rest: unknown[]) {
+      const transaction = this.open.get(connection)
+      if (action === 'rollback' && transaction)
+        this.announce([transaction, ...transaction.savepoints].flatMap((part: any) => part.changes))
+      return apply.call(this, connection, action, ...rest)
+    }
   },
   /** A tally keeps every count, however many changes add: it never re-anchors. */
   'tally-anchor'() {

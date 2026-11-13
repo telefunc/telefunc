@@ -539,6 +539,8 @@ function sqlStateOf(err: unknown): string | undefined {
 const ROLLED_BACK_WRITES = ['txRollback', 'batchRollback']
 /** Reads a write of `ROLLED_BACK_WRITES` changed. */
 const rolledBackChanges: string[] = []
+/** Reads a write of `ROLLED_BACK_WRITES` invalidated: it committed nothing, so nothing may be announced. */
+const rolledBackInvalidations: string[] = []
 
 /** Shapes counting todos in groups a user's deletion may empty: they race it. */
 const EMPTIED_BY_DELETE_USER = ['countByDone', 'busyUsers', 'topPriority']
@@ -576,6 +578,8 @@ for (let step = 0; step < STEPS; step++) {
       )
     }
     if (changed && ROLLED_BACK_WRITES.includes(write)) rolledBackChanges.push(`step ${step} ${write} → ${sub.shape}`)
+    if (sub.invalidated && ROLLED_BACK_WRITES.includes(write))
+      rolledBackInvalidations.push(`step ${step} ${write} → ${sub.shape}`)
     if (changed || sub.invalidated) stale.push(sub)
   }
   await Promise.all(stale.map((sub) => subscribe(sub)))
@@ -680,6 +684,12 @@ console.log(
     .map((c) => `\n  ${c}`)
     .join('')}`,
 )
+console.log(
+  `reads a rolled-back write invalidated: ${rolledBackInvalidations.length}${rolledBackInvalidations
+    .slice(0, 3)
+    .map((c) => `\n  ${c}`)
+    .join('')}`,
+)
 // The scripted writes make their case once: one refused, or the last changing no read, they made none.
 const noCase = scripted.filter(
   (write, i) => writeRuns.get(write)?.refused || (i === scripted.length - 1 && !byWrite.get(write)?.changes),
@@ -702,6 +712,7 @@ const failed =
   failedWrites.length > 0 ||
   alwaysRefused.length > 0 ||
   rolledBackChanges.length > 0 ||
+  rolledBackInvalidations.length > 0 ||
   noCase.length > 0 ||
   sharedVolatile.length > 0 ||
   misshared.length > 0 ||
