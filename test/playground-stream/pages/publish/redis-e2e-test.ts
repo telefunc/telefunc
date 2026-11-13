@@ -105,7 +105,7 @@ function testBroadcastRedisSubscriberDropped() {
     expectLog('Redis subscriber connection closed')
   })
 
-  test("broadcast: reading where a new subscription starts fails during a publish of the key's other kind: the publish arrives, and that subscription closes", async () => {
+  test("broadcast: reading where a new subscription starts fails during a publish of the key's other kind: the publish arrives, and that subscription reads again until it is ready", async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-redis-start-read-failed')
     await autoRetry(
@@ -113,10 +113,11 @@ function testBroadcastRedisSubscriberDropped() {
         expect(await getResult('#redis-start-read-failed-result')).deep.equal({
           received: ['before', 'beside the failed read'],
           reported: [],
-          binary: 'closed',
+          binary: 'ready',
         })
       },
       { timeout: 10_000 },
     )
+    expectLog('the start read failed')
   })
 }
