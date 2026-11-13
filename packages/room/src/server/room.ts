@@ -38,6 +38,8 @@ import {
   type RoomSnapshotMetadata,
   type InboxMessage,
   type RoomResult,
+  type DemandChange,
+  type TrackWatch,
 } from '../shared/protocol.js'
 import type { RoomDataEnvelope, RoomMemberRecord, RoomIncarnation } from './protocol.js'
 import type { RoomModel } from '../shared/RoomModel.js'
@@ -88,7 +90,7 @@ type RoomHandleOptions = {
   /** For the handle's stubs. */
   roster: Pick<RosterStream, 'settled'>
   /** For the handle's participants. */
-  incomingDemand: Pick<RoomDemand, 'wanted'>
+  incomingDemand: Pick<RoomDemand, 'watchesOf'>
   /** For the handle's writes. */
   acks: PendingDmAcks
   /** Hosts the members the handle admits, and evicts again one whose eviction failed. */
@@ -487,10 +489,10 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     return this.localParticipants.get(id) ?? this.stubOf.get(id)
   }
 
-  deliverDemand(member: string, track: string, wanted: boolean): void {
+  deliverDemand(member: string, track: string, change: DemandChange): void {
     const holder = this.holderOf(member)
-    if (holder instanceof ServerLocalParticipant) holder._onDemand(track, wanted)
-    else holder?.relayEvent({ __r: 'demand', member, track, wanted })
+    if (holder instanceof ServerLocalParticipant) holder._demandChanged(track, change)
+    else holder?.relayEvent({ __r: 'demand', member, track, ...change })
   }
 }
 
@@ -545,8 +547,8 @@ function handleOf(room: ServerRoom): RoomHandle {
 type ServerLocalParticipantOptions = {
   room: RoomHandle
   participant: ParticipantBaseOptions['participant']
-  /** Holds the participant's demand once for the whole room. */
-  incomingDemand: Pick<RoomDemand, 'wanted'>
+  /** Holds who receives the participant's tracks, once for the whole room. */
+  incomingDemand: Pick<RoomDemand, 'watchesOf'>
   /** Where a client holding the participant mirrors its meta. */
   metaMirrors: Set<MetaMirror>
 }
@@ -576,8 +578,22 @@ class ServerLocalParticipant extends ParticipantBase {
   }
 
   /** @internal Read from the room's demand, which holds it once. */
-  get _demandedTracks(): TrackKey[] {
-    return this._left ? [] : this.incomingDemand.wanted(this.id)
+  get _watches(): ReadonlyMap<TrackKey, TrackWatch> {
+    return this.incomingDemand.watchesOf(this.id)
+  }
+
+  protected _shownParticipant(id: string): RemoteParticipant | null {
+    return this.room.state.shownParticipantOf(id)
+  }
+
+  protected _followRoom(onChange: () => void): () => void {
+    return this.room.state.onChange(onChange)
+  }
+
+  /** @internal Who receives one of its tracks changed, which the client holding it hears too. */
+  _demandChanged(track: TrackKey, change: DemandChange): void {
+    this._changed()
+    this.holder?.demandChanged(track, change)
   }
 
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {

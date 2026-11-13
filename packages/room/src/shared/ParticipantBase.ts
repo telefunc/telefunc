@@ -18,14 +18,16 @@ import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderSnapshot } from './arguments.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
 import { DEFAULT_TRACK, encodeBinaryFrame, encodeMessageFrame, publicTrack, type TrackKey } from './binary.js'
-import type { MemberMetaUpdate, WholeMemberUpdate, RoomResult, InboxMessage } from './protocol.js'
+import type { MemberMetaUpdate, WholeMemberUpdate, RoomResult, InboxMessage, TrackWatch } from './protocol.js'
 import type {
   BinaryPublishOptions,
   LeaveCause,
   LocalParticipant,
   ParticipantMeta,
   PublishOptions,
+  RemoteParticipant,
   Sender,
+  TrackDemand,
 } from '../types.js'
 
 /** What holding a DM before the first `listen()` retains beyond its serialized bytes (about 55 measured), so many small
@@ -34,6 +36,10 @@ const PENDING_INBOX_OVERHEAD_BYTES = 64
 type HeldDm = { msg: InboxMessage; bytes: number; ackResolve?: (reply: RoomResult) => void }
 /** Where the inbox delivers once it attaches: the local listeners, or the client holding the participant. */
 type InboxTarget = { deliver(msg: InboxMessage): void; deliverAck(msg: InboxMessage): Promise<RoomResult> }
+
+/** What `onChange` tells a change of. */
+type Shown = { meta: ParticipantMeta; connected: boolean; demand: readonly TrackDemand[] }
+const NO_DEMAND: readonly TrackDemand[] = Object.freeze([])
 
 type ParticipantBaseOptions = {
   participant: { id: string; meta: ParticipantMeta; selfDelivery: boolean; identity: string | null }
@@ -53,7 +59,11 @@ abstract class ParticipantBase implements LocalParticipant {
   // Each list is made when its first listener is added.
   private leaveListeners: Listeners<(cause: LeaveCause) => unknown> | null = null
   private messageListeners: Listeners<(data: unknown, from: Sender | null) => unknown> | null = null
-  private demandListeners: Listeners<(track: string | null, wanted: boolean) => unknown> | null = null
+  private changeListeners: Listeners<() => unknown> | null = null
+  /** What `onChange`'s listeners last heard of, while they listen. */
+  private seen: Shown | null = null
+  private changeDue = false
+  private shownDemand: readonly TrackDemand[] = NO_DEMAND
   private disconnectListeners: Listeners<() => unknown> | null = null
   private reconnectListeners: Listeners<() => unknown> | null = null
   private listenerCleanups: Set<() => void> | null = null
@@ -91,7 +101,9 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal A meta update the room accepted, applied in seq order; whether it applied. One past a gap waits for the
    *  whole meta its holder's next attach or roster sends. */
   _acceptMeta(update: MemberMetaUpdate): boolean {
-    return this.memberMeta.apply(update) === 'applied'
+    if (this.memberMeta.apply(update) !== 'applied') return false
+    this._changed()
+    return true
   }
 
   protected get _left(): boolean {
@@ -209,19 +221,80 @@ abstract class ParticipantBase implements LocalParticipant {
     return null
   }
 
-  onDemand(callback: (track: string | null, wanted: boolean) => void, options?: ListenerOptions): () => void {
-    if (options?.signal?.aborted) return makeDisposer()
-    const unlisten = this.register((this.demandListeners ??= new Listeners()), callback, options)
-    for (const track of this._demandedTracks) this.invoke(callback, publicTrack(track), true)
-    return unlisten
+  /** Who receives each of its tracks, in the order they started: each entry the same object until its watchers or
+   *  count change, and the list the same array until an entry does. */
+  get demand(): readonly TrackDemand[] {
+    if (this._left) return (this.shownDemand = NO_DEMAND)
+    const shown = this.shownDemand
+    const next: TrackDemand[] = []
+    for (const [key, watch] of this._watches) {
+      const track = publicTrack(key)
+      next.push(
+        this.demandEntry(
+          track,
+          watch,
+          shown.find((entry) => entry.track === track),
+        ),
+      )
+    }
+    const same = next.length === shown.length && next.every((entry, i) => entry === shown[i])
+    if (!same) this.shownDemand = Object.freeze(next)
+    return this.shownDemand
   }
 
-  /** @internal */
-  abstract get _demandedTracks(): TrackKey[]
+  /** The entry of `track`, which is `was` while nothing in it changed. */
+  private demandEntry(track: string | null, { watchers: ids, count }: TrackWatch, was: TrackDemand | undefined) {
+    const watchers: RemoteParticipant[] = []
+    for (const id of ids) {
+      const watcher = this._shownParticipant(id)
+      if (watcher) watchers.push(watcher)
+    }
+    watchers.sort((a, b) => a.joinedAt - b.joinedAt || (a.id < b.id ? -1 : 1))
+    const same =
+      was?.watcherCount === count &&
+      was.watchers.length === watchers.length &&
+      watchers.every((watcher, i) => watcher === was.watchers[i])
+    if (same) return was
+    return Object.freeze({ track, watchers: Object.freeze(watchers), watcherCount: count })
+  }
 
-  /** @internal Room-wide demand for one of this member's tracks changed. */
-  _onDemand(track: TrackKey, wanted: boolean): void {
-    for (const cb of this.demandListeners?.list() ?? []) this.invoke(cb, publicTrack(track), wanted)
+  /** @internal Who receives each of its tracks, as the room told it. */
+  abstract get _watches(): ReadonlyMap<TrackKey, TrackWatch>
+  /** The participant as its room lists it now, or `null` where it doesn't: one that left, is hidden, or whose join this
+   *  side hasn't seen yet. */
+  protected abstract _shownParticipant(id: string): RemoteParticipant | null
+  /** Calls `onChange` at each change of the room it lists participants by; returns what stops it. */
+  protected abstract _followRoom(onChange: () => void): () => void
+
+  onChange(callback: () => void, options?: ListenerOptions): () => void {
+    if (options?.signal?.aborted) return makeDisposer()
+    if (!this.changeListeners?.size) this.seen = this.shown()
+    if (this.changeListeners === null) {
+      this.changeListeners = new Listeners()
+      ;(this.listenerCleanups ??= new Set()).add(this._followRoom(() => this._changed()))
+    }
+    return this.register(this.changeListeners, callback, options)
+  }
+
+  /** @internal What it shows may have changed: its `onChange` listeners hear it once the current task's changes are
+   *  in, if it did. */
+  _changed(): void {
+    if (this.changeDue || !this.changeListeners?.size) return
+    this.changeDue = true
+    queueMicrotask(() => this.tellChanged())
+  }
+
+  private tellChanged(): void {
+    this.changeDue = false
+    const now = this.shown()
+    const seen = this.seen
+    this.seen = now
+    if (seen?.meta === now.meta && seen.connected === now.connected && seen.demand === now.demand) return
+    for (const cb of this.changeListeners?.list() ?? []) this.invoke(cb)
+  }
+
+  private shown(): Shown {
+    return { meta: this.meta, connected: this.isConnected, demand: this.demand }
   }
 
   onDisconnect(callback: () => void, options?: ListenerOptions): () => void {
@@ -234,11 +307,13 @@ abstract class ParticipantBase implements LocalParticipant {
 
   /** @internal */
   _onDisconnected(): void {
+    this._changed()
     for (const cb of this.disconnectListeners?.list() ?? []) this.invoke(cb)
   }
 
   /** @internal */
   _onReconnected(): void {
+    this._changed()
     for (const cb of this.reconnectListeners?.list() ?? []) this.invoke(cb)
   }
 

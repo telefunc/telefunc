@@ -187,6 +187,8 @@ class RoomState {
   private readonly memberListeners = new WeakMap<MemberEntry, MemberListeners>()
   private snapshotCache: { version: number; value: WeakRef<RoomSnapshotView> } | null = null
   private readonly changeListeners: Listeners<() => void> = new Listeners()
+  /** A change waits for the end of its task, so the changes of one task call `onChange` once. */
+  private changeDue = false
   private readonly owner: RoomStateOwner
   /** The owner's `reportCallbackError`, bound once for every listener call. */
   private readonly reportError: (error: unknown) => void
@@ -309,6 +311,12 @@ class RoomState {
     return value
   }
 
+  /** The member as `snapshot()` lists it now, or `null` where it doesn't: a hidden member is never listed. */
+  shownParticipantOf(id: string): RemoteParticipant | null {
+    const entry = this.model.entry(id)
+    return entry && !entry.hidden ? this.shownParticipant(entry) : null
+  }
+
   /** The member's remote with its fields as they are now, the same object until they change. */
   private shownParticipant(entry: MemberEntry): RemoteParticipant {
     const listeners = this.listenersOf(entry)
@@ -387,7 +395,12 @@ class RoomState {
 
   // Each of these tells one change of the model, while this view has a listener.
   changed(): void {
-    this.fireAll(this.changeListeners)
+    if (this.changeDue) return
+    this.changeDue = true
+    queueMicrotask(() => {
+      this.changeDue = false
+      this.fireAll(this.changeListeners)
+    })
   }
 
   /** A visible member joined. */

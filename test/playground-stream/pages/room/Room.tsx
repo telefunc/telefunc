@@ -110,7 +110,14 @@ import {
   onStopChurn,
   onPublishWhileEstablishing,
   onCutWire,
+  onPublishOnServer,
+  onServerPublisherReads,
+  onJoinHiddenHeld,
+  onWatchAsServer,
 } from './Room.telefunc'
+import { defineParticipantField } from '@telefunc/room/__internal'
+import type { LocalParticipant } from '@telefunc/room/client'
+import { demandNames, type NamedDemand } from './demandNames'
 
 type PollResult = { done: boolean; result?: unknown }
 /** The members one room view joins, and the named tracks one member publishes on (docs/pages/room, Reference). */
@@ -139,6 +146,8 @@ let startAwayJoin: (() => void) | null = null
 let goAway: (() => void) | null = null
 /** The check the `member-keeps-room` card runs when its second button is clicked. */
 let checkKeptMember: (() => void) | null = null
+/** The check the `watchers-upgrade` card runs when its second button is clicked. */
+let checkUpgradedWatch: (() => void) | null = null
 /** The check the `members-let-go` card runs when its second button is clicked. */
 let checkLetGo: (() => void) | null = null
 /** The chat the `ack-dm-close` card closes when its second button is clicked. */
@@ -161,6 +170,26 @@ function threadedReply() {
   thread.replies.push(reply)
   return reply
 }
+
+/** Each of the participant's tracks as someone starts (`true`) and the last one stops (`false`) receiving it. */
+function demandLog(me: Pick<LocalParticipant, 'demand' | 'onChange'>): Array<[string | null, boolean]> {
+  const log: Array<[string | null, boolean]> = []
+  let watched = new Set<string | null>()
+  me.onChange(() => {
+    const now = new Set(me.demand.map(({ track }) => track))
+    for (const track of now) if (!watched.has(track)) log.push([track, true])
+    for (const track of watched) if (!now.has(track)) log.push([track, false])
+    watched = now
+  })
+  return log
+}
+
+/** Whether the last of `reads` is `expected`. */
+const readsAt = (reads: NamedDemand[][], expected: NamedDemand[]) =>
+  JSON.stringify(reads.at(-1)) === JSON.stringify(expected)
+
+/** `cam` received by `watchers` and `watcherCount` people in all. */
+const cam = (watchers: string[], watcherCount: number): NamedDemand => ({ track: 'cam', watchers, watcherCount })
 
 /** Joins through a room the page doesn't keep, and lets go of the member too, without leaving. */
 async function joinAndLetGo(roomId: string, leaves: string[]): Promise<void> {
@@ -1518,26 +1547,148 @@ function Room() {
         })
       })}
 
-      {scenario('demand', 'onDemand (track demand)', 'Track demand up & down', async () => {
+      {scenario('demand', 'me.demand (who watches)', 'Track demand up & down', async () => {
         const [roomId, pubRoom] = await createRoom('demand')
         // A GC pass would close `pubRoom`, and Pub leaving with it ends the demand this waits on.
         const releasePubRoom = keepReachable(pubRoom)
         const pub = await pubRoom.join({ meta: { name: 'Pub' } })
-        const cam: boolean[] = []
-        pub.onDemand((track, wanted) => {
-          if (track === 'camera') cam.push(wanted)
-        })
+        const demand = demandLog(pub)
+        const camera = () => demand.filter(([track]) => track === 'camera').map(([, watched]) => watched)
         await pub.publishBinary(new Uint8Array(8).fill(1), { track: 'camera', meta: { key: true } })
 
         const viewer = await onGetRoom(roomId)
         const unsub = viewer.subscribeBinary(() => {}, { track: 'camera' })
-        await pollUntil(() => ({ result: { cam }, done: cam.includes(true) }))
+        await pollUntil(() => ({ result: { cam: camera() }, done: camera().includes(true) }))
         unsub()
-        await pollUntil(() => ({
-          result: { cam },
-          done: cam.includes(true) && cam[cam.length - 1] === false,
-        }))
+        await pollUntil(() => ({ result: { cam: camera() }, done: camera().at(-1) === false }))
         releasePubRoom()
+      })}
+
+      {scenario('watchers', null, "Watch a server participant's track", async () => {
+        const releases: Array<() => void> = []
+        const kept = <T extends object>(handle: T) => {
+          releases.push(keepReachable(handle))
+          return handle
+        }
+        /** A room with `Pub` on the server and its `cam` watched as `watch` sets up: each `demand` Pub read, until it
+         *  reads `expected`. */
+        const readsOf = async (
+          label: string,
+          expected: NamedDemand[],
+          watch: (roomId: string, pubId: string) => Promise<unknown>,
+        ) => {
+          const roomId = await createRoomId(`watchers-${label}`)
+          await watch(roomId, await onPublishOnServer(roomId))
+          let reads: NamedDemand[][] = []
+          await pollUntil(async () => {
+            reads = await onServerPublisherReads(roomId)
+            return { done: readsAt(reads, expected) }
+          })
+          return reads
+        }
+        // The docs' page: `me` joined through one view, the publisher watched through another.
+        const docsPage = await readsOf('docs-page', [cam(['Me'], 1)], async (roomId, pubId) => {
+          kept(await kept(await onGetRoom(roomId)).join({ meta: { name: 'Me' } }))
+          const view = kept(await onGetRoom(roomId))
+          ;(await getParticipantWhenJoined(view, pubId)).subscribeBinary(() => {}, { track: 'cam' })
+        })
+        const twoOnOnePage = await readsOf('two', [cam(['Ann', 'Bob'], 2)], async (roomId) => {
+          const view = kept(await onGetRoom(roomId))
+          kept(await view.join({ meta: { name: 'Ann' } }))
+          kept(await view.join({ meta: { name: 'Bob' } }))
+          view.subscribeBinary(() => {}, { track: 'cam' })
+        })
+        const nameless = await readsOf('nameless', [cam([], 1)], async (roomId) => {
+          kept(await onGetRoom(roomId)).subscribeBinary(() => {}, { track: 'cam' })
+        })
+        const hidden = await readsOf('hidden', [cam([], 1)], async (roomId) => {
+          kept(await onJoinHiddenHeld(roomId))
+          kept(await onGetRoom(roomId)).subscribeBinary(() => {}, { track: 'cam' })
+        })
+        const oneTask = await readsOf(
+          'one-task',
+          [cam([], 1), { track: 'mic', watchers: [], watcherCount: 1 }],
+          (roomId) => onWatchAsServer(roomId, [], ['cam', 'mic']),
+        )
+        setResult(JSON.stringify({ docsPage, twoOnOnePage, nameless, hidden, oneTask }))
+        releases.forEach((release) => release())
+      })}
+
+      {scenario('watchers-on-page', null, 'Watch a track of this page', async () => {
+        const [roomId, view] = await createRoom('watchers-on-page')
+        const releaseView = keepReachable(view)
+        const pub = await view.join({ meta: { name: 'Pub' } })
+        const reads: NamedDemand[][] = []
+        pub.onChange(() => reads.push(demandNames(pub)))
+        await onWatchAsServer(roomId, ['Sam', 'Tia'], ['cam'])
+        await pollUntil(() => ({ result: { reads }, done: readsAt(reads, [cam(['Sam', 'Tia'], 2)]) }))
+        await onWatchAsServer(roomId, [], ['cam'])
+        await pollUntil(() => ({ result: { reads }, done: readsAt(reads, [cam(['Sam', 'Tia'], 3)]) }))
+        const shown = pub.demand
+        await pub.setMeta({ name: 'Pub', mood: 'on air' })
+        await pollUntil(() => ({ done: pub.meta.mood === 'on air' }))
+        const sameList = pub.demand === shown
+        await onWatchAsServer(roomId, [], ['mic'])
+        await pollUntil(() => ({ done: pub.demand.length === 2 }))
+        setResult(JSON.stringify({ reads, sameList, sameEntry: pub.demand[0] === shown[0], tracks: demandNames(pub) }))
+        releaseView()
+      })}
+
+      {scenario('watchers-upgrade', null, 'Watch while the connection upgrades', async () => {
+        const roomId = await createRoomId('watchers-upgrade')
+        const pubId = await onPublishOnServer(roomId)
+        const room = await onGetRoom(roomId)
+        const releaseRoom = keepReachable(room)
+        const releaseMe = keepReachable(await room.join({ meta: { name: 'Me' } }))
+        const view = await onGetRoom(roomId)
+        const releaseView = keepReachable(view)
+        ;(await getParticipantWhenJoined(view, pubId)).subscribeBinary(() => {}, { track: 'cam' })
+        let readsBefore = 0
+        await pollUntil(async () => {
+          const reads = await onServerPublisherReads(roomId)
+          readsBefore = reads.length
+          return { done: readsAt(reads, [cam(['Me'], 1)]) }
+        })
+        const { promise: checked, resolve } = Promise.withResolvers<void>()
+        checkUpgradedWatch = resolve
+        setResult(JSON.stringify({ watching: true }))
+        await checked
+        // From the last read before the upgrade on.
+        setResult(JSON.stringify({ reads: (await onServerPublisherReads(roomId)).slice(readsBefore - 1) }))
+        releaseRoom()
+        releaseMe()
+        releaseView()
+      })}
+      <button id="test-room-watchers-upgrade-check" onClick={() => checkUpgradedWatch?.()}>
+        Check the watch
+      </button>
+
+      {scenario('change-once', null, "A task's changes", async () => {
+        const tag: { set?: (memberId: string, tag: string) => void } = {}
+        defineParticipantField<string>('e2eTag', {
+          initial: '',
+          attach: ({ set }) => {
+            tag.set = set
+            return () => {}
+          },
+        })
+        const [roomId, room] = await createRoom('change-once')
+        const releaseRoom = keepReachable(room)
+        const ann = await room.join({ meta: { name: 'Ann' } })
+        const bob = await room.join({ meta: { name: 'Bob' } })
+        // As `useSyncExternalStore()` takes it, unbound: of a `me` the page joined, and of one a server returned alone.
+        const alone = await onJoinHiddenHeld(roomId)
+        for (const subscribe of [ann.onChange, alone.onChange]) subscribe(() => {})()
+        let changes = 0
+        room.onChange(() => changes++)
+        const before = room.snapshot()
+        tag.set!(ann.id, 'a')
+        tag.set!(bob.id, 'b')
+        tag.set!(ann.id, 'c')
+        // After the microtask the first change queued, and before anything else can arrive.
+        await Promise.resolve()
+        setResult(JSON.stringify({ changes, changed: room.snapshot() !== before }))
+        releaseRoom()
       })}
 
       {scenario('member-keeps-room', 'A member keeps its room', 'Join, then let go of the room', async () => {
@@ -2027,10 +2178,8 @@ function Room() {
         const releasePubView = keepReachable(pubView)
         const pub = await pubView.join({ meta: { name: 'Pub' }, selfDelivery: false })
         const other = await pubView.join({ meta: { name: 'Other' } })
-        const demand: Array<[string | null, boolean]> = []
-        pub.onDemand((track, wanted) => demand.push([track, wanted]))
-        const otherDemand: Array<[string | null, boolean]> = []
-        other.onDemand((track, wanted) => otherDemand.push([track, wanted]))
+        const demand = demandLog(pub)
+        const otherDemand = demandLog(other)
         // Pub's own side: its frames never come back to this view, so it wants nothing of Pub.
         pubView.subscribeBinary(() => {}, { track: 'own' })
 

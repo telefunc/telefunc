@@ -10,6 +10,7 @@ export type {
   ReadonlyMeta,
   LocalParticipant,
   RemoteParticipant,
+  TrackDemand,
   Sender,
   SendGuard,
   PublishGuard,
@@ -309,8 +310,11 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   /** Receive private messages; returning a value answers an acknowledged send. */
   listen(callback: (data: unknown, from: Sender<P> | null) => unknown, options?: { signal?: AbortSignal }): () => void
 
-  /** Watch whether any observer wants each published track. */
-  onDemand(callback: (track: string | null, wanted: boolean) => void, options?: { signal?: AbortSignal }): () => void
+  /** Your tracks that someone receives now. */
+  readonly demand: readonly TrackDemand<P, Pub>[]
+  /** What you show changed: your `meta`, whether you are connected, or `demand`. Changes made in one task call it
+   *  once. */
+  onChange(callback: () => void, options?: { signal?: AbortSignal }): () => void
   /** Replace your metadata wholesale. Propagates to all observers in real time. Takes a new object, or one built from
    *  the read-only meta Room handed you. */
   setMeta(meta: ReadonlyMeta<P>): Promise<void>
@@ -326,6 +330,17 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   /** The page holding you reaches the room again. */
   onReconnect(callback: () => void, options?: { signal?: AbortSignal }): () => void
 } & RoomShield<Pub>
+
+/** One of your tracks that someone receives now. */
+type TrackDemand<P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = {
+  /** The track; `null` for what you publish without one. The entry goes when the last one stops receiving it. */
+  readonly track: string | null
+  /** The people at the pages and server-side rooms receiving it, in join order: never you, never a hidden participant. */
+  readonly watchers: readonly RemoteParticipant<P, Pub>[]
+  /** Everyone receiving it: the people in `watchers`, plus one for each page or server-side room that receives it and
+   *  has nobody to list. At least 1, at least `watchers.length`. */
+  readonly watcherCount: number
+}
 
 /** A returnable view of another room member, bound to its room's live state. An interface, so a package can add the
  *  fields it defines. */

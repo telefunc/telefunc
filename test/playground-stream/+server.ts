@@ -203,7 +203,8 @@ type CrossInstanceRoomFixture = {
   received: unknown[]
   /** Binary frames of the tracks this instance watches: `<track>:<member>:<first byte>`. */
   frames: string[]
-  /** `join:<name>`, `leave:<name>:<cause>` and `close` as this instance's view saw them, `demand:<track>:<wanted>`. */
+  /** `join:<name>`, `leave:<name>:<cause>` and `close` as this instance's view saw them, `demand:<track>:<wanted>` as
+   *  a track of its member starts or stops being received. */
   events: string[]
   unsubscribe(): void
   /** Removes this instance's room listeners, or adds its event listeners again: its view stops or starts watching. */
@@ -238,7 +239,13 @@ app.post('/api/room-cross-instance/join', async (c) => {
   ]
   let removers = listeners()
   const participant = await room.join({ meta: { instance: INST, name: c.req.query('name') ?? INST } })
-  participant.onDemand((track, wanted) => events.push(`demand:${track}:${wanted}`))
+  let demanded = new Set<string | null>()
+  participant.onChange(() => {
+    const now = new Set(participant.demand.map(({ track }) => track))
+    for (const track of now) if (!demanded.has(track)) events.push(`demand:${track}:true`)
+    for (const track of demanded) if (!now.has(track)) events.push(`demand:${track}:false`)
+    demanded = now
+  })
   const received: unknown[] = []
   const readiness = crypto.randomUUID()
   const { promise: subscribed, resolve } = Promise.withResolvers<void>()

@@ -9,6 +9,7 @@ import { runAll, toggle } from '../../utils/sets.js'
 import { Slice } from '../../shared/Slice.js'
 import type { PublishedTracks } from './PublishedTracks.js'
 import { WhoScopes } from './WhoScopes.js'
+import type { DemandChange, TrackWatch } from '../../shared/protocol.js'
 
 /** The reporters of an entry, each with the generation (`Reporter.generation`) it last told the entry in. */
 type Leases = Map<string, number>
@@ -30,11 +31,9 @@ type LeaseDropped = (instance: string, generation: number) => boolean
 type Who = { page: string; by: string | undefined; leases: Leases }
 /** A scope's who-entries, by page and participant. */
 type WhoScope = Map<string, Who>
-/** Who receives an owned member's track: the participants named, and how many people and pages with nobody to name. */
-type TrackWatch = { watchers: Set<string>; count: number }
 
-/** The handle that owns a member, which hears whether a track of it is wanted. */
-type MemberOwner = { deliverDemand(member: string, track: string, wanted: boolean): void }
+/** The handle that owns a member, which hears who receives each of its tracks as it changes. */
+type MemberOwner = { deliverDemand(member: string, track: string, change: DemandChange): void }
 
 type RoomDemandOptions = {
   /** The members this process owns, by their owning handle, kept current by the replica. */
@@ -235,9 +234,9 @@ class RoomDemand {
     }
   }
 
-  /** The owned member's tracks told wanted. */
-  wanted(member: string): string[] {
-    return [...(this.told.get(member)?.keys() ?? [])]
+  /** Who receives each of the owned member's tracks, as told. */
+  watchesOf(member: string): ReadonlyMap<string, TrackWatch> {
+    return this.told.get(member) ?? NO_WATCHES
   }
 
   forgetMember(member: string): void {
@@ -372,12 +371,12 @@ class RoomDemand {
     if (owner === undefined) return
     const watch = this.watchOf(member, track)
     const told = getOrCreate(this.told, member, () => new Map())
-    const wanted = watch.count > 0
-    const was = told.has(track)
-    if (wanted) told.set(track, watch)
+    const was = told.get(track)
+    if (watch.count > 0) told.set(track, watch)
     else told.delete(track)
     if (told.size === 0) this.told.delete(member)
-    if (wanted !== was) owner.deliverDemand(member, track, wanted)
+    const change = changeOf(was, watch)
+    if (change !== null) owner.deliverDemand(member, track, change)
   }
 
   /** Who receives the owned member's track: each page that receives it counts its participants but the member, or one
@@ -391,12 +390,13 @@ class RoomDemand {
         if (by !== undefined && by !== member) people.add(by)
       }
     }
-    const watch: TrackWatch = { watchers: new Set(), count: 0 }
+    const watchers = new Set<string>()
+    let count = 0
     for (const people of pages.values()) {
-      watch.count += Math.max(1, people.size)
-      for (const id of people) watch.watchers.add(id)
+      count += Math.max(1, people.size)
+      for (const id of people) watchers.add(id)
     }
-    return watch
+    return { watchers, count }
   }
 
   /** Whether the reporter's delivery entries say it receives the owned member's track. */
@@ -424,6 +424,19 @@ function lease<K>(leases: Map<K, Leases>, key: K, { instance, on, generation }: 
   if (!held?.delete(instance) || held.size > 0) return false
   leases.delete(key)
   return true
+}
+
+const NO_WATCHES: ReadonlyMap<string, TrackWatch> = new Map()
+
+/** What changed from `was` to `now`, if anything did. */
+function changeOf(was: TrackWatch | undefined, now: TrackWatch): DemandChange | null {
+  const add = [...now.watchers].filter((id) => !was?.watchers.has(id))
+  const remove = [...(was?.watchers ?? [])].filter((id) => !now.watchers.has(id))
+  if (add.length === 0 && remove.length === 0 && now.count === (was?.count ?? 0)) return null
+  const change: DemandChange = { count: now.count }
+  if (add.length > 0) change.add = add
+  if (remove.length > 0) change.remove = remove
+  return change
 }
 
 /** Takes, renews or drops a reporter's lease on a who-entry, and whether the entry came or went. */

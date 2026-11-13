@@ -19,11 +19,13 @@ import {
   isRoomRequest,
   pageFrameMessage,
 } from './requests.js'
-import { DEFAULT_TRACK, type BinaryFrame } from '../shared/binary.js'
+import type { BinaryFrame, TrackKey } from '../shared/binary.js'
 import { DM_FAILURE } from '../shared/errors.js'
 import {
   leaveCauseToWire,
   dmNotice,
+  watchStates,
+  type DemandChange,
   type ParticipantStubNotice,
   type ParticipantStubRequest,
   type InboxMessage,
@@ -79,7 +81,7 @@ class RoomParticipantStub implements BroadcastEndOwner {
   _onPageAttach(connection: PageConnection): void {
     this.participant.room.replica.placeAtPage(this, connection)
     this.notify({ __r: 'p-meta', ...this.participant._acceptedMeta })
-    this.notify({ __r: 'demand-state', tracks: this.participant._demandedTracks })
+    this.notify({ __r: 'demand-state', tracks: watchStates(this.participant._watches) })
   }
 
   /** A request, sent with an ack, answers with its result; an ack DM's reply, sent without one, settles that DM. */
@@ -116,10 +118,6 @@ class RoomParticipantStub implements BroadcastEndOwner {
       rewound: () => this.notify({ __r: 'rewound' }),
     })
 
-    const unlistenDemand = participant.onDemand((track, wanted) =>
-      this.notify({ __r: 'demand', track: track ?? DEFAULT_TRACK, wanted }),
-    )
-
     let left = false
     const unlistenLeave = participant.onLeave((cause) => {
       left = true
@@ -133,11 +131,15 @@ class RoomParticipantStub implements BroadcastEndOwner {
     this.end.onClose(() => {
       participant.room.replica.leavePage(this)
       unlistenMeta()
-      unlistenDemand()
       unlistenLeave()
       this.dmReplies.drop()
       if (!left) void participant._releaseHolder()
     })
+  }
+
+  /** Who receives one of its participant's tracks changed. */
+  demandChanged(track: TrackKey, change: DemandChange): void {
+    this.notify({ __r: 'demand', track, ...change })
   }
 
   /** Its participant, who is at its page. */

@@ -26,6 +26,9 @@ import {
   type MemberMetaUpdate,
   type MemberMutationRequest,
   type RoomDemandEvent,
+  type DemandChange,
+  type TrackWatch,
+  type TrackWatchState,
   type RoomDataPublish,
   type RoomDmEnvelope,
   type SenderStamp,
@@ -307,8 +310,8 @@ class ClientRoom extends RoomStateView implements Room {
         this._state.applyAnnounce(event.data, { key: this.id, seq: rawInfo.seq, timestamp: rawInfo.timestamp })
         return
       case 'demand':
-        // Whether anyone wants one of our own members' tracks flipped (onDemand).
-        this.localParticipants.get(event.member)?._onDemand(event.track, event.wanted)
+        // Who receives one of our own members' tracks changed.
+        this.localParticipants.get(event.member)?._applyDemand(event.track, event)
         return
       case 'demand-state':
         this.localParticipants.get(event.member)?._applyDemandState(event.tracks)
@@ -465,7 +468,7 @@ class ClientRoom extends RoomStateView implements Room {
 }
 
 abstract class ClientParticipantBase extends ParticipantBase {
-  private readonly wantedTracks = new Set<TrackKey>()
+  private readonly watches = new Map<TrackKey, TrackWatch>()
   protected readonly _bugMessage = CLIENT_ROOM_BUG_MESSAGE
 
   /** @internal The page holds this member from now on, until it leaves. */
@@ -489,21 +492,28 @@ abstract class ClientParticipantBase extends ParticipantBase {
     if (heldMembers.get(this.id) === this) heldMembers.delete(this.id)
   }
 
-  get _demandedTracks(): TrackKey[] {
-    return this._left ? [] : [...this.wantedTracks]
+  get _watches(): ReadonlyMap<TrackKey, TrackWatch> {
+    return this.watches
   }
 
-  /** @internal The whole wanted set, as a holder hears it when it attaches again: only the tracks that changed fire. */
-  _applyDemandState(tracks: TrackKey[]): void {
-    const next = new Set(tracks)
-    for (const track of this.wantedTracks) if (!next.has(track)) this._onDemand(track, false)
-    for (const track of next) if (!this.wantedTracks.has(track)) this._onDemand(track, true)
+  /** @internal Who receives one of its tracks changed. */
+  _applyDemand(track: TrackKey, { add, remove, count }: DemandChange): void {
+    if (count === 0) {
+      this.watches.delete(track)
+    } else {
+      const watchers = new Set(this.watches.get(track)?.watchers)
+      for (const id of add ?? []) watchers.add(id)
+      for (const id of remove ?? []) watchers.delete(id)
+      this.watches.set(track, { watchers, count })
+    }
+    this._changed()
   }
 
-  override _onDemand(track: TrackKey, wanted: boolean): void {
-    if (wanted) this.wantedTracks.add(track)
-    else this.wantedTracks.delete(track)
-    super._onDemand(track, wanted)
+  /** @internal Who receives each of its tracks, whole, as a holder hears it when it attaches again. */
+  _applyDemandState(tracks: TrackWatchState[]): void {
+    this.watches.clear()
+    for (const { track, watchers, count } of tracks) this.watches.set(track, { watchers: new Set(watchers), count })
+    this._changed()
   }
 
   /** Each flavor's wire publish. */
@@ -631,6 +641,14 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return this.room._state.getRemote(id)
   }
 
+  protected _shownParticipant(id: string): RemoteParticipant | null {
+    return this.room._state.shownParticipantOf(id)
+  }
+
+  protected _followRoom(onChange: () => void): () => void {
+    return this.room._state.onChange(onChange)
+  }
+
   protected override _onOwnMetaWritten(accepted: MemberMetaUpdate): void {
     this.room._acceptParticipantMeta(this.id, accepted)
   }
@@ -684,11 +702,13 @@ type ClientStandaloneParticipantOptions = { end: ClientBroadcast; metadata: Part
 /** `LocalParticipant` revived from a serialized `ServerLocalParticipant`. Owns its channel. */
 class ClientStandaloneParticipant extends ClientParticipantBase {
   private readonly end: ClientBroadcast
+  private readonly roomId: string
 
   constructor({ end, metadata }: ClientStandaloneParticipantOptions) {
     // Its own: the `rewound` notice forgets its seq.
     super({ participant: metadata, rewinds: { count: 0 } })
     this.end = end
+    this.roomId = metadata.roomId
 
     end._subscribeLocal('text', (notice) => this.onNotice(notice))
     end.onClose(() => this._onLeft({ type: 'disconnected' }))
@@ -711,7 +731,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
       case 'rewound':
         return this.memberMeta.forget()
       case 'demand':
-        return this._onDemand(msg.track, msg.wanted)
+        return this._applyDemand(msg.track, msg)
       case 'demand-state':
         return this._applyDemandState(msg.tracks)
       case 'dm':
@@ -719,6 +739,27 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
         return sendDmReply(this.end, msg.ackId, this._deliverMessageAck(inboxMessageFromWire(msg)))
       case 'left':
         return this._onLeft(leaveCauseFromWire(msg))
+    }
+  }
+
+  /** It has no room of its own: the page's views of its room list the participants. */
+  protected _shownParticipant(id: string): RemoteParticipant | null {
+    for (const room of this.pageViews()) {
+      const participant = room._state.shownParticipantOf(id)
+      if (participant) return participant
+    }
+    return null
+  }
+
+  protected _followRoom(onChange: () => void): () => void {
+    const stops = Array.from(this.pageViews(), (room) => room._state.onChange(onChange))
+    return () => stops.forEach((stop) => stop())
+  }
+
+  private *pageViews(): Generator<ClientRoom> {
+    for (const view of roomViews) {
+      const room = view.deref()
+      if (room?.id === this.roomId) yield room
     }
   }
 

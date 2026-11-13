@@ -14,6 +14,7 @@ export type {
   ReadonlyMeta,
   LocalParticipant,
   RemoteParticipant,
+  TrackDemand,
   Sender,
   SendGuard,
   PublishGuard,

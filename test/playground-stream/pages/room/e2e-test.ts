@@ -1,5 +1,6 @@
 export {
   testRoom,
+  testRoomDemand,
   testRoomFailingBackend,
   testRoomMetaReads,
   testRoomLimits,
@@ -25,6 +26,7 @@ import {
   canCutWire,
 } from '../../e2e-utils'
 import { newCDPSession } from '../../../utils'
+import type { NamedDemand } from './demandNames'
 
 /** On SSE the server waits out the 60 s reconnectTimeout for a closed tab. */
 const CLOSED_TAB_WAIT = { timeout: 90_000 }
@@ -89,6 +91,9 @@ type MemberResult = {
   sameObject: boolean
   listedOnServer: string[]
 }
+
+/** `cam` received by `watchers` and `watcherCount` people in all. */
+const cam = (watchers: string[], watcherCount: number): NamedDemand => ({ track: 'cam', watchers, watcherCount })
 
 function testRoomScenario<Result>(id: string, name: string, validate: (result: Result) => void | Promise<void>) {
   test(name, async () => {
@@ -665,14 +670,7 @@ function testRoom() {
     expect(r.localName).toBe('Zoe')
     expect(r.localHasScore).toBe(false)
   })
-  testRoomScenario<{ cam: boolean[] }>(
-    'demand',
-    'room: onDemand turns on when a subscriber wants a track and off when it leaves',
-    (r) => {
-      expect(r.cam).toContain(true) // a viewer arrived (the track is wanted)
-      expect(r.cam[r.cam.length - 1]).toBe(false) // ...and left again, back to unwanted
-    },
-  )
+  testRoomDemand()
   test('room: a member the page keeps works on after the page lets go of the room it joined through and a GC pass runs', async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-member-keeps-room')
@@ -1213,7 +1211,7 @@ function testRoom() {
     tooMany: string | null
   }>(
     'tracks',
-    "room: each of 1,000 named tracks reaches its subscriber in order, onDemand follows the wants, and a selfDelivery:false member's own side is no demand",
+    "room: each of 1,000 named tracks reaches its subscriber in order, me.demand follows the wants, and a selfDelivery:false member's own side is no demand",
     (r) => {
       expect(r.inOrder).toBe(1_000)
       expect(r.defaultTrack).deep.equal([7])
@@ -1386,6 +1384,82 @@ function testRoom() {
       })
     })
   })
+}
+
+/** Who receives a participant's tracks: `me.demand`, and the `onChange` it is read on. */
+function testRoomDemand() {
+  testRoomScenario<{ cam: boolean[] }>(
+    'demand',
+    'room: a track is in me.demand while a subscriber receives it, and leaves it when the subscriber stops',
+    (r) => {
+      expect(r.cam).toContain(true) // a viewer arrived (the track is watched)
+      expect(r.cam[r.cam.length - 1]).toBe(false) // ...and left again, back to unwatched
+    },
+  )
+  testRoomScenario<Record<'docsPage' | 'twoOnOnePage' | 'nameless' | 'hidden' | 'oneTask', NamedDemand[][]>>(
+    'watchers',
+    "room: me.demand lists the people at each page that receives a track and counts them: `me` beside the page's watching view, two people on one page, one for a page with nobody to name, a hidden one never named; changes of one task call onChange once",
+    (r) => {
+      expect(r.docsPage.at(-1)).deep.equal([cam(['Me'], 1)])
+      expect(r.twoOnOnePage.at(-1)).deep.equal([cam(['Ann', 'Bob'], 2)])
+      expect(r.nameless.at(-1)).deep.equal([cam([], 1)])
+      expect(r.hidden.flat().flatMap(({ watchers }) => watchers)).deep.equal([])
+      expect(r.hidden.at(-1)).deep.equal([cam([], 1)])
+      // Two tracks a server-side room started receiving in one task: one call, both in it.
+      expect(r.oneTask).deep.equal([[cam([], 1), { track: 'mic', watchers: [], watcherCount: 1 }]])
+    },
+  )
+  testRoomScenario<{ reads: NamedDemand[][]; sameList: boolean; sameEntry: boolean; tracks: NamedDemand[] }>(
+    'watchers-on-page',
+    "room: a page's me.demand names the people at a server-side room that receives its track, counts a room with nobody to name, and keeps its array and entries while they don't change",
+    (r) => {
+      expect(r.reads).deep.include([cam(['Sam', 'Tia'], 2)])
+      expect(r.reads).deep.include([cam(['Sam', 'Tia'], 3)])
+      expect(r.sameList).toBe(true) // a meta change called onChange, and demand stayed the same array
+      expect(r.sameEntry).toBe(true) // `mic` came, and the `cam` entry stayed the same object
+      expect(r.tracks).deep.equal([cam(['Sam', 'Tia'], 3), { track: 'mic', watchers: [], watcherCount: 1 }])
+    },
+  )
+  test("room: a view that watches beside the page's `me` while the page's connection upgrades to a WebSocket shows its publisher `me` throughout, never a watcher it can't name", async () => {
+    const transports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!)
+    if (!transports.includes('sse') || !transports.includes('ws')) return
+    const context = await page.context().browser()!.newContext()
+    try {
+      // The page's WebSocket opens once the page watches: the upgrade then moves a watching page.
+      const { promise: watching, resolve: watched } = Promise.withResolvers<void>()
+      await context.routeWebSocket(/\/_telefunc/, async (ws) => {
+        await watching
+        ws.connectToServer()
+      })
+      const tab = await context.newPage()
+      let upgradedFrames = 0
+      tab.on('websocket', (ws) => ws.on('framereceived', () => upgradedFrames++))
+      await navigate(`${getServerUrl()}/room`, undefined, tab)
+      await tab.click('#test-room-watchers-upgrade')
+      await autoRetry(async () =>
+        expect(JSON.parse((await tab.textContent('#room-result'))!)).deep.equal({ watching: true }),
+      )
+      watched()
+      await autoRetry(() => expect(upgradedFrames).greaterThan(0))
+      // The upgrade's join, and the planning pass after it, had their chance to tell the publisher a new page.
+      await sleep(1000)
+      await tab.click('#test-room-watchers-upgrade-check')
+      await autoRetry(async () => {
+        const { reads } = JSON.parse((await tab.textContent('#room-result'))!) as { reads: NamedDemand[][] }
+        expect(reads.length).greaterThan(0)
+        for (const read of reads) expect(read).deep.equal([cam(['Me'], 1)])
+      })
+    } finally {
+      await context.close()
+    }
+  })
+  testRoomScenario<{ changes: number; changed: boolean }>(
+    'change-once',
+    'room: room.onChange is called once for the changes of one task, and me.onChange works unbound',
+    (r) => {
+      expect(r).deep.equal({ changes: 1, changed: true })
+    },
+  )
 }
 
 /** Tests that need the failing backend (failing-backend.ts), which a server without Redis installs. */

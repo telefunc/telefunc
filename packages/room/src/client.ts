@@ -8,6 +8,7 @@ export type {
   ReadonlyMeta,
   LocalParticipant,
   RemoteParticipant,
+  TrackDemand,
   Sender,
   RoomSendReceipt,
   RoomAckReceipt,

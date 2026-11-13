@@ -105,6 +105,10 @@ export {
   onStopChurn,
   onPublishWhileEstablishing,
   onCutWire,
+  onPublishOnServer,
+  onServerPublisherReads,
+  onJoinHiddenHeld,
+  onWatchAsServer,
 }
 
 import { Buffer } from 'node:buffer'
@@ -119,6 +123,7 @@ import { createDeferred } from '../../createDeferred'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
 import { cutWireSockets } from '../../wire-sockets'
+import { demandNames, type NamedDemand } from './demandNames'
 import {
   addBackendFault,
   dropBackendSubscriptions,
@@ -668,7 +673,7 @@ async function releaseRefs(roomId: string) {
   const left = await room.join({ meta: { name: 'Left' } })
   left.listen(() => {})
   left.onLeave(() => {})
-  left.onDemand(() => {})
+  left.onChange(() => {})
   const view = await Room.get(roomId)
   const departed = view.getParticipant(left.id)!
   departed.onChange(() => {})
@@ -1350,4 +1355,34 @@ async function onPublishWhileEstablishing(roomId: string, count: number, bytes: 
 /** The page's wire drops right after this answer, as a failing network would drop it. */
 async function onCutWire() {
   setTimeout(cutWireSockets, 50)
+}
+
+const serverPublishers = new Map<string, { refs: unknown[]; reads: NamedDemand[][] }>()
+
+/** A participant on the server, `Pub`, and its `demand` as each of its `onChange` calls read it. */
+async function onPublishOnServer(roomId: string) {
+  const room = await Room.get(roomId)
+  const pub = await room.join({ meta: { name: 'Pub' } })
+  const reads: NamedDemand[][] = []
+  pub.onChange(() => reads.push(demandNames(pub)))
+  serverPublishers.set(roomId, { refs: [room, pub], reads })
+  return pub.id
+}
+
+async function onServerPublisherReads(roomId: string) {
+  return serverPublishers.get(roomId)!.reads
+}
+
+/** A hidden participant the page holds. */
+async function onJoinHiddenHeld(roomId: string) {
+  return await (await Room.get(roomId)).join({ hidden: true, meta: { name: 'Ghost' } })
+}
+
+/** A server-side room, `names` joined through it one after the other, that receives `tracks` of every member, all in
+ *  one task. */
+async function onWatchAsServer(roomId: string, names: string[], tracks: string[]) {
+  const room = await Room.get(roomId)
+  for (const name of names) await room.join({ meta: { name } })
+  for (const track of tracks) room.subscribeBinary(() => {}, { track })
+  watchedRooms.set(`${roomId} ${names.join()} ${tracks.join()}`, room)
 }

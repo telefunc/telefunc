@@ -1,5 +1,5 @@
 // Room wire envelopes, requests and notices, shared by client and server.
-export { hasRoomTag, joinedMember, inboxMessageFromWire, dmNotice, leaveCauseFromWire, leaveCauseToWire }
+export { hasRoomTag, joinedMember, inboxMessageFromWire, dmNotice, leaveCauseFromWire, leaveCauseToWire, watchStates }
 export type {
   MemberSnapshot,
   RoomSnapshotMetadata,
@@ -9,6 +9,9 @@ export type {
   RoomRosterEvent,
   RoomJoinedEvent,
   RoomDemandEvent,
+  DemandChange,
+  TrackWatch,
+  TrackWatchState,
   RoomCtrlEnvelope,
   RoomMetaEntry,
   RoomMetaUpdate,
@@ -112,11 +115,19 @@ type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[]; part: number;
 /** To the client whose `req-join` (`reqId`) admitted the member, before any event naming it. */
 type RoomJoinedEvent = { __r: 'joined'; reqId: number; id: string }
 
-/** Global demand for one of a member's own published tracks, pushed on aggregate state changes; a client that attaches
- *  again gets the member's whole wanted set, since its offline buffer may have dropped changes. */
+/** Who receives one of a member's tracks changed: the participants it names from now on (`add`) and no longer
+ *  (`remove`), and how many receive it (`count`), 0 once nobody does. */
+type DemandChange = { add?: string[]; remove?: string[]; count: number }
+/** Who receives one of a member's tracks: the participants named, by id, and how many receive it. */
+type TrackWatch = { readonly watchers: ReadonlySet<string>; readonly count: number }
+/** A track's `TrackWatch`, as a client that attaches is sent it. */
+type TrackWatchState = { track: TrackKey; watchers: string[]; count: number }
+
+/** Who receives each of a member's own tracks, told as it changes; a client that attaches again gets the whole state,
+ *  since its offline buffer may have dropped changes. */
 type RoomDemandEvent =
-  | { __r: 'demand'; member: string; track: TrackKey; wanted: boolean }
-  | { __r: 'demand-state'; member: string; tracks: TrackKey[] }
+  | ({ __r: 'demand'; member: string; track: TrackKey } & DemandChange)
+  | { __r: 'demand-state'; member: string; tracks: TrackWatchState[] }
 
 /** On the recipient's inbox lane, which only its owner subscribes. `ackId` asks for a reply on the sender's inbox. A
  *  room-authored one has no sender (`from: ''`, `fromMeta: null`); a client that names the sender gets it unstamped. */
@@ -183,8 +194,8 @@ type ParticipantStubNotice =
   | ({ __r: 'p-meta' } & MemberMetaUpdate)
   | { __r: 'rewound' }
   | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown; ackId?: string }
-  | { __r: 'demand'; track: TrackKey; wanted: boolean }
-  | { __r: 'demand-state'; tracks: TrackKey[] }
+  | ({ __r: 'demand'; track: TrackKey } & DemandChange)
+  | { __r: 'demand-state'; tracks: TrackWatchState[] }
 
 /** Which members' streams a holder wants on the text lane: `all` for room-level listeners, or a specific member set for
  *  participant-scoped ones. */
@@ -211,6 +222,11 @@ function inboxMessageFromWire(dm: WireDm): InboxMessage {
   }
   if (dm.ackId) msg.ackId = dm.ackId
   return msg
+}
+
+/** Who receives each track, whole, as a client that attaches is sent it. */
+function watchStates(watches: ReadonlyMap<TrackKey, TrackWatch>): TrackWatchState[] {
+  return Array.from(watches, ([track, { watchers, count }]) => ({ track, watchers: [...watchers], count }))
 }
 
 function dmNotice(msg: InboxMessage): Extract<ParticipantStubNotice, { __r: 'dm' }> {

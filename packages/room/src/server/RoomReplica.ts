@@ -15,7 +15,7 @@ import { RoomDemand } from './lanes/RoomDemand.js'
 import { PublishedTracks } from './lanes/PublishedTracks.js'
 import { PageIndex, type PageEnd } from './lanes/PageIndex.js'
 import { DM_FAILURE, RoomError } from '../shared/errors.js'
-import { joinedMember, leaveCauseFromWire, leaveCauseToWire } from '../shared/protocol.js'
+import { joinedMember, leaveCauseFromWire, leaveCauseToWire, watchStates } from '../shared/protocol.js'
 import type {
   MemberMetaUpdate,
   MemberSnapshot,
@@ -259,7 +259,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     void this.authority.ensureRoster().catch(reportRoomError)
     stub.relayEvent({ __r: 'update', seq: this.model.metaSeq, meta: this.model.metaEntries() })
     for (const member of stub.heldMembers()) {
-      stub.relayEvent({ __r: 'demand-state', member, tracks: this.incomingDemand.wanted(member) })
+      stub.relayEvent({ __r: 'demand-state', member, tracks: watchStates(this.incomingDemand.watchesOf(member)) })
     }
   }
 

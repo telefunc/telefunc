@@ -447,20 +447,45 @@ onStroke((stroke) => me.publishBinary(stroke, { track: 'drawing' })) // a viewer
 
 With `lossy: true`, a viewer can skip a video frame that later frames depend on, so number the frames in `meta` (a frame replaced on its way to the server never gets an `info.seq`) and, at a gap, drop frames until the next keyframe and restart your decoder from it.
 
-To send frames only while someone watches, use `onDemand()`, which also fires, as you call it, for the tracks already watched:
+To send frames only while someone watches, read `me.demand`, the tracks of yours that someone receives now, and follow it with `me.onChange()`:
 
 ```js
 // Environment: client
 
-const wanted = new Set()
-me.onDemand((track, on) => (on ? wanted.add(track) : wanted.delete(track))) // null: also wanted by a viewer of every track
+let watched = false
+function follow() {
+  watched = me.demand.some((demand) => demand.track === 'camera')
+}
+follow()
+me.onChange(follow)
 // live video: don't await, or each frame waits a round trip for the previous one
 encodeCamera((frame, isKeyframe) => {
-  if (wanted.has('camera') || wanted.has(null)) {
-    me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe, lossy: true })
-  }
+  if (watched) me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe, lossy: true })
 })
 ```
+
+> A viewer of every track, `subscribeBinary()` without `track`, receives a track from its first publish on.
+
+Each entry also says who receives the track: `watchers`, the people at the pages and server-side rooms receiving it, in join order, and `watcherCount`, everyone receiving it. A page or a server-side room that receives it with nobody to list, such as a page that didn't join, counts one. You are never listed, and neither is a hidden participant:
+
+```js
+// Environment: client
+
+function watchingLine({ watchers, watcherCount }) {
+  const names = watchers.map((participant) => participant.meta.name).join(', ')
+  const more = watcherCount - watchers.length
+  if (watchers.length === 0) return `${watcherCount} watching`
+  return more > 0 ? `watching: ${names} and ${more} more` : `watching: ${names}`
+}
+function showWatching() {
+  const camera = me.demand.find((demand) => demand.track === 'camera')
+  caption.textContent = camera ? watchingLine(camera) : ''
+}
+showWatching()
+me.onChange(showWatching)
+```
+
+`me.demand` stays the same array, and each entry the same object, until it changes, so `useSyncExternalStore(me.onChange, () => me.demand)` reads it in React.
 
 > Audio works the same way, on its own track such as `{ track: 'mic' }`.
 
@@ -613,7 +638,7 @@ Server-side.
 |---|---|
 | `join({ meta?, selfDelivery? }?)` | Join; returns your participant. |
 | `join({ meta?, identity?, hidden? })` | Server-side: join with a user id, or as a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>. |
-| `snapshot()` / `onChange(cb)` | The whole room, `{ id, meta, count, isClosed, participants }` with each participant as of the snapshot / called on every change. |
+| `snapshot()` / `onChange(cb)` | The whole room, `{ id, meta, count, isClosed, participants }` with each participant as of the snapshot / called when it changed, once for the changes of one task. |
 | `getParticipants()` | The participants. |
 | `getParticipant(id)` | One participant, or `null`. |
 | `getParticipants({ hidden: true })` | Server-side: the hidden participants. |
@@ -634,11 +659,11 @@ Properties: `id`, `meta`, `count`, `isEmpty`, `isClosed`.
 | `send(to, message, { ack? }?)` | Send to one participant. |
 | `listen(cb)` | Receive private messages; return a value to reply. |
 | `setMeta(meta)` / `setAttributes(attributes)` | Replace / update your `meta`. |
-| `onDemand(cb)` | Whether anyone watches a track of yours. |
+| `onChange(cb)` | Your `meta`, `isConnected` or `demand` changed; once for the changes of one task. |
 | `leave()` / `onLeave(cb)` | Leave / you left, with `cause.type`: `'left'`, `'removed'`, `'closed'`, `'disconnected'`, or `'unknown'` (it left while nothing here listened to the room, too long ago to know why). |
 | `onDisconnect(cb)` / `onReconnect(cb)` | Your connection to the room dropped / is back. |
 
-Properties: `id`, `meta`, `identity`, `isConnected`.
+Properties: `id`, `meta`, `identity`, `isConnected`, and `demand`: the tracks of yours someone receives now, each `{ track, watchers, watcherCount }`.
 
 ### Other participants
 
