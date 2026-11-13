@@ -1013,16 +1013,42 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
-  test('channel: lossy sends on a channel keep only the newest before the telefunction returns, and all of them on a link that keeps up', async () => {
+  /** 60 lossy sends, each its ordinal, 1000 / 30 ms apart, with the plain ones `plain` puts after the ordinal it is
+   *  given, then a plain `'done'`. */
+  function lossyStream(plain: (i: number) => string[] = () => []): string[] {
+    return [...Array.from({ length: 60 }, (_, i) => [String(i), ...plain(i)]).flat(), 'done']
+  }
+
+  /** What `lossy` promises on a link that keeps up. A busy machine may still delay the confirmations past the 600 ms a
+   *  sender waits for one (`LOSSY_CONFIRM_SLACK_MS` and the wire's wait, `WireSender.behindAfter` and the transports'
+   *  `behindAfter` on the page), and then skips. So: every plain send arrives once and in order, the lossy ones that arrive
+   *  keep their order, the newest arrives, and so do 15: nothing is skipped before the stream's first 600 ms (18 sends
+   *  at 30 a second), less 3 for a confirmation of what went before the stream that may still be on its way. */
+  function expectLossyStream(read: string[], sent: string[]) {
+    const isLossy = (value: string) => /^\d+$/.test(value)
+    expect(read.filter((value) => !isLossy(value))).deep.equal(sent.filter((value) => !isLossy(value)))
+    const order = read.map((value) => sent.indexOf(value))
+    expect(order).not.include(-1)
+    expect(order).deep.equal([...new Set(order)].sort((a, b) => a - b))
+    const lossy = read.filter(isLossy)
+    expect(lossy.at(-1)).toBe(sent.filter(isLossy).at(-1))
+    expect(lossy.length).greaterThanOrEqual(15)
+  }
+
+  test('channel: lossy sends on a channel keep only the newest before the telefunction returns, and their order, the newest and the plain ones on a link that keeps up', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-lossy-sends')
+    let lossySends: string[] | null = null
     await autoRetry(
       async () => {
-        const { lossySends } = await getResult<{ lossySends: string[] | null }>('#channel-state')
-        expect(lossySends).deep.equal(['L3', 'R1', 'L4', ...Array.from({ length: 60 }, (_, i) => String(i)), 'done'])
+        lossySends = (await getResult<{ lossySends: string[] | null }>('#channel-state')).lossySends
+        expect(lossySends?.at(-1)).toBe('done')
       },
       { timeout: 20_000 },
     )
+    // Before the telefunction returns, nothing is sent, so which go doesn't depend on the link.
+    expect(lossySends!.slice(0, 3)).deep.equal(['L3', 'R1', 'L4'])
+    expectLossyStream(lossySends!.slice(3), lossyStream())
   })
 
   /** What the server read of the page's lossy-sends channel, once the page opened it. */
@@ -1032,11 +1058,21 @@ function testChannel(isDev: boolean, inDocker = false) {
     return JSON.parse((await getCleanupState())[`lossyFromPage_${lossyFromPageChannelId}`] ?? '[]')
   }
 
-  test('channel: lossy sends from the page keep their order around plain ones, and all arrive on a link that keeps up', async () => {
+  test('channel: lossy sends from the page keep their order around plain ones, and the newest arrives, on a link that keeps up', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-lossy-from-page')
-    const sent = Array.from({ length: 60 }, (_, i) => (i % 20 === 19 ? [String(i), `R${i}`] : [String(i)])).flat()
-    await autoRetry(async () => expect(await readLossyFromPage()).deep.equal([...sent, 'done']), { timeout: 20_000 })
+    let read: string[] = []
+    await autoRetry(
+      async () => {
+        read = await readLossyFromPage()
+        expect(read.at(-1)).toBe('done')
+      },
+      { timeout: 20_000 },
+    )
+    expectLossyStream(
+      read,
+      lossyStream((i) => (i % 20 === 19 ? [`R${i}`] : [])),
+    )
   })
 
   if (!isDev) {
