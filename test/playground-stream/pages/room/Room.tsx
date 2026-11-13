@@ -1838,7 +1838,8 @@ function Room() {
         await join({ meta: { name: 'Detached' } })
         await pollUntil(() => ({ done: snapshot().count === 1 }))
         setLiveRoom(room)
-        await onJoinAsServer(roomId, 'Bob')
+        // A GC pass would close Bob's channel, and Bob leaving with it takes the live count the test reads from 2 to 1.
+        keepReachable(await onJoinAsServer(roomId, 'Bob'))
 
         const closed = await onCloseRoomWithMember(`e2e-proxy-closed:${crypto.randomUUID()}`)
         const causes: unknown[] = []
