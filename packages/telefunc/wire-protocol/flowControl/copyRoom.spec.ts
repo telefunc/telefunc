@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { addWireCopies, dropWireCopies, hasCopyRoom } from '../channel/server/channelMemory.js'
 import { WIRE_PIECES_ACK_GAP_MS, WIRE_SEND_AHEAD_MIN_BYTES } from '../constants.js'
@@ -8,9 +8,13 @@ import { ClientPieceReceiver } from './client/ClientPieceReceiver.js'
 import { ServerHeadroom } from './server/ServerHeadroom.js'
 
 const FULL = 2 ** 40
-afterEach(() => dropWireCopies(FULL))
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance', 'Date'] })
+})
+afterEach(() => {
+  vi.useRealTimers()
+  dropWireCopies(FULL)
+})
 
 /** A server wire whose socket keeps a copy of each message, as Bun's, Deno's and a Durable Object's do, to a page that
  *  takes every message a task later and, as its credit does, sends a MSG_WINDOW every 25 messages it took. */
@@ -64,7 +68,7 @@ describe('ServerHeadroom.copyRoom', () => {
   it('a page reading small frames keeps its wire going once copies fill their budget, and sends nothing more', async () => {
     const wire = wireToPage()
     wire.send(20, 1000)
-    await sleep(200)
+    await vi.advanceTimersByTimeAsync(200)
     expect(wire.taken()).toBe(20)
 
     addWireCopies(FULL)
@@ -74,7 +78,7 @@ describe('ServerHeadroom.copyRoom', () => {
     const frames = Math.ceil((4 * WIRE_SEND_AHEAD_MIN_BYTES) / 1000)
     wire.send(frames, 1000)
     // Well before the page's next PING, which comes a ping interval later.
-    await sleep(10 * WIRE_PIECES_ACK_GAP_MS)
+    await vi.advanceTimersByTimeAsync(10 * WIRE_PIECES_ACK_GAP_MS)
     expect(wire.taken()).toBe(20 + frames)
     expect(wire.acknowledgements()).toBe(acknowledged)
   })
