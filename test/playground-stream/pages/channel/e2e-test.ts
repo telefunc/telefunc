@@ -12,7 +12,7 @@ import {
   startProxy,
   countConnections,
 } from '../../e2e-utils'
-import { newCDPSession, sendsOutrunWarning, sendRefusedWarning, withNetworkConditions } from '../../../utils'
+import { newCDPSession, sendRefusedWarning, withNetworkConditions } from '../../../utils'
 
 type ChannelState = {
   heldBytes: number | null
@@ -1131,10 +1131,9 @@ function testChannel(isDev: boolean, inDocker = false) {
       },
       { timeout: 60_000 },
     )
-    expect(() => expectLog(sendsOutrunWarning)).throw()
   })
 
-  test('channel: sends nobody awaits that keep outrunning a 1 MB/s page warn once, then are refused at maxMemory with the channel open', async () => {
+  test('channel: sends nobody awaits that keep outrunning a 1 MB/s page are refused at maxMemory with the channel open', async () => {
     await navigate(`${getServerUrl()}/channel`)
     // 1 MiB every 50 ms to a page that takes 1 MB/s.
     await withNetworkConditions({ downloadThroughput: 1_000_000, uploadThroughput: -1 }, async () => {
@@ -1147,7 +1146,6 @@ function testChannel(isDev: boolean, inDocker = false) {
         { timeout: 60_000 },
       )
     })
-    expectLog(sendsOutrunWarning)
     expectLog(sendRefusedWarning)
     const paced = (await getResult<ChannelState>('#channel-state')).paced!
     expect(paced.ended).toBe(false)
@@ -1178,7 +1176,6 @@ function testChannel(isDev: boolean, inDocker = false) {
       },
       { timeout: 30_000 },
     )
-    expect(() => expectLog(sendsOutrunWarning)).throw()
   })
 
   test('channel: 6,000 text messages of 16 KiB the server sends in one loop without awaiting all reach a page that reads', async () => {
@@ -1207,7 +1204,6 @@ function testChannel(isDev: boolean, inDocker = false) {
       },
       { timeout: 30_000 },
     )
-    expect(() => expectLog(sendsOutrunWarning)).throw()
   })
 
   test('channel: of 18,000 acknowledgement requests of 64 KiB the server sends in one loop, those past maxMemory are refused and the channel stays open', async () => {

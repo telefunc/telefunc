@@ -286,7 +286,7 @@ On the server, `send()` works the same whether the client is connected, offline,
 - It holds each message until the client confirms it, up to the default per-channel limit of 320 MiB, within <Link href="/channel-config">`maxMemory`</Link> for all channels. An awaited `send()` resolves once the client has room, so a sender that awaits builds no backlog.
 - A `send()` past that rejects with `ChannelOverflowError`, and that message isn't delivered. The channel stays open, and later sends that fit go through.
 
-So fire-and-forget can leave a gap: the client never gets a `send()` the server refused. Telefunc logs a warning once per channel when your sends keep outrunning the client, well before that limit, and another at the first refused `send()`.
+So fire-and-forget can leave a gap: the client never gets a `send()` the server refused. Telefunc logs a warning at a channel's first refused `send()`.
 
 To fix it, `await` each `send()` before the next, as in the clock example above, or send slower.
 
@@ -354,7 +354,7 @@ Broadcast.subscribe('room:lobby', (msg, info) => {
 
 > In memory, a key's counter lasts while the key has a subscriber on that server. Once the key has no subscriber left there, its next publish gets a `seq` above every one that server has issued.
 
-Awaiting `publish()` doesn't wait for any subscriber's client to keep up, so the <Link href="#backpressure">warning about sends that outrun their client</Link> doesn't apply to a `BroadcastChannel`. Instead, a client that falls behind a broadcast gets every message the server holds for it, and past that the channel closes with `ChannelOverflowError` (see <Link href="#errors">errors</Link>). Other channels on its connection wait behind what's held for it. Where only the newest message matters, make it <Link href="#skip-to-the-newest">lossy</Link>: a client that can't keep up then skips to the newest, and `info.seq` jumps over what it skipped.
+Awaiting `publish()` doesn't wait for any subscriber's client to keep up: a client that falls behind a broadcast gets every message the server holds for it, and past that the channel closes with `ChannelOverflowError` (see <Link href="#errors">errors</Link>). Other channels on its connection wait behind what's held for it. Where only the newest message matters, make it <Link href="#skip-to-the-newest">lossy</Link>: a client that can't keep up then skips to the newest, and `info.seq` jumps over what it skipped.
 
 A `subscribe()` callback's `async` work isn't awaited, on the page or on the server: the next message arrives whether or not your callback is done. Telefunc doesn't limit how many calls of your callback are unfinished, so if it can fall behind, limit them in your code.
 For example, a callback that does an `await fetch()` for each message should queue them, and drop or merge what it can't keep up with.

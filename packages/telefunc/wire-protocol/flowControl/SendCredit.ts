@@ -49,18 +49,9 @@ class SendCredit {
     macrotaskYield.assertSupported()
   }
 
-  get waitingCount(): number {
-    return this.waiters?.length ?? 0
-  }
-
   /** Keeps what it lets be in flight within what the server's `maxMemory` allows. */
   capWindow(peerWindow: number): void {
     if (!this.limitRaised) this.limitBytes = Math.min(CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_MAX_BYTES, peerWindow)
-  }
-
-  /** Bytes sent past the byte limit and still past it. */
-  get bytesSentPastCredit(): number {
-    return Math.max(0, this.sentBytes - this.limitBytes)
   }
 
   /** Counts a frame of `bytes` against credit; a Promise where the sender waits for credit or yields. The frame already
@@ -81,16 +72,14 @@ class SendCredit {
     }
   }
 
-  /** Returns the bytes `limit` raised the byte limit by. A limit that doesn't raise the current one is stale, and
-   *  ignored, as in QUIC. */
-  onPeerByteWindow(limit: number): number {
+  /** A limit that doesn't raise the current one is stale, and ignored, as in QUIC. */
+  onPeerByteWindow(limit: number): void {
     const raise = (limit - this.limitBytes) | 0
-    if (raise <= 0) return 0
+    if (raise <= 0) return
     this.noteBacklog()
     this.limitBytes += raise
     this.limitRaised = true
     this.tryWakeCreditWaiters()
-    return raise
   }
 
   onPeerMessageWindow(limit: number): void {

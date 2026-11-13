@@ -33,7 +33,7 @@ class ServerChannelBuffer<TAck = never> {
   private entries: Entry[] = []
   private readonly owner: BufferedSender
   /** What the held sends count as on the channel's ledger. */
-  sendBytes = 0
+  private sendBytes = 0
 
   constructor(owner: BufferedSender) {
     this.owner = owner

@@ -327,10 +327,6 @@ export const CREDIT_WINDOW_INITIAL_BYTES_BATCH = 8 * 1024 * 1024
  *  Covers ~5 Gbit/s × 100 ms RTT or ~500 Mbit/s × 1 s RTT. */
 export const CREDIT_WINDOW_MAX_BYTES = 64 * 1024 * 1024
 
-/** A server channel's sends outrun its page once, each time the page takes some for this long, more is ahead of it than
- *  when that began, and more than the page takes in this long: a few round trips of Slow 3G's 400 ms. */
-export const SENDS_OUTRUN_MS = 1_000
-
 /** The most a batch POST is sized to carry (see `SSE_POST_TARGET_MS`). */
 export const SSE_POST_MAX_BYTES = CREDIT_WINDOW_MAX_BYTES / 2
 

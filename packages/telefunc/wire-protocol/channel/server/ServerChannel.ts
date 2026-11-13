@@ -51,7 +51,6 @@ import { creditWindowOf, type CreditOwner } from '../../flowControl/credit.js'
 import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import { SelfTime } from '../../flowControl/SelfTime.js'
 import { SendCredit } from '../../flowControl/SendCredit.js'
-import { SendsOutrun } from '../../flowControl/server/SendsOutrun.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
 import { ServerChannelBuffer, type BufferedSender, type EntryCallback, type EntryData } from './ServerChannelBuffer.js'
 import { ServerReplay } from './ServerReplay.js'
@@ -143,8 +142,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected selfTime = new SelfTime()
   /** Paces fire-and-forget TEXT, BINARY and PUBLISH sends to what the page grants; see `constants.ts`. */
   protected sendCredit: SendCredit
-  /** Whether its sends outrun the page; null once it warned they do. */
-  private outrun: SendsOutrun | null = new SendsOutrun()
   /** A send nobody awaits can't show its rejection, so the first refusal warns. */
   private refusalWarned = false
   protected receiveCredit: ReceiveCredit
@@ -322,32 +319,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     return new ChannelOverflowError(
       'Send refused: the most for one channel, or config.channel.maxMemory, is held; await each send',
-    )
-  }
-
-  /** What its sends put ahead of the page: past the page's credit, the ack requests it hasn't answered, and what waits
-   *  for it to attach. */
-  private bytesAhead(): number {
-    return (
-      this.sendCredit.bytesSentPastCredit +
-      this.sendCredit.waitingCount * HELD_SEND_OVERHEAD_BYTES +
-      this.pendingAckBytes +
-      this.pendingAcks.size * HELD_SEND_OVERHEAD_BYTES +
-      this.offlineBuffer.sendBytes
-    )
-  }
-
-  /** The page took `bytes`; warns, once, where the sends nobody awaits keep outrunning it (see `SendsOutrun`). */
-  private onDrained(bytes: number): void {
-    if (this.outrun === null) return
-    const ahead = this.bytesAhead()
-    if (!this.outrun.drained(bytes, ahead, performance.now())) return
-    const mibPerS = (this.outrun.rate * 1000) / 2 ** 20
-    this.outrun = null
-    assertWarning(
-      false,
-      `A channel's \`send()\` calls outrun its client: ${(ahead / 2 ** 20).toFixed(1)} MiB wait for it and keep growing, while it takes ${mibPerS.toFixed(1)} MiB/s. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next, or send slower: past ${(maxPendingBytesOf() / 2 ** 20).toFixed(0)} MiB, or \`config.channel.maxMemory\` on this server, sends are refused with \`ChannelOverflowError\`.`,
-      { onlyOnce: false },
     )
   }
 
@@ -537,7 +508,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this.shutdown(replayLossError(), { pageGone: true })
         return
       case TAG.WINDOW:
-        this.onDrained(this.sendCredit.onPeerByteWindow(frame.bytes))
+        this.sendCredit.onPeerByteWindow(frame.bytes)
         this.onPageHas(seqThrough(frame.lastSeq, this._replayBuffer?.seq ?? 0))
         return
       case TAG.MSG_WINDOW:
@@ -668,7 +639,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     } finally {
       this.pendingAcks.delete(ackedSeq)
       this.pendingAckBytes -= pending.bytes
-      this.onDrained(pending.bytes)
     }
   }
 
