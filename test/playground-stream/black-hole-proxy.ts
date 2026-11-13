@@ -143,8 +143,8 @@ function frameLength(bytes: Buffer): number | null {
   return bytes.length < 10 ? null : 10 + 4 + Number(bytes.readBigUInt64BE(2))
 }
 
-/** The most of the link's time one tick sends: a tick later than that found the test process stopped, not slow, and a
- *  link of the named rate doesn't hand over more than a second of it at once. */
+/** The most of the link's time one tick of a busy link sends, however late it runs: a link of the named rate doesn't
+ *  hand over more than a second of it at once. */
 const MAX_TICK_MS = 1000
 
 /** One direction of a slow link: what its senders write leaves in order at `bytesPerSecond`, no sooner than `delayMs`,
