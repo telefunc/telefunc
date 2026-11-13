@@ -13,16 +13,9 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["TelefuncDurableObject"] }
   ],
-  // Two bindings to one database: their live databases see each other's writes only through Broadcast, as two
-  // isolates writing to one D1 database do.
   "d1_databases": [
     {
-      "binding": "READER_DB",
-      "database_name": "todos",
-      "database_id": "live-d1"
-    },
-    {
-      "binding": "WRITER_DB",
+      "binding": "DB",
       "database_name": "todos",
       "database_id": "live-d1"
     }

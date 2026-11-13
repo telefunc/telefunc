@@ -1,14 +1,7 @@
 export { ChangeFeed }
 
 import type { BroadcastTransport } from 'telefunc'
-import {
-  getBroadcastPlane,
-  getOrCreate,
-  hostLocal,
-  markHandled,
-  unrefTimer,
-  type BackendSubscription,
-} from 'telefunc/__internal'
+import { getBroadcastPlane, getOrCreate, markHandled, unrefTimer, type BackendSubscription } from 'telefunc/__internal'
 import type { Change } from './match/liveRead.js'
 
 type Message = { origin: string; changes: Change[] }
@@ -22,7 +15,8 @@ const RETRY_FIRST_MS = 100
 const RETRY_LAST_MS = 10_000
 /** Past this many changes of a table waiting to be sent, they're sent as a change to any of its rows. */
 const MAX_WAITING_CHANGES = 10_000
-/** How far below a table's highest sequence number a message is still told apart from one received already. */
+/** How far below a table's highest sequence number a message is still told apart from one received already: a
+ *  transport of the app's may reorder or repeat messages. */
 const RECEIVED_WINDOW = 64
 
 /** What the feed publishes and subscribes through: the installed Broadcast backend, or the app's `transport`. */
@@ -31,14 +25,15 @@ type Channel = {
   subscribe(key: string, listener: Listener): BackendSubscription
 }
 
-/** Sends this server's committed changes to the other servers, and hands theirs to `onRemote`, one key per table. */
+/** Sends this host's committed changes to the other hosts, and hands theirs to `onRemote`, one key per table. A host
+ *  is a process, or a session Durable Object on Cloudflare: several of those in one isolate are other hosts. */
 class ChangeFeed {
   private readonly channel: Channel
   private readonly database: string
   private readonly onRemote: (changes: Change[]) => void
   private readonly origin = crypto.randomUUID()
-  /** This feed's subscriptions on each host (a Cloudflare session Durable Object, else the process), by table. */
-  private readonly subscriptions = Symbol('@telefunc/live subscriptions')
+  /** By table. */
+  private readonly subscriptions = new Map<string, BackendSubscription>()
   /** Per table: the highest sequence number received, and those of the last `RECEIVED_WINDOW`, each at its number
    *  modulo `RECEIVED_WINDOW`. */
   private readonly received = new Map<string, { highest: number; recent: number[] }>()
@@ -52,12 +47,11 @@ class ChangeFeed {
     this.onRemote = onRemote
   }
 
-  /** Listens to `tables`' changes on this host: while one may not arrive yet, returns a promise settled once it can. */
+  /** Listens to `tables`' changes: while one may not arrive yet, returns a promise settled once it can. */
   watch(tables: Iterable<string>): Promise<void> | undefined {
-    const subscriptions = hostLocal(this.subscriptions, () => new Map<string, BackendSubscription>())
     const establishing: Promise<void>[] = []
     for (const table of tables) {
-      const subscription = subscriptions.get(table) ?? this.subscribe(table, subscriptions)
+      const subscription = this.subscriptions.get(table) ?? this.subscribe(table)
       if (subscription.state() !== 'ready') establishing.push(subscription.ready)
     }
     if (establishing.length === 0) return undefined
@@ -114,18 +108,18 @@ class ChangeFeed {
     }
   }
 
-  private subscribe(table: string, subscriptions: Map<string, BackendSubscription>): BackendSubscription {
+  private subscribe(table: string): BackendSubscription {
     const subscription = this.channel.subscribe(this.key(table), (payload, { seq }) =>
       this.receive(table, payload, seq),
     )
     // Closed at once, it failed: the next read subscribes again.
     if (subscription.state() === 'closed') return subscription
-    subscriptions.set(table, subscription)
+    this.subscriptions.set(table, subscription)
     subscription.onStateChange((state) => {
       if (state === 'ready') return
       // It may have missed messages: any row of the table may have changed.
       this.onRemote([{ table, kind: 'unknown' }])
-      if (state === 'closed' && subscriptions.get(table) === subscription) subscriptions.delete(table)
+      if (state === 'closed' && this.subscriptions.get(table) === subscription) this.subscriptions.delete(table)
     })
     return subscription
   }
@@ -139,10 +133,10 @@ class ChangeFeed {
       if (seq !== received.highest + 1) this.onRemote([{ table, kind: 'unknown' }])
       received.highest = seq
     } else if (received.highest - seq >= RECEIVED_WINDOW) {
-      // Too old to tell whether another host of this server delivered it already: any row may have changed.
+      // Too old to tell whether it was received already: any row may have changed.
       return this.onRemote([{ table, kind: 'unknown' }])
     } else if (received.recent[slot] === seq) {
-      // Another host of this server delivered it already.
+      // Received already.
       return
     }
     received.recent[slot] = seq

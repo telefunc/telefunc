@@ -2,6 +2,7 @@ export { LiveDatabase, MAX_RESULT_ROWS }
 export type { Statement, FollowUp, LiveOptions, Sharing, Reservation, Engine }
 
 import type { BroadcastTransport } from 'telefunc'
+import { hostLocal } from 'telefunc/__internal'
 import { accessAnswered, tablesChangedBy, type Access, type Catalog, type Table } from './catalog.js'
 import { ChangeFeed } from './changeFeed.js'
 import {
@@ -132,6 +133,9 @@ const MAX_RESULT_ROWS = 10_000
  *  would cost the writer more than the refetches it spares (a 100,000-row `UPDATE` took twice as long). */
 const MAX_CHANGED_ROWS = 10_000
 
+/** A host's part of a database (`LiveDatabase.host()`): one per process, one per session Durable Object on Cloudflare. */
+type Host = { router: Router; shared: SharedReads; feed: ChangeFeed }
+
 /** Everything one wrapped database shares between its connections: what it knows of the schema, the live reads,
  *  open transactions, and the other servers. */
 class LiveDatabase {
@@ -141,12 +145,12 @@ class LiveDatabase {
   /** Connections whose change log follows the loaded catalog (`Engine.changeLog`): the count its rows were read up to. */
   private loggedUpTo = new WeakMap<object, number>()
   private plans = new Map<string, Plan>()
-  private readonly router = new Router()
   private readonly transactions = new Transactions((changes) => this.announce(changes))
   private readonly transport: BroadcastTransport | undefined
   private readonly name: string | undefined
-  private feed: ChangeFeed | undefined
-  private readonly shared = new SharedReads()
+  /** The channel of the database's changes, named once the catalog loaded. */
+  private database: string | undefined
+  private readonly hosts = Symbol('@telefunc/live host')
   /** A statement changed a session: connections may answer the same read differently from now on. */
   private sessionsDiffer = false
   /** A statement may have changed a session's `search_path`, if only for its transaction: an unqualified name may mean
@@ -252,10 +256,11 @@ class LiveDatabase {
     const plan = this.planOf(text, this.catalog!)
     const key = plan.kind === 'read' && plan.shareable ? this.shareKey(text, values, undefined, rowForm) : undefined
     if (!key || plan.kind !== 'read') return undefined
-    const joined = this.shared.join(key, live)
+    const { shared } = this.host()
+    const joined = shared.join(key, live)
     if (joined) return { joined }
     const read = this.watched(plan.shape, text, values, live)
-    const lead = this.shared.lead(key, read)
+    const lead = shared.lead(key, read)
     let settled = false
     const failed = () => {
       if (settled) return
@@ -304,7 +309,7 @@ class LiveDatabase {
   ): Statement {
     let plan = withRoleSet(this.planOf(text, this.catalog!), values)
     // A read planned after it on its connection runs after it: it doesn't join a read running before it.
-    if (plan.kind !== 'read' || plan.role) this.shared.stopJoining(connection)
+    if (plan.kind !== 'read' || plan.role) this.host().shared.stopJoining(connection)
     const sessionsStart = changesSession(plan) && !this.sessionsDiffer
     const pathsStart = (sessionsStart || changesPath(plan)) && !this.pathsDiffer
     if (sessionsStart) this.sessionsStartDiffering()
@@ -479,11 +484,12 @@ class LiveDatabase {
       sharing && !sharing.reservation && plan.shareable
         ? this.shareKey(text, values, connection, sharing.rowForm)
         : undefined
-    const joined = key ? this.shared.join(key, live) : undefined
+    const { shared } = this.host()
+    const joined = key ? shared.join(key, live) : undefined
     if (joined) return { ...this.statement(connection, text, 0, () => []), joined, keepsSession }
     const reservation = sharing?.reservation
     const watched = reservation?.read ?? this.watched(plan.shape, text, values, live)
-    const lead = reservation?.lead ?? (key ? this.shared.lead(key, watched, connection) : undefined)
+    const lead = reservation?.lead ?? (key ? shared.lead(key, watched, connection) : undefined)
     return {
       text: plan.liveText ?? text,
       ...(plan.liveText && plan.liveValues ? { values: plan.liveValues.map((i) => values[i]) } : {}),
@@ -541,7 +547,7 @@ class LiveDatabase {
   private watched(shape: ReadShape, text: string, values: readonly unknown[], live: LiveQuery): WatchedRead {
     const operandsKey = this.operandsKey(text, values)
     const operands = !shape.operandQuery ? [] : operandsKey ? this.knownOperands.get(operandsKey) : undefined
-    const read = new WatchedRead(shape, values, operands, this.router, this.watchTables(shape))
+    const read = new WatchedRead(shape, values, operands, this.host().router, this.watchTables(shape))
     read.watch(live)
     return read
   }
@@ -738,9 +744,10 @@ class LiveDatabase {
   private cascadesRead(cascades: Cascade[], connection: object): Cascade[] {
     const role = this.roles!.of(connection)
     const access = role === null ? undefined : this.access.get(role)
+    const { router } = this.host()
     return cascades.flatMap((cascade) => {
       const seen = access?.get(cascade.table.id)
-      if (!seen?.readable || seen.rowSecurity || !cascade.reach.some((table) => this.router.watches(table))) return []
+      if (!seen?.readable || seen.rowSecurity || !cascade.reach.some((table) => router.watches(table))) return []
       return [cascade, ...this.cascadesRead(cascade.next, connection)]
     })
   }
@@ -785,8 +792,20 @@ class LiveDatabase {
   }
 
   private announce(changes: Change[]): void {
-    this.receive(changes)
-    this.feed!.publish(changes)
+    const { router, feed } = this.host()
+    route(router, changes)
+    feed.publish(changes)
+  }
+
+  /** This host's part: its live reads, the reads running that others join, and its feed. A read's stale signal goes out
+   *  from the host that holds the read: workerd lets no Durable Object use the I/O of another, the WebSocket the
+   *  signal goes out on included. */
+  private host(): Host {
+    return hostLocal(this.hosts, () => {
+      const router = new Router()
+      const feed = new ChangeFeed(this.transport, this.database!, (changes) => route(router, changes))
+      return { router, shared: new SharedReads(), feed }
+    })
   }
 
   private planOf(text: string, catalog: Catalog): Plan {
@@ -806,13 +825,8 @@ class LiveDatabase {
     this.access.set(this.catalog.role, this.catalog.access)
     // The app's name for the database, or its own. One no other process opens is a channel of its own: another one in
     // this process is another database.
-    const database =
+    this.database ??=
       this.name ?? ((!this.engine.inProcess && this.catalog.database) || `in-process ${crypto.randomUUID()}`)
-    this.feed ??= new ChangeFeed(this.transport, database, (changes) => this.receive(changes))
-  }
-
-  private receive(changes: Change[]): void {
-    for (const change of changes) this.router.route(change)
   }
 
   /** After a statement that may have changed its session: connections may answer the same read differently. */
@@ -844,8 +858,12 @@ class LiveDatabase {
     const { aliases, alsoReads } = shape
     const tables =
       alsoReads === 'all' ? this.catalog!.tables.keys() : [...aliases.map((alias) => alias.table.id), ...alsoReads]
-    return this.feed!.watch(['*', ...tables])
+    return this.host().feed.watch(['*', ...tables])
   }
+}
+
+function route(router: Router, changes: Change[]): void {
+  for (const change of changes) router.route(change)
 }
 
 /** The rows a foreign key's `ON DELETE CASCADE` deletes, found by the key of each deleted parent (what deleting them
