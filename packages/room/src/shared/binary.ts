@@ -71,7 +71,7 @@ function encodeBinaryFrame(memberId: string, payload: Uint8Array, opts?: BinaryP
 }
 
 /** The frame of a message `publish()` sends on a track: its payload is the message, serialized. */
-function encodeMessageFrame(memberId: string, message: unknown, opts: BinaryPublishOptions): Uint8Array {
+function encodeMessageFrame(memberId: string, message: unknown, opts: BinaryPublishOptions | undefined): Uint8Array {
   return encodeFrame(memberId, frameTextEncoder.encode(stringify(message)), opts, FRAME_FLAG_TEXT)
 }
 

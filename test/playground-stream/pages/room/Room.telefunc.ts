@@ -512,8 +512,7 @@ async function onRoomTracks(roomId: string, heavy: 'cursor' | 'drawing') {
     for (let n = 0; n < 8; n++)
       await speaker.publishBinary(new Uint8Array(256 * 1024), { track: 'pointer', meta: { n }, lossy: true })
     for (let n = 0; n < 16; n++) {
-      // Its first publish makes the track lossy, which the later ones keep.
-      await speaker.publishBinary(frame('cursor'), { track: 'cursor', meta: { n }, ...(n === 0 && { lossy: true }) })
+      await speaker.publishBinary(frame('cursor'), { track: 'cursor', meta: { n }, lossy: true })
       await speaker.publishBinary(frame('drawing'), { track: 'drawing', meta: { n } })
       await speaker.publish(String(n))
     }
@@ -545,20 +544,34 @@ async function onOpenReliableGapRoom(roomId: string) {
   return room
 }
 
-/** A speaker sends, run by the test while the page is offline, 16 positions of 256 KiB on a lossy text track: 4 MiB. */
+/** A speaker sends, run by the test while the page is offline, 16 positions of 256 KiB on a lossy text track: 4 MiB.
+ *  Halfway, a publish on the track without `lossy`, whose outcome the test reads. */
 async function onRoomTextCursor(roomId: string) {
   const room = await Room.get(roomId)
   const speaker = await room.join({ meta: { name: 'Speaker' } })
   awayMembers.set(roomId, [speaker])
   onServerAction(`roomTextCursor_${roomId}`, async () => {
     const padding = ' '.repeat(256 * 1024)
-    for (let n = 0; n < 16; n++) await speaker.publish({ n, padding }, { track: 'cursor', lossy: true })
+    for (let n = 0; n < 16; n++) {
+      if (n === 8) cleanupState[`roomTextCursorPlain_${roomId}`] = await publishPlain(speaker, { n: 'plain' })
+      await speaker.publish({ n, padding }, { track: 'cursor', lossy: true })
+    }
     cleanupState[`roomTextCursor_${roomId}`] = 'done'
   })
   await speaker.publish({ n: -1 }, { track: 'cursor', lossy: true })
 }
 
-/** A speaker sends, run by the test while the page is offline, one 600 KiB frame on each of three lossy tracks: past 7/8 of
+/** A publish on the `cursor` track without `lossy`: 'published', or the error it threw. */
+async function publishPlain(speaker: LocalParticipant, message: unknown): Promise<string> {
+  try {
+    await speaker.publish(message, { track: 'cursor' })
+    return 'published'
+  } catch (err) {
+    return (err as Error).message
+  }
+}
+
+/** A speaker sends, run by the test while the page is offline, one lossy 600 KiB frame on each of three tracks: past 7/8 of
  *  its lane's 2 MiB, so the server tries to free what it holds, and within it, so it needn't let the page go. */
 async function onRoomLossyNearBudget(roomId: string) {
   const room = await Room.get(roomId)

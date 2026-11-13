@@ -1436,14 +1436,15 @@ function testRoomSmallMemory() {
   )
   testRoomScenario<Record<string, string | null>>(
     'track-lossy',
-    'room: a track keeps the lossy setting of its first publish: a later publish may leave it out, and one naming the other throws at the call',
-    ({ other, textOther, noTrack, ...accepted }) => {
-      expect(accepted).deep.equal({ first: null, omitted: null, defaultTrack: null, text: null })
-      for (const thrown of [other, textOther]) {
-        expect(thrown ?? 'no error').toContain(
-          `The "cursor" track's first publish gave it lossy: true, which a track keeps`,
-        )
+    "room: each publish on a track says lossy itself: one of the other kind than the track's throws at the call, and a message's lossy needs a track",
+    ({ omitted, text, lossyAfterPlain, noTrack, ...accepted }) => {
+      expect(accepted).deep.equal({ first: null, plain: null, defaultTrack: null })
+      for (const thrown of [omitted, text]) {
+        expect(thrown ?? 'no error').toContain(`The "cursor" track's publishes are lossy, and a track takes one kind`)
       }
+      expect(lossyAfterPlain ?? 'no error').toContain(
+        `The "drawing" track's publishes aren't lossy, and a track takes one kind`,
+      )
       expect(noTrack ?? 'no error').toContain('publish() options.lossy needs options.track')
     },
   )
@@ -1456,7 +1457,7 @@ function testRoomSmallMemory() {
   )
   testRoomScenario<{ receipts: number; seen: number[]; listed: number }>(
     'lossy-uplink',
-    "room: a lossy track's frames that wait for the page's uplink while it reconnects are replaced by the newest, which its viewers get, their publishes share its receipt, and none stays listed once settled",
+    "room: lossy frames that wait for the page's uplink while it reconnects are replaced by the newest of their track, which its viewers get, their publishes share its receipt, and none stays listed once settled",
     (r) => {
       expect(r.listed).toBe(0)
       expect(r.receipts).lessThan(20)
@@ -1479,7 +1480,7 @@ function testRoomSmallMemory() {
   )
   testRoomTracksBehind(
     'cursor',
-    "room: a page offline while its room sent it more than maxMemory holds on lossy tracks gets each track's newest frame, with the jump in its info.seq, and gets the reliable track and the messages whole",
+    "room: a page offline while its room sent it more than maxMemory holds in lossy frames gets each track's newest frame, with the jump in its info.seq, and gets the reliable track and the messages whole",
     (r) => {
       expect(r).deep.include({ closed: false, myCause: null })
       const all = Array.from({ length: 16 }, (_, n) => n)
@@ -1510,15 +1511,18 @@ function testRoomSmallMemory() {
       expectLog('fell behind and skipped frames of its lossy tracks')
     },
   )
-  test('room: a page offline while a lossy text track sent it more than maxMemory holds gets the newest message, with the jump in its info.seq, and stays in its room', async () => {
+  test('room: a page offline while a text track sent it more than maxMemory holds in lossy messages gets the newest one, with the jump in its info.seq, and stays in its room; a publish on the track without lossy is refused at the call, never skipped', async () => {
     if (!canCutWire()) return
-    await runServerActionOffline('text-cursor', 'roomTextCursor')
+    const roomId = await runServerActionOffline('text-cursor', 'roomTextCursor')
+    const plain = (await getCleanupState())[`roomTextCursorPlain_${roomId}`]
     await autoRetry(async () => {
-      const r = await getResult<{ cursor?: { n: number; seq: number }[]; closed: boolean; myCause: unknown }>(
+      const r = await getResult<{ cursor?: { n: number | 'plain'; seq: number }[]; closed: boolean; myCause: unknown }>(
         '#room-result',
       )
       expect(r).deep.include({ closed: false, myCause: null })
-      const cursor = r.cursor!
+      expect(r.cursor!.some(({ n }) => n === 'plain')).toBe(false)
+      expect(plain).toContain(`The "cursor" track's publishes are lossy, and a track takes one kind`)
+      const cursor = r.cursor as { n: number; seq: number }[]
       expect(cursor.length).lessThan(17)
       expect(cursor.at(-1)?.n).toBe(15)
       expect(cursor.map(({ n, seq }) => seq - n)).deep.equal(cursor.map(() => cursor[0]!.seq - cursor[0]!.n))
@@ -1541,7 +1545,7 @@ function testRoomSmallMemory() {
       })
     })
   })
-  test('room: a page offline with only lossy tracks is not let go over them where the server still holds each newest frame', async () => {
+  test("room: a page offline with only lossy frames waiting is not let go over them where the server still holds each track's newest", async () => {
     if (!canCutWire()) return
     await runServerActionOffline('lossy-near-budget', 'roomLossyNearBudget')
     await autoRetry(async () => {
@@ -1552,8 +1556,9 @@ function testRoomSmallMemory() {
   })
 }
 
-/** Runs the room scenario `id`, whose result names its room, then its server `action` while the page is offline. */
-async function runServerActionOffline(id: string, action: string) {
+/** Runs the room scenario `id`, whose result names its room, then its server `action` while the page is offline; the
+ *  room's id. */
+async function runServerActionOffline(id: string, action: string): Promise<string> {
   await navigate(`${getServerUrl()}/room`)
   await page.click(`#test-room-${id}`)
   let roomId = ''
@@ -1568,6 +1573,7 @@ async function runServerActionOffline(id: string, action: string) {
     expect((await getCleanupState())[`${action}_${roomId}`]).toBe('done')
   })
   await page.context().setOffline(false)
+  return roomId
 }
 
 type TracksBehind = {

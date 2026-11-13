@@ -194,13 +194,18 @@ type PublishOptions = {
   /** Your named track (≤ 255 UTF-8 bytes) to publish on, which viewers `subscribe()` to with `{ track }`. Without it,
    *  the message goes on the room's message stream, where everyone gets every message in one order. */
   track?: string
-  /** On a `track`: a newer message replaces one no connection has taken yet, so a page that can't keep up skips to the
-   *  newest and the track's `info.seq` jumps over what it skipped. A track keeps the value of its first publish, which
-   *  a later one may leave out; naming the other throws. Throws without `track`. Default: `false`. */
-  lossy?: boolean
   /** Keep this as the room's last-write-wins retained message, or the track's retained message. */
   retain?: boolean
-}
+} & (
+  | { lossy?: false }
+  | {
+      track: string
+      /** On a `track`: a newer message replaces one no connection has taken yet, so a page that can't keep up skips to
+       *  the newest and the track's `info.seq` jumps over what it skipped. Without it, the message arrives. Each publish
+       *  says it: a track's publishes are all lossy or all not, and one of the other kind throws. Needs `track`. */
+      lossy: true
+    }
+)
 
 /** Publish-side binary options. */
 type BinaryPublishOptions = {
@@ -212,8 +217,8 @@ type BinaryPublishOptions = {
   retain?: boolean
   /** A newer frame replaces one no connection has taken yet, so a page that can't keep up skips to the newest and the
    *  track's `info.seq` jumps over what it skipped. Without it, a page gets every frame, or leaves the room
-   *  (`'disconnected'`) where the server can't hold them. A track keeps the value of its first publish, which a later
-   *  one may leave out; naming the other throws. Default: `false`. */
+   *  (`'disconnected'`) where the server can't hold them. Each publish says it: a track's publishes are all lossy or
+   *  all not, and one of the other kind throws. Default: `false`. */
   lossy?: boolean
 }
 

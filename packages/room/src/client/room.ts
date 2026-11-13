@@ -545,15 +545,15 @@ abstract class ClientParticipantBase extends ParticipantBase {
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
     assertPublishOptions(options)
     if (options?.track === undefined) return markHandled(this._sendPublish(data, options?.retain))
-    return this.publishOnTrack(this.encodeTextFrame(data, options), options.track)
+    return this.publishOnTrack(this.encodeTextFrame(data, options), options)
   }
 
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
-    return this.publishOnTrack(this.encodeBinaryFrame(data, options), options?.track)
+    return this.publishOnTrack(this.encodeBinaryFrame(data, options), options)
   }
 
-  private publishOnTrack(framed: Uint8Array, track: string | undefined): Promise<ChannelPublishAck> {
-    return markHandled(this._sendPublishBinary(framed, this.lossyStreamOf(track)))
+  private publishOnTrack(framed: Uint8Array, options: BinaryPublishOptions | undefined): Promise<ChannelPublishAck> {
+    return markHandled(this._sendPublishBinary(framed, this.lossyStreamOf(options)))
   }
 
   send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {

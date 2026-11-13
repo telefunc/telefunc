@@ -345,7 +345,7 @@ me.onLeave((cause) => {
 })
 ```
 
-A page that falls behind what the server can hold for it gets `'disconnected'`. It never misses a message, a join, a leave, a `meta` change or a frame, except on a track published with `lossy: true`, where it skips to the newest frame (see <Link href="#stream-audio-or-video" />).
+A page that falls behind what the server can hold for it gets `'disconnected'`. It never misses a message, a join, a leave, a `meta` change or a frame, except a frame published with `lossy: true`, where it skips to the newest frame (see <Link href="#stream-audio-or-video" />).
 
 
 ## Run a game loop or a bot on the server
@@ -371,7 +371,7 @@ export async function onStartMatch() {
 }
 ```
 
-> A page that falls behind gets every message, so state it may skip belongs on a <Link href="#stream-audio-or-video">lossy track</Link>, where it skips to the newest frame.
+> A page that falls behind gets every message, so state it may skip goes on a track, published with <Link href="#stream-audio-or-video">`lossy: true`</Link>, where it skips to the newest frame.
 
 A hidden participant can do everything a participant does, but players don't see it among the room's participants.
 
@@ -428,7 +428,7 @@ room.onJoin(watch)
 
 With `retain: isKeyframe`, a viewer who arrives mid-stream starts from the last keyframe, see <Link href="#give-late-joiners-the-current-state" />.
 
-On a track, `info.seq` counts its sender's frames on that track. A viewer that falls behind gets every frame, and gets `'disconnected'` where the server can't hold them for it. Where only the newest frame matters, such as a position or live audio and video, give the track `lossy: true` in its first publish, which it keeps: a newer frame then replaces one no connection has taken yet, and a viewer's `info.seq` jumps over what it skipped:
+On a track, `info.seq` counts its sender's frames on that track. A viewer that falls behind gets every frame, and gets `'disconnected'` where the server can't hold them for it. Where only the newest frame matters, such as a position or live audio and video, pass `lossy: true` in each publish on its track: a newer frame then replaces one no connection has taken yet, and a viewer's `info.seq` jumps over what it skipped:
 
 ```js
 // Environment: client
@@ -437,7 +437,9 @@ me.publishBinary(position, { track: 'cursor', lossy: true }) // a viewer that fa
 me.publishBinary(stroke, { track: 'drawing' }) // a viewer never misses one
 ```
 
-A lossy video track can skip a frame that later frames depend on, so number the frames in `meta` (a frame replaced on its way to the server never gets an `info.seq`) and, at a gap, drop frames until the next keyframe and restart your decoder from it.
+> A track's publishes are all lossy or all not: a publish of the other kind throws, so give it a track of its own.
+
+With `lossy: true`, a viewer can skip a video frame that later frames depend on, so number the frames in `meta` (a frame replaced on its way to the server never gets an `info.seq`) and, at a gap, drop frames until the next keyframe and restart your decoder from it.
 
 To send frames only while someone watches, use `onDemand()`, which also fires, as you call it, for the tracks already watched:
 
@@ -619,7 +621,7 @@ Properties: `id`, `meta`, `count`.
 | Method | Description |
 |---|---|
 | `publish(message, { track?, lossy?, retain? }?)` | Send to everyone. `lossy` needs `track`. |
-| `publishBinary(data, { track?, meta?, retain?, lossy? }?)` | Send binary to everyone. |
+| `publishBinary(data, { track?, meta?, retain?, lossy? }?)` | Send binary to everyone. Without `track`, on your default track. |
 | `send(to, message, { ack? }?)` | Send to one participant. |
 | `listen(cb)` | Receive private messages; return a value to reply. |
 | `setMeta(meta)` / `setAttributes(attributes)` | Replace / update your `meta`. |

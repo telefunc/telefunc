@@ -2061,7 +2061,7 @@ function Room() {
         setResult(JSON.stringify({ seen, closed }))
       })}
 
-      {scenario('track-lossy', null, "A track keeps its first publish's lossy", async () => {
+      {scenario('track-lossy', null, 'Each publish on a track says its lossy', async () => {
         const [, view] = await createRoom('track-lossy')
         const me = await view.join({ meta: { name: 'Me' } })
         const frame = new Uint8Array(1)
@@ -2077,10 +2077,11 @@ function Room() {
           JSON.stringify({
             first: thrown(() => me.publishBinary(frame, { track: 'cursor', lossy: true })),
             omitted: thrown(() => me.publishBinary(frame, { track: 'cursor' })),
-            other: thrown(() => me.publishBinary(frame, { track: 'cursor', lossy: false })),
-            defaultTrack: thrown(() => me.publishBinary(frame, { lossy: true })),
             text: thrown(() => me.publish('a', { track: 'cursor' })),
-            textOther: thrown(() => me.publish('a', { track: 'cursor', lossy: false })),
+            plain: thrown(() => me.publishBinary(frame, { track: 'drawing' })),
+            lossyAfterPlain: thrown(() => me.publishBinary(frame, { track: 'drawing', lossy: true })),
+            defaultTrack: thrown(() => me.publishBinary(frame, { lossy: true })),
+            // @ts-expect-error `lossy` needs a `track`, which the JavaScript caller gets told at the call.
             noTrack: thrown(() => me.publish('a', { lossy: true })),
           }),
         )
@@ -2141,7 +2142,7 @@ function Room() {
         setResult(JSON.stringify({ roomId, received, receipt, closed, myCause }))
       })}
 
-      {scenario('text-cursor', null, 'Offline past maxMemory on a lossy text track', async () => {
+      {scenario('text-cursor', null, 'Offline past maxMemory on a text track, lossy', async () => {
         const roomId = await createRoomId('text-cursor')
         const view = await onGetRoom(roomId)
         const cursor: { n: number; seq: number }[] = []
@@ -2160,11 +2161,11 @@ function Room() {
         setResult(JSON.stringify({ roomId, cursor, closed, myCause }))
       })}
 
-      {scenario('tracks-cursor', null, 'Offline past maxMemory on a lossy track', tracksBehind('cursor'))}
+      {scenario('tracks-cursor', null, 'Offline past maxMemory on a track, lossy', tracksBehind('cursor'))}
 
       {scenario('tracks-drawing', null, 'Offline past maxMemory on a reliable track', tracksBehind('drawing'))}
 
-      {scenario('lossy-near-budget', null, 'Offline with only lossy tracks near maxMemory', async () => {
+      {scenario('lossy-near-budget', null, 'Offline with only lossy frames near maxMemory', async () => {
         const [roomId, view] = await createRoom('lossy-near-budget')
         const got = new Set<string | null>()
         view.subscribeBinary((_data, info) => got.add(info.track))
@@ -2177,7 +2178,7 @@ function Room() {
         setResult(JSON.stringify({ roomId, tracks: [...got].sort(), closed }))
       })}
 
-      {scenario('lossy-uplink', null, "A lossy track's frames waiting for the page's uplink", async () => {
+      {scenario('lossy-uplink', null, "Lossy frames waiting for the page's uplink", async () => {
         const [, view] = await createRoom('lossy-uplink')
         const seen: number[] = []
         view.subscribeBinary((_data, info) => seen.push(info.meta!.n as number), { track: 'cursor' })
