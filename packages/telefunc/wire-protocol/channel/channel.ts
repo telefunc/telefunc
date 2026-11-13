@@ -7,7 +7,6 @@ export type {
   ChannelCloseOptions,
   ChannelCloseResult,
   ChannelData,
-  ChannelJson,
   ChannelAck,
   ChannelPublishAck,
   ChannelPublishInfo,
@@ -24,13 +23,6 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assertUsage } from '../../utils/assert.js'
 
 type ChannelData<T> = [T] extends [never] ? never : T extends (data: infer D) => any ? D : T
-/** What `send()` and `publish()` take: the channel's data, on an untyped channel the argument's type; never bytes. */
-type ChannelJson<T, D, Method extends 'send' | 'publish'> = unknown extends ChannelData<T>
-  ? RefuseBytes<D, Method>
-  : RefuseBytes<ChannelData<T>, Method>
-type RefuseBytes<D, Method extends 'send' | 'publish'> = D extends ArrayBuffer | ArrayBufferView
-  ? `${Method}() serializes its data as JSON: bytes go through ${Method}Binary()`
-  : D
 type ChannelAck<T> = [T] extends [never] ? never : T extends (data: any) => infer R ? Awaited<R> : unknown
 type ChannelPublishMeta = Record<string, unknown>
 /** Metadata delivered to broadcast subscribers alongside each message. */
@@ -94,16 +86,16 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
   >
   /** Default send. Returns `Promise<ack>` when `TDefault = true`, otherwise `Promise<void>`.
    *  Serializes `data` as JSON: bytes go through `sendBinary()`. */
-  send<D>(data: ChannelJson<TOut, D, 'send'>): TDefault extends true ? Promise<ChannelAck<TOut>> : Promise<void>
+  send(data: ChannelData<TOut>): TDefault extends true ? Promise<ChannelAck<TOut>> : Promise<void>
   /** Per-send ack opt-in — always returns `Promise<ack>`. */
-  send<D>(data: ChannelJson<TOut, D, 'send'>, opts: { ack: true }): Promise<ChannelAck<TOut>>
+  send(data: ChannelData<TOut>, opts: { ack: true }): Promise<ChannelAck<TOut>>
   /** Per-send ack opt-out — always returns `Promise<void>`. */
-  send<D>(data: ChannelJson<TOut, D, 'send'>, opts: { ack: false }): Promise<void>
+  send(data: ChannelData<TOut>, opts: { ack: false }): Promise<void>
   /** Send where only the newest matters: a receiver that keeps up gets every message, and one that falls behind skips to
    *  the newest. It resolves at once, and can't be combined with `ack: true`.
    *
    *  https://telefunc.com/channel#skip-to-the-newest */
-  send<D>(data: ChannelJson<TOut, D, 'send'>, opts: { lossy: true; ack?: false }): Promise<void>
+  send(data: ChannelData<TOut>, opts: { lossy: true; ack?: false }): Promise<void>
   sendBinary(data: Uint8Array): Promise<void>
   sendBinary(data: Uint8Array, opts: { ack: true }): Promise<unknown>
   sendBinary(data: Uint8Array, opts: { ack: false }): Promise<void>

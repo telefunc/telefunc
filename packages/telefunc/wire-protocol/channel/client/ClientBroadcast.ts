@@ -4,7 +4,6 @@ import type {
   BroadcastBinaryListener,
   BroadcastListener,
   ChannelData,
-  ChannelJson,
   ChannelPublishAck,
   ChannelPublishInfo,
 } from '../channel.js'
@@ -39,7 +38,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this._attach.declareSubscriptions(this.subscribed)
   }
 
-  publish<D>(data: ChannelJson<T, D, 'publish'>): Promise<ChannelPublishAck> {
+  publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
     if (this.stopped) throw new ChannelClosedError()
     const ret = this.sendPublish(encode.publishAckReq, stringifyMessage(data, 'publish'))
     ret.catch(() => {})

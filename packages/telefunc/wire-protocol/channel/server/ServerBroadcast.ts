@@ -2,7 +2,6 @@ export { Broadcast, BroadcastChannel, ServerBroadcast }
 
 import type {
   ChannelData,
-  ChannelJson,
   ChannelPublishAck,
   ChannelPublishInfo,
   BroadcastBinaryListener,
@@ -114,7 +113,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     assertUsage(false, '`listenBinary()` is not available on a `BroadcastChannel` — use `subscribeBinary()`.')
   }
 
-  publish<D>(data: ChannelJson<T, D, 'publish'>): Promise<ChannelPublishAck> {
+  publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
     const serialized = stringifyMessage(data, 'publish')
     const ret = this.lifecycle.trackAck(Promise.resolve(this.publishBroadcast(serialized)))
     ret.catch(() => {})
@@ -432,7 +431,7 @@ type BroadcastChannel<T = unknown> = {
     ack: unknown
   }
   /** Serializes `data` as JSON: bytes go through `publishBinary()`. */
-  publish<D>(data: ChannelJson<T, D, 'publish'>): Promise<ChannelPublishAck>
+  publish(data: ChannelData<T>): Promise<ChannelPublishAck>
   subscribe(callback: BroadcastListener<T>, options?: { signal?: AbortSignal }): () => void
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
   subscribeBinary(callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): () => void
@@ -502,10 +501,7 @@ function receiptOf(
 
 const Broadcast = {
   /** Serializes `data` as JSON: bytes go through `publishBinary()`. */
-  publish<U = unknown, D = unknown>(
-    key: string,
-    data: ChannelJson<U, D, 'publish'>,
-  ): ChannelPublishAck | Promise<ChannelPublishAck> {
+  publish<U = unknown>(key: string, data: ChannelData<U>): ChannelPublishAck | Promise<ChannelPublishAck> {
     const adapter = getBroadcastAdapter()
     const serialized = stringifyMessage(data, 'publish')
     return receiptOf(key, adapter.publish(key, serialized))

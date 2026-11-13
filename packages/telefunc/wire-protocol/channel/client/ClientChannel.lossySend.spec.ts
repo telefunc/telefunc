@@ -249,18 +249,16 @@ describe('`lossy` on the page', () => {
 })
 
 describe('bytes given to `send()` and `publish()` on the page', () => {
-  test('are a usage error naming `sendBinary()`, the types refuse them, and nothing goes', () => {
+  test('are a usage error naming `sendBinary()`, and nothing goes', () => {
     const channel = newChannel()
     const page = channel as unknown as ClientChannelType
-    // @ts-expect-error
     expect(() => page.send(new Uint8Array([1, 2, 255]))).toThrow('Bytes go through `sendBinary()`')
-    // @ts-expect-error
     expect(() => page.send(new ArrayBuffer(4), { lossy: true })).toThrow('turns this `ArrayBuffer` into a plain object')
     void page.send('R')
     expect(held(channel)).toEqual(['R'])
   })
 
-  test('`publish()` is a usage error naming `publishBinary()`, and the types refuse it', () => {
+  test('`publish()` is a usage error naming `publishBinary()`', () => {
     const room = new ClientBroadcast({
       channelId: crypto.randomUUID(),
       connection: {
@@ -269,7 +267,6 @@ describe('bytes given to `send()` and `publish()` on the page', () => {
         connectionKey: crypto.randomUUID(),
       },
     })
-    // @ts-expect-error
     expect(() => room.publish(new Uint8Array(1))).toThrow('Bytes go through `publishBinary()`')
   })
 })

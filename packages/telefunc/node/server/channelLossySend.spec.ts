@@ -262,15 +262,11 @@ describe('a lossy send to an attached page', () => {
 })
 
 describe('bytes given to `send()` and `publish()`', () => {
-  test('are a usage error naming `sendBinary()`, the types refuse them, and nothing goes', () => {
+  test('are a usage error naming `sendBinary()`, and nothing goes', () => {
     const channel = new Channel()
-    // @ts-expect-error
     expect(() => channel.send(new Uint8Array([1, 2, 255]))).toThrow('Bytes go through `sendBinary()`')
-    // @ts-expect-error
     expect(() => channel.send(Buffer.from('hi'), { ack: true })).toThrow('turns this `Buffer` into a plain object')
-    // @ts-expect-error
     expect(() => channel.send(new DataView(new ArrayBuffer(2)), { lossy: true })).toThrow('this `DataView`')
-    // @ts-expect-error
     expect(() => channel.send(new ArrayBuffer(4), { ack: false })).toThrow('this `ArrayBuffer`')
     void channel.send('R')
     const server = channel as unknown as ServerChannel<never, string>
@@ -280,26 +276,31 @@ describe('bytes given to `send()` and `publish()`', () => {
     expect(page.read).toEqual(['R'])
   })
 
-  test('are a usage error naming `publishBinary()`, the types refuse them, and nothing is published', async () => {
+  test('are a usage error naming `publishBinary()`, and nothing is published', async () => {
     const key = `room:bytes:${crypto.randomUUID()}`
     const received: unknown[] = []
     const unsubscribe = Broadcast.subscribe(key, (data) => received.push(data))
     const room = new BroadcastChannel({ key })
-    // @ts-expect-error
     expect(() => room.publish(new Float32Array(2))).toThrow('Bytes go through `publishBinary()`')
-    // @ts-expect-error
     expect(() => Broadcast.publish(key, new Uint8Array(1))).toThrow('Bytes go through `publishBinary()`')
     await Broadcast.publish(key, 'R')
     expect(received).toEqual(['R'])
     unsubscribe()
   })
 
-  test("the types keep a typed channel's own data, excess properties refused", () => {
+  test('the types: a generic helper forwards its data to an untyped channel, and a typed channel refuses bytes', () => {
     // Checked by test:types; never called.
-    const types = (channel: Channel<never, { text: string }>) => {
-      void channel.send({ text: 'x' })
+    const types = (channel: Channel, chat: Channel<never, { text: string }>) => {
+      function relay<T>(data: T) {
+        return channel.send(data)
+      }
+      function relayText<T extends { text: string }>(data: T) {
+        return channel.send(data)
+      }
+      void relay(1)
+      void relayText({ text: 'x' })
       // @ts-expect-error
-      void channel.send({ text: 'x', typo: 1 })
+      void chat.send(new Uint8Array(1))
     }
     expect(types).toBeTypeOf('function')
   })

@@ -8,7 +8,6 @@ import type {
   ChannelCloseOptions,
   ChannelCloseResult,
   ChannelData,
-  ChannelJson,
   ChannelListener,
   ChannelBinaryListener,
 } from '../channel.js'
@@ -161,11 +160,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.connection
   }
 
-  send<D>(data: ChannelJson<ClientToServer, D, 'send'>): Promise<void>
-  send<D>(data: ChannelJson<ClientToServer, D, 'send'>, opts: { ack: true }): Promise<ChannelAck<ClientToServer>>
-  send<D>(data: ChannelJson<ClientToServer, D, 'send'>, opts: { ack: false }): Promise<void>
-  send<D>(data: ChannelJson<ClientToServer, D, 'send'>, opts: { lossy: true; ack?: false }): Promise<void>
-  send(data: unknown, opts?: { ack?: boolean; lossy?: boolean }): Promise<ChannelAck<ClientToServer>> | Promise<void> {
+  send(data: ChannelData<ClientToServer>): Promise<void>
+  send(data: ChannelData<ClientToServer>, opts: { ack: true }): Promise<ChannelAck<ClientToServer>>
+  send(data: ChannelData<ClientToServer>, opts: { ack: false }): Promise<void>
+  send(data: ChannelData<ClientToServer>, opts: { lossy: true; ack?: false }): Promise<void>
+  send(
+    data: ChannelData<ClientToServer>,
+    opts?: { ack?: boolean; lossy?: boolean },
+  ): Promise<ChannelAck<ClientToServer>> | Promise<void> {
     const t0 = performance.now()
     try {
       const ret = this.sendData(data, opts) ?? Promise.resolve()
@@ -177,7 +179,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private sendData(
-    data: unknown,
+    data: ChannelData<ClientToServer>,
     opts?: { ack?: boolean; lossy?: boolean },
   ): void | Promise<ChannelAck<ClientToServer>> | Promise<void> {
     if (this.stopped) throw new ChannelClosedError()
