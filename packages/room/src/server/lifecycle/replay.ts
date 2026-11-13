@@ -236,6 +236,8 @@ type TextWantsChange = { all: boolean; members: Map<string, boolean> }
 /** A consumer of a room's lanes that retained frames replay into: a client stub, or this instance's own listeners. */
 interface LaneHolder {
   readonly binaryWants: BinaryWants
+  /** The participants it holds, who are the people at its page. */
+  heldMembers(): Iterable<string>
   readonly wantsAnnounce: boolean
   /** The text the holder needs ingested; its relay filters further. */
   textDemand(): MemberWants
@@ -255,6 +257,8 @@ type LocalHolderOptions = {
   state: RoomState
   /** The local members joined with `selfDelivery: false`, whose messages these listeners don't get. */
   suppressed: ReadonlySet<string>
+  /** The participants that joined through this handle. */
+  participants: ReadonlyMap<string, { readonly _heldByPage: boolean }>
 }
 
 /** This instance's own listeners as one holder: gated like a client's stub, with wants that change only when they
@@ -262,14 +266,21 @@ type LocalHolderOptions = {
 class LocalHolder implements LaneHolder {
   private readonly state: RoomState
   private readonly suppressed: ReadonlySet<string>
+  private readonly participants: LocalHolderOptions['participants']
   private readonly replay = new ReplayGate()
   private textAll = false
   private readonly textMembers = new Set<string>()
   readonly binaryWants: BinaryWants = emptyBinaryWants()
 
-  constructor({ state, suppressed }: LocalHolderOptions) {
+  constructor({ state, suppressed, participants }: LocalHolderOptions) {
     this.state = state
     this.suppressed = suppressed
+    this.participants = participants
+  }
+
+  /** The server-side room is its own page: the participants that joined through it and no page holds are at it. */
+  *heldMembers(): Generator<string> {
+    for (const [id, participant] of this.participants) if (!participant._heldByPage) yield id
   }
 
   /** Re-derives the listeners' room-wide text want, and the own want of `member` when its listeners changed; `null`

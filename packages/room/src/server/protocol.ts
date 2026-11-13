@@ -5,6 +5,7 @@ export type {
   RoomIncarnation,
   RoomMemberRecord,
   DemandEntry,
+  WhoEntry,
   RoomDemandPage,
   RoomDataEnvelope,
   RoomDmAckEnvelope,
@@ -54,6 +55,12 @@ type DemandEntry =
   | { member: string; byMember: true }
   | { track: string; except: readonly string[]; byMember?: true }
   | { track: string; member: string; except: true }
+  | WhoEntry
+
+/** Who at a page receives what the page asks for: `track` of `member`, every track of `member` (no `track`), `track` of
+ *  every member (no `member`), or every track of every member. `page` is a token the reporting instance minted for the
+ *  page, and `by` one of the participants the page holds; a page holding none it may name is told without `by`. */
+type WhoEntry = { page: string; by?: string; member?: string; track?: string }
 
 /** Demand between instances, on the demand lane: entries one instance starts or stops receiving, in the order it told
  *  them, at most `ROOM_DEMAND_PAGE_ENTRIES`, its `page`th page. Its entries from `{ again: true }` to

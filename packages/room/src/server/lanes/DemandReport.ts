@@ -1,7 +1,7 @@
 export { DemandReport }
 export type { DemandReportOptions, DemandReportOwner }
 
-import type { DemandEntry } from '../protocol.js'
+import type { DemandEntry, WhoEntry } from '../protocol.js'
 import { hasEntry, toggle, toggleEntry } from '../../utils/sets.js'
 
 /** The room's demand exchange, which tells the other processes and this one each change of the planner's demand. */
@@ -22,10 +22,12 @@ class DemandSets {
   readonly fetched = new Set<string>()
   /** Per track of every member, the members it isn't received from. */
   readonly except = new Map<string, Set<string>>()
+  /** Who at a page here receives what, by `whoKey`. */
+  readonly who = new Map<string, WhoEntry>()
 }
 
 /** What a replica's planner sets, told as it changes: one track of a member, every track of a member, and one track of
- *  every member less the members no holder here receives it from. */
+ *  every member less the members no holder here receives it from; and who at each page here receives what. */
 class DemandReport {
   /** The reports of this process carry it, so its own echo is told apart. */
   readonly instance = crypto.randomUUID()
@@ -43,6 +45,7 @@ class DemandReport {
     /** Each track told, with the members it was told without and whether it was told fetched by member. */
     tracks: new Map<string, { except: Set<string>; byMember: boolean }>(),
     fetched: new Set<string>(),
+    who: new Map<string, WhoEntry>(),
   }
 
   private readonly owner: DemandReportOwner
@@ -87,6 +90,15 @@ class DemandReport {
     toggleEntry(this.untold.except, track, member, true)
   }
 
+  /** Who at a page here receives what. */
+  setWho(entry: WhoEntry, on: boolean): void {
+    const key = whoKey(entry)
+    if (on === this.planned.who.has(key)) return
+    if (on) this.planned.who.set(key, entry)
+    else this.planned.who.delete(key)
+    this.untold.who.set(key, entry)
+  }
+
   /** No holder here names `track` of every member any more. */
   forgetTrack(track: string): void {
     this.setTrack(track, false)
@@ -106,7 +118,9 @@ class DemandReport {
   /** Whether some entry is told. */
   get reporting(): boolean {
     const told = this.told
-    return told.pairs.size > 0 || told.members.size > 0 || told.tracks.size > 0 || told.fetched.size > 0
+    return (
+      told.pairs.size > 0 || told.members.size > 0 || told.tracks.size > 0 || told.fetched.size > 0 || told.who.size > 0
+    )
   }
 
   /** Whether some planned change isn't told yet. */
@@ -118,7 +132,8 @@ class DemandReport {
       changed.members.size > 0 ||
       changed.tracks.size > 0 ||
       changed.fetched.size > 0 ||
-      changed.except.size > 0
+      changed.except.size > 0 ||
+      changed.who.size > 0
     )
   }
 
@@ -152,6 +167,10 @@ class DemandReport {
       this.owner.tellDemand(trackEntry(track, entry), true)
       yield
     }
+    for (const entry of told.who.values()) {
+      this.owner.tellDemand(entry, true)
+      yield
+    }
   }
 
   /** Tells the untold changes, ons before offs, so no pair reads as unreceived while one state hands over to another. A
@@ -163,6 +182,7 @@ class DemandReport {
   private *tellChanges(): Generator<void, void, void> {
     const changed = this.untold
     this.untold = new DemandSets()
+    yield* this.tellWho(changed, true)
     yield* this.tellPairs(changed, true)
     yield* this.tellMembers(changed, 'members', true)
     yield* this.tellMembers(changed, 'fetched', true)
@@ -173,6 +193,20 @@ class DemandReport {
     yield* this.tellMembers(changed, 'fetched', false)
     yield* this.tellMembers(changed, 'members', false)
     yield* this.tellPairs(changed, false)
+    yield* this.tellWho(changed, false)
+  }
+
+  /** Tells each changed who-entry the pages here started (`on`) or stopped since it was told. */
+  private *tellWho(changed: DemandSets, on: boolean): Generator<void> {
+    const told = this.told.who
+    for (const [key, entry] of changed.who) {
+      if (this.planned.who.has(key) === on && told.has(key) !== on) {
+        if (on) told.set(key, entry)
+        else told.delete(key)
+        this.owner.tellDemand(entry, on)
+      }
+      yield
+    }
   }
 
   /** Tells each changed pair the planner started (`on`) or stopped since it was told. */
@@ -245,4 +279,8 @@ class DemandReport {
 
 function trackEntry(track: string, { except, byMember }: { except: Set<string>; byMember: boolean }): DemandEntry {
   return byMember ? { track, except: [...except], byMember } : { track, except: [...except] }
+}
+
+function whoKey({ page, by, member, track }: WhoEntry): string {
+  return JSON.stringify([page, by, member, track])
 }

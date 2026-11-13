@@ -7,12 +7,13 @@ import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { getRoomPlane } from '../backend/plane.js'
 import type { LaneId } from '../backend/contract.js'
-import { hostLocal, type OrderingInfo, type PublishBody } from 'telefunc/__internal'
+import { hostLocal, type OrderingInfo, type PageConnection, type PublishBody } from 'telefunc/__internal'
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { ROOM_MEMBER_TRACKS_MAX } from '../shared/constants.js'
 import { DemandExchange } from './lanes/DemandExchange.js'
 import { RoomDemand } from './lanes/RoomDemand.js'
 import { PublishedTracks } from './lanes/PublishedTracks.js'
+import { PageIndex, type PageEnd } from './lanes/PageIndex.js'
 import { DM_FAILURE, RoomError } from '../shared/errors.js'
 import { joinedMember, leaveCauseFromWire, leaveCauseToWire } from '../shared/protocol.js'
 import type {
@@ -106,6 +107,8 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   /** This process's demand to the other processes, and theirs to `incomingDemand`. */
   private readonly demandExchange: DemandExchange
   private readonly lanePlan: LanePlan
+  /** Who is at each page holding the room here. */
+  private readonly pages: PageIndex
   private readonly authority: AuthoritySync
   private readonly heartbeat: RoomHeartbeat
   private readonly staleReads: StaleReads
@@ -146,7 +149,9 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.demandExchange = new DemandExchange({ incarnation, incomingDemand: this.incomingDemand })
     const { model, demandExchange } = this
     const { outgoingDemand } = demandExchange
-    this.lanePlan = new LanePlan({ owner: this, roles: this.roles, incarnation, model, outgoingDemand, demandExchange })
+    const pages = (this.pages = new PageIndex({ model }))
+    const roles = this.roles
+    this.lanePlan = new LanePlan({ owner: this, roles, incarnation, model, outgoingDemand, demandExchange, pages })
     const lanePlan = this.lanePlan
     this.roster = new RosterStream({ model, stubs: this.stubs })
     this.authority = new AuthoritySync({ owner: this, incarnation, roster: this.roster, model, lanePlan })
@@ -198,8 +203,12 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   private reconsider(handle: RoomHandle): void {
     handle.syncFields()
     const tailHeld = handle.holdsTail()
-    toggle(this.served, handle, handle.isObserved() || tailHeld)
+    const served = handle.isObserved() || tailHeld
+    toggle(this.served, handle, served)
     toggle(this.receivers, handle, handle.state.listenerCount > 0 || tailHeld)
+    // A server-side room is its own page while it is served.
+    if (served) this.placeAtPage(handle.local, handle.local)
+    else this.leavePage(handle.local)
     const roles = this.roles
     roles.observed = roles.listened = roles.tailHeld = false
     for (const served of this.served) {
@@ -211,6 +220,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
 
   own(member: string, handle: RoomHandle): void {
     this.reconsider(handle)
+    this.pageEndChanged(handle.local)
     this.owners.set(member, handle)
     // A member's id is fresh at each join, so its inbox starts before seq 1.
     this.inboxSeqs.set(member, 0)
@@ -241,9 +251,11 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.lanePlan.holderChanged(stub)
   }
 
-  /** The stub's client attached: the roster is read again unless the view is current, which tells every client its
-   *  drift, and the client gets the room's meta and the demand for the members it holds. */
-  onStubAttached(stub: RoomStub): void {
+  /** The stub's client attached on `connection`, which is the stub's page from now on: the roster is read again unless
+   *  the view is current, which tells every client its drift, and the client gets the room's meta and the demand for
+   *  the members it holds. */
+  onStubAttached(stub: RoomStub, connection: PageConnection): void {
+    this.placeAtPage(stub, connection)
     void this.authority.ensureRoster().catch(reportRoomError)
     stub.relayEvent({ __r: 'update', seq: this.model.metaSeq, meta: this.model.metaEntries() })
     for (const member of stub.heldMembers()) {
@@ -254,9 +266,31 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   /** The handle's stub detached: its view is removed and its wants dropped. */
   detachStub(handle: RoomHandle, stub: RoomStub): void {
     this.reconsider(handle)
+    this.leavePage(stub)
     this.stubs.delete(stub)
     void this.hosting.dropView(stub)
     this.lanePlan.holderGone(stub)
+  }
+
+  /** The end is at `page` from now on; its page's people and wants are told in the next planning pass. */
+  placeAtPage(end: PageEnd, page: object): void {
+    this.pages.place(end, page)
+    this.attributionChanged()
+  }
+
+  leavePage(end: PageEnd): void {
+    this.pages.remove(end)
+    this.attributionChanged()
+  }
+
+  /** The participants the end holds changed. */
+  pageEndChanged(end: PageEnd): void {
+    this.pages.endChanged(end)
+    this.attributionChanged()
+  }
+
+  private attributionChanged(): void {
+    if (this.pages.changed) this.lanePlan.attributionChanged()
   }
 
   /** A handle's tail started or ended: text ingestion follows it, ready once the returned promise resolves. */
@@ -304,6 +338,8 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     switch (event.__r) {
       case 'join':
         if (!this.model.applyJoin(joinedMember(event))) return
+        this.pages.memberChanged(event.id)
+        this.attributionChanged()
         this.lanePlan.memberChanged(event.id)
         relay()
         return
@@ -524,6 +560,8 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   /** Every leave the model applies, event or reconcile, runs the member's cleanup. */
   onMemberLeft(id: string, cause: LeaveCause, hidden: boolean | null): void {
     this.acks.settleMember(id, DM_FAILURE.left) // strand no waiter on a gone sender or recipient
+    this.pages.memberChanged(id)
+    this.attributionChanged()
     for (const handle of this.receivers) handle.local.forgetMember(id)
     const owner = this.owners.get(id)
     if (owner !== undefined) {

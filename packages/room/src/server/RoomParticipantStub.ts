@@ -7,6 +7,7 @@ import {
   reconnectWindow,
   type BroadcastEndOwner,
   type ChannelPublishAck,
+  type PageConnection,
   type ServerBroadcastEnd,
 } from 'telefunc/__internal'
 import type { ShieldValidator } from 'telefunc'
@@ -75,7 +76,8 @@ class RoomParticipantStub implements BroadcastEndOwner {
     return await this.participant._publishFrame(frame, framed, message)
   }
 
-  _onPageAttach(): void {
+  _onPageAttach(connection: PageConnection): void {
+    this.participant.room.replica.placeAtPage(this, connection)
     this.notify({ __r: 'p-meta', ...this.participant._acceptedMeta })
     this.notify({ __r: 'demand-state', tracks: this.participant._demandedTracks })
   }
@@ -129,12 +131,18 @@ class RoomParticipantStub implements BroadcastEndOwner {
     this.end.onDisconnect(() => participant._setHolderConnected(false))
     this.end.onReconnect(() => participant._setHolderConnected(true))
     this.end.onClose(() => {
+      participant.room.replica.leavePage(this)
       unlistenMeta()
       unlistenDemand()
       unlistenLeave()
       this.dmReplies.drop()
       if (!left) void participant._releaseHolder()
     })
+  }
+
+  /** Its participant, who is at its page. */
+  heldMembers(): string[] {
+    return [this.participant.id]
   }
 
   /** Its participant's inbox forwards here. */

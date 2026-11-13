@@ -4,10 +4,11 @@ export type { RoomDemandOptions }
 import { EVERY_MEMBER, DEFAULT_TRACK, type EveryMember } from '../../shared/binary.js'
 import { getOrCreate } from 'telefunc/__internal'
 import { ROOM_DEMAND_TTL_MS } from '../constants.js'
-import type { DemandEntry, RoomDemandPage } from '../protocol.js'
-import { hasEntry, runAll, toggle, toggleEntry } from '../../utils/sets.js'
+import type { DemandEntry, RoomDemandPage, WhoEntry } from '../protocol.js'
+import { runAll, toggle } from '../../utils/sets.js'
 import { Slice } from '../../shared/Slice.js'
 import type { PublishedTracks } from './PublishedTracks.js'
+import { WhoScopes } from './WhoScopes.js'
 
 /** The reporters of an entry, each with the generation (`Reporter.generation`) it last told the entry in. */
 type Leases = Map<string, number>
@@ -25,6 +26,12 @@ type Reporter = { expiresAt: number; page: number; generation: number; asked: bo
 type Report = { instance: string; on: boolean; generation: number }
 /** Whether a reporter's lease, last told in `generation`, is dropped. */
 type LeaseDropped = (instance: string, generation: number) => boolean
+/** A who-entry of one scope (see `WhoEntry`): its page, the participant it names if any, and its reporters. */
+type Who = { page: string; by: string | undefined; leases: Leases }
+/** A scope's who-entries, by page and participant. */
+type WhoScope = Map<string, Who>
+/** Who receives an owned member's track: the participants named, and how many people and pages with nobody to name. */
+type TrackWatch = { watchers: Set<string>; count: number }
 
 /** The handle that owns a member, which hears whether a track of it is wanted. */
 type MemberOwner = { deliverDemand(member: string, track: string, wanted: boolean): void }
@@ -36,8 +43,9 @@ type RoomDemandOptions = {
   publishedTracks: Pick<PublishedTracks, 'has' | 'namedTracks'>
 }
 
-/** The demand for the members a process owns: every process's reports, each process's leased, and one `wanted` boolean
- *  per owned member and track, told once as it flips. */
+/** The demand for the members a process owns: every process's reports, each process's leased, and who receives each
+ *  owned member's track, told as it changes. Who-entries say who at a page receives what; a reporter's entry counts for
+ *  a pair while that reporter's delivery entries say it receives the pair. */
 class RoomDemand {
   /** The other processes telling demand; this process's entries are never leased. */
   private readonly reporters = new Map<string, Reporter>()
@@ -49,8 +57,9 @@ class RoomDemand {
   private readonly fetched = new Map<string, Leases>()
   /** Per track, the reports of it of every member, whoever owns them. */
   private readonly tracks = new Map<string, TrackLeases>()
-  /** Per track, the owned members told it is wanted, kept by track as `due` is evaluated a track at a time. */
-  private readonly told = new Map<string, Set<string>>()
+  private readonly who = new WhoScopes<Who>()
+  /** Per owned member, who receives each of its tracks as last told. */
+  private readonly told = new Map<string, Map<string, TrackWatch>>()
   /** Per track, the owned members whose `wanted` may have changed, or `EVERY_MEMBER`: all of them. */
   private readonly due = new Map<string, Set<string> | EveryMember>()
   private settling = false
@@ -105,6 +114,7 @@ class RoomDemand {
       for (const instance of leases.keys()) if (this.reporters.has(instance)) leases.delete(instance)
       if (leases.size === 0) this.tracks.delete(track)
     }
+    runAll(this.dropWho((instance) => this.reporters.has(instance)))
     this.reporters.clear()
   }
 
@@ -112,7 +122,9 @@ class RoomDemand {
    *  owner keeps its pairs; ownership is fixed from before the member exists anywhere. */
   take(instance: string, entry: DemandEntry, on: boolean): void {
     const report: Report = { instance, on, generation: this.reporters.get(instance)?.generation ?? 0 }
-    if ('except' in entry) {
+    if ('page' in entry) {
+      this.takeWho(entry, report)
+    } else if ('except' in entry) {
       this.takeTrack(entry, report)
     } else if (!this.ownedMembers.has(entry.member)) {
       return
@@ -132,7 +144,7 @@ class RoomDemand {
     this.settle()
   }
 
-  /** A member this process owns from now on is wanted on each track reported of every member, unless excepted. */
+  /** A member this process owns from now on is received on each track reported of every member, unless excepted. */
   owned(member: string): void {
     for (const track of this.tracks.keys()) this.queue(track, member)
     this.settle()
@@ -162,6 +174,16 @@ class RoomDemand {
     yield* this.dropMembers(dropped)
     yield* this.dropFetched(dropped)
     yield* this.dropTracks(dropped)
+    yield* this.dropWho(dropped)
+  }
+
+  /** A step per scope. */
+  private *dropWho(dropped: LeaseDropped): Generator<void> {
+    for (const [member, track, scope] of this.who.scopes()) {
+      if (lapseWho(scope, dropped)) this.queueCovered(member, track)
+      this.who.prune(member, track)
+      yield
+    }
   }
 
   private *dropPairs(dropped: LeaseDropped): Generator<void> {
@@ -215,18 +237,15 @@ class RoomDemand {
 
   /** The owned member's tracks told wanted. */
   wanted(member: string): string[] {
-    const tracks: string[] = []
-    for (const [track, members] of this.told) if (members.has(member)) tracks.push(track)
-    return tracks
+    return [...(this.told.get(member)?.keys() ?? [])]
   }
 
   forgetMember(member: string): void {
     this.pairs.delete(member)
     this.members.delete(member)
     this.fetched.delete(member)
-    for (const [track, members] of this.told) {
-      if (members.delete(member) && members.size === 0) this.told.delete(track)
-    }
+    this.who.forget(member)
+    this.told.delete(member)
   }
 
   /** The room closed: it holds no demand from now on, so its members' leaves forget nothing one at a time. */
@@ -236,8 +255,23 @@ class RoomDemand {
     this.members.clear()
     this.fetched.clear()
     this.tracks.clear()
+    this.who.clear()
     this.told.clear()
     this.due.clear()
+  }
+
+  /** A who-entry starts or stops; one naming a member only its owner keeps. */
+  private takeWho(entry: WhoEntry, report: Report): void {
+    const { member, track } = entry
+    if (member !== undefined && !this.ownedMembers.has(member)) return
+    if (leaseWho(this.who.of(member, track), entry, report)) this.queueCovered(member, track)
+    this.who.prune(member, track)
+  }
+
+  /** Queues each owned member's track the scope covers: `undefined` for every one. */
+  private queueCovered(member: string | undefined, track: string | undefined): void {
+    if (track !== undefined) return this.queue(track, member ?? EVERY_MEMBER)
+    for (const owned of member === undefined ? this.ownedMembers.keys() : [member]) this.queueEveryTrack(owned)
   }
 
   private takeTrack(entry: Extract<DemandEntry, { except: unknown }>, { instance, on, generation }: Report): void {
@@ -290,6 +324,10 @@ class RoomDemand {
     for (const member of members) this.queue(track, member)
   }
 
+  private queueEveryTrack(member: string): void {
+    for (const track of this.everyTrackOf(member)) this.queue(track, member)
+  }
+
   private queue(track: string, member: string | EveryMember): void {
     const due = this.due.get(track)
     if (due === EVERY_MEMBER) return
@@ -298,7 +336,8 @@ class RoomDemand {
     else this.due.set(track, new Set([member]))
   }
 
-  /** Tells what is due a slice at a time; what falls due meanwhile is told in the same run. */
+  /** Tells what is due a slice at a time, from the next microtask on, so the entries told in one turn are told as one
+   *  change; what falls due meanwhile is told in the same run. */
   private settle(): void {
     if (this.settling) return
     this.settling = true
@@ -306,6 +345,7 @@ class RoomDemand {
   }
 
   private async tellDue(): Promise<void> {
+    await Promise.resolve()
     const slice = new Slice()
     const steps = this.evaluations()
     try {
@@ -330,20 +370,42 @@ class RoomDemand {
   private evaluate(member: string, track: string): void {
     const owner = this.ownedMembers.get(member)
     if (owner === undefined) return
-    const wanted = this.isWanted(member, track)
-    if (wanted === hasEntry(this.told, track, member)) return
-    toggleEntry(this.told, track, member, wanted)
-    owner.deliverDemand(member, track, wanted)
+    const watch = this.watchOf(member, track)
+    const told = getOrCreate(this.told, member, () => new Map())
+    const wanted = watch.count > 0
+    const was = told.has(track)
+    if (wanted) told.set(track, watch)
+    else told.delete(track)
+    if (told.size === 0) this.told.delete(member)
+    if (wanted !== was) owner.deliverDemand(member, track, wanted)
   }
 
-  /** Whether some reporter receives the owned member's track. */
-  private isWanted(member: string, track: string): boolean {
-    if (this.pairs.get(member)?.has(track)) return true
-    if (this.publishedTracks.has(member, track) && this.members.has(member)) return true
-    for (const { instance, except, byMember } of this.tracks.get(track)?.values() ?? []) {
-      if (!except.has(member) && (!byMember || this.fetched.get(member)?.has(instance) === true)) return true
+  /** Who receives the owned member's track: each page that receives it counts its participants but the member, or one
+   *  where it names none of them. A reporter's who-entry counts where its delivery entries say it receives the pair. */
+  private watchOf(member: string, track: string): TrackWatch {
+    const pages = new Map<string, Set<string>>()
+    for (const scope of this.who.covering(member, track, this.publishedTracks.has(member, track))) {
+      for (const { page, by, leases } of scope?.values() ?? []) {
+        if (!someKey(leases, (instance) => this.receives(instance, member, track))) continue
+        const people = getOrCreate(pages, page, () => new Set())
+        if (by !== undefined && by !== member) people.add(by)
+      }
     }
-    return false
+    const watch: TrackWatch = { watchers: new Set(), count: 0 }
+    for (const people of pages.values()) {
+      watch.count += Math.max(1, people.size)
+      for (const id of people) watch.watchers.add(id)
+    }
+    return watch
+  }
+
+  /** Whether the reporter's delivery entries say it receives the owned member's track. */
+  private receives(instance: string, member: string, track: string): boolean {
+    if (this.pairs.get(member)?.get(track)?.has(instance)) return true
+    if (this.publishedTracks.has(member, track) && this.members.get(member)?.has(instance)) return true
+    const lease = this.tracks.get(track)?.get(instance)
+    if (lease === undefined || lease.except.has(member)) return false
+    return !lease.byMember || this.fetched.get(member)?.has(instance) === true
   }
 
   private everyTrackOf(member: string): string[] {
@@ -362,6 +424,36 @@ function lease<K>(leases: Map<K, Leases>, key: K, { instance, on, generation }: 
   if (!held?.delete(instance) || held.size > 0) return false
   leases.delete(key)
   return true
+}
+
+/** Takes, renews or drops a reporter's lease on a who-entry, and whether the entry came or went. */
+function leaseWho(scope: WhoScope, { page, by }: WhoEntry, { instance, on, generation }: Report): boolean {
+  const key = `${page} ${by ?? ''}`
+  const held = scope.get(key)
+  if (on) {
+    if (held) held.leases.set(instance, generation)
+    else scope.set(key, { page, by, leases: new Map([[instance, generation]]) })
+    return held === undefined
+  }
+  if (!held?.leases.delete(instance) || held.leases.size > 0) return false
+  scope.delete(key)
+  return true
+}
+
+/** Drops the leases `dropped` names from a scope's who-entries, and whether an entry went. */
+function lapseWho(scope: WhoScope, dropped: LeaseDropped): boolean {
+  let went = false
+  for (const [key, { leases }] of scope) {
+    if (!lapse(leases, dropped)) continue
+    scope.delete(key)
+    went = true
+  }
+  return went
+}
+
+function someKey<K>(map: Map<K, unknown>, test: (key: K) => boolean): boolean {
+  for (const key of map.keys()) if (test(key)) return true
+  return false
 }
 
 /** Drops the leases `dropped` names, and whether none is left. */

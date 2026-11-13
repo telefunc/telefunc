@@ -9,6 +9,7 @@ import {
   type PublishBody,
   type BroadcastEndOwner,
   type BroadcastKind,
+  type PageConnection,
   type ServerBroadcastEnd,
   type OrderingInfo,
   type ChannelPublishAck,
@@ -155,8 +156,8 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     this.room.onHolderTextChanged(this, before)
   }
 
-  _onPageAttach(): void {
-    this.room.replica.onStubAttached(this)
+  _onPageAttach(connection: PageConnection): void {
+    this.room.replica.onStubAttached(this, connection)
   }
 
   // Client requests

@@ -10,6 +10,7 @@ import { ROOM_MEMBER_NAMED_LANES_MAX } from '../constants.js'
 import { EVERY_TRACK, type BinaryWantChange, type EveryTrack, type TrackKey } from '../../shared/binary.js'
 import type { DemandReport } from './DemandReport.js'
 import type { DemandExchange } from './DemandExchange.js'
+import type { PageIndex } from './PageIndex.js'
 import type { RoomIncarnation } from '../protocol.js'
 import type { RoomModel } from '../../shared/RoomModel.js'
 import { reportRoomError } from '../reportRoomError.js'
@@ -58,6 +59,8 @@ type LanePlanOptions = {
   outgoingDemand: DemandReport
   /** Where the demand lane delivers, and hears when it delivers and when it stops. */
   demandExchange: Pick<DemandExchange, 'onPage' | 'ask' | 'forget'>
+  /** Who is at each page here, which the plan tells with the demand. */
+  pages: Pick<PageIndex, 'changed' | 'report' | 'endChanged'>
 }
 
 /** What a planning pass replans. `all`: the binary lanes of every member and every track. `members`: the binary lanes
@@ -105,14 +108,16 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   private readonly model: LanePlanOptions['model']
   private readonly outgoingDemand: DemandReport
   private readonly demandExchange: LanePlanOptions['demandExchange']
+  private readonly pages: LanePlanOptions['pages']
 
-  constructor({ owner, roles, incarnation, model, outgoingDemand, demandExchange }: LanePlanOptions) {
+  constructor({ owner, roles, incarnation, model, outgoingDemand, demandExchange, pages }: LanePlanOptions) {
     this.owner = owner
     this.roles = roles
     this.incarnation = incarnation
     this.model = model
     this.outgoingDemand = outgoingDemand
     this.demandExchange = demandExchange
+    this.pages = pages
     this.lanes = new BinaryLanes({ laneOwner: this, model })
   }
 
@@ -150,6 +155,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
    *  planning pass recounts each member it may have changed. */
   holderChanged(holder: LaneHolder, members?: Iterable<string>): void {
     runAll(this.indexHolder(holder, { members }))
+    this.pages.endChanged(holder)
     this.schedulePlan()
     this.syncLanes()
   }
@@ -171,6 +177,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   /** One of a holder's binary wants changed: a want of one track replans only that track's pairs, in the next
    *  planning pass. */
   binaryChanged(holder: LaneHolder, change: BinaryWantChange): void {
+    this.pages.endChanged(holder)
     const { track } = change
     if (track !== EVERY_TRACK) {
       this.namedTrackChanged(holder, { member: change.member, track, on: change.on })
@@ -204,6 +211,11 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     for (const member of affected) this.queuePair(member, track)
     // Whom the track's every-member lane serves here may have changed.
     if (everyMember || wasEveryMember) this.queued.tracks.add(track)
+  }
+
+  /** Who is at a page here changed: the next planning pass tells it. */
+  attributionChanged(): void {
+    this.schedulePlan()
   }
 
   /** A member joined, or which holders suppress it changed: the next planning pass recounts it. */
@@ -304,9 +316,10 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     this.planning ??= this.runPlan().catch(reportRoomError)
   }
 
-  /** Plans what is queued once the current turn's changes are in, then tells the changed demand. Each round runs in
-   *  `ROOM_PLAN_SLICE_MS` slices, so timers and I/O run between slices; what is queued meanwhile waits for the next
-   *  round. No other demand is told until the pass ends, so no owner sees the demand between two slices. */
+  /** Plans what is queued once the current turn's changes are in, then who is at the pages that changed, then tells
+   *  the changed demand. Each round runs in `ROOM_PLAN_SLICE_MS` slices, so timers and I/O run between slices; what is
+   *  queued meanwhile waits for the next round. No other demand is told until the pass ends, so no owner sees the
+   *  demand between two slices. */
   private async runPlan(): Promise<void> {
     try {
       await Promise.resolve()
@@ -319,6 +332,8 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
           await this.replanEach(slice, drain(this.gone), (holder) => this.indexHolder(holder, { gone: true }))
         } else if (!isEmpty(plan)) {
           await this.planRound(slice, plan)
+        } else if (this.pages.changed) {
+          for (const _ of this.pages.report(this.outgoingDemand)) if (slice.over) await slice.next()
         } else if (this.outgoingDemand.changed) {
           while (!this.outgoingDemand.tellUntil(slice.end)) await slice.next()
         } else {

@@ -146,7 +146,11 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     this.view = view
     this.incarnation = replica.incarnation
     this.state = new RoomState({ view, model: replica.model, owner: new RoomHandleStateOwner({ room: this }) })
-    this.local = new LocalHolder({ state: this.state, suppressed: this.localSuppressed })
+    this.local = new LocalHolder({
+      state: this.state,
+      suppressed: this.localSuppressed,
+      participants: this.localParticipants,
+    })
     this.writes = new RoomWrites({
       owner: this,
       incarnation: this.incarnation,
@@ -429,6 +433,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     this.assertNotKnownClosed()
     await this.admit(admission, () => {
       stub.addMember(req.reqId, admission.id, req.selfDelivery)
+      this.replica.pageEndChanged(stub)
       if (this.stubs.has(stub)) {
         this.stubOf.set(admission.id, stub)
         this.replica.own(admission.id, this)
@@ -620,6 +625,11 @@ class ServerLocalParticipant extends ParticipantBase {
     this.holder?.trackReply(replied)
   }
 
+  /** @internal Whether a page holds this participant, which is then at that page. */
+  get _heldByPage(): boolean {
+    return this.holder !== null
+  }
+
   /** @internal A client's hold on this participant, which its inbox forwards to. */
   _openStub({ end, publishShield }: Omit<RoomParticipantStubOptions, 'participant'>): ParticipantStubMetadata {
     // A LocalParticipant has one holder; rebinding would overwrite its inbox forwarder and let either close drop it.
@@ -630,6 +640,8 @@ class ServerLocalParticipant extends ParticipantBase {
         'instead.',
     )
     this.holder = new RoomParticipantStub({ participant: this, end, publishShield })
+    // It is at the holder's page from now on, not at its server-side room's.
+    this.room.replica.pageEndChanged(this.room.local)
     this._flushHeld(this.holder)
     return {
       channelId: end.id,
