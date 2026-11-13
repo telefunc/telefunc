@@ -28,5 +28,4 @@ export type {
   BinaryFrameInfo,
   BinaryPublishOptions,
   RoomSnapshotView,
-  ParticipantSnapshotView,
 } from './types.js'

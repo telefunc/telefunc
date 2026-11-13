@@ -3,7 +3,7 @@ export type { RoomStateOwner }
 
 import { assert, assertUsage } from '../utils/assert.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
-import { invokeChannelListener, type ChannelPublishInfo, getOrCreate, Listeners } from 'telefunc/__internal'
+import { invokeChannelListener, type ChannelPublishInfo, getOrCreate, Listeners, untether } from 'telefunc/__internal'
 import { makeDisposer, type ListenerOptions } from './disposer.js'
 import {
   EVERY_MEMBER,
@@ -20,7 +20,15 @@ import {
 import { type MemberEntry, type RoomModel } from './RoomModel.js'
 import { assertKnownOptions, senderSnapshot } from './arguments.js'
 import type { MemberSnapshot, MemberWants, RoomDataEvent, SenderStamp } from './protocol.js'
-import type { BinaryFrameInfo, LeaveCause, RemoteParticipant, RoomMeta, Sender } from '../types.js'
+import type {
+  BinaryFrameInfo,
+  LeaveCause,
+  ParticipantMeta,
+  RemoteParticipant,
+  RoomMeta,
+  RoomSnapshotView,
+  Sender,
+} from '../types.js'
 
 type BinaryListenerOptions = ListenerOptions & { track?: string | null }
 type MessageListenerOptions = ListenerOptions & { track?: string }
@@ -42,6 +50,8 @@ type TrackListener<From extends unknown[]> = {
  *  members never get one. */
 type MemberListeners = {
   remote: RemoteParticipant | null
+  /** The participant `snapshot()` lists, with the meta and connection it shows. */
+  shown: { meta: ParticipantMeta; isConnected: boolean; participant: RemoteParticipant } | null
   dataListeners: Listeners<(data: unknown, info: ChannelPublishInfo) => unknown> | null
   binary: { listeners: Listeners<TrackListener<[]>>; tracks: TrackCounts } | null
   changeListeners: Listeners<() => void> | null
@@ -68,7 +78,8 @@ interface RoomStateOwner {
   reportCallbackError(error: unknown): void
 }
 
-/** Exact-keyed backing lets the serializer recover (room, member) without exposing a public brand. */
+/** Exact-keyed backing lets the serializer recover (room, member) without exposing a public brand. A remote and the
+ *  participants `snapshot()` lists of it share one. */
 type RemoteBacking = { state: RoomState; entry: MemberEntry }
 
 const { remoteBackings } = getGlobalObject('state.ts', () => ({
@@ -149,6 +160,7 @@ class RoomState {
   private readonly listenerCleanups = new Map<object, Set<() => void>>()
   /** By the model's entry, so a remote still held keeps its own, and a member's leave forgets it. */
   private readonly memberListeners = new WeakMap<MemberEntry, MemberListeners>()
+  private snapshotCache: { version: number; value: WeakRef<RoomSnapshotView> } | null = null
   private readonly changeListeners: Listeners<() => void> = new Listeners()
   private readonly owner: RoomStateOwner
   /** The owner's `reportCallbackError`, bound once for every listener call. */
@@ -213,6 +225,49 @@ class RoomState {
 
   listVisible(): RemoteParticipant[] {
     return [...this.model.entries()].filter((entry) => !entry.hidden).map((entry) => this.remote(entry))
+  }
+
+  /** Immutable view of the whole room, cached by the model's state version, so the reference is stable until something
+   *  actually changes (the `useSyncExternalStore` contract). */
+  snapshot(): RoomSnapshotView {
+    const model = this.model
+    const cached = this.snapshotCache?.version === model.version ? this.snapshotCache.value.deref() : undefined
+    if (cached) return cached
+    const participants = Object.freeze(
+      [...model.entries()].filter((entry) => !entry.hidden).map((entry) => this.shownParticipant(entry)),
+    )
+    const value = Object.freeze({
+      id: model.roomId,
+      meta: model.meta,
+      count: model.count,
+      isClosed: model.closed,
+      participants,
+    })
+    untether(value) // holding a snapshot must not keep the room's wrapper alive
+    this.snapshotCache = { version: model.version, value: new WeakRef(value) }
+    return value
+  }
+
+  /** The member's remote with its fields as they are now, the same object until they change. */
+  private shownParticipant(entry: MemberEntry): RemoteParticipant {
+    const listeners = this.listenersOf(entry)
+    const meta = entry.meta.object
+    const isConnected = this.model.isConnected(entry)
+    const shown = listeners.shown
+    if (shown?.meta === meta && shown.isConnected === isConnected) return shown.participant
+    const remote = this.remote(entry)
+    const participant: RemoteParticipant = Object.freeze(
+      Object.create(remote, {
+        id: field(entry.id),
+        identity: field(entry.identity),
+        meta: field(meta),
+        joinedAt: field(entry.joinedAt),
+        isConnected: field(isConnected),
+      }),
+    )
+    remoteBackings.set(participant, remoteBackings.get(remote)!)
+    listeners.shown = { meta, isConnected, participant }
+    return participant
   }
 
   /** A revived `RemoteParticipant`: the live member if known, else seeded silently from the snapshot. */
@@ -359,6 +414,7 @@ class RoomState {
     if (existing !== undefined) return existing
     const listeners: MemberListeners = {
       remote: null,
+      shown: null,
       dataListeners: null,
       binary: null,
       changeListeners: null,
@@ -512,6 +568,11 @@ class RoomState {
   private fireAll<Args extends unknown[]>(listeners: Listeners<(...args: Args) => unknown>, ...args: Args): void {
     for (const cb of listeners.list()) invokeChannelListener(cb, args, this.reportError)
   }
+}
+
+/** A snapshot participant's field: its own, so it shadows the remote's getter. */
+function field(value: unknown): PropertyDescriptor {
+  return { value, enumerable: true }
 }
 
 /** Validate a `subscribeBinary` track option: `undefined` = every track, `null` = the default track, a non-empty name =

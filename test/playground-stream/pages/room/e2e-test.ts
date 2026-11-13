@@ -561,6 +561,23 @@ function testRoom() {
       expect(result.sameObject).toBe(true) // ref-identity binds the view to its room
     },
   )
+  testRoomScenario<{
+    kept: boolean[]
+    replaced: boolean
+    status: (string | null)[]
+    fromA: unknown[]
+    revived: { sameObject: boolean; name: string }
+  }>(
+    'snapshot-grid',
+    "room: a snapshot's participants act as the participants, and one that changes is the only one replaced",
+    (r) => {
+      expect(r.kept).deep.equal([true, true])
+      expect(r.replaced).toBe(true)
+      expect(r.status).deep.equal([null, 'away'])
+      expect(r.fromA).deep.equal(['from A'])
+      expect(r.revived).deep.equal({ sameObject: true, name: 'C' })
+    },
+  )
   testRoomScenario<GuardResult>(
     'guard',
     "room: guards reject over the wire, a room returned unguarded refuses a page's join, and allowed messages flow",

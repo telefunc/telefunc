@@ -27,7 +27,6 @@ export type {
   BinaryPublishOptions,
   RoomMessage,
   RoomSnapshotView,
-  ParticipantSnapshotView,
 }
 
 import type { ChannelPublishAck, ChannelPublishInfo, TELEFUNC_SHIELDS } from 'telefunc/__internal'
@@ -154,23 +153,15 @@ type JoinOptions<P extends ParticipantMeta = ParticipantMeta> = {
 
 type ClientJoinOptions<P extends ParticipantMeta = ParticipantMeta> = Omit<JoinOptions<P>, 'identity' | 'hidden'>
 
-/** One participant inside `room.snapshot()`. */
-type ParticipantSnapshotView<P extends ParticipantMeta = ParticipantMeta> = {
-  readonly id: string
-  readonly identity: string | null
-  readonly meta: ReadonlyMeta<P>
-  readonly joinedAt: number
-  /** False while the participant's page can't be reached and the room waits for it. */
-  readonly isConnected: boolean
-}
-
 /** Immutable and reference-stable until the room changes. */
-type RoomSnapshotView<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta> = {
+type RoomSnapshotView<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = {
   readonly id: string
   readonly meta: ReadonlyMeta<M>
   readonly count: number
   readonly isClosed: boolean
-  readonly participants: readonly ParticipantSnapshotView<P>[]
+  /** Each participant as of the snapshot: its methods, and its fields as they were. A participant that changed since
+   *  the last snapshot is a new object, every other one the same. */
+  readonly participants: readonly RemoteParticipant<P, Pub>[]
 }
 
 /** Lightweight room snapshot returned by `Room.list()`. */
@@ -291,7 +282,7 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
    *  `meta`, or the room closed. Pairs with `snapshot()`. */
   onChange(callback: () => void, options?: { signal?: AbortSignal }): () => void
   /** Immutable whole-room view, reference-stable until the next change. */
-  snapshot(): RoomSnapshotView<M, P>
+  snapshot(): RoomSnapshotView<M, P, Pub>
 } & RoomShield<Pub>
 
 type ClientRoom<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = Omit<

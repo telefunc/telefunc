@@ -17,6 +17,7 @@ import {
   onJoinAsServer,
   onJoinRoomAsServerSelf,
   onGetRoomWithMember,
+  onGetRoomWithSnapshotMember,
   onWatchRoom,
   onGetWatched,
   onWatchRoomTrack,
@@ -1349,6 +1350,38 @@ function Room() {
           sameObject: out.member !== null && viaRoom === out.member,
         }
         setResult(JSON.stringify(state))
+      })}
+
+      {scenario('snapshot-grid', 'Snapshot participants', 'A grid of three, one of them changes', async () => {
+        const [roomId, room] = await createRoom('snapshot-grid')
+        const [a, b, c] = await Promise.all([
+          room.join({ meta: { name: 'A' } }),
+          room.join({ meta: { name: 'B' } }),
+          room.join({ meta: { name: 'C' } }),
+        ])
+        const tile = <P extends { id: string }>(participants: readonly P[], id: string) =>
+          participants.find((p) => p.id === id)!
+        const before = room.snapshot().participants
+        await b.setAttributes({ status: 'away' })
+        const after = room.snapshot().participants
+        const fromA: unknown[] = []
+        const everyone: unknown[] = []
+        tile(after, a.id).subscribe((data) => fromA.push(data))
+        room.subscribe((data) => everyone.push(data))
+        await a.publish('from A')
+        await c.publish('from C')
+        const handed = await onGetRoomWithSnapshotMember(roomId, c.id)
+        const live = await handed.room.getParticipant(c.id)
+        await pollUntil(() => ({
+          result: {
+            kept: [a, c].map(({ id }) => tile(after, id) === tile(before, id)),
+            replaced: tile(after, b.id) !== tile(before, b.id),
+            status: [before, after].map((participants) => tile(participants, b.id).meta.status ?? null),
+            fromA,
+            revived: { sameObject: handed.member !== null && handed.member === live, name: handed.member?.meta.name },
+          },
+          done: everyone.includes('from C') && fromA.length > 0,
+        }))
       })}
 
       {scenario(

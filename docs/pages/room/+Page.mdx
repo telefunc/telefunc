@@ -98,6 +98,8 @@ function Members({ room }) {
 }
 ```
 
+Each participant of `room.snapshot()` is that participant as of the snapshot: it has the participant's methods, and its fields stay as they were. A participant that changes is a new object in the next snapshot, and everyone else is the same object as before, so compare participants by `id`.
+
 A participant whose page lost its connection stays in the room while it reconnects, with `isConnected: false`:
 
 ```jsx
@@ -608,7 +610,7 @@ Server-side.
 |---|---|
 | `join({ meta?, selfDelivery? }?)` | Join; returns your participant. |
 | `join({ meta?, identity?, hidden? })` | Server-side: join with a user id, or as a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>. |
-| `snapshot()` / `onChange(cb)` | The room as it is now, `{ id, meta, count, isClosed, participants }` with each participant `{ id, identity, meta, joinedAt, isConnected }` / called on every change. |
+| `snapshot()` / `onChange(cb)` | The room as it is now, `{ id, meta, count, isClosed, participants }` with each participant as of the snapshot / called on every change. |
 | `getParticipants()` / `getParticipant(id)` | The participants / one participant. |
 | `getParticipants({ hidden: true })` | Server-side: the hidden participants. |
 | `onJoin(cb)` / `onLeave(cb)` | Someone joined / left. |

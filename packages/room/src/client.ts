@@ -16,7 +16,6 @@ export type {
   BinaryPublishOptions,
   RoomMessage,
   RoomSnapshotView,
-  ParticipantSnapshotView,
 } from './types.js'
 
 import { config } from 'telefunc/client'

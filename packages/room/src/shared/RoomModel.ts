@@ -2,7 +2,7 @@ export { RoomModel }
 export type { MemberEntry, MembershipEvent, RosterRead, RoomModelOwner, ServerModelOwner }
 
 import { assert } from '../utils/assert.js'
-import { untether, getOrCreate } from 'telefunc/__internal'
+import { getOrCreate } from 'telefunc/__internal'
 import { Slice } from './Slice.js'
 import { RoomMetaState } from './RoomMetaState.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
@@ -15,7 +15,7 @@ import type {
   SenderStamp,
   WholeMemberUpdate,
 } from './protocol.js'
-import type { LeaveCause, ParticipantMeta, RoomMeta, RoomSnapshotView, Sender } from '../types.js'
+import type { LeaveCause, ParticipantMeta, RoomMeta, Sender } from '../types.js'
 import type { RoomState } from './state.js'
 
 /** A membership event as this model got it, whether it applied it or not. */
@@ -86,7 +86,6 @@ class RoomModel {
   /** Bumped on every observable change (membership, participant meta, room config, closure). Drives
    *  `onChange`/`snapshot()` cache invalidation. */
   private stateVersion = 0
-  private snapshotCache: { version: number; value: WeakRef<RoomSnapshotView> } | null = null
   /** The membership events the in-flight roster read has seen so far. */
   private recording: MembershipEvent[] | null = null
   private readonly members = new Map<string, MemberEntry>()
@@ -216,31 +215,6 @@ class RoomModel {
   listen(view: RoomState, on: boolean): void {
     if (on) this.views.add(view)
     else this.views.delete(view)
-  }
-
-  /** Immutable view of the whole room, cached by state version, so the reference is stable until something actually
-   *  changes (the `useSyncExternalStore` contract). */
-  snapshot(): RoomSnapshotView {
-    const cached = this.snapshotCache?.version === this.stateVersion ? this.snapshotCache.value.deref() : undefined
-    if (cached) return cached
-    const participants = Object.freeze(
-      [...this.members.values()]
-        .filter((entry) => !entry.hidden)
-        .map((entry) => {
-          const { id, identity, meta, joinedAt } = entry
-          return Object.freeze({ id, identity, meta: meta.object, joinedAt, isConnected: this.isConnected(entry) })
-        }),
-    )
-    const value = Object.freeze({
-      id: this.roomId,
-      meta: this.meta,
-      count: this.count,
-      isClosed: this.closed,
-      participants,
-    })
-    untether(value) // plain data: holding a snapshot must not keep the room's wrapper alive
-    this.snapshotCache = { version: this.stateVersion, value: new WeakRef(value) }
-    return value
   }
 
   /** State changed observably: invalidate the snapshot and tell `onChange` subscribers. */

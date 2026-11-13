@@ -26,8 +26,8 @@ import type {
   LocalParticipant,
   ParticipantMeta,
   ParticipantRef,
-  ParticipantSnapshotView,
   PublishGuard,
+  RemoteParticipant,
   Room,
   RoomGetOptions,
   RoomInfo,
@@ -64,6 +64,12 @@ import { cancelClose } from './lifecycle/hold.js'
 import { repairRoomIndex } from './store/directory.js'
 import { ROOM_GUARD_USAGE } from './constants.js'
 
+/** A participant as `Room.getParticipants(id)` reads it from the store: its fields, with no room view to act through. */
+type StoredParticipant<P extends ParticipantMeta = ParticipantMeta> = Pick<
+  RemoteParticipant<P>,
+  'id' | 'identity' | 'meta' | 'joinedAt' | 'isConnected'
+>
+
 type RoomStatic = {
   create<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown>(
     id: string,
@@ -95,7 +101,7 @@ type RoomStatic = {
   getParticipants<P extends ParticipantMeta = ParticipantMeta>(
     id: string,
     target?: { identity: string },
-  ): Promise<ParticipantSnapshotView<P>[]>
+  ): Promise<StoredParticipant<P>[]>
 }
 
 const roomStatics: RoomStatic = {
@@ -326,7 +332,7 @@ async function removeParticipant(id: string, target: ParticipantRef & { reason?:
   await eachInFlight(members, (member) => evictMember(incarnation, member.id, cause))
 }
 
-async function getRoomParticipants(id: string, target?: { identity: string }): Promise<ParticipantSnapshotView[]> {
+async function getRoomParticipants(id: string, target?: { identity: string }): Promise<StoredParticipant[]> {
   const incarnation = await requireRoom(id)
   let members: MemberSnapshot[]
   if (target === undefined) {

@@ -218,7 +218,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
   snapshot(): RoomSnapshotView {
     // Loads the members for the next snapshot; their arrival fires onChange.
     if (!this.model.rosterKnown) void this.authority.ensureRoster().catch(reportRoomError)
-    return this.model.snapshot()
+    return this.state.snapshot()
   }
 
   /** Both join paths: the guard passes, the holder takes the member, then the member commits. */

@@ -261,7 +261,7 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   snapshot(): RoomSnapshotView {
-    return this.model.snapshot()
+    return this._state.snapshot()
   }
 
   /** @internal */
