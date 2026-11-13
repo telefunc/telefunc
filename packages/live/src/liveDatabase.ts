@@ -134,14 +134,18 @@ const MAX_RESULT_ROWS = 10_000
 const MAX_CHANGED_ROWS = 10_000
 
 /** A host's part of a database (`LiveDatabase.host()`): one per process, one per session Durable Object on Cloudflare. */
-type Host = { router: Router; shared: SharedReads; feed: ChangeFeed }
+type Host = {
+  router: Router
+  shared: SharedReads
+  feed: ChangeFeed | undefined
+  loadingCatalog: Promise<Catalog> | undefined
+}
 
 /** Everything one wrapped database shares between its connections: what it knows of the schema, the live reads,
  *  open transactions, and the other servers. */
 class LiveDatabase {
   private readonly engine: Engine
   private catalog: Catalog | undefined
-  private loadingCatalog: Promise<Catalog> | undefined
   /** Connections whose change log follows the loaded catalog (`Engine.changeLog`): the count its rows were read up to. */
   private loggedUpTo = new WeakMap<object, number>()
   private plans = new Map<string, Plan>()
@@ -179,12 +183,13 @@ class LiveDatabase {
   /** Loads what `statementFor()` needs; `query` runs our catalog query on the connection about to be used. */
   async ready(query: (text: string) => Promise<string>): Promise<void> {
     if (this.catalog) return
-    this.loadingCatalog ??= this.engine.loadCatalog(query)
+    const host = this.host()
+    host.loadingCatalog ??= this.engine.loadCatalog(query)
     try {
-      this.loaded(await this.loadingCatalog)
+      this.loaded(await host.loadingCatalog)
     } finally {
       // A failure fails the statement waiting for it; the next one tries again.
-      this.loadingCatalog = undefined
+      host.loadingCatalog = undefined
     }
   }
 
@@ -792,20 +797,27 @@ class LiveDatabase {
   }
 
   private announce(changes: Change[]): void {
-    const { router, feed } = this.host()
-    route(router, changes)
-    feed.publish(changes)
+    const host = this.host()
+    route(host.router, changes)
+    this.feedOf(host).publish(changes)
   }
 
-  /** This host's part: its live reads, the reads running that others join, and its feed. A read's stale signal goes out
-   *  from the host that holds the read: workerd lets no Durable Object use the I/O of another, the WebSocket the
-   *  signal goes out on included. */
+  /** This host's part: its live reads, the reads running that others join, its feed and its catalog load. What a host
+   *  does on I/O, it does itself: workerd lets no Durable Object use the I/O of another (the WebSocket a stale signal
+   *  goes out on), and a load another one started never settles once that one is reset. */
   private host(): Host {
-    return hostLocal(this.hosts, () => {
-      const router = new Router()
-      const feed = new ChangeFeed(this.transport, this.database!, (changes) => route(router, changes))
-      return { router, shared: new SharedReads(), feed }
-    })
+    return hostLocal(this.hosts, () => ({
+      router: new Router(),
+      shared: new SharedReads(),
+      feed: undefined,
+      loadingCatalog: undefined,
+    }))
+  }
+
+  /** `host`'s feed, once the catalog named the database. */
+  private feedOf(host: Host): ChangeFeed {
+    host.feed ??= new ChangeFeed(this.transport, this.database!, (changes) => route(host.router, changes))
+    return host.feed
   }
 
   private planOf(text: string, catalog: Catalog): Plan {
@@ -858,7 +870,7 @@ class LiveDatabase {
     const { aliases, alsoReads } = shape
     const tables =
       alsoReads === 'all' ? this.catalog!.tables.keys() : [...aliases.map((alias) => alias.table.id), ...alsoReads]
-    return this.host().feed.watch(['*', ...tables])
+    return this.feedOf(this.host()).watch(['*', ...tables])
   }
 }
 
