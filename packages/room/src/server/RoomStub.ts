@@ -112,7 +112,6 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   private tail: TailHold | null = null
   /** Whether this client was sent the whole roster since it attached. */
   rosterSent = false
-  private missedWarned = false
 
   constructor({ room, roster, end, publishShield, grants }: RoomStubOptions) {
     this.room = room
@@ -159,15 +158,6 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   _onPageAttach(): void {
     this.rosterSent = false
     this.room.replica.onStubAttached(this)
-  }
-
-  /** Its client sees each gap in a track's `info.seq`, and the server's log this once. */
-  _onPublishesMissed(): void {
-    if (this.missedWarned) return
-    this.missedWarned = true
-    console.warn(
-      `[@telefunc/room][Warning] A client of room "${this.room.model.roomId}" fell behind and skipped frames of its lossy tracks: \`info.seq\` of each track shows its gap.`,
-    )
   }
 
   // Client requests

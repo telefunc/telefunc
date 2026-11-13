@@ -1498,7 +1498,6 @@ function testRoomSmallMemory() {
         expect(stream.at(-1)?.n).toBe(count - 1)
         expect(stream.map(({ n, seq }) => seq - n)).deep.equal(stream.map(() => stream[0]!.seq - stream[0]!.n))
       }
-      expectLog('fell behind and skipped frames of its lossy tracks')
     },
   )
   testRoomTracksBehind(
@@ -1507,8 +1506,6 @@ function testRoomSmallMemory() {
     (r) => {
       expect(r).deep.include({ closed: true, myCause: { type: 'disconnected' } })
       expect(r.drawing.map(({ n }) => n)).deep.equal(r.drawing.map((_, i) => i))
-      // The pointer's oldest frames went first, before the drawing's didn't fit.
-      expectLog('fell behind and skipped frames of its lossy tracks')
     },
   )
   test('room: a page offline while a text track sent it more than maxMemory holds in lossy messages gets the newest one, with the jump in its info.seq, and stays in its room; a publish on the track without lossy is refused at the call, never skipped', async () => {
@@ -1527,7 +1524,6 @@ function testRoomSmallMemory() {
       expect(cursor.at(-1)?.n).toBe(15)
       expect(cursor.map(({ n, seq }) => seq - n)).deep.equal(cursor.map(() => cursor[0]!.seq - cursor[0]!.n))
     })
-    expectLog('fell behind and skipped frames of its lossy tracks')
   })
   test('room: a page offline while reliable messages pass 7/8 of maxMemory, its publish waiting for a receipt, is let go: no message and no receipt crosses what it missed', async () => {
     if (!canCutWire()) return
