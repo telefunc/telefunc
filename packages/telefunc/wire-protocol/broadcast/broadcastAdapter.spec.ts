@@ -6,6 +6,7 @@ import { TAG } from '../wire/tags.js'
 import { IndexedPeer } from '../channel/server/IndexedPeer.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcastAdapter.js'
 import type { BroadcastTransport } from './broadcastAdapter.js'
+import { ChannelOverflowError } from '../channel/channelErrors.js'
 
 const previousBroadcastAdapter = getBroadcastAdapter()
 afterEach(() => _resetBroadcastAdapterForTesting(previousBroadcastAdapter))
@@ -176,6 +177,24 @@ describe('keyed in-process broadcast', () => {
     expect(b1.seq).toBeGreaterThan(0)
     expect(typeof a1.timestamp).toBe('number')
   })
+})
+
+describe('in-memory publishes in answer', () => {
+  it('rejects a listener that answers its own messages without end, and timers run again', async () => {
+    const adapter = new DefaultBroadcastAdapter()
+    const errors: unknown[] = []
+    const unsubscribe = adapter.subscribe('room:endless', () => {
+      const result = adapter.publish('room:endless', 'again')
+      if (result instanceof Promise) result.catch((err: unknown) => errors.push(err))
+    })
+    const timerRan = new Promise((resolve) => setTimeout(resolve, 0))
+    adapter.publish('room:endless', 'start')
+    await timerRan
+    unsubscribe()
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toBeInstanceOf(ChannelOverflowError)
+    expect((errors[0] as Error).message).toContain('a listener that answers its own messages')
+  }, 60_000)
 })
 
 // ───────────────────────────────────────────────────────────────────────────
