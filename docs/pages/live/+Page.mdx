@@ -210,7 +210,7 @@ const { data: todos } = useQuery({
 
 `todos` is the rows. The query refetches when a write changes the rows `onGetTodos()` read.
 
-> `live()` wraps the `queryFn` and imports only `@tanstack/query-core`, no framework adapter. Its tests use React.
+> `live()` wraps the `queryFn` and imports only `@tanstack/query-core`, no framework adapter. Its end-to-end tests use React.
 
 > A query rendered on the server shows its rows in the HTML, then fetches once more in the browser to go live, whatever its `staleTime`.
 

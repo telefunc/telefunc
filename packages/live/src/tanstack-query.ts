@@ -23,7 +23,7 @@ const registries = processWide('tanstackRegistries', () => new WeakMap<QueryClie
  * const { data: todos } = useQuery({ queryKey: ['todos', userId], queryFn: live(onGetTodos, userId) })
  * ```
  *
- * It wraps the `queryFn` and imports only `@tanstack/query-core`, no framework adapter. Its tests use React.
+ * It wraps the `queryFn` and imports only `@tanstack/query-core`, no framework adapter. Its end-to-end tests use React.
  */
 function live<T, TArgs extends unknown[]>(
   telefunction: (...args: TArgs) => Promise<Live<T>>,
