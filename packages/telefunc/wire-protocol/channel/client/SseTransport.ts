@@ -276,7 +276,7 @@ class SseTransport implements UpgradeSource {
     const reader = createSseEventStreamReader(
       body.getReader() as ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
       abortController,
-      (bytes) => this.heartbeat?.noteReceived(bytes),
+      (bytes) => this.heartbeatOf(abortController)?.noteReceived(bytes),
     )
     // Run the SSE loop concurrently with the handshake wait — frames (including the first
     // RECONCILED) can arrive while the open-ack is still in flight and must be dispatched.
@@ -408,7 +408,7 @@ class SseTransport implements UpgradeSource {
         }
         const frame = decode(raw)
         if (frame.tag === TAG.PONG) {
-          this.heartbeat?.resetPong()
+          this.heartbeatOf(abortController)?.resetPong()
           this.owner.onTransportPong(frame.ended)
           continue
         }
@@ -432,6 +432,12 @@ class SseTransport implements UpgradeSource {
       // Abandoned controllers are owned by a successor transport — don't notify closed.
       if (!this.abandonedControllers.has(abortController)) this.owner.onTransportClosed(this)
     }
+  }
+
+  /** The heartbeat of the wire `abortController` aborts; none once the page left that wire, whose stream then says
+   *  nothing of the wire in use. */
+  private heartbeatOf(abortController: AbortController): Heartbeat | null {
+    return this.transportAbort === abortController ? this.heartbeat : null
   }
 
   private stageInitialBatch(): SseInitialBatchStage {
