@@ -407,6 +407,50 @@ describe('a live read reaching a PL/pgSQL function of the app that only reads', 
   })
 })
 
+describe('a live read reaching a PL/pgSQL function of the app returning rows or columns', () => {
+  it.each([
+    [
+      'rows through RETURN QUERY',
+      'returns setof items',
+      'begin return query select * from items where active; end',
+      [{ id: 1, active: true }],
+    ],
+    [
+      'rows through RETURN NEXT',
+      'returns setof items',
+      'declare r items; begin for r in select * from items where active loop return next r; end loop; end',
+      [{ id: 1, active: true }],
+    ],
+    [
+      'a column of its RETURNS TABLE',
+      'returns table (item int)',
+      'begin item := (select max(id) from items where active); return next; end',
+      [{ item: 1 }],
+    ],
+    ['an OUT parameter', '', 'begin item := (select max(id) from items where active); end', [{ item: 1 }]],
+  ])(
+    'watches what it reads, returning %s, through a view and called in the statement',
+    async (_, result, body, rows) => {
+      const pglite = new PGlite()
+      const parameters = result ? '()' : '(out item int)'
+      await pglite.exec(`
+      create table items (id int primary key, active bool);
+      insert into items values (1, true), (2, false);
+      create function active_items${parameters} ${result} language plpgsql as $f$ ${body} $f$;
+      create view active as select * from active_items();`)
+      liveDatabaseOf(pglite, {})
+      const reads = await Promise.all([
+        watched(pglite, 'select * from active'),
+        watched(pglite, 'select * from active_items()'),
+      ])
+      expect(reads.map((read) => read.rows)).toEqual([rows, rows])
+      await written(pglite, 'update items set active = true where id = 2')
+      expect(reads.map((read) => read.stale())).toEqual([1, 1])
+      await pglite.close()
+    },
+  )
+})
+
 describe('a live read calling an aggregate of the app', () => {
   it.each([
     ["Postgres's own", 'numeric_mul'],

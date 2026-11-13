@@ -41,7 +41,7 @@ type CatalogRow = {
     /** An aggregate's support functions (`pg_aggregate`): each one's name, whether it is Postgres's own, in C, and
      *  whether it is volatile. */
     support: [name: string, ownC: boolean, volatile: boolean][] | null,
-    /** A PL/pgSQL function's body. */
+    /** A PL/pgSQL function's `CREATE FUNCTION`. */
     plpgsql: string | null,
   ][]
   volatileFunctions: string[]
@@ -66,7 +66,8 @@ type CatalogRow = {
     ][]
     primaryKey: string[] | null
     policies: string[] | null
-    triggers: [type: number, language: string, source: string][] | null
+    /** Its triggers: the events each fires on (`pg_trigger.tgtype`), its function's language and `CREATE FUNCTION`. */
+    triggers: [type: number, language: string, definition: string][] | null
     /** Its rules: the event each fires on (`pg_rewrite.ev_type`), and its `CREATE RULE`. */
     rules: [event: string, definition: string][] | null
     /** The functions its column defaults call. */
@@ -113,7 +114,7 @@ select json_build_object(
         join pg_proc s on s.oid = f.oid join pg_namespace sn on sn.oid = s.pronamespace
         join pg_language sl on sl.oid = s.prolang
         where a.aggfnoid = p.oid),
-      case when l.lanname = 'plpgsql' then p.prosrc end)), '[]') from pg_proc p
+      case when l.lanname = 'plpgsql' then pg_get_functiondef(p.oid) end)), '[]') from pg_proc p
     join pg_namespace n on n.oid = p.pronamespace join pg_language l on l.oid = p.prolang
     where n.nspname not in ('pg_catalog', 'information_schema') and p.prorettype <> 'trigger'::regtype),
   'volatileFunctions', (select coalesce(json_agg(distinct p.proname), '[]') from pg_proc p where p.provolatile = 'v'),
@@ -141,7 +142,7 @@ select json_build_object(
       where i.indrelid = c.oid and i.indisprimary),
     'policies', (select json_agg(concat_ws(' and ', pg_get_expr(p.polqual, p.polrelid), pg_get_expr(p.polwithcheck, p.polrelid)))
       from pg_policy p where p.polrelid = c.oid),
-    'triggers', (select json_agg(json_build_array(tg.tgtype, l.lanname, pr.prosrc)) from pg_trigger tg
+    'triggers', (select json_agg(json_build_array(tg.tgtype, l.lanname, pg_get_functiondef(pr.oid))) from pg_trigger tg
       join pg_proc pr on pr.oid = tg.tgfoid join pg_language l on l.oid = pr.prolang
       where tg.tgrelid = c.oid and not tg.tgisinternal),
     'rules', (select json_agg(json_build_array(r.ev_type, pg_get_ruledef(r.oid))) from pg_rewrite r
@@ -320,9 +321,9 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
     const writes = union(parsed.map((statements) => (statements ? writesOfCalls(statements, catalog) : 'all')))
     if (writes === 'all' || writes.size > 0) table.writes = writes
     const { alsoWrites } = table
-    for (const [type, language, source] of t.triggers ?? []) {
+    for (const [type, language, definition] of t.triggers ?? []) {
       // A trigger resolves names with the `search_path` of the session that fires it: any schema's table may be meant.
-      const written = tablesWrittenByBody(language, source, anySchema, catalog, functionWrites)
+      const written = tablesWrittenByBody(language, definition, anySchema, catalog, functionWrites)
       for (const [bit, write] of TRIGGER_EVENTS) if (type & bit) alsoWrites[write] = union([alsoWrites[write], written])
     }
     for (const [event, definition] of t.rules ?? []) {
@@ -471,27 +472,28 @@ function tablesReadBy(statements: Node[] | null, named: (table: RangeVar) => Tab
 }
 
 /**
- * What a function with the body `source` in `language`, a trigger's or one of the app's, may write: the tables its
- * statements write. Every table when that can't be told: it runs SQL built at run time, isn't written in PL/pgSQL, or
- * one of its statements can't be told (`tablesWrittenBy`).
+ * What a function in `language` may write, a trigger's or one of the app's, by its `CREATE FUNCTION` (`definition`): the
+ * tables its statements write. Every table when that can't be told: it runs SQL built at run time, isn't written in
+ * PL/pgSQL, or one of its statements can't be told (`tablesWrittenBy`).
  */
 function tablesWrittenByBody(
   language: string,
-  source: string,
+  definition: string,
   named: (table: RangeVar) => Table[],
   catalog: Catalog,
   functionWrites: Map<string, TableSet>,
 ): TableSet {
-  const statements = language === 'plpgsql' ? statementsOf(source) : null
+  const statements = language === 'plpgsql' ? statementsOf(definition) : null
   if (!statements) return 'all'
   return union(statements.map((sql) => tablesWrittenBy(parseStatements(sql), named, catalog, functionWrites)))
 }
 
-/** The SQL a trigger runs, every expression as a `SELECT`; `null` when it runs SQL built at run time. */
-function statementsOf(source: string): string[] | null {
+/** The SQL a PL/pgSQL function runs, every expression as a `SELECT`, from its `CREATE FUNCTION`, whose signature
+ *  declares its parameters, its result columns and how it returns. `null` when it runs SQL built at run time. */
+function statementsOf(definition: string): string[] | null {
   let parsed: unknown
   try {
-    parsed = parsePlPgSQLSync(`create function f() returns trigger language plpgsql as $live$${source}$live$`)
+    parsed = parsePlPgSQLSync(definition)
   } catch {
     return null
   }
