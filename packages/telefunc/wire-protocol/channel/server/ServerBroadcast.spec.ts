@@ -226,7 +226,7 @@ describe('ServerBroadcastEnd', () => {
     end.setOwner({ _onPagePublish() {}, _onPagePublishBinary() {} })
     end._registerChannel()
 
-    end.deliver(publishBody('"hello"', { seq: 1, timestamp: 1 }, 'room:early'))
+    end.deliver(publishBody('"hello"', { seq: 1, timestamp: 1 }, 'room:early', true))
 
     const frames: Uint8Array[] = []
     end._attachPeer(
@@ -255,7 +255,61 @@ describe('ServerBroadcastEnd', () => {
 
     expect(frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>).tag)).toEqual([TAG.PUBLISH_TO, TAG.PUBLISH])
   })
+
+  it("sends a stream's held lossy publish before a plain one of that stream", () => {
+    const { end, sent } = behindEnd()
+    end.deliver(publishBody('"first"', { seq: 1, timestamp: 1 }, null, false))
+    end.deliver(publishBody('"lossy"', { seq: 2, timestamp: 2 }, 'cursor', true))
+    end.deliver(publishBody('"plain"', { seq: 3, timestamp: 3 }, 'cursor', false))
+
+    expect(sent).toEqual(['"first"', '"lossy"', '"plain"'])
+  })
+
+  it('lets a plain publish of another stream go ahead of a held one, which a newer one still replaces', () => {
+    const { end, sent } = behindEnd()
+    end.deliver(publishBody('"first"', { seq: 1, timestamp: 1 }, null, false))
+    end.deliver(publishBody('"older"', { seq: 2, timestamp: 2 }, 'cursor', true))
+    end.deliver(publishBody('"plain"', { seq: 3, timestamp: 3 }, 'drawing', false))
+    end.deliver(publishBody('"newer"', { seq: 4, timestamp: 4 }, 'cursor', true))
+    void end.close()
+
+    expect(sent).toEqual(['"first"', '"plain"', '"newer"'])
+  })
 })
+
+/** An attached page's end whose page is behind once a publish waits for its confirmation; the publishes it sends. */
+function behindEnd() {
+  const end = new ServerBroadcastEnd()
+  end.setOwner({ _onPagePublish() {}, _onPagePublishBinary() {} })
+  end._registerChannel()
+  const sent: string[] = []
+  end._attachPeer(
+    new IndexedPeer({
+      sender: {
+        send: (frame) => {
+          const decoded = decode(frame as Uint8Array<ArrayBuffer>)
+          if (decoded.tag === TAG.PUBLISH) sent.push(decoded.text)
+        },
+        carry() {},
+        bufferedAmount: () => 0,
+        behindAfter: () => -1,
+        deliveredBefore: () => 0,
+        terminate() {},
+        sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+        queue: {
+          waitingPublishes: () => 0,
+          dropWaitingPublishes() {},
+          dropWaitingFromPublish() {},
+          drainRate: () => 0,
+        },
+      },
+      index: 7,
+      // Its own replay: what it hasn't confirmed there is what makes its page behind.
+      replay: end._replayBuffer!,
+    }),
+  )
+  return { end, sent }
+}
 
 // ───────────────────────────────────────────────────────────────────────────
 // Channel-method gating — the type hides send/listen/sendBinary/listenBinary,

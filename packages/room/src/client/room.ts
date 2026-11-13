@@ -278,7 +278,9 @@ class ClientRoom extends RoomStateView implements Room {
 
   /** @internal */
   async _publishBinaryFramed(framed: Uint8Array, lossyStream: string | null): Promise<ChannelPublishAck> {
-    return roomResultValue<ChannelPublishAck>(this.end._publishBinaryUnreported(framed, lossyStream))
+    return roomResultValue<ChannelPublishAck>(
+      this.end._publishBinaryUnreported(framed, lossyStream, lossyStream !== null),
+    )
   }
 
   /** @internal A local participant completed its voluntary leave. */
@@ -760,7 +762,9 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
 
   protected async _sendPublishBinary(framed: Uint8Array, lossyStream: string | null): Promise<ChannelPublishAck> {
     this._assertActive()
-    return roomResultValue<ChannelPublishAck>(this.end._publishBinaryUnreported(framed, lossyStream))
+    return roomResultValue<ChannelPublishAck>(
+      this.end._publishBinaryUnreported(framed, lossyStream, lossyStream !== null),
+    )
   }
 
   protected async _request(request: ParticipantStubRequest): Promise<unknown> {

@@ -41,7 +41,7 @@ class ServerReplay {
     this.pushed(seq)
     this.publishes.push(seq, { seq, head, body, at: performance.now() })
     hold(this.holder, body)
-    if (body.lossyStream !== null) this.newestOfStream.set(body.lossyStream, seq)
+    if (body.lossy && body.stream !== null) this.newestOfStream.set(body.stream, seq)
   }
 
   /** The least time a publish waited for its page's confirmation, `Infinity` before the first. */
@@ -119,7 +119,7 @@ class ServerReplay {
     let lossyBytes = 0
     for (let i = this.publishes.length - waiting; i < this.publishes.length; i++) {
       const { body } = this.publishes.at(i)
-      if (body.lossyStream === null) reliable++
+      if (!body.lossy) reliable++
       else lossyBytes += body.frame.byteLength
     }
     return reliable > 1 && this.holder.heldBytes - lossyBytes > toBytes
@@ -141,8 +141,8 @@ class ServerReplay {
 
   private letPublishGo({ seq, body }: Publish): void {
     letGo(this.holder, body)
-    const { lossyStream } = body
-    if (lossyStream !== null && this.newestOfStream.get(lossyStream) === seq) this.newestOfStream.delete(lossyStream)
+    const { stream } = body
+    if (stream !== null && this.newestOfStream.get(stream) === seq) this.newestOfStream.delete(stream)
   }
 }
 

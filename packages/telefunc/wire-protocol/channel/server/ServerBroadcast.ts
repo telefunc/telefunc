@@ -339,13 +339,14 @@ const globalObject = getGlobalObject('wire-protocol/channel/server/ServerBroadca
   lossyPublishBodies: new WeakMap<WirePublishInfo, PublishBody>(),
 })
 
-/** A broadcast's one stream is its `key`, of each kind: a text message doesn't take a binary one's place. A lossy subscriber
- *  and a reliable one of a key share neither the body nor its place in a replay. */
+/** A lossy broadcast's one stream is its `key`, of each kind: a text message doesn't take a binary one's place. A
+ *  reliable broadcast has none. A lossy subscriber and a reliable one of a key share neither the body nor its place in a
+ *  replay. */
 function bodyOf(payload: string | Uint8Array, info: WirePublishInfo, lossyStream: string | null): PublishBody {
   const bodies = lossyStream === null ? globalObject.publishBodies : globalObject.lossyPublishBodies
   let body = bodies.get(info)
   if (!body) {
-    body = publishBody(payload, info, lossyStream)
+    body = publishBody(payload, info, lossyStream, lossyStream !== null)
     bodies.set(info, body)
   }
   return body

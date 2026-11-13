@@ -88,10 +88,11 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   /** @internal A publish that leaves reporting its rejection to the caller. */
   _publishUnreported(
     data: ChannelData<T>,
-    lossyStream: string | null = this.lossy ? 'text' : null,
+    stream: string | null = this.lossy ? 'text' : null,
+    lossy = this.lossy,
   ): Promise<ChannelPublishAck> {
     if (this.stopped) throw new ChannelClosedError()
-    return this.sendPublish(encode.publishAckReq, stringify(data), lossyStream)
+    return this.sendPublish(encode.publishAckReq, stringify(data), stream, lossy)
   }
 
   override messages(options?: { signal?: AbortSignal }) {
@@ -109,29 +110,35 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   /** @internal A publish that leaves reporting its rejection to the caller. */
   _publishBinaryUnreported(
     data: Uint8Array,
-    lossyStream: string | null = this.lossy ? 'binary' : null,
+    stream: string | null = this.lossy ? 'binary' : null,
+    lossy = this.lossy,
   ): Promise<ChannelPublishAck> {
     if (this.stopped) throw new ChannelClosedError()
-    return this.sendPublish(encode.publishBinaryAckReq, data, lossyStream)
+    return this.sendPublish(encode.publishBinaryAckReq, data, stream, lossy)
   }
 
-  /** Of `lossyStream`, once its uplink is behind, a publish that still waits to go takes the newer one's data in its
-   *  place, and both get its receipt. */
+  /** Of a lossy `stream`, once its uplink is behind, a publish that still waits to go takes the newer one's data in its
+   *  place, and both get its receipt. A plain publish of the stream ends that place, so no later one goes ahead of it. */
   private sendPublish<D>(
     encodeFrame: SequencedEncoder<D>,
     data: D,
-    lossyStream: string | null,
+    stream: string | null,
+    lossy: boolean,
   ): Promise<ChannelPublishAck> {
-    if (lossyStream === null) return this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data)
-    const newest = this.newestPublishes.get(lossyStream)
+    if (stream === null) return this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data)
+    if (!lossy) {
+      this.newestPublishes.delete(stream)
+      return this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data)
+    }
+    const newest = this.newestPublishes.get(stream)
     if (newest !== undefined && this.connection.replaceWaiting(this, newest.seq, encodeFrame, data)) {
       return newest.receipt
     }
     let seq = 0
     const receipt = this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data, (queued) => (seq = queued))
     const publish = { seq, receipt }
-    this.newestPublishes.set(lossyStream, publish)
-    void this.forgetOnceSettled(lossyStream, publish)
+    this.newestPublishes.set(stream, publish)
+    void this.forgetOnceSettled(stream, publish)
     return receipt
   }
 

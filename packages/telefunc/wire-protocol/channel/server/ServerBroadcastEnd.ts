@@ -71,7 +71,9 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   deliver(body: PublishBody): void {
     this.endOverflowed()
     if (this._phase === 'ended') return
-    if (body.lossyStream !== null) return this.deliverLossy(body, body.lossyStream)
+    const { stream } = body
+    if (body.lossy && stream !== null) return this.deliverLossy(body, stream)
+    if (stream !== null) this.sendHeldOf(stream)
     this.forward(body)
     const share = this.share()
     if (this.heldBytes > share) this.shed(share)
@@ -111,6 +113,15 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
       this.forward(body)
       letGo(this, body)
     }
+  }
+
+  /** A plain publish of `stream` goes after the lossy one it holds of that stream, so none overtakes another. */
+  private sendHeldOf(stream: string): void {
+    const body = this.newestHeld.get(stream)
+    if (body === undefined) return
+    this.newestHeld.delete(stream)
+    this.forward(body)
+    letGo(this, body)
   }
 
   /** Returns whether it held one of `stream`. */

@@ -66,8 +66,9 @@ function admitPublish(body: PublishBody): void {
   const maxMemory = maxMemoryOf()
   const bytes = body.frame.byteLength
   const target = shedTarget(maxMemory)
-  if (body.lossyStream !== null && memory.total + bytes > target) {
-    for (const holder of [...memory.holders]) holder.replaceWaiting?.(body.lossyStream)
+  const { stream } = body
+  if (body.lossy && stream !== null && memory.total + bytes > target) {
+    for (const holder of [...memory.holders]) holder.replaceWaiting?.(stream)
   }
   reclaim(bytes, target)
   if (memory.total + bytes <= maxMemory || memory.reclaiming) return
