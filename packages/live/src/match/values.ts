@@ -1,4 +1,4 @@
-export { compareValues, valueKey, hasCanonicalText, paramText }
+export { compareValues, valueKey, tupleKey, hasCanonicalText, paramText }
 export type { Column, HiddenValue }
 
 /** A column as the catalog describes it: how Postgres compares its values. */
@@ -78,6 +78,18 @@ function valueKey(text: string, column: Column): string | undefined {
     default:
       return undefined
   }
+}
+
+/** A key equal for two rows exactly when Postgres calls their values equal; `undefined` when it can't be told. */
+function tupleKey(columns: readonly Column[], texts: readonly HiddenValue[]): string | undefined {
+  const keys: (string | null)[] = []
+  for (const [i, column] of columns.entries()) {
+    const text = texts[i]
+    const key = text === null ? null : text === undefined ? undefined : valueKey(text, column)
+    if (key === undefined) return undefined
+    keys.push(key)
+  }
+  return JSON.stringify(keys)
 }
 
 /** Whether equal values of `column` always have the same text (`1.0` and `1.00` are equal `numeric`s). */

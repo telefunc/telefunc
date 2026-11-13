@@ -4,7 +4,7 @@ import { and, COMPARISONS, FALSE, isTrue, mayBeTrue, not, NULL, or, TRUE, type R
 import type { Alias } from './readShape.js'
 import { MAX_TALLY_ROWS, type ColumnAggregate, type Comparison, type SetTree, type TallyShape } from './tallyShape.js'
 import type { OperandValue } from './operands.js'
-import { compareValues, valueKey, type Column, type HiddenValue } from './values.js'
+import { compareValues, tupleKey, valueKey, type Column, type HiddenValue } from './values.js'
 
 /** How many matching rows of `source` have some values (`texts`, the source's columns): at least `lo`, at most `hi`.
  *  A change may be counted already, by the counts query that ran after the read, or not: an insert raises `hi`, a
@@ -60,9 +60,9 @@ class Tally {
     const shownHidden = shape.rule.kind === 'set' ? columns.map((_, i) => i) : shape.rule.groupHidden
     for (const row of hiddenRows) {
       const texts = shownHidden.map((i) => row[i])
-      const key = keyOf(columns.slice(0, groupColumns), texts)
+      const key = tupleKey(columns.slice(0, groupColumns), texts)
       if (key === undefined) return undefined
-      // `keyOf()` keyed each: none is unknown.
+      // `tupleKey()` keyed each: none is unknown.
       tally.groupAt(key, texts as (string | null)[]).shown = row
     }
     return tally
@@ -223,8 +223,8 @@ class Tally {
   private placeOf(source: number, texts: HiddenValue[]): Place | undefined {
     if (texts.some((t) => t === undefined)) return undefined
     const { columns, groupColumns } = this.shape.sources[source]!
-    const group = keyOf(columns.slice(0, groupColumns), texts.slice(0, groupColumns))
-    const rest = keyOf(columns.slice(groupColumns), texts.slice(groupColumns))
+    const group = tupleKey(columns.slice(0, groupColumns), texts.slice(0, groupColumns))
+    const rest = tupleKey(columns.slice(groupColumns), texts.slice(groupColumns))
     if (group === undefined || rest === undefined) return undefined
     return { group, entry: `${source}:${rest}`, source, texts: texts as (string | null)[] }
   }
@@ -274,16 +274,4 @@ function mayHave(row: Row, columns: Column[], texts: (string | null)[]): boolean
     if (a === undefined) return true
     return a === null || b === null ? a === b : valueKey(a, column) === valueKey(b, column)
   })
-}
-
-/** A key equal for two rows exactly when Postgres calls their values equal; `undefined` when it can't be told. */
-function keyOf(columns: Column[], texts: HiddenValue[]): string | undefined {
-  const keys: (string | null)[] = []
-  for (const [i, column] of columns.entries()) {
-    const text = texts[i]
-    const key = text === null ? null : text === undefined ? undefined : valueKey(text, column)
-    if (key === undefined) return undefined
-    keys.push(key)
-  }
-  return JSON.stringify(keys)
 }

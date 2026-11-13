@@ -5,7 +5,7 @@ import { isTrue, mayBeTrue, type Row } from './condition.js'
 import { SEED_LIMIT, type Alias, type Join, type ReadShape } from './readShape.js'
 import { Tally } from './tally.js'
 import type { OperandValue } from './operands.js'
-import { compareValues, paramText, valueKey, type Column, type HiddenValue } from './values.js'
+import { compareValues, paramText, tupleKey, valueKey, type Column, type HiddenValue } from './values.js'
 
 /** A committed change to a table, with the images of the rows it wrote. `old` may lack columns: an `UPDATE` on
  *  Postgres < 18 only tells which columns it assigned. */
@@ -33,7 +33,7 @@ type Result = {
   /** Per `EXISTS` count: how many rows it found for each outer row, by correlation key; it only goes down (a row
    *  counted twice, a change seen twice, can only make it reach 0 early). */
   counts: Map<number, Map<string | undefined, number>>
-  /** For a `SELECT DISTINCT`: how many rows have each result row's values, by `tupleKey()`; it only goes down. */
+  /** For a `SELECT DISTINCT`: how many rows have each result row's values, by `rowKey()`; it only goes down. */
   tuples: Map<string, number>
 }
 
@@ -194,8 +194,8 @@ class LiveRead {
     several: boolean,
   ): boolean {
     const { tuples, first } = this.result!
-    const before = old && tupleKey(this.shape.distinct!.columns, old)
-    const after = now && tupleKey(this.shape.distinct!.columns, now)
+    const before = old && rowKey(this.shape.distinct!.columns, old)
+    const after = now && rowKey(this.shape.distinct!.columns, now)
     if (now && (after === undefined || !tuples.has(after)) && this.mayEnter(alias, now, false)) return true
     if (!old) return false
     if (before === undefined) return true
@@ -298,7 +298,7 @@ class LiveRead {
     const tuples = new Map<string, number>()
     const { distinct } = this.shape
     for (const row of distinct ? rows : []) {
-      const key = tupleKey(
+      const key = rowKey(
         distinct!.columns,
         Object.fromEntries(distinct!.columns.map((c, i) => [c.name, row[distinct!.hidden[i]!]!])),
       )
@@ -309,15 +309,11 @@ class LiveRead {
 }
 
 /** A key for a row's values of `columns`; `undefined` when one is missing or can't be keyed. */
-function tupleKey(columns: Column[], row: Row): string | undefined {
-  const keys: (string | null)[] = []
-  for (const column of columns) {
-    const value = row[column.name]
-    const key = value === null ? null : value === undefined ? undefined : valueKey(value, column)
-    if (key === undefined) return undefined
-    keys.push(key)
-  }
-  return JSON.stringify(keys)
+function rowKey(columns: Column[], row: Row): string | undefined {
+  return tupleKey(
+    columns,
+    columns.map((c) => row[c.name]),
+  )
 }
 
 /** The keys of one hidden column's values in `rows`. */
