@@ -20,7 +20,7 @@ import {
 import { type MemberEntry, type RoomModel } from './RoomModel.js'
 import { assertKnownOptions, senderSnapshot } from './arguments.js'
 import type { MemberSnapshot, MemberWants, RoomDataEvent, SenderStamp } from './protocol.js'
-import type { BinaryFrameInfo, LeaveCause, ParticipantMeta, RemoteParticipant, RoomMeta, Sender } from '../types.js'
+import type { BinaryFrameInfo, LeaveCause, RemoteParticipant, RoomMeta, Sender } from '../types.js'
 
 type BinaryListenerOptions = ListenerOptions & { track?: string | null }
 type MessageListenerOptions = ListenerOptions & { track?: string }
@@ -44,7 +44,7 @@ type MemberListeners = {
   remote: RemoteParticipant | null
   dataListeners: Listeners<(data: unknown, info: ChannelPublishInfo) => unknown> | null
   binary: { listeners: Listeners<TrackListener<[]>>; tracks: TrackCounts } | null
-  updateListeners: Listeners<(meta: ParticipantMeta, prev: ParticipantMeta) => void> | null
+  changeListeners: Listeners<() => void> | null
   disconnectListeners: Listeners<() => void> | null
   reconnectListeners: Listeners<() => void> | null
   leaveListeners: Listeners<(cause: LeaveCause) => void> | null
@@ -123,17 +123,6 @@ abstract class RoomStateView {
     return this._state.onLeave(callback, options)
   }
 
-  onParticipantUpdate(
-    callback: (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void,
-    options?: ListenerOptions,
-  ): () => void {
-    return this._state.onParticipantUpdate(callback, options)
-  }
-
-  onUpdate(callback: (meta: RoomMeta, prev: RoomMeta) => void, options?: ListenerOptions): () => void {
-    return this._state.onUpdate(callback, options)
-  }
-
   onEmpty(callback: () => void, options?: ListenerOptions): () => void {
     return this._state.onEmpty(callback, options)
   }
@@ -176,11 +165,6 @@ class RoomState {
   private readonly joinListeners: Listeners<(member: RemoteParticipant) => void> = new Listeners()
   private readonly leaveListeners: Listeners<(member: RemoteParticipant, cause: LeaveCause) => void> = new Listeners()
 
-  private readonly participantUpdateListeners: Listeners<
-    (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void
-  > = new Listeners()
-
-  private readonly updateListeners: Listeners<(meta: RoomMeta, prev: RoomMeta) => void> = new Listeners()
   private readonly emptyListeners: Listeners<() => void> = new Listeners()
   private readonly closeListeners: Listeners<() => void> = new Listeners()
   private readonly announceListeners: Listeners<(data: unknown, info: ChannelPublishInfo) => void> = new Listeners()
@@ -264,17 +248,6 @@ class RoomState {
     return this.register(this.leaveListeners, cb, opts)
   }
 
-  onParticipantUpdate(
-    cb: (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void,
-    opts?: ListenerOptions,
-  ): () => void {
-    return this.register(this.participantUpdateListeners, cb, opts)
-  }
-
-  onUpdate(cb: (meta: RoomMeta, prev: RoomMeta) => void, opts?: ListenerOptions): () => void {
-    return this.register(this.updateListeners, cb, opts)
-  }
-
   onEmpty(cb: () => void, opts?: ListenerOptions): () => void {
     return this.register(this.emptyListeners, cb, opts)
   }
@@ -321,25 +294,10 @@ class RoomState {
     if (connectionListeners) this.fireAll(connectionListeners)
   }
 
-  /** Whether a member meta change needs its previous meta built for this view. */
-  listensToMeta(entry: MemberEntry): boolean {
-    return (
-      (this.memberListeners.get(entry)?.updateListeners ?? null) !== null || this.participantUpdateListeners.size > 0
-    )
-  }
-
-  metaChanged(entry: MemberEntry, next: ParticipantMeta, prev: ParticipantMeta): void {
-    const updateListeners = this.memberListeners.get(entry)?.updateListeners
-    if (updateListeners) this.fireAll(updateListeners, next, prev)
-    this.fireAll(this.participantUpdateListeners, this.remote(entry), next, prev)
-  }
-
-  listensToRoomMeta(): boolean {
-    return this.updateListeners.size > 0
-  }
-
-  roomMetaChanged(next: RoomMeta, prev: RoomMeta): void {
-    this.fireAll(this.updateListeners, next, prev)
+  /** What a member shows changed: its meta, or its connection. */
+  memberChanged(entry: MemberEntry): void {
+    const changeListeners = this.memberListeners.get(entry)?.changeListeners
+    if (changeListeners) this.fireAll(changeListeners)
   }
 
   closed(departed: MemberEntry[], cause: LeaveCause): void {
@@ -403,7 +361,7 @@ class RoomState {
       remote: null,
       dataListeners: null,
       binary: null,
-      updateListeners: null,
+      changeListeners: null,
       disconnectListeners: null,
       reconnectListeners: null,
       leaveListeners: null,
@@ -436,7 +394,7 @@ class RoomState {
         return this.registerMemberTrack(entry, listeners, textListener(cb, opts.track), opts)
       },
       subscribeBinary: (cb, opts) => this.registerMemberTrack(entry, listeners, binaryListener(cb, opts), opts),
-      onUpdate: (cb, opts) => this.registerLive(entry, (listeners.updateListeners ??= new Listeners()), cb, opts),
+      onChange: (cb, opts) => this.registerLive(entry, (listeners.changeListeners ??= new Listeners()), cb, opts),
       onDisconnect: (cb, opts) =>
         this.registerLive(entry, (listeners.disconnectListeners ??= new Listeners()), cb, opts),
       onReconnect: (cb, opts) => this.registerLive(entry, (listeners.reconnectListeners ??= new Listeners()), cb, opts),
@@ -524,7 +482,7 @@ class RoomState {
     const lists = [
       listeners.dataListeners,
       listeners.binary?.listeners,
-      listeners.updateListeners,
+      listeners.changeListeners,
       listeners.disconnectListeners,
       listeners.reconnectListeners,
       listeners.leaveListeners,

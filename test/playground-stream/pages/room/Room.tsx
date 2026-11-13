@@ -128,6 +128,8 @@ type RoomView = Awaited<ReturnType<typeof onGetRoom>>
 
 /** The join the `away-join` card starts when its second button is clicked. */
 let startAwayJoin: (() => void) | null = null
+/** The status the `join-only` card's member sets when its second button is clicked. */
+let goAway: (() => void) | null = null
 /** The check the `member-keeps-room` card runs when its second button is clicked. */
 let checkKeptMember: (() => void) | null = null
 /** The check the `members-let-go` card runs when its second button is clicked. */
@@ -340,7 +342,8 @@ function Room() {
         const me = await lobby.join({ meta: { name: 'Alice' } })
         const countAfterJoin = lobby.count
         const updates: unknown[] = []
-        ;(await lobby.getParticipant(me.id))!.onUpdate((meta, prev) => updates.push([meta.score, prev.score]))
+        const alice = (await lobby.getParticipant(me.id))!
+        alice.onChange(() => updates.push(alice.meta.score))
 
         const ack = await me.publish({ text: 'hello' })
         await me.setMeta({ name: 'Alice', score: 42 })
@@ -833,13 +836,15 @@ function Room() {
         const events: string[] = []
         room.onJoin((member) => {
           if (member.meta.name !== 'Closer') return
+          member.onChange(() => events.push(`change:${member.meta.status ?? 'here'}:${member.isConnected}`))
           member.onDisconnect(() => events.push(`disconnect:${member.isConnected}`))
           member.onReconnect(() => events.push(`reconnect:${member.isConnected}`))
           member.onLeave((cause) => events.push(`leave:${cause.type}`))
         })
         const closerConnected = () =>
           room.snapshot().participants.find((member) => member.meta.name === 'Closer')?.isConnected ?? null
-        // The test joins `Closer` from another tab, takes that tab offline and back, then offline and closes it.
+        // The test joins `Closer` from another tab, sets it away, takes that tab offline and back, then offline and
+        // closes it.
         await pollUntil(
           () => ({
             result: { roomId, events, closerConnected: closerConnected() },
@@ -853,9 +858,17 @@ function Room() {
         const roomId = new URLSearchParams(location.search).get('roomId')!
         const room = await onGetRoom(roomId)
         keepReachable(room)
-        await room.join({ meta: { name: 'Closer' } })
+        const me = await room.join({ meta: { name: 'Closer' } })
+        const { promise: away, resolve } = Promise.withResolvers<void>()
+        goAway = resolve
         setResult(JSON.stringify('joined'))
+        await away
+        await me.setAttributes({ status: 'away' })
+        setResult(JSON.stringify('away'))
       })}
+      <button id="test-room-join-only-away" onClick={() => goAway?.()}>
+        Set away
+      </button>
 
       {scenario('malformed', 'Malformed requests', 'Join, and say goodbye to whoever leaves', async () => {
         const [roomId, room] = await createRoom('malformed')
@@ -1681,7 +1694,7 @@ function Room() {
         const room = await onGetRoom(roomId)
         await room.join({ meta: { name: 'R' } })
         const updates: string[] = []
-        room.onUpdate((meta) => updates.push((meta as { topic?: string }).topic ?? ''))
+        room.onChange(() => updates.push((room.meta as { topic?: string }).topic ?? ''))
 
         await onUpdateRoom(roomId, { topic: 'updated' })
         const secondRoomId = `${base}:b`
@@ -1831,7 +1844,6 @@ function Room() {
         const events: string[] = []
         view.onJoin((m) => events.push(`join:${m.meta.name}`))
         view.onLeave((m) => events.push(`leave:${m.meta.name}`))
-        view.onParticipantUpdate((m) => events.push(`update:${m.meta.name}`))
         let empty = false
         view.onEmpty(() => (empty = true))
         const player = await view.join({ meta: { name: 'P' } })
@@ -1841,12 +1853,13 @@ function Room() {
         handed.room.onJoin((m) => handedEvents.push(`join:${m.meta.name}`))
         handed.room.onLeave((m) => handedEvents.push(`leave:${m.meta.name}`))
         const memberEvents: string[] = []
-        handed.member!.onUpdate((meta) => memberEvents.push(`update:${meta.name}`))
-        handed.member!.onLeave((cause) => memberEvents.push(`leave:${cause.type}`))
+        const bot = handed.member!
+        bot.onChange(() => memberEvents.push(`change:${bot.meta.name}`))
+        bot.onLeave((cause) => memberEvents.push(`leave:${cause.type}`))
         const counts = [view.count, handed.room.count]
 
         await onHiddenSetMeta(roomId, 'Bot2')
-        await pollUntil(() => ({ done: memberEvents.includes('update:Bot2') }))
+        await pollUntil(() => ({ done: memberEvents.includes('change:Bot2') }))
         await player.leave()
         await pollUntil(() => ({ done: empty }))
         await onHiddenLeave(roomId)

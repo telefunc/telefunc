@@ -31,7 +31,7 @@ const CLOSED_TAB_WAIT = { timeout: 90_000 }
 type ChatResult = {
   events: string[]
   received: Array<{ text: string; from: string }>
-  updates: Array<[number, number | undefined]>
+  updates: unknown[]
   countAfterJoin: number
   count: number
   ack: { key: string; seq: number }
@@ -235,7 +235,7 @@ function testRoom() {
     expect(result.received).deep.equal([{ text: 'hello', from: 'Alice' }])
     expect(result.ack.key).match(/^e2e-chat:/)
     expect(result.ack.seq).greaterThan(0)
-    expect(result.updates).deep.equal([[42, null]])
+    expect(result.updates).deep.equal([42])
     expect(result.snapshotChanged).toBe(true)
     expect(result.snapshotStable).toBe(true)
     expect(result.changes).greaterThan(0)
@@ -733,7 +733,7 @@ function testRoom() {
     sameId: boolean
     sameCount: number
   }>('reconfig', 'room: Room.setMeta propagates; list and getOrCreate resolve', (r) => {
-    expect(r.updates).toContain('updated') // room.onUpdate fired
+    expect(r.updates).toContain('updated') // room.onChange fired with the new meta
     expect(r.topic).toBe('updated')
     expect([...r.listed].sort()).deep.equal([...r.expectedIds].sort())
     expect(r.sameId).toBe(true)
@@ -799,7 +799,7 @@ function testRoom() {
         await page.goto('about:blank')
       }
     })
-  test("room: another page's member shows when its page drops and comes back, and leaves with 'disconnected' once its page never returns", async () => {
+  test("room: another page's member shows when its meta changes and its page drops and comes back, through onChange and its events, and leaves with 'disconnected' once its page never returns", async () => {
     if (!canCutWire()) return
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-connection')
@@ -816,21 +816,23 @@ function testRoom() {
       return { events, closerConnected }
     }
     await autoRetry(async () => expect(await seen()).deep.equal({ events: [], closerConnected: true }))
+    await other.click('#test-room-join-only-away')
+    await autoRetry(async () => expect(await other.textContent('#room-result')).toBe('"away"'))
+    const away = ['change:away:true']
+    await autoRetry(async () => expect(await seen()).deep.equal({ events: away, closerConnected: true }))
     await context.setOffline(true)
     await cutWire()
-    await autoRetry(async () =>
-      expect(await seen()).deep.equal({ events: ['disconnect:false'], closerConnected: false }),
-    )
+    const dropped = [...away, 'change:away:false', 'disconnect:false']
+    await autoRetry(async () => expect(await seen()).deep.equal({ events: dropped, closerConnected: false }))
     await context.setOffline(false)
-    await autoRetry(async () =>
-      expect(await seen()).deep.equal({ events: ['disconnect:false', 'reconnect:true'], closerConnected: true }),
-    )
+    const back = [...dropped, 'change:away:true', 'reconnect:true']
+    await autoRetry(async () => expect(await seen()).deep.equal({ events: back, closerConnected: true }))
     await context.setOffline(true)
     await cutWire()
     await context.close()
     await autoRetry(async () => {
       expect(await seen()).deep.equal({
-        events: ['disconnect:false', 'reconnect:true', 'disconnect:false', 'leave:disconnected'],
+        events: [...back, 'change:away:false', 'disconnect:false', 'leave:disconnected'],
         closerConnected: null,
       })
     }, CLOSED_TAB_WAIT)
@@ -1087,7 +1089,7 @@ function testRoom() {
       expect(r.counts).deep.equal([1, 1])
       expect(r.events).deep.equal(['join:P', 'leave:P', 'join:Q'])
       expect(r.handedEvents.filter((e) => e.includes('Bot'))).deep.equal([])
-      expect(r.memberEvents).deep.equal(['update:Bot2', 'leave:left'])
+      expect(r.memberEvents).deep.equal(['change:Bot2', 'leave:left'])
       expect(r.empty).toBe(true)
       expect(r.alone).deep.equal({ cause: { type: 'closed' }, closed: true })
     },

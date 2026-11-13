@@ -621,12 +621,12 @@ async function releaseRefs(roomId: string) {
   left.onDemand(() => {})
   const view = await Room.get(roomId)
   const departed = (await view.getParticipant(left.id))!
-  departed.onUpdate(() => {})
+  departed.onChange(() => {})
   await left.leave()
   // Listeners added to a member that left, then the view's own, all gone.
   departed.subscribe(() => {})
   departed.subscribeBinary(() => {})
-  departed.onUpdate(() => {})
+  departed.onChange(() => {})
   const offs = [view.subscribe(() => {}), view.subscribeBinary(() => {}), view.onJoin(() => {}), view.onLeave(() => {})]
   for (const off of offs) off()
 

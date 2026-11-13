@@ -276,16 +276,6 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
     callback: (member: RemoteParticipant<P, Pub>, cause: LeaveCause) => void,
     options?: { signal?: AbortSignal },
   ): () => void
-  /** Any participant's metadata changed. */
-  onParticipantUpdate(
-    callback: (member: RemoteParticipant<P, Pub>, meta: ReadonlyMeta<P>, prev: ReadonlyMeta<P>) => void,
-    options?: { signal?: AbortSignal },
-  ): () => void
-  /** The room's metadata was replaced (`Room.setMeta()`) or merged (`Room.setAttributes()`). */
-  onUpdate(
-    callback: (meta: ReadonlyMeta<M>, prev: ReadonlyMeta<M>) => void,
-    options?: { signal?: AbortSignal },
-  ): () => void
   /** A room-authored message arrived (`Room.announce()`), e.g. system notices. */
   onAnnounce(
     callback: (data: unknown, info: ChannelPublishInfo) => void,
@@ -297,7 +287,8 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
    *  that it can't miss than the server holds for it). */
   onClose(callback: () => void, options?: { signal?: AbortSignal }): () => void
 
-  /** Anything observable changed; pairs with `snapshot()`. */
+  /** Anything `snapshot()` shows changed: someone joined or left, a participant's `meta` or connection, the room's
+   *  `meta`, or the room closed. Pairs with `snapshot()`. */
   onChange(callback: () => void, options?: { signal?: AbortSignal }): () => void
   /** Immutable whole-room view, reference-stable until the next change. */
   snapshot(): RoomSnapshotView<M, P>
@@ -374,11 +365,8 @@ type RemoteParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknow
   /** Receive only this member's binary frames, optionally filtered to one track. */
   subscribeBinary(callback: MemberBinaryListener, options?: { track?: string | null; signal?: AbortSignal }): () => void
 
-  /** This member's metadata changed. */
-  onUpdate(
-    callback: (meta: ReadonlyMeta<P>, prev: ReadonlyMeta<P>) => void,
-    options?: { signal?: AbortSignal },
-  ): () => void
+  /** What this member shows changed: its `meta`, or whether it is connected. */
+  onChange(callback: () => void, options?: { signal?: AbortSignal }): () => void
   /** This member left the room. `cause` as on `Room`'s `onLeave`. */
   onLeave(callback: (cause: LeaveCause) => void, options?: { signal?: AbortSignal }): () => void
   /** This member's page can't be reached. The room keeps it until it's back, or it leaves with `'disconnected'`. */

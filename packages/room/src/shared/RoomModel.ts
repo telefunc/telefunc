@@ -259,7 +259,12 @@ class RoomModel {
     const entry = this.members.get(id)
     if (!entry || this.isConnected(entry) === (wasConnected ?? entry.meta.connected)) return
     this.bumpState()
+    this.memberChanged(entry)
     this.connectionChanged(entry)
+  }
+
+  private memberChanged(entry: MemberEntry): void {
+    for (const view of [...this.views]) view.memberChanged(entry)
   }
 
   private connectionChanged(entry: MemberEntry): void {
@@ -327,37 +332,30 @@ class RoomModel {
   }
 
   /** Applies updates in seq order (see `MemberMeta.apply`): the origin's echo (same seq) and events arriving behind a
-   *  fresher reconcile are absorbed. Only a listener builds the meta object per update. */
+   *  fresher reconcile are absorbed. */
   applyParticipantMeta(id: string, update: MemberMetaUpdate): boolean {
     this.record({ meta: { id, update } })
     const entry = this.members.get(id)
     // Before the first roster every member is unknown, and the first roster applies the changes after its own.
     if (!entry && !this._rosterKnown) getOrCreate(this.preRosterMeta, id, () => []).push(update)
     if (!entry) return false
-    const listening = 'connected' in update ? [] : [...this.views].filter((view) => view.listensToMeta(entry))
-    const prev = listening.length > 0 ? entry.meta.object : null
     const wasConnected = this.isConnected(entry)
     const applied = entry.meta.apply(update)
     if (applied === 'gap') this.owner.onMemberMetaGap?.()
     if (applied !== 'applied') return false
     this.owner.onMemberMeta?.(id, update)
     this.bumpState()
-    if (this.isConnected(entry) !== wasConnected) this.connectionChanged(entry)
-    if (prev === null) return true
-    const next = entry.meta.object
-    for (const view of listening) view.metaChanged(entry, next, prev)
+    const connectionChanged = this.isConnected(entry) !== wasConnected
+    // The room's record of a connection this side holds itself changes nothing it shows.
+    if (connectionChanged || !('connected' in update)) this.memberChanged(entry)
+    if (connectionChanged) this.connectionChanged(entry)
     return true
   }
 
-  /** Applies updates in `seq` order (see `RoomMetaState.apply`), so every model converges; returns the ones applied.
-   *  `prev` is this model's own previous meta, which can differ per model. */
+  /** Applies updates in `seq` order (see `RoomMetaState.apply`), so every model converges; returns the ones applied. */
   applyRoomUpdate(update: RoomMetaUpdate): RoomMetaUpdate[] {
-    const listening = [...this.views].filter((view) => view.listensToRoomMeta())
-    const prev = listening.length > 0 ? this.metaState.object : null
     const applied = this.metaState.apply(update)
-    if (applied.length === 0) return applied
-    this.bumpState()
-    if (prev !== null) for (const view of listening) view.roomMetaChanged(this.metaState.object, prev)
+    if (applied.length > 0) this.bumpState()
     return applied
   }
 
