@@ -201,8 +201,8 @@ type PublishOptions = {
   | {
       track: string
       /** On a `track`: a newer message replaces one no connection has taken yet, so a page that can't keep up skips to
-       *  the newest and the track's `info.seq` jumps over what it skipped. Without it, the message arrives. Each publish
-       *  says it: a track's publishes are all lossy or all not, and one of the other kind throws. Needs `track`. */
+       *  the newest and the track's `info.seq` jumps over what it skipped. Without it, the message arrives, after the
+       *  lossy ones published on its track before it. Needs `track`. */
       lossy: true
     }
 )
@@ -216,9 +216,8 @@ type BinaryPublishOptions = {
   /** Keep this as the track's last-write-wins retained frame. */
   retain?: boolean
   /** A newer frame replaces one no connection has taken yet, so a page that can't keep up skips to the newest and the
-   *  track's `info.seq` jumps over what it skipped. Without it, a page gets every frame, or leaves the room
-   *  (`'disconnected'`) where the server can't hold them. Each publish says it: a track's publishes are all lossy or
-   *  all not, and one of the other kind throws. Default: `false`. */
+   *  track's `info.seq` jumps over what it skipped. Without it, a page gets the frame, after the lossy ones published on
+   *  its track before it, or leaves the room (`'disconnected'`) where the server can't hold them. Default: `false`. */
   lossy?: boolean
 }
 

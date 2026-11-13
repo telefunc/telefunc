@@ -29,11 +29,11 @@ function orderedBody(serialized: string, info: OrderingInfo): PublishBody {
   return publishBody(serialized, info, null, false)
 }
 
-/** A track's frame as its lane carried it. One published with `lossy: true` gives way to a newer one of its track that no
- *  wire has taken. */
+/** A track's frame as its lane carried it, in its track's stream. One published with `lossy: true` gives way to a newer
+ *  lossy one of its track that no wire has taken; a plain one goes after the lossy one waiting before it. */
 function trackFrameBody(frame: BinaryFrame, framed: Uint8Array, info: OrderingInfo): PublishBody {
-  const lossyStream = frame.lossy ? encodeLaneKey({ kind: 'binary', member: frame.from, track: frame.track }) : null
-  return publishBody(framed, info, lossyStream, lossyStream !== null)
+  const stream = encodeLaneKey({ kind: 'binary', member: frame.from, track: frame.track })
+  return publishBody(framed, info, stream, frame.lossy)
 }
 
 /** A member's message as its lane carried it, stamped, and without the stamp, each made once for every client. */

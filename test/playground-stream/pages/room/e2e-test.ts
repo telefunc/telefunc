@@ -1436,15 +1436,16 @@ function testRoomSmallMemory() {
   )
   testRoomScenario<Record<string, string | null>>(
     'track-lossy',
-    "room: each publish on a track says lossy itself: one of the other kind than the track's throws at the call, and a message's lossy needs a track",
-    ({ omitted, text, lossyAfterPlain, noTrack, ...accepted }) => {
-      expect(accepted).deep.equal({ first: null, plain: null, defaultTrack: null })
-      for (const thrown of [omitted, text]) {
-        expect(thrown ?? 'no error').toContain(`The "cursor" track's publishes are lossy, and a track takes one kind`)
-      }
-      expect(lossyAfterPlain ?? 'no error').toContain(
-        `The "drawing" track's publishes aren't lossy, and a track takes one kind`,
-      )
+    "room: each publish on a track says lossy itself, a track takes publishes with and without it, and a message's lossy: true needs a track",
+    ({ noTrack, ...accepted }) => {
+      expect(accepted).deep.equal({
+        first: null,
+        omitted: null,
+        text: null,
+        plain: null,
+        lossyAfterPlain: null,
+        defaultTrack: null,
+      })
       expect(noTrack ?? 'no error').toContain('publish() options.lossy: true needs options.track')
     },
   )
@@ -1508,7 +1509,7 @@ function testRoomSmallMemory() {
       expect(r.drawing.map(({ n }) => n)).deep.equal(r.drawing.map((_, i) => i))
     },
   )
-  test('room: a page offline while a text track sent it more than maxMemory holds in lossy messages gets the newest one, with the jump in its info.seq, and stays in its room; a publish on the track without lossy is refused at the call, never skipped', async () => {
+  test('room: a page offline while a text track sent it more than maxMemory holds in lossy messages gets the newest one, with the jump in its info.seq, and stays in its room; a publish on the track without lossy is never skipped, and arrives after the lossy ones before it', async () => {
     if (!canCutWire()) return
     const roomId = await runServerActionOffline('text-cursor', 'roomTextCursor')
     const plain = (await getCleanupState())[`roomTextCursorPlain_${roomId}`]
@@ -1517,12 +1518,24 @@ function testRoomSmallMemory() {
         '#room-result',
       )
       expect(r).deep.include({ closed: false, myCause: null })
-      expect(r.cursor!.some(({ n }) => n === 'plain')).toBe(false)
-      expect(plain).toContain(`The "cursor" track's publishes are lossy, and a track takes one kind`)
-      const cursor = r.cursor as { n: number; seq: number }[]
-      expect(cursor.length).lessThan(17)
+      expect(plain).toBe('published')
+      const cursor = r.cursor!
+      expect(cursor.length).lessThan(18)
       expect(cursor.at(-1)?.n).toBe(15)
-      expect(cursor.map(({ n, seq }) => seq - n)).deep.equal(cursor.map(() => cursor[0]!.seq - cursor[0]!.n))
+      // The order they were published in: each arrives in it, its seq jumping by as many as were skipped before it.
+      const sent = [
+        -1,
+        ...Array.from({ length: 8 }, (_, n) => n),
+        'plain',
+        ...Array.from({ length: 8 }, (_, n) => n + 8),
+      ]
+      expect(cursor.map(({ n }) => n)).toContain('plain')
+      expect(cursor.map(({ n, seq }) => seq - sent.indexOf(n))).deep.equal(
+        cursor.map(() => cursor[0]!.seq - sent.indexOf(cursor[0]!.n)),
+      )
+      expect(cursor.map(({ n }) => sent.indexOf(n))).deep.equal(
+        cursor.map(({ n }) => sent.indexOf(n)).sort((a, b) => a - b),
+      )
     })
   })
   test('room: a page offline while reliable messages pass 7/8 of maxMemory, its publish waiting for a receipt, is let go: no message and no receipt crosses what it missed', async () => {

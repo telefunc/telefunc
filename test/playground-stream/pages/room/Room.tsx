@@ -2062,7 +2062,7 @@ function Room() {
         setResult(JSON.stringify({ seen, closed }))
       })}
 
-      {scenario('track-lossy', null, 'Each publish on a track says its lossy', async () => {
+      {scenario('track-lossy', null, 'Each publish on a track says its lossy, of either kind', async () => {
         const [, view] = await createRoom('track-lossy')
         const me = await view.join({ meta: { name: 'Me' } })
         const frame = new Uint8Array(1)

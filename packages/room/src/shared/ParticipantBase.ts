@@ -18,7 +18,6 @@ import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderSnapshot } from './arguments.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
 import { DEFAULT_TRACK, encodeBinaryFrame, encodeMessageFrame, publicTrack, type TrackKey } from './binary.js'
-import { assertUsage } from '../utils/assert.js'
 import type { MemberMetaUpdate, WholeMemberUpdate, RoomResult, InboxMessage } from './protocol.js'
 import type {
   BinaryPublishOptions,
@@ -62,8 +61,6 @@ abstract class ParticipantBase implements LocalParticipant {
   /** DMs held until the first `listen()` (`null` once flushed); an ack DM carries the resolver of its reply. */
   private pendingInbox: Fifo<HeldDm> | null = null
   private pendingInboxBytes = 0
-  /** Whether each track's publishes are lossy: a track takes one kind. */
-  private readonly trackLossy = new Map<TrackKey, boolean>()
 
   constructor({ participant, rewinds }: ParticipantBaseOptions) {
     this.id = participant.id
@@ -115,40 +112,18 @@ abstract class ParticipantBase implements LocalParticipant {
   protected abstract readonly _bugMessage: string
 
   protected encodeBinaryFrame(data: Uint8Array, options?: BinaryPublishOptions): Uint8Array {
-    return this.encodeOnTrack(encodeBinaryFrame, data, options)
+    return encodeBinaryFrame(this.id, data, options)
   }
 
   /** The frame of a `publish()` on a track. */
   protected encodeTextFrame(data: unknown, options: PublishOptions): Uint8Array {
-    return this.encodeOnTrack(encodeMessageFrame, data, options)
+    return encodeMessageFrame(this.id, data, options)
   }
 
-  /** Each publish says its own `lossy`, and a track's publishes are all of one kind. */
-  private encodeOnTrack<Payload>(
-    encode: (memberId: string, payload: Payload, opts: BinaryPublishOptions | undefined) => Uint8Array,
-    payload: Payload,
-    options: BinaryPublishOptions | undefined,
-  ): Uint8Array {
-    const framed = encode(this.id, payload, options)
-    const track = options?.track ?? DEFAULT_TRACK
-    const lossy = options?.lossy === true
-    const kind = this.trackLossy.get(track)
-    if (kind === undefined) this.trackLossy.set(track, lossy)
-    else if (kind !== lossy) {
-      const name = track === DEFAULT_TRACK ? 'default' : `"${track}"`
-      const [are, fix] = kind ? ['are', 'pass lossy: true to this one too'] : ["aren't", 'leave lossy out of this one']
-      assertUsage(
-        false,
-        `The ${name} track's publishes ${are} lossy, and a track takes one kind: ${fix}, or publish it on another track`,
-      )
-    }
-    return framed
-  }
-
-  /** The stream a newer frame of this member's lossy publish replaces an older one in on its way up; null for a publish
-   *  without `lossy`. */
-  protected lossyStreamOf(options: BinaryPublishOptions | undefined): string | null {
-    return options?.lossy === true ? `${this.id}:${options.track ?? DEFAULT_TRACK}` : null
+  /** The stream this member's publishes on `track` go up in, in order: a newer lossy one replaces an older one still
+   *  waiting, and a plain one goes after it. */
+  protected trackStreamOf(track: string | undefined): string {
+    return `${this.id}:${track ?? DEFAULT_TRACK}`
   }
 
   listen(callback: (data: unknown, from: Sender | null) => unknown, options?: ListenerOptions): () => void {

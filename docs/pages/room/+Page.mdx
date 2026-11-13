@@ -438,7 +438,7 @@ onCursorMove((position) => me.publishBinary(position, { track: 'cursor', lossy: 
 onStroke((stroke) => me.publishBinary(stroke, { track: 'drawing' })) // a viewer never misses one
 ```
 
-> A publish without `lossy` is `lossy: false`, also on a track whose earlier publishes had `lossy: true`, and there it throws: a track's publishes are all lossy or all not. Give the updates that may be skipped and the messages that must all arrive a track each.
+> Each publish says `lossy` itself. A publish without it is never skipped, and on a track it arrives after the lossy ones published before it, so a cursor's last position or a stroke's end can follow its lossy updates on the same track.
 
 With `lossy: true`, a viewer can skip a video frame that later frames depend on, so number the frames in `meta` (a frame replaced on its way to the server never gets an `info.seq`) and, at a gap, drop frames until the next keyframe and restart your decoder from it.
 

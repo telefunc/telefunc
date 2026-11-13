@@ -277,10 +277,8 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   /** @internal */
-  async _publishBinaryFramed(framed: Uint8Array, lossyStream: string | null): Promise<ChannelPublishAck> {
-    return roomResultValue<ChannelPublishAck>(
-      this.end._publishBinaryUnreported(framed, lossyStream, lossyStream !== null),
-    )
+  async _publishBinaryFramed(framed: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck> {
+    return roomResultValue<ChannelPublishAck>(this.end._publishBinaryUnreported(framed, stream, lossy))
   }
 
   /** @internal A local participant completed its voluntary leave. */
@@ -539,7 +537,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
 
   /** Each flavor's wire publish. */
   protected abstract _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck>
-  protected abstract _sendPublishBinary(framed: Uint8Array, lossyStream: string | null): Promise<ChannelPublishAck>
+  protected abstract _sendPublishBinary(framed: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck>
   /** The wire request of a flavor: the base's DMs and metadata writes, and the standalone's publish and leave. */
   protected abstract _request(request: MemberMutationRequest): Promise<unknown>
 
@@ -555,7 +553,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
   }
 
   private publishOnTrack(framed: Uint8Array, options: BinaryPublishOptions | undefined): Promise<ChannelPublishAck> {
-    return markHandled(this._sendPublishBinary(framed, this.lossyStreamOf(options)))
+    return markHandled(this._sendPublishBinary(framed, this.trackStreamOf(options?.track), options?.lossy === true))
   }
 
   send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
@@ -666,9 +664,9 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return await this.room._publishText(this.id, data, retain)
   }
 
-  protected async _sendPublishBinary(framed: Uint8Array, lossyStream: string | null): Promise<ChannelPublishAck> {
+  protected async _sendPublishBinary(framed: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this.room._publishBinaryFramed(framed, lossyStream)
+    return await this.room._publishBinaryFramed(framed, stream, lossy)
   }
 
   protected _request(request: MemberMutationRequest): Promise<unknown> {
@@ -760,11 +758,9 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     return (await this._request(request)) as ChannelPublishAck
   }
 
-  protected async _sendPublishBinary(framed: Uint8Array, lossyStream: string | null): Promise<ChannelPublishAck> {
+  protected async _sendPublishBinary(framed: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck> {
     this._assertActive()
-    return roomResultValue<ChannelPublishAck>(
-      this.end._publishBinaryUnreported(framed, lossyStream, lossyStream !== null),
-    )
+    return roomResultValue<ChannelPublishAck>(this.end._publishBinaryUnreported(framed, stream, lossy))
   }
 
   protected async _request(request: ParticipantStubRequest): Promise<unknown> {
