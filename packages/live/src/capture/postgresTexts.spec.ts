@@ -10,6 +10,7 @@ import { REQUEST_CONTEXT } from 'telefunc'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { liveDatabaseOf } from '../database.js'
 import { readLive } from '../liveQuery.js'
+import { emptyPGlite } from '../test/pglite.js'
 
 type Driver = {
   /** Runs a text of several statements: the driver's result. */
@@ -23,7 +24,7 @@ type Driver = {
 
 /** A PGlite holding `t`, through `driver`; `live`: wrapped by `liveDatabaseOf()`. */
 async function database(driver: string, live: boolean): Promise<Driver> {
-  const pglite = new PGlite()
+  const pglite = await emptyPGlite()
   await pglite.exec('create table t (id int primary key, x text)')
   const wrapped = <T extends object>(client: T) => (live && liveDatabaseOf(client as never, {}), client)
   if (driver === 'PGlite') {

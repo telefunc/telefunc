@@ -1,11 +1,11 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { PGlite } from '@electric-sql/pglite'
 import { sql, type SQL } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/pglite'
 import { integer, pgTable, text } from 'drizzle-orm/pg-core'
 import { REQUEST_CONTEXT } from 'telefunc'
 import { describe, expect, it } from 'vitest'
 import { liveDrizzle } from '@telefunc/live/drizzle'
+import { emptyPGlite } from '../test/pglite.js'
 
 // Only the SQL names these: each test creates `v` with the types it compares.
 const a = pgTable('a', { id: integer('id').primaryKey(), v: text('v') })
@@ -18,7 +18,7 @@ async function staleAfterInsert(
   filter: (table: typeof b) => SQL,
   { held, inserted }: { held: string; inserted: string },
 ) {
-  const pglite = new PGlite()
+  const pglite = await emptyPGlite()
   await pglite.exec(`create table a (id int primary key, v ${types.a});
     create table b (id int primary key, v ${types.b}); insert into b values (1, ${held})`)
   const db = liveDrizzle(drizzle(pglite))

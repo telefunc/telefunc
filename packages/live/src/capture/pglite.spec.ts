@@ -1,15 +1,13 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { PGlite } from '@electric-sql/pglite'
 import { sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/pglite'
 import { REQUEST_CONTEXT } from 'telefunc'
-import { afterAll, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { liveDrizzle } from '@telefunc/live/drizzle'
 import { liveDatabaseOf } from '../database.js'
 import { readLive } from '../liveQuery.js'
+import { emptyPGlite } from '../test/pglite.js'
 
 const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
 
@@ -33,7 +31,7 @@ async function written(pglite: PGlite, text: string): Promise<void> {
 describe('PGlite capture', () => {
   // The tenant sees only row 1, so a write captured with a widened `RETURNING` would update row 1 only.
   it('plans a write after the role change queued before it', async () => {
-    const pglite = new PGlite()
+    const pglite = await emptyPGlite()
     await pglite.exec(`create table items (id int primary key, value text);
       insert into items values (1, 'before'), (2, 'before');
       create role tenant;
@@ -58,7 +56,7 @@ describe('PGlite capture', () => {
   })
 
   it('announces nothing a ROLLBACK TO undid, past 10,000 changes', async () => {
-    const pglite = new PGlite()
+    const pglite = await emptyPGlite()
     await pglite.exec(
       'create table t (id int primary key, x int); insert into t select i, 0 from generate_series(1, 10002) i',
     )
@@ -80,7 +78,7 @@ describe('PGlite capture', () => {
 
 describe('two in-memory PGlite databases', () => {
   it("announce a write to one to the other's reads", async () => {
-    const [one, other] = [new PGlite(), new PGlite()]
+    const [one, other] = await Promise.all([emptyPGlite(), emptyPGlite()])
     for (const pglite of [one, other]) {
       await pglite.exec("create table t (id int primary key, x text); insert into t values (1, 'a')")
       liveDatabaseOf(pglite, {})
@@ -107,7 +105,7 @@ describe('identical live reads on one PGlite', () => {
 
   /** A wrapped PGlite counting the reads of `todos` that reach it; `hold()` delays the results of those after it. */
   async function counting() {
-    const pglite = new PGlite()
+    const pglite = await emptyPGlite()
     await pglite.exec(`
       create table todos (id int primary key, done bool);
       insert into todos values (1, false);
@@ -169,7 +167,7 @@ describe('a delete cascading two levels on PGlite', () => {
 
   /** A live PGlite with `SCHEMA`, the texts sent to it, and how many stale signals each of `reads` gets. */
   async function cascading(reads: string[]) {
-    const pglite = new PGlite()
+    const pglite = await emptyPGlite()
     await pglite.exec(SCHEMA)
     const sent: string[] = []
     const query = pglite.query.bind(pglite)
@@ -219,7 +217,7 @@ describe('a live read calling a SQL function of the app', () => {
     ['its SQL-standard body', (table: string) => `return (select count(*)::int from ${table})`],
   ])('watches the tables %s reads, as defined now', async (_, body) => {
     const define = (table: string) => `create or replace function n() returns int language sql stable ${body(table)}`
-    const pglite = new PGlite()
+    const pglite = await emptyPGlite()
     await pglite.exec(`create table a (id int); create table b (id int); create table c (id int); ${define('a')}`)
     liveDatabaseOf(pglite, {})
     const before = await watched(pglite, 'select n()')
@@ -239,7 +237,7 @@ describe('a live read calling a SQL function of the app', () => {
 
 describe("a live read of a view or a table whose policy calls the app's SQL function", () => {
   it('watches the tables a view calls it to read', async () => {
-    const pglite = new PGlite()
+    const pglite = await emptyPGlite()
     await pglite.exec(`
       create table source (id int);
       create table c (id int);
@@ -258,7 +256,7 @@ describe("a live read of a view or a table whose policy calls the app's SQL func
   })
 
   it('watches the tables a row-level security policy calls a security definer function to read', async () => {
-    const pglite = new PGlite()
+    const pglite = await emptyPGlite()
     await pglite.exec(`
       create table items (id int);
       create table flags (ok bool);
@@ -286,21 +284,17 @@ describe("a live read of a view or a table whose policy calls the app's SQL func
 })
 
 describe('identical live reads reaching a volatile function', () => {
-  const folder = mkdtempSync(join(tmpdir(), 'live-pglite-'))
-  afterAll(() => rmSync(folder, { recursive: true, force: true }))
   /** A PGlite holding `schema`, connected as `role` when given: the app's role from the start, as a `SET ROLE` would
    *  keep identical reads from sharing anyway. */
   async function database(schema: string, role: string | undefined): Promise<PGlite> {
-    if (!role) {
-      const pglite = new PGlite()
-      await pglite.exec(schema)
-      return pglite
-    }
-    const dataDir = mkdtempSync(join(folder, 'db-'))
-    const owner = new PGlite(dataDir)
+    const owner = await emptyPGlite()
     await owner.exec(schema)
+    if (!role) return owner
+    const loadDataDir = await owner.dumpDataDir('none')
     await owner.close()
-    return new PGlite(dataDir, { username: role })
+    const pglite = new PGlite({ loadDataDir, username: role })
+    await pglite.waitReady
+    return pglite
   }
 
   it.each([
@@ -342,7 +336,7 @@ describe('a read calling a SQL function of the app that writes', () => {
     ['through a view', 'select * from bumped'],
     ['through an aggregate', 'select total(id) from one'],
   ])('announces what the function writes, called %s', async (_, text) => {
-    const pglite = new PGlite()
+    const pglite = await emptyPGlite()
     await pglite.exec(`
       create table counters (id int primary key, n int);
       insert into counters values (1, 0);
@@ -368,7 +362,7 @@ describe('a live read reaching a PL/pgSQL function of the app that only reads', 
     ['called in the statement', 'select read_n() as n'],
     ['through a view', 'select * from readable'],
   ])('watches what it reads, %s', async (_, text) => {
-    const pglite = new PGlite()
+    const pglite = await emptyPGlite()
     await pglite.exec(`
       create table counters (id int primary key, n int);
       insert into counters values (1, 0);
@@ -384,7 +378,7 @@ describe('a live read reaching a PL/pgSQL function of the app that only reads', 
   })
 
   it('watches what it reads, through a row-level security policy calling a security definer one', async () => {
-    const pglite = new PGlite()
+    const pglite = await emptyPGlite()
     await pglite.exec(`
       create table members (uid int);
       insert into members values (1);
@@ -431,7 +425,7 @@ describe('a live read reaching a PL/pgSQL function of the app returning rows or 
   ])(
     'watches what it reads, returning %s, through a view and called in the statement',
     async (_, result, body, rows) => {
-      const pglite = new PGlite()
+      const pglite = await emptyPGlite()
       const parameters = result ? '()' : '(out item int)'
       await pglite.exec(`
       create table items (id int primary key, active bool);
@@ -456,7 +450,7 @@ describe('a live read calling an aggregate of the app', () => {
     ["Postgres's own", 'numeric_mul'],
     ['a SQL function reading no table', 'times'],
   ])('watches the table it aggregates, through %s as its transition function', async (_, transition) => {
-    const pglite = new PGlite()
+    const pglite = await emptyPGlite()
     await pglite.exec(`
       create table a (n numeric);
       create table c (id int);
@@ -474,7 +468,7 @@ describe('a live read calling an aggregate of the app', () => {
 
 describe('a transaction writing through a rule, a default and a trigger of the app', () => {
   it('stales the reads of what they and a trigger calling one write, not every read', async () => {
-    const pglite = new PGlite()
+    const pglite = await emptyPGlite()
     await pglite.exec(`
       create table t (id int primary key, x text);
       insert into t values (1, 'a'), (2, 'a');
