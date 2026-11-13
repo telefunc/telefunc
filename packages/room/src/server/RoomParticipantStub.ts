@@ -100,6 +100,8 @@ class RoomParticipantStub implements BroadcastEndOwner {
         return await participant._setAttributes(req.attrs)
       case 'req-dm':
         return await participant.send(req.to, req.data, req.ack ? { ack: true } : undefined)
+      case 'req-private':
+        return await participant._sendPrivate(req.to, req.field, req.data)
       case 'req-leave':
         return await participant.leave()
     }

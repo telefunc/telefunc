@@ -130,6 +130,8 @@ type RoomDmEnvelope = {
   fromDisconnected?: true
   data: unknown
   ackId?: string
+  /** A package's message: for the field of that name (`defineParticipantField()`), never the app's `listen()`. */
+  field?: string
 }
 
 /** A member's meta and connection at `seq`, whole, or as the write at `seq` changed them: a merge, with a key it
@@ -154,6 +156,7 @@ type MemberMutationRequest =
   | { __r: 'req-set-meta'; meta: ParticipantMeta }
   | { __r: 'req-set-attrs'; attrs: ParticipantMeta }
   | { __r: 'req-dm'; to: string; data: unknown; ack?: boolean }
+  | { __r: 'req-private'; to: string; field: string; data: unknown }
 
 /** Client→server requests on a room stub; `id` is the acting member. The room-wide text want rides the Broadcast
  *  subscription, which attaches again before `onOpen`. */

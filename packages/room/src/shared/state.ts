@@ -190,6 +190,8 @@ class RoomState {
   private readonly emptyListeners: Listeners<() => void> = new Listeners()
   private readonly closeListeners: Listeners<() => void> = new Listeners()
   private readonly announceListeners: Listeners<(data: unknown, info: ChannelPublishInfo) => void> = new Listeners()
+  /** The package fields' `onPrivate()` callbacks, by field. */
+  private readonly privateListeners = new Map<string, Listeners<(from: string, data: unknown) => void>>()
   private _listenerCount = 0
   /** Of them, the listeners the package fields attached (`attachFields()`). */
   private fieldListenerCount = 0
@@ -229,7 +231,16 @@ class RoomState {
   attachFields(room: ParticipantFieldView<unknown>['room']): () => void {
     const detaches = this.countedAsFields(() =>
       Array.from(participantFields(), ([name, { attach }]) =>
-        attach({ room, set: (id, value) => this.model.setField(id, name, value) }),
+        attach({
+          room,
+          set: (id, value) => this.model.setField(id, name, value),
+          onPrivate: (cb) =>
+            this.register(
+              getOrCreate(this.privateListeners, name, () => new Listeners()),
+              cb,
+              undefined,
+            ),
+        }),
       ),
     )
     return () => this.countedAsFields(() => detaches.forEach((detach) => detach()))
@@ -399,6 +410,12 @@ class RoomState {
     }
     this.fireAll(this.closeListeners)
     this.releaseAllListeners()
+  }
+
+  /** A package's message to a member this view holds, for its field's `onPrivate()` callbacks only. */
+  applyPrivate(field: string, from: string, data: unknown): void {
+    const listeners = this.privateListeners.get(field)
+    if (listeners) this.fireAll(listeners, from, data)
   }
 
   applyAnnounce(data: unknown, info: ChannelPublishInfo): void {

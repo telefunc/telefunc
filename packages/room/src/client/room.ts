@@ -327,6 +327,7 @@ class ClientRoom extends RoomStateView implements Omit<Room, 'getParticipants' |
         // Relayed from this member's private inbox: only its own stub ever receives it.
         const local = this.localParticipants.get(event.to)
         if (!local) return
+        if (event.field !== undefined) return this._state.applyPrivate(event.field, event.from, event.data)
         const msg = inboxMessageFromWire(event)
         // A room-authored DM has no sender to resolve.
         if (event.from !== '') {
@@ -550,6 +551,11 @@ abstract class ClientParticipantBase extends ParticipantBase {
     const request: MemberMutationRequest = { __r: 'req-dm', to, data }
     if (ack) request.ack = true
     return await this._request(request)
+  }
+
+  async _sendPrivate(to: string, field: string, data: unknown): Promise<void> {
+    this._assertActive()
+    await this._request({ __r: 'req-private', to, field, data })
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {

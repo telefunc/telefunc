@@ -63,6 +63,7 @@ export {
   onGetWatchedBinary,
   onPublishBufferAsServer,
   onSendReusingObjects,
+  onSendPackageMessage,
   onPublishRightAfterSubscribe,
   onOpenSlowGuardRoom,
   onConcurrentMetaWrites,
@@ -105,6 +106,7 @@ import { Buffer } from 'node:buffer'
 import { Abort, Broadcast, config, onBug } from 'telefunc'
 import { Room, roomConfig, type LeaveCause, type LocalParticipant } from '@telefunc/room'
 import { getRoomPlane } from '@telefunc/room/backend'
+import { sendPrivate } from '@telefunc/room/__internal'
 import { anyoneCanJoin } from '../../anyone-can-join'
 import { sleep } from '../../sleep'
 import { dropRedisSubscribers } from '../../redis'
@@ -768,6 +770,13 @@ async function onSendReusingObjects(roomId: string, memberId: string) {
   bytes.fill(0)
   await Promise.all([published, sent, announced, systemSent, metaSet, roomMetaSet, binary])
   return me.id
+}
+
+/** A package's message to the member, then the app's: the member's side gets the package's on another route. */
+async function onSendPackageMessage(roomId: string, memberId: string) {
+  const me = await Room.join(roomId, { meta: { name: 'Package' } })
+  await sendPrivate(me, memberId, 'e2e-field', 'from the package')
+  await me.send(memberId, 'from the app')
 }
 
 /** While another member's publishes commit, a view subscribes and a member publishes at once; a member DMs one who just

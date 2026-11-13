@@ -183,6 +183,8 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
         return await room.writes.mergeMemberMeta(this.requireMember(req.id), req.attrs)
       case 'req-dm':
         return await room.writes.sendDm(this.requireMember(req.id), req.to, req.data, req.ack === true)
+      case 'req-private':
+        return await room.writes.sendPrivate(this.requireMember(req.id), req.to, req.field, req.data)
     }
   }
 

@@ -102,6 +102,8 @@ abstract class ParticipantBase implements LocalParticipant {
   abstract publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>
   // The overloads live on `LocalParticipant`; this is their implementation signature.
   abstract send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any>
+  /** @internal A package's message to `to`, for its field `field` there (`sendPrivate()`). */
+  abstract _sendPrivate(to: string, field: string, data: unknown): Promise<void>
   abstract setMeta(meta: ParticipantMeta): Promise<void>
   abstract setAttributes(attributes: ParticipantMeta): Promise<void>
   abstract leave(): Promise<void>

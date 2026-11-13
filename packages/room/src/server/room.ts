@@ -351,6 +351,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
       return holder.relayDm(bodies, envelope)
     }
     if (holder === undefined) return
+    if (envelope.field !== undefined) return this.state.applyPrivate(envelope.field, envelope.from, envelope.data)
     const msg = inboxMessageFromWire(envelope)
     const { ackId } = envelope
     if (ackId === undefined) return holder._deliverMessage(msg)
@@ -710,6 +711,11 @@ class ServerLocalParticipant extends ParticipantBase {
   private async sendDm(to: string, data: unknown, ack: boolean): Promise<unknown> {
     this._assertActive()
     return await this.room.writes.sendDm(this.id, to, data, ack)
+  }
+
+  async _sendPrivate(to: string, field: string, data: unknown): Promise<void> {
+    this._assertActive()
+    await this.room.writes.sendPrivate(this.id, to, field, ownMessage(data))
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {

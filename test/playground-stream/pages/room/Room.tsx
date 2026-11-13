@@ -68,6 +68,7 @@ import {
   onGetWatchedBinary,
   onPublishBufferAsServer,
   onSendReusingObjects,
+  onSendPackageMessage,
   onPublishRightAfterSubscribe,
   onOpenSlowGuardRoom,
   onConcurrentMetaWrites,
@@ -595,6 +596,15 @@ function Room() {
               state.roomTags !== null,
           }
         })
+      })}
+
+      {scenario('package-message', 'Package messages', "A package's message to me, then the app's", async () => {
+        const [roomId, room] = await createRoom('package-message')
+        const me = await room.join({ meta: { name: 'Me' } })
+        const dms: unknown[] = []
+        me.listen((data) => dms.push(data))
+        await onSendPackageMessage(roomId, me.id)
+        await pollUntil(() => ({ result: { dms }, done: dms.includes('from the app') }))
       })}
 
       {scenario('right-after', 'Publish right after subscribe', 'Subscribe, then publish at once', async () => {

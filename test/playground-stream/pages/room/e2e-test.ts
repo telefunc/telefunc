@@ -309,6 +309,13 @@ function testRoom() {
       expect(r.roomTags).deep.equal(['x'])
     },
   )
+  testRoomScenario<{ dms: unknown[] }>(
+    'package-message',
+    "room: a package's private message never reaches the app's listen()",
+    (r) => {
+      expect(r.dms).deep.equal(['from the app'])
+    },
+  )
   testRoomScenario<{ seen: unknown[]; serverSeen: unknown[] }>(
     'right-after',
     'room: a publish right after subscribing, and a DM right after its recipient joined, arrive, each kind in call order',

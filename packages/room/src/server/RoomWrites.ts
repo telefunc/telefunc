@@ -209,6 +209,11 @@ class RoomWrites {
     return ack ? await this.sendDmAck(from, to, data) : await this.publishDm(from, to, data)
   }
 
+  /** A package's message, through the app's send guards as any DM. */
+  async sendPrivate(from: string, to: string, field: string, data: unknown): Promise<void> {
+    await this.publishDm(from, to, data, { field })
+  }
+
   private async sendDmAck(from: string, to: string, data: unknown): Promise<RoomAckReceipt> {
     const ackId = crypto.randomUUID()
     const acks = this.acks
@@ -217,7 +222,7 @@ class RoomWrites {
     const timer = unrefTimer(setTimeout(() => void this.settleTimedOut(from, ackId), ROOM_DM_ACK_TIMEOUT_MS))
     let receipt: RoomSendReceipt
     try {
-      receipt = await this.publishDm(from, to, data, ackId)
+      receipt = await this.publishDm(from, to, data, { ackId })
     } catch (err) {
       acks.delete(ackId)
       clearTimeout(timer)
@@ -240,7 +245,12 @@ class RoomWrites {
     this.acks.settle(ackId, reply)
   }
 
-  private async publishDm(from: string, to: string, data: unknown, ackId?: string): Promise<RoomSendReceipt> {
+  private async publishDm(
+    from: string,
+    to: string,
+    data: unknown,
+    { ackId, field }: { ackId?: string; field?: string } = {},
+  ): Promise<RoomSendReceipt> {
     if (this.model.closed) throw roomClosedError(this.incarnation.id)
     const target = await this.resolveMember(to)
     if (!target) throw participantGoneError(to)
@@ -250,6 +260,7 @@ class RoomWrites {
     if (onBeforeSend) await onBeforeSend(sender, target, data)
     const envelope: RoomDmEnvelope = { __r: 'dm', to, from, ...stamp, data }
     if (ackId) envelope.ackId = ackId
+    if (field !== undefined) envelope.field = field
     const requiredCellKeys = [memberCellKey(from), memberCellKey(to)]
     const committing = commitLane(inboxOf(this.incarnation.id, this.incarnation.inc, to), encodeRoomRecord(envelope), {
       requiredCellKeys,
