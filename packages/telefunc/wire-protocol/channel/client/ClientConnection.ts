@@ -60,8 +60,9 @@ interface MuxConnection {
     data: T,
     onQueued?: (seq: number) => void,
   ): number
-  /** Puts a newer frame in the place of the channel's frame `seq` while that still waits to go: false once it went. */
-  replaceWaiting<T>(channel: MuxChannel, seq: number, encodeFrame: SequencedEncoder<T>, data: T): boolean
+  /** Puts a newer frame in the place of the channel's frame `seq` while that still waits to go and is the channel's last,
+   *  and returns the bytes it adds over that one: null once it went, or once the channel sent a frame after it. */
+  replaceWaiting<T>(channel: MuxChannel, seq: number, encodeFrame: SequencedEncoder<T>, data: T): number | null
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status?: AckResultStatus): void
   sendAbort(channel: MuxChannel, abortValue: string): void
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
@@ -214,9 +215,10 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     return frame.byteLength
   }
 
-  replaceWaiting<T>(channel: MuxChannel, seq: number, encodeFrame: SequencedEncoder<T>, data: T): boolean {
+  replaceWaiting<T>(channel: MuxChannel, seq: number, encodeFrame: SequencedEncoder<T>, data: T): number | null {
     const record = this.channels.of(channel)
-    if (record === undefined) return false
+    // A frame sent after it must not arrive ahead of what takes its place.
+    if (record === undefined || seq !== record.replay.seq) return null
     const frame = encodeFrame(record.ix, data, seq)
     const maxFrameBytes = this.maxFrameBytesOf(channel)
     assertUsage(

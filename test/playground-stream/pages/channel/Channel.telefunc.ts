@@ -44,6 +44,7 @@ export {
   onChannelPublishesBehind,
   onChannelLossyTicker,
   onChannelLossySends,
+  onChannelLossyFromPage,
   onChannelAcksWaiting,
   onChannelsQueuedBeforeReturn,
   onChannelAcrossFlip,
@@ -964,6 +965,19 @@ async function onChannelLossySends(count: number) {
     return 'started'
   })
   return { channel: channel.client, control: control.client }
+}
+
+/** A channel the page sends on, some sends lossy: what the server reads, in order, as JSON in `cleanupState`. */
+async function onChannelLossyFromPage() {
+  const channel = new Channel<string, never>()
+  const key = `lossyFromPage_${channel.id}`
+  const read: string[] = []
+  cleanupState[key] = '[]'
+  channel.listen((value) => {
+    read.push(value)
+    cleanupState[key] = JSON.stringify(read)
+  })
+  return { channel: channel.client, channelId: channel.id }
 }
 
 /** Eight channels with 1 MiB queued on each before the telefunction returns. An acknowledged send to one answers how its

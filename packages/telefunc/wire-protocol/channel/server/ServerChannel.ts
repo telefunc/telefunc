@@ -16,6 +16,7 @@ import type {
   ChannelListener,
   ChannelBinaryListener,
 } from '../channel.js'
+import { LOSSY_WITH_ACK_TEXT } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 
 import type { IndexedPeer } from './IndexedPeer.js'
@@ -102,8 +103,6 @@ function heldAnswerBytes(result: string): number {
 const REFUSAL_BYTES = heldAnswerBytes('')
 const TOO_MANY_ANSWERS_TEXT =
   'Channel closed: more `{ ack: true }` sends and `publish()` calls wait for their answers than the server can hold even refusals for, see config.channel.maxMemory'
-const LOSSY_WITH_ACK_TEXT =
-  "`lossy` can't be combined with `ack: true`: a newer send may take this one's place, so it gets no answer. Send it without `lossy` to get its answer."
 
 /** Closing frames the channel produced while no page was attached; the next attach sends them. */
 type PendingEnd = { closeAck: boolean; closeRequest: boolean; abort: string | null; error: ErrorReason | null }
@@ -1047,10 +1046,6 @@ type Channel<ClientToServer = unknown, ServerToClient = unknown, TDefault extend
   ChannelShield<ClientToServer, ServerToClient> & {
     /** The client-side end of the channel — return this from a telefunction. */
     readonly client: ClientChannel<ClientToServer, ServerToClient, TDefault>
-    /** A send a newer `lossy` one may take the place of, while it waits to go: the client gets every one it keeps up
-     *  with, and the newest. It resolves at once. */
-    send(data: ChannelData<ServerToClient>, opts: { lossy: true; ack?: false }): Promise<void>
-    sendBinary(data: Uint8Array, opts: { lossy: true; ack?: false }): Promise<void>
   }
 // Public `Channel` constructor — proxies to the `ServerChannel` impl, but typed against the
 // `Channel` interface so internal `_method` members are hidden, and so the third generic

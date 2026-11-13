@@ -1025,6 +1025,51 @@ function testChannel(isDev: boolean, inDocker = false) {
     )
   })
 
+  /** What the server read of the page's lossy-sends channel, once the page opened it. */
+  async function readLossyFromPage(): Promise<string[]> {
+    const { lossyFromPageChannelId } = await getResult<{ lossyFromPageChannelId: string | null }>('#channel-state')
+    expect(lossyFromPageChannelId).not.toBe(null)
+    return JSON.parse((await getCleanupState())[`lossyFromPage_${lossyFromPageChannelId}`] ?? '[]')
+  }
+
+  test('channel: lossy sends from the page keep their order around plain ones, and all arrive on a link that keeps up', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-lossy-from-page')
+    const sent = Array.from({ length: 60 }, (_, i) => (i % 20 === 19 ? [String(i), `R${i}`] : [String(i)])).flat()
+    await autoRetry(async () => expect(await readLossyFromPage()).deep.equal([...sent, 'done']), { timeout: 20_000 })
+  })
+
+  if (!isDev) {
+    test('channel: lossy sends from the page while it is offline arrive after the reconnect, the plain ones in order and the newest last', async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await page.click('#channel-test-lossy-from-page-open')
+      await autoRetry(async () => expect(await readLossyFromPage()).deep.equal([]))
+
+      if (inDocker) stopProxy()
+      else await page.context().setOffline(true)
+      await page.waitForTimeout(3000)
+      await page.click('#channel-test-lossy-from-page-send')
+      const reconnectSignalPromise = waitForTransportReconnectSignal()
+      if (inDocker) startProxy()
+      else await page.context().setOffline(false)
+      await reconnectSignalPromise
+
+      let read: string[] = []
+      await autoRetry(async () => {
+        read = await readLossyFromPage()
+        expect(read.at(-1)).toBe('L4')
+      })
+      // A page that noticed it was offline replaced L1 with L2 and L3 with L4; R1 kept L2 from passing it.
+      console.log(`[lossy-from-page] the server read ${JSON.stringify(read)}`)
+      const sent = ['L1', 'L2', 'R1', 'L3', 'L4']
+      expect(read.filter((value) => value.startsWith('R'))).deep.equal(['R1'])
+      // Each once, in the order sent.
+      const order = read.map((value) => sent.indexOf(value))
+      expect(order).not.include(-1)
+      expect(order).deep.equal([...new Set(order)].sort((a, b) => a - b))
+    })
+  }
+
   // 100 messages of 4 KiB in one go, each way, on a link that keeps up.
   test('channel: a lossy broadcast on a link that keeps up delivers every message of a burst, from the server and from the page', async () => {
     await navigate(`${getServerUrl()}/channel`)

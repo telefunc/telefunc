@@ -77,22 +77,25 @@ class SendGate {
     this.waitForHeadroom({ frame, channelIx: record.ix, seq, waitingSince: performance.now() })
   }
 
-  /** Puts `frame` in the place of channel `ix`'s frame `seq` while that waits and the page is behind: false once it went,
-   *  as the wire then has it, or while the link keeps up. A page with no wire has no link to keep up with. */
-  replaceWaiting(ix: number, seq: number, frame: Uint8Array<ArrayBuffer>): boolean {
+  /** Puts `frame` in the place of channel `ix`'s frame `seq` while that waits and the page is behind, and returns the
+   *  bytes it adds over that one: null once it went, as the wire then has it, or while the link keeps up. A page with no
+   *  wire has no link to keep up with. */
+  replaceWaiting(ix: number, seq: number, frame: Uint8Array<ArrayBuffer>): number | null {
     for (const entry of this.waitingForHeadroom) {
       if (entry.channelIx !== ix || entry.seq !== seq) continue
-      if (!this.isBehind(this.waitingForHeadroom.peek()!)) return false
-      this.waitingForHeadroomBytes += frame.byteLength - entry.frame.byteLength
+      if (!this.isBehind(this.waitingForHeadroom.peek()!)) return null
+      const added = frame.byteLength - entry.frame.byteLength
+      this.waitingForHeadroomBytes += added
       entry.frame = frame
-      return true
+      return added
     }
     const sendBuffer = this.settleQueue()
     const held = sendBuffer.find((entry) => entry.channelIx === ix && entry.seq === seq)
-    if (held === undefined) return false
-    if (!this.owner.reconnecting && !this.isBehind(sendBuffer.find((entry) => entry.channelIx === ix)!)) return false
+    if (held === undefined) return null
+    if (!this.owner.reconnecting && !this.isBehind(sendBuffer.find((entry) => entry.channelIx === ix)!)) return null
+    const added = frame.byteLength - held.frame.byteLength
     held.frame = frame
-    return true
+    return added
   }
 
   /** Sends a frame without a seq, or holds it as `send` does: a late WINDOW is still right, its limit cumulative. */

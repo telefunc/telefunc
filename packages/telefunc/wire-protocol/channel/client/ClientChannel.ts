@@ -11,6 +11,7 @@ import type {
   ChannelListener,
   ChannelBinaryListener,
 } from '../channel.js'
+import { LOSSY_WITH_ACK_TEXT } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -26,7 +27,7 @@ import {
   type SequencedEncoder,
 } from '../../wire/frame.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
-import { assert } from '../../../utils/assert.js'
+import { assert, assertUsage } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
@@ -98,6 +99,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   readonly _attach: ChannelAttach
   /** This page's newest lossy send, which may still wait to go, and what it settles with. */
   private newestLossy: { seq: number; settled: Promise<any> } | null = null
+  /** Sends this page's lossy send that waits for the server to grant more credit; a newer one takes its place. */
+  private heldLossy: (() => void) | null = null
 
   constructor({
     channelId,
@@ -160,9 +163,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   send(data: ChannelData<ClientToServer>): Promise<void>
   send(data: ChannelData<ClientToServer>, opts: { ack: true }): Promise<ChannelAck<ClientToServer>>
   send(data: ChannelData<ClientToServer>, opts: { ack: false }): Promise<void>
+  send(data: ChannelData<ClientToServer>, opts: { lossy: true; ack?: false }): Promise<void>
   send(
     data: ChannelData<ClientToServer>,
-    opts?: { ack?: boolean },
+    opts?: { ack?: boolean; lossy?: boolean },
   ): Promise<ChannelAck<ClientToServer>> | Promise<void> {
     const t0 = performance.now()
     try {
@@ -176,9 +180,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   private sendData(
     data: ChannelData<ClientToServer>,
-    opts?: { ack?: boolean },
+    opts?: { ack?: boolean; lossy?: boolean },
   ): void | Promise<ChannelAck<ClientToServer>> | Promise<void> {
     if (this.stopped) throw new ChannelClosedError()
+    if (opts?.lossy) {
+      assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
+      return this.sendNewest(encode.text, stringify(data))
+    }
+    this.flushLossy()
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ack === true)
     const serialized = stringify(data)
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
@@ -192,7 +201,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   sendBinary(data: Uint8Array): Promise<void>
   sendBinary(data: Uint8Array, opts: { ack: true }): Promise<unknown>
   sendBinary(data: Uint8Array, opts: { ack: false }): Promise<void>
-  sendBinary(data: Uint8Array, opts?: { ack?: boolean }): Promise<unknown> | Promise<void> {
+  sendBinary(data: Uint8Array, opts: { lossy: true; ack?: false }): Promise<void>
+  sendBinary(data: Uint8Array, opts?: { ack?: boolean; lossy?: boolean }): Promise<unknown> | Promise<void> {
     const t0 = performance.now()
     try {
       const ret = this._sendBinary(data, opts) ?? Promise.resolve()
@@ -203,8 +213,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  _sendBinary(data: Uint8Array, opts?: { ack?: boolean }): void | Promise<unknown> | Promise<void> {
+  _sendBinary(data: Uint8Array, opts?: { ack?: boolean; lossy?: boolean }): void | Promise<unknown> | Promise<void> {
     if (this.stopped) throw new ChannelClosedError()
+    if (opts?.lossy) {
+      assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
+      return this.sendNewest(encode.binary, data)
+    }
+    this.flushLossy()
     // Ack-bearing path bypasses credit; see `sendData` for rationale.
     if (opts?.ack === true) {
       return this.sendAckReq<unknown, Uint8Array>(encode.binaryAckReq, data)
@@ -236,6 +251,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       timeout,
       peer: 'expected',
       send: () => {
+        this.flushLossy()
         this.stopped = true
         this.connection.sendCloseRequest(this, timeout)
       },
@@ -370,9 +386,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.WINDOW:
         this.sendCredit.onPeerByteWindow(frame.bytes)
+        this.lossyMayGo()
         return
       case TAG.MSG_WINDOW:
         this.sendCredit.onPeerMessageWindow(frame.count)
+        this.lossyMayGo()
         return
       case TAG.BDP_PING:
         this.connection.sendBdpPingAck(this, {
@@ -462,19 +480,67 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.connection.sendAckRes(this, seq, answer)
   }
 
-  /** A send a newer one may replace: once the uplink is behind, the newest lossy send that still waits to go takes
-   *  `data` in its place, and both settle as it does. Else `start` sends it and tells its seq. */
+  /** A send a newer one may replace: once the uplink is behind, the newest lossy send that still waits to go, with
+   *  nothing sent after it, takes `data` in its place, and both settle as it does; `replaced` gets the bytes that adds.
+   *  Else `start` sends it and tells its seq. */
   protected sendLossy<D, R>(
     encodeFrame: SequencedEncoder<D>,
     data: D,
     start: (onQueued: (seq: number) => void) => Promise<R>,
+    replaced?: (addedBytes: number) => void,
   ): Promise<R> {
     const newest = this.newestLossy
-    if (newest !== null && this.connection.replaceWaiting(this, newest.seq, encodeFrame, data)) return newest.settled
+    if (newest !== null) {
+      const added = this.connection.replaceWaiting(this, newest.seq, encodeFrame, data)
+      if (added !== null) {
+        replaced?.(added)
+        return newest.settled
+      }
+    }
     let seq = 0
     const settled = start((queued) => (seq = queued))
     this.newestLossy = { seq, settled }
     return settled
+  }
+
+  /** A send of which only the newest matters. It goes, or takes the place of the newest that still waits for a link
+   *  that is behind; while the server grants no more credit, it waits as the newest. */
+  private sendNewest<D extends string | Uint8Array>(encodeFrame: SequencedEncoder<D>, data: D): Promise<void> {
+    if (this.sendCredit.isOutOfCredit()) {
+      // The caller may write into its bytes once `sendBinary` returned.
+      const copy = (typeof data === 'string' ? data : new Uint8Array(data)) as D
+      this.heldLossy = () => void this.handLossy(encodeFrame, copy)
+      return Promise.resolve()
+    }
+    this.heldLossy = null
+    return this.handLossy(encodeFrame, data)
+  }
+
+  /** Counts a lossy send against the server's credit, and nothing waits on that: a replacement counts the bytes it
+   *  adds. */
+  private handLossy<D>(encodeFrame: SequencedEncoder<D>, data: D): Promise<void> {
+    return this.sendLossy(
+      encodeFrame,
+      data,
+      (onQueued) => {
+        this.sendCredit.count(this.connection.sendSequenced(this, 'data', encodeFrame, data, onQueued))
+        return Promise.resolve()
+      },
+      (added) => this.sendCredit.refund(-added, 0),
+    )
+  }
+
+  /** The lossy send held for credit goes now, ahead of what the page sends next. */
+  private flushLossy(): void {
+    const send = this.heldLossy
+    if (send === null) return
+    this.heldLossy = null
+    send()
+  }
+
+  /** The server granted more: the lossy send held for credit goes, where it no longer has to wait. */
+  private lossyMayGo(): void {
+    if (this.heldLossy !== null && !this.sendCredit.isOutOfCredit()) this.flushLossy()
   }
 
   /** An ack-bearing send: what refuses it throws here, as it does for a send without an ack. */
@@ -491,6 +557,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   _end(err?: Error): void {
     if (this.lifecycle.ended) return
     this.lifecycle.forcedTermination(err, () => {
+      this.heldLossy = null
       this.listeners.clear()
       this.binaryListeners.clear()
       this.sendCredit.shutdown(err)

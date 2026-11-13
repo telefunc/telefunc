@@ -103,14 +103,30 @@ async function* readLengthPrefixed(stream: ReadableStream<Uint8Array>): AsyncGen
   }
 }
 
+/** What the page sends: `first` on wire 1, `whileReconnecting` once it went; the server then has seqs through `lastSeq`. */
+type Sends = {
+  first: (conn: ClientConnection, channel: never) => void
+  whileReconnecting: (conn: ClientConnection, channel: never) => void
+  lastSeq: number
+}
+
+const plainSends: Sends = {
+  first: (conn, channel) => void conn.sendSequenced(channel, 'data', encode.text, stringify(1)),
+  whileReconnecting: (conn, channel) => void conn.sendSequenced(channel, 'data', encode.text, stringify(2)),
+  lastSeq: 2,
+}
+
 /**
  * Connect, send seq 1, sever the wire (optionally losing seq 1 in flight), send seq 2 while
  * reconnecting, then let the reconnect settle. Returns what the server channel actually received.
  */
-async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wire2Upstream: number[] }> {
-  const received: number[] = []
-  const serverCh = new ServerChannel<(n: number) => void, never>()
-  serverCh.listen((n) => void received.push(n))
+async function runScenario(
+  loseSeq1: boolean,
+  sends: Sends = plainSends,
+): Promise<{ received: unknown[]; wire2Upstream: number[] }> {
+  const received: unknown[] = []
+  const serverCh = new ServerChannel<(value: unknown) => void, never>()
+  serverCh.listen((value) => void received.push(value))
 
   const upstreamSeqsByPost: number[][] = []
   const upstreamEnded: boolean[] = []
@@ -213,7 +229,7 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
   expect(wire).toBe(1)
 
   // 2) Send seq 1 — goes onto wire 1's streamRequest (delivered, or "lost" in flight).
-  conn.sendSequenced(channel as never, 'data', encode.text, stringify(1))
+  sends.first(conn, channel as never)
   await until(() => expect(upstreamSeqsByPost[1]).toContain(1)) // client always emits seq 1 on wire 1
 
   // 3) Sever wire 1 → client reconnects. From here upstream is delivered to the server.
@@ -222,10 +238,10 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
   await until(() => expect(upstreamEnded[1]).toBe(true))
 
   // 4) Send seq 2 while reconnecting → buffered, picked up by the reconnect.
-  conn.sendSequenced(channel as never, 'data', encode.text, stringify(2))
+  sends.whileReconnecting(conn, channel as never)
 
   // 5) Wait out the reconnect (CHANNEL_RECONNECT_INITIAL_DELAY_MS = 500ms) until the server has taken seq 2.
-  await until(() => expect(serverCh._lastClientSeq).toBe(2))
+  await until(() => expect(serverCh._lastClientSeq).toBe(sends.lastSeq))
   expect(wire).toBe(2)
 
   return { received, wire2Upstream: upstreamSeqsByPost[2] ?? [] }
@@ -245,5 +261,30 @@ describe('SSE reconnect preserves client→server seq order (exactly-once)', () 
     const { received, wire2Upstream } = await runScenario(/* loseSeq1 */ true)
     expect(wire2Upstream).toContain(1) // client replays the lost seq 1 on the new wire…
     expect(received).toEqual([1, 2]) // …and the server now accepts it (no spurious dup-drop)
+  })
+})
+
+describe('SSE reconnect with lossy sends from the page', () => {
+  test('one lost with the wire goes again; while the page reconnects, a newer one takes the place of the one before it, up to a plain send', async () => {
+    // What `ClientChannel.sendLossy` does: the newest lossy frame is replaced where it still waits and nothing was sent
+    // after it, else the send takes the next seq.
+    let newest = 0
+    const lossy = (conn: ClientConnection, channel: never, value: string) => {
+      if (conn.replaceWaiting(channel, newest, encode.text, stringify(value)) !== null) return
+      conn.sendSequenced(channel, 'data', encode.text, stringify(value), (seq) => (newest = seq))
+    }
+    const { received } = await runScenario(/* loseSeq1 */ true, {
+      first: (conn, channel) => lossy(conn, channel, 'L1'),
+      whileReconnecting: (conn, channel) => {
+        lossy(conn, channel, 'L2')
+        lossy(conn, channel, 'L3')
+        conn.sendSequenced(channel, 'data', encode.text, stringify('R'))
+        lossy(conn, channel, 'L4')
+        lossy(conn, channel, 'L5')
+      },
+      lastSeq: 4,
+    })
+    // L1 went with wire 1, so L2 couldn't take its place; R kept L4 from taking L3's.
+    expect(received).toEqual(['L1', 'L3', 'R', 'L5'])
   })
 })

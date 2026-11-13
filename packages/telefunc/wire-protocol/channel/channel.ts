@@ -1,4 +1,4 @@
-export { makePublishInfo }
+export { makePublishInfo, LOSSY_WITH_ACK_TEXT }
 export type {
   ChannelBase,
   ChannelShield,
@@ -36,6 +36,10 @@ type ChannelPublishAck = ChannelPublishInfo & { meta?: ChannelPublishMeta }
 function makePublishInfo(key: string, seq: number, timestamp: number): ChannelPublishInfo {
   return { key, seq, timestamp }
 }
+
+/** What `send(data, { lossy: true, ack: true })` throws, on either end. */
+const LOSSY_WITH_ACK_TEXT =
+  "`lossy` can't be combined with `ack: true`: a newer send may take this one's place, so it gets no answer. Send it without `lossy` to get its answer."
 type ChannelListenReturn<T> = [T] extends [never]
   ? void
   : T extends (data: any) => infer R
@@ -72,9 +76,13 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
   send(data: ChannelData<TOut>, opts: { ack: true }): Promise<ChannelAck<TOut>>
   /** Per-send ack opt-out — always returns `Promise<void>`. */
   send(data: ChannelData<TOut>, opts: { ack: false }): Promise<void>
+  /** A send a newer `lossy` one may take the place of, while it waits to go: the other end gets every one it keeps up
+   *  with, and the newest. It resolves at once. */
+  send(data: ChannelData<TOut>, opts: { lossy: true; ack?: false }): Promise<void>
   sendBinary(data: Uint8Array): Promise<void>
   sendBinary(data: Uint8Array, opts: { ack: true }): Promise<unknown>
   sendBinary(data: Uint8Array, opts: { ack: false }): Promise<void>
+  sendBinary(data: Uint8Array, opts: { lossy: true; ack?: false }): Promise<void>
   /** Receive messages. Return a value to ack the sender. Returns an unlisten function. */
   listen(callback: ChannelListener<TIn>, options?: { signal?: AbortSignal }): () => void
   listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): () => void
