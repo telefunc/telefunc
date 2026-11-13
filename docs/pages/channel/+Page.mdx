@@ -109,8 +109,8 @@ channel.send('Hello!')
 | `opened` | Promise that resolves on open; rejects if the channel ends before opening. |
 | `closed` | Promise that resolves on clean close; rejects on failure. |
 | `messages({ signal })` | Iterate `{ type: 'text' \| 'binary', data }` messages; abort to stop. |
-| `onOpen(cb)` | Called when the channel opens. |
-| `onClose(cb)` | Called when the channel closes. |
+| `onOpen(cb)` | Called when the channel opens. Returns a function that removes the callback. |
+| `onClose(cb)` | Called when the channel closes. Returns a function that removes the callback. |
 | `close()` | Close gracefully. |
 | `abort(value?)` | Terminate immediately. |
 
@@ -563,8 +563,8 @@ price.subscribe((value, info) => showPrice(value, info.seq))
 | `subscribe(cb, { signal }?)` | Receive `(data, info)`. Returns an unsubscribe function. |
 | `publishBinary(data)` | Publish raw binary to every subscriber. Returns a receipt. |
 | `subscribeBinary(cb, { signal }?)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function. |
-| `onOpen(cb)` | Called when the channel opens. |
-| `onClose(cb)` | Called when the channel closes. |
+| `onOpen(cb)` | Called when the channel opens. Returns a function that removes the callback. |
+| `onClose(cb)` | Called when the channel closes. Returns a function that removes the callback. |
 | `close()` | Close gracefully. |
 | `abort(abortValue?)` | Terminate immediately. |
 
