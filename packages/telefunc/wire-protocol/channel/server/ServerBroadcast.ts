@@ -34,7 +34,6 @@ import { TAG } from '../../wire/tags.js'
 import type { ChannelDataFrame } from '../../wire/frame.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { PublishBody } from './PublishBody.js'
-import { CHANNEL_RECONNECT_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import type { AttachState } from '../../wire/payloads.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
@@ -210,8 +209,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     if (this._phase === 'ended') return
     if (this.lossy) return this.forwardLossy(body)
     this.lastPeer!.sendPublish(body)
-    const share = this.share()
-    if (this.heldBytes > share) this.shed(share, this.owner)
+    const most = maxPendingBytesOf()
+    if (this.heldBytes > most) this.shed(most, this.owner)
   }
 
   /** A page that keeps up gets every publish. One that is behind gets the newest once it catches up, so that older ones
@@ -293,15 +292,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     if (!(holder instanceof ServerBroadcast) || !holder.lossy || holder.key !== this.key) return
     if (holder.owner !== this.owner) return
     if (binary ? holder.peerSubscribedBinary : holder.peerSubscribedText) holder.letWaitingGo()
-  }
-
-  /** What it may hold: 60 s of what its page takes, at least 64 MiB, within what any channel may; that most before its
-   *  page's rate is measured. */
-  private share(): number {
-    const perMs = this.peer?.sender.queue.drainRate() ?? 0
-    const most = maxPendingBytesOf()
-    if (perMs === 0) return most
-    return Math.min(most, Math.max(CREDIT_WINDOW_MAX_BYTES, perMs * CHANNEL_RECONNECT_TIMEOUT_MS))
   }
 
   /** How many of its newest publishes no wire has: all of them while it has no wire. */

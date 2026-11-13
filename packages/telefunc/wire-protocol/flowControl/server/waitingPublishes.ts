@@ -12,8 +12,6 @@ interface WireQueue {
   dropWaitingPublishes(ix: number, count: number): void
   /** Drops what of channel `ix` waits here from its oldest publish on, receipts too. */
   dropWaitingFromPublish(ix: number): void
-  /** The rate the page takes data at, in bytes per ms, 0 before one was measured. */
-  drainRate(): number
 }
 
 function isHeadOf(frame: Uint8Array, ix: number): boolean {

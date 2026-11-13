@@ -290,7 +290,7 @@ So fire-and-forget can leave a gap: the client never gets a `send()` the server 
 
 To fix it, `await` each `send()` before the next, as in the clock example above, or send slower.
 
-A publish waits for no subscriber, so a `BroadcastChannel` has limits of its own. While its client is connected, the server holds up to as much as that client downloads in a minute: at least 64 MiB, at most the default per-channel limit of 320 MiB. While its client is away, the server holds up to that limit. Past that, the channel closes with `ChannelOverflowError`, unless it's lossy (see <Link href="#broadcast" />).
+A publish waits for no subscriber, so a `BroadcastChannel` refuses none: the server holds up to the same per-channel limit for its client, within `maxMemory`, and past that the channel closes with `ChannelOverflowError`, unless it's lossy (see <Link href="#broadcast" />).
 
 > On a slow uplink, a client's large message delays what that client sends after it, on all its channels, until the large message has gone up. A 4 MiB `sendBinary()` at 1 MiB/s delays them by about 3 s. Only later messages wait, and what the server sends keeps arriving. To keep later messages quick, split the large one into smaller sends.
 

@@ -25,7 +25,6 @@ import { getChannelMux } from './ChannelMux.js'
 import type { ReconcileOutcome, ServerTransport } from './ChannelMux.js'
 import { encode } from '../../wire/frame.js'
 import { TAG, passesData } from '../../wire/tags.js'
-import { DrainRate } from '../../flowControl/DrainRate.js'
 import {
   countWaitingPublishes,
   droppingFromPublish,
@@ -77,9 +76,6 @@ class EventStream implements WireQueue {
   private headStarted: Uint8Array<ArrayBuffer> | null = null
   /** Whether the stream asks for more. */
   private takes: boolean
-  /** The rate the page takes what waits, and when it last took some; null while nothing waits. */
-  private readonly drain = new DrainRate()
-  private tookAt: number | null = null
 
   constructor({ useNodeStream, onCancel }: EventStreamOptions) {
     // A Web stream asks from inside `enqueue`: an ask waits, so that no push runs inside another.
@@ -114,7 +110,6 @@ class EventStream implements WireQueue {
       this.startEvent(frame)
       return
     }
-    this.tookAt ??= performance.now()
     this.waiting.push(frame)
     this.waitingBytes += eventBytes(frame)
   }
@@ -144,10 +139,6 @@ class EventStream implements WireQueue {
     })
   }
 
-  drainRate(): number {
-    return this.drain.rate
-  }
-
   /** Past a wire only lost, what waits is dropped: the page's reconnect gets it from its channels' replay, and it could
    *  wait here for as long as the socket stays open taking nothing. */
   close({ permanent }: { permanent: boolean }): void {
@@ -165,47 +156,38 @@ class EventStream implements WireQueue {
   /** Hands the stream the data that waits, as far as it asks. */
   private handWaiting(): void {
     this.takes = true
-    let bytes = this.current === null ? 0 : this.pushChunks()
+    if (this.current !== null) this.pushChunks()
     while (this.takes && this.waiting.length > 0) {
       const frame = this.waiting.shift()!
       this.waitingBytes -= eventBytes(frame)
-      bytes += this.startEvent(frame)
+      this.startEvent(frame)
     }
-    if (this.tookAt === null) return
-    const now = performance.now()
-    this.drain.spanned((bytes * 3) / 4, now - this.tookAt)
-    this.tookAt = this.current !== null || this.waiting.length > 0 ? now : null
   }
 
-  /** Starts `frame`'s event and returns the bytes that went. */
-  private startEvent(frame: Uint8Array<ArrayBuffer>): number {
+  private startEvent(frame: Uint8Array<ArrayBuffer>): void {
     if (frame[0] === TAG.PUBLISH_TO) this.headStarted = frame
     this.current = { frame, offset: 0 }
-    return this.pushChunks()
+    this.pushChunks()
   }
 
-  /** Pushes the current event's next chunks, at least one, as far as the stream asks, and returns their bytes. What passes
-   *  goes as the event ends. */
-  private pushChunks(): number {
+  /** Pushes the current event's next chunks, at least one, as far as the stream asks. What passes goes as the event
+   *  ends. */
+  private pushChunks(): void {
     const current = this.current!
     const { frame } = current
-    let bytes = 0
     do {
       const start = current.offset
       const end = Math.min(frame.byteLength, start + SSE_EVENT_SLICE_BYTES)
-      const chunk = encodeChunk(frame, start, end)
-      this.takes = this.stream.push(chunk)
+      this.takes = this.stream.push(encodeChunk(frame, start, end))
       current.offset = end
-      bytes += chunk.byteLength
     } while (this.takes && current.offset < frame.byteLength)
-    if (current.offset < frame.byteLength) return bytes
+    if (current.offset < frame.byteLength) return
     this.current = null
     while (this.passing.length > 0) {
       const passing = this.passing.shift()!
       this.waitingBytes -= eventBytes(passing)
       this.takes = this.stream.push(encodeChunk(passing, 0, passing.byteLength))
     }
-    return bytes
   }
 }
 

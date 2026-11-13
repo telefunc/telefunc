@@ -96,10 +96,6 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     this.sender.dropWaiting(droppingFromPublish(ix))
   }
 
-  drainRate(): number {
-    return this.drain.rate || this.pieceRate.carried
-  }
-
   /** The rate sends go by, which a probe gives before any data does. */
   private pathRate(): number {
     return this.drain.rate || this.pieceRate.fastest
