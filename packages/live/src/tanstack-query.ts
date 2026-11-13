@@ -1,6 +1,6 @@
 export { live }
 
-import { hashKey, type QueryClient, type QueryFunctionContext, type QueryKey } from '@tanstack/query-core'
+import type { Query, QueryClient, QueryFunctionContext, QueryKey } from '@tanstack/query-core'
 import { withContext } from 'telefunc/client'
 import { assertUsage } from './assert.js'
 import type { Live } from './live.js'
@@ -8,8 +8,9 @@ import { processWide } from './processWide.js'
 import { Refetcher } from './refetcher.js'
 import { closeSubscription, subscriptionOf, type Subscription } from './wire/shared.js'
 
-/** The live queries of one `QueryClient`, by `hashKey(queryKey)`, and how to stop watching its cache. Kept per
- *  client, not per `live()` call: `queryFn: live(onGetTodos)` makes a new function on each render. */
+/** The live queries of one `QueryClient`, by `queryHash` (the cache's own key, made by its `queryKeyHashFn`), and how
+ *  to stop watching its cache. Kept per client, not per `live()` call: `queryFn: live(onGetTodos)` makes a new
+ *  function on each render. */
 type Registry = { queries: Map<string, Watched>; stopWatchingCache: (() => void) | undefined }
 /** A query's `Live` (holding it keeps its channel open) and when to refetch it. */
 type Watched = { value: Live<unknown> | undefined; refetcher: Refetcher }
@@ -47,25 +48,27 @@ function live<T, TArgs extends unknown[]>(
       void subscription.close()
       throw abortError()
     }
-    bind(context.client, context.queryKey, value, subscription)
+    // The query this fetch is for, found as the cache finds it.
+    const query = context.client.getQueryCache().find({ queryKey: context.queryKey, exact: true })
+    // Left the cache while it fetched: no removal will close it.
+    if (!query) void subscription.close()
+    else bind(context.client, query, value, subscription)
     return value.data
   }
 }
 
 /** Refetches the query when `value` goes stale. A refetch's new value replaces it. */
-function bind(client: QueryClient, queryKey: QueryKey, value: Live<unknown>, subscription: Subscription): void {
+function bind(client: QueryClient, query: Query, value: Live<unknown>, subscription: Subscription): void {
   const registry = registryOf(client)
-  const hash = hashKey(queryKey)
-  let watched = registry.queries.get(hash)
+  let watched = registry.queries.get(query.queryHash)
   if (!watched) {
     const refetch = async () => {
       // A running fetch (its persister saving, its retries) may hold data read before the value went stale: wait it out.
-      const running = client.getQueryCache().find({ queryKey, exact: true })?.promise
-      await running?.catch(() => {})
-      await client.invalidateQueries({ queryKey, exact: true }, { cancelRefetch: false })
+      await query.promise?.catch(() => {})
+      await client.invalidateQueries({ queryKey: query.queryKey, exact: true }, { cancelRefetch: false })
     }
     watched = { value: undefined, refetcher: new Refetcher(refetch) }
-    registry.queries.set(hash, watched)
+    registry.queries.set(query.queryHash, watched)
   }
   closeSubscription(watched.value)
   watched.value = value
@@ -81,17 +84,16 @@ function registryOf(client: QueryClient): Registry {
   }
   // A query leaving the cache (garbage-collected, removed) stops being watched; one merely unmounted stays live.
   registry.stopWatchingCache ??= client.getQueryCache().subscribe((event) => {
-    if (event.type === 'removed') unbind(registry, event.query.queryKey)
+    if (event.type === 'removed') unbind(registry, event.query.queryHash)
   })
   return registry
 }
 
-function unbind(registry: Registry, queryKey: QueryKey): void {
-  const hash = hashKey(queryKey)
-  const watched = registry.queries.get(hash)
+function unbind(registry: Registry, queryHash: string): void {
+  const watched = registry.queries.get(queryHash)
   watched?.refetcher.stop()
   closeSubscription(watched?.value)
-  registry.queries.delete(hash)
+  registry.queries.delete(queryHash)
   if (registry.queries.size > 0) return
   registry.stopWatchingCache?.()
   registry.stopWatchingCache = undefined

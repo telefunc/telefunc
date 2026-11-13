@@ -64,4 +64,15 @@ describe('live()', () => {
     client.clear()
     expect(values.map((value) => value.closed)).toEqual([1, 1])
   })
+
+  it('keys a query by the hash its client makes with its queryKeyHashFn', async () => {
+    const queryKeyHashFn = (key: unknown) => JSON.stringify(key, (_, v) => (typeof v === 'bigint' ? String(v) : v))
+    client = new QueryClient({ defaultOptions: { queries: { queryKeyHashFn } } })
+    let closed = 0
+    const subscription = { onStale: () => () => {}, close: async () => void closed++ }
+    const call = async () => ({ data: 42, [SUBSCRIPTION]: subscription }) as Live<number>
+    expect(await client.fetchQuery({ queryKey: ['todo', 1n], queryFn: live(call) })).toBe(42)
+    client.clear()
+    expect(closed).toBe(1)
+  })
 })
