@@ -310,7 +310,7 @@ A publish waits for no subscriber, so a `BroadcastChannel` refuses none: the ser
 
 ### Skip to the newest
 
-Where only the newest message matters, such as a pointer's position, pass `lossy: true` to that send. A client that keeps up still gets every message. Once a message has waited longer than its connection takes to confirm one, about 600 ms past its round trip, a newer one replaces those waiting, on the way to the client and on the client's own way up, so a client that can't keep up gets the newest soon:
+Where only the newest message matters, such as a pointer's position, pass `lossy: true` to that send. A client that keeps up still gets every message. Once a message has waited about 600 ms past the connection's round trip, a newer one replaces those waiting, so a client that can't keep up gets the newest soon. This holds both ways, on the way to the client and on the client's own way up:
 
 ```ts
 // Pointer.telefunc.ts
@@ -319,9 +319,10 @@ Where only the newest message matters, such as a pointer's position, pass `lossy
 import { Channel } from 'telefunc'
 
 type Position = { x: number; y: number }
+type PointerMove = (position: Position) => void
 
 export async function onPointer() {
-  const channel = new Channel<Position, Position>()
+  const channel = new Channel<PointerMove, PointerMove>()
   channel.listen((position) => moveMyPointer(position))
   onOthersPointerMove((position) => channel.send(position, { lossy: true }))
   return { channel: channel.client }
@@ -339,7 +340,7 @@ channel.listen((position) => drawOthersPointer(position))
 window.addEventListener('pointermove', (e) => channel.send({ x: e.clientX, y: e.clientY }, { lossy: true }))
 ```
 
-> A send without `lossy` is never skipped, and nothing passes it: a lossy send made before it arrives before it, and one made after it arrives after it.
+> A send without `lossy` is never skipped, and nothing passes it: the lossy sends that arrive stay on the side of it they were sent on.
 
 > A lossy send resolves at once, without waiting for the other end. `lossy` can't be combined with `ack: true`: a newer message may take its place, so it gets no answer.
 
