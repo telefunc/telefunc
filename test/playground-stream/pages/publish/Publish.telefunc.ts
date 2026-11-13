@@ -191,26 +191,18 @@ async function onBroadcastSelfAnswer() {
   const key = `room:self-answer:${crypto.randomUUID()}`
   let answers = 0
   // A store like Redis delivers a message to local subscribers once it comes back through the store.
-  const syncAnswered = Promise.withResolvers<void>()
-  const asyncAnswered = Promise.withResolvers<void>()
-  const offSync = Broadcast.subscribe<number>(`${key}:sync`, (n) => {
+  const answered = Promise.withResolvers<void>()
+  const off = Broadcast.subscribe<number>(key, (n) => {
     answers++
-    syncAnswered.resolve()
-    void Broadcast.publish(`${key}:sync`, n + 1)
+    answered.resolve()
+    // Past the answer bound the publish is rejected, and the listener stops.
+    Promise.resolve(Broadcast.publish(key, n + 1)).catch(() => {})
   })
-  const offAsync = Broadcast.subscribe<number>(`${key}:async`, async (n) => {
-    await Promise.resolve()
-    answers++
-    asyncAnswered.resolve()
-    void Broadcast.publish(`${key}:async`, n + 1)
-  })
-  void Broadcast.publish(`${key}:sync`, 0)
-  void Broadcast.publish(`${key}:async`, 0)
-  await within10s(Promise.all([syncAnswered.promise, asyncAnswered.promise]))
+  void Broadcast.publish(key, 0)
+  await within10s(answered.promise)
   return {
     stop: async () => {
-      offSync()
-      offAsync()
+      off()
       return answers
     },
   }

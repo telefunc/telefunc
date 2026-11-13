@@ -318,7 +318,7 @@ function testPublish(isDev: boolean, inDocker = false) {
     })
   })
 
-  test('broadcast: the server answers the next call while listeners answer every message on their own key', async () => {
+  test('broadcast: the server answers the next call while a listener answers every message on its own key', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-self-answer')
 
