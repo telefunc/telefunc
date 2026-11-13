@@ -176,6 +176,8 @@ class ClientRoom extends RoomStateView implements Omit<Room, 'getParticipants' |
     end.onReconnect(() => {
       for (const local of this.localParticipants.values()) local._onReconnected()
     })
+    // A page's room runs the package fields until it closes, which removes their listeners with the others.
+    this._state.attachFields(this)
   }
 
   join(options?: JoinOptions): Promise<LocalParticipant> {

@@ -127,6 +127,9 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
   private readonly localSuppressed = new Set<string>()
   /** The admissions under way; an `owned` one the heartbeat leaves alone, and its holder's detach doesn't evict. */
   private readonly admissions = new Map<string, Admission>()
+  private readonly view: ServerRoom
+  /** What stops the package fields on the view, while they run (`syncFields()`). */
+  private detachFields: (() => void) | null = null
   readonly writes: RoomWrites
 
   private readonly lanePlan: RoomHandleOptions['lanePlan']
@@ -154,6 +157,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     this.incomingDemand = incomingDemand
     this.hosting = hosting
     this.metaMirrors = metaMirrors
+    this.view = view
     this.incarnation = replica.incarnation
     this.state = new RoomState({ view, model: replica.model, owner: new RoomHandleStateOwner({ room: this }) })
     this.local = new LocalHolder({ state: this.state, suppressed: this.localSuppressed })
@@ -475,9 +479,23 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     return holder === this.local || this.stubs.has(holder as RoomStub)
   }
 
-  /** Whether this handle observes the room: a client stub, a participant, or a listener. */
+  /** Whether this handle observes the room: a client stub, a participant, or a listener besides the package fields'. */
   isObserved(): boolean {
-    return this.stubs.size > 0 || this.localParticipants.size > 0 || this.state.listenerCount > 0
+    return this.stubs.size > 0 || this.localParticipants.size > 0 || this.state.ownListenerCount > 0
+  }
+
+  /** Runs the package fields on the handle's view while it is observed, and stops them when it no longer is. */
+  syncFields(): void {
+    if (this.isObserved() === (this.detachFields !== null)) return
+    if (this.detachFields === null) {
+      // Attaching adds listeners, which brings the replica back here: the handle counts as attached already.
+      this.detachFields = () => {}
+      this.detachFields = this.state.attachFields(this.view)
+    } else {
+      const detach = this.detachFields
+      this.detachFields = null
+      detach()
+    }
   }
 
   holdsTail(): boolean {

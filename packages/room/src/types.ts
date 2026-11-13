@@ -278,8 +278,8 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
    *  that it can't miss than the server holds for it). */
   onClose(callback: () => void, options?: { signal?: AbortSignal }): () => void
 
-  /** Anything `snapshot()` shows changed: someone joined or left, a participant's `meta` or connection, the room's
-   *  `meta`, or the room closed. Pairs with `snapshot()`. */
+  /** Anything `snapshot()` shows changed: someone joined or left, a participant's `meta`, connection or a field a
+   *  package adds, the room's `meta`, or the room closed. Pairs with `snapshot()`. */
   onChange(callback: () => void, options?: { signal?: AbortSignal }): () => void
   /** Immutable whole-room view, reference-stable until the next change. */
   snapshot(): RoomSnapshotView<M, P, Pub>
@@ -340,8 +340,9 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   onReconnect(callback: () => void, options?: { signal?: AbortSignal }): () => void
 } & RoomShield<Pub>
 
-/** A returnable view of another room member, bound to its room's live state. */
-type RemoteParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = {
+/** A returnable view of another room member, bound to its room's live state. An interface, so a package can add the
+ *  fields it defines. */
+interface RemoteParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown> {
   readonly id: string
   readonly meta: ReadonlyMeta<P>
   /** The app identity stamped at join, or `null`. */
@@ -361,7 +362,7 @@ type RemoteParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknow
   /** Receive only this member's binary frames, optionally filtered to one track. */
   subscribeBinary(callback: MemberBinaryListener, options?: { track?: string | null; signal?: AbortSignal }): () => void
 
-  /** What this member shows changed: its `meta`, or whether it is connected. */
+  /** What this member shows changed: its `meta`, whether it is connected, or a field a package adds. */
   onChange(callback: () => void, options?: { signal?: AbortSignal }): () => void
   /** This member left the room. `cause` as on `Room`'s `onLeave`. */
   onLeave(callback: (cause: LeaveCause) => void, options?: { signal?: AbortSignal }): () => void

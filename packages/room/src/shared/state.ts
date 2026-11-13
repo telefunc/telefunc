@@ -18,6 +18,7 @@ import {
   type TrackKey,
 } from './binary.js'
 import { type MemberEntry, type RoomModel } from './RoomModel.js'
+import { fieldValue, participantFields, type ParticipantFieldView } from './participantFields.js'
 import { assertKnownOptions, senderSnapshot } from './arguments.js'
 import type { MemberSnapshot, MemberWants, RoomDataEvent, SenderStamp } from './protocol.js'
 import type {
@@ -50,8 +51,13 @@ type TrackListener<From extends unknown[]> = {
  *  members never get one. */
 type MemberListeners = {
   remote: RemoteParticipant | null
-  /** The participant `snapshot()` lists, with the meta and connection it shows. */
-  shown: { meta: ParticipantMeta; isConnected: boolean; participant: RemoteParticipant } | null
+  /** The participant `snapshot()` lists, with the meta, connection and package fields it shows. */
+  shown: {
+    meta: ParticipantMeta
+    isConnected: boolean
+    fields: Readonly<Record<string, unknown>>
+    participant: RemoteParticipant
+  } | null
   dataListeners: Listeners<(data: unknown, info: ChannelPublishInfo) => unknown> | null
   binary: { listeners: Listeners<TrackListener<[]>>; tracks: TrackCounts } | null
   changeListeners: Listeners<() => void> | null
@@ -185,6 +191,8 @@ class RoomState {
   private readonly closeListeners: Listeners<() => void> = new Listeners()
   private readonly announceListeners: Listeners<(data: unknown, info: ChannelPublishInfo) => void> = new Listeners()
   private _listenerCount = 0
+  /** Of them, the listeners the package fields attached (`attachFields()`). */
+  private fieldListenerCount = 0
   /** The tracks its binary listeners name, each `(member or room, track)` pair once. */
   private trackWants = 0
   private readonly trackWantsMax: number
@@ -210,6 +218,29 @@ class RoomState {
   /** Total attached listeners; owners derive lane-specific wants from the callback lists. */
   get listenerCount(): number {
     return this._listenerCount
+  }
+
+  /** The listeners besides the package fields': only these make a server's view observed. */
+  get ownListenerCount(): number {
+    return this._listenerCount - this.fieldListenerCount
+  }
+
+  /** Runs each package's field on this view, the `room` it is the state of. Returns what stops them. */
+  attachFields(room: ParticipantFieldView<unknown>['room']): () => void {
+    const detaches = this.countedAsFields(() =>
+      Array.from(participantFields(), ([name, { attach }]) =>
+        attach({ room, set: (id, value) => this.model.setField(id, name, value) }),
+      ),
+    )
+    return () => this.countedAsFields(() => detaches.forEach((detach) => detach()))
+  }
+
+  /** Runs `change`, counting the listeners it adds or removes as the package fields'. */
+  private countedAsFields<T>(change: () => T): T {
+    const before = this._listenerCount
+    const result = change()
+    this.fieldListenerCount += this._listenerCount - before
+    return result
   }
 
   /** Whether this holder consumes room-authored messages on the semantic lane. */
@@ -257,20 +288,21 @@ class RoomState {
     const listeners = this.listenersOf(entry)
     const meta = entry.meta.object
     const isConnected = this.model.isConnected(entry)
+    const { fields } = entry
     const shown = listeners.shown
-    if (shown?.meta === meta && shown.isConnected === isConnected) return shown.participant
+    if (shown?.meta === meta && shown.isConnected === isConnected && shown.fields === fields) return shown.participant
     const remote = this.remote(entry)
-    const participant: RemoteParticipant = Object.freeze(
-      Object.create(remote, {
-        id: field(entry.id),
-        identity: field(entry.identity),
-        meta: field(meta),
-        joinedAt: field(entry.joinedAt),
-        isConnected: field(isConnected),
-      }),
-    )
+    const values: PropertyDescriptorMap = {
+      id: ownValue(entry.id),
+      identity: ownValue(entry.identity),
+      meta: ownValue(meta),
+      joinedAt: ownValue(entry.joinedAt),
+      isConnected: ownValue(isConnected),
+    }
+    for (const name of participantFields().keys()) values[name] = ownValue(fieldValue(fields, name))
+    const participant: RemoteParticipant = Object.freeze(Object.create(remote, values))
     remoteBackings.set(participant, remoteBackings.get(remote)!)
-    listeners.shown = { meta, isConnected, participant }
+    listeners.shown = { meta, isConnected, fields, participant }
     return participant
   }
 
@@ -353,7 +385,7 @@ class RoomState {
     if (connectionListeners) this.fireAll(connectionListeners)
   }
 
-  /** What a member shows changed: its meta, or its connection. */
+  /** What a member shows changed: its meta, its connection, or a package's field. */
   memberChanged(entry: MemberEntry): void {
     const changeListeners = this.memberListeners.get(entry)?.changeListeners
     if (changeListeners) this.fireAll(changeListeners)
@@ -465,6 +497,9 @@ class RoomState {
         return makeDisposer()
       },
     }
+    for (const name of participantFields().keys()) {
+      Object.defineProperty(remote, name, { get: () => fieldValue(entry.fields, name), enumerable: true })
+    }
     listeners.remote = remote
     remoteBackings.set(remote, { state: this, entry })
     // A read through the page's room wrapper tethers what it returns to it, but only the member `join()` returns holds
@@ -557,8 +592,10 @@ class RoomState {
     }
   }
 
+  /** The room closed: every listener goes, the package fields' too. */
   private releaseAllListeners(): void {
     for (const cleanups of this.listenerCleanups.values()) for (const unlisten of cleanups) unlisten()
+    this.fieldListenerCount = 0
   }
 
   private bumpListenerCount(delta: number, entry: MemberEntry | null, binary: BinaryWantChange | null): void {
@@ -577,8 +614,8 @@ class RoomState {
   }
 }
 
-/** A snapshot participant's field: its own, so it shadows the remote's getter. */
-function field(value: unknown): PropertyDescriptor {
+/** A snapshot participant's value: its own, so it shadows the remote's getter. */
+function ownValue(value: unknown): PropertyDescriptor {
   return { value, enumerable: true }
 }
 

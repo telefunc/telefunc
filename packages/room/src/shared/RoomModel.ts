@@ -1,11 +1,13 @@
 export { RoomModel }
 export type { MemberEntry, MembershipEvent, RosterRead, RoomModelOwner, ServerModelOwner }
 
+import { stringify } from '@brillout/json-serializer/stringify'
 import { assert } from '../utils/assert.js'
 import { Slice } from './Slice.js'
 import { RoomMetaState } from './RoomMetaState.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
 import { ownLeaveCause, senderSnapshot, unknownLeaveCause } from './arguments.js'
+import { fieldValue, frozenFieldValue } from './participantFields.js'
 import type {
   MemberMetaUpdate,
   MemberSnapshot,
@@ -36,7 +38,11 @@ type MemberEntry = {
   hidden: boolean
   left: boolean
   leaveCause?: LeaveCause
+  /** The values packages set on the member (`defineParticipantField()`), replaced whole on each set. */
+  fields: Readonly<Record<string, unknown>>
 }
+
+const NO_FIELDS: Readonly<Record<string, unknown>> = Object.freeze({})
 
 type RoomModelOptions = {
   roomId: string
@@ -232,6 +238,16 @@ class RoomModel {
     this.bumpState()
     this.memberChanged(entry)
     this.connectionChanged(entry)
+  }
+
+  /** A package's field of a member, frozen deeply. A value equal to the member's changes nothing, and one for a member
+   *  this model doesn't know is dropped: the package's source sets it again with the member. */
+  setField(id: string, name: string, value: unknown): void {
+    const entry = this.members.get(id)
+    if (!entry || stringify(fieldValue(entry.fields, name)) === stringify(value)) return
+    entry.fields = Object.freeze({ ...entry.fields, [name]: frozenFieldValue(value) })
+    this.bumpState()
+    this.memberChanged(entry)
   }
 
   private memberChanged(entry: MemberEntry): void {
@@ -484,6 +500,7 @@ function newEntry(
     identity: identity ?? null,
     hidden: hidden === true,
     left: false,
+    fields: NO_FIELDS,
   }
 }
 
