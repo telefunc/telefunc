@@ -32,8 +32,8 @@ function assertPublishOptions(options: PublishOptions | undefined): void {
     )
   }
   assertUsage(
-    options?.lossy === undefined || options.track !== undefined,
-    "publish() options.lossy needs options.track: a message on no track reaches everyone, in the room's order",
+    options?.lossy !== true || options.track !== undefined,
+    "publish() options.lossy: true needs options.track: a message on no track reaches everyone, in the room's order",
   )
 }
 

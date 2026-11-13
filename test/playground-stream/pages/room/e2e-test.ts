@@ -1445,7 +1445,7 @@ function testRoomSmallMemory() {
       expect(lossyAfterPlain ?? 'no error').toContain(
         `The "drawing" track's publishes aren't lossy, and a track takes one kind`,
       )
-      expect(noTrack ?? 'no error').toContain('publish() options.lossy needs options.track')
+      expect(noTrack ?? 'no error').toContain('publish() options.lossy: true needs options.track')
     },
   )
   testRoomScenario<{ closed: boolean; myCause: unknown }>(
