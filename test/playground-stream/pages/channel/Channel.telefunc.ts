@@ -247,9 +247,12 @@ async function onChannelAckListenerAbort() {
   return { channel: ch.client }
 }
 
+type HeldBytesState = { channel: { heldBytes: number } | undefined; lateAnswer: Promise<void> }
 /** The channel `onChannelHeldBytes` reads what it holds of, once a listener's late answer went. */
-let heldChannel: { heldBytes: number } | undefined
-let lateAnswer = Promise.resolve()
+const heldBytesState = ((globalThis as Record<symbol, unknown>)[Symbol.for('telefunc__heldBytesState')] ??= {
+  channel: undefined,
+  lateAnswer: Promise.resolve(),
+}) as HeldBytesState
 
 /** A listener's `Abort` ends the channel from inside the delivery of the message it got. */
 async function onChannelListenerAbortHolds() {
@@ -257,7 +260,7 @@ async function onChannelListenerAbortHolds() {
   ch.listen(() => {
     throw Abort('stop')
   })
-  heldChannel = ch as unknown as { heldBytes: number }
+  heldBytesState.channel = ch as unknown as { heldBytes: number }
   return { channel: ch.client }
 }
 
@@ -266,7 +269,7 @@ async function onChannelLateAnswerHolds() {
   const ch = new Channel<(msg: string) => string, never>()
   const closed = new Promise<void>((resolve) => ch.onClose(() => resolve()))
   let markAnswered!: () => void
-  lateAnswer = new Promise((resolve) => {
+  heldBytesState.lateAnswer = new Promise((resolve) => {
     markAnswered = resolve
   })
   ch.listen(async (msg) => {
@@ -275,13 +278,13 @@ async function onChannelLateAnswerHolds() {
     setTimeout(markAnswered)
     return msg
   })
-  heldChannel = ch as unknown as { heldBytes: number }
+  heldBytesState.channel = ch as unknown as { heldBytes: number }
   return { channel: ch.client }
 }
 
 async function onChannelHeldBytes() {
-  await lateAnswer
-  return heldChannel!.heldBytes
+  await heldBytesState.lateAnswer
+  return heldBytesState.channel!.heldBytes
 }
 
 async function onChannelAckListenerBug() {
