@@ -8,8 +8,11 @@ import { contractFromJson } from '@prisma/orm-postgres/static'
 import { defineContract as defineSqliteContract } from '@prisma/orm-sqlite/contract-builder'
 import sqlite from '@prisma/orm-sqlite/runtime'
 import { eq } from 'drizzle-orm'
+import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
+import * as libsql from 'drizzle-orm/libsql'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { boolean, integer, pgTable, serial, text } from 'drizzle-orm/pg-core'
+import * as sqliteCore from 'drizzle-orm/sqlite-core'
 import { Kysely, PostgresDialect } from 'kysely'
 import pg from 'pg'
 import { derived, type Live } from '../src/index.js'
@@ -64,6 +67,50 @@ async function drizzleReads() {
   const plain = await db.select().from(todos).where(eq(todos.done, false))
   same<typeof plain, Todo[]>(true)
   await db.insert(todos).values({ userId: 1, text: 'a', done: false })
+}
+
+// ── Drizzle on SQLite: the same, with the driver's own result kind ──
+const sqliteTodos = sqliteCore.sqliteTable('todos', {
+  id: sqliteCore.integer().primaryKey(),
+  userId: sqliteCore.integer().notNull(),
+  text: sqliteCore.text().notNull(),
+})
+const sqliteUsers = sqliteCore.sqliteTable('users', {
+  id: sqliteCore.integer().primaryKey(),
+  name: sqliteCore.text().notNull(),
+})
+type SqliteTodo = { id: number; userId: number; text: string }
+// better-sqlite3 runs each call at once, libSQL returns a promise.
+declare const rawSyncSqlite: BetterSQLite3Database & { $client: unknown }
+const syncSqlite = liveDrizzle(rawSyncSqlite)
+const rawAsyncSqlite = libsql.drizzle('file:app.db')
+const asyncSqlite = liveDrizzle(rawAsyncSqlite)
+async function drizzleSqliteReads() {
+  const all = await syncSqlite.select().from(sqliteTodos).live()
+  same<typeof all, Live<SqliteTodo[]>>(true)
+  // @ts-expect-error The rows are typed, not `any`.
+  same<typeof all, Live<{ id: string }[]>>(true)
+  const joined = await asyncSqlite
+    .select({ text: sqliteTodos.text, name: sqliteUsers.name })
+    .from(sqliteTodos)
+    .leftJoin(sqliteUsers, eq(sqliteUsers.id, sqliteTodos.userId))
+    .live()
+  same<typeof joined, Live<{ text: string; name: string | null }[]>>(true)
+  const distinct = await syncSqlite.selectDistinct({ userId: sqliteTodos.userId }).from(sqliteTodos).live()
+  same<typeof distinct, Live<{ userId: number }[]>>(true)
+  const open = asyncSqlite.$with('open').as(asyncSqlite.select().from(sqliteTodos))
+  const fromCte = await asyncSqlite.with(open).select({ id: open.id }).from(open).live()
+  same<typeof fromCte, Live<{ id: number }[]>>(true)
+  // A transaction returns what the unwrapped database's does: its callback's result, at once on a sync driver.
+  const syncTransaction = syncSqlite.transaction((tx) => tx.select().from(sqliteTodos).all())
+  same<typeof syncTransaction, SqliteTodo[]>(true)
+  const rawSyncTransaction = rawSyncSqlite.transaction((tx) => tx.select().from(sqliteTodos).all())
+  same<typeof syncTransaction, typeof rawSyncTransaction>(true)
+  const asyncTransaction = asyncSqlite.transaction(async (tx) => tx.select().from(sqliteTodos))
+  const rawAsyncTransaction = rawAsyncSqlite.transaction(async (tx) => tx.select().from(sqliteTodos))
+  same<typeof asyncTransaction, typeof rawAsyncTransaction>(true)
+  const inTransaction = await asyncSqlite.transaction(async (tx) => tx.select().from(sqliteTodos).live())
+  same<typeof inTransaction, Live<SqliteTodo[]>>(true)
 }
 
 // ── Kysely ──
@@ -224,4 +271,14 @@ const stop: () => void = watch(onGetTodos, [1], (rows) => same<typeof rows, Todo
 // @ts-expect-error Forgetting `.live()`.
 watch(onGetTodosPlain, [1], () => {})
 
-void [drizzleReads, kyselyReads, prismaReads, prismaSteps, prismaSelectKeepsSteps, prismaScope, prismaOnSqlite, stop]
+void [
+  drizzleReads,
+  drizzleSqliteReads,
+  kyselyReads,
+  prismaReads,
+  prismaSteps,
+  prismaSelectKeepsSteps,
+  prismaScope,
+  prismaOnSqlite,
+  stop,
+]
