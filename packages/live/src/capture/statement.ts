@@ -1,4 +1,4 @@
-export { planRead, alsoWrites, cascadesOf, ofRows, HIDDEN_PREFIX, READS_EVERYTHING }
+export { planRead, writesReached, alsoWrites, cascadesOf, ofRows, HIDDEN_PREFIX, READS_EVERYTHING }
 export type { Cascade, Plan, ReadPlan, WritePlan, TransactionAction, ChangedTables }
 
 import {
@@ -6,6 +6,7 @@ import {
   callsVolatile,
   sideEffects,
   tablesChangedBy,
+  union,
   type Catalog,
   type ForeignKey,
   type Table,
@@ -142,12 +143,24 @@ function planRead(select: Node, text: string | undefined, catalog: Catalog): Rea
   return { kind: 'read', shape, liveText, shareable }
 }
 
-/** Whether a read may call a volatile function through what it reads: a view or a policy calling one (`Table.volatile`),
- *  among its tables, or among any table when what it reads isn't known. */
-function reachesVolatile(shape: ReadShape, catalog: Catalog): boolean {
-  if (shape.alsoReads === 'all') return [...catalog.tables.values()].some((table) => table.volatile)
+/** The tables a read reaches: its own and those its views and policies read, or every table when what it reads isn't
+ *  known. */
+function tablesReached(shape: ReadShape, catalog: Catalog): Table[] {
+  if (shape.alsoReads === 'all') return [...catalog.tables.values()]
   const reached = [...shape.aliases.map((alias) => alias.table.id), ...shape.alsoReads]
-  return reached.some((id) => catalog.tables.get(id)?.volatile)
+  return reached.flatMap((id) => catalog.tables.get(id) ?? [])
+}
+
+/** Whether a read may call a volatile function through what it reads: a view or a policy calling one (`Table.volatile`). */
+function reachesVolatile(shape: ReadShape, catalog: Catalog): boolean {
+  return tablesReached(shape, catalog).some((table) => table.volatile)
+}
+
+/** What a read writes through what it reads: a view or a policy calling a volatile function that writes
+ *  (`Table.writes`). */
+function writesReached(shape: ReadShape, catalog: Catalog): TableSet | undefined {
+  const writes = tablesReached(shape, catalog).flatMap((table) => table.writes ?? [])
+  return writes.length > 0 ? union(writes) : undefined
 }
 
 /** What `writes` to `table` change besides their rows: `WritePlan.alsoWrites`. */

@@ -45,6 +45,9 @@ type Table = {
   /** A read of it may call a volatile function (`Catalog.volatileFunctions`): its view or its row-level security
    *  policies call one, or can't be read. */
   volatile?: boolean
+  /** A read of it writes these: its view or its row-level security policies call a volatile function that writes
+   *  (`Catalog.volatileWritingFunctions`), or can't be read. */
+  writes?: TableSet
   /** What each kind of write to this table also changes: the tables its triggers write. Every table (`'all'`) when the
    *  catalog can't name them: a rule, a column default or a trigger calling a function of the app's, SQL a trigger
    *  builds at run time, a view's tables. */

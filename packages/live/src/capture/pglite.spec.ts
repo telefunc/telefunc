@@ -336,6 +336,33 @@ describe('identical live reads reaching a volatile function', () => {
   })
 })
 
+describe('a read calling a SQL function of the app that writes', () => {
+  it.each([
+    ['in the statement', 'select bump()'],
+    ['through a view', 'select * from bumped'],
+    ['through an aggregate', 'select total(id) from one'],
+  ])('announces what the function writes, called %s', async (_, text) => {
+    const pglite = new PGlite()
+    await pglite.exec(`
+      create table counters (id int primary key, n int);
+      insert into counters values (1, 0);
+      create function bump() returns int language sql volatile as
+        'update counters set n = n + 1 where id = 1 returning n';
+      create view bumped as select bump() as n;
+      create function step(int, int) returns int language sql volatile as
+        'update counters set n = n + 1 where id = 1 returning $1 + $2';
+      create aggregate total(int) (sfunc = step, stype = int, initcond = '0');
+      create table one (id int);
+      insert into one values (1);`)
+    liveDatabaseOf(pglite, {})
+    const read = await watched(pglite, 'select * from counters')
+    await written(pglite, text)
+    expect((await pglite.query('select n from counters')).rows).toEqual([{ n: 1 }])
+    expect(read.stale()).toBe(1)
+    await pglite.close()
+  })
+})
+
 describe('a live read calling an aggregate of the app', () => {
   it.each([
     ["Postgres's own", 'numeric_mul'],

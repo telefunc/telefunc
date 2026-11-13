@@ -303,6 +303,7 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
   // Second pass: these name other tables, which must all be known first. A function's body resolves names by the
   // `search_path` of the session that calls it: any schema's table may be meant.
   const functionWrites = writesOfFunctions(row.functions, anySchema, catalog)
+  addWritingAggregates(row.functions, catalog, functionWrites)
   catalog.functionReads = readsOfFunctions(row.functions, anySchema, catalog)
   for (const t of row.tables) {
     const table = tables.get(`${t.schema}.${t.name}`)!
@@ -311,6 +312,8 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
     const parsed = reads.map((sql) => parseStatements(sql))
     table.alsoReads = union(parsed.map((statements) => tablesReadBy(statements, (t) => catalog.named(t), catalog)))
     table.volatile = parsed.some((statements) => !statements || callsVolatile(statements, catalog))
+    const writes = union(parsed.map((statements) => writesOfCalls(statements, catalog, functionWrites)))
+    if (writes === 'all' || writes.size > 0) table.writes = writes
     const { alsoWrites } = table
     for (const [type, language, source] of t.triggers ?? []) {
       // A trigger resolves names with the `search_path` of the session that fires it: any schema's table may be meant.
@@ -357,6 +360,32 @@ function readsOfFunctions(
     reads.set(name, union([reads.get(name) ?? new Set(), read]))
   }
   return reads
+}
+
+/** Makes each aggregate whose support functions write a table (`functionWrites`) one of `Catalog.writingFunctions`,
+ *  writing those, and a volatile one when such a support function is: Postgres records every aggregate as written in C.
+ *  An aggregate whose support functions write no table stays a read. */
+function addWritingAggregates(
+  functions: CatalogRow['functions'],
+  catalog: Catalog,
+  functionWrites: Map<string, TableSet>,
+): void {
+  for (const [name, , , , , , , , , support] of functions) {
+    const writers = (support ?? []).filter(([called, ownC]) => !ownC && catalog.writingFunctions.has(called))
+    const written = union(writers.map(([called]) => functionWrites.get(called) ?? 'all'))
+    if (written !== 'all' && written.size === 0) continue
+    catalog.writingFunctions.add(name)
+    if (writers.some(([called]) => catalog.volatileWritingFunctions.has(called)))
+      catalog.volatileWritingFunctions.add(name)
+    functionWrites.set(name, union([functionWrites.get(name) ?? new Set(), written]))
+  }
+}
+
+/** What the volatile writing functions `statements` call write (`Table.writes`): every table when they can't be read. */
+function writesOfCalls(statements: Node[] | null, catalog: Catalog, functionWrites: Map<string, TableSet>): TableSet {
+  if (!statements) return 'all'
+  const called = catalog.calls(statements).filter((name) => catalog.volatileWritingFunctions.has(name))
+  return union(called.map((name) => functionWrites.get(name) ?? 'all'))
 }
 
 /** What a call of each of the app's writing functions writes: the tables the bodies of the functions of its name write.

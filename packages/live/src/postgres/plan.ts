@@ -7,6 +7,7 @@ import {
   HIDDEN_PREFIX,
   ofRows,
   planRead,
+  writesReached,
   type Plan,
   type WritePlan,
 } from '../capture/statement.js'
@@ -72,9 +73,15 @@ function planOne(statement: Node, text: string | undefined, catalog: Catalog): P
     }
   }
   switch (kind) {
-    case 'SelectStmt':
+    case 'SelectStmt': {
       if (node.intoClause) return { kind: 'unknownWrite', tables: 'all', schemaChange: true }
-      return { ...planRead(node, text, catalog), ...roleOfCalls }
+      const read = planRead(node, text, catalog)
+      // A view or a policy it reads may call a function that writes: the read writes what that writes, as a call of
+      // it in the statement does. Like a trigger's, such a function's role or settings don't count.
+      const writes = writesReached(read.shape, catalog)
+      if (writes) return { kind: 'unknownWrite', tables: ofRows(writes), schemaChange: false, ...roleOfCalls }
+      return { ...read, ...roleOfCalls }
+    }
     case 'InsertStmt':
     case 'UpdateStmt':
     case 'DeleteStmt':
