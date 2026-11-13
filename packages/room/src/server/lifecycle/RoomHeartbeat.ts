@@ -22,7 +22,7 @@ type RoomHeartbeatOptions = {
   hosting: Pick<RoomHosting, 'maintain'>
   incarnation: RoomIncarnation
   model: Pick<RoomModel, 'closed'>
-  lanePlan: Pick<LanePlan, 'observing' | 'ownsInbox' | 'resumeDropped'>
+  lanePlan: Pick<LanePlan, 'observing' | 'ownsInbox'>
   outgoingDemand: Pick<DemandReport, 'reporting'>
   /** Renews what this process told of its demand. */
   demandExchange: Pick<DemandExchange, 'renew'>
@@ -79,7 +79,6 @@ class RoomHeartbeat {
     if (this.ticking) return
     this.ticking = true
     try {
-      this.lanePlan.resumeDropped()
       const [renewal, reconciled] = await Promise.allSettled([
         Promise.all([this.demandExchange.renew(), this.hosting.maintain()]),
         this.model.closed ? null : this.authority.reconcileMeta(),

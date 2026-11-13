@@ -42,18 +42,25 @@ function setup(subscribe: SubscriberSocket['subscribe'] = async () => {}) {
 }
 
 describe('a publish waiting on its key’s new subscriptions', () => {
-  it('goes out when the other kind’s start read fails: that is no refusal of this publish', async () => {
+  it('goes out once the other kind’s start read, failed and read again, is ready: a failed read is no end', async () => {
     const { subscriptions, listen, sends } = setup()
     listen(TEXT)
     await Promise.all(subscriptions.establishingOn([TEXT]))
-    const read = createDeferred<Map<string, { seq: number; timestamp: number }>>()
-    const binary = listen(BINARY, () => read.promise)
+    const reads = [
+      createDeferred<Map<string, { seq: number; timestamp: number }>>(),
+      createDeferred<Map<string, { seq: number; timestamp: number }>>(),
+    ]
+    let read = 0
+    const binary = listen(BINARY, () => reads[read++]!.promise)
 
     const waiting = sends.waitTurn(RULE, 'hello')!
-    read.reject(new Error('the command connection dropped'))
+    reads[0]!.reject(new Error('the command connection dropped'))
+    await expect.poll(() => read, { timeout: 3_000 }).toBe(2)
+    expect(binary.state()).toBe('establishing')
+    reads[1]!.resolve(new Map())
 
     await expect(waiting.turn).resolves.toBe('hello')
-    expect(binary.state()).toBe('closed')
+    expect(binary.state()).toBe('ready')
   })
 
   it('fails with the reason when Redis refuses a subscription it waits for', async () => {

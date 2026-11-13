@@ -18,6 +18,8 @@ import type { CloudflareRoomAuthorityStub } from './objects.js'
 import type { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
 
 const ROOM_SESSION = Symbol.for('telefunc.room.cloudflareSession')
+const REGISTER_RETRY_MIN_MS = 100
+const REGISTER_RETRY_MAX_MS = 5_000
 
 /** A session DO's Room part: its subscriptions, made by the first subscribe or lane commit made in it. */
 type RoomSession = { readonly id: string; subscriptions: RoomSessionSubscriptions | null }
@@ -100,7 +102,7 @@ class RoomSessionSubscriptions {
     try {
       results = await this.callAuthority(roomId, (authority) => authority.renewRoutes(attempts.map((a) => a.route)))
     } catch (error) {
-      for (const attempt of attempts) attempt.fail(error)
+      for (const attempt of attempts) attempt.lose(error)
       return
     }
     attempts.forEach((attempt, index) => attempt.onRenewal(results[index]!))
@@ -118,12 +120,14 @@ type CloudflareRoomAttemptOptions = {
 }
 
 /** Ready once the authority has durably registered this attempt's exact route, or for an inbox once the registration
- *  went out; Room owns retry and replacement. */
+ *  went out. A failed call to the authority, or a lapsed route, holds it back until its route is registered again. */
 class CloudflareRoomAttempt extends DriverAttempt {
   readonly route: RouteInstallation
   private readonly owner: RoomSessionSubscriptions
   private readonly stopDeliveries: () => void
   private readonly readyWhenSent: boolean
+  private retry: ReturnType<typeof setTimeout> | null = null
+  private retryDelay = REGISTER_RETRY_MIN_MS
 
   constructor({ owner, route, stopDeliveries, readyWhenSent }: CloudflareRoomAttemptOptions) {
     super()
@@ -140,11 +144,12 @@ class CloudflareRoomAttempt extends DriverAttempt {
     try {
       registration = await registering
     } catch (error) {
-      return this.fail(error)
+      return this.lose(error)
     }
     // Unsubscribed while it registered: its release already went out.
     if (this.state() === 'closed') return
     if (registration === 'dropped') return this.end()
+    this.retryDelay = REGISTER_RETRY_MIN_MS
     this.transition('ready')
     this.owner.renewWithRoom(this)
   }
@@ -158,9 +163,23 @@ class CloudflareRoomAttempt extends DriverAttempt {
   onRenewal(renewal: RenewWire): void {
     if (this.state() === 'closed') return
     if (renewal === 'renewed') return this.owner.renewWithRoom(this)
-    // A route that went with its dropped incarnation ends on purpose; a lapsed one is a failure.
+    // A route that went with its dropped incarnation ends on purpose; a lapsed one is registered again.
     if (renewal === 'dropped') this.end()
-    else this.fail(new Error(`Cloudflare route '${this.route.laneKey}' lapsed`))
+    else this.lose(new Error(`Cloudflare route '${this.route.laneKey}' lapsed`))
+  }
+
+  /** What is committed until its route is registered again may miss it: lost if it was ready, then registered again
+   *  after a wait that doubles while the authority fails. The first failure of a run is reported. */
+  lose(error: unknown): void {
+    if (this.state() === 'closed') return
+    this.owner.stopRenewing(this)
+    if (this.state() === 'ready') this.transition('lost')
+    if (this.retryDelay === REGISTER_RETRY_MIN_MS) console.error(error)
+    this.retry = setTimeout(() => {
+      this.retry = null
+      void this.register()
+    }, this.retryDelay)
+    this.retryDelay = Math.min(this.retryDelay * 2, REGISTER_RETRY_MAX_MS)
   }
 
   /** Its incarnation is no longer open: closed on purpose, with no reason. */
@@ -169,13 +188,9 @@ class CloudflareRoomAttempt extends DriverAttempt {
     this.transition('closed')
   }
 
-  fail(error: unknown): void {
-    if (this.state() === 'closed') return
-    this.stop()
-    this.transition('closed', error)
-  }
-
   private stop(): void {
+    if (this.retry !== null) clearTimeout(this.retry)
+    this.retry = null
     this.owner.stopRenewing(this)
     this.stopDeliveries()
   }

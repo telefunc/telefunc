@@ -37,7 +37,7 @@ type AuthoritySyncOptions = {
     RoomModel,
     'closed' | 'metaWaiting' | 'metaSeq' | 'rosterKnown' | 'memberIds' | 'recordMembership' | 'stopRecordingMembership'
   >
-  lanePlan: Pick<LanePlan, 'replan' | 'resumeDropped' | 'observing' | 'controlEstablished'>
+  lanePlan: Pick<LanePlan, 'replan' | 'observing' | 'controlEstablished'>
 }
 
 /** The repairs a gap asks for, each due `ROOM_META_REPAIR_MS` after it. */

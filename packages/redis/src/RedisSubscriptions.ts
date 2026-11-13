@@ -104,6 +104,10 @@ class RedisSubscriptions {
   private reconnectDelay = RECONNECT_DELAY_MIN_MS
   /** An establishing attempt reports no failure, so the first one of an outage is reported here. */
   private outageReported = false
+  /** The next try of start reads that failed, the wait before it, and whether this run of failures was reported. */
+  private readRetry: ReturnType<typeof setTimeout> | null = null
+  private readRetryDelay = RECONNECT_DELAY_MIN_MS
+  private readFailureReported = false
 
   constructor({ connection }: RedisSubscriptionsOptions) {
     this.connection = connection
@@ -265,6 +269,8 @@ class RedisSubscriptions {
     if (connection.phase === 'waiting') clearTimeout(connection.timer)
     else if (connection.phase !== 'idle') connection.socket?.disconnect()
     if (connection.phase === 'connected') clearInterval(connection.pings)
+    if (this.readRetry !== null) clearTimeout(this.readRetry)
+    this.readRetry = null
   }
 
   private isCurrent(id: number): boolean {
@@ -360,15 +366,35 @@ class RedisSubscriptions {
       // still be on its way, and the acknowledgment of a repeated SUBSCRIBE comes after it.
       if (!attempt.establishing) await socket.subscribe(...attempt.channels)
     } catch (error) {
-      // A failed read (a command-connection error) fails this attempt, not the shared subscriber connection.
-      if (this.isCurrent(id)) attempt.fail(error)
-      return
+      if (!this.isCurrent(id)) return
+      // A refusal stands until an operator changes Redis's ACL. Any other failure (a command-connection error) is tried
+      // again, as a drop is: the attempt awaits confirmation meanwhile, and the shared subscriber connection stays.
+      if (isRefusal(error)) return attempt.fail(error)
+      return this.retryRead(attempt, error)
     }
     if (!this.isCurrent(id)) return
+    this.readRetryDelay = RECONNECT_DELAY_MIN_MS
+    this.readFailureReported = false
     if (starts !== null) return attempt.markReady(starts)
     // Closed on purpose since the caller read it open; gone after a loss, it may have gone with Redis's data.
     if (attempt.establishing) return attempt.end()
     attempt.fail(new Error(`subscribeLane: the incarnation of '${attempt.channel}' is not open`))
+  }
+
+  private retryRead(attempt: RedisAttempt, error: unknown): void {
+    this.unconfirmed.add(attempt)
+    if (this.readRetry !== null) return
+    if (!this.readFailureReported) {
+      this.readFailureReported = true
+      console.error(error)
+    }
+    this.readRetry = unrefTimer(
+      setTimeout(() => {
+        this.readRetry = null
+        this.syncChannels()
+      }, this.readRetryDelay),
+    )
+    this.readRetryDelay = Math.min(this.readRetryDelay * 2, RECONNECT_DELAY_MAX_MS)
   }
 
   private attempts(): Set<RedisAttempt> {
@@ -507,7 +533,7 @@ class RedisAttempt extends DriverAttempt {
 
   fail(error: unknown): void {
     if (this.state() === 'closed') return
-    // Only a refusal fails the sends waiting on it: a failed read says nothing of them, and `closed` ends their wait.
+    // Only a refusal fails the sends waiting on it: a closed incarnation says nothing of them, and `closed` ends their wait.
     if (isRefusal(error)) this.firstReadiness.reject(error)
     this.close(error)
     this.transition('closed', error)

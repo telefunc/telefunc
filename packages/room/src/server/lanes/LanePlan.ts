@@ -19,7 +19,7 @@ import { Slice } from '../../shared/Slice.js'
 import type { LaneHolder } from '../lifecycle/replay.js'
 import { WantsIndex, type WantsIndexOwner } from './WantsIndex.js'
 import { runAll, toggle, toggleEntry } from '../../utils/sets.js'
-import { CONTROL_LANE, DEMAND_LANE, SEMANTIC_LANE, decodeRoomText, readOpenConfig, withinRoomHorizon } from './lanes.js'
+import { CONTROL_LANE, DEMAND_LANE, SEMANTIC_LANE, decodeRoomText } from './lanes.js'
 assertIsNotBrowser()
 
 /** What a lane but the demand lane carries: the text of a control, semantic or inbox frame, or a framed binary one. */
@@ -92,9 +92,6 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   /** The members whose named tracks exceeded `ROOM_MEMBER_NAMED_LANES_MAX` when last planned. */
   private readonly overflowing = new Set<string>()
   private readonly inbox = new Map<string, LaneSubscription>()
-  private readonly recovering = new Set<LaneSubscription>()
-  /** The lanes whose recovery gave up, which the heartbeat subscribes again while they are wanted. */
-  private readonly dropped = new Set<LaneSubscription>()
   /** What the next planning pass replans. Binary want changes and lane readiness queue here and wait for that pass, so
    *  it plans a burst of them from the whole want set before it opens any lane. */
   private queued = newBinaryPlan()
@@ -141,18 +138,12 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     return this.inbox.get(member)
   }
 
-  /** Plans everything in the next planning pass, resolving once it ends; it also retries every still-wanted lane whose
-   *  recovery failed. */
+  /** Plans everything in the next planning pass, resolving once it ends. */
   replan(): Promise<void> {
     this.queued.all = true
     this.schedulePlan()
     this.syncLanes()
     return this.planning!
-  }
-
-  /** Subscribes again each lane whose recovery gave up and that is still wanted, as a planning pass would. */
-  resumeDropped(): void {
-    for (const lane of drain(this.dropped)) lane.resume()
   }
 
   /** A holder attached, or its wants changed wholesale: its room-wide ones, and those of `members` when given. The next
@@ -636,35 +627,8 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     this.schedulePlan()
   }
 
-  onLaneTerminal(lane: LaneSubscription): void {
-    // A replacement that ends is its recovery's failure.
-    if (this.recovering.has(lane)) return
-    this.recovering.add(lane)
-    void this.recover(lane).catch(reportRoomError)
-  }
-
-  /** A still-wanted terminal lane gets one replacement after a head read; if that fails too, the heartbeat subscribes
-   *  it again. A lane of an incarnation that ended isn't replaced: the view's catch-up finds the close. */
-  private async recover(lane: LaneSubscription): Promise<void> {
-    let replaced = false
-    try {
-      const config = await withinRoomHorizon(readOpenConfig(this.incarnation))
-      if (config === null) return this.owner.laneEvent('deliveries-lost')
-      lane.retry()
-      replaced = true
-      await withinRoomHorizon(lane.attemptReady)
-    } catch (error) {
-      if (lane.wanted) {
-        lane.dropAttempt()
-        this.dropped.add(lane)
-      }
-      // The backend reported the replacement's end; the horizon's RoomError goes unreported.
-      if (replaced) return
-      throw error
-    } finally {
-      this.recovering.delete(lane)
-    }
-    // Catch up on what the outage dropped; a later end of the lane gets its own recovery.
+  /** An ended lane isn't subscribed again: the view's catch-up finds a dropped incarnation's close. */
+  onLaneEnded(): void {
     this.owner.laneEvent('deliveries-lost')
   }
 }

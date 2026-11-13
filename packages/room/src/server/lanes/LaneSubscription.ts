@@ -13,8 +13,8 @@ interface LaneSubscriptionOwner {
   /** One attempt at `address`, delivering to `listener`. */
   subscribeLane(address: LaneAddress, listener: BackendListener<Uint8Array>): BackendSubscription
   onLaneDelivery(lane: LaneSubscription, payload: Uint8Array, info: OrderingInfo): void
-  /** The lane ended for good: the owner's recovery policy replaces it. */
-  onLaneTerminal(lane: LaneSubscription): void
+  /** The lane ended for good: its incarnation was dropped, or it failed. */
+  onLaneEnded(lane: LaneSubscription): void
   /** The lane is ready again after a loss. */
   onLaneRecovered(): void
   onLanePending(lane: LaneSubscription, pending: boolean): void
@@ -24,8 +24,8 @@ type LaneAddress = RoomSubscriptionSource['lane']
 
 type LaneSubscriptionOptions = { owner: LaneSubscriptionOwner; address: LaneAddress }
 
-/** A lane subscription the room wants: holder-facing readiness survives failed attempts, and Room's recovery policy
- *  replaces them. */
+/** A lane subscription the room wants. Its driver recovers a loss; an end is final, and a failure rejects its readiness
+ *  with the backend's cause. */
 class LaneSubscription {
   private subscription: BackendSubscription | null = null
   private isWanted = false
@@ -54,7 +54,7 @@ class LaneSubscription {
     return this.isWanted
   }
 
-  /** Whether an attempt was ready since the lane started; a loss or a dropped attempt keeps it. */
+  /** Whether its subscription was ready since the lane started; a loss keeps it. */
   get delivering(): boolean {
     return this._delivering
   }
@@ -63,28 +63,14 @@ class LaneSubscription {
     return this.readyPromise
   }
 
-  /** The current attempt's readiness, for Room's bounded recovery policy. */
-  get attemptReady(): Promise<void> {
-    return this.subscription?.ready ?? Promise.resolve()
-  }
-
-  /** The lane is wanted: it subscribes unless an attempt is open. A closed attempt is replaced by the recovery policy,
-   *  not by starting again. */
+  /** The lane is wanted: it subscribes unless it has a subscription, which its driver keeps or which ended for good. */
   start(): void {
     this.isWanted = true
-    this.resume()
+    if (this.subscription === null) this.subscribe()
   }
 
-  /** Opens an attempt of a wanted lane that has none, once its recovery gave up. */
-  resume(): void {
-    if (this.subscription === null) this.retry()
-  }
-
-  retry(): void {
-    if (!this.isWanted) return
+  private subscribe(): void {
     this.ensurePendingReady()
-    const previous = this.subscription
-    this.unobserve?.()
     const subscription = this.owner.subscribeLane(this.address, this.listener)
     this.subscription = subscription
     let wasReady = subscription.state() === 'ready'
@@ -102,7 +88,6 @@ class LaneSubscription {
       }
     }
     void settleOnReady()
-    // Every reassignment of `subscription` unobserves first, so this listener only hears the current one.
     this.unobserve = subscription.onStateChange((state) => {
       if (state === 'lost') {
         if (wasReady) lostAfterReady = true
@@ -118,29 +103,28 @@ class LaneSubscription {
     })
     // It may have ended as it opened, before it had an observer.
     if (subscription.state() === 'closed') this.ended(subscription)
-    if (previous) void previous.unsubscribe()
   }
 
-  /** A terminal end rejects `ready` right after announcing `closed`, and the backend reports it unless it dropped the
-   *  lane's incarnation; a stop resolves it. */
+  /** Core rejects `ready` right after announcing `closed`: with the driver's reason as the cause where the lane failed
+   *  (Redis refused it), which its readiness rejects with; without one where the backend dropped its incarnation. */
   private ended(subscription: BackendSubscription): void {
-    this.ensurePendingReady()
-    const end = () => {
-      if (this.subscription === subscription) this.owner.onLaneTerminal(this)
-    }
-    void subscription.ready.then(end, end)
+    const pending = this.ensurePendingReady()
+    void subscription.ready.catch((failure: Error) => {
+      if (this.subscription !== subscription) return
+      if (failure.cause !== undefined) pending.reject(failure)
+      this.owner.onLaneEnded(this)
+    })
   }
 
   stop(): void {
     this.isWanted = false
     this._delivering = false
-    this.dropAttempt()
+    this.unsubscribe()
     this.settleReady()
     this.readyPromise = Promise.resolve()
   }
 
-  /** Exhausted policy keeps demand and holder readiness pending, but drops the dead attempt until the lane resumes. */
-  dropAttempt(): void {
+  private unsubscribe(): void {
     const subscription = this.subscription
     this.subscription = null
     this.unobserve?.()
@@ -148,11 +132,15 @@ class LaneSubscription {
     if (subscription) void subscription.unsubscribe()
   }
 
-  private ensurePendingReady(): void {
-    if (this.pendingReady !== null) return
-    this.pendingReady = createDeferred()
-    this.readyPromise = this.pendingReady.promise
+  private ensurePendingReady(): Deferred<void> {
+    if (this.pendingReady !== null) return this.pendingReady
+    const pending = createDeferred()
+    // A failure is reported once by core; a consumer that waits on `ready` gets it too.
+    void pending.promise.catch(() => {})
+    this.pendingReady = pending
+    this.readyPromise = pending.promise
     this.owner.onLanePending(this, true)
+    return pending
   }
 
   private settleReady(): void {
