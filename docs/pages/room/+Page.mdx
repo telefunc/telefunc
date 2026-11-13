@@ -171,7 +171,7 @@ room.onJoin(follow)
 
 > You also receive your own messages. To not receive them, join with `room.join({ meta, selfDelivery: false })`.
 
-> `info.seq` numbers everyone's messages and the room's announcements in one order for the whole room, so it jumps over the ones this page doesn't receive: its own with `selfDelivery: false`, or those of participants it doesn't subscribe to. It never jumps over a lost message: a page never misses one (see <Link href="#remove-a-participant" />).
+> `info.seq` numbers everyone's messages and the room's announcements in one order for the whole room, so it jumps over the ones this page doesn't receive: its own with `selfDelivery: false`, or those of participants it doesn't subscribe to. It never jumps over a lost message: a page never misses a message on no track (see <Link href="#remove-a-participant" />).
 
 > Each participant's messages arrive in the order it sent them. `from` is that participant as the room knows it when the message arrives, so `from.meta` is its meta then, not when it sent the message. Joins, leaves and meta changes arrive in the same order everywhere, but two pages can see a message and someone else's join in a different order.
 
@@ -184,7 +184,7 @@ onCursorMove((position) => me.publish(position, { track: 'cursor', lossy: true }
 room.subscribe((position, info, from) => drawCursor(from.id, position), { track: 'cursor' })
 ```
 
-> `lossy` needs a `track`: a message on no track reaches everyone, in the room's order, and is never skipped.
+> In `publish()`, `lossy` needs a `track`: a message on no track reaches everyone, in the room's order, and is never skipped. `publishBinary()` without a `track` publishes on your default track, which takes `lossy` like any other track.
 
 
 ## Check the message type
@@ -428,16 +428,17 @@ room.onJoin(watch)
 
 With `retain: isKeyframe`, a viewer who arrives mid-stream starts from the last keyframe, see <Link href="#give-late-joiners-the-current-state" />.
 
-On a track, `info.seq` counts its sender's frames on that track. A viewer that falls behind gets every frame, and gets `'disconnected'` where the server can't hold them for it. Where only the newest frame matters, such as a position or live audio and video, pass `lossy: true` in each publish on its track: a newer frame then replaces one no connection has taken yet, and a viewer's `info.seq` jumps over what it skipped:
+On a track, `info.seq` counts its sender's frames on that track. A viewer that falls behind gets every frame, and gets `'disconnected'` where the server can't hold them for it. Where only the newest frame matters, such as a position or live audio and video, pass `lossy: true` in each publish on its track: a viewer that falls behind then skips to the newest frame, and its `info.seq` jumps over what it skipped:
 
 ```js
 // Environment: client
 
-me.publishBinary(position, { track: 'cursor', lossy: true }) // a viewer that falls behind skips to the newest
-me.publishBinary(stroke, { track: 'drawing' }) // a viewer never misses one
+// onCursorMove(), onStroke(): your app's input events, each giving a Uint8Array
+onCursorMove((position) => me.publishBinary(position, { track: 'cursor', lossy: true })) // may be skipped
+onStroke((stroke) => me.publishBinary(stroke, { track: 'drawing' })) // a viewer never misses one
 ```
 
-> A track's publishes are all lossy or all not: a publish of the other kind throws, so give it a track of its own.
+> A publish without `lossy` is `lossy: false`, also on a track whose earlier publishes had `lossy: true`, and there it throws: a track's publishes are all lossy or all not. Give the updates that may be skipped and the messages that must all arrive a track each.
 
 With `lossy: true`, a viewer can skip a video frame that later frames depend on, so number the frames in `meta` (a frame replaced on its way to the server never gets an `info.seq`) and, at a gap, drop frames until the next keyframe and restart your decoder from it.
 
@@ -468,6 +469,7 @@ Publish with `retain: true`, and a room that starts listening later receives tha
 ```js
 // Environment: client
 
+// keyframe: a Uint8Array from your encoder, e.g. WebCodecs' VideoEncoder
 await me.publish({ phase: 'voting' }, { retain: true })
 await me.publishBinary(keyframe, { track: 'camera', meta: { isKeyframe: true }, retain: true, lossy: true })
 ```
