@@ -338,8 +338,8 @@ describe('the confirmation time a lossy send measures', () => {
 })
 
 describe('a page away for 5 s, with 30 lossy sends and one plain send a second', () => {
-  /** One send every 1000 / 30 ms for 8 s: the wire goes at 1 s, and the page is back at 6 s. Returns what the page read
-   *  after it was back, and how many lossy values it read then that were sent before it was back. */
+  /** One send every 1000 / 30 ms for 8 s: the wire goes at 1 s, and the page is back at 6 s. Returns what the page read,
+   *  and what it read after it was back. */
   function run(died: 'closed' | 'silently') {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance', 'Date'] })
     const channel = new ServerChannel<never, string>()
@@ -365,17 +365,12 @@ describe('a page away for 5 s, with 30 lossy sends and one plain send a second',
       if (i < 30 || i >= 6 * 30)
         channel._dispatchFrame({ tag: TAG.WINDOW, index: 7, bytes: 1 << 30, lastSeq: page.lastSeq } as any)
     }
-    const after = page.read.slice(back)
-    const stale = after.filter((value) => value.startsWith('~') && Number(value.slice(2)) < 6 * 30).length
-    return { read: page.read, after, stale, owed: owed(channel, page) }
+    return { read: page.read, after: page.read.slice(back), owed: owed(channel, page) }
   }
 
   for (const died of ['closed', 'silently'] as const) {
     test(`after a wire that ${died === 'closed' ? 'closed' : 'died silently'}: every plain one once and in order, the newest last`, () => {
-      const { read, after, stale, owed } = run(died)
-      console.log(
-        `lossy values sent before the page was back that it read after, the wire having ${died === 'closed' ? 'closed' : 'died silently'}: ${stale}`,
-      )
+      const { read, after, owed } = run(died)
       expect(read.filter((value) => value.startsWith('R'))).toEqual(['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8'])
       expect(new Set(read).size).toBe(read.length)
       expect(read.at(-2)).toBe('~L240')
