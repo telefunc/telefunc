@@ -376,7 +376,8 @@ class SseServerTransport {
     } finally {
       wire.pendingDispatches.delete(drain)
     }
-    return okResponse()
+    // Frames after a close don't run: refused, as a POST for a wire closed before it is, so the page reconnects.
+    return wire.closed ? badRequest() : okResponse()
   }
 
   /** Stream-response POST lifecycle: consume the initial reconcile batch; once its RECONCILE is answered, drain the
