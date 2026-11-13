@@ -4,7 +4,7 @@ import { assert } from '../../../utils/assert.js'
 import { HELD_SEND_OVERHEAD_BYTES, hold, letGo, type MemoryHolder } from './channelMemory.js'
 import type { PublishBody } from './PublishBody.js'
 
-/** `alone`: sent with none of its channel's unconfirmed, so no publish of the channel's waits ahead of its confirmation. */
+/** `alone`: sent with nothing of its channel's unconfirmed, publish or frame, so nothing waits ahead of its confirmation. */
 type Publish = { head: Uint8Array<ArrayBuffer>; body: PublishBody; at: number; alone: boolean }
 
 /** What a channel sent and its page hasn't confirmed, for a reconnect to send again: its own frames, and its publishes,
@@ -40,12 +40,14 @@ class ServerReplay {
 
   pushPublish(seq: number, head: Uint8Array<ArrayBuffer>, body: PublishBody): void {
     this.pushed(seq)
-    this.publishes.push(seq, { head, body, at: performance.now(), alone: this.publishes.length === 0 })
+    const alone = this.publishes.length === 0 && this.frames.length === 0
+    this.publishes.push(seq, { head, body, at: performance.now(), alone })
     hold(this.holder, body)
   }
 
-  /** The least time a publish waited for its page's confirmation, `Infinity` before the first. One sent alone waited
-   *  for the path alone, so its confirmation sets it, also where the path got slower; the others only lower it. */
+  /** The least time a publish waited for its page's confirmation, `Infinity` before the first. One sent with nothing
+   *  unconfirmed ahead of it waited for the path alone, so its confirmation sets it, also where the path got slower; one
+   *  sent behind others, publishes or frames, only lowers it. */
   leastConfirmMs = Number.POSITIVE_INFINITY
 
   /** The page has every frame through `lastSeq`, which a reconnect never asks for again: they go. */

@@ -18,8 +18,13 @@ const ledgerTotal = () => (globalThis as any)._telefunc['channelMemory.ts'].tota
 type Page = { lastSeq: number; read: string[]; consumed: number }
 
 /** One wire to the page. While `stalled`, what the server sends waits in the wire's queue; `deliver()` hands the page
- *  what waits; `close()` drops what is sent from then on, as a closed wire does. */
-function wire(channel: ServerChannel<never, string>, page: Page, { behindAfter = Number.POSITIVE_INFINITY } = {}) {
+ *  what waits; `close()` drops what is sent from then on, as a closed wire does. `behindAfter`: how long a lossy send may
+ *  wait, or how that follows from the least confirmation time. */
+function wire(
+  channel: ServerChannel<never, string>,
+  page: Page,
+  { behindAfter = Number.POSITIVE_INFINITY }: { behindAfter?: number | ((leastConfirmMs: number) => number) } = {},
+) {
   let waiting: Uint8Array[] = []
   let stalled = false
   let closed = false
@@ -46,7 +51,7 @@ function wire(channel: ServerChannel<never, string>, page: Page, { behindAfter =
     },
     carry() {},
     bufferedAmount: () => 0,
-    behindAfter: () => behindAfter,
+    behindAfter: (leastConfirmMs) => (typeof behindAfter === 'number' ? behindAfter : behindAfter(leastConfirmMs)),
     deliveredBefore: () => 0,
     sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
     queue: {
@@ -252,6 +257,37 @@ describe('a lossy send to an attached page', () => {
     expectTypeOf(channel.sendBinary(new Uint8Array(1), { lossy: true, ack: false })).toEqualTypeOf<Promise<void>>()
     const opts = { lossy: true } as const
     expectTypeOf(channel.send('x', opts)).toEqualTypeOf<Promise<void>>()
+  })
+})
+
+describe('the confirmation time a lossy send measures', () => {
+  test('a lossy send behind an unconfirmed plain one keeps it, so a wire that dies silently takes 20 values in 2 s, not 60', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance', 'Date'] })
+    const channel = new ServerChannel<never, string>()
+    channel._registerChannel()
+    const page = newPage()
+    // A WebSocket's: 600 ms past the least confirmation time.
+    const w = wire(channel, page, { behindAfter: (leastConfirmMs) => 600 + leastConfirmMs })
+    w.attach()
+    void channel.send('warm', { lossy: true })
+    vi.advanceTimersByTime(50)
+    w.confirm()
+    expect(channel._replayBuffer!.leastConfirmMs).toBe(50)
+    // A 1 MiB snapshot, then a cursor value, which waits for the snapshot's 8.4 s at 1 Mbit/s before it is confirmed.
+    w.stall()
+    void channel.send('R'.repeat(1024 * 1024))
+    void channel.send('cursor', { lossy: true })
+    vi.advanceTimersByTime((1024 * 1024 * 8) / 1000 + 50)
+    w.deliver()
+    w.confirm()
+    expect(channel._replayBuffer!.leastConfirmMs).toBe(50)
+    w.close()
+    const handed = channel._replayBuffer!.seq
+    for (let i = 0; i < 60; i++) {
+      vi.advanceTimersByTime(1000 / 30)
+      void channel.send(`cursor ${i}`, { lossy: true })
+    }
+    expect(channel._replayBuffer!.seq - handed).toBe(20)
   })
 })
 
