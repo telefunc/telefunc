@@ -544,7 +544,7 @@ const price = await onWatchPrice('ACME')
 price.subscribe((value, info) => showPrice(value, info.seq))
 ```
 
-> `lossy` is a constructor option because a `BroadcastChannel` is one client's subscription: it lets that client skip, whoever publishes, while a client of the same key without it gets every message.
+> `lossy` lets this channel's client skip to the newest, whoever publishes. A client of the same key without it gets every message.
 
 > `info.seq` jumps over the messages a client skipped. A client skips to the newest of the whole key, so give each value its own key, such as one per pointer.
 

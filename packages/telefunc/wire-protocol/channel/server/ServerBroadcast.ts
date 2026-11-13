@@ -446,9 +446,9 @@ type BroadcastChannelOptions = {
   key: string
   /**
    * Where only the newest message matters: a client that keeps up gets every message, and one that falls behind skips
-   * to the newest, with `info.seq` jumping over what it skipped. A `BroadcastChannel` is one client's subscription, so
-   * this lets that client skip, whoever publishes, while a client of the same key without it gets every message, or
-   * the channel closes with `ChannelOverflowError` past what the server holds for it.
+   * to the newest, with `info.seq` jumping over what it skipped. This channel's client skips whoever publishes, while a
+   * client of the same key without it gets every message, or its channel closes with `ChannelOverflowError` past what
+   * the server holds for it.
    *
    * https://telefunc.com/channel#skip-to-the-newest
    *
