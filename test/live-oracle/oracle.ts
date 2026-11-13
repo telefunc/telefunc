@@ -161,7 +161,7 @@ async function queriesAnswered(): Promise<void> {
   }
 }
 
-const { driver, writer, query, close } = await connect()
+const { driver, writer, query, close, transactions } = await connect()
 
 /** A file in a directory of its own, removed when the process exits: a failed run's too. */
 async function temporaryFile(name: string): Promise<string> {
@@ -177,6 +177,8 @@ async function connect(): Promise<{
   writer: OrmDriver
   query: (text: string) => Promise<any[]>
   close: () => Promise<void>
+  /** better-sqlite3 and bun:sqlite: a transaction function called on an object, natively and through the capture. */
+  transactions?: { native: string; wrapped: string }
 }> {
   if (DB === 'd1') {
     const { Miniflare } = await import('miniflare')
@@ -214,6 +216,7 @@ async function connect(): Promise<{
       writer: driver,
       query: async (text) => sqlite.prepare(text).all(),
       close: async () => sqlite.close(),
+      transactions: transactionsOnAnObject(new Database(':memory:'), sqlite),
     }
   }
   if (DB === 'node') {
@@ -269,6 +272,7 @@ async function connect(): Promise<{
       writer: driver,
       query: async (text) => sqlite.prepare(text).all(),
       close: async () => sqlite.close(),
+      transactions: transactionsOnAnObject(new Database(':memory:'), sqlite),
     }
   }
   if (DB === 'pglite') {
@@ -684,6 +688,11 @@ console.log(`scripted writes that made no case: ${noCase.length}${noCase.map((wr
 console.log(`volatile reads shared: ${sharedVolatile.length} of ${volatile.length}`)
 console.log(`reads holding another read's rows: ${misshared.length}${misshared.map((s) => ` ${s.shape}`).join('')}`)
 console.log(`derived: rows held=${heldRows} of ${subscribers.filter((s) => s.derive).length} derived subscribers`)
+const receiverLost = transactions !== undefined && transactions.wrapped !== transactions.native
+if (transactions)
+  console.log(
+    `transactions called on an object: ${receiverLost ? `native ${transactions.native}, wrapped ${transactions.wrapped}` : 'as native'}`,
+  )
 for (const miss of misses.slice(0, 10)) console.log(`MISSED ${miss}`)
 for (const failure of failedWrites.slice(0, 10)) console.log(`FAILED ${failure}`)
 const failed =
@@ -695,7 +704,8 @@ const failed =
   rolledBackChanges.length > 0 ||
   noCase.length > 0 ||
   sharedVolatile.length > 0 ||
-  misshared.length > 0
+  misshared.length > 0 ||
+  receiverLost
 process.exit(failed ? 1 : 0)
 
 // ── Helpers ──
@@ -731,6 +741,38 @@ function canonical(shape: string, result: unknown): string {
     priorities: rows.map((r) => r.priority),
     above: rows.filter((r) => r.priority !== last).map((r) => r.id),
   })
+}
+
+/** A better-sqlite3 or bun:sqlite database, as far as a transaction function needs one. */
+type SyncSqlite = {
+  exec(text: string): unknown
+  prepare(text: string): { get(...params: unknown[]): unknown; all(): unknown[] }
+  transaction(fn: (this: { tenant: number }) => unknown): {
+    (this: unknown): unknown
+    immediate(this: unknown): unknown
+  }
+}
+
+/** What a transaction function inserting the row its object names (`this.tenant`) returns and commits, on `native`
+ *  and on `wrapped`: called as a method in the default mode, and through `.immediate` with `call()`. */
+function transactionsOnAnObject(native: SyncSqlite, wrapped: SyncSqlite): { native: string; wrapped: string } {
+  const run = (db: SyncSqlite) => {
+    db.exec('create table tenant_rows (id int)')
+    const insert = db.transaction(function () {
+      return db.prepare('insert into tenant_rows (id) values (?) returning id').get(this.tenant)
+    })
+    const attempt = (call: () => unknown) => {
+      try {
+        return call()
+      } catch (err) {
+        return String(err)
+      }
+    }
+    const service = { tenant: 1, insert }
+    const results = [attempt(() => service.insert()), attempt(() => insert.immediate.call({ tenant: 2 }))]
+    return JSON.stringify({ results, committed: db.prepare('select id from tenant_rows order by id').all() })
+  }
+  return { native: run(native), wrapped: run(wrapped) }
 }
 
 function mulberry32(seed: number): () => number {

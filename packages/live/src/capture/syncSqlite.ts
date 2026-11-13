@@ -140,14 +140,14 @@ function captureSyncSqlite(driver: SyncSqlite, live: LiveDatabase) {
     },
     exec,
     /** A transaction function: it runs `BEGIN` (or a savepoint, inside another) and its end past the statements the
-     *  capture sees. */
+     *  capture sees, and calls `call` on what it's called on, as the driver's own does. */
     transaction(call: (...args: unknown[]) => unknown) {
-      return (...args: unknown[]) => {
+      return function (this: unknown, ...args: unknown[]) {
         const nested = driver.inTransaction()
         control(nested ? 'SAVEPOINT "__live"' : 'BEGIN')
         let result: unknown
         try {
-          result = call(...args)
+          result = call.apply(this, args)
         } catch (err) {
           if (nested) control('ROLLBACK TO "__live"')
           control(nested ? 'RELEASE "__live"' : 'ROLLBACK')
