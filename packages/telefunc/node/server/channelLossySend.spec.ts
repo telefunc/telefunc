@@ -156,6 +156,18 @@ describe('a lossy send while the page is away', () => {
 })
 
 describe('a lossy send to an attached page', () => {
+  test('a graceful close hands the held newest ahead of the close', async () => {
+    const channel = new ServerChannel<never, string>()
+    channel._registerChannel()
+    const page = newPage()
+    wire(channel, page, { behindAfter: 0 }).attach()
+    send(channel, 'L1')
+    await new Promise((resolve) => setTimeout(resolve, 2))
+    send(channel, 'L2')
+    void channel.close()
+    expect(page.read.join(' ')).toBe('~L1 ~L2 CLOSE')
+  })
+
   test('a page that keeps up reads every one, in order with the others', () => {
     const channel = new ServerChannel<never, string>()
     channel._registerChannel()
@@ -302,8 +314,12 @@ describe("the server's memory after a lossy send", () => {
     w.attach()
     send(channel, 'L1')
     await new Promise((resolve) => setTimeout(resolve, 2))
+    const sent = channel.heldBytes
     void channel.send('x'.repeat(64 * 1024), { lossy: true })
+    expect(channel.heldBytes - sent).toBeGreaterThan(64 * 1024)
     channel.abort()
+    // What its replay keeps for the page, the ABORT among it, stays until the page is gone.
+    expect(channel.heldBytes - sent).toBeLessThan(1024)
     channel._release()
     expect(ledgerTotal()).toBe(before)
   })
