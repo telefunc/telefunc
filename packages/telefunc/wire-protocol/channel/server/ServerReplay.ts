@@ -76,12 +76,14 @@ class ServerReplay {
     return out
   }
 
-  /** The newest publish of lossy `stream` goes if it is among its newest `droppable` publishes, the ones no wire has, for
-   *  a newer one to take its place: the page's `info.seq` shows what it skipped. Returns its seq where it went. */
+  /** The newest publish of lossy `stream` goes if it is among its newest `droppable` publishes, the ones no wire has, and
+   *  no plain publish of `stream` came after it, for a newer one to take its place: the page's `info.seq` shows what it
+   *  skipped. Returns its seq where it went. */
   dropNewestOf(stream: string, droppable: number): number | undefined {
     const seq = this.newestOfStream.get(stream)
     if (seq === undefined) return undefined
-    const publish = this.publishes.removeAmongNewest(seq, droppable)
+    // Any later publish of `stream` is a plain one, as `seq` is its newest lossy one.
+    const publish = this.publishes.removeAmongNewest(seq, droppable, (later) => later.body.stream === stream)
     if (!publish) return undefined
     this.letPublishGo(publish)
     return seq
@@ -198,11 +200,14 @@ class SeqQueue<T> {
     return item
   }
 
-  /** Takes out the entry of `seq` where it is among the newest `newest`, and returns it. */
-  removeAmongNewest(seq: number, newest: number): T | undefined {
+  /** Takes out the entry of `seq` where it is among the newest `newest` and no entry after it `fences` it, and returns it. */
+  removeAmongNewest(seq: number, newest: number, fences: (later: T) => boolean): T | undefined {
     const oldest = Math.max(this.head, this.seqs.length - newest)
     for (let i = this.seqs.length - 1; i >= oldest; i--) {
-      if (this.seqs[i] !== seq) continue
+      if (this.seqs[i] !== seq) {
+        if (fences(this.items[i]!)) return undefined
+        continue
+      }
       this.seqs.splice(i, 1)
       const [item] = this.items.splice(i, 1)
       if (this.head >= this.items.length) this.clear()

@@ -275,40 +275,73 @@ describe('ServerBroadcastEnd', () => {
 
     expect(sent).toEqual(['"first"', '"plain"', '"newer"'])
   })
+
+  // As a Channel's send and a page's publish: a lossy publish replaces only lossy ones after the last plain one of its stream.
+  describe.each(['behind', 'away'] as const)('to a page that is %s', (wire) => {
+    it.each([
+      [
+        ['l1', 'plain', 'l2'],
+        ['l1', 'plain', 'l2'],
+      ],
+      [
+        ['l1', 'l2', 'plain', 'l3', 'l4'],
+        ['l2', 'plain', 'l4'],
+      ],
+    ])('keeps a lossy publish before a plain one of its stream: %j arrives as %j', (published, arrives) => {
+      const { end, peer } = behindEnd(Number.POSITIVE_INFINITY)
+      if (wire === 'away') end._onPeerDisconnect(peer, 60_000)
+      end.deliver(publishBody('"first"', { seq: 1, timestamp: 1 }, null, false))
+      published.forEach((text, i) => {
+        const info = { seq: i + 2, timestamp: i + 2 }
+        end.deliver(publishBody(JSON.stringify(text), info, 'cursor', text !== 'plain'))
+      })
+      void end.close()
+
+      expect(replayed(end)).toEqual(['first', ...arrives].map((text) => JSON.stringify(text)))
+    })
+  })
 })
 
-/** An attached page's end whose page is behind once a publish waits for its confirmation; the publishes it sends. */
-function behindEnd() {
+/** The publishes a reconnect of `end`'s page would get, in order. */
+function replayed(end: ServerBroadcastEnd): string[] {
+  return end
+    ._replayBuffer!.getAfter(0)
+    .map((frame) => decode(frame))
+    .flatMap((decoded) => (decoded.tag === TAG.PUBLISH ? [decoded.text] : []))
+}
+
+/** An attached page's end whose page is behind once a publish waits for its confirmation, with `waiting` of its newest
+ *  publishes not yet taken by its wire; the publishes it sends. */
+function behindEnd(waiting = 0) {
   const end = new ServerBroadcastEnd()
   end.setOwner({ _onPagePublish() {}, _onPagePublishBinary() {} })
   end._registerChannel()
   const sent: string[] = []
-  end._attachPeer(
-    new IndexedPeer({
-      sender: {
-        send: (frame) => {
-          const decoded = decode(frame as Uint8Array<ArrayBuffer>)
-          if (decoded.tag === TAG.PUBLISH) sent.push(decoded.text)
-        },
-        carry() {},
-        bufferedAmount: () => 0,
-        behindAfter: () => -1,
-        deliveredBefore: () => 0,
-        terminate() {},
-        sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-        queue: {
-          waitingPublishes: () => 0,
-          dropWaitingPublishes() {},
-          dropWaitingFromPublish() {},
-          drainRate: () => 0,
-        },
+  const peer = new IndexedPeer({
+    sender: {
+      send: (frame) => {
+        const decoded = decode(frame as Uint8Array<ArrayBuffer>)
+        if (decoded.tag === TAG.PUBLISH) sent.push(decoded.text)
       },
-      index: 7,
-      // Its own replay: what it hasn't confirmed there is what makes its page behind.
-      replay: end._replayBuffer!,
-    }),
-  )
-  return { end, sent }
+      carry() {},
+      bufferedAmount: () => 0,
+      behindAfter: () => -1,
+      deliveredBefore: () => 0,
+      terminate() {},
+      sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+      queue: {
+        waitingPublishes: () => waiting,
+        dropWaitingPublishes() {},
+        dropWaitingFromPublish() {},
+        drainRate: () => 0,
+      },
+    },
+    index: 7,
+    // Its own replay: what it hasn't confirmed there is what makes its page behind.
+    replay: end._replayBuffer!,
+  })
+  end._attachPeer(peer)
+  return { end, peer, sent }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
