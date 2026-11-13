@@ -63,6 +63,8 @@ interface MuxConnection {
   /** Puts a newer frame in the place of the channel's frame `seq` while that still waits to go and is the channel's last,
    *  and returns the bytes it adds over that one: null once it went, or once the channel sent a frame after it. */
   replaceWaiting<T>(channel: MuxChannel, seq: number, encodeFrame: SequencedEncoder<T>, data: T): number | null
+  /** Throws where `data`, encoded by `encodeFrame`, is larger than the server accepts, as its send would. */
+  assertFits<T>(channel: MuxChannel, encodeFrame: SequencedEncoder<T>, data: T): void
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status?: AckResultStatus): void
   sendAbort(channel: MuxChannel, abortValue: string): void
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
@@ -202,13 +204,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     const record = this.channels.of(channel)
     if (record === undefined) return 0
     const { replay } = record
-    const frame = encodeFrame(record.ix, data, replay.seq + 1)
-    const maxFrameBytes = this.maxFrameBytesOf(channel)
-    // The server ends any wire a larger frame arrives on, and the replay would send it again on the next one.
-    assertUsage(
-      frame.byteLength <= maxFrameBytes,
-      `Channel message too large: ${frame.byteLength} bytes encoded, the server accepts ${maxFrameBytes} at most`,
-    )
+    const frame = this.fitting(channel, encodeFrame(record.ix, data, replay.seq + 1))
     const seq = replay.nextSeq()
     onQueued?.(seq)
     this.gate.send(record, seq, frame, kind)
@@ -219,13 +215,24 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     const record = this.channels.of(channel)
     // A frame sent after it must not arrive ahead of what takes its place.
     if (record === undefined || seq !== record.replay.seq) return null
-    const frame = encodeFrame(record.ix, data, seq)
+    return this.gate.replaceWaiting(record.ix, seq, this.fitting(channel, encodeFrame(record.ix, data, seq)))
+  }
+
+  /** For a send held before it takes a seq: a frame's header has the same size at any seq. */
+  assertFits<T>(channel: MuxChannel, encodeFrame: SequencedEncoder<T>, data: T): void {
+    const record = this.channels.of(channel)
+    if (record !== undefined) this.fitting(channel, encodeFrame(record.ix, data, record.replay.seq + 1))
+  }
+
+  /** `frame`, where it is no larger than the server accepts from `channel`: the server ends any wire a larger frame
+   *  arrives on, and the replay would send it again on the next one. */
+  private fitting(channel: MuxChannel, frame: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
     const maxFrameBytes = this.maxFrameBytesOf(channel)
     assertUsage(
       frame.byteLength <= maxFrameBytes,
       `Channel message too large: ${frame.byteLength} bytes encoded, the server accepts ${maxFrameBytes} at most`,
     )
-    return this.gate.replaceWaiting(record.ix, seq, frame)
+    return frame
   }
 
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {

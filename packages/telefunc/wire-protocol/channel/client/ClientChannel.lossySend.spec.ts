@@ -167,6 +167,17 @@ describe('a lossy send from the page out of credit', () => {
     expect(held(channel).slice(-4)).toEqual(['L1', 'R1', 'L2', 'CLOSE'])
   })
 
+  test('one larger than the server accepts throws at its call, and leaves the one held and the next plain send', () => {
+    const channel = newChannel()
+    useUpCredit(channel)
+    send(channel, 'L1')
+    expect(() => channel.sendBinary(new Uint8Array(WIRE_MAX_RAW_FRAME_BYTES), { lossy: true })).toThrow(
+      'Channel message too large',
+    )
+    expect(() => channel.send('R')).not.toThrow()
+    expect(held(channel).slice(-2)).toEqual(['L1', 'R'])
+  })
+
   test('is dropped by a newer one sent once a reconnect raised the credit, so it never goes after it', () => {
     const channel = newChannel()
     channel._attach.capWindows(1024)

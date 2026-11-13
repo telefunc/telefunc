@@ -507,6 +507,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  that is behind; while the server grants no more credit, it waits as the newest. */
   private sendNewest<D extends string | Uint8Array>(encodeFrame: SequencedEncoder<D>, data: D): Promise<void> {
     if (this.sendCredit.isOutOfCredit()) {
+      // Too large, it throws here, and the one held stays.
+      this.connection.assertFits(this, encodeFrame, data)
       // The caller may write into its bytes once `sendBinary` returned.
       const copy = (typeof data === 'string' ? data : new Uint8Array(data)) as D
       this.heldLossy = () => void this.handLossy(encodeFrame, copy)
