@@ -114,15 +114,16 @@ async function acksWaitingOutcome(count: number) {
   const { channel, control } = await openChannel(onChannelAcksWaiting)
   const closed = new Promise<string>((resolve) => channel.onClose((err) => resolve(err?.name ?? 'none')))
   let settledEarly = 0
-  const sends = Array.from({ length: count }, (_, n) =>
-    channel
-      .send(n, { ack: true })
-      .then(
-        () => 'answered',
-        (err: Error) => err.name,
-      )
-      .finally(() => settledEarly++),
-  )
+  const sends = Array.from({ length: count }, async (_, n) => {
+    try {
+      await channel.send(n, { ack: true })
+      return 'answered'
+    } catch (err) {
+      return (err as Error).name
+    } finally {
+      settledEarly++
+    }
+  })
   // Until each waits on the server, or was refused as it came.
   const allIn = async () => {
     while (!channel.isClosed && Number(await control.send('started', { ack: true })) + settledEarly < count) {

@@ -985,10 +985,15 @@ async function onChannelLossyFromPage() {
 async function onChannelsQueuedBeforeReturn() {
   return Array.from({ length: 8 }, () => {
     const channel = new Channel<(msg: 'how') => string, never>()
-    const queued = channel.sendBinary(new Uint8Array(1024 * 1024)).then(
-      () => 'delivered',
-      (err: Error) => err.name,
-    )
+    const queuedOutcome = async () => {
+      try {
+        await channel.sendBinary(new Uint8Array(1024 * 1024))
+        return 'delivered'
+      } catch (err) {
+        return (err as Error).name
+      }
+    }
+    const queued = queuedOutcome()
     channel.listen(() => queued)
     return channel.client
   })
@@ -1147,8 +1152,12 @@ async function onChannelBudgets() {
   const refused = (err: Error) => {
     cleanupState[`budget_${bytes.id}`] ??= err.message
   }
+  const recordCredit = async () => {
+    await bytes.send('x'.repeat(4 * 1024))
+    cleanupState[`budget_${bytes.id}_credit`] = 'accepted'
+  }
   bytes.onOpen(() => {
-    void bytes.send('x'.repeat(4 * 1024)).then(() => (cleanupState[`budget_${bytes.id}_credit`] = 'accepted'))
+    void recordCredit()
     for (let i = 0; i < 6000; i++) void bytes.send('x'.repeat(1024)).catch(refused)
   })
   return { bytes: bytes.client }
@@ -1160,7 +1169,7 @@ async function onChannelBudgets() {
  */
 async function onChannelAwaitedFromOffline() {
   const ch = new Channel<never, string>()
-  void (async () => {
+  const sendAll = async () => {
     const sends: string[] = []
     for (const bytes of [1024, 5 * 1024 * 1024, 1024]) {
       try {
@@ -1171,7 +1180,8 @@ async function onChannelAwaitedFromOffline() {
       }
     }
     cleanupState[`awaitedFromOffline_${ch.id}`] = JSON.stringify(sends)
-  })()
+  }
+  void sendAll()
   return { channel: ch.client, channelId: ch.id }
 }
 
@@ -1217,11 +1227,13 @@ async function onChannelOfflineBudgets() {
   ch.listen((msg) => `answered ${msg}`)
   // Sent before the page attaches: they wait in the channel's buffer until it does.
   const sends = Array.from({ length: 3 }, () => ch.send('x'.repeat(800 * 1024), { ack: true }))
-  void Promise.allSettled(sends).then((results) => {
+  const recordOutcomes = async () => {
+    const results = await Promise.allSettled(sends)
     cleanupState[`offline_budget_${ch.id}`] = JSON.stringify(
       results.map((r) => (r.status === 'rejected' ? `${r.reason.name}: ${r.reason.message}` : 'answered')),
     )
-  })
+  }
+  void recordOutcomes()
   return { channel: ch.client }
 }
 
