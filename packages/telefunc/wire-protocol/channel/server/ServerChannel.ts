@@ -817,7 +817,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         })
         break
       case TAG.PUBLISH:
-        assert(data instanceof PublishBody)
+        assert(PublishBody.isPublishBody(data))
         peer.sendPublish(data)
         break
     }

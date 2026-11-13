@@ -1,11 +1,15 @@
 export { PublishBody, publishBody }
 
+import { hasProp } from '../../../utils/hasProp.js'
 import { encode } from '../../wire/frame.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { admitPublish } from './channelMemory.js'
 
+const PUBLISH_BODY_BRAND = Symbol.for('telefunc.PublishBody')
+
 /** A publish's frame, which every subscriber on this server holds and sends behind a head of its own. */
 class PublishBody {
+  readonly [PUBLISH_BODY_BRAND] = true
   readonly frame: Uint8Array<ArrayBuffer>
   /** The stream within which a newer body takes this one's place while no wire has it; null if its page may not miss it. */
   readonly lossyStream: string | null
@@ -15,6 +19,10 @@ class PublishBody {
   constructor(frame: Uint8Array<ArrayBuffer>, lossyStream: string | null) {
     this.frame = frame
     this.lossyStream = lossyStream
+  }
+
+  static isPublishBody(value: unknown): value is PublishBody {
+    return hasProp(value, PUBLISH_BODY_BRAND)
   }
 }
 
