@@ -14,6 +14,7 @@ export {
   refuseNextSsePost,
   releaseHeldSsePosts,
   navigate,
+  withPacedLink,
   expectServerError,
   getResult,
   sleep,
@@ -31,6 +32,7 @@ import type { Response, WebSocket } from 'playwright-chromium'
 import { execSync } from 'node:child_process'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { startBlackHoleProxy, type BlackHoleProxy } from './black-hole-proxy'
 
 const playgroundDir = dirname(fileURLToPath(import.meta.url))
 
@@ -219,6 +221,20 @@ async function navigate(url: string, options?: Parameters<typeof page.goto>[1], 
 const NAVIGATE_ATTEMPTS = 4
 const HYDRATION_TIMEOUT = 5_000
 const NAVIGATE_RETRY_DELAY = 500
+
+/** Loads the channel page through a proxy that paces its connections as `link`, then runs `run`. */
+async function withPacedLink(link: Parameters<BlackHoleProxy['pace']>[0], run: () => Promise<void>) {
+  const proxy = await startBlackHoleProxy(getServerUrl())
+  try {
+    await navigate(`${proxy.url}/channel`)
+    proxy.pace(link)
+    await run()
+  } finally {
+    // The page leaves before the proxy closes, which would cut its connections.
+    await page.goto('about:blank')
+    await proxy.close()
+  }
+}
 
 // Transient errors Chromium-in-Docker surfaces when the bridge interface state shifts. Mirrors
 // the connection-family errors `.testRun-docker.ts`'s `tolerateError()` already allows in logs.

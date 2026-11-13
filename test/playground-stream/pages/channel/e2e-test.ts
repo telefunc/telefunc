@@ -1,10 +1,10 @@
 export { testChannel, testChannelApi }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { startBlackHoleProxy } from '../../black-hole-proxy'
 import type { Request, Response, WebSocket, WebSocketRoute } from 'playwright-chromium'
 import {
   navigate,
+  withPacedLink,
   getResult,
   getCleanupState,
   restartProxy,
@@ -1140,48 +1140,40 @@ function testChannel(isDev: boolean, inDocker = false) {
   // only, as `testSlowLink`: the page loads through a proxy in the test process.
   if (!isDev && !inDocker && channelTransports.length === 1) {
     test('channel: a 1 MB message to the page, 8 s at 1 Mbit/s, arrives over the connection it left on', async () => {
-      const proxy = await startBlackHoleProxy(getServerUrl())
-      try {
-        await navigate(`${proxy.url}/channel`)
-        const connections = countConnections()
-        // 1 Mbit/s each way.
-        proxy.pace({ downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 })
-        await page.click('#channel-test-slow-link')
-        await autoRetry(
-          async () => {
-            expect((await getResult<ChannelState>('#channel-state')).slowLinkReceived).toBe(1_000_000)
-          },
-          { timeout: 40_000 },
-        )
-        expect(connections.stop()).toBe(1)
-      } finally {
-        // The page leaves before the proxy closes, which would cut its connections.
-        await page.goto('about:blank')
-        await proxy.close()
-      }
+      // 1 Mbit/s each way.
+      await withPacedLink(
+        { downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 },
+        async () => {
+          const connections = countConnections()
+          await page.click('#channel-test-slow-link')
+          await autoRetry(
+            async () => {
+              expect((await getResult<ChannelState>('#channel-state')).slowLinkReceived).toBe(1_000_000)
+            },
+            { timeout: 40_000 },
+          )
+          expect(connections.stop()).toBe(1)
+        },
+      )
     })
   }
 
   // Over SSE, a channel's registration and the message the page queued with it go in one request.
   if (!isDev && !inDocker && channelTransports.length === 1 && channelTransport === 'sse') {
     test("channel: at 1 Mbit/s, a channel the page opens beside another's 4 MiB burst gets the message its server sends as it opens", async () => {
-      const proxy = await startBlackHoleProxy(getServerUrl())
-      try {
-        await navigate(`${proxy.url}/channel`)
-        // 1 Mbit/s each way.
-        proxy.pace({ downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 })
-        await page.click('#channel-test-hello-beside-burst')
-        await autoRetry(
-          async () => {
-            expect((await getResult<ChannelState>('#channel-state')).helloBesideBurst).toBe(true)
-          },
-          { timeout: 50_000 },
-        )
-      } finally {
-        // The page leaves before the proxy closes, which would cut its connections.
-        await page.goto('about:blank')
-        await proxy.close()
-      }
+      // 1 Mbit/s each way.
+      await withPacedLink(
+        { downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 },
+        async () => {
+          await page.click('#channel-test-hello-beside-burst')
+          await autoRetry(
+            async () => {
+              expect((await getResult<ChannelState>('#channel-state')).helloBesideBurst).toBe(true)
+            },
+            { timeout: 50_000 },
+          )
+        },
+      )
     })
   }
 
