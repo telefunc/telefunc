@@ -115,6 +115,10 @@ abstract class RoomStateView {
     return this._state.model.closed
   }
 
+  snapshot(): RoomSnapshotView {
+    return this._state.snapshot()
+  }
+
   subscribe(callback: MessageListener<[Sender]>, options?: MessageListenerOptions): () => void {
     return this._state.subscribe(callback, options)
   }
@@ -463,6 +467,9 @@ class RoomState {
     }
     listeners.remote = remote
     remoteBackings.set(remote, { state: this, entry })
+    // A read through the page's room wrapper tethers what it returns to it, but only the member `join()` returns holds
+    // its room open.
+    untether(remote)
     return remote
   }
 

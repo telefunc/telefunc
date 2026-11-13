@@ -232,9 +232,10 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.lanePlan.holderChanged(stub)
   }
 
-  /** The stub's client attached: it gets the roster, the room's meta and the demand for the members it holds. */
+  /** The stub's client attached: the roster is read again unless the view is current, which tells every client its
+   *  drift, and the client gets the room's meta and the demand for the members it holds. */
   onStubAttached(stub: RoomStub): void {
-    void this.roster.sendTo(stub, this.authority.ensureRoster())
+    void this.authority.ensureRoster().catch(reportRoomError)
     stub.relayEvent({ __r: 'update', seq: this.model.metaSeq, meta: this.model.metaEntries() })
     for (const member of stub.heldMembers()) {
       stub.relayEvent({ __r: 'demand-state', member, tracks: this.incomingDemand.wanted(member) })
@@ -246,7 +247,6 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.reconsider(handle)
     this.stubs.delete(stub)
     void this.hosting.dropView(stub)
-    this.roster.forget(stub)
     this.lanePlan.holderGone(stub)
   }
 

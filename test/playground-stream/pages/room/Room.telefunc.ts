@@ -227,7 +227,6 @@ async function onGetRoomWithMember(roomId: string, memberId: string) {
 /** The room with one of its participants as `room.snapshot()` lists it. */
 async function onGetRoomWithSnapshotMember(roomId: string, memberId: string) {
   const room = anyoneCanJoin(await Room.get(roomId))
-  await room.getParticipants() // the snapshot lists the members once the roster is read
   const member = room.snapshot().participants.find((participant) => participant.id === memberId) ?? null
   return { room, member }
 }

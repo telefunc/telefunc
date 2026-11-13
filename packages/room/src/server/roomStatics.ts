@@ -161,15 +161,16 @@ async function applyGetOptions(room: ServerRoom, { tail }: RoomGetOptions = {}):
   if (tail === true) await handleOf(room).startTail()
 }
 
-/** A handle on this process's view of the room: a held view catches up unless it is current; a new one reads the member
- *  count and the meta. */
+/** A handle on this process's view of the room, with its members: a held view catches up unless it is current; a new
+ *  one reads the roster and the meta. */
 async function openRoom(incarnation: RoomIncarnation & RoomConfigRecord): Promise<ServerRoom> {
   const { id } = incarnation
   const held = RoomReplica.of(incarnation.inc)
   if (held !== undefined) return await held.sharedHandle()
-  const [count, meta] = await Promise.all([reapAndCountPresence(incarnation), requireRoomMeta(id, incarnation)])
-  const replica = RoomReplica.seeded(id, incarnation, meta, { count })
-  return replica.handle()
+  const [roster, meta] = await Promise.all([reapAndReadRoster(incarnation), requireRoomMeta(id, incarnation)])
+  const replica = RoomReplica.seeded(id, incarnation, meta, roster)
+  // One seeded meanwhile for a join alone has read no roster.
+  return replica.model.rosterKnown ? replica.handle() : await replica.sharedHandle()
 }
 
 async function requireRoomMeta(id: string, config: RoomConfigRecord): Promise<StoredRoomMeta> {

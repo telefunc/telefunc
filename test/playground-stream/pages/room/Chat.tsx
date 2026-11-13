@@ -101,17 +101,14 @@ function MemberActivity({
   log,
 }: { chat: ChatRoom; id: string; name: string; log: (line: string) => void }) {
   useEffect(() => {
-    let unlisten = () => {}
-    void chat.getParticipant(id).then((member) => {
-      if (!member) return
-      const offDisconnect = member.onDisconnect(() => log(`${name} lost connection`))
-      const offReconnect = member.onReconnect(() => log(`${name} is connected again`))
-      unlisten = () => {
-        offDisconnect()
-        offReconnect()
-      }
-    })
-    return () => unlisten()
+    const member = chat.getParticipant(id)
+    if (!member) return
+    const offDisconnect = member.onDisconnect(() => log(`${name} lost connection`))
+    const offReconnect = member.onReconnect(() => log(`${name} is connected again`))
+    return () => {
+      offDisconnect()
+      offReconnect()
+    }
   }, [chat, id])
   return null
 }

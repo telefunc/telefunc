@@ -534,11 +534,10 @@ function testRoom() {
     { fromHangingUp: 'Participant left the room' },
     { fromHangingUp: 'Participant left the room', unhandled: [] },
   )
-  testRoomScenario<{ listed: number | string; serverCount: number; count: number; emptied: boolean }>(
+  testRoomScenario<{ listed: number; serverCount: number; count: number; emptied: boolean }>(
     'roster-churn',
-    'room: a page opening a room of 2,000 members while members join, leave and change meta loads its roster, counts only visible members, and sees no empty room',
+    'room: a page opening a room of 2,000 members while members join, leave and change meta gets its roster, counts only visible members, and sees no empty room',
     (r) => {
-      expect(typeof r.listed).toBe('number') // the roster loaded, not an error
       expect(r.listed).greaterThanOrEqual(2000)
       expect(r.serverCount).toBe(2001) // 2,000 members and the page's; not the hidden one
       expect(r.count).toBe(r.serverCount)
@@ -559,6 +558,14 @@ function testRoom() {
       expect(result.hasMember).toBe(true)
       expect(result.memberName).toBe('Viewed')
       expect(result.sameObject).toBe(true) // ref-identity binds the view to its room
+    },
+  )
+  testRoomScenario<{ arrived: unknown; joins: unknown[] }>(
+    'complete-room',
+    'room: a page gets a room with its participants: on the next line both reads list them and the snapshot shows them, and a later join reaches onJoin',
+    (r) => {
+      expect(r.arrived).deep.equal({ listed: ['A', 'B'], shown: ['A', 'B'], count: 2, one: 'A' })
+      expect(r.joins).deep.equal(['C'])
     },
   )
   testRoomScenario<{
@@ -1718,7 +1725,7 @@ function testRoomLongWaits() {
     expect(viewRoomId).match(/^e2e-hiccup-view:/)
   })
 
-  test('room: a room of 100,000 members streams its roster to a page, with a join and a leave landing meanwhile, and the server answers the page promptly through a heartbeat', async () => {
+  test('room: a room of 100,000 members reaches a page with its roster, with a join and a leave landing meanwhile, and the server answers the page promptly through a heartbeat', async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-scale')
     await autoRetry(

@@ -50,7 +50,8 @@ type RoomSnapshotMetadata = {
   roomId: string
   meta: RoomMetaEntry[]
   closed: boolean
-  count: number
+  /** The visible members, as of the response. */
+  members: MemberSnapshot[]
   /** How many meta writes `meta` reflects, which orders later updates. */
   metaSeq: number
   maxFrameBytes?: number
@@ -103,13 +104,10 @@ type RoomDataPublish = { __r: 'data'; from: string; data: unknown; retain?: bool
 type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
 type RoomEnvelope = RoomCtrlEnvelope | RoomDataEvent | RoomAnnounceEnvelope
 
-/** Sent when a stub opens, a part per frame, numbered from 0, each part reflecting every event relayed before it;
- *  `more` on all but the last. A failed read says so, so roster getters don't wait forever. `rewound`: a failover
- *  rewound the room's meta seqs, so the next whole meta of the room and of each member applies, whatever its seq. */
-type RoomRosterEvent =
-  | { __r: 'roster'; members: MemberSnapshot[]; part: number; more?: true }
-  | { __r: 'roster-error' }
-  | { __r: 'rewound' }
+/** Sent once a roster read corrected a drift, a part per frame, numbered from 0, each part reflecting every event
+ *  relayed before it; `more` on all but the last. `rewound`: a failover rewound the room's meta seqs, so the next whole
+ *  meta of the room and of each member applies, whatever its seq. */
+type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[]; part: number; more?: true } | { __r: 'rewound' }
 
 /** To the client whose `req-join` (`reqId`) admitted the member, before any event naming it. */
 type RoomJoinedEvent = { __r: 'joined'; reqId: number; id: string }

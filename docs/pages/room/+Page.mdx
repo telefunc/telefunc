@@ -167,9 +167,11 @@ To receive the messages of one participant only, subscribe on that participant. 
 // Environment: client
 
 const follow = (member) => member.subscribe((message) => showMessageFrom(member.meta.name, message.text))
-for (const member of await room.getParticipants()) follow(member)
+for (const member of room.getParticipants()) follow(member)
 room.onJoin(follow)
 ```
+
+The room reaches the page with its participants, so `room.getParticipants()` and `room.getParticipant(id)` answer at once. On the server they return a Promise, as a server's room may have to read its participants from the store.
 
 > You also receive your own messages. To not receive them, join with `room.join({ meta, selfDelivery: false })`.
 
@@ -424,7 +426,7 @@ encodeCamera((frame, isKeyframe) =>
 // The participants who watch; showVideo(): your decoder, e.g. WebCodecs' VideoDecoder
 const watch = (member) =>
   member.subscribeBinary((frame, info) => showVideo(member.id, frame, info.meta.isKeyframe), { track: 'camera' })
-for (const member of await room.getParticipants()) watch(member)
+for (const member of room.getParticipants()) watch(member)
 room.onJoin(watch)
 ```
 
@@ -611,7 +613,7 @@ Server-side.
 | `join({ meta?, selfDelivery? }?)` | Join; returns your participant. |
 | `join({ meta?, identity?, hidden? })` | Server-side: join with a user id, or as a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>. |
 | `snapshot()` / `onChange(cb)` | The room as it is now, `{ id, meta, count, isClosed, participants }` with each participant as of the snapshot / called on every change. |
-| `getParticipants()` / `getParticipant(id)` | The participants / one participant. |
+| `getParticipants()` / `getParticipant(id)` | The participants / one participant; on the server, a Promise. |
 | `getParticipants({ hidden: true })` | Server-side: the hidden participants. |
 | `onJoin(cb)` / `onLeave(cb)` | Someone joined / left. |
 | `subscribe(cb, { track? }?)` / `subscribeBinary(cb, { track? }?)` | Everyone's messages, or those on `track` / binary frames: `cb(message, info, from)`, with `info` `{ seq, timestamp }`, plus `{ track, meta }` on a track. |

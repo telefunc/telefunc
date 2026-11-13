@@ -216,8 +216,8 @@ function Room() {
   }
 
   const getParticipantWhenJoined = async (room: RoomView, id: string) => {
-    await pollUntil(async () => ({ done: (await room.getParticipant(id)) !== null }))
-    const participant = await room.getParticipant(id)
+    await pollUntil(() => ({ done: room.getParticipant(id) !== null }))
+    const participant = room.getParticipant(id)
     if (!participant) throw new Error(`Participant did not join within the test horizon: ${id}`)
     return participant
   }
@@ -278,7 +278,7 @@ function Room() {
         lobby.subscribe(() => calls++, { signal: lifetime.signal })
         lobby.onJoin(() => calls++, { signal: lifetime.signal })
         const me = await lobby.join({ meta: { name: 'Alice' } })
-        const remote = (await lobby.getParticipant(me.id))!
+        const remote = lobby.getParticipant(me.id)!
         remote.subscribe(() => calls++, { signal: lifetime.signal })
         me.listen(() => calls++, { signal: lifetime.signal })
         lifetime.abort()
@@ -343,7 +343,7 @@ function Room() {
         const me = await lobby.join({ meta: { name: 'Alice' } })
         const countAfterJoin = lobby.count
         const updates: unknown[] = []
-        const alice = (await lobby.getParticipant(me.id))!
+        const alice = lobby.getParticipant(me.id)!
         alice.onChange(() => updates.push(alice.meta.score))
 
         const ack = await me.publish({ text: 'hello' })
@@ -668,7 +668,7 @@ function Room() {
         const reads: Array<string | undefined> = []
         for (let i = 0; i < 6; i++) {
           const room = await onGetRoom(roomId)
-          const member = await room.getParticipant(memberId)
+          const member = room.getParticipant(memberId)
           reads.push(which(room.meta), which(member?.meta ?? {}))
         }
         await onStopReplacingMeta(roomId)
@@ -1287,10 +1287,7 @@ function Room() {
           const room = await onGetRoom(roomId)
           let emptied = false
           room.onEmpty(() => (emptied = true))
-          const listed = await room.getParticipants().then(
-            (members) => members.length,
-            (err: Error) => err.message,
-          )
+          const listed = room.getParticipants().length
           const me = await room.join({ meta: { name: 'Page' } })
           const serverCount = await onStopChurn(roomId)
           await pollUntil(() => ({
@@ -1343,7 +1340,7 @@ function Room() {
         const me = await lobby.join({ meta: { name: 'Viewed' } })
 
         const out = await onGetRoomWithMember(roomId, me.id)
-        const viaRoom = await out.room.getParticipant(me.id)
+        const viaRoom = out.room.getParticipant(me.id)
         const state = {
           hasMember: out.member !== null,
           memberName: out.member?.meta.name ?? null,
@@ -1371,7 +1368,7 @@ function Room() {
         await a.publish('from A')
         await c.publish('from C')
         const handed = await onGetRoomWithSnapshotMember(roomId, c.id)
-        const live = await handed.room.getParticipant(c.id)
+        const live = handed.room.getParticipant(c.id)
         await pollUntil(() => ({
           result: {
             kept: [a, c].map(({ id }) => tile(after, id) === tile(before, id)),
@@ -1382,6 +1379,25 @@ function Room() {
           },
           done: everyone.includes('from C') && fromA.length > 0,
         }))
+      })}
+
+      {scenario('complete-room', 'A room with its participants', 'Get a room two members are in', async () => {
+        const roomId = await createRoomId('complete-room')
+        const [a, b] = await Promise.all([onJoinAsServer(roomId, 'A'), onJoinAsServer(roomId, 'B')])
+        const room = await onGetRoom(roomId)
+        const names = (participants: readonly { meta: { name?: unknown } }[]) =>
+          participants.map((participant) => participant.meta.name).sort()
+        const arrived = {
+          listed: names(room.getParticipants()),
+          shown: names(room.snapshot().participants),
+          count: room.count,
+          one: room.getParticipant(a.id)?.meta.name ?? null,
+        }
+        const joins: unknown[] = []
+        room.onJoin((member) => joins.push(member.meta.name))
+        const c = await onJoinAsServer(roomId, 'C')
+        await pollUntil(() => ({ result: { arrived, joins }, done: joins.length > 0 }))
+        await Promise.all([a, b, c].map((member) => member.leave()))
       })}
 
       {scenario(
@@ -2418,7 +2434,7 @@ function Room() {
         await onSeedChurn(roomId)
         let names: string[] = []
         await pollUntil(async () => {
-          names = (await view.getParticipants()).map((member) => member.meta.name as string)
+          names = view.getParticipants().map((member) => member.meta.name as string)
           return { done: names.includes('late') }
         }, 300)
         const roster = {

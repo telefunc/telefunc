@@ -70,7 +70,6 @@ import type {
   PublishOptions,
   RemoteParticipant,
   Room,
-  RoomSnapshotView,
   Sender,
 } from '../types.js'
 import type { RoomGuards } from './roomStatics.js'
@@ -213,12 +212,6 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
   async getParticipant(id: string): Promise<RemoteParticipant | null> {
     await this.authority.ensureRoster()
     return this.state.getRemote(id)
-  }
-
-  snapshot(): RoomSnapshotView {
-    // Loads the members for the next snapshot; their arrival fires onChange.
-    if (!this.model.rosterKnown) void this.authority.ensureRoster().catch(reportRoomError)
-    return this.state.snapshot()
   }
 
   /** Both join paths: the guard passes, the holder takes the member, then the member commits. */
@@ -385,17 +378,19 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     void this.replica.tailChanged(this)
   }
 
-  /** A client's view of this room. It attaches before the snapshot, so every later event relays and every
-   *  earlier one is in the snapshot. */
+  /** A client's view of this room, with its members. It attaches before the snapshot, so every later event relays and
+   *  every earlier one is in the snapshot. */
   openStub({ end, publishShield, grants }: Omit<RoomStubOptions, 'room' | 'roster'>): RoomSnapshotMetadata {
     this.attachStub(new RoomStub({ room: this, roster: this.roster, end, publishShield, grants }))
+    const model = this.model
+    const members = [...model.entries()].filter((entry) => !entry.hidden).map((entry) => model.memberSnapshot(entry.id))
     return {
       channelId: end.id,
       roomId: this.id,
-      meta: this.model.metaEntries(),
-      closed: this.model.closed,
-      metaSeq: this.model.metaSeq,
-      count: this.model.count,
+      meta: model.metaEntries(),
+      closed: model.closed,
+      metaSeq: model.metaSeq,
+      members,
     }
   }
 
@@ -530,10 +525,6 @@ class ServerRoom extends RoomStateView implements Room {
 
   getParticipant(id: string): Promise<RemoteParticipant | null> {
     return this.handle.getParticipant(id)
-  }
-
-  snapshot(): RoomSnapshotView {
-    return this.handle.snapshot()
   }
 }
 

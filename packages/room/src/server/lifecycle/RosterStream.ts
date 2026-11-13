@@ -24,10 +24,8 @@ type RosterStreamOptions = {
   stubs: ReadonlySet<RoomStub>
 }
 
-/** A view's roster to its clients: on attach, and again to every client once a roster read corrected a drift. */
+/** A view's roster to its clients, once a roster read corrected a drift: each client got the members with its room. */
 class RosterStream {
-  /** Stubs whose first roster read failed: the next successful refresh sends them one. */
-  private readonly owed = new Set<RoomStub>()
   /** Each roster part's body for the clients that see no hidden member, at one roster version: one roster's bodies at
    *  most, until the first stream after a change or the room's teardown. */
   private bodies: { version: number; parts: PartBody[] } | null = null
@@ -51,38 +49,17 @@ class RosterStream {
   }
 
   /** Reconciles with a roster read in `ROOM_PLAN_SLICE_MS` slices, replaying `events`, which grow until it ends; false
-   *  if the room closed first. Every client gets a roster that corrected a drift; otherwise only the clients still owed
-   *  their first. */
+   *  if the room closed first. Every client gets a roster that corrected a drift. */
   async reconcile(roster: RosterRead, events: readonly MembershipEvent[]): Promise<boolean> {
     this.reconciling = this.model.rosterKnown
     try {
       const drifted = await this.model.reconcileRoster(roster, events)
       if (drifted === null) return false
-      const recipients = drifted ? [...this.stubs] : [...this.owed]
-      this.owed.clear()
-      if (recipients.length > 0) void this.stream(recipients).catch(reportRoomError)
+      if (drifted && this.stubs.size > 0) void this.stream([...this.stubs]).catch(reportRoomError)
       return true
     } finally {
       this.reconciling = false
     }
-  }
-
-  /** An attached stub's first roster, once `known`, the view's roster read, settles; a failed read owes it the next
-   *  one. */
-  async sendTo(stub: RoomStub, known: Promise<void>): Promise<void> {
-    try {
-      await known
-      if (this.stubs.has(stub) && !this.model.closed) await this.stream([stub])
-    } catch (error) {
-      reportRoomError(error)
-      if (!this.stubs.has(stub) || this.model.closed) return
-      stub.relayEvent({ __r: 'roster-error' })
-      this.owed.add(stub)
-    }
-  }
-
-  forget(stub: RoomStub): void {
-    this.owed.delete(stub)
   }
 
   /** The room closed: no stream reuses a body. */

@@ -2,7 +2,6 @@ export { RoomModel }
 export type { MemberEntry, MembershipEvent, RosterRead, RoomModelOwner, ServerModelOwner }
 
 import { assert } from '../utils/assert.js'
-import { getOrCreate } from 'telefunc/__internal'
 import { Slice } from './Slice.js'
 import { RoomMetaState } from './RoomMetaState.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
@@ -43,8 +42,8 @@ type RoomModelOptions = {
   roomId: string
   /** In key order. */
   meta: readonly RoomMetaEntry[]
-  /** Either the authoritative roster, or just its member count. A lazy model seeds with `{ count }` and learns the
-   *  members from its first roster (read on the server, streamed to the client). */
+  /** Either the authoritative roster, or just its member count: a server's view made for a join alone seeds with
+   *  `{ count: 0 }` and learns the members from its first roster read. */
   seed: { members: MemberSnapshot[] } | { count: number }
   /** How many meta writes `meta` reflects (see `applyRoomUpdate`). */
   metaSeq: number
@@ -99,8 +98,6 @@ class RoomModel {
   private _rosterKnown: boolean
   private _closedCause: LeaveCause = ownLeaveCause({ type: 'closed' })
   private seedCount = 0
-  /** The meta changes per member that reached this model before its first roster, in order. */
-  private readonly preRosterMeta = new Map<string, MemberMetaUpdate[]>()
 
   constructor(opts: RoomModelOptions) {
     this.roomId = opts.roomId
@@ -277,16 +274,6 @@ class RoomModel {
     return true
   }
 
-  /** A leave a server relayed, which it does once for each member it knew: before the first roster, a visible member
-   *  this model has not seen is one its seed count holds. */
-  applyRelayedLeave(id: string, cause: LeaveCause, hidden: boolean): void {
-    if (!this._rosterKnown && !hidden && !this.closed && !this.members.has(id)) {
-      this.seedCount = Math.max(0, this.seedCount - 1)
-      this.bumpState()
-    }
-    this.applyLeave(id, cause)
-  }
-
   applyLeave(id: string, cause: LeaveCause): void {
     this.record({ leave: id })
     const entry = this.members.get(id)
@@ -310,8 +297,6 @@ class RoomModel {
   applyParticipantMeta(id: string, update: MemberMetaUpdate): boolean {
     this.record({ meta: { id, update } })
     const entry = this.members.get(id)
-    // Before the first roster every member is unknown, and the first roster applies the changes after its own.
-    if (!entry && !this._rosterKnown) getOrCreate(this.preRosterMeta, id, () => []).push(update)
     if (!entry) return false
     const wasConnected = this.isConnected(entry)
     const applied = entry.meta.apply(update)
@@ -398,10 +383,7 @@ class RoomModel {
       return { entry }
     }
     assert(pending !== undefined)
-    // With the meta changes relayed after the member's roster part.
-    const meta = new MemberMeta({ meta: pending.meta, seq: pending.metaSeq })
-    for (const update of this.preRosterMeta.get(from) ?? []) meta.apply(update)
-    return { sender: senderSnapshot(from, meta.object, pending.identity ?? null) }
+    return { sender: senderSnapshot(from, pending.meta, pending.identity ?? null) }
   }
 
   /** The first roster loads silently; later ones narrate the drift they correct as events. Runs `reconcilingRoster` a
@@ -443,7 +425,6 @@ class RoomModel {
     }
     if (!narrate) {
       this._rosterKnown = true
-      this.preRosterMeta.clear()
       this.bumpState()
     }
     for (const id of [...this.members.keys()]) {

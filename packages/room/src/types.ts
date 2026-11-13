@@ -287,9 +287,14 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
 
 type ClientRoom<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = Omit<
   Room<M, P, Pub>,
-  'join'
+  'join' | 'getParticipants' | 'getParticipant'
 > & {
   join(options?: ClientJoinOptions<P>): Promise<LocalParticipant<P, Pub>>
+  /** Visible participants. The page's room arrives with them; on the server this returns a Promise, as a server handle
+   *  may have to read them from the store. */
+  getParticipants(): RemoteParticipant<P, Pub>[]
+  /** One participant, or `null`. */
+  getParticipant(id: string): RemoteParticipant<P, Pub> | null
   /** Iterate participant messages until aborted, closed, or the loop ends. */
   messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<RoomMessage<Pub, P>>
 }

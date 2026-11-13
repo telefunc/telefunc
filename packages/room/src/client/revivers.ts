@@ -5,7 +5,7 @@ import { ClientRoom, ClientStandaloneParticipant } from './room.js'
 import type { LocalParticipant, RemoteParticipant } from '../types.js'
 import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from '../shared/protocol.js'
 import { assert } from '../utils/assert.js'
-import { untether, type ClientBroadcast } from 'telefunc/__internal'
+import type { ClientBroadcast } from 'telefunc/__internal'
 import {
   SERIALIZER_PREFIX_ROOM,
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
@@ -35,9 +35,6 @@ const roomRemoteReviver: ReviverType<RoomRemoteReviverContract, ClientReviverCon
     assert(metadata.room instanceof ClientRoom)
     const room = metadata.room
     const remote = room._state.ensureRemoteFromSnapshot(metadata)
-    // A call through the room's wrapper tethers the result to it, but only the member `join()` returns holds its room
-    // open.
-    untether(remote)
     context.shareLifecycle(remote, room)
     return {
       value: remote,

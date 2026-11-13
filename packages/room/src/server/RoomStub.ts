@@ -110,8 +110,8 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   private readonly binary: BinaryWants = emptyBinaryWants()
   /** A tail waits for the client's first text selector, then flushes once in order. */
   private tail: TailHold | null = null
-  /** Whether this client was sent the whole roster since it attached. */
-  rosterSent = false
+  /** Whether this client was sent the whole roster: its room carried it, and no drift streams to it. */
+  rosterSent = true
 
   constructor({ room, roster, end, publishShield, grants }: RoomStubOptions) {
     this.room = room
@@ -156,7 +156,6 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   }
 
   _onPageAttach(): void {
-    this.rosterSent = false
     this.room.replica.onStubAttached(this)
   }
 

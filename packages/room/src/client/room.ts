@@ -2,7 +2,7 @@ export { ClientRoom, ClientStandaloneParticipant }
 
 import { roomMessages } from './messages.js'
 import { assert, assertUsage } from '../utils/assert.js'
-import { createDeferred, getOrCreate, markHandled } from 'telefunc/__internal'
+import { getOrCreate, markHandled } from 'telefunc/__internal'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import type { TELEFUNC_SHIELDS, ChannelPublishAck, ChannelPublishInfo, ClientBroadcast } from 'telefunc/__internal'
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange, type TrackKey } from '../shared/binary.js'
@@ -52,7 +52,6 @@ import type {
   RemoteParticipant,
   Room,
   RoomMessage,
-  RoomSnapshotView,
   Sender,
 } from '../types.js'
 
@@ -123,7 +122,7 @@ function heldConnectionChanged(id: string, wasConnected: boolean | null): void {
 type ClientRoomOptions = { end: ClientBroadcast; snapshot: RoomSnapshotMetadata }
 
 /** A server room through one Broadcast channel: its frames carry events and data, its acked messages requests. */
-class ClientRoom extends RoomStateView implements Room {
+class ClientRoom extends RoomStateView implements Omit<Room, 'getParticipants' | 'getParticipant'> {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
   private readonly end: ClientBroadcast
@@ -139,8 +138,6 @@ class ClientRoom extends RoomStateView implements Room {
   /** The wants the server stub holds, as last declared; a fresh stub holds none. */
   private declaredAnnounce = false
   private readonly declaredText = new Set<string>()
-  /** Settled by the first `roster` or `roster-error` event, or when this view closes. Gates `getParticipants()`. */
-  private readonly roster = createDeferred()
   /** @internal */
   _rosterStream: RosterStream | null = null
 
@@ -155,13 +152,12 @@ class ClientRoom extends RoomStateView implements Room {
     this.model = new RoomModel({
       roomId: snapshot.roomId,
       meta: snapshot.meta,
-      seed: { count: snapshot.count }, // the roster itself streams right behind the response
+      seed: { members: snapshot.members },
       metaSeq: snapshot.metaSeq,
       closed: snapshot.closed,
       owner,
     })
     this._state = new RoomState({ view: this, model: this.model, owner, trackWantsMax: ROOM_TRACK_WANTS_MAX })
-    if (snapshot.closed) this.roster.resolve()
 
     // Delivery handlers are local-only. What the server relays is driven by the declared wants: control always arrives,
     // text while subscribed, binary per `sub-binary`.
@@ -180,9 +176,6 @@ class ClientRoom extends RoomStateView implements Room {
     end.onReconnect(() => {
       for (const local of this.localParticipants.values()) local._onReconnected()
     })
-    // A backend rejection can arrive before the application asks for the roster. Mark it handled here while preserving
-    // the original rejection for each later getter.
-    void this.roster.promise.catch(() => {})
   }
 
   join(options?: JoinOptions): Promise<LocalParticipant> {
@@ -235,20 +228,14 @@ class ClientRoom extends RoomStateView implements Room {
     }
   }
 
-  async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
+  getParticipants(options?: { hidden?: boolean }): RemoteParticipant[] {
     assertKnownOptions(options, ['hidden'], 'getParticipants()')
     assertUsage(!options?.hidden, 'Hidden participants can only be enumerated on the server')
-    await this.awaitRoster()
     return this._state.listVisible()
   }
 
-  async getParticipant(id: string): Promise<RemoteParticipant | null> {
-    await this.awaitRoster()
+  getParticipant(id: string): RemoteParticipant | null {
     return this._state.getRemote(id)
-  }
-
-  private async awaitRoster(): Promise<void> {
-    if (!this.model.rosterKnown) await this.roster.promise
   }
 
   /** Plain DM fires local listeners; ack DM returns their reply through the symmetric `dm-reply`/`dm-ack` path. */
@@ -258,10 +245,6 @@ class ClientRoom extends RoomStateView implements Room {
       return
     }
     sendDmReply(this.end, msg.ackId, participant._deliverMessageAck(msg))
-  }
-
-  snapshot(): RoomSnapshotView {
-    return this._state.snapshot()
   }
 
   /** @internal */
@@ -307,9 +290,6 @@ class ClientRoom extends RoomStateView implements Room {
       case 'roster':
         this.onRosterPart(event)
         return
-      case 'roster-error':
-        this.roster.reject(new Error('Failed to load room participants'))
-        return
       case 'rewound':
         this.model.forgetMetaSeqs()
         return
@@ -320,7 +300,7 @@ class ClientRoom extends RoomStateView implements Room {
         this.model.applyJoin(joinedMember(event))
         return
       case 'leave':
-        this.model.applyRelayedLeave(event.id, leaveCauseFromWire(event), event.hidden === true)
+        this.model.applyLeave(event.id, leaveCauseFromWire(event))
         return
       case 'p-meta':
         this._acceptParticipantMeta(event.id, event)
@@ -414,7 +394,6 @@ class ClientRoom extends RoomStateView implements Room {
         const accepted = this.model.acceptedMeta(id)
         if (accepted !== null) local._acceptMeta(accepted)
       }
-      this.roster.resolve()
     } finally {
       stream.applying--
       this.stopRosterEvents()
@@ -447,7 +426,6 @@ class ClientRoom extends RoomStateView implements Room {
   private applyClosed(causeType: 'closed' | 'disconnected'): void {
     const cause: LeaveCause = { type: causeType }
     if (!this.model.applyClosed(cause)) return
-    this.roster.resolve() // unblock any getParticipants() waiting on a wire that just died
     // Local participants end after onClose, as on the server.
     for (const local of this.localParticipants.values()) local._onLeft(cause)
     this.localParticipants.clear()
