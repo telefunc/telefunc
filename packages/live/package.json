@@ -108,7 +108,7 @@
   "peerDependencies": {
     "@prisma/orm-postgres": ">=8.0.0-rc.23",
     "@prisma/orm-sqlite": ">=8.0.0-rc.23",
-    "@tanstack/query-core": ">=5.0.0",
+    "@tanstack/query-core": ">=5.40.0",
     "drizzle-orm": ">=0.45.0",
     "kysely": ">=0.28.0",
     "telefunc": ">=0.3.1"

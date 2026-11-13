@@ -57,8 +57,12 @@ function bind(client: QueryClient, queryKey: QueryKey, value: Live<unknown>, sub
   const hash = hashKey(queryKey)
   let watched = registry.queries.get(hash)
   if (!watched) {
-    // A fetch running when the value goes stale isn't cancelled: one going stale while it runs refetches after it.
-    const refetch = () => client.invalidateQueries({ queryKey, exact: true }, { cancelRefetch: false })
+    const refetch = async () => {
+      // A running fetch (its persister saving, its retries) may hold data read before the value went stale: wait it out.
+      const running = client.getQueryCache().find({ queryKey, exact: true })?.promise
+      await running?.catch(() => {})
+      await client.invalidateQueries({ queryKey, exact: true }, { cancelRefetch: false })
+    }
     watched = { value: undefined, refetcher: new Refetcher(refetch) }
     registry.queries.set(hash, watched)
   }
