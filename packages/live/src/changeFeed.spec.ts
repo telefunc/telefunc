@@ -32,6 +32,22 @@ function failingOnce(failure: 'throws' | 'never settles') {
   return transport
 }
 
+/** A transport whose messages the test delivers, with the sequence numbers it picks, as another server sent them. */
+function deliveredByTest() {
+  const listeners = new Set<Listener>()
+  const transport = {
+    listen(_key: string, listener: Listener) {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+  } as unknown as BroadcastTransport
+  const deliver = (seq: number, change: Change) => {
+    const payload = JSON.stringify({ origin: 'another server', changes: [change] })
+    for (const listener of listeners) listener(payload, { seq, timestamp: 0 })
+  }
+  return { transport, deliver }
+}
+
 const todo1: Change = {
   table: 'public.todos',
   kind: 'update',
@@ -53,6 +69,26 @@ describe('ChangeFeed', () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.restoreAllMocks()
+  })
+
+  it('delivers a message that arrives after a later one, and a repeat of one once', () => {
+    const { transport, deliver } = deliveredByTest()
+    const received: Change[] = []
+    new ChangeFeed(transport, 'app', (changes) => received.push(...changes)).watch(['public.todos'])
+    deliver(2, todo2)
+    deliver(1, todo1)
+    deliver(2, todo2)
+    expect(received).toEqual([todo2, todo1])
+  })
+
+  it('takes a message too far behind the latest to tell from a repeat as a change to any row', () => {
+    const { transport, deliver } = deliveredByTest()
+    const received: Change[] = []
+    new ChangeFeed(transport, 'app', (changes) => received.push(...changes)).watch(['public.todos'])
+    deliver(100, todo2)
+    deliver(37, todo1)
+    deliver(36, todo1)
+    expect(received).toEqual([todo2, todo1, { table: 'public.todos', kind: 'unknown' }])
   })
 
   for (const failure of ['throws', 'never settles'] as const) {

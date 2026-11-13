@@ -1,7 +1,14 @@
 export { ChangeFeed }
 
 import type { BroadcastTransport } from 'telefunc'
-import { getBroadcastPlane, hostLocal, markHandled, unrefTimer, type BackendSubscription } from 'telefunc/__internal'
+import {
+  getBroadcastPlane,
+  getOrCreate,
+  hostLocal,
+  markHandled,
+  unrefTimer,
+  type BackendSubscription,
+} from 'telefunc/__internal'
 import type { Change } from './match/liveRead.js'
 
 type Message = { origin: string; changes: Change[] }
@@ -15,6 +22,8 @@ const RETRY_FIRST_MS = 100
 const RETRY_LAST_MS = 10_000
 /** Past this many changes of a table waiting to be sent, they're sent as a change to any of its rows. */
 const MAX_WAITING_CHANGES = 10_000
+/** How far below a table's highest sequence number a message is still told apart from one received already. */
+const RECEIVED_WINDOW = 64
 
 /** What the feed publishes and subscribes through: the installed Broadcast backend, or the app's `transport`. */
 type Channel = {
@@ -30,8 +39,9 @@ class ChangeFeed {
   private readonly origin = crypto.randomUUID()
   /** This feed's subscriptions on each host (a Cloudflare session Durable Object, else the process), by table. */
   private readonly subscriptions = Symbol('@telefunc/live subscriptions')
-  /** Per table: the last message's sequence number. */
-  private readonly lastSeq = new Map<string, number>()
+  /** Per table: the highest sequence number received, and those of the last `RECEIVED_WINDOW`, each at its number
+   *  modulo `RECEIVED_WINDOW`. */
+  private readonly received = new Map<string, { highest: number; recent: number[] }>()
   /** Per table, while a message is on the way: the changes committed since, sent together once it's through, or
    *  with its own if it was lost. */
   private readonly waiting = new Map<string, Change[]>()
@@ -121,12 +131,21 @@ class ChangeFeed {
   }
 
   private receive(table: string, serialized: string, seq: number): void {
-    const last = this.lastSeq.get(table)
-    // Another host of this server delivered it already.
-    if (last !== undefined && seq <= last) return
-    this.lastSeq.set(table, seq)
-    // A message was lost on the way: any row of the table may have changed.
-    if (last !== undefined && seq !== last + 1) this.onRemote([{ table, kind: 'unknown' }])
+    // The first message of a table follows on from none.
+    const received = getOrCreate(this.received, table, () => ({ highest: seq - 1, recent: [] }))
+    const slot = seq % RECEIVED_WINDOW
+    if (seq > received.highest) {
+      // A message was lost on the way: any row of the table may have changed.
+      if (seq !== received.highest + 1) this.onRemote([{ table, kind: 'unknown' }])
+      received.highest = seq
+    } else if (received.highest - seq >= RECEIVED_WINDOW) {
+      // Too old to tell whether another host of this server delivered it already: any row may have changed.
+      return this.onRemote([{ table, kind: 'unknown' }])
+    } else if (received.recent[slot] === seq) {
+      // Another host of this server delivered it already.
+      return
+    }
+    received.recent[slot] = seq
     const message = JSON.parse(serialized) as Message
     if (message.origin !== this.origin) this.onRemote(message.changes)
   }
