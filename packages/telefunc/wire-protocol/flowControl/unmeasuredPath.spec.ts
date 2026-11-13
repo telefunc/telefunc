@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { WIRE_QUEUE_DELAY_MS, WIRE_SEND_AHEAD_MIN_BYTES } from '../constants.js'
 import { decode, encode, isOneFrame, messageFrames, type PiecesAck } from '../wire/frame.js'
@@ -6,7 +6,12 @@ import { TAG } from '../wire/tags.js'
 import { ClientPieceReceiver } from './client/ClientPieceReceiver.js'
 import { ServerHeadroom } from './server/ServerHeadroom.js'
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+// The link runs on the fake clock, `performance.now()` included, so a busy machine can't slow it.
+beforeEach(() =>
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance'] }),
+)
+afterEach(() => vi.useRealTimers())
+const sleep = (ms: number) => vi.advanceTimersByTimeAsync(ms)
 
 /** 125 kB/s, 1 Mbit/s. */
 const LINK_BYTES_PER_MS = 125
