@@ -44,12 +44,12 @@ class IndexedPeer {
     this.replay = replay
   }
 
-  /** Encodes `data` by `encodeFrame` at the next seq; `onQueued` gets its seq and bytes before the wire has it. Returns
-   *  the bytes the frame counts against flow control. */
-  sendSequenced<T>(encodeFrame: SequencedEncoder<T>, data: T, onQueued?: (seq: number, bytes: number) => void): number {
+  /** Encodes `data` by `encodeFrame` at the next seq; `onQueued` gets its seq before the wire has it. Returns the bytes
+   *  the frame counts against flow control. */
+  sendSequenced<T>(encodeFrame: SequencedEncoder<T>, data: T, onQueued?: (seq: number) => void): number {
     const seq = this.replay.nextSeq()
     const frame = encodeFrame(this.index, data, seq)
-    onQueued?.(seq, frame.byteLength)
+    onQueued?.(seq)
     this.commit(seq, frame)
     return frame.byteLength
   }

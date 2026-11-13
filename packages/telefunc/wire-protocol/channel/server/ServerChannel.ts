@@ -107,8 +107,8 @@ const TOO_MANY_ANSWERS_TEXT =
 
 /** Closing frames the channel produced while no page was attached; the next attach sends them. */
 type PendingEnd = { closeAck: boolean; closeRequest: boolean; abort: string | null; error: ErrorReason | null }
-/** A `sendAck` awaiting the peer's ACK_RES; `bytes` is its payload's share of `pendingAckBytes`. */
-type PendingAck<T> = { resolve: (result: ChannelAck<T>) => void; reject: (err: Error) => void; bytes: number }
+/** A `sendAck` awaiting the peer's ACK_RES. */
+type PendingAck<T> = { resolve: (result: ChannelAck<T>) => void; reject: (err: Error) => void }
 /** A `send(data, { lossy: true })` to an attached page, text or a copy of its bytes once held; `held` is what it holds
  *  while it waits. */
 type LossySend = { data: EntryData; held: number }
@@ -147,8 +147,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   heldBytes = 0
   released = false
   protected pendingAcks = new Map<number, PendingAck<ServerToClient>>()
-  /** Payload bytes of the ack requests in `pendingAcks`. */
-  private pendingAckBytes = 0
   protected readonly lifecycle = new ChannelLifecycle({ owner: this, reportError: handleCallbackBug })
   private ttlTimer: ReturnType<typeof setTimeout> | null = null
   protected selfTime = new SelfTime()
@@ -402,18 +400,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private sendAckRequest<D>(encodeFrame: SequencedEncoder<D>, data: D): Promise<ChannelAck<ServerToClient>> {
     return this.lifecycle.trackAck(
       new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
-        this.peer!.sendSequenced(encodeFrame, data, (seq, bytes) => this.addPendingAck(seq, bytes, { resolve, reject }))
+        this.peer!.sendSequenced(encodeFrame, data, (seq) => this.pendingAcks.set(seq, { resolve, reject }))
       }),
     )
-  }
-
-  private addPendingAck(
-    seq: number,
-    bytes: number,
-    settle: { resolve: (result: ChannelAck<ServerToClient>) => void; reject: (err: Error) => void },
-  ): void {
-    this.pendingAcks.set(seq, { resolve: settle.resolve, reject: settle.reject, bytes })
-    this.pendingAckBytes += bytes
   }
 
   listen(callback: ChannelListener<ClientToServer>, options?: { signal?: AbortSignal }): () => void {
@@ -716,7 +705,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       throw err
     } finally {
       this.pendingAcks.delete(ackedSeq)
-      this.pendingAckBytes -= pending.bytes
     }
   }
 
@@ -854,8 +842,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         break
       case TAG.TEXT_ACK_REQ:
         assert(typeof data === 'string')
-        peer.sendSequenced(encode.textAckReq, data, (seq, bytes) => {
-          if (callback) this.addPendingAck(seq, bytes, callback)
+        peer.sendSequenced(encode.textAckReq, data, (seq) => {
+          if (callback) this.pendingAcks.set(seq, callback)
         })
         break
       case TAG.BINARY:
@@ -864,8 +852,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         break
       case TAG.BINARY_ACK_REQ:
         assert(data instanceof Uint8Array)
-        peer.sendSequenced(encode.binaryAckReq, data, (seq, bytes) => {
-          if (callback) this.addPendingAck(seq, bytes, callback)
+        peer.sendSequenced(encode.binaryAckReq, data, (seq) => {
+          if (callback) this.pendingAcks.set(seq, callback)
         })
         break
     }
@@ -1015,7 +1003,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this.offlineBuffer.rejectAcks(ackErr)
       }
       this.pendingAcks.clear()
-      this.pendingAckBytes = 0
       this.letAnsweringGo()
     })
   }
