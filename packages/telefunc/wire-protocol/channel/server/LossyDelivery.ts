@@ -15,10 +15,8 @@ interface LossyHost<U> {
   /** `unit` waits as the newest: what it holds for its page, until `letGo`. */
   hold(unit: U): void
   letGo(unit: U): void
-  /** Its sends that no wire has taken go. Returns how many. */
-  dropUnhanded(): number
-  /** It let go of sends its page hadn't received. */
-  skipped(): void
+  /** Its sends that no wire has taken go. */
+  dropUnhanded(): void
   /** Its page granted no more credit for what it sends. */
   outOfCredit(): boolean
 }
@@ -67,10 +65,8 @@ class LossyDelivery<U> {
 
   /** The sends that no wire has taken go, and the newest that waits, as a newer one takes their place. */
   letWaitingGo(): void {
-    const dropped = this.host.dropUnhanded()
-    const held = this.slot !== null
+    this.host.dropUnhanded()
     this.dispose()
-    if (held || dropped > 0) this.host.skipped()
   }
 
   /** The newest that waits goes, unsent. */

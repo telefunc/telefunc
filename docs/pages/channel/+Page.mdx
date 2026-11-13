@@ -541,7 +541,7 @@ price.subscribe((value, info) => showPrice(value, info.seq))
 
 > `lossy` is a constructor option because a `BroadcastChannel` is one client's subscription: it lets that client skip, whoever publishes, while a client of the same key without it gets every message.
 
-> `info.seq` jumps over the messages a client skipped, and the server logs a warning once. A client skips to the newest of the whole key, so give each value its own key, such as one per pointer.
+> `info.seq` jumps over the messages a client skipped. A client skips to the newest of the whole key, so give each value its own key, such as one per pointer.
 
 > Without `lossy`, a client gets every message, and past what the server holds for it the channel closes with `ChannelOverflowError` (see <Link href="#broadcast" />). To catch up, load the state again and call the telefunction for a new channel.
 

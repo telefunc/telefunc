@@ -23,7 +23,7 @@ import type {
 } from '../../broadcast/broadcastAdapter.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
-import { assertUsage, assertWarning } from '../../../utils/assert.js'
+import { assertUsage } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { admitPublish, hold, letGo, maxPendingBytesOf, queueMemory, type MemoryHolder } from './channelMemory.js'
 import { isPromise } from '../../../utils/isPromise.js'
@@ -83,15 +83,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
           hold: (body) => hold(this, body),
           letGo: (body) => letGo(this, body),
           dropUnhanded: () => this.dropUnhanded(),
-          skipped: () => this.warnMissed(),
           // A broadcast's publishes count against no credit.
           outOfCredit: () => false,
         })
       : null
   }
 
-  /** Its page is told what it missed by `info.seq`, and the server's log by this once. */
-  private missedWarned = false
   /** Why `shed` ended it, which its page has yet to learn: see `shed`. */
   private overflowed: string | null = null
   /** The page's channel on the wire it last attached on: a publish while the page is away joins the replay through it,
@@ -250,12 +247,11 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.lossyPublishes?.mayGo()
   }
 
-  /** Its publishes that no wire has taken go, unless it ended: its replay is then what its page reads. Returns how many. */
-  private dropUnhanded(): number {
-    if (this._phase === 'ended') return 0
+  /** Its publishes that no wire has taken go, unless it ended: its replay is then what its page reads. */
+  private dropUnhanded(): void {
+    if (this._phase === 'ended') return
     const dropped = this._replayBuffer?.dropNewestPublishes(this.unhanded()).units ?? 0
     if (dropped > 0) this.peer?.sender.queue.dropWaitingPublishes(this.peer.index, dropped)
-    return dropped
   }
 
   /** Where `holder` is a lossy page this publish reaches (its key, on its object), it lets go of what the publish
@@ -313,16 +309,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private endOverflowed(): void {
     if (this.overflowed === null) return
     this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(`Broadcast closed: ${this.overflowed}`))
-  }
-
-  private warnMissed(): void {
-    if (this.missedWarned) return
-    this.missedWarned = true
-    assertWarning(
-      false,
-      `A lossy \`BroadcastChannel\` on key "${this.key}" skipped messages its client hadn't taken yet: \`info.seq\` shows the gap on the client.`,
-      { onlyOnce: false },
-    )
   }
 
   protected override onPeerSubscription({ binary, subscribed }: { binary: boolean; subscribed: boolean }): void {

@@ -339,10 +339,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         const { units, bytes } = this._replayBuffer!.dropNewestPublishes(sender.queue.waitingPublishes(index))
         if (units > 0) sender.queue.dropWaitingPublishes(index, units)
         this.sendCredit.refund(bytes, units)
-        return units
       },
-      // Its page learns of nothing it skipped: only the newest was asked for.
-      skipped: () => {},
       outOfCredit: () => this.sendCredit.isOutOfCredit(),
     }
   }

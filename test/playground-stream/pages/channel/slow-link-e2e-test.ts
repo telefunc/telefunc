@@ -1,6 +1,6 @@
 export { testSlowLink }
 
-import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult, countConnections, serverArrayBuffers, sleep } from '../../e2e-utils'
 import { startBlackHoleProxy } from '../../black-hole-proxy'
 import { withNetworkConditions } from '../../../utils'
@@ -155,7 +155,6 @@ function testSlowLink(isDev: boolean) {
       expect(ticker!.last).toBe(299)
       expect(ticker!.received).lessThan(300)
       expect(ticker!.worstMs).lessThan(3000)
-      expectLog('skipped messages its client')
     } finally {
       // The page leaves before the proxy closes, which would cut its connections.
       await page.goto('about:blank')
@@ -179,7 +178,6 @@ function testSlowLink(isDev: boolean) {
         { timeout: 40_000 },
       )
       expect(ticker).deep.equal({ ...ticker!, last: 119, closed: 'none' })
-      expectLog('skipped messages its client')
     } finally {
       // The page leaves before the proxy closes, which would cut its connections.
       await page.goto('about:blank')
