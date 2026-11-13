@@ -811,7 +811,7 @@ async function onChannelPaced() {
 
 /**
  * At the page's message, sends that many text messages, each starting with its index, in one loop: of 16 KiB, without
- * awaiting them or awaiting each, or of 1 KiB with `{ ack: true }`, awaiting the acks together.
+ * awaiting them or awaiting each, or of 64 KiB with `{ ack: true }`, awaiting the acks together.
  * cleanupState keys:
  *   textBurst_<id>_error = why the first refused send was refused, if one was
  *   textBurst_<id>_acked = how many of the ack-requesting sends resolved

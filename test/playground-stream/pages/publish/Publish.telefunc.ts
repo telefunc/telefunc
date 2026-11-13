@@ -185,8 +185,8 @@ async function onBroadcastAnswerOrder() {
   return seen
 }
 
-/** Listeners that answer every message on their own key, one at once and one after an await, until stop(); it returns
- *  once each answered, or 10 s pass. */
+/** A listener that answers every message on its own key until stop() or a refused publish; returns once it answered, or
+ *  10 s pass. */
 async function onBroadcastSelfAnswer() {
   const key = `room:self-answer:${crypto.randomUUID()}`
   let answers = 0

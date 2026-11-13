@@ -2382,7 +2382,7 @@ function ChannelDemo() {
               onClick={() => testTextBurst(mode, count)}
               className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
             >
-              Server Bursts {count} × {mode === 'acks' ? 1 : 16} KiB ({mode})
+              Server Bursts {count} × {mode === 'acks' ? 64 : 16} KiB ({mode})
             </button>
           ))}
           <button

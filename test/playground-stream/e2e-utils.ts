@@ -168,6 +168,18 @@ async function releaseHeldSsePosts(): Promise<number> {
   return released
 }
 
+/** The server logged `error`: on its stderr, or under Docker on compose's stdout, each line prefixed with the container's
+ *  name. */
+function expectServerError(error: string, inDocker: boolean) {
+  expectLog(error, {
+    filter: (log) =>
+      inDocker
+        ? log.logSource === 'stdout' &&
+          log.logText.split('\n').some((line) => line.includes(error) && /^playground-[a-z]-\d+ +\| /.test(line))
+        : log.logSource === 'stderr',
+  })
+}
+
 /**
  * Loads a page and waits for it to hydrate — resiliently, because the Docker suite runs the browser
  * against a Caddy container over the Docker bridge.
@@ -184,18 +196,6 @@ async function releaseHeldSsePosts(): Promise<number> {
  *
  * `target` defaults to the shared `page`; pass another page to load a second tab/context resiliently.
  */
-/** The server logged `error`: on its stderr, or under Docker on compose's stdout, each line prefixed with the container's
- *  name. */
-function expectServerError(error: string, inDocker: boolean) {
-  expectLog(error, {
-    filter: (log) =>
-      inDocker
-        ? log.logSource === 'stdout' &&
-          log.logText.split('\n').some((line) => line.includes(error) && /^playground-[a-z]-\d+ +\| /.test(line))
-        : log.logSource === 'stderr',
-  })
-}
-
 async function navigate(url: string, options?: Parameters<typeof page.goto>[1], target: typeof page = page) {
   for (let attempt = 1; attempt <= NAVIGATE_ATTEMPTS; attempt++) {
     const lastAttempt = attempt === NAVIGATE_ATTEMPTS
