@@ -76,12 +76,18 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
   send(data: ChannelData<TOut>, opts: { ack: true }): Promise<ChannelAck<TOut>>
   /** Per-send ack opt-out — always returns `Promise<void>`. */
   send(data: ChannelData<TOut>, opts: { ack: false }): Promise<void>
-  /** A send a newer `lossy` one may take the place of, while it waits to go: the other end gets every one it keeps up
-   *  with, and the newest. It resolves at once. */
+  /** Send where only the newest matters: a receiver that keeps up gets every message, and one that falls behind skips to
+   *  the newest. It resolves at once, and can't be combined with `ack: true`.
+   *
+   *  https://telefunc.com/channel#skip-to-the-newest */
   send(data: ChannelData<TOut>, opts: { lossy: true; ack?: false }): Promise<void>
   sendBinary(data: Uint8Array): Promise<void>
   sendBinary(data: Uint8Array, opts: { ack: true }): Promise<unknown>
   sendBinary(data: Uint8Array, opts: { ack: false }): Promise<void>
+  /** Send binary where only the newest matters: a receiver that keeps up gets every message, and one that falls behind
+   *  skips to the newest. It resolves at once, and can't be combined with `ack: true`.
+   *
+   *  https://telefunc.com/channel#skip-to-the-newest */
   sendBinary(data: Uint8Array, opts: { lossy: true; ack?: false }): Promise<void>
   /** Receive messages. Return a value to ack the sender. Returns an unlisten function. */
   listen(callback: ChannelListener<TIn>, options?: { signal?: AbortSignal }): () => void

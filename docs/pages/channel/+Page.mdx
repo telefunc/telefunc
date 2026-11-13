@@ -102,7 +102,7 @@ channel.send('Hello!')
 | `send(data, { ack: true })` | Send and await acknowledgement. |
 | `sendBinary(data)` | Send binary data. Await to apply backpressure. |
 | `sendBinary(data, { ack: true })` | Send binary and await acknowledgement. |
-| `send(data, { lossy: true })` | Send where only the newest matters. A newer one may replace it. |
+| `send(data, { lossy: true })` | Send where only the newest matters. A receiver that falls behind skips to the newest. |
 | `sendBinary(data, { lossy: true })` | Send binary where only the newest matters. |
 | `listen(cb)` | Receive messages. Return a value to ack. Returns an unlisten function. |
 | `listenBinary(cb)` | Receive binary. Return a value to ack. Returns an unlisten function. |
@@ -310,7 +310,7 @@ A publish waits for no subscriber, so a `BroadcastChannel` refuses none: the ser
 
 ### Skip to the newest
 
-Where only the newest message matters, such as a pointer's position, pass `lossy: true` to that send. A client that keeps up still gets every message. Once a message has waited about 600 ms past the connection's round trip, a newer one replaces those waiting, so a client that can't keep up gets the newest soon. This holds both ways, on the way to the client and on the client's own way up:
+Where only the newest message matters, such as a pointer's position, pass `lossy: true` to that send. A receiver that keeps up still gets every message. A receiver falls behind when it leaves a message unconfirmed for longer than its connection takes to confirm one, and it then skips to the newest. This holds both ways, on the way to the client and on the client's own way up:
 
 ```ts
 // Pointer.telefunc.ts
@@ -340,11 +340,11 @@ channel.listen((position) => drawOthersPointer(position))
 window.addEventListener('pointermove', (e) => channel.send({ x: e.clientX, y: e.clientY }, { lossy: true }))
 ```
 
-> A send without `lossy` is never skipped, and nothing passes it: the lossy sends that arrive stay on the side of it they were sent on.
+> A send without `lossy` is never skipped, and nothing passes it: the lossy sends that arrive stay on the side of it they were sent on. A graceful `close()` delivers the newest first, and `abort()` drops it.
 
-> A lossy send resolves at once, without waiting for the other end. `lossy` can't be combined with `ack: true`: a newer message may take its place, so it gets no answer.
+> A lossy call returns what it returns without `lossy`, and never waits for the receiver: `send()` resolves at once, and `publish()` on a lossy `BroadcastChannel` resolves with the server's receipt, and a client's publish that a newer one skipped before it went up resolves with the newer one's. `lossy` can't be combined with `ack: true`: a skipped message has no answer.
 
-> `lossy` skips what the connection couldn't carry. A slow `for await` loop over `messages()` still reads every message that arrived.
+> A receiver skips only what its connection hasn't carried yet: a slow `for await` loop over `messages()` still reads every message that arrived.
 
 ## `Broadcast`
 
@@ -394,7 +394,7 @@ Broadcast.subscribe('room:lobby', (msg, info) => {
 
 > In memory, a key's counter lasts while the key has a subscriber on that server. Once the key has no subscriber left there, its next publish gets a `seq` above every one that server has issued.
 
-Awaiting `publish()` doesn't wait for any subscriber's client to keep up: a client that falls behind a broadcast gets every message the server holds for it, and past that the channel closes with `ChannelOverflowError` (see <Link href="#errors">errors</Link>). Other channels on its connection wait behind what's held for it. Where only the newest message matters, make it <Link href="#skip-to-the-newest">lossy</Link>: a client that can't keep up then skips to the newest, and `info.seq` jumps over what it skipped.
+Awaiting `publish()` doesn't wait for any subscriber's client to keep up: a client that falls behind a broadcast gets every message the server holds for it, and past that the channel closes with `ChannelOverflowError` (see <Link href="#errors">errors</Link>). Other channels on its connection wait behind what's held for it. Where only the newest message matters, make it <Link href="#lossy-broadcast">lossy</Link>: a client that falls behind then skips to the newest, and `info.seq` jumps over what it skipped.
 
 A `subscribe()` callback's `async` work isn't awaited, on the page or on the server: the next message arrives whether or not your callback is done. Telefunc doesn't limit how many calls of your callback are unfinished, so if it can fall behind, limit them in your code.
 For example, a callback that does an `await fetch()` for each message should queue them, and drop or merge what it can't keep up with.
@@ -516,7 +516,7 @@ broadcast.subscribe((n) => showToast(n))
 
 ### Lossy broadcast
 
-A `BroadcastChannel` made with `lossy: true` <Link href="#skip-to-the-newest">skips to the newest</Link> for every message, such as a price:
+Where only the newest message matters, such as a price, make the `BroadcastChannel` with `lossy: true`, and its client <Link href="#skip-to-the-newest">skips to the newest</Link> when it falls behind:
 
 ```ts
 // Price.telefunc.ts
@@ -539,7 +539,9 @@ const price = await onWatchPrice('ACME')
 price.subscribe((value, info) => showPrice(value, info.seq))
 ```
 
-> `info.seq` jumps over the messages a client skipped, and the server logs a warning once. A key is one stream: a newer message replaces an older one whoever published it, so give each value its own key, such as one per pointer.
+> `lossy` is a constructor option because a `BroadcastChannel` is one client's subscription: it lets that client skip, whoever publishes, while a client of the same key without it gets every message.
+
+> `info.seq` jumps over the messages a client skipped, and the server logs a warning once. A client skips to the newest of the whole key, so give each value its own key, such as one per pointer.
 
 > Without `lossy`, a client gets every message, and past what the server holds for it the channel closes with `ChannelOverflowError` (see <Link href="#broadcast" />). To catch up, load the state again and call the telefunction for a new channel.
 
@@ -583,7 +585,7 @@ Only the two ends of a channel can use it, while anything that knows a broadcast
 | Delivery | The other end | Every subscriber of the `key`, including the publisher |
 | Message type | Asymmetric:<ul><li>Two different types: `Channel<ClientMessageType, ServerMessageType>`</li><li>The server uses the `new Channel()` instance, and returns `channel.client` to the client</li></ul> | Symmetric:<ul><li>Same type for every member: `BroadcastChannel<MessageType>`</li><li>The server uses and returns the same `BroadcastChannel` instance</li></ul> |
 | Message return | The other end's reply (if `{ ack: true }`) | A receipt: `{ key, seq, timestamp }` |
-| Skip to the newest | Per send: `send(data, { lossy: true })` | Per channel: `new BroadcastChannel({ key, lossy: true })` |
+| Skip to the newest | Per send, in either direction: `send(data, { lossy: true })` | Per subscriber, whoever publishes: `new BroadcastChannel({ key, lossy: true })` |
 | `close()` | Closes the channel for both ends | Detaches this member; the group lives on |
 | Multi-server | <Link href="/stream/scale#sticky-sessions">Sticky sessions</Link> | <Link href="/stream/scale#sticky-sessions">Sticky sessions</Link> and a <Link href="/stream/scale#broadcast">broadcast transport</Link> |
 
