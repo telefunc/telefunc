@@ -152,7 +152,7 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   /** A newer publish of `stream` takes the place of the one no wire has taken, or of the one it holds. */
   private takeWaitingPlace(stream: string): void {
     if (this._phase === 'ended') return
-    const seq = this._replayBuffer?.dropNewestOf(stream, this.unhanded())
+    const seq = this._replayBuffer?.dropReplaceableOf(stream, this.unhanded())
     if (seq !== undefined) this.dropWaiting([seq])
     if (this.dropHeld(stream) || seq !== undefined) this.owner?._onPublishesMissed?.()
   }
@@ -188,7 +188,8 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
 
   /** `MemoryHolder`: its page gets every reliable publish, so where it would miss one no wire has, the channel ends: from
    *  that gap on everything goes, receipts too, and its page reads on up to the gap and no further. A lossy stream holds
-   *  no publish waiting but its newest, so a page only on those ends at 0, where not even that fits. The bytes go at once,
+   *  no publish waiting but its newest and those a plain one of it followed, so a page only on lossy publishes ends at
+   *  0, where not even that fits. The bytes go at once,
    *  but only its own object can write to its page, so from another's it ends when its own next runs. */
   shed(toBytes: number): void {
     const replay = this._replayBuffer

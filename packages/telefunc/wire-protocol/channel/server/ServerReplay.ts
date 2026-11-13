@@ -12,8 +12,9 @@ type Publish = { seq: number; head: Uint8Array<ArrayBuffer>; body: PublishBody; 
 class ServerReplay {
   private readonly frames = new SeqQueue<Uint8Array<ArrayBuffer>>()
   private readonly publishes = new SeqQueue<Publish>()
-  /** The seq of each lossy stream's newest publish it holds. */
-  private readonly newestOfStream = new Map<string, number>()
+  /** The seq of each stream's lossy publish that a newer one may replace: its newest, while no publish of its stream
+   *  came after it. Any other publish it holds its page must get. */
+  private readonly replaceableOfStream = new Map<string, number>()
   private readonly holder: MemoryHolder
   private issuedSeq = 0
   private pushedSeq = 0
@@ -41,7 +42,10 @@ class ServerReplay {
     this.pushed(seq)
     this.publishes.push(seq, { seq, head, body, at: performance.now() })
     hold(this.holder, body)
-    if (body.lossy && body.stream !== null) this.newestOfStream.set(body.stream, seq)
+    const { stream } = body
+    if (stream === null) return
+    if (body.lossy) this.replaceableOfStream.set(stream, seq)
+    else this.replaceableOfStream.delete(stream)
   }
 
   /** The least time a publish waited for its page's confirmation, `Infinity` before the first. */
@@ -76,23 +80,22 @@ class ServerReplay {
     return out
   }
 
-  /** The newest publish of lossy `stream` goes if it is among its newest `droppable` publishes, the ones no wire has, and
-   *  no plain publish of `stream` came after it, for a newer one to take its place: the page's `info.seq` shows what it
-   *  skipped. Returns its seq where it went. */
-  dropNewestOf(stream: string, droppable: number): number | undefined {
-    const seq = this.newestOfStream.get(stream)
+  /** The publish of `stream` that a newer one may replace goes if it is among its newest `droppable` publishes, the ones
+   *  no wire has, for the newer one to take its place: the page's `info.seq` shows what it skipped. Returns its seq where
+   *  it went. */
+  dropReplaceableOf(stream: string, droppable: number): number | undefined {
+    const seq = this.replaceableOfStream.get(stream)
     if (seq === undefined) return undefined
-    // Any later publish of `stream` is a plain one, as `seq` is its newest lossy one.
-    const publish = this.publishes.removeAmongNewest(seq, droppable, (later) => later.body.stream === stream)
+    const publish = this.publishes.removeAmongNewest(seq, droppable)
     if (!publish) return undefined
     this.letPublishGo(publish)
     return seq
   }
 
-  /** A page gets every reliable publish: where its holder holds more than `toBytes` and one of its newest `droppable`
-   *  publishes would have to go (any at 0; above 0, a reliable one but the newest reliable, once its waiting lossy
-   *  publishes, each its stream's newest, are counted out), the oldest of them goes with every frame after it, receipts
-   *  too, so nothing reaches the page past the gap. Returns how many publishes went. */
+  /** A page gets every publish no newer one may replace: where its holder holds more than `toBytes` and one of its newest
+   *  `droppable` publishes would have to go (any at 0; above 0, one its page must get but the newest such, once the
+   *  replaceable ones are counted out), the oldest of them goes with every frame after it, receipts too, so nothing
+   *  reaches the page past the gap. Returns how many publishes went. */
   dropFromGap(toBytes: number, droppable: number): number {
     const waiting = Math.min(this.publishes.length, droppable)
     if (waiting === 0 || this.holder.heldBytes <= toBytes) return 0
@@ -114,17 +117,21 @@ class ServerReplay {
     return this.publishes.length > 0 ? this.publishes.at(this.publishes.length - 1).body : undefined
   }
 
-  /** Whether more than one reliable publish is among its newest `waiting`, and what it holds without the lossy ones among
-   *  them is over `toBytes`. */
+  /** Whether more than one publish its page must get is among its newest `waiting`, and what it holds without the
+   *  replaceable ones among them is over `toBytes`. */
   private reliableOver(toBytes: number, waiting: number): boolean {
     let reliable = 0
-    let lossyBytes = 0
+    let replaceableBytes = 0
     for (let i = this.publishes.length - waiting; i < this.publishes.length; i++) {
-      const { body } = this.publishes.at(i)
-      if (!body.lossy) reliable++
-      else lossyBytes += body.frame.byteLength
+      const publish = this.publishes.at(i)
+      if (this.isReplaceable(publish)) replaceableBytes += publish.body.frame.byteLength
+      else reliable++
     }
-    return reliable > 1 && this.holder.heldBytes - lossyBytes > toBytes
+    return reliable > 1 && this.holder.heldBytes - replaceableBytes > toBytes
+  }
+
+  private isReplaceable({ seq, body }: Publish): boolean {
+    return body.stream !== null && this.replaceableOfStream.get(body.stream) === seq
   }
 
   dispose(): void {
@@ -141,10 +148,9 @@ class ServerReplay {
     letGo(this.holder, frame.byteLength + HELD_SEND_OVERHEAD_BYTES)
   }
 
-  private letPublishGo({ seq, body }: Publish): void {
-    letGo(this.holder, body)
-    const { stream } = body
-    if (stream !== null && this.newestOfStream.get(stream) === seq) this.newestOfStream.delete(stream)
+  private letPublishGo(publish: Publish): void {
+    letGo(this.holder, publish.body)
+    if (this.isReplaceable(publish)) this.replaceableOfStream.delete(publish.body.stream!)
   }
 }
 
@@ -200,14 +206,11 @@ class SeqQueue<T> {
     return item
   }
 
-  /** Takes out the entry of `seq` where it is among the newest `newest` and no entry after it `fences` it, and returns it. */
-  removeAmongNewest(seq: number, newest: number, fences: (later: T) => boolean): T | undefined {
+  /** Takes out the entry of `seq` where it is among the newest `newest`, and returns it. */
+  removeAmongNewest(seq: number, newest: number): T | undefined {
     const oldest = Math.max(this.head, this.seqs.length - newest)
     for (let i = this.seqs.length - 1; i >= oldest; i--) {
-      if (this.seqs[i] !== seq) {
-        if (fences(this.items[i]!)) return undefined
-        continue
-      }
+      if (this.seqs[i] !== seq) continue
       this.seqs.splice(i, 1)
       const [item] = this.items.splice(i, 1)
       if (this.head >= this.items.length) this.clear()
