@@ -69,6 +69,8 @@ type Statement = {
   keepsSession?: boolean
   /** A read outside `.live()`: sent as written, and `succeeded()` may come before its rows (as an iterator gives them). */
   unwatched?: boolean
+  /** A statement that may change rows, on a connection with a change log (SQLite). */
+  writes?: boolean
   /** Queries of ours naming the tables a transaction changed without the catalog naming them, sent on the same
    *  connection right before it commits, with nothing else between: when one fails, the transaction rolls back and the
    *  caller gets its error. `ownTransaction`: the statement runs in a transaction of ours (`BEGIN`, the statement, the
@@ -366,6 +368,7 @@ class LiveDatabase {
     }
     return {
       ...statement,
+      writes: true,
       succeeded: (rows, command) => [...statement.succeeded(rows, command), read()],
       failed: () => [...statement.failed(), read()],
     }

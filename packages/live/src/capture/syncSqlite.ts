@@ -118,8 +118,10 @@ function captureSyncSqlite(driver: SyncSqlite, live: LiveDatabase) {
   return {
     method,
     /** The app's statement method `iterate`, which runs its statement as its rows are read: a read outside `.live()`
-     *  gets the driver's own iterator. Any other statement is done once its iterator ran out, was closed or failed
-     *  (a write's changes stay its own until then); its rows come without their hidden columns. */
+     *  gets the driver's own iterator. A live read is done once its iterator ran out, was closed or failed; its rows
+     *  come without their hidden columns. A write runs to its end at once: SQLite makes all its changes on its first
+     *  step and holds its `RETURNING` rows in memory (https://www.sqlite.org/lang_returning.html), so running it now
+     *  loses no laziness, and its implicit transaction commits before the app's next statement on the connection. */
     iterate(statement: SyncStatement, native: (...params: unknown[]) => Iterator<unknown>, rowsKind: () => RowsKind) {
       return (...params: unknown[]) => {
         const { planned, sendOurs, takeHidden } = plan(statement, params, rowsKind())
@@ -128,11 +130,12 @@ function captureSyncSqlite(driver: SyncSqlite, live: LiveDatabase) {
           planned.text === statement.text ? native(...params) : (sendOurs('iterate') as Iterator<unknown>),
         )
         const hiddenRows: (string | null)[][] = []
-        return whenDone(rows, {
+        const iterator = whenDone(rows, {
           row: (row) => hiddenRows.push(...takeHidden([row])),
           succeeded: () => settle(planned.succeeded(hiddenRows), 'commit'),
           failed: () => settle(planned.failed(), 'rollback'),
         })
+        return planned.writes ? readToItsEnd(iterator) : iterator
       }
     },
     exec,
@@ -155,6 +158,15 @@ function captureSyncSqlite(driver: SyncSqlite, live: LiveDatabase) {
       }
     },
   }
+}
+
+/** The rows `iterator` gives, read to its end now, through an iterator that can be closed as a driver's can. */
+function readToItsEnd<T>(iterator: Iterator<T>): Iterator<T> {
+  const rows: T[] = []
+  for (let row = iterator.next(); !row.done; row = iterator.next()) rows.push(row.value)
+  return (function* () {
+    yield* rows
+  })()
 }
 
 /** `iterator`, telling `done` of each row it gives, and once, of how it ended: it ran out, was closed or failed. */

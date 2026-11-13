@@ -250,14 +250,22 @@ describe('SQLite capture', () => {
   })
 
   it.each(['read to its end', 'closed'])('announces a write whose iterator was %s', async (end) => {
-    const { db } = open(TWO_ROWS)
-    const first = await watch(db, 'select * from t where id = 1')
-    const second = await watch(db, 'select * from t where id = 2')
+    const { db, path } = open(TWO_ROWS)
+    const other = new DatabaseSync(path)
+    const first = await watch(other, 'select * from t where id = 1')
+    const second = await watch(other, 'select * from t where id = 2')
     const rows = db.prepare("update t set x = 'c' where id = 1 returning id").iterate()
     expect(rows.next()).toEqual({ done: false, value: { id: 1 } })
+    // Another write while the iterator is open, and a client refetching row 1 from the other connection once told.
+    db.prepare("update t set x = 'd' where id = 2").run()
+    expect([await first(), await second()]).toEqual([1, 1])
+    const again = await watch(other, 'select x from t where id = 1')
+    const refetched = other.prepare('select x from t where id = 1').get()
     if (end === 'closed') rows.return!()
     else expect(rows.next().done).toBe(true)
-    expect([await first(), await second()]).toEqual([1, 0])
+    expect(other.prepare('select x from t order by id').all()).toEqual([{ x: 'c' }, { x: 'd' }])
+    // The client has row 1 as committed, or is told again.
+    expect({ refetched, stale: await again() }).not.toEqual({ refetched: { x: 'a' }, stale: 0 })
   })
 
   it.each([
