@@ -70,7 +70,8 @@ type SendGuard<P extends ParticipantMeta = ParticipantMeta> = (
   data: unknown,
 ) => void | Promise<void>
 
-/** Runs before a room-wide text or binary publish; throw to reject it. */
+/** Runs before a room-wide text or binary publish; throw to reject it. `track` is `null` for a message on the room's
+ *  message stream. */
 type PublishGuard<P extends ParticipantMeta = ParticipantMeta> = (
   from: Sender<P>,
   data: unknown,
@@ -171,8 +172,8 @@ type RoomInfo<M extends RoomMeta = RoomMeta> = {
 
 /** Per-frame metadata of a track, straight from the frame header. */
 type BinaryFrameInfo = {
-  /** Named substream, or `null` for the default track. */
-  track: string | null
+  /** The track: its name, or `'main'` for what is published without one. */
+  track: string
   /** Publisher metadata, or `null` when absent. */
   meta: Record<string, unknown> | null
 }
@@ -197,7 +198,7 @@ type PublishOptions = {
 
 /** Publish-side binary options. */
 type BinaryPublishOptions = {
-  /** Named substream (≤ 255 UTF-8 bytes). Subscribers can filter by it. Default: the default track. */
+  /** Named substream (≤ 255 UTF-8 bytes). Subscribers can filter by it. Default: `'main'`. */
   track?: string
   /** Per-frame metadata surfaced as `info.meta` (≤ 65,535 bytes serialized). */
   meta?: Record<string, unknown>
@@ -254,10 +255,7 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
     options?: { signal?: AbortSignal },
   ): () => void
   /** Receive all members' binary frames, optionally filtered to one track at the source. */
-  subscribeBinary(
-    callback: RoomBinaryListener<P>,
-    options?: { track?: string | null; signal?: AbortSignal },
-  ): () => void
+  subscribeBinary(callback: RoomBinaryListener<P>, options?: { track?: string; signal?: AbortSignal }): () => void
   /** Iterate participant messages until aborted, closed, or the loop ends. */
   messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<RoomMessage<Pub, P>>
 
@@ -333,8 +331,8 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
 
 /** One of your tracks that someone receives now. */
 type TrackDemand<P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = {
-  /** The track; `null` for what you publish without one. The entry goes when the last one stops receiving it. */
-  readonly track: string | null
+  /** The track; `'main'` for what you publish without one. The entry goes when the last one stops receiving it. */
+  readonly track: string
   /** The people at the pages and server-side rooms receiving it, in join order: never you, never a hidden participant. */
   readonly watchers: readonly RemoteParticipant<P, Pub>[]
   /** Everyone receiving it: the people in `watchers`, plus one for each page or server-side room that receives it and
@@ -362,7 +360,7 @@ interface RemoteParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = u
   /** Receive only this member's messages. Returns an unsubscribe function. */
   subscribe(callback: (data: Pub, info: ChannelPublishInfo) => unknown, options?: { signal?: AbortSignal }): () => void
   /** Receive only this member's binary frames, optionally filtered to one track. */
-  subscribeBinary(callback: MemberBinaryListener, options?: { track?: string | null; signal?: AbortSignal }): () => void
+  subscribeBinary(callback: MemberBinaryListener, options?: { track?: string; signal?: AbortSignal }): () => void
 
   /** What this member shows changed: its `meta`, whether it is connected, or a field a package adds. */
   onChange(callback: () => void, options?: { signal?: AbortSignal }): () => void

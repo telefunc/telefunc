@@ -17,7 +17,7 @@ import { makeDisposer, type ListenerOptions } from './disposer.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderSnapshot } from './arguments.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
-import { DEFAULT_TRACK, encodeBinaryFrame, encodeMessageFrame, publicTrack, type TrackKey } from './binary.js'
+import { DEFAULT_TRACK, encodeBinaryFrame, encodeMessageFrame, publicTrack, trackKey, type TrackKey } from './binary.js'
 import type { MemberMetaUpdate, WholeMemberUpdate, RoomResult, InboxMessage, TrackWatch } from './protocol.js'
 import type {
   BinaryPublishOptions,
@@ -137,7 +137,7 @@ abstract class ParticipantBase implements LocalParticipant {
   /** The stream this member's publishes on `track` go up in, in order: a newer lossy one replaces an older one still
    *  waiting, and a plain one goes after it. */
   protected trackStreamOf(track: string | undefined): string {
-    return `${this.id}:${track ?? DEFAULT_TRACK}`
+    return `${this.id}:${track === undefined ? DEFAULT_TRACK : trackKey(track)}`
   }
 
   listen(callback: (data: unknown, from: Sender | null) => unknown, options?: ListenerOptions): () => void {
@@ -243,7 +243,7 @@ abstract class ParticipantBase implements LocalParticipant {
   }
 
   /** The entry of `track`, which is `was` while nothing in it changed. */
-  private demandEntry(track: string | null, { watchers: ids, count }: TrackWatch, was: TrackDemand | undefined) {
+  private demandEntry(track: string, { watchers: ids, count }: TrackWatch, was: TrackDemand | undefined) {
     const watchers: RemoteParticipant[] = []
     for (const id of ids) {
       const watcher = this._shownParticipant(id)

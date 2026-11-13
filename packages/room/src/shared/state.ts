@@ -8,10 +8,10 @@ import { makeDisposer, type ListenerOptions } from './disposer.js'
 import {
   EVERY_MEMBER,
   EVERY_TRACK,
-  DEFAULT_TRACK,
   isNamedTrack,
   decodeFrameMessage,
   publicTrack,
+  trackKey,
   type EveryTrack,
   type BinaryFrame,
   type BinaryWantChange,
@@ -33,7 +33,7 @@ import type {
   Sender,
 } from '../types.js'
 
-type BinaryListenerOptions = ListenerOptions & { track?: string | null }
+type BinaryListenerOptions = ListenerOptions & { track?: string }
 type MessageListenerOptions = ListenerOptions & { track?: string }
 /** A `subscribe()` listener: its `info` has the frame's fields where it names a track. */
 type MessageListener<From extends unknown[]> = (data: unknown, info: any, ...from: From) => unknown
@@ -665,8 +665,8 @@ function ownValue(value: unknown): PropertyDescriptor {
   return { value, enumerable: true }
 }
 
-/** Validate a `subscribeBinary` track option: `undefined` = every track, `null` = the default track, a non-empty name =
- *  that track. */
+/** Validate a `subscribeBinary` track option: `undefined` = every track, a non-empty name = that track, `'main'` the
+ *  default one. */
 function normalizeTrackFilter(opts: BinaryListenerOptions | undefined): TrackFilter {
   assertUsage(
     opts === undefined || (typeof opts === 'object' && opts !== null && !Array.isArray(opts)),
@@ -675,9 +675,8 @@ function normalizeTrackFilter(opts: BinaryListenerOptions | undefined): TrackFil
   assertKnownOptions(opts, ['track', 'signal'], 'subscribeBinary()')
   const track = opts?.track
   if (track === undefined) return EVERY_TRACK
-  if (track === null) return DEFAULT_TRACK
   assertUsage(isNamedTrack(track), 'subscribeBinary() track should be a valid non-empty string')
-  return track
+  return trackKey(track)
 }
 
 function binaryListener<CB>(
@@ -689,7 +688,7 @@ function binaryListener<CB>(
 
 function textListener<CB>(cb: CB, track: unknown): { cb: CB; track: TrackFilter; text: boolean } {
   assertUsage(isNamedTrack(track), 'subscribe() track should be a valid non-empty string')
-  return { cb, track, text: true }
+  return { cb, track: trackKey(track), text: true }
 }
 
 function hearsFrame({ track, text }: Omit<TrackListener<[]>, 'cb'>, frame: BinaryFrame): boolean {

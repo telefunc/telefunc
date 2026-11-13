@@ -8,6 +8,7 @@ export {
   EVERY_MEMBER,
   EVERY_TRACK,
   publicTrack,
+  trackKey,
   isNamedTrack,
   isRoomTrack,
 }
@@ -98,8 +99,12 @@ function encodeFrame(
       isNamedTrack(opts.track),
       `track should be a non-empty well-formed string of at most ${TRACK_LENGTH_FIELD_MAX} bytes`,
     )
-    trackBytes = frameTextEncoder.encode(opts.track)
-    flags |= FRAME_FLAG_TRACK
+    // A frame names the default track by naming none.
+    const track = trackKey(opts.track)
+    if (track !== DEFAULT_TRACK) {
+      trackBytes = frameTextEncoder.encode(track)
+      flags |= FRAME_FLAG_TRACK
+    }
   }
   let metaBytes: Uint8Array | null = null
   if (opts?.meta !== undefined) {
@@ -208,18 +213,25 @@ function decodeBinaryFrame(data: Uint8Array): BinaryFrame | null {
 }
 
 // Tracks
-/** A track inside Room: a name, or `DEFAULT_TRACK`, which the public API calls `null`. */
+/** A track inside Room: a name, or `DEFAULT_TRACK`, which the public API calls `'main'`. */
 type TrackKey = string
 /** The default track's key; named tracks are non-empty, so `''` is unambiguous. */
 const DEFAULT_TRACK: TrackKey = ''
+/** The default track's name in the public API: what `publishBinary()` without `track` publishes on. */
+const MAIN_TRACK = 'main'
 /** Every member, and every track, as a want's target; the wire carries `null`. */
 const EVERY_MEMBER: unique symbol = Symbol.for('telefunc.RoomEveryMember')
 const EVERY_TRACK: unique symbol = Symbol.for('telefunc.RoomEveryTrack')
 type EveryMember = typeof EVERY_MEMBER
 type EveryTrack = typeof EVERY_TRACK
 
-function publicTrack(track: TrackKey): string | null {
-  return track === DEFAULT_TRACK ? null : track
+function publicTrack(track: TrackKey): string {
+  return track === DEFAULT_TRACK ? MAIN_TRACK : track
+}
+
+/** The track a public name names inside Room. */
+function trackKey(track: string): TrackKey {
+  return track === MAIN_TRACK ? DEFAULT_TRACK : track
 }
 
 /** One change of a holder's binary wants: `track` (or `EVERY_TRACK`) of `member` (or `EVERY_MEMBER`), on or off. */

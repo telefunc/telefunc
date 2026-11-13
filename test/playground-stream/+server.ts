@@ -239,7 +239,7 @@ app.post('/api/room-cross-instance/join', async (c) => {
   ]
   let removers = listeners()
   const participant = await room.join({ meta: { instance: INST, name: c.req.query('name') ?? INST } })
-  let demanded = new Set<string | null>()
+  let demanded = new Set<string>()
   participant.onChange(() => {
     const now = new Set(participant.demand.map(({ track }) => track))
     for (const track of now) if (!demanded.has(track)) events.push(`demand:${track}:true`)

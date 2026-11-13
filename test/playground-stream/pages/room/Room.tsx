@@ -172,9 +172,9 @@ function threadedReply() {
 }
 
 /** Each of the participant's tracks as someone starts (`true`) and the last one stops (`false`) receiving it. */
-function demandLog(me: Pick<LocalParticipant, 'demand' | 'onChange'>): Array<[string | null, boolean]> {
-  const log: Array<[string | null, boolean]> = []
-  let watched = new Set<string | null>()
+function demandLog(me: Pick<LocalParticipant, 'demand' | 'onChange'>): Array<[string, boolean]> {
+  const log: Array<[string, boolean]> = []
+  let watched = new Set<string>()
   me.onChange(() => {
     const now = new Set(me.demand.map(({ track }) => track))
     for (const track of now) if (!watched.has(track)) log.push([track, true])
@@ -474,7 +474,7 @@ function Room() {
           size: number
           firstByte: number
           fromSelf: boolean
-          track: string | null
+          track: string
           meta: Record<string, unknown> | null
         }> = []
         videoRoom.subscribeBinary((data, info, from) => {
@@ -489,7 +489,7 @@ function Room() {
         const cameraOnly: number[] = []
         videoRoom.subscribeBinary((data) => cameraOnly.push(data[0]!), { track: 'camera' })
         const defaultOnly: number[] = []
-        videoRoom.subscribeBinary((data) => defaultOnly.push(data[0]!), { track: null })
+        videoRoom.subscribeBinary((data) => defaultOnly.push(data[0]!), { track: 'main' })
 
         for (let i = 0; i < 3; i++) {
           await me.publishBinary(new Uint8Array(64).fill(i + 1))
@@ -782,7 +782,7 @@ function Room() {
         await me.publishBinary(new Uint8Array([3]))
         const late = await onGetRoom(roomId)
         const releaseLate = keepReachable(late)
-        const retained = new Set<string | null>()
+        const retained = new Set<string>()
         late.subscribeBinary((_data, info) => retained.add(info.track))
         await pollUntil(() => ({
           result: { accepted: publishes.length - errors.length, errors, retained: retained.size },
@@ -1860,7 +1860,7 @@ function Room() {
         const xText: string[] = []
         const xBin: number[] = []
         remoteX.subscribe((data) => xText.push(data as string))
-        remoteX.subscribeBinary((data) => xBin.push(data[0]!), { track: null })
+        remoteX.subscribeBinary((data) => xBin.push(data[0]!), { track: 'main' })
         // Room-level control: proves Y's traffic really was delivered, so xText's absence means something.
         const all: string[] = []
         observer.subscribe((data) => all.push(data as string))
@@ -2022,7 +2022,7 @@ function Room() {
           await onWatchRoomTrack(roomId, 'cam')
           const late = await onGetRoom(roomId)
           const text: string[] = []
-          const frames: Array<[string | null, number, unknown]> = []
+          const frames: Array<[string, number, unknown]> = []
           late.subscribe((data) => text.push(data as string))
           late.subscribeBinary((data, info, from) => frames.push([info.track, data[0]!, from.meta.name]))
           await a.publish('live')
@@ -2057,7 +2057,7 @@ function Room() {
 
         await onHoldRetainedReads(roomId)
         const late = await onGetRoom(roomId)
-        const frames: Array<[string | null, number, unknown]> = []
+        const frames: Array<[string, number, unknown]> = []
         const left: unknown[] = []
         late.subscribeBinary((data, info, from) => frames.push([info.track, data[0]!, from.meta.name ?? null]))
         late.onLeave((member) => left.push(member.meta.name))
@@ -2191,7 +2191,7 @@ function Room() {
           remote.subscribeBinary((data, info) => (frames[info.track!] ??= []).push(data[0]!), { track }),
         )
         const defaultTrack: number[] = []
-        viewer.subscribeBinary((data) => defaultTrack.push(data[0]!), { track: null })
+        viewer.subscribeBinary((data) => defaultTrack.push(data[0]!), { track: 'main' })
         await pollUntil(() => ({
           done: demand.some(([track]) => track === 't999') && demand.some(([t]) => t === null),
         }))
@@ -2220,7 +2220,9 @@ function Room() {
           JSON.stringify({
             inOrder: tracks.filter((track) => frames[track]!.join() === '1,2').length,
             defaultTrack,
-            demand: demand.filter(([track]) => track === null || track === 'own' || track === 't0' || track === 't999'),
+            demand: demand.filter(
+              ([track]) => track === 'main' || track === 'own' || track === 't0' || track === 't999',
+            ),
             wanted: new Set(demand.filter(([, wanted]) => wanted).map(([track]) => track)).size,
             otherOwn: otherDemand.filter(([track]) => track === 'own'),
             tooMany,
@@ -2425,7 +2427,7 @@ function Room() {
 
       {scenario('lossy-near-budget', null, 'Offline with only lossy frames near maxMemory', async () => {
         const [roomId, view] = await createRoom('lossy-near-budget')
-        const got = new Set<string | null>()
+        const got = new Set<string>()
         view.subscribeBinary((_data, info) => got.add(info.track))
         let closed = false
         view.onClose(() => (closed = true))

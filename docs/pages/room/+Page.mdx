@@ -188,7 +188,7 @@ onCursorMove((position) => me.publish(position, { track: 'cursor', lossy: true }
 room.subscribe((position, info, from) => drawCursor(from.id, position), { track: 'cursor' })
 ```
 
-> In `publish()`, `lossy` needs a `track`: a message on no track reaches everyone, in the room's order, and is never skipped. `publishBinary()` without a `track` publishes on your default track, which takes `lossy` like any other track.
+> In `publish()`, `lossy` needs a `track`: a message on no track reaches everyone, in the room's order, and is never skipped. `publishBinary()` without a `track` publishes on the track `'main'`, which takes `lossy` like any other track.
 
 
 ## Check the message type
@@ -655,7 +655,7 @@ Properties: `id`, `meta`, `count`, `isEmpty`, `isClosed`.
 | Method | Description |
 |---|---|
 | `publish(message, { track?, lossy?, retain? }?)` | Send to everyone. `lossy` needs `track`. |
-| `publishBinary(data, { track?, meta?, retain?, lossy? }?)` | Send binary to everyone. Without `track`, on your default track. |
+| `publishBinary(data, { track?, meta?, retain?, lossy? }?)` | Send binary to everyone. Without `track`, on the track `'main'`. |
 | `send(to, message, { ack? }?)` | Send to one participant. |
 | `listen(cb)` | Receive private messages; return a value to reply. |
 | `setMeta(meta)` / `setAttributes(attributes)` | Replace / update your `meta`. |
@@ -681,7 +681,7 @@ Properties: `id`, `meta`, `identity`, `isConnected`.
 |---|---|
 | `anyoneCanJoin` | `true`: any client may join. Without it or `onBeforeJoin()`, a client's `room.join()` is refused. |
 | `onBeforeJoin(member)` | Before a join. Throw `Abort()` to reject it. |
-| `onBeforePublish(from, message, { track })` | Before a message or a binary frame to everyone, `track` being `null` off a track. Throw `Abort()` to reject it. |
+| `onBeforePublish(from, message, { track })` | Before a message or a binary frame to everyone, `track` being `null` for a message on no track. Throw `Abort()` to reject it. |
 | `onBeforeSend(from, to, message)` | Before a private message. Throw `Abort()` to reject it. |
 | `onAfterJoin(member, { joinedAt })` | After a join. |
 | `onAfterPublish(from, message, { seq, timestamp, track })` | After a message or a binary frame to everyone. |

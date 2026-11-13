@@ -58,7 +58,7 @@ type BinaryResult = {
     size: number
     firstByte: number
     fromSelf: boolean
-    track: string | null
+    track: string
     meta: Record<string, unknown> | null
   }>
   cameraOnly: number[]
@@ -275,7 +275,7 @@ function testRoom() {
     expect(result.frames.map((f) => f.size)).deep.equal([64, 64, 64, 32])
     expect(result.frames.map((f) => f.firstByte)).deep.equal([1, 2, 3, 9])
     for (const frame of result.frames) expect(frame.fromSelf).toBe(true)
-    expect(result.frames.map((f) => f.track)).deep.equal([null, null, null, 'camera'])
+    expect(result.frames.map((f) => f.track)).deep.equal(['main', 'main', 'main', 'camera'])
     expect(result.frames.map((f) => f.meta)).deep.equal([null, null, null, { key: true }])
     expect(result.cameraOnly).deep.equal([9])
     expect(result.defaultOnly).deep.equal([1, 2, 3])
@@ -1096,7 +1096,7 @@ function testRoom() {
   )
   testRoomScenario<{
     text: string[]
-    frames: Array<[string | null, number, string]>
+    frames: Array<[string, number, string]>
     later: string[]
     server: { text: string[]; frames: number[] }
   }>(
@@ -1112,7 +1112,7 @@ function testRoom() {
       expect(r.server).deep.equal({ text: ['pinned', 'live', 'live-2'], frames: [1, 4] })
     },
   )
-  testRoomScenario<{ frames: Array<[string | null, number, unknown]>; server: Array<[number, unknown]> }>(
+  testRoomScenario<{ frames: Array<[string, number, unknown]>; server: Array<[number, unknown]> }>(
     'retain-leave',
     "room: a member who leaves while a late subscriber's replay holds its live frames has none of them delivered after its leave, on the page or the server, and another member's held frames still arrive",
     (r) => {
@@ -1205,7 +1205,7 @@ function testRoom() {
   testRoomScenario<{
     inOrder: number
     defaultTrack: number[]
-    demand: Array<[string | null, boolean]>
+    demand: Array<[string, boolean]>
     wanted: number
     otherOwn: Array<[string, boolean]>
     tooMany: string | null
@@ -1215,12 +1215,12 @@ function testRoom() {
     (r) => {
       expect(r.inOrder).toBe(1_000)
       expect(r.defaultTrack).deep.equal([7])
-      expect(r.demand.filter(([track]) => track !== null)).deep.equal([
+      expect(r.demand.filter(([track]) => track !== 'main')).deep.equal([
         ['t0', true],
         ['t999', true],
         ['t0', false],
       ])
-      expect(r.demand.filter(([track]) => track === null)).deep.equal([[null, true]])
+      expect(r.demand.filter(([track]) => track === 'main')).deep.equal([['main', true]])
       expect(r.wanted).toBe(1_001)
       expect(r.otherOwn).deep.equal([['own', true]])
       expect(r.tooMany).include('[Wrong Usage] Too many binary tracks subscribed on one room (4096 max)')
