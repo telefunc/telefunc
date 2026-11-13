@@ -84,6 +84,19 @@ function captureSession(session: D1Session, db: D1, live: LiveDatabase): () => P
   const ours = ({ text, values }: FollowUp) => prepare(text).bind(...values)
   /** The statement `planned` as sent: our text, with the values it takes. */
   const sent = (planned: Statement, values: unknown[]) => prepare(planned.text).bind(...(planned.values ?? values))
+  /** Runs `planned` through `raw()`: its column names, then its rows as arrays. A query of ours it reads first goes in
+   *  one `batch()` with it, whose rows come as objects: the statement is then sent with its columns aliased by
+   *  position, which rebuild the arrays, and comes back without names (`batched`). */
+  const rawRows = async (planned: Statement, values: unknown[]): Promise<{ rows: unknown[][]; batched: boolean }> => {
+    const { readsFirst, positional } = planned
+    if (!readsFirst || !positional)
+      return { rows: await sent(planned, values).raw({ columnNames: true }), batched: false }
+    const [first, result] = await batch([ours(readsFirst), prepare(positional.text).bind(...positional.values)])
+    readsFirst.done(rowsOf(first!))
+    const keys = [...positional.keys, ...hiddenNames(planned)]
+    const rows = result!.results.map((row) => keys.map((key) => (row as Record<string, unknown>)[key]))
+    return { rows: [hiddenNames(planned), ...rows], batched: true }
+  }
   const send = async <T>(planned: Statement, request: () => Promise<T>): Promise<T> => {
     try {
       return await request()
@@ -123,12 +136,19 @@ function captureSession(session: D1Session, db: D1, live: LiveDatabase): () => P
       raw: async (options) => {
         await ready()
         const planned = live.statementFor(db, text, values)
-        const [names = [], ...rows] = await send(planned, () => sent(planned, values).raw({ columnNames: true }))
+        const { rows: answer, batched } = await send(planned, () => rawRows(planned, values))
+        const [returned = [], ...rows] = answer
         const hiddenRows = takeHiddenValues(rows, hiddenNames(planned), true)
-        names.splice(names.length - planned.hiddenColumns, planned.hiddenColumns)
         await runFollowUps(planned.succeeded(hiddenRows))
         const kept = planned.returnsRows ? rows : []
-        return options?.columnNames ? [names, ...kept] : kept
+        if (!options?.columnNames) return kept
+        // Rows that came as objects came without names: SQLite's, from a query of ours reading no rows.
+        const named = batched ? planned.positional!.names : undefined
+        if (!named) return [returned.slice(0, returned.length - planned.hiddenColumns), ...kept]
+        const [names = []] = await prepare(named.text)
+          .bind(...named.values)
+          .raw({ columnNames: true })
+        return [names, ...kept]
       },
     }
     prepared.set(statement, { text, values })

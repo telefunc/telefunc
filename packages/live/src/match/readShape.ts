@@ -231,7 +231,17 @@ function analyzeSelect(
     else readsEverything(analysis)
     scope.ctes.add(cte.CommonTableExpr.ctename)
   }
-  for (const name of analysis.catalog.calls(stmt)) if (analysis.catalog.functions.has(name)) readsEverything(analysis)
+  for (const name of analysis.catalog.calls(stmt)) {
+    if (!analysis.catalog.functions.has(name)) continue
+    // What the function reads, when its body tells.
+    const reads = analysis.catalog.functionReads?.get(name) ?? 'all'
+    if (reads === 'all') readsEverything(analysis)
+    else
+      for (const id of reads) {
+        if (analysis.alsoReads !== 'all') analysis.alsoReads.add(id)
+        addAlsoReads(analysis.catalog.tables.get(id)!, analysis)
+      }
+  }
 
   // This scope's own tables first: subqueries below derive their routes from them.
   const filters: Filter[] = []

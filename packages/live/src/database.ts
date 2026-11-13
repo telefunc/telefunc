@@ -3,6 +3,7 @@ export type { DatabaseClient }
 
 import { importPostgres } from '#postgres'
 import { assertUsage } from './assert.js'
+import { ACCESS_QUERY, LOCKED_TABLES, ROLE_QUERY } from './catalog.js'
 import { captureBetterSqlite3, isBetterSqlite3, type BetterSqlite3 } from './capture/betterSqlite3.js'
 import { captureBunSqlite, isBunSqlite, type BunSqlite } from './capture/bunSqlite.js'
 import { captureD1, isD1, type D1 } from './capture/d1.js'
@@ -25,6 +26,13 @@ let postgres: typeof import('./postgres/engine.js') | undefined
 const POSTGRES_ENGINE: Engine = {
   loadCatalog: async (query) => (postgres ??= await importPostgres()).loadCatalog(query),
   plan: (text, catalog) => postgres!.plan(text, catalog),
+  split: (text) => postgres!.split(text),
+  session: {
+    access: ACCESS_QUERY,
+    role: ROLE_QUERY,
+    immediate: 'SET CONSTRAINTS ALL IMMEDIATE',
+    locked: LOCKED_TABLES,
+  },
   failureAbortsTransaction: true,
 }
 
@@ -98,6 +106,10 @@ function sameDatabase(known: Known, options: LiveOptions): LiveDatabase {
   assertUsage(
     options.transport === undefined || options.transport === known.options.transport,
     'Pass the same `transport` to every live*() wrapper of one database.',
+  )
+  assertUsage(
+    options.name === undefined || options.name === known.options.name,
+    'Pass the same `name` to every live*() wrapper of one database.',
   )
   return known.live
 }

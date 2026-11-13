@@ -11,6 +11,19 @@ import { afterAll, describe, expect, it } from 'vitest'
 import { liveDatabaseOfFile } from '../database.js'
 import { readLive } from '../liveQuery.js'
 
+/** The texts node:sqlite refused to prepare, ours among them: the capture prepares through `DatabaseSync.prototype`,
+ *  as it was before the first file was wrapped. */
+const refused: string[] = []
+const { prepare } = DatabaseSync.prototype
+DatabaseSync.prototype.prepare = function (this: DatabaseSync, text: string, ...options: unknown[]) {
+  try {
+    return (prepare as (text: string, ...options: unknown[]) => ReturnType<typeof prepare>).call(this, text, ...options)
+  } catch (err) {
+    refused.push(text)
+    throw err
+  }
+} as typeof prepare
+
 const folder = mkdtempSync(join(tmpdir(), 'live-sqlite-'))
 afterAll(() => rmSync(folder, { recursive: true, force: true }))
 const telefunc = (globalThis as any)._telefunc
@@ -291,6 +304,18 @@ describe('SQLite capture', () => {
     expect(await stale()).toBe(0)
     db.prepare('insert into t (g) values (1)').run()
     expect(await stale()).toBe(1)
+  })
+
+  it("loads the catalog again after CREATE TABLE and ALTER TABLE, and asks nothing SQLite can't run", async () => {
+    const { db } = open(TWO_ROWS)
+    refused.length = 0
+    db.exec('create table u (id integer primary key)')
+    db.exec('alter table u add column x text')
+    db.prepare("insert into u values (1, 'a')").run()
+    const stale = await watch(db, 'select * from u where id = 1')
+    db.prepare("update u set x = 'b' where id = 1").run()
+    expect(await stale()).toBe(1)
+    expect(refused).toEqual([])
   })
 
   it('announces no change twice once a transaction rolled back', async () => {

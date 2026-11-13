@@ -2,17 +2,17 @@ export { LiveDatabase, MAX_RESULT_ROWS }
 export type { Statement, FollowUp, LiveOptions, Sharing, Reservation, Engine }
 
 import type { BroadcastTransport } from 'telefunc'
-import {
-  accessAnswered,
-  ACCESS_QUERY,
-  ROLE_QUERY,
-  tablesChangedBy,
-  type Access,
-  type Catalog,
-  type Table,
-} from './catalog.js'
+import { accessAnswered, tablesChangedBy, type Access, type Catalog, type Table } from './catalog.js'
 import { ChangeFeed } from './changeFeed.js'
-import { ofRows, READS_EVERYTHING, type ChangedTables, type Plan, type WritePlan } from './capture/statement.js'
+import {
+  ofRows,
+  HIDDEN_PREFIX,
+  READS_EVERYTHING,
+  type Cascade,
+  type ChangedTables,
+  type Plan,
+  type WritePlan,
+} from './capture/statement.js'
 import { ConnectionRoles, roleChangeOf } from './capture/roles.js'
 import { named, Transactions, UNNAMED_TABLES } from './capture/transactions.js'
 import { currentQuery, type LiveQuery } from './liveQuery.js'
@@ -27,6 +27,12 @@ type LiveOptions = {
   /** Carries changes to the other servers.
    *  @default the installed Broadcast backend: Redis once installed, Cloudflare's on Workers, else this process */
   transport?: BroadcastTransport
+  /** The name the database's changes go to the other servers under. Set it when several databases with the same
+   *  tables share one transport, for example a D1 database per tenant, and give it the same on every server that writes
+   *  the database.
+   *  @default the database's own: its name on Postgres, its file's path on SQLite, `main` on D1; a database in memory
+   *  has one of its own */
+  name?: string
 }
 
 /** How a driver runs one statement: send `text`, give back each row's last `hiddenColumns` values (as text) to
@@ -45,6 +51,10 @@ type Statement = {
   /** A query of ours to send right before `text`, in the same transaction with nothing between: its rows go to `done`
    *  before `succeeded` (a write's rows before it). A driver that doesn't send it makes the write count less precisely. */
   readsFirst?: FollowUp
+  /** The statement as a driver whose rows come as objects with `readsFirst` sends it (D1's `batch()`): each column the
+   *  caller gets aliased by its position, `keys`, which rebuild its arrays, then the hidden ones; `names`: a query of
+   *  ours reading no rows, which gives those columns' names. */
+  positional?: { text: string; values: unknown[]; keys: string[]; names?: { text: string; values: unknown[] } }
   /** A write that runs as a role its connection doesn't know yet: run this query of ours on the connection first,
    *  then plan the statement again, which may then capture its rows. A driver that doesn't sends it as is. */
   asks?: FollowUp
@@ -101,17 +111,17 @@ type Engine = {
   split?(text: string): string[] | undefined
   /** The database lives in this process alone (PGlite): no other process hears of its changes. */
   inProcess?: boolean
+  /** Queries about a connection's session (Postgres): `access` the role it runs as and what that role sees, `role` the
+   *  same unless the role is one of those whose access is known (a JSON array), and `locked` the tables its
+   *  transaction locked, once `immediate` fired its deferred triggers. Without them (SQLite), every connection runs as
+   *  the catalog's role, the catalog tells what it sees, and a change to tables the catalog can't name changes every
+   *  table. */
+  session?: { access: string; role: string; immediate: string; locked: string }
   /** A statement that fails inside a transaction makes it roll back (Postgres). On SQLite, the transaction goes on,
    *  and what the statement changed before failing may stay (`OR FAIL`, the statements before it in a text). */
   failureAbortsTransaction: boolean
 }
 
-/** The tables the transaction locked as a write does, or more strongly (`TRUNCATE`): an explicit `LOCK TABLE`, which
- *  writes nothing, lists its table too. */
-const LOCKED_TABLES = `select n.nspname || '.' || c.relname from pg_locks l
-  join pg_class c on c.oid = l.relation join pg_namespace n on n.oid = c.relnamespace
-  where l.locktype = 'relation' and l.pid = pg_backend_pid() and c.relkind in ('r', 'p', 'v', 'm', 'f')
-    and l.mode in ('RowExclusiveLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')`
 const MAX_PLANS = 10_000
 const MAX_KNOWN_OPERANDS = 10_000
 /** A read returning more rows keeps no result keys: any change to a matching row counts. */
@@ -132,6 +142,7 @@ class LiveDatabase {
   private readonly router = new Router()
   private readonly transactions = new Transactions((changes) => this.announce(changes))
   private readonly transport: BroadcastTransport | undefined
+  private readonly name: string | undefined
   private feed: ChangeFeed | undefined
   private readonly shared = new SharedReads()
   /** A statement changed a session: connections may answer the same read differently from now on. */
@@ -150,6 +161,7 @@ class LiveDatabase {
 
   constructor(options: LiveOptions, engine: Engine) {
     this.transport = options.transport
+    this.name = options.name
     this.engine = engine
   }
 
@@ -196,6 +208,22 @@ class LiveDatabase {
     if (plan.kind !== 'several' || !plan.plans.some((p) => p.kind === 'transaction')) return undefined
     const writes = plan.plans.some((p) => p.kind === 'logged' || p.kind === 'write' || p.kind === 'unknownWrite')
     return writes ? this.engine.split?.(text) : undefined
+  }
+
+  /** The statements of a text of several that writes rows, once `isReady()`, when one by one in a transaction they do
+   *  what the text does (Postgres runs it as one transaction): none begins or ends a transaction, or changes the
+   *  schema, which some statements can't do in one. */
+  oneTransactionSteps(text: string): string[] | undefined {
+    const plan = this.planOf(text, this.catalog!)
+    if (plan.kind !== 'several' || !plan.plans.some((p) => p.kind === 'write' || p.kind === 'unknownWrite'))
+      return undefined
+    const inOne = plan.plans.every((p) => readsOrWritesRows(p) || p.kind === 'session' || p.kind === 'none')
+    return inOne ? this.engine.split?.(text) : undefined
+  }
+
+  /** Whether `connection` is in a transaction, as its statements told. */
+  inTransaction(connection: object): boolean {
+    return this.transactions.isOpen(connection)
   }
 
   /** Called before each statement, on the connection that runs it, once `isReady()`. Without `rewrite`, the text is
@@ -295,7 +323,7 @@ class LiveDatabase {
         break
       case 'unknownWrite':
         if (plan.unread && live) return this.readOfAnything(connection, text, plan, live)
-        if (rewrite && isUnnamed(plan) && !this.transactions.isOpen(connection))
+        if (rewrite && isUnnamed(plan) && this.engine.session && !this.transactions.isOpen(connection))
           return this.inOwnTransaction(connection, text, plan)
     }
     const sent = this.statement(
@@ -306,11 +334,12 @@ class LiveDatabase {
       () => this.keptChanges(plan, connection),
     )
     const statement = this.learningAccess(connection, this.withChangeLog(connection, sent, plan))
-    if (plan.kind !== 'write' || !rewrite || this.roles!.of(connection) !== null) return statement
+    const session = this.engine.session
+    if (!session || plan.kind !== 'write' || !rewrite || this.roles!.of(connection) !== null) return statement
     // The role, and what it sees unless known: one round trip.
     const known = JSON.stringify([...this.access.keys()])
     const asks = {
-      text: ROLE_QUERY,
+      text: session.role,
       values: [known],
       done: (rows: Rows | undefined) => this.roleAnswered(connection, rows),
     }
@@ -364,13 +393,15 @@ class LiveDatabase {
 
   /** Learns what its connection's role sees of the tables, right after `statement`, when that isn't known yet. */
   private learningAccess(connection: object, statement: Statement): Statement {
+    const session = this.engine.session
+    if (!session) return statement
     return {
       ...statement,
       succeeded: (rows) => {
         const followUps = statement.succeeded(rows)
         const role = this.roles!.of(connection)
         if (role === null || this.access.has(role)) return followUps
-        return [...followUps, { text: ACCESS_QUERY, values: [], done: (rows) => this.learnAccess(rows) }]
+        return [...followUps, { text: session.access, values: [], done: (rows) => this.learnAccess(rows) }]
       },
     }
   }
@@ -387,7 +418,11 @@ class LiveDatabase {
    *  the next transaction starts once it succeeds (a `COMMIT AND CHAIN` that fails ends without one). */
   private commit(connection: object, text: string, chain = false): Statement {
     let locked: string[] | undefined
-    const queries = this.transactions.hasUnnamed(connection) ? namingQueries((tables) => (locked = tables)) : undefined
+    const { session } = this.engine
+    const queries =
+      session && this.transactions.hasUnnamed(connection)
+        ? namingQueries(session, (tables) => (locked = tables))
+        : undefined
     return {
       ...this.statement(connection, text, 0, () => []),
       ...(queries ? { beforeCommit: { queries, ownTransaction: false } } : {}),
@@ -414,7 +449,10 @@ class LiveDatabase {
     })
     return {
       ...statement,
-      beforeCommit: { queries: namingQueries((tables) => (locked = tables)), ownTransaction: true },
+      beforeCommit: {
+        queries: namingQueries(this.engine.session!, (tables) => (locked = tables)),
+        ownTransaction: true,
+      },
     }
   }
 
@@ -600,12 +638,14 @@ class LiveDatabase {
     else this.transactions.record(connection, kept())
   }
 
-  /** What a statement that failed on SQLite may still have changed: SQLite keeps the rows an `OR FAIL` statement
-   *  changed before its conflict, and what the statements before the one that failed in a text did. */
-  private keptChanges(plan: Plan, connection: object): Change[] {
-    if (plan.kind === 'several') return plan.plans.flatMap((p) => this.keptChanges(p, connection))
+  /** What a statement that failed on SQLite may still have changed: what the statements before the one that failed in
+   *  a text did, and the rows a statement changed before its conflict when an `OR FAIL` kept them. Any other failure
+   *  undid the statement (`undoneByFailure`). */
+  private keptChanges(plan: Plan, connection: object, inText = false): Change[] {
+    if (plan.kind === 'several') return plan.plans.flatMap((p) => this.keptChanges(p, connection, true))
     const writes = plan.kind === 'logged' || plan.kind === 'write' || plan.kind === 'unknownWrite'
-    return writes ? this.changesOf(plan, connection) : []
+    const undone = !inText && 'undoneByFailure' in plan
+    return writes && !undone ? this.changesOf(plan, connection) : []
   }
 
   /** Changes of a statement that isn't a single captured write; applies transaction statements and role changes. */
@@ -658,34 +698,68 @@ class LiveDatabase {
   }
 
   /** `plan`, sent with images of the rows it writes, and the rows it will write as they are before it when the driver
-   *  sends `readsFirst`. */
+   *  sends `readsFirst`; a delete with the rows of the cascades a live read here reads (`WritePlan.cascades`). */
   private widenedWrite(connection: object, plan: WritePlan, values: readonly unknown[]): Statement {
+    const cascades = plan.cascades ? this.cascadesRead(plan.cascades.of, connection) : []
+    const inReturning = plan.cascades?.at === undefined ? [] : cascades
     let before: Rows | undefined
+    let cascaded: unknown[][][] | undefined
     const sent = {
       ...this.statement(
         connection,
-        plan.text,
-        plan.images.length,
-        (rows) => this.changesOfWrite(plan, rows, before),
-        () => this.changesOf(plan, connection),
+        withColumns(plan, inReturning),
+        plan.images.length + inReturning.length,
+        (rows) => {
+          // An array of images for each row deleted, in the columns past the write's own images.
+          if (inReturning.length > 0)
+            cascaded = inReturning.map((_, i) => rows.flatMap((row) => JSON.parse(row[plan.images.length + i] ?? '[]')))
+          return this.changesOfWrite(plan, rows, before, cascaded && { of: cascades, rows: cascaded })
+        },
+        () => this.keptChanges(plan, connection),
       ),
       ...(plan.params && { values: plan.params.map((i) => values[i]) }),
       returnsRows: plan.hadReturning,
+      ...(plan.positional && { positional: bound(plan.positional, values) }),
     }
-    if (!plan.readsFirst) return sent
-    const { text, params } = plan.readsFirst
-    const readsFirst = { text, values: params.map((i) => values[i]), done: (rows?: Rows) => void (before = rows) }
-    return { ...sent, readsFirst }
+    if (plan.readsFirst) {
+      const { text, params } = plan.readsFirst
+      const readsFirst = { text, values: params.map((i) => values[i]), done: (rows?: Rows) => void (before = rows) }
+      return { ...sent, readsFirst }
+    }
+    if (cascades.length === inReturning.length) return sent
+    return { ...sent, readsFirst: cascadesFirst(cascades, values, (images) => (cascaded = images)) }
   }
 
-  /** `before`: what `readsFirst` read, when the driver sent it. */
-  private changesOfWrite(plan: WritePlan, rows: Rows, before: Rows | undefined): Change[] {
+  /** Of `cascades`, those to read: a live read here reads their table or one past it, and the connection's role reads
+   *  their rows unfiltered, as the cascades before them, which they're read through. */
+  private cascadesRead(cascades: Cascade[], connection: object): Cascade[] {
+    const role = this.roles!.of(connection)
+    const access = role === null ? undefined : this.access.get(role)
+    return cascades.flatMap((cascade) => {
+      const seen = access?.get(cascade.table.id)
+      if (!seen?.readable || seen.rowSecurity || !cascade.reach.some((table) => this.router.watches(table))) return []
+      return [cascade, ...this.cascadesRead(cascade.next, connection)]
+    })
+  }
+
+  /** `before`: what `readsFirst` read, when the driver sent it; `cascaded`: the images of the rows of each cascade
+   *  read, when they were. */
+  private changesOfWrite(
+    plan: WritePlan,
+    rows: Rows,
+    before: Rows | undefined,
+    cascaded?: { of: Cascade[]; rows: unknown[][][] },
+  ): Change[] {
     const whole = () => unknownChanges(ofRows(tablesChangedBy([[plan.table.id, undefined]], this.catalog!)))
     if (rows.length > MAX_CHANGED_ROWS || (before?.length ?? 0) > MAX_CHANGED_ROWS) return whole()
     // An upsert's `RETURNING` doesn't tell an inserted row from an updated one: the rows it conflicted with do.
     if (plan.readsFirst && plan.statement === 'insert' && !before) return whole()
     const changes = before ? pairedChanges(plan, rows, before) : this.returnedChanges(plan, rows)
-    return [...changes, ...cascadedDeletes(plan, changes), ...unknownChanges(plan.alsoWrites)]
+    // A write that changed no row fired no row trigger and no foreign key action.
+    if (plan.alsoWritesPerRow && rows.length === 0) return changes
+    const read = cascaded && cascaded.rows.flat().length <= MAX_CHANGED_ROWS ? cascaded : undefined
+    if (!read) return [...changes, ...cascadedDeletes(plan, changes), ...unknownChanges(plan.alsoWrites)]
+    return [...changes, ...cascadeChanges(plan.cascades!, read), ...cascadedDeletes(plan, changes, read.of)]
   }
 
   /** The changes of a write whose `RETURNING` gives all it knows of its rows. */
@@ -727,8 +801,10 @@ class LiveDatabase {
     if (this.pathsDiffer) this.catalog.searchPath = undefined
     this.roles ??= new ConnectionRoles(this.catalog.role)
     this.access.set(this.catalog.role, this.catalog.access)
-    // A database no other process opens is a channel of its own: another one in this process is another database.
-    const database = (!this.engine.inProcess && this.catalog.database) || `in-process ${crypto.randomUUID()}`
+    // The app's name for the database, or its own. One no other process opens is a channel of its own: another one in
+    // this process is another database.
+    const database =
+      this.name ?? ((!this.engine.inProcess && this.catalog.database) || `in-process ${crypto.randomUUID()}`)
     this.feed ??= new ChangeFeed(this.transport, database, (changes) => this.receive(changes))
   }
 
@@ -770,9 +846,12 @@ class LiveDatabase {
 }
 
 /** The rows a foreign key's `ON DELETE CASCADE` deletes, found by the key of each deleted parent (what deleting them
- *  changes in turn is in `WritePlan.alsoWrites`). */
-function cascadedDeletes(plan: WritePlan, changes: Change[]): Change[] {
-  const keys = plan.statement === 'delete' ? plan.table.referencedBy.filter((k) => k.onDelete === 'c' && k.column) : []
+ *  changes in turn is in `WritePlan.alsoWrites`), but those of the cascades `read`. */
+function cascadedDeletes(plan: WritePlan, changes: Change[], read: Cascade[] = []): Change[] {
+  const keys =
+    plan.statement === 'delete'
+      ? plan.table.referencedBy.filter((k) => k.onDelete === 'c' && k.column && !read.some((c) => c.key === k))
+      : []
   return keys.flatMap((key) =>
     changes.flatMap((change): Change[] => {
       if (change.kind !== 'delete') return []
@@ -782,12 +861,81 @@ function cascadedDeletes(plan: WritePlan, changes: Change[]): Change[] {
   )
 }
 
+/** The changes of the cascades `read`, from the images of their rows: each deleted, or its key set to `NULL` or to its
+ *  default (unknown); and what the delete changes besides, as a whole: what their rows' triggers write, and the
+ *  cascades not read. */
+function cascadeChanges(
+  cascades: NonNullable<WritePlan['cascades']>,
+  read: { of: Cascade[]; rows: unknown[][][] },
+): Change[] {
+  const changes: Change[] = []
+  const also = new Set(cascades.alsoWrites)
+  const add = (tables: ReadonlySet<string>) => tables.forEach((table) => also.add(table))
+  const walk = (of: Cascade[]) => {
+    for (const cascade of of) {
+      const at = read.of.indexOf(cascade)
+      if (at === -1) {
+        add(cascade.whole)
+        continue
+      }
+      add(cascade.alsoWrites)
+      walk(cascade.next)
+      const { table, key, write } = cascade
+      for (const image of read.rows[at]!) {
+        const old = rowOf(table.columns.map((c, i) => [c.name, (image as unknown[])[i] ?? null]))
+        if (write === 'delete') changes.push({ table: table.id, kind: 'delete', old })
+        else {
+          const { [key.column!]: _, ...kept } = old
+          changes.push({
+            table: table.id,
+            kind: 'update',
+            old,
+            new: key.onDelete === 'n' ? { ...kept, [key.column!]: null } : kept,
+          })
+        }
+      }
+    }
+  }
+  walk(cascades.of)
+  return [...changes, ...unknownChanges(also)]
+}
+
+/** `plan`'s text with a column of each of `cascades` after its images (Postgres: `WritePlan.cascades`). */
+function withColumns(plan: WritePlan, cascades: Cascade[]): string {
+  if (cascades.length === 0) return plan.text
+  const at = plan.cascades!.at!
+  const columns = cascades.map((c, i) => `, ${c.read.text} AS "${HIDDEN_PREFIX}${plan.images.length + i}"`)
+  return plan.text.slice(0, at) + columns.join('') + plan.text.slice(at)
+}
+
+/** A query of ours reading the rows of `cascades` (SQLite: `WritePlan.cascades`), each with its cascade's index:
+ *  `done` gets the images of each one's. */
+function cascadesFirst(
+  cascades: Cascade[],
+  values: readonly unknown[],
+  done: (images: unknown[][][] | undefined) => void,
+): FollowUp {
+  return {
+    text: cascades.map((c, i) => `SELECT ${i} AS "${HIDDEN_PREFIX}c", ${c.read.text}`).join(' UNION ALL '),
+    values: cascades.flatMap((c) => c.read.params.map((i) => values[i])),
+    done: (rows) =>
+      done(rows && cascades.map((_, i) => rows.filter((r) => Number(r[0]) === i).map((r) => JSON.parse(r[1]!)))),
+  }
+}
+
+/** `positional` with the app's `values` its texts take. */
+function bound(positional: NonNullable<WritePlan['positional']>, values: readonly unknown[]): Statement['positional'] {
+  const { text, params, keys, names } = positional
+  const of = (params: number[]) => params.map((i) => values[i])
+  return { text, values: of(params), keys, ...(names && { names: { text: names.text, values: of(names.params) } }) }
+}
+
 /** Queries naming the tables a transaction changed, for `Statement.beforeCommit`: `named` gets them. */
-function namingQueries(named: (tables: string[]) => void): FollowUp[] {
+function namingQueries(session: NonNullable<Engine['session']>, named: (tables: string[]) => void): FollowUp[] {
   return [
     // Its deferred triggers fire now: the tables they write are locked before the locks are read.
-    { text: 'SET CONSTRAINTS ALL IMMEDIATE', values: [], done: () => {} },
-    { text: LOCKED_TABLES, values: [], done: (rows) => rows && named(rows.map((row) => row[0]!)) },
+    { text: session.immediate, values: [], done: () => {} },
+    { text: session.locked, values: [], done: (rows) => rows && named(rows.map((row) => row[0]!)) },
   ]
 }
 

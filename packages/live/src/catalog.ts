@@ -1,4 +1,14 @@
-export { accessAnswered, accessOf, actionOf, sideEffects, tablesChangedBy, union, ACCESS_QUERY, ROLE_QUERY }
+export {
+  accessAnswered,
+  accessOf,
+  actionOf,
+  sideEffects,
+  tablesChangedBy,
+  union,
+  ACCESS_QUERY,
+  ROLE_QUERY,
+  LOCKED_TABLES,
+}
 export { ACCESS_ROWS, WRITES_OF_ANY_KIND }
 export type { Access, AccessRow, Catalog, Table, TableSet, ForeignKey, Write, Written }
 
@@ -43,6 +53,9 @@ type Table = {
   updateChangesOtherColumns: boolean
   /** SQLite: a constraint's conflict clause is `REPLACE`, so a write may delete the rows it conflicts with. */
   conflictReplace?: boolean
+  /** SQLite: a constraint's conflict clause is `FAIL`, or a trigger on the table calls `RAISE(FAIL)`, so a write that
+   *  fails may keep the rows it changed before. */
+  failKeepsChanges?: boolean
   /** SQLite: a virtual table, whose writes no trigger sees. */
   virtual?: boolean
 }
@@ -62,9 +75,12 @@ type Catalog = {
   access: Map<string, Access>
   serverVersion: number
   tables: Map<string, Table>
-  /** User-defined functions: a statement calling one may read any table, and write any table when it's one of
-   *  `writingFunctions`. */
+  /** User-defined functions: a statement calling one may read any table (but those `functionReads` names), and write
+   *  any table when it's one of `writingFunctions`. */
   functions: Set<string>
+  /** The tables a call of a function of `functions` reads, when its body tells (Postgres: every function of that name
+   *  is in SQL, calling none of the app's). */
+  functionReads?: Map<string, TableSet>
   /** The functions in SQL or a procedural language: a write calling one, or firing a trigger, rule or default that
    *  calls one, may write any table, whatever the function's volatility (a `STABLE` function's body may call a
    *  volatile one). A function in C (`internal` included: `uuid_generate_v4()`) is taken to compute a value. */
@@ -114,6 +130,13 @@ const ACCESS_QUERY = `select json_build_object('role', current_user, 'access', (
 const ROLE_QUERY = `select json_build_object('role', current_user, 'access', case when current_user::text in
   (select json_array_elements_text($1::json)) then null else (${ACCESS_ROWS}) end)::text`
 
+/** The tables the transaction locked as a write does, or more strongly (`TRUNCATE`): an explicit `LOCK TABLE`, which
+ *  writes nothing, lists its table too. */
+const LOCKED_TABLES = `select n.nspname || '.' || c.relname from pg_locks l
+  join pg_class c on c.oid = l.relation join pg_namespace n on n.oid = c.relnamespace
+  where l.locktype = 'relation' and l.pid = pg_backend_pid() and c.relkind in ('r', 'p', 'v', 'm', 'f')
+    and l.mode in ('RowExclusiveLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')`
+
 const WRITES_OF_ANY_KIND: Write[] = ['insert', 'update', 'delete', 'truncate']
 
 /** What writing `table` changes at once besides its own rows: the tables its triggers and rules write, and the
@@ -134,7 +157,7 @@ function sideEffects(table: Table, write: Write | undefined): Written[] | 'all' 
 
 /** What a foreign key's action does to the referencing rows when their parent gets `write` (`assigned`: the columns
  *  an update assigns, when known). */
-function actionOf(key: ForeignKey, write: Write, assigned?: string[]): Write | undefined {
+function actionOf(key: ForeignKey, write: Write, assigned?: string[]): 'delete' | 'update' | undefined {
   if (write === 'delete')
     return key.onDelete === 'c' ? 'delete' : ['n', 'd'].includes(key.onDelete) ? 'update' : undefined
   const keyAssigned = !assigned || !key.parentColumn || assigned.includes(key.parentColumn)

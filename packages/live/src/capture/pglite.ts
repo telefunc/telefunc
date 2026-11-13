@@ -3,7 +3,7 @@ export type { Pglite }
 
 import type { FollowUp, LiveDatabase, Statement } from '../liveDatabase.js'
 import { copyRows } from '../sharedReads.js'
-import { runInOrder, sendWithBeforeCommit } from './beforeCommit.js'
+import { inOneTransaction, runInOrder, sendWithBeforeCommit } from './beforeCommit.js'
 import { takeHiddenFields, takeHiddenValues } from './hiddenColumns.js'
 import { Turns } from './turns.js'
 
@@ -156,6 +156,9 @@ function captureExecutor(
   }
   async function runExec(text: string, options: unknown): Promise<Results[]> {
     await ready()
+    const steps = live.oneTransactionSteps(text)
+    if (steps)
+      return inOneTransaction(live, connection, steps, (step) => runQuery(step, [], options as QueryOptions, () => {}))
     // Several statements, possibly: run as written, and count every write as a change to its whole table.
     const statement = live.statementFor(connection, text, [], { rewrite: false })
     const results = await run(statement, () => exec(text, options))

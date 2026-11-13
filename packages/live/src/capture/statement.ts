@@ -1,17 +1,18 @@
-export { planRead, alsoWrites, ofRows, HIDDEN_PREFIX, READS_EVERYTHING }
-export type { Plan, ReadPlan, WritePlan, TransactionAction, ChangedTables }
+export { planRead, alsoWrites, cascadesOf, ofRows, HIDDEN_PREFIX, READS_EVERYTHING }
+export type { Cascade, Plan, ReadPlan, WritePlan, TransactionAction, ChangedTables }
 
 import {
   actionOf,
   sideEffects,
   tablesChangedBy,
   type Catalog,
+  type ForeignKey,
   type Table,
   type TableSet,
   type Written,
 } from '../catalog.js'
 import { analyzeRead, type ReadShape } from '../match/readShape.js'
-import type { Node } from '../tree.js'
+import { quote, type Node } from '../tree.js'
 import type { RoleChange, SettingName } from './roles.js'
 
 type TransactionAction = 'begin' | 'commit' | 'rollback' | 'savepoint' | 'release' | 'rollbackTo'
@@ -38,6 +39,10 @@ type WritePlan = {
   /** The app's parameter each of `text`'s takes, when they aren't the app's in order (`Dialect.bindParams()`). */
   params?: number[]
   hadReturning: boolean
+  /** The write as a driver whose rows come as objects sends it with `readsFirst` (D1's `batch()`): each column of its
+   *  own `RETURNING` aliased `keys[i]` by its position, then the hidden ones; `names`: a read of no rows giving those
+   *  columns' names as SQLite gives them. */
+  positional?: { text: string; params: number[]; keys: string[]; names?: { text: string; params: number[] } }
   /** Which hidden columns the rows carry, in order: row images, and whether an upsert inserted (Postgres < 18, which
    *  has no `old` image). */
   images: ('new' | 'old' | 'inserted')[]
@@ -50,6 +55,34 @@ type WritePlan = {
   /** What the write changes besides the rows it returns and those a cascade deletes by key (`cascadedDeletes()`): what
    *  the table's triggers write and the rows its foreign key actions change, then what those changes change in turn. */
   alsoWrites: ReadonlySet<string>
+  /** SQLite: `alsoWrites` changes only with each row the write changes, as its triggers and foreign key actions act
+   *  for each row (Postgres also has statement triggers). */
+  alsoWritesPerRow?: true
+  /** SQLite: a failure undoes all the write changed, since no `OR FAIL` can apply to it. */
+  undoneByFailure?: true
+  /** A delete's cascades, read while a live read reads their tables; `alsoWrites`: what the delete changes besides
+   *  its rows and theirs. Postgres reads them in the delete's own `RETURNING`, a column each spliced in at `at`: its
+   *  subqueries read the rows as they were before the statement. SQLite's ran after the cascade: a query of ours reads
+   *  them first (`readsFirst`). */
+  cascades?: { of: Cascade[]; alsoWrites: ReadonlySet<string>; at?: number }
+}
+
+/** The rows of a table that a delete's foreign key actions change: those whose `key.column` is the `parentColumn` of
+ *  a row deleted, by the statement or the cascade before. They're deleted (`CASCADE`), or their key set to `NULL` or
+ *  its default (`SET NULL`, `SET DEFAULT`): an `update`. */
+type Cascade = {
+  table: Table
+  key: ForeignKey
+  write: 'delete' | 'update'
+  /** SQL reading its rows' images: `rows()` given the alias and the images' text. */
+  read: { text: string; params: number[] }
+  /** The cascades of the rows it deletes. */
+  next: Cascade[]
+  /** Its table and those of the cascades past it: a live read of one of them has its rows read. */
+  reach: string[]
+  /** What changing its rows changes besides those of `next`, read; `whole`: what counts as changed when they aren't. */
+  alsoWrites: ReadonlySet<string>
+  whole: ReadonlySet<string>
 }
 
 /** What a statement may have changed: rows of these tables, or anything (`'all'`, schema changes included).
@@ -74,6 +107,8 @@ type Plan =
       role?: RoleChange
       setConfigs?: SettingName[]
       unread?: true
+      /** As `WritePlan.undoneByFailure`. */
+      undoneByFailure?: true
     }
   /** `SET`, `RESET`: the settings of its session change (a role, a `search_path`, what a row level security policy
    *  reads). `role`: how its role changes. */
@@ -133,6 +168,60 @@ function alsoWrites(
     }
   }
   return tablesChangedBy(written, catalog)
+}
+
+/** How many levels of cascades a delete reads: past them, a cycle of keys (a tree's) counts whole. */
+const CASCADE_DEPTH = 4
+
+/** The cascades of deleting rows of `table` (`Cascade`), and what the delete changes besides their rows; `undefined`
+ *  when the catalog can't name it. `rows`: SQL for the rows a key references among the deleted ones, `IN (…)` or
+ *  `= …`, from their `column`; `read`: SQL reading the images of a table's rows, named `alias`, `from` its rows. */
+function cascadesOf(
+  table: Table,
+  catalog: Catalog,
+  rows: (column: string) => string,
+  read: (table: Table, alias: string, from: string) => Cascade['read'],
+  depth = 1,
+): { of: Cascade[]; alsoWrites: ReadonlySet<string> } | undefined {
+  const named = (written: Written[] | 'all') => {
+    const tables = written === 'all' ? 'all' : tablesChangedBy(written, catalog)
+    return tables === 'all' ? undefined : tables
+  }
+  const triggers = table.alsoWrites.delete
+  if (triggers === 'all') return undefined
+  const of: Cascade[] = []
+  const written: Written[] = [...triggers].map((id) => [id, undefined])
+  for (const key of table.referencedBy) {
+    const write = actionOf(key, 'delete')
+    const child = catalog.tables.get(key.table)
+    if (!write) continue
+    if (!child || !key.column || !key.parentColumn || depth > CASCADE_DEPTH) {
+      written.push([key.table, write])
+      continue
+    }
+    const alias = `"${HIDDEN_PREFIX}c${depth}"`
+    const from = `FROM ${child.sqlName} AS ${alias} WHERE ${alias}.${quote(key.column)} ${rows(key.parentColumn)}`
+    const next =
+      write === 'delete'
+        ? cascadesOf(child, catalog, (column) => `IN (SELECT ${alias}.${quote(column)} ${from})`, read, depth + 1)
+        : { of: [], alsoWrites: named(sideEffects(child, 'update')) }
+    // The rows a first-level `CASCADE` deletes are found by key, unread (`cascadedDeletes()`).
+    const whole = named(depth === 1 && write === 'delete' ? sideEffects(child, 'delete') : [[child.id, write]])
+    if (!next?.alsoWrites || !whole) return undefined
+    const reach = [child.id, ...next.of.flatMap((c) => c.reach)]
+    of.push({
+      table: child,
+      key,
+      write,
+      read: read(child, alias, from),
+      next: next.of,
+      reach,
+      alsoWrites: next.alsoWrites,
+      whole,
+    })
+  }
+  const alsoWrites = named(written)
+  return alsoWrites && { of, alsoWrites }
 }
 
 /** What a statement that changes rows only may change: `'unnamed'` for every table. */

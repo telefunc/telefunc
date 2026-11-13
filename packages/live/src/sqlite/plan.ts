@@ -1,8 +1,9 @@
 export { planSqlite }
 
-import { tablesChangedBy, type Catalog, type Table } from '../catalog.js'
+import { tablesChangedBy, type Catalog, type Table, type TableSet } from '../catalog.js'
 import {
   alsoWrites,
+  cascadesOf,
   HIDDEN_PREFIX,
   planRead,
   READS_EVERYTHING,
@@ -126,7 +127,19 @@ function planWrite(statement: Ast, text: string | undefined, catalog: Catalog): 
   if (catalog.changeLog) return { kind: 'logged', tables: whole, also: replaces || table?.virtual ? whole : new Set() }
   const widened =
     !replaces && table && text && !table.virtual && !table.isView && widenedWrite(statement, text, table, catalog)
-  return widened || { kind: 'unknownWrite', tables: whole, schemaChange: false }
+  const plan = widened || { kind: 'unknownWrite' as const, tables: whole, schemaChange: false }
+  return failureKeeps(write, whole, catalog) ? plan : { ...plan, undoneByFailure: true }
+}
+
+/** Whether `write`, failing, may keep the rows it changed before: under an `OR FAIL` of its own, a `FAIL` conflict
+ *  clause or a `RAISE(FAIL)` of a table it may write, or in a table whose writes aren't undone with it (a virtual
+ *  table's). Any other failure undoes the statement. */
+function failureKeeps(write: Ast, tables: TableSet, catalog: Catalog): boolean {
+  if (write.or === 'Fail' || tables === 'all') return true
+  return [...tables].some((id) => {
+    const table = catalog.tables.get(id)
+    return !table || table.virtual === true || table.failKeepsChanges === true
+  })
 }
 
 /** `statement` with an image of each row it writes appended to its `RETURNING` list: the new row, or the deleted one.
@@ -149,11 +162,29 @@ function widenedWrite(statement: Ast, text: string, table: Table, catalog: Catal
   // `UPDATE t AS a … RETURNING a.x` fails: the image names its columns bare.
   const image = `json_array(${table.columns.map((c) => SQLITE.text(quote(c.name), c)).join(', ')}) AS "${HIDDEN_PREFIX}0"`
   const where =
-    written === 'update' ? updatedRows(write, text, table, catalog) : update ? conflictingRows(write, table) : undefined
+    written !== 'insert'
+      ? writtenRows(kind, write, text, table, catalog)
+      : update
+        ? conflictingRows(write, table)
+        : undefined
   if (update && where === undefined) return undefined
+  // A delete's cascades, read first: SQLite runs its `RETURNING` subqueries after them.
+  const cascades =
+    written === 'delete' &&
+    where !== undefined &&
+    cascadesOf(
+      table,
+      catalog,
+      (column) => `IN (SELECT ${quote(column)} FROM ${where})`,
+      (child, alias, from) => {
+        const columns = child.columns.map((c) => SQLITE.text(`${alias}.${quote(c.name)}`, c))
+        return SQLITE.bindParams(`json_array(${columns.join(', ')}) AS "${HIDDEN_PREFIX}i" ${from}`)
+      },
+    )
   const hadReturning = write.returning?.length > 0
   const appended = `${hadReturning ? ',' : ' RETURNING'} ${image}`
   const sent = SQLITE.bindParams(SQLITE.splice(text, SQLITE.statementEnd(text), appended))
+  const positional = positionally(write, text, table, image)
   return {
     kind: 'write',
     table,
@@ -164,14 +195,64 @@ function widenedWrite(statement: Ast, text: string, table: Table, catalog: Catal
     images: [written === 'delete' ? 'old' : 'new'],
     assigned,
     alsoWrites: also,
-    ...(where !== undefined && { readsFirst: SQLITE.bindParams(`SELECT ${image} FROM ${where}`) }),
+    alsoWritesPerRow: true,
+    ...(positional && { positional }),
+    ...(where !== undefined &&
+      written !== 'delete' && { readsFirst: SQLITE.bindParams(`SELECT ${image} FROM ${where}`) }),
+    ...(cascades && cascades.of.length > 0 && { cascades }),
   }
 }
 
-/** The rows an `UPDATE` of `table` writes, named in its own words (`AS a WHERE …`), unless it has more than a `WHERE`
- *  (`FROM`, `ORDER BY`, `LIMIT`) or its `WHERE` calls a volatile function, which a second read could answer otherwise. */
-function updatedRows(write: Ast, text: string, table: Table, catalog: Catalog): string | undefined {
-  if (write.from || write.limit || write.order_by?.length) return undefined
+/** `write` with each column of its own `RETURNING` aliased by its position (a `*` spelled out, an alias dropped), then
+ *  `image`, and a read of no rows giving the names SQLite gives those columns; `undefined` when the list can't be cut
+ *  into its items. */
+function positionally(write: Ast, text: string, table: Table, image: string): WritePlan['positional'] {
+  const items = (write.returning ?? []) as Ast[]
+  const end = SQLITE.statementEnd(text)
+  const pieces: string[] = []
+  let clause: number | undefined
+  let from: number | undefined
+  let depth = 0
+  for (const token of tokensOf(text.slice(0, end))) {
+    if (token.text === '(') depth++
+    else if (token.text === ')') depth--
+    else if (depth > 0) continue
+    else if (token.word === 'returning') {
+      clause = token.start
+      from = token.end
+      pieces.length = 0
+    } else if (from !== undefined && token.text === ',') {
+      pieces.push(text.slice(from, token.start).trim())
+      from = token.end
+    }
+  }
+  if (from !== undefined) pieces.push(text.slice(from, end).trim())
+  if (pieces.length !== items.length) return undefined
+  const columns = items.flatMap((item, i) =>
+    item.Wildcard || item.QualifiedWildcard
+      ? table.columns.map((c) => quote(c.name))
+      : [item.ExprWithAlias ? withoutAlias(pieces[i]!) : pieces[i]!],
+  )
+  const keys = columns.map((_, i) => `${HIDDEN_PREFIX}r${i}`)
+  const list = [...columns.map((column, i) => `${column} AS "${keys[i]}"`), image].join(', ')
+  const before = clause === undefined ? `${text.slice(0, end)} ` : text.slice(0, clause)
+  const names =
+    pieces.length > 0 ? SQLITE.bindParams(`SELECT ${pieces.join(', ')} FROM ${table.sqlName} LIMIT 0`) : undefined
+  return { ...SQLITE.bindParams(`${before}RETURNING ${list}${text.slice(end)}`), keys, ...(names && { names }) }
+}
+
+/** An aliased item's expression: its text without its alias, nor the `AS` before it. */
+function withoutAlias(item: string): string {
+  const tokens = tokensOf(item)
+  const alias = tokens.length - 1
+  return item.slice(0, tokens[tokens[alias - 1]?.word === 'as' ? alias - 1 : alias]!.start).trim()
+}
+
+/** The rows an `UPDATE` or a `DELETE` of `table` writes, named in its own words (`AS a WHERE …`), unless it has more
+ *  than a `WHERE` (an update's `FROM`, `ORDER BY`, `LIMIT`) or its `WHERE` calls a volatile function, which a second
+ *  read could answer otherwise. */
+function writtenRows(kind: string, write: Ast, text: string, table: Table, catalog: Catalog): string | undefined {
+  if ((kind === 'Update' && write.from) || write.limit || write.order_by?.length) return undefined
   const tokens = tokensOf(text)
   let depth = 0
   let where: number | undefined
@@ -189,7 +270,8 @@ function updatedRows(write: Ast, text: string, table: Table, catalog: Catalog): 
   const condition = where === undefined ? [] : tokens.slice(where, end)
   if (condition.some((t, i) => t.word && catalog.volatileFunctions.has(t.word) && condition[i + 1]?.text === '('))
     return undefined
-  const { alias } = write.table.relation.Table
+  const { alias } = (kind === 'Update' ? write.table : (write.from.WithFromKeyword ?? write.from.WithoutKeyword)[0])
+    .relation.Table
   const named = table.sqlName + (alias ? ` AS ${quote(identifier(alias.name))}` : '')
   return where === undefined ? named : `${named} ${text.slice(condition[0]!.start, condition.at(-1)!.end)}`
 }

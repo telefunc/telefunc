@@ -1,0 +1,273 @@
+// D1 through a stand-in for its binding: what a write tells the live reads of its database, and of another one with
+// the same tables.
+
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { DatabaseSync, type StatementSync } from 'node:sqlite'
+import { eq, sql } from 'drizzle-orm'
+import { drizzle } from 'drizzle-orm/d1'
+import { integer, sqliteTable } from 'drizzle-orm/sqlite-core'
+import { REQUEST_CONTEXT } from 'telefunc'
+import { describe, expect, it } from 'vitest'
+import { liveDatabaseOf } from '../database.js'
+import { readLive } from '../liveQuery.js'
+
+const telefunc = (globalThis as any)._telefunc
+const calls: AsyncLocalStorage<object> = (telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
+
+/** A stand-in for a Worker's D1 binding (`env.DB`), on a node:sqlite database in memory: the parts `@telefunc/live`
+ *  calls. */
+function d1Database(schema = "create table t (id integer primary key, x text); insert into t values (1, 'a')") {
+  const db = new DatabaseSync(':memory:')
+  db.exec(schema)
+  const statements = new WeakMap<object, (arrays: boolean) => { names: string[]; rows: unknown[] }>()
+  const statementOf = (text: string, values: unknown[]) => {
+    const rowsOf = (arrays: boolean) => {
+      const prepared: StatementSync = db.prepare(text)
+      prepared.setReturnArrays(arrays)
+      return { names: prepared.columns().map((c) => c.name), rows: prepared.all(...(values as [])) }
+    }
+    const statement = {
+      bind: (...bound: unknown[]) => statementOf(text, bound),
+      all: async () => ({ results: rowsOf(false).rows }),
+      run: async () => ({ results: rowsOf(false).rows }),
+      first: async () => rowsOf(false).rows[0] ?? null,
+      raw: async (options?: { columnNames?: boolean }) => {
+        const { names, rows } = rowsOf(true)
+        return options?.columnNames ? [names, ...rows] : rows
+      },
+    }
+    statements.set(statement, rowsOf)
+    return statement
+  }
+  return {
+    prepare: (text: string) => statementOf(text, []),
+    batch: async (batched: object[]) => {
+      db.exec('BEGIN')
+      try {
+        const results = batched.map((statement) => ({ results: statements.get(statement)!(false).rows }))
+        db.exec('COMMIT')
+        return results
+      } catch (err) {
+        db.exec('ROLLBACK')
+        throw err
+      }
+    },
+    exec: async (text: string) => db.exec(text),
+  }
+}
+
+/** How many stale signals `read`, run in `.live()`, gets from now on. */
+async function staleSignals(read: () => Promise<unknown>): Promise<() => number> {
+  const cell = await calls.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () => readLive(read, 'the spec'))
+  let stale = 0
+  cell.onStale(() => stale++)
+  cell.send()
+  return () => stale
+}
+
+const settled = () => new Promise((resolve) => setTimeout(resolve, 50))
+
+describe('two D1 databases with the same tables', () => {
+  it.each([
+    { label: 'without names', one: undefined, other: undefined, signals: 1 },
+    { label: 'named alike', one: 'tenant', other: 'tenant', signals: 1 },
+    { label: 'named apart', one: 'tenant-a', other: 'tenant-b', signals: 0 },
+  ])("$label: a write to one gives the other's read $signals stale signal(s)", async ({ one, other, signals }) => {
+    const [a, b] = [d1Database(), d1Database()]
+    liveDatabaseOf(a, { name: one })
+    liveDatabaseOf(b, { name: other })
+    const stale = await staleSignals(
+      async () => (await b.prepare('select * from t where id = ?').bind(1).all()).results,
+    )
+    await a.prepare("update t set x = 'b' where id = ?").bind(1).run()
+    await settled()
+    expect(stale()).toBe(signals)
+  })
+})
+
+describe('a write the database refused', () => {
+  const refuse = "create trigger refuse before insert on t when new.x = 'z' begin select raise(fail, 'refused'); end;"
+  it.each([
+    {
+      label: 'under the default ABORT',
+      clause: '',
+      trigger: '',
+      write: "insert into t values (2, 'b'), (3, 'a')",
+      kept: false,
+    },
+    {
+      label: 'under OR FAIL',
+      clause: '',
+      trigger: '',
+      write: "insert or fail into t values (2, 'b'), (3, 'a')",
+      kept: true,
+    },
+    {
+      label: 'under ON CONFLICT FAIL',
+      clause: ' on conflict fail',
+      trigger: '',
+      write: "insert into t values (2, 'b'), (3, 'a')",
+      kept: true,
+    },
+    {
+      label: 'by RAISE(FAIL)',
+      clause: '',
+      trigger: refuse,
+      write: "insert into t values (2, 'b'), (3, 'z')",
+      kept: true,
+    },
+    {
+      label: 'after a statement in its text',
+      clause: '',
+      trigger: '',
+      write: "insert into t values (2, 'b'); insert into t values (3, 'a')",
+      kept: true,
+    },
+  ])('$label: the reads go stale when it kept a row ($kept)', async ({ label, clause, trigger, write, kept }) => {
+    const d1 = d1Database(
+      `create table t (id integer primary key, x text unique${clause}); insert into t values (1, 'a'); ${trigger}`,
+    )
+    liveDatabaseOf(d1, { name: label })
+    const read = async () => (await d1.prepare('select id from t order by id').all()).results
+    const stale = await staleSignals(read)
+    await expect(write.includes(';') ? d1.exec(write) : d1.prepare(write).run()).rejects.toThrow()
+    await settled()
+    expect(await read()).toEqual(kept ? [{ id: 1 }, { id: 2 }] : [{ id: 1 }])
+    expect(stale()).toBe(kept ? 1 : 0)
+  })
+})
+
+describe('a write that changed no row', () => {
+  const schema = `
+    create table users (id integer primary key);
+    create table todos (id integer primary key, user_id int not null references users (id) on delete cascade);
+    create table tags (id integer primary key, todo_id int not null references todos (id) on delete cascade);
+    create table deleted_todos (id integer primary key, todo_id int not null);
+    create trigger todos_deleted after delete on todos begin insert into deleted_todos (todo_id) values (old.id); end;
+    insert into users values (1); insert into todos values (1, 1); insert into tags values (1, 1);`
+
+  it.each([
+    { label: "a user who doesn't exist", user: 9, signals: [0, 0, 0] },
+    { label: 'a user with a tagged todo', user: 1, signals: [1, 1, 1] },
+  ])(
+    'deleting $label stales the reads of what its cascades and triggers write: $signals',
+    async ({ label, user, signals }) => {
+      const d1 = d1Database(schema)
+      liveDatabaseOf(d1, { name: label })
+      const reads = ['select id from todos', 'select id from tags', 'select todo_id from deleted_todos']
+      const stale = await Promise.all(
+        reads.map((text) => staleSignals(async () => (await d1.prepare(text).all()).results)),
+      )
+      await d1.prepare('delete from users where id = ?').bind(user).run()
+      await settled()
+      expect(stale.map((count) => count())).toEqual(signals)
+    },
+  )
+})
+
+describe("a write's own RETURNING, which Drizzle reads through raw()", () => {
+  const todos = sqliteTable('todos', { id: integer('id').primaryKey(), userId: integer('user_id').notNull() })
+  const schema =
+    'create table todos (id integer primary key, user_id int not null); insert into todos values (1, 1), (2, 3)'
+  const moved = eq(todos.id, 1)
+  const forms: Record<string, (db: any) => Promise<unknown>> = {
+    'its columns': (db) => db.update(todos).set({ userId: 2 }).where(moved).returning().all(),
+    'a field of sql': (db) =>
+      db
+        .update(todos)
+        .set({ userId: 2 })
+        .where(moved)
+        .returning({ x: sql`${todos.id} * 10` })
+        .all(),
+    'a field twice': (db) =>
+      db.update(todos).set({ userId: 2 }).where(moved).returning({ a: todos.id, b: todos.id }).all(),
+    'sql through values()': (db) => db.values(sql`update todos set user_id = 2 where id = 1 returning id, id * 10`),
+  }
+
+  it.each([
+    { form: 'its columns', rows: [{ id: 1, userId: 2 }] },
+    { form: 'a field of sql', rows: [{ x: 10 }] },
+    { form: 'a field twice', rows: [{ a: 1, b: 1 }] },
+    { form: 'sql through values()', rows: [[1, 10]] },
+  ])("$form: moving a todo refetches its old user's read, not an unrelated user's", async ({ form, rows }) => {
+    const d1 = d1Database(schema)
+    liveDatabaseOf(d1, { name: `moves, ${form}` })
+    // A count: unlike a list of rows, its result can't tell whether the moved todo was the user's.
+    const countOf = (user: number) => async () =>
+      (await d1.prepare('select count(*) as n from todos where user_id = ?').bind(user).all()).results
+    const [oldUser, unrelated] = [await staleSignals(countOf(1)), await staleSignals(countOf(3))]
+    expect(await forms[form]!(drizzle(d1 as never))).toEqual(rows)
+    await settled()
+    expect([oldUser(), unrelated()]).toEqual([1, 0])
+  })
+
+  it('gives the column names asked for, though no row came back', async () => {
+    const d1 = d1Database(schema)
+    liveDatabaseOf(d1, { name: 'names of nothing' })
+    const update = d1.prepare('update todos set user_id = ? where id = ? returning id, user_id as owner')
+    expect(await update.bind(2, 9).raw({ columnNames: true })).toEqual([['id', 'owner']])
+  })
+})
+
+describe('a D1 delete cascading two levels', () => {
+  const SCHEMA = `pragma foreign_keys = on;
+    create table users (id integer primary key);
+    create table todos (id integer primary key, user_id integer references users on delete cascade);
+    create table tags (id integer primary key, todo_id integer references todos on delete cascade);
+    insert into users values (1), (2);
+    insert into todos values (10, 1), (11, 1), (20, 2);
+    insert into tags values (100, 10), (101, 11), (200, 20);`
+
+  /** A live D1 stand-in with `SCHEMA`, and the texts prepared on it. */
+  function cascading() {
+    const d1 = d1Database(SCHEMA)
+    const sent: string[] = []
+    const prepare = d1.prepare
+    d1.prepare = (text) => {
+      sent.push(text)
+      return prepare(text)
+    }
+    liveDatabaseOf(d1, {})
+    const read = (text: string, id: number) => staleSignals(async () => (await d1.prepare(text).bind(id).all()).results)
+    return { d1, sent, read }
+  }
+
+  it('stales only the reads of the rows it deletes', async () => {
+    const { d1, read } = cascading()
+    const [deleted, kept] = [
+      await read('select * from tags where id = ?', 100),
+      await read('select * from tags where id = ?', 200),
+    ]
+    await d1.prepare('delete from users where id = ?').bind(1).run()
+    await settled()
+    expect([deleted(), kept()]).toEqual([1, 0])
+  })
+
+  it('is sent as without cascades while no live read reads their tables', async () => {
+    const { d1, sent, read } = cascading()
+    await read('select * from users where id = ?', 2)
+    sent.length = 0
+    await d1.prepare('delete from users where id = ?').bind(1).run()
+    expect(sent).toEqual([
+      'delete from users where id = ? RETURNING json_array(CASE WHEN typeof("id") IN (\'null\', \'integer\', \'real\') THEN CAST("id" AS TEXT) ELSE 0 END) AS "__live_0"',
+    ])
+  })
+  it('sets the key of the rows a SET NULL changes, past a cascade', async () => {
+    const d1 = d1Database(`pragma foreign_keys = on;
+      create table users (id integer primary key);
+      create table todos (id integer primary key, user_id integer references users on delete cascade);
+      create table notes (id integer primary key, todo_id integer references todos on delete set null);
+      insert into users values (1), (2);
+      insert into todos values (10, 1), (20, 2);
+      insert into notes values (1000, 10), (2000, 20);`)
+    liveDatabaseOf(d1, {})
+    const read = (text: string, id: number) => staleSignals(async () => (await d1.prepare(text).bind(id).all()).results)
+    const [changed, kept] = [
+      await read('select * from notes where todo_id = ?', 10),
+      await read('select * from notes where id = ?', 2000),
+    ]
+    await d1.prepare('delete from users where id = ?').bind(1).run()
+    await settled()
+    expect([changed(), kept()]).toEqual([1, 0])
+  })
+})

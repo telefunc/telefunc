@@ -133,3 +133,176 @@ describe('identical live reads on one PGlite', () => {
     await pglite.close()
   })
 })
+
+describe('a delete cascading two levels on PGlite', () => {
+  const SCHEMA = `create table users (id int primary key);
+    create table todos (id int primary key, user_id int references users on delete cascade);
+    create table tags (id int primary key, todo_id int references todos on delete cascade);
+    insert into users values (1), (2);
+    insert into todos values (10, 1), (11, 1), (20, 2);
+    insert into tags values (100, 10), (101, 11), (200, 20);`
+
+  /** A live PGlite with `SCHEMA`, the texts sent to it, and how many stale signals each of `reads` gets. */
+  async function cascading(reads: string[]) {
+    const pglite = new PGlite()
+    await pglite.exec(SCHEMA)
+    const sent: string[] = []
+    const query = pglite.query.bind(pglite)
+    pglite.query = ((text: string, ...rest: []) => {
+      sent.push(text)
+      return query(text, ...rest)
+    }) as typeof query
+    liveDatabaseOf(pglite, {})
+    const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
+    const counts = await Promise.all(
+      reads.map(async (read) => {
+        const cell = await store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
+          readLive(() => pglite.query(read), 'the spec'),
+        )
+        let stale = 0
+        cell.onStale(() => stale++)
+        cell.send()
+        return () => stale
+      }),
+    )
+    return { pglite, sent, stale: () => counts.map((count) => count()) }
+  }
+
+  it('stales only the reads of the rows it deletes', async () => {
+    const { pglite, stale } = await cascading([
+      'select * from tags where id = 100',
+      'select * from tags where id = 200',
+    ])
+    await pglite.query('delete from users where id = $1', [1])
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(stale()).toEqual([1, 0])
+    await pglite.close()
+  })
+
+  it('is sent as without cascades while no live read reads their tables', async () => {
+    const { pglite, sent } = await cascading(['select * from users where id = 2'])
+    await pglite.query('delete from users where id = $1', [1])
+    expect(sent.filter((text) => text.startsWith('delete'))).toEqual([
+      'delete from users where id = $1 RETURNING to_json(ARRAY["users"."id"::text])::text AS "__live_0"',
+    ])
+    await pglite.close()
+  })
+})
+
+describe('a live read calling a SQL function of the app', () => {
+  it.each([
+    ['its AS text', (table: string) => `as 'select count(*)::int from ${table}'`],
+    ['its SQL-standard body', (table: string) => `return (select count(*)::int from ${table})`],
+  ])('watches the tables %s reads, as defined now', async (_, body) => {
+    const define = (table: string) => `create or replace function n() returns int language sql stable ${body(table)}`
+    const pglite = new PGlite()
+    await pglite.exec(`create table a (id int); create table b (id int); create table c (id int); ${define('a')}`)
+    liveDatabaseOf(pglite, {})
+    const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
+    const live = async () => {
+      const cell = await store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
+        readLive(() => pglite.query('select n()'), 'the spec'),
+      )
+      let stale = 0
+      cell.onStale(() => stale++)
+      cell.send()
+      return () => stale
+    }
+    const write = async (text: string) => {
+      await pglite.query(text)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    // A read goes stale once: each count is read after the write that may make it stale.
+    const before = await live()
+    await write('insert into c values (1)')
+    expect(before()).toBe(0)
+    await write('insert into a values (1)')
+    expect(before()).toBe(1)
+    await write(define('b'))
+    const after = await live()
+    await write('insert into a values (2)')
+    expect(after()).toBe(0)
+    await write('insert into b values (1)')
+    expect(after()).toBe(1)
+    await pglite.close()
+  })
+})
+
+describe('a live read calling an aggregate of the app', () => {
+  it.each([
+    ["Postgres's own", 'numeric_mul'],
+    ['a SQL function reading no table', 'times'],
+  ])('watches the table it aggregates, through %s as its transition function', async (_, transition) => {
+    const pglite = new PGlite()
+    await pglite.exec(`
+      create table a (n numeric);
+      create table c (id int);
+      create function times(numeric, numeric) returns numeric language sql immutable as 'select $1 * $2';
+      create aggregate product(numeric) (sfunc = ${transition}, stype = numeric, initcond = '1');`)
+    liveDatabaseOf(pglite, {})
+    const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
+    const cell = await store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
+      readLive(() => pglite.query('select product(n) from a'), 'the spec'),
+    )
+    let stale = 0
+    cell.onStale(() => stale++)
+    cell.send()
+    const write = async (text: string) => {
+      await pglite.query(text)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    // A read goes stale once: each count is read after the write that may make it stale.
+    await write('insert into c values (1)')
+    expect(stale).toBe(0)
+    await write('insert into a values (2)')
+    expect(stale).toBe(1)
+    await pglite.close()
+  })
+})
+
+describe('a transaction writing through a rule, a default and a trigger of the app', () => {
+  it('stales the reads of what they and a trigger calling one write, not every read', async () => {
+    const pglite = new PGlite()
+    await pglite.exec(`
+      create table t (id int primary key, x text);
+      insert into t values (1, 'a'), (2, 'a');
+      create table audit (id serial primary key, what text);
+      create table counters (id int primary key, n int);
+      insert into counters values (1, 0);
+      create function next_n() returns int language sql as 'update counters set n = n + 1 where id = 1 returning n';
+      create table events (id serial primary key, kind text, seq int default next_n());
+      create rule audited as on insert to events do also insert into audit (what) values ('event ' || new.kind);
+      create table settled (n int);
+      insert into settled values (0);
+      create function settle() returns void language sql as 'update settled set n = n + 1';
+      create function settled_event() returns trigger language plpgsql as 'begin perform settle(); return null; end';
+      create trigger settles after insert on events for each row execute function settled_event();`)
+    liveDatabaseOf(pglite, {})
+    const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
+    const live = async (text: string) => {
+      const cell = await store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
+        readLive(() => pglite.query(text), 'the spec'),
+      )
+      let stale = 0
+      cell.onStale(() => stale++)
+      cell.send()
+      return () => stale
+    }
+    const reads = await Promise.all([
+      live('select x from t where id = 1'),
+      live('select x from t where id = 2'),
+      // The app inserts into audit too: its row doesn't stand for the rule's.
+      live(`select what from audit where what like 'event%'`),
+      live('select n from counters'),
+      live('select n from settled'),
+    ])
+    await pglite.transaction(async (tx) => {
+      await tx.query(`insert into events (kind) values ('signup')`)
+      await tx.query(`update t set x = 'b' where id = 1`)
+      await tx.query(`insert into audit (what) values ('app')`)
+    })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(reads.map((stale) => stale())).toEqual([1, 0, 1, 1, 1])
+    await pglite.close()
+  })
+})
