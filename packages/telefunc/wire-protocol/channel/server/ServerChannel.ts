@@ -413,12 +413,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.binaryListeners.add(callback, options)
   }
 
-  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): void {
-    this.lifecycle.onClose(callback, options)
+  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void {
+    return this.lifecycle.onClose(callback, options)
   }
 
-  onOpen(callback: () => void, options?: { signal?: AbortSignal }): void {
-    this.lifecycle.onOpen(callback, options)
+  onOpen(callback: () => void, options?: { signal?: AbortSignal }): () => void {
+    return this.lifecycle.onOpen(callback, options)
   }
 
   _setResponseAbort(abortResponse: (abortValue?: unknown) => void): void {

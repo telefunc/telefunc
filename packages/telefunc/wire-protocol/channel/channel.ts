@@ -107,8 +107,10 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
   /** Receive messages. Return a value to ack the sender. Returns an unlisten function. */
   listen(callback: ChannelListener<TIn>, options?: { signal?: AbortSignal }): () => void
   listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): () => void
-  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): void
-  onOpen(callback: () => void, options?: { signal?: AbortSignal }): void
+  /** Called when the channel closes. Returns a function that removes the callback. */
+  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void
+  /** Called when the channel opens. Returns a function that removes the callback. */
+  onOpen(callback: () => void, options?: { signal?: AbortSignal }): () => void
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>
   abort(): void
   abort(abortValue: unknown, message?: string): void

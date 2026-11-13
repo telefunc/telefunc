@@ -435,8 +435,8 @@ type BroadcastChannel<T = unknown> = {
   subscribe(callback: BroadcastListener<T>, options?: { signal?: AbortSignal }): () => void
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
   subscribeBinary(callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): () => void
-  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): void
-  onOpen(callback: () => void, options?: { signal?: AbortSignal }): void
+  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void
+  onOpen(callback: () => void, options?: { signal?: AbortSignal }): () => void
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>
   abort(): void
   abort(abortValue: unknown, message?: string): void
