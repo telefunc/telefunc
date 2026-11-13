@@ -1,4 +1,4 @@
-export { startBlackHoleProxy }
+export { startBlackHoleProxy, PacedDirection }
 export type { BlackHoleProxy }
 
 import * as net from 'node:net'
@@ -143,7 +143,12 @@ function frameLength(bytes: Buffer): number | null {
   return bytes.length < 10 ? null : 10 + 4 + Number(bytes.readBigUInt64BE(2))
 }
 
-/** One direction of a slow link: what its senders write leaves in order at `bytesPerSecond`, no sooner than `delayMs`. */
+/** The most of the link's time one tick sends: a tick later than that found the test process stopped, not slow, and a
+ *  link of the named rate doesn't hand over more than a second of it at once. */
+const MAX_TICK_MS = 1000
+
+/** One direction of a slow link: what its senders write leaves in order at `bytesPerSecond`, no sooner than `delayMs`,
+ *  however late its ticks run. */
 class PacedDirection {
   private queue: { from: net.Socket; to: net.Socket; chunk: Buffer; at: number }[] = []
   private head = 0
@@ -151,6 +156,8 @@ class PacedDirection {
   private paused = new Set<net.Socket>()
   private allowance = 0
   private last = performance.now()
+  /** Whether bytes that were due still waited at the last tick: the link was busy the whole time since. */
+  private backlogged = false
   private timer: ReturnType<typeof setInterval>
 
   constructor(
@@ -173,10 +180,12 @@ class PacedDirection {
 
   private drain() {
     const now = performance.now()
-    // A link idle for a while doesn't send a burst once it has data again.
+    // A busy link carried bytes the whole time since the last tick, however late this one runs. One idle for a while
+    // doesn't send a burst once it has data again.
+    const mostMs = this.backlogged ? MAX_TICK_MS : 2 * this.burstMs
     this.allowance = Math.min(
       this.allowance + ((now - this.last) * this.bytesPerSecond) / 1000,
-      (this.bytesPerSecond * 2 * this.burstMs) / 1000,
+      (this.bytesPerSecond * mostMs) / 1000,
     )
     this.last = now
     while (this.allowance >= 1 && this.head < this.queue.length && this.queue[this.head]!.at <= now) {
@@ -188,6 +197,7 @@ class PacedDirection {
       if (bytes === entry.chunk.length) this.head++
       else entry.chunk = entry.chunk.subarray(bytes)
     }
+    this.backlogged = this.head < this.queue.length && this.queue[this.head]!.at <= now
     if (this.head > 1024 && this.head * 2 > this.queue.length) {
       this.queue = this.queue.slice(this.head)
       this.head = 0
