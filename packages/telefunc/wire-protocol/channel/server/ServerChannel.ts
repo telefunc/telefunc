@@ -52,10 +52,17 @@ import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import { SelfTime } from '../../flowControl/SelfTime.js'
 import { SendCredit } from '../../flowControl/SendCredit.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
-import { ServerChannelBuffer, type BufferedSender, type EntryCallback, type EntryData } from './ServerChannelBuffer.js'
+import {
+  ServerChannelBuffer,
+  type BufferedSender,
+  type Entry,
+  type EntryCallback,
+  type EntryData,
+} from './ServerChannelBuffer.js'
 import { ServerReplay } from './ServerReplay.js'
+import { LossyDelivery, type LossyHost } from './LossyDelivery.js'
 import { getChannelConfig } from '../../../node/server/serverConfig.js'
-import { assert, assertWarning } from '../../../utils/assert.js'
+import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import {
   ACK_STATUS,
@@ -95,11 +102,16 @@ function heldAnswerBytes(result: string): number {
 const REFUSAL_BYTES = heldAnswerBytes('')
 const TOO_MANY_ANSWERS_TEXT =
   'Channel closed: more `{ ack: true }` sends and `publish()` calls wait for their answers than the server can hold even refusals for, see config.channel.maxMemory'
+const LOSSY_WITH_ACK_TEXT =
+  "`lossy` can't be combined with `ack: true`: a newer send may take this one's place, so it gets no answer. Send it without `lossy` to get its answer."
 
 /** Closing frames the channel produced while no page was attached; the next attach sends them. */
 type PendingEnd = { closeAck: boolean; closeRequest: boolean; abort: string | null; error: ErrorReason | null }
 /** A `sendAck` awaiting the peer's ACK_RES; `bytes` is its payload's share of `pendingAckBytes`. */
 type PendingAck<T> = { resolve: (result: ChannelAck<T>) => void; reject: (err: Error) => void; bytes: number }
+/** A `send(data, { lossy: true })` to an attached page, text or a copy of its bytes once held; `held` is what it holds
+ *  while it waits. */
+type LossySend = { data: EntryData; held: number }
 
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements Channel<ClientToServer, ServerToClient>, ChannelLifecycleOwner, BufferedSender, MemoryHolder
@@ -158,6 +170,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private pageLastSeq = 0
   /** The page closed its end, so it takes nothing more from this channel. */
   private pageClosed = false
+  /** Its lossy sends while its page is attached, from the first one on. */
+  private lossySends: LossyDelivery<LossySend> | null = null
 
   // ── Wire state — channel-owned, kept across the page's attaches ────
   /** @internal Buffer of outgoing wire frames, used to replay missed frames on reconnect. Allocated in
@@ -212,9 +226,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   send(data: ChannelData<ServerToClient>): Promise<void>
   send(data: ChannelData<ServerToClient>, opts: { ack: true }): Promise<ChannelAck<ServerToClient>>
   send(data: ChannelData<ServerToClient>, opts: { ack: false }): Promise<void>
+  send(data: ChannelData<ServerToClient>, opts: { lossy: true; ack?: false }): Promise<void>
   send(
     data: ChannelData<ServerToClient>,
-    opts?: { ack?: boolean },
+    opts?: { ack?: boolean; lossy?: boolean },
   ): Promise<ChannelAck<ServerToClient>> | Promise<void> {
     const t0 = performance.now()
     try {
@@ -228,13 +243,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   private sendData(
     data: ChannelData<ServerToClient>,
-    opts?: { ack?: boolean },
+    opts?: { ack?: boolean; lossy?: boolean },
   ): void | Promise<ChannelAck<ServerToClient>> | Promise<void> {
     if (this._phase !== 'open') throw new ChannelClosedError()
+    if (opts?.lossy) assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ack === true)
     const serialized = stringify(data)
     const refusal = this.pendingRefusal(serialized)
     if (refusal) return Promise.reject<void>(refusal)
+    if (opts?.lossy) return this.sendLossy(TAG.TEXT, serialized, utf8ByteLength(serialized))
     if (!this.peer) {
       if (needsAck) {
         return this.lifecycle.trackAck(
@@ -247,6 +264,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this.offlineBuffer.pushText(serialized, resolve, reject)
       })
     }
+    this.lossySends?.flush()
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
     // Promise already serializes the next send, so credit would add nothing.
     if (needsAck) return this.sendAckRequest(encode.textAckReq, serialized)
@@ -258,7 +276,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   sendBinary(data: Uint8Array): Promise<void>
   sendBinary(data: Uint8Array, opts: { ack: true }): Promise<unknown>
   sendBinary(data: Uint8Array, opts: { ack: false }): Promise<void>
-  sendBinary(data: Uint8Array, opts?: { ack?: boolean }): Promise<unknown> | Promise<void> {
+  sendBinary(data: Uint8Array, opts: { lossy: true; ack?: false }): Promise<void>
+  sendBinary(data: Uint8Array, opts?: { ack?: boolean; lossy?: boolean }): Promise<unknown> | Promise<void> {
     const t0 = performance.now()
     try {
       const ret = this._sendBinary(data, opts) ?? Promise.resolve()
@@ -269,11 +288,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  _sendBinary(data: Uint8Array, opts?: { ack?: boolean }): void | Promise<unknown> | Promise<void> {
+  _sendBinary(data: Uint8Array, opts?: { ack?: boolean; lossy?: boolean }): void | Promise<unknown> | Promise<void> {
     if (this._phase !== 'open') throw new ChannelClosedError()
+    if (opts?.lossy) assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
     const needsAck = opts?.ack === true
     const refusal = this.pendingRefusal(data)
     if (refusal) return Promise.reject<void>(refusal)
+    if (opts?.lossy) return this.sendLossy(TAG.BINARY, data, data.byteLength)
     if (!this.peer) {
       if (needsAck) {
         return this.lifecycle.trackAck(
@@ -286,10 +307,53 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this.offlineBuffer.pushBinary(data, resolve, reject)
       })
     }
+    this.lossySends?.flush()
     // Ack-bearing path bypasses credit; see `sendData` for rationale.
     if (needsAck) return this.sendAckRequest(encode.binaryAckReq, data)
     // Cooperative credit model; see `sendData`.
     return this.sendCredit.decrement(this.peer.sendSequenced(encode.binary, data))
+  }
+
+  /** A send of which only the newest matters. With no page attached it waits as the offline buffer's last entry, which
+   *  the next one replaces; attached, it goes, or waits as the newest while the page is behind or out of credit. */
+  private sendLossy(tag: typeof TAG.TEXT | typeof TAG.BINARY, data: EntryData, bytes: number): void {
+    if (!this.peer) return this.offlineBuffer.pushLossy(tag, data, bytes)
+    this.lossySends ??= new LossyDelivery(this.lossyHost())
+    this.lossySends.send({ data, held: bytes + HEADER + HELD_SEND_OVERHEAD_BYTES })
+  }
+
+  /** Its lossy sends wait only while its page is attached: the wire that goes hands the newest first. */
+  private lossyHost(): LossyHost<LossySend> {
+    return {
+      peer: () => this.peer,
+      replay: () => this._replayBuffer,
+      hand: ({ data }) => this.handLossy(this.peer!, data),
+      hold: (send) => {
+        // The caller may write into its bytes once `sendBinary` returned.
+        if (typeof send.data !== 'string') send.data = new Uint8Array(send.data)
+        this._holdOffline(send.held)
+      },
+      letGo: ({ held }) => this._letGoOffline(held),
+      // Those still in the wire's queue never left the server, so the credit they counted comes back.
+      dropUnhanded: () => {
+        const { index, sender } = this.peer!
+        const { units, bytes } = this._replayBuffer!.dropNewestPublishes(sender.queue.waitingPublishes(index))
+        if (units > 0) sender.queue.dropWaitingPublishes(index, units)
+        this.sendCredit.refund(bytes, units)
+        return units
+      },
+      // Its page learns of nothing it skipped: only the newest was asked for.
+      skipped: () => {},
+      outOfCredit: () => this.sendCredit.isOutOfCredit(),
+    }
+  }
+
+  /** Sends a lossy send's `data` to `peer`, where a newer one may take its place while it waits on the wire. It counts
+   *  against the page's credit, and nothing waits on that. */
+  private handLossy(peer: IndexedPeer, data: EntryData): void {
+    this.sendCredit.count(
+      typeof data === 'string' ? peer.sendOwn(encode.text, data) : peer.sendOwn(encode.binary, data),
+    )
   }
 
   /** Why a send of `data` can't go, where it isn't admitted. It holds nothing and takes no seq, so the page sees no gap
@@ -380,6 +444,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       peer: this.didRegister ? 'expected' : 'absent',
       send: () => {
         this._phase = 'closing'
+        this.lossySends?.flush()
         if (this.peer) this.closeRequestSeq = this.peer.sendCloseRequest(timeout)
         else this.ensurePendingEnd().closeRequest = true
       },
@@ -513,6 +578,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.MSG_WINDOW:
         this.sendCredit.onPeerMessageWindow(frame.count)
+        this.lossySends?.mayGo()
         return
       case TAG.BDP_PING:
         // A channel measures no path RTT of its own, so `pathRtt` is `Infinity`.
@@ -676,6 +742,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal The wire of `peer` went away. A channel a later RECONCILE already moved to another wire stays there. */
   _onPeerDisconnect(peer: IndexedPeer, reconnectTimeout: number): void {
     if (this._phase === 'ended' || this.peer?.sender !== peer.sender) return
+    // Into the replay, which the reconnect sends: the wire that went drops it.
+    this.lossySends?.flush()
     this.peer = null
     this.receiveCredit.detach()
     this.reconnectTimer = unrefTimer(
@@ -725,6 +793,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected onPageHas(lastSeq: number): void {
     if (lastSeq > this.pageLastSeq) this.pageLastSeq = lastSeq
     this._replayBuffer?.acknowledge(lastSeq)
+    this.lossySends?.mayGo()
   }
 
   /** True once the page needs nothing more: it closed its end, or it received every frame and nothing is pending. */
@@ -764,7 +833,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal `BufferedSender`: sends `peer` a frame buffered while no page was attached, as it would have gone then.
    *  An ack request already rejected at shutdown has no callback left to answer. */
-  _sendBuffered(peer: IndexedPeer, tag: number, data: EntryData, callback: EntryCallback | null): void {
+  _sendBuffered(peer: IndexedPeer, { tag, data, callback, lossy }: Entry): void {
+    if (lossy) return this.handLossy(peer, data)
     switch (tag) {
       case TAG.TEXT:
         assert(typeof data === 'string' && callback)
@@ -909,6 +979,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected shutdown(err?: Error, { pageGone = false } = {}): void {
     if (this._phase === 'ended') return
     this._phase = 'ended'
+    this.lossySends?.dispose()
     this.lifecycle.forcedTermination(err, () => {
       const pageAttached = this.peer !== null
       this.peer = null
@@ -976,6 +1047,10 @@ type Channel<ClientToServer = unknown, ServerToClient = unknown, TDefault extend
   ChannelShield<ClientToServer, ServerToClient> & {
     /** The client-side end of the channel — return this from a telefunction. */
     readonly client: ClientChannel<ClientToServer, ServerToClient, TDefault>
+    /** A send a newer `lossy` one may take the place of, while it waits to go: the client gets every one it keeps up
+     *  with, and the newest. It resolves at once. */
+    send(data: ChannelData<ServerToClient>, opts: { lossy: true; ack?: false }): Promise<void>
+    sendBinary(data: Uint8Array, opts: { lossy: true; ack?: false }): Promise<void>
   }
 // Public `Channel` constructor — proxies to the `ServerChannel` impl, but typed against the
 // `Channel` interface so internal `_method` members are hidden, and so the third generic

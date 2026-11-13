@@ -3,7 +3,7 @@ export type { PeerSender }
 
 import { ACK_STATUS, encode } from '../../wire/frame.js'
 import type { AckResultStatus, SequencedEncoder } from '../../wire/frame.js'
-import type { PublishBody } from './PublishBody.js'
+import { PublishBody } from './PublishBody.js'
 import type { ServerReplay } from './ServerReplay.js'
 import type { SendWait } from '../../flowControl/SendWaits.js'
 import type { Urgency } from '../../flowControl/credit.js'
@@ -56,11 +56,16 @@ class IndexedPeer {
 
   /** Sends `body` behind a head naming this channel and its next seq; both join the replay and the wire in one call. */
   sendPublish(body: PublishBody): void {
+    this.sendBehindHead(this.replay.nextSeq(), body)
+  }
+
+  /** Sends `data` by `encodeFrame` at the next seq as a publish of this channel's own, which a newer one may replace while
+   *  it waits on the wire. Returns the bytes the frame counts against flow control. */
+  sendOwn<T>(encodeFrame: SequencedEncoder<T>, data: T): number {
     const seq = this.replay.nextSeq()
-    const head = encode.publishTo(this.index, seq)
-    this.replay.pushPublish(seq, head, body)
-    this.sender.send(head)
-    this.sender.send(body.frame)
+    const frame = encodeFrame(this.index, data, seq)
+    this.sendBehindHead(seq, new PublishBody(frame))
+    return frame.byteLength
   }
 
   /** Send an acknowledgement response for a message the client sent.
@@ -102,6 +107,13 @@ class IndexedPeer {
   private sendLimit(frame: Uint8Array, urgency: Urgency): void {
     if (urgency === 'acknowledgement') this.sender.carry(frame)
     else this.sender.send(frame)
+  }
+
+  private sendBehindHead(seq: number, body: PublishBody): void {
+    const head = encode.publishTo(this.index, seq)
+    this.replay.pushPublish(seq, head, body)
+    this.sender.send(head)
+    this.sender.send(body.frame)
   }
 
   /** Sends `frame` of `seq`, kept to replay, so a frame a dead wire lost goes again. */

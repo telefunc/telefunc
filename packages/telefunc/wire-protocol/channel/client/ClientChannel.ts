@@ -331,12 +331,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     switch (frame.tag) {
       case TAG.TEXT:
         this.onPeerMessage(frame.text, frame.bytes)
+        if (frame.lossy) this.receiveCredit.confirmSoon()
         return
       case TAG.TEXT_ACK_REQ:
         void this.onPeerAckReqMessage(frame.text, frame.seq)
         return
       case TAG.BINARY:
         this.onPeerBinaryMessage(frame.data as Uint8Array<ArrayBuffer>, frame.bytes)
+        if (frame.lossy) this.receiveCredit.confirmSoon()
         return
       case TAG.BINARY_ACK_REQ:
         void this.onPeerBinaryAckReqMessage(frame.data, frame.seq)

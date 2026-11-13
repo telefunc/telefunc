@@ -1,5 +1,5 @@
 export { ServerChannelBuffer }
-export type { BufferedSender, EntryCallback, EntryData }
+export type { BufferedSender, Entry, EntryCallback, EntryData }
 
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import { TAG } from '../../wire/tags.js'
@@ -13,17 +13,18 @@ type EntryCallback = {
   reject: (err: Error) => void
 }
 
-/** The channel `flush` hands each held entry to, with the entry's tag, data and callbacks (null once rejected). */
+/** The channel `flush` hands each held entry to. */
 interface BufferedSender {
   /** The buffer holds `bytes` more for its page. */
   _holdOffline(bytes: number): void
   /** The buffer let `bytes` go. */
   _letGoOffline(bytes: number): void
-  _sendBuffered(peer: IndexedPeer, tag: number, data: EntryData, callback: EntryCallback | null): void
+  _sendBuffered(peer: IndexedPeer, entry: Entry): void
 }
 
 type EntryData = string | Uint8Array
-type Entry = { tag: number; data: EntryData; callback: EntryCallback | null; held: number }
+/** `callback`: null once rejected, and for a lossy send, which nothing waits on. */
+type Entry = { tag: number; data: EntryData; callback: EntryCallback | null; held: number; lossy: boolean }
 
 /**
  * Holds what a channel sends while no peer is attached (text, binary, ack requests), for `flush` to send in order. It
@@ -60,10 +61,23 @@ class ServerChannelBuffer<TAck = never> {
     this.pushSend(TAG.BINARY_ACK_REQ, new Uint8Array(data), data.byteLength, { resolve, reject })
   }
 
+  /** A lossy send of `bytes`, which takes the place of the last entry where that is a lossy send too: between two sends
+   *  that must arrive, a page that was away gets only the newest. Holds a copy of binary data, as `pushBinary` does. */
+  pushLossy(tag: typeof TAG.TEXT | typeof TAG.BINARY, data: EntryData, bytes: number): void {
+    const last = this.entries.at(-1)
+    if (last?.lossy) {
+      this.entries.pop()
+      this.sendBytes -= last.held
+      this.owner._letGoOffline(last.held)
+    }
+    const copy = typeof data === 'string' ? data : new Uint8Array(data)
+    this.keep({ tag, data: copy, callback: null, held: bytes + HEADER + HELD_SEND_OVERHEAD_BYTES, lossy: true })
+  }
+
   /** Sends every entry to its channel in the order it came, then empties the buffer. */
   flush(peer: IndexedPeer): void {
     this.letGoSends()
-    for (const { tag, data, callback } of this.entries) this.owner._sendBuffered(peer, tag, data, callback)
+    for (const entry of this.entries) this.owner._sendBuffered(peer, entry)
     this.clear()
   }
 
@@ -94,7 +108,7 @@ class ServerChannelBuffer<TAck = never> {
   }
 
   private pushSend(tag: number, data: EntryData, bytes: number, callback: EntryCallback): void {
-    this.keep({ tag, data, callback, held: bytes + HEADER + HELD_SEND_OVERHEAD_BYTES })
+    this.keep({ tag, data, callback, held: bytes + HEADER + HELD_SEND_OVERHEAD_BYTES, lossy: false })
   }
 
   private keep(entry: Entry): void {

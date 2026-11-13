@@ -43,6 +43,7 @@ export {
   onChannelSlowUplink,
   onChannelPublishesBehind,
   onChannelLossyTicker,
+  onChannelLossySends,
   onChannelAcksWaiting,
   onChannelsQueuedBeforeReturn,
   onChannelAcrossFlip,
@@ -941,6 +942,28 @@ async function onChannelLossyTicker(bytes: number, count: number, periodMs: numb
     return 'started'
   })
   return { broadcast, control: control.client }
+}
+
+/** A channel's lossy sends. Before it returns, three, a plain one and one more: the page gets the third, the plain one and
+ *  the last. Then, once the page asks, `count` more, 1000 / 30 ms apart, each its ordinal, then a plain `'done'`. */
+async function onChannelLossySends(count: number) {
+  const channel = new Channel<never, string>()
+  for (const value of ['L1', 'L2', 'L3']) void channel.send(value, { lossy: true })
+  void channel.send('R1')
+  void channel.send('L4', { lossy: true })
+  const sendAll = async () => {
+    for (let i = 0; i < count; i++) {
+      void channel.send(String(i), { lossy: true })
+      await new Promise((resolve) => setTimeout(resolve, 1000 / 30))
+    }
+    void channel.send('done')
+  }
+  const control = new Channel<(msg: 'start') => string, never>()
+  control.listen(() => {
+    void sendAll()
+    return 'started'
+  })
+  return { channel: channel.client, control: control.client }
 }
 
 /** Eight channels with 1 MiB queued on each before the telefunction returns. An acknowledged send to one answers how its

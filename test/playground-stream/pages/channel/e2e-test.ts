@@ -1013,6 +1013,18 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
+  test('channel: lossy sends on a channel keep only the newest before the telefunction returns, and all of them on a link that keeps up', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-lossy-sends')
+    await autoRetry(
+      async () => {
+        const { lossySends } = await getResult<{ lossySends: string[] | null }>('#channel-state')
+        expect(lossySends).deep.equal(['L3', 'R1', 'L4', ...Array.from({ length: 60 }, (_, i) => String(i)), 'done'])
+      },
+      { timeout: 20_000 },
+    )
+  })
+
   // 100 messages of 4 KiB in one go, each way, on a link that keeps up.
   test('channel: a lossy broadcast on a link that keeps up delivers every message of a burst, from the server and from the page', async () => {
     await navigate(`${getServerUrl()}/channel`)

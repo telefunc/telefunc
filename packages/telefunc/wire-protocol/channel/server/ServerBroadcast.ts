@@ -84,6 +84,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
           letGo: (body) => letGo(this, body),
           dropUnhanded: () => this.dropUnhanded(),
           skipped: () => this.warnMissed(),
+          // A broadcast's publishes count against no credit.
+          outOfCredit: () => false,
         })
       : null
   }
@@ -251,7 +253,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** Its publishes that no wire has taken go, unless it ended: its replay is then what its page reads. Returns how many. */
   private dropUnhanded(): number {
     if (this._phase === 'ended') return 0
-    const dropped = this._replayBuffer?.dropNewestPublishes(this.unhanded()) ?? 0
+    const dropped = this._replayBuffer?.dropNewestPublishes(this.unhanded()).units ?? 0
     if (dropped > 0) this.peer?.sender.queue.dropWaitingPublishes(this.peer.index, dropped)
     return dropped
   }

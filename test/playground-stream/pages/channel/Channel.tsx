@@ -57,6 +57,7 @@ import {
   onChannelSlowUplink,
   onChannelPublishesBehind,
   onChannelLossyTicker,
+  onChannelLossySends,
   onChannelAcksWaiting,
   onChannelsQueuedBeforeReturn,
   onChannelAcrossFlip,
@@ -267,6 +268,7 @@ type ChannelState = {
     reconnected: { receipts: number; last: string }
   } | null
   lossyKeepsUp: { fromServer: number; fromPage: number; last: string } | null
+  lossySends: string[] | null
   lossyTicker: { received: number; last: number | undefined; worstMs: number; closed: string | null } | null
   broadcastAwayShared: { received: number[][]; closed: string[] } | null
   channelsQueued: { queued: string[]; received: string[][]; closed: boolean[] } | null
@@ -369,6 +371,7 @@ const initialState: ChannelState = {
   broadcastBehind: null,
   broadcastBehindCloses: null,
   lossyKeepsUp: null,
+  lossySends: null,
   lossyTicker: null,
   broadcastAwayShared: null,
   channelsQueued: null,
@@ -1645,6 +1648,19 @@ function ChannelDemo() {
     control.close()
   }, [])
 
+  const testLossySends = useCallback(async () => {
+    setChannelState((s) => ({ ...s, lossySends: null }))
+    const { channel, control } = await openChannel(() => onChannelLossySends(60))
+    const read: string[] = []
+    channel.listen((value) => void read.push(value))
+    await control.send('start', { ack: true })
+    const newest = Date.now() + 15_000
+    while (read.at(-1) !== 'done' && Date.now() < newest) await new Promise((resolve) => setTimeout(resolve, 100))
+    setChannelState((s) => ({ ...s, lossySends: read }))
+    control.close()
+    channel.close()
+  }, [])
+
   const testLossyTicker = useCallback(async (bytes: number, count: number, close: boolean) => {
     setChannelState((s) => ({ ...s, lossyTicker: null }))
     const { broadcast, control } = await openChannel(() => onChannelLossyTicker(bytes, count, 1000 / 60, close))
@@ -2184,6 +2200,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             Lossy Broadcast On A Link That Keeps Up
+          </button>
+          <button
+            id="channel-test-lossy-sends"
+            type="button"
+            onClick={testLossySends}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Lossy Sends On A Channel
           </button>
           <button
             id="channel-test-lossy-ticker"

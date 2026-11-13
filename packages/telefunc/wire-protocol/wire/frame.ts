@@ -96,10 +96,11 @@ type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON]
 
 // ===== Decoded frame =====
 
-/** `bytes`: the whole frame, what flow control counts, so an empty message counts too. */
+/** `bytes`: the whole frame, what flow control counts, so an empty message counts too. `lossy`: it came behind a
+ *  `PUBLISH_TO`, as a send a newer one may have replaced. */
 type ChannelDataFrame = { index: number; seq: number; bytes: number } & (
-  | { tag: typeof TAG.TEXT; text: string }
-  | { tag: typeof TAG.BINARY; data: Uint8Array }
+  | { tag: typeof TAG.TEXT; text: string; lossy?: true }
+  | { tag: typeof TAG.BINARY; data: Uint8Array; lossy?: true }
   | { tag: typeof TAG.TEXT_ACK_REQ; text: string }
   | { tag: typeof TAG.BINARY_ACK_REQ; data: Uint8Array }
   | { tag: typeof TAG.ACK_RES; ackedSeq: number; status: AckResultStatus; text: string }

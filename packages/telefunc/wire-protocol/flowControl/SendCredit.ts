@@ -72,6 +72,20 @@ class SendCredit {
     }
   }
 
+  /** Counts a frame of `bytes` that went and that nothing waits on: a lossy send, which its sender holds back while the
+   *  peer granted no more. */
+  count(bytes: number): void {
+    this.sentBytes += bytes
+    this.sentMessages += 1
+  }
+
+  /** Takes back `messages` frames of `bytes` that were counted and never reached the peer. */
+  refund(bytes: number, messages: number): void {
+    this.sentBytes -= bytes
+    this.sentMessages -= messages
+    this.tryWakeCreditWaiters()
+  }
+
   /** A limit that doesn't raise the current one is stale, and ignored, as in QUIC. */
   onPeerByteWindow(limit: number): void {
     const raise = (limit - this.limitBytes) | 0
@@ -109,7 +123,8 @@ class SendCredit {
     this.leastBacklog = Math.min(this.leastBacklog, this.owner.backlogBytes() ?? 0)
   }
 
-  private isOutOfCredit(): boolean {
+  /** The peer granted no more: of bytes, or of messages. */
+  isOutOfCredit(): boolean {
     return this.limitBytes - this.sentBytes <= 0 || this.limitMessages - this.sentMessages <= 0
   }
 

@@ -197,7 +197,7 @@ class ReceiveCredit {
     this.arrived = true
   }
 
-  /** A `WINDOW` confirms what arrived soon: a lossy broadcast's server tells by that whether its page keeps up. */
+  /** A `WINDOW` confirms what arrived soon: a lossy sender tells by that whether its page keeps up. */
   confirmSoon(): void {
     this.confirmTimer ??= unrefTimer(setTimeout(this.confirm, WIRE_PIECES_ACK_GAP_MS))
   }

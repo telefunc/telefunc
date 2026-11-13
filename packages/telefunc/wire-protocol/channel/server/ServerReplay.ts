@@ -83,12 +83,17 @@ class ServerReplay {
   }
 
   /** Its newest `droppable` publishes go, for a newer one to take their place: the page's `info.seq` shows what it
-   *  skipped. Receipts stay. Returns how many went. The older ones are on the wire, which a reconnect may have to send
-   *  again. */
-  dropNewestPublishes(droppable: number): number {
-    const dropping = Math.min(this.publishes.length, droppable)
-    for (let i = 0; i < dropping; i++) this.letPublishGo(this.publishes.pop())
-    return dropping
+   *  skipped. Receipts stay. Returns how many went, and their bodies' bytes. The older ones are on the wire, which a
+   *  reconnect may have to send again. */
+  dropNewestPublishes(droppable: number): { units: number; bytes: number } {
+    const units = Math.min(this.publishes.length, droppable)
+    let bytes = 0
+    for (let i = 0; i < units; i++) {
+      const publish = this.publishes.pop()
+      bytes += publish.body.frame.byteLength
+      this.letPublishGo(publish)
+    }
+    return { units, bytes }
   }
 
   /** For a page that may miss none: where its holder holds more than `toBytes`, and one of its newest `droppable`
