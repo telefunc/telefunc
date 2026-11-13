@@ -62,8 +62,9 @@ type BroadcastTransport = {
   ): () => void
 }
 
-/** How deep in-memory publishes in answer to answers go: a listener that answers its own messages goes on without end. */
-const MAX_ANSWER_DEPTH = 1024
+/** How deep in-memory publishes in answer to answers may go: 10,000, past the about 1,300 that Node.js's call stack holds
+ *  for a recursive delivery, so only a listener that answers its own messages without end gets there. */
+const MAX_ANSWER_DEPTH = 10_000
 
 // ---------------------------------------------------------------------------
 // Default adapter — subscriber multiplexer + in-memory fallback
@@ -279,7 +280,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
 
 function endlessAnswersError(): ChannelOverflowError {
   return new ChannelOverflowError(
-    `Publish rejected: listeners kept publishing in answer to each other's answers, ${MAX_ANSWER_DEPTH} deep, as a listener that answers its own messages does without end; make it skip the messages it published itself`,
+    `Publish rejected: listeners published in answer to each other's answers ${MAX_ANSWER_DEPTH} deep, far past the about 1,300 a call stack holds, as a listener that answers its own messages does without end; make it skip the messages it published itself`,
   )
 }
 

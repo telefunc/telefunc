@@ -180,6 +180,19 @@ describe('keyed in-process broadcast', () => {
 })
 
 describe('in-memory publishes in answer', () => {
+  it('delivers a chain of 5,000 answers', async () => {
+    const adapter = new DefaultBroadcastAdapter()
+    let received = 0
+    const unsubscribe = adapter.subscribe('room:finite', (serialized) => {
+      received++
+      const n = Number(serialized)
+      if (n < 5000) void adapter.publish('room:finite', String(n + 1))
+    })
+    await adapter.publish('room:finite', '0')
+    unsubscribe()
+    expect(received).toBe(5001)
+  })
+
   it('rejects a listener that answers its own messages without end, and timers run again', async () => {
     const adapter = new DefaultBroadcastAdapter()
     const errors: unknown[] = []
