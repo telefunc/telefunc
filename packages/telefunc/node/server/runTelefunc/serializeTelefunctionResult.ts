@@ -61,7 +61,6 @@ function serializeTelefunctionResult(runContext: {
   telefunctionAborted: boolean
   context: Context
   requestContext: RequestContext
-  abortSignal: AbortSignal
   streamTransport: StreamTransport
   useNodeStream: boolean
   serverConfig: {

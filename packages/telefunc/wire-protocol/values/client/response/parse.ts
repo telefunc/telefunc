@@ -245,7 +245,8 @@ class FrameDemuxer {
    *  drops its buffered/future frames, resolves any pending waiter with null. */
   cancelIndex(index: number): void {
     if (this.cancelledIndices.has(index)) return
-    // Drop buffered frames for this index; a finished one is not counted as cancelled.
+    // Drop buffered frames for this index. A finished one isn't counted as cancelled too: counted twice, it would cancel
+    // the body under a stream still being read.
     this.pendingFrames.delete(index)
     if (this.doneIndices.has(index)) return
     this.cancelledIndices.add(index)

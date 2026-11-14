@@ -398,10 +398,7 @@ async function runTelefunc_(
   }
 
   {
-    objectAssign(runContext, {
-      abortSignal: runContext.requestContext.abortSignal,
-      useNodeStream: readable !== undefined,
-    })
+    objectAssign(runContext, { useNodeStream: readable !== undefined })
     const result = serializeTelefunctionResult(runContext)
 
     if (result.type === 'streaming') {

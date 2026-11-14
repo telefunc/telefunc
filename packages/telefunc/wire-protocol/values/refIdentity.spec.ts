@@ -434,7 +434,6 @@ async function roundTrip(
       telefunctionAborted: false,
       context: {},
       requestContext,
-      abortSignal: requestContext.abortSignal,
       streamTransport: STREAM_TRANSPORT.BINARY_INLINE,
       useNodeStream: false,
       serverConfig: {
@@ -680,7 +679,6 @@ describe('extension wire types registered while a telefunc module loads', () => 
         telefunctionAborted: false,
         context: {},
         requestContext,
-        abortSignal: requestContext.abortSignal,
         streamTransport: STREAM_TRANSPORT.BINARY_INLINE,
         useNodeStream: false,
         serverConfig: requestStartConfig,

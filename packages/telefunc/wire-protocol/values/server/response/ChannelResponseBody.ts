@@ -35,10 +35,9 @@ type ChannelPumpRunContext = {
  * ChannelStreamSource. Errors are encoded with `encodeErrorPayload` — the same
  * payload format as inline streaming.
  *
- * The pump races three promises each iteration:
- *   1. `responseAbort.errorPromise` — resolves when a sibling throws Abort
+ * Each `producer.chunks.next()` races one `stop` promise, built once from:
+ *   1. `responseAbort.errorPromise` — rejects when a sibling throws Abort
  *   2. `cancelledPromise` — resolves when the channel closes (client disconnect/abort)
- *   3. `producer.chunks.next()` — resolves when the producer yields a chunk
  *
  * `cancelledPromise` is needed because async generator `.return()` is queued behind
  * a pending `.next()` — it can't interrupt an in-progress `await` (e.g. `sleep()`).
@@ -48,7 +47,7 @@ function pumpProducerToChannel(
   channel: ServerChannel<never, never>,
   createProducer: () => StreamingProducer,
   runContext: ChannelPumpRunContext,
-  onComplete?: () => void,
+  onComplete: () => void,
 ): void {
   getChannelMux().registerChannel(channel as unknown as ServerChannel<unknown, unknown>)
   const producer = createProducer()
@@ -88,7 +87,7 @@ function pumpProducerToChannel(
       doCancel()
       // A page that is away gets the stream's end once back, as an open channel waits for it.
       channel.close({ timeout: reconnectWindow() })
-      onComplete?.()
+      onComplete()
     }
   }
 

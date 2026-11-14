@@ -94,8 +94,7 @@ function buildInlineResponseBody(runContext: {
     drainResolve = null
     r?.()
   }
-  // `producersStopped` is a private idempotency latch — calling `producer.cancel()`
-  // twice on the same producer is at best wasted work, at worst a double-free.
+  // Both the consumer leaving and a failed merge reach here: each producer is cancelled once.
   let producersStopped = false
   const cancelProducers = () => {
     if (producersStopped) return
