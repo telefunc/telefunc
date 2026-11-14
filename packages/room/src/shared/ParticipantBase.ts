@@ -252,7 +252,8 @@ abstract class ParticipantBase implements LocalParticipant {
       const watcher = this._shownParticipant(id)
       if (watcher) watchers.push(watcher)
     }
-    watchers.sort((a, b) => a.joinedAt - b.joinedAt || (a.id < b.id ? -1 : 1))
+    // Stable: who joined in the same millisecond keep the order the room reported them in.
+    watchers.sort((a, b) => a.joinedAt - b.joinedAt)
     const same =
       was?.watcherCount === count &&
       was.watchers.length === watchers.length &&
