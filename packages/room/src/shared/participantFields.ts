@@ -14,7 +14,8 @@ type ParticipantFieldView<T> = {
   /** Freezes `value` deeply; a value equal to the member's changes nothing, and one for a member the view doesn't
    *  know is dropped: the package's source sets it again with the member. */
   set(memberId: string, value: T): void
-  /** The package's messages to a member this view holds (`sendPrivate()`), by the sender's id. */
+  /** The package's messages (`sendPrivate()`) to a member joined through this view, or on a page to a `me` of this
+   *  room returned alone, by the sender's id. */
   onPrivate(callback: (from: string, data: unknown) => void): () => void
 }
 

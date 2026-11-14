@@ -320,7 +320,6 @@ class ClientRoom extends RoomStateView implements Room {
         // Relayed from this member's private inbox: only its own stub ever receives it.
         const local = this.localParticipants.get(event.to)
         if (!local) return
-        if (event.field !== undefined) return this._state.applyPrivate(event.field, event.from, event.data)
         const msg = inboxMessageFromWire(event)
         // A room-authored DM has no sender to resolve.
         if (event.from !== '') {
@@ -649,6 +648,10 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return this.room._state.onChange(onChange)
   }
 
+  protected _deliverPrivate(field: string, from: string, data: unknown): void {
+    this.room._state.applyPrivate(field, from, data)
+  }
+
   protected override _onOwnMetaWritten(accepted: MemberMetaUpdate): void {
     this.room._acceptParticipantMeta(this.id, accepted)
   }
@@ -754,6 +757,10 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
   protected _followRoom(onChange: () => void): () => void {
     const stops = Array.from(this.pageViews(), (room) => room._state.onChange(onChange))
     return () => stops.forEach((stop) => stop())
+  }
+
+  protected _deliverPrivate(field: string, from: string, data: unknown): void {
+    for (const room of this.pageViews()) room._state.applyPrivate(field, from, data)
   }
 
   private *pageViews(): Generator<ClientRoom> {

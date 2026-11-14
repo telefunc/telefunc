@@ -116,6 +116,8 @@ abstract class ParticipantBase implements LocalParticipant {
   abstract send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any>
   /** @internal A package's message to `to`, for its field `field` there (`sendPrivate()`). */
   abstract _sendPrivate(to: string, field: string, data: unknown): Promise<void>
+  /** A package's message to this member, for its field's `onPrivate()` on the views of its room here. */
+  protected abstract _deliverPrivate(field: string, from: string, data: unknown): void
   abstract setMeta(meta: ParticipantMeta): Promise<void>
   abstract setAttributes(attributes: ParticipantMeta): Promise<void>
   abstract leave(): Promise<void>
@@ -147,8 +149,9 @@ abstract class ParticipantBase implements LocalParticipant {
     return unlisten
   }
 
-  /** @internal A DM for this member: to its listeners, held until the first `listen()`. */
+  /** @internal A DM for this member: to its listeners, held until the first `listen()`; a package's to the package. */
   _deliverMessage(msg: InboxMessage): void {
+    if (msg.field !== undefined) return this._deliverPrivate(msg.field, msg.from, msg.data)
     if (!this.messageListeners?.size) {
       if (this._left || this.inboxAttached) return
       this.hold(msg)

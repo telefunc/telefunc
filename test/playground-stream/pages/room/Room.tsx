@@ -640,12 +640,26 @@ function Room() {
       })}
 
       {scenario('package-message', 'Package messages', "A package's message to me, then the app's", async () => {
-        const [roomId, room] = await createRoom('package-message')
+        // The package's side of the page: its field runs on the page's room, the only one of it here.
+        const packaged: unknown[] = []
+        defineParticipantField<null>('e2e-field', {
+          initial: null,
+          attach: ({ onPrivate }) => onPrivate((_from, data) => packaged.push(data)),
+        })
+        const roomId = `e2e-package-message:${crypto.randomUUID()}`
+        await onCreateRoomWith(roomId, {})
+        const room = await onGetRoom(roomId)
+        const releaseRoom = keepReachable(room)
         const me = await room.join({ meta: { name: 'Me' } })
-        const dms: unknown[] = []
-        me.listen((data) => dms.push(data))
+        // And a `me` a server returned alone.
+        const alone = await onJoinHiddenHeld(roomId)
+        const dms: string[] = []
+        me.listen((data) => dms.push(`me: ${data}`))
+        alone.listen((data) => dms.push(`alone: ${data}`))
         await onSendPackageMessage(roomId, me.id)
-        await pollUntil(() => ({ result: { dms }, done: dms.includes('from the app') }))
+        await onSendPackageMessage(roomId, alone.id)
+        await pollUntil(() => ({ result: { dms, packaged }, done: dms.length === 2 && packaged.length === 2 }))
+        releaseRoom()
       })}
 
       {scenario('right-after', 'Publish right after subscribe', 'Subscribe, then publish at once', async () => {

@@ -193,7 +193,15 @@ type ParticipantStubNotice =
   | ({ __r: 'left' } & WireLeaveCause)
   | ({ __r: 'p-meta' } & MemberMetaUpdate)
   | { __r: 'rewound' }
-  | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown; ackId?: string }
+  | {
+      __r: 'dm'
+      from: string
+      fromMeta: ParticipantMeta | null
+      fromIdentity?: string
+      data: unknown
+      ackId?: string
+      field?: string
+    }
   | ({ __r: 'demand'; track: TrackKey } & DemandChange)
   | { __r: 'demand-state'; tracks: TrackWatchState[] }
 
@@ -209,6 +217,8 @@ type InboxMessage = {
   fromIdentity: string | null
   data: unknown
   ackId?: string
+  /** A package's message, for the field of that name: it never reaches the app's `listen()`. */
+  field?: string
 }
 
 type WireDm = Omit<RoomDmEnvelope, '__r' | 'to'>
@@ -221,6 +231,7 @@ function inboxMessageFromWire(dm: WireDm): InboxMessage {
     data: dm.data,
   }
   if (dm.ackId) msg.ackId = dm.ackId
+  if (dm.field !== undefined) msg.field = dm.field
   return msg
 }
 
@@ -238,6 +249,7 @@ function dmNotice(msg: InboxMessage): Extract<ParticipantStubNotice, { __r: 'dm'
   }
   if (msg.fromIdentity !== null) notice.fromIdentity = msg.fromIdentity
   if (msg.ackId) notice.ackId = msg.ackId
+  if (msg.field !== undefined) notice.field = msg.field
   return notice
 }
 

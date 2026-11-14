@@ -318,11 +318,12 @@ function testRoom() {
       expect(r.roomTags).deep.equal(['x'])
     },
   )
-  testRoomScenario<{ dms: unknown[] }>(
+  testRoomScenario<{ dms: string[]; packaged: unknown[] }>(
     'package-message',
-    "room: a package's private message never reaches the app's listen()",
+    "room: a package's private message reaches the package on the page holding its recipient, joined there or returned alone, never the app's listen()",
     (r) => {
-      expect(r.dms).deep.equal(['from the app'])
+      expect(r.dms).to.have.members(['me: from the app', 'alone: from the app'])
+      expect(r.packaged).deep.equal(['from the package', 'from the package'])
     },
   )
   testRoomScenario<{ seen: unknown[]; serverSeen: unknown[] }>(

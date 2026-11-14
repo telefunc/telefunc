@@ -332,7 +332,6 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
       return holder.relayDm(bodies, envelope)
     }
     if (holder === undefined) return
-    if (envelope.field !== undefined) return this.state.applyPrivate(envelope.field, envelope.from, envelope.data)
     const msg = inboxMessageFromWire(envelope)
     const { ackId } = envelope
     if (ackId === undefined) return holder._deliverMessage(msg)
@@ -588,6 +587,10 @@ class ServerLocalParticipant extends ParticipantBase {
 
   protected _followRoom(onChange: () => void): () => void {
     return this.room.state.onChange(onChange)
+  }
+
+  protected _deliverPrivate(field: string, from: string, data: unknown): void {
+    this.room.state.applyPrivate(field, from, data)
   }
 
   /** @internal Who receives one of its tracks changed, which the client holding it hears too. */
