@@ -57,20 +57,16 @@ const probes: Record<string, () => void> = {
   },
   /** Text is compared in JavaScript under any collation. */
   collation() {
-    const loadCatalog = database.loadCatalog
-    database.loadCatalog = async function (query: unknown) {
-      await loadCatalog.call(this, query)
-      for (const table of this.catalog.tables.values()) for (const column of table.columns) column.orderableText = true
-    }
+    loadedCatalog((catalog) => {
+      for (const table of catalog.tables.values()) for (const column of table.columns) column.orderableText = true
+    })
   },
   /** An update changes only the columns its `SET` list names, as if no trigger or generated column changed others: a
    *  key referenced `ON UPDATE CASCADE` among them. */
   'other-columns'() {
-    const loadCatalog = database.loadCatalog
-    database.loadCatalog = async function (query: unknown) {
-      await loadCatalog.call(this, query)
-      for (const table of this.catalog.tables.values()) table.updateChangesOtherColumns = false
-    }
+    loadedCatalog((catalog) => {
+      for (const table of catalog.tables.values()) table.updateChangesOtherColumns = false
+    })
   },
   /** Reads are told apart by their parameters' JSON, which writes `NaN` and the infinities as `null`. */
   'value-keys'() {
@@ -161,31 +157,25 @@ const probes: Record<string, () => void> = {
    *  as computing a value. */
   'write-volatility'() {
     catalogRow((row) => {
-      row.functions = row.functions.map(([name, writing, volatile, ...rest]: any[]) => [
+      row.functions = row.functions.map(([name, writing, ...rest]: any[]) => [
         name,
-        writing && volatile,
-        volatile,
+        writing && row.volatileFunctions.includes(name),
         ...rest,
       ])
     })
   },
-  /** A read is judged by the language of the functions it calls, as a write is: a read calling a `STABLE` SQL helper
-   *  counts as a write, and its `.live()` fails. */
+  /** A read is judged by the volatility of the functions it calls: what a `STABLE` function's callees write goes
+   *  unannounced. */
   'read-language'() {
-    catalogRow((row) => {
-      row.functions = row.functions.map(([name, writing, , ...rest]: any[]) => [name, writing, true, ...rest])
+    loadedCatalog((catalog) => {
+      for (const name of catalog.functionWrites.keys())
+        if (!catalog.volatileFunctions.has(name)) catalog.functionWrites.set(name, new Set())
     })
   },
   /** A function's default arguments are taken to call nothing. */
   'default-calls'() {
     catalogRow((row) => {
-      row.functions = row.functions.map(([name, writing, volatile, , ...rest]: any[]) => [
-        name,
-        writing,
-        volatile,
-        null,
-        ...rest,
-      ])
+      row.functions = row.functions.map(([name, writing, , ...rest]: any[]) => [name, writing, null, ...rest])
     })
   },
   /** A typed operand, a cast or a number, is compared with a column whatever its type, as if Postgres compared both
@@ -201,26 +191,22 @@ const probes: Record<string, () => void> = {
   },
   /** A `char(n)` value is matched against a pattern without its padding. */
   'char-padding'() {
-    const loadCatalog = database.loadCatalog
-    database.loadCatalog = async function (query: unknown) {
-      await loadCatalog.call(this, query)
-      for (const table of this.catalog.tables.values()) for (const column of table.columns) delete column.charLength
-    }
+    loadedCatalog((catalog) => {
+      for (const table of catalog.tables.values()) for (const column of table.columns) delete column.charLength
+    })
   },
   /** A foreign key is taken to reference its parent column's name in every table, not only in its parent. */
   'fk-target'() {
-    const loadCatalog = database.loadCatalog
-    database.loadCatalog = async function (query: unknown) {
-      await loadCatalog.call(this, query)
-      const tables = [...this.catalog.tables.values()]
-      // Each key once, whatever table it names: a table loaded before keeps the keys this gave it.
+    loadedCatalog((catalog) => {
+      const tables = [...catalog.tables.values()]
+      // Each key once, whatever table it names: each database of a host gets its one catalog, this gave it the keys.
       for (const table of tables) {
         const keys = new Map(table.references.map((key: any) => [`${key.column}\0${key.parentColumn}`, key]))
         table.references = [...keys.values()].flatMap((key: any) =>
           tables.map((parent) => ({ ...key, parent: parent.id })),
         )
       }
-    }
+    })
   },
   /** Foreign key cascades change nothing in the child tables. */
   cascade() {
@@ -400,7 +386,8 @@ const probes: Record<string, () => void> = {
       return counted
     }
   },
-  /** A cascade only reaches the groups the counts have. */
+  /** A cascade only reaches the groups the counts have. It bites on `SERVERS=2` only: a delete reads the rows it
+   *  cascades to for the live reads of its own server, and only the other server's get a cascade as a whole. */
   'tally-cascade'() {
     const dropAll = tally.dropAll
     tally.dropAll = function (source: unknown, row: unknown) {
@@ -409,11 +396,20 @@ const probes: Record<string, () => void> = {
   },
 }
 
+/** Changes the catalog as it's loaded, before a database reads it: each database of a host gets the host's one. */
+function loadedCatalog(change: (catalog: any) => void) {
+  const loaded = database.loaded
+  database.loaded = function (catalog: unknown) {
+    change(catalog)
+    return loaded.call(this, catalog)
+  }
+}
+
 /** Changes the catalog as its query returns it (`CatalogRow`), before it's read. */
 function catalogRow(change: (row: any) => void) {
-  const loadCatalog = database.loadCatalog
-  database.loadCatalog = async function (query: (text: string) => Promise<string>) {
-    await loadCatalog.call(this, async (text: string) => {
+  const ready = database.ready
+  database.ready = function (query: (text: string) => Promise<string>) {
+    return ready.call(this, async (text: string) => {
       const answer = await query(text)
       // The catalog's answer, told by its shape: the query's text changes with what it reads.
       const row = answer.startsWith('{') ? JSON.parse(answer) : undefined

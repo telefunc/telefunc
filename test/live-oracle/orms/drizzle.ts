@@ -459,7 +459,8 @@ function createDrizzle(
             .where(eq(todos.id, todo))
         }),
       resetEvents: () => db.execute(sql`insert into resets default values`),
-      stampRead: () => db.execute(sql`select stamp()`),
+      // `settle_stably()` is `STABLE`, and calls a function writing `settled`.
+      stampRead: () => db.execute(sql`select stamp(), settle_stably()`),
       // The brand's slug follows its name, and its products' references the slug.
       renameBrand: ({ text, value }) =>
         db.execute(sql`update brands set name = ${`${text.slice(0, 3)}${value % 4}`} where id = ${1 + (value % 3)}`),

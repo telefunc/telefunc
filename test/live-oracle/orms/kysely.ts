@@ -460,7 +460,8 @@ function createKysely(client: any, kind: 'pg' | 'pglite', transport?: BroadcastT
             .execute()
         }),
       resetEvents: () => sql`insert into resets default values`.execute(db),
-      stampRead: () => sql`select stamp()`.execute(db),
+      // `settle_stably()` is `STABLE`, and calls a function writing `settled`.
+      stampRead: () => sql`select stamp(), settle_stably()`.execute(db),
       // The brand's slug follows its name, and its products' references the slug.
       renameBrand: ({ text, value }) =>
         sql`update brands set name = ${`${text.slice(0, 3)}${value % 4}`} where id = ${1 + (value % 3)}`.execute(db),

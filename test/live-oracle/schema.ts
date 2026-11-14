@@ -11,7 +11,7 @@ drop table if exists tags, todos, users, deleted_todos, notes, tag_log, note_log
 drop sequence if exists tickets;
 drop schema if exists tenant cascade;
 drop function if exists log_deleted_todo, log_tag, tag_added, log_note, note_bumped, next_event, settle_event,
-  event_inserted, empty_event_log, stamp, reset_stamped, label_of, tag_count, settle_stably, measure_set;
+  event_inserted, empty_event_log, settle_reset, stamp, reset_stamped, label_of, tag_count, settle_stably, measure_set;
 drop domain if exists todo_code, base_code;
 -- A todo's code is a domain over a domain over char(4), which pads its values.
 create domain base_code as char(4);
@@ -89,6 +89,15 @@ begin
   return null;
 end $$;
 create trigger resets_emptied after insert on resets for each statement execute function empty_event_log();
+-- No catalog can name what \`TRUNCATE\` writes: a write to \`resets\` reads its transaction's locks, once its deferred
+-- trigger wrote \`settled\`.
+create function settle_reset() returns trigger language plpgsql as $$
+begin
+  perform settle_event();
+  return null;
+end $$;
+create constraint trigger resets_settled after insert on resets deferrable initially deferred
+  for each row execute function settle_reset();
 -- A STABLE function whose default argument writes \`counters\`: the caller evaluates it. A trigger on \`resets\` calls
 -- it, and so does a read.
 create function stamp(n int default next_event()) returns int language sql stable as $$ select n $$;
