@@ -30,7 +30,9 @@ describe('what the queue dropped', () => {
         await new Promise((resolve) => setTimeout(resolve, 10))
       }
       expect(bodies.slice(0, dropped).filter((body) => body.deref() !== undefined)).toHaveLength(0)
-      expect(bodies.slice(dropped).every((body, i) => body.deref() === queue.at(i))).toBe(true)
+      expect(queue.length).toBe(1024 - dropped)
+      const kept = bodies.slice(dropped).map((body) => body.deref())
+      expect(kept.every((body, i) => body !== undefined && body === queue.at(i))).toBe(true)
     },
   )
 })
