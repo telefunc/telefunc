@@ -174,7 +174,7 @@ class ClientRoom extends RoomStateView implements Room {
       for (const local of this.localParticipants.values()) local._onReconnected()
     })
     // A page's room runs the package fields until it closes.
-    this._state.attachFields(this)
+    this._state.attachFields()
   }
 
   join(options?: JoinOptions): Promise<LocalParticipant> {

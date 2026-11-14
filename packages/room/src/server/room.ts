@@ -467,7 +467,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
 
   /** Runs the package fields on the handle's view while it is observed, and stops them when it no longer is. */
   syncFields(): void {
-    if (this.isObserved()) this.state.attachFields(this.view)
+    if (this.isObserved()) this.state.attachFields()
     else this.state.detachFields()
   }
 

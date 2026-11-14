@@ -3,7 +3,14 @@ export type { RoomStateOwner }
 
 import { assert, assertUsage } from '../utils/assert.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
-import { invokeChannelListener, type ChannelPublishInfo, getOrCreate, Listeners, untether } from 'telefunc/__internal'
+import {
+  invokeChannelListener,
+  type ChannelPublishInfo,
+  getOrCreate,
+  Listeners,
+  untether,
+  type TELEFUNC_SHIELDS,
+} from 'telefunc/__internal'
 import { makeDisposer, type ListenerOptions } from './disposer.js'
 import {
   EVERY_MEMBER,
@@ -18,7 +25,7 @@ import {
   type TrackKey,
 } from './binary.js'
 import { type MemberEntry, type RoomModel } from './RoomModel.js'
-import { fieldValue, participantFields, type ParticipantFieldView } from './participantFields.js'
+import { fieldValue, participantFields } from './participantFields.js'
 import { assertKnownOptions, senderSnapshot } from './arguments.js'
 import { roomMessages } from './messages.js'
 import type { MemberSnapshot, MemberWants, RoomDataEvent, SenderStamp } from './protocol.js'
@@ -49,17 +56,23 @@ type TrackListener<From extends unknown[]> = {
   text: boolean
 }
 
-/** One view's remote of a member and its listeners on it; each list is made when its first listener is added: most
- *  members never get one. */
+/** Who adds a listener to a view: the app, or a package's field, through what `attach` hands it. Only the app's
+ *  listeners make a server's view observed. */
+type Adder = 'app' | 'field'
+
+/** The participant `snapshot()` lists, with the meta, connection and package fields it shows. */
+type ShownParticipant = {
+  meta: ParticipantMeta
+  isConnected: boolean
+  fields: Readonly<Record<string, unknown>>
+  participant: RemoteParticipant
+}
+
+/** One view's remotes of a member, one per adder, and its listeners on it; each list is made when its first listener
+ *  is added: most members never get one. */
 type MemberListeners = {
-  remote: RemoteParticipant | null
-  /** The participant `snapshot()` lists, with the meta, connection and package fields it shows. */
-  shown: {
-    meta: ParticipantMeta
-    isConnected: boolean
-    fields: Readonly<Record<string, unknown>>
-    participant: RemoteParticipant
-  } | null
+  remotes: Partial<Record<Adder, RemoteParticipant>>
+  shown: Partial<Record<Adder, ShownParticipant>>
   dataListeners: Listeners<(data: unknown, info: ChannelPublishInfo) => unknown> | null
   binary: { listeners: Listeners<TrackListener<[]>>; tracks: TrackCounts } | null
   changeListeners: Listeners<() => void> | null
@@ -102,6 +115,8 @@ function remoteBacking(value: unknown): RemoteBacking | null {
 /** The side-neutral public view over a `RoomState`; client/server keep their own I/O and lifecycle. */
 abstract class RoomStateView {
   protected abstract readonly _state: RoomState
+  /** Who adds the listeners added through this view, and through the participants it hands out. */
+  protected readonly _adder: Adder = 'app'
 
   /** The state a read answers from; a server's room checks first how old its view is. */
   protected get _read(): RoomState {
@@ -129,22 +144,22 @@ abstract class RoomStateView {
   }
 
   getParticipant(id: string): RemoteParticipant | null {
-    return this._read.getRemote(id)
+    return this._read.getRemote(id, this._adder)
   }
 
   snapshot(): RoomSnapshotView {
-    return this._read.snapshot()
+    return this._read.snapshot(this._adder)
   }
 
   subscribe(callback: MessageListener<[Sender]>, options?: MessageListenerOptions): () => void {
-    return this._state.subscribe(callback, options)
+    return this._state.subscribe(callback, options, this._adder)
   }
 
   subscribeBinary(
     callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
     options?: BinaryListenerOptions,
   ): () => void {
-    return this._state.subscribeBinary(callback, options)
+    return this._state.subscribeBinary(callback, options, this._adder)
   }
 
   messages(options?: ListenerOptions): AsyncIterableIterator<RoomMessage> {
@@ -152,27 +167,27 @@ abstract class RoomStateView {
   }
 
   onJoin(callback: (member: RemoteParticipant) => void, options?: ListenerOptions): () => void {
-    return this._state.onJoin(callback, options)
+    return this._state.onJoin(callback, options, this._adder)
   }
 
   onLeave(callback: (member: RemoteParticipant, cause: LeaveCause) => void, options?: ListenerOptions): () => void {
-    return this._state.onLeave(callback, options)
+    return this._state.onLeave(callback, options, this._adder)
   }
 
   onEmpty(callback: () => void, options?: ListenerOptions): () => void {
-    return this._state.onEmpty(callback, options)
+    return this._state.onEmpty(callback, options, this._adder)
   }
 
   onClose(callback: (cause: LeaveCause) => void, options?: ListenerOptions): () => void {
-    return this._state.onClose(callback, options)
+    return this._state.onClose(callback, options, this._adder)
   }
 
   onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void, options?: ListenerOptions): () => void {
-    return this._state.onAnnounce(callback, options)
+    return this._state.onAnnounce(callback, options, this._adder)
   }
 
   onChange(callback: () => void, options?: ListenerOptions): () => void {
-    return this._state.onChange(callback, options)
+    return this._state.onChange(callback, options, this._adder)
   }
 }
 
@@ -185,7 +200,7 @@ class RoomState {
   private readonly listenerCleanups = new Map<object, Set<() => void>>()
   /** By the model's entry, so a remote still held keeps its own, and a member's leave forgets it. */
   private readonly memberListeners = new WeakMap<MemberEntry, MemberListeners>()
-  private snapshotCache: { version: number; value: WeakRef<RoomSnapshotView> } | null = null
+  private readonly snapshots: Partial<Record<Adder, { version: number; value: WeakRef<RoomSnapshotView> }>> = {}
   private readonly changeListeners: Listeners<() => void> = new Listeners()
   /** A change waits for the end of its task, so the changes of one task call `onChange` once. */
   private changeDue = false
@@ -210,12 +225,10 @@ class RoomState {
   /** The package fields' `onPrivate()` callbacks, by field. */
   private readonly privateListeners = new Map<string, Listeners<(from: string, data: unknown) => void>>()
   private _listenerCount = 0
-  /** Of them, the listeners the package fields attached (`attachFields()`). */
+  /** Of them, the listeners the package fields added. */
   private fieldListenerCount = 0
   /** What stops the package fields on this view, while they run. */
   private stopFields: (() => void) | null = null
-  /** While the package fields attach: what registers now is theirs. */
-  private attachingFields = false
   /** The tracks its binary listeners name, each `(member or room, track)` pair once. */
   private trackWants = 0
   private readonly trackWantsMax: number
@@ -248,30 +261,26 @@ class RoomState {
     return this._listenerCount - this.fieldListenerCount
   }
 
-  /** Runs each package's field on this view, the `room` it is the state of, until `detachFields()`; a closed room runs
-   *  none. */
-  attachFields(room: ParticipantFieldView<unknown>['room']): void {
+  /** Runs each package's field on this view until `detachFields()`; a closed room runs none. */
+  attachFields(): void {
     if (this.stopFields !== null || this.model.closed) return
     // Attaching adds listeners, which can bring the owner back here: the fields run already.
     this.stopFields = () => {}
-    this.attachingFields = true
-    try {
-      const detaches = Array.from(participantFields(), ([name, { attach }]) =>
-        attach({
-          room,
-          set: (id, value) => this.model.setField(id, name, value),
-          onPrivate: (cb) =>
-            this.register(
-              getOrCreate(this.privateListeners, name, () => new Listeners()),
-              cb,
-              undefined,
-            ),
-        }),
-      )
-      this.stopFields = () => detaches.forEach((detach) => detach())
-    } finally {
-      this.attachingFields = false
-    }
+    const room = new FieldRoom({ state: this })
+    const detaches = Array.from(participantFields(), ([name, { attach }]) =>
+      attach({
+        room,
+        set: (id, value) => this.model.setField(id, name, value),
+        onPrivate: (cb) =>
+          this.register(
+            getOrCreate(this.privateListeners, name, () => new Listeners()),
+            cb,
+            undefined,
+            'field',
+          ),
+      }),
+    )
+    this.stopFields = () => detaches.forEach((detach) => detach())
   }
 
   /** Stops the package fields on this view, where they run. */
@@ -291,9 +300,15 @@ class RoomState {
     return { all: this.roomDataListeners.size > 0, members: this.textWanted }
   }
 
-  getRemote(id: string): RemoteParticipant | null {
+  getRemote(id: string, adder: Adder = 'app'): RemoteParticipant | null {
     const entry = this.model.entry(id)
-    return entry ? this.remote(entry) : null
+    return entry ? this.remote(entry, adder) : null
+  }
+
+  /** The participant `adder` holds of the member `sender` is a remote of, or `null` if it is none. */
+  participantFor(sender: Sender, adder: Adder): RemoteParticipant | null {
+    const backing = remoteBacking(sender)
+    return backing === null ? null : this.remote(backing.entry, adder)
   }
 
   listVisible(): RemoteParticipant[] {
@@ -302,12 +317,13 @@ class RoomState {
 
   /** Immutable view of the whole room, cached by the model's state version, so the reference is stable until something
    *  actually changes (the `useSyncExternalStore` contract). */
-  snapshot(): RoomSnapshotView {
+  snapshot(adder: Adder = 'app'): RoomSnapshotView {
     const model = this.model
-    const cached = this.snapshotCache?.version === model.version ? this.snapshotCache.value.deref() : undefined
+    const cache = this.snapshots[adder]
+    const cached = cache?.version === model.version ? cache.value.deref() : undefined
     if (cached) return cached
     const participants = Object.freeze(
-      [...model.entries()].filter((entry) => !entry.hidden).map((entry) => this.shownParticipant(entry)),
+      [...model.entries()].filter((entry) => !entry.hidden).map((entry) => this.shownParticipant(entry, adder)),
     )
     const value = Object.freeze({
       id: model.roomId,
@@ -317,7 +333,7 @@ class RoomState {
       participants,
     })
     untether(value) // holding a snapshot must not keep the room's wrapper alive
-    this.snapshotCache = { version: model.version, value: new WeakRef(value) }
+    this.snapshots[adder] = { version: model.version, value: new WeakRef(value) }
     return value
   }
 
@@ -328,14 +344,14 @@ class RoomState {
   }
 
   /** The member's remote with its fields as they are now, the same object until they change. */
-  private shownParticipant(entry: MemberEntry): RemoteParticipant {
+  private shownParticipant(entry: MemberEntry, adder: Adder = 'app'): RemoteParticipant {
     const listeners = this.listenersOf(entry)
     const meta = entry.meta.object
     const isConnected = this.model.isConnected(entry)
     const { fields } = entry
-    const shown = listeners.shown
+    const shown = listeners.shown[adder]
     if (shown?.meta === meta && shown.isConnected === isConnected && shown.fields === fields) return shown.participant
-    const remote = this.remote(entry)
+    const remote = this.remote(entry, adder)
     const values: PropertyDescriptorMap = {
       id: ownValue(entry.id),
       identity: ownValue(entry.identity),
@@ -346,7 +362,7 @@ class RoomState {
     for (const name of participantFields().keys()) values[name] = ownValue(fieldValue(fields, name))
     const participant: RemoteParticipant = Object.freeze(Object.create(remote, values))
     remoteBackings.set(participant, remoteBackings.get(remote)!)
-    listeners.shown = { meta, isConnected, fields, participant }
+    listeners.shown[adder] = { meta, isConnected, fields, participant }
     return participant
   }
 
@@ -356,51 +372,64 @@ class RoomState {
   }
 
   // Each registration returns its unlisten function.
-  subscribe(cb: MessageListener<[Sender]>, opts?: MessageListenerOptions): () => void {
-    if (opts?.track === undefined) return this.register(this.roomDataListeners, cb, opts)
-    return this.registerRoomTrack(textListener(cb, opts.track), opts)
+  subscribe(cb: MessageListener<[Sender]>, opts?: MessageListenerOptions, adder: Adder = 'app'): () => void {
+    if (opts?.track === undefined) return this.register(this.roomDataListeners, cb, opts, adder)
+    return this.registerRoomTrack(textListener(cb, opts.track), opts, adder)
   }
 
   subscribeBinary(
     cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
     opts?: BinaryListenerOptions,
+    adder: Adder = 'app',
   ): () => void {
-    return this.registerRoomTrack(binaryListener(cb, opts), opts)
+    return this.registerRoomTrack(binaryListener(cb, opts), opts, adder)
   }
 
-  private registerRoomTrack(listener: TrackListener<[Sender]>, opts: ListenerOptions | undefined): () => void {
-    return this.register(this.roomBinaryListeners, listener, opts, null, {
+  private registerRoomTrack(
+    listener: TrackListener<[Sender]>,
+    opts: ListenerOptions | undefined,
+    adder: Adder,
+  ): () => void {
+    return this.register(this.roomBinaryListeners, listener, opts, adder, null, {
       counts: this.roomBinaryTracks,
       track: listener.track,
     })
   }
 
-  onJoin(cb: (member: RemoteParticipant) => void, opts?: ListenerOptions): () => void {
-    return this.register(this.joinListeners, cb, opts)
+  onJoin(cb: (member: RemoteParticipant) => void, opts?: ListenerOptions, adder: Adder = 'app'): () => void {
+    return this.register(this.joinListeners, cb, opts, adder)
   }
 
-  onLeave(cb: (member: RemoteParticipant, cause: LeaveCause) => void, opts?: ListenerOptions): () => void {
-    return this.register(this.leaveListeners, cb, opts)
+  onLeave(
+    cb: (member: RemoteParticipant, cause: LeaveCause) => void,
+    opts?: ListenerOptions,
+    adder: Adder = 'app',
+  ): () => void {
+    return this.register(this.leaveListeners, cb, opts, adder)
   }
 
-  onEmpty(cb: () => void, opts?: ListenerOptions): () => void {
-    return this.register(this.emptyListeners, cb, opts)
+  onEmpty(cb: () => void, opts?: ListenerOptions, adder: Adder = 'app'): () => void {
+    return this.register(this.emptyListeners, cb, opts, adder)
   }
 
-  onClose(cb: (cause: LeaveCause) => void, opts?: ListenerOptions): () => void {
+  onClose(cb: (cause: LeaveCause) => void, opts?: ListenerOptions, adder: Adder = 'app'): () => void {
     const cause = this.model.closedCause
-    if (cause === null) return this.register(this.closeListeners, cb, opts)
+    if (cause === null) return this.register(this.closeListeners, cb, opts, adder)
     // Terminal, like a departed member's onLeave: a late listener hears it at once.
     if (!opts?.signal?.aborted) invokeChannelListener(cb, [cause], this.reportError)
     return makeDisposer()
   }
 
-  onChange(cb: () => void, opts?: ListenerOptions): () => void {
-    return this.register(this.changeListeners, cb, opts)
+  onChange(cb: () => void, opts?: ListenerOptions, adder: Adder = 'app'): () => void {
+    return this.register(this.changeListeners, cb, opts, adder)
   }
 
-  onAnnounce(cb: (data: unknown, info: ChannelPublishInfo) => void, opts?: ListenerOptions): () => void {
-    return this.register(this.announceListeners, cb, opts)
+  onAnnounce(
+    cb: (data: unknown, info: ChannelPublishInfo) => void,
+    opts?: ListenerOptions,
+    adder: Adder = 'app',
+  ): () => void {
+    return this.register(this.announceListeners, cb, opts, adder)
   }
 
   // Each of these tells one change of the model, while this view has a listener.
@@ -506,8 +535,8 @@ class RoomState {
     const existing = this.memberListeners.get(entry)
     if (existing !== undefined) return existing
     const listeners: MemberListeners = {
-      remote: null,
-      shown: null,
+      remotes: {},
+      shown: {},
       dataListeners: null,
       binary: null,
       changeListeners: null,
@@ -519,9 +548,10 @@ class RoomState {
     return listeners
   }
 
-  private remote(entry: MemberEntry): RemoteParticipant {
+  private remote(entry: MemberEntry, adder: Adder = 'app'): RemoteParticipant {
     const listeners = this.listenersOf(entry)
-    if (listeners.remote) return listeners.remote
+    const existing = listeners.remotes[adder]
+    if (existing) return existing
     const model = this.model
     const remote: RemoteParticipant = {
       id: entry.id,
@@ -539,16 +569,18 @@ class RoomState {
       },
       subscribe: (cb: MessageListener<[]>, opts?: MessageListenerOptions) => {
         if (opts?.track === undefined)
-          return this.registerLive(entry, (listeners.dataListeners ??= new Listeners()), cb, opts)
-        return this.registerMemberTrack(entry, listeners, textListener(cb, opts.track), opts)
+          return this.registerLive(entry, (listeners.dataListeners ??= new Listeners()), cb, opts, adder)
+        return this.registerMemberTrack(entry, listeners, textListener(cb, opts.track), opts, adder)
       },
-      subscribeBinary: (cb, opts) => this.registerMemberTrack(entry, listeners, binaryListener(cb, opts), opts),
-      onChange: (cb, opts) => this.registerLive(entry, (listeners.changeListeners ??= new Listeners()), cb, opts),
+      subscribeBinary: (cb, opts) => this.registerMemberTrack(entry, listeners, binaryListener(cb, opts), opts, adder),
+      onChange: (cb, opts) =>
+        this.registerLive(entry, (listeners.changeListeners ??= new Listeners()), cb, opts, adder),
       onDisconnect: (cb, opts) =>
-        this.registerLive(entry, (listeners.disconnectListeners ??= new Listeners()), cb, opts),
-      onReconnect: (cb, opts) => this.registerLive(entry, (listeners.reconnectListeners ??= new Listeners()), cb, opts),
+        this.registerLive(entry, (listeners.disconnectListeners ??= new Listeners()), cb, opts, adder),
+      onReconnect: (cb, opts) =>
+        this.registerLive(entry, (listeners.reconnectListeners ??= new Listeners()), cb, opts, adder),
       onLeave: (cb: (cause: LeaveCause) => void, opts?: ListenerOptions) => {
-        if (!entry.left) return this.register((listeners.leaveListeners ??= new Listeners()), cb, opts, entry)
+        if (!entry.left) return this.register((listeners.leaveListeners ??= new Listeners()), cb, opts, adder, entry)
         assert(entry.leaveCause)
         if (!opts?.signal?.aborted) invokeChannelListener(cb, [entry.leaveCause], this.reportError)
         return makeDisposer()
@@ -557,7 +589,7 @@ class RoomState {
     for (const name of participantFields().keys()) {
       Object.defineProperty(remote, name, { get: () => fieldValue(entry.fields, name), enumerable: true })
     }
-    listeners.remote = remote
+    listeners.remotes[adder] = remote
     remoteBackings.set(remote, { state: this, entry })
     // A read through the page's room wrapper tethers what it returns to it, but only the member `join()` returns holds
     // its room open.
@@ -570,9 +602,10 @@ class RoomState {
     listeners: MemberListeners,
     listener: TrackListener<[]>,
     opts: ListenerOptions | undefined,
+    adder: Adder,
   ): () => void {
     const binary = (listeners.binary ??= { listeners: new Listeners(), tracks: newTrackCounts() })
-    return this.registerLive(entry, binary.listeners, listener, opts, {
+    return this.registerLive(entry, binary.listeners, listener, opts, adder, {
       counts: binary.tracks,
       track: listener.track,
     })
@@ -584,10 +617,11 @@ class RoomState {
     list: Listeners<T>,
     cb: T,
     opts: ListenerOptions | undefined,
+    adder: Adder,
     filter?: CountedTrack,
   ): () => void {
     if (entry.left) return makeDisposer()
-    return this.register(list, cb, opts, entry, filter)
+    return this.register(list, cb, opts, adder, entry, filter)
   }
 
   /** `entry` owns the list (`null`: the room); a binary listener's `filter` is counted in its list's counts. */
@@ -595,6 +629,7 @@ class RoomState {
     list: Listeners<T>,
     cb: T,
     opts: ListenerOptions | undefined,
+    adder: Adder,
     entry: MemberEntry | null = null,
     filter?: CountedTrack,
   ): () => void {
@@ -609,8 +644,8 @@ class RoomState {
         `to receive every track`,
     )
     const remove = list.add(cb)
-    // Counted on the side it registered on, by every way it goes: its stop, its signal, its member's leave or the close.
-    const asField = this.attachingFields
+    // Counted for its adder by every way it goes: its stop, its signal, its member's leave or the close.
+    const asField = adder === 'field'
     if (asField) this.fieldListenerCount++
     this.bumpListenerCount(
       1,
@@ -671,6 +706,49 @@ class RoomState {
 
   private fireAll<Args extends unknown[]>(listeners: Listeners<(...args: Args) => unknown>, ...args: Args): void {
     for (const cb of listeners.list()) invokeChannelListener(cb, args, this.reportError)
+  }
+}
+
+type FieldRoomOptions = { state: RoomState }
+
+/** A view's room as a package's field sees it (`attachFields()`): what the field adds through it, or through a
+ *  participant it hands out, is the field's. */
+class FieldRoom extends RoomStateView {
+  /** Phantom, as on the rooms it stands for. */
+  declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
+  protected readonly _state: RoomState
+  protected override readonly _adder = 'field'
+
+  constructor({ state }: FieldRoomOptions) {
+    super()
+    this._state = state
+  }
+
+  override subscribe(callback: MessageListener<[Sender]>, options?: MessageListenerOptions): () => void {
+    return super.subscribe((data, info, from) => callback(data, info, this.own(from) ?? from), options)
+  }
+
+  override subscribeBinary(
+    callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
+    options?: BinaryListenerOptions,
+  ): () => void {
+    return super.subscribeBinary((data, info, from) => callback(data, info, this.own(from) ?? from), options)
+  }
+
+  override onJoin(callback: (member: RemoteParticipant) => void, options?: ListenerOptions): () => void {
+    return super.onJoin((member) => callback(this.own(member) ?? member), options)
+  }
+
+  override onLeave(
+    callback: (member: RemoteParticipant, cause: LeaveCause) => void,
+    options?: ListenerOptions,
+  ): () => void {
+    return super.onLeave((member, cause) => callback(this.own(member) ?? member, cause), options)
+  }
+
+  /** The field's own participant of the member `sender` is, if it is one. */
+  private own(sender: Sender): RemoteParticipant | null {
+    return this._state.participantFor(sender, 'field')
   }
 }
 

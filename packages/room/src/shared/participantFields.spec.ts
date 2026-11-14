@@ -3,6 +3,7 @@ import type { ClientBroadcast } from 'telefunc/__internal'
 import { Room } from '../index.js'
 import { ClientRoom } from '../client/room.js'
 import { defineParticipantField, type ParticipantFieldView } from './participantFields.js'
+import type { RemoteParticipant } from '../types.js'
 
 /** A page's room of `members` on a channel that sends nothing, and what ends the channel's wire. */
 function pageRoom(members: string[] = []) {
@@ -33,9 +34,16 @@ function pageRoom(members: string[] = []) {
   return { room, endWire: () => closes.forEach((close) => close()) }
 }
 
-/** A field that keeps the views of a room it runs on. */
-function runningField(name: string): Set<unknown> {
-  const running = new Set<unknown>()
+type FieldRooms = Set<ParticipantFieldView<unknown>['room']>
+
+/** How many views of the room `id` the field runs on. */
+function runningOn(running: FieldRooms, id: string): number {
+  return [...running].filter((room) => room.id === id).length
+}
+
+/** A field that keeps the rooms it runs on. */
+function runningField(name: string): FieldRooms {
+  const running: FieldRooms = new Set()
   defineParticipantField(name, {
     initial: null,
     attach({ room }) {
@@ -50,22 +58,22 @@ describe("a package's field", () => {
   it("stops on a page's room when the room closes", () => {
     const running = runningField('stopsOnPage')
     const { room, endWire } = pageRoom()
-    expect(running.has(room)).toBe(true)
+    expect(runningOn(running, room.id)).toBe(1)
     endWire()
-    expect(running.has(room)).toBe(false)
+    expect(runningOn(running, room.id)).toBe(0)
   })
 
   it("stops on a server's room when the room closes while the app observes it", async () => {
     const running = runningField('stopsOnServer')
     const room = await Room.create(`fields-${crypto.randomUUID()}`)
     room.onChange(() => {})
-    expect(running.has(room)).toBe(true)
+    expect(runningOn(running, room.id)).toBe(1)
     await Room.close(room.id)
-    await vi.waitFor(() => expect(running.has(room)).toBe(false))
+    await vi.waitFor(() => expect(runningOn(running, room.id)).toBe(0))
   })
 
   it("keeps running on a server's room while the app observes it, though the members it listened to left", async () => {
-    const running = new Set<unknown>()
+    const running: FieldRooms = new Set()
     defineParticipantField('listensToMembers', {
       initial: null,
       attach({ room }) {
@@ -83,9 +91,37 @@ describe("a package's field", () => {
     const stopObserving = view.onChange(() => {})
     await Promise.all(members.map((member) => member.leave()))
     await vi.waitFor(() => expect(view.snapshot().count).toBe(0))
-    expect(running.has(view)).toBe(true)
+    // The view only: the room joined through observes it no more.
+    await vi.waitFor(() => expect(runningOn(running, view.id)).toBe(1))
     stopObserving()
-    await vi.waitFor(() => expect(running.has(view)).toBe(false))
+    await vi.waitFor(() => expect(runningOn(running, view.id)).toBe(0))
+  })
+
+  it("stops on a server's room once the app stops observing it, though it follows those who joined later", async () => {
+    const running: FieldRooms = new Set()
+    defineParticipantField('followsLaterJoins', {
+      initial: null,
+      attach({ room }) {
+        running.add(room)
+        const stops: Array<() => void> = []
+        const follow = (participant: RemoteParticipant) => stops.push(participant.onChange(() => {}))
+        room.snapshot().participants.forEach(follow)
+        stops.push(room.onJoin(follow))
+        return () => {
+          running.delete(room)
+          stops.forEach((stop) => stop())
+        }
+      },
+    })
+    const room = await Room.create(`fields-${crypto.randomUUID()}`)
+    const view = await Room.get(room.id)
+    const stopObserving = view.onChange(() => {})
+    await room.join({ meta: {} })
+    await vi.waitFor(() => expect(view.snapshot().count).toBe(1))
+    // The view, and the room joined through.
+    expect(runningOn(running, room.id)).toBe(2)
+    stopObserving()
+    await vi.waitFor(() => expect(runningOn(running, room.id)).toBe(1))
   })
 
   it('keeps its own copy of a value, so a value the package froze only at its root never changes a snapshot', () => {
