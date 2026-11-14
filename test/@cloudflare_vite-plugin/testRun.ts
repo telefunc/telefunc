@@ -375,8 +375,12 @@ function testResubscribe() {
     await autoRetry(async () => {
       expect(JSON.parse((await page.textContent('#resubscribe-state'))!).subscribed).toBe(true)
     })
-    // A presence lasts 90 s unless refreshed.
-    await page.waitForTimeout(95_000)
+    // A presence lasts 90 s unless refreshed. The page reads meanwhile, as a page's traffic does: a session Durable
+    // Object nothing calls is evicted 70-140 s after its last request, and the subscription it holds with it.
+    for (let waited = 0; waited < 95_000; waited += 19_000) {
+      await page.waitForTimeout(19_000)
+      await page.click('#read')
+    }
     await page.click('#publish')
     await autoRetry(
       async () => {
