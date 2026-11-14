@@ -3,7 +3,7 @@ export { ClientRoom, ClientStandaloneParticipant }
 import { assert, assertUsage } from '../utils/assert.js'
 import { getOrCreate, markHandled } from 'telefunc/__internal'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
-import type { TELEFUNC_SHIELDS, ChannelPublishAck, ChannelPublishInfo, ClientBroadcast } from 'telefunc/__internal'
+import type { ChannelPublishAck, ChannelPublishInfo, ClientBroadcast } from 'telefunc/__internal'
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange, type TrackKey } from '../shared/binary.js'
 import {
   assertKnownOptions,
@@ -124,8 +124,6 @@ type ClientRoomOptions = { end: ClientBroadcast; snapshot: RoomSnapshotMetadata 
 
 /** A server room through one Broadcast channel: its frames carry events and data, its acked messages requests. */
 class ClientRoom extends RoomStateView implements Room {
-  /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
-  declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
   private readonly end: ClientBroadcast
   private readonly model: RoomModel
   /** @internal */
@@ -426,10 +424,10 @@ class ClientRoom extends RoomStateView implements Room {
     this.localParticipants.clear()
   }
 
-  /** Room-wide text wants ride the Broadcast subscription, which attaches again before the channel's `onOpen`.
-   *  Declarations are replayed channel messages, so the server keeps them across reconnects: each carries only what
-   *  changed, the room-wide text wants and those of `member`, whose listeners changed, or the binary want that did. */
-  /** @internal */
+  /** @internal Room-wide text wants ride the Broadcast subscription, which attaches again before the channel's
+   *  `onOpen`. Declarations are replayed channel messages, so the server keeps them across reconnects: each carries
+   *  only what changed, the room-wide text wants and those of `member`, whose listeners changed, or the binary want
+   *  that did. */
   _syncWants(member: string | null, binary: BinaryWantChange | null): void {
     if (this.model.closed) {
       this.end._setSubscribed('text', false) // a closed room takes no declaration
@@ -491,6 +489,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
     if (heldMembers.get(this.id) === this) heldMembers.delete(this.id)
   }
 
+  /** @internal As the room's stub last told the page. */
   get _watches(): ReadonlyMap<TrackKey, TrackWatch> {
     return this.watches
   }

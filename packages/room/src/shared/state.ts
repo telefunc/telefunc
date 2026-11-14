@@ -40,8 +40,7 @@ import type {
   Sender,
 } from '../types.js'
 
-type BinaryListenerOptions = ListenerOptions & { track?: string }
-type MessageListenerOptions = ListenerOptions & { track?: string }
+type TrackListenerOptions = ListenerOptions & { track?: string }
 /** A `subscribe()` listener: its `info` has the frame's fields where it names a track. */
 type MessageListener<From extends unknown[]> = (data: unknown, info: any, ...from: From) => unknown
 /** A binary listener's track filter: one track, or `EVERY_TRACK`. */
@@ -114,6 +113,8 @@ function remoteBacking(value: unknown): RemoteBacking | null {
 
 /** The side-neutral public view over a `RoomState`; client/server keep their own I/O and lifecycle. */
 abstract class RoomStateView {
+  /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
+  declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
   protected abstract readonly _state: RoomState
   /** Who adds the listeners added through this view, and through the participants it hands out. */
   protected readonly _adder: Adder = 'app'
@@ -151,13 +152,13 @@ abstract class RoomStateView {
     return this._read.snapshot(this._adder)
   }
 
-  subscribe(callback: MessageListener<[Sender]>, options?: MessageListenerOptions): () => void {
+  subscribe(callback: MessageListener<[Sender]>, options?: TrackListenerOptions): () => void {
     return this._state.subscribe(callback, options, this._adder)
   }
 
   subscribeBinary(
     callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
-    options?: BinaryListenerOptions,
+    options?: TrackListenerOptions,
   ): () => void {
     return this._state.subscribeBinary(callback, options, this._adder)
   }
@@ -242,16 +243,12 @@ class RoomState {
     this.trackWantsMax = opts.trackWantsMax ?? Number.POSITIVE_INFINITY
   }
 
-  get roomId(): string {
-    return this.model.roomId
-  }
-
   /** `join({ hidden: true })` members: routable, excluded from every presence read. */
   listHidden(): RemoteParticipant[] {
     return [...this.model.entries()].filter((entry) => entry.hidden).map((entry) => this.remote(entry))
   }
 
-  /** Total attached listeners; owners derive lane-specific wants from the callback lists. */
+  /** Every listener on this view, the package fields' included. */
   get listenerCount(): number {
     return this._listenerCount
   }
@@ -372,14 +369,14 @@ class RoomState {
   }
 
   // Each registration returns its unlisten function.
-  subscribe(cb: MessageListener<[Sender]>, opts?: MessageListenerOptions, adder: Adder = 'app'): () => void {
+  subscribe(cb: MessageListener<[Sender]>, opts?: TrackListenerOptions, adder: Adder = 'app'): () => void {
     if (opts?.track === undefined) return this.register(this.roomDataListeners, cb, opts, adder)
     return this.registerRoomTrack(textListener(cb, opts.track), opts, adder)
   }
 
   subscribeBinary(
     cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
-    opts?: BinaryListenerOptions,
+    opts?: TrackListenerOptions,
     adder: Adder = 'app',
   ): () => void {
     return this.registerRoomTrack(binaryListener(cb, opts), opts, adder)
@@ -567,7 +564,7 @@ class RoomState {
       get isConnected() {
         return model.isConnected(entry)
       },
-      subscribe: (cb: MessageListener<[]>, opts?: MessageListenerOptions) => {
+      subscribe: (cb: MessageListener<[]>, opts?: TrackListenerOptions) => {
         if (opts?.track === undefined)
           return this.registerLive(entry, (listeners.dataListeners ??= new Listeners()), cb, opts, adder)
         return this.registerMemberTrack(entry, listeners, textListener(cb, opts.track), opts, adder)
@@ -714,8 +711,6 @@ type FieldRoomOptions = { state: RoomState }
 /** A view's room as a package's field sees it (`attachFields()`): what the field adds through it, or through a
  *  participant it hands out, is the field's. */
 class FieldRoom extends RoomStateView {
-  /** Phantom, as on the rooms it stands for. */
-  declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
   protected readonly _state: RoomState
   protected override readonly _adder = 'field'
 
@@ -724,13 +719,13 @@ class FieldRoom extends RoomStateView {
     this._state = state
   }
 
-  override subscribe(callback: MessageListener<[Sender]>, options?: MessageListenerOptions): () => void {
+  override subscribe(callback: MessageListener<[Sender]>, options?: TrackListenerOptions): () => void {
     return super.subscribe((data, info, from) => callback(data, info, this.own(from) ?? from), options)
   }
 
   override subscribeBinary(
     callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
-    options?: BinaryListenerOptions,
+    options?: TrackListenerOptions,
   ): () => void {
     return super.subscribeBinary((data, info, from) => callback(data, info, this.own(from) ?? from), options)
   }
@@ -759,7 +754,7 @@ function ownValue(value: unknown): PropertyDescriptor {
 
 /** Validate a `subscribeBinary` track option: `undefined` = every track, a non-empty name = that track, `'main'` the
  *  default one. */
-function normalizeTrackFilter(opts: BinaryListenerOptions | undefined): TrackFilter {
+function normalizeTrackFilter(opts: TrackListenerOptions | undefined): TrackFilter {
   assertUsage(
     opts === undefined || (typeof opts === 'object' && opts !== null && !Array.isArray(opts)),
     'subscribeBinary() options should be an object',
@@ -771,14 +766,14 @@ function normalizeTrackFilter(opts: BinaryListenerOptions | undefined): TrackFil
   return trackKey(track)
 }
 
-function binaryListener<CB>(
-  cb: CB,
-  opts: BinaryListenerOptions | undefined,
-): { cb: CB; track: TrackFilter; text: boolean } {
+function binaryListener<From extends unknown[]>(
+  cb: TrackListener<From>['cb'],
+  opts: TrackListenerOptions | undefined,
+): TrackListener<From> {
   return { cb, track: normalizeTrackFilter(opts), text: false }
 }
 
-function textListener<CB>(cb: CB, track: unknown): { cb: CB; track: TrackFilter; text: boolean } {
+function textListener<From extends unknown[]>(cb: TrackListener<From>['cb'], track: unknown): TrackListener<From> {
   assertUsage(isNamedTrack(track), 'subscribe() track should be a valid non-empty string')
   return { cb, track: trackKey(track), text: true }
 }

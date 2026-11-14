@@ -47,7 +47,7 @@ type MemberSnapshot = {
   disconnected?: true
 }
 
-/** Scalars only: the roster streams once the stub's peer attaches, so serializing a room is O(1) in members. */
+/** A room as the response carries it, with its visible members; every later change relays on its channel. */
 type RoomSnapshotMetadata = {
   channelId: string
   roomId: string

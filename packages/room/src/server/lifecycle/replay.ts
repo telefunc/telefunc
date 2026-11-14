@@ -380,6 +380,6 @@ class LocalHolder implements LaneHolder {
   }
 
   private publishInfo(info: OrderingInfo): ChannelPublishInfo {
-    return { key: this.state.roomId, seq: info.seq, timestamp: info.timestamp }
+    return { key: this.state.model.roomId, seq: info.seq, timestamp: info.timestamp }
   }
 }

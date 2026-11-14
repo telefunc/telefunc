@@ -2,7 +2,6 @@ export { ServerRoom, ServerLocalParticipant, RoomHandle, handleOf }
 export type { MetaMirror }
 
 import {
-  type TELEFUNC_SHIELDS,
   type ChannelPublishAck,
   reconnectWindow,
   handleCallbackBug,
@@ -86,7 +85,7 @@ type RoomHandleOptions = {
   view: ServerRoom
   replica: RoomReplica
   /** Where the handle's holders' wants replan. */
-  lanePlan: Pick<LanePlan, 'textChanged' | 'binaryChanged' | 'memberChanged' | 'observing'>
+  lanePlan: Pick<LanePlan, 'textChanged' | 'binaryChanged' | 'observing'>
   /** For the handle's stubs. */
   roster: Pick<RosterStream, 'settled'>
   /** For the handle's participants. */
@@ -127,7 +126,6 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
   private readonly localSuppressed = new Set<string>()
   /** The admissions under way; an `owned` one the heartbeat leaves alone, and its holder's detach doesn't evict. */
   private readonly admissions = new Map<string, Admission>()
-  private readonly view: ServerRoom
   readonly writes: RoomWrites
 
   private readonly lanePlan: RoomHandleOptions['lanePlan']
@@ -143,7 +141,6 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     this.incomingDemand = incomingDemand
     this.hosting = hosting
     this.metaMirrors = metaMirrors
-    this.view = view
     this.incarnation = replica.incarnation
     this.state = new RoomState({ view, model: replica.model, owner: new RoomHandleStateOwner({ room: this }) })
     this.local = new LocalHolder({
@@ -490,8 +487,6 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
  *  code is given instead. */
 class ServerRoom extends RoomStateView implements Room {
   readonly [SERVER_ROOM_BRAND] = true
-  /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
-  declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
   protected readonly _state: RoomState
   private readonly handle: RoomHandle
 

@@ -72,7 +72,7 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, ServerReplace
     // Returning a hidden member hands it to this client: its room stub relays that member's events. One that left is
     // not handed: as any member its room's roster doesn't list, it revives on the page as one that left.
     const handedHidden = entry.hidden && !entry.left
-    if (handedHidden) responseHidden(context, state.roomId).add(entry.id)
+    if (handedHidden) responseHidden(context, state.model.roomId).add(entry.id)
     const metadata: RemoteParticipantMetadata = {
       room: state.view,
       id: entry.id,
