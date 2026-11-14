@@ -62,6 +62,9 @@ function telefunc(): TelefuncServe {
         return ws.handleUpgrade(request, server) as Response | Promise<Response>
       }
       if (!isTelefuncRequest(request)) return undefined
+      // Bun cuts a response quiet for `idleTimeout` (10 s by default), as a stream or an SSE wire can be; telefunc ends
+      // its own responses.
+      server.timeout(request, 0)
 
       const httpResponse = await serveTelefunc(context ? { request, context } : { request })
       return toResponse(httpResponse)
