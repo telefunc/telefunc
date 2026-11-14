@@ -13,6 +13,7 @@ export {
   onJoinRoomAsServerSelf,
   onJoinAsServerSelf,
   onJoinAsServerSelfPublishing,
+  onJoinTailAsServerSelfGreeting,
   onGetRoomWithMember,
   onGetRoomWithSnapshotMember,
   onWatchRoom,
@@ -244,6 +245,14 @@ async function onJoinAsServerSelfPublishing(roomId: string, name: string) {
   const me = await onJoinAsServerSelf(roomId, name)
   setTimeout(() => void publishMine(me))
   return me
+}
+
+/** The room with its tail and `me`, joined with `selfDelivery: false`, which greets the room before it is returned. */
+async function onJoinTailAsServerSelfGreeting(roomId: string, name: string) {
+  const room = anyoneCanJoin(await Room.get(roomId, { tail: true }))
+  const me = await room.join({ meta: { name }, selfDelivery: false })
+  await me.publish('greeting')
+  return { room, me }
 }
 
 async function onGetRoomWithMember(roomId: string, memberId: string) {

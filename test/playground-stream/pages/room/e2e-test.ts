@@ -808,6 +808,13 @@ function testRoom() {
       expect(r).deep.equal(othersOnly)
     },
   )
+  testRoomScenario<{ earlier: string[]; returned: string[]; selfDelivery: boolean }>(
+    'self-greeting',
+    'room: a message a telefunction publishes as its selfDelivery:false participant before returning it reaches a room the page already has open, and not the room returned with it',
+    (r) => {
+      expect(r).deep.equal({ earlier: ['greeting', 'bye'], returned: ['bye'], selfDelivery: false })
+    },
+  )
   testRoomScenario<{ myCause: unknown; closes: unknown[]; isClosed: boolean }>(
     'self-removed',
     "room: removing the page's participant closes the page's view of the room when they came over two of the page's connections",

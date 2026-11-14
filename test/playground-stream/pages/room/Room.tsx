@@ -18,6 +18,7 @@ import {
   onJoinRoomAsServerSelf,
   onJoinAsServerSelf,
   onJoinAsServerSelfPublishing,
+  onJoinTailAsServerSelfGreeting,
   onGetRoomWithMember,
   onGetRoomWithSnapshotMember,
   onWatchRoom,
@@ -2034,6 +2035,22 @@ function Room() {
         })
         releaseMe()
         setResult(JSON.stringify(received))
+      })}
+
+      {scenario('self-greeting', null, 'Me greets the room before the call returns it', async () => {
+        const roomId = await createRoomId('self-greeting')
+        const open = await onGetRoom(roomId)
+        const earlier: unknown[] = []
+        open.subscribe((data) => earlier.push(data))
+        const other = await open.join({ meta: { name: 'Other' } })
+        const { room, me } = await onJoinTailAsServerSelfGreeting(roomId, 'Me')
+        const returned: unknown[] = []
+        room.subscribe((data) => returned.push(data))
+        await other.publish('bye')
+        await pollUntil(() => ({
+          result: { earlier, returned, selfDelivery: me.selfDelivery },
+          done: earlier.includes('bye') && returned.includes('bye'),
+        }))
       })}
 
       {scenario('self-removed', null, 'Remove me, which came from a call on another connection', async () => {
