@@ -1,6 +1,7 @@
 export { MemberMeta, assignAttributes }
 export type { MetaRewinds }
 
+import { stringify } from '@brillout/json-serializer/stringify'
 import { freezeMeta } from './freezeMeta.js'
 import type { MemberMetaUpdate } from './protocol.js'
 import type { ParticipantMeta } from '../types.js'
@@ -57,10 +58,15 @@ class MemberMeta {
     const next: ParticipantMeta = { ...this._object }
     let keys = this.keys
     for (const attrs of merges) keys += assignAttributes(next, attrs)
-    this._object = freezeMeta(next)
+    this.setObject(next)
     this.keys = keys
     this.merges = null
     this.mergedKeys = 0
+  }
+
+  /** A meta that serializes the same as the object keeps the object: readers tell a change by identity. */
+  private setObject(meta: ParticipantMeta): void {
+    if (stringify(meta) !== stringify(this._object)) this._object = freezeMeta(meta)
   }
 
   /** Whether a sender's stamp at `seq` is newer. None is while the seq is forgotten: a stamp from before a failover may
@@ -80,7 +86,7 @@ class MemberMeta {
     const seq = this.seq
     if (update.seq <= seq) return 'stale'
     if ('meta' in update) {
-      this._object = freezeMeta(update.meta)
+      this.setObject(update.meta)
       this.keys = Object.keys(this._object).length
       this.merges = null
       this.mergedKeys = 0
