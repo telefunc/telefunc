@@ -3,6 +3,7 @@ import { describe, expect, test, vi } from 'vitest'
 import { serve } from './telefunc.js'
 import { config } from './serverConfig.js'
 import { shield } from './shield.js'
+import { Abort } from './Abort.js'
 import { Channel } from '../../wire-protocol/channel/server/ServerChannel.js'
 
 /** Each request's lifecycle, as `runTelefunc` creates it: how often its `onClose()` callbacks ran, and its `signal`. */
@@ -65,6 +66,15 @@ const telefunctions: Record<string, (...args: any[]) => Promise<unknown>> = {
     }),
     bad: circular(),
   }),
+  onAbortWithStream: async () => {
+    throw Abort({
+      stream: new ReadableStream({
+        cancel() {
+          opened.cancelled++
+        },
+      }),
+    })
+  },
   onChannel: async () => heldChannel(),
   onText: shield(async (_text: string) => 42, [shield.type.string]),
   onStream: async () =>
@@ -147,6 +157,18 @@ describe('a request ends its lifecycle once, however the call ends', () => {
     expect(request.closed).toBe(1)
     expect(request.signal.aborted).toBe(true)
     expect(opened.cancelled).toBe(1)
+  })
+
+  test('onAbortWithStream(): 403, and the stream in its abort value is cancelled', async () => {
+    const cancelledBefore = opened.cancelled
+    const response = await call('onAbortWithStream')
+    await response.getBody()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(response.statusCode).toBe(403)
+    const request = requests.at(-1)!
+    expect(request.closed).toBe(1)
+    expect(request.signal.aborted).toBe(true)
+    expect(opened.cancelled).toBe(cancelledBefore + 1)
   })
 
   test('a channel it returned holds the request till it closes', async () => {

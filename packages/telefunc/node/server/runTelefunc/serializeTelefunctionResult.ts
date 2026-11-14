@@ -99,22 +99,22 @@ function serializeTelefunctionResult(runContext: {
     })
   }
   function sendStream(createProducer: () => StreamingProducer) {
-    // Once the response goes, the pump or the HTTP body ends the stream.
+    // A cancel before the response goes and the pump or the HTTP body after it share one producer: the stream has one reader.
+    let producer: StreamingProducer | undefined
+    const getProducer = () => (producer ??= createProducer())
     const stream = {
       close() {},
       abort(abortError: AbortError) {
-        if (!goes) createProducer().cancel(abortError)
+        if (!goes) getProducer().cancel(abortError)
       },
     }
     if (useChannelPump) {
       const channel = new ServerChannel<never, never>()
-      registrations.push(() =>
-        pumpProducerToChannel(channel, createProducer, runContext, requestContext.trackPending()),
-      )
+      registrations.push(() => pumpProducerToChannel(channel, getProducer, runContext, requestContext.trackPending()))
       return { metadata: { channelId: channel.id }, ...stream }
     }
     const index = nextStreamingIndex++
-    streamingValues.push({ createProducer, index })
+    streamingValues.push({ createProducer: getProducer, index })
     return { metadata: { __index: index }, ...stream }
   }
   function createChannel<ClientToServer, ServerToClient>(opts?: { ack?: boolean }) {
