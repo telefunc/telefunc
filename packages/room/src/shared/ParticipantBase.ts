@@ -13,7 +13,7 @@ import {
   TWO_ANSWERS,
   utf8ByteLength,
 } from 'telefunc/__internal'
-import { makeDisposer, type ListenerOptions } from './disposer.js'
+import { makeDisposer, replayToLateListener, type ListenerOptions } from './disposer.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderSnapshot } from './arguments.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
@@ -322,11 +322,8 @@ abstract class ParticipantBase implements LocalParticipant {
   }
 
   onLeave(callback: (cause: LeaveCause) => void, options?: ListenerOptions): () => void {
-    if (options?.signal?.aborted) return makeDisposer()
-    if (this.leftCause) {
-      this.invoke(callback, this.leftCause)
-      return makeDisposer()
-    }
+    if (this.leftCause)
+      return replayToLateListener(callback, [this.leftCause], options, (err) => this._reportError(err))
     return this.register((this.leaveListeners ??= new Listeners()), callback, options)
   }
 

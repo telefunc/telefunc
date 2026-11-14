@@ -6,7 +6,6 @@ import { ROOM_TRACK_WANTS_MAX, ROOM_VIEW_MEMBERS_MAX } from '../shared/constants
 import {
   assertProtocol,
   parsePeerText,
-  reconnectWindow,
   type PublishBody,
   type BroadcastEndOwner,
   type BroadcastKind,
@@ -62,7 +61,13 @@ import type { RoomDataEnvelope } from './protocol.js'
 import type { LeaveCause } from '../types.js'
 import { toggle } from '../utils/sets.js'
 import { MemberMessageBodies, orderedBody, trackFrameBody, unorderedEventBody } from './publishBodies.js'
-import { PendingDmReplies, assertPublishShield, receiveFromPage, roomResult } from './pageRequests.js'
+import {
+  PendingDmReplies,
+  assertPublishShield,
+  closeAfterReconnectWindow,
+  receiveFromPage,
+  roomResult,
+} from './pageRequests.js'
 assertIsNotBrowser()
 
 type RoomStubOptions = {
@@ -253,8 +258,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   pageRemoved(cause: LeaveCause): void {
     this.end.deliver(unorderedEventBody({ __r: 'closed', ...leaveCauseToWire(cause) }))
     this.room.detachStub(this)
-    // A client back while its channel still holds it gets the close.
-    void this.end.close({ timeout: reconnectWindow() }).catch(() => {})
+    closeAfterReconnectWindow(this.end)
   }
 
   private requireMember(id: string): string {

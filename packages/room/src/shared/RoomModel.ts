@@ -191,6 +191,11 @@ class RoomModel {
     return this.members.values()
   }
 
+  /** Every member's entry but the hidden ones', which no presence read lists. */
+  visibleEntries(): MemberEntry[] {
+    return [...this.members.values()].filter((entry) => !entry.hidden)
+  }
+
   /** A member `memberIds()` listed, as a roster carries it. */
   memberSnapshot(id: string): MemberSnapshot {
     const { meta, joinedAt, identity, hidden } = this.members.get(id)!

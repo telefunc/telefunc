@@ -1,13 +1,7 @@
 export { ServerRoom, ServerLocalParticipant, RoomHandle, handleOf }
 export type { MetaMirror }
 
-import {
-  type ChannelPublishAck,
-  reconnectWindow,
-  handleCallbackBug,
-  type OrderingInfo,
-  markHandled,
-} from 'telefunc/__internal'
+import { type ChannelPublishAck, handleCallbackBug, type OrderingInfo, markHandled } from 'telefunc/__internal'
 import { assert, assertUsage } from '../utils/assert.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
@@ -58,6 +52,7 @@ import type { PendingDmAcks } from './PendingDmAcks.js'
 import type { RoomHosting } from './lifecycle/RoomHosting.js'
 import { RoomWrites, runAfterHook, type RoomWritesOwner } from './RoomWrites.js'
 import { readOpenConfig, withinRoomHorizon } from './lanes/lanes.js'
+import { closeAfterReconnectWindow } from './pageRequests.js'
 import { reportRoomError } from './reportRoomError.js'
 import { Admission } from './Admission.js'
 import { evictMember, joinMember } from './store/members.js'
@@ -310,9 +305,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     this.localParticipants.clear()
     this.localSuppressed.clear()
     for (const admission of this.admissions.values()) admission.abandon()
-    // A client back while its channel still holds it gets `closed`.
-    const timeout = reconnectWindow()
-    for (const stub of this.stubs) void stub.end.close({ timeout }).catch(() => {})
+    for (const stub of this.stubs) closeAfterReconnectWindow(stub.end)
   }
 
   /** A DM for a member this handle owns, routed to its holder: a server participant or its client stub. */
@@ -368,7 +361,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
   }: Omit<RoomStubOptions, 'room' | 'roster'> & { page: object }): RoomSnapshotMetadata {
     this.attachStub(new RoomStub({ room: this, roster: this.roster, end, publishShield, grantedHidden }), page)
     const model = this.model
-    const members = [...model.entries()].filter((entry) => !entry.hidden).map((entry) => model.memberSnapshot(entry.id))
+    const members = model.visibleEntries().map((entry) => model.memberSnapshot(entry.id))
     return {
       channelId: end.id,
       roomId: this.id,

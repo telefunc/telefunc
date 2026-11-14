@@ -1,8 +1,8 @@
-export { PendingDmReplies, roomResult, receiveFromPage, assertPublishShield }
+export { PendingDmReplies, roomResult, receiveFromPage, assertPublishShield, closeAfterReconnectWindow }
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
-import { isProtocolViolationError, type ServerBroadcastEnd } from 'telefunc/__internal'
+import { isProtocolViolationError, reconnectWindow, type ServerBroadcastEnd } from 'telefunc/__internal'
 import { ShieldValidationError, type ShieldValidator } from 'telefunc'
 import { reportRoomError } from './reportRoomError.js'
 import { ROOM_BUG_MESSAGE, toRoomFailure } from '../shared/errors.js'
@@ -55,6 +55,12 @@ function receiveFromPage<T>(end: ServerBroadcastEnd, handle: () => T): T | Promi
     end.terminateWire()
     return Promise.resolve({ ok: false, kind: 'error', message: err.message })
   }
+}
+
+/** Closes a page's channel once the page could no longer come back to it: a page back meanwhile still gets what was
+ *  sent last. */
+function closeAfterReconnectWindow(end: ServerBroadcastEnd): void {
+  void end.close({ timeout: reconnectWindow() }).catch(() => {})
 }
 
 /** The publish shield validates a page's Room data at ingress only. */

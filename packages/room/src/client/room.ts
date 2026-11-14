@@ -65,6 +65,11 @@ function sendDmReply(end: ClientBroadcast, ackId: string, reply: Promise<RoomRes
   end._sendReply(reply.then(declare), declare({ ok: false, kind: 'error', message: CLIENT_ROOM_BUG_MESSAGE }))
 }
 
+/** An acked request on a room's or a participant's channel, as its value or the error it failed with. */
+async function request(end: ClientBroadcast, req: RoomStubRequest | ParticipantStubRequest): Promise<unknown> {
+  return roomResultValue(end.send(req, { ack: true }))
+}
+
 /** The member an event concerns while that member's join may still be settling. */
 function heldMemberOf(event: ClientRoomEvent): string | null {
   switch (event.__r) {
@@ -241,8 +246,8 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   /** @internal */
-  async _request(req: RoomStubRequest): Promise<unknown> {
-    return roomResultValue(this.end.send(req, { ack: true }))
+  _request(req: RoomStubRequest): Promise<unknown> {
+    return request(this.end, req)
   }
 
   /** @internal `from` is a claim: the server checks it against this stub's members and stamps `fromMeta` itself. */
@@ -786,8 +791,8 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     return roomResultValue<ChannelPublishAck>(this.end._publishBinaryUnreported(framed, stream, lossy))
   }
 
-  protected async _request(request: ParticipantStubRequest): Promise<unknown> {
-    return roomResultValue(this.end.send(request, { ack: true }))
+  protected _request(req: ParticipantStubRequest): Promise<unknown> {
+    return request(this.end, req)
   }
 
   async leave(): Promise<void> {

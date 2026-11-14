@@ -4,7 +4,6 @@ export type { RoomParticipantStubOptions }
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import {
   ProtocolViolationError,
-  reconnectWindow,
   type BroadcastEndOwner,
   type ChannelPublishAck,
   type PageConnection,
@@ -32,7 +31,13 @@ import {
   type RoomResult,
 } from '../shared/protocol.js'
 import { unorderedEventBody } from './publishBodies.js'
-import { PendingDmReplies, assertPublishShield, receiveFromPage, roomResult } from './pageRequests.js'
+import {
+  PendingDmReplies,
+  assertPublishShield,
+  closeAfterReconnectWindow,
+  receiveFromPage,
+  roomResult,
+} from './pageRequests.js'
 assertIsNotBrowser()
 
 type RoomParticipantStubOptions = {
@@ -124,8 +129,7 @@ class RoomParticipantStub implements BroadcastEndOwner {
       this.left = true
       participant.room.replica.pageEndChanged(this)
       this.notify({ __r: 'left', ...leaveCauseToWire(cause) })
-      // A client back while its channel still holds it gets its leave.
-      void this.end.close({ timeout: reconnectWindow() }).catch(() => {})
+      closeAfterReconnectWindow(this.end)
     })
 
     this.end.onDisconnect(() => participant._setHolderConnected(false))

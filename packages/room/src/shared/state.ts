@@ -11,7 +11,7 @@ import {
   untether,
   type TELEFUNC_SHIELDS,
 } from 'telefunc/__internal'
-import { makeDisposer, type ListenerOptions } from './disposer.js'
+import { makeDisposer, replayToLateListener, type ListenerOptions } from './disposer.js'
 import {
   EVERY_MEMBER,
   EVERY_TRACK,
@@ -309,7 +309,7 @@ class RoomState {
   }
 
   listVisible(): RemoteParticipant[] {
-    return [...this.model.entries()].filter((entry) => !entry.hidden).map((entry) => this.remote(entry))
+    return this.model.visibleEntries().map((entry) => this.remote(entry))
   }
 
   /** Immutable view of the whole room, cached by the model's state version, so the reference is stable until something
@@ -319,9 +319,7 @@ class RoomState {
     const cache = this.snapshots[adder]
     const cached = cache?.version === model.version ? cache.value.deref() : undefined
     if (cached) return cached
-    const participants = Object.freeze(
-      [...model.entries()].filter((entry) => !entry.hidden).map((entry) => this.shownParticipant(entry, adder)),
-    )
+    const participants = Object.freeze(model.visibleEntries().map((entry) => this.shownParticipant(entry, adder)))
     const value = Object.freeze({
       id: model.roomId,
       meta: model.meta,
@@ -412,9 +410,7 @@ class RoomState {
   onClose(cb: (cause: LeaveCause) => void, opts?: ListenerOptions, adder: Adder = 'app'): () => void {
     const cause = this.model.closedCause
     if (cause === null) return this.register(this.closeListeners, cb, opts, adder)
-    // Terminal, like a departed member's onLeave: a late listener hears it at once.
-    if (!opts?.signal?.aborted) invokeChannelListener(cb, [cause], this.reportError)
-    return makeDisposer()
+    return replayToLateListener(cb, [cause], opts, this.reportError)
   }
 
   onChange(cb: () => void, opts?: ListenerOptions, adder: Adder = 'app'): () => void {
@@ -579,8 +575,7 @@ class RoomState {
       onLeave: (cb: (cause: LeaveCause) => void, opts?: ListenerOptions) => {
         if (!entry.left) return this.register((listeners.leaveListeners ??= new Listeners()), cb, opts, adder, entry)
         assert(entry.leaveCause)
-        if (!opts?.signal?.aborted) invokeChannelListener(cb, [entry.leaveCause], this.reportError)
-        return makeDisposer()
+        return replayToLateListener(cb, [entry.leaveCause], opts, this.reportError)
       },
     }
     for (const name of participantFields().keys()) {
