@@ -1135,6 +1135,8 @@ function ChannelDemo() {
   const testOversize = useCallback(async () => {
     const { channel, channelId, limit, broadcast } = await openChannel(onChannelOversize)
     channel.listen((msg) => (msg === 'big' ? 'x'.repeat(limit + 1) : `client-ack:${msg}`))
+    // The sends below take the page seconds on a busy machine: it attaches first, within the server's `connectTtl`.
+    await channel.opened
     const thrown: string[] = []
     for (const send of [
       () => channel.sendBinary(new Uint8Array(limit + 1)),
