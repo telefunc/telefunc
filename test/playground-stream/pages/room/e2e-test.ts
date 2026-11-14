@@ -573,6 +573,21 @@ function testRoom() {
       expect(result.listedOnServer).deep.equal(['Viewed'])
     },
   )
+  testRoomScenario<{ identity: string; hidden: string; listHidden: string }>(
+    'server-only',
+    "room: a page's join({ identity }), join({ hidden }) and getParticipants({ hidden }) fail with what only a server may do",
+    (r) => {
+      expect(r).deep.equal({
+        identity:
+          '[@telefunc/room@0.1.0][Wrong Usage] join() options.identity is server-assigned: identity is trusted, so set ' +
+          'it where trust lives, in the granting telefunction (server-side join()), not on the client.',
+        hidden:
+          '[@telefunc/room@0.1.0][Wrong Usage] join() options.hidden is server-side only: a hidden participant is ' +
+          'created by the granting telefunction (server-side join({ hidden: true })), not by a client.',
+        listHidden: '[@telefunc/room@0.1.0][Wrong Usage] Hidden participants can only be enumerated on the server',
+      })
+    },
+  )
   testRoomScenario<{ arrived: unknown; joins: unknown[] }>(
     'complete-room',
     'room: a page gets a room with its participants: on the next line both reads list them and the snapshot shows them, and a later join reaches onJoin',

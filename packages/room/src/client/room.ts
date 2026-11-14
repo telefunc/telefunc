@@ -120,7 +120,7 @@ function heldConnectionChanged(id: string, wasConnected: boolean | null): void {
 type ClientRoomOptions = { end: ClientBroadcast; snapshot: RoomSnapshotMetadata }
 
 /** A server room through one Broadcast channel: its frames carry events and data, its acked messages requests. */
-class ClientRoom extends RoomStateView implements Omit<Room, 'getParticipants' | 'getParticipant'> {
+class ClientRoom extends RoomStateView implements Room {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
   private readonly end: ClientBroadcast

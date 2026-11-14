@@ -274,8 +274,7 @@ function Room() {
       {liveRoom && <LiveCount room={liveRoom} />}
 
       {scenario('signals', 'Subscriptions', 'Abort listeners and iterate messages', async () => {
-        const [roomId, room] = await createRoom('signals')
-        const lobby = room as import('@telefunc/room/client').Room
+        const [roomId, lobby] = await createRoom('signals')
         const lifetime = new AbortController()
         let calls = 0
         lobby.subscribe(() => calls++, { signal: lifetime.signal })
@@ -1375,6 +1374,22 @@ function Room() {
           listedOnServer: await onListParticipantNames(roomId),
         }
         setResult(JSON.stringify(state))
+      })}
+
+      {scenario('server-only', null, "A page's server-only options", async () => {
+        const [, room] = await createRoom('server-only')
+        const refusal = (promise: Promise<unknown>) =>
+          promise.then(
+            () => null,
+            (error: Error) => error.message,
+          )
+        setResult(
+          JSON.stringify({
+            identity: await refusal(room.join({ identity: 'admin' })),
+            hidden: await refusal(room.join({ hidden: true })),
+            listHidden: await refusal(Promise.resolve().then(() => room.getParticipants({ hidden: true }))),
+          }),
+        )
       })}
 
       {scenario('snapshot-grid', 'Snapshot participants', 'A grid of three, one of them changes', async () => {

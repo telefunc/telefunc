@@ -1,8 +1,8 @@
 export type {
-  ClientRoom as Room,
+  Room,
   RoomInfo,
   RoomMeta,
-  ClientJoinOptions as JoinOptions,
+  JoinOptions,
   PublishOptions,
   ParticipantMeta,
   ReadonlyMeta,
