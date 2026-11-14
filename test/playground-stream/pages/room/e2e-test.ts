@@ -14,6 +14,7 @@ export {
 }
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Response, WebSocket } from 'playwright-chromium'
+import { startBlackHoleProxy } from '../../black-hole-proxy'
 import {
   navigate,
   getResult,
@@ -1357,7 +1358,7 @@ function testRoom() {
     }
   })
   test("room: on a 1 Mbit/s link, a page gets 640 KB of its room's messages and publishes 640 KB without reconnecting", async () => {
-    await navigate(`${getServerUrl()}/room`)
+    const proxy = await startBlackHoleProxy(getServerUrl())
     let sseStreams = 0
     const onResponse = (response: Response) => {
       if (response.headers()['content-type']?.startsWith('text/event-stream')) sseStreams++
@@ -1366,23 +1367,12 @@ function testRoom() {
     const onWebSocket = (ws: WebSocket) => {
       if (ws.url().includes('/_telefunc')) webSockets++
     }
-    page.on('response', onResponse)
-    page.on('websocket', onWebSocket)
-    // test-e2e's `page` is a proxy, which newCDPSession() doesn't take.
-    const cdp = await page.context().newCDPSession(
-      page
-        .context()
-        .pages()
-        .find((p) => p.url() === page.url())!,
-    )
     try {
-      await cdp.send('Network.enable')
-      await cdp.send('Network.emulateNetworkConditions', {
-        offline: false,
-        latency: 0,
-        downloadThroughput: 125_000,
-        uploadThroughput: 125_000,
-      })
+      await navigate(`${proxy.url}/room`)
+      page.on('response', onResponse)
+      page.on('websocket', onWebSocket)
+      // 1 Mbit/s each way.
+      proxy.pace({ downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 })
       await page.click('#test-room-slow-link')
       await autoRetry(
         async () => {
@@ -1400,15 +1390,11 @@ function testRoom() {
         webSockets: transports.includes('ws') ? 1 : 0,
       })
     } finally {
-      await cdp.send('Network.emulateNetworkConditions', {
-        offline: false,
-        latency: 0,
-        downloadThroughput: -1,
-        uploadThroughput: -1,
-      })
-      await cdp.detach()
       page.off('response', onResponse)
       page.off('websocket', onWebSocket)
+      // The page leaves before the proxy closes, which would cut its connections.
+      await page.goto('about:blank')
+      await proxy.close()
     }
   })
   test('room: the server lets go of a view whose listeners are gone, a member that left and the listeners on it, and a closed room and its members', async () => {
