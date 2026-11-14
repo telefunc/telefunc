@@ -16,7 +16,7 @@ import {
 import { makeDisposer, replayToLateListener, type ListenerOptions } from './disposer.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderSnapshot } from './arguments.js'
-import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
+import { MemberMeta, type MetaRewinds, type MetaWrite } from './MemberMeta.js'
 import { DEFAULT_TRACK, encodeBinaryFrame, encodeMessageFrame, publicTrack, trackKey, type TrackKey } from './binary.js'
 import type { MemberMetaUpdate, WholeMemberUpdate, RoomResult, InboxMessage, TrackWatch } from './protocol.js'
 import type {
@@ -71,6 +71,8 @@ abstract class ParticipantBase implements LocalParticipant {
   /** DMs held until the first `listen()` (`null` once flushed); an ack DM carries the resolver of its reply. */
   private pendingInbox: Fifo<HeldDm> | null = null
   private pendingInboxBytes = 0
+  /** Its meta writes the room hasn't answered yet. */
+  private metaWrites = 0
 
   constructor({ participant, rewinds }: ParticipantBaseOptions) {
     this.id = participant.id
@@ -101,9 +103,22 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal A meta update the room accepted, applied in seq order; whether it applied. One past a gap waits for the
    *  whole meta its holder's next attach or roster sends. */
   _acceptMeta(update: MemberMetaUpdate): boolean {
-    if (this.memberMeta.apply(update) !== 'applied') return false
-    this._changed()
-    return true
+    const applied = this.memberMeta.apply(update)
+    if (applied === 'changed') this._changed()
+    return applied !== 'stale' && applied !== 'gap'
+  }
+
+  /** Sends a meta write, unless it leaves the meta as it is and no write of its own is on its way, whose value it
+   *  must still replace. */
+  protected async _writeMeta(write: MetaWrite, send: () => Promise<unknown>): Promise<void> {
+    this._assertActive()
+    if (this.metaWrites === 0 && !this.memberMeta.changedBy(write)) return
+    this.metaWrites++
+    try {
+      await send()
+    } finally {
+      this.metaWrites--
+    }
   }
 
   protected get _left(): boolean {

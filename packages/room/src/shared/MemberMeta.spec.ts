@@ -44,3 +44,39 @@ describe.each([
     expect(me.meta).toEqual({ name: 'Pat' })
   })
 })
+
+describe('a meta write that leaves the meta as it is', () => {
+  it("is not sent from the page, unless a write before it hasn't been answered yet", async () => {
+    const { room, requests } = pageRoom()
+    const me = await room.join({ meta: { name: 'Pub', mic: true } })
+    const sent = () => requests.filter(({ __r }) => __r !== 'req-join').length
+    // Its keys in another order are another value.
+    await me.setMeta({ mic: true, name: 'Pub' })
+    await me.setMeta({ mic: true, name: 'Pub' })
+    await me.setAttributes({ mic: true, cam: undefined })
+    expect(sent()).toBe(1)
+    void me.setAttributes({ mic: false })
+    await me.setAttributes({ mic: true })
+    expect(sent()).toBe(3)
+    expect(me.meta).toEqual({ name: 'Pub', mic: true })
+  })
+
+  it('changes nothing a reader sees where it arrives', async () => {
+    const room = await Room.create(`meta-${crypto.randomUUID()}`)
+    const me = (await room.join({ meta: { name: 'Pub' } })) as LocalParticipant & {
+      _setMeta(meta: object): Promise<unknown>
+      _setAttributes(attrs: object): Promise<unknown>
+    }
+    const changes = { room: 0, participant: 0, me: 0 }
+    room.onChange(() => changes.room++)
+    room.getParticipant(me.id)!.onChange(() => changes.participant++)
+    me.onChange(() => changes.me++)
+    const snapshot = room.snapshot()
+    // As a page holding `me` sends one that raced another.
+    await me._setMeta({ name: 'Pub' })
+    await me._setAttributes({ name: 'Pub' })
+    await Promise.resolve()
+    expect(changes).toEqual({ room: 0, participant: 0, me: 0 })
+    expect(room.snapshot()).toBe(snapshot)
+  })
+})

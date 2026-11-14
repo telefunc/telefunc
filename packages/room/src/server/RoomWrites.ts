@@ -17,7 +17,7 @@ import {
   toRoomFailure,
   ROOM_BUG_MESSAGE,
 } from '../shared/errors.js'
-import { ownMetaArgument, senderSnapshot } from '../shared/arguments.js'
+import { senderSnapshot } from '../shared/arguments.js'
 import type {
   MemberMetaUpdate,
   WholeMemberUpdate,
@@ -87,14 +87,14 @@ class RoomWrites {
     this.localParticipants = localParticipants
   }
 
-  /** Full replace (`setMeta`). */
+  /** Full replace (`setMeta`), of a meta owned already. */
   async setMemberMeta(id: string, meta: ParticipantMeta): Promise<MemberMetaUpdate> {
-    return await this.writeMetaInOrder(id, { replace: ownMetaArgument(meta, 'setMeta() meta') })
+    return await this.writeMetaInOrder(id, { replace: meta })
   }
 
-  /** Per-key merge (`setAttributes`); an `undefined` value deletes the key. */
+  /** Per-key merge (`setAttributes`), of attributes owned already; an `undefined` value deletes the key. */
   async mergeMemberMeta(id: string, attrs: ParticipantMeta): Promise<MemberMetaUpdate> {
-    return await this.writeMetaInOrder(id, { merge: ownMetaArgument(attrs, 'setAttributes() attributes') })
+    return await this.writeMetaInOrder(id, { merge: attrs })
   }
 
   /** The connection of the page holding the member, which its holder here saw change. */

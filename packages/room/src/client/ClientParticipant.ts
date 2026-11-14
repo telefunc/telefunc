@@ -211,16 +211,17 @@ class ClientParticipant extends ParticipantBase {
   // Concurrent writes can commit out of request order: the participant adopts the sequence-accepted value, as
   // observers do.
   async setMeta(meta: ParticipantMeta): Promise<void> {
-    this._assertActive()
     const owned = ownMetaArgument(meta, 'setMeta() meta')
-    const accepted = await this.link.request(this.id, { __r: 'req-set-meta', meta: owned })
-    this.link.acceptOwnMeta(this.id, accepted as MemberMetaUpdate)
+    await this._writeMeta({ meta: owned }, () => this.requestMetaWrite({ __r: 'req-set-meta', meta: owned }))
   }
 
   async setAttributes(attrs: ParticipantMeta): Promise<void> {
-    this._assertActive()
     const owned = ownMetaArgument(attrs, 'setAttributes() attributes')
-    const accepted = await this.link.request(this.id, { __r: 'req-set-attrs', attrs: owned })
+    await this._writeMeta({ attrs: owned }, () => this.requestMetaWrite({ __r: 'req-set-attrs', attrs: owned }))
+  }
+
+  private async requestMetaWrite(req: MemberMutationRequest): Promise<void> {
+    const accepted = await this.link.request(this.id, req)
     this.link.acceptOwnMeta(this.id, accepted as MemberMetaUpdate)
   }
 

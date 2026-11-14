@@ -18,6 +18,7 @@ import {
   assertPublishOptions,
   normalizeJoinOptions,
   ownMessage,
+  ownMetaArgument,
   ownMetadata,
   recipientId,
 } from '../shared/arguments.js'
@@ -704,11 +705,13 @@ class ServerLocalParticipant extends ParticipantBase {
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
-    await this._setMeta(meta)
+    const owned = ownMetaArgument(meta, 'setMeta() meta')
+    await this._writeMeta({ meta: owned }, () => this._setMeta(owned))
   }
 
   async setAttributes(attrs: ParticipantMeta): Promise<void> {
-    await this._setAttributes(attrs)
+    const owned = ownMetaArgument(attrs, 'setAttributes() attributes')
+    await this._writeMeta({ attrs: owned }, () => this._setAttributes(owned))
   }
 
   /** @internal The accepted write, which a client holder mirrors in revision order. */

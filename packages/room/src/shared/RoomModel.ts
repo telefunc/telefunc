@@ -1,11 +1,10 @@
 export { RoomModel, departureCause }
 export type { MemberEntry, MembershipEvent, RosterRead, RoomModelOwner, ServerModelOwner }
 
-import { stringify } from '@brillout/json-serializer/stringify'
 import { assert } from '../utils/assert.js'
 import { Slice } from './Slice.js'
 import { RoomMetaState } from './RoomMetaState.js'
-import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
+import { MemberMeta, sameValue, type MetaRewinds } from './MemberMeta.js'
 import { ownLeaveCause, senderSnapshot, unknownLeaveCause } from './arguments.js'
 import { fieldValue, ownFieldValue } from './participantFields.js'
 import type {
@@ -258,7 +257,7 @@ class RoomModel {
    *  member. */
   setField(id: string, name: string, value: unknown): void {
     const entry = this.members.get(id)
-    if (!entry || stringify(fieldValue(entry.fields, name)) === stringify(value)) return
+    if (!entry || sameValue(fieldValue(entry.fields, name), value)) return
     entry.fields = Object.freeze({ ...entry.fields, [name]: ownFieldValue(value) })
     this.bumpState()
     this.memberChanged(entry)
@@ -331,8 +330,10 @@ class RoomModel {
     const wasConnected = this.isConnected(entry)
     const applied = entry.meta.apply(update)
     if (applied === 'gap') this.owner.onMemberMetaGap?.()
-    if (applied !== 'applied') return false
+    if (applied === 'stale' || applied === 'gap') return false
     this.owner.onMemberMeta(id, update)
+    // An equal value, as a write that raced another may bring, changes nothing anyone reads.
+    if (applied === 'unchanged') return true
     this.bumpState()
     const connectionChanged = this.isConnected(entry) !== wasConnected
     // The room's record of a connection this side holds itself changes nothing it shows.
@@ -492,7 +493,8 @@ class RoomModel {
       this.applyParticipantMeta(member.id, update)
       return true
     }
-    if (entry.meta.apply(update) === 'applied') this.owner.onMemberMeta(member.id, update)
+    const applied = entry.meta.apply(update)
+    if (applied !== 'stale' && applied !== 'gap') this.owner.onMemberMeta(member.id, update)
     return false
   }
 
@@ -534,7 +536,8 @@ function replayMembershipEvent(
     const member = members.get(id)
     if (member === undefined) return
     const meta = new MemberMeta({ meta: member.meta, seq: member.metaSeq, connected: member.disconnected !== true })
-    if (meta.apply(update) !== 'applied') return
+    const applied = meta.apply(update)
+    if (applied === 'stale' || applied === 'gap') return
     const { disconnected, ...rest } = member
     const next: MemberSnapshot = { ...rest, meta: meta.object, metaSeq: meta.seq }
     if (!meta.connected) next.disconnected = true

@@ -1,31 +1,31 @@
-export { MemberMeta, assignAttributes }
-export type { MetaRewinds }
+export { MemberMeta, assignAttributes, sameValue }
+export type { MetaRewinds, MetaWrite }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { freezeMeta } from './freezeMeta.js'
 import type { MemberMetaUpdate } from './protocol.js'
 import type { ParticipantMeta } from '../types.js'
 
-/** Merges held past this many keys, or past the meta's own size, are folded into the object, so held merges stay
- *  within a constant factor of the meta. */
-const MEMBER_META_MERGES_HELD_MIN = 64
-
 /** How many times a failover rewound a room's meta seqs. Each member's meta sharing it reads its seq as forgotten after
  *  one, so a rewind costs the same at any member count. */
 type MetaRewinds = { count: number }
 const NEVER_REWOUND: MetaRewinds = Object.freeze({ count: 0 })
 
+/** A whole meta, or a merge of `attrs` (see `assignAttributes`). */
+type MetaWrite = { meta: ParticipantMeta } | { attrs: ParticipantMeta }
+
 type MemberMetaOptions = { meta: ParticipantMeta; seq: number; rewinds?: MetaRewinds; connected?: boolean }
 
-/** A member's meta and connection as a view keeps them: its updates apply in `seq` order, a merge in what it changed,
- *  and the object is built when read. What it is given is owned already, as an API argument copied or a frame or record
- *  decoded. */
+/** A member's meta and connection as a view keeps them: its updates apply in `seq` order, a merge in the keys it
+ *  changes, and the object is built when read. What it is given is owned already, as an API argument copied or a frame
+ *  or record decoded. */
 class MemberMeta {
   private _object: ParticipantMeta
-  private keys: number
-  /** Merges applied since `_object` was built, in order. */
-  private merges: ParticipantMeta[] | null = null
-  private mergedKeys = 0
+  /** The values merges set since `_object` was built, by key; a key `_object` lacks goes after its keys, in this
+   *  order. */
+  private setKeys: Map<string, unknown> | null = null
+  /** The keys of `_object` merges removed since it was built; one set again goes after its keys. */
+  private removedKeys: Set<string> | null = null
   private _seq: number
   private readonly rewinds: MetaRewinds
   private rewindsSeen: number
@@ -34,7 +34,6 @@ class MemberMeta {
   constructor({ meta, seq, rewinds = NEVER_REWOUND, connected = true }: MemberMetaOptions) {
     this._connected = connected
     this._object = freezeMeta(meta)
-    this.keys = Object.keys(this._object).length
     this._seq = seq
     this.rewinds = rewinds
     this.rewindsSeen = rewinds.count
@@ -50,23 +49,35 @@ class MemberMeta {
   }
 
   get object(): ParticipantMeta {
-    if (this.merges !== null) this.fold(this.merges)
+    if (this.setKeys !== null || this.removedKeys !== null) this.fold()
     return this._object
   }
 
-  private fold(merges: ParticipantMeta[]): void {
+  private fold(): void {
     const next: ParticipantMeta = { ...this._object }
-    let keys = this.keys
-    for (const attrs of merges) keys += assignAttributes(next, attrs)
-    this.setObject(next)
-    this.keys = keys
-    this.merges = null
-    this.mergedKeys = 0
+    for (const key of this.removedKeys ?? []) delete next[key]
+    for (const [key, value] of this.setKeys ?? []) setKey(next, key, value)
+    this.setKeys = null
+    this.removedKeys = null
+    // Merges that undid one another leave the object, as readers tell a change by identity.
+    if (!sameValue(next, this._object)) this._object = freezeMeta(next)
   }
 
-  /** A meta that serializes the same as the object keeps the object: readers tell a change by identity. */
-  private setObject(meta: ParticipantMeta): void {
-    if (stringify(meta) !== stringify(this._object)) this._object = freezeMeta(meta)
+  /** Whether `write` leaves the meta another value. */
+  changedBy(write: MetaWrite): boolean {
+    if ('meta' in write) return !sameValue(write.meta, this.object)
+    return Object.entries(write.attrs).some(([key, value]) =>
+      this.has(key) ? value === undefined || !sameValue(value, this.valueOf(key)) : value !== undefined,
+    )
+  }
+
+  private has(key: string): boolean {
+    return this.setKeys?.has(key) || (Object.hasOwn(this._object, key) && !this.removedKeys?.has(key))
+  }
+
+  /** The value of a key `has()`. */
+  private valueOf(key: string): unknown {
+    return this.setKeys?.has(key) ? this.setKeys.get(key) : this._object[key]
   }
 
   /** Whether a sender's stamp at `seq` is newer. None is while the seq is forgotten: a stamp from before a failover may
@@ -81,52 +92,59 @@ class MemberMeta {
     this._seq = -1
   }
 
-  /** `gap` for a change past the next seq: an update before it never arrived. */
-  apply(update: MemberMetaUpdate): 'applied' | 'stale' | 'gap' {
+  /** `gap` for a change past the next seq: an update before it never arrived. `unchanged` for one that leaves the meta
+   *  and the connection as they were, whose seq still applies. */
+  apply(update: MemberMetaUpdate): 'changed' | 'unchanged' | 'stale' | 'gap' {
     const seq = this.seq
     if (update.seq <= seq) return 'stale'
+    let changed: boolean
     if ('meta' in update) {
-      this.setObject(update.meta)
-      this.keys = Object.keys(this._object).length
-      this.merges = null
-      this.mergedKeys = 0
-      this._connected = update.disconnected !== true
-      this.setSeq(update.seq)
-      return 'applied'
-    }
-    if (update.seq > seq + 1) return 'gap'
-    if ('connected' in update) {
+      const metaChanged = this.changedBy(update)
+      if (metaChanged) this._object = freezeMeta(update.meta)
+      const connected = update.disconnected !== true
+      changed = metaChanged || connected !== this._connected
+      this._connected = connected
+    } else if (update.seq > seq + 1) {
+      return 'gap'
+    } else if ('connected' in update) {
+      changed = update.connected !== this._connected
       this._connected = update.connected
-      this.setSeq(update.seq)
-      return 'applied'
+    } else {
+      changed = this.changedBy(update)
+      if (changed) this.merge(update.attrs)
     }
-    this.merges ??= []
-    this.merges.push(update.attrs)
-    this.mergedKeys += Object.keys(update.attrs).length
-    this.setSeq(update.seq)
-    if (this.mergedKeys > Math.max(MEMBER_META_MERGES_HELD_MIN, this.keys)) this.fold(this.merges)
-    return 'applied'
+    this._seq = update.seq
+    this.rewindsSeen = this.rewinds.count
+    return changed ? 'changed' : 'unchanged'
   }
 
-  private setSeq(seq: number): void {
-    this._seq = seq
-    this.rewindsSeen = this.rewinds.count
+  private merge(attrs: ParticipantMeta): void {
+    for (const [key, value] of Object.entries(attrs)) {
+      if (value === undefined) {
+        this.setKeys?.delete(key)
+        if (Object.hasOwn(this._object, key)) (this.removedKeys ??= new Set()).add(key)
+      } else {
+        ;(this.setKeys ??= new Map()).set(key, value)
+      }
+    }
   }
 }
 
-/** Assign `attrs` onto `target` per key, returning the change in its key count. A value of `undefined` deletes its
- *  key (the serializer preserves `undefined` on the wire). */
-function assignAttributes(target: ParticipantMeta, attrs: ParticipantMeta): number {
-  let keys = 0
+/** Two values are one when they serialize the same: two objects with their keys in another order are two. */
+function sameValue(a: unknown, b: unknown): boolean {
+  return stringify(a) === stringify(b)
+}
+
+/** Assign `attrs` onto `target` per key. A value of `undefined` deletes its key (the serializer preserves `undefined`
+ *  on the wire). */
+function assignAttributes(target: ParticipantMeta, attrs: ParticipantMeta): void {
   for (const [key, value] of Object.entries(attrs)) {
-    const had = Object.hasOwn(target, key)
-    if (value === undefined) {
-      if (had) keys--
-      delete target[key]
-      continue
-    }
-    if (!had) keys++
-    Object.defineProperty(target, key, { value, enumerable: true, configurable: true, writable: true })
+    if (value === undefined) delete target[key]
+    else setKey(target, key, value)
   }
-  return keys
+}
+
+/** A key already there keeps its place; `__proto__` is a key like any other. */
+function setKey(target: ParticipantMeta, key: string, value: unknown): void {
+  Object.defineProperty(target, key, { value, enumerable: true, configurable: true, writable: true })
 }
