@@ -22,6 +22,7 @@ import {
   onGetRoomWithMember,
   onGetRoomWithSnapshotMember,
   onWatchRoom,
+  onWatchRoomAsSelf,
   onGetWatched,
   onWatchRoomTrack,
   onGetWatchedTrack,
@@ -2051,6 +2052,18 @@ function Room() {
           result: { earlier, returned, selfDelivery: me.selfDelivery },
           done: earlier.includes('bye') && returned.includes('bye'),
         }))
+      })}
+
+      {scenario('self-server-listener', null, "A server's room that listens joins me", async () => {
+        const [roomId, view] = await createRoom('self-server-listener')
+        const me = await onWatchRoomAsSelf(roomId)
+        await me.publish('mine on the page')
+        const other = await view.join({ meta: { name: 'Other' } })
+        await other.publish('other')
+        await pollUntil(async () => {
+          const heard = (await onGetWatched(roomId)) as string[]
+          return { result: { heard }, done: heard.includes('other') }
+        })
       })}
 
       {scenario('self-removed', null, 'Remove me, which came from a call on another connection', async () => {

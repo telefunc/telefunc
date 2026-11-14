@@ -815,6 +815,13 @@ function testRoom() {
       expect(r).deep.equal({ earlier: ['greeting', 'bye'], returned: ['bye'], selfDelivery: false })
     },
   )
+  testRoomScenario<{ heard: string[] }>(
+    'self-server-listener',
+    "room: a server's room that joined a selfDelivery:false participant doesn't get its messages, before or after a page holds it",
+    (r) => {
+      expect(r.heard).deep.equal(['other'])
+    },
+  )
   testRoomScenario<{ myCause: unknown; closes: unknown[]; isClosed: boolean }>(
     'self-removed',
     "room: removing the page's participant closes the page's view of the room when they came over two of the page's connections",

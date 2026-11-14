@@ -17,6 +17,7 @@ export {
   onGetRoomWithMember,
   onGetRoomWithSnapshotMember,
   onWatchRoom,
+  onWatchRoomAsSelf,
   onGetWatched,
   onWatchRoomTrack,
   onGetWatchedTrack,
@@ -273,11 +274,23 @@ const watched = new Map<string, unknown[]>()
 const watchedRooms = new Map<string, unknown>()
 
 async function onWatchRoom(roomId: string) {
+  await watchRoom(roomId)
+}
+
+/** `onWatchRoom()`, and the watching room joins `me` with `selfDelivery: false`, which publishes before it is returned. */
+async function onWatchRoomAsSelf(roomId: string) {
+  const me = await (await watchRoom(roomId)).join({ meta: { name: 'Me' }, selfDelivery: false })
+  await me.publish('mine on the server')
+  return me
+}
+
+async function watchRoom(roomId: string) {
   const room = await Room.get(roomId)
   const list: unknown[] = []
   watched.set(roomId, list)
   watchedRooms.set(roomId, room)
   room.subscribe((data) => list.push(data))
+  return room
 }
 
 async function onGetWatched(roomId: string) {
