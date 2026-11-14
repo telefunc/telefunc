@@ -32,8 +32,10 @@ const { fields } = getGlobalObject('shared/participantFields.ts', () => ({
   fields: new Map<string, ParticipantField<unknown>>(),
 }))
 
-/** `name` on every participant, and on every participant of `room.snapshot()`, as the package sets it. */
+/** `name` on every participant, and on every participant of `room.snapshot()`, as the package sets it. A name defined
+ *  already keeps its first definition, as every copy of the package in the process shares the field. */
 function defineParticipantField<T>(name: string, field: ParticipantField<T>): void {
+  if (fields.has(name)) return
   fields.set(name, {
     initial: ownFieldValue(field.initial),
     attach: field.attach as ParticipantField<unknown>['attach'],

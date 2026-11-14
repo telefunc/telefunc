@@ -106,4 +106,20 @@ describe("a package's field", () => {
     expect((before.participants[0] as unknown as { ownCopy: Tracks }).ownCopy.tracks).toEqual(['camera'])
     expect(room.snapshot()).toBe(before)
   })
+
+  it('keeps its first definition when its name is defined again, as a second copy of the package does', () => {
+    const attached: string[] = []
+    for (const copy of ['first', 'second']) {
+      defineParticipantField('definedTwice', {
+        initial: copy,
+        attach() {
+          attached.push(copy)
+          return () => {}
+        },
+      })
+    }
+    const { room } = pageRoom(['ann'])
+    expect(attached).toEqual(['first'])
+    expect((room.snapshot().participants[0] as unknown as { definedTwice: string }).definedTwice).toBe('first')
+  })
 })
