@@ -26,6 +26,8 @@ import {
   onHeldRetainedReads,
   onReleaseRetainedReads,
   onWatchEveryFrame,
+  onIterateMessages,
+  onGetIteratedMessages,
   onGetEveryFrame,
   onJoinHiddenAndHand,
   onHiddenSetMeta,
@@ -287,6 +289,7 @@ function Room() {
         const bobView = await onGetRoom(roomId)
         const releaseBobView = keepReachable(bobView)
         const bob = await bobView.join({ meta: { name: 'Bob' } })
+        await onIterateMessages(roomId)
         const stream = lobby.messages()
         // The first `next()` subscribes.
         const pending = stream.next()
@@ -306,6 +309,11 @@ function Room() {
         }
         await stream.return!()
         const stopped = (await stream.next()).done
+        let onServer: string[] = []
+        await pollUntil(async () => {
+          onServer = await onGetIteratedMessages(roomId)
+          return { done: onServer.length === 5 }
+        })
         const aborted = lobby.messages({ signal: lifetime.signal })
         const abortedWithReason = await aborted.next().then(
           () => false,
@@ -320,6 +328,7 @@ function Room() {
             unchanged: calls === before,
             // Sorted: this checks what arrived and from whom, not the order.
             received: received.sort(),
+            onServer: onServer.sort(),
             stopped,
             abortedWithReason,
           }),

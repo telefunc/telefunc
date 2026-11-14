@@ -20,12 +20,14 @@ import {
 import { type MemberEntry, type RoomModel } from './RoomModel.js'
 import { fieldValue, participantFields, type ParticipantFieldView } from './participantFields.js'
 import { assertKnownOptions, senderSnapshot } from './arguments.js'
+import { roomMessages } from './messages.js'
 import type { MemberSnapshot, MemberWants, RoomDataEvent, SenderStamp } from './protocol.js'
 import type {
   BinaryFrameInfo,
   LeaveCause,
   ParticipantMeta,
   RemoteParticipant,
+  RoomMessage,
   RoomMeta,
   RoomSnapshotView,
   Sender,
@@ -134,6 +136,10 @@ abstract class RoomStateView {
     options?: BinaryListenerOptions,
   ): () => void {
     return this._state.subscribeBinary(callback, options)
+  }
+
+  messages(options?: ListenerOptions): AsyncIterableIterator<RoomMessage> {
+    return roomMessages(this, options?.signal)
   }
 
   onJoin(callback: (member: RemoteParticipant) => void, options?: ListenerOptions): () => void {

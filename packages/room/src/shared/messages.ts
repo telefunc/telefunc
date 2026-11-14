@@ -11,7 +11,7 @@ import {
   utf8ByteLength,
 } from 'telefunc/__internal'
 import type { BinaryFrameInfo, RoomMessage, Sender } from '../types.js'
-import { senderSnapshot } from '../shared/arguments.js'
+import { senderSnapshot } from './arguments.js'
 
 type Source = {
   subscribe(

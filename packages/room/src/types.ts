@@ -259,6 +259,8 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
     callback: RoomBinaryListener<P>,
     options?: { track?: string | null; signal?: AbortSignal },
   ): () => void
+  /** Iterate participant messages until aborted, closed, or the loop ends. */
+  messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<RoomMessage<Pub, P>>
 
   /** A participant joined. */
   onJoin(callback: (member: RemoteParticipant<P, Pub>) => void, options?: { signal?: AbortSignal }): () => void
@@ -295,8 +297,6 @@ type ClientRoom<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Parti
   getParticipants(): RemoteParticipant<P, Pub>[]
   /** One participant, or `null`. */
   getParticipant(id: string): RemoteParticipant<P, Pub> | null
-  /** Iterate participant messages until aborted, closed, or the loop ends. */
-  messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<RoomMessage<Pub, P>>
 }
 
 /** Your returnable participant handle, returned by `join()`. */

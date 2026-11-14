@@ -617,6 +617,7 @@ Server-side.
 | `getParticipants({ hidden: true })` | Server-side: the hidden participants. |
 | `onJoin(cb)` / `onLeave(cb)` | Someone joined / left. |
 | `subscribe(cb, { track? }?)` / `subscribeBinary(cb, { track? }?)` | Everyone's messages, or those on `track` / binary frames: `cb(message, info, from)`, with `info` `{ seq, timestamp }`, plus `{ track, meta }` on a track. |
+| `messages({ signal? }?)` | Everyone's messages and binary frames, to read with `for await`: each `{ type, data, info, from }`. |
 | `onAnnounce(cb)` | `Room.announce()` messages: `cb(message, info)`. |
 | `onEmpty(cb)` / `onClose(cb)` | The last participant left / the room closed. |
 

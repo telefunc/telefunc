@@ -22,6 +22,8 @@ export {
   onReleaseRetainedReads,
   onWatchEveryFrame,
   onGetEveryFrame,
+  onIterateMessages,
+  onGetIteratedMessages,
   onJoinHiddenAndHand,
   onHiddenSetMeta,
   onHiddenLeave,
@@ -296,6 +298,25 @@ async function onWatchEveryFrame(roomId: string) {
 
 async function onGetEveryFrame(roomId: string) {
   return everyFrame.get(roomId) ?? []
+}
+
+const iterated = new Map<string, string[]>()
+
+/** A server's `for await` loop over the room's messages: each message's type, sender and data. */
+async function onIterateMessages(roomId: string) {
+  const room = await Room.get<{}, { name: string }, string>(roomId)
+  const received: string[] = []
+  iterated.set(roomId, received)
+  void iterateMessages(room, received)
+}
+
+async function iterateMessages(room: Room<{}, { name: string }, string>, received: string[]) {
+  for await (const message of room.messages())
+    received.push(`${message.type} ${message.from.meta.name}: ${message.data}`)
+}
+
+async function onGetIteratedMessages(roomId: string) {
+  return iterated.get(roomId) ?? []
 }
 
 const hiddenBots = new Map<string, LocalParticipant>()

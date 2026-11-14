@@ -212,6 +212,7 @@ function testRoom() {
   testRoomScenario<{
     unchanged: boolean
     received: string[]
+    onServer: string[]
     stopped: boolean
     abortedWithReason: boolean
   }>('signals', 'room: abort removes registrations, and iterated messages keep their sender and track', (result) => {
@@ -224,6 +225,7 @@ function testRoom() {
         'text Alice: hello',
         'text Bob: hi',
       ],
+      onServer: ['binary Alice: 1', 'binary Alice: 2', 'binary Bob: 3', 'text Alice: hello', 'text Bob: hi'],
       stopped: true,
       abortedWithReason: true,
     })

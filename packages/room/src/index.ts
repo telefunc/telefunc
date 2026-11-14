@@ -27,5 +27,6 @@ export type {
   ParticipantRef,
   BinaryFrameInfo,
   BinaryPublishOptions,
+  RoomMessage,
   RoomSnapshotView,
 } from './types.js'

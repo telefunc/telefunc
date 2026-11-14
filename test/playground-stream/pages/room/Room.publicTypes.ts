@@ -35,10 +35,17 @@ type _ServerSurface = AssertAll<
     Exactly<Parameters<Parameters<ServerRoom['subscribe']>[0]>[2], Server.Sender<MemberMeta>>,
     Exactly<ReturnType<ServerRoom['snapshot']>, Server.RoomSnapshotView<RoomMeta, MemberMeta, ChatMsg>>,
     Exactly<ReturnType<ServerRoom['snapshot']>['participants'][number], ServerRemote>,
+    Exactly<ReturnType<ServerRoom['messages']>, AsyncIterableIterator<Server.RoomMessage<ChatMsg, MemberMeta>>>,
   ]
 >
 
-type _ClientSurface = AssertAll<[Exactly<ClientLocal, ServerLocal>, Exactly<ClientRemote, ServerRemote>]>
+type _ClientSurface = AssertAll<
+  [
+    Exactly<ClientLocal, ServerLocal>,
+    Exactly<ClientRemote, ServerRemote>,
+    Exactly<ReturnType<ClientRoom['messages']>, ReturnType<ServerRoom['messages']>>,
+  ]
+>
 
 function assertClientJoinBoundary(room: ClientRoom) {
   void room.join({ meta: { name: 'Alice' }, selfDelivery: false })

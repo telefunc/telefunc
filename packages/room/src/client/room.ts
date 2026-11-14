@@ -1,6 +1,5 @@
 export { ClientRoom, ClientStandaloneParticipant }
 
-import { roomMessages } from './messages.js'
 import { assert, assertUsage } from '../utils/assert.js'
 import { getOrCreate, markHandled } from 'telefunc/__internal'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
@@ -51,7 +50,6 @@ import type {
   PublishOptions,
   RemoteParticipant,
   Room,
-  RoomMessage,
   Sender,
 } from '../types.js'
 
@@ -140,10 +138,6 @@ class ClientRoom extends RoomStateView implements Omit<Room, 'getParticipants' |
   private readonly declaredText = new Set<string>()
   /** @internal */
   _rosterStream: RosterStream | null = null
-
-  messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<RoomMessage> {
-    return roomMessages(this, options?.signal)
-  }
 
   constructor({ end, snapshot }: ClientRoomOptions) {
     super()
