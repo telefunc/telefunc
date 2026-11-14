@@ -31,8 +31,8 @@ const FILE = '/requestLifecycle.telefunc.ts'
 config.disableNamingConvention = true
 /** What this server's channels hold, on the ledger every channel shares. */
 const ledgerTotal = () => (globalThis as any)._telefunc['channelMemory.ts'].total as number
-/** The last channel a telefunction made, and how often a stream it returned was cancelled. */
-const opened = { channel: null as Channel<never, string> | null, cancelled: 0 }
+/** The last channel a telefunction made, how often a stream it returned was cancelled, and what lets a waiting one return. */
+const opened = { channel: null as Channel<never, string> | null, cancelled: 0, letReturn: null as (() => void) | null }
 /** A channel holding a 64 KiB send. */
 function heldChannel() {
   opened.channel = new Channel<never, string>()
@@ -75,6 +75,14 @@ const telefunctions: Record<string, (...args: any[]) => Promise<unknown>> = {
       }),
     })
   },
+  onStreamOnceLetReturn: async () => {
+    await new Promise<void>((resolve) => (opened.letReturn = resolve))
+    return new ReadableStream({
+      cancel() {
+        opened.cancelled++
+      },
+    })
+  },
   onChannel: async () => heldChannel(),
   onText: shield(async (_text: string) => 42, [shield.type.string]),
   onStream: async () =>
@@ -86,12 +94,14 @@ const telefunctions: Record<string, (...args: any[]) => Promise<unknown>> = {
     }),
 }
 
-function call(name: string, args: unknown[] = []) {
+function call(name: string, args: unknown[] = [], signal?: AbortSignal) {
   return serve({
-    url: 'https://example.test/_telefunc',
-    method: 'POST',
-    headers: new Headers({ 'x-telefunc-request': 'txt' }),
-    body: JSON.stringify({ file: FILE, name, args }),
+    request: new Request('https://example.test/_telefunc', {
+      method: 'POST',
+      headers: { 'x-telefunc-request': 'txt' },
+      body: JSON.stringify({ file: FILE, name, args }),
+      signal,
+    }),
   })
 }
 
@@ -181,6 +191,21 @@ describe('a request ends its lifecycle once, however the call ends', () => {
     await opened.channel!.close({ timeout: 0 })
     expect(request.closed).toBe(1)
     expect(request.signal.aborted).toBe(true)
+  })
+
+  test('a stream it returns after its page left is cancelled', async () => {
+    const cancelledBefore = opened.cancelled
+    const page = new AbortController()
+    const response = call('onStreamOnceLetReturn', [], page.signal)
+    await vi.waitFor(() => expect(opened.letReturn).toBeTypeOf('function'))
+    page.abort()
+    const request = requests.at(-1)!
+    expect(request.closed).toBe(1)
+    expect(request.signal.aborted).toBe(true)
+    opened.letReturn!()
+    await response
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(opened.cancelled).toBe(cancelledBefore + 1)
   })
 
   test('a stream it returned holds the request till the page read it', async () => {

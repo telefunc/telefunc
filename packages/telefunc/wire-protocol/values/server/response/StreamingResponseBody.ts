@@ -44,7 +44,8 @@ type Settled = { entry: Entry; result: IteratorResult<Uint8Array<ArrayBuffer>> }
  * sink's `read` / `pull` callback) before the next push.
  *
  * Cleanup paths — one `cancelled` flag means "consumer gone, stop emitting":
- *   - `abortSignal` fires                    → onConsumerGone: cancelled=true + cancelProducers; emits no-op.
+ *   - `abortSignal` fires, or already had    → onConsumerGone: cancelled=true + cancelProducers; emits no-op.
+ *     (the page left while the telefunction ran)
  *   - consumer cancels sink                  → onConsumerGone (same).
  *   - producer throws (caught)               → cancelProducers only; emits still flow if wire alive.
  *   - normal completion                      → emit terminator.
@@ -178,7 +179,8 @@ function buildInlineResponseBody(runContext: {
   }
 
   async function runInlineResponse() {
-    abortSignal.addEventListener('abort', onConsumerGone, { once: true })
+    if (abortSignal.aborted) onConsumerGone()
+    else abortSignal.addEventListener('abort', onConsumerGone, { once: true })
     // A response-wide abort takes its turn after what settled before it, and routes us into the catch below.
     responseAbort.errorPromise.catch((err: unknown) => settle({ err }))
     try {
