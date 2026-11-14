@@ -30,8 +30,8 @@ import {
 import { CLIENT_ROOM_BUG_MESSAGE, roomResultValue } from '../shared/errors.js'
 import { ParticipantBase } from '../shared/ParticipantBase.js'
 import type { MetaRewinds } from '../shared/MemberMeta.js'
-import { heldMembers, roomViews, roomHolds, heldConnectionChanged } from './page.js'
-import type { ClientRoom } from './room.js'
+import { heldConnectionChanged, holdMember, holdRoomOpen, letGoOfMember, releaseRoom, roomsOf } from './page.js'
+import type { ClientRoomHandle } from './ClientRoomHandle.js'
 import type {
   BinaryPublishOptions,
   LeaveCause,
@@ -59,8 +59,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
 
   /** @internal The page holds this member from now on, until it leaves. */
   _holdOnPage(): void {
-    heldMembers.set(this.id, this)
-    heldConnectionChanged(this.id, null)
+    holdMember(this)
   }
 
   override _onDisconnected(): void {
@@ -75,7 +74,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
 
   override _onLeft(cause: LeaveCause): void {
     super._onLeft(cause)
-    if (heldMembers.get(this.id) === this) heldMembers.delete(this.id)
+    letGoOfMember(this)
   }
 
   /** @internal As the room's stub last told the page. */
@@ -166,65 +165,65 @@ abstract class ClientParticipantBase extends ParticipantBase {
 }
 
 type ClientRoomParticipantOptions = {
-  clientRoom: ClientRoom
+  room: ClientRoomHandle
   id: string
   meta: ParticipantMeta
   selfDelivery: boolean
   rewinds: MetaRewinds
 }
 
-/** `LocalParticipant` returned by `ClientRoom.join()`. Operates through the room's channel. */
+/** `LocalParticipant` returned by a page's `room.join()`. Operates through the room's channel. */
 class ClientRoomParticipant extends ClientParticipantBase {
-  private readonly room: ClientRoom
+  private readonly room: ClientRoomHandle
   /** Weak: the room reaches this member, so a strong one would hold the room open for good. */
   private handle: WeakRef<LocalParticipant> | null = null
 
-  constructor({ clientRoom, id, meta, selfDelivery, rewinds }: ClientRoomParticipantOptions) {
+  constructor({ room, id, meta, selfDelivery, rewinds }: ClientRoomParticipantOptions) {
     super({
       // Client-side joins carry no identity: it's server-assigned (see JoinOptions.identity).
       participant: { id, meta, selfDelivery, identity: null },
       rewinds,
     })
-    this.room = clientRoom
+    this.room = room
   }
 
   get isConnected(): boolean {
-    return this.room._isConnected
+    return this.room.isConnected
   }
 
   protected override _resolveSender(id: string): Sender | null {
     // A sync read: delivery must not wait on I/O.
-    return this.room._state.getRemote(id)
+    return this.room.state.getRemote(id)
   }
 
   protected _shownParticipant(id: string): RemoteParticipant | null {
-    return this.room._state.shownParticipantOf(id)
+    return this.room.state.shownParticipantOf(id)
   }
 
   protected _followRoom(onChange: () => void): () => void {
-    return this.room._state.onChange(onChange)
+    return this.room.state.onChange(onChange)
   }
 
   protected _deliverPrivate(field: string, from: string, data: unknown): void {
-    this.room._state.applyPrivate(field, from, data)
+    this.room.state.applyPrivate(field, from, data)
   }
 
   protected override _onOwnMetaWritten(accepted: MemberMetaUpdate): void {
-    this.room._acceptParticipantMeta(this.id, accepted)
+    this.room.acceptParticipantMeta(this.id, accepted)
   }
 
   protected async _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this.room._publishText(this.id, data, retain)
+    return await this.room.publishText(this.id, data, retain)
   }
 
   protected async _sendPublishBinary(framed: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this.room._publishBinaryFramed(framed, stream, lossy)
+    return await this.room.publishFrame(framed, stream, lossy)
   }
 
   protected _request(request: MemberMutationRequest): Promise<unknown> {
-    return this.room._request({ ...request, id: this.id })
+    return this.room.request({ ...request, id: this.id })
   }
 
   /** @internal The page's handle: it holds the room open until this member leaves, and nothing in the room reaches
@@ -238,7 +237,7 @@ class ClientRoomParticipant extends ClientParticipantBase {
       },
     })
     if (this._left) return handle
-    roomHolds.set(handle, joining)
+    holdRoomOpen(handle, joining)
     this.handle = new WeakRef(handle)
     return handle
   }
@@ -246,13 +245,13 @@ class ClientRoomParticipant extends ClientParticipantBase {
   override _onLeft(cause: LeaveCause): void {
     super._onLeft(cause)
     const handle = this.handle?.deref()
-    if (handle) roomHolds.delete(handle)
+    if (handle) releaseRoom(handle)
   }
 
   async leave(): Promise<void> {
     if (this._left) return
-    await this.room._request({ __r: 'req-leave', id: this.id })
-    this.room._dropParticipant(this.id)
+    await this.room.request({ __r: 'req-leave', id: this.id })
+    this.room.dropParticipant(this.id)
     this._onLeft({ type: 'left' })
   }
 }
@@ -302,29 +301,22 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     }
   }
 
-  /** It has no room of its own: the page's views of its room list the participants. */
+  /** It has no room of its own: the page's rooms of its room list the participants. */
   protected _shownParticipant(id: string): RemoteParticipant | null {
-    for (const room of this.pageViews()) {
-      const participant = room._state.shownParticipantOf(id)
+    for (const room of roomsOf(this.roomId)) {
+      const participant = room.state.shownParticipantOf(id)
       if (participant) return participant
     }
     return null
   }
 
   protected _followRoom(onChange: () => void): () => void {
-    const stops = Array.from(this.pageViews(), (room) => room._state.onChange(onChange))
+    const stops = Array.from(roomsOf(this.roomId), (room) => room.state.onChange(onChange))
     return () => stops.forEach((stop) => stop())
   }
 
   protected _deliverPrivate(field: string, from: string, data: unknown): void {
-    for (const room of this.pageViews()) room._state.applyPrivate(field, from, data)
-  }
-
-  private *pageViews(): Generator<ClientRoom> {
-    for (const view of roomViews) {
-      const room = view.deref()
-      if (room?.id === this.roomId) yield room
-    }
+    for (const room of roomsOf(this.roomId)) room.state.applyPrivate(field, from, data)
   }
 
   /** Its own writes and the room's `p-meta` both land here. */
