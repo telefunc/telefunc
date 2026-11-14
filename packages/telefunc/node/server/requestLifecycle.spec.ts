@@ -50,6 +50,7 @@ const telefunctions: Record<string, (...args: any[]) => Promise<unknown>> = {
   },
   onCircular: async () => circular(),
   onChannelThenCircular: async () => ({ channel: heldChannel(), bad: circular() }),
+  onSameChannelThenCircular: async () => ({ channel: opened.channel, bad: circular() }),
   onChannelThenThrowingGetter: async () => ({
     channel: heldChannel(),
     get broken() {
@@ -119,6 +120,23 @@ describe('a request ends its lifecycle once, however the call ends', () => {
       expect(ledgerTotal()).toBe(before)
     })
   }
+
+  test('onSameChannelThenCircular(): 500, and the channel an earlier call returned stays open', async () => {
+    await (await call('onChannel')).getBody()
+    const earlier = requests.at(-1)!
+    const channel = opened.channel!
+    const response = await call('onSameChannelThenCircular')
+    await response.getBody()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(response.statusCode).toBe(500)
+    const request = requests.at(-1)!
+    expect(request.closed).toBe(1)
+    expect(request.signal.aborted).toBe(true)
+    expect(channel.isClosed).toBe(false)
+    expect(earlier.closed).toBe(0)
+    await channel.close({ timeout: 0 })
+    expect(earlier.closed).toBe(1)
+  })
 
   test('onStreamThenCircular(): 500, and the stream it returned before the failure is cancelled', async () => {
     const response = await call('onStreamThenCircular')

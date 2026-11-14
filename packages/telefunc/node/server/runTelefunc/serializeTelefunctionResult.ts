@@ -80,7 +80,7 @@ function serializeTelefunctionResult(runContext: {
   const streamingValues: StreamingValueServer[] = []
   let nextStreamingIndex = 0
   /** What the response carries is registered once the response is sure to go; ending the response before that, as a
-   *  failed serialization does, ends what it would carry, which nothing else reached. */
+   *  failed serialization does, ends what only it would carry; a channel an earlier response carried stays open. */
   const registrations: (() => void)[] = []
   let goes = false
   const { valueShields } = runContext
@@ -91,9 +91,9 @@ function serializeTelefunctionResult(runContext: {
   }
   const mux = getChannelMux()
   function registerChannel(channel: ServerChannel<any, any>) {
-    channel._setResponseAbort(requestContext.responseAbort.abort)
-    channel._validators = makeValidators(channel, valueShields, shieldCtx)
     registrations.push(() => {
+      channel._setResponseAbort(requestContext.responseAbort.abort)
+      channel._validators = makeValidators(channel, valueShields, shieldCtx)
       mux.registerChannel(channel as ServerChannel<unknown, unknown>)
       channel.onClose(requestContext.trackPending())
     })
@@ -131,8 +131,11 @@ function serializeTelefunctionResult(runContext: {
         validators: makeValidators(value, valueShields, shieldCtx),
       }
     },
-    function onReplaced({ abort }) {
-      requestContext.responseAbort.onAbort(abort)
+    function onReplaced({ value, abort }) {
+      // Registered already (it has a replay buffer), so its page may hold it: it ends with this response only once that goes.
+      const carriedBefore = ServerChannel.isServerChannel(value) && value._replayBuffer !== null
+      if (carriedBefore) registrations.push(() => requestContext.responseAbort.onAbort(abort))
+      else requestContext.responseAbort.onAbort(abort)
     },
     responseTypes,
   )
