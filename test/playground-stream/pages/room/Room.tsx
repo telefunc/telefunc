@@ -2047,6 +2047,7 @@ function Room() {
         const { room, me } = await onJoinTailAsServerSelfGreeting(roomId, 'Me')
         const returned: unknown[] = []
         room.subscribe((data) => returned.push(data))
+        await me.publish('after')
         await other.publish('bye')
         await pollUntil(() => ({
           result: { earlier, returned, selfDelivery: me.selfDelivery },

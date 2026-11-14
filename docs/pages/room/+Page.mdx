@@ -173,7 +173,7 @@ room.onJoin(follow)
 
 Every read of a room answers at once: `room.getParticipants()`, `room.getParticipant(id)`, `room.meta`, `room.count`, `room.isClosed` and `room.snapshot()`. A page's room arrives with its participants and stays current while the page is connected. On the server, a room is as of your `await Room.get()`, and stays current from then on while you listen to it or have joined it; once you stop, it stays as it was then. To read it again later, call `Room.get()` again.
 
-> You also receive your own messages. To not receive them, join with `selfDelivery: false`, on the page (`room.join({ meta, selfDelivery: false })`) or on the server (`Room.join(id, { selfDelivery: false })`). A message your telefunction publishes as the participant before it returns it still reaches a room the page already has open.
+> You also receive your own messages. To not receive them, join with `selfDelivery: false`, on the page (`room.join({ meta, selfDelivery: false })`) or on the server (`Room.join(id, { selfDelivery: false })`). For a participant your telefunction joins, that holds from the moment the telefunction returns it: a message published as it before then may or may not reach a room the page already has open, so don't rely on that message being shown, or not shown, on the page.
 
 > `info.seq` numbers everyone's messages and the room's announcements in one order for the whole room, so it jumps over the ones this page doesn't receive: its own with `selfDelivery: false`, or those of participants it doesn't subscribe to. It never jumps over a lost message: a page never misses a message on no track (see <Link href="#remove-a-participant" />).
 

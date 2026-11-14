@@ -78,7 +78,9 @@ this one too, applies the event to its model, and its views tell their listeners
   (`context.page`), so one page holds the ends of all its calls and connections; a request that names no session is a
   page of its own. Each server-side room is its own page. No end of a page gets back the messages of a participant it
   holds that joined with `selfDelivery: false`, and a removal closes the views of each page that held the removed
-  participant and holds no other one of the room.
+  participant and holds no other one of the room. A delivery asks the page as it is then, so what such a participant
+  published before the response that placed it reaches the page's other ends only if it arrives first: on one server it
+  does, through Redis or another Durable Object it may not.
 - **demand**: who receives a member's track. Each process tells on the demand lane what each page here receives and
   who is at it (`PageIndex`), and the member's owner counts them (`RoomDemand`, `DemandExchange`, `GossipOutbox`).
 - **horizon**: `ROOM_HORIZON_MS`, how long Room waits for a lane to be ready, a delivery handoff or a lost lane's read.
