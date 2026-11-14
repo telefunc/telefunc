@@ -7,7 +7,6 @@ import { hasProp } from '../../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
 import { createStreamingReplacer } from '../../../wire-protocol/values/server/response/registry.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
-import { getChannelMux } from '../../../wire-protocol/channel/server/ChannelMux.js'
 import {
   buildShieldValidators,
   type ShieldValidators,
@@ -23,6 +22,7 @@ import { textEncoder } from '../../../wire-protocol/wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../../wire-protocol/wire/base64url.js'
 import type { StreamingProducer, StreamingValueServer } from '../../../wire-protocol/values/types.js'
 import { type RequestContext } from '../context/requestContext.js'
+import { carryChannel } from './carryChannel.js'
 import type { AbortError } from '../Abort.js'
 import type { Context } from '../context/context.js'
 import type { Readable } from 'node:stream'
@@ -88,13 +88,10 @@ function serializeTelefunctionResult(runContext: {
     telefuncFilePath: runContext.telefuncFilePath,
     shieldErrors: runContext.serverConfig.log.shieldErrors,
   }
-  const mux = getChannelMux()
   function registerChannel(channel: ServerChannel<any, any>) {
     registrations.push(() => {
-      channel._setResponseAbort(requestContext.responseAbort.abort)
       channel._validators = makeValidators(channel, valueShields, shieldCtx)
-      mux.registerChannel(channel as ServerChannel<unknown, unknown>)
-      channel.onClose(requestContext.trackPending())
+      carryChannel(channel, requestContext)
     })
   }
   function sendStream(createProducer: () => StreamingProducer) {

@@ -12,7 +12,7 @@ import { BodyReader } from '../../../wire-protocol/wire/BodyReader.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire-protocol/wire/requestKind.js'
 import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
-import { getChannelMux } from '../../../wire-protocol/channel/server/ChannelMux.js'
+import { carryChannel } from './carryChannel.js'
 import { ChannelStreamSource } from '../../../wire-protocol/values/ChannelStreamSource.js'
 import { GcRegistry } from '../../../utils/GcRegistry.js'
 import { wrapProxy } from '../../../utils/wrapProxy.js'
@@ -91,12 +91,9 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   }
 
   // Body + base reviver context (file handling differs between binary and text; channels are the same).
-  const mux = getChannelMux()
   const createChannel = <ClientToServer, ServerToClient>(opts: { id: string; ack?: boolean }) => {
     const channel = new ServerChannel<ClientToServer, ServerToClient>(opts)
-    mux.registerChannel(channel)
-    channel._setResponseAbort(requestContext.responseAbort.abort)
-    channel.onClose(requestContext.trackPending())
+    carryChannel(channel, requestContext)
     return channel
   }
   const { text, registerFile, consumeFile } = await readBody(request, readable, requestKind)
