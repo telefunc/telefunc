@@ -1,7 +1,8 @@
 export { roomRemoteReviver, roomTypes }
 
 import type { ClientReviverContext, ReviverType, TypeContract } from 'telefunc/client'
-import { ClientRoom, ClientStandaloneParticipant } from './room.js'
+import { ClientRoom } from './room.js'
+import { ClientStandaloneParticipant } from './ClientParticipant.js'
 import type { LocalParticipant, RemoteParticipant } from '../types.js'
 import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from '../shared/protocol.js'
 import { assert } from '../utils/assert.js'
