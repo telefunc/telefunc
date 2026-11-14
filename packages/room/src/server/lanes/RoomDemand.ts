@@ -5,7 +5,7 @@ import { EVERY_MEMBER, DEFAULT_TRACK, type EveryMember } from '../../shared/bina
 import { getOrCreate } from 'telefunc/__internal'
 import { ROOM_DEMAND_TTL_MS } from '../constants.js'
 import type { DemandEntry, RoomDemandPage, WhoEntry } from '../protocol.js'
-import { runAll, toggle } from '../../utils/sets.js'
+import { runAll, setChange, toggle } from '../../utils/sets.js'
 import { Slice } from '../../shared/Slice.js'
 import type { PublishedTracks } from './PublishedTracks.js'
 import { WhoScopes } from './WhoScopes.js'
@@ -372,31 +372,31 @@ class RoomDemand {
     const watch = this.watchOf(member, track)
     const told = getOrCreate(this.told, member, () => new Map())
     const was = told.get(track)
-    if (watch.count > 0) told.set(track, watch)
+    if (watch.watchers.size > 0 || watch.pages.size > 0) told.set(track, watch)
     else told.delete(track)
     if (told.size === 0) this.told.delete(member)
     const change = changeOf(was, watch)
     if (change !== null) owner.deliverDemand(member, track, change)
   }
 
-  /** Who receives the owned member's track: each page that receives it counts its participants but the member, or one
-   *  where it names none of them. A reporter's who-entry counts where its delivery entries say it receives the pair. */
+  /** Who receives the owned member's track: the participants each page that receives it names but the member, and the
+   *  pages that name none of them. A reporter's who-entry counts where its delivery entries say it receives the pair. */
   private watchOf(member: string, track: string): TrackWatch {
-    const pages = new Map<string, Set<string>>()
+    const people = new Map<string, Set<string>>()
     for (const scope of this.who.covering(member, track, this.publishedTracks.has(member, track))) {
       for (const { page, by, leases } of scope?.values() ?? []) {
         if (!someKey(leases, (instance) => this.receives(instance, member, track))) continue
-        const people = getOrCreate(pages, page, () => new Set())
-        if (by !== undefined && by !== member) people.add(by)
+        const named = getOrCreate(people, page, () => new Set())
+        if (by !== undefined && by !== member) named.add(by)
       }
     }
     const watchers = new Set<string>()
-    let count = 0
-    for (const people of pages.values()) {
-      count += Math.max(1, people.size)
-      for (const id of people) watchers.add(id)
+    const pages = new Set<string>()
+    for (const [page, named] of people) {
+      if (named.size === 0) pages.add(page)
+      for (const id of named) watchers.add(id)
     }
-    return { watchers, count }
+    return { watchers, pages }
   }
 
   /** Whether the reporter's delivery entries say it receives the owned member's track. */
@@ -430,13 +430,10 @@ const NO_WATCHES: ReadonlyMap<string, TrackWatch> = new Map()
 
 /** What changed from `was` to `now`, if anything did. */
 function changeOf(was: TrackWatch | undefined, now: TrackWatch): DemandChange | null {
-  const add = [...now.watchers].filter((id) => !was?.watchers.has(id))
-  const remove = [...(was?.watchers ?? [])].filter((id) => !now.watchers.has(id))
-  if (add.length === 0 && remove.length === 0 && now.count === (was?.count ?? 0)) return null
-  const change: DemandChange = { count: now.count }
-  if (add.length > 0) change.add = add
-  if (remove.length > 0) change.remove = remove
-  return change
+  const change: DemandChange = setChange(was?.watchers, now.watchers)
+  const pages = setChange(was?.pages, now.pages)
+  if (pages.add || pages.remove) change.pages = pages
+  return change.add || change.remove || change.pages ? change : null
 }
 
 /** Takes, renews or drops a reporter's lease on a who-entry, and whether the entry came or went. */

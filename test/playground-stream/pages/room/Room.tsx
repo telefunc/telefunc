@@ -122,7 +122,7 @@ import {
   onRenameWatcher,
   onWatcherLeaves,
 } from './Room.telefunc'
-import { defineParticipantField } from '@telefunc/room/__internal'
+import { defineParticipantField, watchersOf } from '@telefunc/room/__internal'
 import type { LocalParticipant } from '@telefunc/room/client'
 import { demandNames, type NamedDemand } from './demandNames'
 import { publishMine } from './publishMine'
@@ -1717,6 +1717,32 @@ function Room() {
         await onWatcherLeaves(roomId, 'Sam')
         await pollUntil(() => ({ result: { reads }, done: readsAt(reads, [cam([], 1)]) }))
         releaseMe()
+      })}
+
+      {scenario('watchers-union', null, 'Count who receives a group of tracks', async () => {
+        /** A page's `me` whose tracks `a` and `b` `watch` has received, once both are told. */
+        const publisher = async (label: string, watch: (roomId: string) => Promise<void>) => {
+          const [roomId, view] = await createRoom(label)
+          const releaseView = keepReachable(view)
+          const pub = await view.join({ meta: { name: 'Pub' } })
+          await watch(roomId)
+          await pollUntil(() => ({ done: pub.demand.length === 2 }))
+          return { roomId, pub, releaseView }
+        }
+        const one = await publisher('watchers-union-one', (roomId) => onWatchAsServer(roomId, [], ['a', 'b']))
+        const onePageOnBoth = watchersOf(one.pub, ['a', 'b']).watcherCount
+        const two = await publisher('watchers-union-two', async (roomId) => {
+          await onWatchAsServer(roomId, [], ['a'])
+          await onWatchAsServer(roomId, [], ['b'])
+        })
+        const twoPagesOnOneEach = watchersOf(two.pub, ['a', 'b']).watcherCount
+        await onWatchAsServer(two.roomId, ['Sam'], ['a'])
+        await pollUntil(() => ({ done: watchersOf(two.pub, ['a', 'b']).watchers.length === 1 }))
+        const { watchers, watcherCount } = watchersOf(two.pub, ['a', 'b'])
+        const third = { watchers: watchers.map((watcher) => watcher.meta.name), watcherCount }
+        setResult(JSON.stringify({ onePageOnBoth, twoPagesOnOneEach, third }))
+        one.releaseView()
+        two.releaseView()
       })}
 
       {scenario('watchers-upgrade', null, 'Watch while the connection upgrades', async () => {

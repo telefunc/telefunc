@@ -8,7 +8,7 @@ type DemandHolder = LocalParticipant & { _applyDemandState(tracks: TrackWatchSta
 
 /** The watchers of `me`'s default track, after the room reports `watchers` receiving it. */
 function watchersReported(me: DemandHolder, watchers: string[]): string[] {
-  me._applyDemandState([{ track: '', watchers, count: watchers.length }])
+  me._applyDemandState([{ track: '', watchers, pages: [] }])
   return me.demand[0]!.watchers.map((watcher) => watcher.id)
 }
 

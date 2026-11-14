@@ -1539,6 +1539,19 @@ function testRoomDemand() {
       expect(r.reads.at(-1)).deep.equal([cam([], 1)]) // the server room still receives it, with nobody to name
     },
   )
+  testRoomScenario<{
+    onePageOnBoth: number
+    twoPagesOnOneEach: number
+    third: { watchers: string[]; watcherCount: number }
+  }>(
+    'watchers-union',
+    'room: watchersOf() counts a page with nobody to name once over the tracks it receives, and a person beside the pages',
+    (r) => {
+      expect(r.onePageOnBoth).toBe(1)
+      expect(r.twoPagesOnOneEach).toBe(2)
+      expect(r.third).deep.equal({ watchers: ['Sam'], watcherCount: 3 })
+    },
+  )
   test("room: a view that watches beside the page's `me` while the page's connection upgrades to a WebSocket shows its publisher `me` throughout, never a watcher it can't name", async () => {
     const transports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!)
     if (!transports.includes('sse') || !transports.includes('ws')) return

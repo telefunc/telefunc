@@ -1,4 +1,4 @@
-export { ParticipantBase }
+export { ParticipantBase, watchersOf }
 export type { ParticipantBaseOptions }
 
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -39,6 +39,8 @@ type InboxTarget = { deliver(msg: InboxMessage): void; deliverAck(msg: InboxMess
 
 /** What `onChange` tells a change of. */
 type Shown = { meta: ParticipantMeta; connected: boolean; demand: readonly TrackDemand[] }
+/** Who receives some tracks, counted as `demand` counts one. */
+type TracksWatchers = { watchers: RemoteParticipant[]; watcherCount: number }
 const NO_DEMAND: readonly TrackDemand[] = Object.freeze([])
 
 type ParticipantBaseOptions = {
@@ -261,14 +263,30 @@ abstract class ParticipantBase implements LocalParticipant {
   }
 
   /** The entry of `track`, which is `was` while nothing in it changed. */
-  private demandEntry(track: string, { watchers: ids, count }: TrackWatch, was: TrackDemand | undefined) {
-    const watchers = this._shownParticipants(ids)
+  private demandEntry(track: string, watch: TrackWatch, was: TrackDemand | undefined) {
+    const { watchers, watcherCount } = this.watchersIn(watch)
     const same =
-      was?.watcherCount === count &&
+      was?.watcherCount === watcherCount &&
       was.watchers.length === watchers.length &&
       watchers.every((watcher, i) => watcher === was.watchers[i])
     if (same) return was
-    return Object.freeze({ track, watchers: Object.freeze(watchers), watcherCount: count })
+    return Object.freeze({ track, watchers: Object.freeze(watchers), watcherCount })
+  }
+
+  /** @internal Who receives any of `tracks`: each participant, and each page with nobody to name, once. */
+  _watchersOf(tracks: readonly string[]): TracksWatchers {
+    const union = { watchers: new Set<string>(), pages: new Set<string>() }
+    for (const track of tracks) {
+      const watch = this._watches.get(trackKey(track))
+      for (const id of watch?.watchers ?? []) union.watchers.add(id)
+      for (const page of watch?.pages ?? []) union.pages.add(page)
+    }
+    return this.watchersIn(union)
+  }
+
+  /** The participants `watch` names as its room lists them, and how many receive the track. */
+  private watchersIn({ watchers, pages }: TrackWatch): TracksWatchers {
+    return { watchers: this._shownParticipants(watchers), watcherCount: watchers.size + pages.size }
   }
 
   /** @internal Who receives each of its tracks, as the room told it. */
@@ -364,4 +382,10 @@ abstract class ParticipantBase implements LocalParticipant {
   private invoke<Args extends unknown[]>(cb: (...args: Args) => unknown, ...args: Args): void {
     invokeChannelListener(cb, args, (err) => this._reportError(err))
   }
+}
+
+/** Who receives any of your `tracks`, such as the tracks of one media source: each person, and each page or server-side
+ *  room with nobody to name, once. */
+function watchersOf(me: LocalParticipant, tracks: readonly string[]): TracksWatchers {
+  return (me as ParticipantBase)._watchersOf(tracks)
 }

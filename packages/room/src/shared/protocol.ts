@@ -34,6 +34,7 @@ export type {
 
 import { isRecord, ownLeaveCause, removedCause } from './arguments.js'
 import type { TrackKey } from './binary.js'
+import type { SetChange } from '../utils/sets.js'
 import type { LeaveCause, ParticipantMeta } from '../types.js'
 
 type MemberSnapshot = {
@@ -117,12 +118,13 @@ type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[]; part: number;
 type RoomJoinedEvent = { __r: 'joined'; reqId: number; id: string }
 
 /** Who receives one of a member's tracks changed: the participants it names from now on (`add`) and no longer
- *  (`remove`), and how many receive it (`count`), 0 once nobody does. */
-type DemandChange = { add?: string[]; remove?: string[]; count: number }
-/** Who receives one of a member's tracks: the participants named, by id, and how many receive it. */
-type TrackWatch = { readonly watchers: ReadonlySet<string>; readonly count: number }
+ *  (`remove`), and likewise the pages that receive it with nobody to name (`pages`). Nobody receives it once it names
+ *  no participant and no page. */
+type DemandChange = SetChange<string> & { pages?: SetChange<string> }
+/** Who receives one of a member's tracks: the participants named, by id, and the pages with nobody to name, by token. */
+type TrackWatch = { readonly watchers: ReadonlySet<string>; readonly pages: ReadonlySet<string> }
 /** A track's `TrackWatch`, as a client that attaches is sent it. */
-type TrackWatchState = { track: TrackKey; watchers: string[]; count: number }
+type TrackWatchState = { track: TrackKey; watchers: string[]; pages: string[] }
 
 /** Who receives each of a member's own tracks, told as it changes; a client that attaches again gets the whole state,
  *  since its offline buffer may have dropped changes. */
@@ -238,7 +240,7 @@ function inboxMessageFromWire(dm: WireDm): InboxMessage {
 
 /** Who receives each track, whole, as a client that attaches is sent it. */
 function watchStates(watches: ReadonlyMap<TrackKey, TrackWatch>): TrackWatchState[] {
-  return Array.from(watches, ([track, { watchers, count }]) => ({ track, watchers: [...watchers], count }))
+  return Array.from(watches, ([track, { watchers, pages }]) => ({ track, watchers: [...watchers], pages: [...pages] }))
 }
 
 function dmNotice(msg: InboxMessage): Extract<ParticipantStubNotice, { __r: 'dm' }> {

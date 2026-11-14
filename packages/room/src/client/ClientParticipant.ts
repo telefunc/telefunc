@@ -20,6 +20,7 @@ import { CLIENT_ROOM_BUG_MESSAGE, roomResultValue } from '../shared/errors.js'
 import { ParticipantBase, type ParticipantBaseOptions } from '../shared/ParticipantBase.js'
 import type { RoomState } from '../shared/state.js'
 import { heldConnectionChanged, holdMember, holdRoomOpen, letGoOfMember, releaseRoom } from './page.js'
+import { withChange } from '../utils/sets.js'
 import type {
   BinaryPublishOptions,
   LeaveCause,
@@ -123,22 +124,20 @@ class ClientParticipant extends ParticipantBase {
   }
 
   /** @internal Who receives one of its tracks changed. */
-  _applyDemand(track: TrackKey, { add, remove, count }: DemandChange): void {
-    if (count === 0) {
-      this.watches.delete(track)
-    } else {
-      const watchers = new Set(this.watches.get(track)?.watchers)
-      for (const id of add ?? []) watchers.add(id)
-      for (const id of remove ?? []) watchers.delete(id)
-      this.watches.set(track, { watchers, count })
-    }
+  _applyDemand(track: TrackKey, change: DemandChange): void {
+    const was = this.watches.get(track)
+    const watch = { watchers: withChange(was?.watchers, change), pages: withChange(was?.pages, change.pages) }
+    if (watch.watchers.size === 0 && watch.pages.size === 0) this.watches.delete(track)
+    else this.watches.set(track, watch)
     this._changed()
   }
 
   /** @internal Who receives each of its tracks, whole, as a holder hears it when it attaches again. */
   _applyDemandState(tracks: TrackWatchState[]): void {
     this.watches.clear()
-    for (const { track, watchers, count } of tracks) this.watches.set(track, { watchers: new Set(watchers), count })
+    for (const { track, watchers, pages } of tracks) {
+      this.watches.set(track, { watchers: new Set(watchers), pages: new Set(pages) })
+    }
     this._changed()
   }
 

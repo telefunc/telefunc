@@ -82,7 +82,8 @@ this one too, applies the event to its model, and its views tell their listeners
   published before the response that placed it reaches the page's other ends only if it arrives first: on one server it
   does, through Redis or another Durable Object it may not.
 - **demand**: who receives a member's track. Each process tells on the demand lane what each page here receives and
-  who is at it (`PageIndex`), and the member's owner counts them (`RoomDemand`, `DemandExchange`, `GossipOutbox`).
+  who is at it (`PageIndex`), and the member's owner tells the member the people named and, by its token, each page with
+  nobody to name (`RoomDemand`, `DemandExchange`, `GossipOutbox`); the member's side counts them.
 - **horizon**: `ROOM_HORIZON_MS`, how long Room waits for a lane to be ready, a delivery handoff or a lost lane's read.
 - **plane**: what Room's server code calls instead of the driver: its writes' orderings checked, its subscriptions
   shared (`backend/RoomPlane.ts`). The **kit** is the lane keys and page sizes a driver is built with.
