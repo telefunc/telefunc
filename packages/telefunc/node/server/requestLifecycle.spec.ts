@@ -1,10 +1,10 @@
-import { describe, expect, test, vi } from 'vitest'
+import { describe, expect, onTestFinished, test, vi } from 'vitest'
 
 import { serve } from './telefunc.js'
 import { config } from './serverConfig.js'
 import { shield } from './shield.js'
 import { Abort } from './Abort.js'
-import { Channel } from '../../wire-protocol/channel/server/ServerChannel.js'
+import { Channel, ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
 
 /** Each request's lifecycle, as `runTelefunc` creates it: how often its `onClose()` callbacks ran, and its `signal`. */
 const requests = vi.hoisted(() => [] as { closed: number; signal: AbortSignal }[])
@@ -216,5 +216,14 @@ describe('a request ends its lifecycle once, however the call ends', () => {
     await new Promise((resolve) => setTimeout(resolve, 10))
     expect(request.closed).toBe(1)
     expect(request.signal.aborted).toBe(true)
+  })
+
+  test('onText() with a function argument: 422, and the function it was passed closes at once', async () => {
+    const close = vi.spyOn(ServerChannel.prototype, 'close')
+    onTestFinished(() => close.mockRestore())
+    const channelId = crypto.randomUUID()
+    const response = await call('onText', [1, `!TelefuncFunction:${JSON.stringify({ channelId })}`])
+    expect(response.statusCode).toBe(422)
+    expect(close.mock.contexts.map((channel) => (channel as ServerChannel).id)).toEqual([channelId])
   })
 })

@@ -28,10 +28,10 @@ type RequestContext = {
   signal: AbortSignal
   /** Response-wide abort source used by returned values and response transports. */
   responseAbort: ResponseAbortSource
-  /** Fires once the telefunction has thrown, `Abort()` included; at once if it already has. */
-  onTopLevelError: (cb: () => void) => void
-  /** @internal Called by the framework after executeTelefunction catches a top-level throw. */
-  markTopLevelError: () => void
+  /** Fires once the call answers with a status other than 200; at once if it already has. */
+  onCallFailed: (cb: () => void) => void
+  /** @internal Called by `runTelefunc` once the call answered with a status other than 200. */
+  markCallFailed: () => void
   /** Register a callback that fires when the request lifecycle ends for any reason
    *  (response sent, stream complete, or client disconnect). Fires exactly once. */
   onClose: (cb: () => void) => void
@@ -54,17 +54,17 @@ function createRequestContext(request: Request): RequestContext {
     closeCallbacks.length = 0
   }
 
-  const errorCallbacks: Array<() => void> = []
-  let errored = false
-  const fireError = () => {
-    if (errored) return
-    errored = true
-    for (const cb of errorCallbacks) {
+  const failedCallbacks: Array<() => void> = []
+  let failed = false
+  const fireFailed = () => {
+    if (failed) return
+    failed = true
+    for (const cb of failedCallbacks) {
       try {
         cb()
       } catch {}
     }
-    errorCallbacks.length = 0
+    failedCallbacks.length = 0
   }
 
   const closeController = new AbortController()
@@ -93,14 +93,14 @@ function createRequestContext(request: Request): RequestContext {
     abortSignal: request.signal,
     signal: closeController.signal,
     responseAbort,
-    onTopLevelError(cb) {
-      if (errored) {
+    onCallFailed(cb) {
+      if (failed) {
         cb()
         return
       }
-      errorCallbacks.push(cb)
+      failedCallbacks.push(cb)
     },
-    markTopLevelError: fireError,
+    markCallFailed: fireFailed,
     onClose(cb) {
       if (closed) {
         invokeCloseCallback(cb)

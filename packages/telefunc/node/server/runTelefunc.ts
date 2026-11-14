@@ -262,18 +262,22 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
   // sync access guarded by `useNodeStream`).
   await loadStreamNodeModuleOnce()
   const requestContext = createRequestContext(httpRequestResolved.request)
+  let httpResponse: HttpResponse | undefined
   try {
-    return await runTelefunc_(httpRequestResolved, requestContext)
+    httpResponse = await runTelefunc_(httpRequestResolved, requestContext)
   } catch (err: unknown) {
     handleTelefunctionBug(err)
-    return createHttpResponse({
+    httpResponse = createHttpResponse({
       ...serverError,
       err,
     })
   } finally {
+    // A call that answers without a value ends the live values it was passed as arguments.
+    if (httpResponse?.statusCode !== STATUS_CODE_SUCCESS) requestContext.markCallFailed()
     // However the call ended: what its response still sends, a stream or a channel, holds the request from here on.
     requestContext.markComplete()
   }
+  return httpResponse
 }
 
 async function runTelefunc_(
@@ -384,10 +388,6 @@ async function runTelefunc_(
     objectAssign(runContext, {
       valueShields: resolveReturnShields(runContext.telefunctionReturn, runContext.telefunction),
     })
-  }
-
-  if (runContext.telefunctionHasErrored || runContext.telefunctionAborted) {
-    runContext.requestContext.markTopLevelError()
   }
 
   if (runContext.telefunctionHasErrored) {

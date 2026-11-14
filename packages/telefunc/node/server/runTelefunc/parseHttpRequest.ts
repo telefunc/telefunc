@@ -142,7 +142,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
           const wrapper = wrapProxy(value)
           // Forgotten once the call's channels have closed, so the scan doesn't wait for a collection to stop.
           requestContext.onClose(globalObject.gcRegistry.register(wrapper, close))
-          requestContext.onTopLevelError(close)
+          requestContext.onCallFailed(close)
           requestContext.responseAbort.onAbort(abort)
           return wrapper
         },
