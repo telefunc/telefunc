@@ -562,8 +562,10 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.authority.memberMetaGap()
   }
 
-  /** Every leave the model applies, event or reconcile, runs the member's cleanup. */
+  /** Every leave the model applies, event or reconcile, runs the member's cleanup. A removal then closes the room's
+   *  views at each page here it was held at, unless that page holds another of the room's participants. */
   onMemberLeft(id: string, cause: LeaveCause, hidden: boolean | null): void {
+    const removedFrom = cause.type === 'removed' ? this.pages.pagesHolding(id) : []
     this.acks.settleMember(id, DM_FAILURE.left) // strand no waiter on a gone sender or recipient
     this.pages.memberChanged(id)
     this.attributionChanged()
@@ -572,6 +574,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     if (owner !== undefined) {
       this.disown(id, owner)
       owner.memberLeft(id, cause)
+      this.pageEndChanged(owner.local)
       this.reconsider(owner)
     }
     // Every leave of a known member reaches the clients here, once, whatever applied it.
@@ -585,6 +588,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
       if (stub.forgetWantsOf(id)) this.lanePlan.holderChanged(stub, [id])
     }
     this.lanePlan.memberReleased(id)
+    this.pages.closeRemoved(removedFrom)
   }
 
   /** The room closed. Runs once, after the `closed` event has been applied and relayed. */

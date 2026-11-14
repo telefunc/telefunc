@@ -400,8 +400,9 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     void this.writes.setMemberConnected(id, connected).catch(reportRoomError)
   }
 
+  /** The stub's view ended, or its page's last participant of the room was removed: it relays nothing more. */
   detachStub(stub: RoomStub): void {
-    this.stubs.delete(stub)
+    if (!this.stubs.delete(stub)) return
     stub.endTail()
     stub.replay.dropHolds()
     this.replica.detachStub(this, stub)

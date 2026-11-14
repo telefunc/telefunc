@@ -6,6 +6,7 @@ import { ROOM_TRACK_WANTS_MAX, ROOM_VIEW_MEMBERS_MAX } from '../shared/constants
 import {
   assertProtocol,
   parsePeerText,
+  reconnectWindow,
   type PublishBody,
   type BroadcastEndOwner,
   type BroadcastKind,
@@ -244,6 +245,14 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
 
   atPage(suppressed: ReadonlySet<string>): void {
     this.suppressed = suppressed
+  }
+
+  /** The view closes, and relays nothing from now on. */
+  pageRemoved(): void {
+    this.end.deliver(unorderedEventBody({ __r: 'closed' }))
+    this.room.detachStub(this)
+    // A client back while its channel still holds it gets the close.
+    void this.end.close({ timeout: reconnectWindow() }).catch(() => {})
   }
 
   private requireMember(id: string): string {

@@ -20,10 +20,12 @@ interface PageEnd {
   selfSuppressed?(): Iterable<string>
   /** Its page's members whose own messages it doesn't get back: one set for every end of the page, kept current. */
   atPage?(suppressed: ReadonlySet<string>): void
+  /** Its page's last participant of the room was removed. */
+  pageRemoved?(): void
 }
 
-/** A page's ends here, the members whose own messages none of them gets back, the token its who-entries name it by and
- *  what it was last reported with. A page joined into another names that one (`into`). */
+/** A page's ends here, the participants they hold, those whose own messages none of them gets back, the token its
+ *  who-entries name it by and what it was last reported with. A page joined into another names that one (`into`). */
 type Page = {
   token: string
   ends: Set<PageEnd>
@@ -35,7 +37,8 @@ type Page = {
 
 type PageIndexOptions = { model: Pick<RoomModel, 'memberHidden'> }
 
-/** The pages holding this room here, which decide whose own messages a page gets back and whom a watch is told as.
+/** The pages holding this room here, which decide whose own messages a page gets back, which pages a removal closes,
+ *  and whom a watch is told as.
  *  A key names a page: the response that carried an end, until the end attaches, then each connection an end attached
  *  on. Two keys that ever named one end name one page from then on, so a page's ends returned by separate telefunctions
  *  are one page once they attached, and a reconnect or an upgrade keeps the page. A server-side room is its own page.
@@ -44,7 +47,7 @@ type PageIndexOptions = { model: Pick<RoomModel, 'memberHidden'> }
 class PageIndex {
   private readonly pageOf = new Map<PageEnd, Page>()
   private readonly pageOfKey = new WeakMap<object, Page>()
-  /** The pages each member was held at when they were last reported, which its join and leave report again. */
+  /** The pages holding each member, which its join and leave report again. */
   private readonly heldAt = new Map<string, Set<Page>>()
   private readonly changedPages = new Set<Page>()
   private readonly model: PageIndexOptions['model']
@@ -93,6 +96,19 @@ class PageIndex {
     for (const page of this.heldAt.get(member) ?? []) this.changedPages.add(page)
   }
 
+  /** The pages holding the member now. */
+  pagesHolding(member: string): Page[] {
+    return [...(this.heldAt.get(member) ?? [])]
+  }
+
+  /** Closes the room's views at each of `pages` holding no participant now: the last one it held was removed. */
+  closeRemoved(pages: Page[]): void {
+    for (const page of pages) {
+      if (page.held.size > 0) continue
+      for (const end of [...page.ends]) end.pageRemoved?.()
+    }
+  }
+
   /** Reports each changed page's who-entries again, a page per step. */
   *report(report: Pick<DemandReport, 'setWho'>): Generator<void> {
     for (const page of this.changedPages) {
@@ -109,14 +125,14 @@ class PageIndex {
     end.atPage?.(page.suppressed)
     for (const member of page.suppressed) suppressed.add(member)
     this.changedPages.add(page)
-    this.resuppress(page, suppressed)
+    this.readHolders(page, suppressed)
     return page
   }
 
   private pageChanged(page: Page): Set<string> {
     const suppressed = new Set<string>()
     this.changedPages.add(page)
-    this.resuppress(page, suppressed)
+    this.readHolders(page, suppressed)
     return suppressed
   }
 
@@ -124,11 +140,8 @@ class PageIndex {
   private join(a: Page, b: Page, suppressed: Set<string>): Page {
     if (a === b) return a
     const [page, joined] = a.ends.size >= b.ends.size ? [a, b] : [b, a]
-    for (const member of page.suppressed) suppressed.add(member)
-    for (const member of joined.suppressed) {
-      suppressed.add(member)
-      page.suppressed.add(member)
-    }
+    // Each end of either page drops, or gets back, what the other page dropped.
+    for (const member of [...page.suppressed, ...joined.suppressed]) suppressed.add(member)
     for (const end of joined.ends) {
       this.pageOf.set(end, page)
       page.ends.add(end)
@@ -139,13 +152,23 @@ class PageIndex {
     // The joined page's report retracts its entries.
     this.changedPages.add(joined)
     this.changedPages.add(page)
+    this.readHolders(joined, suppressed)
+    this.readHolders(page, suppressed)
     return page
   }
 
-  /** Keeps the page's set the members its ends hold with `selfDelivery: false`, adding each it changes to `changed`. */
-  private resuppress(page: Page, changed: Set<string>): void {
+  /** Reads whom the page's ends hold, and keeps its set the members they hold with `selfDelivery: false`, adding each
+   *  member that set gains or loses to `changed`. */
+  private readHolders(page: Page, changed: Set<string>): void {
+    const held = new Set<string>()
     const suppressed = new Set<string>()
-    for (const end of page.ends) for (const member of end.selfSuppressed?.() ?? []) suppressed.add(member)
+    for (const end of page.ends) {
+      for (const member of end.heldMembers()) held.add(member)
+      for (const member of end.selfSuppressed?.() ?? []) suppressed.add(member)
+    }
+    for (const member of page.held) if (!held.has(member)) toggleEntry(this.heldAt, member, page, false)
+    for (const member of held) toggleEntry(this.heldAt, member, page, true)
+    page.held = held
     for (const member of page.suppressed) {
       if (suppressed.has(member)) continue
       page.suppressed.delete(member)
@@ -160,13 +183,8 @@ class PageIndex {
 
   private reportPage(page: Page, report: Pick<DemandReport, 'setWho'>): void {
     for (const entry of page.told) report.setWho(entry, false)
-    const held = new Set<string>()
-    for (const end of page.ends) for (const member of end.heldMembers()) held.add(member)
-    for (const member of page.held) if (!held.has(member)) toggleEntry(this.heldAt, member, page, false)
-    for (const member of held) toggleEntry(this.heldAt, member, page, true)
-    page.held = held
     // A hidden participant, and one whose join hasn't applied here yet, is never named.
-    const named = [...held].filter((member) => this.model.memberHidden(member) === false)
+    const named = [...page.held].filter((member) => this.model.memberHidden(member) === false)
     const who = named.length > 0 ? named.map((by) => ({ page: page.token, by })) : [{ page: page.token }]
     page.told = []
     for (const end of page.ends) {

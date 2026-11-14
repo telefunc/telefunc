@@ -149,6 +149,8 @@ let startAwayJoin: (() => void) | null = null
 let goAway: (() => void) | null = null
 /** The check the `member-keeps-room` card runs when its second button is clicked. */
 let checkKeptMember: (() => void) | null = null
+/** The removal the `removed-identity` card makes when its second button is clicked. */
+let removeByIdentity: (() => void) | null = null
 /** The publish the `self-upgrade` card makes when its second button is clicked. */
 let publishUpgradedSelf: (() => void) | null = null
 /** The check the `watchers-upgrade` card runs when its second button is clicked. */
@@ -2046,6 +2048,94 @@ function Room() {
             done: updates.includes('updated'),
           }
         })
+      })}
+
+      {scenario('removed', "Remove the page's participant", 'Alone, then one of two', async () => {
+        /** The view's messages and closes, and the room as it is. */
+        const watch = (room: RoomView) => {
+          const seen = { text: [] as unknown[], closes: 0 }
+          room.subscribe((data) => seen.text.push(data))
+          room.onClose(() => seen.closes++)
+          return () => ({ ...seen, isClosed: room.isClosed })
+        }
+
+        const aloneId = await createRoomId('removed')
+        await onWatchRoom(aloneId)
+        const alone = await onGetRoom(aloneId)
+        const me = await onJoinAsServer(aloneId, 'Me')
+        let myCause: unknown = null
+        me.onLeave((cause) => (myCause = cause))
+        // A participant the page doesn't hold stays in the room, and leaves only the closed view.
+        let pubCause: unknown = null
+        let pubJoined = false
+        alone.onJoin((member) => {
+          if (member.meta.name !== 'Pub') return
+          pubJoined = true
+          member.onLeave((cause) => (pubCause = cause))
+        })
+        await onPublishOnServer(aloneId)
+        await pollUntil(() => ({ done: pubJoined }))
+        const aloneSeen = watch(alone)
+        // A same-channel ack orders the view's subscription before the server's publish.
+        await (await alone.join()).leave()
+        await onRoomBurst(aloneId, 1, 0)
+        await pollUntil(() => ({ done: aloneSeen().text.length === 1 }))
+        await onKick(aloneId, me.id)
+        await pollUntil(() => ({ done: alone.isClosed }))
+        await onRoomBurst(aloneId, 1, 0)
+        await pollUntil(async () => ({
+          done: (await onGetWatched(aloneId)).length === 2 && (alone.isClosed || aloneSeen().text.length === 2),
+        }))
+
+        const twoId = await createRoomId('removed')
+        const two = await onGetRoom(twoId)
+        const gone = await onJoinAsServer(twoId, 'Gone')
+        const stays = await onJoinAsServer(twoId, 'Stays')
+        const twoSeen = watch(two)
+        await (await two.join()).leave()
+        await onKick(twoId, gone.id)
+        await stays.publish('still here')
+        await pollUntil(() => ({ done: twoSeen().text.includes('still here') }))
+        setResult(JSON.stringify({ alone: { ...aloneSeen(), myCause, pubCause }, two: twoSeen() }))
+      })}
+
+      {scenario('removed-identity', null, 'Watch a room whose participant is removed by identity', async () => {
+        const roomId = await createRoomId('removed-identity')
+        const room = await onGetRoom(roomId)
+        const text: unknown[] = []
+        room.subscribe((data) => text.push(data))
+        const { promise: removing, resolve } = Promise.withResolvers<void>()
+        removeByIdentity = resolve
+        setResult(JSON.stringify({ roomId }))
+        await removing
+        await onKickByIdentity(roomId, 'user:Multi')
+        await onRoomBurst(roomId, 1, 0)
+        await pollUntil(() => ({ result: { text, isClosed: room.isClosed }, done: text.length === 1 }))
+      })}
+      <button id="test-room-removed-identity-remove" onClick={() => removeByIdentity?.()}>
+        Remove Multi
+      </button>
+      {scenario('removed-identity-held', null, 'Hold Multi in the room named in the URL', async () => {
+        const roomId = new URLSearchParams(location.search).get('roomId')!
+        const room = await onGetRoom(roomId)
+        const me = await onJoinAsServer(roomId, 'Multi')
+        keepReachable(room)
+        keepReachable(me)
+        const seen = { text: [] as unknown[], closes: 0, cause: null as unknown }
+        const show = () => setResult(JSON.stringify({ ...seen, isClosed: room.isClosed }))
+        room.subscribe((data) => {
+          seen.text.push(data)
+          show()
+        })
+        room.onClose(() => {
+          seen.closes++
+          show()
+        })
+        me.onLeave((cause) => {
+          seen.cause = cause
+          show()
+        })
+        setResult(JSON.stringify({ ready: true }))
       })}
 
       {scenario('identity', 'Kick by identity, onEmpty', 'Remove by identity', async () => {

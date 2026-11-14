@@ -85,6 +85,9 @@ type AdminResult = {
   count: number
 }
 
+/** What a view received after its page's participant was removed, and how often it closed. */
+type RemovedView = { text: string[]; closes: number; isClosed: boolean }
+
 /** What a view received of track `cam` and of messages. */
 type OwnTrack = { text: string[]; frames: number[] }
 
@@ -801,6 +804,57 @@ function testRoom() {
     expect([...r.listed].sort()).deep.equal([...r.expectedIds].sort())
     expect(r.sameId).toBe(true)
     expect(r.sameCount).toBe(1) // ...with exactly its original member preserved
+  })
+  testRoomScenario<{ alone: RemovedView & { myCause: unknown; pubCause: unknown }; two: RemovedView }>(
+    'removed',
+    "room: a removed participant's page stops receiving the room it got from another call, and a page holding another participant keeps it",
+    (r) => {
+      const removed = { type: 'removed', reason: 'be nice' }
+      // Its participant leaves with the removal, the view gets nothing after it, and another participant on the view
+      // leaves it as a closed view's do, not as removed.
+      expect(r.alone).deep.equal({
+        text: ['0'],
+        closes: 1,
+        isClosed: true,
+        myCause: removed,
+        pubCause: { type: 'closed' },
+      })
+      expect(r.two).deep.equal({ text: ['still here'], closes: 0, isClosed: false })
+    },
+  )
+  test('room: a removal by identity closes the room on each tab holding that participant, and a tab that never joined keeps receiving', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-removed-identity')
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-removed-identity:/)
+    })
+    const context = await page.context().browser()!.newContext()
+    const tabs = [await context.newPage(), await context.newPage()]
+    const tabResult = async (tab: (typeof tabs)[number]) => JSON.parse((await tab.textContent('#room-result'))!)
+    try {
+      for (const tab of tabs) {
+        await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(roomId)}`, undefined, tab)
+        await tab.click('#test-room-removed-identity-held')
+        await autoRetry(async () => expect(await tabResult(tab)).deep.equal({ ready: true }))
+      }
+      await page.click('#test-room-removed-identity-remove')
+      await autoRetry(async () => expect(await getResult('#room-result')).deep.equal({ text: ['0'], isClosed: false }))
+      for (const tab of tabs) {
+        await autoRetry(async () =>
+          expect(await tabResult(tab)).deep.equal({
+            text: [],
+            closes: 1,
+            cause: { type: 'removed', reason: 'multi-tab' },
+            isClosed: true,
+          }),
+        )
+      }
+    } finally {
+      await context.close()
+      await page.goto('about:blank')
+    }
   })
   testRoomScenario<{ cause: { type: string; reason?: unknown } | null; count: number; empty: boolean }>(
     'identity',

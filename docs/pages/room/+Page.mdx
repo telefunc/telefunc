@@ -173,7 +173,7 @@ room.onJoin(follow)
 
 Every read of a room answers at once: `room.getParticipants()`, `room.getParticipant(id)`, `room.meta`, `room.count`, `room.isClosed` and `room.snapshot()`. A page's room arrives with its participants and stays current while the page is connected. On the server, a room is as of your `await Room.get()`, and stays current from then on while you listen to it or have joined it. To read it again later, call `Room.get()` again.
 
-> You also receive your own messages. To not receive them, join with `room.join({ meta, selfDelivery: false })`.
+> You also receive your own messages. To not receive them, join with `selfDelivery: false`, on the page (`room.join({ meta, selfDelivery: false })`) or on the server (`Room.join(id, { selfDelivery: false })`).
 
 > `info.seq` numbers everyone's messages and the room's announcements in one order for the whole room, so it jumps over the ones this page doesn't receive: its own with `selfDelivery: false`, or those of participants it doesn't subscribe to. It never jumps over a lost message: a page never misses a message on no track (see <Link href="#remove-a-participant" />).
 
@@ -348,6 +348,10 @@ me.onLeave((cause) => {
   if (cause.type === 'disconnected') rejoin() // automatic reconnection gave up: call the telefunction that returned the room again
 })
 ```
+
+The removed participant's page stops receiving the room: `room.isClosed` is `true` and `room.onClose()` runs, unless the page holds another participant of the room. A page that never joined keeps receiving.
+
+> Removing doesn't keep anyone out: a telefunction that returns the room again lets them back in. Refuse them there, or in `onBeforeJoin()` (see <Link href="#control-who-can-join-and-post" />).
 
 A page that falls behind what the server can hold for it gets `'disconnected'`. It never misses a message, a join, a leave, a `meta` change or a frame, except a frame published with `lossy: true`, where it skips to the newest frame (see <Link href="#stream-audio-or-video" />).
 
@@ -646,7 +650,7 @@ Server-side.
 | `subscribe(cb, { track? }?)` / `subscribeBinary(cb, { track? }?)` | Everyone's messages, or those on `track` / binary frames: `cb(message, info, from)`, with `info` `{ seq, timestamp }`, plus `{ track, meta }` on a track. |
 | `messages({ signal? }?)` | Everyone's messages and binary frames, to read with `for await`: each `{ type, data, info, from }`. |
 | `onAnnounce(cb)` | `Room.announce()` messages: `cb(message, info)`. |
-| `onEmpty(cb)` / `onClose(cb)` | The last participant left / the room closed, with `cause.type`: `'closed'`, or on a page `'disconnected'`. |
+| `onEmpty(cb)` / `onClose(cb)` | The last participant left / the room closed, or the page's last participant of it was removed, with `cause.type`: `'closed'`, or on a page `'disconnected'`. |
 
 Properties: `id`, `meta`, `count`, `isEmpty`, `isClosed`.
 

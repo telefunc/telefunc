@@ -49,6 +49,8 @@ class RoomParticipantStub implements BroadcastEndOwner {
   private readonly participant: ServerLocalParticipant
   private readonly publishShield: ShieldValidator | undefined
   private readonly dmReplies = new PendingDmReplies()
+  /** Whether its participant left, which its page then holds no more. */
+  private left = false
 
   constructor({ participant, end, publishShield }: RoomParticipantStubOptions) {
     this.participant = participant
@@ -118,9 +120,9 @@ class RoomParticipantStub implements BroadcastEndOwner {
       rewound: () => this.notify({ __r: 'rewound' }),
     })
 
-    let left = false
     const unlistenLeave = participant.onLeave((cause) => {
-      left = true
+      this.left = true
+      participant.room.replica.pageEndChanged(this)
       this.notify({ __r: 'left', ...leaveCauseToWire(cause) })
       // A client back while its channel still holds it gets its leave.
       void this.end.close({ timeout: reconnectWindow() }).catch(() => {})
@@ -133,7 +135,7 @@ class RoomParticipantStub implements BroadcastEndOwner {
       unlistenMeta()
       unlistenLeave()
       this.dmReplies.drop()
-      if (!left) void participant._releaseHolder()
+      if (!this.left) void participant._releaseHolder()
     })
   }
 
@@ -142,13 +144,13 @@ class RoomParticipantStub implements BroadcastEndOwner {
     this.notify({ __r: 'demand', track, ...change })
   }
 
-  /** Its participant, who is at its page. */
+  /** Its participant, who is at its page until it leaves. */
   heldMembers(): string[] {
-    return [this.participant.id]
+    return this.left ? [] : [this.participant.id]
   }
 
   selfSuppressed(): string[] {
-    return this.participant.selfDelivery ? [] : [this.participant.id]
+    return this.left || this.participant.selfDelivery ? [] : [this.participant.id]
   }
 
   /** Its participant's inbox forwards here. */
