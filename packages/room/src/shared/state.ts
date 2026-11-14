@@ -332,10 +332,14 @@ class RoomState {
     return value
   }
 
-  /** The member as `snapshot()` lists it now, or `null` where it doesn't: a hidden member is never listed. */
-  shownParticipantOf(id: string): RemoteParticipant | null {
-    const entry = this.model.entry(id)
-    return entry && !entry.hidden ? this.shownParticipant(entry) : null
+  /** The members of `ids` as `snapshot()` lists them now, in its order: a hidden member is never listed. */
+  shownParticipantsOf(ids: ReadonlySet<string>): RemoteParticipant[] {
+    const shown: RemoteParticipant[] = []
+    for (const entry of this.model.entries()) {
+      if (shown.length === ids.size) break
+      if (ids.has(entry.id) && !entry.hidden) shown.push(this.shownParticipant(entry))
+    }
+    return shown
   }
 
   /** The member's remote with its fields as they are now, the same object until they change. */

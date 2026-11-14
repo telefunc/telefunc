@@ -262,13 +262,7 @@ abstract class ParticipantBase implements LocalParticipant {
 
   /** The entry of `track`, which is `was` while nothing in it changed. */
   private demandEntry(track: string, { watchers: ids, count }: TrackWatch, was: TrackDemand | undefined) {
-    const watchers: RemoteParticipant[] = []
-    for (const id of ids) {
-      const watcher = this._shownParticipant(id)
-      if (watcher) watchers.push(watcher)
-    }
-    // Stable: who joined in the same millisecond keep the order the room reported them in.
-    watchers.sort((a, b) => a.joinedAt - b.joinedAt)
+    const watchers = this._shownParticipants(ids)
     const same =
       was?.watcherCount === count &&
       was.watchers.length === watchers.length &&
@@ -279,9 +273,9 @@ abstract class ParticipantBase implements LocalParticipant {
 
   /** @internal Who receives each of its tracks, as the room told it. */
   abstract get _watches(): ReadonlyMap<TrackKey, TrackWatch>
-  /** The participant as its room lists it now, or `null` where it doesn't: one that left, is hidden, or whose join this
+  /** The participants of `ids` as its room lists them now, in its order: none that left, is hidden, or whose join this
    *  side hasn't seen yet. */
-  protected abstract _shownParticipant(id: string): RemoteParticipant | null
+  protected abstract _shownParticipants(ids: ReadonlySet<string>): RemoteParticipant[]
   /** Calls `onChange` at each change of the room it lists participants by; returns what stops it. */
   protected abstract _followRoom(onChange: () => void): () => void
 

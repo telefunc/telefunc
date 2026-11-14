@@ -17,14 +17,14 @@ async function joinedAmong(members: Record<string, number>): Promise<DemandHolde
 }
 
 describe("a track's watchers", () => {
-  it('are listed by join time', async () => {
+  it('are listed in the order the room lists its participants, whatever their join times', async () => {
     const me = await joinedAmong({ sam: 2, tia: 1 })
-    expect(watchersReported(me, ['sam', 'tia'])).toEqual(['tia', 'sam'])
+    expect(watchersReported(me, ['tia', 'sam'])).toEqual(['sam', 'tia'])
   })
 
-  it('who joined at the same time keep the order the room reported them in', async () => {
+  it('who joined at the same time keep that order when the room reports them again in another', async () => {
     const me = await joinedAmong({ sam: 1, tia: 1 })
     expect(watchersReported(me, ['sam', 'tia'])).toEqual(['sam', 'tia'])
-    expect(watchersReported(me, ['tia', 'sam'])).toEqual(['tia', 'sam'])
+    expect(watchersReported(me, ['tia', 'sam'])).toEqual(['sam', 'tia'])
   })
 })

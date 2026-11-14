@@ -552,8 +552,8 @@ class ServerLocalParticipant extends ParticipantBase {
     return this.incomingDemand.watchesOf(this.id)
   }
 
-  protected _shownParticipant(id: string): RemoteParticipant | null {
-    return this.room.state.shownParticipantOf(id)
+  protected _shownParticipants(ids: ReadonlySet<string>): RemoteParticipant[] {
+    return this.room.state.shownParticipantsOf(ids)
   }
 
   protected _followRoom(onChange: () => void): () => void {

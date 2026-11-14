@@ -470,7 +470,7 @@ encodeCamera((frame, isKeyframe) => {
 
 > A viewer of every track, `subscribeBinary()` without `track`, receives a track from its first publish on.
 
-Each entry also says who receives the track: `watchers`, the people at the pages and server-side rooms receiving it, in join order, and `watcherCount`, everyone receiving it. A page or a server-side room that receives it with nobody to list, such as a page that didn't join, counts one. You are never listed, and neither is a hidden participant:
+Each entry also says who receives the track: `watchers`, the people at the pages and server-side rooms receiving it, in the order `room.getParticipants()` lists them, and `watcherCount`, everyone receiving it. A page or a server-side room that receives it with nobody to list, such as a page that didn't join, counts one. You are never listed, and neither is a hidden participant:
 
 ```js
 // Environment: client

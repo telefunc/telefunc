@@ -147,8 +147,8 @@ class ClientParticipant extends ParticipantBase {
     return this.link.resolveSender(id)
   }
 
-  protected _shownParticipant(id: string): RemoteParticipant | null {
-    return this.link.state.shownParticipantOf(id)
+  protected _shownParticipants(ids: ReadonlySet<string>): RemoteParticipant[] {
+    return this.link.state.shownParticipantsOf(ids)
   }
 
   protected _followRoom(onChange: () => void): () => void {

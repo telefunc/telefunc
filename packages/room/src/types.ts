@@ -334,7 +334,8 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
 type TrackDemand<P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = {
   /** The track; `'main'` for what you publish without one. The entry goes when the last one stops receiving it. */
   readonly track: string
-  /** The people at the pages and server-side rooms receiving it, in join order: never you, never a hidden participant. */
+  /** The people at the pages and server-side rooms receiving it, in the order your room lists its participants: never
+   *  you, never a hidden participant. */
   readonly watchers: readonly RemoteParticipant<P, Pub>[]
   /** Everyone receiving it: the people in `watchers`, plus one for each page or server-side room that receives it and
    *  has nobody to list. At least 1, at least `watchers.length`. */
