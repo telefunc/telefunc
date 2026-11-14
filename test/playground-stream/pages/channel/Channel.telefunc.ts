@@ -27,6 +27,7 @@ export {
   onChannelShieldClient,
   onChannelShieldServerAck,
   onChannelSelfRemovingListener,
+  onChannelSendOrder,
   onChannelUnserializableAnswer,
   onChannelOversize,
   onChannelHeldBinary,
@@ -659,6 +660,16 @@ async function onChannelSelfRemovingListener() {
     await ch.send('two')
   })
   return { channel: ch.client, getServerSeen: async () => serverSeen }
+}
+
+/** The server adds what the page sends on it to `sendOrder_<id>`, in the order it gets it: a page opens several. */
+async function onChannelSendOrder(id: string) {
+  const ch = new Channel<(msg: string) => void, never>()
+  const key = `sendOrder_${id}`
+  ch.listen((msg) => {
+    cleanupState[key] = cleanupState[key] ? `${cleanupState[key]} ${msg}` : msg
+  })
+  return ch.client
 }
 
 /** Each end answers 'cyclic' with an object that can't be serialized. */

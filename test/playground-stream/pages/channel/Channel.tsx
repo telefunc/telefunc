@@ -41,6 +41,7 @@ import {
   onChannelShieldClient,
   onChannelShieldServerAck,
   onChannelSelfRemovingListener,
+  onChannelSendOrder,
   onChannelUnserializableAnswer,
   onChannelOversize,
   onChannelHeldBinary,
@@ -225,6 +226,7 @@ type ChannelState = {
   /** C2: server.send(valid, {ack:true}), client listener returns invalid → rejects. */
   shieldServerAckInvalid: { ok: boolean; value?: string; error?: string } | null
   selfRemovingListener: { pageSeen: string[]; serverSeen: string[] } | null
+  sendOrder: { id: string; sent: boolean } | null
   unserializableAnswer: { channelId: string; pageSend: string; pageFollowUp: string; isClosed: boolean } | null
   leftOpen: boolean
   oversize: {
@@ -351,6 +353,7 @@ const initialState: ChannelState = {
   shieldServerAckValid: null,
   shieldServerAckInvalid: null,
   selfRemovingListener: null,
+  sendOrder: null,
   unserializableAnswer: null,
   oversize: null,
   leftOpen: false,
@@ -1088,6 +1091,23 @@ function ChannelDemo() {
 
     addLog('system', 'Shield tests complete.')
   }, [addLog])
+
+  // Once the test says go, two more channels; the second comes while the RECONCILE naming the first is out, and the
+  // page sends on it, then on the channel it had.
+  const testSendOrder = useCallback(async () => {
+    const id = crypto.randomUUID()
+    const first = await openChannel(() => onChannelSendOrder(id))
+    await first.opened
+    await new Promise((go) => {
+      ;(window as any).sendOrderGo = go
+      setChannelState((s) => ({ ...s, sendOrder: { id, sent: false } }))
+    })
+    await onChannelSendOrder(id)
+    const newest = await onChannelSendOrder(id)
+    void newest.send('c1')
+    void first.send('a2')
+    setChannelState((s) => ({ ...s, sendOrder: { id, sent: true } }))
+  }, [])
 
   const testSelfRemovingListener = useCallback(async () => {
     const { channel, getServerSeen } = await openChannel(onChannelSelfRemovingListener)
@@ -2135,6 +2155,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-emerald-700 text-white hover:bg-emerald-800"
           >
             Self-removing Listener
+          </button>
+          <button
+            id="channel-test-send-order"
+            type="button"
+            onClick={testSendOrder}
+            className="px-3 py-1.5 text-sm rounded bg-emerald-700 text-white hover:bg-emerald-800"
+          >
+            Send Order
           </button>
           <button
             id="channel-test-unserializable-answer"

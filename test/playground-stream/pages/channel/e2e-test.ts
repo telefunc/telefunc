@@ -74,6 +74,7 @@ type ChannelState = {
   shieldServerAckValid: { ok: boolean; value?: string; error?: string } | null
   shieldServerAckInvalid: { ok: boolean; value?: string; error?: string } | null
   selfRemovingListener: { pageSeen: string[]; serverSeen: string[] } | null
+  sendOrder: { id: string; sent: boolean } | null
   unserializableAnswer: { channelId: string; pageSend: string; pageFollowUp: string; isClosed: boolean } | null
   oversize: {
     channelId: string
@@ -905,6 +906,51 @@ function testChannel(isDev: boolean, inDocker = false) {
       expect(state.shieldServerAckInvalid?.ok).toBe(false)
       expect(state.shieldServerAckInvalid?.error).toBeTruthy()
     })
+  })
+
+  // The test holds what goes to the server on the page's channels' wire, SSE's POSTs and the WebSocket's messages, while
+  // the page gets two channels: the RECONCILE naming the first can't be answered before the page sent on both.
+  test("channel: a page's sends on a channel it just got and on an older one reach the server in the order it made them", async () => {
+    const context = await page.context().browser()!.newContext()
+    const routed = await context.newPage()
+    try {
+      let holding = false
+      const held: (() => void)[] = []
+      const hold = (go: () => void) => (holding ? held.push(go) : go())
+      await routed.route(/\/_telefunc/, (route) => {
+        // The telefunction calls go through.
+        if (route.request().headers()['x-telefunc-request'] === 'sse') hold(() => void route.continue())
+        else void route.continue()
+      })
+      await routed.routeWebSocket(/\/_telefunc/, (ws) => {
+        const server = ws.connectToServer()
+        ws.onMessage((message) => hold(() => server.send(message)))
+        server.onMessage((message) => ws.send(message))
+      })
+      const sendOrder = async () =>
+        (JSON.parse((await routed.textContent('#channel-state'))!) as ChannelState).sendOrder
+      await navigate(`${getServerUrl()}/channel`, undefined, routed)
+      await routed.click('#channel-test-send-order')
+      await autoRetry(async () => {
+        expect(await sendOrder()).not.toBe(null)
+      })
+      holding = true
+      await routed.evaluate(() => (window as any).sendOrderGo())
+      await autoRetry(async () => {
+        expect((await sendOrder())!.sent).toBe(true)
+      })
+      holding = false
+      for (const go of held.splice(0)) go()
+      const { id } = (await sendOrder())!
+      let received = ''
+      await autoRetry(async () => {
+        received = (await getCleanupState())[`sendOrder_${id}`] ?? ''
+        expect(received.split(' ').length).toBe(2)
+      })
+      expect(received).toBe('c1 a2')
+    } finally {
+      await context.close()
+    }
   })
 
   test("channel: a listener that stops listening itself doesn't make the next one miss a message, on either end", async () => {
