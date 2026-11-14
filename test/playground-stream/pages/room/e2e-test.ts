@@ -436,7 +436,8 @@ function testRoom() {
     close: string
     atLeave: { cause: string; isClosed: boolean; count: number } | null
     unsubscribeInOnClose: string | null
-    lateOnClose: boolean
+    closeCause: unknown
+    lateOnClose: unknown
     isClosed: boolean[]
   }>(
     'close-handles',
@@ -448,7 +449,8 @@ function testRoom() {
       expect(r.isClosed).deep.equal([true, true])
       expect(r.atLeave).deep.equal({ cause: 'closed', isClosed: true, count: 0 })
       expect(r.unsubscribeInOnClose).toBe('returned')
-      expect(r.lateOnClose).toBe(true)
+      expect(r.closeCause).deep.equal({ type: 'closed' })
+      expect(r.lateOnClose).deep.equal({ type: 'closed' })
     },
   )
   testRoomScenario<{
@@ -1484,11 +1486,11 @@ function testRoomSmallMemory() {
       expect(noTrack ?? 'no error').toContain('publish() options.lossy: true needs options.track')
     },
   )
-  testRoomScenario<{ closed: boolean; myCause: unknown }>(
+  testRoomScenario<{ closeCause: unknown; myCause: unknown }>(
     'meta-flood',
     "room: a connected page whose room's events alone are more than the server holds for it is let go",
     (r) => {
-      expect(r).deep.equal({ closed: true, myCause: { type: 'disconnected' } })
+      expect(r).deep.equal({ closeCause: { type: 'disconnected' }, myCause: { type: 'disconnected' } })
     },
   )
   testRoomScenario<{ receipts: number; seen: number[]; listed: number }>(

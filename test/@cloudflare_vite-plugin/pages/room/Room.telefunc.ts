@@ -19,7 +19,7 @@ export {
 }
 
 import { Broadcast, BroadcastChannel, onBug } from 'telefunc'
-import { Room } from '@telefunc/room'
+import { Room, type LeaveCause } from '@telefunc/room'
 import { getRoomPlane } from '@telefunc/room/backend'
 
 async function onRoomRoundTrip() {
@@ -151,7 +151,7 @@ async function onCloseHeld(id: string) {
 async function onSubscribeHeld(id: string) {
   bugs = []
   const room = heldViews.get(id)!
-  const { promise, resolve } = Promise.withResolvers<void>()
+  const { promise, resolve } = Promise.withResolvers<LeaveCause>()
   room.onClose(resolve)
   room.subscribe(() => {})
   room.subscribeBinary(() => {}, { track: 'cam' })

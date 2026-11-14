@@ -1076,7 +1076,9 @@ function Room() {
           member.onLeave((cause) => (atLeave = { cause: cause.type, isClosed: closed.isClosed, count: closed.count }))
           const unsubscribe = closed.subscribe(() => {})
           let unsubscribeInOnClose: string | null = null
-          closed.onClose(() => {
+          let closeCause: unknown = null
+          closed.onClose((cause) => {
+            closeCause = cause
             try {
               unsubscribe()
               unsubscribeInOnClose = 'returned'
@@ -1086,8 +1088,8 @@ function Room() {
           })
           const close = await outcome(onCloseRoom(closedId))
           await pollUntil(() => ({ done: closed.isClosed }))
-          let lateOnClose = false
-          closed.onClose(() => (lateOnClose = true))
+          let lateOnClose: unknown = null
+          closed.onClose((cause) => (lateOnClose = cause))
 
           await pollUntil(() => ({
             result: {
@@ -1096,10 +1098,16 @@ function Room() {
               close,
               atLeave,
               unsubscribeInOnClose,
+              closeCause,
               lateOnClose,
               isClosed: [left.isClosed, kicked.isClosed],
             },
-            done: atLeave !== null && unsubscribeInOnClose !== null && lateOnClose && left.isClosed && kicked.isClosed,
+            done:
+              atLeave !== null &&
+              unsubscribeInOnClose !== null &&
+              lateOnClose !== null &&
+              left.isClosed &&
+              kicked.isClosed,
           }))
         },
       )}
@@ -2171,14 +2179,14 @@ function Room() {
 
       {scenario('meta-flood', null, 'Connected, behind on room events alone', async () => {
         const [roomId, view] = await createRoom('meta-flood')
-        let closed = false
-        view.onClose(() => (closed = true))
+        let closeCause: unknown = null
+        view.onClose((cause) => (closeCause = cause))
         const me = await view.join({ meta: { name: 'Me' } })
         let myCause: unknown = null
         me.onLeave((cause) => (myCause = cause))
         await onRoomMetaFlood(roomId)
-        await pollUntil(() => ({ done: closed && myCause !== null }), 150)
-        setResult(JSON.stringify({ closed, myCause }))
+        await pollUntil(() => ({ done: closeCause !== null && myCause !== null }), 150)
+        setResult(JSON.stringify({ closeCause, myCause }))
       })}
 
       {scenario('meta-past-memory', null, 'A setMeta() larger than maxMemory', async () => {

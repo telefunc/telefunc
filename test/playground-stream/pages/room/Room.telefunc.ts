@@ -360,7 +360,7 @@ async function onGetHiddenAfterPlayers(roomId: string) {
 async function onCloseRoomWithMember(roomId: string) {
   const room = anyoneCanJoin(await Room.create(roomId))
   const member = await room.getParticipant((await room.join({ meta: { name: 'Gone' } })).id)
-  const { promise: closed, resolve } = Promise.withResolvers<void>()
+  const { promise: closed, resolve } = Promise.withResolvers<LeaveCause>()
   room.onClose(resolve)
   await Room.close(roomId)
   await closed
@@ -424,7 +424,7 @@ async function onCloseWhileSubscribing() {
     Array.from({ length: 10 }, async (_, i) => {
       await Room.create(prefix + i)
       const room = await Room.get(prefix + i)
-      const { promise, resolve } = Promise.withResolvers<void>()
+      const { promise, resolve } = Promise.withResolvers<LeaveCause>()
       room.onClose(resolve)
       room.subscribe(() => {})
       room.subscribeBinary(() => {}, { track: 'cam' })

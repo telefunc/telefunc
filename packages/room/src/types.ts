@@ -276,9 +276,10 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   ): () => void
   /** The last participant left. */
   onEmpty(callback: () => void, options?: { signal?: AbortSignal }): () => void
-  /** The room was closed via `Room.close()` (on the client, also: the connection is gone, or the room sent it more
-   *  that it can't miss than the server holds for it). */
-  onClose(callback: () => void, options?: { signal?: AbortSignal }): () => void
+  /** The room closed. `cause.type` says how: `'closed'` (`Room.close()`, or the room ended by itself), or on the
+   *  client `'disconnected'` (the connection is gone, or the room sent it more that it can't miss than the server holds
+   *  for it). */
+  onClose(callback: (cause: LeaveCause) => void, options?: { signal?: AbortSignal }): () => void
 
   /** Anything `snapshot()` shows changed: someone joined or left, a participant's `meta`, connection or a field a
    *  package adds, the room's `meta`, or the room closed. Pairs with `snapshot()`. */

@@ -154,7 +154,7 @@ abstract class RoomStateView {
     return this._state.onEmpty(callback, options)
   }
 
-  onClose(callback: () => void, options?: ListenerOptions): () => void {
+  onClose(callback: (cause: LeaveCause) => void, options?: ListenerOptions): () => void {
     return this._state.onClose(callback, options)
   }
 
@@ -194,7 +194,7 @@ class RoomState {
   private readonly leaveListeners: Listeners<(member: RemoteParticipant, cause: LeaveCause) => void> = new Listeners()
 
   private readonly emptyListeners: Listeners<() => void> = new Listeners()
-  private readonly closeListeners: Listeners<() => void> = new Listeners()
+  private readonly closeListeners: Listeners<(cause: LeaveCause) => void> = new Listeners()
   private readonly announceListeners: Listeners<(data: unknown, info: ChannelPublishInfo) => void> = new Listeners()
   /** The package fields' `onPrivate()` callbacks, by field. */
   private readonly privateListeners = new Map<string, Listeners<(from: string, data: unknown) => void>>()
@@ -360,10 +360,11 @@ class RoomState {
     return this.register(this.emptyListeners, cb, opts)
   }
 
-  onClose(cb: () => void, opts?: ListenerOptions): () => void {
-    if (!this.model.closed) return this.register(this.closeListeners, cb, opts)
+  onClose(cb: (cause: LeaveCause) => void, opts?: ListenerOptions): () => void {
+    const cause = this.model.closedCause
+    if (cause === null) return this.register(this.closeListeners, cb, opts)
     // Terminal, like a departed member's onLeave: a late listener hears it at once.
-    if (!opts?.signal?.aborted) invokeChannelListener(cb, [], this.reportError)
+    if (!opts?.signal?.aborted) invokeChannelListener(cb, [cause], this.reportError)
     return makeDisposer()
   }
 
@@ -414,7 +415,7 @@ class RoomState {
       if (leaveListeners) this.fireAll(leaveListeners, cause)
       this.releaseEntryListeners(entry)
     }
-    this.fireAll(this.closeListeners)
+    this.fireAll(this.closeListeners, cause)
     this.releaseAllListeners()
   }
 
