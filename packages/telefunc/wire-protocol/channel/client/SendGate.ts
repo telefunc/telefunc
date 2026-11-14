@@ -138,7 +138,8 @@ class SendGate {
     return this.drain(this.isSendable)
   }
 
-  /** Takes out what `releasable` channels held; past the headroom, their sequenced frames join those waiting for it. */
+  /** Takes out what `releasable` channels held, in order: from a held frame of a channel no RECONCILE named yet, every
+   *  frame stays for the RECONCILE that names it. Past the headroom, the sequenced frames join those waiting for it. */
   drain(releasable: (ix: number) => boolean): OutboundFrame[] {
     const frames: OutboundFrame[] = []
     const sendBuffer = this.settleQueue()
@@ -150,10 +151,12 @@ class SendGate {
     }
     let headroom = this.owner.transport.headroom()
     let writeIx = 0
+    let behindUndeclared = false
     for (let readIx = 0; readIx < sendBuffer.length; readIx++) {
       const entry = sendBuffer[readIx]!
       const { frame, channelIx, seq } = entry
-      if (!releasable(channelIx)) {
+      if (behindUndeclared || !releasable(channelIx)) {
+        behindUndeclared ||= this.channels.isUndeclared(channelIx)
         sendBuffer[writeIx++] = entry
         continue
       }

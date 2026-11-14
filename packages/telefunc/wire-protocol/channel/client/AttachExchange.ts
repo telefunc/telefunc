@@ -183,7 +183,7 @@ class AttachExchange {
     const attached = (ix: number): boolean => {
       if (inFlight.ixes.has(ix)) return serverHas.has(ix)
       const record = this.channels.get(ix)
-      return record !== undefined && !this.channels.isUndeclared(record) && !record.awaited
+      return record !== undefined && !this.channels.isUndeclared(ix) && !record.awaited
     }
     for (const frame of this.gate.drain(attached)) frames.push(frame)
 

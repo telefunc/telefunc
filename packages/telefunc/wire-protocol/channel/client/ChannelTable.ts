@@ -78,8 +78,9 @@ class ChannelTable {
     return new Set([...this.undeclared, ...this.closed])
   }
 
-  isUndeclared(record: ChannelRecord): boolean {
-    return this.undeclared.has(record)
+  isUndeclared(ix: number): boolean {
+    const record = this.records.get(ix)
+    return record !== undefined && this.undeclared.has(record)
   }
 
   /** A RECONCILE declared `record` to the server. */
