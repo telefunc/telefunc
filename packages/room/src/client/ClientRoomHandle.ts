@@ -8,10 +8,8 @@ import { normalizeJoinOptions } from '../shared/arguments.js'
 import {
   hasRoomTag,
   inboxMessageFromWire,
-  joinedMember,
   leaveCauseFromWire,
   type InboxMessage,
-  type MemberSnapshot,
   type MemberMetaUpdate,
   type RoomDemandEvent,
   type RoomDataPublish,
@@ -23,13 +21,13 @@ import {
   type RoomSnapshotMetadata,
   type RoomStubRequest,
 } from '../shared/protocol.js'
-import { RoomModel, departureCause, type RoomModelOwner } from '../shared/RoomModel.js'
+import { departureCause } from '../shared/RoomModel.js'
 import { RoomState, type RoomStateOwner, type RoomStateView } from '../shared/state.js'
 import { ROOM_TRACK_WANTS_MAX } from '../shared/constants.js'
 import { roomResultValue } from '../shared/errors.js'
-import { RosterIntake } from './RosterIntake.js'
+import { RoomMirror } from './RoomMirror.js'
 import { ClientRoomParticipant, reportClientCallbackError, request, sendDmReply } from './ClientParticipant.js'
-import { addRoom, heldConnection } from './page.js'
+import { addRoom } from './page.js'
 import type { JoinOptions, LeaveCause } from '../types.js'
 
 /** What a room's stub relays to its client on the text lane. */
@@ -44,30 +42,25 @@ type ClientRoomHandleOptions = {
 
 /** What one room a telefunction returned is to its server stub, through the room's own Broadcast channel: its frames
  *  carry events and data, its acked messages requests. The user's `Room` over it carries none of this. */
-class ClientRoomHandle implements RoomModelOwner, RoomStateOwner {
+class ClientRoomHandle implements RoomStateOwner {
   readonly state: RoomState
   private readonly end: ClientBroadcast
-  private readonly model: RoomModel
+  private readonly mirror: RoomMirror
   private readonly localParticipants = new Map<string, ClientRoomParticipant>()
   private readonly joins = new PendingJoins()
   /** The wants the server stub holds, as last declared; a fresh stub holds none. */
   private declaredAnnounce = false
   private readonly declaredText = new Set<string>()
-  private readonly rosters: RosterIntake
 
   constructor({ end, snapshot, view }: ClientRoomHandleOptions) {
     this.end = end
-    this.model = new RoomModel({
-      roomId: snapshot.roomId,
-      meta: snapshot.meta,
-      seed: { members: snapshot.members },
-      metaSeq: snapshot.metaSeq,
-      closed: snapshot.closed,
-      owner: this,
+    this.mirror = new RoomMirror({
+      snapshot,
+      onMemberLeft: (id, cause) => this.memberLeft(id, cause),
+      // A meta change of one's own that a gap dropped, as while offline, is in the roster whole.
+      onRosterApplied: () => this.acceptOwnMeta(),
     })
-    this.state = new RoomState({ view, model: this.model, owner: this, trackWantsMax: ROOM_TRACK_WANTS_MAX })
-    // A meta change of one's own that a gap dropped, as while offline, is in the roster whole.
-    this.rosters = new RosterIntake({ model: this.model, onApplied: () => this.acceptOwnMeta() })
+    this.state = new RoomState({ view, model: this.mirror.model, owner: this, trackWantsMax: ROOM_TRACK_WANTS_MAX })
 
     // Delivery handlers are local-only. What the server relays is driven by the declared wants: control always arrives,
     // text while subscribed, binary per `sub-binary`.
@@ -90,7 +83,7 @@ class ClientRoomHandle implements RoomModelOwner, RoomStateOwner {
   }
 
   get id(): string {
-    return this.model.roomId
+    return this.mirror.model.roomId
   }
 
   async join(options?: JoinOptions): Promise<ClientRoomParticipant> {
@@ -116,15 +109,15 @@ class ClientRoomHandle implements RoomModelOwner, RoomStateOwner {
         id,
         meta,
         selfDelivery,
-        rewinds: this.model.metaRewinds,
+        rewinds: this.mirror.model.metaRewinds,
       })
-      const closedCause = this.model.closedCause
+      const closedCause = this.mirror.model.closedCause
       if (closedCause) {
         participant._onLeft(departureCause(closedCause))
         return participant
       }
       this.localParticipants.set(id, participant)
-      this.model.applyJoin({ id, meta, joinedAt, metaSeq: 0, identity: null })
+      this.mirror.model.applyJoin({ id, meta, joinedAt, metaSeq: 0, identity: null })
       participant._holdOnPage()
       return participant
     } finally {
@@ -150,7 +143,7 @@ class ClientRoomHandle implements RoomModelOwner, RoomStateOwner {
   /** A local participant completed its voluntary leave. */
   dropParticipant(id: string): void {
     this.localParticipants.delete(id)
-    this.model.applyLeave(id, { type: 'left' }) // the relayed event is absorbed
+    this.mirror.model.applyLeave(id, { type: 'left' }) // the relayed event is absorbed
   }
 
   get isConnected(): boolean {
@@ -158,12 +151,12 @@ class ClientRoomHandle implements RoomModelOwner, RoomStateOwner {
   }
 
   heldConnectionChanged(id: string, wasConnected: boolean | null): void {
-    this.model.heldConnectionChanged(id, wasConnected)
+    this.mirror.model.heldConnectionChanged(id, wasConnected)
   }
 
   /** Apply an accepted member meta (event or own write's ack) and mirror it into a local participant. */
   acceptParticipantMeta(id: string, accepted: MemberMetaUpdate): void {
-    this.model.applyParticipantMeta(id, accepted)
+    this.mirror.model.applyParticipantMeta(id, accepted)
     this.localParticipants.get(id)?._acceptMeta(accepted)
   }
 
@@ -173,26 +166,18 @@ class ClientRoomHandle implements RoomModelOwner, RoomStateOwner {
 
   /** Every leave the model applies ends the member's local participant: kicked (with the kick's reason), left through
    *  another handle, or missing from a roster. */
-  onMemberLeft(id: string, cause: LeaveCause): void {
+  private memberLeft(id: string, cause: LeaveCause): void {
     const local = this.localParticipants.get(id)
     if (!local) return
     this.localParticipants.delete(id)
     local._onLeft(cause)
   }
 
-  pendingMember(id: string): MemberSnapshot | undefined {
-    return this.rosters.pending(id)
-  }
-
-  heldConnection(id: string): boolean | null {
-    return heldConnection(id)
-  }
-
   /** Room-wide text wants ride the Broadcast subscription, which attaches again before the channel's `onOpen`.
    *  Declarations are replayed channel messages, so the server keeps them across reconnects: each carries only what
    *  changed, the room-wide text wants and those of `member`, whose listeners changed, or the binary want that did. */
   onListenersChanged(member: string | null, binary: BinaryWantChange | null): void {
-    if (this.model.closed) {
+    if (this.mirror.model.closed) {
       this.end._setSubscribed('text', false) // a closed room takes no declaration
       return
     }
@@ -239,25 +224,17 @@ class ClientRoomHandle implements RoomModelOwner, RoomStateOwner {
         this.joins.named(event.reqId, event.id)
         return
       case 'roster':
-        this.rosters.part(event)
-        return
       case 'rewound':
-        this.model.forgetMetaSeqs()
+      case 'join':
+      case 'leave':
+      case 'update':
+        this.mirror.apply(event)
         return
       case 'data':
         this.state.applyData(event, { key: this.id, seq: rawInfo.seq, timestamp: rawInfo.timestamp })
         return
-      case 'join':
-        this.model.applyJoin(joinedMember(event))
-        return
-      case 'leave':
-        this.model.applyLeave(event.id, leaveCauseFromWire(event))
-        return
       case 'p-meta':
         this.acceptParticipantMeta(event.id, event)
-        return
-      case 'update':
-        this.model.applyRoomUpdate(event)
         return
       case 'closed':
         this.applyClosed(event.cause === 'removed' ? leaveCauseFromWire(event) : { type: 'closed' })
@@ -279,7 +256,7 @@ class ClientRoomHandle implements RoomModelOwner, RoomStateOwner {
         const msg = inboxMessageFromWire(event)
         // A room-authored DM has no sender to resolve.
         if (event.from !== '') {
-          const sender = this.state.resolveSender(event as RoomDmEnvelope & Partial<SenderStamp>)
+          const sender = this.mirror.senderOf(event as RoomDmEnvelope & Partial<SenderStamp>)
           msg.fromMeta = sender.meta
           msg.fromIdentity = sender.identity
         }
@@ -298,13 +275,13 @@ class ClientRoomHandle implements RoomModelOwner, RoomStateOwner {
 
   private acceptOwnMeta(): void {
     for (const [id, local] of this.localParticipants) {
-      const accepted = this.model.acceptedMeta(id)
+      const accepted = this.mirror.model.acceptedMeta(id)
       if (accepted !== null) local._acceptMeta(accepted)
     }
   }
 
   private applyClosed(cause: LeaveCause): void {
-    if (!this.model.applyClosed(cause)) return
+    if (!this.mirror.model.applyClosed(cause)) return
     this.state.detachFields()
     // Local participants end after onClose, as on the server.
     for (const local of this.localParticipants.values()) local._onLeft(departureCause(cause))

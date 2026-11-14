@@ -495,7 +495,7 @@ class RoomState {
   }
 
   /** A message's sender as of its send (see `RoomModel.resolveSender`). */
-  resolveSender(stamp: { from: string } & Partial<SenderStamp>): Sender {
+  private resolveSender(stamp: { from: string } & Partial<SenderStamp>): Sender {
     const resolved = this.model.resolveSender(stamp)
     return 'entry' in resolved ? this.remote(resolved.entry) : resolved.sender
   }
