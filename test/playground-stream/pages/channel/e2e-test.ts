@@ -929,7 +929,9 @@ function testChannel(isDev: boolean, inDocker = false) {
       })
       const sendOrder = async () =>
         (JSON.parse((await routed.textContent('#channel-state'))!) as ChannelState).sendOrder
-      await navigate(`${getServerUrl()}/channel`, undefined, routed)
+      await routed.goto(`${getServerUrl()}/channel`)
+      // A new context loads every asset cold: under load it hydrates later than `navigate` waits.
+      await routed.locator('#hydrated').waitFor({ state: 'attached' })
       await routed.click('#channel-test-send-order')
       await autoRetry(async () => {
         expect(await sendOrder()).not.toBe(null)
