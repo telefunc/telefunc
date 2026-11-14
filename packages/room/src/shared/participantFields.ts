@@ -1,9 +1,9 @@
-export { defineParticipantField, sendPrivate, participantFields, fieldValue, frozenFieldValue }
+export { defineParticipantField, sendPrivate, participantFields, fieldValue, ownFieldValue }
 export type { ParticipantField, ParticipantFieldView }
 
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { freezeMeta } from './freezeMeta.js'
-import { recipientId } from './arguments.js'
+import { ownMessage, recipientId } from './arguments.js'
 import type { ParticipantBase } from './ParticipantBase.js'
 import type { LocalParticipant, Room, Sender } from '../types.js'
 
@@ -11,8 +11,8 @@ import type { LocalParticipant, Room, Sender } from '../types.js'
  *  messages. */
 type ParticipantFieldView<T> = {
   room: Omit<Room, 'join' | 'getParticipants' | 'getParticipant'>
-  /** Freezes `value` deeply; a value equal to the member's changes nothing, and one for a member the view doesn't
-   *  know is dropped: the package's source sets it again with the member. */
+  /** Keeps a copy of `value`, frozen deeply; a value equal to the member's changes nothing, and one for a member the
+   *  view doesn't know is dropped: the package's source sets it again with the member. */
   set(memberId: string, value: T): void
   /** The package's messages (`sendPrivate()`) to a member joined through this view, or on a page to a `me` of this
    *  room returned alone, by the sender's id. */
@@ -35,7 +35,7 @@ const { fields } = getGlobalObject('shared/participantFields.ts', () => ({
 /** `name` on every participant, and on every participant of `room.snapshot()`, as the package sets it. */
 function defineParticipantField<T>(name: string, field: ParticipantField<T>): void {
   fields.set(name, {
-    initial: frozenFieldValue(field.initial),
+    initial: ownFieldValue(field.initial),
     attach: field.attach as ParticipantField<unknown>['attach'],
   })
 }
@@ -55,6 +55,8 @@ function fieldValue(fieldsSet: Readonly<Record<string, unknown>>, name: string):
   return name in fieldsSet ? fieldsSet[name] : fields.get(name)?.initial
 }
 
-function frozenFieldValue<T>(value: T): T {
-  return typeof value === 'object' && value !== null ? freezeMeta(value) : value
+/** A field's value as Room keeps it: its own copy, frozen deeply, which nothing the package does to its value changes. */
+function ownFieldValue<T>(value: T): T {
+  const owned = ownMessage(value)
+  return typeof owned === 'object' && owned !== null ? freezeMeta(owned) : owned
 }

@@ -7,7 +7,7 @@ import { Slice } from './Slice.js'
 import { RoomMetaState } from './RoomMetaState.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
 import { ownLeaveCause, senderSnapshot, unknownLeaveCause } from './arguments.js'
-import { fieldValue, frozenFieldValue } from './participantFields.js'
+import { fieldValue, ownFieldValue } from './participantFields.js'
 import type {
   MemberMetaUpdate,
   MemberSnapshot,
@@ -241,12 +241,13 @@ class RoomModel {
     this.connectionChanged(entry)
   }
 
-  /** A package's field of a member, frozen deeply. A value equal to the member's changes nothing, and one for a member
-   *  this model doesn't know is dropped: the package's source sets it again with the member. */
+  /** A package's field of a member, kept as Room's own copy, frozen deeply. A value equal to the member's changes
+   *  nothing, and one for a member this model doesn't know is dropped: the package's source sets it again with the
+   *  member. */
   setField(id: string, name: string, value: unknown): void {
     const entry = this.members.get(id)
     if (!entry || stringify(fieldValue(entry.fields, name)) === stringify(value)) return
-    entry.fields = Object.freeze({ ...entry.fields, [name]: frozenFieldValue(value) })
+    entry.fields = Object.freeze({ ...entry.fields, [name]: ownFieldValue(value) })
     this.bumpState()
     this.memberChanged(entry)
   }

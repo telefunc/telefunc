@@ -2,15 +2,16 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ClientBroadcast } from 'telefunc/__internal'
 import { Room } from '../index.js'
 import { ClientRoom } from '../client/room.js'
-import { defineParticipantField } from './participantFields.js'
+import { defineParticipantField, type ParticipantFieldView } from './participantFields.js'
 
-/** A page's room on a channel that sends nothing, and what ends the channel's wire. */
-function pageRoom() {
+/** A page's room of `members` on a channel that sends nothing, and what ends the channel's wire. */
+function pageRoom(members: string[] = []) {
   const closes: Array<() => void> = []
   const end = {
     isClosed: false,
     isConnected: true,
     _subscribeLocal: () => () => {},
+    _setSubscribed: () => {},
     onClose: (callback: () => void) => {
       closes.push(callback)
       return () => {}
@@ -20,7 +21,14 @@ function pageRoom() {
   }
   const room = new ClientRoom({
     end: end as unknown as ClientBroadcast,
-    snapshot: { channelId: 'channel', roomId: crypto.randomUUID(), meta: [], metaSeq: 0, closed: false, members: [] },
+    snapshot: {
+      channelId: 'channel',
+      roomId: crypto.randomUUID(),
+      meta: [],
+      metaSeq: 0,
+      closed: false,
+      members: members.map((id) => ({ id, meta: {}, metaSeq: 0, identity: null, joinedAt: 0 })),
+    },
   })
   return { room, endWire: () => closes.forEach((close) => close()) }
 }
@@ -78,5 +86,24 @@ describe("a package's field", () => {
     expect(running.has(view)).toBe(true)
     stopObserving()
     await vi.waitFor(() => expect(running.has(view)).toBe(false))
+  })
+
+  it('keeps its own copy of a value, so a value the package froze only at its root never changes a snapshot', () => {
+    type Tracks = { tracks: string[] }
+    const views: Array<ParticipantFieldView<Tracks>> = []
+    defineParticipantField<Tracks>('ownCopy', {
+      initial: { tracks: [] },
+      attach(view) {
+        views.push(view)
+        return () => {}
+      },
+    })
+    const { room } = pageRoom(['ann'])
+    const value = Object.freeze({ tracks: ['camera'] })
+    views.at(-1)!.set('ann', value)
+    const before = room.snapshot()
+    value.tracks.push('screen')
+    expect((before.participants[0] as unknown as { ownCopy: Tracks }).ownCopy.tracks).toEqual(['camera'])
+    expect(room.snapshot()).toBe(before)
   })
 })
