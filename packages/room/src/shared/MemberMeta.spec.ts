@@ -1,33 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import type { ClientBroadcast } from 'telefunc/__internal'
 import { Room } from '../index.js'
-import { ClientRoom } from '../client/room.js'
-import type { RoomStubRequest } from './protocol.js'
+import { pageRoom } from '../test/pageRoom.js'
 import type { LocalParticipant } from '../types.js'
 
-/** `me`, joined at a page through a channel that answers as the server does: each meta write is accepted at the next
- *  seq. */
 async function pageMember(meta: { name: string }): Promise<LocalParticipant> {
-  let seq = 0
-  const end = {
-    isClosed: false,
-    isConnected: true,
-    send: async (req: RoomStubRequest) => {
-      if (req.__r === 'req-join') return { ok: true, value: { id: 'me', joinedAt: 0 } }
-      if (req.__r === 'req-set-meta') return { ok: true, value: { seq: ++seq, meta: req.meta } }
-      throw new Error(`Unexpected request ${req.__r}`)
-    },
-    _subscribeLocal: () => () => {},
-    _setSubscribed: () => {},
-    onClose: () => () => {},
-    onDisconnect: () => () => {},
-    onReconnect: () => () => {},
-  }
-  const room = new ClientRoom({
-    end: end as unknown as ClientBroadcast,
-    snapshot: { channelId: 'channel', roomId: crypto.randomUUID(), meta: [], metaSeq: 0, closed: false, members: [] },
-  })
-  return await room.join({ meta })
+  return await pageRoom().room.join({ meta })
 }
 
 async function serverMember(meta: { name: string }): Promise<LocalParticipant> {

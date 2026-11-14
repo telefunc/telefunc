@@ -1,38 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { ClientBroadcast } from 'telefunc/__internal'
 import { Room } from '../index.js'
-import { ClientRoom } from '../client/room.js'
+import { pageRoom } from '../test/pageRoom.js'
 import { defineParticipantField, type ParticipantFieldView } from './participantFields.js'
 import type { RemoteParticipant } from '../types.js'
-
-/** A page's room of `members` on a channel that sends nothing, and what ends the channel's wire. */
-function pageRoom(members: string[] = []) {
-  const closes: Array<() => void> = []
-  const end = {
-    isClosed: false,
-    isConnected: true,
-    _subscribeLocal: () => () => {},
-    _setSubscribed: () => {},
-    onClose: (callback: () => void) => {
-      closes.push(callback)
-      return () => {}
-    },
-    onDisconnect: () => () => {},
-    onReconnect: () => () => {},
-  }
-  const room = new ClientRoom({
-    end: end as unknown as ClientBroadcast,
-    snapshot: {
-      channelId: 'channel',
-      roomId: crypto.randomUUID(),
-      meta: [],
-      metaSeq: 0,
-      closed: false,
-      members: members.map((id) => ({ id, meta: {}, metaSeq: 0, identity: null, joinedAt: 0 })),
-    },
-  })
-  return { room, endWire: () => closes.forEach((close) => close()) }
-}
 
 type FieldRooms = Set<ParticipantFieldView<unknown>['room']>
 
@@ -134,7 +104,7 @@ describe("a package's field", () => {
         return () => {}
       },
     })
-    const { room } = pageRoom(['ann'])
+    const { room } = pageRoom({ ann: 0 })
     const value = Object.freeze({ tracks: ['camera'] })
     views.at(-1)!.set('ann', value)
     const before = room.snapshot()
@@ -154,7 +124,7 @@ describe("a package's field", () => {
         },
       })
     }
-    const { room } = pageRoom(['ann'])
+    const { room } = pageRoom({ ann: 0 })
     expect(attached).toEqual(['first'])
     expect((room.snapshot().participants[0] as unknown as { definedTwice: string }).definedTwice).toBe('first')
   })
