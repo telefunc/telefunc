@@ -213,7 +213,7 @@ class WantsIndex {
     coverers: Array<Set<LaneHolder> | undefined>,
     except?: LaneHolder,
   ): boolean {
-    // Each coverer suppresses only members it holds, so this stops within a few.
+    // Each coverer suppresses only members its page holds, so this stops within a few.
     for (const holders of coverers) {
       for (const holder of holders ?? []) if (holder !== except && holder.wantsBinary(member, track)) return true
     }

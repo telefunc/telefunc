@@ -361,10 +361,15 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     void this.replica.tailChanged(this)
   }
 
-  /** A client's view of this room, with its members. It attaches before the snapshot, so every later event relays and
-   *  every earlier one is in the snapshot. */
-  openStub({ end, publishShield, grants }: Omit<RoomStubOptions, 'room' | 'roster'>): RoomSnapshotMetadata {
-    this.attachStub(new RoomStub({ room: this, roster: this.roster, end, publishShield, grants }))
+  /** A client's view of this room, with its members, at the page `page` names (`PageIndex.place`). It attaches before
+   *  the snapshot, so every later event relays and every earlier one is in the snapshot. */
+  openStub({
+    end,
+    publishShield,
+    grantedHidden,
+    page,
+  }: Omit<RoomStubOptions, 'room' | 'roster'> & { page: object }): RoomSnapshotMetadata {
+    this.attachStub(new RoomStub({ room: this, roster: this.roster, end, publishShield, grantedHidden }), page)
     const model = this.model
     const members = [...model.entries()].filter((entry) => !entry.hidden).map((entry) => model.memberSnapshot(entry.id))
     return {
@@ -377,13 +382,13 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     }
   }
 
-  attachStub(stub: RoomStub): void {
+  private attachStub(stub: RoomStub, page: object): void {
     this.stubs.add(stub)
     if (this.tail !== null) {
       stub.beginTail(this.tail.take())
       this.tail = null
     }
-    this.replica.attachStub(this, stub)
+    this.replica.attachStub(this, stub, page)
   }
 
   setHeldConnected(stub: RoomStub, connected: boolean): void {
@@ -409,11 +414,6 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
       if (owned) continue // the admission rolls itself back
       void this.removeDepartedMember(id)
     }
-  }
-
-  /** A response serialized a participant whose own frames the stub's client doesn't get back. */
-  onStubSuppressed(stub: RoomStub, member: string): void {
-    if (this.stubs.has(stub)) this.lanePlan.memberChanged(member)
   }
 
   async joinStubMember(
@@ -639,8 +639,13 @@ class ServerLocalParticipant extends ParticipantBase {
     return this.holder !== null
   }
 
-  /** @internal A client's hold on this participant, which its inbox forwards to. */
-  _openStub({ end, publishShield }: Omit<RoomParticipantStubOptions, 'participant'>): ParticipantStubMetadata {
+  /** @internal A client's hold on this participant, which its inbox forwards to, at the page `page` names
+   *  (`PageIndex.place`). */
+  _openStub({
+    end,
+    publishShield,
+    page,
+  }: Omit<RoomParticipantStubOptions, 'participant'> & { page: object }): ParticipantStubMetadata {
     // A LocalParticipant has one holder; rebinding would overwrite its inbox forwarder and let either close drop it.
     assertUsage(
       this.holder === null,
@@ -650,6 +655,7 @@ class ServerLocalParticipant extends ParticipantBase {
     )
     this.holder = new RoomParticipantStub({ participant: this, end, publishShield })
     // It is at the holder's page from now on, not at its server-side room's.
+    this.room.replica.placeAtPage(this.holder, page)
     this.room.replica.pageEndChanged(this.room.local)
     this._flushHeld(this.holder)
     return {

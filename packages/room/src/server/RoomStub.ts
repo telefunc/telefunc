@@ -1,4 +1,4 @@
-export { RoomStub, ResponseRoomGrants }
+export { RoomStub }
 export type { RoomStubOptions }
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
@@ -62,32 +62,15 @@ import { MemberMessageBodies, orderedBody, trackFrameBody, unorderedEventBody } 
 import { PendingDmReplies, assertPublishShield, receiveFromPage, roomResult } from './pageRequests.js'
 assertIsNotBrowser()
 
-/** What one response's Room values grant the client on a room: echo drops for its own members, and hidden members it
- *  returned. A streamed response can serialize a participant after its room's stub attached, so the stubs holding the
- *  grants hear each new echo drop. */
-class ResponseRoomGrants {
-  readonly selfSuppressed = new Set<string>()
-  readonly hidden = new Set<string>()
-  private readonly suppressedListeners: Array<(member: string) => void> = []
-
-  suppress(member: string): void {
-    if (this.selfSuppressed.has(member)) return
-    this.selfSuppressed.add(member)
-    for (const listener of this.suppressedListeners) listener(member)
-  }
-
-  onSuppressed(listener: (member: string) => void): void {
-    this.suppressedListeners.push(listener)
-  }
-}
-
 type RoomStubOptions = {
   room: RoomHandle
   /** Whether every client of the view was sent every member it holds. */
   roster: Pick<RosterStream, 'settled'>
   end: ServerBroadcastEnd
   publishShield?: ShieldValidator
-  grants: ResponseRoomGrants
+  /** The hidden members its response handed the client, which a streamed response may add to after the stub
+   *  attached. */
+  grantedHidden: ReadonlySet<string>
 }
 
 /** One client's view of a server room: it relays what the client wants and acts for the members the client joined. */
@@ -97,12 +80,12 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   private readonly room: RoomHandle
   private readonly roster: RoomStubOptions['roster']
   private readonly publishShield: ShieldValidator | undefined
-  private readonly members = new Set<string>()
-  /** Members whose own messages this client doesn't get back:
-   *  its selfDelivery: false joins and co-returned server joins. */
-  private readonly selfSuppressed: Set<string>
-  /** Hidden members this response handed the client: their events are relayed to it alone. */
-  private readonly grantedHidden: Set<string>
+  /** The members its client joined, each with its `selfDelivery`. */
+  private readonly members = new Map<string, boolean>()
+  /** The members whose own messages its page doesn't get back (`PageIndex`). */
+  private suppressed: ReadonlySet<string> = new Set()
+  /** Hidden members its response handed the client: their events are relayed to it alone. */
+  private readonly grantedHidden: ReadonlySet<string>
   private readonly dmReplies = new PendingDmReplies()
   readonly replay = new ReplayGate()
   private wantsText = false
@@ -111,15 +94,16 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   private readonly binary: BinaryWants = emptyBinaryWants()
   /** A tail waits for the client's first text selector, then flushes once in order. */
   private tail: TailHold | null = null
+  /** Whether its client attached, which makes its page, and so whose own messages it drops, known. */
+  private attached = false
   /** Whether this client was sent the whole roster: its room carried it, and no drift streams to it. */
   rosterSent = true
 
-  constructor({ room, roster, end, publishShield, grants }: RoomStubOptions) {
+  constructor({ room, roster, end, publishShield, grantedHidden }: RoomStubOptions) {
     this.room = room
     this.roster = roster
     this.publishShield = publishShield
-    this.selfSuppressed = grants.selfSuppressed
-    this.grantedHidden = grants.hidden
+    this.grantedHidden = grantedHidden
     this.end = end
     end.setOwner(this)
     end.listen((message) => receiveFromPage(end, () => this.receive(message)))
@@ -129,7 +113,6 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     })
     end.onDisconnect(() => room.setHeldConnected(this, false))
     end.onReconnect(() => room.setHeldConnected(this, true))
-    grants.onSuppressed((member) => room.onStubSuppressed(this, member))
   }
 
   // Client publishes, subscriptions and attaches
@@ -158,6 +141,8 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
 
   _onPageAttach(connection: PageConnection): void {
     this.room.replica.onStubAttached(this, connection)
+    this.attached = true
+    this.flushTail()
   }
 
   // Client requests
@@ -250,7 +235,15 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   }
 
   heldMembers(): IterableIterator<string> {
-    return this.members.values()
+    return this.members.keys()
+  }
+
+  *selfSuppressed(): Generator<string> {
+    for (const [id, selfDelivery] of this.members) if (!selfDelivery) yield id
+  }
+
+  atPage(suppressed: ReadonlySet<string>): void {
+    this.suppressed = suppressed
   }
 
   private requireMember(id: string): string {
@@ -264,15 +257,14 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     if (this.members.size === ROOM_VIEW_MEMBERS_MAX) {
       throw new RoomError(`A room view joins at most ${ROOM_VIEW_MEMBERS_MAX} participants`)
     }
-    this.members.add(id)
-    if (!selfDelivery) this.selfSuppressed.add(id)
+    this.members.set(id, selfDelivery)
     this.end.deliver(unorderedEventBody({ __r: 'joined', reqId, id }))
   }
 
-  forgetMember(id: string): void {
-    this.members.delete(id)
-    this.selfSuppressed.delete(id)
+  /** Returns whether it held the member. */
+  forgetMember(id: string): boolean {
     this.replay.forgetMember(id)
+    return this.members.delete(id)
   }
 
   /** Drops its wants naming `id`; returns whether it held any. */
@@ -297,15 +289,15 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   }
 
   wantsTextFrom(memberId: string): boolean {
-    return !this.selfSuppressed.has(memberId) && (this.wantsText || this.textMemberWants.has(memberId))
+    return !this.suppressed.has(memberId) && (this.wantsText || this.textMemberWants.has(memberId))
   }
 
   wantsBinary(memberId: string, track: string): boolean {
-    return !this.selfSuppressed.has(memberId) && binaryWantsCovers(this.binary, memberId, track)
+    return !this.suppressed.has(memberId) && binaryWantsCovers(this.binary, memberId, track)
   }
 
   suppressedMembers(): ReadonlySet<string> {
-    return this.selfSuppressed
+    return this.suppressed
   }
 
   // Relays
@@ -421,9 +413,9 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     this.room.onHolderTextChanged(this, null)
   }
 
-  /** The first real text want flushes the tail in order through the replay gate. */
+  /** The first real text want flushes the tail in order through the replay gate, once the stub knows its page. */
   private flushTail(): void {
-    if (this.tail === null) return
+    if (this.tail === null || !this.attached) return
     if (!this.wantsText && this.textMemberWants.size === 0) return // keep holding until a real want
     const held = this.tail.take()
     this.tail = null

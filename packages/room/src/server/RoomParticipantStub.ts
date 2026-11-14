@@ -147,6 +147,10 @@ class RoomParticipantStub implements BroadcastEndOwner {
     return [this.participant.id]
   }
 
+  selfSuppressed(): string[] {
+    return this.participant.selfDelivery ? [] : [this.participant.id]
+  }
+
   /** Its participant's inbox forwards here. */
   deliver(msg: InboxMessage): void {
     this.notify(dmNotice(msg))

@@ -16,6 +16,7 @@ import {
   onGetAudit,
   onJoinAsServer,
   onJoinRoomAsServerSelf,
+  onJoinAsServerSelf,
   onGetRoomWithMember,
   onGetRoomWithSnapshotMember,
   onWatchRoom,
@@ -140,6 +141,7 @@ async function createRoom(label: string) {
 let selfCloseBase = ''
 
 type RoomView = Awaited<ReturnType<typeof onGetRoom>>
+type ServerJoined = Awaited<ReturnType<typeof onJoinAsServerSelf>>
 
 /** The join the `away-join` card starts when its second button is clicked. */
 let startAwayJoin: (() => void) | null = null
@@ -147,6 +149,8 @@ let startAwayJoin: (() => void) | null = null
 let goAway: (() => void) | null = null
 /** The check the `member-keeps-room` card runs when its second button is clicked. */
 let checkKeptMember: (() => void) | null = null
+/** The publish the `self-upgrade` card makes when its second button is clicked. */
+let publishUpgradedSelf: (() => void) | null = null
 /** The check the `watchers-upgrade` card runs when its second button is clicked. */
 let checkUpgradedWatch: (() => void) | null = null
 /** The check the `members-let-go` card runs when its second button is clicked. */
@@ -284,6 +288,38 @@ function Room() {
       tracks.drawing.length === 16
     await pollUntil(() => ({ done: done() || (closed && myCause !== null) }), 150)
     setResult(JSON.stringify({ roomId, text, ...tracks, closed, myCause }))
+  }
+
+  /** What the view receives of track `cam` and of messages: `Other`'s before and after `me`'s, once `meanwhile` is
+   *  done. `me` joined on the server with `selfDelivery: false`, and a server-side room watches `cam`
+   *  (`onWatchRoomTrack()`). */
+  const receivedBesideMe = async (
+    roomId: string,
+    room: RoomView,
+    me: ServerJoined,
+    meanwhile?: () => Promise<void>,
+  ) => {
+    const text: unknown[] = []
+    const frames: number[] = []
+    room.subscribe((data) => text.push(data))
+    room.subscribeBinary((data) => frames.push(data[0]!), { track: 'cam' })
+    const other = await room.join({ meta: { name: 'Other' } })
+    const otherSends = async (data: string, frame: number) => {
+      await other.publish(data)
+      await other.publishBinary(new Uint8Array([frame]), { track: 'cam' })
+      await pollUntil(() => ({ done: text.includes(data) && frames.includes(frame) }))
+    }
+    await otherSends('hello', 1)
+    await meanwhile?.()
+    await me.publish('mine')
+    await me.publishBinary(new Uint8Array([7]), { track: 'cam' })
+    // The view was relayed them when the server-side room was, so it gets `Other`'s next ones after them.
+    await pollUntil(async () => {
+      const watched = await onGetWatchedTrack(roomId)
+      return { done: watched.text.includes('mine') && watched.frames.includes(7) }
+    })
+    await otherSends('bye', 9)
+    return { text, frames }
   }
 
   const scenario = (id: string, heading: string | null, label: string, run: () => Promise<void>) => (
@@ -1948,6 +1984,40 @@ function Room() {
         },
       )}
 
+      {scenario(
+        'self-separate',
+        'selfDelivery: false (the room and me from two calls)',
+        'The room, then me, and me, then the room',
+        async () => {
+          const roomFirst = await createRoomId('self-separate')
+          await onWatchRoomTrack(roomFirst, 'cam')
+          const room = await onGetRoom(roomFirst)
+          const received = await receivedBesideMe(roomFirst, room, await onJoinAsServerSelf(roomFirst, 'Me'))
+          const meFirst = await createRoomId('self-separate')
+          await onWatchRoomTrack(meFirst, 'cam')
+          const me = await onJoinAsServerSelf(meFirst, 'Me')
+          const receivedReversed = await receivedBesideMe(meFirst, await onGetRoom(meFirst), me)
+          setResult(JSON.stringify({ roomFirst: received, meFirst: receivedReversed }))
+        },
+      )}
+
+      {scenario('self-upgrade', null, 'The room and me from two calls while the connection upgrades', async () => {
+        const roomId = await createRoomId('self-upgrade')
+        await onWatchRoomTrack(roomId, 'cam')
+        const room = await onGetRoom(roomId)
+        const me = await onJoinAsServerSelf(roomId, 'Me')
+        const received = await receivedBesideMe(roomId, room, me, async () => {
+          const { promise: upgraded, resolve } = Promise.withResolvers<void>()
+          publishUpgradedSelf = resolve
+          setResult(JSON.stringify({ ready: true }))
+          await upgraded
+        })
+        setResult(JSON.stringify(received))
+      })}
+      <button id="test-room-self-upgrade-publish" onClick={() => publishUpgradedSelf?.()}>
+        Publish as me
+      </button>
+
       {scenario('reconfig', 'Reconfigure, list, getOrCreate', 'Update, list, getOrCreate', async () => {
         const base = `e2e-reconfig:${crypto.randomUUID()}`
         const roomId = `${base}:a`
@@ -2209,11 +2279,11 @@ function Room() {
         const [roomId, pubView] = await createRoom('tracks')
         // A GC pass would close `pubView`, and its members leaving with it end the demand this reads.
         const releasePubView = keepReachable(pubView)
-        const pub = await pubView.join({ meta: { name: 'Pub' }, selfDelivery: false })
-        const other = await pubView.join({ meta: { name: 'Other' } })
+        const pub = await pubView.join({ meta: { name: 'Pub' } })
+        const other = await pubView.join({ meta: { name: 'Other' }, selfDelivery: false })
         const demand = demandLog(pub)
         const otherDemand = demandLog(other)
-        // Pub's own side: its frames never come back to this view, so it wants nothing of Pub.
+        // Other's own side: its frames never come back to this page, so the page wants nothing of Other.
         pubView.subscribeBinary(() => {}, { track: 'own' })
 
         const tracks = Array.from({ length: 1_000 }, (_, i) => `t${i}`)
@@ -2226,7 +2296,10 @@ function Room() {
         const defaultTrack: number[] = []
         viewer.subscribeBinary((data) => defaultTrack.push(data[0]!), { track: 'main' })
         await pollUntil(() => ({
-          done: demand.some(([track]) => track === 't999') && demand.some(([t]) => t === null),
+          done:
+            demand.some(([track]) => track === 't999') &&
+            demand.some(([t]) => t === null) &&
+            demand.some(([t]) => t === 'own'),
         }))
 
         await Promise.all([
@@ -2253,10 +2326,9 @@ function Room() {
           JSON.stringify({
             inOrder: tracks.filter((track) => frames[track]!.join() === '1,2').length,
             defaultTrack,
-            demand: demand.filter(
-              ([track]) => track === 'main' || track === 'own' || track === 't0' || track === 't999',
-            ),
+            demand: demand.filter(([track]) => track === 'main' || track === 't0' || track === 't999'),
             wanted: new Set(demand.filter(([, wanted]) => wanted).map(([track]) => track)).size,
+            pubOwn: demand.filter(([track]) => track === 'own'),
             otherOwn: otherDemand.filter(([track]) => track === 'own'),
             tooMany,
           }),

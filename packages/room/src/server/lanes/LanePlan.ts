@@ -526,8 +526,8 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   }
 
   /** Leaves `member` out of the demand of each track named of every member that no holder here receives from it. Only a
-   *  holder's own member can be left out, since a holder suppresses its own member; so this reads only an owned member
-   *  while some track has its every-member lane or is told by member, or a member left out before. */
+   *  member at a holder's page can be left out, since a holder suppresses only those; so this reads only an owned
+   *  member while some track has its every-member lane or is told by member, or a member left out before. */
   private syncExcept(member: string): void {
     const served = this.lanes.servesTracks
     if (!this.excepted.has(member) && (!served || !this.roles.owned.has(member))) return

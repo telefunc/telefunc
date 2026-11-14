@@ -243,17 +243,18 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.publishedTracks.forget(member)
   }
 
-  /** The handle's stub attached: its view is written and its wants planned. */
-  attachStub(handle: RoomHandle, stub: RoomStub): void {
+  /** The handle's stub attached at the page `page` names: its view is written and its wants planned. */
+  attachStub(handle: RoomHandle, stub: RoomStub, page: object): void {
     this.reconsider(handle)
     this.stubs.add(stub)
     this.hosting.hostView(stub)
+    this.placeAtPage(stub, page)
     this.lanePlan.holderChanged(stub)
   }
 
-  /** The stub's client attached on `connection`, which is the stub's page from now on: the roster is read again unless
-   *  the view is current, which tells every client its drift, and the client gets the room's meta and the demand for
-   *  the members it holds. */
+  /** The stub's client attached on `connection`, which names the stub's page from now on: the roster is read again
+   *  unless the view is current, which tells every client its drift, and the client gets the room's meta and the demand
+   *  for the members it holds. */
   onStubAttached(stub: RoomStub, connection: PageConnection): void {
     this.placeAtPage(stub, connection)
     void this.authority.ensureRoster().catch(reportRoomError)
@@ -272,20 +273,24 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.lanePlan.holderGone(stub)
   }
 
-  /** The end is at `page` from now on; its page's people and wants are told in the next planning pass. */
-  placeAtPage(end: PageEnd, page: object): void {
-    this.pages.place(end, page)
-    this.attributionChanged()
+  /** The end is at the page `key` names from now on (`PageIndex.place`); its page's people and wants are told in the
+   *  next planning pass. */
+  placeAtPage(end: PageEnd, key: object): void {
+    this.suppressionChanged(this.pages.place(end, key))
   }
 
   leavePage(end: PageEnd): void {
-    this.pages.remove(end)
-    this.attributionChanged()
+    this.suppressionChanged(this.pages.remove(end))
   }
 
   /** The participants the end holds changed. */
   pageEndChanged(end: PageEnd): void {
-    this.pages.endChanged(end)
+    this.suppressionChanged(this.pages.endChanged(end))
+  }
+
+  /** A page's ends stopped or started getting `members`' own messages back: the next planning pass recounts them. */
+  private suppressionChanged(members: Set<string>): void {
+    for (const member of members) this.lanePlan.memberChanged(member)
     this.attributionChanged()
   }
 
@@ -576,7 +581,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
       this.relayControl(leave, () => unorderedEventBody(leave))
     }
     for (const stub of this.stubs) {
-      stub.forgetMember(id)
+      if (stub.forgetMember(id)) this.pageEndChanged(stub)
       if (stub.forgetWantsOf(id)) this.lanePlan.holderChanged(stub, [id])
     }
     this.lanePlan.memberReleased(id)

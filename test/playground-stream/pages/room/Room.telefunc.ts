@@ -11,6 +11,7 @@ export {
   onGetAudit,
   onJoinAsServer,
   onJoinRoomAsServerSelf,
+  onJoinAsServerSelf,
   onGetRoomWithMember,
   onGetRoomWithSnapshotMember,
   onWatchRoom,
@@ -229,6 +230,11 @@ async function onJoinRoomAsServerSelf(roomId: string, name: string) {
   const room = anyoneCanJoin(await Room.get(roomId))
   const me = await room.join({ meta: { name }, selfDelivery: false })
   return { room, me }
+}
+
+/** `me` alone, joined with `selfDelivery: false`. */
+async function onJoinAsServerSelf(roomId: string, name: string) {
+  return await Room.join(roomId, { meta: { name }, selfDelivery: false })
 }
 
 async function onGetRoomWithMember(roomId: string, memberId: string) {

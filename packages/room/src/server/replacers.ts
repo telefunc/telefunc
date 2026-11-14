@@ -10,7 +10,6 @@ import {
 import { ServerLocalParticipant, ServerRoom, handleOf } from './room.js'
 import type { RemoteParticipant } from '../types.js'
 import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from '../shared/protocol.js'
-import { ResponseRoomGrants } from './RoomStub.js'
 import { remoteBacking } from '../shared/state.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
@@ -19,12 +18,19 @@ type RoomReplacerContract = TypeContract<ServerRoom, never, RoomSnapshotMetadata
 type RoomParticipantReplacerContract = TypeContract<ServerLocalParticipant, never, ParticipantStubMetadata>
 type RoomRemoteReplacerContract = TypeContract<RemoteParticipant, never, RemoteParticipantMetadata>
 
-const ROOM_GRANTS = Symbol.for('telefunc.RoomResponseGrants')
+const RESPONSE_PAGE = Symbol.for('telefunc.RoomResponsePage')
+const RESPONSE_HIDDEN = Symbol.for('telefunc.RoomResponseHidden')
 
-/** Keyed by room id: `Room.join(id)` and `Room.get(id)` build separate instances of one room. */
-function responseRoomGrants(context: ServerReplacerContext, roomId: string): ResponseRoomGrants {
-  const byRoom = context.responseState(ROOM_GRANTS, () => new Map<string, ResponseRoomGrants>())
-  return getOrCreate(byRoom, roomId, () => new ResponseRoomGrants())
+/** What names the page a response goes to until its Room values attach: a response reaches one page. */
+function responsePage(context: ServerReplacerContext): object {
+  return context.responseState(RESPONSE_PAGE, () => ({}))
+}
+
+/** The hidden members a response hands its client, by room id: `Room.join(id)` and `Room.get(id)` build separate
+ *  instances of one room. */
+function responseHidden(context: ServerReplacerContext, roomId: string): Set<string> {
+  const byRoom = context.responseState(RESPONSE_HIDDEN, () => new Map<string, Set<string>>())
+  return getOrCreate(byRoom, roomId, () => new Set())
 }
 
 const roomReplacer: ReplacerType<RoomReplacerContract, ServerReplacerContext> = {
@@ -37,7 +43,8 @@ const roomReplacer: ReplacerType<RoomReplacerContract, ServerReplacerContext> = 
     const metadata = handleOf(serverRoom).openStub({
       end,
       publishShield: context.validators.get('data'),
-      grants: responseRoomGrants(context, serverRoom.id),
+      grantedHidden: responseHidden(context, serverRoom.id),
+      page: responsePage(context),
     })
     if (context.maxFrameBytes) metadata.maxFrameBytes = context.maxFrameBytes
     return {
@@ -65,7 +72,7 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, ServerReplace
     // Returning a hidden member hands it to this client: its room stub relays that member's events. One that left is
     // not handed: as any member its room's roster doesn't list, it revives on the page as one that left.
     const handedHidden = entry.hidden && !entry.left
-    if (handedHidden) responseRoomGrants(context, state.roomId).hidden.add(entry.id)
+    if (handedHidden) responseHidden(context, state.roomId).add(entry.id)
     const metadata: RemoteParticipantMetadata = {
       room: state.view,
       id: entry.id,
@@ -91,9 +98,11 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, Ser
   },
   replace(participant, context) {
     const end = context.createBroadcastChannel()
-    const metadata = participant._openStub({ end, publishShield: context.validators.get('data') })
-    // Its room's stub, if co-returned, drops this member's echo at the source; otherwise the grant goes unused.
-    if (!participant.selfDelivery) responseRoomGrants(context, participant.room.id).suppress(participant.id)
+    const metadata = participant._openStub({
+      end,
+      publishShield: context.validators.get('data'),
+      page: responsePage(context),
+    })
     if (context.maxFrameBytes) metadata.maxFrameBytes = context.maxFrameBytes
     return {
       metadata,

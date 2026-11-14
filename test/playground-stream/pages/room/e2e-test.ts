@@ -85,6 +85,9 @@ type AdminResult = {
   count: number
 }
 
+/** What a view received of track `cam` and of messages. */
+type OwnTrack = { text: string[]; frames: number[] }
+
 type MemberResult = {
   hasMember: boolean
   memberName: string | null
@@ -777,6 +780,14 @@ function testRoom() {
       expect(r.mine).deep.equal(['from-notme']) // own co-return echo suppressed; client join delivered
     },
   )
+  testRoomScenario<{ roomFirst: OwnTrack; meFirst: OwnTrack }>(
+    'self-separate',
+    "room: selfDelivery: false holds on the page's view of the room when the room and `me` come from two telefunction calls, in either order",
+    (r) => {
+      const others = { text: ['hello', 'bye'], frames: [1, 9] }
+      expect(r).deep.equal({ roomFirst: others, meFirst: others })
+    },
+  )
   testRoomScenario<{
     updates: string[]
     topic: string | null
@@ -1220,6 +1231,7 @@ function testRoom() {
     defaultTrack: number[]
     demand: Array<[string, boolean]>
     wanted: number
+    pubOwn: Array<[string, boolean]>
     otherOwn: Array<[string, boolean]>
     tooMany: string | null
   }>(
@@ -1234,8 +1246,9 @@ function testRoom() {
         ['t0', false],
       ])
       expect(r.demand.filter(([track]) => track === 'main')).deep.equal([['main', true]])
-      expect(r.wanted).toBe(1_001)
-      expect(r.otherOwn).deep.equal([['own', true]])
+      expect(r.wanted).toBe(1_002)
+      expect(r.pubOwn).deep.equal([['own', true]])
+      expect(r.otherOwn).deep.equal([])
       expect(r.tooMany).include('[Wrong Usage] Too many binary tracks subscribed on one room (4096 max)')
     },
   )
@@ -1462,6 +1475,40 @@ function testRoomDemand() {
         expect(reads.length).greaterThan(0)
         for (const read of reads) expect(read).deep.equal([cam(['Me'], 1)])
       })
+    } finally {
+      await context.close()
+    }
+  })
+  test("room: selfDelivery: false holds on the page's view of the room from another call after the page's connection upgrades to a WebSocket", async () => {
+    const transports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!)
+    if (!transports.includes('sse') || !transports.includes('ws')) return
+    const context = await page.context().browser()!.newContext()
+    try {
+      // The page's WebSocket opens once `me` and the room are on the page: the upgrade then moves both.
+      const { promise: ready, resolve: release } = Promise.withResolvers<void>()
+      await context.routeWebSocket(/\/_telefunc/, async (ws) => {
+        await ready
+        ws.connectToServer()
+      })
+      const tab = await context.newPage()
+      let upgradedFrames = 0
+      tab.on('websocket', (ws) => ws.on('framereceived', () => upgradedFrames++))
+      await navigate(`${getServerUrl()}/room`, undefined, tab)
+      await tab.click('#test-room-self-upgrade')
+      await autoRetry(async () =>
+        expect(JSON.parse((await tab.textContent('#room-result'))!)).deep.equal({ ready: true }),
+      )
+      release()
+      await autoRetry(() => expect(upgradedFrames).greaterThan(0))
+      // The upgrade's reconcile had its chance to move every end of the page.
+      await sleep(1000)
+      await tab.click('#test-room-self-upgrade-publish')
+      await autoRetry(async () =>
+        expect(JSON.parse((await tab.textContent('#room-result'))!)).deep.equal({
+          text: ['hello', 'bye'],
+          frames: [1, 9],
+        }),
+      )
     } finally {
       await context.close()
     }
