@@ -1,11 +1,10 @@
 export { ServerBroadcastEnd }
-export type { BroadcastEndOwner, PageConnection }
+export type { BroadcastEndOwner }
 
 import { ServerChannel } from './ServerChannel.js'
 import { getChannelMux } from './ChannelMux.js'
 import { assert } from '../../../utils/assert.js'
-import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import type { IndexedPeer, PeerSender } from './IndexedPeer.js'
+import type { IndexedPeer } from './IndexedPeer.js'
 import { hold, letGo, maxPendingBytesOf, type MemoryHolder } from './channelMemory.js'
 import type { PublishBody } from './PublishBody.js'
 import { CHANNEL_RECONNECT_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
@@ -18,10 +17,6 @@ import type { ChannelCloseOptions, ChannelCloseResult } from '../channel.js'
 const NOT_EVEN_NEWEST = 'the server could not hold even the newest message for its client'
 const FELL_BEHIND = 'its client fell behind what the server holds for it; `lossy: true` lets it skip to the newest'
 
-const PAGE_CONNECTION: unique symbol = Symbol.for('telefunc.pageConnection')
-/** The connection a page attached its channels on. Opaque: compare it by identity, and nothing else. */
-type PageConnection = { readonly [PAGE_CONNECTION]: true }
-
 /** What a page's publishes, subscriptions and attaches go to. */
 type BroadcastEndOwner = {
   /** What it returns answers the page's `publish()`. */
@@ -29,9 +24,8 @@ type BroadcastEndOwner = {
   _onPagePublishBinary(data: Uint8Array): unknown
   /** The page subscribes or unsubscribes `kind`, and declares both at each attach. */
   _onPageSubscription?(kind: BroadcastKind, on: boolean): void
-  /** Each attach of the page while the channel is open, after the page's subscriptions applied. `connection` is the
-   *  same object for every channel the page attached on its current connection, and a new one once it reconnects. */
-  _onPageAttach?(connection: PageConnection): void
+  /** Each attach of the page while the channel is open, after the page's subscriptions applied. */
+  _onPageAttach?(): void
   /** A newer publish of a lossy stream took the place of one its page hadn't taken. */
   _onPublishesMissed?(): void
 }
@@ -236,7 +230,7 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     this.endOverflowed()
     if (this.peer !== peer || this.isClosed) return
     assert(this.owner)
-    this.owner._onPageAttach?.(pageConnectionOf(peer.sender))
+    this.owner._onPageAttach?.()
   }
 
   override _acknowledge(): void {
@@ -276,18 +270,4 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     assert(this.owner)
     this.owner._onPageSubscription?.(kind, on)
   }
-}
-
-const globalObject = getGlobalObject('wire-protocol/channel/server/ServerBroadcastEnd.ts', {
-  pageConnections: new WeakMap<PeerSender, PageConnection>(),
-})
-
-/** One per wire, so every channel the page attached on it shares it. */
-function pageConnectionOf(sender: PeerSender): PageConnection {
-  let connection = globalObject.pageConnections.get(sender)
-  if (connection === undefined) {
-    connection = Object.freeze({ [PAGE_CONNECTION]: true as const })
-    globalObject.pageConnections.set(sender, connection)
-  }
-  return connection
 }

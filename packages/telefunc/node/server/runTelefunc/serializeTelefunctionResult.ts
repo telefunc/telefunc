@@ -9,6 +9,7 @@ import { createStreamingReplacer } from '../../../wire-protocol/values/server/re
 import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
 import { ServerBroadcastEnd } from '../../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 import { getChannelMux } from '../../../wire-protocol/channel/server/ChannelMux.js'
+import { getSessionToken } from '../../../wire-protocol/wire/requestKind.js'
 import {
   buildShieldValidators,
   type ShieldValidators,
@@ -130,6 +131,8 @@ function serializeTelefunctionResult(runContext: {
     if (!responseStates.has(key)) responseStates.set(key, init())
     return responseStates.get(key) as T
   }
+  // Read once a replacer asks, so a response that returns no value of a page parses no URL.
+  let page: string | undefined
   const replacer = createStreamingReplacer(
     function getContext(value: unknown): ServerReplacerContext {
       return {
@@ -138,6 +141,9 @@ function serializeTelefunctionResult(runContext: {
         createBroadcastChannel,
         sendStream,
         responseState,
+        get page() {
+          return (page ??= getSessionToken(requestContext.request) ?? crypto.randomUUID())
+        },
         validators: makeValidators(value, valueShields, shieldCtx),
         maxFrameBytes: getAdapterMaxFrameBytes(),
       }

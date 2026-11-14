@@ -89,8 +89,11 @@ type AdminResult = {
 /** What a view received after its page's participant was removed, and how often it closed. */
 type RemovedView = { text: string[]; closes: number; closeCause: unknown; isClosed: boolean }
 
-/** What a view received of track `cam` and of messages. */
-type OwnTrack = { text: string[]; frames: number[] }
+/** What a view received of messages, of track `cam` and of the lossy track `cursor`. */
+type OwnTrack = { text: string[]; frames: number[]; lossy: number[] }
+
+/** What a view receives of `Other`'s messages and frames, beside a `me` whose own it doesn't get back. */
+const othersOnly: OwnTrack = { text: ['hello', 'bye'], frames: [1, 9], lossy: [1, 9] }
 
 type MemberResult = {
   hasMember: boolean
@@ -788,8 +791,29 @@ function testRoom() {
     'self-separate',
     "room: selfDelivery: false holds on the page's view of the room when the room and `me` come from two telefunction calls, in either order",
     (r) => {
-      const others = { text: ['hello', 'bye'], frames: [1, 9] }
-      expect(r).deep.equal({ roomFirst: others, meFirst: others })
+      expect(r).deep.equal({ roomFirst: othersOnly, meFirst: othersOnly })
+    },
+  )
+  testRoomScenario<OwnTrack>(
+    'self-two-connections',
+    "room: selfDelivery: false holds on the page's view of the room when `me` comes from a call on another of the page's connections",
+    (r) => {
+      expect(r).deep.equal(othersOnly)
+    },
+  )
+  testRoomScenario<OwnTrack>(
+    'self-returned',
+    "room: selfDelivery: false holds on the page's view of the room for what `me` publishes right after a telefunction returned it",
+    (r) => {
+      expect(r).deep.equal(othersOnly)
+    },
+  )
+  testRoomScenario<{ myCause: unknown; closes: unknown[]; isClosed: boolean }>(
+    'self-removed',
+    "room: removing the page's participant closes the page's view of the room when they came over two of the page's connections",
+    (r) => {
+      const removed = { type: 'removed', reason: 'be nice' }
+      expect(r).deep.equal({ myCause: removed, closes: [removed], isClosed: true })
     },
   )
   testRoomScenario<{
@@ -1166,7 +1190,7 @@ function testRoom() {
     text: string[]
     frames: Array<[string, number, string]>
     later: string[]
-    server: { text: string[]; frames: number[] }
+    server: { text: string[]; frames: number[]; lossy: number[] }
   }>(
     'retain-late',
     'room: a late subscriber, on the page or the server, gets each retained message once before the live ones, and none of a member who left',
@@ -1177,7 +1201,7 @@ function testRoom() {
         ['cam', 4, 'A'],
       ])
       expect(r.later).deep.equal(['live-2'])
-      expect(r.server).deep.equal({ text: ['pinned', 'live', 'live-2'], frames: [1, 4] })
+      expect(r.server).deep.equal({ text: ['pinned', 'live', 'live-2'], frames: [1, 4], lossy: [] })
     },
   )
   testRoomScenario<{ frames: Array<[string, number, unknown]>; server: Array<[number, unknown]> }>(
@@ -1547,12 +1571,7 @@ function testRoomDemand() {
       // The upgrade's reconcile had its chance to move every end of the page.
       await sleep(1000)
       await tab.click('#test-room-self-upgrade-publish')
-      await autoRetry(async () =>
-        expect(JSON.parse((await tab.textContent('#room-result'))!)).deep.equal({
-          text: ['hello', 'bye'],
-          frames: [1, 9],
-        }),
-      )
+      await autoRetry(async () => expect(JSON.parse((await tab.textContent('#room-result'))!)).deep.equal(othersOnly))
     } finally {
       await context.close()
     }

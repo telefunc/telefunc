@@ -7,7 +7,7 @@ import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { getRoomPlane } from '../backend/plane.js'
 import type { LaneId } from '../backend/contract.js'
-import { hostLocal, type OrderingInfo, type PageConnection, type PublishBody } from 'telefunc/__internal'
+import { hostLocal, type OrderingInfo, type PublishBody } from 'telefunc/__internal'
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { ROOM_MEMBER_TRACKS_MAX } from '../shared/constants.js'
 import { DemandExchange } from './lanes/DemandExchange.js'
@@ -207,7 +207,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     toggle(this.served, handle, served)
     toggle(this.receivers, handle, handle.state.listenerCount > 0 || tailHeld)
     // A server-side room is its own page while it is served.
-    if (served) this.placeAtPage(handle.local, handle.local)
+    if (served) this.placeAtPage(handle.local)
     else this.leavePage(handle.local)
     const roles = this.roles
     roles.observed = roles.listened = roles.tailHeld = false
@@ -244,7 +244,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   }
 
   /** The handle's stub attached at the page `page` names: its view is written and its wants planned. */
-  attachStub(handle: RoomHandle, stub: RoomStub, page: object): void {
+  attachStub(handle: RoomHandle, stub: RoomStub, page: string): void {
     this.reconsider(handle)
     this.stubs.add(stub)
     this.hosting.hostView(stub)
@@ -252,11 +252,9 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.lanePlan.holderChanged(stub)
   }
 
-  /** The stub's client attached on `connection`, which names the stub's page from now on: the roster is read again
-   *  unless the view is current, which tells every client its drift, and the client gets the room's meta and the demand
-   *  for the members it holds. */
-  onStubAttached(stub: RoomStub, connection: PageConnection): void {
-    this.placeAtPage(stub, connection)
+  /** The stub's client attached: the roster is read again unless the view is current, which tells every client its
+   *  drift, and the client gets the room's meta and the demand for the members it holds. */
+  onStubAttached(stub: RoomStub): void {
     void this.authority.ensureRoster().catch(reportRoomError)
     stub.relayEvent({ __r: 'update', seq: this.model.metaSeq, meta: this.model.metaEntries() })
     for (const member of stub.heldMembers()) {
@@ -273,9 +271,9 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.lanePlan.holderGone(stub)
   }
 
-  /** The end is at the page `key` names from now on (`PageIndex.place`); its page's people and wants are told in the
+  /** The end is at the page `key` names, or at its own (`PageIndex.place`); its page's people and wants are told in the
    *  next planning pass. */
-  placeAtPage(end: PageEnd, key: object): void {
+  placeAtPage(end: PageEnd, key?: string): void {
     this.suppressionChanged(this.pages.place(end, key))
   }
 

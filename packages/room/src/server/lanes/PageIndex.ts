@@ -7,7 +7,9 @@ import type { LeaveCause } from '../../types.js'
 import type { WhoEntry } from '../protocol.js'
 import type { BinaryWants } from './binaryWants.js'
 import type { DemandReport } from './DemandReport.js'
+import { getOrCreate } from 'telefunc/__internal'
 import { toggleEntry } from '../../utils/sets.js'
+import { assert } from '../../utils/assert.js'
 assertIsNotBrowser()
 
 /** A Room end at a page: a view's stub, a participant's stub, or a server-side room's own listeners, which are their
@@ -26,28 +28,29 @@ interface PageEnd {
 }
 
 /** A page's ends here, the participants they hold, those whose own messages none of them gets back, the token its
- *  who-entries name it by and what it was last reported with. A page joined into another names that one (`into`). */
+ *  who-entries name it by and what it was last reported with. */
 type Page = {
+  /** What names it here (`ServerReplacerContext.page`); none for a server-side room's own page. */
+  key: string | undefined
+  /** Random, never its key: who-entries leave this process. */
   token: string
   ends: Set<PageEnd>
   suppressed: Set<string>
   held: Set<string>
   told: WhoEntry[]
-  into: Page | null
 }
 
 type PageIndexOptions = { model: Pick<RoomModel, 'memberHidden'> }
 
 /** The pages holding this room here, which decide whose own messages a page gets back, which pages a removal closes,
  *  and whom a watch is told as.
- *  A key names a page: the response that carried an end, until the end attaches, then each connection an end attached
- *  on. Two keys that ever named one end name one page from then on, so a page's ends returned by separate telefunctions
- *  are one page once they attached, and a reconnect or an upgrade keeps the page. A server-side room is its own page.
+ *  An end is at the page of the response that returned it, from then on: the page its client's session names, whatever
+ *  telefunction or connection the end came by. A server-side room is its own page.
  *  A watch is told as that of the participants the page's ends hold, or of the page's token where they hold none it
  *  may name, in the planning pass after the page changed, never as it changes. */
 class PageIndex {
   private readonly pageOf = new Map<PageEnd, Page>()
-  private readonly pageOfKey = new WeakMap<object, Page>()
+  private readonly pageOfKey = new Map<string, Page>()
   /** The pages holding each member, which its join and leave report again. */
   private readonly heldAt = new Map<string, Set<Page>>()
   private readonly changedPages = new Set<Page>()
@@ -62,17 +65,22 @@ class PageIndex {
     return this.changedPages.size > 0
   }
 
-  /** The end is at the page `key` names from now on; a key that named another page joins the two. Returns the members
+  /** The end is at the page `key` names, or at a page of its own without one, until it is removed. Returns the members
    *  whose own messages some end stopped or started getting back. */
-  place(end: PageEnd, key: object): Set<string> {
+  place(end: PageEnd, key?: string): Set<string> {
     const suppressed = new Set<string>()
-    const named = this.pageOfKey.get(key)
     const was = this.pageOf.get(end)
-    let page: Page
-    if (was === undefined) page = this.add(end, named === undefined ? newPage() : rootOf(named), suppressed)
-    else if (named === undefined) page = was
-    else page = this.join(rootOf(named), was, suppressed)
-    this.pageOfKey.set(key, page)
+    if (was !== undefined) {
+      assert(was.key === key)
+      return suppressed
+    }
+    const page = key === undefined ? newPage(key) : getOrCreate(this.pageOfKey, key, () => newPage(key))
+    this.pageOf.set(end, page)
+    page.ends.add(end)
+    end.atPage?.(page.suppressed)
+    for (const member of page.suppressed) suppressed.add(member)
+    this.changedPages.add(page)
+    this.readHolders(page, suppressed)
     return suppressed
   }
 
@@ -82,6 +90,7 @@ class PageIndex {
     if (page === undefined) return new Set()
     this.pageOf.delete(end)
     page.ends.delete(end)
+    if (page.ends.size === 0 && page.key !== undefined) this.pageOfKey.delete(page.key)
     return this.pageChanged(page)
   }
 
@@ -120,43 +129,11 @@ class PageIndex {
     }
   }
 
-  /** The end's first page. */
-  private add(end: PageEnd, page: Page, suppressed: Set<string>): Page {
-    this.pageOf.set(end, page)
-    page.ends.add(end)
-    end.atPage?.(page.suppressed)
-    for (const member of page.suppressed) suppressed.add(member)
-    this.changedPages.add(page)
-    this.readHolders(page, suppressed)
-    return page
-  }
-
   private pageChanged(page: Page): Set<string> {
     const suppressed = new Set<string>()
     this.changedPages.add(page)
     this.readHolders(page, suppressed)
     return suppressed
-  }
-
-  /** The pages are one from now on: the one with fewer ends moves into the other, whose token stays. */
-  private join(a: Page, b: Page, suppressed: Set<string>): Page {
-    if (a === b) return a
-    const [page, joined] = a.ends.size >= b.ends.size ? [a, b] : [b, a]
-    // Each end of either page drops, or gets back, what the other page dropped.
-    for (const member of [...page.suppressed, ...joined.suppressed]) suppressed.add(member)
-    for (const end of joined.ends) {
-      this.pageOf.set(end, page)
-      page.ends.add(end)
-      end.atPage?.(page.suppressed)
-    }
-    joined.ends.clear()
-    joined.into = page
-    // The joined page's report retracts its entries.
-    this.changedPages.add(joined)
-    this.changedPages.add(page)
-    this.readHolders(joined, suppressed)
-    this.readHolders(page, suppressed)
-    return page
   }
 
   /** Reads whom the page's ends hold, and keeps its set the members they hold with `selfDelivery: false`, adding each
@@ -198,14 +175,8 @@ class PageIndex {
   }
 }
 
-function newPage(): Page {
-  return { token: crypto.randomUUID(), ends: new Set(), suppressed: new Set(), held: new Set(), told: [], into: null }
-}
-
-/** The page a page was joined into, if it was. */
-function rootOf(page: Page): Page {
-  while (page.into !== null) page = page.into
-  return page
+function newPage(key: string | undefined): Page {
+  return { key, token: crypto.randomUUID(), ends: new Set(), suppressed: new Set(), held: new Set(), told: [] }
 }
 
 /** Each scope the wants cover: every track of every member, a track of every member, every track of a member, or a

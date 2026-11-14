@@ -358,7 +358,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     publishShield,
     grantedHidden,
     page,
-  }: Omit<RoomStubOptions, 'room' | 'roster'> & { page: object }): RoomSnapshotMetadata {
+  }: Omit<RoomStubOptions, 'room' | 'roster'> & { page: string }): RoomSnapshotMetadata {
     this.attachStub(new RoomStub({ room: this, roster: this.roster, end, publishShield, grantedHidden }), page)
     const model = this.model
     const members = model.visibleEntries().map((entry) => model.memberSnapshot(entry.id))
@@ -372,7 +372,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     }
   }
 
-  private attachStub(stub: RoomStub, page: object): void {
+  private attachStub(stub: RoomStub, page: string): void {
     this.stubs.add(stub)
     if (this.tail !== null) {
       stub.beginTail(this.tail.take())
@@ -634,7 +634,7 @@ class ServerLocalParticipant extends ParticipantBase {
     end,
     publishShield,
     page,
-  }: Omit<RoomParticipantStubOptions, 'participant'> & { page: object }): ParticipantStubMetadata {
+  }: Omit<RoomParticipantStubOptions, 'participant'> & { page: string }): ParticipantStubMetadata {
     // A LocalParticipant has one holder; rebinding would overwrite its inbox forwarder and let either close drop it.
     assertUsage(
       this.holder === null,

@@ -12,6 +12,7 @@ export {
   onJoinAsServer,
   onJoinRoomAsServerSelf,
   onJoinAsServerSelf,
+  onJoinAsServerSelfPublishing,
   onGetRoomWithMember,
   onGetRoomWithSnapshotMember,
   onWatchRoom,
@@ -126,6 +127,7 @@ import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
 import { cutWireSockets } from '../../wire-sockets'
 import { demandNames, type NamedDemand } from './demandNames'
+import { publishMine } from './publishMine'
 import {
   addBackendFault,
   dropBackendSubscriptions,
@@ -237,6 +239,13 @@ async function onJoinAsServerSelf(roomId: string, name: string) {
   return await Room.join(roomId, { meta: { name }, selfDelivery: false })
 }
 
+/** `onJoinAsServerSelf()`, and `me` publishes (`publishMine()`) right after it is returned, before its page has it. */
+async function onJoinAsServerSelfPublishing(roomId: string, name: string) {
+  const me = await onJoinAsServerSelf(roomId, name)
+  setTimeout(() => void publishMine(me))
+  return me
+}
+
 async function onGetRoomWithMember(roomId: string, memberId: string) {
   const room = anyoneCanJoin(await Room.get(roomId))
   const member = room.getParticipant(memberId)
@@ -266,22 +275,24 @@ async function onGetWatched(roomId: string) {
   return watched.get(roomId) ?? []
 }
 
-const watchedTracks = new Map<string, number[]>()
+const watchedTracks = new Map<string, { frames: number[]; lossy: number[] }>()
 
-/** A server-side view's subscribers, text and one binary track, kept like `onWatchRoom()`'s. */
+/** A server-side view's subscribers, text, one binary track and the lossy track `cursor`, kept like `onWatchRoom()`'s. */
 async function onWatchRoomTrack(roomId: string, track: string) {
   const room = await Room.get(roomId)
   const list: unknown[] = []
   const frames: number[] = []
+  const lossy: number[] = []
   watched.set(roomId, list)
-  watchedTracks.set(roomId, frames)
+  watchedTracks.set(roomId, { frames, lossy })
   watchedRooms.set(roomId, room)
   room.subscribe((data) => list.push(data))
   room.subscribeBinary((data) => frames.push(data[0]!), { track })
+  room.subscribeBinary((data) => lossy.push(data[0]!), { track: 'cursor' })
 }
 
 async function onGetWatchedTrack(roomId: string) {
-  return { text: watched.get(roomId) ?? [], frames: watchedTracks.get(roomId) ?? [] }
+  return { text: watched.get(roomId) ?? [], ...(watchedTracks.get(roomId) ?? { frames: [], lossy: [] }) }
 }
 
 const retainedReads = new Map<string, ReturnType<typeof holdRetainedReads>>()

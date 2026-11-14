@@ -18,13 +18,7 @@ type RoomReplacerContract = TypeContract<ServerRoom, never, RoomSnapshotMetadata
 type RoomParticipantReplacerContract = TypeContract<ServerLocalParticipant, never, ParticipantStubMetadata>
 type RoomRemoteReplacerContract = TypeContract<RemoteParticipant, never, RemoteParticipantMetadata>
 
-const RESPONSE_PAGE = Symbol.for('telefunc.RoomResponsePage')
 const RESPONSE_HIDDEN = Symbol.for('telefunc.RoomResponseHidden')
-
-/** What names the page a response goes to until its Room values attach: a response reaches one page. */
-function responsePage(context: ServerReplacerContext): object {
-  return context.responseState(RESPONSE_PAGE, () => ({}))
-}
 
 /** The hidden members a response hands its client, by room id: `Room.join(id)` and `Room.get(id)` build separate
  *  instances of one room. */
@@ -44,7 +38,7 @@ const roomReplacer: ReplacerType<RoomReplacerContract, ServerReplacerContext> = 
       end,
       publishShield: context.validators.get('data'),
       grantedHidden: responseHidden(context, serverRoom.id),
-      page: responsePage(context),
+      page: context.page,
     })
     if (context.maxFrameBytes) metadata.maxFrameBytes = context.maxFrameBytes
     return {
@@ -101,7 +95,7 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, Ser
     const metadata = participant._openStub({
       end,
       publishShield: context.validators.get('data'),
-      page: responsePage(context),
+      page: context.page,
     })
     if (context.maxFrameBytes) metadata.maxFrameBytes = context.maxFrameBytes
     return {

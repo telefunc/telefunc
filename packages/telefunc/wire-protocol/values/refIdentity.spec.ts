@@ -65,6 +65,7 @@ function createServerHarness(extensionTypes: ReplacerType<TypeContract, ServerRe
     },
     validators: new Map(),
     responseState: (_key, init) => init(),
+    page: 'page',
     maxFrameBytes: undefined,
   }
   const replacer = createStreamingReplacer(

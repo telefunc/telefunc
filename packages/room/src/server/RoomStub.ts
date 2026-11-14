@@ -9,7 +9,6 @@ import {
   type PublishBody,
   type BroadcastEndOwner,
   type BroadcastKind,
-  type PageConnection,
   type ServerBroadcastEnd,
   type OrderingInfo,
   type ChannelPublishAck,
@@ -102,7 +101,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   private readonly binary: BinaryWants = emptyBinaryWants()
   /** A tail waits for the client's first text selector, then flushes once in order. */
   private tail: TailHold | null = null
-  /** Whether its client attached, which makes its page, and so whose own messages it drops, known. */
+  /** Whether its client attached, before which its tail holds. */
   private attached = false
   /** Whether this client was sent the whole roster: its room carried it, and no drift streams to it. */
   rosterSent = true
@@ -147,8 +146,8 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     this.room.onHolderTextChanged(this, before)
   }
 
-  _onPageAttach(connection: PageConnection): void {
-    this.room.replica.onStubAttached(this, connection)
+  _onPageAttach(): void {
+    this.room.replica.onStubAttached(this)
     this.attached = true
     this.flushTail()
   }
@@ -428,7 +427,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     this.room.onHolderTextChanged(this, null)
   }
 
-  /** The first real text want flushes the tail in order through the replay gate, once the stub knows its page. */
+  /** The first real text want flushes the tail in order through the replay gate, once its client attached. */
   private flushTail(): void {
     if (this.tail === null || !this.attached) return
     if (!this.wantsText && this.textMemberWants.size === 0) return // keep holding until a real want

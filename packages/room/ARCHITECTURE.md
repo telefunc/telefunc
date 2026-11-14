@@ -73,11 +73,12 @@ this one too, applies the event to its model, and its views tell their listeners
   its timeout (`lifecycle/hold.ts`).
 - **roster**: the members as the authority lists them, read to correct a view that drifted (`store/roster.ts`,
   `RosterStream`).
-- **page**: one tab's Room ends in a process: its views' and participants' stubs (`PageIndex`). A key names it: the
-  response that carried an end, until the end attaches, then each connection it attached on (core's `PageConnection`);
-  two keys that ever named one end name one page. A server-side room is its own page. No end of a page gets back the
-  messages of a participant it holds that joined with `selfDelivery: false`, and a removal closes the views of each
-  page that held the removed participant and holds no other one of the room.
+- **page**: one tab's Room ends in a process: its views' and participants' stubs (`PageIndex`). An end is at the page
+  of the response that returned it, which core names by the session the page's client sends with every call
+  (`context.page`), so one page holds the ends of all its calls and connections; a request that names no session is a
+  page of its own. Each server-side room is its own page. No end of a page gets back the messages of a participant it
+  holds that joined with `selfDelivery: false`, and a removal closes the views of each page that held the removed
+  participant and holds no other one of the room.
 - **demand**: who receives a member's track. Each process tells on the demand lane what each page here receives and
   who is at it (`PageIndex`), and the member's owner counts them (`RoomDemand`, `DemandExchange`, `GossipOutbox`).
 - **horizon**: `ROOM_HORIZON_MS`, how long Room waits for a lane to be ready, a delivery handoff or a lost lane's read.

@@ -6,7 +6,6 @@ import {
   ProtocolViolationError,
   type BroadcastEndOwner,
   type ChannelPublishAck,
-  type PageConnection,
   type ServerBroadcastEnd,
 } from 'telefunc/__internal'
 import type { ShieldValidator } from 'telefunc'
@@ -85,8 +84,7 @@ class RoomParticipantStub implements BroadcastEndOwner {
     return await this.participant._publishFrame(frame, framed, message)
   }
 
-  _onPageAttach(connection: PageConnection): void {
-    this.participant.room.replica.placeAtPage(this, connection)
+  _onPageAttach(): void {
     this.notify({ __r: 'p-meta', ...this.participant._acceptedMeta })
     this.notify({ __r: 'demand-state', tracks: watchStates(this.participant._watches) })
   }

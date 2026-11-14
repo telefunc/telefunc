@@ -22,7 +22,7 @@ export { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 
 // An add-on that drives a page's channel ends: Room's stubs and its client.
 export type { ServerBroadcastEnd, ClientBroadcast }
-export type { BroadcastEndOwner, PageConnection } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
+export type { BroadcastEndOwner } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 export type { BroadcastKind } from '../../wire-protocol/wire/payloads.js'
 export type { ChannelPublishAck, ChannelPublishInfo } from '../../wire-protocol/channel/channel.js'
 export { publishBody, type PublishBody } from '../../wire-protocol/channel/server/PublishBody.js'

@@ -1,7 +1,7 @@
 export { Room }
 
 import React, { useEffect, useState, useSyncExternalStore } from 'react'
-import { abort, close } from 'telefunc/client'
+import { abort, close, withContext } from 'telefunc/client'
 import { keepReachable } from '../keepReachable'
 import {
   onCreateRoom,
@@ -17,6 +17,7 @@ import {
   onJoinAsServer,
   onJoinRoomAsServerSelf,
   onJoinAsServerSelf,
+  onJoinAsServerSelfPublishing,
   onGetRoomWithMember,
   onGetRoomWithSnapshotMember,
   onWatchRoom,
@@ -120,6 +121,7 @@ import {
 import { defineParticipantField } from '@telefunc/room/__internal'
 import type { LocalParticipant } from '@telefunc/room/client'
 import { demandNames, type NamedDemand } from './demandNames'
+import { publishMine } from './publishMine'
 
 type PollResult = { done: boolean; result?: unknown }
 /** The members one room view joins, and the named tracks one member publishes on (docs/pages/room, Reference). */
@@ -298,36 +300,38 @@ function Room() {
     setResult(JSON.stringify({ roomId, text, ...tracks, closed, myCause }))
   }
 
-  /** What the view receives of track `cam` and of messages: `Other`'s before and after `me`'s, once `meanwhile` is
-   *  done. `me` joined on the server with `selfDelivery: false`, and a server-side room watches `cam`
-   *  (`onWatchRoomTrack()`). */
+  /** What the view receives of messages, of track `cam` and of the lossy track `cursor`: `Other`'s before and after
+   *  `me`'s (`publishMine()`, which `actAsMe` makes happen), once `meanwhile` is done. `me` joined on the server with
+   *  `selfDelivery: false`, and a server-side room watches `cam` (`onWatchRoomTrack()`). */
   const receivedBesideMe = async (
     roomId: string,
     room: RoomView,
-    me: ServerJoined,
+    actAsMe: () => Promise<unknown>,
     meanwhile?: () => Promise<void>,
   ) => {
     const text: unknown[] = []
     const frames: number[] = []
+    const lossy: number[] = []
     room.subscribe((data) => text.push(data))
     room.subscribeBinary((data) => frames.push(data[0]!), { track: 'cam' })
+    room.subscribeBinary((data) => lossy.push(data[0]!), { track: 'cursor' })
     const other = await room.join({ meta: { name: 'Other' } })
     const otherSends = async (data: string, frame: number) => {
       await other.publish(data)
       await other.publishBinary(new Uint8Array([frame]), { track: 'cam' })
-      await pollUntil(() => ({ done: text.includes(data) && frames.includes(frame) }))
+      await other.publishBinary(new Uint8Array([frame]), { track: 'cursor', lossy: true })
+      await pollUntil(() => ({ done: text.includes(data) && frames.includes(frame) && lossy.includes(frame) }))
     }
     await otherSends('hello', 1)
     await meanwhile?.()
-    await me.publish('mine')
-    await me.publishBinary(new Uint8Array([7]), { track: 'cam' })
+    await actAsMe()
     // The view was relayed them when the server-side room was, so it gets `Other`'s next ones after them.
     await pollUntil(async () => {
       const watched = await onGetWatchedTrack(roomId)
-      return { done: watched.text.includes('mine') && watched.frames.includes(7) }
+      return { done: watched.text.includes('mine') && watched.frames.includes(7) && watched.lossy.includes(7) }
     })
     await otherSends('bye', 9)
-    return { text, frames }
+    return { text, frames, lossy }
   }
 
   const scenario = (id: string, heading: string | null, label: string, run: () => Promise<void>) => (
@@ -2000,26 +2004,70 @@ function Room() {
           const roomFirst = await createRoomId('self-separate')
           await onWatchRoomTrack(roomFirst, 'cam')
           const room = await onGetRoom(roomFirst)
-          const received = await receivedBesideMe(roomFirst, room, await onJoinAsServerSelf(roomFirst, 'Me'))
+          const me = await onJoinAsServerSelf(roomFirst, 'Me')
+          const received = await receivedBesideMe(roomFirst, room, () => publishMine(me))
           const meFirst = await createRoomId('self-separate')
           await onWatchRoomTrack(meFirst, 'cam')
-          const me = await onJoinAsServerSelf(meFirst, 'Me')
-          const receivedReversed = await receivedBesideMe(meFirst, await onGetRoom(meFirst), me)
+          const meBefore = await onJoinAsServerSelf(meFirst, 'Me')
+          const receivedReversed = await receivedBesideMe(meFirst, await onGetRoom(meFirst), () =>
+            publishMine(meBefore),
+          )
           setResult(JSON.stringify({ roomFirst: received, meFirst: receivedReversed }))
         },
       )}
+
+      {scenario('self-two-connections', null, 'The room, then me from a call on another connection', async () => {
+        const roomId = await createRoomId('self-two-connections')
+        await onWatchRoomTrack(roomId, 'cam')
+        const room = await onGetRoom(roomId)
+        const me = await withContext(onJoinAsServerSelf, { channel: { connectionKey: 'me' } })(roomId, 'Me')
+        setResult(JSON.stringify(await receivedBesideMe(roomId, room, () => publishMine(me))))
+      })}
+
+      {scenario('self-returned', null, 'Me from a call that publishes as me right after returning it', async () => {
+        const roomId = await createRoomId('self-returned')
+        await onWatchRoomTrack(roomId, 'cam')
+        const room = await onGetRoom(roomId)
+        let releaseMe = () => {}
+        const received = await receivedBesideMe(roomId, room, async () => {
+          releaseMe = keepReachable(await onJoinAsServerSelfPublishing(roomId, 'Me'))
+        })
+        releaseMe()
+        setResult(JSON.stringify(received))
+      })}
+
+      {scenario('self-removed', null, 'Remove me, which came from a call on another connection', async () => {
+        const roomId = await createRoomId('self-removed')
+        const room = await onGetRoom(roomId)
+        const closes: unknown[] = []
+        room.onClose((cause) => closes.push(cause))
+        const me = await withContext(onJoinAsServer, { channel: { connectionKey: 'me' } })(roomId, 'Me')
+        let myCause: unknown = null
+        me.onLeave((cause) => (myCause = cause))
+        await pollUntil(() => ({ done: me.isConnected }))
+        await onKick(roomId, me.id)
+        await pollUntil(() => ({
+          result: { myCause, closes, isClosed: room.isClosed },
+          done: room.isClosed && myCause !== null,
+        }))
+      })}
 
       {scenario('self-upgrade', null, 'The room and me from two calls while the connection upgrades', async () => {
         const roomId = await createRoomId('self-upgrade')
         await onWatchRoomTrack(roomId, 'cam')
         const room = await onGetRoom(roomId)
         const me = await onJoinAsServerSelf(roomId, 'Me')
-        const received = await receivedBesideMe(roomId, room, me, async () => {
-          const { promise: upgraded, resolve } = Promise.withResolvers<void>()
-          publishUpgradedSelf = resolve
-          setResult(JSON.stringify({ ready: true }))
-          await upgraded
-        })
+        const received = await receivedBesideMe(
+          roomId,
+          room,
+          () => publishMine(me),
+          async () => {
+            const { promise: upgraded, resolve } = Promise.withResolvers<void>()
+            publishUpgradedSelf = resolve
+            setResult(JSON.stringify({ ready: true }))
+            await upgraded
+          },
+        )
         setResult(JSON.stringify(received))
       })}
       <button id="test-room-self-upgrade-publish" onClick={() => publishUpgradedSelf?.()}>

@@ -195,6 +195,9 @@ type ServerReplacerContext = {
   validators: ShieldValidators
   /** One store per response, shared by every replacer in it; `init` runs on the first call for `key`. */
   responseState<T>(key: symbol, init: () => T): T
+  /** The page the response goes to: the session its client names in every call, one per tab and `telefuncUrl`. A
+   *  request that names no session is a page of its own. Opaque: compare it, and nothing else. */
+  readonly page: string
   /** The largest WebSocket message the runtime accepts, where it caps them (Cloudflare); a channel's metadata tells the
    *  page. */
   maxFrameBytes: number | undefined

@@ -43,7 +43,7 @@ import {
 import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/adapter/cloudflare/session.js'
 import type { TelefuncDurableObjectNamespace } from '../wire-protocol/adapter/cloudflare/namespace.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
-import { REQUEST_KIND, getRequestKind, namesWireVersion } from '../wire-protocol/wire/requestKind.js'
+import { REQUEST_KIND, getRequestKind, getSessionToken, namesWireVersion } from '../wire-protocol/wire/requestKind.js'
 import { STATUS_BODY_MALFORMED_REQUEST, STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
 
 // A subscription finds its session through AsyncLocalStorage, which a compatibility flag enables. A Worker without it
@@ -269,16 +269,14 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         return new Response('reload the page', { status: STATUS_CODE_WIRE_VERSION })
       }
 
-      const { searchParams } = new URL(request.url)
-      const token = searchParams.get('session') || crypto.randomUUID()
       // No lookup and nothing shared: each request names the home its session's responses gave its page.
       const { sessionInstanceName, locationBucket } = resolveSessionRoutingTarget(
         baseInstanceName,
         scale,
         request,
         locationFallback,
-        token,
-        searchParams.get('home'),
+        getSessionToken(request) || crypto.randomUUID(),
+        new URL(request.url).searchParams.get('home'),
       )
 
       const forwardedHeaders = new Headers(request.headers as Headers)
