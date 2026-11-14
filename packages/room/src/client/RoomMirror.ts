@@ -4,6 +4,7 @@ export type { RoomMirrorOptions, MirrorEvent }
 import {
   joinedMember,
   leaveCauseFromWire,
+  type MemberMetaUpdate,
   type MemberSnapshot,
   type RoomCtrlEnvelope,
   type RoomRosterEvent,
@@ -16,15 +17,15 @@ import { heldConnection } from './page.js'
 import type { LeaveCause, Sender } from '../types.js'
 
 /** The events that change who is in the room and its meta, which a mirror applies as they arrive. */
-type MirrorEvent = RoomRosterEvent | Extract<RoomCtrlEnvelope, { __r: 'join' | 'leave' | 'update' }>
+type MirrorEvent = RoomRosterEvent | Extract<RoomCtrlEnvelope, { __r: 'join' | 'leave' | 'p-meta' | 'update' }>
 
 type RoomMirrorOptions = {
   /** The room as the response carried it. */
   snapshot: RoomSnapshotMetadata
   /** Every leave the model applies, after its views' callbacks. */
   onMemberLeft: (id: string, cause: LeaveCause) => void
-  /** A roster applied: it holds whole each member's meta, those of the page's own members too. */
-  onRosterApplied: () => void
+  /** Each member meta the model applies, from an event, an accepted write, a stamp or a roster. */
+  onMemberMeta: (id: string, update: MemberMetaUpdate) => void
 }
 
 /** A room's model as its server streams it to the page: the room the response carried, then its rosters in parts and
@@ -33,9 +34,11 @@ class RoomMirror implements RoomModelOwner {
   readonly model: RoomModel
   private readonly rosters: RosterIntake
   private readonly memberLeft: (id: string, cause: LeaveCause) => void
+  private readonly memberMeta: (id: string, update: MemberMetaUpdate) => void
 
-  constructor({ snapshot, onMemberLeft, onRosterApplied }: RoomMirrorOptions) {
+  constructor({ snapshot, onMemberLeft, onMemberMeta }: RoomMirrorOptions) {
     this.memberLeft = onMemberLeft
+    this.memberMeta = onMemberMeta
     this.model = new RoomModel({
       roomId: snapshot.roomId,
       meta: snapshot.meta,
@@ -44,7 +47,7 @@ class RoomMirror implements RoomModelOwner {
       closed: snapshot.closed,
       owner: this,
     })
-    this.rosters = new RosterIntake({ model: this.model, onApplied: onRosterApplied })
+    this.rosters = new RosterIntake({ model: this.model })
   }
 
   apply(event: MirrorEvent): void {
@@ -58,6 +61,9 @@ class RoomMirror implements RoomModelOwner {
         return
       case 'leave':
         return this.model.applyLeave(event.id, leaveCauseFromWire(event))
+      case 'p-meta':
+        this.model.applyParticipantMeta(event.id, event)
+        return
       case 'update':
         this.model.applyRoomUpdate(event)
         return
@@ -74,6 +80,10 @@ class RoomMirror implements RoomModelOwner {
 
   onMemberLeft(id: string, cause: LeaveCause): void {
     this.memberLeft(id, cause)
+  }
+
+  onMemberMeta(id: string, update: MemberMetaUpdate): void {
+    this.memberMeta(id, update)
   }
 
   pendingMember(id: string): MemberSnapshot | undefined {

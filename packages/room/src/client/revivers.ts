@@ -2,7 +2,7 @@ export { roomRemoteReviver, roomTypes }
 
 import type { ClientReviverContext, ReviverType, TypeContract } from 'telefunc/client'
 import { ClientRoom } from './room.js'
-import { ClientStandaloneParticipant } from './ClientParticipant.js'
+import { LoneMember } from './LoneMember.js'
 import type { LocalParticipant, RemoteParticipant } from '../types.js'
 import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from '../shared/protocol.js'
 import { assert } from '../utils/assert.js'
@@ -25,7 +25,7 @@ const roomReviver = channelReviver<RoomReviverContract>(
 
 const roomParticipantReviver = channelReviver<RoomParticipantReviverContract>(
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
-  (end, metadata) => new ClientStandaloneParticipant({ end, metadata }),
+  (end, metadata) => new LoneMember({ end, metadata }).participant,
 )
 
 /** Bound to the live `ClientRoom` the parser revived first, so `room.getParticipant(m.id) === m` while the member is

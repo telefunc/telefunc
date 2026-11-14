@@ -4,11 +4,7 @@ export type { RosterIntakeOptions }
 import type { MemberSnapshot, RoomRosterEvent } from '../shared/protocol.js'
 import type { MembershipEvent, RoomModel } from '../shared/RoomModel.js'
 
-type RosterIntakeOptions = {
-  model: RoomModel
-  /** A roster applied: it holds whole each member's meta, those of the page's own members too. */
-  onApplied: () => void
-}
+type RosterIntakeOptions = { model: RoomModel }
 
 /** The rosters streaming in or applying, from the first part of the first until the last applies. */
 type Rosters = {
@@ -28,11 +24,9 @@ type Rosters = {
 class RosterIntake {
   private rosters: Rosters | null = null
   private readonly model: RoomModel
-  private readonly onApplied: () => void
 
-  constructor({ model, onApplied }: RosterIntakeOptions) {
+  constructor({ model }: RosterIntakeOptions) {
     this.model = model
-    this.onApplied = onApplied
   }
 
   /** A member of a roster streaming in or applying, which an unstamped message may name. */
@@ -75,7 +69,6 @@ class RosterIntake {
   private async apply(rosters: Rosters, members: MemberSnapshot[]): Promise<void> {
     try {
       await this.model.reconcileRoster({ members }, rosters.events)
-      this.onApplied()
     } finally {
       rosters.applying--
       this.stopRecording()

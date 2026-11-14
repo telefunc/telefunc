@@ -1,37 +1,25 @@
-export {
-  ClientParticipantBase,
-  ClientRoomParticipant,
-  ClientStandaloneParticipant,
-  reportClientCallbackError,
-  request,
-  sendDmReply,
-}
+export { ClientParticipant, reportClientCallbackError, request, sendDmReply }
+export type { ClientParticipantOptions, PageLink }
 
-import { assert, assertUsage } from '../utils/assert.js'
+import { assertUsage } from '../utils/assert.js'
 import { getOrCreate, markHandled } from 'telefunc/__internal'
 import type { ChannelPublishAck, ClientBroadcast } from 'telefunc/__internal'
 import type { TrackKey } from '../shared/binary.js'
 import { assertKnownOptions, assertPublishOptions, ownMetaArgument, recipientId } from '../shared/arguments.js'
-import {
-  hasRoomTag,
-  inboxMessageFromWire,
-  leaveCauseFromWire,
-  type RoomResult,
-  type ParticipantStubMetadata,
-  type ParticipantStubNotice,
-  type ParticipantStubRequest,
-  type MemberMetaUpdate,
-  type MemberMutationRequest,
-  type DemandChange,
-  type TrackWatch,
-  type TrackWatchState,
-  type RoomStubRequest,
+import type {
+  RoomResult,
+  ParticipantStubRequest,
+  MemberMetaUpdate,
+  MemberMutationRequest,
+  DemandChange,
+  TrackWatch,
+  TrackWatchState,
+  RoomStubRequest,
 } from '../shared/protocol.js'
 import { CLIENT_ROOM_BUG_MESSAGE, roomResultValue } from '../shared/errors.js'
-import { ParticipantBase } from '../shared/ParticipantBase.js'
-import type { MetaRewinds } from '../shared/MemberMeta.js'
-import { heldConnectionChanged, holdMember, holdRoomOpen, letGoOfMember, releaseRoom, roomsOf } from './page.js'
-import type { ClientRoomHandle } from './ClientRoomHandle.js'
+import { ParticipantBase, type ParticipantBaseOptions } from '../shared/ParticipantBase.js'
+import type { RoomState } from '../shared/state.js'
+import { heldConnectionChanged, holdMember, holdRoomOpen, letGoOfMember, releaseRoom } from './page.js'
 import type {
   BinaryPublishOptions,
   LeaveCause,
@@ -53,9 +41,41 @@ async function request(end: ClientBroadcast, req: RoomStubRequest | ParticipantS
   return roomResultValue(end.send(req, { ack: true }))
 }
 
-abstract class ClientParticipantBase extends ParticipantBase {
+/** Where a page's participant `from` acts, and the page's rooms it lists the other participants by: the room it
+ *  joined through (`ClientRoomHandle`), or, for one a telefunction returned alone, its own channel (`LoneMember`). */
+interface PageLink {
+  readonly isConnected: boolean
+  publishText(from: string, data: unknown, retain: boolean | undefined): Promise<ChannelPublishAck>
+  publishFrame(framed: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck>
+  request(from: string, req: MemberMutationRequest): Promise<unknown>
+  /** Leaves on the server, then ends the participant. */
+  leave(from: string): Promise<void>
+  /** The participant's own meta write, as the room accepted it. */
+  acceptOwnMeta(from: string, accepted: MemberMetaUpdate): void
+  /** The sender of a message to the participant, live, where its link has a room of its own. */
+  resolveSender(id: string): Sender | null
+  /** The states of the page's rooms it lists participants by. */
+  rooms(): Iterable<RoomState>
+}
+
+type ClientParticipantOptions = ParticipantBaseOptions & { link: PageLink }
+
+/** A page's `LocalParticipant`: joined through a room the page holds, or returned alone by a telefunction. */
+class ClientParticipant extends ParticipantBase {
+  private readonly link: PageLink
   private readonly watches = new Map<TrackKey, TrackWatch>()
   protected readonly _bugMessage = CLIENT_ROOM_BUG_MESSAGE
+  /** Weak: the room reaches this member, so a strong one would hold the room open for good. */
+  private handle: WeakRef<LocalParticipant> | null = null
+
+  constructor({ link, ...options }: ClientParticipantOptions) {
+    super(options)
+    this.link = link
+  }
+
+  get isConnected(): boolean {
+    return this.link.isConnected
+  }
 
   /** @internal The page holds this member from now on, until it leaves. */
   _holdOnPage(): void {
@@ -75,6 +95,24 @@ abstract class ClientParticipantBase extends ParticipantBase {
   override _onLeft(cause: LeaveCause): void {
     super._onLeft(cause)
     letGoOfMember(this)
+    const handle = this.handle?.deref()
+    if (handle) releaseRoom(handle)
+  }
+
+  /** @internal The page's handle of a member its room's `join()` returns: it holds the room open until the member
+   *  leaves, and nothing in the room reaches it. */
+  _handOut(joining: Promise<LocalParticipant>): LocalParticipant {
+    const bound = new Map<PropertyKey, unknown>()
+    const handle = new Proxy<LocalParticipant>(this, {
+      get(target, prop) {
+        const value: unknown = Reflect.get(target, prop, target)
+        return typeof value === 'function' ? getOrCreate(bound, prop, () => value.bind(target)) : value
+      },
+    })
+    if (this._left) return handle
+    holdRoomOpen(handle, joining)
+    this.handle = new WeakRef(handle)
+    return handle
   }
 
   /** @internal As the room's stub last told the page. */
@@ -102,16 +140,32 @@ abstract class ClientParticipantBase extends ParticipantBase {
     this._changed()
   }
 
-  /** Each flavor's wire publish. */
-  protected abstract _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck>
-  protected abstract _sendPublishBinary(framed: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck>
-  /** The wire request of a flavor: the base's DMs and metadata writes, and the standalone's publish and leave. */
-  protected abstract _request(request: MemberMutationRequest): Promise<unknown>
+  protected override _resolveSender(id: string): Sender | null {
+    // A sync read: delivery must not wait on I/O.
+    return this.link.resolveSender(id)
+  }
+
+  protected _shownParticipant(id: string): RemoteParticipant | null {
+    for (const state of this.link.rooms()) {
+      const participant = state.shownParticipantOf(id)
+      if (participant) return participant
+    }
+    return null
+  }
+
+  protected _followRoom(onChange: () => void): () => void {
+    const stops = Array.from(this.link.rooms(), (state) => state.onChange(onChange))
+    return () => stops.forEach((stop) => stop())
+  }
+
+  protected _deliverPrivate(field: string, from: string, data: unknown): void {
+    for (const state of this.link.rooms()) state.applyPrivate(field, from, data)
+  }
 
   // Messaging is often fire-and-forget: a usage error throws, and a failure is a rejection left handled.
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
     assertPublishOptions(options)
-    if (options?.track === undefined) return markHandled(this._sendPublish(data, options?.retain))
+    if (options?.track === undefined) return markHandled(this.publishText(data, options?.retain))
     return this.publishOnTrack(this.encodeTextFrame(data, options), options)
   }
 
@@ -119,8 +173,18 @@ abstract class ClientParticipantBase extends ParticipantBase {
     return this.publishOnTrack(this.encodeBinaryFrame(data, options), options)
   }
 
+  private async publishText(data: unknown, retain: boolean | undefined): Promise<ChannelPublishAck> {
+    this._assertActive()
+    return await this.link.publishText(this.id, data, retain)
+  }
+
   private publishOnTrack(framed: Uint8Array, options: BinaryPublishOptions | undefined): Promise<ChannelPublishAck> {
-    return markHandled(this._sendPublishBinary(framed, this.trackStreamOf(options?.track), options?.lossy === true))
+    return markHandled(this.publishFrame(framed, this.trackStreamOf(options?.track), options?.lossy === true))
+  }
+
+  private async publishFrame(framed: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck> {
+    this._assertActive()
+    return await this.link.publishFrame(framed, stream, lossy)
   }
 
   send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
@@ -136,215 +200,37 @@ abstract class ClientParticipantBase extends ParticipantBase {
     this._assertActive()
     const request: MemberMutationRequest = { __r: 'req-dm', to, data }
     if (ack) request.ack = true
-    return await this._request(request)
+    return await this.link.request(this.id, request)
   }
 
   async _sendPrivate(to: string, field: string, data: unknown): Promise<void> {
     this._assertActive()
-    await this._request({ __r: 'req-private', to, field, data })
+    await this.link.request(this.id, { __r: 'req-private', to, field, data })
   }
 
+  // Concurrent writes can commit out of request order: the participant adopts the sequence-accepted value, as
+  // observers do.
   async setMeta(meta: ParticipantMeta): Promise<void> {
     this._assertActive()
     const owned = ownMetaArgument(meta, 'setMeta() meta')
-    this._onOwnMetaWritten((await this._request({ __r: 'req-set-meta', meta: owned })) as MemberMetaUpdate)
+    const accepted = await this.link.request(this.id, { __r: 'req-set-meta', meta: owned })
+    this.link.acceptOwnMeta(this.id, accepted as MemberMetaUpdate)
   }
 
   async setAttributes(attrs: ParticipantMeta): Promise<void> {
     this._assertActive()
     const owned = ownMetaArgument(attrs, 'setAttributes() attributes')
-    this._onOwnMetaWritten((await this._request({ __r: 'req-set-attrs', attrs: owned })) as MemberMetaUpdate)
+    const accepted = await this.link.request(this.id, { __r: 'req-set-attrs', attrs: owned })
+    this.link.acceptOwnMeta(this.id, accepted as MemberMetaUpdate)
   }
 
-  /** Concurrent writes can commit out of request order: adopt the sequence-accepted value, as observers do. */
-  protected abstract _onOwnMetaWritten(accepted: MemberMetaUpdate): void
+  async leave(): Promise<void> {
+    if (this._left) return
+    await this.link.leave(this.id)
+  }
 
   protected _reportError(err: unknown): void {
     reportClientCallbackError(err)
-  }
-}
-
-type ClientRoomParticipantOptions = {
-  room: ClientRoomHandle
-  id: string
-  meta: ParticipantMeta
-  selfDelivery: boolean
-  rewinds: MetaRewinds
-}
-
-/** `LocalParticipant` returned by a page's `room.join()`. Operates through the room's channel. */
-class ClientRoomParticipant extends ClientParticipantBase {
-  private readonly room: ClientRoomHandle
-  /** Weak: the room reaches this member, so a strong one would hold the room open for good. */
-  private handle: WeakRef<LocalParticipant> | null = null
-
-  constructor({ room, id, meta, selfDelivery, rewinds }: ClientRoomParticipantOptions) {
-    super({
-      // Client-side joins carry no identity: it's server-assigned (see JoinOptions.identity).
-      participant: { id, meta, selfDelivery, identity: null },
-      rewinds,
-    })
-    this.room = room
-  }
-
-  get isConnected(): boolean {
-    return this.room.isConnected
-  }
-
-  protected override _resolveSender(id: string): Sender | null {
-    // A sync read: delivery must not wait on I/O.
-    return this.room.state.getRemote(id)
-  }
-
-  protected _shownParticipant(id: string): RemoteParticipant | null {
-    return this.room.state.shownParticipantOf(id)
-  }
-
-  protected _followRoom(onChange: () => void): () => void {
-    return this.room.state.onChange(onChange)
-  }
-
-  protected _deliverPrivate(field: string, from: string, data: unknown): void {
-    this.room.state.applyPrivate(field, from, data)
-  }
-
-  protected override _onOwnMetaWritten(accepted: MemberMetaUpdate): void {
-    this.room.acceptParticipantMeta(this.id, accepted)
-  }
-
-  protected async _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
-    this._assertActive()
-    return await this.room.publishText(this.id, data, retain)
-  }
-
-  protected async _sendPublishBinary(framed: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck> {
-    this._assertActive()
-    return await this.room.publishFrame(framed, stream, lossy)
-  }
-
-  protected _request(request: MemberMutationRequest): Promise<unknown> {
-    return this.room.request({ ...request, id: this.id })
-  }
-
-  /** @internal The page's handle: it holds the room open until this member leaves, and nothing in the room reaches
-   *  it. */
-  _handOut(joining: Promise<LocalParticipant>): LocalParticipant {
-    const bound = new Map<PropertyKey, unknown>()
-    const handle = new Proxy<LocalParticipant>(this, {
-      get(target, prop) {
-        const value: unknown = Reflect.get(target, prop, target)
-        return typeof value === 'function' ? getOrCreate(bound, prop, () => value.bind(target)) : value
-      },
-    })
-    if (this._left) return handle
-    holdRoomOpen(handle, joining)
-    this.handle = new WeakRef(handle)
-    return handle
-  }
-
-  override _onLeft(cause: LeaveCause): void {
-    super._onLeft(cause)
-    const handle = this.handle?.deref()
-    if (handle) releaseRoom(handle)
-  }
-
-  async leave(): Promise<void> {
-    if (this._left) return
-    await this.room.request({ __r: 'req-leave', id: this.id })
-    this.room.dropParticipant(this.id)
-    this._onLeft({ type: 'left' })
-  }
-}
-
-type ClientStandaloneParticipantOptions = { end: ClientBroadcast; metadata: ParticipantStubMetadata }
-
-/** `LocalParticipant` revived from a serialized `ServerLocalParticipant`. Owns its channel. */
-class ClientStandaloneParticipant extends ClientParticipantBase {
-  private readonly end: ClientBroadcast
-  private readonly roomId: string
-
-  constructor({ end, metadata }: ClientStandaloneParticipantOptions) {
-    // Its own: the `rewound` notice forgets its seq.
-    super({ participant: metadata, rewinds: { count: 0 } })
-    this.end = end
-    this.roomId = metadata.roomId
-
-    end._subscribeLocal('text', (notice) => this.onNotice(notice))
-    end.onClose(() => this._onLeft({ type: 'disconnected' }))
-    // Held from its channel's open: before it, the channel reads disconnected.
-    end.onOpen(() => this._holdOnPage())
-    end.onDisconnect(() => this._onDisconnected())
-    end.onReconnect(() => this._onReconnected())
-  }
-
-  get isConnected(): boolean {
-    return this.end.isConnected
-  }
-
-  private onNotice(notice: unknown): void {
-    assert(hasRoomTag(notice))
-    const msg = notice as ParticipantStubNotice
-    switch (msg.__r) {
-      case 'p-meta':
-        return this._onOwnMetaWritten(msg)
-      case 'rewound':
-        return this.memberMeta.forget()
-      case 'demand':
-        return this._applyDemand(msg.track, msg)
-      case 'demand-state':
-        return this._applyDemandState(msg.tracks)
-      case 'dm':
-        if (msg.ackId === undefined) return this._deliverMessage(inboxMessageFromWire(msg))
-        return sendDmReply(this.end, msg.ackId, this._deliverMessageAck(inboxMessageFromWire(msg)))
-      case 'left':
-        return this._onLeft(leaveCauseFromWire(msg))
-    }
-  }
-
-  /** It has no room of its own: the page's rooms of its room list the participants. */
-  protected _shownParticipant(id: string): RemoteParticipant | null {
-    for (const room of roomsOf(this.roomId)) {
-      const participant = room.state.shownParticipantOf(id)
-      if (participant) return participant
-    }
-    return null
-  }
-
-  protected _followRoom(onChange: () => void): () => void {
-    const stops = Array.from(roomsOf(this.roomId), (room) => room.state.onChange(onChange))
-    return () => stops.forEach((stop) => stop())
-  }
-
-  protected _deliverPrivate(field: string, from: string, data: unknown): void {
-    for (const room of roomsOf(this.roomId)) room.state.applyPrivate(field, from, data)
-  }
-
-  /** Its own writes and the room's `p-meta` both land here. */
-  protected override _onOwnMetaWritten(accepted: MemberMetaUpdate): void {
-    this._acceptMeta(accepted)
-  }
-
-  protected async _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
-    this._assertActive()
-    const request: ParticipantStubRequest = { __r: 'req-publish', data }
-    if (retain) request.retain = true
-    return (await this._request(request)) as ChannelPublishAck
-  }
-
-  protected async _sendPublishBinary(framed: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck> {
-    this._assertActive()
-    return roomResultValue<ChannelPublishAck>(this.end._publishBinaryUnreported(framed, stream, lossy))
-  }
-
-  protected _request(req: ParticipantStubRequest): Promise<unknown> {
-    return request(this.end, req)
-  }
-
-  async leave(): Promise<void> {
-    if (this._left) return
-    await this._request({ __r: 'req-leave' })
-    this._onLeft({ type: 'left' })
-    void this.end.close().catch(() => {})
   }
 }
 

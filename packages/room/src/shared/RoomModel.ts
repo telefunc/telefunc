@@ -76,16 +76,15 @@ interface RoomModelOwner {
   /** This side's own connection to a member it holds, shown in place of the room's record of it; `null` for one it
    *  doesn't hold. */
   heldConnection?(id: string): boolean | null
-  // Only a server acts on these (see `ServerModelOwner`): a client's local participants take their meta where it
-  // arrives, and the server repairs the meta.
-  onMemberMeta?(id: string, update: MemberMetaUpdate): void
+  /** A known member's meta update applied, from an event, an accepted write, a stamp or a roster: the side hands it to
+   *  the participant it holds of that member. */
+  onMemberMeta(id: string, update: MemberMetaUpdate): void
+  // Only a server acts on this (see `ServerModelOwner`): on a client, the server repairs the meta.
   onMemberMetaGap?(): void
 }
 
 /** What a server's model also tells its replica. */
 interface ServerModelOwner extends RoomModelOwner {
-  /** A known member's meta update applied, from an event, a stamp or a roster read. */
-  onMemberMeta(id: string, update: MemberMetaUpdate): void
   /** A member's meta change arrived ahead of one before it, which never arrived: the next roster read repairs it. */
   onMemberMetaGap(): void
 }
@@ -333,7 +332,7 @@ class RoomModel {
     const applied = entry.meta.apply(update)
     if (applied === 'gap') this.owner.onMemberMetaGap?.()
     if (applied !== 'applied') return false
-    this.owner.onMemberMeta?.(id, update)
+    this.owner.onMemberMeta(id, update)
     this.bumpState()
     const connectionChanged = this.isConnected(entry) !== wasConnected
     // The room's record of a connection this side holds itself changes nothing it shows.
@@ -493,7 +492,7 @@ class RoomModel {
       this.applyParticipantMeta(member.id, update)
       return true
     }
-    if (entry.meta.apply(update) === 'applied') this.owner.onMemberMeta?.(member.id, update)
+    if (entry.meta.apply(update) === 'applied') this.owner.onMemberMeta(member.id, update)
     return false
   }
 
