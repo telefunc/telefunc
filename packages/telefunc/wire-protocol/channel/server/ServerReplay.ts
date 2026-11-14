@@ -3,6 +3,7 @@ export { ServerReplay }
 import { assert } from '../../../utils/assert.js'
 import { HELD_SEND_OVERHEAD_BYTES, hold, letGo, type MemoryHolder } from './channelMemory.js'
 import type { PublishBody } from './PublishBody.js'
+import { SeqQueue } from '../SeqQueue.js'
 
 /** `alone`: sent with nothing of its channel's unconfirmed, publish or frame, so nothing waits ahead of its confirmation. */
 type Publish = { head: Uint8Array<ArrayBuffer>; body: PublishBody; at: number; alone: boolean }
@@ -52,16 +53,18 @@ class ServerReplay {
 
   /** The page has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
   acknowledge(lastSeq: number): void {
-    while (this.frames.length > 0 && this.frames.seqAt(0) <= lastSeq) this.letFrameGo(this.frames.shift())
+    const frames = this.frames.indexAfter(lastSeq)
+    for (let i = 0; i < frames; i++) this.letFrameGo(this.frames.at(i))
+    this.frames.dropOldest(frames)
+    const publishes = this.publishes.indexAfter(lastSeq)
+    if (publishes === 0) return
     // Only the oldest can be alone: the others were sent while it was unconfirmed.
-    const alone = this.publishes.length > 0 && this.publishes.at(0).alone
-    let newest: Publish | undefined
-    while (this.publishes.length > 0 && this.publishes.seqAt(0) <= lastSeq) {
-      newest = this.publishes.shift()
-      this.letPublishGo(newest)
-    }
+    const alone = this.publishes.at(0).alone
+    const newest = this.publishes.at(publishes - 1)
+    for (let i = 0; i < publishes; i++) this.letPublishGo(this.publishes.at(i))
+    this.publishes.dropOldest(publishes)
     // Sent before the wire its confirmation came on: its page may have had it long before.
-    if (newest === undefined || newest.at < this.movedAt) return
+    if (newest.at < this.movedAt) return
     const confirmMs = performance.now() - newest.at
     this.leastConfirmMs = alone ? confirmMs : Math.min(this.leastConfirmMs, confirmMs)
   }
@@ -144,64 +147,5 @@ class ServerReplay {
 
   private letPublishGo({ body }: Publish): void {
     letGo(this.holder, body)
-  }
-}
-
-/** Entries in seq order that leave only at the ends, as `channel/client/ReplayBuffer.ts`'s queues: a slot left at the
- *  oldest end holds nothing, and the slots go once they are as many as the live ones, which keeps a shift amortised
- *  O(1). Indices count from the oldest live entry. */
-class SeqQueue<T> {
-  // Seqs in an array of their own, so a scan by seq reads only numbers.
-  private seqs: number[] = []
-  private items: (T | undefined)[] = []
-  private head = 0
-
-  get length(): number {
-    return this.items.length - this.head
-  }
-
-  seqAt(i: number): number {
-    return this.seqs[this.head + i]!
-  }
-
-  at(i: number): T {
-    return this.items[this.head + i]!
-  }
-
-  /** The index of the oldest entry after `seq`, `length` where none is. */
-  indexAfter(seq: number): number {
-    let i = 0
-    while (i < this.length && this.seqAt(i) <= seq) i++
-    return i
-  }
-
-  push(seq: number, item: T): void {
-    this.seqs.push(seq)
-    this.items.push(item)
-  }
-
-  shift(): T {
-    const item = this.items[this.head]!
-    this.items[this.head++] = undefined
-    if (this.head >= this.items.length) this.clear()
-    else if (this.head >= this.length) {
-      this.seqs = this.seqs.slice(this.head)
-      this.items = this.items.slice(this.head)
-      this.head = 0
-    }
-    return item
-  }
-
-  pop(): T {
-    this.seqs.pop()
-    const item = this.items.pop()!
-    if (this.head >= this.items.length) this.clear()
-    return item
-  }
-
-  private clear(): void {
-    this.seqs.length = 0
-    this.items.length = 0
-    this.head = 0
   }
 }
