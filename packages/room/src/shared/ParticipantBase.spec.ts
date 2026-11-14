@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { pageRoom } from '../test/pageRoom.js'
-import type { TrackWatchState } from './protocol.js'
+import type { DemandChange, TrackWatchState } from './protocol.js'
 import type { LocalParticipant } from '../types.js'
 
 /** How the page's room hands its member who receives each of its tracks. */
-type DemandHolder = LocalParticipant & { _applyDemandState(tracks: TrackWatchState[]): void }
+type DemandHolder = LocalParticipant & {
+  _applyDemand(track: string, change: DemandChange): void
+  _applyDemandState(tracks: TrackWatchState[]): void
+}
 
 /** The watchers of `me`'s default track, after the room reports `watchers` receiving it. */
 function watchersReported(me: DemandHolder, watchers: string[]): string[] {
@@ -26,5 +29,17 @@ describe("a track's watchers", () => {
     const me = await joinedAmong({ sam: 1, tia: 1 })
     expect(watchersReported(me, ['sam', 'tia'])).toEqual(['sam', 'tia'])
     expect(watchersReported(me, ['tia', 'sam'])).toEqual(['sam', 'tia'])
+  })
+})
+
+describe("a participant's demand", () => {
+  it('lists its tracks by name in code-unit order, whatever order the room told them in', async () => {
+    const told = async (tracks: string[]) => {
+      const me = await joinedAmong({ sam: 1 })
+      for (const track of tracks) me._applyDemand(track, { add: ['sam'] })
+      return me.demand.map((entry) => entry.track)
+    }
+    expect(await told(['mic', '', 'Screen'])).toEqual(['Screen', 'main', 'mic'])
+    expect(await told(['Screen', 'mic', ''])).toEqual(['Screen', 'main', 'mic'])
   })
 })

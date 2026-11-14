@@ -241,8 +241,8 @@ abstract class ParticipantBase implements LocalParticipant {
     return null
   }
 
-  /** Who receives each of its tracks, in the order they started: each entry the same object until its watchers or
-   *  count change, and the list the same array until an entry does. */
+  /** Who receives each of its tracks, by track name: each entry the same object until its watchers or count change, and
+   *  the list the same array until an entry does. */
   get demand(): readonly TrackDemand[] {
     if (this._left) return (this.shownDemand = NO_DEMAND)
     const shown = this.shownDemand
@@ -257,6 +257,7 @@ abstract class ParticipantBase implements LocalParticipant {
         ),
       )
     }
+    next.sort(byTrack)
     const same = next.length === shown.length && next.every((entry, i) => entry === shown[i])
     if (!same) this.shownDemand = Object.freeze(next)
     return this.shownDemand
@@ -388,4 +389,9 @@ abstract class ParticipantBase implements LocalParticipant {
  *  room with nobody to name, once. */
 function watchersOf(me: LocalParticipant, tracks: readonly string[]): TracksWatchers {
   return (me as ParticipantBase)._watchersOf(tracks)
+}
+
+/** In code-unit order, as `sort()` orders strings; no two entries share a track. */
+function byTrack(a: TrackDemand, b: TrackDemand): number {
+  return a.track < b.track ? -1 : 1
 }

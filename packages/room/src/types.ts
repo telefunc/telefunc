@@ -309,7 +309,7 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   /** Receive private messages; returning a value answers an acknowledged send. */
   listen(callback: (data: unknown, from: Sender<P> | null) => unknown, options?: { signal?: AbortSignal }): () => void
 
-  /** Your tracks that someone receives now. */
+  /** Your tracks that someone receives now, by track name in code-unit order (as `sort()` orders strings). */
   readonly demand: readonly TrackDemand<P, Pub>[]
   /** What you show changed: your `meta`, whether you are connected, or `demand`. Changes made in one task call it
    *  once. */

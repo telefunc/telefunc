@@ -451,7 +451,7 @@ onStroke((stroke) => me.publishBinary(stroke, { track: 'drawing' })) // a viewer
 
 With `lossy: true`, a viewer can skip a video frame that later frames depend on, so number the frames in `meta` (a frame replaced on its way to the server never gets an `info.seq`) and, at a gap, drop frames until the next keyframe and restart your decoder from it.
 
-To send frames only while someone watches, read `me.demand`, the tracks of yours that someone receives now, and follow it with `me.onChange()`:
+To send frames only while someone watches, read `me.demand`, the tracks of yours that someone receives now, sorted by track name, and follow it with `me.onChange()`:
 
 ```js
 // Environment: client
