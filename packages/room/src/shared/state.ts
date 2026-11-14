@@ -212,6 +212,8 @@ class RoomState {
   private _listenerCount = 0
   /** Of them, the listeners the package fields attached (`attachFields()`). */
   private fieldListenerCount = 0
+  /** What stops the package fields on this view, while they run. */
+  private stopFields: (() => void) | null = null
   /** The tracks its binary listeners name, each `(member or room, track)` pair once. */
   private trackWants = 0
   private readonly trackWantsMax: number
@@ -244,8 +246,12 @@ class RoomState {
     return this._listenerCount - this.fieldListenerCount
   }
 
-  /** Runs each package's field on this view, the `room` it is the state of. Returns what stops them. */
-  attachFields(room: ParticipantFieldView<unknown>['room']): () => void {
+  /** Runs each package's field on this view, the `room` it is the state of, until `detachFields()`; a closed room runs
+   *  none. */
+  attachFields(room: ParticipantFieldView<unknown>['room']): void {
+    if (this.stopFields !== null || this.model.closed) return
+    // Attaching adds listeners, which can bring the owner back here: the fields run already.
+    this.stopFields = () => {}
     const detaches = this.countedAsFields(() =>
       Array.from(participantFields(), ([name, { attach }]) =>
         attach({
@@ -260,7 +266,14 @@ class RoomState {
         }),
       ),
     )
-    return () => this.countedAsFields(() => detaches.forEach((detach) => detach()))
+    this.stopFields = () => this.countedAsFields(() => detaches.forEach((detach) => detach()))
+  }
+
+  /** Stops the package fields on this view, where they run. */
+  detachFields(): void {
+    const stop = this.stopFields
+    this.stopFields = null
+    stop?.()
   }
 
   /** Runs `change`, counting the listeners it adds or removes as the package fields'. */

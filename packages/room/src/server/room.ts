@@ -128,8 +128,6 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
   /** The admissions under way; an `owned` one the heartbeat leaves alone, and its holder's detach doesn't evict. */
   private readonly admissions = new Map<string, Admission>()
   private readonly view: ServerRoom
-  /** What stops the package fields on the view, while they run (`syncFields()`). */
-  private detachFields: (() => void) | null = null
   readonly writes: RoomWrites
 
   private readonly lanePlan: RoomHandleOptions['lanePlan']
@@ -468,16 +466,8 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
 
   /** Runs the package fields on the handle's view while it is observed, and stops them when it no longer is. */
   syncFields(): void {
-    if (this.isObserved() === (this.detachFields !== null)) return
-    if (this.detachFields === null) {
-      // Attaching adds listeners, which brings the replica back here: the handle counts as attached already.
-      this.detachFields = () => {}
-      this.detachFields = this.state.attachFields(this.view)
-    } else {
-      const detach = this.detachFields
-      this.detachFields = null
-      detach()
-    }
+    if (this.isObserved()) this.state.attachFields(this.view)
+    else this.state.detachFields()
   }
 
   holdsTail(): boolean {

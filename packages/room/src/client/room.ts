@@ -173,7 +173,7 @@ class ClientRoom extends RoomStateView implements Room {
     end.onReconnect(() => {
       for (const local of this.localParticipants.values()) local._onReconnected()
     })
-    // A page's room runs the package fields until it closes, which removes their listeners with the others.
+    // A page's room runs the package fields until it closes.
     this._state.attachFields(this)
   }
 
@@ -421,6 +421,7 @@ class ClientRoom extends RoomStateView implements Room {
   private applyClosed(causeType: 'closed' | 'disconnected'): void {
     const cause: LeaveCause = { type: causeType }
     if (!this.model.applyClosed(cause)) return
+    this._state.detachFields()
     // Local participants end after onClose, as on the server.
     for (const local of this.localParticipants.values()) local._onLeft(cause)
     this.localParticipants.clear()
