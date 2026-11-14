@@ -224,7 +224,7 @@ async function onJoinRoomAsServerSelf(roomId: string, name: string) {
 
 async function onGetRoomWithMember(roomId: string, memberId: string) {
   const room = anyoneCanJoin(await Room.get(roomId))
-  const member = await room.getParticipant(memberId)
+  const member = room.getParticipant(memberId)
   return { room, member }
 }
 
@@ -326,7 +326,7 @@ async function onJoinHiddenAndHand(roomId: string) {
   const room = anyoneCanJoin(await Room.get(roomId))
   const bot = await room.join({ hidden: true, meta: { name: 'Bot' } })
   hiddenBots.set(roomId, bot)
-  return { room, member: await room.getParticipant(bot.id) }
+  return { room, member: room.getParticipant(bot.id) }
 }
 
 async function onHiddenSetMeta(roomId: string, name: string) {
@@ -359,7 +359,7 @@ async function onGetHiddenAfterPlayers(roomId: string) {
 /** Returns a room closed under its member, as a page gets one that closed while the call ran. */
 async function onCloseRoomWithMember(roomId: string) {
   const room = anyoneCanJoin(await Room.create(roomId))
-  const member = await room.getParticipant((await room.join({ meta: { name: 'Gone' } })).id)
+  const member = room.getParticipant((await room.join({ meta: { name: 'Gone' } })).id)
   const { promise: closed, resolve } = Promise.withResolvers<LeaveCause>()
   room.onClose(resolve)
   await Room.close(roomId)
@@ -651,7 +651,7 @@ async function releaseRefs(roomId: string) {
   left.onLeave(() => {})
   left.onDemand(() => {})
   const view = await Room.get(roomId)
-  const departed = (await view.getParticipant(left.id))!
+  const departed = view.getParticipant(left.id)!
   departed.onChange(() => {})
   await left.leave()
   // Listeners added to a member that left, then the view's own, all gone.
@@ -683,7 +683,10 @@ async function onDropBackendSubscriptions(roomId: string) {
 
 async function onListParticipantNames(roomId: string) {
   const room = await Room.get(roomId)
-  return (await room.getParticipants()).map((member) => member.meta.name).sort()
+  return room
+    .getParticipants()
+    .map((member) => member.meta.name)
+    .sort()
 }
 
 /** A room that closes `emptyTimeout` ms after nothing holds it, if nobody joined it. */
@@ -849,7 +852,7 @@ async function onConcurrentMetaWrites(roomId: string) {
       .map((i) => (i % 10 === 0 ? me.setMeta({ name: 'Writer', round: i }) : me.setAttributes({ [`a${i}`]: i }))),
   )
   const view = await Room.get(roomId)
-  const member = await view.getParticipant(me.id)
+  const member = view.getParticipant(me.id)
   return {
     afterAttributes,
     roomMeta: Object.entries(view.meta),
@@ -1128,8 +1131,8 @@ async function onBusyLanes(roomId: string) {
   const arrives = () => arrived++
   room.subscribe(arrives)
   room.subscribeBinary(arrives, { track: 'shared' })
-  ;(await view.getParticipant(alice.id))!.subscribeBinary(arrives)
-  ;(await view.getParticipant(bob.id))!.subscribeBinary(arrives, { track: 'named' })
+  view.getParticipant(alice.id)!.subscribeBinary(arrives)
+  view.getParticipant(bob.id)!.subscribeBinary(arrives, { track: 'named' })
   alice.listen(() => 'read')
   const key = `room:at-rest:${roomId}`
   Broadcast.subscribe(key, arrives)

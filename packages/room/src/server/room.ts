@@ -52,7 +52,6 @@ import { TailHold, type TailHoldOwner } from './lifecycle/TailHold.js'
 import type { RoomReplica } from './RoomReplica.js'
 import type { LanePlan } from './lanes/LanePlan.js'
 import type { RoomDemand } from './lanes/RoomDemand.js'
-import type { AuthoritySync } from './lifecycle/AuthoritySync.js'
 import type { RosterStream } from './lifecycle/RosterStream.js'
 import type { PendingDmAcks } from './PendingDmAcks.js'
 import type { RoomHosting } from './lifecycle/RoomHosting.js'
@@ -86,7 +85,6 @@ type RoomHandleOptions = {
   replica: RoomReplica
   /** Where the handle's holders' wants replan. */
   lanePlan: Pick<LanePlan, 'textChanged' | 'binaryChanged' | 'memberChanged' | 'observing'>
-  authority: Pick<AuthoritySync, 'ensureRoster'>
   /** For the handle's stubs. */
   roster: Pick<RosterStream, 'settled'>
   /** For the handle's participants. */
@@ -133,26 +131,14 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
   readonly writes: RoomWrites
 
   private readonly lanePlan: RoomHandleOptions['lanePlan']
-  private readonly authority: RoomHandleOptions['authority']
   private readonly roster: RoomHandleOptions['roster']
   private readonly incomingDemand: RoomHandleOptions['incomingDemand']
   private readonly hosting: RoomHandleOptions['hosting']
   private readonly metaMirrors: Set<MetaMirror>
 
-  constructor({
-    view,
-    replica,
-    lanePlan,
-    authority,
-    roster,
-    incomingDemand,
-    acks,
-    hosting,
-    metaMirrors,
-  }: RoomHandleOptions) {
+  constructor({ view, replica, lanePlan, roster, incomingDemand, acks, hosting, metaMirrors }: RoomHandleOptions) {
     this.replica = replica
     this.lanePlan = lanePlan
-    this.authority = authority
     this.roster = roster
     this.incomingDemand = incomingDemand
     this.hosting = hosting
@@ -205,17 +191,6 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
       if (!selfDelivery) this.localSuppressed.add(admission.id)
     })
     return participant
-  }
-
-  async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
-    assertKnownOptions(options, ['hidden'], 'getParticipants()')
-    await this.authority.ensureRoster()
-    return options?.hidden ? this.state.listHidden() : this.state.listVisible()
-  }
-
-  async getParticipant(id: string): Promise<RemoteParticipant | null> {
-    await this.authority.ensureRoster()
-    return this.state.getRemote(id)
   }
 
   /** Both join paths: the guard passes, the holder takes the member, then the member commits. */
@@ -538,12 +513,9 @@ class ServerRoom extends RoomStateView implements Room {
     return this.handle.join(options)
   }
 
-  getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
-    return this.handle.getParticipants(options)
-  }
-
-  getParticipant(id: string): Promise<RemoteParticipant | null> {
-    return this.handle.getParticipant(id)
+  getParticipants(options?: { hidden?: boolean }): RemoteParticipant[] {
+    assertKnownOptions(options, ['hidden'], 'getParticipants()')
+    return options?.hidden ? this._state.listHidden() : this._state.listVisible()
   }
 }
 

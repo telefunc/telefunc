@@ -1372,6 +1372,7 @@ function Room() {
           hasMember: out.member !== null,
           memberName: out.member?.meta.name ?? null,
           sameObject: out.member !== null && viaRoom === out.member,
+          listedOnServer: await onListParticipantNames(roomId),
         }
         setResult(JSON.stringify(state))
       })}

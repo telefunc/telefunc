@@ -83,7 +83,7 @@ update()
 room.onChange(update)
 ```
 
-`room.onChange()` fires whenever anything `room.snapshot()` shows changes: someone joins, leaves, changes their `meta`, or loses and regains their connection, or the room's `meta` changes. `room.snapshot()` returns the room as it is now.
+`room.onChange()` fires whenever anything `room.snapshot()` shows changes: someone joins, leaves, changes their `meta`, or loses and regains their connection, or the room's `meta` changes. `room.snapshot()` returns the whole room in one value.
 
 In React:
 
@@ -171,7 +171,7 @@ for (const member of room.getParticipants()) follow(member)
 room.onJoin(follow)
 ```
 
-The room reaches the page with its participants, so `room.getParticipants()` and `room.getParticipant(id)` answer at once. On the server they return a Promise, as a server's room may have to read its participants from the store.
+Every read of a room answers at once: `room.getParticipants()`, `room.getParticipant(id)`, `room.meta`, `room.count`, `room.isClosed` and `room.snapshot()`. A page's room arrives with its participants and stays current while the page is connected. On the server, a room is as of your `await Room.get()`, and stays current from then on while you listen to it or have joined it. To read it again later, call `Room.get()` again.
 
 > You also receive your own messages. To not receive them, join with `room.join({ meta, selfDelivery: false })`.
 
@@ -385,13 +385,14 @@ To let players send it commands, return it with the room:
 // Match.telefunc.js
 // Environment: server
 
-import { getContext } from 'telefunc'
+import { Abort, getContext } from 'telefunc'
 import { Room } from '@telefunc/room'
 
 export async function onJoinMatch(matchId, name) {
   const { user } = getContext()
   const room = await Room.get(matchId)
-  const host = (await room.getParticipants({ hidden: true })).find((p) => p.identity === 'host')
+  const host = room.getParticipants({ hidden: true }).find((p) => p.identity === 'host')
+  if (!host) throw Abort('no host')
   const me = await room.join({ meta: { name }, identity: user.id })
   return { room, me, host }
 }
@@ -592,7 +593,7 @@ Server-side.
 | Method | Description |
 |---|---|
 | `Room.create(id, options?)` | Create a room. Throws if it exists. |
-| `Room.get(id, { tail? }?)` | Get a room. Throws if it doesn't exist. With `tail: true`, the client also gets the messages published after the history you load (see <Link href="#load-chat-history" />). |
+| `Room.get(id, { tail? }?)` | Read a room: as it is now, and current from then on while you listen to it or have joined it. Throws if it doesn't exist. With `tail: true`, the client also gets the messages published after the history you load (see <Link href="#load-chat-history" />). |
 | `Room.getOrCreate(id, { ...options, tail? }?)` | Get a room, or create it. `tail` as for `Room.get()`. |
 | `Room.guard(room, hooks)` | Add `onBefore*()` and `onAfter*()` hooks to a room, once, and say who may join it from the client. |
 | `Room.join(id, { meta?, selfDelivery?, identity?, hidden? }?)` | Join a room from the server, without getting the room first. |
@@ -612,8 +613,9 @@ Server-side.
 |---|---|
 | `join({ meta?, selfDelivery? }?)` | Join; returns your participant. |
 | `join({ meta?, identity?, hidden? })` | Server-side: join with a user id, or as a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>. |
-| `snapshot()` / `onChange(cb)` | The room as it is now, `{ id, meta, count, isClosed, participants }` with each participant as of the snapshot / called on every change. |
-| `getParticipants()` / `getParticipant(id)` | The participants / one participant; on the server, a Promise. |
+| `snapshot()` / `onChange(cb)` | The whole room, `{ id, meta, count, isClosed, participants }` with each participant as of the snapshot / called on every change. |
+| `getParticipants()` | The participants. |
+| `getParticipant(id)` | One participant, or `null`. |
 | `getParticipants({ hidden: true })` | Server-side: the hidden participants. |
 | `onJoin(cb)` / `onLeave(cb)` | Someone joined / left. |
 | `subscribe(cb, { track? }?)` / `subscribeBinary(cb, { track? }?)` | Everyone's messages, or those on `track` / binary frames: `cb(message, info, from)`, with `info` `{ seq, timestamp }`, plus `{ track, meta }` on a track. |
@@ -621,7 +623,7 @@ Server-side.
 | `onAnnounce(cb)` | `Room.announce()` messages: `cb(message, info)`. |
 | `onEmpty(cb)` / `onClose(cb)` | The last participant left / the room closed, with `cause.type`: `'closed'`, or on a page `'disconnected'`. |
 
-Properties: `id`, `meta`, `count`.
+Properties: `id`, `meta`, `count`, `isEmpty`, `isClosed`.
 
 ### `me`
 

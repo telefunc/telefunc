@@ -60,5 +60,5 @@ async function onWhoIsOnline(chatId: string) {
 
 async function onGetChatMember(chatId: string, memberId: string) {
   const chat = await onGetChat(chatId)
-  return { chat, member: await chat.getParticipant(memberId) }
+  return { chat, member: chat.getParticipant(memberId) }
 }

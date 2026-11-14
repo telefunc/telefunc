@@ -227,7 +227,9 @@ type RoomBinaryListener<P extends ParticipantMeta = ParticipantMeta> = (
 /** One member's binary frames: the sender is the member subscribed to. */
 type MemberBinaryListener = (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown
 
-/** A returnable multi-party room with presence, membership, and events. */
+/** A returnable multi-party room with presence, membership, and events. Its reads answer at once: a page's room is
+ *  current while the page is connected; a server's room is as of its `Room.get()`, and current from then on while you
+ *  listen to it or have joined it. */
 type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = {
   /** The ID the room was created with. */
   readonly id: string
@@ -240,9 +242,9 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   join(options?: JoinOptions<P>): Promise<LocalParticipant<P, Pub>>
 
   /** Visible participants, or hidden participants when requested server-side. */
-  getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant<P, Pub>[]>
-  /** One participant, or `null`; loads the member view on first need. */
-  getParticipant(id: string): Promise<RemoteParticipant<P, Pub> | null>
+  getParticipants(options?: { hidden?: boolean }): RemoteParticipant<P, Pub>[]
+  /** One participant, or `null`. */
+  getParticipant(id: string): RemoteParticipant<P, Pub> | null
 
   /** Receive the messages published on `track`. Returns an unsubscribe function. */
   subscribe(
@@ -293,8 +295,7 @@ type ClientRoom<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Parti
   'join' | 'getParticipants' | 'getParticipant'
 > & {
   join(options?: ClientJoinOptions<P>): Promise<LocalParticipant<P, Pub>>
-  /** Visible participants. The page's room arrives with them; on the server this returns a Promise, as a server handle
-   *  may have to read them from the store. */
+  /** Visible participants. */
   getParticipants(): RemoteParticipant<P, Pub>[]
   /** One participant, or `null`. */
   getParticipant(id: string): RemoteParticipant<P, Pub> | null

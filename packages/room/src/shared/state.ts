@@ -123,6 +123,10 @@ abstract class RoomStateView {
     return this._state.model.closed
   }
 
+  getParticipant(id: string): RemoteParticipant | null {
+    return this._state.getRemote(id)
+  }
+
   snapshot(): RoomSnapshotView {
     return this._state.snapshot()
   }

@@ -18,8 +18,8 @@ type ServerRoom = Server.Room<RoomMeta, MemberMeta, ChatMsg>
 type ClientRoom = Client.Room<RoomMeta, MemberMeta, ChatMsg>
 type ServerLocal = Awaited<ReturnType<ServerRoom['join']>>
 type ClientLocal = Awaited<ReturnType<ClientRoom['join']>>
-type ServerRemote = NonNullable<Awaited<ReturnType<ServerRoom['getParticipant']>>>
-type ClientRemote = NonNullable<Awaited<ReturnType<ClientRoom['getParticipant']>>>
+type ServerRemote = NonNullable<ReturnType<ServerRoom['getParticipant']>>
+type ClientRemote = NonNullable<ReturnType<ClientRoom['getParticipant']>>
 
 type _ServerSurface = AssertAll<
   [
@@ -29,6 +29,8 @@ type _ServerSurface = AssertAll<
     Exactly<ServerLocal['meta'], MemberMeta>,
     Exactly<Parameters<ServerLocal['publish']>[0], ChatMsg>,
     Exactly<ServerRemote, Server.RemoteParticipant<MemberMeta, ChatMsg>>,
+    Exactly<ReturnType<ServerRoom['getParticipant']>, ServerRemote | null>,
+    Exactly<ReturnType<ServerRoom['getParticipants']>, ServerRemote[]>,
     Exactly<ServerRemote['meta'], MemberMeta>,
     Exactly<Parameters<Parameters<ServerRemote['subscribe']>[0]>[0], ChatMsg>,
     Exactly<Parameters<Parameters<ServerRoom['subscribe']>[0]>[0], ChatMsg>,

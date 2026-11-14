@@ -86,6 +86,7 @@ type MemberResult = {
   hasMember: boolean
   memberName: string | null
   sameObject: boolean
+  listedOnServer: string[]
 }
 
 function testRoomScenario<Result>(id: string, name: string, validate: (result: Result) => void | Promise<void>) {
@@ -564,11 +565,12 @@ function testRoom() {
   )
   testRoomScenario<MemberResult>(
     'member',
-    'room: a returned RemoteParticipant is the same object as the room view',
+    'room: a returned RemoteParticipant is the same object as the room view, and a server lists it at once after Room.get()',
     (result) => {
       expect(result.hasMember).toBe(true)
       expect(result.memberName).toBe('Viewed')
       expect(result.sameObject).toBe(true) // ref-identity binds the view to its room
+      expect(result.listedOnServer).deep.equal(['Viewed'])
     },
   )
   testRoomScenario<{ arrived: unknown; joins: unknown[] }>(

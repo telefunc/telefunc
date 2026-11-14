@@ -165,7 +165,6 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     return new ServerRoom({
       replica: this,
       lanePlan: this.lanePlan,
-      authority: this.authority,
       roster: this.roster,
       incomingDemand: this.incomingDemand,
       acks: this.acks,

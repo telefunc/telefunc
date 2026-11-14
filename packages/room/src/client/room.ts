@@ -230,10 +230,6 @@ class ClientRoom extends RoomStateView implements Omit<Room, 'getParticipants' |
     return this._state.listVisible()
   }
 
-  getParticipant(id: string): RemoteParticipant | null {
-    return this._state.getRemote(id)
-  }
-
   /** Plain DM fires local listeners; ack DM returns their reply through the symmetric `dm-reply`/`dm-ack` path. */
   private deliverDm(participant: ClientRoomParticipant, msg: InboxMessage): void {
     if (msg.ackId === undefined) {

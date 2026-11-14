@@ -369,7 +369,7 @@ app.get('/api/room-cross-instance/view', async (c) => {
   const roomId = c.req.query('roomId')
   const fixture = roomId ? crossInstanceRooms.get(roomId) : undefined
   if (!fixture) return c.json({ ok: false, reason: 'room fixture not joined on this instance' }, 404)
-  const participants = fixture.room.isClosed ? [] : await fixture.room.getParticipants()
+  const participants = fixture.room.isClosed ? [] : fixture.room.getParticipants()
   const members = Object.fromEntries(participants.map((member) => [nameOf(member), member.meta]))
   // A room the store closed before this view saw it holds no members.
   const inStore = await Room.getParticipants(roomId!).catch(() => [])
