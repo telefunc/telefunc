@@ -38,7 +38,8 @@ import {
   type RoomSnapshotMetadata,
   type RoomStubRequest,
 } from '../shared/protocol.js'
-import { RoomModel, departureCause, type MembershipEvent, type RoomModelOwner } from '../shared/RoomModel.js'
+import { RoomModel, departureCause, type RoomModelOwner } from '../shared/RoomModel.js'
+import { RosterIntake } from './RosterIntake.js'
 import { RoomState, RoomStateView, type RoomStateOwner } from '../shared/state.js'
 import { ROOM_TRACK_WANTS_MAX } from '../shared/constants.js'
 import { CLIENT_ROOM_BUG_MESSAGE, roomResultValue } from '../shared/errors.js'
@@ -90,20 +91,6 @@ function heldMemberOf(event: ClientRoomEvent): string | null {
  *  member. */
 type PendingJoin = { id: string | null; held: Array<{ envelope: unknown; rawInfo: ChannelPublishInfo }> }
 
-/** The rosters streaming in or applying, from the first part of the first until the last applies. */
-type RosterStream = {
-  /** The roster streaming in: its members so far and the part due next. */
-  parts: { members: MemberSnapshot[]; next: number } | null
-  /** The members of the rosters streaming in or applying, by id, which an unstamped message may name. */
-  pending: Map<string, MemberSnapshot>
-  /** The membership events since the stream's first part. Each roster replays them all: those from before its own
-   *  first part change nothing it lists. */
-  events: readonly MembershipEvent[]
-  /** The rosters received and not yet applied, applied in turn. */
-  applying: number
-  applied: Promise<void>
-}
-
 const { heldMembers, roomViews, roomHolds } = getGlobalObject('client/room.ts', () => ({
   /** The members the page holds, joined through any of its room views or held through their own channel, by id. */
   heldMembers: new Map<string, ClientParticipantBase>(),
@@ -143,7 +130,7 @@ class ClientRoom extends RoomStateView implements Room {
   private declaredAnnounce = false
   private readonly declaredText = new Set<string>()
   /** @internal */
-  _rosterStream: RosterStream | null = null
+  readonly _rosters: RosterIntake
 
   constructor({ end, snapshot }: ClientRoomOptions) {
     super()
@@ -158,6 +145,8 @@ class ClientRoom extends RoomStateView implements Room {
       owner,
     })
     this._state = new RoomState({ view: this, model: this.model, owner, trackWantsMax: ROOM_TRACK_WANTS_MAX })
+    // A meta change of one's own that a gap dropped, as while offline, is in the roster whole.
+    this._rosters = new RosterIntake({ model: this.model, onApplied: () => this.acceptOwnMeta() })
 
     // Delivery handlers are local-only. What the server relays is driven by the declared wants: control always arrives,
     // text while subscribed, binary per `sub-binary`.
@@ -286,7 +275,7 @@ class ClientRoom extends RoomStateView implements Room {
         return
       }
       case 'roster':
-        this.onRosterPart(event)
+        this._rosters.part(event)
         return
       case 'rewound':
         this.model.forgetMetaSeqs()
@@ -352,57 +341,11 @@ class ClientRoom extends RoomStateView implements Room {
     this._state.applyBinary(frame, { key: this.id, seq: rawInfo.seq, timestamp: rawInfo.timestamp })
   }
 
-  private onRosterPart({ members, part, more }: Extract<RoomRosterEvent, { __r: 'roster' }>): void {
-    if (part === 0) {
-      this._rosterStream ??= {
-        parts: null,
-        pending: new Map(),
-        events: this.model.recordMembership(),
-        applying: 0,
-        applied: Promise.resolve(),
-      }
-      this._rosterStream.parts = { members: [], next: 0 }
+  private acceptOwnMeta(): void {
+    for (const [id, local] of this.localParticipants) {
+      const accepted = this.model.acceptedMeta(id)
+      if (accepted !== null) local._acceptMeta(accepted)
     }
-    const stream = this._rosterStream
-    if (stream === null) return
-    const parts = stream.parts
-    // A part lost while offline: the next attach sends the whole roster again.
-    if (parts === null || part !== parts.next) {
-      stream.parts = null
-      this.stopRosterEvents()
-      return
-    }
-    for (const member of members) {
-      parts.members.push(member)
-      stream.pending.set(member.id, member)
-    }
-    parts.next++
-    if (more) return
-    stream.parts = null
-    const apply = () => this.applyRoster(stream, parts.members)
-    stream.applying++
-    stream.applied = stream.applying === 1 ? apply() : stream.applied.then(apply)
-  }
-
-  private async applyRoster(stream: RosterStream, members: MemberSnapshot[]): Promise<void> {
-    try {
-      await this.model.reconcileRoster({ members }, stream.events)
-      // A meta change of one's own that a gap dropped, as while offline, is in the roster whole.
-      for (const [id, local] of this.localParticipants) {
-        const accepted = this.model.acceptedMeta(id)
-        if (accepted !== null) local._acceptMeta(accepted)
-      }
-    } finally {
-      stream.applying--
-      this.stopRosterEvents()
-    }
-  }
-
-  private stopRosterEvents(): void {
-    const stream = this._rosterStream
-    if (stream === null || stream.parts !== null || stream.applying > 0) return
-    this._rosterStream = null
-    this.model.stopRecordingMembership()
   }
 
   /** @internal */
@@ -600,7 +543,7 @@ class ClientRoomOwner implements RoomModelOwner, RoomStateOwner {
   }
 
   pendingMember(id: string): MemberSnapshot | undefined {
-    return this.room._rosterStream?.pending.get(id)
+    return this.room._rosters.pending(id)
   }
 
   heldConnection(id: string): boolean | null {
