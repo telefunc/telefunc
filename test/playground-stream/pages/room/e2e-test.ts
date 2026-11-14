@@ -1530,6 +1530,15 @@ function testRoomDemand() {
       expect(r.tracks).deep.equal([cam(['Sam', 'Tia'], 3), { track: 'mic', watchers: [], watcherCount: 1 }])
     },
   )
+  testRoomScenario<{ reads: NamedDemand[][] }>(
+    'watchers-alone',
+    "room: a `me` a server returned alone, with no room of it on the page, names who receives its track, and shows that watcher's meta change and leave",
+    (r) => {
+      expect(r.reads).deep.include([cam(['Sam'], 1)])
+      expect(r.reads).deep.include([cam(['Samuel'], 1)])
+      expect(r.reads.at(-1)).deep.equal([cam([], 1)]) // the server room still receives it, with nobody to name
+    },
+  )
   test("room: a view that watches beside the page's `me` while the page's connection upgrades to a WebSocket shows its publisher `me` throughout, never a watcher it can't name", async () => {
     const transports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!)
     if (!transports.includes('sse') || !transports.includes('ws')) return

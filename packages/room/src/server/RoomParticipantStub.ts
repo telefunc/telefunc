@@ -6,6 +6,7 @@ import {
   ProtocolViolationError,
   type BroadcastEndOwner,
   type ChannelPublishAck,
+  type PublishBody,
   type ServerBroadcastEnd,
 } from 'telefunc/__internal'
 import type { ShieldValidator } from 'telefunc'
@@ -27,9 +28,11 @@ import {
   type ParticipantStubNotice,
   type ParticipantStubRequest,
   type InboxMessage,
+  type MemberSnapshot,
   type RoomResult,
 } from '../shared/protocol.js'
 import { unorderedEventBody } from './publishBodies.js'
+import { reportRoomError } from './reportRoomError.js'
 import {
   PendingDmReplies,
   assertPublishShield,
@@ -85,8 +88,10 @@ class RoomParticipantStub implements BroadcastEndOwner {
   }
 
   _onPageAttach(): void {
-    this.notify({ __r: 'p-meta', ...this.participant._acceptedMeta })
-    this.notify({ __r: 'demand-state', tracks: watchStates(this.participant._watches) })
+    const participant = this.participant
+    this.notify({ __r: 'p-meta', id: participant.id, ...participant._acceptedMeta })
+    if (participant._watches.size > 0) this.followRoster()
+    this.notify({ __r: 'demand-state', tracks: watchStates(participant._watches) })
   }
 
   /** A request, sent with an ack, answers with its result; an ack DM's reply, sent without one, settles that DM. */
@@ -119,7 +124,7 @@ class RoomParticipantStub implements BroadcastEndOwner {
   private mirrorParticipant(): void {
     const participant = this.participant
     const unlistenMeta = participant._onMeta({
-      accepted: (accepted) => this.notify({ __r: 'p-meta', ...accepted }),
+      accepted: (accepted) => this.notify({ __r: 'p-meta', id: participant.id, ...accepted }),
       rewound: () => this.notify({ __r: 'rewound' }),
     })
 
@@ -134,6 +139,7 @@ class RoomParticipantStub implements BroadcastEndOwner {
     this.end.onReconnect(() => participant._setHolderConnected(true))
     this.end.onClose(() => {
       participant.room.replica.leavePage(this)
+      participant.room.replica.unfollowRoster(this)
       unlistenMeta()
       unlistenLeave()
       this.dmReplies.drop()
@@ -143,7 +149,13 @@ class RoomParticipantStub implements BroadcastEndOwner {
 
   /** Who receives one of its participant's tracks changed. */
   demandChanged(track: TrackKey, change: DemandChange): void {
+    this.followRoster()
     this.notify({ __r: 'demand', track, ...change })
+  }
+
+  /** Its client names who receives its participant's tracks from the room's roster from now on. */
+  private followRoster(): void {
+    if (!this.end.isClosed) void this.participant.room.replica.followRoster(this).catch(reportRoomError)
   }
 
   /** Its participant, who is at its page until it leaves. */
@@ -174,9 +186,21 @@ class RoomParticipantStub implements BroadcastEndOwner {
     if (!this.end.isClosed) void this.end.trackAck(replied).catch(() => {})
   }
 
-  /** A closed stub's client gets no notice: one sent after an overflow ended it would arrive after a gap. */
+  /** A closed stub's client gets nothing: a body sent after an overflow ended it would arrive after a gap. */
+  relayEventBody(body: PublishBody): void {
+    if (!this.end.isClosed) this.end.deliver(body)
+  }
+
+  /** Its client was handed no hidden member. */
+  rosterMembers(_part: MemberSnapshot[], visible: MemberSnapshot[]): MemberSnapshot[] {
+    return visible
+  }
+
+  relayControl(body: PublishBody, hiddenMember: string | null): void {
+    if (hiddenMember === null) this.relayEventBody(body)
+  }
+
   private notify(notice: ParticipantStubNotice): void {
-    if (this.end.isClosed) return
-    this.end.deliver(unorderedEventBody(notice))
+    this.relayEventBody(unorderedEventBody(notice))
   }
 }

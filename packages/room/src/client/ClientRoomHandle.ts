@@ -51,8 +51,6 @@ type ClientRoomHandleOptions = {
  *  carry events and data, its acked messages requests. The user's `Room` over it carries none of this. */
 class ClientRoomHandle implements RoomStateOwner, PageLink {
   readonly state: RoomState
-  /** The rooms its participants list the others by: its own. */
-  private readonly ownRooms: readonly RoomState[]
   private readonly end: ClientBroadcast
   private readonly mirror: RoomMirror
   private readonly localParticipants = new Map<string, ClientParticipant>()
@@ -69,7 +67,6 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
       onMemberMeta: (id, update) => this.localParticipants.get(id)?._acceptMeta(update),
     })
     this.state = new RoomState({ view, model: this.mirror.model, owner: this, trackWantsMax: ROOM_TRACK_WANTS_MAX })
-    this.ownRooms = [this.state]
 
     // Delivery handlers are local-only. What the server relays is driven by the declared wants: control always arrives,
     // text while subscribed, binary per `sub-binary`.
@@ -171,8 +168,8 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
     return this.state.getRemote(id)
   }
 
-  rooms(): Iterable<RoomState> {
-    return this.ownRooms
+  deliverPrivate(field: string, from: string, data: unknown): void {
+    this.state.applyPrivate(field, from, data)
   }
 
   reportCallbackError(error: unknown): void {

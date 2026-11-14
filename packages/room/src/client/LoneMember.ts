@@ -13,27 +13,32 @@ import {
   type ParticipantStubRequest,
 } from '../shared/protocol.js'
 import { roomResultValue } from '../shared/errors.js'
-import type { MetaRewinds } from '../shared/MemberMeta.js'
-import type { RoomState } from '../shared/state.js'
-import { ClientParticipant, request, sendDmReply, type PageLink } from './ClientParticipant.js'
+import { RoomState, RoomStateView, type RoomStateOwner } from '../shared/state.js'
+import {
+  ClientParticipant,
+  reportClientCallbackError,
+  request,
+  sendDmReply,
+  type PageLink,
+} from './ClientParticipant.js'
+import { RoomMirror } from './RoomMirror.js'
 import { roomsOf } from './page.js'
 import type { Sender } from '../types.js'
 
 type LoneMemberOptions = { end: ClientBroadcast; metadata: ParticipantStubMetadata }
 
 /** A server's `LocalParticipant` that a telefunction returned alone: the page's participant, on a channel of its own
- *  to the participant's stub. */
+ *  to the participant's stub, and the room it lists its watchers by. */
 class LoneMember implements PageLink {
   readonly participant: ClientParticipant
   private readonly end: ClientBroadcast
-  private readonly roomId: string
-  /** Its own: the `rewound` notice forgets its seq. */
-  private readonly rewinds: MetaRewinds = { count: 0 }
+  private readonly room: LoneRoom
 
   constructor({ end, metadata }: LoneMemberOptions) {
     this.end = end
-    this.roomId = metadata.roomId
-    this.participant = new ClientParticipant({ link: this, participant: metadata, rewinds: this.rewinds })
+    this.room = new LoneRoom(metadata)
+    const rewinds = this.room.mirror.model.metaRewinds
+    this.participant = new ClientParticipant({ link: this, participant: metadata, rewinds })
     const { participant } = this
 
     end._subscribeLocal('text', (notice) => this.onNotice(notice))
@@ -69,7 +74,7 @@ class LoneMember implements PageLink {
     void this.end.close().catch(() => {})
   }
 
-  /** Its own writes and its stub's `p-meta` notices both land here. */
+  /** Its own writes and its stub's `p-meta` notices of it both land here. */
   acceptOwnMeta(_from: string, accepted: MemberMetaUpdate): void {
     this.participant._acceptMeta(accepted)
   }
@@ -78,9 +83,13 @@ class LoneMember implements PageLink {
     return null
   }
 
-  /** It has no room of its own: the page's rooms of its room list the participants. */
-  *rooms(): Generator<RoomState> {
-    for (const room of roomsOf(this.roomId)) yield room.state
+  get state(): RoomState {
+    return this.room._state
+  }
+
+  /** The package fields run on the page's rooms of its room. */
+  deliverPrivate(field: string, from: string, data: unknown): void {
+    for (const room of roomsOf(this.room.id)) room.state.applyPrivate(field, from, data)
   }
 
   private onNotice(notice: unknown): void {
@@ -88,10 +97,17 @@ class LoneMember implements PageLink {
     const msg = notice as ParticipantStubNotice
     const { participant } = this
     switch (msg.__r) {
-      case 'p-meta':
-        return this.acceptOwnMeta(participant.id, msg)
+      case 'roster':
       case 'rewound':
-        this.rewinds.count++
+      case 'join':
+      case 'leave':
+        return this.room.mirror.apply(msg)
+      case 'p-meta':
+        this.room.mirror.apply(msg)
+        if (msg.id === participant.id) this.acceptOwnMeta(participant.id, msg)
+        return
+      // It shows no room meta.
+      case 'update':
         return
       case 'demand':
         return participant._applyDemand(msg.track, msg)
@@ -103,5 +119,30 @@ class LoneMember implements PageLink {
       case 'left':
         return participant._onLeft(leaveCauseFromWire(msg))
     }
+  }
+}
+
+/** The room a `me` returned alone lists its watchers by: the roster and presence events its stub sends once someone
+ *  receives one of its tracks; it knows nobody before. Its listeners declare nothing: the stub's channel carries no
+ *  message of the room. */
+class LoneRoom extends RoomStateView implements RoomStateOwner {
+  /** @internal */
+  readonly _state: RoomState
+  readonly mirror: RoomMirror
+
+  constructor({ channelId, roomId }: ParticipantStubMetadata) {
+    super()
+    this.mirror = new RoomMirror({
+      snapshot: { channelId, roomId, meta: [], metaSeq: 0, closed: false, members: [] },
+      onMemberLeft: () => {},
+      onMemberMeta: () => {},
+    })
+    this._state = new RoomState({ view: this, model: this.mirror.model, owner: this })
+  }
+
+  onListenersChanged(): void {}
+
+  reportCallbackError(error: unknown): void {
+    reportClientCallbackError(error)
   }
 }

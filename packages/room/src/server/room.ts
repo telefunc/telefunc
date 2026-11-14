@@ -83,7 +83,7 @@ type RoomHandleOptions = {
   /** Where the handle's holders' wants replan. */
   lanePlan: Pick<LanePlan, 'textChanged' | 'binaryChanged' | 'observing'>
   /** For the handle's stubs. */
-  roster: Pick<RosterStream, 'settled'>
+  roster: Pick<RosterStream, 'settled' | 'sentTo'>
   /** For the handle's participants. */
   incomingDemand: Pick<RoomDemand, 'watchesOf'>
   /** For the handle's writes. */

@@ -188,12 +188,12 @@ type ParticipantStubRequest =
   | MemberMutationRequest
   | { __r: 'req-leave' }
 
-/** Server→client notices on a participant stub. `rewound`: a failover rewound the participant's meta seq, so its next
- *  whole meta applies, whatever its seq. */
+/** Server→client notices on a participant stub. Its participant's own meta is a `p-meta` with its id, as on a room's
+ *  channel. Once someone receives one of its tracks, the room's roster and presence events follow, which name them. */
 type ParticipantStubNotice =
   | ({ __r: 'left' } & WireLeaveCause)
-  | ({ __r: 'p-meta' } & MemberMetaUpdate)
-  | { __r: 'rewound' }
+  | RoomRosterEvent
+  | Extract<RoomCtrlEnvelope, { __r: 'join' | 'leave' | 'p-meta' | 'update' }>
   | {
       __r: 'dm'
       from: string

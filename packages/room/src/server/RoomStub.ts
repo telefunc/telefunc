@@ -72,7 +72,7 @@ assertIsNotBrowser()
 type RoomStubOptions = {
   room: RoomHandle
   /** Whether every client of the view was sent every member it holds. */
-  roster: Pick<RosterStream, 'settled'>
+  roster: Pick<RosterStream, 'settled' | 'sentTo'>
   end: ServerBroadcastEnd
   publishShield?: ShieldValidator
   /** The hidden members its response handed the client, which a streamed response may add to after the stub
@@ -103,8 +103,6 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   private tail: TailHold | null = null
   /** Whether its client attached, before which its tail holds. */
   private attached = false
-  /** Whether this client was sent the whole roster: its room carried it, and no drift streams to it. */
-  rosterSent = true
 
   constructor({ room, roster, end, publishShield, grantedHidden }: RoomStubOptions) {
     this.room = room
@@ -381,7 +379,10 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
    *  after it, none dropped while it was away. A hidden member's grant may reach the client after a message does. */
   private namesSender(member: string): boolean {
     return (
-      this.end.isAttached && this.rosterSent && this.roster.settled && this.room.model.memberHidden(member) === false
+      this.end.isAttached &&
+      this.roster.sentTo(this) &&
+      this.roster.settled &&
+      this.room.model.memberHidden(member) === false
     )
   }
 

@@ -41,6 +41,7 @@ import { RosterStream } from './lifecycle/RosterStream.js'
 import { StaleReads } from './lifecycle/StaleReads.js'
 import { toggle } from '../utils/sets.js'
 import type { RoomStub } from './RoomStub.js'
+import type { RoomParticipantStub } from './RoomParticipantStub.js'
 import { MemberMessageBodies, orderedBody, trackFrameBody, unorderedEventBody } from './publishBodies.js'
 import { LanePlan, type LaneDelivery, type LaneEvent, type LanePlanOwner } from './lanes/LanePlan.js'
 import { RoomHeartbeat } from './lifecycle/RoomHeartbeat.js'
@@ -119,6 +120,9 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   private readonly acks = new PendingDmAcks()
   /** Every handle's attached stubs. */
   private readonly stubs = new Set<RoomStub>()
+  /** The clients the roster and the presence events reach: every attached stub, and each participant stub whose
+   *  participant someone receives a track of, so its page names them. */
+  private readonly rosterClients = new Set<RoomStub | RoomParticipantStub>()
   /** The meta of each participant a client holds, which the client mirrors. */
   private readonly metaMirrors = new Set<MetaMirror>()
   /** The handle holding each member it joined. */
@@ -153,7 +157,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     const roles = this.roles
     this.lanePlan = new LanePlan({ owner: this, roles, incarnation, model, outgoingDemand, demandExchange, pages })
     const lanePlan = this.lanePlan
-    this.roster = new RosterStream({ model, stubs: this.stubs })
+    this.roster = new RosterStream({ model, clients: this.rosterClients })
     this.authority = new AuthoritySync({ owner: this, incarnation, roster: this.roster, model, lanePlan })
     const authority = this.authority
     this.heartbeat = new RoomHeartbeat({
@@ -247,6 +251,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   attachStub(handle: RoomHandle, stub: RoomStub, page: string): void {
     this.reconsider(handle)
     this.stubs.add(stub)
+    this.rosterClients.add(stub)
     this.hosting.hostView(stub)
     this.placeAtPage(stub, page)
     this.lanePlan.holderChanged(stub)
@@ -267,8 +272,22 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.reconsider(handle)
     this.leavePage(stub)
     this.stubs.delete(stub)
+    this.rosterClients.delete(stub)
     void this.hosting.dropView(stub)
     this.lanePlan.holderGone(stub)
+  }
+
+  /** The participant stub's client gets the roster as this view knows it, then each presence event, until
+   *  `unfollowRoster()`. */
+  async followRoster(stub: RoomParticipantStub): Promise<void> {
+    if (this.rosterClients.has(stub)) return
+    this.rosterClients.add(stub)
+    await this.authority.ensureRoster()
+    this.roster.sendTo(stub)
+  }
+
+  unfollowRoster(stub: RoomParticipantStub): void {
+    this.rosterClients.delete(stub)
   }
 
   /** The end is at the page `key` names, or at its own (`PageIndex.place`); its page's people and wants are told in the
@@ -545,10 +564,10 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   }
 
   private relayControl(event: PresenceEvent, carried: () => PublishBody): void {
-    if (this.stubs.size === 0) return
+    if (this.rosterClients.size === 0) return
     const body = carried()
     const hiddenMember = hiddenMemberOf(event)
-    for (const stub of this.stubs) stub.relayControl(body, hiddenMember)
+    for (const client of this.rosterClients) client.relayControl(body, hiddenMember)
   }
 
   /** A local participant takes each update its member's meta takes here. */

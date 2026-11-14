@@ -114,6 +114,8 @@ export {
   onServerPublisherReads,
   onJoinHiddenHeld,
   onWatchAsServer,
+  onRenameWatcher,
+  onWatcherLeaves,
 }
 
 import { Buffer } from 'node:buffer'
@@ -1435,11 +1437,23 @@ async function onJoinHiddenHeld(roomId: string) {
   return await (await Room.get(roomId)).join({ hidden: true, meta: { name: 'Ghost' } })
 }
 
+const serverWatchers = new Map<string, LocalParticipant>()
+
 /** A server-side room, `names` joined through it one after the other, that receives `tracks` of every member, all in
  *  one task. */
 async function onWatchAsServer(roomId: string, names: string[], tracks: string[]) {
   const room = await Room.get(roomId)
-  for (const name of names) await room.join({ meta: { name } })
+  for (const name of names) serverWatchers.set(`${roomId} ${name}`, await room.join({ meta: { name } }))
   for (const track of tracks) room.subscribeBinary(() => {}, { track })
   watchedRooms.set(`${roomId} ${names.join()} ${tracks.join()}`, room)
+}
+
+/** The participant `onWatchAsServer()` joined as `name` takes the name `newName`. */
+async function onRenameWatcher(roomId: string, name: string, newName: string) {
+  await serverWatchers.get(`${roomId} ${name}`)!.setMeta({ name: newName })
+}
+
+async function onWatcherLeaves(roomId: string, name: string) {
+  await serverWatchers.get(`${roomId} ${name}`)!.leave()
+  serverWatchers.delete(`${roomId} ${name}`)
 }

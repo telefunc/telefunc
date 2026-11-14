@@ -41,8 +41,8 @@ async function request(end: ClientBroadcast, req: RoomStubRequest | ParticipantS
   return roomResultValue(end.send(req, { ack: true }))
 }
 
-/** Where a page's participant `from` acts, and the page's rooms it lists the other participants by: the room it
- *  joined through (`ClientRoomHandle`), or, for one a telefunction returned alone, its own channel (`LoneMember`). */
+/** Where a page's participant `from` acts, and the room it lists the other participants by: the room it joined
+ *  through (`ClientRoomHandle`), or, for one a telefunction returned alone, its own channel (`LoneMember`). */
 interface PageLink {
   readonly isConnected: boolean
   publishText(from: string, data: unknown, retain: boolean | undefined): Promise<ChannelPublishAck>
@@ -54,8 +54,10 @@ interface PageLink {
   acceptOwnMeta(from: string, accepted: MemberMetaUpdate): void
   /** The sender of a message to the participant, live, where its link has a room of its own. */
   resolveSender(id: string): Sender | null
-  /** The states of the page's rooms it lists participants by. */
-  rooms(): Iterable<RoomState>
+  /** The state of the room it lists the other participants by. */
+  readonly state: RoomState
+  /** A package's message to the participant, for its field on the page's rooms of its room. */
+  deliverPrivate(field: string, from: string, data: unknown): void
 }
 
 type ClientParticipantOptions = ParticipantBaseOptions & { link: PageLink }
@@ -146,20 +148,15 @@ class ClientParticipant extends ParticipantBase {
   }
 
   protected _shownParticipant(id: string): RemoteParticipant | null {
-    for (const state of this.link.rooms()) {
-      const participant = state.shownParticipantOf(id)
-      if (participant) return participant
-    }
-    return null
+    return this.link.state.shownParticipantOf(id)
   }
 
   protected _followRoom(onChange: () => void): () => void {
-    const stops = Array.from(this.link.rooms(), (state) => state.onChange(onChange))
-    return () => stops.forEach((stop) => stop())
+    return this.link.state.onChange(onChange)
   }
 
   protected _deliverPrivate(field: string, from: string, data: unknown): void {
-    for (const state of this.link.rooms()) state.applyPrivate(field, from, data)
+    this.link.deliverPrivate(field, from, data)
   }
 
   // Messaging is often fire-and-forget: a usage error throws, and a failure is a rejection left handled.

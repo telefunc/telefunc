@@ -119,6 +119,8 @@ import {
   onServerPublisherReads,
   onJoinHiddenHeld,
   onWatchAsServer,
+  onRenameWatcher,
+  onWatcherLeaves,
 } from './Room.telefunc'
 import { defineParticipantField } from '@telefunc/room/__internal'
 import type { LocalParticipant } from '@telefunc/room/client'
@@ -1697,6 +1699,24 @@ function Room() {
         await pollUntil(() => ({ done: pub.demand.length === 2 }))
         setResult(JSON.stringify({ reads, sameList, sameEntry: pub.demand[0] === shown[0], tracks: demandNames(pub) }))
         releaseView()
+      })}
+
+      {scenario('watchers-alone', null, 'Watch a track of a me returned alone', async () => {
+        const roomId = `e2e-watchers-alone:${crypto.randomUUID()}`
+        // Created through a telefunction that returns no room, so the page holds none: `me` alone.
+        await onCreateRoomWith(roomId, {})
+        const me = await onJoinAsServer(roomId, 'Pub')
+        const releaseMe = keepReachable(me)
+        const reads: NamedDemand[][] = []
+        me.onChange(() => reads.push(demandNames(me)))
+        await me.publishBinary(new Uint8Array([1]), { track: 'cam' })
+        await onWatchAsServer(roomId, ['Sam'], ['cam'])
+        await pollUntil(() => ({ result: { reads }, done: readsAt(reads, [cam(['Sam'], 1)]) }))
+        await onRenameWatcher(roomId, 'Sam', 'Samuel')
+        await pollUntil(() => ({ result: { reads }, done: readsAt(reads, [cam(['Samuel'], 1)]) }))
+        await onWatcherLeaves(roomId, 'Sam')
+        await pollUntil(() => ({ result: { reads }, done: readsAt(reads, [cam([], 1)]) }))
+        releaseMe()
       })}
 
       {scenario('watchers-upgrade', null, 'Watch while the connection upgrades', async () => {
