@@ -1472,8 +1472,11 @@ function testRoomDemand() {
       expect(r.nameless.at(-1)).deep.equal([cam([], 1)])
       expect(r.hidden.flat().flatMap(({ watchers }) => watchers)).deep.equal([])
       expect(r.hidden.at(-1)).deep.equal([cam([], 1)])
-      // Two tracks a server-side room started receiving in one task: one call, both in it.
-      expect(r.oneTask).deep.equal([[cam([], 1), { track: 'mic', watchers: [], watcherCount: 1 }]])
+      // Two tracks a server-side room started receiving in one task: each is told once its lane delivers, and on Redis the
+      // two lanes can deliver in two tasks, the first track then told alone first.
+      const mic = { track: 'mic', watchers: [], watcherCount: 1 }
+      expect(r.oneTask.at(-1)).deep.equal([cam([], 1), mic])
+      expect([[], [[cam([], 1)]], [[mic]]]).deep.include(r.oneTask.slice(0, -1))
     },
   )
   testRoomScenario<{ reads: NamedDemand[][]; sameList: boolean; sameEntry: boolean; tracks: NamedDemand[] }>(
