@@ -19,7 +19,7 @@ describe('StaleReads', () => {
     warn.mockRestore()
   })
 
-  it('warns once, naming the room, at a read a heartbeat past the last Room.get()', () => {
+  it('warns once, naming the room, at a read a heartbeat past when it was last current', () => {
     const { reads } = staleReads()
     vi.advanceTimersByTime(ROOM_HEARTBEAT_INTERVAL_MS)
     reads.read()
@@ -28,7 +28,7 @@ describe('StaleReads', () => {
     reads.read()
     reads.read()
     expect(warn).toHaveBeenCalledOnce()
-    expect(warn.mock.calls[0]![0]).toContain("Room 'lobby' was read 30 s after its last Room.get()")
+    expect(warn.mock.calls[0]![0]).toContain("Room 'lobby' was read 30 s after it was last current on this server")
   })
 
   it('stays quiet while followed, on a closed room, and after a Room.get() caught it up', () => {

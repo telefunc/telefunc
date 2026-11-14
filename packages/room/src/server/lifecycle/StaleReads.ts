@@ -50,9 +50,9 @@ class StaleReads {
     this.warned = true
     assertWarning(
       false,
-      `Room '${this.roomId}' was read ${Math.round(age / 1000)} s after its last Room.get() on this server, and nothing ` +
-        'here listens to it or has joined it, so the read misses what other servers changed since. Call Room.get() ' +
-        'where you read the room, or listen to it to keep it current.',
+      `Room '${this.roomId}' was read ${Math.round(age / 1000)} s after it was last current on this server (its last ` +
+        'Room.get(), or when nothing here listened to it or had joined it any more), so the read misses what other ' +
+        'servers changed since. Call Room.get() where you read the room, or listen to it to keep it current.',
     )
   }
 }
