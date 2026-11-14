@@ -1,8 +1,16 @@
 export { testClose }
 
-import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { WebSocket } from 'playwright-chromium'
-import { resetCleanupState, getCleanupState, forceServerGc, navigate, getResult, sleep } from '../../e2e-utils'
+import {
+  resetCleanupState,
+  getCleanupState,
+  forceServerGc,
+  navigate,
+  getResult,
+  sleep,
+  expectServerError,
+} from '../../e2e-utils'
 
 function testClose(inDocker = false) {
   for (const wakeOn of ['onClose', 'signal', 'channel'] as const) {
@@ -223,16 +231,7 @@ function testClose(inDocker = false) {
     await autoRetry(async () => {
       expect(await getResult('#close-result')).deep.equal({ text: 'Draft' })
     })
-    expectLog('Could not release the lock', {
-      // docker compose prints a server's stderr on its stdout, each line prefixed with the container's name.
-      filter: (log) =>
-        inDocker
-          ? log.logSource === 'stdout' &&
-            log.logText
-              .split('\n')
-              .some((line) => line.includes('Could not release the lock') && /^playground-[a-z]-\d+ +\| /.test(line))
-          : log.logSource === 'stderr',
-    })
+    expectServerError('Could not release the lock', inDocker)
   })
 
   // ── context.onClose waits for channel to close ───────────────────────

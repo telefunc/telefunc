@@ -27,8 +27,6 @@ class SendCredit {
   private sentMessages = 0
   private limitBytes: number = CREDIT_WINDOW_INITIAL_BYTES
   private limitMessages: number = CREDIT_MSG_WINDOW_INITIAL
-  /** The largest window the peer grants: what this side's replay holds (see `fitReplay`). */
-  private peerByteWindowCap: number = CREDIT_WINDOW_MAX_BYTES
   /** A `WINDOW` raised the byte limit past the one this side assumed the peer starts with. */
   private limitRaised = false
   /** Senders waiting on credit, oldest first, from the first that waited on. */
@@ -51,31 +49,15 @@ class SendCredit {
     macrotaskYield.assertSupported()
   }
 
-  get waitingCount(): number {
-    return this.waiters?.length ?? 0
-  }
-
-  /** The largest window the peer grants. */
-  get peerByteWindowMax(): number {
-    return this.peerByteWindowCap
-  }
-
-  /** Keeps what it lets be in flight within the replay buffer that holds what it sends (see `replayWindow`). */
-  fitReplay(peerWindow: number): void {
-    this.peerByteWindowCap = Math.min(CREDIT_WINDOW_MAX_BYTES, peerWindow)
-    if (!this.limitRaised) this.limitBytes = Math.min(CREDIT_WINDOW_INITIAL_BYTES, this.peerByteWindowCap)
-  }
-
-  /** Bytes sent past the byte limit and still past it. */
-  get bytesSentPastCredit(): number {
-    return Math.max(0, this.sentBytes - this.limitBytes)
+  /** Keeps what it lets be in flight within what the server's `maxMemory` allows. */
+  capWindow(peerWindow: number): void {
+    if (!this.limitRaised) this.limitBytes = Math.min(CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_MAX_BYTES, peerWindow)
   }
 
   /** Counts a frame of `bytes` against credit; a Promise where the sender waits for credit or yields. The frame already
    *  went (`sendSequenced`): awaiting the Promise throttles the sender's next send, not awaiting it bypasses credit. */
   decrement(bytes: number): void | Promise<void> {
-    this.sentBytes += bytes
-    this.sentMessages += 1
+    this.count(bytes)
     this.released = false
     if (this.isOutOfCredit()) return this.waitForCredit()
     if (this.waiters !== null && this.waiters.length > 0) {
@@ -89,16 +71,28 @@ class SendCredit {
     }
   }
 
-  /** Returns the bytes `limit` raised the byte limit by. A limit that doesn't raise the current one is stale, and
-   *  ignored, as in QUIC. */
-  onPeerByteWindow(limit: number): number {
+  /** Counts a frame of `bytes` that went and that nothing waits on: a lossy send, which its sender holds back while the
+   *  peer granted no more. */
+  count(bytes: number): void {
+    this.sentBytes += bytes
+    this.sentMessages += 1
+  }
+
+  /** Takes back `messages` frames of `bytes` that were counted and never reached the peer. */
+  refund(bytes: number, messages: number): void {
+    this.sentBytes -= bytes
+    this.sentMessages -= messages
+    this.tryWakeCreditWaiters()
+  }
+
+  /** A limit that doesn't raise the current one is stale, and ignored, as in QUIC. */
+  onPeerByteWindow(limit: number): void {
     const raise = (limit - this.limitBytes) | 0
-    if (raise <= 0) return 0
+    if (raise <= 0) return
     this.noteBacklog()
     this.limitBytes += raise
     this.limitRaised = true
     this.tryWakeCreditWaiters()
-    return raise
   }
 
   onPeerMessageWindow(limit: number): void {
@@ -128,7 +122,8 @@ class SendCredit {
     this.leastBacklog = Math.min(this.leastBacklog, this.owner.backlogBytes() ?? 0)
   }
 
-  private isOutOfCredit(): boolean {
+  /** The peer granted no more: of bytes, or of messages. */
+  isOutOfCredit(): boolean {
     return this.limitBytes - this.sentBytes <= 0 || this.limitMessages - this.sentMessages <= 0
   }
 

@@ -2,7 +2,7 @@ export { testCounter }
 export { testRunClassic }
 export { withNetworkConditions }
 export { newCDPSession }
-export { sendsOutrunWarning }
+export { sendRefusedWarning }
 
 import {
   page,
@@ -17,8 +17,7 @@ import {
   editFileRevert,
 } from '@brillout/test-e2e'
 
-/** What a server channel prints once the sends nobody awaits keep outrunning its page. */
-const sendsOutrunWarning = "A channel's `send()` calls outrun its client"
+const sendRefusedWarning = 'A channel refused a `send()`'
 
 function newCDPSession() {
   // test-e2e's `page` is a proxy, and a CDP session needs the page itself.

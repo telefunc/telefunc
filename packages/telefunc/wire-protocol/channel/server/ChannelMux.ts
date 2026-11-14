@@ -3,11 +3,10 @@ export type { WireEntry, ReconcileOutcome, ServerTransport, Wire }
 
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import { getAdapterMaxFrameBytes, getServerConfig, pingDeadlineOf } from '../../../node/server/serverConfig.js'
+import { getAdapterMaxFrameBytes, getChannelConfig } from '../../../node/server/serverConfig.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
-  CHANNEL_PING_INTERVAL_MIN_MS,
   CREDIT_MSG_WINDOW_MAX,
   CREDIT_WINDOW_MAX_BYTES,
   MAX_CHANNELS_PER_CONNECTION,
@@ -19,14 +18,17 @@ import {
   WIRE_RECV_BACKLOG_BASE_FRAMES,
   type ChannelTransports,
 } from '../../constants.js'
-import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, withTook } from '../../wire/frame.js'
+import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, tookOf, withTook } from '../../wire/frame.js'
 import { TAG, isWireCtrlTag } from '../../wire/tags.js'
+import { pingDeadline } from '../../wire/pingDeadline.js'
 import { textEncoder } from '../../wire/envelope.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type { BarrierPayload, PreparePayload, ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
 import { IndexedPeer } from './IndexedPeer.js'
+import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
+import { creditWindowOf } from '../../flowControl/credit.js'
 import { WireSender } from './WireSender.js'
 import { EndedChannels } from './EndedChannels.js'
 import { UpgradeStages, type UpgradeStagesOwner } from './UpgradeStages.js'
@@ -48,11 +50,15 @@ type ServerTransport<TWire> = {
   sendNow(wire: TWire, frame: Uint8Array<ArrayBuffer>): void
   /** True if the peer gets a message only once all of it has arrived, as on a WebSocket (see `pieces.ts`). */
   wholeMessages: boolean
+  /** True if the runtime keeps a copy of each message it's handed, as Bun, Deno and workerd do: Node keeps the bytes. */
+  copiesOnSend?: boolean
   /** Bytes of sent frames still in the wire, never undercounted; `undefined` if the runtime can't tell. */
   bufferedAmount(wire: TWire): number | undefined
   /** The part of `bufferedAmount` a frame sent now waits behind, where it can pass the rest (SSE). Without this
    *  method, a frame waits behind all of `bufferedAmount`. */
   queuedAhead?(wire: TWire): number | undefined
+  /** What the wire holds back for its page, on a transport that isn't `wholeMessages`. */
+  queueOf?(wire: TWire): WireQueue
   terminateWire(wire: TWire): void
 }
 
@@ -78,10 +84,7 @@ type MuxServerOptions = {
   idleTimeout: number
   pingInterval: number
   pingDeadline: number
-  serverReplayBuffer: number
-  serverReplayBufferBinary: number
-  clientReplayBuffer: number
-  clientReplayBufferBinary: number
+  creditWindow: number
   connectTtl: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
@@ -214,6 +217,7 @@ class ChannelMux implements UpgradeStagesOwner {
         wire,
         transport: transport as ServerTransport<unknown>,
         pingInterval: this.options.pingInterval,
+        sseFlushThrottle: this.options.sseFlushThrottle,
         deliveries,
         sessions: this.sessions,
         attaching,
@@ -243,10 +247,7 @@ class ChannelMux implements UpgradeStagesOwner {
         idleTimeout: this.options.idleTimeout,
         pingInterval: this.options.pingInterval,
         maxFrameBytes: getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES,
-        serverReplayBuffer: this.options.serverReplayBuffer,
-        serverReplayBufferBinary: this.options.serverReplayBufferBinary,
-        clientReplayBuffer: this.options.clientReplayBuffer,
-        clientReplayBufferBinary: this.options.clientReplayBufferBinary,
+        creditWindow: this.options.creditWindow,
         sseFlushThrottle: this.options.sseFlushThrottle,
         ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
         transports: this.options.transports,
@@ -458,10 +459,14 @@ class ChannelMux implements UpgradeStagesOwner {
     rawFrame: Uint8Array<ArrayBuffer>,
   ): null | ReconcileOutcome | Promise<ReconcileOutcome | null> {
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CTRL_FRAME_BYTES)
+    const took = tookOf(rawFrame)
+    const pieces = entry.sender.pieces
+    // The bytes the page took off this wire: more than it was sent is a broken peer, and the wire ends.
+    if (took !== null && pieces) {
+      const known = pieces.headroom.heartbeat(took, performance.now())
+      assertProtocol(known, 'the page says it took more bytes than this wire sent it')
+    }
     if (frame.tag === TAG.PING) {
-      const pieces = entry.sender.pieces
-      if (pieces)
-        assertProtocol(pieces.headroom.sender.heartbeat(frame.took, performance.now()), 'PING took more than sent')
       this.resetPingTimer(entry)
       this.acknowledgeArrivals(entry)
       this.pong(entry, this.answerPing(entry, frame.ended))
@@ -542,8 +547,11 @@ class ChannelMux implements UpgradeStagesOwner {
   private handlePrepare(entry: WireEntry, payload: PreparePayload, rawByteLength: number): null {
     const { wire } = entry
     assertProtocol(!entry.transport.getSessionId(wire), 'PREPARE on a reconciled wire')
-    assertProtocol(this.sessions.peekSession(payload.sessionId), 'PREPARE for an unknown session')
+    const session = this.sessions.peekSession(payload.sessionId)
+    assertProtocol(session, 'PREPARE for an unknown session')
     this.stages.stage(wire, payload, rawByteLength)
+    // From the READY on, the page holds back what it would send on its old wire, its confirmations included.
+    for (const { channel } of session.values()) channel._onPageMoving()
     entry.sender.send(encode.ready({ upgradeId: payload.upgradeId }))
     return null
   }
@@ -788,8 +796,8 @@ class ChannelMux implements UpgradeStagesOwner {
     }
   }
 
-  /** Attaches `channel` to the wire. With `replay`, first sends what the page missed, or ends the channel if the
-   *  replay lost it. Null once the channel keeps nothing for a page (its replay was released). */
+  /** Attaches `channel` to the wire. With `replay`, first sends what the page missed. Null once the channel keeps
+   *  nothing for a page (its replay was released). */
   private attachChannel(
     channel: ServerChannel,
     open: ReconcileOpenEntry,
@@ -800,13 +808,8 @@ class ChannelMux implements UpgradeStagesOwner {
     if (buffer === null) return null
     channel._onPageAttach(open.lastSeq, request)
     const peer = new IndexedPeer({ sender, index: open.ix, replay: buffer })
-    const missed = replay ? buffer.getAfter(open.lastSeq) : []
-    if (missed === null) {
-      channel._onReplayLost(peer)
-    } else {
-      for (const frame of missed) sender.send(frame)
-      channel._attachPeer(peer, open)
-    }
+    if (replay) for (const frame of buffer.getAfter(open.lastSeq)) sender.send(frame)
+    channel._attachPeer(peer, open)
     if (this.ended.has(channel)) this.ended.keep(channel, null)
     return { channel, ix: open.ix, peer }
   }
@@ -897,17 +900,13 @@ class ChannelMux implements UpgradeStagesOwner {
 }
 
 function resolveMuxServerOptions(): MuxServerOptions {
-  const c = getServerConfig().channel
-  const pingInterval = Math.max(c.pingInterval, CHANNEL_PING_INTERVAL_MIN_MS)
+  const c = getChannelConfig()
   return {
     reconnectTimeout: c.reconnectTimeout,
     idleTimeout: c.idleTimeout,
-    pingInterval,
-    pingDeadline: pingDeadlineOf(c),
-    serverReplayBuffer: c.serverReplayBuffer,
-    serverReplayBufferBinary: c.serverReplayBufferBinary,
-    clientReplayBuffer: c.clientReplayBuffer,
-    clientReplayBufferBinary: c.clientReplayBufferBinary,
+    pingInterval: c.pingInterval,
+    pingDeadline: pingDeadline(c.pingInterval),
+    creditWindow: creditWindowOf(c.maxMemory, c.maxPendingBytes),
     connectTtl: c.connectTtl,
     sseFlushThrottle: c.sseFlushThrottle,
     ssePostIdleFlushDelay: c.ssePostIdleFlushDelay,

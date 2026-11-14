@@ -61,8 +61,8 @@ type TypeContract<V = unknown, R = unknown, M extends Record<string, unknown> = 
 /** Replacer: detect a value during serialization and replace it with prefix+metadata on the wire.
  *  `replace` is the primary verb of the Replacer API — it runs once per serialized value and may
  *  perform side effects (register channels, install listeners, wire lifecycle). The returned
- *  `metadata` is what crosses the wire; `close` / `abort` are lifecycle hooks tracked by the
- *  registry and invoked when the carrier message completes or is aborted.
+ *  `metadata` is what crosses the wire; `abort` runs when the carrier message is aborted, and on the page
+ *  `close` runs once the value it sent is let go.
  *
  *  Duplicated references run `replace` once and revive as one client object (see
  *  createStreamingReplacer), so metadata must identify the value uniquely within the
@@ -148,7 +148,12 @@ type ClientReviverContext = {
     ack?: boolean
     maxFrameBytes?: number
   }): ClientChannel<ClientToServer, ServerToClient>
-  createBroadcast<T = unknown>(opts: { channelId: string; key: string; maxFrameBytes?: number }): ClientBroadcast<T>
+  createBroadcast<T = unknown>(opts: {
+    channelId: string
+    key: string
+    lossy?: true
+    maxFrameBytes?: number
+  }): ClientBroadcast<T>
   receiveStream(metadata: StreamingMetadata): StreamSource
 }
 
@@ -200,7 +205,7 @@ type ClientReplacerContext = {
 
 // ===== Metadata =====
 
-type StreamingMetadata = { channelId: string } | { __index: number; flowId?: string }
+type StreamingMetadata = { channelId: string } | { __index: number }
 
 /** Request-direction (client→server): bytes are framed back-to-back in the request body,
  *  so the reader needs an explicit `index` and `size` to know where this file starts and ends. */
@@ -254,7 +259,7 @@ type ChannelContract = TypeContract<
 type BroadcastContract = TypeContract<
   ServerBroadcast,
   ClientBroadcast,
-  { channelId: string; key: string; maxFrameBytes?: number }
+  { channelId: string; key: string; lossy?: true; maxFrameBytes?: number }
 >
 
 type FunctionContract = TypeContract<

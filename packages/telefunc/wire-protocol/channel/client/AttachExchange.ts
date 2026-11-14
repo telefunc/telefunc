@@ -417,7 +417,7 @@ class AttachExchange {
   private loseChannel({ ix, replay, channel }: ChannelRecord): OutboundFrame {
     this.gate.dropQueue(ix)
     const frame = encode.error(ix, ERROR_REASON.LOST, replay.nextSeq())
-    channel._onEnded(replayLossError('client'))
+    channel._onEnded(replayLossError())
     return { kind: 'control', frame }
   }
 }

@@ -1,27 +1,38 @@
 export { ClientBroadcast }
 
-import type { BroadcastBinaryListener, BroadcastListener, ChannelData, ChannelPublishAck } from '../channel.js'
-import { makePublishInfo } from '../channel.js'
+import type {
+  BroadcastBinaryListener,
+  BroadcastListener,
+  ChannelData,
+  ChannelPublishAck,
+  ChannelPublishInfo,
+} from '../channel.js'
+import { makePublishInfo, stringifyMessage } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
-import { stringify } from '@brillout/json-serializer/stringify'
-import { encode, type ChannelDataFrame } from '../../wire/frame.js'
+import { encode, type ChannelDataFrame, type SequencedEncoder } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
-import type { WirePublishInfo } from '../../wire/publishInfo.js'
+import { PUBLISH_BINARY_HEADER, type WirePublishInfo } from '../../wire/publishInfo.js'
+import { HEADER } from '../../wire/header.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { broadcastMessages } from '../channelMessages.js'
-import { CHANNEL_BUFFER_LIMIT_BINARY_BYTES, CHANNEL_BUFFER_LIMIT_BYTES } from '../../constants.js'
 import { ChannelClosedError } from '../channelErrors.js'
 import { isPromise } from '../../../utils/isPromise.js'
+import { forListener } from '../listenerAnswer.js'
 import { ClientChannel, type ClientChannelOptions } from './ClientChannel.js'
+
+type ClientBroadcastOptions = ClientChannelOptions & { lossy?: boolean }
 
 class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly broadcastListeners = new Listeners<BroadcastListener<T>>()
   private readonly broadcastBinaryListeners = new Listeners<BroadcastBinaryListener>()
   /** The subscriptions this page asks the server for. */
   private readonly subscribed = { text: false, binary: false }
+  /** A newer publish replaces this page's own that no wire has taken yet: see `sendLossy`. */
+  private readonly lossy: boolean
 
-  constructor(options: ClientChannelOptions) {
+  constructor(options: ClientBroadcastOptions) {
     super(options)
+    this.lossy = options.lossy === true
     // Nothing waits on a publish's credit, so the page grants the largest window from the start.
     this.receiveCredit.widenByteWindow()
     this._attach.declareSubscriptions(this.subscribed)
@@ -29,16 +40,13 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
     if (this.stopped) throw new ChannelClosedError()
-    const serialized = stringify(data)
-    const ret = this.sendAckReq<ChannelPublishAck, string>(encode.publishAckReq, serialized)
+    const ret = this.sendPublish(encode.publishAckReq, stringifyMessage(data, 'publish'))
     ret.catch(() => {})
     return ret
   }
 
-  /** The page holds what its loop falls behind by within the server's default buffer limits. */
   override messages(options?: { signal?: AbortSignal }) {
-    const budget = { text: CHANNEL_BUFFER_LIMIT_BYTES, binary: CHANNEL_BUFFER_LIMIT_BINARY_BYTES }
-    return broadcastMessages<ChannelData<T>>(this, budget, options)
+    return broadcastMessages<ChannelData<T>>(this, options)
   }
 
   subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {
@@ -55,9 +63,16 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
     if (this.stopped) throw new ChannelClosedError()
-    const ret = this.sendAckReq<ChannelPublishAck, Uint8Array>(encode.publishBinaryAckReq, data)
+    const ret = this.sendPublish(encode.publishBinaryAckReq, data)
     ret.catch(() => {})
     return ret
+  }
+
+  /** On a lossy broadcast, a publish that takes the place of one still waiting gets that one's receipt. */
+  private sendPublish<D>(encodeFrame: SequencedEncoder<D>, data: D): Promise<ChannelPublishAck> {
+    const start = (onQueued?: (seq: number) => void) =>
+      this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data, onQueued)
+    return this.lossy ? this.sendLossy(encodeFrame, data, start) : start()
   }
 
   subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
@@ -101,30 +116,33 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private onPeerPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
     const parsed = parse(data) as ChannelData<T>
-    const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of this.broadcastListeners.list()) {
-      try {
-        const result = cb(parsed, info)
-        if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
-      } catch (err) {
-        if (this.lifecycle.handleCallbackError(err)) return
-      }
-    }
-    this.receiveCredit.onPublishConsumed(bytes)
+    this.deliverPublish(this.broadcastListeners.list(), () => parsed, wireInfo, bytes)
   }
 
   private onPeerPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
+    const list = this.broadcastBinaryListeners.list()
+    this.deliverPublish(list, (i) => forListener(data, list, i, HEADER + PUBLISH_BINARY_HEADER), wireInfo, bytes)
+  }
+
+  /** Calls each listener with its value, `valueFor` its index; an `Abort` stops the rest and leaves the publish
+   *  unconsumed. A listener's promise isn't awaited. */
+  private deliverPublish<V>(
+    listeners: readonly ((value: V, info: ChannelPublishInfo) => unknown)[],
+    valueFor: (i: number) => V,
+    wireInfo: WirePublishInfo,
+    bytes: number,
+  ): void {
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of this.broadcastBinaryListeners.list()) {
+    for (const [i, cb] of listeners.entries()) {
       try {
-        // Bytes of its own: a listener may write into them or transfer their buffer.
-        const result = cb(new Uint8Array(data), info)
+        const result = cb(valueFor(i), info)
         if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
       } catch (err) {
         if (this.lifecycle.handleCallbackError(err)) return
       }
     }
     this.receiveCredit.onPublishConsumed(bytes)
+    if (this.lossy) this.receiveCredit.confirmSoon()
   }
 }

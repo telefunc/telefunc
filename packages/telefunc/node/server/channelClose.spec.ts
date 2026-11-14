@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 
-import { ReplayBuffer } from '../../wire-protocol/channel/ReplayBuffer.js'
+import { ServerReplay } from '../../wire-protocol/channel/server/ServerReplay.js'
 import { ACK_STATUS, decode, encode, type AckResultStatus, type ChannelFrame } from '../../wire-protocol/wire/frame.js'
 import { TAG } from '../../wire-protocol/wire/tags.js'
 import { ProtocolViolationError } from '../../wire-protocol/wire/protocolViolation.js'
@@ -15,11 +15,13 @@ function createPeer(frames: Uint8Array[]) {
       },
       carry() {},
       bufferedAmount: () => 0,
+      behindAfter: () => 700,
       deliveredBefore: () => 0,
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+      queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, dropWaitingFromPublish() {} },
     },
     index: 7,
-    replay: new ReplayBuffer({ maxBytes: 1024 * 1024, binaryMaxBytes: 2 * 1024 * 1024 }),
+    replay: new ServerReplay({ heldBytes: 0 }),
   })
 }
 
@@ -450,5 +452,91 @@ describe('cross-close', () => {
 
     await expect(closePromise).resolves.toBe(1)
     expect(channel._phase).toBe('ended')
+  })
+})
+
+// ── Stopping an onOpen or onClose callback ──
+
+describe('stopping an onOpen or onClose callback', () => {
+  test('a stopped onOpen is not called on open', () => {
+    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
+    let didFireOpen = false
+
+    const stop = channel.onOpen(() => {
+      didFireOpen = true
+    })
+    stop()
+
+    channel._registerChannel()
+    channel._attachPeer(createPeer([]))
+    expect(didFireOpen).toBe(false)
+  })
+
+  test('a stopped onClose is not called, and close() does not wait for it', async () => {
+    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
+    const frames: Uint8Array[] = []
+    let didFireClose = false
+
+    channel._registerChannel()
+    channel._attachPeer(createPeer(frames))
+    const page = fromPage(channel, frames)
+    const stop = channel.onClose(() => {
+      didFireClose = true
+      return new Promise<void>(() => {})
+    })
+    stop()
+
+    const closePromise = channel.close({ timeout: 100 })
+    page.closeAck()
+
+    await expect(closePromise).resolves.toBe(0)
+    expect(didFireClose).toBe(false)
+  })
+
+  test('stopping after the event, or twice, does nothing', async () => {
+    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
+    const frames: Uint8Array[] = []
+    let opens = 0
+    let closes = 0
+    const onClose = () => {
+      closes++
+    }
+
+    const stopOpen = channel.onOpen(() => {
+      opens++
+    })
+    const stopFirstClose = channel.onClose(onClose)
+    const stopSecondClose = channel.onClose(onClose)
+    stopFirstClose()
+    stopFirstClose()
+
+    channel._registerChannel()
+    channel._attachPeer(createPeer(frames))
+    stopOpen()
+    stopOpen()
+    fromPage(channel, frames).closeRequest(100)
+    stopSecondClose()
+
+    expect(opens).toBe(1)
+    expect(closes).toBe(1)
+  })
+
+  test('aborting { signal } removes the callback', () => {
+    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
+    const frames: Uint8Array[] = []
+    const controller = new AbortController()
+    let didFire = false
+    const fire = () => {
+      didFire = true
+    }
+
+    channel.onOpen(fire, { signal: controller.signal })
+    channel.onClose(fire, { signal: controller.signal })
+    controller.abort()
+
+    channel._registerChannel()
+    channel._attachPeer(createPeer(frames))
+    fromPage(channel, frames).closeRequest(100)
+    expect(didFire).toBe(false)
   })
 })

@@ -11,7 +11,7 @@ import type {
   ChannelCloseResult,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
-import { makePublishInfo } from '../channel.js'
+import { makePublishInfo, stringifyMessage } from '../channel.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { ServerChannel } from './ServerChannel.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
@@ -23,23 +23,29 @@ import type {
 } from '../../broadcast/broadcastAdapter.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
-import { assert, assertUsage } from '../../../utils/assert.js'
+import { assertUsage } from '../../../utils/assert.js'
+import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+import { admitPublish, hold, letGo, maxPendingBytesOf, queueMemory, type MemoryHolder } from './channelMemory.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { Listeners } from '../../../utils/Listeners.js'
-import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
-import { ACK_STATUS, ERROR_REASON, encode } from '../../wire/frame.js'
+import { ChannelOverflowError } from '../channelErrors.js'
+import { ACK_STATUS, ERROR_REASON, encode, type AckResultStatus } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
-import { encodePublishText, encodePublishBinary } from '../../wire/publishInfo.js'
 import type { ChannelDataFrame } from '../../wire/frame.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
-import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
+import { PublishBody } from './PublishBody.js'
+import { LossyDelivery } from './LossyDelivery.js'
+import type { IndexedPeer } from './IndexedPeer.js'
+import type { AttachState } from '../../wire/payloads.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { isAbort } from '../../../node/server/Abort.js'
 assertIsNotBrowser()
 
 const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
+const NOT_EVEN_NEWEST = 'the server could not hold even the newest message for its client'
+const FELL_BEHIND = 'its client fell behind what the server holds for it; `lossy: true` lets it skip to the newest'
 
-class ServerBroadcast<T = unknown> extends ServerChannel {
+class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder {
   readonly [SERVER_BROADCAST_BRAND] = true
   /** @see ChannelShield in ../channel/channel.ts — broadcast only validates incoming
    *  publishes from clients (the `data` direction). The `ack` slot is unused: publish
@@ -58,16 +64,36 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   private peerSubscribedText = false
   private peerSubscribedBinary = false
 
-  constructor(opts: { key: string }) {
+  /** Past what its wire takes to confirm, a newer publish replaces those waiting, on the way to its page and on the page's
+   *  way up. */
+  readonly lossy: boolean
+  private readonly lossyPublishes: LossyDelivery<PublishBody> | null
+
+  constructor(opts: BroadcastChannelOptions) {
     super()
-    this.key = opts.key
+    const { key, lossy = false } = opts
+    assertUsage(typeof lossy === 'boolean', "`new BroadcastChannel()`'s `lossy` should be a boolean")
+    this.key = key
+    this.lossy = lossy
+    this.lossyPublishes = lossy
+      ? new LossyDelivery({
+          peer: () => this.peer,
+          replay: () => this._replayBuffer,
+          hand: (body) => this.lastPeer!.sendPublish(body),
+          hold: (body) => hold(this, body),
+          letGo: (body) => letGo(this, body),
+          dropUnhanded: () => this.dropUnhanded(),
+          // A broadcast's publishes count against no credit.
+          outOfCredit: () => false,
+        })
+      : null
   }
 
-  /** A publish can't be awaited per page, so a broadcast's page gets a quarter of the largest window past credit, not
-   *  what was published to it: a page that stops reading has its wire cut, and reconnects. */
-  protected override pastCreditAllowance(): number {
-    return this.sendCredit.peerByteWindowMax / 4
-  }
+  /** Why `shed` ended it, which its page has yet to learn: see `shed`. */
+  private overflowed: string | null = null
+  /** The page's channel on the wire it last attached on: a publish while the page is away joins the replay through it,
+   *  as one a silently dead wire lost does. */
+  private lastPeer: IndexedPeer | null = null
 
   static isServerBroadcast(value: unknown): value is ServerBroadcast {
     return value !== null && typeof value === 'object' && SERVER_BROADCAST_BRAND in value
@@ -88,21 +114,18 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
-    this.ensureBroadcast()
-    if (!this.adapter) throw new ChannelClosedError()
-    const serialized = stringify(data)
+    const serialized = stringifyMessage(data, 'publish')
     const ret = this.lifecycle.trackAck(Promise.resolve(this.publishBroadcast(serialized)))
     ret.catch(() => {})
     return ret
   }
 
   override messages(options?: { signal?: AbortSignal }) {
-    return broadcastMessages<ChannelData<T>>(this, { text: this.bufferLimit, binary: this.bufferLimitBinary }, options)
+    return broadcastMessages<ChannelData<T>>(this, options, queueMemory())
   }
 
   subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {
     if (options.signal?.aborted) return () => {}
-    this.ensureBroadcast()
     const remove = this.broadcastListeners.add(callback, {
       ...options,
       onRemove: () => this.unsubscribeUnusedBroadcasts(),
@@ -113,8 +136,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
-    this.ensureBroadcast()
-    if (!this.adapter) throw new ChannelClosedError()
     const ret = this.lifecycle.trackAck(Promise.resolve(this.publishBinaryBroadcast(data)))
     ret.catch(() => {})
     return ret
@@ -122,7 +143,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
     if (options.signal?.aborted) return () => {}
-    this.ensureBroadcast()
     const remove = this.broadcastBinaryListeners.add(callback, {
       ...options,
       onRemove: () => this.unsubscribeUnusedBroadcasts(),
@@ -146,80 +166,161 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     super.dispatchDataFrame(frame)
   }
 
+  // What the publish carries is the broadcast's to hold, so its request holds only the room for its answer.
   _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
-    return this.lifecycle.trackAck(this.dispatchPublishAckReq(text, seq))
+    return this.answerHeld(seq, 0, () => this.dispatchPublishAckReq(text, seq))
   }
 
   _onPeerPublishBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
-    return this.lifecycle.trackAck(this.dispatchPublishBinaryAckReq(data, seq))
+    return this.answerHeld(seq, 0, () => this.dispatchPublishBinaryAckReq(data, seq))
   }
 
   private deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     const data = parse(serialized) as ChannelData<T>
     for (const cb of this.broadcastListeners.list()) {
-      try {
-        const result = cb(data, info)
-        if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
-      } catch (err) {
-        if (this.lifecycle.handleCallbackError(err)) return
-      }
+      if (this.callListener(cb, data, info)) return
     }
     if (!this.peerSubscribedText) return
-    this.forwardPublish(encodePublishText(serialized, rawInfo))
+    const body = bodyOf(encode.publish, serialized, rawInfo, this.owner, (holder) => this.replaceIn(holder, false))
+    this.forwardPublish(body)
   }
 
   private deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     for (const cb of this.broadcastBinaryListeners.list()) {
-      try {
-        // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
-        const result = cb(new Uint8Array(data), info)
-        if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
-      } catch (err) {
-        if (this.lifecycle.handleCallbackError(err)) return
-      }
+      // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
+      if (this.callListener(cb, new Uint8Array(data), info)) return
     }
     if (!this.peerSubscribedBinary) return
-    this.forwardPublish(encodePublishBinary(data, rawInfo))
+    const body = bodyOf(encode.publishBinary, data, rawInfo, this.owner, (holder) => this.replaceIn(holder, true))
+    this.forwardPublish(body)
   }
 
-  /** A text (`string`) or binary publish to the page, buffered while it is away. */
-  private forwardPublish(wire: string | Uint8Array): void {
-    const binary = typeof wire !== 'string'
-    const peer = this.peer
-    if (!peer) {
-      if (binary) this.offlineBuffer.pushPublishBinary(wire)
-      else this.offlineBuffer.pushPublish(wire)
-      this.closeIfDroppedOffline(binary)
-      return
+  /** Calls `listener` with a publish; true where it threw `Abort`, which aborts the channel, so the rest get none. */
+  private callListener<D>(
+    listener: (data: D, info: ChannelPublishInfo) => unknown,
+    data: D,
+    info: ChannelPublishInfo,
+  ): boolean {
+    try {
+      const result = listener(data, info)
+      if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
+    } catch (err) {
+      return this.lifecycle.handleCallbackError(err)
     }
-    if (binary) peer.sendSequenced(encode.publishBinary, wire)
-    else peer.sendSequenced(encode.publish, wire)
+    return false
   }
 
-  /** A publish the buffer for an offline page dropped would leave it a gap: it gets the end at its next attach instead. */
-  private closeIfDroppedOffline(binary: boolean): void {
-    if (!this.offlineBuffer.dropped) return
-    const limit = binary ? 'bufferLimitBinary' : 'bufferLimit'
-    this.endWithError(
-      ERROR_REASON.OVERFLOW,
-      new ChannelOverflowError(
-        `Broadcast closed: more was published to its client while it was offline than config.channel.${limit} lets the server hold`,
-      ),
-    )
+  /** A publish to the page. A subscription is the page's, so it has attached before, but it may have ended since: this
+   *  delivery's own listeners or admitting its body can end the channel, and the subscribers after it still get theirs. */
+  private forwardPublish(body: PublishBody): void {
+    this.endOverflowed()
+    if (this._phase === 'ended') return
+    if (this.lossyPublishes) return this.lossyPublishes.send(body)
+    this.lastPeer!.sendPublish(body)
+    const most = maxPendingBytesOf()
+    if (this.heldBytes > most) this.shed(most, this.owner)
+  }
+
+  /** A graceful close goes behind what waits for its page, so a lossy one first replaces that with the newest; an abort
+   *  drops it. */
+  override close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
+    if (this._phase === 'open') this.sendNewestOnly()
+    return super.close(opts)
+  }
+
+  /** Leaves a lossy page only the newest publish to wait for: what waits for its wire goes, and the newest is sent again. */
+  private sendNewestOnly(): void {
+    const publishes = this.lossyPublishes
+    if (publishes === null) return
+    if (this.peer !== null && publishes.held === null && this.unhanded() > 1) {
+      const newest = this._replayBuffer!.newestPublish()!
+      publishes.letWaitingGo()
+      this.peer.sendPublish(newest)
+    }
+    publishes.flush()
+  }
+
+  protected override onPageHas(lastSeq: number): void {
+    super.onPageHas(lastSeq)
+    this.lossyPublishes?.mayGo()
+  }
+
+  /** Its publishes that no wire has taken go, unless it ended: its replay is then what its page reads. */
+  private dropUnhanded(): void {
+    if (this._phase === 'ended') return
+    const dropped = this._replayBuffer?.dropNewestPublishes(this.unhanded()).units ?? 0
+    if (dropped > 0) this.peer?.sender.queue.dropWaitingPublishes(this.peer.index, dropped)
+  }
+
+  /** Where `holder` is a lossy page this publish reaches (its key, on its object), it lets go of what the publish
+   *  replaces. */
+  private replaceIn(holder: MemoryHolder, binary: boolean): void {
+    if (!(holder instanceof ServerBroadcast) || !holder.lossyPublishes || holder.key !== this.key) return
+    if (holder.owner !== this.owner) return
+    if (binary ? holder.peerSubscribedBinary : holder.peerSubscribedText) holder.lossyPublishes.letWaitingGo()
+  }
+
+  /** How many of its newest publishes no wire has: all of them while it has no wire. */
+  private unhanded(): number {
+    const { peer } = this
+    return peer ? peer.sender.queue.waitingPublishes(peer.index) : Number.POSITIVE_INFINITY
+  }
+
+  /** Its newest publish, where no wire has that yet. */
+  get newestUnhanded(): PublishBody | undefined {
+    if (this._phase === 'ended' || !this._replayBuffer) return undefined
+    return this.lossyPublishes?.held ?? (this.unhanded() === 0 ? undefined : this._replayBuffer.newestPublish())
+  }
+
+  private get owner(): string | undefined {
+    return this.adapter?.ownerOf?.(this.wireRequest)
+  }
+
+  /** `MemoryHolder`: its page gets every publish, so where it would miss one no wire has, the channel ends: from that gap
+   *  on everything goes, receipts too, and its page reads on up to the gap and no further. A lossy one holds no publish
+   *  waiting but its newest, so it ends only at 0, where not even that fits. The bytes go at once, but only its own
+   *  object can write to its page, so from `owner`'s it ends when its own next runs. */
+  shed(toBytes: number, owner?: string): void {
+    const replay = this._replayBuffer
+    if (this._phase === 'ended' || !replay || (this.lossy && toBytes > 0)) return
+    if (toBytes === 0) this.lossyPublishes?.dispose()
+    const gap = replay.dropFromGap(toBytes, this.unhanded()) > 0
+    if (gap) {
+      this.peer?.sender.queue.dropWaitingFromPublish(this.peer.index)
+      this.dropPendingAnswers()
+    }
+    if (toBytes === 0) this.overflow(NOT_EVEN_NEWEST, owner)
+    else if (gap) this.overflow(FELL_BEHIND, owner)
+  }
+
+  /** An answer past the gap would cross it: the channel ends first, and the publish it answers settles with that. */
+  protected override sendAckRes(ackedSeq: number, result: string, status?: AckResultStatus): void {
+    if (this.overflowed !== null) return this.endOverflowed()
+    super.sendAckRes(ackedSeq, result, status)
+  }
+
+  private overflow(why: string, owner: string | undefined): void {
+    this.overflowed ??= why
+    if (owner === this.owner) this.endOverflowed()
+  }
+
+  private endOverflowed(): void {
+    if (this.overflowed === null) return
+    this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(`Broadcast closed: ${this.overflowed}`))
   }
 
   protected override onPeerSubscription({ binary, subscribed }: { binary: boolean; subscribed: boolean }): void {
     if (binary) this.peerSubscribedBinary = subscribed
     else this.peerSubscribedText = subscribed
-    if (subscribed) {
-      this.ensureBroadcast()
-      if (binary) this.subscribeBinaryBroadcast()
-      else this.subscribeBroadcast()
-      return
+    if (!subscribed) {
+      // A page that reads none of its publishes any more would only drop those still waiting for its wire.
+      if (!this.peerSubscribedText && !this.peerSubscribedBinary) this.dropUnhanded()
+      return this.unsubscribeUnusedBroadcasts()
     }
-    this.unsubscribeUnusedBroadcasts()
+    if (binary) this.subscribeBinaryBroadcast()
+    else this.subscribeBroadcast()
   }
 
   private unsubscribeUnusedBroadcasts(): void {
@@ -233,7 +334,20 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     }
   }
 
+  override _attachPeer(peer: IndexedPeer, state?: AttachState): void {
+    this.lastPeer = peer
+    super._attachPeer(peer, state)
+    this.endOverflowed()
+  }
+
+  override _acknowledge(): void {
+    super._acknowledge()
+    this.endOverflowed()
+  }
+
   protected override shutdown(err?: Error, options?: { pageGone?: boolean }): void {
+    this.lossyPublishes?.dispose()
+    this.lastPeer = null
     this.unsubBroadcast?.()
     this.unsubBroadcast = null
     this.unsubBinaryBroadcast?.()
@@ -245,15 +359,15 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   // --- Internal broadcast helpers ---
 
-  private ensureBroadcast(): void {
-    if (this.adapter) return
-    this.adapter = getBroadcastAdapter()
+  /** The installed adapter, which the channel keeps from its first use. */
+  private broadcastAdapter(): BroadcastAdapter {
+    this.adapter ??= getBroadcastAdapter()
+    return this.adapter
   }
 
   private subscribeBroadcast(): void {
     if (this.unsubBroadcast) return
-    assert(this.adapter)
-    this.unsubBroadcast = this.adapter.subscribe(
+    this.unsubBroadcast = this.broadcastAdapter().subscribe(
       this.key,
       (serialized, rawInfo) => this.deliverBroadcastMessage(serialized, rawInfo),
       this.wireRequest,
@@ -262,8 +376,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   private subscribeBinaryBroadcast(): void {
     if (this.unsubBinaryBroadcast) return
-    assert(this.adapter)
-    this.unsubBinaryBroadcast = this.adapter.subscribeBinary(
+    this.unsubBinaryBroadcast = this.broadcastAdapter().subscribeBinary(
       this.key,
       (data, rawInfo) => this.deliverBroadcastBinaryMessage(data, rawInfo),
       this.wireRequest,
@@ -271,45 +384,33 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   private publishBroadcast(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
-    assert(this.adapter)
-    return receiptOf(this.key, this.adapter.publish(this.key, serialized))
+    return receiptOf(this.key, this.broadcastAdapter().publish(this.key, serialized))
   }
 
   private publishBinaryBroadcast(data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
-    assert(this.adapter)
-    return receiptOf(this.key, this.adapter.publishBinary(this.key, data))
+    return receiptOf(this.key, this.broadcastAdapter().publishBinary(this.key, data))
   }
 
   private async dispatchPublishAckReq(serialized: string, seq: number): Promise<void> {
     try {
-      this.ensureBroadcast()
       const validateData = this._validators.get('data')
-      if (validateData) {
-        const data = parse(serialized) as ChannelData<T>
-        const result = validateData(data)
-        // `shield-error` status lets the client reject its `publish()` promise with a branded
-        // ShieldValidationError — same identity every other shield-fail surface produces.
-        if (result !== true) {
-          this.sendAckRes(seq, result, ACK_STATUS.SHIELD_ERROR)
-          return
-        }
-      }
-      const result = await this.publishBroadcast(serialized)
-      this.sendAckRes(seq, stringify(result))
+      const verdict = validateData ? validateData(parse(serialized) as ChannelData<T>) : true
+      // `shield-error` status lets the client reject its `publish()` promise with a branded
+      // ShieldValidationError — same identity every other shield-fail surface produces.
+      if (verdict !== true) return this.sendAckRes(seq, verdict, ACK_STATUS.SHIELD_ERROR)
+      const receipt = await this.publishBroadcast(serialized)
+      this.sendAckRes(seq, stringify(receipt))
     } catch (err) {
-      if (this.lifecycle.handleCallbackError(err)) return
-      this.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+      this.answerFailed(seq, err)
     }
   }
 
   private async dispatchPublishBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
     try {
-      this.ensureBroadcast()
       const result = await this.publishBinaryBroadcast(data)
       this.sendAckRes(seq, stringify(result))
     } catch (err) {
-      if (this.lifecycle.handleCallbackError(err)) return
-      this.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+      this.answerFailed(seq, err)
     }
   }
 }
@@ -329,19 +430,56 @@ type BroadcastChannel<T = unknown> = {
     data: ChannelData<T>
     ack: unknown
   }
+  /** Serializes `data` as JSON: bytes go through `publishBinary()`. */
   publish(data: ChannelData<T>): Promise<ChannelPublishAck>
   subscribe(callback: BroadcastListener<T>, options?: { signal?: AbortSignal }): () => void
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
   subscribeBinary(callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): () => void
-  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): void
-  onOpen(callback: () => void, options?: { signal?: AbortSignal }): void
+  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void
+  onOpen(callback: () => void, options?: { signal?: AbortSignal }): () => void
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>
   abort(): void
   abort(abortValue: unknown, message?: string): void
 }
 
+type BroadcastChannelOptions = {
+  key: string
+  /**
+   * Where only the newest message matters: a client that keeps up gets every message, and one that falls behind skips
+   * to the newest, with `info.seq` jumping over what it skipped. This channel's client skips whoever publishes, while a
+   * client of the same key without it gets every message, or its channel closes with `ChannelOverflowError` past what
+   * the server holds for it.
+   *
+   * https://telefunc.com/channel#skip-to-the-newest
+   *
+   * @default false
+   */
+  lossy?: boolean
+}
+
 const BroadcastChannel = ServerBroadcast as {
-  new <T = unknown>(opts: { key: string }): BroadcastChannel<T>
+  new <T = unknown>(opts: BroadcastChannelOptions): BroadcastChannel<T>
+}
+
+const globalObject = getGlobalObject('wire-protocol/channel/server/ServerBroadcast.ts', {
+  /** One delivery hands every subscriber on this server the same `info`, so they share the body the first one makes. */
+  publishBodies: new WeakMap<WirePublishInfo, PublishBody>(),
+})
+
+function bodyOf<T>(
+  encodeBody: (data: T, info: WirePublishInfo) => Uint8Array<ArrayBuffer>,
+  data: T,
+  info: WirePublishInfo,
+  owner: string | undefined,
+  replace: (holder: MemoryHolder) => void,
+): PublishBody {
+  let body = globalObject.publishBodies.get(info)
+  if (!body) {
+    body = new PublishBody(encodeBody(data, info))
+    admitPublish(body, owner, replace)
+    globalObject.publishBodies.set(info, body)
+  }
+  return body
 }
 
 /** The adapter's receipt as the public one, carrying its key like a subscriber's `info`. */
@@ -362,9 +500,10 @@ function receiptOf(
 }
 
 const Broadcast = {
+  /** Serializes `data` as JSON: bytes go through `publishBinary()`. */
   publish<U = unknown>(key: string, data: ChannelData<U>): ChannelPublishAck | Promise<ChannelPublishAck> {
     const adapter = getBroadcastAdapter()
-    const serialized = stringify(data)
+    const serialized = stringifyMessage(data, 'publish')
     return receiptOf(key, adapter.publish(key, serialized))
   },
   subscribe<U = unknown>(
@@ -373,14 +512,12 @@ const Broadcast = {
     options?: { signal?: AbortSignal },
   ): BroadcastUnsubscribe {
     const adapter = getBroadcastAdapter()
-    return subscribeWithSignal(
-      () =>
-        adapter.subscribe(key, (serialized, info) => {
-          const data = parse(serialized) as ChannelData<U>
-          callStaticListener(callback, data, makePublishInfo(key, info.seq, info.timestamp))
-        }),
-      options,
-    )
+    if (options?.signal?.aborted) return () => {}
+    const unsubscribe = adapter.subscribe(key, (serialized, info) => {
+      const data = parse(serialized) as ChannelData<U>
+      callStaticListener(callback, data, makePublishInfo(key, info.seq, info.timestamp))
+    })
+    return unsubscribeOnAbort(unsubscribe, options?.signal)
   },
   publishBinary(key: string, data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     const adapter = getBroadcastAdapter()
@@ -392,14 +529,12 @@ const Broadcast = {
     options?: { signal?: AbortSignal },
   ): BroadcastUnsubscribe {
     const adapter = getBroadcastAdapter()
-    return subscribeWithSignal(
-      () =>
-        adapter.subscribeBinary(key, (data, info) => {
-          // A copy of its own, as a `BroadcastChannel` listener gets.
-          callStaticListener(callback, new Uint8Array(data), makePublishInfo(key, info.seq, info.timestamp))
-        }),
-      options,
-    )
+    if (options?.signal?.aborted) return () => {}
+    const unsubscribe = adapter.subscribeBinary(key, (data, info) => {
+      // A copy of its own, as a `BroadcastChannel` listener gets.
+      callStaticListener(callback, new Uint8Array(data), makePublishInfo(key, info.seq, info.timestamp))
+    })
+    return unsubscribeOnAbort(unsubscribe, options?.signal)
   },
 }
 
@@ -421,14 +556,14 @@ function reportStaticListenerError(err: unknown): void {
   if (!isAbort(err)) handleCallbackBug(err)
 }
 
-function subscribeWithSignal(subscribe: () => () => void, { signal }: { signal?: AbortSignal } = {}): () => void {
-  if (signal?.aborted) return () => {}
-  let unsubscribe: (() => void) | undefined = subscribe()
+/** Unsubscribes once `signal` aborts, at once if it aborted while subscribing, or when the returned function runs. */
+function unsubscribeOnAbort(unsubscribe: () => void, signal: AbortSignal | undefined): () => void {
+  let current: (() => void) | undefined = unsubscribe
   const remove = () => {
-    const current = unsubscribe
-    unsubscribe = undefined
+    const pending = current
+    current = undefined
     signal?.removeEventListener('abort', remove)
-    current?.()
+    pending?.()
   }
   signal?.addEventListener('abort', remove, { once: true })
   if (signal?.aborted) remove()

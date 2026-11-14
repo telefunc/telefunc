@@ -31,24 +31,24 @@ function isBlobDownload(value: unknown): value is BlobDownload {
  *  onChunk hook for progress + cancel detection. */
 class FileDownload extends LazyFile {
   readonly [FILE_DOWNLOAD_BRAND] = true
-  readonly #core: DownloadCore
+  private readonly core: DownloadCore
 
   constructor(metadata: FileDownloadMetadata, source: StreamSource) {
     super(metadata.size ?? 0, metadata.type, metadata.name, metadata.lastModified, source.stream)
-    this.#core = new DownloadCore(source, metadata.size, this.name, this.type, () => this.markConsumed())
+    this.core = new DownloadCore(source, metadata.size, this.name, this.type, () => this.markConsumed())
   }
 
   get loaded(): number {
-    return this.#core.state.loaded
+    return this.core.state.loaded
   }
   onProgress(cb: DownloadProgress): void {
-    this.#core.onProgress(cb)
+    this.core.onProgress(cb)
   }
   cancel(): void {
-    this.#core.cancel()
+    this.core.cancel()
   }
   override stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
-    return this.#core.stream()
+    return this.core.stream()
   }
   /** Saves to user's filesystem. `opts.mode` selects the path:
    *  - `'picker'` — opens [`showSaveFilePicker`](https://developer.mozilla.org/en-US/docs/Web/API/Window/showSaveFilePicker)
@@ -59,11 +59,11 @@ class FileDownload extends LazyFile {
    *
    *  Default: `'picker'` if `showSaveFilePicker` is available, else `'memory'`. */
   saveToDisk(opts?: { mode?: 'picker' | 'memory' | 'opfs' }): Promise<File> {
-    return this.#core.saveToDisk(opts)
+    return this.core.saveToDisk(opts)
   }
   /** Streams into OPFS (browser-private), returns a disk-backed `File` for `URL.createObjectURL` etc. */
   saveToOpfs(path?: string): Promise<File> {
-    return this.#core.saveToOpfs(path)
+    return this.core.saveToOpfs(path)
   }
   /** Buffers all bytes into memory, returns a real `File`. */
   async saveToMemory(): Promise<File> {
@@ -75,24 +75,24 @@ class FileDownload extends LazyFile {
 /** Blob-shaped streaming download. Same shape as FileDownload minus name/lastModified. */
 class BlobDownload extends LazyBlob {
   readonly [BLOB_DOWNLOAD_BRAND] = true
-  readonly #core: DownloadCore
+  private readonly core: DownloadCore
 
   constructor(metadata: BlobDownloadMetadata, source: StreamSource) {
     super(metadata.size ?? 0, metadata.type, source.stream)
-    this.#core = new DownloadCore(source, metadata.size, '', this.type, () => this.markConsumed())
+    this.core = new DownloadCore(source, metadata.size, '', this.type, () => this.markConsumed())
   }
 
   get loaded(): number {
-    return this.#core.state.loaded
+    return this.core.state.loaded
   }
   onProgress(cb: DownloadProgress): void {
-    this.#core.onProgress(cb)
+    this.core.onProgress(cb)
   }
   cancel(): void {
-    this.#core.cancel()
+    this.core.cancel()
   }
   override stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
-    return this.#core.stream()
+    return this.core.stream()
   }
   /** Saves to user's filesystem. `opts.mode` selects the path:
    *  - `'picker'` — opens [`showSaveFilePicker`](https://developer.mozilla.org/en-US/docs/Web/API/Window/showSaveFilePicker)
@@ -103,11 +103,11 @@ class BlobDownload extends LazyBlob {
    *
    *  Default: `'picker'` if `showSaveFilePicker` is available, else `'memory'`. */
   saveToDisk(opts?: { mode?: 'picker' | 'memory' | 'opfs' }): Promise<File> {
-    return this.#core.saveToDisk(opts)
+    return this.core.saveToDisk(opts)
   }
   /** Streams into OPFS (browser-private), returns a disk-backed `File` for `URL.createObjectURL` etc. */
   saveToOpfs(path?: string): Promise<File> {
-    return this.#core.saveToOpfs(path)
+    return this.core.saveToOpfs(path)
   }
   /** Buffers all bytes into memory, returns a real `Blob`. */
   async saveToMemory(): Promise<Blob> {
@@ -122,16 +122,16 @@ class BlobDownload extends LazyBlob {
  *  everything except `saveToMemory` (return type differs) and the brand. */
 class DownloadCore {
   readonly state: ProgressState
-  readonly #source: StreamSource
-  readonly #name: string
-  readonly #type: string
-  readonly #markConsumed: () => void
+  private readonly source: StreamSource
+  private readonly name: string
+  private readonly type: string
+  private readonly markConsumed: () => void
 
   constructor(source: StreamSource, total: number | undefined, name: string, type: string, markConsumed: () => void) {
-    this.#source = source
-    this.#name = name
-    this.#type = type
-    this.#markConsumed = markConsumed
+    this.source = source
+    this.name = name
+    this.type = type
+    this.markConsumed = markConsumed
     this.state = makeState(total)
   }
 
@@ -141,38 +141,38 @@ class DownloadCore {
   }
 
   cancel(): void {
-    this.#source.cancel()
+    this.source.cancel()
   }
 
   /** Returns the underlying source's instrumented stream — fires progress + errors on
    *  cancel/truncation. Inherited `bytes`/`text`/`arrayBuffer` flow through this. */
   stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
-    this.#markConsumed()
-    return this.#source.stream({ expectedSize: this.state.total, onChunk: (n) => this.state.fire(n) })
+    this.markConsumed()
+    return this.source.stream({ expectedSize: this.state.total, onChunk: (n) => this.state.fire(n) })
   }
 
   async saveToDisk(opts: { mode?: 'picker' | 'memory' | 'opfs' } = {}): Promise<File> {
-    this.#markConsumed()
+    this.markConsumed()
     const showPicker = getShowSaveFilePicker()
     const mode = opts.mode ?? (showPicker ? 'picker' : 'memory')
     if (mode === 'picker') {
       if (!showPicker) {
         throw new Error('saveToDisk({ mode: "picker" }) requires window.showSaveFilePicker')
       }
-      const handle = await openPickerHandle(showPicker, this.#name, this.#type)
-      return pipeAndGetFile(this.#source, this.state, handle)
+      const handle = await openPickerHandle(showPicker, this.name, this.type)
+      return pipeAndGetFile(this.source, this.state, handle)
     }
     if (mode === 'opfs') {
-      return streamToOpfsThenTrigger(this.#source, this.state, this.#name)
+      return streamToOpfsThenTrigger(this.source, this.state, this.name)
     }
-    return bufferThenTrigger(this.#source, this.state, this.#name, this.#type)
+    return bufferThenTrigger(this.source, this.state, this.name, this.type)
   }
 
   async saveToOpfs(path?: string): Promise<File> {
-    this.#markConsumed()
-    const finalPath = path ?? `__telefunc_opfs/${randomUuid()}${this.#name ? `-${this.#name}` : ''}`
+    this.markConsumed()
+    const finalPath = path ?? `__telefunc_opfs/${randomUuid()}${this.name ? `-${this.name}` : ''}`
     const handle = await openOpfsHandle(finalPath)
-    return pipeAndGetFile(this.#source, this.state, handle)
+    return pipeAndGetFile(this.source, this.state, handle)
   }
 }
 

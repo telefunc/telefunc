@@ -102,13 +102,15 @@ channel.send('Hello!')
 | `send(data, { ack: true })` | Send and await acknowledgement. |
 | `sendBinary(data)` | Send binary data. Await to apply backpressure. |
 | `sendBinary(data, { ack: true })` | Send binary and await acknowledgement. |
+| `send(data, { lossy: true })` | Send where only the newest matters. A receiver that falls behind skips to the newest. |
+| `sendBinary(data, { lossy: true })` | Send binary where only the newest matters. |
 | `listen(cb)` | Receive messages. Return a value to ack. Returns an unlisten function. |
 | `listenBinary(cb)` | Receive binary. Return a value to ack. Returns an unlisten function. |
 | `opened` | Promise that resolves on open; rejects if the channel ends before opening. |
 | `closed` | Promise that resolves on clean close; rejects on failure. |
 | `messages({ signal })` | Iterate `{ type: 'text' \| 'binary', data }` messages; abort to stop. |
-| `onOpen(cb)` | Called when the channel opens. |
-| `onClose(cb)` | Called when the channel closes. |
+| `onOpen(cb)` | Called when the channel opens. Returns a function that removes the callback. |
+| `onClose(cb)` | Called when the channel closes. Returns a function that removes the callback. |
 | `close()` | Close gracefully. |
 | `abort(value?)` | Terminate immediately. |
 
@@ -263,11 +265,13 @@ channel.listenBinary((data) => {
 const ack = await channel.sendBinary(frame, { ack: true })
 ```
 
-A message the client sends must be under 64 MiB (32 MiB on Cloudflare with the `'ws'` transport). A larger `send()`, `sendBinary()`, `publish()` or `publishBinary()` throws, and the channel stays open.
+> `send()` and `publish()` serialize their data as JSON, so they throw at the call when given a `Uint8Array`, another typed array or an `ArrayBuffer`: bytes go through `sendBinary()` and `publishBinary()`.
+
+A message the client sends must be under 64 MiB (32 MiB on Cloudflare with the `'ws'` transport). Over that, `send()`, `sendBinary()`, `publish()` and `publishBinary()` each throw at the call, before returning a promise, and the channel stays open.
 
 ### Backpressure
 
-Both `send()` and `sendBinary()` return a `Promise` that resolves when the receiver has capacity for more data. Await them in a loop to apply [backpressure](https://en.wikipedia.org/wiki/Backpressure_routing):
+Without <Link href="#skip-to-the-newest">`lossy`</Link>, both `send()` and `sendBinary()` return a `Promise` that resolves when the receiver has capacity for more data. Await them in a loop to apply [backpressure](https://en.wikipedia.org/wiki/Backpressure_routing):
 
 ```ts
 for (const frame of frames) {
@@ -281,20 +285,75 @@ Fire-and-forget is also fine — a send goes out as soon as the connection has r
 channel.send({ type: 'ping' }) // no await needed
 ```
 
-What happens to a server channel's sends, awaited or not:
+On the server, `send()` works the same whether the client is connected, offline, or hasn't opened the channel yet:
 
-- While the client is connected, the server delivers sends within `maxPendingBytes` and `maxPendingAcks` (see <Link href="/channel-config" />). Exceeding either budget closes the channel with `ChannelOverflowError` naming the setting.
-- While the client is offline, the server buffers them, up to `bufferLimit`/`bufferLimitBinary` (see <Link href="/channel-config" />). An awaited `send()` resolves once the client is back and the message went out. From then on, these sends count toward `maxPendingBytes` and `maxPendingAcks` like any other.
-- Past that limit, the server drops the oldest buffered sends, and each dropped `send()` rejects with `ChannelOverflowError`. A single message larger than the limit is dropped even if you await it. Earlier buffered sends of the same kind (text or binary) are dropped too.
+- It holds each message until the client confirms it, up to the default per-channel limit of 320 MiB, within <Link href="/channel-config">`maxMemory`</Link> for all channels. An awaited `send()` resolves once the client has room, so a sender that awaits builds no backlog.
+- A `send()` past that rejects with `ChannelOverflowError`, and that message isn't delivered. The channel stays open, and later sends that fit go through.
 
-Telefunc logs a warning once per channel when the sends nobody awaits keep outrunning what the client takes, well before they exceed `maxPendingBytes`.
+So fire-and-forget can leave a gap: the client never gets a `send()` the server refused. Telefunc logs a warning at a channel's first refused `send()`.
 
 To fix it, `await` each `send()` before the next, as in the clock example above, or send slower.
 
+A publish waits for no subscriber, so a `BroadcastChannel` refuses none: the server holds up to the same per-channel limit for its client, within `maxMemory`, and past that the channel closes with `ChannelOverflowError`, unless it's lossy (see <Link href="#broadcast" />).
+
+> On a slow uplink, a client's large message delays what that client sends after it, on all its channels, until the large message has gone up. A 4 MiB `sendBinary()` at 1 MiB/s delays them by about 3 s. Only later messages wait, and what the server sends keeps arriving. To keep later messages quick, split the large one into smaller sends.
+
+> Over SSE, the server can't pause a message on its way to the client. Encoding adds a third, so 8 MiB at 1 MiB/s takes about 11 s. A later `send()` of up to 16 KiB on another channel goes as soon as that 8 MiB message is out, ahead of what's queued behind it. Every other later message from the server waits behind what's queued before it. What the client sends still reaches the server.
+
+> A server's `close()` waits for the client's answer, up to its timeout of 5 s by default. When a message on its way takes longer, as the 8 MiB one above does, the `close()` times out: the channel ends on the server, and `onClose()` receives a `ChannelClosedError`. To avoid that, pass a longer timeout, such as `close({ timeout: 20_000 })`.
+
+#### When held messages clear
+
+| Held | Where | Limit | Clears |
+|---|---|---|---|
+| A channel's `send()`s | Server | 320 MiB per channel by default, within `maxMemory` | As the client confirms them, in batches, once its `listen()` callbacks are done, including the promises they return |
+| A `BroadcastChannel`'s publishes | Server | See above, within `maxMemory` | As the client confirms them, in batches, once its `subscribe()` callbacks have returned. Their promises aren't awaited |
+| A `BroadcastChannel`'s `messages()` loop | Where the loop runs | 2 MiB past its next message | As the loop reaches each message |
+
+### Skip to the newest
+
+Where only the newest message matters, such as a pointer's position, pass `lossy: true` to that send. A receiver that keeps up still gets every message. A receiver falls behind when it leaves a message unconfirmed for longer than its connection takes to confirm one, and it then skips to the newest. This holds both ways, on the way to the client and on the client's own way up:
+
+```ts
+// Pointer.telefunc.ts
+// Environment: server
+
+import { Channel } from 'telefunc'
+
+type Position = { x: number; y: number }
+type PointerMove = (position: Position) => void
+
+export async function onFollowPointer(userId: string) {
+  const channel = new Channel<PointerMove, PointerMove>()
+  channel.listen((position) => moveMyPointer(position))
+  onPointerMove(userId, (position) => channel.send(position, { lossy: true }))
+  return { channel: channel.client }
+}
+```
+
+```ts
+// Pointer.tsx
+// Environment: client
+
+import { onFollowPointer } from './Pointer.telefunc'
+
+const userId = 'alice'
+const { channel } = await onFollowPointer(userId)
+channel.listen((position) => drawPointer(userId, position))
+window.addEventListener('pointermove', (e) => channel.send({ x: e.clientX, y: e.clientY }, { lossy: true }))
+```
+
+> A channel's lossy sends in one direction replace each other whatever they hold, so send the values that change together as one message, such as one pointer's `x` and `y`.
+
+> A send without `lossy` is never skipped, and nothing passes it: the lossy sends that arrive stay on the side of it they were sent on. A graceful `close()` delivers the newest first, and `abort()` drops it.
+
+> Awaiting a lossy call never waits for the receiver. A lossy `send()` resolves at once. `lossy` can't be combined with `ack: true`: a skipped message has no answer.
+
+> A receiver skips only what its connection hasn't carried yet: a slow `for await` loop over `messages()` still reads every message that arrived.
 
 ## `Broadcast`
 
-`Broadcast` is a keyed pub/sub **bus**: a message published to a `key` reaches every subscriber of that `key` — server-side subscribers (via `Broadcast.subscribe()`) and clients bridged into the `key` (via <Link href="#new-broadcastchannel">`new BroadcastChannel()`</Link>). Publishers and subscribers are decoupled; all they share is the `key` string. It's the fan-out layer that `new BroadcastChannel()` is built on.
+`Broadcast` is a keyed pub/sub **bus**: a message published to a `key` reaches every subscriber of that `key` — server-side subscribers (via `Broadcast.subscribe()`) and clients bridged into the `key` (via <Link href="#new-broadcastchannel">`new BroadcastChannel()`</Link>). Publishers and subscribers are decoupled; all they share is the `key` string.
 
 The static methods run purely on the server — no client, no handle, no lifecycle — and take the `key` as their first argument:
 
@@ -318,11 +377,31 @@ info.seq        // monotonic sequence number for this key
 info.timestamp  // server timestamp (Unix epoch ms)
 ```
 
-`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted.
+`publish()` resolves to `info` once the message is accepted.
 
-`publish()` can't be awaited per subscriber, so the <Link href="#backpressure">warning about sends that outrun their client</Link> doesn't apply to a `BroadcastChannel`. Instead, a client that falls far behind a broadcast has its connection cut and reconnects. Other channels on the connection also <Link href="#reconnection">reconnect</Link>. The `BroadcastChannel` gets what it missed after reconnecting. If it missed more than the server's buffers hold, it closes (see <Link href="#errors">errors</Link>).
+`seq` counts the publishes on a `key`, `publish()` and `publishBinary()` together. Each publish adds exactly 1, so a jump means a subscriber missed messages:
 
-A listener's `async` work isn't awaited: the next message arrives whether or not your `subscribe()` callback is done. So if your callback can fall behind, unfinished calls pile up on the page, and Telefunc doesn't limit them: your code has to.
+```ts
+let lastSeq = null
+Broadcast.subscribe('room:lobby', (msg, info) => {
+  if (lastSeq !== null && info.seq > lastSeq + 1) console.warn(`Missed ${info.seq - lastSeq - 1} messages`)
+  lastSeq = info.seq
+})
+```
+
+> A subscriber sees only its kind of message: to check `seq` on a key that mixes text and binary, count `subscribe()` and `subscribeBinary()` together.
+
+| Broadcast transport | Across server instances | After a restart |
+|---|---|---|
+| In-memory (default) | Each server has its own | Starts over when the server restarts |
+| `@telefunc/redis` | One counter, so a message has the same `seq` on every instance | Continues across server restarts. Starts over at 1 if Redis loses its data |
+| Cloudflare | One counter, so a message has the same `seq` everywhere | Continues |
+
+> In memory, a key's counter lasts while the key has a subscriber on that server. Once the key has no subscriber left there, its next publish gets a `seq` above every one that server has issued.
+
+Awaiting `publish()` doesn't wait for any subscriber's client to keep up: a client that falls behind a broadcast gets every message the server holds for it, and past that the channel closes with `ChannelOverflowError` (see <Link href="#errors">errors</Link>). Other channels on its connection wait behind what's held for it. Where only the newest message matters, make it <Link href="#lossy-broadcast">lossy</Link>: a client that falls behind then skips to the newest, and `info.seq` jumps over what it skipped.
+
+A `subscribe()` callback's `async` work isn't awaited, on the page or on the server: the next message arrives whether or not your callback is done. Telefunc doesn't limit how many calls of your callback are unfinished, so if it can fall behind, limit them in your code.
 For example, a callback that does an `await fetch()` for each message should queue them, and drop or merge what it can't keep up with.
 
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
@@ -407,7 +486,7 @@ for await (const message of chat.messages({ signal: controller.signal })) {
 
 > `messages()` works on both server and client. Each message includes the same `info` as a subscription callback. The loop follows the <Link href="#receive-messages-in-a-loop">channel loop's cancellation and close behavior</Link>.
 
-> A publish doesn't wait for a slow loop, so the loop holds what it falls behind by: up to `config.channel.bufferLimit` of text and `bufferLimitBinary` of binary on the server, and their defaults (512 KB and 2 MB) on the client. A loop that falls further behind throws `ChannelOverflowError` and stops receiving.
+> A publish doesn't wait for a slow loop. The loop holds up to 2 MiB of messages past its next one. Beyond that, the loop ends with `ChannelOverflowError`, on the server and on the client.
 
 > `subscribe()`, `subscribeBinary()`, `onOpen()` and `onClose()` accept `{ signal }` after the callback. The static `Broadcast.subscribe()` and `Broadcast.subscribeBinary()` accept it too. Aborting removes that registration.
 
@@ -440,6 +519,39 @@ const broadcast = await onListenNotifications()
 broadcast.subscribe((n) => showToast(n))
 ```
 
+### Lossy broadcast
+
+Where only the newest message matters, such as a price, make the `BroadcastChannel` with `lossy: true`, and its client <Link href="#skip-to-the-newest">skips to the newest</Link> when it falls behind:
+
+```ts
+// Price.telefunc.ts
+// Environment: server
+
+import { BroadcastChannel } from 'telefunc'
+
+export async function onWatchPrice(symbol: string) {
+  return new BroadcastChannel<number>({ key: `price:${symbol}`, lossy: true })
+}
+```
+
+```ts
+// Price.tsx
+// Environment: client
+
+import { onWatchPrice } from './Price.telefunc'
+
+const price = await onWatchPrice('ACME')
+price.subscribe((value, info) => showPrice(value, info.seq))
+```
+
+> `lossy` lets this channel's client skip to the newest, whoever publishes. A client of the same key without it gets every message.
+
+> `info.seq` jumps over the messages a client skipped. A client skips to the newest of the whole key, so give each value its own key, such as one per pointer.
+
+> `publish()` resolves with the server's receipt. A client's `publish()` that a newer one replaced before it left resolves with the newer one's receipt.
+
+> Without `lossy`, a client gets every message, and past what the server holds for it the channel closes with `ChannelOverflowError` (see <Link href="#broadcast" />). To catch up, load the state again and call the telefunction for a new channel.
+
 ### `BroadcastChannel` methods
 
 | Method | Description |
@@ -451,8 +563,8 @@ broadcast.subscribe((n) => showToast(n))
 | `subscribe(cb, { signal }?)` | Receive `(data, info)`. Returns an unsubscribe function. |
 | `publishBinary(data)` | Publish raw binary to every subscriber. Returns a receipt. |
 | `subscribeBinary(cb, { signal }?)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function. |
-| `onOpen(cb)` | Called when the channel opens. |
-| `onClose(cb)` | Called when the channel closes. |
+| `onOpen(cb)` | Called when the channel opens. Returns a function that removes the callback. |
+| `onClose(cb)` | Called when the channel closes. Returns a function that removes the callback. |
 | `close()` | Close gracefully. |
 | `abort(abortValue?)` | Terminate immediately. |
 
@@ -471,10 +583,6 @@ A broadcast is an announcement, like a radio frequency: whoever tunes in to the 
 
 Only the two ends of a channel can use it, while anything that knows a broadcast's `key` can join it. A channel ends when either side closes it, while a broadcast outlives any single member.
 
-### Technically
-
-`new BroadcastChannel()` is essentially `new Channel()` combined with the static `Broadcast.publish()` / `Broadcast.subscribe()`: the server holds a private channel to the one client that received it, then bridges that client into the keyed broadcast group.
-
 ### Comparison
 
 | | `new Channel()` | `new BroadcastChannel()` |
@@ -484,25 +592,30 @@ Only the two ends of a channel can use it, while anything that knows a broadcast
 | Delivery | The other end | Every subscriber of the `key`, including the publisher |
 | Message type | Asymmetric:<ul><li>Two different types: `Channel<ClientMessageType, ServerMessageType>`</li><li>The server uses the `new Channel()` instance, and returns `channel.client` to the client</li></ul> | Symmetric:<ul><li>Same type for every member: `BroadcastChannel<MessageType>`</li><li>The server uses and returns the same `BroadcastChannel` instance</li></ul> |
 | Message return | The other end's reply (if `{ ack: true }`) | A receipt: `{ key, seq, timestamp }` |
+| Skip to the newest | Per send, in either direction: `send(data, { lossy: true })` | Per subscriber, whoever publishes: `new BroadcastChannel({ key, lossy: true })` |
 | `close()` | Closes the channel for both ends | Detaches this member; the group lives on |
-| Multi-server | <Link href="/stream/scale#sticky-sessions">Sticky sessions</Link> | <Link href="/stream/scale#broadcast">Broadcast transport</Link> |
+| Multi-server | <Link href="/stream/scale#sticky-sessions">Sticky sessions</Link> | <Link href="/stream/scale#sticky-sessions">Sticky sessions</Link> and a <Link href="/stream/scale#broadcast">broadcast transport</Link> |
 
 
 ## Errors
 
 Telefunc silently handles rejected promises from `send()`, `sendBinary()`, `publish()` and `publishBinary()`. To observe a failure, `await` the call or use `.catch()`.
 
+A call that can't start throws instead of rejecting: one on a closed channel, or a client's message over the size limit in <Link href="#binary-data" />. `.catch()` doesn't see that throw, so put a `try` around the call.
+
+A channel closes when one of its ends closes or aborts it, and when its client stays gone longer than `reconnectTimeout`. A slow client doesn't close a `Channel`, and neither does a refused `send()`. One thing does: a client with so many `send(data, { ack: true })` or `publish()` calls waiting for their answers at once that the server can't hold even their refusals. The channel then closes with `ChannelOverflowError`. A `BroadcastChannel` also closes, with `ChannelOverflowError`, where its client would miss a message, and a <Link href="#lossy-broadcast">lossy</Link> one where the server can't hold even the newest message for its client.
+
 Channels and broadcasts signal failure through four errors:
 
 | Error | When | Channel state | Recovery |
 |---|---|---|---|
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
-| `NetworkError` (`isChannel: true`) | Offline longer than `reconnectTimeout`, or missed more messages than the replay buffer holds | Closed | Auto-closed — recreate if needed |
+| `NetworkError` (`isChannel: true`) | The client stayed gone longer than `reconnectTimeout` | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
-| `ChannelOverflowError` | A server channel's sends overfilled `bufferLimit`/`bufferLimitBinary` while its client was offline; the dropped ones reject | **Open** | `await` your sends, and raise `bufferLimit`/`bufferLimitBinary` above your largest message |
-| `ChannelOverflowError` (send budget) | A connected channel exceeded `maxPendingBytes`/`maxPendingAcks` | Closed | `await` the server's sends or raise the named setting, then recreate the channel |
-| `ChannelOverflowError` (`BroadcastChannel`) | More was published to its key while the client was offline than `bufferLimit`/`bufferLimitBinary` holds | Closed | Call its telefunction again to rejoin |
-| `ChannelOverflowError` (`publish()`) | With no Redis or other transport installed, a `subscribe()` callback published more than `maxPendingBytes` before its first `await` | Open | Publish less from the callback, or raise the named setting |
+| `ChannelOverflowError` (`send()`) | The message would pass the default per-channel limit of 320 MiB, or `maxMemory`. For a client's `send(data, { ack: true })`, also where the server can't hold the answer | **Open**; only that message is lost | `await` each `send()` before the next. Split a message past the per-channel limit: awaiting doesn't help it, and neither does `maxMemory`. Raise `maxMemory` only where all channels together hold too much |
+| `ChannelOverflowError` (closed) | A `BroadcastChannel`'s client fell behind what the server holds for it; for a lossy one, the server couldn't hold even the newest message. For any channel, its client had so many `send(data, { ack: true })` or `publish()` calls waiting for their answers at once that the server couldn't hold even their refusals | Closed | Call its telefunction again, then pass `lossy: true`, `await` each acknowledged call before the next, or raise `maxMemory` |
+| `ChannelOverflowError` (`messages()`) | Its loop fell over 2 MiB behind the publishes, past its next message, or `maxMemory` is held and it's behind | The loop ends, the broadcast stays open | Handle each message faster, or use `subscribe()` |
+| `ChannelOverflowError` (`publish()`) | With no Redis or other transport installed, a `subscribe()` callback published more than 320 MiB before its first `await` | Open | Publish less from the callback |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 
@@ -515,9 +628,11 @@ See also:
 
 If the connection drops, Telefunc reconnects automatically and resumes existing channels and broadcasts:
 
-- Messages sent while offline are buffered and delivered in order on reconnect.
-- Messages lost in the disconnect are resent after reconnect, if the client is back within `reconnectTimeout` and the replay buffer still holds them.
-- Otherwise, the channel closes with `NetworkError`. When the replay buffer dropped them, the error message names the setting to raise (see <Link href="/channel-config" />).
+- Messages sent while offline are held and delivered in order on reconnect, up to the default per-channel limit of 320 MiB, within <Link href="/channel-config">`maxMemory`</Link>.
+- Messages lost in the disconnect are resent after reconnect, if the client is back within `reconnectTimeout`.
+- Otherwise, the channel closes with `NetworkError`.
+- A `BroadcastChannel` holds up to the default per-channel limit of 320 MiB of what's published while its client is away, and closes with `ChannelOverflowError` past that. A lossy one holds only the newest, and `info.seq` shows the jump.
+- While its client is away, a `Channel` keeps the newest `lossy` send between two sends without `lossy`.
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.
 
 > Reconnection is automatic — you don't need to handle it in your application code.

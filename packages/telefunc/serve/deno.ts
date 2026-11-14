@@ -42,6 +42,7 @@ function telefunc(): TelefuncServe {
     // Deno frees an upgraded request's headers once the upgrade answers: a copy taken before the upgrade keeps them.
     upgrade: (request) => ({ context: { wireRequest: new Request(request.url, { headers: request.headers }) } }),
     wireRequest: (peer) => peer.context.wireRequest!,
+    copiesOnSend: true,
   })
   const ws = crossws({
     hooks: {

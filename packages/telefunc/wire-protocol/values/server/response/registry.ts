@@ -43,7 +43,11 @@ const serverTypes = [
  *  mirror cache (createStreamingReviver) revives equal wire strings to one object. */
 function createStreamingReplacer(
   getContext: (value: unknown) => ServerReplacerContext,
-  onReplaced: (replaced: { close: () => Promise<void> | void; abort: (abortError: AbortError) => void }) => void,
+  onReplaced: (replaced: {
+    value: unknown
+    close: () => Promise<void> | void
+    abort: (abortError: AbortError) => void
+  }) => void,
   extensionTypes: ReplacerType<TypeContract, ServerReplacerContext>[],
 ) {
   const allTypes = [...serverTypes, ...extensionTypes]
@@ -59,7 +63,7 @@ function createStreamingReplacer(
         if (cached !== undefined) return { replacement: cached, resolved: true }
       }
       const { metadata, close, abort } = type.replace(value as never, getContext(value))
-      onReplaced({ close, abort })
+      onReplaced({ value, close, abort })
       const replacement = type.prefix + serializer(metadata)
       if (hasIdentity) {
         // The client treats equal wire strings as the same identity, so two distinct values

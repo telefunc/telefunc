@@ -28,18 +28,17 @@ type RequestContext = {
   signal: AbortSignal
   /** Response-wide abort source used by returned values and response transports. */
   responseAbort: ResponseAbortSource
-  /** Fires when the telefunction throws (or has already thrown) at the top level. */
-  onTopLevelError: (cb: () => void) => void
-  /** @internal Called by the framework after executeTelefunction catches a top-level throw. */
-  markTopLevelError: () => void
+  /** Fires once the call answers with a status other than 200; at once if it already has. */
+  onCallFailed: (cb: () => void) => void
+  /** @internal Called by `runTelefunc` once the call answered with a status other than 200. */
+  markCallFailed: () => void
   /** Register a callback that fires when the request lifecycle ends for any reason
    *  (response sent, stream complete, or client disconnect). Fires exactly once. */
   onClose: (cb: () => void) => void
-  /** Mark the response as complete. Fires onClose callbacks.
-   *  Gated by trackPending: if pending items exist, defers until all complete. */
+  /** The call ended, whichever way: fires onClose callbacks once no item of trackPending is pending. */
   markComplete: () => void
-  /** Register a pending item (channel, stream pump, inline stream).
-   *  Returns a completion callback. markComplete is deferred until all pending items complete. */
+  /** Take a hold (a channel, a stream pump, an inline body) and return its one-shot release.
+   *  onClose callbacks fire once no hold is left. */
   trackPending: () => () => void
 }
 
@@ -55,17 +54,17 @@ function createRequestContext(request: Request): RequestContext {
     closeCallbacks.length = 0
   }
 
-  const errorCallbacks: Array<() => void> = []
-  let errored = false
-  const fireError = () => {
-    if (errored) return
-    errored = true
-    for (const cb of errorCallbacks) {
+  const failedCallbacks: Array<() => void> = []
+  let failed = false
+  const fireFailed = () => {
+    if (failed) return
+    failed = true
+    for (const cb of failedCallbacks) {
       try {
         cb()
       } catch {}
     }
-    errorCallbacks.length = 0
+    failedCallbacks.length = 0
   }
 
   const closeController = new AbortController()
@@ -83,7 +82,7 @@ function createRequestContext(request: Request): RequestContext {
       if (--pendingCount === 0) fireClose()
     }
   }
-  // markComplete is the initial hold — released when serialization finishes
+  // markComplete is the initial hold — released when the call ends, whichever way,
   // or when the client disconnects, whichever comes first.
   const markComplete = trackPending()
 
@@ -94,14 +93,14 @@ function createRequestContext(request: Request): RequestContext {
     abortSignal: request.signal,
     signal: closeController.signal,
     responseAbort,
-    onTopLevelError(cb) {
-      if (errored) {
+    onCallFailed(cb) {
+      if (failed) {
         cb()
         return
       }
-      errorCallbacks.push(cb)
+      failedCallbacks.push(cb)
     },
-    markTopLevelError: fireError,
+    markCallFailed: fireFailed,
     onClose(cb) {
       if (closed) {
         invokeCloseCallback(cb)
@@ -113,9 +112,8 @@ function createRequestContext(request: Request): RequestContext {
     trackPending,
   }
 
-  // request.signal fires on abnormal client disconnect.
-  // During telefunc execution (pendingCount=1): releasePending fires onClose immediately.
-  // After serialization (pending channels/streams): defers until they all complete.
+  // request.signal fires when the page disconnects: it releases the call's hold, so onClose waits only for what
+  // the response still carries.
   if (request.signal.aborted) {
     markComplete()
   } else {
@@ -125,7 +123,7 @@ function createRequestContext(request: Request): RequestContext {
   return ctx
 }
 
-function createResponseAbortSource(onAbort: () => void): ResponseAbortSource {
+function createResponseAbortSource(releaseCallHold: () => void): ResponseAbortSource {
   const abortCallbacks: Array<(abortError: AbortError) => void> = []
   let aborted = false
   let abortError: AbortError | null = null
@@ -149,7 +147,7 @@ function createResponseAbortSource(onAbort: () => void): ResponseAbortSource {
         }
       }
       abortCallbacks.length = 0
-      onAbort()
+      releaseCallHold()
     },
     onAbort(cb) {
       if (abortError) {

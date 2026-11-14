@@ -12,10 +12,11 @@
 // faithfully mirroring server/sse.ts runStreamResponse + server/ChannelMux.ts (RECONCILED.lastSeq is
 // captured from _lastClientSeq at reconcile time, before the initial-batch data frames dispatch).
 
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 
 import { ClientConnection } from './ClientConnection.js'
+import { ClientChannel } from './ClientChannel.js'
 import { ServerChannel } from '../server/ServerChannel.js'
 import { decode, encode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
@@ -23,7 +24,8 @@ import { decodeU32, concat } from '../../wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
 
-const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
+/** Polls until `check` passes: a step waits for the event it needs, however loaded the machine. */
+const until = (check: () => void) => vi.waitFor(check, { timeout: 10_000, interval: 5 })
 
 function createChannel(id = crypto.randomUUID()) {
   return {
@@ -36,7 +38,7 @@ function createChannel(id = crypto.randomUUID()) {
     _attach: {
       state: () => ({}),
       receiveCredit: { onProbeAnswered() {}, acknowledge() {}, answered() {} },
-      fitReplays() {},
+      capWindows() {},
       onBatched() {},
       onUpgradeJoined() {},
     },
@@ -102,16 +104,47 @@ async function* readLengthPrefixed(stream: ReadableStream<Uint8Array>): AsyncGen
   }
 }
 
+const TELEFUNC_URL = 'http://test.local/_telefunc'
+
+/** What the page opens on `fetchImpl`, what it sends on wire 1 (`first`) and once that wire went (`whileReconnecting`);
+ *  the server then has seqs through `lastSeq`. */
+type Sends<Page> = {
+  open: (fetchImpl: typeof fetch) => Page
+  first: (page: Page) => void
+  whileReconnecting: (page: Page) => void
+  lastSeq: number
+}
+
+/** Seq 1, then seq 2, straight on the connection of a stub channel. */
+const plainSends: Sends<{ conn: ClientConnection; channel: never }> = {
+  open: (fetchImpl) => {
+    const channel = createChannel() as never
+    const conn = ClientConnection.getOrCreate(TELEFUNC_URL, channel, {
+      transports: ['sse'],
+      fetchImpl,
+      connectionKey: crypto.randomUUID(),
+    })
+    return { conn, channel }
+  },
+  first: ({ conn, channel }) => void conn.sendSequenced(channel, 'data', encode.text, stringify(1)),
+  whileReconnecting: ({ conn, channel }) => void conn.sendSequenced(channel, 'data', encode.text, stringify(2)),
+  lastSeq: 2,
+}
+
 /**
  * Connect, send seq 1, sever the wire (optionally losing seq 1 in flight), send seq 2 while
  * reconnecting, then let the reconnect settle. Returns what the server channel actually received.
  */
-async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wire2Upstream: number[] }> {
-  const received: number[] = []
-  const serverCh = new ServerChannel<(n: number) => void, never>()
-  serverCh.listen((n) => void received.push(n))
+async function runScenario<Page = { conn: ClientConnection; channel: never }>(
+  loseSeq1: boolean,
+  sends: Sends<Page> = plainSends as unknown as Sends<Page>,
+): Promise<{ received: unknown[]; wire2Upstream: number[] }> {
+  const received: unknown[] = []
+  const serverCh = new ServerChannel<(value: unknown) => void, never>()
+  serverCh.listen((value) => void received.push(value))
 
   const upstreamSeqsByPost: number[][] = []
+  const upstreamEnded: boolean[] = []
   let streamReqCount = 0
   let dropUpstream = loseSeq1 // wire 1's upstream is "lost" only in the lost-frame case
   let wire = 0 // count of SSE downstream POSTs (connect attempts)
@@ -139,10 +172,7 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
         idleTimeout: 60_000,
         pingInterval: 100_000,
         maxFrameBytes: 64 * 1024 * 1024,
-        serverReplayBuffer: 1_000_000,
-        serverReplayBufferBinary: 2_000_000,
-        clientReplayBuffer: 1_000_000,
-        clientReplayBufferBinary: 2_000_000,
+        creditWindow: 1_000_000,
         sseFlushThrottle: 300,
         ssePostIdleFlushDelay: 50,
         transports: ['sse'],
@@ -175,7 +205,14 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
     upstreamSeqsByPost[postIx] = seen
     const stream = body as ReadableStream<Uint8Array>
     return await new Promise<Response>((resolve, reject) => {
-      init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
+      init.signal?.addEventListener(
+        'abort',
+        () => {
+          upstreamEnded[postIx] = true
+          reject(new DOMException('aborted', 'AbortError'))
+        },
+        { once: true },
+      )
       ;(async () => {
         let first = true
         for await (const chunk of readLengthPrefixed(stream)) {
@@ -189,39 +226,33 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
             if (!dropUpstream) serverCh._dispatchFrame(f) // wire 1 dropped in the lost-frame case
           }
         }
+        upstreamEnded[postIx] = true
         resolve(new Response('', { status: 200 }))
       })().catch(reject)
     })
   }) as unknown as typeof fetch
 
-  const channel = createChannel()
-  const conn = ClientConnection.getOrCreate('http://test.local/_telefunc', channel as never, {
-    transports: ['sse'],
-    fetchImpl,
-    connectionKey: crypto.randomUUID(),
-  })
+  const page = sends.open(fetchImpl)
 
-  // 1) First connect + reconcile.
-  await delay(120)
+  // 1) First connect + reconcile, which opens wire 1's streamRequest.
+  await until(() => expect(upstreamSeqsByPost[1]).toBeDefined())
   expect(wire).toBe(1)
 
   // 2) Send seq 1 — goes onto wire 1's streamRequest (delivered, or "lost" in flight).
-  conn.sendSequenced(channel as never, 'data', encode.text, stringify(1))
-  await delay(40)
-  expect(upstreamSeqsByPost[1]).toContain(1) // client always emits seq 1 on wire 1
+  sends.first(page)
+  await until(() => expect(upstreamSeqsByPost[1]).toContain(1)) // client always emits seq 1 on wire 1
 
   // 3) Sever wire 1 → client reconnects. From here upstream is delivered to the server.
   dropUpstream = false
   downstream!.close()
-  await delay(20)
+  await until(() => expect(upstreamEnded[1]).toBe(true))
 
   // 4) Send seq 2 while reconnecting → buffered, picked up by the reconnect.
-  conn.sendSequenced(channel as never, 'data', encode.text, stringify(2))
+  sends.whileReconnecting(page)
 
-  // 5) Wait out the reconnect (CHANNEL_RECONNECT_INITIAL_DELAY_MS = 500ms) + settle.
-  await delay(900)
+  // 5) Wait out the reconnect (CHANNEL_RECONNECT_INITIAL_DELAY_MS = 500ms) until the server has taken seq 2.
+  await until(() => expect(serverCh._lastClientSeq).toBe(sends.lastSeq))
   expect(wire).toBe(2)
-  await delay(50)
 
   return { received, wire2Upstream: upstreamSeqsByPost[2] ?? [] }
 }
@@ -240,5 +271,36 @@ describe('SSE reconnect preserves client→server seq order (exactly-once)', () 
     const { received, wire2Upstream } = await runScenario(/* loseSeq1 */ true)
     expect(wire2Upstream).toContain(1) // client replays the lost seq 1 on the new wire…
     expect(received).toEqual([1, 2]) // …and the server now accepts it (no spurious dup-drop)
+  })
+})
+
+describe('SSE reconnect with lossy sends from the page', () => {
+  test('one lost with the wire goes again; while the page reconnects, a newer one takes the place of the one before it, up to a plain send', async () => {
+    const { received } = await runScenario(/* loseSeq1 */ true, {
+      // A real channel: its connection takes the page's `fetch` as it is made.
+      open: (fetchImpl) => {
+        vi.stubGlobal('fetch', fetchImpl)
+        try {
+          return new ClientChannel<string, never>({
+            channelId: crypto.randomUUID(),
+            ack: false,
+            connection: { transports: ['sse'], telefuncUrl: TELEFUNC_URL, connectionKey: crypto.randomUUID() },
+          })
+        } finally {
+          vi.unstubAllGlobals()
+        }
+      },
+      first: (channel) => void channel.send('L1', { lossy: true }),
+      whileReconnecting: (channel) => {
+        void channel.send('L2', { lossy: true })
+        void channel.send('L3', { lossy: true })
+        void channel.send('R')
+        void channel.send('L4', { lossy: true })
+        void channel.send('L5', { lossy: true })
+      },
+      lastSeq: 4,
+    })
+    // L1 went with wire 1, so L2 couldn't take its place; R kept L4 from taking L3's.
+    expect(received).toEqual(['L1', 'L3', 'R', 'L5'])
   })
 })

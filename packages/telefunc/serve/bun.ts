@@ -36,7 +36,10 @@ function telefunc(): TelefuncServe {
   // A peer's `websocket` is a Proxy, and Bun's methods refuse one as `this`: the socket itself answers.
   const sockets = new WeakMap<Peer, BunSocket>()
   const ws = crossws({
-    hooks: getTelefuncChannelHooks({ bufferedAmount: (peer) => sockets.get(peer)!.getBufferedAmount() }),
+    hooks: getTelefuncChannelHooks({
+      bufferedAmount: (peer) => sockets.get(peer)!.getBufferedAmount(),
+      copiesOnSend: true,
+    }),
   })
 
   return {
@@ -59,6 +62,9 @@ function telefunc(): TelefuncServe {
         return ws.handleUpgrade(request, server) as Response | Promise<Response>
       }
       if (!isTelefuncRequest(request)) return undefined
+      // Bun cuts a response quiet for `idleTimeout` (10 s by default), as a stream or an SSE wire can be; telefunc ends
+      // its own responses.
+      server.timeout(request, 0)
 
       const httpResponse = await serveTelefunc(context ? { request, context } : { request })
       return toResponse(httpResponse)

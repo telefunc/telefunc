@@ -65,10 +65,8 @@ type ReconciledPayload = {
   pingInterval: number
   /** The largest frame the server takes on a WebSocket. */
   maxFrameBytes: number
-  serverReplayBuffer: number
-  serverReplayBufferBinary: number
-  clientReplayBuffer: number
-  clientReplayBufferBinary: number
+  /** The largest credit window, each way. */
+  creditWindow: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
   transports: ChannelTransports

@@ -3,7 +3,7 @@ export type { ChannelPumpRunContext }
 
 import type { StreamingProducer } from '../../types.js'
 import { concat } from '../../../wire/envelope.js'
-import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_END, CHANNEL_PUMP_TAG_ERROR } from '../../../constants.js'
+import { CHANNEL_PUMP_TAG_ERROR } from '../../../constants.js'
 import { ChannelClosedError, ServerChannel } from '../../../channel/server/ServerChannel.js'
 import { reconnectWindow } from '../../../../node/server/serverConfig.js'
 import { getChannelMux } from '../../../channel/server/ChannelMux.js'
@@ -13,10 +13,9 @@ import { restoreContext } from '../../../../node/server/context/context.js'
 import type { Context } from '../../../../node/server/context/context.js'
 import type { RequestContext } from '../../../../node/server/context/requestContext.js'
 import { createDeferred } from '../../../../utils/createDeferred.js'
+import { sendChunks } from '../../sendChunks.js'
 
-const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
 const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
-const TAG_END = new Uint8Array([CHANNEL_PUMP_TAG_END])
 
 type ChannelPumpRunContext = {
   context: Context
@@ -28,31 +27,28 @@ type ChannelPumpRunContext = {
 /**
  * Pump a single producer's chunks through a dedicated ServerChannel.
  *
- * Creates the channel, registers it, waits for client connection, then streams
+ * Registers the channel, waits for client connection, then streams
  * chunks with proper context restoration and cleanup.
  *
- * Each binary send is tagged: `[TAG_DATA][payload]` for data, `[TAG_ERROR][errorPayload]`
+ * Each binary send is tagged: `[TAG_DATA][payload]` for data (`[TAG_PART]` for a chunk's part before its last), `[TAG_ERROR][errorPayload]`
  * for errors, `[TAG_END]` at the producer's end. Tags are defined in constants.ts and shared with the client's
  * ChannelStreamSource. Errors are encoded with `encodeErrorPayload` — the same
  * payload format as inline streaming.
  *
- * The pump races three promises each iteration:
- *   1. `responseAbort.errorPromise` — resolves when a sibling throws Abort
+ * Each `producer.chunks.next()` races one `stop` promise, built once from:
+ *   1. `responseAbort.errorPromise` — rejects when a sibling throws Abort
  *   2. `cancelledPromise` — resolves when the channel closes (client disconnect/abort)
- *   3. `producer.chunks.next()` — resolves when the producer yields a chunk
  *
  * `cancelledPromise` is needed because async generator `.return()` is queued behind
  * a pending `.next()` — it can't interrupt an in-progress `await` (e.g. `sleep()`).
  * Without it the pump would stay stuck until the generator's current await resolves.
- *
- * Returns the channelId for inclusion in serialized metadata.
  */
 function pumpProducerToChannel(
+  channel: ServerChannel<never, never>,
   createProducer: () => StreamingProducer,
   runContext: ChannelPumpRunContext,
-  onComplete?: () => void,
-): string {
-  const channel = new ServerChannel<never, never>()
+  onComplete: () => void,
+): void {
   getChannelMux().registerChannel(channel as unknown as ServerChannel<unknown, unknown>)
   const producer = createProducer()
 
@@ -62,57 +58,38 @@ function pumpProducerToChannel(
   }
 
   let cancelled = false
-  const { promise: cancelledPromise, resolve: resolveCancelled } =
-    createDeferred<IteratorResult<Uint8Array<ArrayBuffer>>>()
+  const { promise: cancelledPromise, resolve: resolveCancelled } = createDeferred<null>()
   const doCancel = () => {
     if (cancelled) return
     cancelled = true
-    resolveCancelled({ done: true, value: undefined as never })
+    resolveCancelled(null)
     producer.cancel()
   }
 
   channel.onClose(doCancel)
-  ;(async () => {
+
+  async function runChannelPump() {
     try {
       await channel.opened
-      await restoreContext(runContext.context, async () => {
-        const { responseAbort } = runContext.requestContext
-        while (true) {
-          const { done, value } = await Promise.race([
-            responseAbort.errorPromise,
-            cancelledPromise,
-            producer.chunks.next(),
-          ])
-          if (cancelled) break
-          if (done) {
-            channel.sendBinary(TAG_END)
-            break
-          }
-          const pending = channel._sendBinary(concat(TAG_DATA, value))
-          if (pending) await pending
-        }
-      })
+      const { responseAbort } = runContext.requestContext
+      const stop = Promise.race([responseAbort.errorPromise, cancelledPromise])
+      await restoreContext(runContext.context, () => sendChunks(channel, producer, stop))
     } catch (err) {
-      if (!(err instanceof ChannelClosedError)) {
-        if (isAbort(err)) {
-          runContext.requestContext.responseAbort.abort(err.abortValue)
-        }
-        if (!channel.isClosed) {
-          const errorFrame = concat(TAG_ERROR, encodeErrorPayload(err, telefuncId))
-          try {
-            await channel._sendBinary(errorFrame)
-          } catch {
-            // The channel ended before the frame went out: no page is left to tell.
-          }
-        }
+      if (err instanceof ChannelClosedError) return
+      if (isAbort(err)) runContext.requestContext.responseAbort.abort(err.abortValue)
+      if (channel.isClosed) return
+      try {
+        await channel._sendBinary(concat(TAG_ERROR, encodeErrorPayload(err, telefuncId)))
+      } catch {
+        // The channel ended before the frame went out: no page is left to tell.
       }
     } finally {
       doCancel()
       // A page that is away gets the stream's end once back, as an open channel waits for it.
       channel.close({ timeout: reconnectWindow() })
-      onComplete?.()
+      onComplete()
     }
-  })()
+  }
 
-  return channel.id
+  void runChannelPump()
 }

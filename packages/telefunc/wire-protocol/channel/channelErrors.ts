@@ -19,10 +19,10 @@ class ChannelOverflowError extends Error {
   }
 }
 
-/** How a channel ends when a reconnect needs what `side`'s replay buffer dropped. */
-function replayLossError(side: 'server' | 'client'): NetworkError {
+/** How a channel ends when a reconnect needs what the page's replay buffer dropped. */
+function replayLossError(): NetworkError {
   return new NetworkError(
-    `Channel closed: a reconnect needed messages the ${side}'s replay buffer had dropped to stay within its size. Raise config.channel.${side}ReplayBuffer, or ${side}ReplayBufferBinary for binary messages and streams.`,
+    "Channel closed: a reconnect needed messages the client's replay buffer had dropped to stay within its size. Await your sends.",
     true,
   )
 }

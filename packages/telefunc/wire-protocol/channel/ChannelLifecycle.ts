@@ -107,13 +107,10 @@ class ChannelLifecycle {
     return this.didReceiveCloseAck ? 0 : 1
   }
 
-  onOpen(callback: () => void, options?: { signal?: AbortSignal }): void {
-    if (options?.signal?.aborted) return
-    if (this.didFireOpen) {
-      this.invokeOpenCallback(callback)
-      return
-    }
-    this.openListeners.add(callback, options)
+  onOpen(callback: () => void, options?: { signal?: AbortSignal }): () => void {
+    if (!this.didFireOpen) return this.openListeners.add(callback, options)
+    if (!options?.signal?.aborted) this.invokeOpenCallback(callback)
+    return () => {}
   }
 
   fireOpen(): void {
@@ -146,13 +143,10 @@ class ChannelLifecycle {
     return false
   }
 
-  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): void {
-    if (options?.signal?.aborted) return
-    if (this.didFireClose) {
-      void this.invokeCloseCallback(callback, this.endError)
-      return
-    }
-    this.closeListeners.add(callback, options)
+  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void {
+    if (!this.didFireClose) return this.closeListeners.add(callback, options)
+    if (!options?.signal?.aborted) void this.invokeCloseCallback(callback, this.endError)
+    return () => {}
   }
 
   localCloseRequested({

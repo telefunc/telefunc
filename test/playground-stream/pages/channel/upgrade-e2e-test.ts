@@ -9,7 +9,7 @@
 export { testUpgrade }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import type { WebSocket } from 'playwright-chromium'
+import type { Page, WebSocket, WebSocketRoute } from 'playwright-chromium'
 import { navigate, getResult, getCleanupState, resetCleanupState } from '../../e2e-utils'
 
 type FrameCounts = { received: number }
@@ -106,12 +106,95 @@ function testUpgrade() {
       page.off('websocket', onWebSocket)
     }
   })
+
+  if (!expectsUpgrade) return
+
+  // The server moves a page's publishes to the WebSocket at the barrier, and the page takes that wire over once the
+  // barrier's POST answers. Holding that answer lands a publish between the two, whole or with its body's end after.
+  for (const { bytes, what, bodyHeld } of [
+    { bytes: 1024, what: 'arrives whole', bodyHeld: false },
+    { bytes: 4 * 1024 * 1024, what: 'starts arriving', bodyHeld: true },
+  ]) {
+    test(`${label}: a publish that ${what} before the page takes the new wire over reaches the page [${transports.join(',')}]`, async () => {
+      const context = await page.context().browser()!.newContext()
+      const routed = await context.newPage()
+      const acrossFlip = async () => {
+        const state = JSON.parse((await routed.textContent('#channel-state'))!) as UpgradeChannelState
+        return state.acrossFlip
+      }
+      try {
+        const gate = await holdFlip(routed, bytes / 2)
+        await navigate(`${getServerUrl()}/channel`, undefined, routed)
+        await routed.click('#channel-test-across-flip')
+        await autoRetry(async () => expect(await acrossFlip()).not.toBe(null))
+        await gate.committed
+        gate.countFromHere()
+        await routed.evaluate((n) => (window as unknown as AcrossFlipPage).publishAcrossFlip(n), bytes)
+        void routed.evaluate(() => (window as unknown as AcrossFlipPage).sendAcrossFlip())
+        await autoRetry(() => expect(gate.passedBytes()).greaterThan(bytes / 2))
+        expect((await gate.flip()) > 0).toBe(bodyHeld)
+        await autoRetry(async () => expect((await acrossFlip())?.received).deep.equal([bytes]))
+      } finally {
+        await context.close()
+      }
+    })
+  }
+}
+
+/** Routes `target`'s wires through the test: the barrier's POST is answered only by `flip()`, which then passes what it
+ *  held of the page's WebSocket past `heldPast` bytes, once the page's first send after the flip shows it took the wire. */
+async function holdFlip(target: Page, heldPast: number) {
+  const held: Buffer[] = []
+  let counted = false
+  let passed = 0
+  let toPage: WebSocketRoute | undefined
+  let allowFlip: () => void
+  const flipAllowed = new Promise<void>((resolve) => (allowFlip = resolve))
+  let tookWire: () => void
+  const tookWireP = new Promise<void>((resolve) => (tookWire = resolve))
+  let serverCommitted: () => void
+  const committed = new Promise<void>((resolve) => (serverCommitted = resolve))
+  await target.route(/\/_telefunc/, async (route) => {
+    if (!route.request().postDataBuffer()?.includes('upgradeId')) return route.fallback()
+    const answer = await route.fetch()
+    serverCommitted()
+    await flipAllowed
+    await route.fulfill({ response: answer })
+  })
+  await target.routeWebSocket(/\/_telefunc/, (ws) => {
+    const server = ws.connectToServer()
+    toPage = ws
+    ws.onMessage((message) => {
+      if (Buffer.from(message as Buffer).includes('after-flip')) tookWire()
+      server.send(message)
+    })
+    server.onMessage((message) => {
+      const bytes = Buffer.from(message as Buffer)
+      if (counted && passed > heldPast) return void held.push(bytes)
+      if (counted) passed += bytes.length
+      ws.send(message)
+    })
+  })
+  return {
+    committed,
+    countFromHere: () => void (counted = true),
+    passedBytes: () => passed,
+    flip: async () => {
+      allowFlip()
+      await tookWireP
+      counted = false
+      for (const message of held) toPage!.send(message)
+      return held.length
+    },
+  }
 }
 
 function parseChannelTransports(raw: string | undefined): string[] {
   if (!raw) return ['sse']
   return JSON.parse(raw) as string[]
 }
+
+type AcrossFlipPage = { publishAcrossFlip(bytes: number): Promise<void>; sendAcrossFlip(): Promise<void> }
 
 type UpgradeChannelState = {
   connected: boolean
@@ -124,4 +207,5 @@ type UpgradeChannelState = {
   multiCh1IsMonotonic: boolean | null
   multiCh2IsMonotonic: boolean | null
   upstreamReconnectChannelId: string | null
+  acrossFlip: { received: number[] } | null
 }

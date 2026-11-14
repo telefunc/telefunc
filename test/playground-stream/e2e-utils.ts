@@ -1,9 +1,9 @@
 export {
   resetCleanupState,
   getCleanupState,
-  getStreamFlowCount,
   forceServerGc,
   serverHeapUsed,
+  serverArrayBuffers,
   cutWire,
   dropNextWebSocket,
   runServerAction,
@@ -14,6 +14,8 @@ export {
   refuseNextSsePost,
   releaseHeldSsePosts,
   navigate,
+  withPacedLink,
+  expectServerError,
   getResult,
   sleep,
   restartProxy,
@@ -25,11 +27,12 @@ export {
   canCutWire,
 }
 
-import { page, getServerUrl } from '@brillout/test-e2e'
+import { page, getServerUrl, expectLog } from '@brillout/test-e2e'
 import type { Response, WebSocket } from 'playwright-chromium'
 import { execSync } from 'node:child_process'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { startBlackHoleProxy, type BlackHoleProxy } from './black-hole-proxy'
 
 const playgroundDir = dirname(fileURLToPath(import.meta.url))
 
@@ -77,12 +80,6 @@ async function resetCleanupState() {
   await fetch(`${getServerUrl()}/api/cleanup-state/reset`, { method: 'POST' })
 }
 
-/** How many responses on the page's server take stream-flow requests; through the page, for the sticky cookie. */
-async function getStreamFlowCount(): Promise<number> {
-  const { text } = await fetchFromPage(`${getServerUrl()}/api/stream-flows`, 'GET')
-  return JSON.parse(text).count
-}
-
 async function getCleanupState(): Promise<Record<string, string>> {
   const resp = await fetch(`${getServerUrl()}/api/cleanup-state`)
   return resp.json()
@@ -101,6 +98,13 @@ async function forceServerGc() {
 async function serverHeapUsed(): Promise<number> {
   const resp = await fetchFromPage(`${getServerUrl()}/api/heap-used`, 'GET')
   return (JSON.parse(resp.text) as { heapUsed: number }).heapUsed
+}
+
+/** The server's `arrayBuffers` after a GC, in bytes, asked for from here, as the page's link may be what's being tested. */
+async function serverArrayBuffers(): Promise<number> {
+  await fetch(`${getServerUrl()}/api/gc`, { method: 'POST' })
+  const resp = await fetch(`${getServerUrl()}/api/array-buffers`)
+  return ((await resp.json()) as { arrayBuffers: number }).arrayBuffers
 }
 
 function fetchFromPage(url: string, method: 'GET' | 'POST'): Promise<{ ok: boolean; text: string }> {
@@ -164,6 +168,18 @@ async function releaseHeldSsePosts(): Promise<number> {
   return released
 }
 
+/** The server logged `error`: on its stderr, or under Docker on compose's stdout, each line prefixed with the container's
+ *  name. */
+function expectServerError(error: string, inDocker: boolean) {
+  expectLog(error, {
+    filter: (log) =>
+      inDocker
+        ? log.logSource === 'stdout' &&
+          log.logText.split('\n').some((line) => line.includes(error) && /^playground-[a-z]-\d+ +\| /.test(line))
+        : log.logSource === 'stderr',
+  })
+}
+
 /**
  * Loads a page and waits for it to hydrate — resiliently, because the Docker suite runs the browser
  * against a Caddy container over the Docker bridge.
@@ -206,6 +222,20 @@ const NAVIGATE_ATTEMPTS = 4
 const HYDRATION_TIMEOUT = 5_000
 const NAVIGATE_RETRY_DELAY = 500
 
+/** Loads the channel page through a proxy that paces its connections as `link`, then runs `run`. */
+async function withPacedLink(link: Parameters<BlackHoleProxy['pace']>[0], run: () => Promise<void>) {
+  const proxy = await startBlackHoleProxy(getServerUrl())
+  try {
+    await navigate(`${proxy.url}/channel`)
+    proxy.pace(link)
+    await run()
+  } finally {
+    // The page leaves before the proxy closes, which would cut its connections.
+    await page.goto('about:blank')
+    await proxy.close()
+  }
+}
+
 // Transient errors Chromium-in-Docker surfaces when the bridge interface state shifts. Mirrors
 // the connection-family errors `.testRun-docker.ts`'s `tolerateError()` already allows in logs.
 const transientNetworkErrors = [
@@ -214,7 +244,6 @@ const transientNetworkErrors = [
   'ERR_CONNECTION_RESET',
   'ERR_CONNECTION_REFUSED',
   'ERR_INTERNET_DISCONNECTED',
-  'ERR_ALPN_NEGOTIATION_FAILED',
   'ERR_SSL_PROTOCOL_ERROR',
   // Chromium aborts a navigation that starts just after a test's setOffline(false).
   'ERR_ABORTED',

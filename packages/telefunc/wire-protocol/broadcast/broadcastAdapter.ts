@@ -11,12 +11,10 @@ export type {
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { Fifo } from '../../utils/Fifo.js'
-import { afterEventLoopTurn } from '../../utils/afterEventLoopTurn.js'
-import { isCloudflareWorkers } from '../../utils/isCloudflareWorkers.js'
 import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
-import { getServerConfig } from '../../node/server/serverConfig.js'
+import { CHANNEL_HOLD_MAX_BYTES } from '../constants.js'
 import { ChannelOverflowError } from '../channel/channelErrors.js'
-import { HELD_SEND_OVERHEAD_BYTES } from '../channel/server/ServerChannelBuffer.js'
+import { HELD_SEND_OVERHEAD_BYTES } from '../channel/server/channelMemory.js'
 import type { WirePublishInfo } from '../wire/publishInfo.js'
 
 /** Transport-level publish result. */
@@ -29,12 +27,16 @@ type BroadcastBinaryOnMessage = (data: Uint8Array, info: WirePublishInfo) => voi
 
 type BroadcastUnsubscribe = () => void
 
+type QueuedPublish = { size: number; depth: number; deliver: () => void; reject: (err: Error) => void }
+
 /** `wireRequest`: the request that opened the wire a subscribing page's messages go out on, where one did. */
 type BroadcastAdapter = {
   subscribe(key: string, onMessage: BroadcastOnMessage, wireRequest?: Request): BroadcastUnsubscribe
   publish(key: string, serialized: string): BroadcastPublishResult | Promise<BroadcastPublishResult>
   subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, wireRequest?: Request): BroadcastUnsubscribe
   publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult>
+  /** Where a process runs several objects that can't write to each other's pages, the one a subscriber's page is on. */
+  ownerOf?(wireRequest: Request | undefined): string
 }
 
 /**
@@ -60,8 +62,9 @@ type BroadcastTransport = {
   ): () => void
 }
 
-/** After this many in-memory publishes delivered at once, those from the next microtask on wait for the next turn. */
-const PUBLISHES_BETWEEN_TURNS = 16_384
+/** How deep in-memory publishes in answer to answers may go: 10,000, past the about 1,300 that Node.js's call stack holds
+ *  for a recursive delivery. A chain that deep is taken for a listener that answers its own messages without end. */
+const MAX_ANSWER_DEPTH = 10_000
 
 // ---------------------------------------------------------------------------
 // Default adapter — subscriber multiplexer + in-memory fallback
@@ -77,13 +80,13 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   private readonly keySeqs = new Map<string, number>()
   /** The highest seq issued on any key: a key without a counter goes on above it. */
   private highestSeq = 0
-  /** In-memory publishes waiting for the ones before them, in publish order. */
-  private readonly queued = new Fifo<() => void>()
-  /** What `queued` holds: at most `maxPendingBytes` and one message, since a publish outside a listener is never refused. */
+  /** In-memory publishes from listeners, waiting for the ones before them, in publish order. */
+  private readonly queued = new Fifo<QueuedPublish>()
+  /** What `queued` holds: at most `CHANNEL_HOLD_MAX_BYTES`, or one message whatever its size. */
   private queuedBytes = 0
   private delivering = false
-  private publishesSinceTurn = 0
-  private holdingPublishes = false
+  /** How many answers deep the publish being delivered is: 0 for one from outside a listener. */
+  private depth = 0
 
   constructor(transport?: BroadcastTransport) {
     this.transport = transport ?? null
@@ -174,23 +177,26 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   ): BroadcastPublishResult | Promise<BroadcastPublishResult> {
     const timestamp = Date.now()
     // A publish from a listener reaches subscribers after the message it answers.
-    if (this.delivering || this.holdingPublishes || this.queued.length > 0) {
-      return this.queueInMemory(subs, key, data, timestamp)
-    }
-    // A loop delivered at once holds nothing, and only a publish left waiting ends a chain of microtasks. A Worker has
-    // no process to starve, its CPU limit ending the request, and its timer would die with that request.
-    if (++this.publishesSinceTurn === PUBLISHES_BETWEEN_TURNS && !isCloudflareWorkers()) {
-      queueMicrotask(this.holdPublishes)
-      // Now: a producer's next turn, which it schedules once its loop ends, finds the hold over.
-      afterEventLoopTurn(this.drainQueued)
-    }
+    if (this.delivering) return this.queueInMemory(subs, key, data, timestamp)
     this.delivering = true
     try {
       return this.deliverInMemory(subs, key, data, timestamp)
     } finally {
+      this.deliverQueued()
       this.delivering = false
-      if (this.queued.length > 0) this.drainQueued()
     }
+  }
+
+  /** Delivers what listeners published in answer, and what they publish in answer to that, in order. */
+  private deliverQueued(): void {
+    while (this.queued.length > 0) {
+      const publish = this.queued.shift()!
+      this.queuedBytes -= publish.size
+      this.depth = publish.depth
+      if (publish.depth <= MAX_ANSWER_DEPTH) publish.deliver()
+      else publish.reject(endlessAnswersError())
+    }
+    this.depth = 0
   }
 
   private queueInMemory<T extends string | Uint8Array>(
@@ -202,29 +208,25 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     const isText = typeof data === 'string'
     const size = (isText ? utf8ByteLength(data) : data.byteLength) + HELD_SEND_OVERHEAD_BYTES
     // One message alone goes through whatever its size.
-    if (this.queuedBytes > 0 && this.queuedBytes + size > getServerConfig().channel.maxPendingBytes) {
-      if (this.delivering) {
-        return Promise.reject(
-          new ChannelOverflowError(
-            'Publish rejected: publishes waiting to be delivered exceeded config.channel.maxPendingBytes; raise the setting or publish less from the listener',
-          ),
-        )
-      }
-      // Outside a listener nothing rejects: what waits goes now.
-      this.drainQueued()
+    if (this.queuedBytes > 0 && this.queuedBytes + size > CHANNEL_HOLD_MAX_BYTES) {
+      return Promise.reject(
+        new ChannelOverflowError(
+          `Publish rejected: publishes waiting to be delivered exceeded ${CHANNEL_HOLD_MAX_BYTES} bytes; publish less from the listener`,
+        ),
+      )
     }
     this.queuedBytes += size
     // The caller may reuse or transfer its buffer once the publish returns.
     const queuedData = isText ? data : (new Uint8Array(data as Uint8Array) as T)
     return new Promise((resolve, reject) => {
-      this.queued.push(() => {
-        this.queuedBytes -= size
+      const deliver = () => {
         try {
           resolve(this.deliverInMemory(subs, key, queuedData, timestamp))
         } catch (err) {
           reject(err)
         }
-      })
+      }
+      this.queued.push({ size, depth: this.depth + 1, deliver, reject })
     })
   }
 
@@ -247,26 +249,6 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       }
     }
     return { seq, timestamp, meta: { delivered, transport: 'in-memory' } }
-  }
-
-  private readonly holdPublishes = (): void => {
-    this.holdingPublishes = true
-    this.publishesSinceTurn = 0
-  }
-
-  /** Delivers what waits now, whatever its size. What its listeners publish waits for the next turn, so a listener
-   *  answering itself can't starve the event loop; on a Worker, whose timer would die with its request, it goes now. */
-  private readonly drainQueued = (): void => {
-    this.holdingPublishes = false
-    do {
-      for (let waiting = this.queued.length; waiting > 0; waiting--) {
-        const deliver = this.queued.shift()!
-        this.delivering = true
-        deliver()
-        this.delivering = false
-      }
-    } while (this.queued.length > 0 && isCloudflareWorkers())
-    if (this.queued.length > 0) afterEventLoopTurn(this.drainQueued)
   }
 
   // ── Shared ──
@@ -294,6 +276,12 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     map.delete(key)
     unsub()
   }
+}
+
+function endlessAnswersError(): ChannelOverflowError {
+  return new ChannelOverflowError(
+    `Publish rejected: listeners published in answer to each other's answers ${MAX_ANSWER_DEPTH} deep, far past the about 1,300 a call stack holds, which is taken for a listener that answers its own messages without end; make it skip the messages it published itself`,
+  )
 }
 
 // ---------------------------------------------------------------------------

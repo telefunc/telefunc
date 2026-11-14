@@ -3,6 +3,8 @@ export {
   ERROR_REASON,
   encode,
   withTook,
+  tookOf,
+  TOOK_TAGS,
   MESSAGE_FRAME_OVERHEAD_MAX_BYTES,
   isOneFrame,
   messageFrames,
@@ -39,7 +41,14 @@ import {
   type ReconcilePayload,
   type ReconciledPayload,
 } from './payloads.js'
-import { decodePublishBinary, decodePublishText, type WirePublishInfo } from './publishInfo.js'
+import {
+  PUBLISH_BINARY_HEADER,
+  decodePublishBinary,
+  decodePublishText,
+  encodePublishText,
+  writePublishBinaryInfo,
+  type WirePublishInfo,
+} from './publishInfo.js'
 import { ProtocolViolationError, assertProtocol } from './protocolViolation.js'
 import { textDecoder, textEncoder } from './envelope.js'
 
@@ -61,12 +70,14 @@ type PongEntry = { ix: number; lastSeq: number | null }
  *  - `ERROR`: a generic listener/channel error; `text` is the user-facing message.
  *  - `ABORT`: `text` is the serialized abort value.
  *  - `SHIELD_ERROR`: a shield validator rejected the data/ack; `text` is the validator message.
- *    Kept distinct from `ERROR` so the receiving side can throw `ShieldValidationError`. */
+ *    Kept distinct from `ERROR` so the receiving side can throw `ShieldValidationError`.
+ *  - `OVERFLOW`: the server couldn't hold the page's ack request or its answer; no `text`. Server → page only. */
 const ACK_STATUS = {
   OK: 0x00 as const,
   ERROR: 0x01 as const,
   ABORT: 0x02 as const,
   SHIELD_ERROR: 0x03 as const,
+  OVERFLOW: 0x04 as const,
 }
 
 type AckResultStatus = (typeof ACK_STATUS)[keyof typeof ACK_STATUS]
@@ -75,22 +86,21 @@ type AckResultStatus = (typeof ACK_STATUS)[keyof typeof ACK_STATUS]
 const ERROR_REASON = {
   /** An unhandled server error. */
   BUG: 0x00 as const,
-  /** More was published to its broadcast while its page was offline than the server holds for it. */
+  /** Its page fell behind what the server holds for it, or the server can't hold even a refusal of its ack requests. */
   OVERFLOW: 0x01 as const,
   /** A reconnect needed frames its sender's replay buffer had dropped to stay within its size. */
   LOST: 0x02 as const,
-  /** Its sends got further ahead of its page than `maxPendingBytes` or `maxPendingAcks` lets the server hold. */
-  AHEAD: 0x03 as const,
 }
 
 type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON]
 
 // ===== Decoded frame =====
 
-/** `bytes`: the whole frame, what flow control counts, so an empty message counts too. */
+/** `bytes`: the whole frame, what flow control counts, so an empty message counts too. `lossy`: it came behind a
+ *  `PUBLISH_TO`, as a send a newer one may have replaced. */
 type ChannelDataFrame = { index: number; seq: number; bytes: number } & (
-  | { tag: typeof TAG.TEXT; text: string }
-  | { tag: typeof TAG.BINARY; data: Uint8Array }
+  | { tag: typeof TAG.TEXT; text: string; lossy?: true }
+  | { tag: typeof TAG.BINARY; data: Uint8Array; lossy?: true }
   | { tag: typeof TAG.TEXT_ACK_REQ; text: string }
   | { tag: typeof TAG.BINARY_ACK_REQ; data: Uint8Array }
   | { tag: typeof TAG.ACK_RES; ackedSeq: number; status: AckResultStatus; text: string }
@@ -98,6 +108,7 @@ type ChannelDataFrame = { index: number; seq: number; bytes: number } & (
   | { tag: typeof TAG.PUBLISH_ACK_REQ; text: string }
   | { tag: typeof TAG.PUBLISH_BINARY; data: Uint8Array; info: WirePublishInfo }
   | { tag: typeof TAG.PUBLISH_BINARY_ACK_REQ; data: Uint8Array }
+  | { tag: typeof TAG.PUBLISH_TO }
 )
 
 type ChannelCtrlFrame =
@@ -127,7 +138,7 @@ type PiecesAck = { bytes: number; heldMs: number; spanUs: number }
 type BdpPingAck = { probe: number; backlog: number; pathRtt: number }
 
 type WireCtrlFrame =
-  | { tag: typeof TAG.PING; ended: PingEntry[]; took: number }
+  | { tag: typeof TAG.PING; ended: PingEntry[] }
   | { tag: typeof TAG.PONG; ended: PongEntry[]; took: number }
   | { tag: typeof TAG.FIN }
   | { tag: typeof TAG.RECONCILE; payload: ReconcilePayload }
@@ -184,13 +195,21 @@ type SequencedEncoder<T> = (index: number, data: T, seq: number) => Uint8Array<A
 
 const encode = {
   text: (index: number, text: string, seq: number) => encodeTextFrame(TAG.TEXT, index, text, seq),
-  publish: (index: number, text: string, seq: number) => encodeTextFrame(TAG.PUBLISH, index, text, seq),
+  /** A publish's body, which names no channel: `publishTo` goes ahead of it on each subscriber's wire. */
+  publish: (text: string, info: WirePublishInfo) => encodeTextFrame(TAG.PUBLISH, 0, encodePublishText(text, info), 0),
   publishAckReq: (index: number, text: string, seq: number) => encodeTextFrame(TAG.PUBLISH_ACK_REQ, index, text, seq),
   textAckReq: (index: number, text: string, seq: number) => encodeTextFrame(TAG.TEXT_ACK_REQ, index, text, seq),
 
   binary: (index: number, data: Uint8Array, seq: number) => encodeBinaryFrame(TAG.BINARY, index, data, seq),
-  publishBinary: (index: number, data: Uint8Array, seq: number) =>
-    encodeBinaryFrame(TAG.PUBLISH_BINARY, index, data, seq),
+  /** A binary publish's body, as `publish`. */
+  publishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + PUBLISH_BINARY_HEADER + data.byteLength)
+    writeHeader(frame, TAG.PUBLISH_BINARY, 0, 0)
+    writePublishBinaryInfo(frame, HEADER, info)
+    frame.set(data, HEADER + PUBLISH_BINARY_HEADER)
+    return frame
+  },
+  publishTo: (index: number, seq: number) => encodeBareFrame(TAG.PUBLISH_TO, index, seq),
   publishBinaryAckReq: (index: number, data: Uint8Array, seq: number) =>
     encodeBinaryFrame(TAG.PUBLISH_BINARY_ACK_REQ, index, data, seq),
   binaryAckReq: (index: number, data: Uint8Array, seq: number) =>
@@ -355,11 +374,19 @@ const encode = {
   },
 }
 
-/** Writes into `heartbeat`, which its caller just encoded, that its sender took `bytes` of what its WebSocket carried
- *  (mod 2^32): it bounds the link's rate. */
-function withTook(heartbeat: Uint8Array<ArrayBuffer>, bytes: number): Uint8Array<ArrayBuffer> {
-  writeHeader(heartbeat, heartbeat[0]!, 0, bytes)
-  return heartbeat
+/** Writes into `frame`, a PONG or a frame `tookOf` reads, that its sender took `bytes` of what its WebSocket carried
+ *  (mod 2^32): it bounds the link's rate, and frees the peer's copies of what was taken. */
+function withTook(frame: Uint8Array<ArrayBuffer>, bytes: number): Uint8Array<ArrayBuffer> {
+  writeU32(frame, SEQ_OFFSET, bytes)
+  return frame
+}
+
+/** The page's frames that say, where a sequenced frame has its seq, what the page took off its WebSocket. */
+const TOOK_TAGS: ReadonlySet<number> = new Set([TAG.PING, TAG.WINDOW, TAG.MSG_WINDOW, TAG.BDP_PING, TAG.BDP_PING_ACK])
+
+/** What the page took off its WebSocket, as `frame` says; null for a frame that doesn't say. */
+function tookOf(frame: Uint8Array): number | null {
+  return TOOK_TAGS.has(frame[0]!) ? readU32(frame, SEQ_OFFSET) : null
 }
 
 // ===== Decode =====
@@ -371,6 +398,7 @@ function fixedBytes(tag: number): number {
 
 const FIXED_BYTES: Partial<Record<number, number>> = {
   [TAG.FIN]: encode.fin().byteLength,
+  [TAG.PUBLISH_TO]: encode.publishTo(0, 0).byteLength,
   [TAG.STREAM_REQUEST_OPEN_ACK]: encode.streamRequestOpenAck().byteLength,
   [TAG.PIECES_ACK]: encode.piecesAck(0, 0, 0).byteLength,
   [TAG.ANNOUNCE]: encode.announce(0, 0).byteLength,
@@ -453,6 +481,8 @@ function decode(frame: Uint8Array): DecodedFrame {
     }
     case TAG.PUBLISH_BINARY_ACK_REQ:
       return { tag: TAG.PUBLISH_BINARY_ACK_REQ, index, seq, bytes, data: payload }
+    case TAG.PUBLISH_TO:
+      return { tag: TAG.PUBLISH_TO, index, seq, bytes }
     case TAG.ACK_RES: {
       assertProtocol(payload.length >= ACK_RES_PREFIX, 'ACK_RES payload too short')
       const ackedSeq = readU64(payload, 0)
@@ -461,7 +491,8 @@ function decode(frame: Uint8Array): DecodedFrame {
         status === ACK_STATUS.OK ||
           status === ACK_STATUS.ERROR ||
           status === ACK_STATUS.ABORT ||
-          status === ACK_STATUS.SHIELD_ERROR,
+          status === ACK_STATUS.SHIELD_ERROR ||
+          status === ACK_STATUS.OVERFLOW,
         `ACK_RES unknown status ${status}`,
       )
       const text = textDecoder.decode(payload.subarray(ACK_RES_PREFIX))
@@ -475,7 +506,7 @@ function decode(frame: Uint8Array): DecodedFrame {
         const ix = readU16(payload, offset)
         ended.push({ ix, lastSeq: readU32(payload, offset + 2) })
       }
-      return { tag: TAG.PING, ended, took: readU32(frame, SEQ_OFFSET) }
+      return { tag: TAG.PING, ended }
     }
     case TAG.PONG: {
       assertProtocol(payload.length % PONG_ENTRY_BYTES === 0, 'PONG payload')

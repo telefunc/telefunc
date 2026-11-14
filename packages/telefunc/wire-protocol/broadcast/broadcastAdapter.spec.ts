@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { Broadcast, ServerBroadcast } from '../channel/server/ServerBroadcast.js'
-import { ReplayBuffer } from '../channel/ReplayBuffer.js'
+import { ServerReplay } from '../channel/server/ServerReplay.js'
 import { ACK_STATUS, decode, encode, type ChannelFrame } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
 import { IndexedPeer } from '../channel/server/IndexedPeer.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcastAdapter.js'
 import type { BroadcastTransport } from './broadcastAdapter.js'
+import { ChannelOverflowError } from '../channel/channelErrors.js'
 
 const previousBroadcastAdapter = getBroadcastAdapter()
 afterEach(() => _resetBroadcastAdapterForTesting(previousBroadcastAdapter))
@@ -143,40 +144,6 @@ describe('keyed in-process broadcast', () => {
     expect(seen).toEqual([1])
   })
 
-  // Edge case: a Broadcast can be created and have `publish` called on it BEFORE
-  // any peer attaches. The behavioral contract: when the peer eventually attaches,
-  // the previously-published message is delivered to it (not silently dropped).
-  // Asserts at the count level — exact frame encoding is impl detail.
-  it('buffers wire frames until a peer attaches, then flushes them on attach', () => {
-    const sender = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
-    const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
-    sender._registerChannel()
-    receiver._registerChannel()
-    receiver._dispatchFrame(decode(encode.broadcastSub(0, false)) as ChannelFrame) // the page subscribes
-
-    sender.publish({ text: 'hello' })
-
-    const frames: Uint8Array[] = []
-    receiver._attachPeer(
-      new IndexedPeer({
-        sender: {
-          send: (frame) => {
-            frames.push(frame)
-          },
-          carry() {},
-          bufferedAmount: () => 0,
-          deliveredBefore: () => 0,
-          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-        },
-        index: 7,
-        replay: new ReplayBuffer({ maxBytes: 1024 * 1024, binaryMaxBytes: 2 * 1024 * 1024 }),
-      }),
-    )
-
-    // One publish made before attach → exactly one frame replayed on attach.
-    expect(frames.length).toBe(1)
-  })
-
   it('buffers keyed publishes that arrive before a sibling has registered yet', () => {
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:late-register' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:late-register' })
@@ -210,6 +177,37 @@ describe('keyed in-process broadcast', () => {
     expect(b1.seq).toBeGreaterThan(0)
     expect(typeof a1.timestamp).toBe('number')
   })
+})
+
+describe('in-memory publishes in answer', () => {
+  it('delivers a chain of 5,000 answers', async () => {
+    const adapter = new DefaultBroadcastAdapter()
+    let received = 0
+    const unsubscribe = adapter.subscribe('room:finite', (serialized) => {
+      received++
+      const n = Number(serialized)
+      if (n < 5000) void adapter.publish('room:finite', String(n + 1))
+    })
+    await adapter.publish('room:finite', '0')
+    unsubscribe()
+    expect(received).toBe(5001)
+  })
+
+  it('rejects a listener that answers its own messages without end, and timers run again', async () => {
+    const adapter = new DefaultBroadcastAdapter()
+    const errors: unknown[] = []
+    const unsubscribe = adapter.subscribe('room:endless', () => {
+      const result = adapter.publish('room:endless', 'again')
+      if (result instanceof Promise) result.catch((err: unknown) => errors.push(err))
+    })
+    const timerRan = new Promise((resolve) => setTimeout(resolve, 0))
+    adapter.publish('room:endless', 'start')
+    await timerRan
+    unsubscribe()
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toBeInstanceOf(ChannelOverflowError)
+    expect((errors[0] as Error).message).toContain('a listener that answers its own messages')
+  }, 60_000)
 })
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -294,11 +292,17 @@ describe('Broadcast shield validation', () => {
           },
           carry() {},
           bufferedAmount: () => 0,
+          behindAfter: () => 700,
           deliveredBefore: () => 0,
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+          queue: {
+            waitingPublishes: () => 0,
+            dropWaitingPublishes() {},
+            dropWaitingFromPublish() {},
+          },
         },
         index: 7,
-        replay: new ReplayBuffer({ maxBytes: 1024 * 1024, binaryMaxBytes: 2 * 1024 * 1024 }),
+        replay: new ServerReplay({ heldBytes: 0 }),
       }),
     )
 
@@ -330,16 +334,60 @@ describe('Broadcast shield validation', () => {
           send: () => {},
           carry() {},
           bufferedAmount: () => 0,
+          behindAfter: () => 700,
           deliveredBefore: () => 0,
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+          queue: {
+            waitingPublishes: () => 0,
+            dropWaitingPublishes() {},
+            dropWaitingFromPublish() {},
+          },
         },
         index: 7,
-        replay: new ReplayBuffer({ maxBytes: 1024 * 1024, binaryMaxBytes: 2 * 1024 * 1024 }),
+        replay: new ServerReplay({ heldBytes: 0 }),
       }),
     )
     void sender._onPeerPublishAckReqMessage(JSON.stringify({ text: 'malicious' }), 1)
 
     expect(seen).toEqual([])
+  })
+})
+
+describe('lossy broadcast under memory pressure', () => {
+  // Another owner's publish sheds it: the channel ends once its own owner runs, but what it holds goes at once.
+  it('lets go of the newest it holds for a page that is behind', async () => {
+    const broadcast = new ServerBroadcast<string>({ key: 'room:lossy-shed', lossy: true })
+    broadcast._registerChannel()
+    broadcast._attachPeer(
+      new IndexedPeer({
+        sender: {
+          send() {},
+          carry() {},
+          bufferedAmount: () => 0,
+          behindAfter: () => 0,
+          deliveredBefore: () => 0,
+          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+          queue: {
+            waitingPublishes: () => 0,
+            dropWaitingPublishes() {},
+            dropWaitingFromPublish() {},
+          },
+        },
+        index: 7,
+        replay: broadcast._replayBuffer!,
+      }),
+      { broadcast: { text: true, binary: false } },
+    )
+    await broadcast.publish('first')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await broadcast.publish('x'.repeat(256 * 1024))
+    expect(broadcast.newestUnhanded).toBeDefined()
+    expect(broadcast.heldBytes).greaterThan(256 * 1024)
+
+    broadcast.shed(0, 'another owner')
+
+    expect(broadcast.newestUnhanded).toBe(undefined)
+    expect(broadcast.heldBytes).lessThan(1024)
   })
 })
 

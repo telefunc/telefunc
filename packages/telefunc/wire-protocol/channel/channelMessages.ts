@@ -1,9 +1,10 @@
 export { channelMessages, broadcastMessages }
-export type { MessageBudget }
+export type { QueueMemory }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { Fifo } from '../../utils/Fifo.js'
 import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
+import { PUBLISH_HOLD_BYTES } from '../constants.js'
 import { ChannelOverflowError } from './channelErrors.js'
 import type { ChannelPublishInfo } from './channel.js'
 
@@ -24,9 +25,14 @@ interface BroadcastSource<T> {
 
 type Message<T> = { type: 'text'; data: T } | { type: 'binary'; data: Uint8Array }
 
-/** The most bytes of each kind a loop may fall behind by, as `config.channel.bufferLimit` and `bufferLimitBinary` bound
- *  what the server holds for a page. */
-type MessageBudget = { text: number; binary: number }
+/** Where a loop's queue counts what it holds: on a server, the ledger. A page's queue is the page's own memory. */
+interface QueueMemory {
+  admit(bytes: number): boolean
+  hold(bytes: number): void
+  letGo(bytes: number): void
+  /** Its loop or that loop's channel ended: what the queue still has is no longer counted. */
+  release(): void
+}
 
 /** What a queued message holds beyond its payload: its entry, its info and the promise its listener got, about 314 B
  *  measured. */
@@ -43,13 +49,9 @@ function channelMessages<T>(channel: MessageSource<T>, options?: { signal?: Abor
   )
 }
 
-/** A broadcast's publishes don't wait for its listeners, so what its loop falls behind by is held here, within
- *  `budget`: past it, the loop ends with `ChannelOverflowError`. */
-function broadcastMessages<T>(
-  broadcast: BroadcastSource<T>,
-  budget: MessageBudget,
-  options?: { signal?: AbortSignal },
-) {
+/** A broadcast's publishes don't wait for its listeners, so what its loop falls behind by is held here: past
+ *  `PUBLISH_HOLD_BYTES` beyond the next message, or what `memory` admits, the loop ends with `ChannelOverflowError`. */
+function broadcastMessages<T>(broadcast: BroadcastSource<T>, options?: { signal?: AbortSignal }, memory?: QueueMemory) {
   return iterateMessages<Message<T> & { info: ChannelPublishInfo }>(
     broadcast,
     (receive, registration) => {
@@ -60,7 +62,8 @@ function broadcastMessages<T>(
       broadcast.subscribeBinary((data, info) => receive({ type: 'binary', data, info }, data.byteLength), registration)
     },
     options,
-    budget,
+    PUBLISH_HOLD_BYTES,
+    memory,
   )
 }
 
@@ -72,18 +75,25 @@ async function* iterateMessages<M extends Message<unknown>>(
     options: { signal: AbortSignal },
   ) => void,
   { signal }: { signal?: AbortSignal } = {},
-  budget?: MessageBudget,
+  budget?: number,
+  memory?: QueueMemory,
 ): AsyncIterableIterator<M> {
   const registrations = new AbortController()
   const queue = new Fifo<{ message: M; consumed: () => void; size: number }>()
-  const held = { text: 0, binary: 0 }
+  let held = 0
   let wake: (() => void) | undefined
   let ended = false
   let error: unknown
   let behindCheck: ReturnType<typeof setTimeout> | undefined
+  const letGo = (size: number) => {
+    held -= size
+    memory?.letGo(size)
+  }
   const release = () => {
-    for (let item = queue.shift(); item; item = queue.shift()) item.consumed()
-    held.text = held.binary = 0
+    for (let item = queue.shift(); item; item = queue.shift()) {
+      letGo(item.size)
+      item.consumed()
+    }
   }
   // A failure drops what is queued: the loop throws at its next step. The first failure stays, and a clean end can't
   // erase it.
@@ -93,25 +103,31 @@ async function* iterateMessages<M extends Message<unknown>>(
     error = err
     registrations.abort()
     if (err !== undefined) release()
+    memory?.release()
     wake?.()
   }
   const abort = () => finish(signal!.reason)
+  // The next message waits only for the loop's current one to finish, so what counts is what waits beyond it.
+  const isBehind = () => held - (queue.peek()?.size ?? 0) > budget!
   // A burst delivered in one task reaches the loop only once that task ends, so the loop is behind where it still
   // holds more than `budget` then, whether or not its source closed meanwhile.
   const checkBehind = () => {
     behindCheck = undefined
-    const type = held.text > budget!.text ? 'text' : held.binary > budget!.binary ? 'binary' : null
-    if (type === null) return
-    const behind = `${budget![type]} bytes of ${type} messages`
-    finish(new ChannelOverflowError(`messages() ended: its loop fell behind the publishes by more than ${behind}`))
+    if (!isBehind()) return
+    finish(new ChannelOverflowError(`messages() ended: its loop fell over ${budget} bytes behind the publishes`))
   }
   const receive = (message: M, bytes = 0) => {
     if (registrations.signal.aborted) return
     const size = budget ? bytes + QUEUED_MESSAGE_OVERHEAD_BYTES : 0
-    held[message.type] += size
-    if (budget && held[message.type] > budget[message.type]) behindCheck ??= setTimeout(checkBehind, 0)
+    if (memory && !memory.admit(size)) {
+      finish(new ChannelOverflowError('messages() ended: config.channel.maxMemory is held, and its loop is behind'))
+      return
+    }
+    memory?.hold(size)
+    held += size
     return new Promise<void>((consumed) => {
       queue.push({ message, consumed, size })
+      if (budget && isBehind()) behindCheck ??= setTimeout(checkBehind, 0)
       wake?.()
     })
   }
@@ -130,7 +146,7 @@ async function* iterateMessages<M extends Message<unknown>>(
         })
         continue
       }
-      held[next.message.type] -= next.size
+      letGo(next.size)
       try {
         yield next.message
       } finally {

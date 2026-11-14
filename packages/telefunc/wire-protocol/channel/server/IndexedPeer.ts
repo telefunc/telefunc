@@ -2,12 +2,19 @@ export { IndexedPeer }
 export type { PeerSender }
 
 import { ACK_STATUS, encode } from '../../wire/frame.js'
-import type { AckResultStatus, ErrorReason, SequencedEncoder } from '../../wire/frame.js'
-import { ReplayBuffer } from '../ReplayBuffer.js'
+import type { AckResultStatus, SequencedEncoder } from '../../wire/frame.js'
+import { PublishBody } from './PublishBody.js'
+import type { ServerReplay } from './ServerReplay.js'
 import type { SendWait } from '../../flowControl/SendWaits.js'
 import type { Urgency } from '../../flowControl/credit.js'
+import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
 
 interface PeerSender {
+  /** What the wire holds back for its page. */
+  readonly queue: WireQueue
+  /** How long a lossy page on the wire may leave a publish unconfirmed before it counts as behind, where a confirmation
+   *  takes at least `roundTrip` ms: `Infinity` before one was measured. */
+  behindAfter(roundTrip: number): number
   send(frame: Uint8Array): void
   /** Sends `frame` in the next message the wire sends, where it can carry one (see `PieceSender.carry`). */
   carry(frame: Uint8Array): void
@@ -22,14 +29,14 @@ interface PeerSender {
 type IndexedPeerOptions = {
   sender: PeerSender
   index: number
-  replay: ReplayBuffer
+  replay: ServerReplay
 }
 
 /** Encodes a channel's frames with its index; a sequenced one joins the replay buffer as it goes to the wire. */
 class IndexedPeer {
   readonly sender: PeerSender
-  private index: number
-  private replay: ReplayBuffer
+  readonly index: number
+  private replay: ServerReplay
 
   constructor({ sender, index, replay }: IndexedPeerOptions) {
     this.sender = sender
@@ -37,13 +44,27 @@ class IndexedPeer {
     this.replay = replay
   }
 
-  /** Encodes `data` by `encodeFrame` at the next seq; `onQueued` gets its seq and bytes before the wire has it. Returns
-   *  the bytes the frame counts against flow control. */
-  sendSequenced<T>(encodeFrame: SequencedEncoder<T>, data: T, onQueued?: (seq: number, bytes: number) => void): number {
+  /** Encodes `data` by `encodeFrame` at the next seq; `onQueued` gets its seq before the wire has it. Returns the bytes
+   *  the frame counts against flow control. */
+  sendSequenced<T>(encodeFrame: SequencedEncoder<T>, data: T, onQueued?: (seq: number) => void): number {
     const seq = this.replay.nextSeq()
     const frame = encodeFrame(this.index, data, seq)
-    onQueued?.(seq, frame.byteLength)
+    onQueued?.(seq)
     this.commit(seq, frame)
+    return frame.byteLength
+  }
+
+  /** Sends `body` behind a head naming this channel and its next seq; both join the replay and the wire in one call. */
+  sendPublish(body: PublishBody): void {
+    this.sendBehindHead(this.replay.nextSeq(), body)
+  }
+
+  /** Sends `data` by `encodeFrame` at the next seq as a publish of this channel's own, which a newer one may replace while
+   *  it waits on the wire. Returns the bytes the frame counts against flow control. */
+  sendOwn<T>(encodeFrame: SequencedEncoder<T>, data: T): number {
+    const seq = this.replay.nextSeq()
+    const frame = encodeFrame(this.index, data, seq)
+    this.sendBehindHead(seq, new PublishBody(frame))
     return frame.byteLength
   }
 
@@ -66,14 +87,6 @@ class IndexedPeer {
     this.commit(seq, encode.closeAck(this.index, seq))
   }
 
-  sendAbort(abortValue: string): void {
-    this.sendSequenced(encode.abort, abortValue)
-  }
-
-  sendError(reason: ErrorReason): void {
-    this.sendSequenced(encode.error, reason)
-  }
-
   /** `lastSeq`: the last seq the server has of what the page sent on the channel. */
   sendByteLimit(limit: number, lastSeq: number, urgency: Urgency): void {
     this.sendLimit(encode.window(this.index, limit, lastSeq), urgency)
@@ -94,6 +107,13 @@ class IndexedPeer {
   private sendLimit(frame: Uint8Array, urgency: Urgency): void {
     if (urgency === 'acknowledgement') this.sender.carry(frame)
     else this.sender.send(frame)
+  }
+
+  private sendBehindHead(seq: number, body: PublishBody): void {
+    const head = encode.publishTo(this.index, seq)
+    this.replay.pushPublish(seq, head, body)
+    this.sender.send(head)
+    this.sender.send(body.frame)
   }
 
   /** Sends `frame` of `seq`, kept to replay, so a frame a dead wire lost goes again. */

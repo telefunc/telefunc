@@ -5,9 +5,10 @@ export { applyManifestConfig }
 export { getServerExtensionTypes }
 export { enableChannelTransports }
 export { setAdapterMaxFrameBytes }
+export { setAdapterMaxMemory }
 export { getAdapterMaxFrameBytes }
 export { setRootFromVite }
-export { pingDeadlineOf }
+export { getChannelConfig }
 export { reconnectWindow }
 export type {
   ConfigUser,
@@ -34,19 +35,15 @@ import {
   type BroadcastTransport,
 } from '../../wire-protocol/broadcast/broadcastAdapter.js'
 import {
-  CHANNEL_BUFFER_LIMIT_BYTES,
-  CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
-  CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
-  CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_CONNECT_TTL_MS,
+  CHANNEL_HOLD_MAX_BYTES,
   CHANNEL_IDLE_TIMEOUT_MS,
-  CHANNEL_MAX_PENDING_ACKS,
-  CHANNEL_MAX_PENDING_BYTES,
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
+  CHANNEL_RECONNECT_INITIAL_DELAY_MS,
+  CHANNEL_RECONNECT_TIMEOUT_MIN_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
-  CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
-  CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
+  CREDIT_WINDOW_INITIAL_BYTES,
   DEFAULT_SERVER_CHANNEL_TRANSPORTS,
   DEFAULT_STREAM_TRANSPORT,
   parseStreamConfig,
@@ -103,30 +100,22 @@ type ChannelConfigUser = {
    */
   pingInterval?: number
   /**
-   * The most bytes of text messages the server keeps per channel, of those it sent that the client hasn't acknowledged,
-   * to replay after a reconnect. If you `await` your sends, a reconnect loses nothing, as long as each message is at
-   * most half its replay buffer: 64 MiB with the defaults.
+   * The most all channels on this server hold for their clients, in bytes or as `'4g'`, `'512m'`. It's a ceiling: nothing
+   * is set aside, and one channel holds at most 320 MiB of it by default.
+   *
+   * https://telefunc.com/channel-config
+   *
+   * @default a quarter of the memory the process may use
    */
-  serverReplayBuffer?: number
-  /** As `serverReplayBuffer`, for binary messages. */
-  serverReplayBufferBinary?: number
-  /** As `serverReplayBuffer`, for what the client sends: the client keeps that replay, sized as the server tells it. */
-  clientReplayBuffer?: number
-  /** As `clientReplayBuffer`, for binary messages. */
-  clientReplayBufferBinary?: number
+  maxMemory?: number | string
+  /** The most one channel holds for its client, of its sends and of what awaits acknowledgement, in bytes, within
+   *  `maxMemory`. @default 335544320 */
+  maxPendingBytes?: number
   /**
    * How long, in milliseconds, a newly created channel waits for the client to
    * connect before it is closed automatically.
    */
   connectTtl?: number
-  /** Maximum bytes queued beyond credit or awaiting acknowledgements. @default 268435456 */
-  maxPendingBytes?: number
-  /** Maximum simultaneous acknowledgement requests. @default 16384 */
-  maxPendingAcks?: number
-  /** Maximum text bytes buffered per channel while no client is attached. */
-  bufferLimit?: number
-  /** Maximum number of bytes buffered per channel for binary messages while no client peer is attached. */
-  bufferLimitBinary?: number
   /**
    * When using SSE channels, upstream client-to-server frames are batched for at
    * most this many milliseconds before Telefunc sends a POST.
@@ -150,15 +139,9 @@ type ChannelConfigResolved = {
   reconnectTimeout: number
   idleTimeout: number
   pingInterval: number
-  serverReplayBuffer: number
-  serverReplayBufferBinary: number
-  clientReplayBuffer: number
-  clientReplayBufferBinary: number
-  connectTtl: number
+  maxMemory: number
   maxPendingBytes: number
-  maxPendingAcks: number
-  bufferLimit: number
-  bufferLimitBinary: number
+  connectTtl: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
 }
@@ -241,6 +224,12 @@ const globalObject = getGlobalObject('serverConfig.ts', {
   adapterChannelTransports: new Set<ChannelTransports[number]>(),
   /** The largest frame the adapter's runtime takes, where that is less than the server reads. */
   adapterMaxFrameBytes: undefined as number | undefined,
+  /** The default of `maxMemory` where the adapter's runtime can't tell what the process may use. */
+  adapterMaxMemory: undefined as number | undefined,
+  /** The default of `maxMemory` elsewhere: a request reads the config, and this process's memory doesn't change. */
+  defaultMaxMemory: undefined as number | undefined,
+  /** A channel read `config.channel`, whose values each of its parts then relies on staying as they are. */
+  channelConfigInUse: false,
 })
 const configState = globalObject.config
 
@@ -356,30 +345,44 @@ function getServerConfig(): ConfigResolved {
     stream: {
       transport: configState.stream.transport || DEFAULT_STREAM_TRANSPORT,
     },
-    channel: {
-      transports: configState.channel.transports ?? [
-        ...DEFAULT_SERVER_CHANNEL_TRANSPORTS,
-        ...globalObject.adapterChannelTransports,
-      ],
-      reconnectTimeout: configState.channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
-      idleTimeout: configState.channel.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS,
-      pingInterval: configState.channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
-      serverReplayBuffer: configState.channel.serverReplayBuffer ?? CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
-      serverReplayBufferBinary:
-        configState.channel.serverReplayBufferBinary ?? CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
-      clientReplayBuffer: configState.channel.clientReplayBuffer ?? CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
-      clientReplayBufferBinary:
-        configState.channel.clientReplayBufferBinary ?? CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
-      connectTtl: configState.channel.connectTtl ?? CHANNEL_CONNECT_TTL_MS,
-      maxPendingBytes: configState.channel.maxPendingBytes ?? CHANNEL_MAX_PENDING_BYTES,
-      maxPendingAcks: configState.channel.maxPendingAcks ?? CHANNEL_MAX_PENDING_ACKS,
-      bufferLimit: configState.channel.bufferLimit ?? CHANNEL_BUFFER_LIMIT_BYTES,
-      bufferLimitBinary: configState.channel.bufferLimitBinary ?? CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
-      sseFlushThrottle: configState.channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
-      ssePostIdleFlushDelay: configState.channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
-    },
+    channel: resolveChannelConfig(configState.channel),
     extensions: configState.extensions,
   }
+}
+
+function resolveChannelConfig(channel: ChannelConfigUser): ChannelConfigResolved {
+  const reconnectTimeout = channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS
+  return {
+    transports: channel.transports ?? [...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...globalObject.adapterChannelTransports],
+    reconnectTimeout,
+    // A long reconnect window doesn't pin an idle wire, and a short one (Cloudflare's) doesn't wait longer than itself.
+    idleTimeout: channel.idleTimeout ?? Math.min(reconnectTimeout, CHANNEL_IDLE_TIMEOUT_MS),
+    pingInterval: channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
+    connectTtl: channel.connectTtl ?? CHANNEL_CONNECT_TTL_MS,
+    maxMemory:
+      (channel.maxMemory as number | undefined) ??
+      globalObject.adapterMaxMemory ??
+      (globalObject.defaultMaxMemory ??= defaultMaxMemory()),
+    maxPendingBytes: channel.maxPendingBytes ?? CHANNEL_HOLD_MAX_BYTES,
+    sseFlushThrottle: channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
+    ssePostIdleFlushDelay: channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
+  }
+}
+
+/** What a process may use where the runtime can't tell. */
+const DEFAULT_PROCESS_MEMORY_BYTES = 4 * 1024 * 1024 * 1024
+
+/** A quarter of what the process may use: channels hold bytes outside the JS heap, which the rest of the process needs too. */
+function defaultMaxMemory(): number {
+  const process = globalThis.process
+  const total = process?.getBuiltinModule?.('node:os')?.totalmem() ?? DEFAULT_PROCESS_MEMORY_BYTES
+  return Math.floor(Math.min(process?.constrainedMemory?.() || total, total) / 4)
+}
+
+/** The settings a channel runs by, which can't change from here on. */
+function getChannelConfig(): ChannelConfigResolved {
+  globalObject.channelConfigInUse = true
+  return resolveChannelConfig(configState.channel)
 }
 
 /** The user's settings as plain data, for the production manifest. (`extensions` and `broadcast` are runtime objects; `root` and `telefuncFiles` are paths on the build machine.) */
@@ -408,15 +411,10 @@ function fillUnset(current: unknown, val: unknown): unknown {
   return filled
 }
 
-/** How long a wire may deliver nothing before it is taken for dead: two ping intervals, each of at least a second. */
-function pingDeadlineOf({ pingInterval }: Pick<ChannelConfigResolved, 'pingInterval'>): number {
-  return pingDeadline(Math.max(pingInterval, CHANNEL_PING_INTERVAL_MIN_MS))
-}
-
 /** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
 function reconnectWindow(): number {
-  const c = getServerConfig().channel
-  return Math.min(TIMER_DELAY_MAX_MS, pingDeadlineOf(c) + c.reconnectTimeout)
+  const c = getChannelConfig()
+  return Math.min(TIMER_DELAY_MAX_MS, pingDeadline(c.pingInterval) + c.reconnectTimeout)
 }
 
 /** Extension wire types are consumed after user modules may have registered more extensions.
@@ -436,6 +434,11 @@ function enableChannelTransports(transports: ChannelTransports): void {
 /** @internal The runtime ends a WebSocket on a larger message: the page refuses one, told by each channel the server makes and by each RECONCILED. */
 function setAdapterMaxFrameBytes(bytes: number | undefined): void {
   globalObject.adapterMaxFrameBytes = bytes
+}
+
+/** @internal */
+function setAdapterMaxMemory(bytes: number): void {
+  globalObject.adapterMaxMemory = bytes
 }
 
 function getAdapterMaxFrameBytes(): number | undefined {
@@ -543,35 +546,61 @@ function applyChannelConfig(val: unknown): void {
           Math.floor(TIMER_DELAY_MAX_MS / 2),
           'as its deadline, twice it, is at most the longest a timer waits',
         )
+        assertUsage(
+          value >= CHANNEL_PING_INTERVAL_MIN_MS,
+          `\`${configPath}\` should be at least ${CHANNEL_PING_INTERVAL_MIN_MS}: more pings than that flood the wire`,
+        )
         next[key] = value
         break
-      case 'reconnectTimeout':
-      case 'idleTimeout':
       case 'connectTtl':
+      case 'idleTimeout':
       case 'sseFlushThrottle':
       case 'ssePostIdleFlushDelay':
         assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
         next[key] = value
         break
-      case 'serverReplayBuffer':
-      case 'serverReplayBufferBinary':
-      case 'clientReplayBuffer':
-      case 'clientReplayBufferBinary':
-      case 'maxPendingBytes':
-      case 'maxPendingAcks':
-      case 'bufferLimit':
-      case 'bufferLimitBinary':
+      case 'reconnectTimeout':
+        assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
         assertUsage(
-          typeof value === 'number' && Number.isSafeInteger(value) && value >= 0,
-          `\`${configPath}\` should be a non-negative safe integer`,
+          value >= CHANNEL_RECONNECT_TIMEOUT_MIN_MS,
+          `\`${configPath}\` should be at least ${CHANNEL_RECONNECT_TIMEOUT_MIN_MS}: a client that lost its connection retries after ${CHANNEL_RECONNECT_INITIAL_DELAY_MS} ms, so in less its channels close before it is back`,
         )
-        ;(next as Record<string, unknown>)[key] = value
+        next[key] = value
         break
+      case 'maxPendingBytes':
+        assertUsage(
+          typeof value === 'number' && Number.isSafeInteger(value) && value >= CREDIT_WINDOW_INITIAL_BYTES,
+          `\`${configPath}\` should be an integer of at least ${CREDIT_WINDOW_INITIAL_BYTES}: a channel's credit window starts at that`,
+        )
+        next[key] = value
+        break
+      case 'maxMemory': {
+        const bytes = parseMemorySize(value)
+        assertUsage(
+          bytes !== null && bytes >= CREDIT_WINDOW_INITIAL_BYTES,
+          `\`${configPath}\` should be a number of bytes, or a size such as '4g' or '512m', of at least ${CREDIT_WINDOW_INITIAL_BYTES}: a channel's credit window starts at that`,
+        )
+        next[key] = bytes
+        break
+      }
       default:
         assertUsage(false, `Unknown ${configPath}`)
     }
   }
+  assertUsage(
+    !globalObject.channelConfigInUse ||
+      JSON.stringify(resolveChannelConfig(next)) === JSON.stringify(resolveChannelConfig(configState.channel)),
+    "`config.channel` can't change once a channel exists, as those already open would keep the old values: set it before the server handles a request",
+  )
   configState.channel = next
+}
+
+/** `value` in bytes: a whole number, or a size such as `'4g'`; null where it is neither. */
+function parseMemorySize(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isSafeInteger(value) ? value : null
+  const match = typeof value === 'string' ? /^(\d+(?:\.\d+)?)([kmg])$/i.exec(value) : null
+  if (!match) return null
+  return Math.floor(Number(match[1]) * 1024 ** ('kmg'.indexOf(match[2]!.toLowerCase()) + 1))
 }
 
 function applyBroadcastConfig(val: unknown): void {

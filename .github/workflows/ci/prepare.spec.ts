@@ -187,6 +187,14 @@ describe('prepare()', () => {
                   "job": "Playground Stream",
                 },
               },
+              "testFilePath": "test/playground-stream/.test-docker.binary-inline.ws.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
               "testFilePath": "test/playground-stream/.test-preview.binary-inline.node.test.ts",
             },
             {
@@ -219,6 +227,14 @@ describe('prepare()', () => {
                   "job": "Playground Stream",
                 },
               },
+              "testFilePath": "test/playground-stream/.test-preview.channel-short-reconnect.ws.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
               "testFilePath": "test/playground-stream/.test-preview.channel-slow-ping.ws.test.ts",
             },
             {
@@ -227,7 +243,7 @@ describe('prepare()', () => {
                   "job": "Playground Stream",
                 },
               },
-              "testFilePath": "test/playground-stream/.test-preview.channel-small-replay.sse.test.ts",
+              "testFilePath": "test/playground-stream/.test-preview.channel-small-pending.sse.test.ts",
             },
             {
               "localConfig": {
@@ -235,23 +251,7 @@ describe('prepare()', () => {
                   "job": "Playground Stream",
                 },
               },
-              "testFilePath": "test/playground-stream/.test-preview.channel-small-replay.ws.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-preview.channel-zero-settings.sse.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-preview.channel-zero-settings.ws.test.ts",
+              "testFilePath": "test/playground-stream/.test-preview.channel-small-pending.ws.test.ts",
             },
             {
               "localConfig": {

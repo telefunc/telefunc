@@ -1,11 +1,11 @@
-export { TAG, isWireCtrlTag, isChannelCtrlTag, isSequencedTag, passesData, replayKindOf, countsCredit }
+export { TAG, isWireCtrlTag, isChannelCtrlTag, isClosingTag, isSequencedTag, passesData, replayKindOf, countsCredit }
 export type { ReplayKind }
 
 import { assert } from '../../utils/assert.js'
 
 // Tag layout — sparse ranges so range checks classify:
 //   0x01–0x0f  wire-level control (no ix; seq 0 except on a LENGTH and a WebSocket's PING, PONG and ANNOUNCE)
-//   0x10–0x29  data plane (carries seq, payload varies)
+//   0x10–0x2f  data plane (carries seq, payload varies)
 //   0x30–      per-channel control (carries ix; seq 0 except on the four closing frames)
 
 const DATA_TAG_MIN = 0x10
@@ -59,6 +59,9 @@ const TAG = {
   PUBLISH_BINARY: 0x17 as const,
   /** Replayable keyed binary publish frame that requests an acknowledgement receipt. */
   PUBLISH_BINARY_ACK_REQ: 0x18 as const,
+  /** Goes right before a PUBLISH or PUBLISH_BINARY on a subscriber's wire and names that subscriber's channel and seq
+   *  for it: the body is the same bytes for every subscriber, so its own index and seq are 0. */
+  PUBLISH_TO: 0x19 as const,
 
   // ─── Per-channel control (carries ix) ───
   /** A close request. Sequenced, so it replays like data. */
@@ -67,7 +70,7 @@ const TAG = {
   CLOSE_ACK: 0x31 as const,
   /** Channel closed with an abort value (analogous to `throw Abort()`). Sequenced, as CLOSE is. */
   ABORT: 0x32 as const,
-  /** Channel closed with an error. Payload: u8 `ERROR_REASON`. Client → server for `LOST` only; sequenced as CLOSE. */
+  /** Channel closed with an error, either way; a page's is `LOST`. Payload: u8 `ERROR_REASON`. Sequenced, as CLOSE. */
   ERROR: 0x33 as const,
   /** Receiver → sender: bytes consumed plus window (mod 2^32), and the last seq it has, which the replay lets go. */
   WINDOW: 0x34 as const,
@@ -81,7 +84,8 @@ const TAG = {
   /** Flow-control message-count limit. Parallel to `WINDOW` but counted in messages, not bytes,
    *  to bound receiver dispatch CPU regardless of message size. */
   MSG_WINDOW: 0x39 as const,
-  /** Server → client: an initial channel a RECONCILED left out, attached at `lastSeq` or not within `connectTtl`. */
+  /** Server → client: an initial channel a RECONCILED left out, attached at `lastSeq` or not within
+   *  `CHANNEL_CONNECT_TTL_MS`. */
   ATTACH_RESULT: 0x3b as const,
 }
 

@@ -150,19 +150,14 @@ function RxJSDemo() {
         id="test-subject-close"
         onClick={async () => {
           setResult('')
-          console.log('subject close: clicked')
           const subject = await onSubject()
-          console.log('subject close: call returned')
           const received: string[] = []
           subject.subscribe((v) => {
             received.push(v)
-            console.log('subject close: tick')
           })
           setTimeout(async () => {
-            console.log('subject close: timer fired')
             try {
               await close(subject)
-              console.log('subject close: close settled')
               setResult(JSON.stringify({ received, closed: true }))
             } catch (err: any) {
               setResult(JSON.stringify({ received, closed: false, error: String(err?.message ?? err) }))

@@ -15,6 +15,8 @@ import {
   onBroadcastServerListener,
   onBroadcastOwnBytes,
   onBroadcastOnOpenPublish,
+  onBroadcastSubscriberAborts,
+  onBroadcastLoopLeftBehind,
   onBroadcastAnswerOrder,
   onBroadcastSelfAnswer,
   onStaticPublishReceipts,
@@ -107,7 +109,7 @@ function Publish() {
             })()
             // On the wire after the loop's subscribe, so the server has the subscription before the flood.
             await room.publish('ready')
-            await remote.flood(1000)
+            await remote.flood(2000)
             const error = await loop
             setResult(JSON.stringify({ error, received, server: await remote.serverLoop() }))
           } catch (err) {
@@ -142,7 +144,7 @@ function Publish() {
               }
             })()
             await room.publish('ready')
-            await remote.flood(1000)
+            await remote.flood(2000)
             await new Promise((resolve) => setTimeout(resolve, 1000))
             await remote.close()
             const error = await loop
@@ -432,6 +434,41 @@ function Publish() {
         onOpen publishes
       </button>
 
+      <h2>Subscriber Ends</h2>
+
+      <button
+        id="test-broadcast-subscriber-aborts"
+        onClick={async () => {
+          setResult('')
+          const { aborting, room } = await onBroadcastSubscriberAborts()
+          listenedRef.current = room
+          aborting.subscribe(() => {})
+          const received: string[] = []
+          // A transport like Redis may answer the publish before it delivers the message.
+          const delivered = new Promise<void>((resolve) =>
+            room.subscribe((msg) => {
+              received.push(msg)
+              resolve()
+            }),
+          )
+          const { seq } = await room.publish('abort')
+          await delivered
+          setResult(JSON.stringify({ seq, received }))
+        }}
+      >
+        A subscriber aborts its channel
+      </button>
+
+      <button
+        id="test-broadcast-loop-left-behind"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onBroadcastLoopLeftBehind()))
+        }}
+      >
+        A loop stops reading before its channel closes
+      </button>
+
       <h2>Listener Answers</h2>
 
       <button
@@ -452,7 +489,7 @@ function Publish() {
           setResult(JSON.stringify({ answers: await stop() }))
         }}
       >
-        Listeners answer their own key
+        A listener answers its own key
       </button>
 
       <h2>Static Publish Receipts</h2>
@@ -608,7 +645,7 @@ function Publish() {
 
       <h2>Published While Offline</h2>
 
-      {[2, 8].map((count) => (
+      {[2, 32].map((count) => (
         <button
           key={count}
           id={`test-broadcast-while-offline-${count}`}
