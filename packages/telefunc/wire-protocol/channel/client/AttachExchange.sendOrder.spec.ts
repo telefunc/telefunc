@@ -81,6 +81,10 @@ function connect(carriesReconcileInOpen: boolean) {
       const seq = record.replay.nextSeq()
       gate.send(record, seq, encode.text(record.ix, text, seq), 'data')
     },
+    /** The server's ATTACH_RESULT for channel `ix`, which it awaited. */
+    attachResult(ix: number) {
+      exchange.handleAttachResult(ix, 0)
+    },
     /** The server's RECONCILED, attaching `ixes`; what it releases goes on the wire, as `handleReconciled` sends it. */
     reconciled(ixes: number[]) {
       const ctrl = { sessionId: 'session', open: ixes.map((ix) => ({ ix, lastSeq: 0 })) } as ReconciledPayload
@@ -126,6 +130,20 @@ for (const [transport, carriesReconcileInOpen] of [
       page.send(a, 'a2')
       page.reconciled([2])
       expect(page.wire.filter((frame) => !frame.startsWith('RECONCILE'))).toEqual(['a2'])
+    })
+
+    test('a send on a channel the server awaits keeps its place behind earlier sends when it attaches while a RECONCILE is out', () => {
+      const page = connect(carriesReconcileInOpen)
+      const b = page.register(1)
+      page.reconcile()
+      page.reconciled([])
+      const c = page.register(2)
+      page.reconcile()
+      page.send(c, 'c1')
+      page.send(b, 'b1')
+      page.attachResult(1)
+      page.reconciled([2])
+      expect(page.wire.filter((frame) => !frame.startsWith('RECONCILE'))).toEqual(['c1', 'b1'])
     })
   })
 }
