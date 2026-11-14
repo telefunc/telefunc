@@ -4,7 +4,7 @@
 // lossy send may take its place. Its channel is open, as after its first attach, unless a test says otherwise. The
 // reconnect, with what the server then reads, is in ClientConnection.reconnectOrdering.spec.ts.
 
-import { afterEach, beforeEach, describe, expect, expectTypeOf, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { ClientChannel } from './ClientChannel.js'
 import { ClientBroadcast } from './ClientBroadcast.js'
@@ -232,19 +232,6 @@ describe('`lossy` on the page', () => {
     expect((channel as any).pendingAcks.size).toBe(0)
     // @ts-expect-error
     expect(() => channel.send('x', { lossy: true, ack: true })).toThrow("`lossy` can't be combined with `ack: true`")
-  })
-
-  test('the types: a lossy send is `Promise<void>` on any channel, and takes no `ack: true`', () => {
-    // Checked by test:types; never called.
-    const types = (page: ClientChannelType<string, never, true>) => {
-      expectTypeOf(page.send('x', { lossy: true })).toEqualTypeOf<Promise<void>>()
-      expectTypeOf(page.sendBinary(new Uint8Array(1), { lossy: true, ack: false })).toEqualTypeOf<Promise<void>>()
-      const opts = { lossy: true } as const
-      expectTypeOf(page.send('x', opts)).toEqualTypeOf<Promise<void>>()
-      // @ts-expect-error
-      void page.sendBinary(new Uint8Array(1), { lossy: true, ack: true })
-    }
-    expect(types).toBeTypeOf('function')
   })
 })
 

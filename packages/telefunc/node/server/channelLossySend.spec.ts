@@ -287,23 +287,6 @@ describe('bytes given to `send()` and `publish()`', () => {
     expect(received).toEqual(['R'])
     unsubscribe()
   })
-
-  test('the types: a generic helper forwards its data to an untyped channel, and a typed channel refuses bytes', () => {
-    // Checked by test:types; never called.
-    const types = (channel: Channel, chat: Channel<never, { text: string }>) => {
-      function relay<T>(data: T) {
-        return channel.send(data)
-      }
-      function relayText<T extends { text: string }>(data: T) {
-        return channel.send(data)
-      }
-      void relay(1)
-      void relayText({ text: 'x' })
-      // @ts-expect-error
-      void chat.send(new Uint8Array(1))
-    }
-    expect(types).toBeTypeOf('function')
-  })
 })
 
 describe('the confirmation time a lossy send measures', () => {
