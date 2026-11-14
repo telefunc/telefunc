@@ -214,6 +214,8 @@ class RoomState {
   private fieldListenerCount = 0
   /** What stops the package fields on this view, while they run. */
   private stopFields: (() => void) | null = null
+  /** While the package fields attach: what registers now is theirs. */
+  private attachingFields = false
   /** The tracks its binary listeners name, each `(member or room, track)` pair once. */
   private trackWants = 0
   private readonly trackWantsMax: number
@@ -252,8 +254,9 @@ class RoomState {
     if (this.stopFields !== null || this.model.closed) return
     // Attaching adds listeners, which can bring the owner back here: the fields run already.
     this.stopFields = () => {}
-    const detaches = this.countedAsFields(() =>
-      Array.from(participantFields(), ([name, { attach }]) =>
+    this.attachingFields = true
+    try {
+      const detaches = Array.from(participantFields(), ([name, { attach }]) =>
         attach({
           room,
           set: (id, value) => this.model.setField(id, name, value),
@@ -264,9 +267,11 @@ class RoomState {
               undefined,
             ),
         }),
-      ),
-    )
-    this.stopFields = () => this.countedAsFields(() => detaches.forEach((detach) => detach()))
+      )
+      this.stopFields = () => detaches.forEach((detach) => detach())
+    } finally {
+      this.attachingFields = false
+    }
   }
 
   /** Stops the package fields on this view, where they run. */
@@ -274,14 +279,6 @@ class RoomState {
     const stop = this.stopFields
     this.stopFields = null
     stop?.()
-  }
-
-  /** Runs `change`, counting the listeners it adds or removes as the package fields'. */
-  private countedAsFields<T>(change: () => T): T {
-    const before = this._listenerCount
-    const result = change()
-    this.fieldListenerCount += this._listenerCount - before
-    return result
   }
 
   /** Whether this holder consumes room-authored messages on the semantic lane. */
@@ -611,6 +608,9 @@ class RoomState {
         `to receive every track`,
     )
     const remove = list.add(cb)
+    // Counted on the side it registered on, by every way it goes: its stop, its signal, its member's leave or the close.
+    const asField = this.attachingFields
+    if (asField) this.fieldListenerCount++
     this.bumpListenerCount(
       1,
       entry,
@@ -620,6 +620,7 @@ class RoomState {
     return makeDisposer(
       () => {
         if (remove()) {
+          if (asField) this.fieldListenerCount--
           this.bumpListenerCount(
             -1,
             entry,
@@ -654,7 +655,6 @@ class RoomState {
   /** The room closed: every listener goes, the package fields' too. */
   private releaseAllListeners(): void {
     for (const cleanups of this.listenerCleanups.values()) for (const unlisten of cleanups) unlisten()
-    this.fieldListenerCount = 0
   }
 
   private bumpListenerCount(delta: number, entry: MemberEntry | null, binary: BinaryWantChange | null): void {

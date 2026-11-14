@@ -55,4 +55,28 @@ describe("a package's field", () => {
     await Room.close(room.id)
     await vi.waitFor(() => expect(running.has(room)).toBe(false))
   })
+
+  it("keeps running on a server's room while the app observes it, though the members it listened to left", async () => {
+    const running = new Set<unknown>()
+    defineParticipantField('listensToMembers', {
+      initial: null,
+      attach({ room }) {
+        running.add(room)
+        const stops = room.snapshot().participants.map((participant) => participant.onChange(() => {}))
+        return () => {
+          running.delete(room)
+          stops.forEach((stop) => stop())
+        }
+      },
+    })
+    const room = await Room.create(`fields-${crypto.randomUUID()}`)
+    const members = [await room.join({ meta: {} }), await room.join({ meta: {} })]
+    const view = await Room.get(room.id)
+    const stopObserving = view.onChange(() => {})
+    await Promise.all(members.map((member) => member.leave()))
+    await vi.waitFor(() => expect(view.snapshot().count).toBe(0))
+    expect(running.has(view)).toBe(true)
+    stopObserving()
+    await vi.waitFor(() => expect(running.has(view)).toBe(false))
+  })
 })
