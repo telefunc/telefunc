@@ -340,8 +340,8 @@ class RoomState {
     return participant
   }
 
-  /** A revived `RemoteParticipant`: the live member if known, else seeded silently from the snapshot. */
-  ensureRemoteFromSnapshot(snap: MemberSnapshot): RemoteParticipant {
+  /** A revived `RemoteParticipant`: the member's remote, or one that left where this room doesn't have it. */
+  remoteFromSnapshot(snap: MemberSnapshot): RemoteParticipant {
     return this.remote(this.model.entryFromSnapshot(snap))
   }
 

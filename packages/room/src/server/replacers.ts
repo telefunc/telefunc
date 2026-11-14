@@ -62,9 +62,10 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, ServerReplace
   },
   replace(remote, context) {
     const { state, entry } = remoteBacking(remote)!
-    // Returning a hidden member hands it to this client: its room stub relays that member's events.
-    if (entry.hidden) responseRoomGrants(context, state.roomId).hidden.add(entry.id)
-    // The entry outlives a racing leave, so the snapshot stays coherent and the client's roster heals it.
+    // Returning a hidden member hands it to this client: its room stub relays that member's events. One that left is
+    // not handed: as any member its room's roster doesn't list, it revives on the page as one that left.
+    const handedHidden = entry.hidden && !entry.left
+    if (handedHidden) responseRoomGrants(context, state.roomId).hidden.add(entry.id)
     const metadata: RemoteParticipantMetadata = {
       room: state.view,
       id: entry.id,
@@ -73,7 +74,7 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, ServerReplace
       metaSeq: entry.meta.seq,
       identity: entry.identity,
     }
-    if (entry.hidden) metadata.hidden = true
+    if (handedHidden) metadata.hidden = true
     if (!entry.meta.connected) metadata.disconnected = true
     return {
       metadata,

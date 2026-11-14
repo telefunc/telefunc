@@ -27,14 +27,14 @@ const roomParticipantReviver = channelReviver<RoomParticipantReviverContract>(
   (end, metadata) => new ClientStandaloneParticipant({ end, metadata }),
 )
 
-/** Bound to the live `ClientRoom` the parser revived first, so `room.getParticipant(m.id) === m`, and sharing its
- *  lifecycle. */
+/** Bound to the live `ClientRoom` the parser revived first, so `room.getParticipant(m.id) === m` while the member is
+ *  in it, and sharing its lifecycle. */
 const roomRemoteReviver: ReviverType<RoomRemoteReviverContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_REMOTE,
   revive(metadata, context) {
     assert(metadata.room instanceof ClientRoom)
     const room = metadata.room
-    const remote = room._state.ensureRemoteFromSnapshot(metadata)
+    const remote = room._state.remoteFromSnapshot(metadata)
     context.shareLifecycle(remote, room)
     return {
       value: remote,

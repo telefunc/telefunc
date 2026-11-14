@@ -1145,6 +1145,18 @@ function testRoom() {
       expect(r.alone).deep.equal({ cause: { type: 'closed' }, closed: true })
     },
   )
+  testRoomScenario<{ names: string[]; count: number; causes: Array<string | null>; listed: boolean[] }>(
+    'departed-returned',
+    'room: a member returned after it left, held across an await, from an older snapshot or hidden, has left on the page too',
+    (r) => {
+      expect(r).deep.equal({
+        names: [],
+        count: 0,
+        causes: ['unknown', 'unknown', 'unknown'],
+        listed: [false, false, false],
+      })
+    },
+  )
   test('room: React reads a room through useSyncExternalStore with its methods as they are; a member returned with a closed room has left', async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-proxy')

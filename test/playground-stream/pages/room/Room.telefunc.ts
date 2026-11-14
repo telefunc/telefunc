@@ -28,6 +28,7 @@ export {
   onCountKeptRoom,
   onCountRoom,
   onJoinHiddenAndHand,
+  onReturnDeparted,
   onHiddenSetMeta,
   onHiddenLeave,
   onHiddenAfterPlayers,
@@ -351,6 +352,23 @@ async function onJoinHiddenAndHand(roomId: string) {
   const bot = await room.join({ hidden: true, meta: { name: 'Bot' } })
   hiddenBots.set(roomId, bot)
   return { room, member: room.getParticipant(bot.id) }
+}
+
+/** Members read, then gone before the response: one held across an await, one from an older snapshot, and a hidden one
+ *  handed to the page. */
+async function onReturnDeparted(roomId: string) {
+  const room = anyoneCanJoin(await Room.get(roomId))
+  const held = await room.join({ meta: { name: 'Held' } })
+  const old = await room.join({ meta: { name: 'Old' } })
+  const hidden = await room.join({ hidden: true, meta: { name: 'Hidden' } })
+  const before = room.snapshot()
+  const members = [
+    room.getParticipant(held.id),
+    before.participants.find(({ id }) => id === old.id),
+    room.getParticipant(hidden.id),
+  ]
+  await Promise.all([held.leave(), old.leave(), hidden.leave()])
+  return { room, members }
 }
 
 async function onHiddenSetMeta(roomId: string, name: string) {

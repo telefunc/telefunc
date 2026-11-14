@@ -197,20 +197,21 @@ class RoomModel {
     return this.stateVersion
   }
 
-  /** The entry of a revived `RemoteParticipant`: the live one if known, else seeded silently from the
-   *  snapshot (its seed count already includes it). */
+  /** The entry of a revived `RemoteParticipant`: the member's, where this room has it. A room arrives with its whole
+   *  roster, so a member it doesn't have had left before the response: it revives as one that left. Only a hidden
+   *  member handed to this side, which no roster lists, is added. */
   entryFromSnapshot(snap: MemberSnapshot): MemberEntry {
     const existing = this.members.get(snap.id)
     if (existing) return existing
-    if (this.closed) {
-      // A closed room has no members: one it hands out left with it.
-      const entry = newEntry(snap, this.metaRewinds)
-      entry.left = true
-      entry.leaveCause = this._closedCause
+    if (snap.hidden && !this.closed) {
+      const entry = this.createEntry(snap)
+      this.bumpState()
       return entry
     }
-    const entry = this.createEntry(snap)
-    this.bumpState()
+    const entry = newEntry(snap, this.metaRewinds)
+    entry.left = true
+    // A closed room has no members: one it hands out left with it.
+    entry.leaveCause = this.closed ? this._closedCause : unknownLeaveCause()
     return entry
   }
 

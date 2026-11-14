@@ -33,6 +33,7 @@ import {
   onCountRoom,
   onGetEveryFrame,
   onJoinHiddenAndHand,
+  onReturnDeparted,
   onHiddenSetMeta,
   onHiddenLeave,
   onHiddenAfterPlayers,
@@ -2123,6 +2124,24 @@ function Room() {
             done: alone.closed && alone.cause !== null,
           }
         })
+      })}
+
+      {scenario('departed-returned', null, 'Members returned after they left', async () => {
+        const { room, members } = await onReturnDeparted(await createRoomId('departed-returned'))
+        const causes = members.map((member) => {
+          let cause: string | null = null
+          member!.onLeave(({ type }) => (cause = type))
+          return cause
+        })
+        const { participants, count } = room.snapshot()
+        setResult(
+          JSON.stringify({
+            names: participants.map(({ meta }) => meta.name),
+            count,
+            causes,
+            listed: members.map((member) => participants.some(({ id }) => id === member!.id)),
+          }),
+        )
       })}
 
       {scenario('proxy', 'Room methods as React reads them', 'Stable and detached methods', async () => {
