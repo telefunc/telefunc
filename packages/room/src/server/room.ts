@@ -117,8 +117,6 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
   /** The attached stub holding each member a client joined through. */
   private readonly stubOf = new Map<string, RoomStub>()
   readonly localParticipants = new Map<string, ServerLocalParticipant>()
-  /** The local participants that joined with `selfDelivery: false`. */
-  private readonly localSuppressed = new Set<string>()
   /** The admissions under way; an `owned` one the heartbeat leaves alone, and its holder's detach doesn't evict. */
   private readonly admissions = new Map<string, Admission>()
   readonly writes: RoomWrites
@@ -138,11 +136,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     this.metaMirrors = metaMirrors
     this.incarnation = replica.incarnation
     this.state = new RoomState({ view, model: replica.model, owner: new RoomHandleStateOwner({ room: this }) })
-    this.local = new LocalHolder({
-      state: this.state,
-      suppressed: this.localSuppressed,
-      participants: this.localParticipants,
-    })
+    this.local = new LocalHolder({ state: this.state, participants: this.localParticipants })
     this.writes = new RoomWrites({
       owner: this,
       incarnation: this.incarnation,
@@ -184,7 +178,6 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     await this.admit(admission, () => {
       this.localParticipants.set(admission.id, participant)
       this.replica.own(admission.id, this)
-      if (!selfDelivery) this.localSuppressed.add(admission.id)
     })
     return participant
   }
@@ -291,7 +284,6 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     const local = this.localParticipants.get(id)
     if (local) {
       this.localParticipants.delete(id)
-      this.localSuppressed.delete(id)
       local._onLeft(cause)
     }
     this.stubOf.delete(id)
@@ -303,7 +295,6 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
     this.teardownTail()
     for (const local of this.localParticipants.values()) local._onLeft({ type: 'closed' })
     this.localParticipants.clear()
-    this.localSuppressed.clear()
     for (const admission of this.admissions.values()) admission.abandon()
     for (const stub of this.stubs) closeAfterReconnectWindow(stub.end)
   }

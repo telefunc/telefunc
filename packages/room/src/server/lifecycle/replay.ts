@@ -255,32 +255,40 @@ interface LaneHolder {
 
 type LocalHolderOptions = {
   state: RoomState
-  /** The local members joined with `selfDelivery: false`, whose messages these listeners don't get. */
-  suppressed: ReadonlySet<string>
   /** The participants that joined through this handle. */
-  participants: ReadonlyMap<string, { readonly _heldByPage: boolean }>
+  participants: ReadonlyMap<string, { readonly _heldByPage: boolean; readonly selfDelivery: boolean }>
 }
 
 /** This instance's own listeners as one holder: gated like a client's stub, with wants that change only when they
  *  differ, as a client declares them. */
 class LocalHolder implements LaneHolder {
   private readonly state: RoomState
-  private readonly suppressed: ReadonlySet<string>
+  /** The members whose own messages its page doesn't get back (`PageIndex`). */
+  private suppressed: ReadonlySet<string> = new Set()
   private readonly participants: LocalHolderOptions['participants']
   private readonly replay = new ReplayGate()
   private textAll = false
   private readonly textMembers = new Set<string>()
   readonly binaryWants: BinaryWants = emptyBinaryWants()
 
-  constructor({ state, suppressed, participants }: LocalHolderOptions) {
+  constructor({ state, participants }: LocalHolderOptions) {
     this.state = state
-    this.suppressed = suppressed
     this.participants = participants
   }
 
   /** The server-side room is its own page: the participants that joined through it and no page holds are at it. */
   *heldMembers(): Generator<string> {
     for (const [id, participant] of this.participants) if (!participant._heldByPage) yield id
+  }
+
+  /** Every participant that joined through it with `selfDelivery: false`, a page holding it or not: its listeners never
+   *  get that participant's messages. */
+  *selfSuppressed(): Generator<string> {
+    for (const [id, participant] of this.participants) if (!participant.selfDelivery) yield id
+  }
+
+  atPage(suppressed: ReadonlySet<string>): void {
+    this.suppressed = suppressed
   }
 
   /** Re-derives the listeners' room-wide text want, and the own want of `member` when its listeners changed; `null`
