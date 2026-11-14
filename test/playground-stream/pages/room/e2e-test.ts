@@ -9,6 +9,7 @@ export {
   testRoomLongWaits,
   testRoomRedisSubscriberDropped,
   testRoomRedisPublishLimit,
+  testRoomStaleRead,
 }
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Response, WebSocket } from 'playwright-chromium'
@@ -1711,6 +1712,24 @@ function testRoomRedisSubscriberDropped() {
       expectLog('Redis subscriber connection closed')
     },
   )
+}
+
+function testRoomStaleRead() {
+  test("room: a server's room that nothing follows warns, naming it, when read a heartbeat after its Room.get(); a room read right after its own Room.get() doesn't", async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-stale-read')
+    let keptId = ''
+    await autoRetry(
+      async () => {
+        const r = await getResult<{ keptId: string; kept: number; fresh: number }>('#room-result')
+        keptId = r.keptId
+        expect(r).deep.equal({ keptId, kept: 0, fresh: 0 })
+      },
+      { timeout: 60_000 },
+    )
+    // Any other warning, such as one for the room read after its own Room.get(), is a log the test doesn't expect.
+    expectLog(`Room '${keptId}' was read`)
+  })
 }
 
 function testRoomRedisPublishLimit() {

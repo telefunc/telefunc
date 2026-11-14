@@ -6,6 +6,7 @@ import {
   testRoomPublishHold,
   testRoomRedisPublishLimit,
   testRoomRedisSubscriberDropped,
+  testRoomStaleRead,
 } from './pages/room/e2e-test'
 
 process.env.PUBLIC_ENV__STREAM_TRANSPORT = 'channel'
@@ -22,3 +23,4 @@ testRoomRedisSubscriberDropped()
 testBroadcastRedisSubscriberDropped()
 testBroadcastRedisPublishLimit()
 testRoomRedisPublishLimit()
+testRoomStaleRead()

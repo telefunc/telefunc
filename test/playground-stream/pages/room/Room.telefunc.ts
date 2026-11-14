@@ -24,6 +24,9 @@ export {
   onGetEveryFrame,
   onIterateMessages,
   onGetIteratedMessages,
+  onKeepRoom,
+  onCountKeptRoom,
+  onCountRoom,
   onJoinHiddenAndHand,
   onHiddenSetMeta,
   onHiddenLeave,
@@ -317,6 +320,22 @@ async function iterateMessages(room: Room<{}, { name: string }, string>, receive
 
 async function onGetIteratedMessages(roomId: string) {
   return iterated.get(roomId) ?? []
+}
+
+/** Handles kept across calls, on rooms no page holds, so nothing follows them. */
+const keptRooms = new Map<string, Room>()
+
+async function onKeepRoom(roomId: string) {
+  await Room.create(roomId)
+  keptRooms.set(roomId, await Room.get(roomId))
+}
+
+async function onCountKeptRoom(roomId: string) {
+  return keptRooms.get(roomId)!.count
+}
+
+async function onCountRoom(roomId: string) {
+  return (await Room.get(roomId)).count
 }
 
 const hiddenBots = new Map<string, LocalParticipant>()

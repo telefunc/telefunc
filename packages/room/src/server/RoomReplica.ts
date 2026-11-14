@@ -37,6 +37,7 @@ import type { StoredRoomMeta } from './store/meta.js'
 import type { LaneHolder, ReplayHold, TextWantsChange } from './lifecycle/replay.js'
 import { type MetaMirror, type RoomHandle, ServerRoom } from './room.js'
 import { RosterStream } from './lifecycle/RosterStream.js'
+import { StaleReads } from './lifecycle/StaleReads.js'
 import { toggle } from '../utils/sets.js'
 import type { RoomStub } from './RoomStub.js'
 import { MemberMessageBodies, orderedBody, trackFrameBody, unorderedEventBody } from './publishBodies.js'
@@ -107,6 +108,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   private readonly lanePlan: LanePlan
   private readonly authority: AuthoritySync
   private readonly heartbeat: RoomHeartbeat
+  private readonly staleReads: StaleReads
   private readonly roster: RosterStream
   /** Hosts the members the handles join and the pages' views. */
   private readonly hosting: RoomHosting
@@ -158,6 +160,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
       demandExchange,
       authority,
     })
+    this.staleReads = new StaleReads({ roomId: incarnation.id, model, lanePlan })
   }
 
   /** A new handle on this view, given the parts of it a handle and its stubs, participants and writes use. */
@@ -176,7 +179,13 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   /** A new handle on a view other handles share, which catches up with the authority first unless it is current. */
   async sharedHandle(): Promise<ServerRoom> {
     await this.authority.catchUp()
+    this.staleReads.caughtUp()
     return this.handle()
+  }
+
+  /** A handle's read, which warns once if the view is a heartbeat older than its last `Room.get()` and unfollowed. */
+  read(): void {
+    this.staleReads.read()
   }
 
   /** A handle's listeners changed. */
@@ -426,6 +435,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
       case 'deliveries-lost':
         return void this.authority.reconcileAuthority().catch(reportRoomError)
       case 'lanes-changed':
+        this.staleReads.lanesChanged()
         return this.heartbeat.update()
       case 'control-subscribed':
         return this.authority.controlSubscribed()

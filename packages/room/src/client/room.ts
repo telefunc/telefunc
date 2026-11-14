@@ -227,7 +227,7 @@ class ClientRoom extends RoomStateView implements Room {
   getParticipants(options?: { hidden?: boolean }): RemoteParticipant[] {
     assertKnownOptions(options, ['hidden'], 'getParticipants()')
     assertUsage(!options?.hidden, 'Hidden participants can only be enumerated on the server')
-    return this._state.listVisible()
+    return this._read.listVisible()
   }
 
   /** Plain DM fires local listeners; ack DM returns their reply through the symmetric `dm-reply`/`dm-ack` path. */

@@ -103,32 +103,37 @@ function remoteBacking(value: unknown): RemoteBacking | null {
 abstract class RoomStateView {
   protected abstract readonly _state: RoomState
 
+  /** The state a read answers from; a server's room checks first how old its view is. */
+  protected get _read(): RoomState {
+    return this._state
+  }
+
   get id(): string {
     return this._state.model.roomId
   }
 
   get meta(): RoomMeta {
-    return this._state.model.meta
+    return this._read.model.meta
   }
 
   get count(): number {
-    return this._state.model.count
+    return this._read.model.count
   }
 
   get isEmpty(): boolean {
-    return this._state.model.count === 0
+    return this._read.model.count === 0
   }
 
   get isClosed(): boolean {
-    return this._state.model.closed
+    return this._read.model.closed
   }
 
   getParticipant(id: string): RemoteParticipant | null {
-    return this._state.getRemote(id)
+    return this._read.getRemote(id)
   }
 
   snapshot(): RoomSnapshotView {
-    return this._state.snapshot()
+    return this._read.snapshot()
   }
 
   subscribe(callback: MessageListener<[Sender]>, options?: MessageListenerOptions): () => void {

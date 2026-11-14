@@ -509,13 +509,19 @@ class ServerRoom extends RoomStateView implements Room {
     return value !== null && typeof value === 'object' && SERVER_ROOM_BRAND in value
   }
 
+  protected override get _read(): RoomState {
+    this.handle.replica.read()
+    return this._state
+  }
+
   join(options?: JoinOptions): Promise<LocalParticipant> {
     return this.handle.join(options)
   }
 
   getParticipants(options?: { hidden?: boolean }): RemoteParticipant[] {
     assertKnownOptions(options, ['hidden'], 'getParticipants()')
-    return options?.hidden ? this._state.listHidden() : this._state.listVisible()
+    const state = this._read
+    return options?.hidden ? state.listHidden() : state.listVisible()
   }
 }
 

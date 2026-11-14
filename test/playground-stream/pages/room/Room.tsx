@@ -28,6 +28,9 @@ import {
   onWatchEveryFrame,
   onIterateMessages,
   onGetIteratedMessages,
+  onKeepRoom,
+  onCountKeptRoom,
+  onCountRoom,
   onGetEveryFrame,
   onJoinHiddenAndHand,
   onHiddenSetMeta,
@@ -2367,6 +2370,16 @@ function Room() {
         await me.setAttributes({}) // same-channel ack orders the subscription before the live publish
         await me.publish('live')
         await pollUntil(() => ({ result: { received }, done: received.includes('live') }))
+      })}
+
+      {scenario('stale-read', null, 'Read a kept room a heartbeat later', async () => {
+        const [keptId, freshId] = [`e2e-stale-kept:${crypto.randomUUID()}`, `e2e-stale-fresh:${crypto.randomUUID()}`]
+        await Promise.all([onKeepRoom(keptId), onKeepRoom(freshId)])
+        setResult(JSON.stringify({ waiting: true }))
+        // Past the 30 s heartbeat after each room's Room.get().
+        await new Promise((resolve) => setTimeout(resolve, 31_000))
+        const [kept, fresh] = await Promise.all([onCountKeptRoom(keptId), onCountRoom(freshId)])
+        setResult(JSON.stringify({ keptId, kept, fresh }))
       })}
 
       {scenario('hiccups', 'Store hiccups', 'A store write fails once', async () => {
