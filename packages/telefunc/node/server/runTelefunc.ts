@@ -32,7 +32,7 @@ import {
   STATUS_CODE_SUCCESS,
 } from '../../shared/constants.js'
 import { STREAM_TRANSPORT } from '../../wire-protocol/constants.js'
-import { createRequestContext } from './context/requestContext.js'
+import { createRequestContext, type RequestContext } from './context/requestContext.js'
 
 type StreamWritableWeb = WritableStream
 type StreamReadableWeb = ReadableStream
@@ -261,27 +261,33 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
   // No-op on subsequent calls and a silent no-op on Workers (load fails,
   // sync access guarded by `useNodeStream`).
   await loadStreamNodeModuleOnce()
+  const requestContext = createRequestContext(httpRequestResolved.request)
   try {
-    return await runTelefunc_(httpRequestResolved)
+    return await runTelefunc_(httpRequestResolved, requestContext)
   } catch (err: unknown) {
     handleTelefunctionBug(err)
     return createHttpResponse({
       ...serverError,
       err,
     })
+  } finally {
+    // However the call ended: what its response still sends, a stream or a channel, holds the request from here on.
+    requestContext.markComplete()
   }
 }
 
-async function runTelefunc_({
-  request,
-  readable,
-  context,
-}: {
-  request: Request
-  readable?: StreamReadableNode
-  context?: Telefunc.Context
-}): Promise<HttpResponse> {
-  const requestContext = createRequestContext(request)
+async function runTelefunc_(
+  {
+    request,
+    readable,
+    context,
+  }: {
+    request: Request
+    readable?: StreamReadableNode
+    context?: Telefunc.Context
+  },
+  requestContext: RequestContext,
+): Promise<HttpResponse> {
   const runContext = { requestContext }
 
   {

@@ -35,8 +35,7 @@ type RequestContext = {
   /** Register a callback that fires when the request lifecycle ends for any reason
    *  (response sent, stream complete, or client disconnect). Fires exactly once. */
   onClose: (cb: () => void) => void
-  /** Mark the response as complete. Fires onClose callbacks.
-   *  Gated by trackPending: if pending items exist, defers until all complete. */
+  /** The call ended, whichever way: fires onClose callbacks once no item of trackPending is pending. */
   markComplete: () => void
   /** Register a pending item (channel, stream pump, inline stream).
    *  Returns a completion callback. markComplete is deferred until all pending items complete. */
@@ -83,7 +82,7 @@ function createRequestContext(request: Request): RequestContext {
       if (--pendingCount === 0) fireClose()
     }
   }
-  // markComplete is the initial hold — released when serialization finishes
+  // markComplete is the initial hold — released when the call ends, whichever way,
   // or when the client disconnects, whichever comes first.
   const markComplete = trackPending()
 
@@ -115,7 +114,7 @@ function createRequestContext(request: Request): RequestContext {
 
   // request.signal fires on abnormal client disconnect.
   // During telefunc execution (pendingCount=1): releasePending fires onClose immediately.
-  // After serialization (pending channels/streams): defers until they all complete.
+  // After the call (pending channels/streams): defers until they all complete.
   if (request.signal.aborted) {
     markComplete()
   } else {

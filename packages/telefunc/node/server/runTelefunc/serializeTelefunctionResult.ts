@@ -23,6 +23,7 @@ import { textEncoder } from '../../../wire-protocol/wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../../wire-protocol/wire/base64url.js'
 import type { StreamingProducer, StreamingValueServer } from '../../../wire-protocol/values/types.js'
 import { type RequestContext } from '../context/requestContext.js'
+import type { AbortError } from '../Abort.js'
 import type { Context } from '../context/context.js'
 import type { Readable } from 'node:stream'
 import { getServerExtensionTypes } from '../serverConfig.js'
@@ -78,6 +79,10 @@ function serializeTelefunctionResult(runContext: {
   const useChannelPump = runContext.streamTransport === STREAM_TRANSPORT.CHANNEL
   const streamingValues: StreamingValueServer[] = []
   let nextStreamingIndex = 0
+  /** What the response carries is registered once the response is sure to go; ending the response before that, as a
+   *  failed serialization does, ends what it would carry, which nothing else reached. */
+  const registrations: (() => void)[] = []
+  let goes = false
   const { valueShields } = runContext
   const shieldCtx = {
     telefunctionName: runContext.telefunctionName,
@@ -86,29 +91,31 @@ function serializeTelefunctionResult(runContext: {
   }
   const mux = getChannelMux()
   function registerChannel(channel: ServerChannel<any, any>) {
-    mux.registerChannel(channel as ServerChannel<unknown, unknown>)
     channel._setResponseAbort(requestContext.responseAbort.abort)
-    channel.onClose(requestContext.trackPending())
     channel._validators = makeValidators(channel, valueShields, shieldCtx)
+    registrations.push(() => {
+      mux.registerChannel(channel as ServerChannel<unknown, unknown>)
+      channel.onClose(requestContext.trackPending())
+    })
   }
   function sendStream(createProducer: () => StreamingProducer) {
+    // Once the response goes, the pump or the HTTP body ends the stream.
+    const stream = {
+      close() {},
+      abort(abortError: AbortError) {
+        if (!goes) createProducer().cancel(abortError)
+      },
+    }
     if (useChannelPump) {
-      const channelId = pumpProducerToChannel(createProducer, runContext, requestContext.trackPending())
-      return {
-        metadata: { channelId },
-        // Pump self-manages lifecycle: close in finally, abort via responseAbort.errorPromise race.
-        close() {},
-        abort() {},
-      }
+      const channel = new ServerChannel<never, never>()
+      registrations.push(() =>
+        pumpProducerToChannel(channel, createProducer, runContext, requestContext.trackPending()),
+      )
+      return { metadata: { channelId: channel.id }, ...stream }
     }
     const index = nextStreamingIndex++
     streamingValues.push({ createProducer, index })
-    return {
-      metadata: { __index: index },
-      // Inline streaming lifecycle is managed by the HTTP body stream.
-      close() {},
-      abort() {},
-    }
+    return { metadata: { __index: index }, ...stream }
   }
   function createChannel<ClientToServer, ServerToClient>(opts?: { ack?: boolean }) {
     const channel = new ServerChannel<ClientToServer, ServerToClient>(opts)
@@ -134,6 +141,7 @@ function serializeTelefunctionResult(runContext: {
   try {
     httpResponseBody = stringify(bodyValue, { forbidReactElements: true, replacer })
   } catch (err: unknown) {
+    requestContext.responseAbort.abort()
     assert(hasProp(err, 'message', 'string'))
     assertUsage(
       false,
@@ -145,10 +153,10 @@ function serializeTelefunctionResult(runContext: {
     )
   }
 
-  if (useChannelPump || streamingValues.length === 0) {
-    requestContext.markComplete()
-    return { type: 'text', body: httpResponseBody }
-  }
+  goes = true
+  for (const register of registrations) register()
+
+  if (useChannelPump || streamingValues.length === 0) return { type: 'text', body: httpResponseBody }
 
   const telefuncId: TelefuncId = {
     telefunctionName: runContext.telefunctionName,
@@ -161,7 +169,6 @@ function serializeTelefunctionResult(runContext: {
       : (frame: Uint8Array<ArrayBuffer>) => frame
 
   const onStreamComplete = requestContext.trackPending()
-  requestContext.markComplete()
 
   return {
     type: 'streaming',

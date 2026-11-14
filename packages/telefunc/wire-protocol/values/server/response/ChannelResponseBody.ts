@@ -27,7 +27,7 @@ type ChannelPumpRunContext = {
 /**
  * Pump a single producer's chunks through a dedicated ServerChannel.
  *
- * Creates the channel, registers it, waits for client connection, then streams
+ * Registers the channel, waits for client connection, then streams
  * chunks with proper context restoration and cleanup.
  *
  * Each binary send is tagged: `[TAG_DATA][payload]` for data (`[TAG_PART]` for a chunk's part before its last), `[TAG_ERROR][errorPayload]`
@@ -43,15 +43,13 @@ type ChannelPumpRunContext = {
  * `cancelledPromise` is needed because async generator `.return()` is queued behind
  * a pending `.next()` — it can't interrupt an in-progress `await` (e.g. `sleep()`).
  * Without it the pump would stay stuck until the generator's current await resolves.
- *
- * Returns the channelId for inclusion in serialized metadata.
  */
 function pumpProducerToChannel(
+  channel: ServerChannel<never, never>,
   createProducer: () => StreamingProducer,
   runContext: ChannelPumpRunContext,
   onComplete?: () => void,
-): string {
-  const channel = new ServerChannel<never, never>()
+): void {
   getChannelMux().registerChannel(channel as unknown as ServerChannel<unknown, unknown>)
   const producer = createProducer()
 
@@ -95,6 +93,4 @@ function pumpProducerToChannel(
   }
 
   void runChannelPump()
-
-  return channel.id
 }
