@@ -6,6 +6,7 @@ import {
   accessOf,
   callsVolatile,
   readsOfCalls,
+  tablesChangedBy,
   writesOfCalls,
   union,
   WRITES_OF_ANY_KIND,
@@ -14,6 +15,7 @@ import {
   type Table,
   type TableSet,
   type Write,
+  type Written,
 } from '../catalog.js'
 import type { Column } from '../match/values.js'
 import { names, quote, tablesIn, walk, type Node, type RangeVar } from '../tree.js'
@@ -30,7 +32,6 @@ type CatalogRow = {
   functions: [
     name: string,
     writing: boolean,
-    volatile: boolean,
     defaults: string | null,
     argumentNames: string[] | null,
     argumentModes: string[] | null,
@@ -103,7 +104,7 @@ select json_build_object(
   'searchPath', current_schemas(false),
   'serverVersion', current_setting('server_version_num')::int,
   'cOrdering', (select datlocprovider in ('c', 'b') and datcollate in ('C', 'POSIX') from pg_database where datname = current_database()),
-  'functions', (select coalesce(json_agg(json_build_array(p.proname, ${WRITING}, p.provolatile = 'v',
+  'functions', (select coalesce(json_agg(json_build_array(p.proname, ${WRITING},
       pg_get_expr(p.proargdefaults, 0), p.proargnames, p.proargmodes, p.pronargs, p.provariadic <> 0,
       case when l.lanname = 'sql' and p.prokind = 'f' then pg_get_functiondef(p.oid) end,
       (select json_agg(json_build_array(s.proname, sn.nspname = 'pg_catalog' and sl.lanname in ('internal', 'c'),
@@ -184,8 +185,52 @@ const RULE_EVENTS: Record<string, Write> = { '2': 'update', '3': 'insert', '4': 
 const PARSE_STATEMENT = 0
 const PARSE_EXPRESSION = 2
 
-/** Statements a trigger may run that change no table but those their nodes name (`WRITES`). */
-const KNOWN_STATEMENTS = new Set(['SelectStmt', 'InsertStmt', 'UpdateStmt', 'DeleteStmt', 'MergeStmt', 'NotifyStmt'])
+/** A function's or a trigger's statements, parsed, and whether they name every table it reads (`readsNamed`). */
+type Body = { statements: Node[]; readsNamed: boolean }
+
+/** Statements a trigger or a function may run that change no table but those their nodes name (`WRITES`): a SQL-standard
+ *  body's `RETURN …` returns a value. */
+const KNOWN_STATEMENTS = new Set([
+  'SelectStmt',
+  'InsertStmt',
+  'UpdateStmt',
+  'DeleteStmt',
+  'MergeStmt',
+  'NotifyStmt',
+  'ReturnStmt',
+])
+/** The PL/pgSQL statements whose reads are all in the SQL of their expressions (`PLpgSQL_expr`), which `statementsOf()`
+ *  reads. A body running any other reads tables its SQL may not name (`Body.readsNamed`): `FETCH` and `MOVE` run the
+ *  query of a cursor that may have been opened elsewhere and passed in, and `EXECUTE` and `FOR … IN EXECUTE` build
+ *  theirs at run time. */
+const READ_PLPGSQL_STATEMENTS = new Set(
+  [
+    'block',
+    'assign',
+    'if',
+    'case',
+    'loop',
+    'while',
+    'fori',
+    'fors',
+    'forc',
+    'foreach_a',
+    'exit',
+    'return',
+    'return_next',
+    'return_query',
+    'raise',
+    'assert',
+    'execsql',
+    'getdiag',
+    'open',
+    'close',
+    'perform',
+    'call',
+    'commit',
+    'rollback',
+  ].map((kind) => `PLpgSQL_stmt_${kind}`),
+)
 const WRITES = new Set(['InsertStmt', 'UpdateStmt', 'DeleteStmt', 'MergeStmt'])
 /** The argument modes (`pg_proc.proargmodes`) of input arguments: `IN`, `INOUT`, `VARIADIC`. */
 const INPUT_MODES = new Set(['i', 'b', 'v'])
@@ -203,14 +248,14 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
   }
   const writingFunctions = new Set(row.functions.filter(([, writing]) => writing).map(([name]) => name))
   /** The functions whose defaults don't parse: a call of one may run anything. */
-  const unreadDefaults: string[] = []
+  const unreadDefaults = new Set<string>()
   const overloads = new Map<string, Overload[]>()
-  for (const [name, , , defaultsText, argumentNames, argumentModes, inputCount, variadic] of row.functions) {
+  for (const [name, , defaultsText, argumentNames, argumentModes, inputCount, variadic] of row.functions) {
     const parsed = defaultsText === null ? [] : parseStatements(`SELECT ${defaultsText}`)
     // Defaults that don't parse may call anything.
     if (!parsed) {
       writingFunctions.add(name)
-      unreadDefaults.push(name)
+      unreadDefaults.add(name)
     }
     const defaults = ((parsed?.[0]?.SelectStmt.targetList ?? []) as Node[]).map((target) => target.ResTarget.val)
     const inputs = argumentNames
@@ -245,7 +290,7 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
     volatileFunctions: new Set([
       ...row.volatileFunctions,
       ...row.functions
-        .filter(([, , , , , , , , , support]) => support?.some(([, , volatile]) => volatile))
+        .filter(([, , , , , , , , support]) => support?.some(([, , volatile]) => volatile))
         .map(([name]) => name),
       ...unreadDefaults,
     ]),
@@ -306,24 +351,24 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
   }
   // Second pass: these name other tables, which must all be known first. A function's body resolves names by the
   // `search_path` of the session that calls it: any schema's table may be meant.
-  const functionWrites = writesOfFunctions(row.functions, anySchema, catalog)
-  addWritingAggregates(row.functions, catalog, functionWrites)
-  for (const name of unreadDefaults) functionWrites.set(name, 'all')
+  const { reads: functionReads, writes: functionWrites } = effectsOfFunctions(
+    row.functions,
+    unreadDefaults,
+    anySchema,
+    catalog,
+  )
+  catalog.functionReads = functionReads
   catalog.functionWrites = functionWrites
-  catalog.functionReads = readsOfFunctions(row.functions, anySchema, catalog)
   for (const t of row.tables) {
-    const table = tables.get(`${t.schema}.${t.name}`)!
-    const reads = [...(t.view ? [t.view] : []), ...(t.rls ? (t.policies ?? []).map((p) => `select 1 where ${p}`) : [])]
-    // Printed for the loading session: its `search_path` resolves them.
-    const parsed = reads.map((sql) => parseStatements(sql))
-    table.alsoReads = union(parsed.map((statements) => tablesReadBy(statements, (t) => catalog.named(t), catalog)))
-    table.volatile = parsed.some((statements) => !statements || callsVolatile(statements, catalog))
-    const writes = union(parsed.map((statements) => (statements ? writesOfCalls(statements, catalog) : 'all')))
-    if (writes === 'all' || writes.size > 0) table.writes = writes
-    const { alsoWrites } = table
+    const { alsoWrites } = tables.get(`${t.schema}.${t.name}`)!
     for (const [type, language, definition] of t.triggers ?? []) {
       // A trigger resolves names with the `search_path` of the session that fires it: any schema's table may be meant.
-      const written = tablesWrittenByBody(language, definition, anySchema, catalog, functionWrites)
+      const written = tablesWrittenBy(
+        statementsOfBody(language, definition)?.statements ?? null,
+        anySchema,
+        catalog,
+        functionWrites,
+      )
       for (const [bit, write] of TRIGGER_EVENTS) if (type & bit) alsoWrites[write] = union([alsoWrites[write], written])
     }
     for (const [event, definition] of t.rules ?? []) {
@@ -339,72 +384,98 @@ async function loadCatalog(query: (text: string) => Promise<string>): Promise<Ca
     // A write to a view writes its tables, or what its rules and `INSTEAD OF` triggers write.
     if (t.view) for (const write of WRITES_OF_ANY_KIND) alsoWrites[write] = 'all'
   }
+  // A function's writes change what writing those tables changes, as a write of the app's does: what their triggers and
+  // rules write, and the rows their foreign keys' actions change. The views and policies calling one write that too.
+  for (const [name, written] of functionWrites) {
+    if (written === 'all') continue
+    const changes: Written[] = [...written].map((id) => [id, undefined])
+    functionWrites.set(name, tablesChangedBy(changes, catalog))
+  }
+  for (const t of row.tables) {
+    const table = tables.get(`${t.schema}.${t.name}`)!
+    const reads = [...(t.view ? [t.view] : []), ...(t.rls ? (t.policies ?? []).map((p) => `select 1 where ${p}`) : [])]
+    // Printed for the loading session: its `search_path` resolves them.
+    const parsed = reads.map((sql) => parseStatements(sql))
+    table.alsoReads = union(parsed.map((statements) => tablesReadBy(statements, (t) => catalog.named(t), catalog)))
+    table.volatile = parsed.some((statements) => !statements || callsVolatile(statements, catalog))
+    const writes = union(parsed.map((statements) => (statements ? writesOfCalls(statements, catalog) : 'all')))
+    if (writes === 'all' || writes.size > 0) table.writes = writes
+  }
   return catalog
 }
 
-/** What a call of each function of the app's reads (`Catalog.functionReads`): the tables the bodies of the functions of
- *  its name name. Any table when one isn't in SQL, calls a function of the app's, or names a table the catalog doesn't
- *  know (or a `WITH` query's name). An aggregate reads what its support functions read; Postgres's own C functions read
- *  nothing. */
-function readsOfFunctions(
+/** What a call of each function of the app's reads and writes (`Catalog.functionReads`, `Catalog.functionWrites`):
+ *  what the bodies of the functions of its name read and write, in SQL or PL/pgSQL (`tablesReadByBody()`,
+ *  `tablesWrittenBy()`), with what the app's functions they call read and write. Any table for one in another language,
+ *  and any table written for one whose defaults don't parse (`unreadDefaults`). An aggregate reads and writes what its
+ *  support functions do, and is one of `Catalog.writingFunctions` when it writes a table: Postgres records every
+ *  aggregate as written in C. Calls may go round: each function's tables grow from none until no call adds one. */
+function effectsOfFunctions(
   functions: CatalogRow['functions'],
+  unreadDefaults: ReadonlySet<string>,
   named: (table: RangeVar) => Table[],
   catalog: Catalog,
-): Map<string, TableSet> {
+): { reads: Map<string, TableSet>; writes: Map<string, TableSet> } {
   const reads = new Map<string, TableSet>()
-  for (const [name, , , , , , , , definition, support] of functions) {
-    if (support) continue
-    const body = definition === null ? null : bodyOf(definition)
-    const tables =
-      body && !catalog.calls(body).some((called) => catalog.functions.has(called)) && tablesIn(body).map(named)
-    const read = tables && !tables.some((found) => found.length === 0) ? new Set(tables.flat().map((t) => t.id)) : 'all'
-    reads.set(name, union([reads.get(name) ?? new Set(), read]))
-  }
-  for (const [name, , , , , , , , , support] of functions) {
-    if (!support) continue
-    const read = union(support.map(([called, ownC]) => (ownC ? new Set<string>() : (reads.get(called) ?? 'all'))))
-    reads.set(name, union([reads.get(name) ?? new Set(), read]))
-  }
-  return reads
-}
-
-/** Makes each aggregate whose support functions write a table (`functionWrites`) one of `Catalog.writingFunctions`,
- *  writing those: Postgres records every aggregate as written in C. An aggregate whose support functions write no
- *  table stays a read. */
-function addWritingAggregates(
-  functions: CatalogRow['functions'],
-  catalog: Catalog,
-  functionWrites: Map<string, TableSet>,
-): void {
-  for (const [name, , , , , , , , , support] of functions) {
-    const writers = (support ?? []).filter(([called, ownC]) => !ownC && catalog.writingFunctions.has(called))
-    const written = union(writers.map(([called]) => functionWrites.get(called) ?? 'all'))
-    if (written !== 'all' && written.size === 0) continue
-    catalog.writingFunctions.add(name)
-    functionWrites.set(name, union([functionWrites.get(name) ?? new Set(), written]))
-  }
-}
-
-/** What a call of each of the app's writing functions writes: the tables the bodies of the functions of its name write,
- *  in SQL or PL/pgSQL (`tablesWrittenByBody`). Any table when one is in another language, or its body calls a writing
- *  function of the app's. */
-function writesOfFunctions(
-  functions: CatalogRow['functions'],
-  named: (table: RangeVar) => Table[],
-  catalog: Catalog,
-): Map<string, TableSet> {
   const writes = new Map<string, TableSet>()
-  for (const [name, writing, , , , , , , definition, , plpgsql] of functions) {
-    if (!writing) continue
-    const written =
-      definition !== null
-        ? tablesWrittenBy(bodyOf(definition), named, catalog, new Map())
-        : plpgsql !== null
-          ? tablesWrittenByBody('plpgsql', plpgsql, named, catalog, new Map())
-          : 'all'
-    writes.set(name, union([writes.get(name) ?? new Set(), written]))
+  /** What each function reads and writes, given what the functions it calls read and write so far. */
+  const effects: [name: string, read: () => TableSet, written: () => TableSet][] = []
+  for (const [name, writing, , , , , , definition, support, plpgsql] of functions) {
+    // Parsed once: each pass walks them again.
+    const body =
+      definition !== null ? bodyOf(definition) : plpgsql !== null ? statementsOfBody('plpgsql', plpgsql) : null
+    const read = support ? () => readBySupport(support, reads) : () => tablesReadByBody(body, named, catalog, reads)
+    const written: () => TableSet = unreadDefaults.has(name)
+      ? () => 'all'
+      : support
+        ? () => writtenBySupport(support, catalog, writes)
+        : writing
+          ? () => tablesWrittenBy(body?.statements ?? null, named, catalog, writes)
+          : () => new Set()
+    effects.push([name, read, written])
   }
-  return writes
+  for (const [name] of effects) {
+    reads.set(name, new Set())
+    writes.set(name, new Set())
+  }
+  for (let grew = true; grew; ) {
+    grew = false
+    for (const [name, read, written] of effects) {
+      if (grown(reads, name, read())) grew = true
+      if (grown(writes, name, written())) {
+        catalog.writingFunctions.add(name)
+        grew = true
+      }
+    }
+  }
+  return { reads, writes }
+}
+
+/** Adds `tables` to the tables `sets` holds for `name`: whether they grew. */
+function grown(sets: Map<string, TableSet>, name: string, tables: TableSet): boolean {
+  const before = sets.get(name)!
+  const after = union([before, tables])
+  if (after === before || (after !== 'all' && before !== 'all' && after.size === before.size)) return false
+  sets.set(name, after)
+  return true
+}
+
+/** What an aggregate's support functions of the app's read: Postgres's own C functions read nothing. */
+function readBySupport(
+  support: NonNullable<CatalogRow['functions'][number][8]>,
+  reads: Map<string, TableSet>,
+): TableSet {
+  return union(support.map(([called, ownC]) => (ownC ? new Set<string>() : (reads.get(called) ?? 'all'))))
+}
+
+/** What an aggregate's support functions of the app's write. */
+function writtenBySupport(
+  support: NonNullable<CatalogRow['functions'][number][8]>,
+  catalog: Catalog,
+  writes: Map<string, TableSet>,
+): TableSet {
+  const writers = support.filter(([called, ownC]) => !ownC && catalog.writingFunctions.has(called))
+  return union(writers.map(([called]) => writes.get(called) ?? 'all'))
 }
 
 /** What a rule writes besides its table: what its `DO ALSO` actions write. Every table for a `DO INSTEAD` rule, whose
@@ -417,13 +488,20 @@ function tablesWrittenByRule(definition: string, catalog: Catalog, functionWrite
 
 /** The statements of a SQL function's `CREATE FUNCTION`: its SQL-standard body (`RETURN …`, `BEGIN ATOMIC …`), or
  *  those of its `AS` text. */
-function bodyOf(definition: string): Node[] | null {
+function bodyOf(definition: string): Body | null {
   const create = parseStatements(definition)?.[0]?.CreateFunctionStmt
   if (!create) return null
-  if (create.sql_body) return [create.sql_body]
+  const body = create.sql_body
+  // `BEGIN ATOMIC`'s statements are in a list in a list.
+  if (body)
+    return {
+      statements: body.List ? (body.List.items as Node[]).flatMap((list) => list.List.items ?? []) : [body],
+      readsNamed: true,
+    }
   const as = ((create.options ?? []) as Node[]).find((option) => option.DefElem.defname === 'as')
   const source = as?.DefElem.arg.List.items[0]?.String?.sval
-  return typeof source === 'string' ? parseStatements(source) : null
+  const statements = typeof source === 'string' ? parseStatements(source) : null
+  return statements && { statements, readsNamed: true }
 }
 
 /** The functions called below `node`, with those the defaults of the arguments they leave out call, theirs too. */
@@ -471,26 +549,42 @@ function tablesReadBy(statements: Node[] | null, named: (table: RangeVar) => Tab
   return union([tables, readsOfCalls(statements, catalog)])
 }
 
-/**
- * What a function in `language` may write, a trigger's or one of the app's, by its `CREATE FUNCTION` (`definition`): the
- * tables its statements write. Every table when that can't be told: it runs SQL built at run time, isn't written in
- * PL/pgSQL, or one of its statements can't be told (`tablesWrittenBy`).
- */
-function tablesWrittenByBody(
-  language: string,
-  definition: string,
+/** The tables a function's `body` reads, with what the app's functions it calls read (`functionReads`). Every table
+ *  when that can't be told: it doesn't parse, reads tables its SQL may not name, or names a table the catalog doesn't
+ *  know (or a `WITH` query's name). */
+function tablesReadByBody(
+  body: Body | null,
   named: (table: RangeVar) => Table[],
   catalog: Catalog,
-  functionWrites: Map<string, TableSet>,
+  functionReads: Map<string, TableSet>,
 ): TableSet {
-  const statements = language === 'plpgsql' ? statementsOf(definition) : null
-  if (!statements) return 'all'
-  return union(statements.map((sql) => tablesWrittenBy(parseStatements(sql), named, catalog, functionWrites)))
+  if (!body?.readsNamed) return 'all'
+  const { statements } = body
+  const tables = tablesIn(statements).map(named)
+  if (tables.some((found) => found.length === 0)) return 'all'
+  const called = catalog.calls(statements).filter((name) => catalog.functions.has(name))
+  return union([
+    new Set(tables.flat().map((table) => table.id)),
+    ...called.map((name) => functionReads.get(name) ?? 'all'),
+  ])
+}
+
+/**
+ * The statements a function in `language` runs, a trigger's or one of the app's, by its `CREATE FUNCTION` (`definition`),
+ * parsed. `null`, every table to `tablesReadByBody()` and `tablesWrittenBy()`, when they can't be told: it runs SQL built
+ * at run time, isn't written in PL/pgSQL, or one of its statements doesn't parse.
+ */
+function statementsOfBody(language: string, definition: string): Body | null {
+  const shown = language === 'plpgsql' ? statementsOf(definition) : null
+  if (!shown) return null
+  const parsed = shown.sql.map((sql) => parseStatements(sql))
+  return parsed.includes(null) ? null : { statements: (parsed as Node[][]).flat(), readsNamed: shown.readsNamed }
 }
 
 /** The SQL a PL/pgSQL function runs, every expression as a `SELECT`, from its `CREATE FUNCTION`, whose signature
- *  declares its parameters, its result columns and how it returns. `null` when it runs SQL built at run time. */
-function statementsOf(definition: string): string[] | null {
+ *  declares its parameters, its result columns and how it returns, and whether it names every table the function reads
+ *  (`READ_PLPGSQL_STATEMENTS`). `null` when it runs SQL built at run time. */
+function statementsOf(definition: string): { sql: string[]; readsNamed: boolean } | null {
   let parsed: unknown
   try {
     parsed = parsePlPgSQLSync(definition)
@@ -499,14 +593,16 @@ function statementsOf(definition: string): string[] | null {
   }
   const statements: string[] = []
   let dynamic = false
+  let readsNamed = true
   walk(parsed, (key, value) => {
     if (key === 'PLpgSQL_stmt_dynexecute' || key === 'PLpgSQL_stmt_dynfors' || key === 'dynquery') dynamic = true
+    if (key.startsWith('PLpgSQL_stmt_') && !READ_PLPGSQL_STATEMENTS.has(key)) readsNamed = false
     if (key !== 'PLpgSQL_expr') return
     const { query, parseMode } = value as { query: string; parseMode: number }
     if (parseMode === PARSE_STATEMENT) statements.push(query)
     else statements.push(`SELECT ${parseMode === PARSE_EXPRESSION ? query : query.replace(/^[^:=]*:?=/, '')}`)
   })
-  return dynamic ? null : statements
+  return dynamic ? null : { sql: statements, readsNamed }
 }
 
 /**

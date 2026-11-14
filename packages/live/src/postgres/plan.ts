@@ -49,7 +49,7 @@ function planOne(statement: Node, text: string | undefined, catalog: Catalog): P
   if (kind === 'TransactionStmt') return planTransaction(node)
   const functions = catalog.calls(node)
   const writingCte = ((node.withClause?.ctes ?? []) as Node[]).some((c) => !c.CommonTableExpr.ctequery.SelectStmt)
-  // A read writes what the volatile functions of the app's it calls write (`writesOfCalls()`). Any other statement
+  // A read writes what the functions of the app's it calls write (`writesOfCalls()`). Any other statement
   // calling a writing function may write any table.
   const read = kind === 'SelectStmt' && !node.intoClause && !writingCte
   const anyWriter = functions.some((name) => catalog.writingFunctions.has(name))

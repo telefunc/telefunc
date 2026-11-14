@@ -357,6 +357,166 @@ describe('a read calling a SQL function of the app that writes', () => {
   })
 })
 
+describe('a read calling a STABLE function of the app', () => {
+  it('announces what the functions it calls write, and only that', async () => {
+    const pglite = await emptyPGlite()
+    await pglite.exec(`
+      create table settled (id int primary key, n int);
+      insert into settled values (1, 0);
+      create table c (id int);
+      create function settle() returns void language sql as $f$ update settled set n = n + 1 $f$;
+      create function settle_stably() returns void language sql stable as $f$ select settle() $f$;`)
+    liveDatabaseOf(pglite, {})
+    const reads = await Promise.all([watched(pglite, 'select n from settled'), watched(pglite, 'select * from c')])
+    await written(pglite, 'select settle_stably()')
+    expect((await pglite.query('select n from settled')).rows).toEqual([{ n: 1 }])
+    expect(reads.map((read) => read.stale())).toEqual([1, 0])
+    await pglite.close()
+  })
+
+  it('stays a read when the functions it calls write nothing', async () => {
+    const pglite = await emptyPGlite()
+    await pglite.exec(`
+      create function shout(t text) returns text language sql stable as $f$ select upper(t) $f$;
+      create function greet(t text) returns text language sql stable as $f$ select shout(t) || '!' $f$;`)
+    liveDatabaseOf(pglite, {})
+    const read = await watched(pglite, "select greet('hi') as g")
+    expect(read.rows).toEqual([{ g: 'HI!' }])
+    await pglite.close()
+  })
+
+  it('announces what functions calling each other write', async () => {
+    const pglite = await emptyPGlite()
+    await pglite.exec(`
+      create table counters (id int primary key, n int);
+      insert into counters values (1, 0);
+      create table c (id int);
+      create function ping(depth int) returns int language plpgsql stable as $f$
+        begin if depth > 0 then perform pong(depth - 1); end if; return depth; end $f$;
+      create function pong(depth int) returns int language plpgsql as $f$
+        begin
+          update counters set n = n + 1 where id = 1;
+          if depth > 0 then perform ping(depth - 1); end if;
+          return depth;
+        end $f$;`)
+    liveDatabaseOf(pglite, {})
+    const reads = await Promise.all([watched(pglite, 'select n from counters'), watched(pglite, 'select * from c')])
+    await written(pglite, 'select ping(3)')
+    expect((await pglite.query('select n from counters')).rows).toEqual([{ n: 2 }])
+    expect(reads.map((read) => read.stale())).toEqual([1, 0])
+    await pglite.close()
+  })
+
+  // A view calling a writer reaches its tables' readers; a read of helpers reading no table reaches no view.
+  it.each([
+    ['SQL', `create function shout(t text) returns text language sql stable as $f$ select upper(t) $f$`],
+    [
+      'PL/pgSQL',
+      `create function shout(t text) returns text language plpgsql stable as $f$ begin return upper(t); end $f$`,
+    ],
+  ])('stays a read through %s helpers while a view of the app writes', async (_, shout) => {
+    const pglite = await emptyPGlite()
+    await pglite.exec(`
+      create table a (n int);
+      insert into a values (0);
+      create function writer() returns int language sql as $f$ update a set n = n + 1 returning n $f$;
+      create view written as select writer() as n;
+      ${shout};
+      create function greet(t text) returns text language sql stable as $f$ select shout(t) || '!' $f$;`)
+    liveDatabaseOf(pglite, {})
+    expect((await watched(pglite, "select greet('hi') as g")).rows).toEqual([{ g: 'HI!' }])
+    await pglite.close()
+  })
+})
+
+describe('a read calling a function of the app that writes a table with side effects', () => {
+  const bodies = [
+    ['a BEGIN ATOMIC body', 'begin atomic update a set n = n + 1 where id = 1; select 1; end'],
+    ['an AS text', 'as $f$ update a set n = n + 1 where id = 1; select 1 $f$'],
+  ]
+  const calls = [
+    ['in the statement', 'select bump()'],
+    ['through a STABLE function', 'select bump_stably()'],
+    ['through a view', 'select * from bumped'],
+  ]
+  it.each(bodies.flatMap(([bodyName, body]) => calls.map(([call, text]) => [bodyName, call, body, text])))(
+    "announces what the table's trigger writes, with %s, called %s",
+    async (_, __, body, text) => {
+      const pglite = await emptyPGlite()
+      await pglite.exec(`
+        create table a (id int primary key, n int);
+        insert into a values (1, 0);
+        create table b (id int primary key, n int);
+        insert into b values (1, 0);
+        create table c (id int);
+        create function log_a() returns trigger language plpgsql as $f$
+          begin update b set n = n + 1; return new; end $f$;
+        create trigger a_logged after update on a for each row execute function log_a();
+        create function bump() returns int language sql ${body};
+        create function bump_stably() returns int language sql stable as $f$ select bump() $f$;
+        create view bumped as select bump();`)
+      liveDatabaseOf(pglite, {})
+      const reads = await Promise.all(['a', 'b', 'c'].map((table) => watched(pglite, `select * from ${table}`)))
+      await written(pglite, text)
+      expect((await pglite.query('select n from b')).rows).toEqual([{ n: 1 }])
+      expect(reads.map((read) => read.stale())).toEqual([1, 1, 0])
+      await pglite.close()
+    },
+  )
+
+  it('announces the rows its delete cascades to', async () => {
+    const pglite = await emptyPGlite()
+    await pglite.exec(`
+      create table a (id int primary key);
+      insert into a values (1);
+      create table b (id int references a (id) on delete cascade);
+      insert into b values (1);
+      create table c (id int);
+      create function empty_a() returns void language sql begin atomic delete from a; end;`)
+    liveDatabaseOf(pglite, {})
+    const reads = await Promise.all(['a', 'b', 'c'].map((table) => watched(pglite, `select * from ${table}`)))
+    await written(pglite, 'select empty_a()')
+    expect((await pglite.query('select * from b')).rows).toEqual([])
+    expect(reads.map((read) => read.stale())).toEqual([1, 1, 0])
+    await pglite.close()
+  })
+})
+
+describe('a SQL function of the app with a SQL-standard body', () => {
+  // Its tables named, a call runs as sent: in no transaction of ours that reads its locks to learn them.
+  it('announces what its BEGIN ATOMIC body writes, as the catalog names it', async () => {
+    const pglite = await emptyPGlite()
+    await pglite.exec(`
+      create table a (id int primary key, n int);
+      insert into a values (1, 0);
+      create table c (id int);
+      create function bump() returns void language sql begin atomic update a set n = n + 1 where id = 1; end;`)
+    let transactions = 0
+    const transaction = pglite.transaction.bind(pglite)
+    pglite.transaction = ((...args: Parameters<typeof transaction>) => {
+      transactions++
+      return transaction(...args)
+    }) as typeof transaction
+    liveDatabaseOf(pglite, {})
+    const reads = await Promise.all([watched(pglite, 'select n from a'), watched(pglite, 'select * from c')])
+    await written(pglite, 'select bump()')
+    expect(reads.map((read) => read.stale())).toEqual([1, 0])
+    expect(transactions).toBe(0)
+    await pglite.close()
+  })
+
+  it('stays a read when its RETURN body writes nothing', async () => {
+    const pglite = await emptyPGlite()
+    await pglite.exec(`
+      create table a (id int);
+      insert into a values (1);
+      create function n() returns int language sql stable return (select count(*)::int from a);`)
+    liveDatabaseOf(pglite, {})
+    expect((await watched(pglite, 'select n()')).rows).toEqual([{ n: 1 }])
+    await pglite.close()
+  })
+})
+
 describe('a live read reaching a PL/pgSQL function of the app that only reads', () => {
   it.each([
     ['called in the statement', 'select read_n() as n'],
@@ -396,6 +556,24 @@ describe('a live read reaching a PL/pgSQL function of the app that only reads', 
     await pglite.query('reset role')
     expect(read.rows).toEqual([{ id: 7 }])
     await written(pglite, 'delete from members')
+    expect(read.stale()).toBe(1)
+    await pglite.close()
+  })
+  // The cursor's query reads `a`, which the function's body doesn't name.
+  it('watches every table when it fetches from a cursor passed to it', async () => {
+    const pglite = await emptyPGlite()
+    await pglite.exec(`
+      create table a (n int);
+      insert into a values (10);
+      create function read_cursor(c refcursor) returns int language plpgsql stable as $f$
+        declare n int;
+        begin fetch next from c into n; return n; end $f$;`)
+    liveDatabaseOf(pglite, {})
+    await pglite.exec('declare data cursor with hold for select n from a')
+    const read = await watched(pglite, "select read_cursor('data') as n")
+    await pglite.exec('close data')
+    expect(read.rows).toEqual([{ n: 10 }])
+    await written(pglite, 'update a set n = 20')
     expect(read.stale()).toBe(1)
     await pglite.close()
   })

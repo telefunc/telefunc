@@ -46,7 +46,7 @@ type Table = {
   /** A read of it may call a volatile function (`Catalog.volatileFunctions`): its view or its row-level security
    *  policies call one, or can't be read. */
   volatile?: boolean
-  /** A read of it writes these: what the volatile functions its view or its row-level security policies call write
+  /** A read of it writes these: what the functions its view or its row-level security policies call write
    *  (`writesOfCalls()`), every table when those can't be read. */
   writes?: TableSet
   /** What each kind of write to this table also changes: the tables its triggers write. Every table (`'all'`) when the
@@ -87,15 +87,16 @@ type Catalog = {
   /** User-defined functions: a statement calling one may read any table (but those `functionReads` names), and write
    *  any table when it's one of `writingFunctions`. */
   functions: Set<string>
-  /** The tables a call of a function of `functions` reads, when its body tells (Postgres: every function of that name
-   *  is in SQL, calling none of the app's). */
+  /** The tables a call of a function of `functions` reads, with those the functions it calls read, when their bodies tell
+   *  (Postgres: every function of that name is in SQL or PL/pgSQL, naming every table it reads). */
   functionReads?: Map<string, TableSet>
   /** The functions in SQL or a procedural language: a write calling one, or firing a trigger, rule or default that
    *  calls one, may write any table, whatever the function's volatility (a `STABLE` function's body may call a
    *  volatile one). A function in C (`internal` included: `uuid_generate_v4()`) is taken to compute a value. */
   writingFunctions: Set<string>
-  /** The tables a call of a function of `writingFunctions` writes, when its body tells (Postgres: every function of
-   *  that name is in SQL or PL/pgSQL, building no SQL at run time). */
+  /** The tables a call of a function of `writingFunctions` changes, when its body tells: those it writes, and those
+   *  writing them changes (`tablesChangedBy()`). Postgres: every function of that name is in SQL or PL/pgSQL, building
+   *  no SQL at run time. */
   functionWrites?: Map<string, TableSet>
   /** The functions `node` calls, with those the defaults of the arguments they leave out call: the caller evaluates
    *  those. */
@@ -210,13 +211,11 @@ function readsOfCalls(node: unknown, catalog: Catalog): TableSet {
   return union(called.map((name) => catalog.functionReads?.get(name) ?? 'all'))
 }
 
-/** What the volatile functions of the app's `node` calls write (`Catalog.functionWrites`): every table for one whose
- *  body doesn't tell. Postgres refuses a write in a `STABLE` or `IMMUTABLE` function's own body: a read calling one
- *  stays a read. */
+/** What the functions of the app's `node` calls write (`Catalog.functionWrites`): every table for one whose body doesn't
+ *  tell. A `STABLE` function's own statements can't write, but the functions it calls can: a read calling one writes
+ *  what they write. */
 function writesOfCalls(node: unknown, catalog: Catalog): TableSet {
-  const called = catalog
-    .calls(node)
-    .filter((name) => catalog.writingFunctions.has(name) && catalog.volatileFunctions.has(name))
+  const called = catalog.calls(node).filter((name) => catalog.writingFunctions.has(name))
   return union(called.map((name) => catalog.functionWrites?.get(name) ?? 'all'))
 }
 
