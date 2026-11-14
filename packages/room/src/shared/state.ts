@@ -441,10 +441,11 @@ class RoomState {
     if (changeListeners) this.fireAll(changeListeners)
   }
 
-  closed(departed: MemberEntry[], cause: LeaveCause): void {
+  /** The room closed with `cause`, taking the `departed` members, which leave with `departure`. */
+  closed(departed: MemberEntry[], cause: LeaveCause, departure: LeaveCause): void {
     for (const entry of departed) {
       const leaveListeners = this.memberListeners.get(entry)?.leaveListeners
-      if (leaveListeners) this.fireAll(leaveListeners, cause)
+      if (leaveListeners) this.fireAll(leaveListeners, departure)
       this.releaseEntryListeners(entry)
     }
     this.fireAll(this.closeListeners, cause)

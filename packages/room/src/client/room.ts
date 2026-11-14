@@ -38,7 +38,7 @@ import {
   type RoomSnapshotMetadata,
   type RoomStubRequest,
 } from '../shared/protocol.js'
-import { RoomModel, type MembershipEvent, type RoomModelOwner } from '../shared/RoomModel.js'
+import { RoomModel, departureCause, type MembershipEvent, type RoomModelOwner } from '../shared/RoomModel.js'
 import { RoomState, RoomStateView, type RoomStateOwner } from '../shared/state.js'
 import { ROOM_TRACK_WANTS_MAX } from '../shared/constants.js'
 import { CLIENT_ROOM_BUG_MESSAGE, roomResultValue } from '../shared/errors.js'
@@ -165,7 +165,7 @@ class ClientRoom extends RoomStateView implements Room {
     roomViews.add(view)
     end.onClose(() => {
       roomViews.delete(view)
-      this.applyClosed('disconnected')
+      this.applyClosed({ type: 'disconnected' })
     })
     end.onDisconnect(() => {
       for (const local of this.localParticipants.values()) local._onDisconnected()
@@ -213,7 +213,7 @@ class ClientRoom extends RoomStateView implements Room {
       })
       const closedCause = this.model.closedCause
       if (closedCause) {
-        participant._onLeft(closedCause)
+        participant._onLeft(departureCause(closedCause))
         return participant
       }
       this.localParticipants.set(id, participant)
@@ -304,7 +304,7 @@ class ClientRoom extends RoomStateView implements Room {
         this.model.applyRoomUpdate(event)
         return
       case 'closed':
-        this.applyClosed('closed')
+        this.applyClosed(event.cause === 'removed' ? leaveCauseFromWire(event) : { type: 'closed' })
         return
       case 'announce':
         this._state.applyAnnounce(event.data, { key: this.id, seq: rawInfo.seq, timestamp: rawInfo.timestamp })
@@ -418,12 +418,11 @@ class ClientRoom extends RoomStateView implements Room {
     this.localParticipants.get(id)?._acceptMeta(accepted)
   }
 
-  private applyClosed(causeType: 'closed' | 'disconnected'): void {
-    const cause: LeaveCause = { type: causeType }
+  private applyClosed(cause: LeaveCause): void {
     if (!this.model.applyClosed(cause)) return
     this._state.detachFields()
     // Local participants end after onClose, as on the server.
-    for (const local of this.localParticipants.values()) local._onLeft(cause)
+    for (const local of this.localParticipants.values()) local._onLeft(departureCause(cause))
     this.localParticipants.clear()
   }
 

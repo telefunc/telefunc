@@ -86,7 +86,7 @@ type AdminResult = {
 }
 
 /** What a view received after its page's participant was removed, and how often it closed. */
-type RemovedView = { text: string[]; closes: number; isClosed: boolean }
+type RemovedView = { text: string[]; closes: number; closeCause: unknown; isClosed: boolean }
 
 /** What a view received of track `cam` and of messages. */
 type OwnTrack = { text: string[]; frames: number[] }
@@ -810,16 +810,17 @@ function testRoom() {
     "room: a removed participant's page stops receiving the room it got from another call, and a page holding another participant keeps it",
     (r) => {
       const removed = { type: 'removed', reason: 'be nice' }
-      // Its participant leaves with the removal, the view gets nothing after it, and another participant on the view
-      // leaves it as a closed view's do, not as removed.
+      // Its participant leaves with the removal, the view closes with it and gets nothing after, and another participant
+      // on the view leaves it as a closed view's do, not as removed.
       expect(r.alone).deep.equal({
         text: ['0'],
         closes: 1,
+        closeCause: removed,
         isClosed: true,
         myCause: removed,
         pubCause: { type: 'closed' },
       })
-      expect(r.two).deep.equal({ text: ['still here'], closes: 0, isClosed: false })
+      expect(r.two).deep.equal({ text: ['still here'], closes: 0, closeCause: null, isClosed: false })
     },
   )
   test('room: a removal by identity closes the room on each tab holding that participant, and a tab that never joined keeps receiving', async () => {

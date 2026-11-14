@@ -588,7 +588,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
       if (stub.forgetWantsOf(id)) this.lanePlan.holderChanged(stub, [id])
     }
     this.lanePlan.memberReleased(id)
-    this.pages.closeRemoved(removedFrom)
+    this.pages.closeRemoved(removedFrom, cause)
   }
 
   /** The room closed. Runs once, after the `closed` event has been applied and relayed. */

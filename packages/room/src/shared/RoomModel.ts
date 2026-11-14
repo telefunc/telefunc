@@ -1,4 +1,4 @@
-export { RoomModel }
+export { RoomModel, departureCause }
 export type { MemberEntry, MembershipEvent, RosterRead, RoomModelOwner, ServerModelOwner }
 
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -43,6 +43,14 @@ type MemberEntry = {
 }
 
 const NO_FIELDS: Readonly<Record<string, unknown>> = Object.freeze({})
+/** A member's leave when its room closed, and how a room closes by default. */
+const CLOSED: LeaveCause = ownLeaveCause({ type: 'closed' })
+
+/** How the members a close takes leave: as the room closed, but a page's room that closed because its participant was
+ *  removed takes the others as `closed`, since none of them was. */
+function departureCause(closed: LeaveCause): LeaveCause {
+  return closed.type === 'removed' ? CLOSED : closed
+}
 
 type RoomModelOptions = {
   roomId: string
@@ -102,7 +110,7 @@ class RoomModel {
   /** Shared by the members' metas here and by the local participants of this view. */
   readonly metaRewinds: MetaRewinds = { count: 0 }
   private _rosterKnown: boolean
-  private _closedCause: LeaveCause = ownLeaveCause({ type: 'closed' })
+  private _closedCause: LeaveCause = CLOSED
   private seedCount = 0
 
   constructor(opts: RoomModelOptions) {
@@ -211,7 +219,7 @@ class RoomModel {
     const entry = newEntry(snap, this.metaRewinds)
     entry.left = true
     // A closed room has no members: one it hands out left with it.
-    entry.leaveCause = this.closed ? this._closedCause : unknownLeaveCause()
+    entry.leaveCause = this.closed ? departureCause(this._closedCause) : unknownLeaveCause()
     return entry
   }
 
@@ -357,12 +365,13 @@ class RoomModel {
 
   /** Room closed: member-level cleanup callbacks run (decoders etc.), then `onClose`. Room-level `onLeave`/`onEmpty`
    *  intentionally don't fire: `onClose` is the signal. */
-  applyClosed(cause: LeaveCause = { type: 'closed' }): boolean {
+  applyClosed(cause: LeaveCause = CLOSED): boolean {
     if (this.closed) return false
     cause = ownLeaveCause(cause)
     this._closedCause = cause
     const departed = [...this.members.values()]
     this.closed = true
+    const departure = departureCause(cause)
     this._rosterKnown = true // authoritatively empty
     this.members.clear()
     this.hiddenMembers = 0
@@ -370,9 +379,9 @@ class RoomModel {
     // State and snapshot are already closed-and-empty when cleanup callbacks run.
     for (const entry of departed) {
       entry.left = true
-      entry.leaveCause = cause
+      entry.leaveCause = departure
     }
-    for (const view of [...this.views]) view.closed(departed, cause)
+    for (const view of [...this.views]) view.closed(departed, cause, departure)
     return true
   }
 

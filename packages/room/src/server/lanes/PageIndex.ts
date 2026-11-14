@@ -3,6 +3,7 @@ export type { PageEnd }
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import type { RoomModel } from '../../shared/RoomModel.js'
+import type { LeaveCause } from '../../types.js'
 import type { WhoEntry } from '../protocol.js'
 import type { BinaryWants } from './binaryWants.js'
 import type { DemandReport } from './DemandReport.js'
@@ -20,8 +21,8 @@ interface PageEnd {
   selfSuppressed?(): Iterable<string>
   /** Its page's members whose own messages it doesn't get back: one set for every end of the page, kept current. */
   atPage?(suppressed: ReadonlySet<string>): void
-  /** Its page's last participant of the room was removed. */
-  pageRemoved?(): void
+  /** Its page's last participant of the room was removed, with `cause`. */
+  pageRemoved?(cause: LeaveCause): void
 }
 
 /** A page's ends here, the participants they hold, those whose own messages none of them gets back, the token its
@@ -101,11 +102,12 @@ class PageIndex {
     return [...(this.heldAt.get(member) ?? [])]
   }
 
-  /** Closes the room's views at each of `pages` holding no participant now: the last one it held was removed. */
-  closeRemoved(pages: Page[]): void {
+  /** Closes the room's views at each of `pages` holding no participant now: the last one it held was removed, with
+   *  `cause`. */
+  closeRemoved(pages: Page[], cause: LeaveCause): void {
     for (const page of pages) {
       if (page.held.size > 0) continue
-      for (const end of [...page.ends]) end.pageRemoved?.()
+      for (const end of [...page.ends]) end.pageRemoved?.(cause)
     }
   }
 

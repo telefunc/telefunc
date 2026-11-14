@@ -2053,9 +2053,12 @@ function Room() {
       {scenario('removed', "Remove the page's participant", 'Alone, then one of two', async () => {
         /** The view's messages and closes, and the room as it is. */
         const watch = (room: RoomView) => {
-          const seen = { text: [] as unknown[], closes: 0 }
+          const seen = { text: [] as unknown[], closes: 0, closeCause: null as unknown }
           room.subscribe((data) => seen.text.push(data))
-          room.onClose(() => seen.closes++)
+          room.onClose((cause) => {
+            seen.closes++
+            seen.closeCause = cause
+          })
           return () => ({ ...seen, isClosed: room.isClosed })
         }
 

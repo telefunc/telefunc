@@ -349,7 +349,7 @@ me.onLeave((cause) => {
 })
 ```
 
-The removed participant's page stops receiving the room: `room.isClosed` is `true` and `room.onClose()` runs, unless the page holds another participant of the room. A page that never joined keeps receiving.
+The removed participant's page stops receiving the room: `room.isClosed` is `true` and `room.onClose()` runs with the removal's cause, unless the page holds another participant of the room. A page that never joined keeps receiving.
 
 > Removing doesn't keep anyone out: a telefunction that returns the room again lets them back in. Refuse them there, or in `onBeforeJoin()` (see <Link href="#control-who-can-join-and-post" />).
 
@@ -588,7 +588,7 @@ To keep a room open until you call `Room.close()`, create it with:
 await Room.create('match-42', { emptyTimeout: Infinity, departureTimeout: Infinity })
 ```
 
-`room.onClose((cause) => {})` fires when the room closes, with `cause.type` `'closed'`. A page's room also closes when its connection is gone for good, with `'disconnected'`.
+`room.onClose((cause) => {})` fires when the room closes, with `cause.type` `'closed'`. A page's room also closes when its connection is gone for good, with `'disconnected'`, and when the page's last participant of it was removed, with `'removed'` and the removal's `reason`.
 
 
 ## Run on multiple servers
@@ -650,7 +650,7 @@ Server-side.
 | `subscribe(cb, { track? }?)` / `subscribeBinary(cb, { track? }?)` | Everyone's messages, or those on `track` / binary frames: `cb(message, info, from)`, with `info` `{ seq, timestamp }`, plus `{ track, meta }` on a track. |
 | `messages({ signal? }?)` | Everyone's messages and binary frames, to read with `for await`: each `{ type, data, info, from }`. |
 | `onAnnounce(cb)` | `Room.announce()` messages: `cb(message, info)`. |
-| `onEmpty(cb)` / `onClose(cb)` | The last participant left / the room closed, or the page's last participant of it was removed, with `cause.type`: `'closed'`, or on a page `'disconnected'`. |
+| `onEmpty(cb)` / `onClose(cb)` | The last participant left / the room closed, with `cause.type`: `'closed'`, or on a page `'removed'` (the page's last participant of it was removed) or `'disconnected'`. |
 
 Properties: `id`, `meta`, `count`, `isEmpty`, `isClosed`.
 

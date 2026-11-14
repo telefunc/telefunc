@@ -84,7 +84,8 @@ type RoomCtrlEnvelope =
   // An instance whose demand lane delivers, from now on or again, asks every other one for its demand; one that missed
   // a page of another's asks that one (`of`).
   | { __r: 'demand-ask'; instance: string; of?: string }
-  | { __r: 'closed' }
+  // The room closed, or, with `cause: 'removed'`, the page's last participant of it was removed.
+  | ({ __r: 'closed' } & WireLeaveCause)
 
 /** A room meta key with its place: the `meta:seq` the write that added it read, and its index in that write. */
 type RoomMetaEntry = [key: string, value: unknown, placeSeq: number, placeIndex: number]

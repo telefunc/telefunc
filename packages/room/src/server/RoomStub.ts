@@ -47,17 +47,19 @@ import {
   type BinaryWants,
 } from './lanes/binaryWants.js'
 import { RoomError } from '../shared/errors.js'
-import type {
-  MemberSnapshot,
-  MemberWants,
-  RoomCtrlEnvelope,
-  RoomDataPublish,
-  RoomDemandEvent,
-  RoomDmEnvelope,
-  RoomResult,
-  RoomRosterEvent,
+import {
+  leaveCauseToWire,
+  type MemberSnapshot,
+  type MemberWants,
+  type RoomCtrlEnvelope,
+  type RoomDataPublish,
+  type RoomDemandEvent,
+  type RoomDmEnvelope,
+  type RoomResult,
+  type RoomRosterEvent,
 } from '../shared/protocol.js'
 import type { RoomDataEnvelope } from './protocol.js'
+import type { LeaveCause } from '../types.js'
 import { toggle } from '../utils/sets.js'
 import { MemberMessageBodies, orderedBody, trackFrameBody, unorderedEventBody } from './publishBodies.js'
 import { PendingDmReplies, assertPublishShield, receiveFromPage, roomResult } from './pageRequests.js'
@@ -247,9 +249,9 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     this.suppressed = suppressed
   }
 
-  /** The view closes, and relays nothing from now on. */
-  pageRemoved(): void {
-    this.end.deliver(unorderedEventBody({ __r: 'closed' }))
+  /** The view closes with the removal's cause, and relays nothing from now on. */
+  pageRemoved(cause: LeaveCause): void {
+    this.end.deliver(unorderedEventBody({ __r: 'closed', ...leaveCauseToWire(cause) }))
     this.room.detachStub(this)
     // A client back while its channel still holds it gets the close.
     void this.end.close({ timeout: reconnectWindow() }).catch(() => {})
