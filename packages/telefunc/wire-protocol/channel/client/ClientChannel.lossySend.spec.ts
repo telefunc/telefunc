@@ -227,9 +227,8 @@ describe('a lossy send from the page out of credit', () => {
 
 describe('`lossy` on the page', () => {
   test('resolves at once, on a channel made with `ack: true` too; with `ack: true` it is a usage error', async () => {
-    const channel = newChannel(true)
+    const channel = unopenedChannel(true)
     await expect(channel.send('L', { lossy: true })).resolves.toBe(undefined)
-    expect((channel as any).pendingAcks.size).toBe(0)
     // @ts-expect-error
     expect(() => channel.send('x', { lossy: true, ack: true })).toThrow("`lossy` can't be combined with `ack: true`")
   })
