@@ -169,6 +169,7 @@ describe('a lossy send while the page is away', () => {
     send(channel, 'R L4')
     wire(channel, page).attach()
     expect(page.read.join(' ')).toBe('~L1 ~L3 R ~L4')
+    expect(owed(channel, page)).toBe(0)
     expect(spareMessages(channel, page)).toBe(100)
   })
 })
@@ -208,6 +209,7 @@ describe('a lossy send to an attached page', () => {
     w.deliver()
     // L went, so nothing of the page's was unconfirmed when L2 came, and it went.
     expect(page.read.join(' ')).toBe('R ~L2')
+    expect(owed(channel, page)).toBe(0)
     expect(spareMessages(channel, page)).toBe(100)
   })
 
@@ -224,6 +226,7 @@ describe('a lossy send to an attached page', () => {
     w.deliver()
     w.confirm()
     expect(page.read.join(' ')).toBe('~L ~L2')
+    expect(owed(channel, page)).toBe(0)
     expect(spareMessages(channel, page)).toBe(100)
   })
 
@@ -334,7 +337,7 @@ describe('the confirmation time a lossy send measures', () => {
 
 describe('a page away for 5 s, with 30 lossy sends and one plain send a second', () => {
   /** One send every 1000 / 30 ms for 8 s: the wire goes at 1 s, and the page is back at 6 s. Returns what the page read,
-   *  what it read after it was back, and its `spareMessages()`. */
+   *  what it read after it was back, what it `owed()`, and its `spareMessages()`. */
   function run(died: 'closed' | 'silently') {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance', 'Date'] })
     const channel = new ServerChannel<never, string>()
@@ -361,17 +364,18 @@ describe('a page away for 5 s, with 30 lossy sends and one plain send a second',
         channel._dispatchFrame({ tag: TAG.WINDOW, index: 7, bytes: 1 << 30, lastSeq: page.lastSeq } as any)
     }
     const after = page.read.slice(back)
-    return { read: [...page.read], after, spare: spareMessages(channel, page) }
+    return { read: [...page.read], after, owed: owed(channel, page), spare: spareMessages(channel, page) }
   }
 
   for (const died of ['closed', 'silently'] as const) {
     test(`after a wire that ${died === 'closed' ? 'closed' : 'died silently'}: every plain one once and in order, the newest last`, () => {
-      const { read, after, spare } = run(died)
+      const { read, after, owed, spare } = run(died)
       expect(read.filter((value) => value.startsWith('R'))).toEqual(['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8'])
       expect(new Set(read).size).toBe(read.length)
       expect(read.at(-2)).toBe('~L240')
       // R1 to R5 went while the page was away.
       expect(after.filter((value) => value.startsWith('R')).slice(0, 5)).toEqual(['R1', 'R2', 'R3', 'R4', 'R5'])
+      expect(owed).toBe(0)
       expect(spare).toBe(100)
     })
   }
@@ -434,6 +438,7 @@ describe('a large lossy send near the memory budget', () => {
 
 describe("the server's memory after a lossy send", () => {
   test('a held newest lets go at abort()', async () => {
+    const before = ledgerTotal()
     const channel = new ServerChannel<never, string>()
     channel._registerChannel()
     const page = newPage()
@@ -449,10 +454,12 @@ describe("the server's memory after a lossy send", () => {
     expect(channel.heldBytes - sent).toBeLessThan(1024)
     channel._release()
     expect(channel.heldBytes).toBe(0)
+    expect(ledgerTotal()).toBe(before)
   })
 
   test('a buffered one lets go at the connect TTL, and at the reconnect timeout', () => {
     vi.useFakeTimers()
+    const before = ledgerTotal()
     const unattached = new ServerChannel<never, string>()
     void unattached.send('x'.repeat(64 * 1024), { lossy: true })
     unattached._registerChannel()
@@ -465,6 +472,7 @@ describe("the server's memory after a lossy send", () => {
     vi.advanceTimersByTime(getChannelConfig().connectTtl + 1_000)
     expect(unattached.isClosed && away.isClosed).toBe(true)
     expect(unattached.heldBytes + away.heldBytes).toBe(0)
+    expect(ledgerTotal()).toBe(before)
   })
 
   test('registration with the memory nearly full keeps the sends it admits, and lets go of the rest', () => {
