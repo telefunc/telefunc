@@ -132,8 +132,8 @@ function serializeTelefunctionResult(runContext: {
       }
     },
     function onReplaced({ value, abort }) {
-      // Registered already (it has a replay buffer), so its page may hold it: it ends with this response only once that goes.
-      const carriedBefore = ServerChannel.isServerChannel(value) && value._replayBuffer !== null
+      // Registered already, so its page may hold it: it ends with this response only once that goes.
+      const carriedBefore = ServerChannel.isServerChannel(value) && value._wasRegistered
       if (carriedBefore) registrations.push(() => requestContext.responseAbort.onAbort(abort))
       else requestContext.responseAbort.onAbort(abort)
     },

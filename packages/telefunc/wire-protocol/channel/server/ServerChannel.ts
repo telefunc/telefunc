@@ -221,6 +221,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this._phase !== 'open'
   }
 
+  /** @internal Whether a request registered it, now or earlier: its page may hold it. */
+  get _wasRegistered(): boolean {
+    return this.didRegister
+  }
+
   send(data: ChannelData<ServerToClient>): Promise<void>
   send(data: ChannelData<ServerToClient>, opts: { ack: true }): Promise<ChannelAck<ServerToClient>>
   send(data: ChannelData<ServerToClient>, opts: { ack: false }): Promise<void>
