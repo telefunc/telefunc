@@ -195,6 +195,37 @@ for (const [ending, end] of Object.entries(ENDINGS)) {
   })
 }
 
+/** Each way channel 0 starts to close and has not ended: the page's close waits for the channel's own publish. */
+const CLOSING: Record<string, (channel: ServerBroadcast<string>) => void> = {
+  'close()': (channel) => void channel.close(),
+  "the page's close while a publish of its own is on its way": (channel) => {
+    void channel.publish('p0')
+    fromPage(channel, encode.close(0, 1_000, 1))
+  },
+}
+
+for (const [closing, begin] of Object.entries(CLOSING)) {
+  test(`on a WebSocket, after ${closing} a publish to its key leaves nothing more of it waiting for the wire or held`, async () => {
+    const key = crypto.randomUUID()
+    const channel = new ServerBroadcast<string>({ key })
+    const other = new ServerChannel()
+    const { headroom } = overWebSocket([channel, other])
+    // The wire is busy with another channel's message: what comes after it waits.
+    void other.send(MESSAGES[0])
+    begin(channel)
+    expect(channel._phase).toBe('closing')
+    const left = () => ({
+      waiting: sent(headroom.sender.waitingFrames).filter(({ index }) => index === 0),
+      held: channel.heldBytes,
+    })
+    const before = left()
+    const publishing = Broadcast.publish(key, MESSAGES[0]!)
+    expect(left()).toEqual(before)
+    await publishing
+    other.abort()
+  })
+}
+
 /** Each way a subscriber that may miss no publish falls behind, by what it publishes and what its page then reads. */
 const OVERFLOWS: Record<string, { publishes: string[]; pageReads: string[] }> = {
   // p1 left: from p2, the oldest waiting, all go.

@@ -220,12 +220,13 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     return false
   }
 
-  /** A publish to the page. A subscription is the page's, so it has attached before, but it may have ended since: this
-   *  delivery's own listeners or admitting its body can end the channel, and the subscribers after it still get theirs.
-   *  Where the server can't hold it for the page, the page ends as one that missed it. */
+  /** A publish to the page, which is owed none made after its close began. A subscription is the page's, so it has
+   *  attached before, but it may have ended since: this delivery's own listeners or admitting its body can end the
+   *  channel, and the subscribers after it still get theirs. Where the server can't hold it for the page, the page ends
+   *  as one that missed it. */
   private forwardPublish(body: PublishBody): void {
     this.endOverflowed()
-    if (this._phase === 'ended') return
+    if (this._phase !== 'open') return
     if (!fitsPublish(body)) return this.overflow(this.lossy ? NOT_EVEN_NEWEST : FELL_BEHIND, this.owner)
     if (this.lossyPublishes) return this.lossyPublishes.send(body)
     this.lastPeer!.sendPublish(body)
