@@ -8,8 +8,8 @@ import { processWide } from './processWide.js'
 import { Refetcher } from './refetcher.js'
 import { closeSubscription, subscriptionOf, type Subscription } from './wire/shared.js'
 
-/** The live queries of one `QueryClient`, by `queryHash` (the cache's own key, made by its `queryKeyHashFn`), and how
- *  to stop watching its cache. Kept per client, not per `live()` call: `queryFn: live(onGetTodos)` makes a new
+/** The live queries of one `QueryClient`, by `queryHash` (the cache's own key: a query's `queryHash`, or what its
+ *  `queryKeyHashFn` makes), and how to stop watching its cache. Kept per client, not per `live()` call: `queryFn: live(onGetTodos)` makes a new
  *  function on each render. */
 type Registry = { queries: Map<string, Watched>; stopWatchingCache: (() => void) | undefined }
 /** A query's `Live` (holding it keeps its channel open) and when to refetch it. */
@@ -48,8 +48,7 @@ function live<T, TArgs extends unknown[]>(
       void subscription.close()
       throw abortError()
     }
-    // The query this fetch is for, found as the cache finds it.
-    const query = context.client.getQueryCache().find({ queryKey: context.queryKey, exact: true })
+    const query = queryOf(context.client, context.queryKey)
     // Left the cache while it fetched: no removal will close it.
     if (!query) void subscription.close()
     else bind(context.client, query, value, subscription)
@@ -65,7 +64,7 @@ function bind(client: QueryClient, query: Query, value: Live<unknown>, subscript
     const refetch = async () => {
       // A running fetch (its persister saving, its retries) may hold data read before the value went stale: wait it out.
       await query.promise?.catch(() => {})
-      await client.invalidateQueries({ queryKey: query.queryKey, exact: true }, { cancelRefetch: false })
+      await client.invalidateQueries({ predicate: (cached) => cached === query }, { cancelRefetch: false })
     }
     watched = { value: undefined, refetcher: new Refetcher(refetch) }
     registry.queries.set(query.queryHash, watched)
@@ -102,10 +101,9 @@ function unbind(registry: Registry, queryHash: string): void {
 /** Marks a query fetched on the server stale once its value is in: the browser then fetches it again on mount, whatever
  *  its `staleTime`, and that fetch opens the channel. TanStack's dehydrated state carries the mark. */
 function refetchAfterHydration(client: QueryClient, queryKey: QueryKey): void {
-  const cache = client.getQueryCache()
-  const query = cache.find({ queryKey, exact: true })
+  const query = queryOf(client, queryKey)
   if (!query) return
-  const stop = cache.subscribe((event) => {
+  const stop = client.getQueryCache().subscribe((event) => {
     if (event.query !== query || event.type !== 'updated') return
     if (event.action.type === 'success' || event.action.type === 'error') stop()
     if (event.action.type !== 'success') return
@@ -113,6 +111,15 @@ function refetchAfterHydration(client: QueryClient, queryKey: QueryKey): void {
     // `dataUpdatedAt` is newer.
     query.setState({ ...query.state, isInvalidated: true, dataUpdatedAt: query.state.dataUpdatedAt + 1 })
   })
+}
+
+/** The query a fetch with `queryKey` is for: TanStack passes a query's own key to its `queryFn`, whatever hashes it
+ *  (`queryHash`, `queryKeyHashFn`). `undefined` once it left the cache. */
+function queryOf(client: QueryClient, queryKey: QueryKey): Query | undefined {
+  return client
+    .getQueryCache()
+    .getAll()
+    .find((query) => query.queryKey === queryKey)
 }
 
 /** The rejection TanStack expects from a cancelled fetch. */

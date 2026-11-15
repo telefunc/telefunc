@@ -65,6 +65,26 @@ describe('live()', () => {
     expect(values.map((value) => value.closed)).toEqual([1, 1])
   })
 
+  it('refetches a query with its own queryHash when its value goes stale, and closes it as it leaves the cache', async () => {
+    client = new QueryClient()
+    const { call, values } = telefunction()
+    const observer = new QueryObserver(client, {
+      queryKey: ['todos'],
+      queryHash: 'todos-v1',
+      queryFn: live(call),
+      staleTime: Number.POSITIVE_INFINITY,
+    })
+    const stop = observer.subscribe(() => {})
+    await vi.waitFor(() => expect(values).toHaveLength(1))
+    expect(values[0]!.closed).toBe(0)
+    values[0]!.goStale()
+    await vi.waitFor(() => expect(observer.getCurrentResult().data).toBe(2))
+    expect(values.map((value) => value.closed)).toEqual([1, 0])
+    stop()
+    client.clear()
+    expect(values.map((value) => value.closed)).toEqual([1, 1])
+  })
+
   it('keys a query by the hash its client makes with its queryKeyHashFn', async () => {
     const queryKeyHashFn = (key: unknown) => JSON.stringify(key, (_, v) => (typeof v === 'bigint' ? String(v) : v))
     client = new QueryClient({ defaultOptions: { queries: { queryKeyHashFn } } })
