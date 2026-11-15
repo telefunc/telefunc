@@ -19,6 +19,9 @@ import type {
   Sender,
 } from '../types.js'
 
+/** What the state hands a listener: a message's info, or a frame's (and a message's on a track) with its track. */
+type TakenInfo = ChannelPublishInfo | (ChannelPublishInfo & BinaryFrameInfo)
+
 /** The participant `snapshot()` lists, with the meta, connection and package fields it shows. */
 type ShownParticipant = {
   meta: ParticipantMeta
@@ -71,8 +74,8 @@ class RoomRemotes {
    *  the server. */
   taking<Data>(
     callback: (data: Data, info: any) => unknown,
-  ): (data: Data, info: object, from: ResolvedSender | null) => unknown {
-    return (data, info, from) => callback(data, { ...info, from: from && this.sender(from) })
+  ): (data: Data, info: TakenInfo, from: ResolvedSender | null) => unknown {
+    return (data, info, from) => callback(data, withSender(info, from && this.sender(from)))
   }
 
   visible(): RemoteParticipant[] {
@@ -264,6 +267,15 @@ class RoomView {
   onChange(callback: () => void, options?: ListenerOptions): () => void {
     return this._remotes.state.onChange(callback, options, this._remotes.adder)
   }
+}
+
+/** `info` with its sender: the listener's own object, built field by field, as a spread costs about 200 instructions
+ *  a message more (the Room bench). */
+function withSender(info: TakenInfo, from: Sender | null): TakenInfo & { from: Sender | null } {
+  const { key, seq, timestamp } = info
+  return 'track' in info
+    ? { key, seq, timestamp, track: info.track, meta: info.meta, from }
+    : { key, seq, timestamp, from }
 }
 
 /** A snapshot participant's value: its own, so it shadows the remote's getter. */
