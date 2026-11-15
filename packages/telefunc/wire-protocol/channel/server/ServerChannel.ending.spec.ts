@@ -1,4 +1,4 @@
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -356,6 +356,32 @@ for (const [kind, publish] of Object.entries(PUBLISHES)) {
     }
   })
 }
+
+test("on a WebSocket, a closing subscriber cut for another object's publish reads the error when its close runs out", async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  const adapter = getBroadcastAdapter()
+  adapter.ownerOf = (request) => request?.url ?? 'server'
+  const [key, otherKey] = [crypto.randomUUID(), crypto.randomUUID()]
+  const channel = new ServerBroadcast<string>({ key })
+  const other = new ServerBroadcast<string>({ key: otherKey })
+  const page = overWebSocket([channel, other], [new Request('http://one.test/'), new Request('http://two.test/')])
+  for (const name of ['p1', 'p2', 'p3']) await Broadcast.publish(key, name + 'x'.repeat(600_000))
+  const closing = channel.close({ timeout: 1_000 })
+  const release = leaveRoom(300_000)
+  try {
+    // The other object's publish cuts channel 0, its CLOSE too, so no answer comes before the close runs out.
+    await Broadcast.publish(otherKey, 'q1' + 'x'.repeat(600_000))
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(await closing).toBe(1)
+    vi.useRealTimers()
+    expect((await page.readAll()).filter((read) => read.startsWith('0:'))).toEqual(['0:p1', '0:ERROR'])
+  } finally {
+    vi.useRealTimers()
+    release()
+    other.abort()
+    delete adapter.ownerOf
+  }
+})
 
 /** Each way an application's `onClose` of one channel ends another, and the last frame that other's page then reads. */
 const ENDED_BY_A_CLOSE_CALLBACK: Record<string, { end: (channel: ServerChannel) => void; last: string }> = {

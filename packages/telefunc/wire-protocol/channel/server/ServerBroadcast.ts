@@ -300,7 +300,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
    *  on everything goes, receipts too, and its page reads on up to the gap and no further. A lossy one holds no publish
    *  waiting but its newest, so it ends only at 0, where not even that fits. The bytes go at once, but only its own
    *  object can write to its page, so cut for a publish of another `owner` it ends at the next delivery of its key, its
-   *  heartbeat, its attach or its answer. */
+   *  heartbeat, its attach, its answer or its close running out. */
   shed(toBytes: number, owner?: string): void {
     const replay = this._replayBuffer
     if (this._phase === 'ended' || !replay || (this.lossy && toBytes > 0)) return
@@ -375,6 +375,13 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   override _acknowledge(): void {
     super._acknowledge()
     this.endOverflowed()
+  }
+
+  /** Where its close ran out, one that was cut ends with why, which its page reads; a close its page asked for or
+   *  answered ends gracefully. */
+  override _end(err?: Error): void {
+    if (err !== undefined && this.overflowed !== null) return this.endOverflowed()
+    super._end(err)
   }
 
   protected override shutdown(err?: Error, options?: { pageGone?: boolean }): void {
