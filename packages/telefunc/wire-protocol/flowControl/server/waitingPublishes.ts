@@ -24,9 +24,8 @@ function isPublishBody(tag: number): boolean {
 
 /** Whether data `frame` goes ahead of `ahead`, the frames its wire holds back: a channel orders only its own frames, so a
  *  slow page's publishes don't hold up its other channels. Publishes keep their line, being what falls behind. An abort
- *  and the answer to the page's close pass that channel's publishes too: the page reads no more of them. A close request
- *  and an error wait behind them, so the page gets what was published before them: a broadcast that ends where its page
- *  would miss a publish drops what waits from that gap on first. */
+ *  and the answer to the page's close pass that channel's publishes too: the page reads no more of them. Any other frame
+ *  of the channel, a close request or an error too, waits behind all of it, so the page gets what was sent before. */
 function overtakes(frame: Uint8Array, ahead: Iterable<Uint8Array>): boolean {
   const tag = frame[0]!
   if (!isSequencedTag(tag) || tag === TAG.PUBLISH_TO || isPublishBody(tag)) return false
