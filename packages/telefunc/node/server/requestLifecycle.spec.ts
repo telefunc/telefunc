@@ -115,6 +115,10 @@ const telefunctions: Record<string, (...args: any[]) => Promise<unknown>> = {
       },
     })
   },
+  onChannelOnceLetReturn: async () => {
+    await new Promise<void>((resolve) => (opened.letReturn = resolve))
+    return heldChannel()
+  },
   onChannel: async () => heldChannel(),
   onText: shield(async (_text: string) => 42, [shield.type.string]),
   onStream: async () =>
@@ -291,10 +295,11 @@ describe('a request ends its lifecycle once, however the call ends', () => {
     expect(request.signal.aborted).toBe(true)
   })
 
-  test('a stream it returns after its page left is cancelled', async () => {
-    const cancelledBefore = opened.cancelled
+  /** Calls `name` and lets it return once its page left. */
+  async function callThatReturnsAfterItsPageLeft(name: string, transport?: string) {
+    opened.letReturn = null
     const page = new AbortController()
-    const response = call('onStreamOnceLetReturn', [], { signal: page.signal })
+    const response = call(name, [], { signal: page.signal, transport })
     await vi.waitFor(() => expect(opened.letReturn).toBeTypeOf('function'))
     page.abort()
     const request = requests.at(-1)!
@@ -303,7 +308,34 @@ describe('a request ends its lifecycle once, however the call ends', () => {
     opened.letReturn!()
     await response
     await new Promise((resolve) => setTimeout(resolve, 10))
-    expect(opened.cancelled).toBe(cancelledBefore + 1)
+  }
+
+  for (const transport of ['binary-inline', 'sse-inline', 'channel']) {
+    test(`a stream it returns over ${transport} after its page left is cancelled`, async () => {
+      const cancelledBefore = opened.cancelled
+      await callThatReturnsAfterItsPageLeft('onStreamOnceLetReturn', transport)
+      expect(opened.cancelled).toBe(cancelledBefore + 1)
+    })
+  }
+
+  test('a channel it returns after its page left closes at once', async () => {
+    const before = ledgerTotal()
+    await callThatReturnsAfterItsPageLeft('onChannelOnceLetReturn')
+    expect(opened.channel!.isClosed).toBe(true)
+    expect(ledgerTotal()).toBe(before)
+  })
+
+  test('a channel it returned stays open when its request aborts after the response', async () => {
+    const page = new AbortController()
+    const response = await call('onChannel', [], { signal: page.signal })
+    await response.getBody()
+    page.abort()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    const request = requests.at(-1)!
+    expect(opened.channel!.isClosed).toBe(false)
+    expect(request.closed).toBe(0)
+    await opened.channel!.close({ timeout: 0 })
+    expect(request.closed).toBe(1)
   })
 
   test('a stream it returned holds the request till the page read it', async () => {

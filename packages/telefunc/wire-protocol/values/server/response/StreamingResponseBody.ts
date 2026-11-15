@@ -43,8 +43,7 @@ type Settled = { entry: StreamingValueServer; result: IteratorResult<Uint8Array<
  * sink's `read` / `pull` callback) before the next push.
  *
  * Cleanup paths — one `cancelled` flag means "consumer gone, stop emitting":
- *   - `abortSignal` fires, or already had    → onConsumerGone: cancelled=true + cancelProducers; emits no-op.
- *     (the page left while the telefunction ran)
+ *   - `abortSignal` fires                    → onConsumerGone: cancelled=true + cancelProducers; emits no-op.
  *   - consumer cancels sink                  → onConsumerGone (same).
  *   - producer throws (caught)               → cancelProducers only; emits still flow if wire alive.
  *   - normal completion                      → emit terminator.
@@ -178,8 +177,7 @@ function buildInlineResponseBody(runContext: {
   }
 
   async function runInlineResponse() {
-    if (abortSignal.aborted) onConsumerGone()
-    else abortSignal.addEventListener('abort', onConsumerGone, { once: true })
+    abortSignal.addEventListener('abort', onConsumerGone, { once: true })
     responseAbort.errorPromise.catch(onResponseAborted)
     try {
       // The telefunc context is restored around the whole merge loop, like the

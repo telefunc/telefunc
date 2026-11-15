@@ -79,7 +79,8 @@ function serializeTelefunctionResult(runContext: {
   const producers: StreamingValueServer[] = []
   let nextStreamingIndex = 0
   /** What the response carries is registered once the response is sure to go; ending the response before that, as a
-   *  failed serialization does, ends what only it would carry; a channel an earlier response carried stays open. */
+   *  failed serialization or a page that left does, ends what only it would carry; a channel an earlier response carried
+   *  stays open. */
   const registrations: (() => void)[] = []
   let goes = false
   const { valueShields } = runContext
@@ -149,6 +150,12 @@ function serializeTelefunctionResult(runContext: {
         `Serialization error: ${lowercaseFirstLetter(err.message)}`,
       ].join(' '),
     )
+  }
+
+  // Its page left while the telefunction ran: nobody gets this response.
+  if (requestContext.abortSignal.aborted) {
+    requestContext.responseAbort.abort()
+    return { type: 'text', body: httpResponseBody }
   }
 
   goes = true
