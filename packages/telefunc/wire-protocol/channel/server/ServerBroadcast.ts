@@ -258,7 +258,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   }
 
   /** Its publishes that no wire has taken go, unless it ended: its replay is then what its page reads. */
-  private dropUnhanded(): void {
+  protected override dropUnhanded(): void {
     if (this._phase === 'ended') return
     const dropped = this._replayBuffer?.dropNewestPublishes(this.unhanded()).units ?? 0
     if (dropped > 0) this.peer?.sender.queue.dropWaitingPublishes(this.peer.index, dropped)

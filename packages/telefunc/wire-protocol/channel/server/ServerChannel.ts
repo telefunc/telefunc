@@ -349,15 +349,18 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._holdOffline(send.held)
       },
       letGo: ({ held }) => this._letGoOffline(held),
-      // Those still in the wire's queue never left the server, so the credit they counted comes back.
-      dropUnhanded: () => {
-        const { index, sender } = this.peer!
-        const { units, bytes } = this._replayBuffer!.dropNewestPublishes(sender.queue.waitingPublishes(index))
-        if (units > 0) sender.queue.dropWaitingPublishes(index, units)
-        this.sendCredit.refund(bytes, units)
-      },
+      dropUnhanded: () => this.dropUnhanded(),
       outOfCredit: () => this.sendCredit.isOutOfCredit(),
     }
+  }
+
+  /** Its lossy sends that no wire has taken go. Those still in the wire's queue never left the server, so the credit
+   *  they counted comes back. */
+  protected dropUnhanded(): void {
+    const { index, sender } = this.peer!
+    const { units, bytes } = this._replayBuffer!.dropNewestPublishes(sender.queue.waitingPublishes(index))
+    if (units > 0) sender.queue.dropWaitingPublishes(index, units)
+    this.sendCredit.refund(bytes, units)
   }
 
   /** Sends a lossy send's `data` to `peer`, where a newer one may take its place while it waits on the wire. It counts
@@ -436,8 +439,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._phase !== 'open') return
     this._phase = 'closing'
     const serializedAbortValue = stringify(abortValue)
-    if (this.peer) this.peer.sendSequenced(encode.abort, serializedAbortValue)
-    else this.ensurePendingEnd().abort = serializedAbortValue
+    if (this.peer) {
+      // Its publishes still waiting for the wire would follow the ABORT, after which its page reads nothing.
+      this.dropUnhanded()
+      this.peer.sendSequenced(encode.abort, serializedAbortValue)
+    } else this.ensurePendingEnd().abort = serializedAbortValue
     this.shutdown(createAbortError(abortValue, message))
   }
 
