@@ -189,7 +189,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     for (const cb of this.broadcastListeners.list()) {
       if (this.callListener(cb, data, info)) return
     }
-    if (!this.peerSubscribedText) return
+    if (!this.takesPublish(this.peerSubscribedText)) return
     const body = bodyOf(encode.publish, serialized, rawInfo, this.owner, (holder) => this.replaceIn(holder, false))
     this.forwardPublish(body)
   }
@@ -200,7 +200,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
       if (this.callListener(cb, new Uint8Array(data), info)) return
     }
-    if (!this.peerSubscribedBinary) return
+    if (!this.takesPublish(this.peerSubscribedBinary)) return
     const body = bodyOf(encode.publishBinary, data, rawInfo, this.owner, (holder) => this.replaceIn(holder, true))
     this.forwardPublish(body)
   }
@@ -220,13 +220,17 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     return false
   }
 
-  /** A publish to the page, which is owed none made after its close began. A subscription is the page's, so it has
-   *  attached before, but it may have ended since: this delivery's own listeners or admitting its body can end the
-   *  channel, and the subscribers after it still get theirs. Where the server can't hold it for the page, the page ends
-   *  as one that missed it. */
+  /** Whether a publish of the kind its page subscribed to (`subscribed`) is the page's. One made after its close began
+   *  is not, and costs it nothing: this is asked before the body is made, which admits it against the budget. */
+  private takesPublish(subscribed: boolean): boolean {
+    return subscribed && this._phase === 'open'
+  }
+
+  /** A publish to a page that takes it (`takesPublish`). Admitting a body, this one or one before it, may have cut the
+   *  page: it ends then, and the subscribers after it still get theirs. Where the server can't hold it for the page, the
+   *  page ends as one that missed it. */
   private forwardPublish(body: PublishBody): void {
-    this.endOverflowed()
-    if (this._phase !== 'open') return
+    if (this.overflowed !== null) return this.endOverflowed()
     if (!fitsPublish(body)) return this.overflow(this.lossy ? NOT_EVEN_NEWEST : FELL_BEHIND, this.owner)
     if (this.lossyPublishes) return this.lossyPublishes.send(body)
     this.lastPeer!.sendPublish(body)
@@ -270,7 +274,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private replaceIn(holder: MemoryHolder, binary: boolean): void {
     if (!ServerBroadcast.isServerBroadcast(holder) || !holder.lossyPublishes || holder.key !== this.key) return
     if (holder.owner !== this.owner) return
-    if (binary ? holder.peerSubscribedBinary : holder.peerSubscribedText) holder.lossyPublishes.letWaitingGo()
+    if (holder.takesPublish(binary ? holder.peerSubscribedBinary : holder.peerSubscribedText)) {
+      holder.lossyPublishes.letWaitingGo()
+    }
   }
 
   /** How many of its newest publishes no wire has: all of them while it has no wire. */

@@ -21,7 +21,7 @@ import { ServerHeadroom } from '../../flowControl/server/ServerHeadroom.js'
 import { pairPublishes } from '../client/pairPublishes.js'
 import { SseEvents } from '../client/SseEvents.js'
 import { getChannelMux } from './ChannelMux.js'
-import { hold } from './channelMemory.js'
+import { hold, letGo, releaseHolder, type MemoryHolder } from './channelMemory.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { ServerChannel } from './ServerChannel.js'
@@ -47,6 +47,8 @@ function sent(frames: Iterable<Uint8Array>): Sent[] {
     const { index, seq } = decoded
     if (decoded.tag === TAG.PUBLISH || decoded.tag === TAG.TEXT)
       out.push({ index, seq, label: `${index}:${(parse(decoded.text) as string).slice(0, 2)}` })
+    if (decoded.tag === TAG.PUBLISH_BINARY)
+      out.push({ index, seq, label: `${index}:${new TextDecoder().decode(decoded.data.subarray(0, 2))}` })
     if (decoded.tag === TAG.CLOSE) out.push({ index, seq, label: `${index}:CLOSE` })
     if (decoded.tag === TAG.ABORT) out.push({ index, seq, label: `${index}:ABORT` })
     if (decoded.tag === TAG.ERROR) out.push({ index, seq, label: `${index}:ERROR` })
@@ -107,6 +109,20 @@ async function overSse(channels: ServerChannel[]) {
   }
 }
 
+/** What this server's channels hold, on the ledger every channel shares. */
+const ledgerTotal = () => (globalThis as any)._telefunc['channelMemory.ts'].total as number
+
+/** Holds what one-to-one channels would, which no publish can make them let go of, leaving `room` below the shedding
+ *  target; returns what lets it go. */
+function leaveRoom(room: number): () => void {
+  const filler: MemoryHolder = { heldBytes: 0 }
+  hold(filler, (getChannelConfig().maxMemory * 7) / 8 - ledgerTotal() - room)
+  return () => {
+    letGo(filler, filler.heldBytes)
+    releaseHolder(filler)
+  }
+}
+
 /** Attaches the page to `channels`, at indexes 0, 1, …, subscribed to the broadcasts, over a WebSocket it doesn't read
  *  yet: past the first frame, what the wire sends waits for headroom. */
 function overWebSocket(channels: ServerChannel[]) {
@@ -144,7 +160,7 @@ function overWebSocket(channels: ServerChannel[]) {
     channel._onPageAttach(lastSeq, undefined)
     for (const frame of replay.getAfter(lastSeq)) sender.send(frame)
     const peer = new IndexedPeer({ sender, index, replay })
-    channel._attachPeer(peer, { broadcast: { text: true, binary: false } })
+    channel._attachPeer(peer, { broadcast: { text: true, binary: true } })
     return peer
   }
   const peers = channels.map((channel, index) => {
@@ -254,6 +270,63 @@ for (const [closing, begin] of Object.entries(CLOSING)) {
     expect(left()).toEqual(before)
     await publishing
     other.abort()
+  })
+}
+
+/** Each kind of publish to `key`, of `data` as text or as its bytes. */
+const PUBLISHES: Record<string, (key: string, data: string) => unknown> = {
+  text: (key, data) => Broadcast.publish(key, data),
+  binary: (key, data) => Broadcast.publishBinary(key, new TextEncoder().encode(data)),
+}
+
+/** A subscriber that began to close, near the server's budget: each publish waiting for its wire, and what its page
+ *  reads after a publish that would take room the closing subscriber holds. A reliable one may miss nothing published
+ *  before its close; a lossy one's close goes behind the newest. */
+const NEAR_THE_BUDGET: Record<string, { lossy: boolean; after: number; pageReads: string[] }> = {
+  reliable: { lossy: false, after: 600_000, pageReads: ['0:p1', '0:p2', '0:p3', '0:CLOSE'] },
+  lossy: { lossy: true, after: 900_000, pageReads: ['0:p1', '0:p3', '0:CLOSE'] },
+}
+
+for (const [kind, publish] of Object.entries(PUBLISHES)) {
+  for (const [subscriber, { lossy, after, pageReads }] of Object.entries(NEAR_THE_BUDGET)) {
+    test(`on a WebSocket, a ${kind} publish after a ${subscriber} subscriber's close() near the budget costs it nothing it was owed`, async () => {
+      const key = crypto.randomUUID()
+      const channel = new ServerBroadcast<string>({ key, lossy })
+      const page = overWebSocket([channel])
+      for (const name of ['p1', 'p2', 'p3']) await publish(key, name + 'x'.repeat(600_000))
+      const closing = channel.close()
+      const release = leaveRoom(after / 2)
+      try {
+        await publish(key, 'p4' + 'x'.repeat(after))
+        expect(await page.readAll()).toEqual(pageReads)
+        fromPage(channel, encode.closeAck(0, 1))
+        expect(await closing).toBe(0)
+      } finally {
+        release()
+      }
+    })
+  }
+
+  test(`on a WebSocket, a ${kind} publish near the budget for an open lossy subscriber replaces nothing a closing one owes`, async () => {
+    const key = crypto.randomUUID()
+    const channel = new ServerBroadcast<string>({ key, lossy: true })
+    const open = new ServerBroadcast<string>({ key, lossy: true })
+    const page = overWebSocket([channel, open])
+    for (const name of ['p1', 'p2', 'p3']) await publish(key, name + 'x'.repeat(600_000))
+    const closing = channel.close()
+    const release = leaveRoom(450_000)
+    try {
+      // Its body is admitted for the open one, which lets go of what it replaces there.
+      await publish(key, 'p4' + 'x'.repeat(900_000))
+      const pageReads = await page.readAll()
+      expect(pageReads.filter((read) => read.startsWith('0:'))).toEqual(['0:p1', '0:p3', '0:CLOSE'])
+      expect(pageReads.filter((read) => read.startsWith('1:'))).toEqual(['1:p4'])
+      fromPage(channel, encode.closeAck(0, 1))
+      expect(await closing).toBe(0)
+    } finally {
+      release()
+      open.abort()
+    }
   })
 }
 
