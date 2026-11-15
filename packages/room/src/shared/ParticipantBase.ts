@@ -59,6 +59,7 @@ type Shown = { meta: ParticipantMeta; connected: boolean; demand: readonly Track
 /** Who receives some tracks, counted as `demand` counts one. */
 type TracksWatchers = { watchers: RemoteParticipant[]; watcherCount: number }
 const NO_DEMAND: readonly TrackDemand[] = Object.freeze([])
+const NO_WATCHES: ReadonlyMap<TrackKey, TrackWatch> = new Map()
 
 /** Where a participant's acts go: on a page, up the channel of the room it joined through or its own; on a server, to
  *  its room's writes. */
@@ -328,10 +329,9 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   /** Who receives each of its tracks, by track name: each entry the same object until its watchers or count change, and
    *  the list the same array until an entry does. */
   get demand(): readonly TrackDemand[] {
-    if (this._left) return (this.shownDemand = NO_DEMAND)
     const shown = this.shownDemand
     const next: TrackDemand[] = []
-    for (const [key, watch] of this._watches) {
+    for (const [key, watch] of this.watchesNow) {
       const track = publicTrack(key)
       next.push(
         this.demandEntry(
@@ -362,7 +362,7 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   _watchersOf(tracks: readonly string[]): TracksWatchers {
     const union = { watchers: new Set<string>(), pages: new Set<string>() }
     for (const track of tracks) {
-      const watch = this._watches.get(trackKey(track))
+      const watch = this.watchesNow.get(trackKey(track))
       for (const id of watch?.watchers ?? []) union.watchers.add(id)
       for (const page of watch?.pages ?? []) union.pages.add(page)
     }
@@ -376,6 +376,11 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
 
   /** @internal Who receives each of its tracks, as the room told it. */
   abstract get _watches(): ReadonlyMap<TrackKey, TrackWatch>
+
+  /** Who receives each of its tracks: nobody once it left, whatever the room last told it. */
+  private get watchesNow(): ReadonlyMap<TrackKey, TrackWatch> {
+    return this._left ? NO_WATCHES : this._watches
+  }
   /** The participants of `ids` as its room lists them now, in its order: none that left, is hidden, or whose join this
    *  side hasn't seen yet. */
   protected abstract _shownParticipants(ids: ReadonlySet<string>): RemoteParticipant[]

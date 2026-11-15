@@ -1745,6 +1745,27 @@ function Room() {
         two.releaseView()
       })}
 
+      {scenario('watchers-left', null, 'Count who receives the tracks of a participant that left', async () => {
+        /** What a page's `me` whose tracks `a` and `b` a server-side room receives shows once `end` ended it. */
+        const after = async (label: string, end: (roomId: string, pub: LocalParticipant) => Promise<void>) => {
+          const [roomId, view] = await createRoom(label)
+          const releaseView = keepReachable(view)
+          const pub = await view.join({ meta: { name: 'Pub' } })
+          await onWatchAsServer(roomId, [], ['a', 'b'])
+          await pollUntil(() => ({ done: watchersOf(pub, ['a', 'b']).watcherCount === 1 }))
+          let left = false
+          pub.onLeave(() => (left = true))
+          await end(roomId, pub)
+          await pollUntil(() => ({ done: left }))
+          const { watchers, watcherCount } = watchersOf(pub, ['a', 'b'])
+          releaseView()
+          return { watchers: watchers.length, watcherCount, demand: pub.demand.length }
+        }
+        const left = await after('watchers-left', (_roomId, pub) => pub.leave())
+        const removed = await after('watchers-removed', (roomId, pub) => onKick(roomId, pub.id))
+        setResult(JSON.stringify({ left, removed }))
+      })}
+
       {scenario('watchers-upgrade', null, 'Watch while the connection upgrades', async () => {
         const roomId = await createRoomId('watchers-upgrade')
         const pubId = await onPublishOnServer(roomId)

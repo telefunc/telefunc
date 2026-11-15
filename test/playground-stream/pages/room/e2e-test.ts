@@ -1552,6 +1552,14 @@ function testRoomDemand() {
       expect(r.third).deep.equal({ watchers: ['Sam'], watcherCount: 3 })
     },
   )
+  testRoomScenario<Record<'left' | 'removed', { watchers: number; watcherCount: number; demand: number }>>(
+    'watchers-left',
+    'room: watchersOf() counts nobody for a participant that left or was removed, as its me.demand lists nothing',
+    (r) => {
+      const none = { watchers: 0, watcherCount: 0, demand: 0 }
+      expect(r).deep.equal({ left: none, removed: none })
+    },
+  )
   test("room: a view that watches beside the page's `me` while the page's connection upgrades to a WebSocket shows its publisher `me` throughout, never a watcher it can't name", async () => {
     const transports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!)
     if (!transports.includes('sse') || !transports.includes('ws')) return
