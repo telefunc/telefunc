@@ -270,7 +270,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** Where `holder` is a lossy page this publish reaches (its key, on its object), it lets go of what the publish
    *  replaces. */
   private replaceIn(holder: MemoryHolder, binary: boolean): void {
-    if (!(holder instanceof ServerBroadcast) || !holder.lossyPublishes || holder.key !== this.key) return
+    if (!ServerBroadcast.isServerBroadcast(holder) || !holder.lossyPublishes || holder.key !== this.key) return
     if (holder.owner !== this.owner) return
     if (binary ? holder.peerSubscribedBinary : holder.peerSubscribedText) holder.lossyPublishes.letWaitingGo()
   }
