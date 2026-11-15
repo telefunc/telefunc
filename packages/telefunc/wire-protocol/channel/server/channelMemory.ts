@@ -69,8 +69,9 @@ function fits(holder: MemoryHolder, bytes: number): boolean {
 }
 
 /** Makes room for a delivery to `owner`'s pages, which nobody can refuse. Near the budget, each page whose waiting
- *  publishes it replaces lets go of them first (`replace`), so what's measured is what stays; past what's older, it ends
- *  as few as must end, where that frees the bytes. */
+ *  publishes it replaces lets go of them first (`replace`), so what's measured is what stays. Past that, it ends the
+ *  pages whose newest no wire has, fewest sharers first, until the body fits or none is left: where ending them can't
+ *  make room, they end all the same, and so do its own pages (`fitsPublish`). */
 function admitPublish(body: PublishBody, owner: string | undefined, replace: (holder: MemoryHolder) => void): void {
   const maxMemory = maxMemoryOf()
   const bytes = body.frame.byteLength
