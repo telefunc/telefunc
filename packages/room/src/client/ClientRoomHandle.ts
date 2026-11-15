@@ -10,8 +10,7 @@ import {
   inboxMessageFromWire,
   leaveCauseFromWire,
   type InboxMessage,
-  type MemberMetaUpdate,
-  type MemberMutationRequest,
+  type MemberRequest,
   type RoomDemandEvent,
   type RoomDataPublish,
   type RoomDmEnvelope,
@@ -29,6 +28,7 @@ import { roomResultValue } from '../shared/errors.js'
 import { RoomMirror } from './RoomMirror.js'
 import {
   ClientParticipant,
+  acceptedMeta,
   reportClientCallbackError,
   request,
   sendDmReply,
@@ -130,14 +130,15 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
     }
   }
 
-  request(from: string, req: MemberMutationRequest): Promise<unknown> {
-    return request(this.end, { ...req, id: from })
-  }
-
-  /** The model's leave ends the participant, and the relayed one is absorbed. */
-  async leave(from: string): Promise<void> {
-    await request(this.end, { __r: 'req-leave', id: from })
-    this.mirror.model.applyLeave(from, { type: 'left' })
+  /** Applied to the mirror once the server performed it, as the server applies it to its model: the model hands the
+   *  participant its accepted meta, as each member meta it applies, and its leave ends the participant (the relayed one
+   *  is absorbed). */
+  async request(from: string, req: MemberRequest): Promise<unknown> {
+    const value = await request(this.end, { ...req, id: from })
+    const accepted = acceptedMeta(req, value)
+    if (accepted) this.mirror.model.applyParticipantMeta(from, accepted)
+    if (req.__r === 'req-leave') this.mirror.model.applyLeave(from, { type: 'left' })
+    return value
   }
 
   /** `from` is a claim: the server checks it against this stub's members and stamps `fromMeta` itself. */
@@ -157,11 +158,6 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
 
   heldConnectionChanged(id: string, wasConnected: boolean | null): void {
     this.mirror.model.heldConnectionChanged(id, wasConnected)
-  }
-
-  /** The model hands it to the participant (`onMemberMeta`), as each member meta it applies. */
-  acceptOwnMeta(from: string, accepted: MemberMetaUpdate): void {
-    this.mirror.model.applyParticipantMeta(from, accepted)
   }
 
   resolveSender(id: string): Sender | null {

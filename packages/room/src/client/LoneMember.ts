@@ -6,8 +6,7 @@ import {
   hasRoomTag,
   inboxMessageFromWire,
   leaveCauseFromWire,
-  type MemberMetaUpdate,
-  type MemberMutationRequest,
+  type MemberRequest,
   type ParticipantStubMetadata,
   type ParticipantStubNotice,
   type ParticipantStubRequest,
@@ -16,6 +15,7 @@ import { roomResultValue } from '../shared/errors.js'
 import { RoomState, RoomStateView, type RoomStateOwner } from '../shared/state.js'
 import {
   ClientParticipant,
+  acceptedMeta,
   reportClientCallbackError,
   request,
   sendDmReply,
@@ -64,19 +64,17 @@ class LoneMember implements PageLink {
     return roomResultValue<ChannelPublishAck>(this.end._publishBinaryUnreported(framed, stream, lossy))
   }
 
-  request(_from: string, req: MemberMutationRequest): Promise<unknown> {
-    return request(this.end, req)
-  }
-
-  async leave(): Promise<void> {
-    await request(this.end, { __r: 'req-leave' })
-    this.participant._onLeft({ type: 'left' })
-    void this.end.close().catch(() => {})
-  }
-
-  /** Its own writes and its stub's `p-meta` notices of it both land here. */
-  acceptOwnMeta(_from: string, accepted: MemberMetaUpdate): void {
-    this.participant._acceptMeta(accepted)
+  /** Its own meta, as the room accepted it, lands here as its stub's `p-meta` notices of it do; its leave ends it and
+   *  its channel. */
+  async request(_from: string, req: MemberRequest): Promise<unknown> {
+    const value = await request(this.end, req)
+    const accepted = acceptedMeta(req, value)
+    if (accepted) this.participant._acceptMeta(accepted)
+    if (req.__r === 'req-leave') {
+      this.participant._onLeft({ type: 'left' })
+      void this.end.close().catch(() => {})
+    }
+    return value
   }
 
   resolveSender(): Sender | null {
@@ -104,7 +102,7 @@ class LoneMember implements PageLink {
         return this.room.mirror.apply(msg)
       case 'p-meta':
         this.room.mirror.apply(msg)
-        if (msg.id === participant.id) this.acceptOwnMeta(participant.id, msg)
+        if (msg.id === participant.id) participant._acceptMeta(msg)
         return
       // It shows no room meta.
       case 'update':

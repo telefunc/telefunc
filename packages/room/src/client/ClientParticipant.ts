@@ -1,35 +1,25 @@
-export { ClientParticipant, reportClientCallbackError, request, sendDmReply }
-export type { ClientParticipantOptions, PageLink }
+export { ClientParticipant, acceptedMeta, reportClientCallbackError, request, sendDmReply }
+export type { PageLink }
 
-import { assertUsage } from '../utils/assert.js'
-import { getOrCreate, markHandled } from 'telefunc/__internal'
-import type { ChannelPublishAck, ClientBroadcast } from 'telefunc/__internal'
+import { getOrCreate } from 'telefunc/__internal'
+import type { ClientBroadcast } from 'telefunc/__internal'
 import type { TrackKey } from '../shared/binary.js'
-import { assertKnownOptions, assertPublishOptions, ownMetaArgument, recipientId } from '../shared/arguments.js'
 import type {
   RoomResult,
   ParticipantStubRequest,
   MemberMetaUpdate,
-  MemberMutationRequest,
+  MemberRequest,
   DemandChange,
   TrackWatch,
   TrackWatchState,
   RoomStubRequest,
 } from '../shared/protocol.js'
 import { CLIENT_ROOM_BUG_MESSAGE, roomResultValue } from '../shared/errors.js'
-import { ParticipantBase, type ParticipantBaseOptions } from '../shared/ParticipantBase.js'
+import { ParticipantBase, type MemberLink } from '../shared/ParticipantBase.js'
 import type { RoomState } from '../shared/state.js'
 import { heldConnectionChanged, holdMember, holdRoomOpen, letGoOfMember, releaseRoom } from './page.js'
 import { withChange } from '../utils/sets.js'
-import type {
-  BinaryPublishOptions,
-  LeaveCause,
-  LocalParticipant,
-  ParticipantMeta,
-  PublishOptions,
-  RemoteParticipant,
-  Sender,
-} from '../types.js'
+import type { LeaveCause, LocalParticipant, RemoteParticipant, Sender } from '../types.js'
 
 /** A reply that can't be sent is reported, and the sender gets an error instead. */
 function sendDmReply(end: ClientBroadcast, ackId: string, reply: Promise<RoomResult>): void {
@@ -42,17 +32,16 @@ async function request(end: ClientBroadcast, req: RoomStubRequest | ParticipantS
   return roomResultValue(end.send(req, { ack: true }))
 }
 
-/** Where a page's participant `from` acts, and the room it lists the other participants by: the room it joined
- *  through (`ClientRoomHandle`), or, for one a telefunction returned alone, its own channel (`LoneMember`). */
-interface PageLink {
+/** The meta the room accepted, which a meta write resolves to. */
+function acceptedMeta(req: MemberRequest, value: unknown): MemberMetaUpdate | null {
+  return req.__r === 'req-set-meta' || req.__r === 'req-set-attrs' ? (value as MemberMetaUpdate) : null
+}
+
+/** Where a page's participant acts, and the room it lists the other participants by: the room it joined through
+ *  (`ClientRoomHandle`), or, for one a telefunction returned alone, its own channel (`LoneMember`). */
+interface PageLink extends MemberLink {
+  /** Whether the participant's channel is connected. */
   readonly isConnected: boolean
-  publishText(from: string, data: unknown, retain: boolean | undefined): Promise<ChannelPublishAck>
-  publishFrame(framed: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck>
-  request(from: string, req: MemberMutationRequest): Promise<unknown>
-  /** Leaves on the server, then ends the participant. */
-  leave(from: string): Promise<void>
-  /** The participant's own meta write, as the room accepted it. */
-  acceptOwnMeta(from: string, accepted: MemberMetaUpdate): void
   /** The sender of a message to the participant, live, where its link has a room of its own. */
   resolveSender(id: string): Sender | null
   /** The state of the room it lists the other participants by. */
@@ -61,20 +50,12 @@ interface PageLink {
   deliverPrivate(field: string, from: string, data: unknown): void
 }
 
-type ClientParticipantOptions = ParticipantBaseOptions & { link: PageLink }
-
 /** A page's `LocalParticipant`: joined through a room the page holds, or returned alone by a telefunction. */
-class ClientParticipant extends ParticipantBase {
-  private readonly link: PageLink
+class ClientParticipant extends ParticipantBase<PageLink> {
   private readonly watches = new Map<TrackKey, TrackWatch>()
   protected readonly _bugMessage = CLIENT_ROOM_BUG_MESSAGE
   /** Weak: the room reaches this member, so a strong one would hold the room open for good. */
   private handle: WeakRef<LocalParticipant> | null = null
-
-  constructor({ link, ...options }: ClientParticipantOptions) {
-    super(options)
-    this.link = link
-  }
 
   get isConnected(): boolean {
     return this.link.isConnected
@@ -156,74 +137,6 @@ class ClientParticipant extends ParticipantBase {
 
   protected _deliverPrivate(field: string, from: string, data: unknown): void {
     this.link.deliverPrivate(field, from, data)
-  }
-
-  // Messaging is often fire-and-forget: a usage error throws, and a failure is a rejection left handled.
-  publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
-    assertPublishOptions(options)
-    if (options?.track === undefined) return markHandled(this.publishText(data, options?.retain))
-    return this.publishOnTrack(this.encodeTextFrame(data, options), options)
-  }
-
-  publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
-    return this.publishOnTrack(this.encodeBinaryFrame(data, options), options)
-  }
-
-  private async publishText(data: unknown, retain: boolean | undefined): Promise<ChannelPublishAck> {
-    this._assertActive()
-    return await this.link.publishText(this.id, data, retain)
-  }
-
-  private publishOnTrack(framed: Uint8Array, options: BinaryPublishOptions | undefined): Promise<ChannelPublishAck> {
-    return markHandled(this.publishFrame(framed, this.trackStreamOf(options?.track), options?.lossy === true))
-  }
-
-  private async publishFrame(framed: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck> {
-    this._assertActive()
-    return await this.link.publishFrame(framed, stream, lossy)
-  }
-
-  send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
-    assertKnownOptions(options, ['ack'], 'send()')
-    assertUsage(
-      options?.ack === undefined || typeof options.ack === 'boolean',
-      'send() options.ack should be a boolean',
-    )
-    return markHandled(this.sendDm(recipientId(to), data, options?.ack === true))
-  }
-
-  private async sendDm(to: string, data: unknown, ack: boolean): Promise<unknown> {
-    this._assertActive()
-    const request: MemberMutationRequest = { __r: 'req-dm', to, data }
-    if (ack) request.ack = true
-    return await this.link.request(this.id, request)
-  }
-
-  async _sendPrivate(to: string, field: string, data: unknown): Promise<void> {
-    this._assertActive()
-    await this.link.request(this.id, { __r: 'req-private', to, field, data })
-  }
-
-  // Concurrent writes can commit out of request order: the participant adopts the sequence-accepted value, as
-  // observers do.
-  async setMeta(meta: ParticipantMeta): Promise<void> {
-    const owned = ownMetaArgument(meta, 'setMeta() meta')
-    await this._writeMeta({ meta: owned }, () => this.requestMetaWrite({ __r: 'req-set-meta', meta: owned }))
-  }
-
-  async setAttributes(attrs: ParticipantMeta): Promise<void> {
-    const owned = ownMetaArgument(attrs, 'setAttributes() attributes')
-    await this._writeMeta({ attrs: owned }, () => this.requestMetaWrite({ __r: 'req-set-attrs', attrs: owned }))
-  }
-
-  private async requestMetaWrite(req: MemberMutationRequest): Promise<void> {
-    const accepted = await this.link.request(this.id, req)
-    this.link.acceptOwnMeta(this.id, accepted as MemberMetaUpdate)
-  }
-
-  async leave(): Promise<void> {
-    if (this._left) return
-    await this.link.leave(this.id)
   }
 
   protected _reportError(err: unknown): void {

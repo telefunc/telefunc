@@ -161,22 +161,8 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   }
 
   async handleRequest(req: RoomRequest): Promise<unknown> {
-    const room = this.room
-    switch (req.__r) {
-      case 'req-join':
-        return await room.joinStubMember(this, req)
-      case 'req-leave':
-        await room.removeMember(this.requireMember(req.id), { type: 'left' })
-        return undefined
-      case 'req-set-meta':
-        return await room.writes.setMemberMeta(this.requireMember(req.id), req.meta)
-      case 'req-set-attrs':
-        return await room.writes.mergeMemberMeta(this.requireMember(req.id), req.attrs)
-      case 'req-dm':
-        return await room.writes.sendDm(this.requireMember(req.id), req.to, req.data, req.ack === true)
-      case 'req-private':
-        return await room.writes.sendPrivate(this.requireMember(req.id), req.to, req.field, req.data)
-    }
+    if (req.__r === 'req-join') return await this.room.joinStubMember(this, req)
+    return await this.room.request(this.requireMember(req.id), req)
   }
 
   private applyDeclaration(declaration: RoomDeclaration): void {

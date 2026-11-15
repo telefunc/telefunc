@@ -1,9 +1,10 @@
 export { ParticipantBase, watchersOf }
-export type { ParticipantBaseOptions }
+export type { ParticipantBaseOptions, MemberLink }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import {
   invokeChannelListener,
+  markHandled,
   type ChannelPublishAck,
   type TELEFUNC_SHIELDS,
   Listeners,
@@ -13,12 +14,28 @@ import {
   TWO_ANSWERS,
   utf8ByteLength,
 } from 'telefunc/__internal'
+import { assertUsage } from '../utils/assert.js'
 import { makeDisposer, replayToLateListener, type ListenerOptions } from './disposer.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
-import { ownLeaveCause, ownMetadata, senderSnapshot } from './arguments.js'
+import {
+  assertKnownOptions,
+  assertPublishOptions,
+  ownLeaveCause,
+  ownMetaArgument,
+  ownMetadata,
+  recipientId,
+  senderSnapshot,
+} from './arguments.js'
 import { MemberMeta, type MetaRewinds, type MetaWrite } from './MemberMeta.js'
 import { DEFAULT_TRACK, encodeBinaryFrame, encodeMessageFrame, publicTrack, trackKey, type TrackKey } from './binary.js'
-import type { MemberMetaUpdate, WholeMemberUpdate, RoomResult, InboxMessage, TrackWatch } from './protocol.js'
+import type {
+  MemberMetaUpdate,
+  MemberRequest,
+  WholeMemberUpdate,
+  RoomResult,
+  InboxMessage,
+  TrackWatch,
+} from './protocol.js'
 import type {
   BinaryPublishOptions,
   LeaveCause,
@@ -43,14 +60,27 @@ type Shown = { meta: ParticipantMeta; connected: boolean; demand: readonly Track
 type TracksWatchers = { watchers: RemoteParticipant[]; watcherCount: number }
 const NO_DEMAND: readonly TrackDemand[] = Object.freeze([])
 
-type ParticipantBaseOptions = {
+/** Where a participant's acts go: on a page, up the channel of the room it joined through or its own; on a server, to
+ *  its room's writes. */
+interface MemberLink {
+  publishText(from: string, data: unknown, retain: boolean | undefined): Promise<ChannelPublishAck>
+  /** A frame of `from` on one of its tracks; `stream` and `lossy` pace a page's uplink. */
+  publishFrame(framed: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck>
+  /** Resolves once the room performed it and this side applied what it changed for the member: its accepted meta, or
+   *  its leave, which ends the participant. */
+  request(from: string, req: MemberRequest): Promise<unknown>
+}
+
+type ParticipantBaseOptions<Link extends MemberLink = MemberLink> = {
   participant: { id: string; meta: ParticipantMeta; selfDelivery: boolean; identity: string | null }
   /** Shared with its room view's members; a participant a client holds without a room view has its own. */
   rewinds: MetaRewinds
+  link: Link
 }
 
-/** The private-message inbox and the leave lifecycle, identical on server and client; flavors supply the transport. */
-abstract class ParticipantBase implements LocalParticipant {
+/** A `LocalParticipant`'s acts, private-message inbox and leave lifecycle, identical on server and page; each side
+ *  supplies its link and what it reads its room through. */
+abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements LocalParticipant {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
   readonly id: string
@@ -75,12 +105,14 @@ abstract class ParticipantBase implements LocalParticipant {
   private pendingInboxBytes = 0
   /** Its meta writes the room hasn't answered yet. */
   private metaWrites = 0
+  protected readonly link: Link
 
-  constructor({ participant, rewinds }: ParticipantBaseOptions) {
+  constructor({ participant, rewinds, link }: ParticipantBaseOptions<Link>) {
     this.id = participant.id
     this.memberMeta = new MemberMeta({ meta: participant.meta, seq: 0, rewinds })
     this.selfDelivery = participant.selfDelivery
     this.identity = participant.identity
+    this.link = link
   }
 
   get meta(): ParticipantMeta {
@@ -110,53 +142,105 @@ abstract class ParticipantBase implements LocalParticipant {
     return applied !== 'stale' && applied !== 'gap'
   }
 
-  /** Sends a meta write, unless it leaves the meta as it is and no write of its own is on its way, whose value it
-   *  must still replace. */
-  protected async _writeMeta(write: MetaWrite, send: () => Promise<unknown>): Promise<void> {
-    this._assertActive()
-    if (this.metaWrites === 0 && !this.memberMeta.changedBy(write)) return
-    this.metaWrites++
-    try {
-      await send()
-    } finally {
-      this.metaWrites--
-    }
-  }
-
   protected get _left(): boolean {
     return this.leftCause !== null
   }
 
-  abstract publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck>
-  abstract publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>
-  // The overloads live on `LocalParticipant`; this is their implementation signature.
-  abstract send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any>
-  /** @internal A package's message to `to`, for its field `field` there (`sendPrivate()`). */
-  abstract _sendPrivate(to: string, field: string, data: unknown): Promise<void>
   /** A package's message to this member, for its field's `onPrivate()` on the views of its room here. */
   protected abstract _deliverPrivate(field: string, from: string, data: unknown): void
-  abstract setMeta(meta: ParticipantMeta): Promise<void>
-  abstract setAttributes(attributes: ParticipantMeta): Promise<void>
-  abstract leave(): Promise<void>
   abstract get isConnected(): boolean
   /** A user callback threw. Each side reports through its own pipeline. */
   protected abstract _reportError(err: unknown): void
   /** An ack DM's reply to a bug in a `listen()` handler, naming where `_reportError` logged it. */
   protected abstract readonly _bugMessage: string
 
-  protected encodeBinaryFrame(data: Uint8Array, options?: BinaryPublishOptions): Uint8Array {
-    return encodeBinaryFrame(this.id, data, options)
+  /** What a message it sends carries of `data`: the value itself, which a page's wire copies on its way. */
+  protected _ownMessage(data: unknown): unknown {
+    return data
   }
 
-  /** The frame of a `publish()` on a track. */
-  protected encodeTextFrame(data: unknown, options: PublishOptions): Uint8Array {
-    return encodeMessageFrame(this.id, data, options)
+  // Messaging is often fire-and-forget: a usage error throws, and a failure is a rejection left handled.
+  publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
+    assertPublishOptions(options)
+    if (options?.track === undefined) return markHandled(this.publishText(this._ownMessage(data), options?.retain))
+    return this.publishOnTrack(encodeMessageFrame(this.id, data, options), options)
+  }
+
+  publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
+    return this.publishOnTrack(encodeBinaryFrame(this.id, data, options), options)
+  }
+
+  private async publishText(data: unknown, retain: boolean | undefined): Promise<ChannelPublishAck> {
+    this.assertActive()
+    return await this.link.publishText(this.id, data, retain)
+  }
+
+  private publishOnTrack(framed: Uint8Array, options: BinaryPublishOptions | undefined): Promise<ChannelPublishAck> {
+    return markHandled(this.publishFrame(framed, this.trackStreamOf(options?.track), options?.lossy === true))
+  }
+
+  private async publishFrame(framed: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck> {
+    this.assertActive()
+    return await this.link.publishFrame(framed, stream, lossy)
   }
 
   /** The stream this member's publishes on `track` go up in, in order: a newer lossy one replaces an older one still
    *  waiting, and a plain one goes after it. */
-  protected trackStreamOf(track: string | undefined): string {
+  private trackStreamOf(track: string | undefined): string {
     return `${this.id}:${track === undefined ? DEFAULT_TRACK : trackKey(track)}`
+  }
+
+  // The overloads live on `LocalParticipant`; this is their implementation signature.
+  send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
+    assertKnownOptions(options, ['ack'], 'send()')
+    assertUsage(
+      options?.ack === undefined || typeof options.ack === 'boolean',
+      'send() options.ack should be a boolean',
+    )
+    return markHandled(this.sendDm(recipientId(to), this._ownMessage(data), options?.ack === true))
+  }
+
+  private async sendDm(to: string, data: unknown, ack: boolean): Promise<unknown> {
+    this.assertActive()
+    const request: MemberRequest = { __r: 'req-dm', to, data }
+    if (ack) request.ack = true
+    return await this.link.request(this.id, request)
+  }
+
+  /** @internal A package's message to `to`, for its field `field` there (`sendPrivate()`). */
+  async _sendPrivate(to: string, field: string, data: unknown): Promise<void> {
+    this.assertActive()
+    await this.link.request(this.id, { __r: 'req-private', to, field, data: this._ownMessage(data) })
+  }
+
+  // Concurrent writes can commit out of request order: the participant adopts the sequence-accepted value, as
+  // observers do.
+  async setMeta(meta: ParticipantMeta): Promise<void> {
+    const owned = ownMetaArgument(meta, 'setMeta() meta')
+    await this.writeMeta({ meta: owned }, { __r: 'req-set-meta', meta: owned })
+  }
+
+  async setAttributes(attrs: ParticipantMeta): Promise<void> {
+    const owned = ownMetaArgument(attrs, 'setAttributes() attributes')
+    await this.writeMeta({ attrs: owned }, { __r: 'req-set-attrs', attrs: owned })
+  }
+
+  /** Sends a meta write, unless it leaves the meta as it is and no write of its own is on its way, whose value it
+   *  must still replace. */
+  private async writeMeta(write: MetaWrite, req: MemberRequest): Promise<void> {
+    this.assertActive()
+    if (this.metaWrites === 0 && !this.memberMeta.changedBy(write)) return
+    this.metaWrites++
+    try {
+      await this.link.request(this.id, req)
+    } finally {
+      this.metaWrites--
+    }
+  }
+
+  async leave(): Promise<void> {
+    if (this._left) return
+    await this.link.request(this.id, { __r: 'req-leave' })
   }
 
   listen(callback: (data: unknown, from: Sender | null) => unknown, options?: ListenerOptions): () => void {
@@ -370,7 +454,7 @@ abstract class ParticipantBase implements LocalParticipant {
     for (const cb of leaveListeners) this.invoke(cb, ownedCause)
   }
 
-  protected _assertActive(): void {
+  private assertActive(): void {
     if (this._left) throw participantLeftError()
   }
 

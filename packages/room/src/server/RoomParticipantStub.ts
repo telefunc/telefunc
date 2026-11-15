@@ -10,7 +10,7 @@ import {
   type ServerBroadcastEnd,
 } from 'telefunc/__internal'
 import type { ShieldValidator } from 'telefunc'
-import type { ServerLocalParticipant } from './room.js'
+import type { RoomHandle, ServerLocalParticipant } from './room.js'
 import {
   decodeParticipantDeclaration,
   decodeParticipantFrame,
@@ -19,7 +19,7 @@ import {
   pageFrameMessage,
 } from './requests.js'
 import type { BinaryFrame, TrackKey } from '../shared/binary.js'
-import { DM_FAILURE } from '../shared/errors.js'
+import { DM_FAILURE, participantLeftError } from '../shared/errors.js'
 import {
   leaveCauseToWire,
   dmNotice,
@@ -43,6 +43,8 @@ import {
 assertIsNotBrowser()
 
 type RoomParticipantStubOptions = {
+  /** The room its participant's requests go to. */
+  room: RoomHandle
   participant: ServerLocalParticipant
   end: ServerBroadcastEnd
   publishShield?: ShieldValidator
@@ -53,13 +55,15 @@ type RoomParticipantStubOptions = {
 class RoomParticipantStub implements BroadcastEndOwner {
   /** Its channel to its client. */
   private readonly end: ServerBroadcastEnd
+  private readonly room: RoomHandle
   private readonly participant: ServerLocalParticipant
   private readonly publishShield: ShieldValidator | undefined
   private readonly dmReplies = new PendingDmReplies()
   /** Whether its participant left, which its page then holds no more. */
   private left = false
 
-  constructor({ participant, end, publishShield }: RoomParticipantStubOptions) {
+  constructor({ room, participant, end, publishShield }: RoomParticipantStubOptions) {
+    this.room = room
     this.participant = participant
     this.publishShield = publishShield
     this.end = end
@@ -84,7 +88,8 @@ class RoomParticipantStub implements BroadcastEndOwner {
 
   private async publishFrame(frame: BinaryFrame, framed: Uint8Array, message: unknown): Promise<ChannelPublishAck> {
     if (frame.text) assertPublishShield(this.publishShield, message)
-    return await this.participant._publishFrame(frame, framed, message)
+    this.assertActive()
+    return await this.room.writes.publishBinaryFrame(frame, framed, message)
   }
 
   _onPageAttach(): void {
@@ -102,23 +107,25 @@ class RoomParticipantStub implements BroadcastEndOwner {
     return undefined
   }
 
+  /** Performed as its participant, and not copied: what it decoded from the wire is its own. */
   private async handleRequest(req: ParticipantStubRequest): Promise<unknown> {
-    const participant = this.participant
+    const { id } = this.participant
     switch (req.__r) {
       case 'req-publish':
         assertPublishShield(this.publishShield, req.data)
-        return await participant.publish(req.data, req.retain ? { retain: true } : undefined)
-      case 'req-set-meta':
-        return await participant._setMeta(req.meta)
-      case 'req-set-attrs':
-        return await participant._setAttributes(req.attrs)
-      case 'req-dm':
-        return await participant.send(req.to, req.data, req.ack ? { ack: true } : undefined)
-      case 'req-private':
-        return await participant._sendPrivate(req.to, req.field, req.data)
+        this.assertActive()
+        return await this.room.writes.publishText(id, req.data, req.retain)
       case 'req-leave':
-        return await participant.leave()
+        if (!this.left) await this.room.request(id, req)
+        return undefined
+      default:
+        this.assertActive()
+        return await this.room.request(id, req)
     }
+  }
+
+  private assertActive(): void {
+    if (this.left) throw participantLeftError()
   }
 
   private mirrorParticipant(): void {
@@ -130,7 +137,7 @@ class RoomParticipantStub implements BroadcastEndOwner {
 
     const unlistenLeave = participant.onLeave((cause) => {
       this.left = true
-      participant.room.replica.pageEndChanged(this)
+      this.room.replica.pageEndChanged(this)
       this.notify({ __r: 'left', ...leaveCauseToWire(cause) })
       closeAfterReconnectWindow(this.end)
     })
@@ -138,8 +145,8 @@ class RoomParticipantStub implements BroadcastEndOwner {
     this.end.onDisconnect(() => participant._setHolderConnected(false))
     this.end.onReconnect(() => participant._setHolderConnected(true))
     this.end.onClose(() => {
-      participant.room.replica.leavePage(this)
-      participant.room.replica.unfollowRoster(this)
+      this.room.replica.leavePage(this)
+      this.room.replica.unfollowRoster(this)
       unlistenMeta()
       unlistenLeave()
       this.dmReplies.drop()
@@ -155,7 +162,7 @@ class RoomParticipantStub implements BroadcastEndOwner {
 
   /** Its client names who receives its participant's tracks from the room's roster from now on. */
   private followRoster(): void {
-    if (!this.end.isClosed) void this.participant.room.replica.followRoster(this).catch(reportRoomError)
+    if (!this.end.isClosed) void this.room.replica.followRoster(this).catch(reportRoomError)
   }
 
   /** Its participant, who is at its page until it leaves. */

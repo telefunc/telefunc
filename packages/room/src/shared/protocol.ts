@@ -26,6 +26,7 @@ export type {
   RoomStubRequest,
   ParticipantStubRequest,
   MemberMutationRequest,
+  MemberRequest,
   ParticipantStubNotice,
   MemberWants,
   InboxMessage,
@@ -172,12 +173,14 @@ type MemberMutationRequest =
   | { __r: 'req-dm'; to: string; data: unknown; ack?: boolean }
   | { __r: 'req-private'; to: string; field: string; data: unknown }
 
+/** What a member asks of its room: the requests both stubs take, and what a server participant does itself. */
+type MemberRequest = MemberMutationRequest | { __r: 'req-leave' }
+
 /** Client→server requests on a room stub; `id` is the acting member. The room-wide text want rides the Broadcast
  *  subscription, which attaches again before `onOpen`. */
 type RoomStubRequest =
   | { __r: 'req-join'; reqId: number; meta: ParticipantMeta; selfDelivery: boolean }
-  | { __r: 'req-leave'; id: string }
-  | (MemberMutationRequest & { id: string })
+  | (MemberRequest & { id: string })
   | { __r: 'dm-reply'; ackId: string; reply: RoomResult }
   /** A `BinaryWantChange`, with `null` for `EVERY_MEMBER` and `EVERY_TRACK`. */
   | { __r: 'sub-binary'; member: string | null; track: string | null; on: boolean }
@@ -185,10 +188,7 @@ type RoomStubRequest =
   | { __r: 'sub-text'; announce: boolean; members: Record<string, boolean> }
 
 /** Client→server requests on a participant stub; an ack DM's reply is a `dm-reply`, as on a room stub. */
-type ParticipantStubRequest =
-  | { __r: 'req-publish'; data: unknown; retain?: boolean }
-  | MemberMutationRequest
-  | { __r: 'req-leave' }
+type ParticipantStubRequest = { __r: 'req-publish'; data: unknown; retain?: boolean } | MemberRequest
 
 /** Server→client notices on a participant stub. Its participant's own meta is a `p-meta` with its id, as on a room's
  *  channel. Once someone receives one of its tracks, the room's roster and presence events follow, which name them. */

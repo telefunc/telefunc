@@ -1,33 +1,20 @@
 export { ServerRoom, ServerLocalParticipant, RoomHandle, handleOf }
 export type { MetaMirror }
 
-import { type ChannelPublishAck, handleCallbackBug, type OrderingInfo, markHandled } from 'telefunc/__internal'
+import { type ChannelPublishAck, handleCallbackBug, type OrderingInfo } from 'telefunc/__internal'
 import { assert, assertUsage } from '../utils/assert.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
-import {
-  decodeBinaryFrame,
-  decodeFrameMessage,
-  type BinaryFrame,
-  type BinaryWantChange,
-  type TrackKey,
-} from '../shared/binary.js'
+import { decodeBinaryFrame, decodeFrameMessage, type BinaryWantChange, type TrackKey } from '../shared/binary.js'
 import { RoomError, roomClosedError, ROOM_BUG_MESSAGE } from '../shared/errors.js'
-import {
-  assertKnownOptions,
-  assertPublishOptions,
-  normalizeJoinOptions,
-  ownMessage,
-  ownMetaArgument,
-  ownMetadata,
-  recipientId,
-} from '../shared/arguments.js'
+import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetadata } from '../shared/arguments.js'
 import {
   inboxMessageFromWire,
   type SenderStamp,
   type RoomDmEnvelope,
   type RoomCtrlEnvelope,
   type MemberMetaUpdate,
+  type MemberRequest,
   type ParticipantStubMetadata,
   type RoomSnapshotMetadata,
   type InboxMessage,
@@ -38,7 +25,7 @@ import {
 import type { RoomDataEnvelope, RoomMemberRecord, RoomIncarnation } from './protocol.js'
 import type { RoomModel } from '../shared/RoomModel.js'
 import { RoomState, RoomStateView, type RoomStateOwner } from '../shared/state.js'
-import { ParticipantBase, type ParticipantBaseOptions } from '../shared/ParticipantBase.js'
+import { ParticipantBase, type MemberLink, type ParticipantBaseOptions } from '../shared/ParticipantBase.js'
 import { RoomStub, type RoomStubOptions } from './RoomStub.js'
 import { RoomParticipantStub, type RoomParticipantStubOptions } from './RoomParticipantStub.js'
 import { MemberMessageBodies } from './publishBodies.js'
@@ -57,17 +44,7 @@ import { closeAfterReconnectWindow } from './pageRequests.js'
 import { reportRoomError } from './reportRoomError.js'
 import { Admission } from './Admission.js'
 import { evictMember, joinMember } from './store/members.js'
-import type {
-  BinaryPublishOptions,
-  JoinOptions,
-  LeaveCause,
-  LocalParticipant,
-  ParticipantMeta,
-  PublishOptions,
-  RemoteParticipant,
-  Room,
-  Sender,
-} from '../types.js'
+import type { JoinOptions, LeaveCause, LocalParticipant, RemoteParticipant, Room, Sender } from '../types.js'
 import type { RoomGuards } from './roomStatics.js'
 assertIsNotBrowser()
 
@@ -96,7 +73,7 @@ type RoomHandleOptions = {
 
 /** One `Room.get()`'s handle on a room: its guards, its tail, the stubs it opened, its participants and its listeners,
  *  over this process's one view of the room, which every handle to it shares. Each serialization opens a fresh stub. */
-class RoomHandle implements RoomWritesOwner, TailHoldOwner {
+class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink {
   /** Every authority check and member write carries this incarnation,
    *  rejecting stale handles after recreate. */
   readonly incarnation: RoomIncarnation
@@ -245,6 +222,34 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner {
   private abandonAdmission(id: string, cause: LeaveCause): void {
     this.admissions.delete(id)
     this.model.applyLeave(id, cause)
+  }
+
+  /** A member's request: from its participant here, from a page that joined through a stub, or from a page holding
+   *  its participant. */
+  async request(id: string, req: MemberRequest): Promise<unknown> {
+    switch (req.__r) {
+      case 'req-leave':
+        return await this.removeMember(id, { type: 'left' })
+      case 'req-set-meta':
+        return await this.writes.setMemberMeta(id, req.meta)
+      case 'req-set-attrs':
+        return await this.writes.mergeMemberMeta(id, req.attrs)
+      case 'req-dm':
+        return await this.writes.sendDm(id, req.to, req.data, req.ack === true)
+      case 'req-private':
+        return await this.writes.sendPrivate(id, req.to, req.field, req.data)
+    }
+  }
+
+  publishText(from: string, data: unknown, retain: boolean | undefined): Promise<ChannelPublishAck> {
+    return this.writes.publishText(from, data, retain)
+  }
+
+  /** A frame of a participant here, decoded as a holder elsewhere decodes it. */
+  publishFrame(framed: Uint8Array): Promise<ChannelPublishAck> {
+    const frame = decodeBinaryFrame(framed)
+    assert(frame !== null)
+    return this.writes.publishBinaryFrame(frame, framed, frame.text ? decodeFrameMessage(frame) : frame.payload)
   }
 
   async removeMember(id: string, cause: LeaveCause): Promise<void> {
@@ -515,6 +520,7 @@ function handleOf(room: ServerRoom): RoomHandle {
 }
 
 type ServerLocalParticipantOptions = {
+  /** Where its acts go, and the room it lists the other participants by. */
   room: RoomHandle
   participant: ParticipantBaseOptions['participant']
   /** Holds who receives the participant's tracks, once for the whole room. */
@@ -523,7 +529,7 @@ type ServerLocalParticipantOptions = {
   metaMirrors: Set<MetaMirror>
 }
 
-/** Server-side `LocalParticipant`, returned by `ServerRoom.join()`. */
+/** Server-side `LocalParticipant`, returned by `ServerRoom.join()`. Its acts go to its room's writes. */
 class ServerLocalParticipant extends ParticipantBase {
   readonly [SERVER_PARTICIPANT_BRAND] = true
   /** @internal */
@@ -537,7 +543,7 @@ class ServerLocalParticipant extends ParticipantBase {
   private readonly metaMirrors: Set<MetaMirror>
 
   constructor({ room, participant, incomingDemand, metaMirrors }: ServerLocalParticipantOptions) {
-    super({ participant, rewinds: room.model.metaRewinds })
+    super({ participant, rewinds: room.model.metaRewinds, link: room })
     this.room = room
     this.incomingDemand = incomingDemand
     this.metaMirrors = metaMirrors
@@ -570,32 +576,9 @@ class ServerLocalParticipant extends ParticipantBase {
     this.holder?.demandChanged(track, change)
   }
 
-  publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
-    assertPublishOptions(options)
-    if (options?.track === undefined) return markHandled(this.publishText(ownMessage(data), options?.retain))
-    return this.publishOnTrack(this.encodeTextFrame(data, options))
-  }
-
-  publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
-    return this.publishOnTrack(this.encodeBinaryFrame(data, options))
-  }
-
-  /** Local holders get exactly what remote ones decode, not the caller's objects. */
-  private publishOnTrack(framed: Uint8Array): Promise<ChannelPublishAck> {
-    const frame = decodeBinaryFrame(framed)
-    assert(frame !== null)
-    return markHandled(this._publishFrame(frame, framed, frame.text ? decodeFrameMessage(frame) : frame.payload))
-  }
-
-  private async publishText(data: unknown, retain: boolean | undefined): Promise<ChannelPublishAck> {
-    this._assertActive()
-    return await this.room.writes.publishText(this.id, data, retain)
-  }
-
-  /** @internal */
-  async _publishFrame(frame: BinaryFrame, framed: Uint8Array, message: unknown): Promise<ChannelPublishAck> {
-    this._assertActive()
-    return await this.room.writes.publishBinaryFrame(frame, framed, message)
+  /** No wire stands between it and a listener here. */
+  protected override _ownMessage(data: unknown): unknown {
+    return ownMessage(data)
   }
 
   /** @internal A DM for this member: to the client holding it, else its listeners. */
@@ -626,7 +609,7 @@ class ServerLocalParticipant extends ParticipantBase {
     end,
     publishShield,
     page,
-  }: Omit<RoomParticipantStubOptions, 'participant'> & { page: string }): ParticipantStubMetadata {
+  }: Omit<RoomParticipantStubOptions, 'room' | 'participant'> & { page: string }): ParticipantStubMetadata {
     // A LocalParticipant has one holder; rebinding would overwrite its inbox forwarder and let either close drop it.
     assertUsage(
       this.holder === null,
@@ -634,7 +617,7 @@ class ServerLocalParticipant extends ParticipantBase {
         'single member: give each client its own join(), or share a getParticipants() view (which is read-only) ' +
         'instead.',
     )
-    this.holder = new RoomParticipantStub({ participant: this, end, publishShield })
+    this.holder = new RoomParticipantStub({ room: this.room, participant: this, end, publishShield })
     // It is at the holder's page from now on, not at its server-side room's.
     this.room.replica.placeAtPage(this.holder, page)
     this.room.replica.pageEndChanged(this.room.local)
@@ -683,52 +666,6 @@ class ServerLocalParticipant extends ParticipantBase {
   /** @internal The client holding this participant went away without leaving. */
   _releaseHolder(): Promise<void> {
     return this.room.removeDepartedMember(this.id)
-  }
-
-  send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
-    assertKnownOptions(options, ['ack'], 'send()')
-    assertUsage(
-      options?.ack === undefined || typeof options.ack === 'boolean',
-      'send() options.ack should be a boolean',
-    )
-    return markHandled(this.sendDm(recipientId(to), ownMessage(data), options?.ack === true))
-  }
-
-  private async sendDm(to: string, data: unknown, ack: boolean): Promise<unknown> {
-    this._assertActive()
-    return await this.room.writes.sendDm(this.id, to, data, ack)
-  }
-
-  async _sendPrivate(to: string, field: string, data: unknown): Promise<void> {
-    this._assertActive()
-    await this.room.writes.sendPrivate(this.id, to, field, ownMessage(data))
-  }
-
-  async setMeta(meta: ParticipantMeta): Promise<void> {
-    const owned = ownMetaArgument(meta, 'setMeta() meta')
-    await this._writeMeta({ meta: owned }, () => this._setMeta(owned))
-  }
-
-  async setAttributes(attrs: ParticipantMeta): Promise<void> {
-    const owned = ownMetaArgument(attrs, 'setAttributes() attributes')
-    await this._writeMeta({ attrs: owned }, () => this._setAttributes(owned))
-  }
-
-  /** @internal The accepted write, which a client holder mirrors in revision order. */
-  async _setMeta(meta: ParticipantMeta): Promise<MemberMetaUpdate> {
-    this._assertActive()
-    return await this.room.writes.setMemberMeta(this.id, meta)
-  }
-
-  /** @internal */
-  async _setAttributes(attrs: ParticipantMeta): Promise<MemberMetaUpdate> {
-    this._assertActive()
-    return await this.room.writes.mergeMemberMeta(this.id, attrs)
-  }
-
-  async leave(): Promise<void> {
-    if (this._left) return
-    await this.room.removeMember(this.id, { type: 'left' })
   }
 
   protected override _resolveSender(id: string): Sender | null {

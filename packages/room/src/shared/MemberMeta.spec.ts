@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Room } from '../index.js'
 import { pageRoom } from '../test/pageRoom.js'
+import type { ServerLocalParticipant } from '../server/room.js'
 import type { LocalParticipant } from '../types.js'
 
 async function pageMember(meta: { name: string }): Promise<LocalParticipant> {
@@ -63,18 +64,15 @@ describe('a meta write that leaves the meta as it is', () => {
 
   it('changes nothing a reader sees where it arrives', async () => {
     const room = await Room.create(`meta-${crypto.randomUUID()}`)
-    const me = (await room.join({ meta: { name: 'Pub' } })) as LocalParticipant & {
-      _setMeta(meta: object): Promise<unknown>
-      _setAttributes(attrs: object): Promise<unknown>
-    }
+    const me = (await room.join({ meta: { name: 'Pub' } })) as ServerLocalParticipant
     const changes = { room: 0, participant: 0, me: 0 }
     room.onChange(() => changes.room++)
     room.getParticipant(me.id)!.onChange(() => changes.participant++)
     me.onChange(() => changes.me++)
     const snapshot = room.snapshot()
     // As a page holding `me` sends one that raced another.
-    await me._setMeta({ name: 'Pub' })
-    await me._setAttributes({ name: 'Pub' })
+    await me.room.request(me.id, { __r: 'req-set-meta', meta: { name: 'Pub' } })
+    await me.room.request(me.id, { __r: 'req-set-attrs', attrs: { name: 'Pub' } })
     await Promise.resolve()
     expect(changes).toEqual({ room: 0, participant: 0, me: 0 })
     expect(room.snapshot()).toBe(snapshot)
