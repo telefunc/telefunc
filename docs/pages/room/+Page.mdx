@@ -72,6 +72,8 @@ A client joins only a room whose telefunction says who may: `anyoneCanJoin: true
 
 > `meta` is what a participant shows about itself, such as its name. A room has a `meta` too: set it with `Room.create('lobby', { meta: { topic: 'General' } })`, and read it on the client with `room.meta`.
 
+Every page that has the room open receives its participants and each change to them, so join only the people who take part. A page that only watches, such as a match's audience, takes the room its telefunction returns and doesn't join it: it reads `room.getParticipants()` and `room.count`, and its `subscribe()` and `onAnnounce()` listeners receive the room's messages. Nobody sees it among the participants, and it can't publish or send a message: those are methods of `me`, the participant `join()` returns.
+
 
 ## Show who's in the room
 
