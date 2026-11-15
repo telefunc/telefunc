@@ -359,9 +359,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  page ahead of its end. */
   protected dropUnhanded(): void {
     if (!this.peer) return this.offlineBuffer.dropLossy()
-    const { index, sender } = this.peer
-    const { units, bytes } = this._replayBuffer!.dropNewestPublishes(sender.queue.waitingPublishes(index))
-    if (units > 0) sender.queue.dropWaitingPublishes(index, units)
+    const { units, bytes } = this.peer.dropUnhanded()
     this.sendCredit.refund(bytes, units)
   }
 

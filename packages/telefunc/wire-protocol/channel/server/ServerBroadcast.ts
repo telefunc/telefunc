@@ -266,8 +266,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** Its publishes that no wire has taken go, unless it ended: its replay is then what its page reads. */
   protected override dropUnhanded(): void {
     if (this._phase === 'ended') return
-    const dropped = this._replayBuffer?.dropNewestPublishes(this.unhanded()).units ?? 0
-    if (dropped > 0) this.peer?.sender.queue.dropWaitingPublishes(this.peer.index, dropped)
+    if (this.peer) this.peer.dropUnhanded()
+    else this._replayBuffer?.dropNewestPublishes(this.unhanded())
   }
 
   /** Where `holder` is a lossy page this publish reaches (its key, on its object), it lets go of what the publish
@@ -282,8 +282,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   /** How many of its newest publishes no wire has: all of them while it has no wire. */
   private unhanded(): number {
-    const { peer } = this
-    return peer ? peer.sender.queue.waitingPublishes(peer.index) : Number.POSITIVE_INFINITY
+    return this.peer?.unhanded() ?? Number.POSITIVE_INFINITY
   }
 
   /** Its newest publish, where no wire has that yet. */

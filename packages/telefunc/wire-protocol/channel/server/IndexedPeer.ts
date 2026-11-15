@@ -104,6 +104,19 @@ class IndexedPeer {
     this.sender.send(encode.bdpPingAck(this.index, probe, backlog, pathRtt))
   }
 
+  /** How many of its publishes no wire has taken: their heads still wait in its wire's queue, and they are the replay's
+   *  newest. */
+  unhanded(): number {
+    return this.sender.queue.waitingPublishes(this.index)
+  }
+
+  /** Takes those back from the replay and the wire's queue. Returns how many went, and their bodies' bytes. */
+  dropUnhanded(): { units: number; bytes: number } {
+    const dropped = this.replay.dropNewestPublishes(this.unhanded())
+    if (dropped.units > 0) this.sender.queue.dropWaitingPublishes(this.index, dropped.units)
+    return dropped
+  }
+
   private sendLimit(frame: Uint8Array, urgency: Urgency): void {
     if (urgency === 'acknowledgement') this.sender.carry(frame)
     else this.sender.send(frame)
