@@ -34,7 +34,7 @@ config.channel = { maxPendingBytes: CREDIT_WINDOW_INITIAL_BYTES, maxMemory: '32m
 /** Three messages, each larger than what a wire sends before its page says it took some. */
 const MESSAGES = ['p1', 'p2', 'p3'].map((name) => name + 'x'.repeat(100_000))
 
-/** A message as `<channel index>:<name>`, an ABORT or an ERROR, with its channel's seq. */
+/** A message as `<channel index>:<name>`, a CLOSE, an ABORT or an ERROR, with its channel's seq. */
 type Sent = { index: number; seq: number; label: string }
 
 /** What `frames` carry, in order. */
@@ -47,6 +47,7 @@ function sent(frames: Iterable<Uint8Array>): Sent[] {
     const { index, seq } = decoded
     if (decoded.tag === TAG.PUBLISH || decoded.tag === TAG.TEXT)
       out.push({ index, seq, label: `${index}:${(parse(decoded.text) as string).slice(0, 2)}` })
+    if (decoded.tag === TAG.CLOSE) out.push({ index, seq, label: `${index}:CLOSE` })
     if (decoded.tag === TAG.ABORT) out.push({ index, seq, label: `${index}:ABORT` })
     if (decoded.tag === TAG.ERROR) out.push({ index, seq, label: `${index}:ERROR` })
   }
@@ -73,7 +74,7 @@ function subscribers() {
 }
 
 /** Subscribes the page to `channels`, at indexes 0, 1, …, over its event stream, which it doesn't read yet. */
-async function overSse(channels: ServerBroadcast<string>[]) {
+async function overSse(channels: ServerChannel[]) {
   const mux = getChannelMux()
   for (const channel of channels) mux.registerChannel(channel)
   const broadcast = { text: true, binary: false }
@@ -245,6 +246,83 @@ for (const [closing, begin] of Object.entries(CLOSING)) {
     other.abort()
   })
 }
+
+/** Each small frame of channel 0 that follows a publish its page has read, which nothing of channel 0 is then ahead of:
+ *  its CLOSE, and a 1 kB send after a lossy one, which goes as a publish. */
+type AfterAPublish = {
+  create: (key: string) => ServerChannel
+  publish: (channel: ServerChannel, key: string) => void
+  small: (channel: ServerChannel) => void
+  reads: [string, string]
+}
+const AFTER_A_PUBLISH: Record<string, AfterAPublish> = {
+  'its close': {
+    create: (key) => new ServerBroadcast<string>({ key }),
+    publish: (_, key) => void Broadcast.publish(key, 'p0'),
+    small: (channel) => void channel.close(),
+    reads: ['0:p0', '0:CLOSE'],
+  },
+  'a 1 kB send after a lossy one': {
+    create: () => new ServerChannel(),
+    publish: (channel) => void channel.send('l0', { lossy: true }),
+    small: (channel) => void channel.send('r1' + 'x'.repeat(1_000)),
+    reads: ['0:l0', '0:r1'],
+  },
+}
+
+for (const [
+  name,
+  {
+    create,
+    publish,
+    small,
+    reads: [published, sent],
+  },
+] of Object.entries(AFTER_A_PUBLISH)) {
+  test(`on a WebSocket, once the page read a publish, ${name} goes ahead of what of another channel waits`, async () => {
+    const key = crypto.randomUUID()
+    const channel = create(key)
+    const other = new ServerChannel()
+    const page = overWebSocket([channel, other])
+    publish(channel, key)
+    expect(await page.readAll()).toEqual([published])
+    for (const message of MESSAGES) void other.send(message)
+    small(channel)
+    // Of the other channel, p1 started and its rest waits.
+    expect(await page.readAll()).toEqual([published, sent, '1:p1', '1:p2', '1:p3'])
+    other.abort()
+  })
+
+  test(`on SSE, once the page read a publish, ${name} goes ahead of what of another channel waits`, async () => {
+    const key = crypto.randomUUID()
+    const channel = create(key)
+    const other = new ServerChannel()
+    const page = await overSse([channel, other])
+    publish(channel, key)
+    await page.readUntil(published)
+    for (const message of MESSAGES) void other.send(message)
+    small(channel)
+    // Of the other channel, p1's event started, and nothing passes an event once it started.
+    expect(reads(await page.readUntil('1:p3'))).toEqual([published, '1:p1', sent, '1:p2', '1:p3'])
+    await page.close()
+  })
+}
+
+test("on SSE, a frame that goes between a publish's head and its body leaves that channel's close behind the body", async () => {
+  const key = crypto.randomUUID()
+  const channel = new ServerBroadcast<string>({ key })
+  const other = new ServerChannel()
+  const page = await overSse([channel, other])
+  // The page reads nothing yet, so both wait for its event stream.
+  void Broadcast.publish(key, 'p0')
+  void Broadcast.publish(key, 'p1')
+  // Each event the page reads lets the next go: once p0 is read, p1's head goes, and its body waits.
+  await page.readUntil('0:p0')
+  void other.send('s1')
+  void channel.close()
+  expect(reads(await page.readUntil('0:CLOSE'))).toEqual(['0:p0', '1:s1', '0:p1', '0:CLOSE'])
+  await page.close()
+})
 
 /** Each way a subscriber that may miss no publish falls behind, by what it publishes and what its page then reads. */
 const OVERFLOWS: Record<string, { publishes: string[]; pageReads: string[] }> = {

@@ -2,7 +2,7 @@ export { countWaitingPublishes, droppingPublishes, droppingFrom, overtakes }
 export type { WireQueue }
 
 import { readU16 } from '../../wire/header.js'
-import { TAG, isSequencedTag } from '../../wire/tags.js'
+import { TAG, isPublishBody, isSequencedTag } from '../../wire/tags.js'
 
 /** What a server wire holds back for its page, which a broadcast falling behind, or a channel its page left, can let go of. */
 interface WireQueue {
@@ -16,10 +16,6 @@ interface WireQueue {
 
 function isHeadOf(frame: Uint8Array, ix: number): boolean {
   return frame[0] === TAG.PUBLISH_TO && readU16(frame, 1) === ix
-}
-
-function isPublishBody(tag: number): boolean {
-  return tag === TAG.PUBLISH || tag === TAG.PUBLISH_BINARY
 }
 
 /** Whether data `frame` goes ahead of `ahead`, the frames its wire holds back: a channel orders only its own frames, so a

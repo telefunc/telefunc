@@ -1,4 +1,14 @@
-export { TAG, isWireCtrlTag, isChannelCtrlTag, isClosingTag, isSequencedTag, passesData, replayKindOf, countsCredit }
+export {
+  TAG,
+  isWireCtrlTag,
+  isChannelCtrlTag,
+  isClosingTag,
+  isSequencedTag,
+  isPublishBody,
+  passesData,
+  replayKindOf,
+  countsCredit,
+}
 export type { ReplayKind }
 
 import { assert } from '../../utils/assert.js'
@@ -99,6 +109,11 @@ function isChannelCtrlTag(tag: number): boolean {
 
 function isSequencedTag(tag: number): boolean {
   return (tag >= DATA_TAG_MIN && tag < CHANNEL_CTRL_TAG_MIN) || isClosingTag(tag)
+}
+
+/** A publish's body, which follows its head and names no channel. */
+function isPublishBody(tag: number): boolean {
+  return tag === TAG.PUBLISH || tag === TAG.PUBLISH_BINARY
 }
 
 /** Whether a frame of `tag` passes the data waiting ahead of it: not sequenced, nor FIN, which ends its wire's data. */
