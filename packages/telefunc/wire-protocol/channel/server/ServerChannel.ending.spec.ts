@@ -233,6 +233,21 @@ for (const [overflow, { publishes, pageReads }] of Object.entries(OVERFLOWS)) {
   })
 }
 
+test('on a WebSocket, a reliable subscriber that fell behind lets go of each message its page confirms before the error', async () => {
+  const key = crypto.randomUUID()
+  const channel = new ServerBroadcast<string>({ key })
+  overWebSocket([channel])
+  const [first, ...rest] = OVERFLOWS['a publish is larger than all the server may hold']!.publishes
+  await Broadcast.publish(key, first!)
+  const oneMessage = channel.heldBytes
+  await Promise.all(rest.map((data) => Broadcast.publish(key, data)))
+  expect(channel.isClosed).toBe(true)
+  const held = channel.heldBytes
+  // The page read p1 and p2, of the same size, and says so.
+  fromPage(channel, encode.window(0, CREDIT_WINDOW_INITIAL_BYTES, 2))
+  expect(channel.heldBytes).toBe(held - 2 * oneMessage)
+})
+
 /** Each way the page leaves channel 0, which then reads nothing more of it. */
 const PAGE_GONE: Record<string, (channel: ServerChannel) => void> = {
   "the page's abort": ENDINGS["the page's abort"]!,

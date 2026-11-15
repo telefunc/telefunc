@@ -529,8 +529,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       if (frame.seq !== 0 && frame.seq <= this._lastClientSeq) return
       if (frame.seq > this._lastClientSeq) this._lastClientSeq = frame.seq
     }
-    // An ended channel only tracks the page's last seq; it acts on no frame.
-    if (this._phase === 'ended') return
+    // An ended channel tracks the page's last seq and lets go of what its page confirms; it acts on nothing else.
+    if (this._phase === 'ended') {
+      if (frame.tag === TAG.WINDOW) this.onPageHasThrough(frame.lastSeq)
+      return
+    }
     if (isChannelCtrlTag(frame.tag)) {
       this.dispatchCtrl(frame as ChannelCtrlFrame)
       return
@@ -586,7 +589,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.WINDOW:
         this.sendCredit.onPeerByteWindow(frame.bytes)
-        this.onPageHas(seqThrough(frame.lastSeq, this._replayBuffer?.seq ?? 0))
+        this.onPageHasThrough(frame.lastSeq)
         return
       case TAG.MSG_WINDOW:
         this.sendCredit.onPeerMessageWindow(frame.count)
@@ -799,6 +802,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  carries. */
   _onPageClosed(lastSeq: number): void {
     this.pageClosed = true
+    this.onPageHasThrough(lastSeq)
+  }
+
+  /** As `onPageHas`, from the low 32 bits of `lastSeq` the wire carries. */
+  private onPageHasThrough(lastSeq: number): void {
     this.onPageHas(seqThrough(lastSeq, this._replayBuffer?.seq ?? 0))
   }
 
