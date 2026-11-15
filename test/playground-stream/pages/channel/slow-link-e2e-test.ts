@@ -118,7 +118,8 @@ function testSlowLink(isDev: boolean) {
         expect(behind!.publishesAhead).toBe(1)
         expect(behind).deep.equal({ ...behind!, closed: '0', received: 5, closeErr: 'none' })
         expect(behind!.abortErr).not.toBe('none')
-        expect(behind!.abortReceived).lessThan(3)
+        // Of the three publishes the abort comes behind, only the one already going out may arrive before it.
+        expect(behind!.abortReceived).lessThan(2)
         expect(behind!.abortMs).lessThan(upToMs)
       },
     )

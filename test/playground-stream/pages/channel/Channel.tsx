@@ -1582,8 +1582,6 @@ function ChannelDemo() {
     closing.control.close()
 
     const aborting = await openBehind()
-    void aborting.control.send(3)
-    await aborting.received(1)
     const abortAt = performance.now()
     await aborting.control.send('abort', { ack: true })
     const abortErr = await aborting.ended

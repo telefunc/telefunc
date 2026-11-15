@@ -922,6 +922,8 @@ async function onChannelPublishesBehind(
     }
     if (msg === 'close') return String(await broadcast.close({ timeout: 20_000 }))
     if (msg === 'abort') {
+      // In the same turn, so the abort comes while all but the first still wait for the wire.
+      publish(3)
       broadcast.abort()
       return 'aborted'
     }
