@@ -11,13 +11,12 @@ import {
   inboxMessageFromWire,
   type SenderStamp,
   type RoomDmEnvelope,
-  type RoomCtrlEnvelope,
   type MemberMetaUpdate,
   type MemberRequest,
   type RoomSnapshotMetadata,
   type DemandChange,
 } from '../shared/protocol.js'
-import type { RoomDataEnvelope, RoomMemberRecord, RoomIncarnation } from './protocol.js'
+import type { RoomDataEnvelope, RoomIncarnation } from './protocol.js'
 import { departureCause, type RoomModel } from '../shared/RoomModel.js'
 import { RoomState, type RoomStateOwner } from '../shared/state.js'
 import { type MemberLink } from '../shared/ParticipantBase.js'
@@ -32,12 +31,13 @@ import type { RoomDemand } from './lanes/RoomDemand.js'
 import type { RosterStream } from './lifecycle/RosterStream.js'
 import type { PendingDmAcks } from './PendingDmAcks.js'
 import type { RoomHosting } from './lifecycle/RoomHosting.js'
-import { RoomWrites, runAfterHook, type RoomWritesOwner } from './RoomWrites.js'
-import { readOpenConfig, withinRoomHorizon } from './lanes/lanes.js'
+import { RoomWrites, type RoomWritesOwner } from './RoomWrites.js'
+import { withinRoomHorizon } from './lanes/lanes.js'
 import { closeAfterReconnectWindow } from './pageRequests.js'
 import { reportRoomError } from './reportRoomError.js'
 import { Admission } from './Admission.js'
-import { evictMember, joinMember } from './store/members.js'
+import { Admissions, type AdmissionsOwner } from './lifecycle/admit.js'
+import { evictMember } from './store/members.js'
 import type { JoinOptions, LeaveCause, LocalParticipant } from '../types.js'
 import type { RoomGuards } from './roomStatics.js'
 import type { ServerRoom } from './room.js'
@@ -62,7 +62,7 @@ type RoomHandleOptions = {
 
 /** One `Room.get()`'s handle on a room: its guards, its tail, the stubs it opened, its participants and its listeners,
  *  over this process's one view of the room, which every handle to it shares. Each serialization opens a fresh stub. */
-class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStateOwner {
+class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStateOwner, AdmissionsOwner {
   /** Every authority check and member write carries this incarnation,
    *  rejecting stale handles after recreate. */
   readonly incarnation: RoomIncarnation
@@ -76,7 +76,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
   // `teardown()`), and the replica reconsiders the handle.
   /** `Room.get({ tail: true })`'s hold until a stub attaches and takes it. */
   private tail: TailHold | null = null
-  guards: RoomGuards | null = null
+  private declaredGuards: RoomGuards | null = null
   /** This handle's listeners over the replica's model. */
   readonly state: RoomState
   readonly local: LocalHolder
@@ -84,8 +84,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
   /** The attached stub holding each member a client joined through. */
   private readonly stubOf = new Map<string, RoomStub>()
   readonly localParticipants = new Map<string, ServerLocalParticipant>()
-  /** The admissions under way; an `owned` one the heartbeat leaves alone, and its holder's detach doesn't evict. */
-  private readonly admissions = new Map<string, Admission>()
+  private readonly admissions: Admissions
   readonly writes: RoomWrites
 
   private readonly lanePlan: RoomHandleOptions['lanePlan']
@@ -102,6 +101,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
     this.incarnation = replica.incarnation
     this.state = new RoomState({ view, model: replica.model, owner: this })
     this.local = new LocalHolder({ state: this.state, participants: this.localParticipants })
+    this.admissions = new Admissions({ owner: this, replica, lanePlan, hosting })
     this.writes = new RoomWrites({
       owner: this,
       incarnation: this.incarnation,
@@ -121,13 +121,17 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
     return this.incarnation.id
   }
 
+  get guards(): RoomGuards | null {
+    return this.declaredGuards
+  }
+
   /** See `Room.guard()`. One declaration per instance keeps the grant declarative. */
   setGuards(guards: RoomGuards): void {
     assertUsage(
-      this.guards === null,
+      this.declaredGuards === null,
       'Room.guard() was already called for this room instance: declare all guards in one call',
     )
-    this.guards = guards
+    this.declaredGuards = guards
   }
 
   async join(options?: JoinOptions): Promise<LocalParticipant> {
@@ -139,75 +143,11 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
       participant: { id: admission.id, meta, selfDelivery, identity },
       incomingDemand: this.incomingDemand,
     })
-    await this.admit(admission, () => {
+    await this.admissions.admit(admission, () => {
       this.localParticipants.set(admission.id, participant)
       this.replica.own(admission.id, this)
     })
     return participant
-  }
-
-  /** Both join paths: the guard passes, the holder takes the member, then the member commits. */
-  private async admit(admission: Admission, hold: () => void): Promise<void> {
-    const { id, meta, identity, joinedAt, hidden } = admission
-    const onBeforeJoin = this.guards?.onBeforeJoin
-    if (!hidden && onBeforeJoin) {
-      // With no control lane, this handle hears of no close, however old it is: a closed room doesn't get its guard run.
-      if (!this.lanePlan.observing && (await readOpenConfig(this.incarnation)) === null) throw roomClosedError(this.id)
-      await onBeforeJoin({ id, meta, identity })
-    }
-    hold()
-    await this.commitAdmission(admission)
-    if (hidden) return // a hidden participant has no post-join hook
-    const onAfterJoin = this.guards?.onAfterJoin
-    if (onAfterJoin) await runAfterHook(() => onAfterJoin({ id, meta, identity }, { joinedAt }))
-  }
-
-  /** The member's inbox is ready before its record is durable, and the join is announced after,
-   *  so no DM or event is lost. */
-  private async commitAdmission(admission: Admission): Promise<void> {
-    const { id, meta, identity, joinedAt, hidden } = admission
-    const record: Omit<RoomMemberRecord, 'session'> = { joinedAt, metaSeq: 0, metaGen: 0 }
-    const join: Extract<RoomCtrlEnvelope, { __r: 'join' }> = { __r: 'join', id, meta, joinedAt }
-    if (identity !== null) record.identity = join.identity = identity
-    if (hidden) record.hidden = join.hidden = true
-    this.admissions.set(id, admission)
-    // A holder that detached during the guard took nothing, and a room that closed meanwhile takes no one.
-    if (this.holderOf(id) === undefined || this.model.closed) admission.abandon()
-    try {
-      // The member's inbox delivers (within the horizon) before its join is visible, and the admission still holds.
-      await this.replica.openInbox(id)
-      admission.assertLive(this.model)
-      // The member's record and its join event are one write, so its leave always follows its join.
-      await joinMember(this.incarnation, this.hosting.lease, { id, record, meta, join })
-      admission.assertLive(this.model)
-      admission.commit()
-      this.admissions.delete(id)
-      this.replica.applyControl(join)
-      // A drop of the page's wire during the admission skipped this member: it starts disconnected.
-      if (this.stubOf.get(id)?.end.isConnected === false) this.setMemberConnected(id, false)
-    } catch (error) {
-      // A member write that rejected may still have committed, its reply lost; evicting an absent member only reads.
-      // In an open room only a detach of the holder, or a removal that already evicted the member, abandons it.
-      const lost = admission.abandoned && !this.model.closed
-      const cause: LeaveCause = { type: lost ? 'disconnected' : 'left' }
-      await this.evictOrLater(id, cause)
-      this.abandonAdmission(id, cause)
-      throw error
-    }
-  }
-
-  private async evictOrLater(id: string, cause: LeaveCause): Promise<void> {
-    try {
-      await evictMember(this.incarnation, id, cause)
-    } catch (error) {
-      reportRoomError(error)
-      this.hosting.evictLater(id)
-    }
-  }
-
-  private abandonAdmission(id: string, cause: LeaveCause): void {
-    this.admissions.delete(id)
-    this.model.applyLeave(id, cause)
   }
 
   /** A member's request: from its participant here, from a page that joined through a stub, or from a page holding
@@ -284,7 +224,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
       local._onLeft(cause)
     }
     this.stubOf.delete(id)
-    this.admissions.get(id)?.abandon()
+    this.admissions.abandon(id)
   }
 
   /** The room closed: the replica already applied and relayed `closed`. Its members leave as the page's do. */
@@ -294,7 +234,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
     this.teardownTail()
     for (const local of this.localParticipants.values()) local._onLeft(departureCause(cause))
     this.localParticipants.clear()
-    for (const admission of this.admissions.values()) admission.abandon()
+    this.admissions.abandonAll()
     for (const stub of this.stubs) closeAfterReconnectWindow(stub.end)
   }
 
@@ -389,10 +329,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
     for (const id of stub.heldMembers()) {
       this.stubOf.delete(id)
       this.replica.release(id, this)
-      const admission = this.admissions.get(id)
-      const owned = admission?.owned === true
-      admission?.abandon()
-      if (owned) continue // the admission rolls itself back
+      if (this.admissions.abandon(id)) continue // the admission rolls itself back
       void this.removeDepartedMember(id)
     }
   }
@@ -409,9 +346,9 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
           'Room.guard(room, { anyoneCanJoin: true }) to admit anyone',
       )
     }
-    const admission = new Admission({ meta: ownMetadata(req.meta), identity: null, hidden: false })
     this.assertNotKnownClosed()
-    await this.admit(admission, () => {
+    const admission = new Admission({ meta: ownMetadata(req.meta), identity: null, hidden: false })
+    await this.admissions.admit(admission, () => {
       stub.addMember(req.reqId, admission.id, req.selfDelivery)
       this.replica.pageEndChanged(stub)
       if (this.stubs.has(stub)) {
@@ -468,6 +405,16 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
 
   private holderOf(id: string): ServerLocalParticipant | RoomStub | undefined {
     return this.localParticipants.get(id) ?? this.stubOf.get(id)
+  }
+
+  /** A holder that detached during the guard took nothing. */
+  holds(id: string): boolean {
+    return this.holderOf(id) !== undefined
+  }
+
+  /** A drop of the page's wire during the admission skipped this member: it starts disconnected. */
+  joined(id: string): void {
+    if (this.stubOf.get(id)?.end.isConnected === false) this.setMemberConnected(id, false)
   }
 
   deliverDemand(member: string, track: string, change: DemandChange): void {
