@@ -733,8 +733,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     assertProtocol(timeoutMs <= TIMER_DELAY_MAX_MS, `CLOSE timeout ${timeoutMs}`)
     this.lifecycle.peerCloseReceived(timeoutMs, () => {
       this._phase = 'closing'
-      if (this.peer) this.peer.sendCloseAck()
-      else this.ensurePendingEnd().closeAck = true
+      if (this.peer) {
+        // Its publishes still waiting for the wire would follow the CLOSE_ACK, after which its page reads none of them.
+        this.dropUnhanded()
+        this.peer.sendCloseAck()
+      } else this.ensurePendingEnd().closeAck = true
     })
   }
 
@@ -913,6 +916,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     if (!admit(this, heldAnswerBytes(result))) {
       if (room === undefined && !admit(this, REFUSAL_BYTES)) {
+        // Its publishes still waiting for the wire would follow the ERROR, after which its page reads nothing.
+        if (this.peer) this.dropUnhanded()
         return this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(TOO_MANY_ANSWERS_TEXT))
       }
       result = ''
@@ -989,6 +994,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** `pageGone`: the page left or never attached, so nothing the channel holds for it can reach it. */
   protected shutdown(err?: Error, { pageGone = false } = {}): void {
     if (this._phase === 'ended') return
+    // What of its publishes still waits for the wire of a page that is gone would reach no one.
+    if (pageGone && this.peer) this.dropUnhanded()
     this._phase = 'ended'
     this.lossySends?.dispose()
     this.lifecycle.forcedTermination(err, () => {
