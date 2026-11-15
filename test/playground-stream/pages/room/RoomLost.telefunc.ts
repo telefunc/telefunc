@@ -28,8 +28,8 @@ async function onLoseLeave(roomId: string) {
 
 async function onLoseMeta(roomId: string) {
   loseNext(roomId)
-  await Room.setAttributes(roomId, { lost: 1 })
-  await Room.setAttributes(roomId, { next: 2 })
+  await Room.updateMeta(roomId, { lost: 1 })
+  await Room.updateMeta(roomId, { next: 2 })
 }
 
 async function onLoseClose(roomId: string) {

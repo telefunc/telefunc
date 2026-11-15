@@ -376,7 +376,7 @@ function testRoom() {
         ['winner', winner],
         [`w${winner}`, true],
       ])
-      // A member's writes apply in call order: its last setMeta(), then the setAttributes() calls after it.
+      // A member's writes apply in call order: its last setMeta(), then the updateMeta() calls after it.
       expect(memberMeta).deep.equal([
         ['name', 'Writer'],
         ['round', 90],
@@ -674,7 +674,7 @@ function testRoom() {
     hasScore: boolean
     localName: string | null
     localHasScore: boolean
-  }>('attributes', 'room: setAttributes merges per key and deletes on undefined', (r) => {
+  }>('attributes', 'room: updateMeta merges per key and deletes on undefined', (r) => {
     expect(r.name).toBe('Zoe')
     expect(r.title).toBe('lead')
     expect(r.hasScore).toBe(false) // score removed by `undefined`

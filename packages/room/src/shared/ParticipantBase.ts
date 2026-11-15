@@ -221,9 +221,9 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
     await this.writeMeta({ meta: owned }, { __r: 'req-set-meta', meta: owned })
   }
 
-  async setAttributes(attrs: ParticipantMeta): Promise<void> {
-    const owned = ownMetaArgument(attrs, 'setAttributes() attributes')
-    await this.writeMeta({ attrs: owned }, { __r: 'req-set-attrs', attrs: owned })
+  async updateMeta(meta: ParticipantMeta): Promise<void> {
+    const owned = ownMetaArgument(meta, 'updateMeta() meta')
+    await this.writeMeta({ attrs: owned }, { __r: 'req-update-meta', attrs: owned })
   }
 
   /** Sends a meta write, unless it leaves the meta as it is and no write of its own is on its way, whose value it

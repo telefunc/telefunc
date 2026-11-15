@@ -662,7 +662,7 @@ function Room() {
         room.onAnnounce((data) => announcements.push(data))
         const dms: unknown[] = []
         me.listen((data) => dms.push(data))
-        await me.setAttributes({}) // same-channel ack orders the declarations before the server's writes
+        await me.updateMeta({}) // same-channel ack orders the declarations before the server's writes
 
         const first = { n: 10 }
         const second = { n: 11 }
@@ -826,7 +826,7 @@ function Room() {
         const joined = joins.flatMap((join) => (join.status === 'fulfilled' ? [join.value] : []))
         const errors = joins.flatMap((join) => (join.status === 'rejected' ? [(join.reason as Error).message] : []))
         // The members it joined keep working.
-        await joined[0]!.setAttributes({ still: true })
+        await joined[0]!.updateMeta({ still: true })
         const count = (await onListParticipantNames(roomId)).length
         setResult(JSON.stringify({ joined: joined.length, errors, count, still: joined[0]!.meta.still }))
         releaseView()
@@ -983,7 +983,7 @@ function Room() {
         goAway = resolve
         setResult(JSON.stringify('joined'))
         await away
-        await me.setAttributes({ status: 'away' })
+        await me.updateMeta({ status: 'away' })
         setResult(JSON.stringify('away'))
       })}
       <button id="test-room-join-only-away" onClick={() => goAway?.()}>
@@ -1031,7 +1031,7 @@ function Room() {
       {scenario(
         'own-meta-race',
         'Own meta under concurrent writes',
-        'Unawaited setMeta() and setAttributes()',
+        'Unawaited setMeta() and updateMeta()',
         async () => {
           const [roomId, room] = await createRoom('own-meta-race')
           const me = await room.join({ meta: { name: 'Mine', round: -1 } })
@@ -1041,7 +1041,7 @@ function Room() {
           const remote = await getParticipantWhenJoined(other, me.id)
           await Promise.all(
             Array.from({ length: 20 }, (_, i) =>
-              i % 5 === 0 ? me.setMeta({ name: 'Mine', round: i }) : me.setAttributes({ [`m${i}`]: i }),
+              i % 5 === 0 ? me.setMeta({ name: 'Mine', round: i }) : me.updateMeta({ [`m${i}`]: i }),
             ),
           )
           await pollUntil(() => {
@@ -1503,7 +1503,7 @@ function Room() {
         const tile = <P extends { id: string }>(participants: readonly P[], id: string) =>
           participants.find((p) => p.id === id)!
         const before = room.snapshot().participants
-        await b.setAttributes({ status: 'away' })
+        await b.updateMeta({ status: 'away' })
         const after = room.snapshot().participants
         const fromA: unknown[] = []
         const everyone: unknown[] = []
@@ -1556,7 +1556,7 @@ function Room() {
           lobby.onAnnounce((data) => announcements.push(data))
           const system: Array<{ data: unknown; fromRoom: boolean }> = []
           me.listen((data, from) => system.push({ data, fromRoom: from === null }))
-          await me.setAttributes({}) // same-channel ack orders the declarations before the HTTP-triggered broadcasts
+          await me.updateMeta({}) // same-channel ack orders the declarations before the HTTP-triggered broadcasts
 
           let kicked = false
           let kickCause: unknown = null
@@ -1591,14 +1591,14 @@ function Room() {
         },
       )}
 
-      {scenario('attributes', 'setAttributes (partial merge)', 'Merge & delete attributes', async () => {
+      {scenario('attributes', 'updateMeta (partial merge)', 'Merge & delete attributes', async () => {
         const [roomId, lobby] = await createRoom('attr')
         const me = await lobby.join({ meta: { name: 'Zoe', score: 1 } })
         const remote = await getParticipantWhenJoined(lobby, me.id)
 
-        await me.setAttributes({ score: 2 }) // merge: name is untouched
-        await me.setAttributes({ title: 'lead' }) // add a key
-        await me.setAttributes({ score: undefined }) // a key set to undefined is removed
+        await me.updateMeta({ score: 2 }) // merge: name is untouched
+        await me.updateMeta({ title: 'lead' }) // add a key
+        await me.updateMeta({ score: undefined }) // a key set to undefined is removed
 
         await pollUntil(() => {
           const meta = (remote?.meta ?? {}) as { name?: string; score?: number; title?: string }
@@ -1934,7 +1934,7 @@ function Room() {
           created: subscribe(created),
           plain: subscribe(plain),
         }
-        await me.setAttributes({}) // same-channel ack orders the subscriptions before the live publish
+        await me.updateMeta({}) // same-channel ack orders the subscriptions before the live publish
         await me.publish({ t: 'after' })
 
         await pollUntil(() => ({
@@ -2725,7 +2725,7 @@ function Room() {
           () => null,
           (err: Error) => err.name,
         )
-        const next = await me.setAttributes({ next: true }).then(
+        const next = await me.updateMeta({ next: true }).then(
           () => 'accepted',
           (err: Error) => err.name,
         )
@@ -2873,7 +2873,7 @@ function Room() {
         await new Promise((resolve) => setTimeout(resolve, 61_000))
         const received: string[] = []
         tailed.subscribe((data) => received.push(data as string))
-        await me.setAttributes({}) // same-channel ack orders the subscription before the live publish
+        await me.updateMeta({}) // same-channel ack orders the subscription before the live publish
         await me.publish('live')
         await pollUntil(() => ({ result: { received }, done: received.includes('live') }))
       })}

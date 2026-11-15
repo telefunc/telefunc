@@ -88,7 +88,7 @@ class RoomWrites {
     return await this.writeMetaInOrder(id, { replace: meta })
   }
 
-  /** Per-key merge (`setAttributes`), of attributes owned already; an `undefined` value deletes the key. */
+  /** Per-key merge (`updateMeta`), of keys owned already; an `undefined` value deletes the key. */
   async mergeMemberMeta(id: string, attrs: ParticipantMeta): Promise<MemberMetaUpdate> {
     return await this.writeMetaInOrder(id, { merge: attrs })
   }

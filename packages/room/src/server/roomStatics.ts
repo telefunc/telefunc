@@ -93,7 +93,7 @@ type RoomStatic = {
   ): Promise<LocalParticipant<P, Pub>>
   list<M extends RoomMeta = RoomMeta>(options?: { prefix?: string }): Promise<RoomInfo<M>[]>
   setMeta(id: string, meta: RoomMeta): Promise<void>
-  setAttributes(id: string, attributes: RoomMeta): Promise<void>
+  updateMeta(id: string, meta: RoomMeta): Promise<void>
   close(id: string): Promise<void>
   removeParticipant(id: string, target: ParticipantRef & { reason?: unknown }): Promise<void>
   announce(id: string, data: unknown): Promise<RoomSendReceipt>
@@ -112,7 +112,7 @@ const roomStatics: RoomStatic = {
   join: joinRoom as RoomStatic['join'],
   list: listRooms as RoomStatic['list'],
   setMeta: setRoomMeta,
-  setAttributes: setRoomAttributes,
+  updateMeta: updateRoomMeta,
   close: closeRoom,
   removeParticipant,
   announce: announceToRoom,
@@ -292,9 +292,9 @@ async function setRoomMeta(id: string, meta: RoomMeta): Promise<void> {
   await writeRoomMeta(id, config, { replace: owned })
 }
 
-async function setRoomAttributes(id: string, attributes: RoomMeta): Promise<void> {
-  assertUsage(isRecord(attributes), 'Room.setAttributes() attributes should be an object')
-  const owned = ownMetadata(attributes)
+async function updateRoomMeta(id: string, meta: RoomMeta): Promise<void> {
+  assertUsage(isRecord(meta), 'Room.updateMeta() meta should be an object')
+  const owned = ownMetadata(meta)
   const config = await requireRoom(id)
   await writeRoomMeta(id, config, { merge: owned })
 }

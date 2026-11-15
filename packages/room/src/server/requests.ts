@@ -35,7 +35,7 @@ assertIsNotBrowser()
 
 type RoomRequest = Extract<
   RoomStubRequest,
-  { __r: 'req-join' | 'req-leave' | 'req-set-meta' | 'req-set-attrs' | 'req-dm' | 'req-private' }
+  { __r: 'req-join' | 'req-leave' | 'req-set-meta' | 'req-update-meta' | 'req-dm' | 'req-private' }
 >
 
 type RoomDeclaration =
@@ -45,7 +45,7 @@ type RoomDeclaration =
 /** A member's meta, attributes and DM requests, by the API call each serves. */
 const MEMBER_MUTATIONS = {
   'req-set-meta': 'setMeta',
-  'req-set-attrs': 'setAttributes',
+  'req-update-meta': 'updateMeta',
   'req-dm': 'send',
   'req-private': 'sendPrivate',
 } as const
@@ -104,7 +104,7 @@ function decodeRoomRequest(value: unknown): RoomRequest {
     case 'req-leave':
       return { __r: 'req-leave', id: memberId(req.id, 'leave') }
     case 'req-set-meta':
-    case 'req-set-attrs':
+    case 'req-update-meta':
     case 'req-dm':
     case 'req-private': {
       const id = memberId(req.id, MEMBER_MUTATIONS[req.__r])
@@ -208,7 +208,7 @@ function decodeParticipantRequest(value: unknown): ParticipantStubRequest {
       return publish
     }
     case 'req-set-meta':
-    case 'req-set-attrs':
+    case 'req-update-meta':
     case 'req-dm':
     case 'req-private':
       return decodeMemberMutation(req.__r, req)
@@ -223,8 +223,8 @@ function decodeMemberMutation(kind: MemberMutationRequest['__r'], req: Record<st
   switch (kind) {
     case 'req-set-meta':
       return { __r: 'req-set-meta', meta: record(req.meta, 'setMeta meta') }
-    case 'req-set-attrs':
-      return { __r: 'req-set-attrs', attrs: record(req.attrs, 'attributes') }
+    case 'req-update-meta':
+      return { __r: 'req-update-meta', attrs: record(req.attrs, 'updateMeta meta') }
     case 'req-dm': {
       const dm: Extract<MemberMutationRequest, { __r: 'req-dm' }> = {
         __r: 'req-dm',

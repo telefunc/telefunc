@@ -921,18 +921,18 @@ async function onOpenSlowGuardRoom(roomId: string) {
   return room
 }
 
-/** 200 concurrent Room.setAttributes() calls, then 20 concurrent Room.setMeta() calls, and a member's 100 concurrent
- *  setAttributes() and setMeta() calls; returns the room meta and the member's meta as a fresh view reads them. */
+/** 200 concurrent Room.updateMeta() calls, then 20 concurrent Room.setMeta() calls, and a member's 100 concurrent
+ *  updateMeta() and setMeta() calls; returns the room meta and the member's meta as a fresh view reads them. */
 async function onConcurrentMetaWrites(roomId: string) {
   const me = await Room.join(roomId, { meta: { name: 'Writer', round: -1 } })
   const keys = Array.from({ length: 200 }, (_, i) => i)
-  await Promise.all(keys.map((i) => Room.setAttributes(roomId, { [`k${i}`]: i })))
+  await Promise.all(keys.map((i) => Room.updateMeta(roomId, { [`k${i}`]: i })))
   const afterAttributes = Object.keys((await Room.get(roomId)).meta)
   await Promise.all(keys.slice(0, 20).map((i) => Room.setMeta(roomId, { winner: i, [`w${i}`]: true })))
   await Promise.all(
     keys
       .slice(0, 100)
-      .map((i) => (i % 10 === 0 ? me.setMeta({ name: 'Writer', round: i }) : me.setAttributes({ [`a${i}`]: i }))),
+      .map((i) => (i % 10 === 0 ? me.setMeta({ name: 'Writer', round: i }) : me.updateMeta({ [`a${i}`]: i }))),
   )
   const view = await Room.get(roomId)
   const member = view.getParticipant(me.id)
@@ -982,7 +982,7 @@ async function onStopReplacingMeta(roomId: string) {
  *  roster while `write` commits between the read's first and second page: 'before', 'after', or the keys the read got. */
 async function onReadMetaAcrossWrite(roomId: string, write: 'replace' | 'replace with no keys' | 'merge', gen: number) {
   const member = await Room.join(roomId, { meta: {} })
-  for (let seq = 1; seq < gen; seq++) await member.setAttributes({ seq })
+  for (let seq = 1; seq < gen; seq++) await member.updateMeta({ seq })
   await member.setMeta(bigMeta('a'))
   const held = holdCellPages(roomId, 'pm:', 1)
   const reading = Room.getParticipants(roomId)
@@ -991,7 +991,7 @@ async function onReadMetaAcrossWrite(roomId: string, write: 'replace' | 'replace
   if (write === 'merge') {
     delete after.a0
     after.zz = 'new'
-    await member.setAttributes({ a0: undefined, zz: 'new' })
+    await member.updateMeta({ a0: undefined, zz: 'new' })
   } else {
     await member.setMeta(after)
   }
@@ -1005,11 +1005,11 @@ async function onReadMetaAcrossWrite(roomId: string, write: 'replace' | 'replace
 async function onReadSplitMetaAcrossMerge(roomId: string) {
   const member = await Room.join<Record<string, string>>(roomId, { meta: { k0: 'a', k1: 'a' } })
   await Room.join(roomId, { meta: bigMeta('b') })
-  await member.setAttributes({ k2: 'a' })
+  await member.updateMeta({ k2: 'a' })
   const held = holdCellPages(roomId, 'pm:', 1)
   const reading = Room.getParticipants(roomId)
   await held.reached
-  await member.setAttributes({ k0: undefined, k2: undefined, zz: 'new' })
+  await member.updateMeta({ k0: undefined, k2: undefined, zz: 'new' })
   held.release()
   const read = (await reading).find((participant) => participant.id === member.id)!
   return metaName(read.meta, { before: { k0: 'a', k1: 'a', k2: 'a' }, after: { k1: 'a', zz: 'new' } })
@@ -1370,7 +1370,7 @@ async function onSeedAndChurn(roomId: string) {
   const churn: (Promise<unknown> | undefined)[] = []
   const timer = setInterval(() => {
     tick++
-    void members[tick % members.length]!.setAttributes({ n: tick })
+    void members[tick % members.length]!.updateMeta({ n: tick })
     if (tick % 2 === 0) {
       churn.push(Room.join(roomId, { meta: { name: `p${tick}` } }).then((member) => passing.push(member)))
     } else {

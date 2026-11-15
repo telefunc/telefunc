@@ -18,7 +18,7 @@ function pageRoom(members: Record<string, number> = {}) {
       requests.push(req)
       if (req.__r === 'req-join') return { ok: true, value: { id: 'me', joinedAt: 0 } }
       if (req.__r === 'req-set-meta') return { ok: true, value: { seq: ++metaSeq, meta: req.meta } }
-      if (req.__r === 'req-set-attrs') return { ok: true, value: { seq: ++metaSeq, attrs: req.attrs } }
+      if (req.__r === 'req-update-meta') return { ok: true, value: { seq: ++metaSeq, attrs: req.attrs } }
       throw new Error(`Unexpected request ${req.__r}`)
     },
     _subscribeLocal: () => () => {},

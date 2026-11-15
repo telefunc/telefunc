@@ -164,7 +164,7 @@ async function onSubscribeHeld(id: string) {
 async function onMetaKeyOrder() {
   const id = `meta-order:${crypto.randomUUID()}`
   await Room.create(id, { meta: { b: 1, a: 2 } })
-  await Room.setAttributes(id, { c: 3, a: 4 })
+  await Room.updateMeta(id, { c: 3, a: 4 })
   const merged = (await Room.get(id)).meta
   await Room.setMeta(id, { z: 1, y: 2 })
   const replaced = (await Room.get(id)).meta

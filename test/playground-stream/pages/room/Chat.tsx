@@ -63,7 +63,7 @@ function ChatView({ chat, me }: { chat: ChatRoom; me: Me }) {
     <div>
       <h2>Chat</h2>
       <p id="chat-status">{isConnected ? 'Connected' : 'Reconnecting…'}</p>
-      <button id="chat-rename" onClick={() => me.setAttributes({ name: `${me.meta.name}!` })}>
+      <button id="chat-rename" onClick={() => me.updateMeta({ name: `${me.meta.name}!` })}>
         {me.meta.name}
       </button>
       <p id="chat-count">{count} in the chat</p>

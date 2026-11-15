@@ -156,7 +156,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
         return await this.removeMember(id, { type: 'left' })
       case 'req-set-meta':
         return await this.writes.setMemberMeta(id, req.meta)
-      case 'req-set-attrs':
+      case 'req-update-meta':
         return await this.writes.mergeMemberMeta(id, req.attrs)
       case 'req-dm':
         return await this.writes.sendDm(id, req.to, req.data, req.ack === true)

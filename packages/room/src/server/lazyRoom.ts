@@ -21,7 +21,7 @@ const ROOM_STATICS = [
   'join',
   'list',
   'setMeta',
-  'setAttributes',
+  'updateMeta',
   'close',
   'removeParticipant',
   'announce',

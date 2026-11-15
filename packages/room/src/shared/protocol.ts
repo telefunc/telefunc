@@ -169,7 +169,7 @@ type RoomResult = { ok: true; value: unknown } | RoomFailure
 /** A member's meta, attributes and DM requests, as a participant stub carries them. */
 type MemberMutationRequest =
   | { __r: 'req-set-meta'; meta: ParticipantMeta }
-  | { __r: 'req-set-attrs'; attrs: ParticipantMeta }
+  | { __r: 'req-update-meta'; attrs: ParticipantMeta }
   | { __r: 'req-dm'; to: string; data: unknown; ack?: boolean }
   | { __r: 'req-private'; to: string; field: string; data: unknown }
 

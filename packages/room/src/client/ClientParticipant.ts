@@ -34,7 +34,7 @@ async function request(end: ClientBroadcast, req: RoomStubRequest | ParticipantS
 
 /** The meta the room accepted, which a meta write resolves to. */
 function acceptedMeta(req: MemberRequest, value: unknown): MemberMetaUpdate | null {
-  return req.__r === 'req-set-meta' || req.__r === 'req-set-attrs' ? (value as MemberMetaUpdate) : null
+  return req.__r === 'req-set-meta' || req.__r === 'req-update-meta' ? (value as MemberMetaUpdate) : null
 }
 
 /** Where a page's participant acts, and the room it lists the other participants by: the room it joined through

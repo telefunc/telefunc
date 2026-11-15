@@ -144,7 +144,7 @@ controller.abort()
 ```js
 // Environment: client
 
-await me.setAttributes({ status: 'away' })            // changes only `status`
+await me.updateMeta({ status: 'away' })               // changes only `status`
 await me.setMeta({ name: 'Alice', status: 'online' }) // replaces all of your meta
 ```
 
@@ -629,7 +629,7 @@ Server-side.
 | `Room.guard(room, hooks)` | Add `onBefore*()` and `onAfter*()` hooks to a room, once, and say who may join it from the client. |
 | `Room.join(id, { meta?, selfDelivery?, identity?, hidden? }?)` | Join a room from the server, without getting the room first. |
 | `Room.list({ prefix? }?)` | List the open rooms. |
-| `Room.setMeta(id, meta)` / `Room.setAttributes(id, attributes)` | Replace / update the room's `meta`. |
+| `Room.setMeta(id, meta)` / `Room.updateMeta(id, meta)` | Replace / update the room's `meta`. |
 | `Room.getParticipants(id, { identity? }?)` | List the participants, or one user's. |
 | `Room.announce(id, message)` | Send to everyone. |
 | `Room.send(id, target, message)` | Send to one participant (`{ id }`) or to every tab of a user (`{ identity }`). |
@@ -664,7 +664,7 @@ Properties: `id`, `meta`, `count`, `isEmpty`, `isClosed`.
 | `publishBinary(data, { track?, meta?, retain?, lossy? }?)` | Send binary to everyone. Without `track`, on the track `'main'`. |
 | `send(to, message, { ack? }?)` | Send to one participant. |
 | `listen(cb)` | Receive private messages; return a value to reply. |
-| `setMeta(meta)` / `setAttributes(attributes)` | Replace / update your `meta`. |
+| `setMeta(meta)` / `updateMeta(meta)` | Replace / update your `meta`. |
 | `onChange(cb)` | Your `meta`, `isConnected` or `demand` changed; once for the changes of one task. |
 | `leave()` / `onLeave(cb)` | Leave / you left, with `cause.type`: `'left'`, `'removed'`, `'closed'`, `'disconnected'`, or `'unknown'` (it left while nothing here listened to the room, too long ago to know why). |
 | `onDisconnect(cb)` / `onReconnect(cb)` | Your connection to the room dropped / is back. |

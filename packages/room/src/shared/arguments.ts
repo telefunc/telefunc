@@ -64,7 +64,7 @@ function unknownLeaveCause(): LeaveCause {
 function removedCause(reason: unknown): LeaveCause {
   return ownLeaveCause(reason === undefined ? { type: 'removed' } : { type: 'removed', reason })
 }
-/** Validate and own a `setMeta()`/`setAttributes()` argument. */
+/** Validate and own a `setMeta()`/`updateMeta()` argument. */
 function ownMetaArgument(value: ParticipantMeta, what: string): ParticipantMeta {
   assertUsage(isRecord(value), `${what} should be an object`)
   return ownMetadata(value)
@@ -75,7 +75,7 @@ function recipientId(to: string | Sender): string {
   return id
 }
 
-/** Merge `attrs` into `meta`, returning a new object (the `setAttributes()` semantics). */
+/** Merge `attrs` into `meta`, returning a new object (the `updateMeta()` semantics). */
 function mergeAttributes(meta: ParticipantMeta, attrs: ParticipantMeta): ParticipantMeta {
   const next: ParticipantMeta = { ...meta }
   assignAttributes(next, attrs)

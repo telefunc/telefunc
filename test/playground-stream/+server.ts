@@ -359,8 +359,8 @@ app.post('/api/room-cross-instance/meta', async (c) => {
   const fixture = roomId ? crossInstanceRooms.get(roomId) : undefined
   if (!roomId || !fixture) return c.json({ ok: false, reason: 'room fixture not joined on this instance' }, 404)
   const attributes = await c.req.json()
-  if (c.req.query('target') === 'room') await Room.setAttributes(roomId, attributes)
-  else await fixture.participant.setAttributes(attributes)
+  if (c.req.query('target') === 'room') await Room.updateMeta(roomId, attributes)
+  else await fixture.participant.updateMeta(attributes)
   return c.json({ ok: true, instance: INST })
 })
 

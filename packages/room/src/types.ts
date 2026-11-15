@@ -318,7 +318,7 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
    *  the read-only meta Room handed you. */
   setMeta(meta: ReadonlyMeta<P>): Promise<void>
   /** Merge metadata per key; `undefined` deletes a key. */
-  setAttributes(attributes: Partial<ReadonlyMeta<P>>): Promise<void>
+  updateMeta(meta: Partial<ReadonlyMeta<P>>): Promise<void>
 
   leave(): Promise<void>
   /** You left. `cause.type` says how: `'left'` (you), `'removed'` (kicked, with the kick's `reason`), `'closed'` (the

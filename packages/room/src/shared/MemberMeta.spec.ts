@@ -54,10 +54,10 @@ describe('a meta write that leaves the meta as it is', () => {
     // Its keys in another order are another value.
     await me.setMeta({ mic: true, name: 'Pub' })
     await me.setMeta({ mic: true, name: 'Pub' })
-    await me.setAttributes({ mic: true, cam: undefined })
+    await me.updateMeta({ mic: true, cam: undefined })
     expect(sent()).toBe(1)
-    void me.setAttributes({ mic: false })
-    await me.setAttributes({ mic: true })
+    void me.updateMeta({ mic: false })
+    await me.updateMeta({ mic: true })
     expect(sent()).toBe(3)
     expect(me.meta).toEqual({ name: 'Pub', mic: true })
   })
@@ -72,7 +72,7 @@ describe('a meta write that leaves the meta as it is', () => {
     const snapshot = room.snapshot()
     // As a page holding `me` sends one that raced another.
     await me.room.request(me.id, { __r: 'req-set-meta', meta: { name: 'Pub' } })
-    await me.room.request(me.id, { __r: 'req-set-attrs', attrs: { name: 'Pub' } })
+    await me.room.request(me.id, { __r: 'req-update-meta', attrs: { name: 'Pub' } })
     await Promise.resolve()
     expect(changes).toEqual({ room: 0, participant: 0, me: 0 })
     expect(room.snapshot()).toBe(snapshot)
