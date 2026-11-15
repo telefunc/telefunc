@@ -353,10 +353,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  /** Its lossy sends that no wire has taken go. Those still in the wire's queue never left the server, so the credit
-   *  they counted comes back. An ending lets go of these, and of a broadcast's waiting publishes: an ABORT or a CLOSE_ACK
-   *  passes them on the wire and its page reads nothing after it, and a channel that can't hold one more answer ends for
-   *  lack of memory, as a shed subscriber does. Reliable sends stay, ahead of the ending. */
+  /** Drops its lossy sends that are still in the wire's queue and refunds the credit they counted: they never left the
+   *  server. A newer lossy send replaces them, or the channel ends; reliable sends stay, and reach the page ahead of its
+   *  end. */
   protected dropUnhanded(): void {
     const { index, sender } = this.peer!
     const { units, bytes } = this._replayBuffer!.dropNewestPublishes(sender.queue.waitingPublishes(index))
@@ -914,6 +913,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     if (!admit(this, heldAnswerBytes(result))) {
       if (room === undefined && !admit(this, REFUSAL_BYTES)) {
+        // It ends for lack of memory, as a shed subscriber does.
         if (this.peer) this.dropUnhanded()
         return this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(TOO_MANY_ANSWERS_TEXT))
       }
