@@ -1,4 +1,4 @@
-export { compareValues, valueKey, tupleKey, hasCanonicalText, paramText }
+export { compareValues, valueKey, tupleKey, hasCanonicalText, compareAlike, paramText }
 export type { Column, HiddenValue }
 
 /** A column as the catalog describes it: how Postgres compares its values. */
@@ -90,6 +90,24 @@ function tupleKey(columns: readonly Column[], texts: readonly HiddenValue[]): st
     keys.push(key)
   }
   return JSON.stringify(keys)
+}
+
+/** Whether `a = b` compares the values as each column compares its own: then a value of one is a value of the other
+ *  (`numeric` and `float8` compare as `float8`; SQLite compares with the left column's collation). */
+function compareAlike(a: Column, b: Column): boolean {
+  return family(a.base) === family(b.base) && a.fold === b.fold && a.deterministic === b.deterministic
+}
+
+/** Postgres types whose values compare across each other as within each: integers of any width, text of either kind
+ *  (not `bpchar`, which ignores trailing spaces). */
+const FAMILIES = new Map([
+  ['int2', 'int8'],
+  ['int4', 'int8'],
+  ['varchar', 'text'],
+])
+
+function family([schema, name]: readonly [string, string]): string {
+  return `${schema}.${schema === 'pg_catalog' ? (FAMILIES.get(name) ?? name) : name}`
 }
 
 /** Whether equal values of `column` always have the same text (`1.0` and `1.00` are equal `numeric`s). */

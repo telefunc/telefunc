@@ -6,7 +6,7 @@ import { isAggregateCall, names, quote, splitAnd, walk, type Node } from '../tre
 import { COMPARISONS } from './condition.js'
 import { isOperand, type Operands } from './operands.js'
 import type { Alias } from './readShape.js'
-import { hasCanonicalText, type Column } from './values.js'
+import { compareAlike, hasCanonicalText, type Column } from './values.js'
 
 /** A read decided by how many matching rows have which values: a grouped aggregate with `HAVING`, `min`, `max` or
  *  `count(DISTINCT)`, or a set operation (`UNION`, `INTERSECT`, `EXCEPT`). A query run right after the read counts
@@ -188,7 +188,7 @@ function analyzeSetOperation(select: Node, context: TallyContext): TallyAnalysis
     for (const target of node.targetList as Node[]) {
       const value = target.ResTarget.val
       const c = value.ColumnRef ? context.columnOf(node, value) : undefined
-      // The hidden columns are part of each output row: equal rows must stay equal.
+      // The hidden columns are part of each output row: rows the database calls equal must stay equal.
       if (!c || !hasCanonicalText(c)) return undefined
       columns.push(c)
     }
@@ -202,6 +202,9 @@ function analyzeSetOperation(select: Node, context: TallyContext): TallyAnalysis
   const tree = treeOf(select)
   // A subquery in a branch reads tables the counts don't follow.
   if (tree === undefined || context.aliases.length !== sources.length) return undefined
+  // A `date` and a `timestamp` of one instant are one row, but their texts differ.
+  const first = sources[0]!.columns
+  if (sources.some((s) => s.columns.some((c, i) => !compareAlike(c, first[i]!)))) return undefined
   return {
     shape: { sources, rule: { kind: 'set', tree } },
     hiddenColumns: hiddenAt[0]!.columns,

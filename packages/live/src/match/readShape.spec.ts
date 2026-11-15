@@ -92,6 +92,8 @@ describe('a join of columns that compare alike', () => {
 const items = pgTable('items', { id: integer('id').primaryKey(), v: text('v') })
 const dates = pgTable('dates', { id: integer('id').primaryKey(), v: text('v') })
 const moments = pgTable('moments', { id: integer('id').primaryKey(), v: text('v') })
+const days = pgTable('days', { id: integer('id').primaryKey(), v: text('v') })
+const stamps = pgTable('stamps', { id: integer('id').primaryKey(), v: text('v') })
 
 const liveDb = (pglite: Awaited<ReturnType<typeof emptyPGlite>>) => liveDrizzle(drizzle(pglite))
 type LiveCell = { send(): unknown; onStale(onStale: () => void): void; release(): void }
@@ -181,5 +183,34 @@ describe('a read of dates', () => {
       expect(after).toEqual([{ id: 1 }])
       expect(stale).toBe(false)
     })
+  })
+})
+
+describe('a UNION', () => {
+  it('sends the rows the database returns: a date and a timestamp of one instant are one row', async () => {
+    const schema = `create table dates (id int primary key, v date); insert into dates values (1, '2026-01-01');
+      create table stamps (id int primary key, v timestamp); insert into stamps values (1, '2026-01-01')`
+    const union = (db: ReturnType<typeof liveDb>) =>
+      db
+        .select({ v: dates.v })
+        .from(dates)
+        .union(db.select({ v: stamps.v }).from(stamps))
+    const { sent, before } = await liveAfter(schema, union)
+    expect(before).toHaveLength(1)
+    expect(sent).toEqual(before)
+  })
+  // Its counts tell that a second row of a value already in the result changes nothing.
+  it('of one type stays fresh when a row of a value in its result is inserted', async () => {
+    const schema = `create table dates (id int primary key, v date); insert into dates values (1, '2026-01-01');
+      create table days (id int primary key, v date); insert into days values (1, '2026-01-01')`
+    const union = (db: ReturnType<typeof liveDb>) =>
+      db
+        .select({ v: dates.v })
+        .from(dates)
+        .union(db.select({ v: days.v }).from(days))
+    const { sent, stale, after } = await liveAfter(schema, union, "insert into days values (2, '2026-01-01')")
+    expect(sent).toEqual([{ v: '2026-01-01' }])
+    expect(after).toEqual(sent)
+    expect(stale).toBe(false)
   })
 })
