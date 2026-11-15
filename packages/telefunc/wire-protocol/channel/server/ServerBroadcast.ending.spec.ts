@@ -24,16 +24,17 @@ import { getChannelMux } from './ChannelMux.js'
 import { hold } from './channelMemory.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
+import { ServerChannel } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
 
 // The least it may be, the credit window a channel starts with: a test can bring one channel to hold the most it may. The
 // server may hold 32 MiB in all, far more than these tests leave held.
 config.channel = { maxPendingBytes: CREDIT_WINDOW_INITIAL_BYTES, maxMemory: '32m' }
 
-/** Three publishes, each larger than what a wire sends before its page says it took some. */
-const PUBLISHES = ['p1', 'p2', 'p3'].map((name) => name + 'x'.repeat(100_000))
+/** Three messages, each larger than what a wire sends before its page says it took some. */
+const MESSAGES = ['p1', 'p2', 'p3'].map((name) => name + 'x'.repeat(100_000))
 
-/** What the page reads of `frames`, in order: each publish as `<channel index>:<name>`, each ABORT and ERROR. As the
+/** What the page reads of `frames`, in order: each message as `<channel index>:<name>`, each ABORT and ERROR. As the
  *  page does, it drops a frame at or below the newest seq it has of that channel. */
 function reads(frames: Iterable<Uint8Array>): string[] {
   const pair = pairPublishes()
@@ -43,7 +44,8 @@ function reads(frames: Iterable<Uint8Array>): string[] {
     const decoded = pair(decode(frame) as DecodedFrame)
     if (decoded === null || !isSequencedFrame(decoded) || decoded.seq <= (newestSeq.get(decoded.index) ?? 0)) continue
     newestSeq.set(decoded.index, decoded.seq)
-    if (decoded.tag === TAG.PUBLISH) out.push(`${decoded.index}:${(parse(decoded.text) as string).slice(0, 2)}`)
+    if (decoded.tag === TAG.PUBLISH || decoded.tag === TAG.TEXT)
+      out.push(`${decoded.index}:${(parse(decoded.text) as string).slice(0, 2)}`)
     if (decoded.tag === TAG.ABORT) out.push(`${decoded.index}:ABORT`)
     if (decoded.tag === TAG.ERROR) out.push(`${decoded.index}:ERROR`)
   }
@@ -80,9 +82,9 @@ async function overSse(channels: ServerBroadcast<string>[]) {
   }
 }
 
-/** Subscribes the page to `channels`, at indexes 0, 1, …, over a WebSocket it doesn't read yet: past the first frame,
- *  what the wire sends waits for headroom. */
-function overWebSocket(channels: ServerBroadcast<string>[]) {
+/** Attaches the page to `channels`, at indexes 0, 1, …, subscribed to the broadcasts, over a WebSocket it doesn't read
+ *  yet: past the first frame, what the wire sends waits for headroom. */
+function overWebSocket(channels: ServerChannel[]) {
   const arrived: Uint8Array[] = []
   const receiver = new ClientPieceReceiver({ owner: { sendAck() {}, carryAck() {} } })
   // The frames of each message, as the page's WebSocket puts them back together.
@@ -134,7 +136,7 @@ test('on SSE, abort() drops its publishes that wait for the wire, and the other 
   const page = await overSse([ended, other])
 
   // The page reads nothing yet, so the publishes wait for its event stream.
-  await Promise.all(PUBLISHES.map((data) => Broadcast.publish(key, data)))
+  await Promise.all(MESSAGES.map((data) => Broadcast.publish(key, data)))
   ended.abort()
 
   expect(await page.readUntil('1:p3')).toEqual(['0:ABORT', '1:p1', '1:p2', '1:p3'])
@@ -142,12 +144,12 @@ test('on SSE, abort() drops its publishes that wait for the wire, and the other 
 })
 
 /** The page sends `frame` on channel 0, its first. */
-function fromPage(channel: ServerBroadcast<string>, frame: Uint8Array<ArrayBuffer>): void {
+function fromPage(channel: ServerChannel, frame: Uint8Array<ArrayBuffer>): void {
   channel._dispatchFrame(decode(frame) as ChannelFrame)
 }
 
 /** Each way channel 0 ends that its page reads nothing of it after: what ends it passes its waiting publishes. */
-const ENDINGS: Record<string, (channel: ServerBroadcast<string>) => void> = {
+const ENDINGS: Record<string, (channel: ServerChannel) => void> = {
   'abort()': (channel) => channel.abort(),
   "the page's close": (channel) => fromPage(channel, encode.close(0, 1_000, 1)),
   "the page's abort": (channel) => fromPage(channel, encode.abort(0, stringify(undefined), 1)),
@@ -164,7 +166,7 @@ for (const [ending, end] of Object.entries(ENDINGS)) {
     const { key, ended, other } = subscribers()
     const { headroom } = overWebSocket([ended, other])
 
-    await Promise.all(PUBLISHES.map((data) => Broadcast.publish(key, data)))
+    await Promise.all(MESSAGES.map((data) => Broadcast.publish(key, data)))
     // p1 started on channel 0's head, which nothing of channel 0 passes.
     expect(reads(headroom.sender.waitingFrames)).toEqual(['1:p1', '0:p2', '1:p2', '0:p3', '1:p3'])
     end(ended)
@@ -212,3 +214,36 @@ for (const [overflow, { publishes, pageReads }] of Object.entries(OVERFLOWS)) {
     expect(await page.readAll()).toEqual(pageReads)
   })
 }
+
+/** Each way the page leaves channel 0, which then reads nothing more of it. */
+const PAGE_GONE: Record<string, (channel: ServerChannel) => void> = {
+  "the page's abort": ENDINGS["the page's abort"]!,
+  'the page losing its replay': ENDINGS['the page losing its replay']!,
+}
+
+for (const [ending, end] of Object.entries(PAGE_GONE)) {
+  test(`on a WebSocket, after ${ending} nothing of that channel waits for the wire, its sends too, and the other channel's arrive in order`, async () => {
+    const ended = new ServerChannel()
+    const other = new ServerChannel()
+    const page = overWebSocket([ended, other])
+    for (const message of MESSAGES) {
+      void ended.send(message)
+      void other.send(message)
+    }
+    expect(reads(page.headroom.sender.waitingFrames)).toEqual(['1:p1', '0:p2', '1:p2', '0:p3', '1:p3'])
+    end(ended)
+    expect(ended.isClosed).toBe(true)
+    expect(reads(page.headroom.sender.waitingFrames)).toEqual(['1:p1', '1:p2', '1:p3'])
+    // Channel 0's p1 had started.
+    expect(await page.readAll()).toEqual(['0:p1', '1:p1', '1:p2', '1:p3'])
+    other.abort()
+  })
+}
+
+test('on a WebSocket, abort() comes behind the sends made before it', async () => {
+  const channel = new ServerChannel()
+  const page = overWebSocket([channel])
+  for (const message of MESSAGES) void channel.send(message)
+  channel.abort()
+  expect(await page.readAll()).toEqual(['0:p1', '0:p2', '0:p3', '0:ABORT'])
+})

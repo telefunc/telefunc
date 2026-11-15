@@ -298,7 +298,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     if (toBytes === 0) this.lossyPublishes?.dispose()
     const gap = replay.dropFromGap(toBytes, this.unhanded()) > 0
     if (gap) {
-      this.peer?.sender.queue.dropWaitingFromPublish(this.peer.index)
+      this.peer?.sender.queue.dropWaitingFrom(this.peer.index, 'publish')
       this.dropPendingAnswers()
     }
     if (toBytes === 0) this.overflow(NOT_EVEN_NEWEST, owner)

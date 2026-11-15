@@ -27,7 +27,7 @@ import { encode } from '../../wire/frame.js'
 import { TAG, passesData } from '../../wire/tags.js'
 import {
   countWaitingPublishes,
-  droppingFromPublish,
+  droppingFrom,
   droppingPublishes,
   overtakes,
   type WireQueue,
@@ -127,8 +127,8 @@ class EventStream implements WireQueue {
     this.dropWaiting(droppingPublishes(ix, count))
   }
 
-  dropWaitingFromPublish(ix: number): void {
-    this.dropWaiting(droppingFromPublish(ix))
+  dropWaitingFrom(ix: number, from: 'publish' | 'start'): void {
+    this.dropWaiting(droppingFrom(ix, from))
   }
 
   private dropWaiting(drops: (frame: Uint8Array) => boolean): void {

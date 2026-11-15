@@ -61,7 +61,7 @@ function wire(
         const dropping = droppingPublishes(ix, count)
         waiting = waiting.filter((frame) => !dropping(frame))
       },
-      dropWaitingFromPublish() {},
+      dropWaitingFrom() {},
     },
   }
   return {

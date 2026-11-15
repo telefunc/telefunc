@@ -21,7 +21,7 @@ import type { PiecesAck } from '../../wire/frame.js'
 import { isSequencedTag } from '../../wire/tags.js'
 import {
   countWaitingPublishes,
-  droppingFromPublish,
+  droppingFrom,
   droppingPublishes,
   overtakes,
   type WireQueue,
@@ -92,8 +92,8 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     this.sender.dropWaiting(droppingPublishes(ix, count))
   }
 
-  dropWaitingFromPublish(ix: number): void {
-    this.sender.dropWaiting(droppingFromPublish(ix))
+  dropWaitingFrom(ix: number, from: 'publish' | 'start'): void {
+    this.sender.dropWaiting(droppingFrom(ix, from))
   }
 
   /** The rate sends go by, which a probe gives before any data does. */

@@ -1,17 +1,17 @@
-export { countWaitingPublishes, droppingPublishes, droppingFromPublish, overtakes }
+export { countWaitingPublishes, droppingPublishes, droppingFrom, overtakes }
 export type { WireQueue }
 
 import { readU16 } from '../../wire/header.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
 
-/** What a server wire holds back for its page, which a broadcast falling behind can let go of. */
+/** What a server wire holds back for its page, which a broadcast falling behind, or a channel its page left, can let go of. */
 interface WireQueue {
   /** How many of channel `ix`'s publishes wait here, counted by their heads: its newest ones. */
   waitingPublishes(ix: number): number
   /** Drops channel `ix`'s oldest `count` publishes that wait here. */
   dropWaitingPublishes(ix: number, count: number): void
-  /** Drops what of channel `ix` waits here from its oldest publish on, receipts too. */
-  dropWaitingFromPublish(ix: number): void
+  /** Drops what of channel `ix` waits here, receipts too: from its oldest publish on, or from the start. */
+  dropWaitingFrom(ix: number, from: 'publish' | 'start'): void
 }
 
 function isHeadOf(frame: Uint8Array, ix: number): boolean {
@@ -48,10 +48,10 @@ function countWaitingPublishes(waiting: Iterable<Uint8Array>, ix: number): numbe
   return count
 }
 
-/** Tells, in the queue's order, whether each frame goes: channel `ix`'s sequenced frames from its first head on, and the
- *  body after each head. */
-function droppingFromPublish(ix: number): (frame: Uint8Array) => boolean {
-  let dropping = false
+/** Tells, in the queue's order, whether each frame goes: channel `ix`'s sequenced frames, from its first head on or from
+ *  the start, and the body after each head. */
+function droppingFrom(ix: number, from: 'publish' | 'start'): (frame: Uint8Array) => boolean {
+  let dropping = from === 'start'
   let bodyNext = false
   return (frame) => {
     if (bodyNext) {

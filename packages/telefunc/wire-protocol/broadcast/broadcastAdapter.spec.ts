@@ -298,7 +298,7 @@ describe('Broadcast shield validation', () => {
           queue: {
             waitingPublishes: () => 0,
             dropWaitingPublishes() {},
-            dropWaitingFromPublish() {},
+            dropWaitingFrom() {},
           },
         },
         index: 7,
@@ -340,7 +340,7 @@ describe('Broadcast shield validation', () => {
           queue: {
             waitingPublishes: () => 0,
             dropWaitingPublishes() {},
-            dropWaitingFromPublish() {},
+            dropWaitingFrom() {},
           },
         },
         index: 7,
@@ -370,7 +370,7 @@ describe('lossy broadcast under memory pressure', () => {
           queue: {
             waitingPublishes: () => 0,
             dropWaitingPublishes() {},
-            dropWaitingFromPublish() {},
+            dropWaitingFrom() {},
           },
         },
         index: 7,

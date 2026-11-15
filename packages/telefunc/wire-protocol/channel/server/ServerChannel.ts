@@ -994,8 +994,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** `pageGone`: the page left or never attached, so nothing the channel holds for it can reach it. */
   protected shutdown(err?: Error, { pageGone = false } = {}): void {
     if (this._phase === 'ended') return
-    // What of its publishes still waits for the wire of a page that is gone would reach no one.
-    if (pageGone && this.peer) this.dropUnhanded()
+    // What of it still waits for the wire of a page that is gone, its sends too, would reach no one.
+    if (pageGone && this.peer) this.peer.sender.queue.dropWaitingFrom(this.peer.index, 'start')
     this._phase = 'ended'
     this.lossySends?.dispose()
     this.lifecycle.forcedTermination(err, () => {

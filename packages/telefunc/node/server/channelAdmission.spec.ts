@@ -24,7 +24,7 @@ const stalledSender: PeerSender = {
   behindAfter: () => Number.POSITIVE_INFINITY,
   deliveredBefore: () => 0,
   sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-  queue: { waitingPublishes: () => 2, dropWaitingPublishes() {}, dropWaitingFromPublish() {} },
+  queue: { waitingPublishes: () => 2, dropWaitingPublishes() {}, dropWaitingFrom() {} },
 }
 
 /** A broadcast of `key` whose page subscribed to its text and reads nothing. */
