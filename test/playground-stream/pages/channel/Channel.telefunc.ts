@@ -786,7 +786,7 @@ async function onChannelBinaryBurst() {
       if (awaited) await ch.sendBinary(message).catch(refused)
       else void ch.sendBinary(message).catch(refused)
     }
-    while (!(await sendFitted(ch, 'end'))) await new Promise((resolve) => setTimeout(resolve, 100))
+    while (!ch.isClosed && !(await sendFitted(ch, 'end'))) await new Promise((resolve) => setTimeout(resolve, 100))
   })
   return { channel: ch.client, channelId: ch.id }
 }
