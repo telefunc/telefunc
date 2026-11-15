@@ -7,7 +7,7 @@
 // orderings. This spec drives the REAL ClientConnection against a scripted SSE server and a fake
 // WebSocket, so each interleaving is chosen rather than raced.
 
-import { afterEach, beforeEach, describe, expect, test } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { ClientConnection } from './ClientConnection.js'
 import { decode, encode } from '../../wire/frame.js'
@@ -16,6 +16,12 @@ import type { DecodedFrame } from '../../wire/frame.js'
 import { decodeU32 } from '../../wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
+
+// This spec pins the join's order, not its deadline: a loaded runner must not reach the deadline between steps.
+vi.mock('../../constants.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../constants.js')>()),
+  UPGRADE_HANDOFF_JOIN_TIMEOUT_MS: 60_000,
+}))
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
 /** Long enough for the connect POST, the probe handshake and any chained microtasks to drain. */
