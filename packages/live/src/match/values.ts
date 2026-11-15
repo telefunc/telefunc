@@ -200,15 +200,26 @@ function compareDateTime(a: string, b: string, type: string): -1 | 0 | 1 | undef
   return compareOrdered(microseconds(a, withZone, dateOnly), microseconds(b, withZone, dateOnly))
 }
 
+/** The UTC time of a date and time, the year as written (`Date.UTC()` reads 0 to 99 as 1900 to 1999); `undefined`
+ *  beyond the dates JavaScript holds. */
+function utcMilliseconds(year: string, month: string, day: string, hour: string, minute: string, second: string) {
+  const date = new Date(0)
+  date.setUTCFullYear(Number(year), Number(month) - 1, Number(day))
+  date.setUTCHours(Number(hour), Number(minute), Number(second))
+  const time = date.getTime()
+  return Number.isNaN(time) ? undefined : time
+}
+
 function microseconds(text: string, withZone: boolean, dateOnly: boolean): bigint | undefined {
   const m = DATE_TIME.exec(text.trim())
   if (!m) return undefined
   const [, year, month, day, hour = '0', minute = '0', second = '0', fraction = '', zone] = m
-  if (dateOnly) return BigInt(Date.UTC(Number(year), Number(month) - 1, Number(day)))
+  const utc = utcMilliseconds(year!, month!, day!, hour, minute, second)
+  if (utc === undefined) return undefined
+  if (dateOnly) return BigInt(utc)
   // A value without a zone is read in the session's time zone, which isn't known here.
   if (withZone && zone === undefined) return undefined
   if (!withZone && zone !== undefined && !/^(Z|[+-]00(:00)*)$/i.test(zone)) return undefined
-  const utc = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second))
   const micros = BigInt(utc) * BigInt(1000) + BigInt(fraction.padEnd(6, '0'))
   if (!withZone || zone!.toUpperCase() === 'Z') return micros
   const [h = '0', mm = '0', ss = '0'] = zone!.slice(1).split(':')

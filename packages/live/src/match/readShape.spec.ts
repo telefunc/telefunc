@@ -90,6 +90,8 @@ describe('a join of columns that compare alike', () => {
 })
 
 const items = pgTable('items', { id: integer('id').primaryKey(), v: text('v') })
+const dates = pgTable('dates', { id: integer('id').primaryKey(), v: text('v') })
+const moments = pgTable('moments', { id: integer('id').primaryKey(), v: text('v') })
 
 const liveDb = (pglite: Awaited<ReturnType<typeof emptyPGlite>>) => liveDrizzle(drizzle(pglite))
 type LiveCell = { send(): unknown; onStale(onStale: () => void): void; release(): void }
@@ -132,5 +134,52 @@ describe('a page of a read', () => {
     expect(sent).toEqual([{ id: 2 }])
     expect(after).toEqual([{ id: 2 }])
     expect(stale).toBe(false)
+  })
+})
+
+describe('a read of dates', () => {
+  const schema = "create table dates (id int primary key, v date); insert into dates values (1, '0001-01-01')"
+  const early = (db: ReturnType<typeof liveDb>) =>
+    db.select({ id: dates.id }).from(dates).where(sql`${dates.v} < '1800-01-01'::date`).orderBy(dates.id)
+  it('goes stale when a date before the year 100 enters its range', async () => {
+    const { sent, stale, after } = await liveAfter(schema, early, "insert into dates values (2, '0002-01-01')")
+    expect(sent).toEqual([{ id: 1 }])
+    expect(after).toEqual([{ id: 1 }, { id: 2 }])
+    expect(stale).toBe(true)
+  })
+  it('stays fresh when a date of now is out of its range', async () => {
+    const { stale, after } = await liveAfter(schema, early, "insert into dates values (2, '2026-11-15')")
+    expect(after).toEqual([{ id: 1 }])
+    expect(stale).toBe(false)
+  })
+
+  // A time zone's offset and microseconds, as SQL compares them.
+  describe('with a time zone', () => {
+    const schema = `create table moments (id int primary key, v timestamptz);
+      insert into moments values (1, '2026-11-15 10:00:00.000002+00')`
+    const later = (db: ReturnType<typeof liveDb>) =>
+      db
+        .select({ id: moments.id })
+        .from(moments)
+        .where(sql`${moments.v} > '2026-11-15 10:00:00.000001+00'::timestamptz`)
+        .orderBy(moments.id)
+    it('goes stale when a moment written in another zone enters its range', async () => {
+      const { stale, after } = await liveAfter(
+        schema,
+        later,
+        "insert into moments values (2, '2026-11-15 11:00:00.5+01')",
+      )
+      expect(after).toEqual([{ id: 1 }, { id: 2 }])
+      expect(stale).toBe(true)
+    })
+    it('stays fresh when a moment at its bound, a microsecond before its row, is inserted', async () => {
+      const { stale, after } = await liveAfter(
+        schema,
+        later,
+        "insert into moments values (2, '2026-11-15 10:00:00.000001+00')",
+      )
+      expect(after).toEqual([{ id: 1 }])
+      expect(stale).toBe(false)
+    })
   })
 })
