@@ -14,7 +14,7 @@ import { boolean, integer, pgTable, serial, text, timestamp } from 'drizzle-orm/
 import pg from 'pg'
 import type { LiveCell } from '../../packages/live/dist/live.js'
 import { Router } from '../../packages/live/dist/match/router.js'
-import { staleSignals } from '../../packages/live/dist/staleSignals.js'
+import { staleSignalsDelivered } from './staleSignalsDelivered.ts'
 
 const ROWS = Number(process.env.ROWS ?? 10_000)
 const N = Number(process.env.N ?? 1000)
@@ -121,12 +121,6 @@ for (let run = 0; run <= RUNS; run++) {
   if (run === 0) continue
   samples.plain.push(plainSample)
   samples.live.push(liveSample)
-}
-
-/** Until no stale signal waits for its turn: the server holds them back while it is busy. */
-async function staleSignalsDelivered(): Promise<void> {
-  do await new Promise((resolve) => setTimeout(resolve, 5))
-  while ((staleSignals as unknown as { waiting: unknown[] }).waiting.length > 0)
 }
 
 const median = (values: number[]) => values.toSorted((a, b) => a - b)[Math.floor(values.length / 2)]!

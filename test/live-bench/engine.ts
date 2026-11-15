@@ -15,6 +15,7 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { Router } from '../../packages/live/dist/match/router.js'
 import { LiveRead } from '../../packages/live/dist/match/liveRead.js'
 import type { LiveCell } from '../../packages/live/dist/live.js'
+import { staleSignalsDelivered } from './staleSignalsDelivered.ts'
 
 const N = Number(process.env.N ?? 1000)
 const VARIANT = process.env.VARIANT ?? 'topk'
@@ -134,6 +135,8 @@ async function write(i: number) {
 
 for (let i = 0; i < WARMUP; i++) {
   await write(i)
+  // Each user whose read went stale watches again, as a client does once the signal arrives.
+  await staleSignalsDelivered()
   for (const user of stale) await subscribe(user)
   stale.clear()
 }
@@ -145,6 +148,7 @@ for (let i = 0; i < WRITES; i++) {
   const start = performance.now()
   await write(WARMUP + i)
   totalMs += performance.now() - start
+  await staleSignalsDelivered()
   for (const user of stale) await subscribe(user)
   stale.clear()
 }
