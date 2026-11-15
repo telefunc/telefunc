@@ -18,7 +18,7 @@ import {
   type DemandChange,
 } from '../shared/protocol.js'
 import type { RoomDataEnvelope, RoomMemberRecord, RoomIncarnation } from './protocol.js'
-import type { RoomModel } from '../shared/RoomModel.js'
+import { departureCause, type RoomModel } from '../shared/RoomModel.js'
 import { RoomState, type RoomStateOwner } from '../shared/state.js'
 import { type MemberLink } from '../shared/ParticipantBase.js'
 import { RoomStub, type RoomStubOptions } from './RoomStub.js'
@@ -41,7 +41,7 @@ import { evictMember, joinMember } from './store/members.js'
 import type { JoinOptions, LeaveCause, LocalParticipant } from '../types.js'
 import type { RoomGuards } from './roomStatics.js'
 import type { ServerRoom } from './room.js'
-import { ServerLocalParticipant, type MetaMirror } from './ServerLocalParticipant.js'
+import { ServerLocalParticipant } from './ServerLocalParticipant.js'
 assertIsNotBrowser()
 
 type RoomHandleOptions = {
@@ -58,13 +58,11 @@ type RoomHandleOptions = {
   acks: PendingDmAcks
   /** Hosts the members the handle admits, and evicts again one whose eviction failed. */
   hosting: Pick<RoomHosting, 'lease' | 'evictLater'>
-  /** The meta of each participant a client holds, which the client mirrors. */
-  metaMirrors: Set<MetaMirror>
 }
 
 /** One `Room.get()`'s handle on a room: its guards, its tail, the stubs it opened, its participants and its listeners,
  *  over this process's one view of the room, which every handle to it shares. Each serialization opens a fresh stub. */
-class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink {
+class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStateOwner {
   /** Every authority check and member write carries this incarnation,
    *  rejecting stale handles after recreate. */
   readonly incarnation: RoomIncarnation
@@ -94,17 +92,15 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink {
   private readonly roster: RoomHandleOptions['roster']
   private readonly incomingDemand: RoomHandleOptions['incomingDemand']
   private readonly hosting: RoomHandleOptions['hosting']
-  private readonly metaMirrors: Set<MetaMirror>
 
-  constructor({ view, replica, lanePlan, roster, incomingDemand, acks, hosting, metaMirrors }: RoomHandleOptions) {
+  constructor({ view, replica, lanePlan, roster, incomingDemand, acks, hosting }: RoomHandleOptions) {
     this.replica = replica
     this.lanePlan = lanePlan
     this.roster = roster
     this.incomingDemand = incomingDemand
     this.hosting = hosting
-    this.metaMirrors = metaMirrors
     this.incarnation = replica.incarnation
-    this.state = new RoomState({ view, model: replica.model, owner: new RoomHandleStateOwner({ room: this }) })
+    this.state = new RoomState({ view, model: replica.model, owner: this })
     this.local = new LocalHolder({ state: this.state, participants: this.localParticipants })
     this.writes = new RoomWrites({
       owner: this,
@@ -142,7 +138,6 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink {
       room: this,
       participant: { id: admission.id, meta, selfDelivery, identity },
       incomingDemand: this.incomingDemand,
-      metaMirrors: this.metaMirrors,
     })
     await this.admit(admission, () => {
       this.localParticipants.set(admission.id, participant)
@@ -276,6 +271,11 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink {
     this.localParticipants.get(id)?._acceptMeta(accepted)
   }
 
+  /** A failover rewound the meta seq of a member this handle owns. */
+  metaRewound(id: string): void {
+    this.localParticipants.get(id)?._metaRewound()
+  }
+
   /** A member this handle owns left: its participant ends, and its admission, if under way, is abandoned. */
   memberLeft(id: string, cause: LeaveCause): void {
     const local = this.localParticipants.get(id)
@@ -287,10 +287,12 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink {
     this.admissions.get(id)?.abandon()
   }
 
-  /** The room closed: the replica already applied and relayed `closed`. */
+  /** The room closed: the replica already applied and relayed `closed`. Its members leave as the page's do. */
   teardown(): void {
+    const cause = this.model.closedCause
+    assert(cause)
     this.teardownTail()
-    for (const local of this.localParticipants.values()) local._onLeft({ type: 'closed' })
+    for (const local of this.localParticipants.values()) local._onLeft(departureCause(cause))
     this.localParticipants.clear()
     for (const admission of this.admissions.values()) admission.abandon()
     for (const stub of this.stubs) closeAfterReconnectWindow(stub.end)
@@ -420,6 +422,17 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink {
     return { id: admission.id, joinedAt: admission.joinedAt }
   }
 
+  /** Its state's listeners changed, and with them what its local holder wants. */
+  onListenersChanged(member: string | null, binary: BinaryWantChange | null): void {
+    this.replica.listenersChanged(this)
+    this.onHolderTextChanged(this.local, this.local.refreshText(member))
+    if (binary !== null && this.local.applyBinary(binary)) this.onHolderBinaryChanged(this.local, binary)
+  }
+
+  reportCallbackError(error: unknown): void {
+    handleCallbackBug(error)
+  }
+
   /** A holder's text wants changed (`before` is `null` when none did): replan, then replay the retained
    *  frame it now wants. */
   onHolderTextChanged(holder: LaneHolder, before: TextWantsChange | null): void {
@@ -461,27 +474,5 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink {
     const holder = this.holderOf(member)
     if (holder instanceof ServerLocalParticipant) holder._demandChanged(track, change)
     else holder?.relayEvent({ __r: 'demand', member, track, ...change })
-  }
-}
-
-type RoomHandleStateOwnerOptions = { room: RoomHandle }
-
-/** What a handle's state asks of it. */
-class RoomHandleStateOwner implements RoomStateOwner {
-  private readonly room: RoomHandle
-
-  constructor({ room }: RoomHandleStateOwnerOptions) {
-    this.room = room
-  }
-
-  reportCallbackError(error: unknown): void {
-    handleCallbackBug(error)
-  }
-
-  onListenersChanged(member: string | null, binary: BinaryWantChange | null): void {
-    const room = this.room
-    room.replica.listenersChanged(room)
-    room.onHolderTextChanged(room.local, room.local.refreshText(member))
-    if (binary !== null && room.local.applyBinary(binary)) room.onHolderBinaryChanged(room.local, binary)
   }
 }

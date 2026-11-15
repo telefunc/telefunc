@@ -38,7 +38,6 @@ import type { StoredRoomMeta } from './store/meta.js'
 import type { LaneHolder, ReplayHold, TextWantsChange } from './lifecycle/replay.js'
 import { ServerRoom } from './room.js'
 import type { RoomHandle } from './RoomHandle.js'
-import type { MetaMirror } from './ServerLocalParticipant.js'
 import { RosterStream } from './lifecycle/RosterStream.js'
 import { StaleReads } from './lifecycle/StaleReads.js'
 import { toggle } from '../utils/sets.js'
@@ -125,8 +124,6 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   /** The clients the roster and the presence events reach: every attached stub, and each participant stub whose
    *  participant someone receives a track of, so its page names them. */
   private readonly rosterClients = new Set<RoomStub | RoomParticipantStub>()
-  /** The meta of each participant a client holds, which the client mirrors. */
-  private readonly metaMirrors = new Set<MetaMirror>()
   /** The handle holding each member it joined. */
   private readonly owners = new Map<string, RoomHandle>()
   /** The seq of the last frame each owned member's inbox delivered, 0 before its first. */
@@ -183,7 +180,6 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
       incomingDemand: this.incomingDemand,
       acks: this.acks,
       hosting: this.hosting,
-      metaMirrors: this.metaMirrors,
     })
   }
 
@@ -354,7 +350,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   applyControl(event: PresenceEvent | AuthorityChange, carried?: () => PublishBody): void {
     if (event.__r === 'rewound') {
       this.model.forgetMetaSeqs()
-      for (const mirror of this.metaMirrors) mirror.rewound()
+      for (const [id, owner] of this.owners) owner.metaRewound(id)
       for (const stub of this.stubs) stub.relayEvent({ __r: 'rewound' })
       return
     }

@@ -1,5 +1,4 @@
 export { ServerLocalParticipant }
-export type { MetaMirror }
 
 import { handleCallbackBug } from 'telefunc/__internal'
 import { assertUsage } from '../utils/assert.js'
@@ -33,8 +32,6 @@ type ServerLocalParticipantOptions = {
   participant: ParticipantBaseOptions['participant']
   /** Holds who receives the participant's tracks, once for the whole room. */
   incomingDemand: Pick<RoomDemand, 'watchesOf'>
-  /** Where a client holding the participant mirrors its meta. */
-  metaMirrors: Set<MetaMirror>
 }
 
 /** Server-side `LocalParticipant`, returned by `ServerRoom.join()`. Its acts go to its room's writes. */
@@ -48,13 +45,11 @@ class ServerLocalParticipant extends ParticipantBase {
   protected readonly _bugMessage = ROOM_BUG_MESSAGE
 
   private readonly incomingDemand: ServerLocalParticipantOptions['incomingDemand']
-  private readonly metaMirrors: Set<MetaMirror>
 
-  constructor({ room, participant, incomingDemand, metaMirrors }: ServerLocalParticipantOptions) {
+  constructor({ room, participant, incomingDemand }: ServerLocalParticipantOptions) {
     super({ participant, rewinds: room.model.metaRewinds, link: room })
     this.room = room
     this.incomingDemand = incomingDemand
-    this.metaMirrors = metaMirrors
   }
 
   static isServerLocalParticipant(value: unknown): value is ServerLocalParticipant {
@@ -144,11 +139,14 @@ class ServerLocalParticipant extends ParticipantBase {
    *  it mirrors. */
   _onMeta(mirror: MetaMirror): () => void {
     this.metaMirror = mirror
-    this.metaMirrors.add(mirror)
     return () => {
-      this.metaMirrors.delete(mirror)
       if (this.metaMirror === mirror) this.metaMirror = null
     }
+  }
+
+  /** @internal A failover rewound its member's meta seq. */
+  _metaRewound(): void {
+    this.metaMirror?.rewound()
   }
 
   /** As the room accepted it: always true for one no page holds. */
