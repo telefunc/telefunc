@@ -19,7 +19,6 @@ export type {
   AfterSendHook,
   AfterJoinHook,
   RoomSendReceipt,
-  RoomAckReceipt,
   LeaveCause,
   ParticipantRef,
   BinaryFrameInfo,
@@ -83,9 +82,6 @@ type JoinGuard<P extends ParticipantMeta = ParticipantMeta> = (member: Sender<P>
 
 /** The receipt for a delivered private message, passed to `onAfterSend`. */
 type RoomSendReceipt = { seq: number; timestamp: number }
-
-/** A delivered-message receipt plus the recipient listener's response. */
-type RoomAckReceipt = RoomSendReceipt & { response: unknown }
 
 /** Runs after a room-wide text or binary publish commits (`data` is a binary frame's bytes); throwing cannot undo
  *  delivery. */
@@ -297,10 +293,11 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   /** Publish binary, optionally on a named track with per-frame metadata. */
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>
 
-  /** Send privately; `{ ack: true }` waits for the recipient handler's response. */
+  /** Send privately; `{ ack: true }` waits for the reply the recipient's `listen()` callback returns, and resolves to
+   *  it. */
   send(to: string | Sender<P>, data: unknown): Promise<RoomSendReceipt>
   send(to: string | Sender<P>, data: unknown, options: { ack?: false }): Promise<RoomSendReceipt>
-  send(to: string | Sender<P>, data: unknown, options: { ack: true }): Promise<RoomAckReceipt>
+  send(to: string | Sender<P>, data: unknown, options: { ack: true }): Promise<unknown>
   /** Receive private messages, `info.from` being who sent it, or `null` for your server (`Room.send()`); returning a
    *  value answers an acknowledged send. */
   listen(

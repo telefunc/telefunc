@@ -23,7 +23,6 @@ export type {
   AfterSendHook,
   AfterJoinHook,
   RoomSendReceipt,
-  RoomAckReceipt,
   LeaveCause,
   ParticipantRef,
   BinaryFrameInfo,

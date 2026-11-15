@@ -236,8 +236,8 @@ To get a reply, pass `{ ack: true }`. The recipient's `listen()` callback return
 me.listen((move) => (isLegal(move) ? 'ok' : 'illegal'))
 
 // Bob
-const { response } = await me.send(alice, { move: 'e4' }, { ack: true })
-console.log(response) // 'ok'
+const reply = await me.send(alice, { move: 'e4' }, { ack: true })
+console.log(reply) // 'ok'
 ```
 
 A callback that returns `undefined` only observes, so it can stand beside the one that replies. If two callbacks return a value, `send()` rejects.
@@ -663,7 +663,7 @@ Properties: `id`, `meta`, `count`, `isEmpty`, `isClosed`.
 |---|---|
 | `publish(message, { track?, lossy?, retain? }?)` | Send to everyone. `lossy` needs `track`. |
 | `publishBinary(data, { track?, meta?, retain?, lossy? }?)` | Send binary to everyone. Without `track`, on the track `'main'`. |
-| `send(to, message, { ack? }?)` | Send to one participant. |
+| `send(to, message, { ack? }?)` | Send to one participant; with `ack: true`, resolves to its `listen()` reply. |
 | `listen(cb)` | Receive private messages: `cb(message, { from })`; return a value to reply. |
 | `setMeta(meta)` / `updateMeta(meta)` | Replace / update your `meta`. |
 | `onChange(cb)` | Your `meta`, `isConnected` or `demand` changed; once for the changes of one task. |

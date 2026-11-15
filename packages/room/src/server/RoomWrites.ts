@@ -27,7 +27,7 @@ import type {
 } from '../shared/protocol.js'
 import type { RoomDataEnvelope, RoomDmAckEnvelope, RoomIncarnation } from './protocol.js'
 import type { RoomModel } from '../shared/RoomModel.js'
-import type { ParticipantMeta, RoomAckReceipt, RoomSendReceipt, Sender } from '../types.js'
+import type { ParticipantMeta, RoomSendReceipt, Sender } from '../types.js'
 import { memberCellKey } from './store/cells.js'
 import { reportRoomError } from './reportRoomError.js'
 import { SEMANTIC_LANE, acceptedOrThrow, commitLane, encodeRoomRecord, inboxOf } from './lanes/lanes.js'
@@ -203,7 +203,8 @@ class RoomWrites {
     return senderSnapshot(from, local.meta, local.identity)
   }
 
-  async sendDm(from: string, to: string, data: unknown, ack: boolean): Promise<RoomSendReceipt | RoomAckReceipt> {
+  /** The receipt, or with `ack` the recipient's reply. */
+  async sendDm(from: string, to: string, data: unknown, ack: boolean): Promise<unknown> {
     return ack ? await this.sendDmAck(from, to, data) : await this.publishDm(from, to, data)
   }
 
@@ -212,15 +213,14 @@ class RoomWrites {
     await this.publishDm(from, to, data, { field })
   }
 
-  private async sendDmAck(from: string, to: string, data: unknown): Promise<RoomAckReceipt> {
+  private async sendDmAck(from: string, to: string, data: unknown): Promise<unknown> {
     const ackId = crypto.randomUUID()
     const acks = this.acks
     const reply = new Promise<RoomResult>((settle) => acks.add(ackId, { from, to, settle }))
     // Bounds the wait nothing else settles: a lost reply frame, or a recipient that never handled the DM.
     const timer = unrefTimer(setTimeout(() => void this.settleTimedOut(from, ackId), ROOM_DM_ACK_TIMEOUT_MS))
-    let receipt: RoomSendReceipt
     try {
-      receipt = await this.publishDm(from, to, data, { ackId })
+      await this.publishDm(from, to, data, { ackId })
     } catch (err) {
       acks.delete(ackId)
       clearTimeout(timer)
@@ -229,7 +229,7 @@ class RoomWrites {
     const settled = await reply
     clearTimeout(timer)
     if (!settled.ok) throw roomFailureError(settled)
-    return { ...receipt, response: settled.value }
+    return settled.value
   }
 
   /** The recipient stores its reply before committing its frame, so a reply whose frame was lost is still read. */

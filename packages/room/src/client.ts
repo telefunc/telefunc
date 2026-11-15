@@ -11,7 +11,6 @@ export type {
   TrackDemand,
   Sender,
   RoomSendReceipt,
-  RoomAckReceipt,
   LeaveCause,
   BinaryFrameInfo,
   BinaryPublishOptions,

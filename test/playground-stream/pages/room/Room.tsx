@@ -170,11 +170,7 @@ let closeViewChat: (() => void) | null = null
 /** The call the `ack-dm-hang-up` card hangs up when its second button is clicked. */
 let hangUp: (() => void) | null = null
 
-const replyOf = (sent: Promise<{ response: unknown }>) =>
-  sent.then(
-    (receipt) => receipt.response,
-    (err: Error) => err.message,
-  )
+const replyOf = (sent: Promise<unknown>) => sent.catch((err: Error) => err.message)
 
 /** A reply that links back to its thread, which can't be sent. */
 function threadedReply() {
