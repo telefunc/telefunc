@@ -112,6 +112,14 @@ describe('prepare()', () => {
               },
               "testFilePath": "test/playground/.test-preview.test.ts",
             },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Vite",
+                },
+              },
+              "testFilePath": "test/standaloner_without-vike/test-preview.test.ts",
+            },
           ],
           "splitFiles": false,
         },
@@ -236,6 +244,14 @@ describe('prepare()', () => {
                 },
               },
               "testFilePath": "test/playground-stream/.test-preview.channel-slow-ping.ws.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
+              "testFilePath": "test/playground-stream/.test-preview.channel-slow-post.sse.test.ts",
             },
             {
               "localConfig": {
@@ -370,6 +386,14 @@ describe('prepare()', () => {
                 },
               },
               "testFilePath": "test/@cloudflare_vite-plugin/test-preview.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Cloudflare",
+                },
+              },
+              "testFilePath": "test/@cloudflare_vite-plugin_without-vike/test-preview.test.ts",
             },
           ],
           "splitFiles": false,
