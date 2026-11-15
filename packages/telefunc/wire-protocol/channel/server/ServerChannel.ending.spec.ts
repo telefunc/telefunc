@@ -207,6 +207,22 @@ test('on SSE, a page that left for good is sent nothing of what waited for it', 
   expect(reads(await page.readToEnd())).toEqual([])
 })
 
+test("on SSE, after the page's abort nothing of that channel waits for the stream, its sends that pass another channel's event too", async () => {
+  const ended = new ServerChannel()
+  const other = new ServerChannel()
+  const page = await overSse([ended, other])
+  void other.send('p0')
+  await page.readUntil('1:p0')
+  for (const message of MESSAGES) void other.send(message)
+  // Of the other channel, p1's event started: channel 0's 1 kB sends wait to pass it once it ends.
+  for (const name of ['s1', 's2', 's3']) void ended.send(name + 'x'.repeat(1_000))
+  fromPage(ended, encode.abort(0, stringify(undefined), 1))
+  expect(ended.isClosed).toBe(true)
+  expect(reads(await page.readUntil('1:p3'))).toEqual(['1:p0', '1:p1', '1:p2', '1:p3'])
+  other.abort()
+  await page.close()
+})
+
 /** The page sends `frame` on channel 0, its first. */
 function fromPage(channel: ServerChannel, frame: Uint8Array<ArrayBuffer>): void {
   channel._dispatchFrame(decode(frame) as ChannelFrame)

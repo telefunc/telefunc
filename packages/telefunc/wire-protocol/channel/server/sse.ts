@@ -136,12 +136,15 @@ class EventStream implements WireQueue {
     this.dropWaiting(droppingFrom(ix, from))
   }
 
+  /** `drops` is asked in the order the stream takes the frames: what passes goes first. */
   private dropWaiting(drops: (frame: Uint8Array) => boolean): void {
-    this.waiting.remove((frame) => {
+    const goes = (frame: Uint8Array<ArrayBuffer>) => {
       if (!drops(frame)) return false
       this.waitingBytes -= eventBytes(frame)
       return true
-    })
+    }
+    this.passing.remove(goes)
+    this.waiting.remove(goes)
   }
 
   /** What waits goes only to a page that still reads: past a wire only lost, the page's reconnect gets it from its
