@@ -2,6 +2,7 @@ export { capturePostgresJs, isPostgresJs, postgresJsConnectionTarget }
 export type { PostgresJs }
 
 import type { FollowUp, LiveDatabase, Statement } from '../liveDatabase.js'
+import { processWide } from '../processWide.js'
 import { copyRows } from '../sharedReads.js'
 import { inOneTransaction, sendWithBeforeCommit } from './beforeCommit.js'
 import { takeHiddenFields, takeHiddenValues } from './hiddenColumns.js'
@@ -51,12 +52,15 @@ type Query = Promise<Result> & {
   values(): Query
 }
 
-/** How the queries of one handler are captured: the database, and the connection they run on (`undefined`: any
- *  connection of the pool, a new one for each statement). `shared`: other callers' statements may run on it between
- *  ours (a pool's connections): a transaction of ours reserves a connection first. */
-type Target = { live: LiveDatabase; sql: PostgresJs; connection: object | undefined; shared: boolean }
+/** How the queries of one handler are captured: the database, the client (`clients`), and the connection they run on
+ *  (`undefined`: any connection of the pool, a new one for each statement). `shared`: other callers' statements may run
+ *  on it between ours (a pool's connections): a transaction of ours reserves a connection first. */
+type Target = { live: LiveDatabase; sql: PostgresJs; client: number; connection: object | undefined; shared: boolean }
 
 const CAPTURED = Symbol.for('@telefunc/live/captured')
+/** How many postgres.js clients were captured: each is numbered, its transactions and reserved connections with it. Two
+ *  clients may turn rows into results apart (`transform`, `types`): their reads share no result. */
+const clients = processWide('postgresJsClients', () => ({ count: 0 }))
 const TARGETS = Symbol.for('@telefunc/live/postgresJsTargets')
 /** A statement of a text of several, run in its text's turn (`runSteps()`). */
 const STEP = Symbol('step')
@@ -79,7 +83,14 @@ function capturePostgresJs(sql: PostgresJs, live: LiveDatabase): void {
   Object.defineProperty(sql, CAPTURED, { value: true, configurable: true })
   const targets = captureQueries(Object.getPrototypeOf(sql.unsafe('')))
   // With one connection, a `BEGIN` sent through `sql` holds for the statements after it.
-  targets.set(handlerOf(sql), { live, sql, connection: sql.options.max === 1 ? sql : undefined, shared: true })
+  const target: Target = {
+    live,
+    sql,
+    client: clients.count++,
+    connection: sql.options.max === 1 ? sql : undefined,
+    shared: true,
+  }
+  targets.set(handlerOf(sql), target)
 
   const begin = sql.begin.bind(sql)
   sql.begin = async (...args) => {
@@ -89,20 +100,22 @@ function capturePostgresJs(sql: PostgresJs, live: LiveDatabase): void {
     return begin(...args, (scope: Scope) => {
       const transaction = {}
       control(live, transaction, 'BEGIN')
-      captureScope(scope, transaction, live, targets)
+      captureScope(scope, transaction, target, targets)
       return callback(scope)
     })
   }
   const reserve = sql.reserve.bind(sql)
   sql.reserve = async () => {
     const reserved = await reserve()
-    targets.set(handlerOf(reserved), { live, sql: reserved, connection: reserved, shared: false })
+    targets.set(handlerOf(reserved), { ...target, sql: reserved, connection: reserved, shared: false })
     return reserved
   }
 }
 
-function captureScope(scope: Scope, transaction: object, live: LiveDatabase, targets: WeakMap<object, Target>): void {
-  targets.set(handlerOf(scope), { live, sql: scope, connection: transaction, shared: false })
+/** `client`: the target of the client whose transaction `scope` is part of. */
+function captureScope(scope: Scope, transaction: object, client: Target, targets: WeakMap<object, Target>): void {
+  const { live } = client
+  targets.set(handlerOf(scope), { ...client, sql: scope, connection: transaction, shared: false })
   const savepoint = scope.savepoint.bind(scope)
   let savepoints = 0
   scope.savepoint = (...args) => {
@@ -111,7 +124,7 @@ function captureScope(scope: Scope, transaction: object, live: LiveDatabase, tar
     const name = `"${HIDDEN_PREFIX}${savepoints++}"`
     control(live, transaction, `SAVEPOINT ${name}`)
     const done = savepoint(...args, (inner: Scope) => {
-      captureScope(inner, transaction, live, targets)
+      captureScope(inner, transaction, client, targets)
       return callback(inner)
     })
     done.catch(() => control(live, transaction, `ROLLBACK TO SAVEPOINT ${name}`))
@@ -143,7 +156,7 @@ function captureQueries(query: Query): WeakMap<object, Target> {
 /** `planned` is told each statement it plans. */
 async function run(
   query: Query,
-  { live, sql, connection = {}, shared }: Target,
+  { live, sql, client, connection = {}, shared }: Target,
   planned: (statement: Statement) => void = () => {},
 ): Promise<void> {
   // As postgres.js does: `.values()` and the like are called before it runs.
@@ -155,9 +168,9 @@ async function run(
   }
   const known = textOf(query)
   const steps = known && query.options.simple && live.oneTransactionSteps(known.text)
-  if (steps) return runSteps(query, steps, { live, sql, connection, shared })
+  if (steps) return runSteps(query, steps, { live, sql, client, connection, shared })
   const plan = (text: NonNullable<typeof known>) => {
-    const statement = rewritten(query, text, live, connection)
+    const statement = rewritten(query, text, live, connection, client)
     planned(statement)
     return statement
   }
@@ -210,10 +223,17 @@ async function whenReady(live: LiveDatabase, sql: PostgresJs): Promise<void> {
   if (!live.isReady()) await live.ready(async (text) => ((await ours(sql, text))[0] as string[])[0]!)
 }
 
-function rewritten(query: Query, known: { text: string; args: unknown[] }, live: LiveDatabase, connection: object) {
+function rewritten(
+  query: Query,
+  known: { text: string; args: unknown[] },
+  live: LiveDatabase,
+  connection: object,
+  client: number,
+) {
   // Rows reach the caller other than as the result: can't strip what the statement would add.
   const asWritten = Boolean(query.cursorFn || query.forEachFn || query.onlyDescribe || query.streaming)
-  const sharing = asWritten ? undefined : { rowForm: `postgres.js:${query.isRaw || 'object'}` }
+  // A client's rows come as its `transform` and `types` make them.
+  const sharing = asWritten ? undefined : { rowForm: `postgres.js:${client}:${query.isRaw || 'object'}` }
   const statement = live.statementFor(connection, known.text, known.args, { rewrite: !asWritten, sharing })
   if (statement.text !== known.text) {
     query.strings = [statement.text]
