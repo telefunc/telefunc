@@ -136,8 +136,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _phase: 'open' | 'closing' | 'ended' = 'open'
   private didRegister = false
   protected peer: IndexedPeer | null = null
-  /** The request that opened the wire the page last attached on. */
-  protected wireRequest: Request | undefined = undefined
+  /** A request that reached the object its page is on: the call's whose response carried it, then its page's wire's. */
+  protected pageRequest: Request | undefined = undefined
   private readonly listeners = new Listeners<ChannelListener<ClientToServer>>()
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
   protected offlineBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(this)
@@ -431,7 +431,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.lifecycle.onOpen(callback, options)
   }
 
-  _setResponseAbort(abortResponse: (abortValue?: unknown) => void): void {
+  /** @internal The response to the call `request` made carries it; `abortResponse` aborts that response. */
+  _carriedBy(request: Request, abortResponse: (abortValue?: unknown) => void): void {
+    this.pageRequest ??= request
     this.responseAbort = abortResponse
   }
 
@@ -792,7 +794,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  `lastSeq`. */
   _onPageAttach(lastSeq: number, request: Request | undefined): void {
     this.onPageHas(lastSeq)
-    this.wireRequest = request
+    this.pageRequest = request
   }
 
   /** @internal The page closed its end after receiving this channel's frames through `lastSeq`, the low 32 bits a PING

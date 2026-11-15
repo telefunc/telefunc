@@ -12,6 +12,8 @@ import { CloudflareBroadcastAuthorityState, CloudflareBroadcastTransport } from 
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { ServerBroadcast } from '../../channel/server/ServerBroadcast.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting } from '../../broadcast/broadcastAdapter.js'
+import { carryChannel } from '../../../node/server/runTelefunc/carryChannel.js'
+import { createRequestContext } from '../../../node/server/context/requestContext.js'
 
 type CloudflareRequest = Request & { cf?: { colo?: string; continent?: string } }
 
@@ -677,6 +679,41 @@ describe('cloudflare broadcast routing', () => {
 
     expect(await kv.get(presenceKey)).toBeNull()
 
+    _resetBroadcastAdapterForTesting(previousTransport)
+  })
+
+  it("delivers a channel the server subscribed to before returning it in its call's Durable Object", async () => {
+    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 5 })
+    const previousTransport = getBroadcastAdapter()
+    let deliveringIn: string | null = null
+    transport.attachBinding(
+      createBasicBinding({
+        onPublish: (_id, request) => transport.publishToSubscribers(createAuthorityState(), request),
+        onDeliver(id, request) {
+          deliveringIn = id.name
+          transport.deliverToLocal(request)
+          deliveringIn = null
+          return Promise.resolve()
+        },
+      }),
+      'TelefuncDurableObject',
+    )
+    transport.attachKV(createMockKV())
+    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
+    _resetBroadcastAdapterForTesting(transport)
+    const call = new Request('https://telefunc.test/_telefunc', { method: 'POST' })
+    transport.attachRequest(call, 'telefunc-shard-weur-1')
+
+    const channel = new ServerBroadcast<string>({ key: 'room:test:carried' })
+    const deliveredIn: Array<string | null> = []
+    channel.subscribe(() => deliveredIn.push(deliveringIn))
+    carryChannel(channel, createRequestContext(call))
+    await flushCoordinatorTurn()
+    await channel.publish('hello')
+    await flushCoordinatorTurn()
+
+    expect(deliveredIn).toEqual(['telefunc-shard-weur-1'])
+    channel.abort()
     _resetBroadcastAdapterForTesting(previousTransport)
   })
 })

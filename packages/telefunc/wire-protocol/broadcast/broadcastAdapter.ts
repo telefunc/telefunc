@@ -29,7 +29,7 @@ type BroadcastUnsubscribe = () => void
 
 type QueuedPublish = { size: number; depth: number; deliver: () => void; reject: (err: Error) => void }
 
-/** `wireRequest`: the request that opened the wire a subscribing page's messages go out on, where one did. */
+/** `wireRequest`: a request that reached the object a subscribing page is on (its call's, then its wire's), if any. */
 type BroadcastAdapter = {
   subscribe(key: string, onMessage: BroadcastOnMessage, wireRequest?: Request): BroadcastUnsubscribe
   publish(key: string, serialized: string): BroadcastPublishResult | Promise<BroadcastPublishResult>
