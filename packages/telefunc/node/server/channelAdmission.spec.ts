@@ -9,7 +9,9 @@ import { Broadcast, ServerBroadcast } from '../../wire-protocol/channel/server/S
 import { IndexedPeer, type PeerSender } from '../../wire-protocol/channel/server/IndexedPeer.js'
 import { hold, letGo, releaseHolder, type MemoryHolder } from '../../wire-protocol/channel/server/channelMemory.js'
 import { ChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
-import { getChannelConfig } from './serverConfig.js'
+import { config, getChannelConfig } from './serverConfig.js'
+
+config.channel = { maxMemory: '2m' }
 
 /** What this server's channels hold, on the ledger every channel shares. */
 const ledgerTotal = () => (globalThis as any)._telefunc['channelMemory.ts'].total as number
@@ -23,6 +25,16 @@ const stalledSender: PeerSender = {
   deliveredBefore: () => 0,
   sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
   queue: { waitingPublishes: () => 2, dropWaitingPublishes() {}, dropWaitingFromPublish() {} },
+}
+
+/** A broadcast of `key` whose page subscribed to its text and reads nothing. */
+function subscribedPage(key: string, lossy: boolean) {
+  const broadcast = new ServerBroadcast<string>({ key, lossy })
+  broadcast._registerChannel()
+  broadcast._attachPeer(new IndexedPeer({ sender: stalledSender, index: 2, replay: broadcast._replayBuffer! }), {
+    broadcast: { text: true, binary: false },
+  })
+  return broadcast
 }
 
 test("a reliable broadcast near the budget stays open when another channel's text send fits at its real size", async () => {
@@ -56,11 +68,7 @@ test("a reliable broadcast near the budget stays open when another channel's tex
 for (const lossy of [false, true]) {
   test(`a ${lossy ? 'lossy' : 'reliable'} broadcast whose publish doesn't fit under the budget closes, and the server holds no more than it`, async () => {
     const key = crypto.randomUUID()
-    const broadcast = new ServerBroadcast<string>({ key, lossy })
-    broadcast._registerChannel()
-    broadcast._attachPeer(new IndexedPeer({ sender: stalledSender, index: 2, replay: broadcast._replayBuffer! }), {
-      broadcast: { text: true, binary: false },
-    })
+    const broadcast = subscribedPage(key, lossy)
     let closedWith: Error | undefined
     broadcast.onClose((err) => {
       closedWith = err
@@ -82,3 +90,22 @@ for (const lossy of [false, true]) {
     }
   })
 }
+
+test("a publish that can't fit under the budget ends its own pages only: another key's keep what they hold", async () => {
+  const others = [subscribedPage(crypto.randomUUID(), false), subscribedPage(crypto.randomUUID(), true)]
+  const page = subscribedPage(crypto.randomUUID(), false)
+  try {
+    for (const other of others) await Broadcast.publish(other.key, 'a'.repeat(100_000))
+    const held = others.map((other) => other.heldBytes)
+    expect(held.every((bytes) => bytes > 100_000)).toBe(true)
+    await Broadcast.publish(page.key, 'b'.repeat(8 * 1024 * 1024))
+    expect(page.isClosed).toBe(true)
+    expect(others.map((other) => other.isClosed)).toEqual([false, false])
+    expect(others.map((other) => other.heldBytes)).toEqual(held)
+  } finally {
+    for (const broadcast of [...others, page]) {
+      broadcast._end()
+      broadcast._release()
+    }
+  }
+})

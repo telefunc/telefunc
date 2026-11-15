@@ -74,6 +74,8 @@ function fits(holder: MemoryHolder, bytes: number): boolean {
 function admitPublish(body: PublishBody, owner: string | undefined, replace: (holder: MemoryHolder) => void): void {
   const maxMemory = maxMemoryOf()
   const bytes = body.frame.byteLength
+  // Nothing let go makes room for one that can't fit at all: its own pages end (`fitsPublish`), and no other page does.
+  if (bytes + HELD_PUBLISH_OVERHEAD_BYTES > maxMemory) return
   const target = shedTarget(maxMemory)
   if (memory.total + bytes > target) for (const holder of [...memory.holders]) replace(holder)
   reclaim(bytes, target)
