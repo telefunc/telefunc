@@ -18,6 +18,7 @@ import {
 import { TAG } from '../../wire/tags.js'
 import { ClientPieceReceiver } from '../../flowControl/client/ClientPieceReceiver.js'
 import { ServerHeadroom } from '../../flowControl/server/ServerHeadroom.js'
+import { getBroadcastAdapter } from '../../broadcast/broadcastAdapter.js'
 import { pairPublishes } from '../client/pairPublishes.js'
 import { SseEvents } from '../client/SseEvents.js'
 import { getChannelMux } from './ChannelMux.js'
@@ -124,8 +125,8 @@ function leaveRoom(room: number): () => void {
 }
 
 /** Attaches the page to `channels`, at indexes 0, 1, …, subscribed to the broadcasts, over a WebSocket it doesn't read
- *  yet: past the first frame, what the wire sends waits for headroom. */
-function overWebSocket(channels: ServerChannel[]) {
+ *  yet: past the first frame, what the wire sends waits for headroom. `requests[index]` opened that channel's wire. */
+function overWebSocket(channels: ServerChannel[], requests: Request[] = []) {
   const arrived: Uint8Array[] = []
   const receiver = new ClientPieceReceiver({ owner: { sendAck() {}, carryAck() {} } })
   // The frames of each message, as the page's WebSocket puts them back together.
@@ -155,9 +156,9 @@ function overWebSocket(channels: ServerChannel[]) {
     sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
   }
   /** Attaches `channel` at `index` as the mux does: what the page lacks after `lastSeq` goes first. */
-  const attach = (channel: ServerChannel, index: number, lastSeq = 0) => {
+  const attach = (channel: ServerChannel, index: number, lastSeq = 0, request?: Request) => {
     const replay = channel._replayBuffer!
-    channel._onPageAttach(lastSeq, undefined)
+    channel._onPageAttach(lastSeq, request)
     for (const frame of replay.getAfter(lastSeq)) sender.send(frame)
     const peer = new IndexedPeer({ sender, index, replay })
     channel._attachPeer(peer, { broadcast: { text: true, binary: true } })
@@ -165,7 +166,7 @@ function overWebSocket(channels: ServerChannel[]) {
   }
   const peers = channels.map((channel, index) => {
     channel._registerChannel()
-    return attach(channel, index)
+    return attach(channel, index, 0, requests[index])
   })
   return {
     headroom,
@@ -326,6 +327,61 @@ for (const [kind, publish] of Object.entries(PUBLISHES)) {
     } finally {
       release()
       open.abort()
+    }
+  })
+}
+
+for (const [kind, publish] of Object.entries(PUBLISHES)) {
+  test(`on a WebSocket, a closing subscriber cut for another object's publish reads the error at the next ${kind} publish of its key`, async () => {
+    // Each object writes only to the pages of the wires its requests opened, as a Durable Object does.
+    const adapter = getBroadcastAdapter()
+    adapter.ownerOf = (request) => request?.url ?? 'server'
+    const [key, otherKey] = [crypto.randomUUID(), crypto.randomUUID()]
+    const channel = new ServerBroadcast<string>({ key })
+    const other = new ServerBroadcast<string>({ key: otherKey })
+    const page = overWebSocket([channel, other], [new Request('http://one.test/'), new Request('http://two.test/')])
+    for (const name of ['p1', 'p2', 'p3']) await publish(key, name + 'x'.repeat(600_000))
+    const closing = channel.close()
+    const release = leaveRoom(300_000)
+    try {
+      // The other object's publish cuts channel 0, which only its own object can end.
+      await publish(otherKey, 'q1' + 'x'.repeat(600_000))
+      await publish(key, 'p4')
+      expect((await page.readAll()).filter((read) => read.startsWith('0:'))).toEqual(['0:p1', '0:ERROR'])
+      expect(await closing).toBe(1)
+    } finally {
+      release()
+      other.abort()
+      delete adapter.ownerOf
+    }
+  })
+}
+
+/** Each way an application's `onClose` of one channel ends another, and the last frame that other's page then reads. */
+const ENDED_BY_ANOTHERS_CLOSE: Record<string, { end: (channel: ServerChannel) => void; last: string }> = {
+  closes: { end: (channel) => void channel.close(), last: 'CLOSE' },
+  aborts: { end: (channel) => channel.abort(), last: 'ABORT' },
+}
+
+for (const [ends, { end, last }] of Object.entries(ENDED_BY_ANOTHERS_CLOSE)) {
+  test(`on a WebSocket, a subscriber that another's onClose ${ends} while its publish is admitted reads nothing after its ${last}, and the subscriber after it gets the publish`, async () => {
+    const [cutKey, key] = [crypto.randomUUID(), crypto.randomUUID()]
+    const cut = new ServerBroadcast<string>({ key: cutKey })
+    const channel = new ServerBroadcast<string>({ key })
+    const after = new ServerBroadcast<string>({ key })
+    const page = overWebSocket([cut, channel, after])
+    for (const name of ['p1', 'p2', 'p3']) await Broadcast.publish(cutKey, name + 'x'.repeat(600_000))
+    cut.onClose(() => end(channel))
+    const release = leaveRoom(300_000)
+    try {
+      // Admitting it for channel 1 cuts channel 0, whose onClose ends channel 1.
+      await Broadcast.publish(key, 'p4' + 'x'.repeat(600_000))
+      const pageReads = await page.readAll()
+      expect(pageReads.filter((read) => read.startsWith('1:'))).toEqual([`1:${last}`])
+      expect(pageReads.filter((read) => read.startsWith('2:'))).toEqual(['2:p4'])
+    } finally {
+      release()
+      for (const subscriber of [cut, channel, after]) subscriber.abort()
     }
   })
 }

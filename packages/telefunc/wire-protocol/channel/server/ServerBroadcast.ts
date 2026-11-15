@@ -189,7 +189,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     for (const cb of this.broadcastListeners.list()) {
       if (this.callListener(cb, data, info)) return
     }
-    if (!this.takesPublish(this.peerSubscribedText)) return
+    if (!this.takesPublish(this.peerSubscribedText)) return this.endOverflowed()
     const body = bodyOf(encode.publish, serialized, rawInfo, this.owner, (holder) => this.replaceIn(holder, false))
     this.forwardPublish(body)
   }
@@ -200,7 +200,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
       if (this.callListener(cb, new Uint8Array(data), info)) return
     }
-    if (!this.takesPublish(this.peerSubscribedBinary)) return
+    if (!this.takesPublish(this.peerSubscribedBinary)) return this.endOverflowed()
     const body = bodyOf(encode.publishBinary, data, rawInfo, this.owner, (holder) => this.replaceIn(holder, true))
     this.forwardPublish(body)
   }
@@ -226,11 +226,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     return subscribed && this._phase === 'open'
   }
 
-  /** A publish to a page that takes it (`takesPublish`). Admitting a body, this one or one before it, may have cut the
-   *  page: it ends then, and the subscribers after it still get theirs. Where the server can't hold it for the page, the
-   *  page ends as one that missed it. */
+  /** A publish to a page that takes it (`takesPublish`). Admitting its body may have ended the channel: this body or one
+   *  before it may have cut it, and the close callbacks of the channels this one cuts may close or abort it. It then sends
+   *  nothing, and the subscribers after it still get theirs. Where the server can't hold it for the page, the page ends
+   *  as one that missed it. */
   private forwardPublish(body: PublishBody): void {
-    if (this.overflowed !== null) return this.endOverflowed()
+    if (this.overflowed !== null || this._phase !== 'open') return this.endOverflowed()
     if (!fitsPublish(body)) return this.overflow(this.lossy ? NOT_EVEN_NEWEST : FELL_BEHIND, this.owner)
     if (this.lossyPublishes) return this.lossyPublishes.send(body)
     this.lastPeer!.sendPublish(body)
@@ -298,7 +299,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** `MemoryHolder`: its page gets every publish, so where it would miss one no wire has, the channel ends: from that gap
    *  on everything goes, receipts too, and its page reads on up to the gap and no further. A lossy one holds no publish
    *  waiting but its newest, so it ends only at 0, where not even that fits. The bytes go at once, but only its own
-   *  object can write to its page, so from `owner`'s it ends when its own next runs. */
+   *  object can write to its page, so cut for a publish of another `owner` it ends at the next delivery of its key, its
+   *  heartbeat, its attach or its answer. */
   shed(toBytes: number, owner?: string): void {
     const replay = this._replayBuffer
     if (this._phase === 'ended' || !replay || (this.lossy && toBytes > 0)) return
