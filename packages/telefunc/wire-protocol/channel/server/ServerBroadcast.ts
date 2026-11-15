@@ -226,10 +226,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private forwardPublish(body: PublishBody): void {
     this.endOverflowed()
     if (this._phase === 'ended') return
-    if (!fitsPublish(body)) {
-      this.overflowed = this.lossy ? NOT_EVEN_NEWEST : FELL_BEHIND
-      return this.endOverflowed()
-    }
+    if (!fitsPublish(body)) return this.overflow(this.lossy ? NOT_EVEN_NEWEST : FELL_BEHIND, this.owner)
     if (this.lossyPublishes) return this.lossyPublishes.send(body)
     this.lastPeer!.sendPublish(body)
     const most = maxPendingBytesOf()

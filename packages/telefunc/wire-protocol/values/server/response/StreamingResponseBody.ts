@@ -103,8 +103,7 @@ function buildInlineResponseBody(runContext: {
     wakeMerge()
     cancelProducers()
   }
-  // A response-wide abort stops the producers at once, takes its turn after what settled before it, and routes the merge
-  // into its catch.
+  // Ends the merge after what settled before it, and stops the producers now: the page may not read the body again.
   const onResponseAborted = (err: unknown) => {
     settle({ err })
     cancelProducers()

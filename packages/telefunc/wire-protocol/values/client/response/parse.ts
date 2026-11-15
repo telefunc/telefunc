@@ -335,8 +335,7 @@ class FrameDemuxer {
     this.indexWaiters.clear()
   }
 
-  /** Hands one frame to its index's waiter, or buffers it; an empty payload is the index's "done" signal. Returns whether
-   *  reading stops: it restarts when the consumer drains via readNextChunkForIndex(). */
+  /** Hands a frame to its index's waiter or buffer; returns whether reading stops till that index's consumer drains. */
   private dispatch(index: number, payload: Uint8Array<ArrayBuffer>): boolean {
     // Drop frames for cancelled indices
     if (this.cancelledIndices.has(index)) return false
