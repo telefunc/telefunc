@@ -358,12 +358,12 @@ for (const [kind, publish] of Object.entries(PUBLISHES)) {
 }
 
 /** Each way an application's `onClose` of one channel ends another, and the last frame that other's page then reads. */
-const ENDED_BY_ANOTHERS_CLOSE: Record<string, { end: (channel: ServerChannel) => void; last: string }> = {
+const ENDED_BY_A_CLOSE_CALLBACK: Record<string, { end: (channel: ServerChannel) => void; last: string }> = {
   closes: { end: (channel) => void channel.close(), last: 'CLOSE' },
   aborts: { end: (channel) => channel.abort(), last: 'ABORT' },
 }
 
-for (const [ends, { end, last }] of Object.entries(ENDED_BY_ANOTHERS_CLOSE)) {
+for (const [ends, { end, last }] of Object.entries(ENDED_BY_A_CLOSE_CALLBACK)) {
   test(`on a WebSocket, a subscriber that another's onClose ${ends} while its publish is admitted reads nothing after its ${last}, and the subscriber after it gets the publish`, async () => {
     const [cutKey, key] = [crypto.randomUUID(), crypto.randomUUID()]
     const cut = new ServerBroadcast<string>({ key: cutKey })
