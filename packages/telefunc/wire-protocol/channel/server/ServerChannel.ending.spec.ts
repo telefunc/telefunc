@@ -79,7 +79,8 @@ async function overSse(channels: ServerBroadcast<string>[]) {
   const broadcast = { text: true, binary: false }
   const open = channels.map((channel, ix) => ({ id: channel.id, ix, lastSeq: 0, initial: true as const, broadcast }))
   const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
-  const body = encodeSseRequest({ connId: crypto.randomUUID(), streamResponse: true }, [encode.reconcile({ open })])
+  const connId = crypto.randomUUID()
+  const body = encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open })])
   const opened = await handleSseChannelRequest(new Request(url, { method: 'POST', body }))
   await Promise.all(channels.map((channel) => channel.opened))
   const reader = (opened.body as ReadableStream<Uint8Array>).getReader()
@@ -91,6 +92,15 @@ async function overSse(channels: ServerBroadcast<string>[]) {
       while (!reads(frames).includes(last)) events.push((await reader.read()).value!, (frame) => frames.push(frame))
       return frames
     },
+    /** Reads the event stream to its end, and returns the frames it carried. */
+    async readToEnd(): Promise<Uint8Array[]> {
+      for (let read = await reader.read(); !read.done; read = await reader.read())
+        events.push(read.value, (frame) => frames.push(frame))
+      return frames
+    },
+    /** The page leaves for good, as a closed tab does. */
+    leave: () =>
+      handleSseChannelRequest(new Request(url, { method: 'POST', body: encodeSseRequest({ connId, close: true }) })),
     /** Ends the page's event stream. */
     close: () => reader.cancel(),
   }
@@ -157,6 +167,16 @@ test('on SSE, abort() drops its publishes that wait for the wire, and the other 
   const frames = await page.readUntil('1:p3')
   expect(sent(frames).map(({ label }) => label)).toEqual(['0:ABORT', '1:p1', '1:p2', '1:p3'])
   await page.close()
+})
+
+test('on SSE, a page that left for good is sent nothing of what waited for it', async () => {
+  const key = crypto.randomUUID()
+  const channel = new ServerBroadcast<string>({ key })
+  const page = await overSse([channel])
+  // The page reads nothing yet, so the publishes wait for its event stream.
+  await Promise.all(MESSAGES.map((data) => Broadcast.publish(key, data)))
+  await page.leave()
+  expect(reads(await page.readToEnd())).toEqual([])
 })
 
 /** The page sends `frame` on channel 0, its first. */

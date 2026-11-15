@@ -139,10 +139,10 @@ class EventStream implements WireQueue {
     })
   }
 
-  /** Past a wire only lost, what waits is dropped: the page's reconnect gets it from its channels' replay, and it could
-   *  wait here for as long as the socket stays open taking nothing. */
-  close({ permanent }: { permanent: boolean }): void {
-    while (permanent && (this.current !== null || this.waiting.length > 0)) {
+  /** What waits goes only to a page that still reads: past a wire only lost, the page's reconnect gets it from its
+   *  channels' replay, and it could wait here for as long as the socket stays open taking nothing. */
+  close({ flush }: { flush: boolean }): void {
+    while (flush && (this.current !== null || this.waiting.length > 0)) {
       if (this.current !== null) this.pushChunks()
       else this.startEvent(this.waiting.shift()!)
     }
@@ -351,7 +351,7 @@ class SseServerTransport {
   private handleClosePost(connId: string): SseChannelHttpResponse {
     const wire = this.mux.getWireByConnId<SseWire>(connId)
     if (wire) {
-      this.closeWire(wire, { permanent: true })
+      this.closeWire(wire, { permanent: true, pageLeft: true })
       return okResponse()
     }
     const sessionId = this.closedWires.get(connId)?.sessionId
@@ -504,14 +504,14 @@ class SseServerTransport {
     })
   }
 
-  private closeWire(wire: SseWire, { permanent }: { permanent: boolean }): void {
+  private closeWire(wire: SseWire, { permanent, pageLeft = false }: { permanent: boolean; pageLeft?: boolean }): void {
     if (wire.closed) return
     wire.closed = true
     this.rememberClosed(wire)
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed wire and bails.
     wire.resolveReady()
     this.mux.onWireClosed(wire, { permanent })
-    wire.events.close({ permanent })
+    wire.events.close({ flush: permanent && !pageLeft })
   }
 
   private terminateWire(wire: SseWire): void {
