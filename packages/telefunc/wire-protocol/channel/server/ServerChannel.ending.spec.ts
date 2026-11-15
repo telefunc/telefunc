@@ -34,20 +34,34 @@ config.channel = { maxPendingBytes: CREDIT_WINDOW_INITIAL_BYTES, maxMemory: '32m
 /** Three messages, each larger than what a wire sends before its page says it took some. */
 const MESSAGES = ['p1', 'p2', 'p3'].map((name) => name + 'x'.repeat(100_000))
 
-/** What the page reads of `frames`, in order: each message as `<channel index>:<name>`, each ABORT and ERROR. As the
- *  page does, it drops a frame at or below the newest seq it has of that channel. */
-function reads(frames: Iterable<Uint8Array>): string[] {
+/** A message as `<channel index>:<name>`, an ABORT or an ERROR, with its channel's seq. */
+type Sent = { index: number; seq: number; label: string }
+
+/** What `frames` carry, in order. */
+function sent(frames: Iterable<Uint8Array>): Sent[] {
   const pair = pairPublishes()
-  const newestSeq = new Map<number, number>()
-  const out: string[] = []
+  const out: Sent[] = []
   for (const frame of frames) {
     const decoded = pair(decode(frame) as DecodedFrame)
-    if (decoded === null || !isSequencedFrame(decoded) || decoded.seq <= (newestSeq.get(decoded.index) ?? 0)) continue
-    newestSeq.set(decoded.index, decoded.seq)
+    if (decoded === null || !isSequencedFrame(decoded)) continue
+    const { index, seq } = decoded
     if (decoded.tag === TAG.PUBLISH || decoded.tag === TAG.TEXT)
-      out.push(`${decoded.index}:${(parse(decoded.text) as string).slice(0, 2)}`)
-    if (decoded.tag === TAG.ABORT) out.push(`${decoded.index}:ABORT`)
-    if (decoded.tag === TAG.ERROR) out.push(`${decoded.index}:ERROR`)
+      out.push({ index, seq, label: `${index}:${(parse(decoded.text) as string).slice(0, 2)}` })
+    if (decoded.tag === TAG.ABORT) out.push({ index, seq, label: `${index}:ABORT` })
+    if (decoded.tag === TAG.ERROR) out.push({ index, seq, label: `${index}:ERROR` })
+  }
+  return out
+}
+
+/** What the page reads of `frames`, in order: what they carry, less each frame at or below the newest seq it has of
+ *  that channel, which the page drops. */
+function reads(frames: Iterable<Uint8Array>): string[] {
+  const newestSeq = new Map<number, number>()
+  const out: string[] = []
+  for (const { index, seq, label } of sent(frames)) {
+    if (seq <= (newestSeq.get(index) ?? 0)) continue
+    newestSeq.set(index, seq)
+    out.push(label)
   }
   return out
 }
@@ -72,10 +86,10 @@ async function overSse(channels: ServerBroadcast<string>[]) {
   const events = new SseEvents()
   const frames: Uint8Array[] = []
   return {
-    /** Reads the event stream until the page has read `last`, and returns all it read. */
-    async readUntil(last: string): Promise<string[]> {
+    /** Reads the event stream until the page has read `last`, and returns the frames it carried. */
+    async readUntil(last: string): Promise<Uint8Array[]> {
       while (!reads(frames).includes(last)) events.push((await reader.read()).value!, (frame) => frames.push(frame))
-      return reads(frames)
+      return frames
     },
     /** Ends the page's event stream. */
     close: () => reader.cancel(),
@@ -139,7 +153,9 @@ test('on SSE, abort() drops its publishes that wait for the wire, and the other 
   await Promise.all(MESSAGES.map((data) => Broadcast.publish(key, data)))
   ended.abort()
 
-  expect(await page.readUntil('1:p3')).toEqual(['0:ABORT', '1:p1', '1:p2', '1:p3'])
+  // What the wire carries: the page itself drops what of channel 0 follows its ABORT.
+  const frames = await page.readUntil('1:p3')
+  expect(sent(frames).map(({ label }) => label)).toEqual(['0:ABORT', '1:p1', '1:p2', '1:p3'])
   await page.close()
 })
 
@@ -162,7 +178,7 @@ const ENDINGS: Record<string, (channel: ServerChannel) => void> = {
 }
 
 for (const [ending, end] of Object.entries(ENDINGS)) {
-  test(`on a WebSocket, ${ending} drops its publishes that wait for the wire, and the other channel keeps its own in order`, async () => {
+  test(`on a WebSocket, after ${ending} its publishes the wire had not started wait no more, and the other channel's still wait in order`, async () => {
     const { key, ended, other } = subscribers()
     const { headroom } = overWebSocket([ended, other])
 
@@ -201,7 +217,7 @@ for (const [overflow, { publishes, pageReads }] of Object.entries(OVERFLOWS)) {
     await page.readUntil('0:p1')
     await Promise.all(publishes.slice(1).map((data) => Broadcast.publish(key, data)))
     expect(channel.isClosed).toBe(true)
-    expect(await page.readUntil('0:ERROR')).toEqual(pageReads)
+    expect(reads(await page.readUntil('0:ERROR'))).toEqual(pageReads)
     await page.close()
   })
 
