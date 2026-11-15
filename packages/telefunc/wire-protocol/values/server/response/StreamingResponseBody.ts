@@ -103,14 +103,21 @@ function buildInlineResponseBody(runContext: {
     wakeMerge()
     cancelProducers()
   }
+  // A response-wide abort stops the producers at once, takes its turn after what settled before it, and routes the merge
+  // into its catch.
+  const onResponseAborted = (err: unknown) => {
+    settle({ err })
+    cancelProducers()
+  }
 
   const sink = useNodeStream
     ? createPushReadable(onConsumerGone, wakeDrain)
     : createPushReadableStream<Uint8Array<ArrayBuffer>>(onConsumerGone, wakeDrain)
 
+  // Once the producers stopped, what's left (a frame each that settled, the error) goes without waiting for the page.
   const emit = async (frame: Uint8Array<ArrayBuffer>): Promise<void> => {
     if (cancelled) return
-    if (!sink.push(frame)) await new Promise<void>((resolve) => (drainResolve = resolve))
+    if (!sink.push(frame) && !producersStopped) await new Promise<void>((resolve) => (drainResolve = resolve))
   }
 
   const settle = (item: Settled) => {
@@ -174,8 +181,7 @@ function buildInlineResponseBody(runContext: {
   async function runInlineResponse() {
     if (abortSignal.aborted) onConsumerGone()
     else abortSignal.addEventListener('abort', onConsumerGone, { once: true })
-    // A response-wide abort takes its turn after what settled before it, and routes us into the catch below.
-    responseAbort.errorPromise.catch((err: unknown) => settle({ err }))
+    responseAbort.errorPromise.catch(onResponseAborted)
     try {
       // The telefunc context is restored around the whole merge loop, like the
       // channel pump (ChannelResponseBody.ts) does, so `getContext()` works

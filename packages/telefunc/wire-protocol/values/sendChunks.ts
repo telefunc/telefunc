@@ -20,7 +20,7 @@ type ChunkChannel = {
 }
 
 /** Sends the producer's chunks, each in parts with its last tagged `TAG_DATA`, then its end. `stop` resolving null ends
- *  it, and rejecting throws. */
+ *  it, and rejecting throws, also while a part waits for the page's credit. */
 async function sendChunks(channel: ChunkChannel, producer: StreamingProducer, stop: Promise<null>): Promise<void> {
   const race = createStopRace(stop)
   while (true) {
@@ -34,7 +34,7 @@ async function sendChunks(channel: ChunkChannel, producer: StreamingProducer, st
       const end = at + STREAM_CHUNK_PART_BYTES
       const tag = end >= next.value.byteLength ? TAG_DATA : TAG_PART
       const pending = channel._sendBinary(concat(tag, next.value.subarray(at, end)))
-      if (pending) await pending
+      if (pending && (await race(pending)) === null) return
     }
   }
 }

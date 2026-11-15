@@ -5,6 +5,8 @@ import { config } from './serverConfig.js'
 import { shield } from './shield.js'
 import { Abort } from './Abort.js'
 import { Channel, ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
+import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'
+import { TAG } from '../../wire-protocol/wire/tags.js'
 
 /** Each request's lifecycle, as `runTelefunc` creates it: how often its `onClose()` callbacks ran, and its `signal`. */
 const requests = vi.hoisted(() => [] as { closed: number; signal: AbortSignal }[])
@@ -79,6 +81,23 @@ const telefunctions: Record<string, (...args: any[]) => Promise<unknown>> = {
       unreadable,
     }
   },
+  onAbortWhileStreamWaits: async () => {
+    const control = new Channel()
+    control.listen(() => {
+      throw Abort()
+    })
+    return {
+      control: control.client,
+      stream: new ReadableStream({
+        pull(controller) {
+          controller.enqueue(new Uint8Array(2 * 1024 * 1024))
+        },
+        cancel() {
+          opened.cancelled++
+        },
+      }),
+    }
+  },
   onAbortWithStream: async () => {
     throw Abort({
       stream: new ReadableStream({
@@ -105,6 +124,23 @@ const telefunctions: Record<string, (...args: any[]) => Promise<unknown>> = {
         controller.close()
       },
     }),
+}
+
+/** A page attached to `channel` on `index` that reads nothing more of it: what's sent past its first credit waits. */
+function pageThatStopsReading(channel: ServerChannel, index: number) {
+  return new IndexedPeer({
+    sender: {
+      send() {},
+      carry() {},
+      bufferedAmount: () => 0,
+      behindAfter: () => Number.POSITIVE_INFINITY,
+      deliveredBefore: () => 0,
+      sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+      queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, dropWaitingFromPublish() {} },
+    },
+    index,
+    replay: channel._replayBuffer!,
+  })
 }
 
 function call(
@@ -212,6 +248,36 @@ describe('a request ends its lifecycle once, however the call ends', () => {
     expect(request.signal.aborted).toBe(true)
     expect(opened.cancelled).toBe(cancelledBefore + 1)
   })
+
+  for (const [transport, waitsFor] of [
+    ['channel', 'credit'],
+    ['channel', 'its page'],
+    ['binary-inline', 'its page'],
+    ['sse-inline', 'its page'],
+  ] as const) {
+    test(`a response aborted while a stream it returned over ${transport} waits for ${waitsFor} ends at once`, async () => {
+      const registered = vi.spyOn(ServerChannel.prototype, '_registerChannel')
+      onTestFinished(() => registered.mockRestore())
+      const cancelledBefore = opened.cancelled
+      const response = await call('onAbortWhileStreamWaits', [], { transport })
+      // An inline response is the stream's body, which the page doesn't read.
+      if (transport === 'channel') await response.getBody()
+      else onTestFinished(() => response.getReadableWebStream().cancel())
+      const request = requests.at(-1)!
+      const [control, stream] = registered.mock.contexts as ServerChannel[]
+      onTestFinished(() => stream?.abort())
+      control!._attachPeer(pageThatStopsReading(control!, 1))
+      if (waitsFor === 'credit') stream!._attachPeer(pageThatStopsReading(stream!, 2))
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      expect(opened.cancelled).toBe(cancelledBefore)
+      // The page's message makes the control channel's listener throw `Abort()`, which aborts the response.
+      control!._dispatchFrame({ tag: TAG.TEXT, index: 1, seq: 1, text: 'null', bytes: 4 } as any)
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      expect(opened.cancelled).toBe(cancelledBefore + 1)
+      expect(request.closed).toBe(1)
+      expect(request.signal.aborted).toBe(true)
+    })
+  }
 
   test('a channel it returned holds the request till it closes', async () => {
     const response = await call('onChannel')

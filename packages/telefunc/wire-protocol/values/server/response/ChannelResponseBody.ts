@@ -35,7 +35,8 @@ type ChannelPumpRunContext = {
  * ChannelStreamSource. Errors are encoded with `encodeErrorPayload` — the same
  * payload format as inline streaming.
  *
- * Each `producer.chunks.next()` races one `stop` promise, built once from:
+ * Each wait, for the page to attach, for `producer.chunks.next()` and for the page's credit, races one `stop` promise,
+ * built once from:
  *   1. `responseAbort.errorPromise` — rejects when a sibling throws Abort
  *   2. `cancelledPromise` — resolves when the channel closes (client disconnect/abort)
  *
@@ -68,19 +69,18 @@ function pumpProducerToChannel(
   channel.onClose(doCancel)
 
   async function runChannelPump() {
+    const stop = Promise.race([runContext.requestContext.responseAbort.errorPromise, cancelledPromise])
     try {
-      await channel.opened
-      const { responseAbort } = runContext.requestContext
-      const stop = Promise.race([responseAbort.errorPromise, cancelledPromise])
+      if ((await Promise.race([channel.opened, stop])) === null) return
       await restoreContext(runContext.context, () => sendChunks(channel, producer, stop))
     } catch (err) {
       if (err instanceof ChannelClosedError) return
       if (isAbort(err)) runContext.requestContext.responseAbort.abort(err.abortValue)
       if (channel.isClosed) return
       try {
-        await channel._sendBinary(concat(TAG_ERROR, encodeErrorPayload(err, telefuncId)))
+        await Promise.race([channel._sendBinary(concat(TAG_ERROR, encodeErrorPayload(err, telefuncId))), stop])
       } catch {
-        // The channel ended before the frame went out: no page is left to tell.
+        // The channel ended, or the response stopped: the pump doesn't wait for its page to take the frame.
       }
     } finally {
       doCancel()
