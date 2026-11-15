@@ -353,11 +353,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  /** Drops its lossy sends that are still in the wire's queue and refunds the credit they counted: they never left the
-   *  server. A newer lossy send replaces them, or the channel ends; reliable sends stay, and reach the page ahead of its
-   *  end. */
+  /** Drops its lossy sends that no wire has taken: they never left the server. While its page is attached, those are
+   *  the ones still in the wire's queue, and the credit they counted comes back; while it is away, those the offline
+   *  buffer holds. An ending drops them, as does a newer lossy send that must wait; reliable sends stay, and reach the
+   *  page ahead of its end. */
   protected dropUnhanded(): void {
-    const { index, sender } = this.peer!
+    if (!this.peer) return this.offlineBuffer.dropLossy()
+    const { index, sender } = this.peer
     const { units, bytes } = this._replayBuffer!.dropNewestPublishes(sender.queue.waitingPublishes(index))
     if (units > 0) sender.queue.dropWaitingPublishes(index, units)
     this.sendCredit.refund(bytes, units)
@@ -439,7 +441,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._phase !== 'open') return
     this._phase = 'closing'
     const serializedAbortValue = stringify(abortValue)
-    if (this.peer) this.dropUnhanded()
+    this.dropUnhanded()
     this.sendEnd((peer) => peer.sendSequenced(encode.abort, serializedAbortValue))
     this.shutdown(createAbortError(abortValue, message))
   }
@@ -733,7 +735,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     assertProtocol(timeoutMs <= TIMER_DELAY_MAX_MS, `CLOSE timeout ${timeoutMs}`)
     this.lifecycle.peerCloseReceived(timeoutMs, () => {
       this._phase = 'closing'
-      if (this.peer) this.dropUnhanded()
+      this.dropUnhanded()
       this.sendEnd((peer) => peer.sendCloseAck())
     })
   }
@@ -914,7 +916,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (!admit(this, heldAnswerBytes(result))) {
       if (room === undefined && !admit(this, REFUSAL_BYTES)) {
         // It ends for lack of memory, as a shed subscriber does.
-        if (this.peer) this.dropUnhanded()
+        this.dropUnhanded()
         return this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(TOO_MANY_ANSWERS_TEXT))
       }
       result = ''

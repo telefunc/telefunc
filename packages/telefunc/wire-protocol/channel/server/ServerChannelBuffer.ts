@@ -80,6 +80,16 @@ class ServerChannelBuffer<TAck = never> {
     this.keep({ tag, data: copy, callback: null, held: bytes + HEADER + HELD_SEND_OVERHEAD_BYTES, lossy: true })
   }
 
+  /** Lets go of its lossy sends, unsent, and of what they held. */
+  dropLossy(): void {
+    let held = 0
+    for (const entry of this.entries) if (entry.lossy) held += entry.held
+    if (held === 0) return
+    this.entries = this.entries.filter((entry) => !entry.lossy)
+    this.sendBytes -= held
+    this.owner._letGoOffline(held)
+  }
+
   /** Sends every entry to its channel in the order it came, then empties the buffer. */
   flush(peer: IndexedPeer): void {
     this.letGoSends()

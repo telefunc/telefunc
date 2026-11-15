@@ -489,6 +489,35 @@ const WHILE_AWAY: Record<
     },
     pageReads: ['0:p1', '0:ABORT'],
   },
+  'abort() after lossy sends': {
+    create: () => new ServerChannel(),
+    away: (channel) => {
+      void channel.send('p1')
+      void channel.send('l1', { lossy: true })
+      void channel.send('l2', { lossy: true })
+      channel.abort()
+    },
+    pageReads: ['0:p1', '0:ABORT'],
+  },
+  'close() after lossy sends': {
+    create: () => new ServerChannel(),
+    away: (channel) => {
+      void channel.send('p1')
+      void channel.send('l1', { lossy: true })
+      void channel.send('l2', { lossy: true })
+      void channel.close()
+    },
+    pageReads: ['0:p1', '0:l2', '0:CLOSE'],
+  },
+  'abort() after a lossy send that a reliable one follows': {
+    create: () => new ServerChannel(),
+    away: (channel) => {
+      void channel.send('l1', { lossy: true })
+      void channel.send('p1')
+      channel.abort()
+    },
+    pageReads: ['0:p1', '0:ABORT'],
+  },
   'an overflow': {
     create: (key) => new ServerBroadcast<string>({ key }),
     away: (_, key) =>
@@ -510,6 +539,16 @@ for (const [ending, { create, away, pageReads }] of Object.entries(WHILE_AWAY)) 
     expect(await back.readAll()).toEqual(pageReads)
   })
 }
+
+test('on a WebSocket, abort() drops each lossy send its wire has not started, also one a reliable send follows', async () => {
+  const channel = new ServerChannel()
+  const page = overWebSocket([channel])
+  void channel.send('p0' + 'x'.repeat(100_000))
+  void channel.send('l1', { lossy: true })
+  void channel.send('p1')
+  channel.abort()
+  expect(await page.readAll()).toEqual(['0:p0', '0:p1', '0:ABORT'])
+})
 
 /** Each way a subscriber that may miss no publish falls behind, by what it publishes and what its page then reads. */
 const OVERFLOWS: Record<string, { publishes: string[]; pageReads: string[] }> = {
