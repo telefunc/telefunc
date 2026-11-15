@@ -32,7 +32,8 @@ type ReadShape = {
    *  their values, with the read's parameters at `params`. */
   operands: Operand[]
   operandQuery?: { text: string; params: number[] }
-  /** `undefined`: the order can't be evaluated on a row (an expression, or columns of several tables). */
+  /** `undefined`: the order is unknown (no `ORDER BY`), or can't be evaluated on a row (an expression, or columns of
+   *  several tables). */
   sort?: SortKey[]
   /** A `SELECT DISTINCT` of one table's columns: each result row carries those columns and how many rows have them. */
   distinct?: { columns: Column[]; hidden: number[]; countHidden: number }
@@ -694,8 +695,10 @@ function limitValue(node: Node | undefined): Bound | undefined {
 }
 
 function sortKeys(select: Node, scope: Scope, hidden: (alias: Alias, column: Column) => number): SortKey[] | undefined {
+  // Without `ORDER BY` the database returns the rows in any order.
+  if (!select.sortClause) return undefined
   const keys: SortKey[] = []
-  for (const item of (select.sortClause ?? []) as Node[]) {
+  for (const item of select.sortClause as Node[]) {
     const sortBy = item.SortBy
     const found = sortColumn(sortBy.node, select, scope)
     if (!found || sortBy.useOp) return undefined

@@ -88,3 +88,49 @@ describe('a join of columns that compare alike', () => {
     expect(stale).toBe(false)
   })
 })
+
+const items = pgTable('items', { id: integer('id').primaryKey(), v: text('v') })
+
+const liveDb = (pglite: Awaited<ReturnType<typeof emptyPGlite>>) => liveDrizzle(drizzle(pglite))
+type LiveCell = { send(): unknown; onStale(onStale: () => void): void; release(): void }
+type Read = PromiseLike<unknown> & { live(): Promise<LiveCell> }
+
+/** A live read of `read` on a PGlite holding `schema`: the rows it sends and the database's own, whether `write` makes
+ *  it stale, and its rows after. */
+async function liveAfter(schema: string, read: (db: ReturnType<typeof liveDb>) => Read, write?: string) {
+  const pglite = await emptyPGlite()
+  await pglite.exec(schema)
+  const db = liveDb(pglite)
+  const store = ((globalThis as any)._telefunc['getContext/async.ts'].asyncStore ??= new AsyncLocalStorage())
+  const live = await store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () => read(db).live())
+  const [sent, before] = [live.send(), await read(db)]
+  let stale = false
+  live.onStale(() => (stale = true))
+  if (write) await db.execute(sql.raw(write))
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  const after = await read(db)
+  live.release()
+  await pglite.close()
+  return { sent, before, stale, after }
+}
+
+describe('a page of a read', () => {
+  const schema =
+    "create table items (id int primary key, v text); insert into items values (1, 'a'), (2, 'b'), (3, 'c')"
+  // Without `ORDER BY` the database returns its rows in any order: a deleted row may have been before the page.
+  it('goes stale without ORDER BY when a row it skipped is deleted', async () => {
+    const page = (db: ReturnType<typeof liveDb>) => db.select({ id: items.id }).from(items).limit(1).offset(1)
+    const { sent, stale, after } = await liveAfter(schema, page, 'delete from items where id = 1')
+    expect(sent).toEqual([{ id: 2 }])
+    expect(after).toEqual([{ id: 3 }])
+    expect(stale).toBe(true)
+  })
+  it('stays fresh in its order when a row after it is deleted', async () => {
+    const page = (db: ReturnType<typeof liveDb>) =>
+      db.select({ id: items.id }).from(items).orderBy(items.id).limit(1).offset(1)
+    const { sent, stale, after } = await liveAfter(schema, page, 'delete from items where id = 3')
+    expect(sent).toEqual([{ id: 2 }])
+    expect(after).toEqual([{ id: 2 }])
+    expect(stale).toBe(false)
+  })
+})
