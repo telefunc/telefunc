@@ -1656,6 +1656,27 @@ function testRoomFailingBackend() {
       })
     })
   })
+  test("room: a member whose page's connection dropped leaves the room though the store fails its eviction once, and the failure is reported", async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-hiccups-departed')
+    const { roomId } = await autoRetry(() => getResult<{ roomId: string }>('#room-result'))
+    const context = await page.context().browser()!.newContext()
+    try {
+      const other = await context.newPage()
+      await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(roomId)}`, undefined, other)
+      await other.click('#test-room-malformed-request')
+      await autoRetry(async () => {
+        expect(await getResult('#room-result')).deep.equal({
+          roomId,
+          events: ['join:Mallory', 'leave:Mallory:disconnected'],
+        })
+        expectLog('failing-backend: runOperation failed')
+      })
+    } finally {
+      await context.close()
+      await page.goto('about:blank')
+    }
+  })
 }
 
 /** Waits out the 60 s acknowledgement timeout: one lane runs it. */

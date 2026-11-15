@@ -90,14 +90,12 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
   private readonly lanePlan: RoomHandleOptions['lanePlan']
   private readonly roster: RoomHandleOptions['roster']
   private readonly incomingDemand: RoomHandleOptions['incomingDemand']
-  private readonly hosting: RoomHandleOptions['hosting']
 
   constructor({ view, replica, lanePlan, roster, incomingDemand, acks, hosting }: RoomHandleOptions) {
     this.replica = replica
     this.lanePlan = lanePlan
     this.roster = roster
     this.incomingDemand = incomingDemand
-    this.hosting = hosting
     this.incarnation = replica.incarnation
     this.state = new RoomState({ view, model: replica.model, owner: this })
     this.local = new LocalHolder({ state: this.state, participants: this.localParticipants })
@@ -186,13 +184,10 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
 
   /** The member's holder is gone: ownership ends even if eviction fails, which the heartbeat then retries. */
   async removeDepartedMember(id: string): Promise<void> {
+    if (this.model.closed) return // close() already removed everyone
     const cause = { type: 'disconnected' } as const
-    try {
-      await this.removeMember(id, cause)
-    } catch {
-      this.hosting.evictLater(id)
-      this.model.applyLeave(id, cause)
-    }
+    await this.admissions.evictOrLater(id, cause)
+    this.model.applyLeave(id, cause)
   }
 
   /** A room whose close hasn't reached this process fails at its join operation, with the same error. */

@@ -2953,6 +2953,16 @@ function Room() {
         )
       })}
 
+      {scenario('hiccups-departed', null, "A departed member's eviction fails once", async () => {
+        const [roomId, room] = await createRoom('hiccup-departed')
+        const events: string[] = []
+        room.onJoin((member) => events.push(`join:${member.meta.name}`))
+        room.onLeave((member, cause) => events.push(`leave:${member.meta.name}:${cause.type}`))
+        // The test joins `Mallory` from another tab, whose malformed request then drops its connection.
+        await onFailBackend({ op: 'runOperation', roomId, key: 'leave' })
+        await pollUntil(() => ({ result: { roomId, events }, done: events.length === 2 }), 150)
+      })}
+
       {scenario('hiccups-heartbeat', null, 'A failed write healed by the heartbeat', async () => {
         const viewRoomId = `e2e-hiccup-view:${crypto.randomUUID()}`
         // Past the 30 s heartbeat, which restores what the store failed to keep.

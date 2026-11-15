@@ -125,7 +125,8 @@ class Admissions {
     }
   }
 
-  private async evictOrLater(id: string, cause: LeaveCause): Promise<void> {
+  /** Evicts member `id`; where that fails, the failure is reported and the heartbeat evicts it again. */
+  async evictOrLater(id: string, cause: LeaveCause): Promise<void> {
     try {
       await evictMember(this.replica.incarnation, id, cause)
     } catch (error) {
