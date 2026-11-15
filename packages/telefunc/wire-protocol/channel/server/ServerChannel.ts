@@ -105,8 +105,6 @@ const REFUSAL_BYTES = heldAnswerBytes('')
 const TOO_MANY_ANSWERS_TEXT =
   'Channel closed: more `{ ack: true }` sends and `publish()` calls wait for their answers than the server can hold even refusals for, see config.channel.maxMemory'
 
-/** Closing frames the channel produced while no page was attached; the next attach sends them. */
-type PendingEnd = { closeAck: boolean; closeRequest: boolean; abort: string | null; error: ErrorReason | null }
 /** A `sendAck` awaiting the peer's ACK_RES. */
 type PendingAck<T> = { resolve: (result: ChannelAck<T>) => void; reject: (err: Error) => void }
 /** A `send(data, { lossy: true })` to an attached page, text or a copy of its bytes once held; `held` is what it holds
@@ -162,7 +160,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private readonly answering = new Map<number, number>()
   /** The mux that registered this channel; when the channel ends, the mux keeps it or forgets it. */
   private mux: ChannelMux | null = null
-  private pendingEnd: PendingEnd | null = null
+  /** The frames that end it, made while no page was attached, in order: the next attach sends them. */
+  private pendingEnd: Array<(peer: IndexedPeer) => void> = []
   private closeRequestSeq = 0
   /** The highest seq the page is known to have received from this channel. */
   private pageLastSeq = 0
@@ -441,10 +440,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._phase !== 'open') return
     this._phase = 'closing'
     const serializedAbortValue = stringify(abortValue)
-    if (this.peer) {
-      this.dropUnhanded()
-      this.peer.sendSequenced(encode.abort, serializedAbortValue)
-    } else this.ensurePendingEnd().abort = serializedAbortValue
+    if (this.peer) this.dropUnhanded()
+    this.sendEnd((peer) => peer.sendSequenced(encode.abort, serializedAbortValue))
     this.shutdown(createAbortError(abortValue, message))
   }
 
@@ -459,7 +456,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._phase = 'closing'
         this.lossySends?.flush()
         if (this.peer) this.closeRequestSeq = this.peer.sendCloseRequest(timeout)
-        else this.ensurePendingEnd().closeRequest = true
+        else this.pendingEnd.push((peer) => (this.closeRequestSeq = peer.sendCloseRequest(this.lifecycle.timeLeft())))
       },
     })
   }
@@ -737,10 +734,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     assertProtocol(timeoutMs <= TIMER_DELAY_MAX_MS, `CLOSE timeout ${timeoutMs}`)
     this.lifecycle.peerCloseReceived(timeoutMs, () => {
       this._phase = 'closing'
-      if (this.peer) {
-        this.dropUnhanded()
-        this.peer.sendCloseAck()
-      } else this.ensurePendingEnd().closeAck = true
+      if (this.peer) this.dropUnhanded()
+      this.sendEnd((peer) => peer.sendCloseAck())
     })
   }
 
@@ -826,12 +821,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this.pageLastSeq >= this._replayBuffer.seq &&
       this.offlineBuffer.size === 0 &&
       this.pendingAckRes.length === 0 &&
-      this.pendingEnd === null
+      this.pendingEnd.length === 0
     )
-  }
-
-  private ensurePendingEnd(): PendingEnd {
-    return (this.pendingEnd ??= { closeAck: false, closeRequest: false, abort: null, error: null })
   }
 
   /** As for a send made now, its `await` throttles the sender by the page's credit. */
@@ -890,14 +881,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
+  /** Sends the page a frame that ends the channel by `send`: now, or with no page attached, on its next attach. */
+  private sendEnd(send: (peer: IndexedPeer) => void): void {
+    if (this.peer) send(this.peer)
+    else this.pendingEnd.push(send)
+  }
+
   private sendPendingEnd(peer: IndexedPeer): void {
-    if (this.pendingEnd === null) return
-    const { closeAck, closeRequest, abort, error } = this.pendingEnd
-    if (closeAck) peer.sendCloseAck()
-    if (closeRequest) this.closeRequestSeq = peer.sendCloseRequest(this.lifecycle.timeLeft())
-    if (abort !== null) peer.sendSequenced(encode.abort, abort)
-    if (error !== null) peer.sendSequenced(encode.error, error)
-    this.pendingEnd = null
+    for (const send of this.pendingEnd.splice(0)) send(peer)
   }
 
   /** Ends the channel on both sides with an ERROR of `reason`; a page not attached receives it on its next attach. */
@@ -906,8 +897,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.offlineBuffer.clear(err)
     // First, so the ERROR, held without asking, takes their room.
     this.letAnsweringGo()
-    if (this.peer) this.peer.sendSequenced(encode.error, reason)
-    else this.ensurePendingEnd().error = reason
+    this.sendEnd((peer) => peer.sendSequenced(encode.error, reason))
     this.shutdown(err)
   }
 
@@ -1052,7 +1042,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private dropPending(err?: Error): void {
     this.offlineBuffer.clear(err)
     this.dropPendingAnswers()
-    this.pendingEnd = null
+    this.pendingEnd = []
   }
 
   /** Drops the answers held for a page not attached, whose sends then settle as the channel ends. */

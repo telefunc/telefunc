@@ -138,13 +138,23 @@ function overWebSocket(channels: ServerChannel[]) {
     deliveredBefore: () => 0,
     sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
   }
-  for (const [index, channel] of channels.entries()) {
-    channel._registerChannel()
-    const peer = new IndexedPeer({ sender, index, replay: channel._replayBuffer! })
+  /** Attaches `channel` at `index` as the mux does: what the page lacks after `lastSeq` goes first. */
+  const attach = (channel: ServerChannel, index: number, lastSeq = 0) => {
+    const replay = channel._replayBuffer!
+    channel._onPageAttach(lastSeq, undefined)
+    for (const frame of replay.getAfter(lastSeq)) sender.send(frame)
+    const peer = new IndexedPeer({ sender, index, replay })
     channel._attachPeer(peer, { broadcast: { text: true, binary: false } })
+    return peer
   }
+  const peers = channels.map((channel, index) => {
+    channel._registerChannel()
+    return attach(channel, index)
+  })
   return {
     headroom,
+    peers,
+    attach,
     /** The page reads all that waits for it, saying it took each byte it got, and returns all it read. */
     async readAll(): Promise<string[]> {
       while (headroom.sender.unhandedBytes > 0) {
@@ -323,6 +333,54 @@ test("on SSE, a frame that goes between a publish's head and its body leaves tha
   expect(reads(await page.readUntil('0:CLOSE'))).toEqual(['0:p0', '1:s1', '0:p1', '0:CLOSE'])
   await page.close()
 })
+
+/** Each way channel 0 ends while its page is away, after what it sends then: the page that comes back reads what it is
+ *  owed of that, then the end. */
+const WHILE_AWAY: Record<
+  string,
+  {
+    create: (key: string) => ServerChannel
+    away: (channel: ServerChannel, key: string) => unknown
+    pageReads: string[]
+  }
+> = {
+  'close()': {
+    create: () => new ServerChannel(),
+    away: (channel) => {
+      void channel.send('p1')
+      void channel.close()
+    },
+    pageReads: ['0:p1', '0:CLOSE'],
+  },
+  'abort()': {
+    create: () => new ServerChannel(),
+    away: (channel) => {
+      void channel.send('p1')
+      channel.abort()
+    },
+    pageReads: ['0:p1', '0:ABORT'],
+  },
+  'an overflow': {
+    create: (key) => new ServerBroadcast<string>({ key }),
+    away: (_, key) =>
+      Promise.all(['p1', 'p2', 'p3', 'p4'].map((name) => Broadcast.publish(key, name + 'x'.repeat(600_000)))),
+    // No wire had any of them: from p1 on, all go.
+    pageReads: ['0:ERROR'],
+  },
+}
+
+for (const [ending, { create, away, pageReads }] of Object.entries(WHILE_AWAY)) {
+  test(`on a WebSocket, after ${ending} while its page is away, the page that comes back reads what it is owed, then the end`, async () => {
+    const key = crypto.randomUUID()
+    const channel = create(key)
+    const [peer] = overWebSocket([channel]).peers
+    channel._onPeerDisconnect(peer!, 60_000)
+    await away(channel, key)
+    const back = overWebSocket([])
+    back.attach(channel, 0)
+    expect(await back.readAll()).toEqual(pageReads)
+  })
+}
 
 /** Each way a subscriber that may miss no publish falls behind, by what it publishes and what its page then reads. */
 const OVERFLOWS: Record<string, { publishes: string[]; pageReads: string[] }> = {
