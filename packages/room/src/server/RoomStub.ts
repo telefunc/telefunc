@@ -14,7 +14,7 @@ import {
   type ChannelPublishAck,
 } from 'telefunc/__internal'
 import type { ShieldValidator } from 'telefunc'
-import type { RoomHandle } from './room.js'
+import type { RoomHandle } from './RoomHandle.js'
 import type { RosterStream } from './lifecycle/RosterStream.js'
 import { reportRoomError } from './reportRoomError.js'
 import {

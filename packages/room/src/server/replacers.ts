@@ -7,7 +7,8 @@ import {
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   SERIALIZER_PREFIX_ROOM_REMOTE,
 } from '../shared/constants.js'
-import { ServerLocalParticipant, ServerRoom, handleOf } from './room.js'
+import { ServerRoom, handleOf } from './room.js'
+import { ServerLocalParticipant } from './ServerLocalParticipant.js'
 import type { RemoteParticipant } from '../types.js'
 import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from '../shared/protocol.js'
 import { remoteBacking } from '../shared/state.js'

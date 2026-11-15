@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Room } from '../index.js'
 import { pageRoom } from '../test/pageRoom.js'
-import type { ServerLocalParticipant } from '../server/room.js'
+import type { ServerLocalParticipant } from '../server/ServerLocalParticipant.js'
 import type { LocalParticipant } from '../types.js'
 
 async function pageMember(meta: { name: string }): Promise<LocalParticipant> {

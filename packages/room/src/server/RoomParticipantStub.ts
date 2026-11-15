@@ -10,7 +10,8 @@ import {
   type ServerBroadcastEnd,
 } from 'telefunc/__internal'
 import type { ShieldValidator } from 'telefunc'
-import type { RoomHandle, ServerLocalParticipant } from './room.js'
+import type { RoomHandle } from './RoomHandle.js'
+import type { ServerLocalParticipant } from './ServerLocalParticipant.js'
 import {
   decodeParticipantDeclaration,
   decodeParticipantFrame,
