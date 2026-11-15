@@ -6,6 +6,7 @@ import { TAG } from '../../wire-protocol/wire/tags.js'
 import { ProtocolViolationError } from '../../wire-protocol/wire/protocolViolation.js'
 import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'
 import { ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
+import { createDeferred } from '../../utils/createDeferred.js'
 
 function createPeer(frames: Uint8Array[]) {
   return new IndexedPeer({
@@ -154,16 +155,13 @@ describe('self-initiated close', () => {
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
-    channel.listen(
-      () =>
-        new Promise<string>((resolve) => {
-          setTimeout(() => resolve('done'), 30)
-        }),
-    )
+    const work = createDeferred<string>()
+    channel.listen(() => work.promise)
 
     // Start inbound ack-req processing
     const inboundPending = page.ackReq('"work"')
-    const closePromise = channel.close({ timeout: 100 })
+    // Its deadline is past any run's: the close ends on the ack.
+    const closePromise = channel.close({ timeout: 60_000 })
 
     expect(channel.isClosed).toBe(true)
     page.closeAck()
@@ -173,6 +171,7 @@ describe('self-initiated close', () => {
     expect(channel._phase).not.toBe('ended')
 
     // Inbound work finishes → close resolves
+    work.resolve('done')
     await expect(inboundPending).resolves.toBeUndefined()
     await expect(closePromise).resolves.toBe(0)
     expect(channel._phase).toBe('ended')
@@ -337,15 +336,12 @@ describe('peer-initiated close', () => {
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
-    channel.listen(
-      () =>
-        new Promise<string>((resolve) => {
-          setTimeout(() => resolve('done'), 25)
-        }),
-    )
+    const work = createDeferred<string>()
+    channel.listen(() => work.promise)
 
     const pending = page.ackReq('"work"')
-    page.closeRequest(100)
+    // Its deadline is past any run's: the close ends on the ack.
+    page.closeRequest(60_000)
 
     expect(channel.isClosed).toBe(true)
 
@@ -353,6 +349,7 @@ describe('peer-initiated close', () => {
     await new Promise((resolve) => setTimeout(resolve, 10))
     expect(channel._phase).not.toBe('ended')
 
+    work.resolve('done')
     await expect(pending).resolves.toBeUndefined()
     expect(channel._phase).toBe('ended')
   })
