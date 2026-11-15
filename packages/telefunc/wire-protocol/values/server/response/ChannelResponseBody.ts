@@ -45,12 +45,11 @@ type ChannelPumpRunContext = {
  */
 function pumpProducerToChannel(
   channel: ServerChannel<never, never>,
-  createProducer: () => StreamingProducer,
+  producer: StreamingProducer,
   runContext: ChannelPumpRunContext,
   onComplete: () => void,
 ): void {
   getChannelMux().registerChannel(channel as unknown as ServerChannel<unknown, unknown>)
-  const producer = createProducer()
 
   const telefuncId = {
     telefunctionName: runContext.telefunctionName,

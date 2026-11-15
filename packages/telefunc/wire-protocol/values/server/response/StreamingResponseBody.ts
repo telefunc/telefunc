@@ -1,7 +1,7 @@
 export { buildInlineResponseBody, encodeErrorPayload }
 
 import type { Readable } from 'node:stream'
-import type { StreamingProducer, StreamingValueServer } from '../../types.js'
+import type { StreamingValueServer } from '../../types.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { encodeU32, encodeIndexedFrame, textEncoder } from '../../../wire/envelope.js'
 import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../../constants.js'
@@ -22,8 +22,7 @@ import { Fifo } from '../../../../utils/Fifo.js'
 
 const EMPTY = new Uint8Array(0)
 
-type Entry = { producer: StreamingProducer; index: number }
-type Settled = { entry: Entry; result: IteratorResult<Uint8Array<ArrayBuffer>> } | { err: unknown }
+type Settled = { entry: StreamingValueServer; result: IteratorResult<Uint8Array<ArrayBuffer>> } | { err: unknown }
 
 /**
  * Stream the inline response body: framed metadata + multiplexed streaming values.
@@ -53,7 +52,7 @@ type Settled = { entry: Entry; result: IteratorResult<Uint8Array<ArrayBuffer>> }
  */
 function buildInlineResponseBody(runContext: {
   metadataSerialized: string
-  streamingValues: StreamingValueServer[]
+  producers: StreamingValueServer[]
   telefuncId: TelefuncId
   context: Context
   abortSignal: AbortSignal
@@ -64,7 +63,7 @@ function buildInlineResponseBody(runContext: {
 }): Readable | ReadableStream<Uint8Array<ArrayBuffer>> {
   const {
     metadataSerialized,
-    streamingValues,
+    producers,
     telefuncId,
     context,
     abortSignal,
@@ -73,11 +72,6 @@ function buildInlineResponseBody(runContext: {
     encodeFrame,
     useNodeStream,
   } = runContext
-
-  // Producers are constructed eagerly so the abort listener can cancel them
-  // even before the loop starts. Cancelling interrupts any suspended
-  // `reader.read()` inside a producer — `iter.return()` alone can't.
-  const producers = streamingValues.map((sv) => ({ producer: sv.createProducer(), index: sv.index }))
 
   let cancelled = false
   // What the merge loop takes next, in the order it settled. A `Promise.race()` per frame would leave a reaction on
@@ -123,7 +117,7 @@ function buildInlineResponseBody(runContext: {
     settled.push(item)
     wakeMerge()
   }
-  const pullNext = async (entry: Entry) => {
+  const pullNext = async (entry: StreamingValueServer) => {
     try {
       settle({ entry, result: await entry.producer.chunks.next() })
     } catch (err) {

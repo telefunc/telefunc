@@ -76,7 +76,7 @@ function serializeTelefunctionResult(runContext: {
     : { ret: runContext.telefunctionReturn }
 
   const useChannelPump = runContext.streamTransport === STREAM_TRANSPORT.CHANNEL
-  const streamingValues: StreamingValueServer[] = []
+  const producers: StreamingValueServer[] = []
   let nextStreamingIndex = 0
   /** What the response carries is registered once the response is sure to go; ending the response before that, as a
    *  failed serialization does, ends what only it would carry; a channel an earlier response carried stays open. */
@@ -95,22 +95,21 @@ function serializeTelefunctionResult(runContext: {
     })
   }
   function sendStream(createProducer: () => StreamingProducer) {
-    // A cancel before the response goes and the pump or the HTTP body after it share one producer: the stream has one reader.
-    let producer: StreamingProducer | undefined
-    const getProducer = () => (producer ??= createProducer())
+    // Taken as it's serialized: a stream that can't be read fails the serialization, which ends what the response carries.
+    const producer = createProducer()
     const stream = {
       close() {},
       abort(abortError: AbortError) {
-        if (!goes) getProducer().cancel(abortError)
+        if (!goes) producer.cancel(abortError)
       },
     }
     if (useChannelPump) {
       const channel = new ServerChannel<never, never>()
-      registrations.push(() => pumpProducerToChannel(channel, getProducer, runContext, requestContext.trackPending()))
+      registrations.push(() => pumpProducerToChannel(channel, producer, runContext, requestContext.trackPending()))
       return { metadata: { channelId: channel.id }, ...stream }
     }
     const index = nextStreamingIndex++
-    streamingValues.push({ createProducer: getProducer, index })
+    producers.push({ producer, index })
     return { metadata: { __index: index }, ...stream }
   }
   function createChannel<ClientToServer, ServerToClient>(opts?: { ack?: boolean }) {
@@ -155,7 +154,7 @@ function serializeTelefunctionResult(runContext: {
   goes = true
   for (const register of registrations) register()
 
-  if (useChannelPump || streamingValues.length === 0) return { type: 'text', body: httpResponseBody }
+  if (useChannelPump || producers.length === 0) return { type: 'text', body: httpResponseBody }
 
   const telefuncId: TelefuncId = {
     telefunctionName: runContext.telefunctionName,
@@ -173,7 +172,7 @@ function serializeTelefunctionResult(runContext: {
     type: 'streaming',
     body: buildInlineResponseBody({
       metadataSerialized: httpResponseBody,
-      streamingValues,
+      producers,
       telefuncId,
       context: runContext.context,
       abortSignal: requestContext.abortSignal,

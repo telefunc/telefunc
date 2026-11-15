@@ -110,7 +110,7 @@ type StreamingProducer = {
 }
 
 type StreamingValueServer = {
-  createProducer: () => StreamingProducer
+  producer: StreamingProducer
   index: number
 }
 

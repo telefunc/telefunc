@@ -66,6 +66,19 @@ const telefunctions: Record<string, (...args: any[]) => Promise<unknown>> = {
     }),
     bad: circular(),
   }),
+  onStreamThenUnreadableStream: async () => {
+    const unreadable = new ReadableStream()
+    unreadable.getReader()
+    return {
+      channel: heldChannel(),
+      stream: new ReadableStream({
+        cancel() {
+          opened.cancelled++
+        },
+      }),
+      unreadable,
+    }
+  },
   onAbortWithStream: async () => {
     throw Abort({
       stream: new ReadableStream({
@@ -94,12 +107,16 @@ const telefunctions: Record<string, (...args: any[]) => Promise<unknown>> = {
     }),
 }
 
-function call(name: string, args: unknown[] = [], signal?: AbortSignal) {
+function call(
+  name: string,
+  args: unknown[] = [],
+  { signal, transport }: { signal?: AbortSignal; transport?: string } = {},
+) {
   return serve({
     request: new Request('https://example.test/_telefunc', {
       method: 'POST',
       headers: { 'x-telefunc-request': 'txt' },
-      body: JSON.stringify({ file: FILE, name, args }),
+      body: JSON.stringify({ file: FILE, name, args, stream: transport && { transport } }),
       signal,
     }),
   })
@@ -169,6 +186,21 @@ describe('a request ends its lifecycle once, however the call ends', () => {
     expect(opened.cancelled).toBe(1)
   })
 
+  for (const transport of ['binary-inline', 'sse-inline', 'channel']) {
+    test(`onStreamThenUnreadableStream() over ${transport}: 500, and what it returned before the failure ends with it`, async () => {
+      const cancelledBefore = opened.cancelled
+      const response = await call('onStreamThenUnreadableStream', [], { transport })
+      await response.getBody()
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      expect(response.statusCode).toBe(500)
+      const request = requests.at(-1)!
+      expect(request.closed).toBe(1)
+      expect(request.signal.aborted).toBe(true)
+      expect(opened.cancelled).toBe(cancelledBefore + 1)
+      expect(opened.channel!.isClosed).toBe(true)
+    })
+  }
+
   test('onAbortWithStream(): 403, and the stream in its abort value is cancelled', async () => {
     const cancelledBefore = opened.cancelled
     const response = await call('onAbortWithStream')
@@ -196,7 +228,7 @@ describe('a request ends its lifecycle once, however the call ends', () => {
   test('a stream it returns after its page left is cancelled', async () => {
     const cancelledBefore = opened.cancelled
     const page = new AbortController()
-    const response = call('onStreamOnceLetReturn', [], page.signal)
+    const response = call('onStreamOnceLetReturn', [], { signal: page.signal })
     await vi.waitFor(() => expect(opened.letReturn).toBeTypeOf('function'))
     page.abort()
     const request = requests.at(-1)!
