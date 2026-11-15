@@ -3,7 +3,7 @@ export type { ClientRoomHandleOptions }
 
 import { assert, assertUsage } from '../utils/assert.js'
 import type { ChannelPublishAck, ChannelPublishInfo, ClientBroadcast } from 'telefunc/__internal'
-import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../shared/binary.js'
+import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame } from '../shared/binary.js'
 import { normalizeJoinOptions } from '../shared/arguments.js'
 import {
   hasRoomTag,
@@ -22,7 +22,7 @@ import {
   type RoomStubRequest,
 } from '../shared/protocol.js'
 import { departureCause } from '../shared/RoomModel.js'
-import { RoomState, type RoomStateOwner, type RoomStateView } from '../shared/state.js'
+import { RoomState, type RoomStateOwner, type RoomStateView, type WantChange } from '../shared/state.js'
 import { ROOM_TRACK_WANTS_MAX } from '../shared/constants.js'
 import { roomResultValue } from '../shared/errors.js'
 import { RoomMirror } from './RoomMirror.js'
@@ -55,9 +55,6 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
   private readonly mirror: RoomMirror
   private readonly localParticipants = new Map<string, ClientParticipant>()
   private readonly joins = new PendingJoins()
-  /** The wants the server stub holds, as last declared; a fresh stub holds none. */
-  private declaredAnnounce = false
-  private readonly declaredText = new Set<string>()
 
   constructor({ end, snapshot, view }: ClientRoomHandleOptions) {
     this.end = end
@@ -183,35 +180,35 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
 
   /** Room-wide text wants ride the Broadcast subscription, which attaches again before the channel's `onOpen`.
    *  Declarations are replayed channel messages, so the server keeps them across reconnects: each carries only what
-   *  changed, the room-wide text wants and those of `member`, whose listeners changed, or the binary want that did. */
-  onListenersChanged(member: string | null, binary: BinaryWantChange | null): void {
+   *  changed, the announce want with a member's text want, or the binary want. */
+  onWantChanged(change: WantChange): void {
     if (this.mirror.model.closed) {
       this.end._setSubscribed('text', false) // a closed room takes no declaration
       return
     }
-    const text = this.state.textWants()
-    this.end._setSubscribed('text', text.all)
-    // Declared under the room-wide stream too, so the server keeps these members' lane when that stream stops.
-    const textChanges: Record<string, boolean> = Object.create(null)
-    const memberText = member !== null && text.members.has(member) !== this.declaredText.has(member)
-    if (memberText) {
-      const wanted = text.members.has(member)
-      textChanges[member] = wanted
-      if (wanted) this.declaredText.add(member)
-      else this.declaredText.delete(member)
+    switch (change.kind) {
+      case 'listeners':
+        return
+      case 'text':
+        if (change.member === null) return this.end._setSubscribed('text', change.on)
+        // Declared under the room-wide stream too, so the server keeps these members' lane when that stream stops.
+        return this.notify({
+          __r: 'sub-text',
+          announce: this.state.wantsAnnounce,
+          members: { [change.member]: change.on },
+        })
+      case 'announce':
+        return this.notify({ __r: 'sub-text', announce: change.on, members: {} })
+      case 'binary': {
+        const { member, track, on } = change.change
+        return this.notify({
+          __r: 'sub-binary',
+          member: member === EVERY_MEMBER ? null : member,
+          track: track === EVERY_TRACK ? null : track,
+          on,
+        })
+      }
     }
-    if (memberText || this.state.wantsAnnounce !== this.declaredAnnounce) {
-      this.declaredAnnounce = this.state.wantsAnnounce
-      this.notify({ __r: 'sub-text', announce: this.state.wantsAnnounce, members: textChanges })
-    }
-    if (binary === null) return
-    const { member: wantMember, track, on } = binary
-    this.notify({
-      __r: 'sub-binary',
-      member: wantMember === EVERY_MEMBER ? null : wantMember,
-      track: track === EVERY_TRACK ? null : track,
-      on,
-    })
   }
 
   /** Plain DM fires local listeners; ack DM returns their reply through the symmetric `dm-reply`/`dm-ack` path. */

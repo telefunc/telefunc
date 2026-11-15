@@ -9,7 +9,6 @@ import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type Binary
 import type { MemberWants } from '../../shared/protocol.js'
 import type { RoomDataEnvelope } from '../protocol.js'
 import type { RoomState } from '../../shared/state.js'
-import { toggle } from '../../utils/sets.js'
 import { ROOM_REPLAY_HOLD_BYTES_MAX, ROOM_REPLAY_HOLD_ENTRY_BYTES } from '../constants.js'
 assertIsNotBrowser()
 
@@ -267,8 +266,6 @@ class LocalHolder implements LaneHolder {
   private suppressed: ReadonlySet<string> = new Set()
   private readonly participants: LocalHolderOptions['participants']
   private readonly replay = new ReplayGate()
-  private textAll = false
-  private readonly textMembers = new Set<string>()
   readonly binaryWants: BinaryWants = emptyBinaryWants()
 
   constructor({ state, participants }: LocalHolderOptions) {
@@ -291,22 +288,11 @@ class LocalHolder implements LaneHolder {
     this.suppressed = suppressed
   }
 
-  /** Re-derives the listeners' room-wide text want, and the own want of `member` when its listeners changed; `null`
-   *  when neither changed. */
-  refreshText(member: string | null): TextWantsChange | null {
-    const text = this.state.textWants()
-    const before = new Map<string, boolean>()
-    if (member !== null) {
-      const wantsText = text.members.has(member)
-      if (wantsText !== this.textMembers.has(member)) {
-        before.set(member, !wantsText)
-        toggle(this.textMembers, member, wantsText)
-      }
-    }
-    const change = text.all !== this.textAll || before.size > 0 ? { all: this.textAll, members: before } : null
-    this.textAll = text.all
-    if (change !== null) this.replay.forgetUnwantedText((member) => this.wantsTextFrom(member))
-    return change
+  /** Its listeners' room-wide text want (`member` null) or `member`'s own turned `on` or off; returns the wants before. */
+  textChanged(member: string | null, on: boolean): TextWantsChange {
+    this.replay.forgetUnwantedText((member) => this.wantsTextFrom(member))
+    if (member === null) return { all: !on, members: new Map() }
+    return { all: this.state.textWants().all, members: new Map([[member, !on]]) }
   }
 
   applyBinary(change: BinaryWantChange): boolean {
@@ -320,7 +306,7 @@ class LocalHolder implements LaneHolder {
   }
 
   textDemand(): MemberWants {
-    return { all: this.textAll, members: this.textMembers }
+    return this.state.textWants()
   }
 
   suppressedMembers(): ReadonlySet<string> {
@@ -328,7 +314,7 @@ class LocalHolder implements LaneHolder {
   }
 
   wantsTextFrom(member: string): boolean {
-    return !this.suppressed.has(member) && (this.textAll || this.textMembers.has(member))
+    return !this.suppressed.has(member) && this.state.wantsTextFrom(member)
   }
 
   wantsBinary(member: string, track: string): boolean {

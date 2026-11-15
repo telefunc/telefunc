@@ -18,7 +18,7 @@ import {
 } from '../shared/protocol.js'
 import type { RoomDataEnvelope, RoomIncarnation } from './protocol.js'
 import { departureCause, type RoomModel } from '../shared/RoomModel.js'
-import { RoomState, type RoomStateOwner } from '../shared/state.js'
+import { RoomState, type RoomStateOwner, type WantChange } from '../shared/state.js'
 import { type MemberLink } from '../shared/ParticipantBase.js'
 import { RoomStub, type RoomStubOptions } from './RoomStub.js'
 import { MemberMessageBodies } from './publishBodies.js'
@@ -354,11 +354,19 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
     return { id: admission.id, joinedAt: admission.joinedAt }
   }
 
-  /** Its state's listeners changed, and with them what its local holder wants. */
-  onListenersChanged(member: string | null, binary: BinaryWantChange | null): void {
-    this.replica.listenersChanged(this)
-    this.onHolderTextChanged(this.local, this.local.refreshText(member))
-    if (binary !== null && this.local.applyBinary(binary)) this.onHolderBinaryChanged(this.local, binary)
+  /** What its state's listeners want crossed, which is what its local holder wants. */
+  onWantChanged(change: WantChange): void {
+    switch (change.kind) {
+      case 'listeners':
+        this.replica.listenersChanged(this)
+        return this.onHolderTextChanged(this.local, null)
+      case 'text':
+        return this.onHolderTextChanged(this.local, this.local.textChanged(change.member, change.on))
+      case 'announce':
+        return this.onHolderTextChanged(this.local, null)
+      case 'binary':
+        if (this.local.applyBinary(change.change)) this.onHolderBinaryChanged(this.local, change.change)
+    }
   }
 
   reportCallbackError(error: unknown): void {

@@ -138,7 +138,7 @@ class LoneRoom extends RoomStateView implements RoomStateOwner {
     this._state = new RoomState({ view: this, model: this.mirror.model, owner: this })
   }
 
-  onListenersChanged(): void {}
+  onWantChanged(): void {}
 
   reportCallbackError(error: unknown): void {
     reportClientCallbackError(error)

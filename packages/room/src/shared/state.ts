@@ -1,5 +1,5 @@
 export { RoomState, RoomStateView, remoteBacking }
-export type { RoomStateOwner }
+export type { RoomStateOwner, WantChange }
 
 import { assert, assertUsage } from '../utils/assert.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
@@ -28,6 +28,7 @@ import { type MemberEntry, type RoomModel } from './RoomModel.js'
 import { fieldValue, participantFields } from './participantFields.js'
 import { assertKnownOptions, senderSnapshot } from './arguments.js'
 import { roomMessages } from './messages.js'
+import { toggle } from '../utils/sets.js'
 import type { MemberSnapshot, MemberWants, RoomDataEvent, SenderStamp } from './protocol.js'
 import type {
   BinaryFrameInfo,
@@ -88,12 +89,20 @@ type RoomStateOptions = {
   trackWantsMax?: number
 }
 
+/** What its listeners want crossed: the first listener of a kind came, or the last one went. `listeners`: its
+ *  listeners, or those besides the package fields'; `text`: the room-wide messages (`member` null) or one member's;
+ *  `announce`: the room's announcements; `binary`: a track. */
+type WantChange =
+  | { kind: 'listeners' }
+  | { kind: 'text'; member: string | null; on: boolean }
+  | { kind: 'announce'; on: boolean }
+  | { kind: 'binary'; change: BinaryWantChange }
+
 /** What a view's state tells the side that holds it. */
 interface RoomStateOwner {
-  /** The number of attached listeners changed, with the member whose own listeners changed (`null` for a room-level
-   *  one), and the binary want it turned on or off, if any: the side (de)activates its event source (adapter
-   *  subscription, wire subscription). */
-  onListenersChanged(member: string | null, binary: BinaryWantChange | null): void
+  /** What its listeners want crossed: the side (de)activates its event source (adapter subscription, wire
+   *  subscription). */
+  onWantChanged(change: WantChange): void
   /** A user callback threw: the side reports it. */
   reportCallbackError(error: unknown): void
 }
@@ -295,6 +304,11 @@ class RoomState {
   /** `all` while room-level `subscribe()`rs exist, and the members with participant-scoped listeners either way. */
   textWants(): MemberWants {
     return { all: this.roomDataListeners.size > 0, members: this.textWanted }
+  }
+
+  /** Whether a listener takes `member`'s messages: a room-level `subscribe()`r, or one of `member`'s own. */
+  wantsTextFrom(member: string): boolean {
+    return this.roomDataListeners.size > 0 || this.textWanted.has(member)
   }
 
   getRemote(id: string, adder: Adder = 'app'): RemoteParticipant | null {
@@ -645,7 +659,7 @@ class RoomState {
     if (asField) this.fieldListenerCount++
     this.bumpListenerCount(
       1,
-      entry,
+      { list, entry, asField },
       filter && countTrack(filter.counts, filter.track, 1) ? { ...wantedTrack(entry, filter), on: true } : null,
     )
     const cleanups = getOrCreate(this.listenerCleanups, list, () => new Set())
@@ -655,7 +669,7 @@ class RoomState {
           if (asField) this.fieldListenerCount--
           this.bumpListenerCount(
             -1,
-            entry,
+            { list, entry, asField },
             filter && countTrack(filter.counts, filter.track, -1) ? { ...wantedTrack(entry, filter), on: false } : null,
           )
         }
@@ -689,15 +703,30 @@ class RoomState {
     for (const cleanups of this.listenerCleanups.values()) for (const unlisten of cleanups) unlisten()
   }
 
-  private bumpListenerCount(delta: number, entry: MemberEntry | null, binary: BinaryWantChange | null): void {
+  /** A listener of `list` came (`delta` 1) or went (-1); `binary` is the track want it turned on or off, if any. The owner
+   *  hears each want that crossed. */
+  private bumpListenerCount(
+    delta: number,
+    { list, entry, asField }: { list: { readonly size: number }; entry: MemberEntry | null; asField: boolean },
+    binary: BinaryWantChange | null,
+  ): void {
+    const on = delta > 0
+    const crossed = (count: number) => count === (on ? 1 : 0)
     this._listenerCount += delta
-    if (this._listenerCount === (delta > 0 ? 1 : 0)) this.model.listen(this, delta > 0)
-    if (binary !== null && binary.track !== EVERY_TRACK) this.trackWants += binary.on ? 1 : -1
-    if (entry !== null) {
-      if ((this.memberListeners.get(entry)?.dataListeners?.size ?? 0) > 0) this.textWanted.add(entry.id)
-      else this.textWanted.delete(entry.id)
+    if (crossed(this._listenerCount)) this.model.listen(this, on)
+    if (binary !== null && binary.track !== EVERY_TRACK) this.trackWants += on ? 1 : -1
+    if (crossed(this._listenerCount) || (!asField && crossed(this.ownListenerCount))) {
+      this.owner.onWantChanged({ kind: 'listeners' })
     }
-    this.owner.onListenersChanged(entry?.id ?? null, binary)
+    if (crossed(list.size)) {
+      if (list === this.roomDataListeners) this.owner.onWantChanged({ kind: 'text', member: null, on })
+      else if (list === this.announceListeners) this.owner.onWantChanged({ kind: 'announce', on })
+      else if (entry !== null && list === this.memberListeners.get(entry)?.dataListeners) {
+        toggle(this.textWanted, entry.id, on)
+        this.owner.onWantChanged({ kind: 'text', member: entry.id, on })
+      }
+    }
+    if (binary !== null) this.owner.onWantChanged({ kind: 'binary', change: binary })
   }
 
   private fireAll<Args extends unknown[]>(listeners: Listeners<(...args: Args) => unknown>, ...args: Args): void {
