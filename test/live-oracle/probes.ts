@@ -82,7 +82,8 @@ const probes: Record<string, () => void> = {
       return readsReachedBy.call(this, change.kind === 'update' ? { ...change, old: change.new } : change)
     }
   },
-  /** A read that joins an identical one gets that read's rows themselves, rather than a copy. */
+  /** A read that joins an identical one gets that read's rows themselves, rather than a copy. It bites through
+   *  postgres.js (`DRIVER=postgres-js`) only: on `pg`, each read parses the text values it shares. */
   'row-copies'() {
     const lead = sharedReads.lead
     sharedReads.lead = function (...args: unknown[]) {
