@@ -8,7 +8,7 @@ room.onChange(() => {
   const names = room.snapshot().participants.map((member) => item(member.meta.name))
   document.querySelector('#members')!.replaceChildren(...names)
 })
-room.subscribe((message, _info, from) => {
+room.subscribe((message, { from }) => {
   document.querySelector('#messages')!.append(item(`${from.meta.name}: ${message.text}`))
 })
 

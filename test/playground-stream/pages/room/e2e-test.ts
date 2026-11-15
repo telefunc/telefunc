@@ -753,13 +753,13 @@ function testRoom() {
     expect(r.publish).deep.equal({ name: 'A', data: 'hello', seqOk: true })
     expect(r.send).deep.equal({ name: 'A', to: 'B', seqOk: true })
   })
-  testRoomScenario<{ xText: string[]; xBin: number[]; all: string[] }>(
+  testRoomScenario<{ xText: string[]; xBin: string[]; all: string[] }>(
     'member-sub',
     'room: a per-member subscription receives only that member',
     (r) => {
       expect(r.all).deep.equal(['x1', 'y1']) // both delivered room-wide (so absence below is meaningful)
-      expect(r.xText).deep.equal(['x1'])
-      expect(r.xBin).deep.equal([7])
+      expect(r.xText).deep.equal(['X:x1']) // each with its sender, the member subscribed to
+      expect(r.xBin).deep.equal(['X:7'])
     },
   )
   testRoomScenario<{ held: string[] }>(

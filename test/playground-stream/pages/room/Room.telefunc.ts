@@ -343,7 +343,7 @@ async function onWatchEveryFrame(roomId: string) {
   const frames: Array<[number, unknown]> = []
   everyFrame.set(roomId, frames)
   watchedRooms.set(roomId, room)
-  room.subscribeBinary((data, _info, from) => frames.push([data[0]!, from.meta.name ?? null]))
+  room.subscribeBinary((data, { from }) => frames.push([data[0]!, from.meta.name ?? null]))
 }
 
 async function onGetEveryFrame(roomId: string) {
@@ -362,7 +362,7 @@ async function onIterateMessages(roomId: string) {
 
 async function iterateMessages(room: Room<{}, { name: string }, string>, received: string[]) {
   for await (const message of room.messages())
-    received.push(`${message.type} ${message.from.meta.name}: ${message.data}`)
+    received.push(`${message.type} ${message.info.from.meta.name}: ${message.data}`)
 }
 
 async function onGetIteratedMessages(roomId: string) {
@@ -896,10 +896,10 @@ async function onPublishRightAfterSubscribe(roomId: string) {
   watched.set(roomId, seen)
   watchedRooms.set(roomId, room)
   for (let i = 0; i < 100; i++) void busy.publish(i)
-  room.subscribe((data, _info, from) => {
+  room.subscribe((data, { from }) => {
     if (from.id === me.id) seen.push(data)
   })
-  room.subscribeBinary((data, _info, from) => {
+  room.subscribeBinary((data, { from }) => {
     if (from.id === me.id) seen.push([...data])
   })
   await Promise.all([me.publish('t1'), me.publishBinary(new Uint8Array([1])), me.publish('t2')])
@@ -1399,7 +1399,7 @@ async function onPublishWhileEstablishing(roomId: string, count: number, bytes: 
   const seen: string[] = []
   watched.set(roomId, seen)
   watchedRooms.set(roomId, room)
-  room.subscribe((data, _info, from) => {
+  room.subscribe((data, { from }) => {
     if (from.id === me.id) seen.push((data as string)[0]!)
   })
   const publishes = Array.from({ length: count }, (_, i) =>

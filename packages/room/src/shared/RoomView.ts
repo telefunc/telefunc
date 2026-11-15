@@ -67,6 +67,13 @@ class RoomRemotes {
     return 'entry' in from ? this.of(from.entry) : from.sender
   }
 
+  /** A listener as the state calls it, with the sender it resolved, which the listener gets as `info.from`. */
+  taking<Data, Info>(
+    callback: (data: Data, info: Info & { from: Sender }) => unknown,
+  ): (data: Data, info: Info, from: ResolvedSender) => unknown {
+    return (data, info, from) => callback(data, { ...info, from: this.sender(from) })
+  }
+
   visible(): RemoteParticipant[] {
     return this.state.model.visibleEntries().map((entry) => this.of(entry))
   }
@@ -132,8 +139,8 @@ class RoomRemotes {
         return model.isConnected(entry)
       },
       subscribe: (cb: MessageListener<[]>, opts?: TrackListenerOptions) =>
-        state.subscribeMember(entry, cb, opts, adder),
-      subscribeBinary: (cb, opts) => state.subscribeMemberBinary(entry, cb, opts, adder),
+        state.subscribeMember(entry, this.taking(cb), opts, adder),
+      subscribeBinary: (cb, opts) => state.subscribeMemberBinary(entry, this.taking(cb), opts, adder),
       onChange: (cb, opts) => state.onMember(entry, 'change', cb, opts, adder),
       onDisconnect: (cb, opts) => state.onMember(entry, 'disconnect', cb, opts, adder),
       onReconnect: (cb, opts) => state.onMember(entry, 'reconnect', cb, opts, adder),
@@ -218,20 +225,17 @@ class RoomView {
     return this._read.snapshot()
   }
 
-  subscribe(callback: MessageListener<[Sender]>, options?: TrackListenerOptions): () => void {
+  subscribe(callback: MessageListener<[]>, options?: TrackListenerOptions): () => void {
     const remotes = this._remotes
-    const cb = (data: unknown, info: any, from: ResolvedSender) => callback(data, info, remotes.sender(from))
-    return remotes.state.subscribe(cb, options, remotes.adder)
+    return remotes.state.subscribe(remotes.taking(callback), options, remotes.adder)
   }
 
   subscribeBinary(
-    callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
+    callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo & { from: Sender }) => unknown,
     options?: TrackListenerOptions,
   ): () => void {
     const remotes = this._remotes
-    const cb = (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: ResolvedSender) =>
-      callback(data, info, remotes.sender(from))
-    return remotes.state.subscribeBinary(cb, options, remotes.adder)
+    return remotes.state.subscribeBinary(remotes.taking(callback), options, remotes.adder)
   }
 
   messages(options?: ListenerOptions): AsyncIterableIterator<RoomMessage> {

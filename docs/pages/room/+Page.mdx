@@ -60,7 +60,7 @@ import { onGetLobby } from './Lobby.telefunc'
 const room = await onGetLobby()
 
 room.onJoin((member) => console.log(`${member.meta.name} joined`))
-room.subscribe((message, info, from) => console.log(`${from.meta.name}: ${message.text}`))
+room.subscribe((message, { from }) => console.log(`${from.meta.name}: ${message.text}`))
 
 const me = await room.join({ meta: { name: 'Alice' } })
 await me.publish({ text: 'hello' })
@@ -122,7 +122,7 @@ useEffect(() => room.subscribe((message) => addMessage(message)), [room])
 
 ## Stop listening
 
-Pass `{ signal }` to a listener registration to remove it when you abort the signal, or use `messages()` to iterate messages. Each message is `{ type, data, info, from }`: `type` is `'text'` or `'binary'`, `data` and `info` are what a `subscribe()` or `subscribeBinary()` listener receives, and `from` is the sender's `id`, `meta` and `identity` as they were when the message arrived:
+Pass `{ signal }` to a listener registration to remove it when you abort the signal, or use `messages()` to iterate messages. Each message is `{ type, data, info }`: `type` is `'text'` or `'binary'`, and `data` and `info` are what a `subscribe()` or `subscribeBinary()` listener receives, with `info.from` the sender's `id`, `meta` and `identity` as they were when the message arrived:
 
 ```js
 // chat.js
@@ -131,8 +131,8 @@ Pass `{ signal }` to a listener registration to remove it when you abort the sig
 const controller = new AbortController()
 room.onJoin((participant) => console.log(participant.id), { signal: controller.signal })
 for await (const message of room.messages({ signal: controller.signal })) {
-  if (message.type === 'binary') showVideo(message.from.id, message.data, message.info.track)
-  else console.log(`${message.from.meta.name}: ${message.data.text}`)
+  if (message.type === 'binary') showVideo(message.info.from.id, message.data, message.info.track)
+  else console.log(`${message.info.from.meta.name}: ${message.data.text}`)
   break
 }
 controller.abort()
@@ -156,12 +156,12 @@ Everyone in the room sees the change. The `meta` you read is read-only, and free
 ```js
 // Environment: client
 
-room.subscribe((message, info, from) => showMessage(from.meta.name, message.text))
+room.subscribe((message, { from }) => showMessage(from.meta.name, message.text))
 
 await me.publish({ text: 'hello' })
 ```
 
-`from` is the participant who sent the message. A client can't fake it.
+`info.from` is the participant who sent the message. A client can't fake it.
 
 To receive the messages of one participant only, subscribe on that participant. `room.onJoin()` gives you the participants who join after you, and `room.getParticipants()` the ones already there:
 
@@ -179,7 +179,7 @@ Every read of a room answers at once: `room.getParticipants()`, `room.getPartici
 
 > `info.seq` numbers everyone's messages and the room's announcements in one order for the whole room, so it jumps over the ones this page doesn't receive: its own with `selfDelivery: false`, or those of participants it doesn't subscribe to. It never jumps over a lost message: a page never misses a message on no track (see <Link href="#remove-a-participant" />).
 
-> Each participant's messages arrive in the order it sent them. `from` is that participant as the room knows it when the message arrives, so `from.meta` is its meta then, not when it sent the message. Joins, leaves and meta changes arrive in the same order everywhere, but two pages can see a message and someone else's join in a different order.
+> Each participant's messages arrive in the order it sent them. `info.from` is that participant as the room knows it when the message arrives, so `info.from.meta` is its meta then, not when it sent the message. Joins, leaves and meta changes arrive in the same order everywhere, but two pages can see a message and someone else's join in a different order.
 
 For updates that change many times per second, such as a mouse cursor, publish on a track with `lossy: true`: a page that falls behind skips to the newest one, and its `info.seq` jumps over the ones it skipped.
 
@@ -187,7 +187,7 @@ For updates that change many times per second, such as a mouse cursor, publish o
 // Environment: client
 
 onCursorMove((position) => me.publish(position, { track: 'cursor', lossy: true }))
-room.subscribe((position, info, from) => drawCursor(from.id, position), { track: 'cursor' })
+room.subscribe((position, { from }) => drawCursor(from.id, position), { track: 'cursor' })
 ```
 
 > In `publish()`, `lossy` needs a `track`: a message on no track reaches everyone, in the room's order, and is never skipped. `publishBinary()` without a `track` publishes on the track `'main'`, which takes `lossy` like any other track.
@@ -220,7 +220,7 @@ export async function onGetChat(roomId: string) {
 ```js
 // Environment: client
 
-me.listen((message, from) => showPrivateMessage(from.meta.name, message))
+me.listen((message, { from }) => showPrivateMessage(from.meta.name, message))
 
 await me.send(member, 'meet me in room 2') // `member` from room.onJoin() or room.getParticipants()
 ```
@@ -259,7 +259,7 @@ await Room.send('lobby', { identity: userId }, { badge: 'winner' }) // to every 
 // Environment: client
 
 room.onAnnounce((notice) => showBanner(notice))
-me.listen((message, from) => {
+me.listen((message, { from }) => {
   if (from === null) showSystemMessage(message) // sent by the server
 })
 ```
@@ -308,7 +308,7 @@ try {
 }
 ```
 
-With no `onBeforeJoin()` and no `anyoneCanJoin`, the client can't call `room.join()` itself: users join only through `onJoinChat()`, as themselves. `identity` is your user id, set by the server at `join()`. Every message carries its sender's `identity` (`from.identity`), and a client can't change it.
+With no `onBeforeJoin()` and no `anyoneCanJoin`, the client can't call `room.join()` itself: users join only through `onJoinChat()`, as themselves. `identity` is your user id, set by the server at `join()`. Every message carries its sender's `identity` (`info.from.identity`), and a client can't change it.
 
 <Warning>Check permissions on `identity`, never on `meta`: a client can set its `meta` to anything.</Warning>
 
@@ -410,7 +410,7 @@ export async function onJoinMatch(matchId, name) {
 import { onJoinMatch } from './Match.telefunc'
 
 const { room, me, host } = await onJoinMatch(matchId, 'Alice')
-room.subscribe((state, info, from) => {
+room.subscribe((state, { from }) => {
   if (from.identity === 'host') render(state)
 })
 await me.send(host, { type: 'move', to: 'e4' })
@@ -649,8 +649,8 @@ Server-side.
 | `getParticipant(id)` | One participant, or `null`. |
 | `getParticipants({ hidden: true })` | Server-side: the hidden participants. |
 | `onJoin(cb)` / `onLeave(cb)` | Someone joined / left. |
-| `subscribe(cb, { track? }?)` / `subscribeBinary(cb, { track? }?)` | Everyone's messages, or those on `track` / binary frames: `cb(message, info, from)`, with `info` `{ seq, timestamp }`, plus `{ track, meta }` on a track. |
-| `messages({ signal? }?)` | Everyone's messages and binary frames, to read with `for await`: each `{ type, data, info, from }`. |
+| `subscribe(cb, { track? }?)` / `subscribeBinary(cb, { track? }?)` | Everyone's messages, or those on `track` / binary frames: `cb(message, info)`, with `info` `{ seq, timestamp, from }`, plus `{ track, meta }` on a track. |
+| `messages({ signal? }?)` | Everyone's messages and binary frames, to read with `for await`: each `{ type, data, info }`. |
 | `onAnnounce(cb)` | `Room.announce()` messages: `cb(message, info)`. |
 | `onEmpty(cb)` / `onClose(cb)` | The last participant left / the room closed, with `cause.type`: `'closed'`, or on a page `'removed'` (the page's last participant of it was removed) or `'disconnected'`. |
 
@@ -663,7 +663,7 @@ Properties: `id`, `meta`, `count`, `isEmpty`, `isClosed`.
 | `publish(message, { track?, lossy?, retain? }?)` | Send to everyone. `lossy` needs `track`. |
 | `publishBinary(data, { track?, meta?, retain?, lossy? }?)` | Send binary to everyone. Without `track`, on the track `'main'`. |
 | `send(to, message, { ack? }?)` | Send to one participant. |
-| `listen(cb)` | Receive private messages; return a value to reply. |
+| `listen(cb)` | Receive private messages: `cb(message, { from })`; return a value to reply. |
 | `setMeta(meta)` / `updateMeta(meta)` | Replace / update your `meta`. |
 | `onChange(cb)` | Your `meta`, `isConnected` or `demand` changed; once for the changes of one task. |
 | `leave()` / `onLeave(cb)` | Leave / you left, with `cause.type`: `'left'`, `'removed'`, `'closed'`, `'disconnected'`, or `'unknown'` (it left while nothing here listened to the room, too long ago to know why). |
@@ -675,7 +675,7 @@ Properties: `id`, `meta`, `identity`, `isConnected`, and `demand`: the tracks of
 
 | Method | Description |
 |---|---|
-| `subscribe(cb, { track? }?)` / `subscribeBinary(cb, { track? }?)` | This participant's messages, or those on `track` / binary frames: `cb(message, info)`. |
+| `subscribe(cb, { track? }?)` / `subscribeBinary(cb, { track? }?)` | This participant's messages, or those on `track` / binary frames: `cb(message, info)`, as on `room`. |
 | `onChange(cb)` / `onLeave(cb)` | This participant's `meta` or connection changed / this participant left. |
 | `onDisconnect(cb)` / `onReconnect(cb)` | This participant's connection dropped / is back. |
 

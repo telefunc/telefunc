@@ -210,20 +210,19 @@ type BinaryPublishOptions = {
   lossy?: boolean
 }
 
-/** One message `messages()` yields: what a `subscribe()` or `subscribeBinary()` listener receives, `from` being the
- *  sender as it was when the message arrived. */
+/** What a room hands a listener with a message: its order, and `from`, who sent it, as it was when the message
+ *  arrived. */
+type MessageInfo<P extends ParticipantMeta = ParticipantMeta> = ChannelPublishInfo & { from: Sender<P> }
+
+/** One message `messages()` yields: what a `subscribe()` or `subscribeBinary()` listener receives. */
 type RoomMessage<Pub = unknown, P extends ParticipantMeta = ParticipantMeta> =
-  | { type: 'text'; data: Pub; info: ChannelPublishInfo; from: Sender<P> }
-  | { type: 'binary'; data: Uint8Array; info: ChannelPublishInfo & BinaryFrameInfo; from: Sender<P> }
+  | { type: 'text'; data: Pub; info: MessageInfo<P> }
+  | { type: 'binary'; data: Uint8Array; info: MessageInfo<P> & BinaryFrameInfo }
 
-type RoomBinaryListener<P extends ParticipantMeta = ParticipantMeta> = (
+type BinaryListener<P extends ParticipantMeta = ParticipantMeta> = (
   data: Uint8Array,
-  info: ChannelPublishInfo & BinaryFrameInfo,
-  from: Sender<P>,
+  info: MessageInfo<P> & BinaryFrameInfo,
 ) => unknown
-
-/** One member's binary frames: the sender is the member subscribed to. */
-type MemberBinaryListener = (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown
 
 /** A returnable multi-party room with presence, membership, and events. Its reads answer at once: a page's room is
  *  current while the page is connected; a server's room is as of its `Room.get()`, and current from then on while you
@@ -246,16 +245,13 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
 
   /** Receive the messages published on `track`. Returns an unsubscribe function. */
   subscribe(
-    callback: (data: Pub, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender<P>) => unknown,
+    callback: (data: Pub, info: MessageInfo<P> & BinaryFrameInfo) => unknown,
     options: { track: string; signal?: AbortSignal },
   ): () => void
   /** Receive all participant messages. Returns an unsubscribe function. */
-  subscribe(
-    callback: (data: Pub, info: ChannelPublishInfo, from: Sender<P>) => unknown,
-    options?: { signal?: AbortSignal },
-  ): () => void
+  subscribe(callback: (data: Pub, info: MessageInfo<P>) => unknown, options?: { signal?: AbortSignal }): () => void
   /** Receive all members' binary frames, optionally filtered to one track at the source. */
-  subscribeBinary(callback: RoomBinaryListener<P>, options?: { track?: string; signal?: AbortSignal }): () => void
+  subscribeBinary(callback: BinaryListener<P>, options?: { track?: string; signal?: AbortSignal }): () => void
   /** Iterate participant messages until aborted, closed, or the loop ends. */
   messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<RoomMessage<Pub, P>>
 
@@ -306,8 +302,12 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   send(to: string | Sender<P>, data: unknown): Promise<RoomSendReceipt>
   send(to: string | Sender<P>, data: unknown, options: { ack?: false }): Promise<RoomSendReceipt>
   send(to: string | Sender<P>, data: unknown, options: { ack: true }): Promise<RoomAckReceipt>
-  /** Receive private messages; returning a value answers an acknowledged send. */
-  listen(callback: (data: unknown, from: Sender<P> | null) => unknown, options?: { signal?: AbortSignal }): () => void
+  /** Receive private messages, `info.from` being who sent it, or `null` for your server (`Room.send()`); returning a
+   *  value answers an acknowledged send. */
+  listen(
+    callback: (data: unknown, info: { from: Sender<P> | null }) => unknown,
+    options?: { signal?: AbortSignal },
+  ): () => void
 
   /** Your tracks that someone receives now, by track name in code-unit order (as `sort()` orders strings). */
   readonly demand: readonly TrackDemand<P, Pub>[]
@@ -356,13 +356,13 @@ interface RemoteParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = u
 
   /** Receive this member's messages on `track`. Returns an unsubscribe function. */
   subscribe(
-    callback: (data: Pub, info: ChannelPublishInfo & BinaryFrameInfo) => unknown,
+    callback: (data: Pub, info: MessageInfo<P> & BinaryFrameInfo) => unknown,
     options: { track: string; signal?: AbortSignal },
   ): () => void
   /** Receive only this member's messages. Returns an unsubscribe function. */
-  subscribe(callback: (data: Pub, info: ChannelPublishInfo) => unknown, options?: { signal?: AbortSignal }): () => void
+  subscribe(callback: (data: Pub, info: MessageInfo<P>) => unknown, options?: { signal?: AbortSignal }): () => void
   /** Receive only this member's binary frames, optionally filtered to one track. */
-  subscribeBinary(callback: MemberBinaryListener, options?: { track?: string; signal?: AbortSignal }): () => void
+  subscribeBinary(callback: BinaryListener<P>, options?: { track?: string; signal?: AbortSignal }): () => void
 
   /** What this member shows changed: its `meta`, whether it is connected, or a field a package adds. */
   onChange(callback: () => void, options?: { signal?: AbortSignal }): () => void

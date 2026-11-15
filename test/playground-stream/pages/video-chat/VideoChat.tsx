@@ -58,7 +58,7 @@ function Person({ call, name }: { call: Call; name: string }) {
     const stopReceiving = showVideo(call, me, remoteVideo.current!)
     const stopSending = sendVideo(camera, me)
     setMessages([])
-    const stopChat = call.subscribe((message, _info, from) => {
+    const stopChat = call.subscribe((message, { from }) => {
       setMessages((messages) => [...messages.slice(-49), { name: from.meta.name, text: message.text }])
     })
 
@@ -148,9 +148,9 @@ function showVideo(call: Call, me: Me, canvas: HTMLCanvasElement) {
   // One player per sender: VP8 frames of two senders through one decoder corrupt the picture
   const players = new Map<string, ReturnType<typeof createPlayer>>()
   const stopFrames = call.subscribeBinary(
-    (frame, info, from) => {
+    (frame, { from, meta }) => {
       if (from.id === me.id) return
-      const { isKeyframe, ordinal } = info.meta as { isKeyframe: boolean; ordinal: number }
+      const { isKeyframe, ordinal } = meta as { isKeyframe: boolean; ordinal: number }
       let player = players.get(from.id)
       // A frame is missing: the delta frames after it can't be decoded, so restart from the next key frame
       if (player?.next !== ordinal) {

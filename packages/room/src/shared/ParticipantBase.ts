@@ -91,7 +91,7 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   private leftCause: LeaveCause | null = null
   // Each list is made when its first listener is added.
   private leaveListeners: Listeners<(cause: LeaveCause) => unknown> | null = null
-  private messageListeners: Listeners<(data: unknown, from: Sender | null) => unknown> | null = null
+  private messageListeners: Listeners<(data: unknown, info: { from: Sender | null }) => unknown> | null = null
   private changeListeners: Listeners<() => unknown> | null = null
   /** What `onChange`'s listeners last heard of, while they listen. */
   private seen: Shown | null = null
@@ -244,7 +244,7 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
     await this.link.request(this.id, { __r: 'req-leave' })
   }
 
-  listen(callback: (data: unknown, from: Sender | null) => unknown, options?: ListenerOptions): () => void {
+  listen(callback: (data: unknown, info: { from: Sender | null }) => unknown, options?: ListenerOptions): () => void {
     if (options?.signal?.aborted) return makeDisposer()
     const unlisten = this.register((this.messageListeners ??= new Listeners()), callback, options)
     this._flushHeld({ deliver: (msg) => this.fireInbox(msg), deliverAck: (msg) => this.fireInboxAck(msg) })
@@ -305,8 +305,8 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   }
 
   private fireInbox(msg: InboxMessage): void {
-    const sender = this.inboxSender(msg)
-    for (const cb of this.messageListeners?.list() ?? []) this.invoke(cb, msg.data, sender)
+    const info = { from: this.inboxSender(msg) }
+    for (const cb of this.messageListeners?.list() ?? []) this.invoke(cb, msg.data, info)
   }
 
   /** Channel's rule (`soleAnswer`) picks the reply; a throw is the failure reply (see `toRoomFailure`: a bug is
@@ -314,7 +314,7 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   private async fireInboxAck(msg: InboxMessage): Promise<RoomResult> {
     let answer: unknown
     try {
-      answer = await soleAnswer(this.messageListeners?.list() ?? [], msg.data, this.inboxSender(msg))
+      answer = await soleAnswer(this.messageListeners?.list() ?? [], msg.data, { from: this.inboxSender(msg) })
     } catch (err) {
       return toRoomFailure(err, (e) => this._reportError(e), this._bugMessage)
     }

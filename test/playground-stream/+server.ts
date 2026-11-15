@@ -307,7 +307,7 @@ app.post('/api/room-cross-instance/watch', async (c) => {
   const fixture = roomId ? crossInstanceRooms.get(roomId) : undefined
   if (!fixture) return c.json({ ok: false, reason: 'room fixture not joined on this instance' }, 404)
   const track = c.req.query('track')!
-  fixture.room.subscribeBinary((data, _info, from) => fixture.frames.push(`${track}:${nameOf(from)}:${data[0]}`), {
+  fixture.room.subscribeBinary((data, { from }) => fixture.frames.push(`${track}:${nameOf(from)}:${data[0]}`), {
     track,
   })
   return c.json({ ok: true, instance: INST })

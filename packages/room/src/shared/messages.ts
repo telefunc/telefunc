@@ -15,11 +15,11 @@ import { senderSnapshot } from './arguments.js'
 
 type Source = {
   subscribe(
-    callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => void,
+    callback: (data: unknown, info: ChannelPublishInfo & { from: Sender }) => void,
     options: { signal: AbortSignal },
   ): () => void
   subscribeBinary(
-    callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => void,
+    callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo & { from: Sender }) => void,
     options: { signal: AbortSignal },
   ): () => void
   onClose(callback: () => void, options: { signal: AbortSignal }): () => void
@@ -51,17 +51,14 @@ function roomMessages(source: Source, signal?: AbortSignal): AsyncIterableIterat
     if (signal?.aborted) return onAbort()
     signal?.addEventListener('abort', onAbort, { once: true })
     source.onClose(() => finish(), { signal: lifetime.signal })
-    source.subscribe(
-      (data, info, from) => receive({ type: 'text', data, info, from }, utf8ByteLength(stringify(data))),
-      {
-        signal: lifetime.signal,
-      },
-    )
+    source.subscribe((data, info) => receive({ type: 'text', data, info }, utf8ByteLength(stringify(data))), {
+      signal: lifetime.signal,
+    })
     // The bytes are this listener's own copy.
     source.subscribeBinary(
-      (data, info, from) =>
+      (data, info) =>
         receive(
-          { type: 'binary', data, info, from },
+          { type: 'binary', data, info },
           data.byteLength + (info.meta ? utf8ByteLength(stringify(info.meta)) : 0),
         ),
       { signal: lifetime.signal },
@@ -115,14 +112,16 @@ class MessageQueue {
 
   /** Queues `message`, its sender as it is now, unless its bytes would pass the limit; then it queues nothing. */
   push(message: RoomMessage, payloadBytes: number): boolean {
-    const from = this.snapshotOf(message.from)
+    const from = this.snapshotOf(message.info.from)
     const size = payloadBytes + 64
     const holders = this.holders.get(from) ?? 0
     const added = size + (holders === 0 ? this.sizeOf(from) : 0)
     if (this.bytes + added > PUBLISH_HOLD_BYTES) return false
     this.bytes += added
     this.holders.set(from, holders + 1)
-    this.queue.push({ message: { ...message, from }, size })
+    // The listener's `info` is its own.
+    message.info.from = from
+    this.queue.push({ message, size })
     return true
   }
 
@@ -131,12 +130,13 @@ class MessageQueue {
     if (entry === undefined) return undefined
     const { message, size } = entry
     this.bytes -= size
-    const holders = this.holders.get(message.from)! - 1
+    const { from } = message.info
+    const holders = this.holders.get(from)! - 1
     if (holders > 0) {
-      this.holders.set(message.from, holders)
+      this.holders.set(from, holders)
     } else {
-      this.holders.delete(message.from)
-      this.bytes -= this.sizeOf(message.from)
+      this.holders.delete(from)
+      this.bytes -= this.sizeOf(from)
     }
     return message
   }

@@ -33,8 +33,8 @@ type TrackFilter = TrackKey | EveryTrack
 type TrackCounts = { all: number; named: Map<TrackKey, number> }
 type CountedTrack = { counts: TrackCounts; track: TrackFilter }
 /** A listener on tracks: `subscribeBinary()`'s gets their binary frames, `subscribe({ track })`'s their messages. */
-type TrackListener<From extends unknown[]> = {
-  cb: (data: any, info: ChannelPublishInfo & BinaryFrameInfo, ...from: From) => unknown
+type TrackListener = {
+  cb: (data: any, info: ChannelPublishInfo & BinaryFrameInfo, from: ResolvedSender) => unknown
   track: TrackFilter
   text: boolean
 }
@@ -45,8 +45,8 @@ type Adder = 'app' | 'field'
 
 /** The listeners on one member, each list made when its first listener is added: most members never get one. */
 type MemberListeners = {
-  data: Listeners<(data: unknown, info: ChannelPublishInfo) => unknown> | null
-  tracks: { listeners: Listeners<TrackListener<[]>>; counts: TrackCounts } | null
+  data: Listeners<(data: unknown, info: ChannelPublishInfo, from: ResolvedSender) => unknown> | null
+  tracks: { listeners: Listeners<TrackListener>; counts: TrackCounts } | null
   change: Listeners<() => void> | null
   disconnect: Listeners<() => void> | null
   reconnect: Listeners<() => void> | null
@@ -109,7 +109,7 @@ class RoomState {
     (data: unknown, info: ChannelPublishInfo, from: ResolvedSender) => unknown
   > = new Listeners()
 
-  private readonly roomTrackListeners: Listeners<TrackListener<[ResolvedSender]>> = new Listeners()
+  private readonly roomTrackListeners: Listeners<TrackListener> = new Listeners()
 
   private readonly roomTracks: TrackCounts = newTrackCounts()
   /** The members with a `subscribe()` listener. */
@@ -245,7 +245,7 @@ class RoomState {
   // A member's own listeners: one added after the member left is never held, as its listeners went at its leave.
   subscribeMember(
     entry: MemberEntry,
-    cb: MessageListener<[]>,
+    cb: MessageListener<[ResolvedSender]>,
     opts: TrackListenerOptions | undefined,
     adder: Adder,
   ): () => void {
@@ -259,7 +259,7 @@ class RoomState {
 
   subscribeMemberBinary(
     entry: MemberEntry,
-    cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown,
+    cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: ResolvedSender) => unknown,
     opts: TrackListenerOptions | undefined,
     adder: Adder,
   ): () => void {
@@ -358,7 +358,7 @@ class RoomState {
     const from = this.model.resolveSender(event)
     this.fireAll(this.roomDataListeners, event.data, info, from)
     const dataListeners = 'entry' in from ? this.memberListeners.get(from.entry)?.data : undefined
-    if (dataListeners) this.fireAll(dataListeners, event.data, info)
+    if (dataListeners) this.fireAll(dataListeners, event.data, info, from)
   }
 
   /** A frame names only its sender's id: one from a member not yet known surfaces as `{ id, meta: {} }`. */
@@ -381,7 +381,7 @@ class RoomState {
     if (!tracks) return
     for (const listener of tracks.listeners.list()) {
       if (hearsFrame(listener, frame))
-        invokeChannelListener(listener.cb, [listenerData(frame), frameInfo], this.reportError)
+        invokeChannelListener(listener.cb, [listenerData(frame), frameInfo, from], this.reportError)
     }
   }
 
@@ -401,11 +401,7 @@ class RoomState {
     return listeners
   }
 
-  private registerRoomTrack(
-    listener: TrackListener<[ResolvedSender]>,
-    opts: ListenerOptions | undefined,
-    adder: Adder,
-  ): () => void {
+  private registerRoomTrack(listener: TrackListener, opts: ListenerOptions | undefined, adder: Adder): () => void {
     const filter: CountedTrack = { counts: this.roomTracks, track: listener.track }
     return this.register(this.roomTrackListeners, listener, { adder, options: opts, filter })
   }
@@ -413,7 +409,7 @@ class RoomState {
   private registerMemberTrack(
     entry: MemberEntry,
     listeners: MemberListeners,
-    listener: TrackListener<[]>,
+    listener: TrackListener,
     opts: ListenerOptions | undefined,
     adder: Adder,
   ): () => void {
@@ -503,19 +499,16 @@ function normalizeTrackFilter(opts: TrackListenerOptions | undefined): TrackFilt
   return trackKey(track)
 }
 
-function binaryListener<From extends unknown[]>(
-  cb: TrackListener<From>['cb'],
-  opts: TrackListenerOptions | undefined,
-): TrackListener<From> {
+function binaryListener(cb: TrackListener['cb'], opts: TrackListenerOptions | undefined): TrackListener {
   return { cb, track: normalizeTrackFilter(opts), text: false }
 }
 
-function textListener<From extends unknown[]>(cb: TrackListener<From>['cb'], track: unknown): TrackListener<From> {
+function textListener(cb: TrackListener['cb'], track: unknown): TrackListener {
   assertUsage(isNamedTrack(track), 'subscribe() track should be a valid non-empty string')
   return { cb, track: trackKey(track), text: true }
 }
 
-function hearsFrame({ track, text }: Omit<TrackListener<[]>, 'cb'>, frame: BinaryFrame): boolean {
+function hearsFrame({ track, text }: Omit<TrackListener, 'cb'>, frame: BinaryFrame): boolean {
   return text === frame.text && (track === EVERY_TRACK || track === frame.track)
 }
 

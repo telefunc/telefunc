@@ -389,8 +389,8 @@ function Room() {
           const message = (await next).value!
           received.push(
             message.type === 'text'
-              ? `text ${message.from.meta.name}: ${message.data}`
-              : `binary ${message.from.meta.name} ${message.info.track}: ${message.data} ${JSON.stringify(message.info.meta)}`,
+              ? `text ${message.info.from.meta.name}: ${message.data}`
+              : `binary ${message.info.from.meta.name} ${message.info.track}: ${message.data} ${JSON.stringify(message.info.meta)}`,
           )
         }
         await stream.return!()
@@ -428,7 +428,7 @@ function Room() {
         lobby.onJoin((m) => events.push(`join:${m.meta.name}`))
         lobby.onLeave((m) => events.push(`leave:${m.meta.name}`))
         const received: Array<{ text: unknown; from: unknown }> = []
-        lobby.subscribe((data, _info, from) => {
+        lobby.subscribe((data, { from }) => {
           received.push({ text: (data as { text: string }).text, from: from.meta.name })
         })
 
@@ -485,7 +485,7 @@ function Room() {
       {scenario('participant', 'Server-Joined Participant', 'Server-side join + publish', async () => {
         const [roomId, observer] = await createRoom('participant')
         const received: Array<{ text: unknown; from: unknown }> = []
-        observer.subscribe((data, _info, from) => {
+        observer.subscribe((data, { from }) => {
           received.push({ text: (data as { text: string }).text, from: from.meta.name })
         })
 
@@ -497,7 +497,7 @@ function Room() {
 
         const ally = await observer.join({ meta: { name: 'Ally' } })
         const dms: Array<{ data: unknown; fromAlly: boolean }> = []
-        me.listen((data, from) => dms.push({ data, fromAlly: from?.id === ally.id }))
+        me.listen((data, { from }) => dms.push({ data, fromAlly: from?.id === ally.id }))
         await ally.send(me.id, 'psst')
 
         await pollUntil(() => {
@@ -532,11 +532,11 @@ function Room() {
           track: string
           meta: Record<string, unknown> | null
         }> = []
-        videoRoom.subscribeBinary((data, info, from) => {
+        videoRoom.subscribeBinary((data, info) => {
           frames.push({
             size: data.byteLength,
             firstByte: data[0]!,
-            fromSelf: from.id === me.id,
+            fromSelf: info.from.id === me.id,
             track: info.track,
             meta: info.meta,
           })
@@ -655,7 +655,7 @@ function Room() {
         const [roomId, room] = await createRoom('at-call')
         const me = await room.join({ meta: { name: 'Me' } })
         const messages: Array<{ data: unknown; from: string }> = []
-        room.subscribe((data, _info, from) => messages.push({ data, from: from.meta.name as string }))
+        room.subscribe((data, { from }) => messages.push({ data, from: from.meta.name as string }))
         const frames: number[][] = []
         room.subscribeBinary((data) => frames.push([...data]))
         const announcements: unknown[] = []
@@ -722,10 +722,10 @@ function Room() {
         const room = await onGetRoom(roomId)
         const me = await room.join({ meta: { name: 'Page' } })
         const seen: unknown[] = []
-        room.subscribe((data, _info, from) => {
+        room.subscribe((data, { from }) => {
           if (from.id === me.id) seen.push(data)
         })
-        room.subscribeBinary((data, _info, from) => {
+        room.subscribeBinary((data, { from }) => {
           if (from.id === me.id) seen.push([...data])
         })
         await Promise.all([me.publish('p1'), me.publishBinary(new Uint8Array([2])), me.publish('p2')])
@@ -865,12 +865,12 @@ function Room() {
         const roomId = await createRoomId('sender')
         const room = await onOpenSlowGuardRoom(roomId)
         const names: unknown[] = []
-        room.subscribe((_data, _info, from) => names.push(from.meta.name))
+        room.subscribe((_data, { from }) => names.push(from.meta.name))
         const me = await room.join({ meta: { name: 'A' } })
         // A view whose roster may still be on its way.
         const other = await onGetRoom(roomId)
         const otherNames: unknown[] = []
-        other.subscribe((_data, _info, from) => otherNames.push(from.meta.name))
+        other.subscribe((_data, { from }) => otherNames.push(from.meta.name))
 
         const published = me.publish(0) // its guard waits 50 ms
         await me.setMeta({ name: 'B' })
@@ -1555,7 +1555,7 @@ function Room() {
           const announcements: unknown[] = []
           lobby.onAnnounce((data) => announcements.push(data))
           const system: Array<{ data: unknown; fromRoom: boolean }> = []
-          me.listen((data, from) => system.push({ data, fromRoom: from === null }))
+          me.listen((data, { from }) => system.push({ data, fromRoom: from === null }))
           await me.updateMeta({}) // same-channel ack orders the declarations before the HTTP-triggered broadcasts
 
           let kicked = false
@@ -1992,9 +1992,9 @@ function Room() {
         const observer = await onGetRoom(roomId)
         const remoteX = await getParticipantWhenJoined(observer, x.id)
         const xText: string[] = []
-        const xBin: number[] = []
-        remoteX.subscribe((data) => xText.push(data as string))
-        remoteX.subscribeBinary((data) => xBin.push(data[0]!), { track: 'main' })
+        const xBin: string[] = []
+        remoteX.subscribe((data, { from }) => xText.push(`${from.meta.name}:${data}`))
+        remoteX.subscribeBinary((data, { from }) => xBin.push(`${from.meta.name}:${data[0]}`), { track: 'main' })
         // Room-level control: proves Y's traffic really was delivered, so xText's absence means something.
         const all: string[] = []
         observer.subscribe((data) => all.push(data as string))
@@ -2006,7 +2006,7 @@ function Room() {
 
         await pollUntil(() => ({
           result: { xText, xBin, all: [...all].sort() },
-          done: all.includes('x1') && all.includes('y1') && xBin.includes(7),
+          done: all.includes('x1') && all.includes('y1') && xBin.includes('X:7'),
         }))
         releaseRoom()
       })}
@@ -2356,7 +2356,7 @@ function Room() {
           const text: string[] = []
           const frames: Array<[string, number, unknown]> = []
           late.subscribe((data) => text.push(data as string))
-          late.subscribeBinary((data, info, from) => frames.push([info.track, data[0]!, from.meta.name]))
+          late.subscribeBinary((data, info) => frames.push([info.track, data[0]!, info.from.meta.name]))
           await a.publish('live')
           await a.publishBinary(new Uint8Array([4]), { track: 'cam' })
           await pollUntil(async () => {
@@ -2391,7 +2391,7 @@ function Room() {
         const late = await onGetRoom(roomId)
         const frames: Array<[string, number, unknown]> = []
         const left: unknown[] = []
-        late.subscribeBinary((data, info, from) => frames.push([info.track, data[0]!, from.meta.name ?? null]))
+        late.subscribeBinary((data, info) => frames.push([info.track, data[0]!, info.from.meta.name ?? null]))
         late.onLeave((member) => left.push(member.meta.name))
         await onWatchEveryFrame(roomId)
         // The page's replay and the server view's each wait on the retained read.
