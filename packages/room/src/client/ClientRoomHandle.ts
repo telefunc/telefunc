@@ -22,7 +22,8 @@ import {
   type RoomStubRequest,
 } from '../shared/protocol.js'
 import { departureCause } from '../shared/RoomModel.js'
-import { RoomState, type RoomStateOwner, type RoomStateView, type WantChange } from '../shared/state.js'
+import { RoomState, type RoomStateOwner, type WantChange } from '../shared/RoomState.js'
+import { RoomRemotes } from '../shared/RoomView.js'
 import { ROOM_TRACK_WANTS_MAX } from '../shared/constants.js'
 import { roomResultValue } from '../shared/errors.js'
 import { RoomMirror } from './RoomMirror.js'
@@ -43,27 +44,28 @@ type ClientRoomEvent = RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomJoi
 type ClientRoomHandleOptions = {
   end: ClientBroadcast
   snapshot: RoomSnapshotMetadata
-  /** The user's `Room` over the handle, which the room's state is the state of. */
-  view: RoomStateView
 }
 
 /** What one room a telefunction returned is to its server stub, through the room's own Broadcast channel: its frames
  *  carry events and data, its acked messages requests. The user's `Room` over it carries none of this. */
 class ClientRoomHandle implements RoomStateOwner, PageLink {
   readonly state: RoomState
+  /** The app's participants of the room, which the user's `Room` and the handle's participants hand out. */
+  readonly remotes: RoomRemotes
   private readonly end: ClientBroadcast
   private readonly mirror: RoomMirror
   private readonly localParticipants = new Map<string, ClientParticipant>()
   private readonly joins = new PendingJoins()
 
-  constructor({ end, snapshot, view }: ClientRoomHandleOptions) {
+  constructor({ end, snapshot }: ClientRoomHandleOptions) {
     this.end = end
     this.mirror = new RoomMirror({
       snapshot,
       onMemberLeft: (id, cause) => this.memberLeft(id, cause),
       onMemberMeta: (id, update) => this.localParticipants.get(id)?._acceptMeta(update),
     })
-    this.state = new RoomState({ view, model: this.mirror.model, owner: this, trackWantsMax: ROOM_TRACK_WANTS_MAX })
+    this.state = new RoomState({ model: this.mirror.model, owner: this, trackWantsMax: ROOM_TRACK_WANTS_MAX })
+    this.remotes = new RoomRemotes({ state: this.state, adder: 'app' })
 
     // Delivery handlers are local-only. What the server relays is driven by the declared wants: control always arrives,
     // text while subscribed, binary per `sub-binary`.
@@ -158,7 +160,7 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
   }
 
   resolveSender(id: string): Sender | null {
-    return this.state.getRemote(id)
+    return this.remotes.get(id)
   }
 
   deliverPrivate(field: string, from: string, data: unknown): void {
@@ -199,7 +201,7 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
         })
       case 'announce':
         return this.notify({ __r: 'sub-text', announce: change.on, members: {} })
-      case 'binary': {
+      case 'track': {
         const { member, track, on } = change.change
         return this.notify({
           __r: 'sub-binary',

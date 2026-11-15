@@ -27,7 +27,6 @@ import type {
 } from '../shared/protocol.js'
 import type { RoomDataEnvelope, RoomDmAckEnvelope, RoomIncarnation } from './protocol.js'
 import type { RoomModel } from '../shared/RoomModel.js'
-import type { RoomState } from '../shared/state.js'
 import type { ParticipantMeta, RoomAckReceipt, RoomSendReceipt, Sender } from '../types.js'
 import { memberCellKey } from './store/cells.js'
 import { reportRoomError } from './reportRoomError.js'
@@ -48,8 +47,7 @@ interface RoomWritesOwner {
 type RoomWritesOptions = {
   owner: RoomWritesOwner
   incarnation: RoomIncarnation
-  model: Pick<RoomModel, 'closed' | 'acceptedMeta'>
-  state: Pick<RoomState, 'getRemote'>
+  model: Pick<RoomModel, 'closed' | 'acceptedMeta' | 'entry'>
   /** The view the writes commit through: it applies a member's committed meta or connection event at once, and admits
    *  a binary publish's track. */
   replica: Pick<RoomReplica, 'applyControl' | 'admitTrack'>
@@ -72,16 +70,14 @@ class RoomWrites {
   private readonly owner: RoomWritesOwner
   private readonly incarnation: RoomIncarnation
   private readonly model: RoomWritesOptions['model']
-  private readonly state: RoomWritesOptions['state']
   private readonly replica: RoomWritesOptions['replica']
   private readonly acks: PendingDmAcks
   private readonly localParticipants: RoomWritesOptions['localParticipants']
 
-  constructor({ owner, incarnation, model, state, replica, acks, localParticipants }: RoomWritesOptions) {
+  constructor({ owner, incarnation, model, replica, acks, localParticipants }: RoomWritesOptions) {
     this.owner = owner
     this.incarnation = incarnation
     this.model = model
-    this.state = state
     this.replica = replica
     this.acks = acks
     this.localParticipants = localParticipants
@@ -200,9 +196,11 @@ class RoomWrites {
 
   /** A member that left while its call waited has no sender to show a guard. */
   private memberSender(from: string): Sender {
-    const known = this.state.getRemote(from) ?? this.localParticipants.get(from)
-    if (!known) throw participantLeftError()
-    return senderSnapshot(from, known.meta, known.identity)
+    const entry = this.model.entry(from)
+    if (entry) return senderSnapshot(from, entry.meta.object, entry.identity)
+    const local = this.localParticipants.get(from)
+    if (!local) throw participantLeftError()
+    return senderSnapshot(from, local.meta, local.identity)
   }
 
   async sendDm(from: string, to: string, data: unknown, ack: boolean): Promise<RoomSendReceipt | RoomAckReceipt> {
@@ -284,8 +282,8 @@ class RoomWrites {
   }
 
   private async resolveMember(id: string): Promise<Sender | null> {
-    const remote = this.state.getRemote(id)
-    if (remote) return senderSnapshot(id, remote.meta, remote.identity)
+    const entry = this.model.entry(id)
+    if (entry) return senderSnapshot(id, entry.meta.object, entry.identity)
     const [member] = await reapAndReadMembersById(this.incarnation, [id])
     return member === undefined ? null : senderSnapshot(id, member.meta, member.identity ?? null)
   }

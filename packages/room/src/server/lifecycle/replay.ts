@@ -8,7 +8,7 @@ import { EVERY_MEMBER, EVERY_TRACK, type BinaryFrame, type BinaryWantChange } fr
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from '../lanes/binaryWants.js'
 import type { MemberWants } from '../../shared/protocol.js'
 import type { RoomDataEnvelope } from '../protocol.js'
-import type { RoomState } from '../../shared/state.js'
+import type { RoomState } from '../../shared/RoomState.js'
 import { ROOM_REPLAY_HOLD_BYTES_MAX, ROOM_REPLAY_HOLD_ENTRY_BYTES } from '../constants.js'
 assertIsNotBrowser()
 

@@ -11,7 +11,7 @@ user code ──► Room (ServerRoom, the user's facade)              client: Cl
               handle (RoomHandle, one per Room.get())                                   │
                 │  guards, tail, stubs, participants, listeners                         │
                 ▼                                                                       │
-              replica (RoomReplica, one per room per process) ── model (RoomModel) ── views (RoomState)
+              replica (RoomReplica, one per room per process) ── model (RoomModel) ── states (RoomState)
                 │  lease, heartbeat, demand, authority sync
                 ▼
               lane plan (LanePlan) ── which lanes this process subscribes, from its holders' wants
@@ -58,8 +58,11 @@ this one too, applies the event to its model, and its views tell their listeners
   lease, the heartbeat and the demand. It keeps the handles it serves, and what they are to the room (observed,
   listened, a tail held, the members owned), in the methods each change of a handle goes through; the lane plan reads
   those roles as data.
-- **model** / **view**: a room's members, meta and closure as one side knows them (`RoomModel`), and one listener set
-  over it (`RoomState`).
+- **model**: a room's members, meta and closure as one side knows them (`RoomModel`).
+- **state**: one side's listeners on a model, the app's and the package fields', and the wants they amount to
+  (`RoomState`).
+- **view**: the public room for one adder, the app or a package's field, with the participants it hands out
+  (`RoomView` over `RoomRemotes`).
 - **stub**: the server end of a client's room: what the client wants, and the members it joined (`RoomStub`).
 - **holder**: anything lanes replay into: a stub, or the handle's own listeners (`LaneHolder`).
 - **wants**: the lanes a holder asks for: text, and binary per member and track (`WantsIndex`).

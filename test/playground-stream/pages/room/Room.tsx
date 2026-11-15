@@ -218,17 +218,19 @@ async function joinAndSendMalformed(kind: 'request' | 'publish' | 'reply'): Prom
   // The room's own channel, past the API that checks what goes on it: its handle holds it, as its state's owner.
   const { end } = (
     room as unknown as {
-      _state: {
-        owner: {
-          end: {
-            send(data: unknown, options: { ack: true }): Promise<unknown>
-            publish(data: unknown): Promise<unknown>
-            _sendReply(reply: Promise<unknown>, failure: unknown): void
+      _remotes: {
+        state: {
+          owner: {
+            end: {
+              send(data: unknown, options: { ack: true }): Promise<unknown>
+              publish(data: unknown): Promise<unknown>
+              _sendReply(reply: Promise<unknown>, failure: unknown): void
+            }
           }
         }
       }
     }
-  )._state.owner
+  )._remotes.state.owner
   if (kind === 'reply') {
     // Before the join: a DM that arrives while the join settles is answered through the end as it is then.
     const sendReply = end._sendReply.bind(end)
@@ -2804,8 +2806,9 @@ function Room() {
         await pollUntil(() => ({ done: seen.at(-1) === 19 }))
         await new Promise((resolve) => setTimeout(resolve))
         // The room's own channel: its handle holds it, as its state's owner.
-        const { end } = (view as unknown as { _state: { owner: { end: { newestPublishes: Map<string, unknown> } } } })
-          ._state.owner
+        const { end } = (
+          view as unknown as { _remotes: { state: { owner: { end: { newestPublishes: Map<string, unknown> } } } } }
+        )._remotes.state.owner
         const receiptSeqs = new Set(receipts.map((receipt) => receipt.seq))
         setResult(JSON.stringify({ receipts: receiptSeqs.size, seen, listed: end.newestPublishes.size }))
       })}

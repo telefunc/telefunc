@@ -12,7 +12,8 @@ import {
   type ParticipantStubRequest,
 } from '../shared/protocol.js'
 import { roomResultValue } from '../shared/errors.js'
-import { RoomState, RoomStateView, type RoomStateOwner } from '../shared/state.js'
+import { RoomState, type RoomStateOwner } from '../shared/RoomState.js'
+import { RoomRemotes } from '../shared/RoomView.js'
 import {
   ClientParticipant,
   acceptedMeta,
@@ -81,8 +82,8 @@ class LoneMember implements PageLink {
     return null
   }
 
-  get state(): RoomState {
-    return this.room._state
+  get remotes(): RoomRemotes {
+    return this.room.remotes
   }
 
   /** The package fields run on the page's rooms of its room. */
@@ -123,19 +124,22 @@ class LoneMember implements PageLink {
 /** The room a `me` returned alone lists its watchers by: the roster and presence events its stub sends once someone
  *  receives one of its tracks; it knows nobody before. Its listeners declare nothing: the stub's channel carries no
  *  message of the room. */
-class LoneRoom extends RoomStateView implements RoomStateOwner {
-  /** @internal */
-  readonly _state: RoomState
+class LoneRoom implements RoomStateOwner {
   readonly mirror: RoomMirror
+  readonly remotes: RoomRemotes
 
   constructor({ channelId, roomId }: ParticipantStubMetadata) {
-    super()
     this.mirror = new RoomMirror({
       snapshot: { channelId, roomId, meta: [], metaSeq: 0, closed: false, members: [] },
       onMemberLeft: () => {},
       onMemberMeta: () => {},
     })
-    this._state = new RoomState({ view: this, model: this.mirror.model, owner: this })
+    const state = new RoomState({ model: this.mirror.model, owner: this })
+    this.remotes = new RoomRemotes({ state, adder: 'app' })
+  }
+
+  get id(): string {
+    return this.mirror.model.roomId
   }
 
   onWantChanged(): void {}

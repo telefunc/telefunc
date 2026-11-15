@@ -1,5 +1,5 @@
 export { RoomModel, departureCause }
-export type { MemberEntry, MembershipEvent, RosterRead, RoomModelOwner, ServerModelOwner }
+export type { MemberEntry, MembershipEvent, ResolvedSender, RosterRead, RoomModelOwner, ServerModelOwner }
 
 import { assert } from '../utils/assert.js'
 import { Slice } from './Slice.js'
@@ -16,7 +16,7 @@ import type {
   WholeMemberUpdate,
 } from './protocol.js'
 import type { LeaveCause, ParticipantMeta, RoomMeta, Sender } from '../types.js'
-import type { RoomState } from './state.js'
+import type { RoomState } from './RoomState.js'
 
 /** A membership event as this model got it, whether it applied it or not. */
 type MembershipEvent = { join: MemberSnapshot } | { leave: string } | { meta: { id: string; update: MemberMetaUpdate } }
@@ -40,6 +40,9 @@ type MemberEntry = {
   /** The values packages set on the member (`defineParticipantField()`), replaced whole on each set. */
   fields: Readonly<Record<string, unknown>>
 }
+
+/** A message's sender: the member's entry, or the snapshot of a sender this model doesn't have. */
+type ResolvedSender = { entry: MemberEntry } | { sender: Sender }
 
 const NO_FIELDS: Readonly<Record<string, unknown>> = Object.freeze({})
 /** A member's leave when its room closed, and how a room closes by default. */
@@ -101,8 +104,8 @@ class RoomModel {
   private recording: MembershipEvent[] | null = null
   private readonly members = new Map<string, MemberEntry>()
   private hiddenMembers = 0
-  /** The views with a listener: one without has nothing to fire. */
-  private readonly views = new Set<RoomState>()
+  /** The states with a listener: one without has nothing to fire. */
+  private readonly states = new Set<RoomState>()
   private readonly owner: RoomModelOwner
   private readonly metaState: RoomMetaState
   /** Shared by the members' metas here and by the local participants of this view. */
@@ -226,16 +229,16 @@ class RoomModel {
     return entry
   }
 
-  /** A view's listeners start or stop: only a view with one hears the changes. */
-  listen(view: RoomState, on: boolean): void {
-    if (on) this.views.add(view)
-    else this.views.delete(view)
+  /** A state's listeners start or stop: only a state with one hears the changes. */
+  listen(state: RoomState, on: boolean): void {
+    if (on) this.states.add(state)
+    else this.states.delete(state)
   }
 
   /** State changed observably: invalidate the snapshot and tell `onChange` subscribers. */
   private bumpState(): void {
     this.stateVersion++
-    for (const view of [...this.views]) view.changed()
+    for (const state of [...this.states]) state.changed()
   }
 
   /** As this side shows it: its own connection to a member it holds, the room's record for any other. */
@@ -264,11 +267,11 @@ class RoomModel {
   }
 
   private memberChanged(entry: MemberEntry): void {
-    for (const view of [...this.views]) view.memberChanged(entry)
+    for (const state of [...this.states]) state.memberChanged(entry)
   }
 
   private connectionChanged(entry: MemberEntry): void {
-    for (const view of [...this.views]) view.connectionChanged(entry)
+    for (const state of [...this.states]) state.connectionChanged(entry)
   }
 
   /** Records the membership events this model gets into the returned list, until `stopRecordingMembership()`. */
@@ -299,7 +302,7 @@ class RoomModel {
     }
     if (!this._rosterKnown) this.seedCount++ // pre-roster, `count` is the seed adjusted by applied events
     this.bumpState()
-    for (const view of [...this.views]) view.joined(entry)
+    for (const state of [...this.states]) state.joined(entry)
     return true
   }
 
@@ -318,7 +321,7 @@ class RoomModel {
     // A hidden participant's leave is no presence event either; its own handlers and listener release still run.
     if (!entry.hidden && !this._rosterKnown) this.seedCount = Math.max(0, this.seedCount - 1)
     this.bumpState()
-    for (const view of [...this.views]) view.left(entry, cause)
+    for (const state of [...this.states]) state.left(entry, cause)
   }
 
   /** Applies updates in seq order (see `MemberMeta.apply`): the origin's echo (same seq) and events arriving behind a
@@ -386,7 +389,7 @@ class RoomModel {
       entry.left = true
       entry.leaveCause = departure
     }
-    for (const view of [...this.views]) view.closed(departed, cause, departure)
+    for (const state of [...this.states]) state.closed(departed, cause, departure)
     return true
   }
 
@@ -398,7 +401,7 @@ class RoomModel {
     fromMetaSeq,
     fromIdentity,
     fromDisconnected,
-  }: { from: string } & Partial<SenderStamp>): { entry: MemberEntry } | { sender: Sender } {
+  }: { from: string } & Partial<SenderStamp>): ResolvedSender {
     const entry = this.members.get(from)
     if (fromMeta !== undefined && fromMetaSeq !== undefined) {
       if (!entry) return { sender: senderSnapshot(from, fromMeta, fromIdentity ?? null) }

@@ -62,11 +62,11 @@ class ServerLocalParticipant extends ParticipantBase {
   }
 
   protected _shownParticipants(ids: ReadonlySet<string>): RemoteParticipant[] {
-    return this.room.state.shownParticipantsOf(ids)
+    return this.room.remotes.shownOf(ids)
   }
 
   protected _followRoom(onChange: () => void): () => void {
-    return this.room.state.onChange(onChange)
+    return this.room.state.onChange(onChange, undefined, 'app')
   }
 
   protected _deliverPrivate(field: string, from: string, data: unknown): void {
@@ -175,7 +175,7 @@ class ServerLocalParticipant extends ParticipantBase {
   }
 
   protected override _resolveSender(id: string): Sender | null {
-    return this.room.state.getRemote(id) // sync view read (delivery must not wait on I/O)
+    return this.room.remotes.get(id) // sync view read (delivery must not wait on I/O)
   }
 
   protected _reportError(err: unknown): void {

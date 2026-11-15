@@ -16,7 +16,7 @@ import type {
 } from '../shared/protocol.js'
 import { CLIENT_ROOM_BUG_MESSAGE, roomResultValue } from '../shared/errors.js'
 import { ParticipantBase, type MemberLink } from '../shared/ParticipantBase.js'
-import type { RoomState } from '../shared/state.js'
+import type { RoomRemotes } from '../shared/RoomView.js'
 import { heldConnectionChanged, holdMember, holdRoomOpen, letGoOfMember, releaseRoom } from './page.js'
 import { withChange } from '../utils/sets.js'
 import type { LeaveCause, LocalParticipant, RemoteParticipant, Sender } from '../types.js'
@@ -44,8 +44,8 @@ interface PageLink extends MemberLink {
   readonly isConnected: boolean
   /** The sender of a message to the participant, live, where its link has a room of its own. */
   resolveSender(id: string): Sender | null
-  /** The state of the room it lists the other participants by. */
-  readonly state: RoomState
+  /** The app's participants of the room it lists the other participants by. */
+  readonly remotes: RoomRemotes
   /** A package's message to the participant, for its field on the page's rooms of its room. */
   deliverPrivate(field: string, from: string, data: unknown): void
 }
@@ -128,11 +128,11 @@ class ClientParticipant extends ParticipantBase<PageLink> {
   }
 
   protected _shownParticipants(ids: ReadonlySet<string>): RemoteParticipant[] {
-    return this.link.state.shownParticipantsOf(ids)
+    return this.link.remotes.shownOf(ids)
   }
 
   protected _followRoom(onChange: () => void): () => void {
-    return this.link.state.onChange(onChange)
+    return this.link.remotes.state.onChange(onChange, undefined, 'app')
   }
 
   protected _deliverPrivate(field: string, from: string, data: unknown): void {

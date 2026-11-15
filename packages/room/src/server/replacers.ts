@@ -7,11 +7,11 @@ import {
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   SERIALIZER_PREFIX_ROOM_REMOTE,
 } from '../shared/constants.js'
-import { ServerRoom, handleOf } from './room.js'
+import { ServerRoom, handleOf, roomOf } from './room.js'
 import { ServerLocalParticipant } from './ServerLocalParticipant.js'
 import type { RemoteParticipant } from '../types.js'
 import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from '../shared/protocol.js'
-import { remoteBacking } from '../shared/state.js'
+import { remoteBacking } from '../shared/RoomView.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
@@ -59,8 +59,9 @@ const roomReplacer: ReplacerType<RoomReplacerContract, ServerReplacerContext> = 
 const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, ServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_REMOTE,
   detect(value): value is RoomRemoteReplacerContract['value'] {
-    // A brand, not instanceof: a dev server can load two module graphs.
-    return ServerRoom.isServerRoom(remoteBacking(value)?.state.view)
+    // A global map, not instanceof: a dev server can load two module graphs.
+    const backing = remoteBacking(value)
+    return backing !== null && roomOf(backing.state) !== null
   },
   replace(remote, context) {
     const { state, entry } = remoteBacking(remote)!
@@ -69,7 +70,7 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, ServerReplace
     const handedHidden = entry.hidden && !entry.left
     if (handedHidden) responseHidden(context, state.model.roomId).add(entry.id)
     const metadata: RemoteParticipantMetadata = {
-      room: state.view,
+      room: roomOf(state)!,
       id: entry.id,
       meta: entry.meta.object,
       joinedAt: entry.joinedAt,

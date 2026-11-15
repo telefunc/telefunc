@@ -36,7 +36,7 @@ const roomRemoteReviver: ReviverType<RoomRemoteReviverContract, ClientReviverCon
     assert(metadata.room instanceof ClientRoom)
     const room = metadata.room
     // `room` is core's tether proxy over the room (`wrapProxy`): a read goes through to it, an identity doesn't.
-    const remote = room._state.remoteFromSnapshot(metadata)
+    const remote = room._remotes.fromSnapshot(metadata)
     context.shareLifecycle(remote, room)
     return {
       value: remote,

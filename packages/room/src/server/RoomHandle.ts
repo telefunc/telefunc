@@ -18,7 +18,8 @@ import {
 } from '../shared/protocol.js'
 import type { RoomDataEnvelope, RoomIncarnation } from './protocol.js'
 import { departureCause, type RoomModel } from '../shared/RoomModel.js'
-import { RoomState, type RoomStateOwner, type WantChange } from '../shared/state.js'
+import { RoomState, type RoomStateOwner, type WantChange } from '../shared/RoomState.js'
+import { RoomRemotes } from '../shared/RoomView.js'
 import { type MemberLink } from '../shared/ParticipantBase.js'
 import { RoomStub, type RoomStubOptions } from './RoomStub.js'
 import { MemberMessageBodies } from './publishBodies.js'
@@ -40,13 +41,10 @@ import { Admissions, type AdmissionsOwner } from './lifecycle/admit.js'
 import { evictMember } from './store/members.js'
 import type { JoinOptions, LeaveCause, LocalParticipant } from '../types.js'
 import type { RoomGuards } from './roomStatics.js'
-import type { ServerRoom } from './room.js'
 import { ServerLocalParticipant } from './ServerLocalParticipant.js'
 assertIsNotBrowser()
 
 type RoomHandleOptions = {
-  /** The user's `Room` over the handle, which the room's state is the state of. */
-  view: ServerRoom
   replica: RoomReplica
   /** Where the handle's holders' wants replan. */
   lanePlan: Pick<LanePlan, 'textChanged' | 'binaryChanged' | 'observing'>
@@ -79,6 +77,8 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
   private declaredGuards: RoomGuards | null = null
   /** This handle's listeners over the replica's model. */
   readonly state: RoomState
+  /** The app's participants of the room, which the user's `Room` and the handle's participants hand out. */
+  readonly remotes: RoomRemotes
   readonly local: LocalHolder
   private readonly stubs = new Set<RoomStub>()
   /** The attached stub holding each member a client joined through. */
@@ -91,20 +91,20 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
   private readonly roster: RoomHandleOptions['roster']
   private readonly incomingDemand: RoomHandleOptions['incomingDemand']
 
-  constructor({ view, replica, lanePlan, roster, incomingDemand, acks, hosting }: RoomHandleOptions) {
+  constructor({ replica, lanePlan, roster, incomingDemand, acks, hosting }: RoomHandleOptions) {
     this.replica = replica
     this.lanePlan = lanePlan
     this.roster = roster
     this.incomingDemand = incomingDemand
     this.incarnation = replica.incarnation
-    this.state = new RoomState({ view, model: replica.model, owner: this })
+    this.state = new RoomState({ model: replica.model, owner: this })
+    this.remotes = new RoomRemotes({ state: this.state, adder: 'app' })
     this.local = new LocalHolder({ state: this.state, participants: this.localParticipants })
     this.admissions = new Admissions({ owner: this, replica, lanePlan, hosting })
     this.writes = new RoomWrites({
       owner: this,
       incarnation: this.incarnation,
       model: replica.model,
-      state: this.state,
       replica,
       acks,
       localParticipants: this.localParticipants,
@@ -364,7 +364,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
         return this.onHolderTextChanged(this.local, this.local.textChanged(change.member, change.on))
       case 'announce':
         return this.onHolderTextChanged(this.local, null)
-      case 'binary':
+      case 'track':
         if (this.local.applyBinary(change.change)) this.onHolderBinaryChanged(this.local, change.change)
     }
   }

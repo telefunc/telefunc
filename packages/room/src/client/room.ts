@@ -3,20 +3,19 @@ export { ClientRoom }
 import { assert, assertUsage } from '../utils/assert.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { assertKnownOptions } from '../shared/arguments.js'
-import { RoomStateView, type RoomState } from '../shared/state.js'
+import { RoomView, type RoomRemotes } from '../shared/RoomView.js'
 import { ClientRoomHandle, type ClientRoomHandleOptions } from './ClientRoomHandle.js'
 import type { JoinOptions, LocalParticipant, RemoteParticipant, Room } from '../types.js'
 
 /** The user's `Room` for one room a telefunction returned: the public methods, over the handle that does the work,
  *  which Room's own code is given instead. */
-class ClientRoom extends RoomStateView implements Room {
-  /** @internal */
-  readonly _state: RoomState
+class ClientRoom extends RoomView implements Room {
+  /** @internal Read through the page's tether proxy over the room, which `handleOf()` doesn't know. */
+  declare readonly _remotes: RoomRemotes
 
-  constructor(options: Omit<ClientRoomHandleOptions, 'view'>) {
-    super()
-    const handle = new ClientRoomHandle({ ...options, view: this })
-    this._state = handle.state
+  constructor(options: ClientRoomHandleOptions) {
+    const handle = new ClientRoomHandle(options)
+    super(handle.remotes)
     roomHandles.set(this, handle)
   }
 
@@ -30,7 +29,7 @@ class ClientRoom extends RoomStateView implements Room {
   getParticipants(options?: { hidden?: boolean }): RemoteParticipant[] {
     assertKnownOptions(options, ['hidden'], 'getParticipants()')
     assertUsage(!options?.hidden, 'Hidden participants can only be enumerated on the server')
-    return this._read.listVisible()
+    return this._read.visible()
   }
 }
 
