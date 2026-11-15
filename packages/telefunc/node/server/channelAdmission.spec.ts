@@ -5,9 +5,10 @@
 import { expect, test } from 'vitest'
 
 import { ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
-import { ServerBroadcast } from '../../wire-protocol/channel/server/ServerBroadcast.js'
+import { Broadcast, ServerBroadcast } from '../../wire-protocol/channel/server/ServerBroadcast.js'
 import { IndexedPeer, type PeerSender } from '../../wire-protocol/channel/server/IndexedPeer.js'
 import { hold, letGo, releaseHolder, type MemoryHolder } from '../../wire-protocol/channel/server/channelMemory.js'
+import { ChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
 import { getChannelConfig } from './serverConfig.js'
 
 /** What this server's channels hold, on the ledger every channel shares. */
@@ -51,3 +52,33 @@ test("a reliable broadcast near the budget stays open when another channel's tex
     broadcast._release()
   }
 })
+
+for (const lossy of [false, true]) {
+  test(`a ${lossy ? 'lossy' : 'reliable'} broadcast whose publish doesn't fit under the budget closes, and the server holds no more than it`, async () => {
+    const key = crypto.randomUUID()
+    const broadcast = new ServerBroadcast<string>({ key, lossy })
+    broadcast._registerChannel()
+    broadcast._attachPeer(new IndexedPeer({ sender: stalledSender, index: 2, replay: broadcast._replayBuffer! }), {
+      broadcast: { text: true, binary: false },
+    })
+    let closedWith: Error | undefined
+    broadcast.onClose((err) => {
+      closedWith = err
+    })
+    // What one-to-one channels hold, which no publish can make them let go of, leaves room for less than the publish.
+    const filler: MemoryHolder = { heldBytes: 0 }
+    const { maxMemory } = getChannelConfig()
+    try {
+      hold(filler, maxMemory - ledgerTotal() - 300_000)
+      expect(await Broadcast.publish(key, 'a'.repeat(400_000))).toMatchObject({ key })
+      expect(ledgerTotal()).toBeLessThanOrEqual(maxMemory)
+      expect(broadcast.isClosed).toBe(true)
+      expect(closedWith).toBeInstanceOf(ChannelOverflowError)
+    } finally {
+      letGo(filler, filler.heldBytes)
+      releaseHolder(filler)
+      broadcast._end()
+      broadcast._release()
+    }
+  })
+}

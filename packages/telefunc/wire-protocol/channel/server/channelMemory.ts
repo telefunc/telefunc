@@ -5,6 +5,7 @@ export {
   admitPublish,
   dropWireCopies,
   fits,
+  fitsPublish,
   hasCopyRoom,
   hold,
   holdsEnough,
@@ -86,6 +87,12 @@ function admitPublish(body: PublishBody, owner: string | undefined, replace: (ho
   } finally {
     memory.reclaiming = false
   }
+}
+
+/** Whether one more page may hold `body` within `maxMemory`, once `admitPublish` made what room it could. */
+function fitsPublish(body: PublishBody): boolean {
+  const bytes = HELD_PUBLISH_OVERHEAD_BYTES + (body.refs === 0 ? body.frame.byteLength : 0)
+  return memory.total + bytes <= maxMemoryOf()
 }
 
 /** Fewest sharers first. A body another page has on the wire counts more references than holders here, so it's left. */

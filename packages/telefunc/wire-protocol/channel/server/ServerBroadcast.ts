@@ -25,7 +25,15 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import { admitPublish, hold, letGo, maxPendingBytesOf, queueMemory, type MemoryHolder } from './channelMemory.js'
+import {
+  admitPublish,
+  fitsPublish,
+  hold,
+  letGo,
+  maxPendingBytesOf,
+  queueMemory,
+  type MemoryHolder,
+} from './channelMemory.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ChannelOverflowError } from '../channelErrors.js'
@@ -213,10 +221,15 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   }
 
   /** A publish to the page. A subscription is the page's, so it has attached before, but it may have ended since: this
-   *  delivery's own listeners or admitting its body can end the channel, and the subscribers after it still get theirs. */
+   *  delivery's own listeners or admitting its body can end the channel, and the subscribers after it still get theirs.
+   *  Where the server can't hold it for the page, the page ends as one that missed it. */
   private forwardPublish(body: PublishBody): void {
     this.endOverflowed()
     if (this._phase === 'ended') return
+    if (!fitsPublish(body)) {
+      this.overflowed = this.lossy ? NOT_EVEN_NEWEST : FELL_BEHIND
+      return this.endOverflowed()
+    }
     if (this.lossyPublishes) return this.lossyPublishes.send(body)
     this.lastPeer!.sendPublish(body)
     const most = maxPendingBytesOf()
