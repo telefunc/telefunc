@@ -4,6 +4,7 @@ export type { Libsql }
 import { assertUsage } from '../assert.js'
 import type { FollowUp, LiveDatabase, Statement } from '../liveDatabase.js'
 import { paramValues } from '../sqlite/dialect.js'
+import { Turns } from './turns.js'
 
 // The parts of `@libsql/client` used here, so that it stays the app's dependency.
 type Args = unknown[] | Record<string, unknown>
@@ -52,6 +53,10 @@ type Planned = { app: { sql: string; args: Args }; statement: Statement }
  * pool, so a connection's own change log can't follow them: a write gives its rows through a `RETURNING` of ours, as
  * on D1, and a query of ours reads its old rows first, in one transaction with it. The client is the connection of
  * statements sent alone and of a `batch()`, which is one transaction; each `transaction()` is one of its own.
+ *
+ * The client runs each call at once, on one connection: two never overlap. A write of ours holds its transaction across
+ * the queries around it, in which another call's write would find the database locked (`SQLITE_BUSY`): the client's
+ * calls take turns, a read letting the next start once it's planned (an identical read then joins it).
  */
 function captureLibsql(client: Libsql, live: LiveDatabase): void {
   if (CAPTURED in client) return
@@ -67,11 +72,14 @@ function captureLibsql(client: Libsql, live: LiveDatabase): void {
   const executeMultiple = client.executeMultiple.bind(client)
   const ready = readyThrough(live, execute)
   const plan = planOn(live, client)
+  const turns = new Turns()
 
-  client.execute = async (statement, args) => {
-    const app = inStatement(statement, args)
+  client.execute = (statement, args) =>
+    turns.take(client, (taken) => executeInTurn(inStatement(statement, args), taken))
+  const executeInTurn = async (app: Planned['app'], taken: (statement: Statement) => void) => {
     await ready()
     const planned = plan(app)
+    taken(planned)
     // A write whose old rows, or whose answer, take a query of ours runs with them in a transaction of ours.
     if (!planned.readsFirst && planned.returnsRows) return await runOn(planned, app, execute, execute)
     let result: Answer
@@ -100,7 +108,8 @@ function captureLibsql(client: Libsql, live: LiveDatabase): void {
   }
 
   // A batch is one transaction: told whole once it committed, so that no other statement of the client lands inside it.
-  client.batch = async (statements, mode) => {
+  client.batch = (statements, mode) => turns.take(client, () => batchInTurn(statements, mode))
+  const batchInTurn = async (statements: BatchStatement[], mode?: string) => {
     const apps = statements.map((statement) => inStatement(statement))
     await ready()
     const planned = apps.map((app) => ({ app, statement: plan(app) }))
@@ -133,7 +142,8 @@ function captureLibsql(client: Libsql, live: LiveDatabase): void {
   }
 
   // Schema changes, as written: their writes count their whole tables.
-  client.migrate = async (statements) => {
+  client.migrate = (statements) => turns.take(client, () => migrateInTurn(statements))
+  const migrateInTurn = async (statements: InStatement[]) => {
     await ready()
     const planned = statements.map((statement) => {
       const { sql } = inStatement(statement)
@@ -158,16 +168,20 @@ function captureLibsql(client: Libsql, live: LiveDatabase): void {
     await ready()
     const statements = live.statementsOf(text)
     if (!statements)
-      return await sendAsWritten(live.statementFor(client, text, [], { rewrite: false }), () => executeMultiple(text))
+      return await turns.take(client, () =>
+        sendAsWritten(live.statementFor(client, text, [], { rewrite: false }), () => executeMultiple(text)),
+      )
     for (const statement of statements) await client.execute(statement)
   }
 
-  client.transaction = async (mode) => {
-    await ready()
-    const tx = await transaction(mode)
-    captureTransaction(tx, live)
-    return tx
-  }
+  // The app's transaction runs as without us once it began.
+  client.transaction = (mode) =>
+    turns.take(client, async () => {
+      await ready()
+      const tx = await transaction(mode)
+      captureTransaction(tx, live)
+      return tx
+    })
 }
 
 /** Captures one `transaction()`, from the `BEGIN` it ran on its connection. */

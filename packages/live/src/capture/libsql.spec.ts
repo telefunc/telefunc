@@ -1,4 +1,5 @@
-// libSQL on a local file: what a delete cascading through foreign keys tells the live reads.
+// libSQL on a local file: what a delete cascading through foreign keys tells the live reads, and writes at once through
+// one client.
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -83,5 +84,29 @@ describe('a libSQL delete cascading two levels', () => {
       'SELECT CAST(changes() AS TEXT), CAST(last_insert_rowid() AS TEXT)',
     ])
     client.close()
+  })
+})
+
+describe('two writes at once through one libSQL client', () => {
+  it('both succeed, as without live', async () => {
+    const run = async (live: boolean) => {
+      const folder = mkdtempSync(join(tmpdir(), 'live-libsql-'))
+      folders.push(folder)
+      const client = createClient({ url: `file:${join(folder, 'db')}` })
+      await client.execute('create table t (id integer primary key, n integer)')
+      if (live) liveDatabaseOf(client, {})
+      // The catalog loaded first: the writes meet each other, not its loading.
+      await client.execute('select * from t')
+      const results = await Promise.allSettled([
+        client.execute('insert into t values (1, 1)'),
+        client.execute('insert into t values (2, 2)'),
+      ])
+      const rows = (await client.execute('select id from t order by id')).rows.map((row) => row.id)
+      client.close()
+      return { results: results.map((result) => (result.status === 'fulfilled' ? 'ok' : String(result.reason))), rows }
+    }
+    const native = await run(false)
+    expect(native).toEqual({ results: ['ok', 'ok'], rows: [1, 2] })
+    expect(await run(true)).toEqual(native)
   })
 })
