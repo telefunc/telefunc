@@ -29,14 +29,14 @@ type BroadcastUnsubscribe = () => void
 
 type QueuedPublish = { size: number; depth: number; deliver: () => void; reject: (err: Error) => void }
 
-/** `wireRequest`: a request that reached the object a subscribing page is on (its call's, then its wire's), if any. */
+/** `pageRequest`: a request that reached the object a subscribing page is on (its call's, then its wire's), if any. */
 type BroadcastAdapter = {
-  subscribe(key: string, onMessage: BroadcastOnMessage, wireRequest?: Request): BroadcastUnsubscribe
+  subscribe(key: string, onMessage: BroadcastOnMessage, pageRequest?: Request): BroadcastUnsubscribe
   publish(key: string, serialized: string): BroadcastPublishResult | Promise<BroadcastPublishResult>
-  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, wireRequest?: Request): BroadcastUnsubscribe
+  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, pageRequest?: Request): BroadcastUnsubscribe
   publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult>
   /** Where a process runs several objects that can't write to each other's pages, the one a subscriber's page is on. */
-  ownerOf?(wireRequest: Request | undefined): string
+  ownerOf?(pageRequest: Request | undefined): string
 }
 
 /**

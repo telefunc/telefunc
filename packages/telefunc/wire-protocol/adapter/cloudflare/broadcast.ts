@@ -396,9 +396,9 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   }
 
   /** The Durable Object that may write to a subscriber's page; the server's own subscribers go with the isolate's first. */
-  ownerOf(wireRequest: Request | undefined): string {
-    if (!wireRequest) return this.requireRepresentativeDOName()
-    const owner = this.requestOwners.get(wireRequest)
+  ownerOf(pageRequest: Request | undefined): string {
+    if (!pageRequest) return this.requireRepresentativeDOName()
+    const owner = this.requestOwners.get(pageRequest)
     assert(owner, 'a wire opened by a request no Durable Object received')
     return owner
   }
@@ -408,10 +408,10 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     subsByKey: Map<string, Map<OnMessage, string>>,
     key: string,
     onMessage: OnMessage,
-    wireRequest: Request | undefined,
+    pageRequest: Request | undefined,
   ): BroadcastUnsubscribe {
     const locationBucket = this.requireLocationBucket()
-    const owner = this.ownerOf(wireRequest)
+    const owner = this.ownerOf(pageRequest)
     let subs = subsByKey.get(key)
     if (!subs) {
       subs = new Map()
@@ -434,12 +434,12 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
   // --- BroadcastAdapter interface ---
 
-  subscribe(key: string, onMessage: BroadcastOnMessage, wireRequest?: Request): BroadcastUnsubscribe {
-    return this.addSubscriber(this.textSubs, key, onMessage, wireRequest)
+  subscribe(key: string, onMessage: BroadcastOnMessage, pageRequest?: Request): BroadcastUnsubscribe {
+    return this.addSubscriber(this.textSubs, key, onMessage, pageRequest)
   }
 
-  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, wireRequest?: Request): BroadcastUnsubscribe {
-    return this.addSubscriber(this.binarySubs, key, onMessage, wireRequest)
+  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, pageRequest?: Request): BroadcastUnsubscribe {
+    return this.addSubscriber(this.binarySubs, key, onMessage, pageRequest)
   }
 
   publish(key: string, serialized: string): Promise<BroadcastPublishResult> {
