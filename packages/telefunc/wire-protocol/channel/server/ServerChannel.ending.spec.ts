@@ -164,7 +164,9 @@ function fromPage(channel: ServerChannel, frame: Uint8Array<ArrayBuffer>): void 
   channel._dispatchFrame(decode(frame) as ChannelFrame)
 }
 
-/** Each way channel 0 ends that its page reads nothing of it after: what ends it passes its waiting publishes. */
+/** Each way channel 0 ends while its wire has started p1 and not the rest. Its ABORT and its answer to the page's close
+ *  go ahead of p1, the too-many-answers ERROR waits behind it, and after the page's own abort or lost replay the server
+ *  sends no frame that ends it. */
 const ENDINGS: Record<string, (channel: ServerChannel) => void> = {
   'abort()': (channel) => channel.abort(),
   "the page's close": (channel) => fromPage(channel, encode.close(0, 1_000, 1)),
@@ -183,11 +185,11 @@ for (const [ending, end] of Object.entries(ENDINGS)) {
     const { headroom } = overWebSocket([ended, other])
 
     await Promise.all(MESSAGES.map((data) => Broadcast.publish(key, data)))
-    // p1 started on channel 0's head, which nothing of channel 0 passes.
+    // Of channel 0, p1 started, so only p2 and p3 wait.
     expect(reads(headroom.sender.waitingFrames)).toEqual(['1:p1', '0:p2', '1:p2', '0:p3', '1:p3'])
     end(ended)
     expect(ended.isClosed).toBe(true)
-    // Of channel 0, an error still waits, behind the p1 its wire started.
+    // Of channel 0, only the too-many-answers ERROR may still wait, behind the p1 its wire started.
     expect(reads(headroom.sender.waitingFrames).filter((read) => read !== '0:ERROR')).toEqual(['1:p1', '1:p2', '1:p3'])
     other.abort()
   })

@@ -355,7 +355,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** Its lossy sends that no wire has taken go. Those still in the wire's queue never left the server, so the credit
-   *  they counted comes back. */
+   *  they counted comes back. A channel lets go of what no wire has taken before its ABORT and its answer to the page's
+   *  close: both go ahead of what waits, and its page reads nothing of the channel after either. */
   protected dropUnhanded(): void {
     const { index, sender } = this.peer!
     const { units, bytes } = this._replayBuffer!.dropNewestPublishes(sender.queue.waitingPublishes(index))
@@ -440,7 +441,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._phase = 'closing'
     const serializedAbortValue = stringify(abortValue)
     if (this.peer) {
-      // Its publishes still waiting for the wire would follow the ABORT, after which its page reads nothing.
       this.dropUnhanded()
       this.peer.sendSequenced(encode.abort, serializedAbortValue)
     } else this.ensurePendingEnd().abort = serializedAbortValue
@@ -734,7 +734,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.lifecycle.peerCloseReceived(timeoutMs, () => {
       this._phase = 'closing'
       if (this.peer) {
-        // Its publishes still waiting for the wire would follow the CLOSE_ACK, after which its page reads none of them.
         this.dropUnhanded()
         this.peer.sendCloseAck()
       } else this.ensurePendingEnd().closeAck = true
