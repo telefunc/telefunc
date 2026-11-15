@@ -27,14 +27,7 @@ import {
   isRoomRequest,
   type RoomDeclaration,
 } from './requests.js'
-import {
-  ANNOUNCE_KEY,
-  ReplayGate,
-  heldTextWeight,
-  heldWeight,
-  type LaneHolder,
-  type ReplayHold,
-} from './lifecycle/replay.js'
+import { ReplayGate, heldTextWeight, heldWeight, type LaneHolder, type ReplayHold } from './lifecycle/replay.js'
 import { TailHold, type TailEntry, type TailHoldOwner } from './lifecycle/TailHold.js'
 import { EVERY_MEMBER, EVERY_TRACK, type BinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import {
@@ -97,7 +90,6 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   readonly replay = new ReplayGate()
   private wantsText = false
   private readonly textMemberWants = new Set<string>()
-  private announce = false
   private readonly binary: BinaryWants = emptyBinaryWants()
   /** A tail waits for the client's first text selector, then flushes once in order. */
   private tail: TailHold | null = null
@@ -170,7 +162,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
       case 'sub-binary':
         return this.declareBinaryWant(declaration)
       case 'sub-text':
-        return this.declareTextWants(declaration.members, declaration.announce)
+        return this.declareTextWants(declaration.members)
       case 'dm-reply':
         return this.dmReplies.settle(declaration.ackId, declaration.reply)
     }
@@ -194,7 +186,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     this.room.onHolderBinaryChanged(this, change)
   }
 
-  private declareTextWants(changes: Record<string, boolean>, announce: boolean): void {
+  private declareTextWants(changes: Record<string, boolean>): void {
     const members = new Map<string, boolean>()
     for (const [id, wanted] of Object.entries(changes)) {
       if (wanted === this.textMemberWants.has(id) || (wanted && !this.room.model.hasMember(id))) continue
@@ -202,7 +194,6 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
       toggle(this.textMemberWants, id, wanted)
     }
     this.replay.forgetUnwantedText((member) => this.wantsTextFrom(member))
-    this.announce = announce
     this.flushTail()
     this.room.onHolderTextChanged(this, { all: this.wantsText, members })
   }
@@ -277,10 +268,6 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     return this.binary
   }
 
-  get wantsAnnounce(): boolean {
-    return this.announce
-  }
-
   /** A tail-pending stub ingests all text so its hold captures the whole recent tail; its selector applies at flush. */
   textDemand(): MemberWants {
     return { all: this.wantsText || this.tail !== null, members: this.textMemberWants }
@@ -321,10 +308,6 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   /** A hidden member's events reach only the clients that were handed it. */
   relayControl(body: PublishBody, hiddenMember: string | null): void {
     if (hiddenMember === null || this.grantedHidden.has(hiddenMember)) this.end.deliver(body)
-  }
-
-  relayAnnouncement(body: PublishBody, ord: OrderingInfo): void {
-    if (this.announce) this.relayTextLive(ANNOUNCE_KEY, body, ord)
   }
 
   relayText(serialized: string, bodies: MemberMessageBodies, from: string, ord: OrderingInfo): void {

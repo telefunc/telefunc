@@ -72,7 +72,7 @@ A client joins only a room whose telefunction says who may: `anyoneCanJoin: true
 
 > `meta` is what a participant shows about itself, such as its name. A room has a `meta` too: set it with `Room.create('lobby', { meta: { topic: 'General' } })`, and read it on the client with `room.meta`.
 
-Every page that has the room open receives its participants and each change to them, so join only the people who take part. A page that only watches, such as a match's audience, takes the room its telefunction returns and doesn't join it: it reads `room.getParticipants()` and `room.count`, and its `subscribe()` and `onAnnounce()` listeners receive the room's messages. Nobody sees it among the participants, and it can't publish or send a message: those are methods of `me`, the participant `join()` returns.
+Every page that has the room open receives its participants and each change to them, so join only the people who take part. A page that only watches, such as a match's audience, takes the room its telefunction returns and doesn't join it: it reads `room.getParticipants()` and `room.count`, and its `subscribe()` listeners receive the room's messages. Nobody sees it among the participants, and it can't publish or send a message: those are methods of `me`, the participant `join()` returns.
 
 
 ## Show who's in the room
@@ -156,12 +156,12 @@ Everyone in the room sees the change. The `meta` you read is read-only, and free
 ```js
 // Environment: client
 
-room.subscribe((message, { from }) => showMessage(from.meta.name, message.text))
+room.subscribe((message, { from }) => showMessage(from?.meta.name, message.text))
 
 await me.publish({ text: 'hello' })
 ```
 
-`info.from` is the participant who sent the message. A client can't fake it.
+`info.from` is the participant who sent the message, or `null` for one your server published (see <Link href="#send-from-the-server" />). A client can't fake it.
 
 To receive the messages of one participant only, subscribe on that participant. `room.onJoin()` gives you the participants who join after you, and `room.getParticipants()` the ones already there:
 
@@ -177,7 +177,7 @@ Every read of a room answers at once: `room.getParticipants()`, `room.getPartici
 
 > You also receive your own messages. To not receive them, join with `selfDelivery: false`, on the page (`room.join({ meta, selfDelivery: false })`) or on the server (`Room.join(id, { selfDelivery: false })`). For a participant your telefunction joins, that holds from the moment the telefunction returns it: a message published as it before then may or may not reach a room the page already has open, so don't rely on that message being shown, or not shown, on the page.
 
-> `info.seq` numbers everyone's messages and the room's announcements in one order for the whole room, so it jumps over the ones this page doesn't receive: its own with `selfDelivery: false`, or those of participants it doesn't subscribe to. It never jumps over a lost message: a page never misses a message on no track (see <Link href="#remove-a-participant" />).
+> `info.seq` numbers everyone's messages, your server's too, in one order for the whole room, so it jumps over the ones this page doesn't receive: its own with `selfDelivery: false`, or those of participants it doesn't subscribe to. It never jumps over a lost message: a page never misses a message on no track (see <Link href="#remove-a-participant" />).
 
 > Each participant's messages arrive in the order it sent them. `info.from` is that participant as the room knows it when the message arrives, so `info.from.meta` is its meta then, not when it sent the message. Joins, leaves and meta changes arrive in the same order everywhere, but two pages can see a message and someone else's join in a different order.
 
@@ -252,13 +252,15 @@ A callback that returns `undefined` only observes, so it can stand beside the on
 
 import { Room } from '@telefunc/room'
 
-await Room.announce('lobby', { type: 'maintenance', in: '5min' })   // to everyone
+await Room.publish('lobby', { type: 'maintenance', in: '5min' })    // to everyone
 await Room.send('lobby', { identity: userId }, { badge: 'winner' }) // to every tab of one user
 ```
 ```js
 // Environment: client
 
-room.onAnnounce((notice) => showBanner(notice))
+room.subscribe((message, { from }) => {
+  if (from === null) showBanner(message) // published by the server
+})
 me.listen((message, { from }) => {
   if (from === null) showSystemMessage(message) // sent by the server
 })
@@ -631,7 +633,7 @@ Server-side.
 | `Room.list({ prefix? }?)` | List the open rooms. |
 | `Room.setMeta(id, meta)` / `Room.updateMeta(id, meta)` | Replace / update the room's `meta`. |
 | `Room.getParticipants(id, { identity? }?)` | List the participants, or one user's. |
-| `Room.announce(id, message)` | Send to everyone. |
+| `Room.publish(id, message)` | Send to everyone: `room.subscribe()` gets it with `info.from` `null`. |
 | `Room.send(id, target, message)` | Send to one participant (`{ id }`) or to every tab of a user (`{ identity }`). |
 | `Room.removeParticipant(id, target)` | Remove a participant (`{ id, reason? }`) or every tab of a user (`{ identity, reason? }`). |
 | `Room.close(id)` | Close a room. |
@@ -649,9 +651,8 @@ Server-side.
 | `getParticipant(id)` | One participant, or `null`. |
 | `getParticipants({ hidden: true })` | Server-side: the hidden participants. |
 | `onJoin(cb)` / `onLeave(cb)` | Someone joined / left. |
-| `subscribe(cb, { track? }?)` / `subscribeBinary(cb, { track? }?)` | Everyone's messages, or those on `track` / binary frames: `cb(message, info)`, with `info` `{ seq, timestamp, from }`, plus `{ track, meta }` on a track. |
+| `subscribe(cb, { track? }?)` / `subscribeBinary(cb, { track? }?)` | Everyone's messages, the server's included, or those on `track` / binary frames: `cb(message, info)`, with `info` `{ seq, timestamp, from }`, plus `{ track, meta }` on a track; `from` is `null` for the server's. |
 | `messages({ signal? }?)` | Everyone's messages and binary frames, to read with `for await`: each `{ type, data, info }`. |
-| `onAnnounce(cb)` | `Room.announce()` messages: `cb(message, info)`. |
 | `onEmpty(cb)` / `onClose(cb)` | The last participant left / the room closed, with `cause.type`: `'closed'`, or on a page `'removed'` (the page's last participant of it was removed) or `'disconnected'`. |
 
 Properties: `id`, `meta`, `count`, `isEmpty`, `isClosed`.

@@ -24,7 +24,7 @@ const ROOM_STATICS = [
   'updateMeta',
   'close',
   'removeParticipant',
-  'announce',
+  'publish',
   'send',
   'getParticipants',
 ] as const satisfies readonly Exclude<keyof RoomStatic, 'guard'>[]

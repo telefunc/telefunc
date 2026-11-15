@@ -77,7 +77,7 @@ type GuardResult = {
 }
 
 type AdminResult = {
-  announcements: string[]
+  published: Array<{ data: string; fromRoom: boolean }>
   system: Array<{ data: string; fromRoom: boolean }>
   kicked: boolean
   kickCause: { type: string; reason?: string } | null
@@ -308,7 +308,7 @@ function testRoom() {
   testRoomScenario<{
     messages: Array<{ data: unknown; from: string }>
     frames: number[][]
-    announcements: unknown[]
+    systemMessages: unknown[]
     dms: unknown[]
     reuserTags: string[] | null
     roomTags: string[] | null
@@ -322,7 +322,7 @@ function testRoom() {
         { data: { n: 1 }, from: 'Reuser' },
       ])
       expect(r.frames).deep.equal([[1, 2, 3]])
-      expect(r.announcements).deep.equal([{ n: 3 }])
+      expect(r.systemMessages).deep.equal([{ n: 3 }])
       expect(r.dms).to.have.deep.members([{ n: 2 }, { n: 4 }])
       expect(r.reuserTags).deep.equal(['b'])
       expect(r.roomTags).deep.equal(['x'])
@@ -657,9 +657,9 @@ function testRoom() {
   )
   testRoomScenario<AdminResult>(
     'admin',
-    'room: room-authored messages, admin kick and close reach the client',
+    "room: the server's messages, admin kick and close reach the client",
     (result) => {
-      expect(result.announcements).deep.equal(['maintenance'])
+      expect(result.published).deep.equal([{ data: 'maintenance', fromRoom: true }])
       expect(result.system).deep.equal([{ data: 'welcome', fromRoom: true }])
       expect(result.kicked).toBe(true) // LocalParticipant.onLeave fired on removeParticipant()
       expect(result.kickCause).deep.equal({ type: 'removed', reason: 'be nice' })
@@ -1456,12 +1456,11 @@ function testRoom() {
       { timeout: 10_000 },
     )
   })
-  testRoomScenario<{ received: string[]; announcements: string[]; kept: string[] }>(
+  testRoomScenario<{ received: string[]; kept: string[] }>(
     'tail-order',
-    'room: a tail hands its first subscriber what it held in order, though an announcement came first, and only the latest 256',
+    "room: a tail hands its first subscriber what it held in order, the server's messages too, and only the latest 256",
     (r) => {
-      expect(r.announcements).deep.equal(['ann'])
-      expect(r.received).deep.equal(['a', 'b'])
+      expect(r.received).deep.equal(['a', 'system', 'b'])
       expect(r.kept).deep.equal(Array.from({ length: 256 }, (_, i) => `n${i + 44}`))
     },
   )

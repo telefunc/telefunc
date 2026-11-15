@@ -59,7 +59,7 @@ function Person({ call, name }: { call: Call; name: string }) {
     const stopSending = sendVideo(camera, me)
     setMessages([])
     const stopChat = call.subscribe((message, { from }) => {
-      setMessages((messages) => [...messages.slice(-49), { name: from.meta.name, text: message.text }])
+      setMessages((messages) => [...messages.slice(-49), { name: from?.meta.name ?? '', text: message.text }])
     })
 
     me.onLeave((cause) => {

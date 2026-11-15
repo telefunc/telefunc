@@ -23,7 +23,7 @@ function unorderedEventBody(
   return publishBody(stringify(event), { seq: 0, timestamp: Date.now() }, null, false)
 }
 
-/** A message, an announcement or an event as its lane carried it, which a page never misses: its room's `info.seq` stays
+/** A message or an event as its lane carried it, which a page never misses: its room's `info.seq` stays
  *  whole. */
 function orderedBody(serialized: string, info: OrderingInfo): PublishBody {
   return publishBody(serialized, info, null, false)

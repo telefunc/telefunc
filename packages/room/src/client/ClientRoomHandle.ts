@@ -182,7 +182,7 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
 
   /** Room-wide text wants ride the Broadcast subscription, which attaches again before the channel's `onOpen`.
    *  Declarations are replayed channel messages, so the server keeps them across reconnects: each carries only what
-   *  changed, the announce want with a member's text want, or the binary want. */
+   *  changed: a member's text want, or the binary want. */
   onWantChanged(change: WantChange): void {
     if (this.mirror.model.closed) {
       this.end._setSubscribed('text', false) // a closed room takes no declaration
@@ -194,13 +194,7 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
       case 'text':
         if (change.member === null) return this.end._setSubscribed('text', change.on)
         // Declared under the room-wide stream too, so the server keeps these members' lane when that stream stops.
-        return this.notify({
-          __r: 'sub-text',
-          announce: this.state.wantsAnnounce,
-          members: { [change.member]: change.on },
-        })
-      case 'announce':
-        return this.notify({ __r: 'sub-text', announce: change.on, members: {} })
+        return this.notify({ __r: 'sub-text', members: { [change.member]: change.on } })
       case 'track': {
         const { member, track, on } = change.change
         return this.notify({
@@ -243,9 +237,6 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
         return
       case 'closed':
         this.applyClosed(event.cause === 'removed' ? leaveCauseFromWire(event) : { type: 'closed' })
-        return
-      case 'announce':
-        this.state.applyAnnounce(event.data, { key: this.id, seq: rawInfo.seq, timestamp: rawInfo.timestamp })
         return
       case 'demand':
         // Who receives one of our own members' tracks changed.

@@ -21,7 +21,6 @@ assertIsNotBrowser()
  *  member). */
 type Indexed = {
   textAll: boolean
-  announce: boolean
   textMembers: Set<string>
   binary: Map<string | EveryMember, Set<TrackKey | EveryTrack>>
 }
@@ -45,7 +44,6 @@ class WantsIndex {
   private readonly indexed = new Map<LaneHolder, Indexed>()
   private textAll = 0
   private readonly textMembers = new Map<string, number>()
-  private announce = 0
   private readonly everyMember: TrackCover = new Map()
   private readonly members = new Map<string, TrackCover>()
   /** Per named track, the members some holder names it of alone. */
@@ -58,7 +56,7 @@ class WantsIndex {
   }
 
   get wantsText(): boolean {
-    return this.textAll > 0 || this.textMembers.size > 0 || this.announce > 0
+    return this.textAll > 0 || this.textMembers.size > 0
   }
 
   get wantsBinary(): boolean {
@@ -113,9 +111,6 @@ class WantsIndex {
     const textAll = text?.all ?? false
     if (textAll !== indexed.textAll) this.textAll += textAll ? 1 : -1
     indexed.textAll = textAll
-    const announce = !gone && holder.wantsAnnounce
-    if (announce !== indexed.announce) this.announce += announce ? 1 : -1
-    indexed.announce = announce
     // Read live: a member listed twice is indexed already when its second step comes.
     for (const ids of members ? [members] : [indexed.textMembers, text?.members ?? []]) {
       for (const id of ids) {
@@ -223,14 +218,13 @@ class WantsIndex {
   /** A holder that wants nothing is let go, as the index is all that holds a handle no longer listening. */
   private forgetIfIdle(holder: LaneHolder): void {
     const indexed = this.indexed.get(holder)
-    if (indexed === undefined || indexed.textAll || indexed.announce) return
+    if (indexed === undefined || indexed.textAll) return
     if (indexed.textMembers.size === 0 && indexed.binary.size === 0) this.indexed.delete(holder)
   }
 
   private holderIndex(holder: LaneHolder): Indexed {
     return getOrCreate(this.indexed, holder, () => ({
       textAll: false,
-      announce: false,
       textMembers: new Set(),
       binary: new Map(),
     }))

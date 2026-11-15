@@ -73,11 +73,10 @@ type RoomStateOptions = {
 
 /** What its listeners want crossed: the first listener of a kind came, or the last one went. `listeners`: its
  *  listeners, or those besides the package fields'; `text`: the room-wide messages (`member` null) or one member's;
- *  `announce`: the room's announcements; `track`: a track. */
+ *  `track`: a track. */
 type WantChange =
   | { kind: 'listeners' }
   | { kind: 'text'; member: string | null; on: boolean }
-  | { kind: 'announce'; on: boolean }
   | { kind: 'track'; change: BinaryWantChange }
 
 /** What a room's state tells the side that holds it. */
@@ -105,8 +104,9 @@ class RoomState {
   /** The owner's `reportCallbackError`, bound once for every listener call. */
   private readonly reportError: (error: unknown) => void
 
+  /** A listener on the room's messages; `from` is `null` for the server's. */
   private readonly roomDataListeners: Listeners<
-    (data: unknown, info: ChannelPublishInfo, from: ResolvedSender) => unknown
+    (data: unknown, info: ChannelPublishInfo, from: ResolvedSender | null) => unknown
   > = new Listeners()
 
   private readonly roomTrackListeners: Listeners<TrackListener> = new Listeners()
@@ -119,7 +119,6 @@ class RoomState {
 
   private readonly emptyListeners: Listeners<() => void> = new Listeners()
   private readonly closeListeners: Listeners<(cause: LeaveCause) => void> = new Listeners()
-  private readonly announceListeners: Listeners<(data: unknown, info: ChannelPublishInfo) => void> = new Listeners()
   /** The package fields' `onPrivate()` callbacks, by field. */
   private readonly privateListeners = new Map<string, Listeners<(from: string, data: unknown) => void>>()
   private _listenerCount = 0
@@ -179,11 +178,6 @@ class RoomState {
     stop?.()
   }
 
-  /** Whether this holder consumes room-authored messages on the semantic lane. */
-  get wantsAnnounce(): boolean {
-    return this.announceListeners.size > 0
-  }
-
   /** `all` while room-level `subscribe()`rs exist, and the members with participant-scoped listeners either way. */
   textWants(): MemberWants {
     return { all: this.roomDataListeners.size > 0, members: this.textWanted }
@@ -195,7 +189,11 @@ class RoomState {
   }
 
   // Each registration returns its unlisten function, and counts its listener as `adder`'s.
-  subscribe(cb: MessageListener<[ResolvedSender]>, opts: TrackListenerOptions | undefined, adder: Adder): () => void {
+  subscribe(
+    cb: MessageListener<[ResolvedSender | null]>,
+    opts: TrackListenerOptions | undefined,
+    adder: Adder,
+  ): () => void {
     if (opts?.track === undefined) return this.register(this.roomDataListeners, cb, { adder, options: opts })
     return this.registerRoomTrack(textListener(cb, opts.track), opts, adder)
   }
@@ -232,14 +230,6 @@ class RoomState {
 
   onChange(cb: () => void, opts: ListenerOptions | undefined, adder: Adder): () => void {
     return this.register(this.changeListeners, cb, { adder, options: opts })
-  }
-
-  onAnnounce(
-    cb: (data: unknown, info: ChannelPublishInfo) => void,
-    opts: ListenerOptions | undefined,
-    adder: Adder,
-  ): () => void {
-    return this.register(this.announceListeners, cb, { adder, options: opts })
   }
 
   // A member's own listeners: one added after the member left is never held, as its listeners went at its leave.
@@ -348,16 +338,13 @@ class RoomState {
     if (listeners) this.fireAll(listeners, from, data)
   }
 
-  applyAnnounce(data: unknown, info: ChannelPublishInfo): void {
-    this.fireAll(this.announceListeners, data, info)
-  }
-
   /** Never waits on the roster: an unknown sender (its join may be behind on the control lane) is the snapshot its
    *  instance stamped (see `RoomModel.resolveSender`). */
   applyData(event: RoomDataEvent, info: ChannelPublishInfo): void {
-    const from = this.model.resolveSender(event)
+    const from = event.from === '' ? null : this.model.resolveSender(event)
     this.fireAll(this.roomDataListeners, event.data, info, from)
-    const dataListeners = 'entry' in from ? this.memberListeners.get(from.entry)?.data : undefined
+    if (from === null || !('entry' in from)) return
+    const dataListeners = this.memberListeners.get(from.entry)?.data
     if (dataListeners) this.fireAll(dataListeners, event.data, info, from)
   }
 
@@ -471,7 +458,6 @@ class RoomState {
     }
     if (crossed(list.size)) {
       if (list === this.roomDataListeners) this.owner.onWantChanged({ kind: 'text', member: null, on })
-      else if (list === this.announceListeners) this.owner.onWantChanged({ kind: 'announce', on })
       else if (entry !== undefined && list === this.memberListeners.get(entry)?.data) {
         toggle(this.textWanted, entry.id, on)
         this.owner.onWantChanged({ kind: 'text', member: entry.id, on })

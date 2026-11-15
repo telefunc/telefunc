@@ -212,16 +212,16 @@ type BinaryPublishOptions = {
 
 /** What a room hands a listener with a message: its order, and `from`, who sent it, as it was when the message
  *  arrived. */
-type MessageInfo<P extends ParticipantMeta = ParticipantMeta> = ChannelPublishInfo & { from: Sender<P> }
+type MessageInfo<From> = ChannelPublishInfo & { from: From }
 
 /** One message `messages()` yields: what a `subscribe()` or `subscribeBinary()` listener receives. */
 type RoomMessage<Pub = unknown, P extends ParticipantMeta = ParticipantMeta> =
-  | { type: 'text'; data: Pub; info: MessageInfo<P> }
-  | { type: 'binary'; data: Uint8Array; info: MessageInfo<P> & BinaryFrameInfo }
+  | { type: 'text'; data: Pub; info: MessageInfo<Sender<P> | null> }
+  | { type: 'binary'; data: Uint8Array; info: MessageInfo<Sender<P>> & BinaryFrameInfo }
 
 type BinaryListener<P extends ParticipantMeta = ParticipantMeta> = (
   data: Uint8Array,
-  info: MessageInfo<P> & BinaryFrameInfo,
+  info: MessageInfo<Sender<P>> & BinaryFrameInfo,
 ) => unknown
 
 /** A returnable multi-party room with presence, membership, and events. Its reads answer at once: a page's room is
@@ -245,11 +245,15 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
 
   /** Receive the messages published on `track`. Returns an unsubscribe function. */
   subscribe(
-    callback: (data: Pub, info: MessageInfo<P> & BinaryFrameInfo) => unknown,
+    callback: (data: Pub, info: MessageInfo<Sender<P>> & BinaryFrameInfo) => unknown,
     options: { track: string; signal?: AbortSignal },
   ): () => void
-  /** Receive all participant messages. Returns an unsubscribe function. */
-  subscribe(callback: (data: Pub, info: MessageInfo<P>) => unknown, options?: { signal?: AbortSignal }): () => void
+  /** Receive the room's messages: its participants', and your server's (`Room.publish()`), whose `info.from` is
+   *  `null`. Returns an unsubscribe function. */
+  subscribe(
+    callback: (data: Pub, info: MessageInfo<Sender<P> | null>) => unknown,
+    options?: { signal?: AbortSignal },
+  ): () => void
   /** Receive all members' binary frames, optionally filtered to one track at the source. */
   subscribeBinary(callback: BinaryListener<P>, options?: { track?: string; signal?: AbortSignal }): () => void
   /** Iterate participant messages until aborted, closed, or the loop ends. */
@@ -260,11 +264,6 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   /** A participant left, and why. */
   onLeave(
     callback: (member: RemoteParticipant<P, Pub>, cause: LeaveCause) => void,
-    options?: { signal?: AbortSignal },
-  ): () => void
-  /** A room-authored message arrived (`Room.announce()`), e.g. system notices. */
-  onAnnounce(
-    callback: (data: unknown, info: ChannelPublishInfo) => void,
     options?: { signal?: AbortSignal },
   ): () => void
   /** The last participant left. */
@@ -356,11 +355,14 @@ interface RemoteParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = u
 
   /** Receive this member's messages on `track`. Returns an unsubscribe function. */
   subscribe(
-    callback: (data: Pub, info: MessageInfo<P> & BinaryFrameInfo) => unknown,
+    callback: (data: Pub, info: MessageInfo<Sender<P>> & BinaryFrameInfo) => unknown,
     options: { track: string; signal?: AbortSignal },
   ): () => void
   /** Receive only this member's messages. Returns an unsubscribe function. */
-  subscribe(callback: (data: Pub, info: MessageInfo<P>) => unknown, options?: { signal?: AbortSignal }): () => void
+  subscribe(
+    callback: (data: Pub, info: MessageInfo<Sender<P>>) => unknown,
+    options?: { signal?: AbortSignal },
+  ): () => void
   /** Receive only this member's binary frames, optionally filtered to one track. */
   subscribeBinary(callback: BinaryListener<P>, options?: { track?: string; signal?: AbortSignal }): () => void
 

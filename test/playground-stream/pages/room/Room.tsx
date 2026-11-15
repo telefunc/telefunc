@@ -67,7 +67,7 @@ import {
   onSeedRoom,
   onSeedChurn,
   onPing,
-  onAnnounce,
+  onSystemPublish,
   onSystemSend,
   onUpdateRoom,
   onListRooms,
@@ -429,7 +429,7 @@ function Room() {
         lobby.onLeave((m) => events.push(`leave:${m.meta.name}`))
         const received: Array<{ text: unknown; from: unknown }> = []
         lobby.subscribe((data, { from }) => {
-          received.push({ text: (data as { text: string }).text, from: from.meta.name })
+          received.push({ text: (data as { text: string }).text, from: from?.meta.name })
         })
 
         const snapBefore = lobby.snapshot()
@@ -486,7 +486,7 @@ function Room() {
         const [roomId, observer] = await createRoom('participant')
         const received: Array<{ text: unknown; from: unknown }> = []
         observer.subscribe((data, { from }) => {
-          received.push({ text: (data as { text: string }).text, from: from.meta.name })
+          received.push({ text: (data as { text: string }).text, from: from?.meta.name })
         })
 
         const me = await onJoinAsServer(roomId, 'Bob')
@@ -655,11 +655,13 @@ function Room() {
         const [roomId, room] = await createRoom('at-call')
         const me = await room.join({ meta: { name: 'Me' } })
         const messages: Array<{ data: unknown; from: string }> = []
-        room.subscribe((data, { from }) => messages.push({ data, from: from.meta.name as string }))
+        const systemMessages: unknown[] = []
+        room.subscribe((data, { from }) => {
+          if (from === null) systemMessages.push(data)
+          else messages.push({ data, from: from.meta.name as string })
+        })
         const frames: number[][] = []
         room.subscribeBinary((data) => frames.push([...data]))
-        const announcements: unknown[] = []
-        room.onAnnounce((data) => announcements.push(data))
         const dms: unknown[] = []
         me.listen((data) => dms.push(data))
         await me.updateMeta({}) // same-channel ack orders the declarations before the server's writes
@@ -675,7 +677,7 @@ function Room() {
           const state = {
             messages,
             frames,
-            announcements,
+            systemMessages,
             dms,
             reuserTags: (reuser.meta.tags as string[] | undefined) ?? null,
             roomTags: (room.meta.tags as string[] | undefined) ?? null,
@@ -685,7 +687,7 @@ function Room() {
             done:
               messages.length >= 3 &&
               frames.length >= 1 &&
-              announcements.length >= 1 &&
+              systemMessages.length >= 1 &&
               dms.length >= 2 &&
               state.reuserTags?.[0] === 'b' &&
               state.roomTags !== null,
@@ -723,7 +725,7 @@ function Room() {
         const me = await room.join({ meta: { name: 'Page' } })
         const seen: unknown[] = []
         room.subscribe((data, { from }) => {
-          if (from.id === me.id) seen.push(data)
+          if (from?.id === me.id) seen.push(data)
         })
         room.subscribeBinary((data, { from }) => {
           if (from.id === me.id) seen.push([...data])
@@ -865,12 +867,12 @@ function Room() {
         const roomId = await createRoomId('sender')
         const room = await onOpenSlowGuardRoom(roomId)
         const names: unknown[] = []
-        room.subscribe((_data, { from }) => names.push(from.meta.name))
+        room.subscribe((_data, { from }) => names.push(from?.meta.name))
         const me = await room.join({ meta: { name: 'A' } })
         // A view whose roster may still be on its way.
         const other = await onGetRoom(roomId)
         const otherNames: unknown[] = []
-        other.subscribe((_data, { from }) => otherNames.push(from.meta.name))
+        other.subscribe((_data, { from }) => otherNames.push(from?.meta.name))
 
         const published = me.publish(0) // its guard waits 50 ms
         await me.setMeta({ name: 'B' })
@@ -1546,14 +1548,14 @@ function Room() {
 
       {scenario(
         'admin',
-        'Admin (announce, system send, kick & close)',
-        'Announce, system send, kick, close',
+        'Admin (system publish and send, kick & close)',
+        'System publish and send, kick, close',
         async () => {
           const [roomId, lobby] = await createRoom('admin')
           const me = await lobby.join({ meta: { name: 'Eve' } })
 
-          const announcements: unknown[] = []
-          lobby.onAnnounce((data) => announcements.push(data))
+          const published: Array<{ data: unknown; fromRoom: boolean }> = []
+          lobby.subscribe((data, { from }) => published.push({ data, fromRoom: from === null }))
           const system: Array<{ data: unknown; fromRoom: boolean }> = []
           me.listen((data, { from }) => system.push({ data, fromRoom: from === null }))
           await me.updateMeta({}) // same-channel ack orders the declarations before the HTTP-triggered broadcasts
@@ -1567,18 +1569,18 @@ function Room() {
           })
           lobby.onClose(() => (closed = true))
 
-          await onAnnounce(roomId, 'maintenance')
+          await onSystemPublish(roomId, 'maintenance')
           await onSystemSend(roomId, me.id, 'welcome')
           await pollUntil(() => ({
-            result: { announcements, system },
-            done: announcements.length >= 1 && system.length >= 1,
+            result: { published, system },
+            done: published.length >= 1 && system.length >= 1,
           }))
 
           await onKick(roomId, me.id)
           await onCloseRoom(roomId)
           await pollUntil(() => {
             const state = {
-              announcements,
+              published,
               system,
               kicked,
               kickCause,
@@ -2841,12 +2843,8 @@ function Room() {
         const [roomId, owner] = await createRoom('tail-order')
         const me = await owner.join({ meta: { name: 'Src' } })
         const tailed = await onGetRoomTail(roomId)
-        const announcements: string[] = []
-        tailed.onAnnounce((data) => announcements.push(data as string))
-        await tailed.join({ meta: { name: 'Tail' } }) // same-channel ack orders the declaration before the announcement
         await me.publish('a')
-        await onAnnounce(roomId, 'ann')
-        await pollUntil(() => ({ done: announcements.length > 0 }))
+        await onSystemPublish(roomId, 'system')
         await me.publish('b')
         const received: string[] = []
         tailed.subscribe((data) => received.push(data as string))
@@ -2861,7 +2859,7 @@ function Room() {
         const kept: string[] = []
         capped.subscribe((data) => kept.push(data as string))
         await pollUntil(() => ({ done: kept.includes('n299') }))
-        setResult(JSON.stringify({ received: flushed, announcements, kept }))
+        setResult(JSON.stringify({ received: flushed, kept }))
       })}
 
       {scenario('tail-lease', null, 'Subscribe to a tail after its lease', async () => {

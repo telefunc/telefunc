@@ -102,13 +102,12 @@ type WireLeaveCause = { cause?: 'removed' | 'disconnected' | 'closed' | 'unknown
 /** The sender as its instance knew it at the send: its meta at `fromMetaSeq`, stamped by that instance, never the
  *  client. */
 type SenderStamp = { fromMeta: ParticipantMeta; fromMetaSeq: number; fromIdentity?: string; fromDisconnected?: true }
-/** A member's message as a client gets it: stamped only while the client can't name the sender yet. */
+/** A message as a client gets it: a member's, stamped only while the client can't name the sender yet, or the
+ *  server's (`Room.publish()`), whose `from` is `''`. */
 type RoomDataEvent = { __r: 'data'; from: string; data: unknown } & Partial<SenderStamp>
 /** What a client sends upward to publish. Its instance verifies membership and stamps `fromMeta`. */
 type RoomDataPublish = { __r: 'data'; from: string; data: unknown; retain?: boolean }
-/** A room-authored message (`Room.announce()`), on the semantic lane so it shares one order with member text. */
-type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
-type RoomEnvelope = RoomCtrlEnvelope | RoomDataEvent | RoomAnnounceEnvelope
+type RoomEnvelope = RoomCtrlEnvelope | RoomDataEvent
 
 /** Sent once a roster read corrected a drift, a part per frame, numbered from 0, each part reflecting every event
  *  relayed before it; `more` on all but the last. `rewound`: a failover rewound the room's meta seqs, so the next whole
@@ -184,8 +183,8 @@ type RoomStubRequest =
   | { __r: 'dm-reply'; ackId: string; reply: RoomResult }
   /** A `BinaryWantChange`, with `null` for `EVERY_MEMBER` and `EVERY_TRACK`. */
   | { __r: 'sub-binary'; member: string | null; track: string | null; on: boolean }
-  /** Changes only: announcements, and each member whose own want changed. */
-  | { __r: 'sub-text'; announce: boolean; members: Record<string, boolean> }
+  /** Changes only: each member whose own want changed. */
+  | { __r: 'sub-text'; members: Record<string, boolean> }
 
 /** Client→server requests on a participant stub; an ack DM's reply is a `dm-reply`, as on a room stub. */
 type ParticipantStubRequest = { __r: 'req-publish'; data: unknown; retain?: boolean } | MemberRequest

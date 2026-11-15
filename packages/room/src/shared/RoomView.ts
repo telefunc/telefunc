@@ -67,11 +67,12 @@ class RoomRemotes {
     return 'entry' in from ? this.of(from.entry) : from.sender
   }
 
-  /** A listener as the state calls it, with the sender it resolved, which the listener gets as `info.from`. */
-  taking<Data, Info>(
-    callback: (data: Data, info: Info & { from: Sender }) => unknown,
-  ): (data: Data, info: Info, from: ResolvedSender) => unknown {
-    return (data, info, from) => callback(data, { ...info, from: this.sender(from) })
+  /** A listener as the state calls it, with the sender it resolved, which the listener gets as `info.from`: `null` for
+   *  the server. */
+  taking<Data>(
+    callback: (data: Data, info: any) => unknown,
+  ): (data: Data, info: object, from: ResolvedSender | null) => unknown {
+    return (data, info, from) => callback(data, { ...info, from: from && this.sender(from) })
   }
 
   visible(): RemoteParticipant[] {
@@ -258,10 +259,6 @@ class RoomView {
 
   onClose(callback: (cause: LeaveCause) => void, options?: ListenerOptions): () => void {
     return this._remotes.state.onClose(callback, options, this._remotes.adder)
-  }
-
-  onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void, options?: ListenerOptions): () => void {
-    return this._remotes.state.onAnnounce(callback, options, this._remotes.adder)
   }
 
   onChange(callback: () => void, options?: ListenerOptions): () => void {

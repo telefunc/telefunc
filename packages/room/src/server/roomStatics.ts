@@ -15,8 +15,8 @@ import {
   ownMetadata,
   removedCause,
 } from '../shared/arguments.js'
-import type { MemberSnapshot, RoomEnvelope } from '../shared/protocol.js'
-import type { RoomConfigRecord, RoomIncarnation } from './protocol.js'
+import type { MemberSnapshot } from '../shared/protocol.js'
+import type { RoomConfigRecord, RoomDataEnvelope, RoomIncarnation } from './protocol.js'
 import type {
   AfterJoinHook,
   AfterPublishHook,
@@ -96,7 +96,7 @@ type RoomStatic = {
   updateMeta(id: string, meta: RoomMeta): Promise<void>
   close(id: string): Promise<void>
   removeParticipant(id: string, target: ParticipantRef & { reason?: unknown }): Promise<void>
-  announce(id: string, data: unknown): Promise<RoomSendReceipt>
+  publish(id: string, data: unknown): Promise<RoomSendReceipt>
   send(id: string, target: ParticipantRef, data: unknown): Promise<void>
   getParticipants<P extends ParticipantMeta = ParticipantMeta>(
     id: string,
@@ -115,7 +115,7 @@ const roomStatics: RoomStatic = {
   updateMeta: updateRoomMeta,
   close: closeRoom,
   removeParticipant,
-  announce: announceToRoom,
+  publish: publishToRoom,
   send: sendToParticipant,
   getParticipants: getRoomParticipants as RoomStatic['getParticipants'],
 }
@@ -354,8 +354,8 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
     }))
 }
 
-async function announceToRoom(id: string, data: unknown): Promise<RoomSendReceipt> {
-  const record = encodeRoomRecord({ __r: 'announce', data } satisfies RoomEnvelope)
+async function publishToRoom(id: string, data: unknown): Promise<RoomSendReceipt> {
+  const record = encodeRoomRecord({ __r: 'data', from: '', data } satisfies RoomDataEnvelope)
   const config = await requireRoom(id)
   const commit = acceptedOrThrow(id, await commitLane({ roomId: id, inc: config.inc, lane: SEMANTIC_LANE }, record))
   return { seq: commit.seq, timestamp: commit.timestamp }

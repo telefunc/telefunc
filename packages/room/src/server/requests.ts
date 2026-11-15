@@ -131,11 +131,7 @@ function decodeRoomDeclaration(value: unknown): RoomDeclaration {
       }
     }
     case 'sub-text':
-      return {
-        __r: 'sub-text',
-        announce: flag(decl.announce, 'text wants'),
-        members: decodeTextWants(decl.members),
-      }
+      return { __r: 'sub-text', members: decodeTextWants(decl.members) }
   }
   return malformed('declaration')
 }

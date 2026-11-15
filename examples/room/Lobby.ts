@@ -9,7 +9,7 @@ room.onChange(() => {
   document.querySelector('#members')!.replaceChildren(...names)
 })
 room.subscribe((message, { from }) => {
-  document.querySelector('#messages')!.append(item(`${from.meta.name}: ${message.text}`))
+  document.querySelector('#messages')!.append(item(from ? `${from.meta.name}: ${message.text}` : message.text))
 })
 
 const me = await room.join({ meta: { name: `Guest ${crypto.randomUUID().slice(0, 4)}` } })

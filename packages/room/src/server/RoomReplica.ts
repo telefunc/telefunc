@@ -21,7 +21,6 @@ import type {
   MemberSnapshot,
   RoomCtrlEnvelope,
   RoomDmEnvelope,
-  RoomEnvelope,
   SenderStamp,
 } from '../shared/protocol.js'
 import type { RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope, RoomIncarnation } from './protocol.js'
@@ -506,14 +505,8 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   }
 
   private onTextData(serialized: string, info: OrderingInfo): void {
-    const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope | Extract<RoomEnvelope, { __r: 'announce' }>
-    if (envelope.__r === 'announce') {
-      for (const handle of this.receivers) handle.local.relayAnnouncement(envelope.data, info)
-      const body = orderedBody(serialized, info)
-      for (const stub of this.stubs) stub.relayAnnouncement(body, info)
-      return
-    }
-    this.applyStamp(envelope.from, envelope)
+    const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope
+    if (envelope.fromMetaSeq !== undefined) this.applyStamp(envelope.from, envelope)
     for (const handle of this.receivers) handle.relayData(serialized, envelope, info)
     if (this.stubs.size === 0) return
     const bodies = new MemberMessageBodies({ serialized, info, envelope })

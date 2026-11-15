@@ -15,7 +15,7 @@ import { senderSnapshot } from './arguments.js'
 
 type Source = {
   subscribe(
-    callback: (data: unknown, info: ChannelPublishInfo & { from: Sender }) => void,
+    callback: (data: unknown, info: ChannelPublishInfo & { from: Sender | null }) => void,
     options: { signal: AbortSignal },
   ): () => void
   subscribeBinary(
@@ -97,8 +97,8 @@ function roomMessages(source: Source, signal?: AbortSignal): AsyncIterableIterat
  * The messages `messages()` holds, within `PUBLISH_HOLD_BYTES`. A message keeps its sender as the listeners got it when
  * it arrived (a live participant's meta changes, and the participant outlives its membership): a snapshot of the id,
  * the identity and the meta object the sender had then, frozen down to its plain objects and arrays, and read-only
- * beyond them. A sender's messages share one snapshot until its meta changes. The bytes count each message's payload,
- * and each snapshot once while any queued message holds it.
+ * beyond them. A sender's messages share one snapshot until its meta changes; the server's have none. The bytes count
+ * each message's payload, and each snapshot once while any queued message holds it.
  */
 class MessageQueue {
   /** Each queued message, with its bytes besides its sender. */
@@ -112,15 +112,17 @@ class MessageQueue {
 
   /** Queues `message`, its sender as it is now, unless its bytes would pass the limit; then it queues nothing. */
   push(message: RoomMessage, payloadBytes: number): boolean {
-    const from = this.snapshotOf(message.info.from)
+    const sender = message.info.from
+    const from = sender && this.snapshotOf(sender)
     const size = payloadBytes + 64
-    const holders = this.holders.get(from) ?? 0
-    const added = size + (holders === 0 ? this.sizeOf(from) : 0)
+    const added = size + (from !== null && !this.holders.has(from) ? this.sizeOf(from) : 0)
     if (this.bytes + added > PUBLISH_HOLD_BYTES) return false
     this.bytes += added
-    this.holders.set(from, holders + 1)
-    // The listener's `info` is its own.
-    message.info.from = from
+    if (from !== null) {
+      this.holders.set(from, (this.holders.get(from) ?? 0) + 1)
+      // The listener's `info` is its own.
+      message.info.from = from
+    }
     this.queue.push({ message, size })
     return true
   }
@@ -130,7 +132,12 @@ class MessageQueue {
     if (entry === undefined) return undefined
     const { message, size } = entry
     this.bytes -= size
-    const { from } = message.info
+    if (message.info.from !== null) this.release(message.info.from)
+    return message
+  }
+
+  /** A queued message holding `from` left the queue. */
+  private release(from: Sender): void {
     const holders = this.holders.get(from)! - 1
     if (holders > 0) {
       this.holders.set(from, holders)
@@ -138,7 +145,6 @@ class MessageQueue {
       this.holders.delete(from)
       this.bytes -= this.sizeOf(from)
     }
-    return message
   }
 
   clear(): void {

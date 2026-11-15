@@ -72,8 +72,11 @@ type RoomDemandPage = {
   wants: Array<({ on: boolean } & DemandEntry) | { again: boolean }>
 }
 
-/** A member's message on the lane; its order rides the transport frame. Stamped, so a receiver behind on the roster
- *  still names the sender. */
-type RoomDataEnvelope = { __r: 'data'; from: string; data: unknown } & SenderStamp
+/** A message on the lane; its order rides the transport frame. A member's is stamped, so a receiver behind on the roster
+ *  still names the sender; the server's (`Room.publish()`) has no sender, and `from: ''`. */
+type RoomDataEnvelope = { __r: 'data'; from: string; data: unknown } & (
+  | SenderStamp
+  | { [K in keyof SenderStamp]?: never }
+)
 /** An ack DM's reply, on the original sender's inbox lane. */
 type RoomDmAckEnvelope = { __r: 'dm-ack'; to: string; ackId: string } & RoomResult

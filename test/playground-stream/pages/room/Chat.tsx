@@ -54,7 +54,7 @@ function ChatView({ chat, me }: { chat: ChatRoom; me: Me }) {
     const unlisten = [
       me.onDisconnect(() => setIsConnected(me.isConnected)),
       me.onReconnect(() => setIsConnected(me.isConnected)),
-      chat.onAnnounce((text) => log(String(text))),
+      chat.subscribe((text) => log(String(text))),
       chat.onLeave((member) => log(`${member.meta.name} left`)),
     ]
     return () => unlisten.forEach((off) => off())

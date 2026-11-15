@@ -362,8 +362,6 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
         return this.onHolderTextChanged(this.local, null)
       case 'text':
         return this.onHolderTextChanged(this.local, this.local.textChanged(change.member, change.on))
-      case 'announce':
-        return this.onHolderTextChanged(this.local, null)
       case 'track':
         if (this.local.applyBinary(change.change)) this.onHolderBinaryChanged(this.local, change.change)
     }

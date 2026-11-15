@@ -62,7 +62,7 @@ export {
   onSeedRoom,
   onSeedChurn,
   onPing,
-  onAnnounce,
+  onSystemPublish,
   onSystemSend,
   onUpdateRoom,
   onListRooms,
@@ -362,7 +362,7 @@ async function onIterateMessages(roomId: string) {
 
 async function iterateMessages(room: Room<{}, { name: string }, string>, received: string[]) {
   for await (const message of room.messages())
-    received.push(`${message.type} ${message.info.from.meta.name}: ${message.data}`)
+    received.push(`${message.type} ${message.info.from?.meta.name}: ${message.data}`)
 }
 
 async function onGetIteratedMessages(roomId: string) {
@@ -804,8 +804,8 @@ async function onPing() {
   return 'pong'
 }
 
-async function onAnnounce(roomId: string, data: unknown) {
-  await Room.announce(roomId, data)
+async function onSystemPublish(roomId: string, data: unknown) {
+  await Room.publish(roomId, data)
 }
 
 async function onSystemSend(roomId: string, participantId: string, data: unknown) {
@@ -862,7 +862,7 @@ async function onSendReusingObjects(roomId: string, memberId: string) {
   message.n = 2
   const sent = me.send(memberId, message)
   message.n = 3
-  const announced = Room.announce(roomId, message)
+  const systemPublished = Room.publish(roomId, message)
   message.n = 4
   const systemSent = Room.send(roomId, { id: memberId }, message)
   message.n = 5
@@ -875,7 +875,7 @@ async function onSendReusingObjects(roomId: string, memberId: string) {
   const bytes = new Uint8Array([1, 2, 3])
   const binary = me.publishBinary(bytes)
   bytes.fill(0)
-  await Promise.all([published, sent, announced, systemSent, metaSet, roomMetaSet, binary])
+  await Promise.all([published, sent, systemPublished, systemSent, metaSet, roomMetaSet, binary])
   return me.id
 }
 
@@ -897,7 +897,7 @@ async function onPublishRightAfterSubscribe(roomId: string) {
   watchedRooms.set(roomId, room)
   for (let i = 0; i < 100; i++) void busy.publish(i)
   room.subscribe((data, { from }) => {
-    if (from.id === me.id) seen.push(data)
+    if (from?.id === me.id) seen.push(data)
   })
   room.subscribeBinary((data, { from }) => {
     if (from.id === me.id) seen.push([...data])
@@ -1316,8 +1316,8 @@ async function onThrowingReceiver(roomId: string) {
     driver.subscribe(source, { deliver: () => void healthy++ }),
   ]
   while (attempts.some((attempt) => attempt.state() !== 'ready')) await sleep(10)
-  await Room.announce(roomId, 'first')
-  await Room.announce(roomId, 'second')
+  await Room.publish(roomId, 'first')
+  await Room.publish(roomId, 'second')
   await sleep(300)
   await Promise.all(attempts.map((attempt) => attempt.unsubscribe()))
   return { thrower, healthy }
@@ -1400,7 +1400,7 @@ async function onPublishWhileEstablishing(roomId: string, count: number, bytes: 
   watched.set(roomId, seen)
   watchedRooms.set(roomId, room)
   room.subscribe((data, { from }) => {
-    if (from.id === me.id) seen.push((data as string)[0]!)
+    if (from?.id === me.id) seen.push((data as string)[0]!)
   })
   const publishes = Array.from({ length: count }, (_, i) =>
     me.publish(`${i + 1}`.padEnd(bytes, '.')).then(

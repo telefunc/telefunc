@@ -1,4 +1,4 @@
-export { ReplayGate, ReplayHold, LocalHolder, ANNOUNCE_KEY, heldWeight, heldTextWeight }
+export { ReplayGate, ReplayHold, LocalHolder, heldWeight, heldTextWeight }
 export type { LaneHolder, TextWantsChange }
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
@@ -11,9 +11,6 @@ import type { RoomDataEnvelope } from '../protocol.js'
 import type { RoomState } from '../../shared/RoomState.js'
 import { ROOM_REPLAY_HOLD_BYTES_MAX, ROOM_REPLAY_HOLD_ENTRY_BYTES } from '../constants.js'
 assertIsNotBrowser()
-
-// Text gate keys: a member's id, and for announcements a key no id takes.
-const ANNOUNCE_KEY = '\0announce'
 
 type HeldFrame = { from: string; bytes: number; relay: () => void }
 
@@ -93,7 +90,7 @@ class ReplayGate {
   admit(key: string, info: OrderingInfo): boolean {
     const first = !this.high.has(key)
     if (!admitInto(this.high, key, info)) return false
-    if (first && key !== ANNOUNCE_KEY) this.firstLive(key, null, info)
+    if (first) this.firstLive(key, null, info)
     return true
   }
 
@@ -123,7 +120,7 @@ class ReplayGate {
 
   /** A sender no text want covers any more starts afresh: a later subscription gets its retained message again. */
   forgetUnwantedText(wanted: (member: string) => boolean): void {
-    for (const key of this.high.keys()) if (key !== ANNOUNCE_KEY && !wanted(key)) this.high.delete(key)
+    for (const key of this.high.keys()) if (!wanted(key)) this.high.delete(key)
   }
 
   /** A lane no want covers any more starts afresh: a later subscription to it gets its retained frame again. */
@@ -237,7 +234,6 @@ interface LaneHolder {
   readonly binaryWants: BinaryWants
   /** The participants it holds, who are the people at its page. */
   heldMembers(): Iterable<string>
-  readonly wantsAnnounce: boolean
   /** The text the holder needs ingested; its relay filters further. */
   textDemand(): MemberWants
   wantsTextFrom(member: string): boolean
@@ -301,10 +297,6 @@ class LocalHolder implements LaneHolder {
     return true
   }
 
-  get wantsAnnounce(): boolean {
-    return this.state.wantsAnnounce
-  }
-
   textDemand(): MemberWants {
     return this.state.textWants()
   }
@@ -329,12 +321,6 @@ class LocalHolder implements LaneHolder {
       if (replay.held(event.from, null, heldTextWeight(serialized), relay)) return
     }
     if (replay.admit(event.from, info)) this.applyTextMessage(event, info)
-  }
-
-  relayAnnouncement(data: unknown, info: OrderingInfo): void {
-    if (this.state.wantsAnnounce && this.replay.admit(ANNOUNCE_KEY, info)) {
-      this.state.applyAnnounce(data, this.publishInfo(info))
-    }
   }
 
   relayBinary(frame: BinaryFrame, info: OrderingInfo): void {

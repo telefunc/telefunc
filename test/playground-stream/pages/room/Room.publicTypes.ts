@@ -33,7 +33,7 @@ type _ServerSurface = AssertAll<
     Exactly<ServerRemote['meta'], MemberMeta>,
     Exactly<Parameters<Parameters<ServerRemote['subscribe']>[0]>[0], ChatMsg>,
     Exactly<Parameters<Parameters<ServerRoom['subscribe']>[0]>[0], ChatMsg>,
-    Exactly<Parameters<Parameters<ServerRoom['subscribe']>[0]>[1]['from'], Server.Sender<MemberMeta>>,
+    Exactly<Parameters<Parameters<ServerRoom['subscribe']>[0]>[1]['from'], Server.Sender<MemberMeta> | null>,
     Exactly<ReturnType<ServerRoom['snapshot']>, Server.RoomSnapshotView<RoomMeta, MemberMeta, ChatMsg>>,
     Exactly<ReturnType<ServerRoom['snapshot']>['participants'][number], ServerRemote>,
     Exactly<ReturnType<ServerRoom['messages']>, AsyncIterableIterator<Server.RoomMessage<ChatMsg, MemberMeta>>>,
