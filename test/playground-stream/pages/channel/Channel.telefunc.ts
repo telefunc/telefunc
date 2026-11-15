@@ -898,7 +898,7 @@ async function onChannelLinkShare() {
  *  pings.
  *  After `'away'`, the page's next publish drops its connections: one body follows on the cut wire, ahead of that
  *  publish's receipt, and 16 more while the page is away (it retries after 500 ms). `'last'` answers the ordinal of the
- *  newest `<ordinal>:…` text its server subscription got. */
+ *  newest `<ordinal>:…` text its server subscription got. `'past memory'` publishes three bodies, then one of 3 MiB. */
 async function onChannelPublishesBehind(
   bytes = 4 * 1024 * 1024,
   lossy?: boolean,
@@ -912,7 +912,10 @@ async function onChannelPublishesBehind(
   broadcast.subscribe((message) => {
     if (typeof message === 'string' && /^\d+:/.test(message)) lastOrdinal = message.slice(0, message.indexOf(':'))
   })
-  const control = new Channel<(msg: 'ping' | 'close' | 'abort' | 'away' | 'cut' | 'last' | number) => string, never>()
+  const control = new Channel<
+    (msg: 'ping' | 'close' | 'abort' | 'away' | 'cut' | 'last' | 'past memory' | number) => string,
+    never
+  >()
   control.listen(async (msg) => {
     if (msg === 'ping') return 'pong'
     if (msg === 'last') return lastOrdinal
@@ -926,6 +929,13 @@ async function onChannelPublishesBehind(
       publish(3)
       broadcast.abort()
       return 'aborted'
+    }
+    if (msg === 'past memory') {
+      // In the same turn, so the three still wait for the wire where a server with a `maxMemory` under 3 MiB can't hold
+      // the fourth.
+      publish(3)
+      void broadcast.publishBinary(new Uint8Array(3 * 1024 * 1024))
+      return 'published'
     }
     if (msg === 'away') {
       const stop = broadcast.subscribe(() => {

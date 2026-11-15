@@ -286,6 +286,7 @@ type ChannelState = {
   broadcastBehindCloses: {
     seqsAhead: number[]
     closeErr: string | null
+    pastMemory: { seqsAhead: number[]; closeErr: string }
     across: { publish: string; received: number; closeErr: string }
   } | null
   acrossFlip: { received: number[] } | null
@@ -1760,6 +1761,17 @@ function ChannelDemo() {
     void control.send(16)
     const closeErr = await ended
     control.close()
+    // Three publishes, then one the server can't hold: its page gets the three, then the close.
+    const behindMemory = await opened()
+    const { seq: start } = await behindMemory.broadcast.publish('before the four')
+    const pastMemory = { seqsAhead: [] as number[], closeErr: '' }
+    behindMemory.broadcast.subscribeBinary((_, info) => pastMemory.seqsAhead.push(info.seq - start))
+    const memoryClosed = new Promise<string>((resolve) =>
+      behindMemory.broadcast.onClose((err) => resolve(err?.name ?? 'none')),
+    )
+    void behindMemory.control.send('past memory')
+    pastMemory.closeErr = await memoryClosed
+    behindMemory.control.close()
     // A publish outstanding across a disconnect, as the page falls behind: it settles with the close, and nothing that
     // follows it comes.
     const away = await opened()
@@ -1772,7 +1784,7 @@ function ChannelDemo() {
       (err: Error) => err.name,
     )
     const across = { publish, received, closeErr: await closed }
-    setChannelState((s) => ({ ...s, broadcastBehindCloses: { seqsAhead, closeErr, across } }))
+    setChannelState((s) => ({ ...s, broadcastBehindCloses: { seqsAhead, closeErr, pastMemory, across } }))
     away.control.close()
   }, [])
 

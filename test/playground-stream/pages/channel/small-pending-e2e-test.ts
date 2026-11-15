@@ -189,16 +189,19 @@ function testSmallPending() {
   })
 
   // The same two without `lossy`, the second on a broadcast of its own: where its page would miss a message, it closes
-  // instead, and the receipt behind the gap doesn't come either.
+  // instead, and the receipt behind the gap doesn't come either. Between them, three publishes and one past the
+  // server's memory in the same turn: the gap is the fourth, so the page gets all three first.
   test('channel: a client that falls behind a broadcast gets every message up to the gap, then closes with ChannelOverflowError', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-broadcast-behind-closes')
     await autoRetry(
       async () => {
-        const { seqsAhead, closeErr, across } = (await getResult<any>('#channel-state')).broadcastBehindCloses
+        const { seqsAhead, closeErr, pastMemory, across } = (await getResult<any>('#channel-state'))
+          .broadcastBehindCloses
         expect(closeErr).toBe('ChannelOverflowError')
         expect(seqsAhead.length).lessThan(16)
         expect(seqsAhead).deep.equal(seqsAhead.map((_: number, i: number) => i + 1))
+        expect(pastMemory).deep.equal({ seqsAhead: [1, 2, 3], closeErr: 'ChannelOverflowError' })
         expect(across).deep.equal({ publish: 'ChannelOverflowError', received: 0, closeErr: 'ChannelOverflowError' })
       },
       { timeout: 30_000 },
