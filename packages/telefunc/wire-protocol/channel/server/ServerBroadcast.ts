@@ -90,7 +90,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
           hand: (body) => this.lastPeer!.sendPublish(body),
           hold: (body) => hold(this, body),
           letGo: (body) => letGo(this, body),
-          dropUnhanded: () => this.dropUnhanded(),
+          dropReplaceable: () => this.dropUnhanded(),
           // A broadcast's publishes count against no credit.
           outOfCredit: () => false,
         })

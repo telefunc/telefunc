@@ -64,8 +64,8 @@ function wire(
     sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
     queue: {
       waitingPublishes: (ix) => countWaitingPublishes(waiting, ix),
-      dropWaitingPublishes(ix, count) {
-        const dropping = droppingPublishes(ix, count)
+      dropWaitingPublishes(ix, keep) {
+        const dropping = droppingPublishes(ix, keep)
         waiting = waiting.filter((frame) => !dropping(frame))
       },
       dropWaitingFrom() {},
@@ -203,19 +203,46 @@ describe('a lossy send to an attached page', () => {
     expect(page.read.join(' ')).toBe('~L1 R1 ~L2 ~L3 R2')
   })
 
-  test('L waits on the wire, R goes, L2 comes while the page is behind: L goes and its credit comes back', async () => {
+  for (const [sends, read] of [
+    ['L R L2', '~L R ~L2'],
+    ['L1 L2 R L3 L4', '~L2 R ~L4'],
+    ['L R1 R2 L2', '~L R1 R2 ~L2'],
+  ] as const) {
+    test(`${sends} waiting on the wire while the page is behind: the page reads ${read}`, async () => {
+      const channel = new ServerChannel<never, string>()
+      channel._registerChannel()
+      const page = newPage()
+      const w = wire(channel, page, { behindAfter: 0 })
+      w.attach()
+      w.stall()
+      for (const [i, s] of sends.split(' ').entries()) {
+        // Unconfirmed past `behindAfter`: the page is behind from the second send on.
+        if (i > 0) await new Promise((resolve) => setTimeout(resolve, 2))
+        send(channel, s)
+      }
+      w.deliver()
+      w.confirm()
+      expect(page.read.join(' ')).toBe(read)
+      expect(owed(channel, page)).toBe(0)
+      expect(spareMessages(channel, page)).toBe(100)
+    })
+  }
+
+  test('of the lossy sends waiting on the wire, a newer one takes the place only of those after the last plain send', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance', 'Date'] })
     const channel = new ServerChannel<never, string>()
     channel._registerChannel()
     const page = newPage()
     const w = wire(channel, page, { behindAfter: 0 })
     w.attach()
     w.stall()
-    send(channel, 'L R')
-    await new Promise((resolve) => setTimeout(resolve, 2))
-    send(channel, 'L2')
+    // Sent at one instant, before the page is behind: all three go to the wire.
+    send(channel, 'L1 R L2')
+    vi.advanceTimersByTime(1)
+    send(channel, 'L3')
     w.deliver()
-    // L went, so nothing of the page's was unconfirmed when L2 came, and it went.
-    expect(page.read.join(' ')).toBe('R ~L2')
+    w.confirm()
+    expect(page.read.join(' ')).toBe('~L1 R ~L3')
     expect(owed(channel, page)).toBe(0)
     expect(spareMessages(channel, page)).toBe(100)
   })
@@ -567,16 +594,16 @@ describe('a large lossy send near the memory budget', () => {
     }
   })
 
-  test('on SSE, a send after the page fell behind takes the place of the one waiting for the wire, and a plain send queued after that one stays', async () => {
+  test('on SSE, a send after the page fell behind that would not fit beside the one waiting for the wire, which a plain send followed, is refused, and that one stays', async () => {
     const { channel, page } = await leftTwoUnread(true)
     void channel.send('R')
     await page.untilBehind()
     const free = leaveRoom(100_000)
     try {
-      await expect(sendLossy(channel, true, 'c'.repeat(800_000))).resolves.toBeUndefined()
-      expect(page.waiting()).toBe(0)
-      // `a` and `c` as above, and `R`, kept to replay: its 3-byte JSON, its header and 512 bytes.
-      expect(channel.heldBytes).toBe(800_007 + 200 + 3 + 7 + 512 + 800_007 + 512)
+      await expect(sendLossy(channel, true, 'c'.repeat(800_000))).rejects.toThrow('Send refused')
+      expect(page.waiting()).toBe(1)
+      // `a` and `b`, kept to replay: each its frame and 200 bytes; `R`: its 3-byte JSON, its header and 512 bytes.
+      expect(channel.heldBytes).toBe(800_007 + 200 + 800_007 + 200 + 3 + 7 + 512)
     } finally {
       free()
       await page.leave()

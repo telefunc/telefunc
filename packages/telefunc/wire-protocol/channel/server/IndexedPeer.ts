@@ -110,15 +110,28 @@ class IndexedPeer {
     return this.sender.queue.waitingPublishes(this.index)
   }
 
-  /** What those hold. */
-  unhandedHeld(): number {
-    return this.replay.heldByNewestPublishes(this.unhanded())
+  /** What those of them hold that a newer send of the channel's own takes the place of: the ones sent after the
+   *  channel's last frame. */
+  replaceableHeld(): number {
+    return this.replay.heldByNewestPublishes(this.replay.sinceFrame(this.unhanded()))
   }
 
-  /** Takes those back from the replay and the wire's queue. Returns how many went, and their bodies' bytes. */
+  /** Takes the publishes no wire has taken back from the replay and the wire's queue. Returns how many went, and their
+   *  bodies' bytes. */
   dropUnhanded(): { units: number; bytes: number } {
-    const dropped = this.replay.dropNewestPublishes(this.unhanded())
-    if (dropped.units > 0) this.sender.queue.dropWaitingPublishes(this.index, dropped.units)
+    const waiting = this.unhanded()
+    return this.drop(waiting, waiting)
+  }
+
+  /** As `dropUnhanded`, of those only the ones sent after the channel's last frame. */
+  dropReplaceable(): { units: number; bytes: number } {
+    const waiting = this.unhanded()
+    return this.drop(waiting, this.replay.sinceFrame(waiting))
+  }
+
+  private drop(waiting: number, count: number): { units: number; bytes: number } {
+    const dropped = this.replay.dropNewestPublishes(count)
+    if (dropped.units > 0) this.sender.queue.dropWaitingPublishes(this.index, waiting - dropped.units)
     return dropped
   }
 

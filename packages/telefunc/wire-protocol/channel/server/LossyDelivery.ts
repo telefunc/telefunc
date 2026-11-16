@@ -15,8 +15,8 @@ interface LossyHost<U> {
   /** `unit` waits as the newest: what it holds for its page, until `letGo`. */
   hold(unit: U): void
   letGo(unit: U): void
-  /** Its sends that no wire has taken go. */
-  dropUnhanded(): void
+  /** Its sends that a newer one takes the place of go. */
+  dropReplaceable(): void
   /** Its page granted no more credit for what it sends. */
   outOfCredit(): boolean
 }
@@ -38,7 +38,7 @@ class LossyDelivery<U> {
   }
 
   /** With no wire, which only a subscriber's publishes meet, `unit` goes as the replay's newest; behind, or out of
-   *  credit, it waits as the newest. In both it takes the place of those no wire has taken; otherwise it goes. */
+   *  credit, it waits as the newest. In both it takes the place of those it replaces; otherwise it goes. */
   send(unit: U): void {
     if (!this.host.peer() || this.waits()) this.letWaitingGo()
     // Those that went gave their credit back, and may have been all its page left unconfirmed: this one may go at once.
@@ -65,9 +65,9 @@ class LossyDelivery<U> {
     if (this.slot !== null && !this.waits()) this.flush()
   }
 
-  /** The sends that no wire has taken go, and the newest that waits, as a newer one takes their place. */
+  /** The sends a newer one takes the place of go, and the newest that waits. */
   letWaitingGo(): void {
-    this.host.dropUnhanded()
+    this.host.dropReplaceable()
     this.dispose()
   }
 
@@ -78,8 +78,7 @@ class LossyDelivery<U> {
     this.slot = null
   }
 
-  /** Whether a send made now waits, and takes the place of those no wire has taken: its page is behind, or out of
-   *  credit. */
+  /** Whether a send made now waits, and takes the place of those it replaces: its page is behind, or out of credit. */
   waits(): boolean {
     return this.isBehind() || this.host.outOfCredit()
   }

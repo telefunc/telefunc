@@ -8,8 +8,8 @@ import { TAG, isPublishBody, isSequencedTag } from '../../wire/tags.js'
 interface WireQueue {
   /** How many of channel `ix`'s publishes wait here, counted by their heads: its newest ones. */
   waitingPublishes(ix: number): number
-  /** Drops channel `ix`'s oldest `count` publishes that wait here. */
-  dropWaitingPublishes(ix: number, count: number): void
+  /** Drops channel `ix`'s publishes that wait here, but its oldest `keep`. */
+  dropWaitingPublishes(ix: number, keep: number): void
   /** Drops what of channel `ix` waits here, receipts too: from its oldest publish on, or from the start. */
   dropWaitingFrom(ix: number, from: 'publish' | 'start'): void
 }
@@ -58,17 +58,21 @@ function droppingFrom(ix: number, from: 'publish' | 'start'): (frame: Uint8Array
   }
 }
 
-/** Tells, in the queue's order, whether each frame goes: the first `count` heads of channel `ix`, and the body after each. */
-function droppingPublishes(ix: number, count: number): (frame: Uint8Array) => boolean {
-  let left = count
+/** Tells, in the queue's order, whether each frame goes: channel `ix`'s heads past its first `keep`, and the body after
+ *  each. */
+function droppingPublishes(ix: number, keep: number): (frame: Uint8Array) => boolean {
+  let kept = 0
   let bodyNext = false
   return (frame) => {
     if (bodyNext) {
       bodyNext = false
       return true
     }
-    if (left === 0 || !isHeadOf(frame, ix)) return false
-    left--
+    if (!isHeadOf(frame, ix)) return false
+    if (kept < keep) {
+      kept++
+      return false
+    }
     bodyNext = true
     return true
   }

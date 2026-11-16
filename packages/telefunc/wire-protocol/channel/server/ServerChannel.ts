@@ -329,13 +329,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** What its next lossy send takes the place of, by what that holds: with no page attached, the offline buffer's lossy
    *  last entry; attached to a page that is behind or out of credit, the newest that waits and its sends still in the
-   *  wire's queue. Nothing for a page that keeps up. */
+   *  wire's queue since its last frame. Nothing for a page that keeps up. */
   private replaceableHeld(): number {
     if (!this.peer) return this.offlineBuffer.replaceableHeld
     // Made before the first attached lossy send is measured: the attach may have handed lossy sends that still wait.
     const sends = (this.lossySends ??= new LossyDelivery(this.lossyHost()))
     if (!sends.waits()) return 0
-    return (sends.held?.held ?? 0) + this.peer.unhandedHeld()
+    return (sends.held?.held ?? 0) + this.peer.replaceableHeld()
   }
 
   /** Its lossy sends wait only while its page is attached: the wire that goes hands the newest first. */
@@ -350,18 +350,24 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._holdOffline(send.held)
       },
       letGo: ({ held }) => this._letGoOffline(held),
-      dropUnhanded: () => this.dropUnhanded(),
+      dropReplaceable: () => this.dropReplaceable(),
       outOfCredit: () => this.sendCredit.isOutOfCredit(),
     }
   }
 
   /** Drops its lossy sends that no wire has taken: they never left the server. While its page is attached, those are
    *  the ones still in the wire's queue, and the credit they counted comes back; while it is away, those the offline
-   *  buffer holds. An ending drops them, as does a newer lossy send that must wait; reliable sends stay, and reach the
-   *  page ahead of its end. */
+   *  buffer holds. An ending drops them; reliable sends stay, and reach the page ahead of its end. */
   protected dropUnhanded(): void {
     if (!this.peer) return this.offlineBuffer.dropLossy()
     const { units, bytes } = this.peer.dropUnhanded()
+    this.sendCredit.refund(bytes, units)
+  }
+
+  /** A newer lossy send takes the place of its lossy sends still in the wire's queue, back to its last frame: a plain send
+   *  keeps the lossy sends before it. The credit they counted comes back. */
+  private dropReplaceable(): void {
+    const { units, bytes } = this.peer!.dropReplaceable()
     this.sendCredit.refund(bytes, units)
   }
 
