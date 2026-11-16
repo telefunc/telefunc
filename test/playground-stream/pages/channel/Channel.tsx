@@ -8,6 +8,7 @@ import {
   BroadcastOverflow,
   BroadcastBehind,
   LossyKeepsUp,
+  LossyBeforePlain,
   LossyTicker,
   BroadcastBehindCloses,
   BroadcastAwayShared,
@@ -1860,6 +1861,7 @@ function ChannelDemo() {
           <BroadcastOverflow show={showState} />
           <BroadcastBehind show={showState} />
           <LossyKeepsUp show={showState} />
+          <LossyBeforePlain show={showState} />
           <LossySends show={showState} />
           <LossyFromPage show={showState} />
           <LossyTicker show={showState} />

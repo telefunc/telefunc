@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { parse } from '@brillout/json-serializer/parse'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { ServerBroadcastEnd } from './ServerBroadcastEnd.js'
 import { publishBody } from './PublishBody.js'
@@ -353,13 +354,21 @@ function replayed(end: ServerBroadcastEnd): string[] {
 function behindEnd(waiting = 0) {
   const end = new ServerBroadcastEnd()
   end.setOwner({ _onPagePublish() {}, _onPagePublishBinary() {} })
+  return behindPage(end, waiting)
+}
+
+/** `end`'s page, attached and reading both kinds, as `behindEnd`'s; the text publishes it gets and their `info.seq`. */
+function behindPage(end: ServerBroadcastEnd, waiting = 0) {
   end._registerChannel()
   const sent: string[] = []
+  const seqs: number[] = []
   const peer = new IndexedPeer({
     sender: {
       send: (frame) => {
         const decoded = decode(frame as Uint8Array<ArrayBuffer>)
-        if (decoded.tag === TAG.PUBLISH) sent.push(decoded.text)
+        if (decoded.tag !== TAG.PUBLISH) return
+        sent.push(decoded.text)
+        seqs.push(decoded.info.seq)
       },
       carry() {},
       bufferedAmount: () => 0,
@@ -377,8 +386,8 @@ function behindEnd(waiting = 0) {
     // Its own replay: what it hasn't confirmed there is what makes its page behind.
     replay: end._replayBuffer!,
   })
-  end._attachPeer(peer)
-  return { end, peer, sent }
+  end._attachPeer(peer, { broadcast: { text: true, binary: true } })
+  return { end, peer, sent, seqs }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -602,6 +611,20 @@ describe('TransportBroadcastDriver — multi-node transport', () => {
     sender.publish({ text: 'hello' })
 
     expect(received).toEqual([{ text: 'hello' }])
+  })
+
+  // A key carries both kinds: a page that is behind skips to the newest lossy publish, and gets the plain one after it.
+  it('delivers the newest lossy publish of a key, then the plain one after it, to a page that is behind', async () => {
+    configureBroadcastTransport(createMockTransport())
+    const key = 'room:tx:lossy-then-plain'
+    const { sent, seqs } = behindPage(new ServerBroadcast({ key })._end)
+
+    await Broadcast.publish(key, 'first')
+    for (let n = 1; n <= 10; n++) void Broadcast.publish(key, n, { lossy: true })
+    await Broadcast.publish(key, 'plain')
+
+    expect(sent.map((text) => parse(text))).toEqual(['first', 10, 'plain'])
+    expect(seqs).toEqual([1, 11, 12])
   })
 
   it('cross-node: a publish from node1 reaches node2 subscribers via the shared transport', () => {

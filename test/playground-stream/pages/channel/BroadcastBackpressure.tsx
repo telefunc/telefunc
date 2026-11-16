@@ -3,6 +3,7 @@ export {
   BroadcastOverflow,
   BroadcastBehind,
   LossyKeepsUp,
+  LossyBeforePlain,
   LossyTicker,
   BroadcastBehindCloses,
   BroadcastAwayShared,
@@ -35,6 +36,7 @@ type BroadcastBackpressureState = {
     reconnected: { receipts: number; last: string }
   } | null
   lossyKeepsUp: { fromServer: number; fromPage: number; last: string } | null
+  lossyBeforePlain: { received: unknown[]; seqsAhead: number[] } | null
   lossyTicker: { received: number; last: number | undefined; worstMs: number; closed: string | null } | null
   broadcastBehindCloses: {
     seqsAhead: number[]
@@ -50,6 +52,7 @@ const initialBroadcastBackpressureState: BroadcastBackpressureState = {
   broadcastOverflow: null,
   broadcastBehind: null,
   lossyKeepsUp: null,
+  lossyBeforePlain: null,
   lossyTicker: null,
   broadcastBehindCloses: null,
   broadcastAwayShared: null,
@@ -233,6 +236,44 @@ function LossyKeepsUp({ show }: { show: Show }) {
       className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
     >
       Lossy Broadcast On A Link That Keeps Up
+    </button>
+  )
+}
+
+function LossyBeforePlain({ show }: { show: Show }) {
+  async function testLossyBeforePlain() {
+    show({ lossyBeforePlain: null })
+    const { broadcast, control } = await openChannel(() => onChannelPublishesBehind(1024))
+    const received: unknown[] = []
+    const seqsAhead: number[] = []
+    let firstSeq: number | undefined
+    const plainArrived = new Promise<void>((resolve) =>
+      broadcast.subscribe((message, info) => {
+        firstSeq ??= info.seq
+        received.push(message)
+        seqsAhead.push(info.seq - firstSeq)
+        if (message === 'plain') resolve()
+      }),
+    )
+    // While its connection is down, ten lossy publishes and a plain one: only the newest of the ten waits to go.
+    broadcast.onDisconnect(() => {
+      for (let n = 1; n <= 10; n++) void broadcast.publish(n, { lossy: true })
+      void broadcast.publish('plain')
+    })
+    await control.send('cut', { ack: true })
+    await plainArrived
+    show({ lossyBeforePlain: { received, seqsAhead } })
+    control.close()
+  }
+
+  return (
+    <button
+      id="channel-test-lossy-before-plain"
+      type="button"
+      onClick={testLossyBeforePlain}
+      className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+    >
+      Lossy Publishes, Then A Plain One, From A Page That Is Away
     </button>
   )
 }
