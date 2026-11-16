@@ -4,7 +4,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CHANNEL_TRANSPORT } from '../../constants.js'
-import { decode } from '../../wire/frame.js'
+import { decode, encode, type ChannelFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { ClientBroadcast } from './ClientBroadcast.js'
 
@@ -41,6 +41,29 @@ describe('ClientBroadcast uplink', () => {
 
     expect(waiting(page)).toEqual([3, 2])
   })
+
+  // The publish whose place it took holds the close till its answer comes, and both get that answer.
+  it('closes once the publish a newer one replaced is answered, and both get its receipt', async () => {
+    const page = behindUplink()
+    const first = page._publishBinaryUnreported(new Uint8Array([1]), 'cursor', true)
+    behind()
+    const newer = page._publishBinaryUnreported(new Uint8Array([2]), 'cursor', true)
+    expect(waiting(page)).toEqual([2])
+    let closed = false
+    void page.close().then(() => (closed = true))
+    const { ix } = (page as any).connection.channels.of(page)
+    page._dispatchFrame(received(encode.closeAck(ix, 1)))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(closed).toBe(false)
+
+    const [seq] = (page as any).pendingAcks.keys()
+    const receipt = { key: 'cursor', seq: 7, timestamp: 7 }
+    page._dispatchFrame(received(encode.ackRes(ix, 2, seq, JSON.stringify(receipt))))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(await first).toEqual(receipt)
+    expect(await newer).toEqual(receipt)
+    expect(closed).toBe(true)
+  })
 })
 
 /** A page's broadcast whose wire opened and measured its round trip, and which a RECONCILED opened: what it publishes
@@ -63,6 +86,13 @@ function behindUplink() {
 
 /** Past the wire's `behindAfter`, short of its reconcile timeout. */
 const behind = () => vi.advanceTimersByTime(1_000)
+
+/** `frame` as the page's connection hands it to its channel. */
+function received(frame: Uint8Array<ArrayBuffer>): ChannelFrame {
+  const decoded = decode(frame)
+  if (!('index' in decoded)) throw new Error('Not a channel frame')
+  return decoded
+}
 
 /** The first byte of each publish the gate holds, in the order they go. */
 function waiting(page: ClientBroadcast): (number | undefined)[] {
