@@ -1,7 +1,7 @@
 export { loadTelefuncFilesWithImportBuild }
 export { setTelefuncLoaders }
 
-import { config } from '../../serverConfig.js'
+import { applyManifestConfig } from '../../serverConfig.js'
 import { getGlobalObject } from '../../../../utils/getGlobalObject.js'
 import { assertManifest } from './assertManifest.js'
 
@@ -26,7 +26,7 @@ function setTelefuncLoaders({
 function setServerConfig(loadManifest: LoadManifest) {
   const manifest = loadManifest()
   assertManifest(manifest)
-  Object.assign(config, manifest.config)
+  applyManifestConfig(manifest.config)
 }
 
 async function loadTelefuncFilesWithImportBuild(): Promise<unknown> {
