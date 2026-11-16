@@ -1,4 +1,17 @@
 import { describe, expect, it, vi } from 'vitest'
+
+vi.mock('cloudflare:workers', () => ({
+  DurableObject: class {
+    protected readonly ctx: DurableObjectState
+    protected readonly env: Cloudflare.Env
+    constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+      this.ctx = ctx
+      this.env = env
+    }
+  },
+}))
+// The test's Durable Objects take no WebSocket.
+vi.mock('crossws/adapters/cloudflare', () => ({ default: () => ({ handleDurableInit() {} }) }))
 import {
   DEFAULT_BROADCAST_BUCKETS,
   assertLocationFallbackIsScaled,
@@ -10,8 +23,10 @@ import {
 import '../../../node/server/async_hooks.js'
 import { CloudflareBroadcastAuthorityState, CloudflareBroadcastTransport } from './broadcast.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
-import { ServerBroadcast } from '../../channel/server/ServerBroadcast.js'
+import { Broadcast, ServerBroadcast } from '../../channel/server/ServerBroadcast.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting } from '../../broadcast/broadcastAdapter.js'
+import { Telefunc } from '../../../serve/cloudflare.js'
+import type { BroadcastDeliverRequest } from './broadcast.js'
 
 type CloudflareRequest = Request & { cf?: { colo?: string; continent?: string } }
 
@@ -256,13 +271,13 @@ describe('cloudflare broadcast routing', () => {
 
     transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
     transport.attachKV(kv)
-    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
+    transport.attachIsolateInfo('weur')
     _resetBroadcastAdapterForTesting(transport)
 
-    transport.subscribe('room:test', () => {})
+    transport.runInObject('telefunc-shard-weur-0', () => transport.subscribe('room:test', () => {}))
     await flushMicrotasks()
 
-    // KV should have a presence record with the representative DO name as value
+    // KV should have a presence record with the subscribing DO's name as value
     const value = await kv.get(`tfps:${encodeURIComponent('room:test')}:weur:telefunc-shard-weur-0`)
     expect(value).toBe('telefunc-shard-weur-0')
 
@@ -331,12 +346,12 @@ describe('cloudflare broadcast routing', () => {
       'TelefuncDurableObject',
     )
     transport.attachKV(kv)
-    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
+    transport.attachIsolateInfo('weur')
     _resetBroadcastAdapterForTesting(transport)
 
     const room = new ServerBroadcast<{ text: string }>({ key: 'room:test' })
     // subscribe() triggers KV presence setup — publish should wait for it
-    room.subscribe(() => {})
+    transport.runInObject('telefunc-shard-weur-0', () => room.subscribe(() => {}))
     room.publish({ text: 'hello' })
 
     await flushMicrotasks(2)
@@ -368,7 +383,7 @@ describe('cloudflare broadcast routing', () => {
 
     const localRegistry = (() => {
       // Access the local registry after attachIsolateInfo sets it up
-      transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
+      transport.attachIsolateInfo('weur')
       // We need access to the local registry for the mock binding deliver path.
       // Use deliverToLocal which reads from the internal registry.
       return null
@@ -394,9 +409,11 @@ describe('cloudflare broadcast routing', () => {
     _resetBroadcastAdapterForTesting(transport)
 
     const subscriber = new ServerBroadcast<{ text: string }>({ key: 'room:test' })
-    subscriber.subscribe((message) => {
-      received.push(message.text)
-    })
+    transport.runInObject('telefunc-shard-weur-0', () =>
+      subscriber.subscribe((message) => {
+        received.push(message.text)
+      }),
+    )
     const publisher = new ServerBroadcast<{ text: string }>({ key: 'room:test' })
 
     publisher.publish({ text: 'hello' })
@@ -426,7 +443,7 @@ describe('cloudflare broadcast routing', () => {
       return originalPut(key, value, options)
     }) as any
 
-    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
+    transport.attachIsolateInfo('weur')
     transport.attachBinding(
       createBasicBinding({
         onPublish(_id, request) {
@@ -446,7 +463,7 @@ describe('cloudflare broadcast routing', () => {
     _resetBroadcastAdapterForTesting(transport)
 
     const subscriber = new ServerBroadcast<{ text: string }>({ key: 'room:test:ack' })
-    subscriber.subscribe(() => undefined)
+    transport.runInObject('telefunc-shard-weur-0', () => subscriber.subscribe(() => undefined))
     const publisher = new ServerBroadcast<{ text: string }>({ key: 'room:test:ack' })
     const receiptPromise = publisher.publish({ text: 'hello' })
 
@@ -549,7 +566,7 @@ describe('cloudflare broadcast routing', () => {
       'TelefuncDurableObject',
     )
     transport.attachKV(kv)
-    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
+    transport.attachIsolateInfo('weur')
     _resetBroadcastAdapterForTesting(transport)
 
     // No request context needed — isolate state provides locationBucket
@@ -666,10 +683,10 @@ describe('cloudflare broadcast routing', () => {
 
     transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
     transport.attachKV(kv)
-    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
+    transport.attachIsolateInfo('weur')
     _resetBroadcastAdapterForTesting(transport)
 
-    const unsub = transport.subscribe('room:test', () => {})
+    const unsub = transport.runInObject('telefunc-shard-weur-0', () => transport.subscribe('room:test', () => {}))
     await flushMicrotasks()
 
     const presenceKey = `tfps:${encodeURIComponent('room:test')}:weur:telefunc-shard-weur-0`
@@ -701,7 +718,7 @@ describe('cloudflare broadcast routing', () => {
     )
     const kvWrites: string[] = []
     transport.attachKV(createMockKV(kvWrites))
-    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
+    transport.attachIsolateInfo('weur')
     _resetBroadcastAdapterForTesting(transport)
 
     const deliveredIn: string[] = []
@@ -716,10 +733,10 @@ describe('cloudflare broadcast routing', () => {
       secondCallStarted = resolve
     })
     // The first call resumes only after the second one ran, so each subscribes while the other's call is under way.
-    const firstCall = transport.runCall('telefunc-shard-weur-1', () =>
+    const firstCall = transport.runInObject('telefunc-shard-weur-1', () =>
       subscribingTelefunction('telefunc-shard-weur-1', secondCallStart),
     )
-    const secondCall = transport.runCall('telefunc-shard-weur-2', () => {
+    const secondCall = transport.runInObject('telefunc-shard-weur-2', () => {
       secondCallStarted()
       return subscribingTelefunction('telefunc-shard-weur-2', flushCoordinatorTurn())
     })
@@ -737,6 +754,50 @@ describe('cloudflare broadcast routing', () => {
       `put tfps:${encodeURIComponent('room:test:call')}:weur:telefunc-shard-weur-2`,
     ])
     for (const channel of channels) channel.abort()
+    _resetBroadcastAdapterForTesting(previousTransport)
+  })
+
+  it('records what a listener subscribes while a publish is delivered under the Durable Object it runs in', async () => {
+    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 5 })
+    const previousTransport = getBroadcastAdapter()
+    _resetBroadcastAdapterForTesting(transport)
+    type DeliveringObject = { telefuncBroadcastDeliver(request: BroadcastDeliverRequest): void }
+    const objects = new Map<string, DeliveringObject>()
+    let deliveringIn: string | null = null
+    const binding = createBasicBinding({
+      onPublish: (_id, request) => transport.publishToSubscribers(createAuthorityState(), request),
+      onDeliver(id, request) {
+        deliveringIn = id.name
+        objects.get(id.name)?.telefuncBroadcastDeliver(request)
+        deliveringIn = null
+        return Promise.resolve()
+      },
+    })
+    const env = { TelefuncDurableObject: binding, TelefuncKV: createMockKV() } as unknown as Cloudflare.Env
+    const { TelefuncDurableObject } = new Telefunc({ scale: 5 })
+    for (const name of ['telefunc-shard-weur-0', 'telefunc-shard-weur-1']) {
+      const ctx = { id: { name }, storage: {} } as unknown as DurableObjectState
+      objects.set(
+        name,
+        new TelefuncDurableObject(ctx, env) as InstanceType<typeof TelefuncDurableObject> & DeliveringObject,
+      )
+    }
+    transport.attachIsolateInfo('weur')
+
+    const deliveredIn: Array<string | null> = []
+    const joined = new ServerBroadcast<string>({ key: 'room:test:joined' })
+    transport.runInObject('telefunc-shard-weur-1', () =>
+      new ServerBroadcast<string>({ key: 'room:test:join' }).subscribe(() =>
+        joined.subscribe(() => deliveredIn.push(deliveringIn)),
+      ),
+    )
+    await flushCoordinatorTurn()
+    await Broadcast.publish('room:test:join', 'join')
+    await flushCoordinatorTurn()
+    await joined.publish('hello')
+    await flushCoordinatorTurn()
+
+    expect(deliveredIn).toEqual(['telefunc-shard-weur-1'])
     _resetBroadcastAdapterForTesting(previousTransport)
   })
 })

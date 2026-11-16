@@ -36,7 +36,9 @@ export default {
 // wrangler.jsonc
 {
   "compatibility_date": "2025-08-15", // or later
-  "compatibility_flags": ["nodejs_als", "enable_request_signal"], // AsyncLocalStorage; a Worker's request.signal aborts when its client disconnects
+  // nodejs_als (or nodejs_compat): server-side Broadcast subscribers need it.
+  // enable_request_signal: a Worker's request.signal aborts when its client disconnects.
+  "compatibility_flags": ["nodejs_als", "enable_request_signal"],
   "durable_objects": {
     "bindings": [
       { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
@@ -51,7 +53,7 @@ export default {
 }
 ```
 
-> `nodejs_als` gives Telefunc `AsyncLocalStorage`, which tells it the Durable Object a telefunction runs in; `nodejs_compat` includes it. Without either, the Worker fails to start with `No such module "node:async_hooks"`.
+> `nodejs_als` gives Telefunc `AsyncLocalStorage`, which tells it the Durable Object a server-side `Broadcast` subscriber belongs to; `nodejs_compat` includes it. A Worker without either still serves telefunctions, channels, and a `BroadcastChannel` returned to the client; a server-side subscriber then throws an error that names the flag.
 
 {/* spellcheck-ignore:off */}
 

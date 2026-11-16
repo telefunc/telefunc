@@ -23,7 +23,7 @@ const mocks = vi.hoisted(() => {
     readonly attachKV = vi.fn()
     readonly attachIsolateInfo = vi.fn()
     readonly attachRequest = vi.fn()
-    readonly runCall = vi.fn(<T>(_doName: string, call: () => T): T => call())
+    readonly runInObject = vi.fn(<T>(_doName: string, run: () => T): T => run())
     readonly publishToSubscribers = vi.fn()
     readonly deliverToLocal = vi.fn()
 
@@ -266,7 +266,7 @@ describe('cloudflare adapter entrypoint', () => {
     )
     expect(mocks.telefuncMock).toHaveBeenCalled()
     expect(response.headers.get('x-telefunc-home')).toBe('weur')
-    expect(mocks.transportInstances[0]?.attachIsolateInfo).toHaveBeenCalledWith('telefunc-shard-weur-1', 'weur')
+    expect(mocks.transportInstances[0]?.attachIsolateInfo).toHaveBeenCalledWith('weur')
 
     instance.webSocketMessage({} as WebSocket, 'payload')
     expect(mocks.crosswsAdapter.handleDurableMessage).toHaveBeenCalledWith(instance, expect.anything(), 'payload')
