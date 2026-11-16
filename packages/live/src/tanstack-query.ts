@@ -99,7 +99,7 @@ function unbind(registry: Registry, queryHash: string): void {
 }
 
 /** Marks a query fetched on the server stale once its value is in: the browser then fetches it again on mount, whatever
- *  its `staleTime`, and that fetch opens the channel. TanStack's dehydrated state carries the mark. */
+ *  its `staleTime` in milliseconds, and that fetch opens the channel. TanStack's dehydrated state carries the mark. */
 function refetchAfterHydration(client: QueryClient, queryKey: QueryKey): void {
   const query = queryOf(client, queryKey)
   if (!query) return
