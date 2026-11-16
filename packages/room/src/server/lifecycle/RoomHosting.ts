@@ -28,10 +28,7 @@ class RoomHosting {
 
   /** The stub's page attached: its view is written. */
   hostView(stub: RoomStub): void {
-    this.views.set(
-      stub,
-      this.writeViews([stub]).then(([key]) => key ?? null),
-    )
+    this.views.set(stub, viewKey(this.writeViews([stub]), 0))
   }
 
   /** The stub's page detached: its view is removed, after its write. */
@@ -59,15 +56,14 @@ class RoomHosting {
     this.viewsLost = false
     const stubs = [...this.views.keys()]
     if (stubs.length === 0) return
-    const previous = Promise.all(this.views.values())
-    const keys = previous.then(() => this.writeViews(stubs))
-    stubs.forEach((stub, i) =>
-      this.views.set(
-        stub,
-        keys.then((written) => written[i] ?? null),
-      ),
-    )
+    const keys = this.writeViewsAfter(Promise.all(this.views.values()), stubs)
+    stubs.forEach((stub, i) => this.views.set(stub, viewKey(keys, i)))
     await keys
+  }
+
+  private async writeViewsAfter(earlier: Promise<unknown>, stubs: RoomStub[]): Promise<(string | null)[]> {
+    await earlier
+    return this.writeViews(stubs)
   }
 
   private async renewOrMarkViewsLost(): Promise<void> {
@@ -94,4 +90,8 @@ class RoomHosting {
       return stubs.map(() => null)
     }
   }
+}
+
+async function viewKey(written: Promise<(string | null)[]>, i: number): Promise<string | null> {
+  return (await written)[i] ?? null
 }

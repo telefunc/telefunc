@@ -15,6 +15,7 @@ import {
   type MemberRequest,
   type RoomSnapshotMetadata,
   type DemandChange,
+  type RoomResult,
 } from '../shared/protocol.js'
 import type { RoomDataEnvelope, RoomIncarnation } from './protocol.js'
 import { departureCause, type RoomModel } from '../shared/RoomModel.js'
@@ -250,11 +251,14 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
     if (ackId === undefined) return holder._deliverMessage(msg)
     // A server participant, or one a client holds (its forwarder answers): the reply goes to the sender's inbox, and a
     // client holding the participant closes once the reply is out, so its leave comes after it.
-    const replied = holder
-      ._deliverMessageAck(msg)
-      .then((reply) => this.writes.publishDmAck(envelope.from, ackId, reply))
+    const replied = this.publishDmReply(holder._deliverMessageAck(msg), envelope.from, ackId)
     holder._trackReply(replied)
     void replied.catch(reportRoomError)
+  }
+
+  private async publishDmReply(reply: Promise<RoomResult>, to: string, ackId: string): Promise<void> {
+    const answer = await reply
+    await this.writes.publishDmAck(to, ackId, answer)
   }
 
   /** Resolves once the tail receives, so it holds everything committed after it returns. */

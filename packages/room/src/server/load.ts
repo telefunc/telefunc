@@ -10,8 +10,14 @@ const globalObject = getGlobalObject<{ loading?: Promise<RoomServer>; loaded?: R
 
 /** Room's server code, imported on first use; until then a server loads only Room's entry and Cloudflare extension. */
 function loadRoomServer(): Promise<RoomServer> {
-  globalObject.loading ??= import('./roomServer.js').then((server) => (globalObject.loaded = server))
+  globalObject.loading ??= importRoomServer()
   return globalObject.loading
+}
+
+async function importRoomServer(): Promise<RoomServer> {
+  const server = await import('./roomServer.js')
+  globalObject.loaded = server
+  return server
 }
 
 /** Room's server code once it is loaded; before, no room, participant or remote participant exists. */

@@ -330,9 +330,14 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
    *  null), within the member's named-track limit; a new track joins what its every-track readers cover. */
   admitTrack(member: string, track: string): Promise<void> | null {
     const planned = this.lanePlan.lanePlanned(member, track)
-    if (planned !== null) return planned.then(() => this.publishOnTrack(member, track))
+    if (planned !== null) return this.publishOnTrackAfter(planned, member, track)
     this.publishOnTrack(member, track)
     return null
+  }
+
+  private async publishOnTrackAfter(planned: Promise<void>, member: string, track: string): Promise<void> {
+    await planned
+    this.publishOnTrack(member, track)
   }
 
   private publishOnTrack(member: string, track: string): void {
@@ -397,7 +402,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     if (before.all) return
     // A live message from a sender another want's subscription already delivers would otherwise beat the retained one.
     const hold = holder.hold(null)
-    const reading = this.readRetainedText(holder, before, hold).finally(() => hold.end())
+    const reading = this.readRetainedText(holder, before, hold)
     try {
       await withinRoomHorizon(reading)
     } finally {
@@ -407,18 +412,22 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   }
 
   private async readRetainedText(holder: LaneHolder, before: TextWantsChange, hold: ReplayHold): Promise<void> {
-    await this.authority.ensureRoster()
-    // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
-    await withinRoomHorizon(this.lanePlan.semanticReady)
-    const stored = await getRoomPlane().readRetained(this.id, this.incarnation.inc, SEMANTIC_LANE)
-    if (stored === null) return
-    const serialized = decodeRoomText(stored.payload)
-    const event = parse(serialized) as RoomDataEnvelope
-    // A member whose own want didn't change is wanted now only by the new room-wide want, if at all.
-    const had = before.members.get(event.from) ?? holder.textDemand().members.has(event.from)
-    if (had || !holder.wantsTextFrom(event.from) || !this.model.hasMember(event.from)) return
-    // Replay the stored order as-is; the holder admits it only if it is newer than what it has.
-    holder.emitRetainedText(event, { seq: stored.seq, timestamp: stored.timestamp }, serialized, hold)
+    try {
+      await this.authority.ensureRoster()
+      // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
+      await withinRoomHorizon(this.lanePlan.semanticReady)
+      const stored = await getRoomPlane().readRetained(this.id, this.incarnation.inc, SEMANTIC_LANE)
+      if (stored === null) return
+      const serialized = decodeRoomText(stored.payload)
+      const event = parse(serialized) as RoomDataEnvelope
+      // A member whose own want didn't change is wanted now only by the new room-wide want, if at all.
+      const had = before.members.get(event.from) ?? holder.textDemand().members.has(event.from)
+      if (had || !holder.wantsTextFrom(event.from) || !this.model.hasMember(event.from)) return
+      // Replay the stored order as-is; the holder admits it only if it is newer than what it has.
+      holder.emitRetainedText(event, { seq: stored.seq, timestamp: stored.timestamp }, serialized, hold)
+    } finally {
+      hold.end()
+    }
   }
 
   /** Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per (member,
@@ -428,7 +437,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   async replayBinary(holder: LaneHolder, change: BinaryWantChange): Promise<void> {
     // A live frame on a lane another want's subscription already delivers would otherwise beat its retained frame.
     const hold = holder.hold(change)
-    const reading = this.readRetainedBinary(holder, change, hold).finally(() => hold.end())
+    const reading = this.readRetainedBinary(holder, change, hold)
     try {
       await withinRoomHorizon(reading)
     } finally {
@@ -438,19 +447,23 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   }
 
   private async readRetainedBinary(holder: LaneHolder, { member, track }: BinaryWantChange, hold: ReplayHold) {
-    await this.authority.ensureRoster()
-    await (member === EVERY_MEMBER ? this.lanePlan.binaryReady() : this.lanePlan.pairsReady(member, track))
-    const plane = getRoomPlane()
-    const lanes: LaneId[] =
-      member !== EVERY_MEMBER && track !== EVERY_TRACK
-        ? [{ kind: 'binary', member, track }]
-        : await plane.driver.listRetained(
-            this.id,
-            this.incarnation.inc,
-            member !== EVERY_MEMBER ? { member } : track !== EVERY_TRACK ? { track } : undefined,
-          )
-    // A frame is admitted by its member and track, so the reads may end in any order.
-    await eachInFlight(lanes, (lane) => this.replayRetainedLane(lane, holder, hold))
+    try {
+      await this.authority.ensureRoster()
+      await (member === EVERY_MEMBER ? this.lanePlan.binaryReady() : this.lanePlan.pairsReady(member, track))
+      const plane = getRoomPlane()
+      const lanes: LaneId[] =
+        member !== EVERY_MEMBER && track !== EVERY_TRACK
+          ? [{ kind: 'binary', member, track }]
+          : await plane.driver.listRetained(
+              this.id,
+              this.incarnation.inc,
+              member !== EVERY_MEMBER ? { member } : track !== EVERY_TRACK ? { track } : undefined,
+            )
+      // A frame is admitted by its member and track, so the reads may end in any order.
+      await eachInFlight(lanes, (lane) => this.replayRetainedLane(lane, holder, hold))
+    } finally {
+      hold.end()
+    }
   }
 
   private async replayRetainedLane(lane: LaneId, holder: LaneHolder, hold: ReplayHold): Promise<void> {

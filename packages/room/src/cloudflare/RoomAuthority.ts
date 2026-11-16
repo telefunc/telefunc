@@ -31,8 +31,7 @@ import {
 import { assert } from '../utils/assert.js'
 import { OPERATION_COMMIT_LANE } from '../backend/operation.js'
 import { ROOM_OPERATIONS, recordRequest, type RoomOperationRequest } from '../server/store/roomOperations.js'
-import { raceTimeout } from '../utils/raceTimeout.js'
-import { ROOM_HORIZON_MS } from '../server/constants.js'
+import { lostReason } from '../server/lanes/lanes.js'
 import { reportLaneLost } from '../server/config.js'
 import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../backend/laneKey.js'
 import { commitPreconditionHolds, isOpenIncarnation, publicHead } from '../backend/semantics.js'
@@ -205,7 +204,7 @@ class RoomAuthority {
     if (lane.kind !== 'inbox' && lane.kind !== 'control') {
       // No committer awaits a data or binary frame's handoff, so a lost one is reported here. A delivery that can be lost
       // has a route, and each route is this room's.
-      delivery.catch((error: unknown) => reportLaneLost(routes[0]!.roomId, lane, String(error)))
+      void reportIfLost(delivery, routes[0]!.roomId, lane)
       return receipt
     }
     const lost = await lostReason(delivery)
@@ -377,11 +376,10 @@ function selectCell(sql: SqlStorage, inc: string, key: string, now: number): Uin
   return read.cells.get(key)
 }
 
-/** Null once each session DO took the delivery, else why it was lost: a handoff unconfirmed within the horizon is. */
-function lostReason(delivery: Promise<void>): Promise<string | null> {
-  const settled = delivery.then(
-    () => null,
-    (reason: unknown) => String(reason),
-  )
-  return raceTimeout(settled, ROOM_HORIZON_MS, () => 'unconfirmed within the horizon')
+async function reportIfLost(delivery: Promise<void>, roomId: string, lane: LaneId): Promise<void> {
+  try {
+    await delivery
+  } catch (error) {
+    reportLaneLost(roomId, lane, String(error))
+  }
 }

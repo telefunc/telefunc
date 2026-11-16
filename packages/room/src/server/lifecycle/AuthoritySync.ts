@@ -223,10 +223,16 @@ class AuthoritySync {
   /** The current subscription's baseline, read again after a failed read. */
   private subscriptionBaseline(): Promise<number> {
     const read = (this.baseline ??= this.controlMark())
-    read.catch(() => {
-      if (this.baseline === read) this.baseline = null
-    })
+    void this.forgetFailedBaseline(read)
     return read
+  }
+
+  private async forgetFailedBaseline(read: Promise<number>): Promise<void> {
+    try {
+      await read
+    } catch {
+      if (this.baseline === read) this.baseline = null
+    }
   }
 
   /** The roster is known, and the control lane delivers every change since. */

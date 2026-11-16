@@ -108,12 +108,17 @@ class LaneSubscription {
   /** Core rejects `ready` right after announcing `closed`: with the driver's reason as the cause where the lane failed
    *  (Redis refused it), which its readiness rejects with; without one where the backend dropped its incarnation. */
   private ended(subscription: BackendSubscription): void {
-    const pending = this.ensurePendingReady()
-    void subscription.ready.catch((failure: Error) => {
+    void this.endOnReadyFailure(subscription, this.ensurePendingReady())
+  }
+
+  private async endOnReadyFailure(subscription: BackendSubscription, pending: Deferred<void>): Promise<void> {
+    try {
+      await subscription.ready
+    } catch (failure) {
       if (this.subscription !== subscription) return
-      if (failure.cause !== undefined) pending.reject(failure)
+      if (failure instanceof Error && failure.cause !== undefined) pending.reject(failure)
       this.owner.onLaneEnded(this)
-    })
+    }
   }
 
   stop(): void {

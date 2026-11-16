@@ -34,9 +34,10 @@ type LoadingStatic = (typeof ROOM_STATICS)[number]
 function onLoad<K extends LoadingStatic>(name: K): RoomStatic[K] {
   const call = (server: RoomServer, args: unknown[]) =>
     (server.roomStatics[name] as (...args: unknown[]) => unknown)(...args)
+  const loadAndCall = async (args: unknown[]) => call(await loadRoomServer(), args)
   return ((...args: unknown[]) => {
     const server = loadedRoomServer()
-    return server === undefined ? loadRoomServer().then((loaded) => call(loaded, args)) : call(server, args)
+    return server === undefined ? loadAndCall(args) : call(server, args)
   }) as RoomStatic[K]
 }
 

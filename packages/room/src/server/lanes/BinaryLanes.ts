@@ -67,7 +67,7 @@ class BinaryLanes {
   /** The lanes not ready yet, so a readiness wait never visits the ready ones. */
   private readonly pending = new Set<LaneSubscription>()
   /** The wait for `pending`, until another lane starts pending. */
-  private allReadyWait: Promise<void> | null = null
+  private allReadyWait: Promise<unknown> | null = null
   private readonly replans: Replans = { members: new Set(), tracks: new Set(), pairs: new Map() }
 
   private readonly laneOwner: LaneSubscriptionOwner
@@ -198,14 +198,19 @@ class BinaryLanes {
   async allReady(): Promise<void> {
     if (this.pending.size === 0) return
     if (this.allReadyWait === null) {
-      const ready = withinRoomHorizon(Promise.all(Array.from(this.pending, (lane) => lane.ready))).then(() => {})
-      const clear = () => {
-        if (this.allReadyWait === ready) this.allReadyWait = null
-      }
-      ready.then(clear, clear)
-      this.allReadyWait = ready
+      this.allReadyWait = withinRoomHorizon(Promise.all(Array.from(this.pending, (lane) => lane.ready)))
+      void this.forgetWhenSettled(this.allReadyWait)
     }
     await this.allReadyWait
+  }
+
+  private async forgetWhenSettled(wait: Promise<unknown>): Promise<void> {
+    try {
+      await wait
+    } catch {
+      // its callers get the failure
+    }
+    if (this.allReadyWait === wait) this.allReadyWait = null
   }
 
   /** A binary lane went pending, or ready; once a wanted one delivers, it replans what it serves. */
