@@ -104,8 +104,9 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     }))
   }
 
-  /** A graceful close goes behind what waits for its page, so each lossy stream first leaves only its newest; an abort
-   *  drops them. */
+  /** A graceful close goes behind what waits for its page: all of it but the stale lossy publishes no wire has taken,
+   *  of which each stream leaves only its newest and the ones a plain publish of it followed. An abort drops what
+   *  waits. */
   override close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
     if (this._phase === 'open' && this.lossyPublishes !== null) {
       this.peer?.dropStaleLossy()
