@@ -29,8 +29,8 @@ const stalledSender: PeerSender = {
 }
 
 /** A broadcast of `key` whose page subscribed to its text and reads nothing. */
-function subscribedPage(key: string, lossy: boolean) {
-  const broadcast = new ServerBroadcast<string>({ key, lossy })
+function subscribedPage(key: string) {
+  const broadcast = new ServerBroadcast<string>({ key })
   broadcast._end._registerChannel()
   broadcast._end._attachPeer(
     new IndexedPeer({ sender: stalledSender, index: 2, replay: broadcast._end._replayBuffer! }),
@@ -73,9 +73,9 @@ test("a reliable broadcast near the budget stays open when another channel's tex
 })
 
 for (const lossy of [false, true]) {
-  test(`a ${lossy ? 'lossy' : 'reliable'} broadcast whose publish doesn't fit under the budget closes, and the server holds no more than it`, async () => {
+  test(`a broadcast whose ${lossy ? 'lossy' : 'plain'} publish doesn't fit under the budget closes, and the server holds no more than it`, async () => {
     const key = crypto.randomUUID()
-    const broadcast = subscribedPage(key, lossy)
+    const broadcast = subscribedPage(key)
     let closedWith: Error | undefined
     broadcast.onClose((err) => {
       closedWith = err
@@ -85,7 +85,7 @@ for (const lossy of [false, true]) {
     const { maxMemory } = getChannelConfig()
     try {
       hold(filler, maxMemory - ledgerTotal() - 300_000)
-      expect(await Broadcast.publish(key, 'a'.repeat(400_000))).toMatchObject({ key })
+      expect(await Broadcast.publish(key, 'a'.repeat(400_000), { lossy })).toMatchObject({ key })
       expect(ledgerTotal()).toBeLessThanOrEqual(maxMemory)
       expect(broadcast.isClosed).toBe(true)
       expect(closedWith).toBeInstanceOf(ChannelOverflowError)
@@ -99,10 +99,12 @@ for (const lossy of [false, true]) {
 }
 
 test("a publish that can't fit under the budget ends its own pages only: another key's keep what they hold", async () => {
-  const others = [subscribedPage(crypto.randomUUID(), false), subscribedPage(crypto.randomUUID(), true)]
-  const page = subscribedPage(crypto.randomUUID(), false)
+  const others = [subscribedPage(crypto.randomUUID()), subscribedPage(crypto.randomUUID())]
+  const page = subscribedPage(crypto.randomUUID())
   try {
-    for (const other of others) await Broadcast.publish(other.key, 'a'.repeat(100_000))
+    // A plain publish to the first, a lossy one to the second.
+    for (const [i, other] of others.entries())
+      await Broadcast.publish(other.key, 'a'.repeat(100_000), { lossy: i === 1 })
     const held = others.map((other) => other._end.heldBytes)
     expect(held.every((bytes) => bytes > 100_000)).toBe(true)
     await Broadcast.publish(page.key, 'b'.repeat(8 * 1024 * 1024))

@@ -894,8 +894,8 @@ async function onChannelLinkShare() {
   return { download: download.client, ping: ping.client }
 }
 
-/** A broadcast that publishes `count` bodies of `bytes`, closes or aborts, as a channel beside it asks, and answers its
- *  pings.
+/** A broadcast that publishes `count` bodies of `bytes`, `lossy` or not, closes or aborts, as a channel beside it asks,
+ *  and answers its pings.
  *  After `'away'`, the page's next publish drops its connections: one body follows on the cut wire, ahead of that
  *  publish's receipt, and 16 more while the page is away (it retries after 500 ms). `'last'` answers the ordinal of the
  *  newest `<ordinal>:…` text its server subscription got. `'past memory'` publishes three bodies, then one of 3 MiB. */
@@ -904,9 +904,9 @@ async function onChannelPublishesBehind(
   lossy?: boolean,
   key = `behind:${crypto.randomUUID()}`,
 ) {
-  const broadcast = new BroadcastChannel({ key, lossy })
+  const broadcast = new BroadcastChannel({ key })
   const publish = (count: number) => {
-    for (let i = 0; i < count; i++) void broadcast.publishBinary(new Uint8Array(bytes))
+    for (let i = 0; i < count; i++) void broadcast.publishBinary(new Uint8Array(bytes), { lossy })
   }
   let lastOrdinal = 'none'
   broadcast.subscribe((message) => {
@@ -934,7 +934,7 @@ async function onChannelPublishesBehind(
       // In the same turn, so the three still wait for the wire where a server with a `maxMemory` under 3 MiB can't hold
       // the fourth.
       publish(3)
-      void broadcast.publishBinary(new Uint8Array(3 * 1024 * 1024))
+      void broadcast.publishBinary(new Uint8Array(3 * 1024 * 1024), { lossy })
       return 'published'
     }
     if (msg === 'away') {
@@ -952,13 +952,13 @@ async function onChannelPublishesBehind(
   return { broadcast, control: control.client }
 }
 
-/** Once the page asks, `count` publishes of `bytes` to a lossy broadcast, `periodMs` apart, each with its ordinal and when
- *  it went; then, with `close`, a graceful close. */
+/** Once the page asks, `count` lossy publishes of `bytes`, `periodMs` apart, each with its ordinal and when it went;
+ *  then, with `close`, a graceful close. */
 async function onChannelLossyTicker(bytes: number, count: number, periodMs: number, close = false) {
-  const broadcast = new BroadcastChannel<string>({ key: `ticker:${crypto.randomUUID()}`, lossy: true })
+  const broadcast = new BroadcastChannel<string>({ key: `ticker:${crypto.randomUUID()}` })
   const publishAll = async () => {
     for (let i = 0; i < count; i++) {
-      void broadcast.publish(`${i}:${Date.now()}:`.padEnd(bytes, 'x'))
+      void broadcast.publish(`${i}:${Date.now()}:`.padEnd(bytes, 'x'), { lossy: true })
       await new Promise((resolve) => setTimeout(resolve, periodMs))
     }
     if (close) await broadcast.close({ timeout: 10_000 })

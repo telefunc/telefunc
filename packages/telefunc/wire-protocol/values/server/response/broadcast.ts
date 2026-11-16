@@ -15,7 +15,6 @@ const broadcastReplacer: ReplacerType<BroadcastContract, ServerReplacerContext> 
     context.registerChannel(broadcast._end)
     broadcast._publishShield = context.validators.get('data')
     const metadata: BroadcastContract['metadata'] = { channelId: broadcast.id, key: broadcast.key }
-    if (broadcast.lossy) metadata.lossy = true
     if (context.maxFrameBytes) metadata.maxFrameBytes = context.maxFrameBytes
     return {
       metadata,

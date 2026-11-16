@@ -152,7 +152,6 @@ type ClientReviverContext = {
   createBroadcastChannel<T = unknown>(opts: {
     channelId: string
     key: string
-    lossy?: true
     maxFrameBytes?: number
   }): ClientBroadcast<T>
   receiveStream(metadata: StreamingMetadata): StreamSource
@@ -272,7 +271,7 @@ type ChannelContract = TypeContract<
 type BroadcastContract = TypeContract<
   ServerBroadcast,
   ClientBroadcast,
-  { channelId: string; key: string; lossy?: true; maxFrameBytes?: number }
+  { channelId: string; key: string; maxFrameBytes?: number }
 >
 
 type FunctionContract = TypeContract<

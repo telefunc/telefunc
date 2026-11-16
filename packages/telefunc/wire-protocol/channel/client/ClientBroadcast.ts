@@ -28,18 +28,13 @@ import { isPromise } from '../../../utils/isPromise.js'
 import { forListener } from '../listenerAnswer.js'
 import { ClientChannel, reportChannelError, type ClientChannelOptions } from './ClientChannel.js'
 
-type ClientBroadcastOptions = ClientChannelOptions & { lossy?: boolean }
-
 class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
   /** The subscriptions this page asks the server for. */
   private readonly subscribed: BroadcastSubscriptions = { text: false, binary: false }
-  /** A newer publish replaces this page's own that no wire has taken yet: see `sendPublish`. */
-  private readonly lossy: boolean
 
-  constructor(options: ClientBroadcastOptions) {
+  constructor(options: ClientChannelOptions) {
     super(options)
-    this.lossy = options.lossy === true
     // Nothing waits on a publish's credit, so the page grants the largest window from the start.
     this.receiveCredit.widenByteWindow()
     this._attach.declareSubscriptions(this.subscribed)
@@ -82,7 +77,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   publish(data: ChannelData<T>, options?: BroadcastPublishOptions): Promise<ChannelPublishAck> {
-    const lossy = options?.lossy ?? this.lossy
+    const lossy = options?.lossy ?? false
     const payload = textPayload(stringifyMessage(data, 'publish'), lossy)
     return reportingUnexpected(this.sendPublish(encode.publishAckReq, payload, 'text', lossy))
   }
@@ -101,7 +96,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   publishBinary(data: Uint8Array, options?: BroadcastPublishOptions): Promise<ChannelPublishAck> {
-    const lossy = options?.lossy ?? this.lossy
+    const lossy = options?.lossy ?? false
     return reportingUnexpected(
       this.sendPublish(encode.publishBinaryAckReq, binaryPayload(data, lossy), 'binary', lossy),
     )
@@ -182,7 +177,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private onPeerPublish(payload: string, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
     const parsed = parse(payload) as ChannelData<T>
-    this.deliverPublish(this.subscribers.text.list(), () => parsed, wireInfo, bytes, this.lossy || isLossy(payload))
+    this.deliverPublish(this.subscribers.text.list(), () => parsed, wireInfo, bytes, isLossy(payload))
   }
 
   /** A `subscribeBinary()` listener reads the payload's mark, as Room's local ones read their own frames. */
@@ -190,7 +185,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this.receiveCredit.onPublishArrived()
     const list = this.subscribers.binary.list()
     const valueFor = (i: number) => forListener(payload, list, i, HEADER + PUBLISH_BINARY_HEADER)
-    this.deliverPublish(list, valueFor, wireInfo, bytes, this.lossy)
+    this.deliverPublish(list, valueFor, wireInfo, bytes, false)
   }
 
   /** Calls each listener with its value, `valueFor` its index; an `Abort` stops the rest and leaves the publish

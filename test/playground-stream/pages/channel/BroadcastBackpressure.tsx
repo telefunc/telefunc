@@ -159,7 +159,9 @@ function BroadcastBehind({ show }: { show: Show }) {
     // The page's own 20 publishes at once, each its ordinal at the same size, and the last the server's subscription got.
     const publishOrdinals = async (from: number) => {
       const receipts = await Promise.all(
-        Array.from({ length: 20 }, (_, n) => broadcast.publish(`${from + n}:`.padEnd(256 * 1024, 'x'))),
+        Array.from({ length: 20 }, (_, n) =>
+          broadcast.publish(`${from + n}:`.padEnd(256 * 1024, 'x'), { lossy: true }),
+        ),
       )
       return {
         receipts: new Set(receipts.map((receipt) => receipt.seq)).size,
@@ -220,7 +222,7 @@ function LossyKeepsUp({ show }: { show: Show }) {
     await control.send(100, { ack: true })
     for (let i = 0; i < 30 && fromServer < 100; i++) await new Promise((resolve) => setTimeout(resolve, 100))
     const receipts = await Promise.all(
-      Array.from({ length: 100 }, (_, n) => broadcast.publish(`${n}:`.padEnd(4096, 'x'))),
+      Array.from({ length: 100 }, (_, n) => broadcast.publish(`${n}:`.padEnd(4096, 'x'), { lossy: true })),
     )
     const fromPage = new Set(receipts.map((receipt) => receipt.seq)).size
     const lossyKeepsUp = { fromServer, fromPage, last: await control.send('last', { ack: true }) }
@@ -341,7 +343,7 @@ function BroadcastBehindCloses({ show }: { show: Show }) {
     const { broadcast, control } = await opened()
     const { seq: before } = await broadcast.publish('before the burst')
     const seqsAhead: number[] = []
-    // It closes, or, as a lossy one does, reads on up to the newest.
+    // It closes, or, where the publishes are lossy, reads on up to the newest.
     const ended = new Promise<string | null>((resolve) => {
       broadcast.onClose((err) => resolve(err?.name ?? 'none'))
       broadcast.subscribeBinary((_, info) => {
@@ -394,7 +396,7 @@ function BroadcastBehindCloses({ show }: { show: Show }) {
 function BroadcastAwayShared({ show }: { show: Show }) {
   async function testBroadcastAwayShared() {
     show({ broadcastAwayShared: null })
-    // Two lossy broadcasts on one key, with bodies of 1200 KiB: one fits the lane's 2 MiB, two don't.
+    // Two broadcasts on one key, with lossy bodies of 1200 KiB: one fits the lane's 2 MiB, two don't.
     const key = `away-shared:${crypto.randomUUID()}`
     const pages = await Promise.all(
       [0, 1].map(() => openChannel(() => onChannelPublishesBehind(1200 * 1024, true, key))),

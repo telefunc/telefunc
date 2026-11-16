@@ -63,16 +63,10 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
   /** The stream of each kind's publishes: a text message doesn't take a binary one's place. */
   private readonly streams: Record<BroadcastKind, string>
 
-  /** Past what its wire takes to confirm, a newer publish replaces those waiting, on the way to its page and on the page's
-   *  way up. */
-  readonly lossy: boolean
-
   constructor(opts: BroadcastChannelOptions) {
-    const { key, lossy = false } = opts
+    const { key } = opts
     assertBroadcastKey(key)
-    assertUsage(typeof lossy === 'boolean', "`new BroadcastChannel()`'s `lossy` should be a boolean")
     this.key = key
-    this.lossy = lossy
     this.streams = { text: `text:${key}`, binary: `binary:${key}` }
     this._end = new ServerBroadcastEnd()
     this._end.setOwner(this)
@@ -185,7 +179,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     }
     // Asked before a body is made, which admits it against the budget: a page that began to close costs nothing.
     if (!this.peerSubscriptions.text || this._end.isClosed) return this._end._endOverflowed()
-    this._end.deliver(bodyOf(payload, rawInfo, this.streams.text, this.lossy || isLossy(payload)))
+    this._end.deliver(bodyOf(payload, rawInfo, this.streams.text))
   }
 
   private deliverBroadcastBinaryMessage(payload: Uint8Array, rawInfo: WirePublishInfo): void {
@@ -195,7 +189,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
       if (this.callListener(cb, new Uint8Array(binaryData(payload)), info)) return
     }
     if (!this.peerSubscriptions.binary || this._end.isClosed) return this._end._endOverflowed()
-    this._end.deliver(bodyOf(payload, rawInfo, this.streams.binary, this.lossy || isLossy(payload)))
+    this._end.deliver(bodyOf(payload, rawInfo, this.streams.binary))
   }
 
   /** Calls `listener` with a publish; true where it threw `Abort`, which aborts the channel, so the rest get none. */
@@ -319,17 +313,6 @@ function publishOnPlane<Kind extends BroadcastKind>(
 
 type BroadcastChannelOptions = {
   key: string
-  /**
-   * Where only the newest message matters: a client that keeps up gets every message, and one that falls behind skips
-   * to the newest, with `info.seq` jumping over what it skipped. This channel's client skips whoever publishes, while a
-   * client of the same key without it gets every message, or its channel closes with `ChannelOverflowError` past what
-   * the server holds for it.
-   *
-   * https://telefunc.com/channel#skip-to-the-newest
-   *
-   * @default false
-   */
-  lossy?: boolean
 }
 
 const BroadcastChannel = ServerBroadcast as {
@@ -339,17 +322,14 @@ const BroadcastChannel = ServerBroadcast as {
 const globalObject = getGlobalObject('wire-protocol/channel/server/ServerBroadcast.ts', {
   /** One delivery hands every subscriber on this server the same `info`, so they share the body the first one makes. */
   publishBodies: new WeakMap<WirePublishInfo, PublishBody>(),
-  lossyPublishBodies: new WeakMap<WirePublishInfo, PublishBody>(),
 })
 
-/** A broadcast's one stream is its `key`, of each kind: a text message doesn't take a binary one's place. A lossy
- *  subscriber and a reliable one of a key share neither the body nor its place in a replay. */
-function bodyOf(payload: string | Uint8Array, info: WirePublishInfo, stream: string, lossy: boolean): PublishBody {
-  const bodies = lossy ? globalObject.lossyPublishBodies : globalObject.publishBodies
-  let body = bodies.get(info)
+/** A broadcast's one stream is its `key`, of each kind: a text message doesn't take a binary one's place. */
+function bodyOf(payload: string | Uint8Array, info: WirePublishInfo, stream: string): PublishBody {
+  let body = globalObject.publishBodies.get(info)
   if (!body) {
-    body = publishBody(payload, info, stream, lossy)
-    bodies.set(info, body)
+    body = publishBody(payload, info, stream, isLossy(payload))
+    globalObject.publishBodies.set(info, body)
   }
   return body
 }

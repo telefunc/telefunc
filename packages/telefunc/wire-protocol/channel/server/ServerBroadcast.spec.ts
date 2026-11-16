@@ -500,7 +500,7 @@ describe('Broadcast shield validation', () => {
 describe('lossy broadcast under memory pressure', () => {
   // Another object's publish sheds it: the channel ends once its own object runs, but what it holds goes at once.
   it('lets go of the newest it holds for a page that is behind', async () => {
-    const broadcast = new ServerBroadcast<string>({ key: 'room:lossy-shed', lossy: true })
+    const broadcast = new ServerBroadcast<string>({ key: 'room:lossy-shed' })
     const end = broadcast._end
     end._registerChannel()
     end._attachPeer(
@@ -524,9 +524,9 @@ describe('lossy broadcast under memory pressure', () => {
       }),
       { broadcast: { text: true, binary: false } },
     )
-    await broadcast.publish('first')
+    await broadcast.publish('first', { lossy: true })
     await new Promise((resolve) => setTimeout(resolve, 5))
-    await broadcast.publish('x'.repeat(256 * 1024))
+    await broadcast.publish('x'.repeat(256 * 1024), { lossy: true })
     expect(end.newestUnhanded).toBeDefined()
     expect(end.heldBytes).greaterThan(256 * 1024)
 

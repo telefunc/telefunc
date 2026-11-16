@@ -317,31 +317,31 @@ for (const [closing, begin] of Object.entries(CLOSING)) {
   })
 }
 
-/** Each kind of publish to `key`, of `data` as text or as its bytes. */
-const PUBLISHES: Record<string, (key: string, data: string) => unknown> = {
-  text: (key, data) => Broadcast.publish(key, data),
-  binary: (key, data) => Broadcast.publishBinary(key, new TextEncoder().encode(data)),
+/** Each kind of publish to `key`, of `data` as text or as its bytes, lossy or not. */
+const PUBLISHES: Record<string, (key: string, data: string, lossy?: boolean) => unknown> = {
+  text: (key, data, lossy) => Broadcast.publish(key, data, { lossy }),
+  binary: (key, data, lossy) => Broadcast.publishBinary(key, new TextEncoder().encode(data), { lossy }),
 }
 
 /** A subscriber that began to close, near the server's budget: each publish waiting for its wire, and what its page
- *  reads after a publish that would take room the closing subscriber holds. A reliable one may miss nothing published
- *  before its close; a lossy one's close goes behind the newest. */
+ *  reads after a publish that would take room the closing subscriber holds. It may miss no plain publish made before
+ *  its close; its close goes behind the newest lossy one. */
 const NEAR_THE_BUDGET: Record<string, { lossy: boolean; after: number; pageReads: string[] }> = {
-  reliable: { lossy: false, after: 600_000, pageReads: ['0:p1', '0:p2', '0:p3', '0:CLOSE'] },
+  plain: { lossy: false, after: 600_000, pageReads: ['0:p1', '0:p2', '0:p3', '0:CLOSE'] },
   lossy: { lossy: true, after: 900_000, pageReads: ['0:p1', '0:p3', '0:CLOSE'] },
 }
 
 for (const [kind, publish] of Object.entries(PUBLISHES)) {
-  for (const [subscriber, { lossy, after, pageReads }] of Object.entries(NEAR_THE_BUDGET)) {
-    test(`on a WebSocket, a ${kind} publish after a ${subscriber} subscriber's close() near the budget costs it nothing it was owed`, async () => {
+  for (const [publishes, { lossy, after, pageReads }] of Object.entries(NEAR_THE_BUDGET)) {
+    test(`on a WebSocket, a ${publishes} ${kind} publish after a subscriber's close() near the budget costs it nothing it was owed`, async () => {
       const key = crypto.randomUUID()
-      const channel = new ServerBroadcast<string>({ key, lossy })
+      const channel = new ServerBroadcast<string>({ key })
       const page = overWebSocket([channel])
-      for (const name of ['p1', 'p2', 'p3']) await publish(key, name + 'x'.repeat(600_000))
+      for (const name of ['p1', 'p2', 'p3']) await publish(key, name + 'x'.repeat(600_000), lossy)
       const closing = channel.close()
       const release = leaveRoom(after / 2)
       try {
-        await publish(key, 'p4' + 'x'.repeat(after))
+        await publish(key, 'p4' + 'x'.repeat(after), lossy)
         expect(await page.readAll()).toEqual(pageReads)
         fromPage(channel, encode.closeAck(0, 1))
         expect(await closing).toBe(0)
@@ -351,17 +351,17 @@ for (const [kind, publish] of Object.entries(PUBLISHES)) {
     })
   }
 
-  test(`on a WebSocket, a ${kind} publish near the budget for an open lossy subscriber replaces nothing a closing one owes`, async () => {
+  test(`on a WebSocket, a lossy ${kind} publish near the budget for an open subscriber replaces nothing a closing one owes`, async () => {
     const key = crypto.randomUUID()
-    const channel = new ServerBroadcast<string>({ key, lossy: true })
-    const open = new ServerBroadcast<string>({ key, lossy: true })
+    const channel = new ServerBroadcast<string>({ key })
+    const open = new ServerBroadcast<string>({ key })
     const page = overWebSocket([channel, open])
-    for (const name of ['p1', 'p2', 'p3']) await publish(key, name + 'x'.repeat(600_000))
+    for (const name of ['p1', 'p2', 'p3']) await publish(key, name + 'x'.repeat(600_000), true)
     const closing = channel.close()
     const release = leaveRoom(450_000)
     try {
       // Its body is admitted for the open one, which lets go of what it replaces there.
-      await publish(key, 'p4' + 'x'.repeat(900_000))
+      await publish(key, 'p4' + 'x'.repeat(900_000), true)
       const pageReads = await page.readAll()
       expect(pageReads.filter((read) => read.startsWith('0:'))).toEqual(['0:p1', '0:p3', '0:CLOSE'])
       expect(pageReads.filter((read) => read.startsWith('1:'))).toEqual(['1:p4'])
