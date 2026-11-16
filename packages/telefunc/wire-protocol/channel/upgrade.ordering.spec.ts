@@ -1,6 +1,7 @@
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import { ChannelMux, type ServerTransport } from './server/ChannelMux.js'
 import { ServerChannel } from './server/ServerChannel.js'
+import { onBug } from '../../node/server/runTelefunc/onBug.js'
 import { decode, encode, type DecodedFrame } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
 import { WIRE_MAX_CTRL_FRAME_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
@@ -149,4 +150,30 @@ test('a page that awaits one channel at two indexes of its session has its wire 
   expect(wire.terminated()).toBe(false)
   h.mux.registerChannel(new ServerChannel({ id: 'B' }))
   expect(wire.terminated()).toBe(true)
+})
+
+test('a bug in handling a frame is reported, and the server goes on handling the frames after it', async () => {
+  const h = createHarness()
+  class ChannelWithABug extends ServerChannel<number, never> {
+    override _dispatchFrame(): void {
+      throw new Error('a bug in handling a frame')
+    }
+  }
+  h.mux.registerChannel(new ChannelWithABug({ id: 'B' }))
+  const bugs: unknown[] = []
+  onBug((err) => bugs.push(err))
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  const buggy = h.wire()
+  const other = h.wire()
+  await buggy.deliver(encode.reconcile({ open: [{ id: 'B', ix: 0, lastSeq: 0, initial: true }] }))
+  await other.deliver(encode.reconcile({ open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] }))
+
+  // As a WebSocket host calls it: the promise is dropped, so a rejection would be unhandled.
+  void buggy.deliver(encode.text(0, '111', 1))
+  await other.deliver(encode.text(0, '222', 1))
+
+  expect(bugs).toEqual([new Error('a bug in handling a frame')])
+  expect(h.received).toEqual([222])
+  expect(buggy.terminated()).toBe(false)
+  vi.restoreAllMocks()
 })

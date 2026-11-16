@@ -433,8 +433,9 @@ class ChannelMux implements UpgradeStagesOwner {
       entry.state.deliveries.handle(delivery)
       return (await this.handleFrame(entry, rawFrame)) ?? null
     } catch (err) {
-      if (!isProtocolViolationError(err)) throw err
-      this.terminateWire(err.target ?? entry.wire)
+      // A bug is reported here and the wire goes on: no WebSocket host awaits a message's handling.
+      if (isProtocolViolationError(err)) this.terminateWire(err.target ?? entry.wire)
+      else handleTelefunctionBug(err)
       return null
     } finally {
       entry.state.recvBacklog.bytes -= byteLength
