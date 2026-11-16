@@ -47,8 +47,7 @@ type PgPool = {
   Client?: new (
     options: unknown,
   ) => PgClient
-  /** What it opens its clients with: `types`, the type parsers they parse values with. */
-  options?: { types?: object }
+  options?: unknown
 }
 /** A `pg-cursor` (Prisma reads and writes through one), or another object `pg` submits. */
 type Submittable = {
@@ -71,14 +70,13 @@ const RESERVATION = Symbol('reservation')
 const AS_TEXT = { getTypeParser: () => (text: string) => text }
 /** The follow-up queries of ours a client still runs, one after the other; settles once they all ended. */
 const followingUp = new WeakMap<PgClient, Promise<void>>()
-/** What decides how clients parse values, numbered (`rowFormOf()`). */
-const parsings = processWide('pgParsings', () => ({ numbers: new WeakMap<object, number>(), count: 0 }))
+/** The pools and the clients of no pool captured, numbered (`rowFormOf()`). */
+const owners = processWide('pgOwners', () => ({ numbers: new WeakMap<object, number>(), count: 0 }))
 
 /** Captures every statement of a `pg.Pool` (each of its clients) or a `pg.Client`. */
 function capturePg(database: PgPool | PgClient, live: LiveDatabase): void {
-  // A client of no pool doesn't tell its `types`: its reads share only with its own.
-  if (!('totalCount' in database)) return captureClient(database, live, rowFormOf(database))
-  const rowForm = rowFormOf(database.options?.types)
+  const rowForm = rowFormOf(database)
+  if (!('totalCount' in database)) return captureClient(database, live, rowForm)
   database.on('connect', (client) => captureClient(client, live, rowForm))
   checkOutForCaller(database)
   shareReadsBeforeConnecting(database, live, rowForm)
@@ -138,12 +136,12 @@ function answer(result: Promise<PgResult | PgResult[]>, callback: PgCallback | u
   return undefined
 }
 
-/** How the reads of clients parsing values with `parsing` return rows (`undefined`: `pg`'s own type parsers). A read
- *  shares the text values of its result only with reads of clients that parse them alike (`parsedFor()`). */
-function rowFormOf(parsing: object | undefined): string {
-  if (!parsing) return 'pg'
-  let number = parsings.numbers.get(parsing)
-  if (number === undefined) parsings.numbers.set(parsing, (number = parsings.count++))
+/** How the reads of a pool, or of a client of no pool, return rows. Each parses values its own way (`types`,
+ *  `setTypeParser()` on its clients): a read shares the text values of its result only with reads of the same one,
+ *  which each parse them with the leading client's parsers (`parsedFor()`). */
+function rowFormOf(owner: PgPool | PgClient): string {
+  let number = owners.numbers.get(owner)
+  if (number === undefined) owners.numbers.set(owner, (number = owners.count++))
   return `pg:${number}`
 }
 
