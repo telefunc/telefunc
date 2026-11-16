@@ -1190,8 +1190,8 @@ async function onPublishOverRedisLimit(roomId: string) {
 }
 
 /** What a drop reports of this room, read from Room's log until the returned function gives the log back: Room logs
- *  every room on the server, and another test's room may commit its heartbeat's demand page while the connections are
- *  down, which is a true report of that room. */
+ *  every room on the server, and another test's room may lose a commit of its own while the connections are down, which
+ *  is a true report of that room. */
 function reportOf(roomId: string, report: (reason: string) => void) {
   const logError = console.error
   const lost = `Room delivery handoff of '${roomId}' lost: `
