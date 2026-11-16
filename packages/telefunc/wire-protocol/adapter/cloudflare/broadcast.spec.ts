@@ -721,6 +721,14 @@ describe('cloudflare broadcast routing', () => {
     )
   })
 
+  it('a subscriber with no page, outside the code of any Durable Object, throws an error that says where to subscribe', () => {
+    const transport = createTransport(1)
+    transport.attachIsolateInfo('weur')
+    expect(() => transport.subscribe('room:test', () => {})).toThrow(
+      'subscribes on the server only in code a Durable Object runs',
+    )
+  })
+
   it('records what a call subscribes after an `await` under the Durable Object that received that call', async () => {
     const transport = createTransport(5)
     const previousTransport = getBroadcastAdapter()
