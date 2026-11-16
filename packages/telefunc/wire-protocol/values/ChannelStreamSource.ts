@@ -130,8 +130,7 @@ class ChannelStreamSource {
   /** Counts a part of `bytes` that this reader keeps, and throws where the server can't hold it. */
   private holdPart(bytes: number): void {
     if (!this.memory) return
-    if (!this.memory.admit(bytes)) throw new ChannelOverflowError(CHUNK_OVERFLOW_TEXT)
-    this.memory.hold(bytes)
+    if (!this.memory.tryHold(bytes)) throw new ChannelOverflowError(CHUNK_OVERFLOW_TEXT)
   }
 
   /** The stream's next data frame, a chunk or a part of one: null at its end, and an error frame throws. */

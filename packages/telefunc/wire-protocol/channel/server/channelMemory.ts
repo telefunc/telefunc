@@ -7,6 +7,7 @@ export {
   fits,
   fitsPublish,
   hasCopyRoom,
+  heldAnswerBytes,
   heldPublishBytes,
   heldSendBytes,
   hold,
@@ -15,12 +16,15 @@ export {
   maxPendingBytesOf,
   queueMemory,
   releaseHolder,
+  tryHold,
 }
 export type { MemoryHolder }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { getChannelConfig } from '../../../node/server/serverConfig.js'
 import { HEADER } from '../../wire/header.js'
+import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES } from '../../wire/frame.js'
+import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import type { PublishBody } from './PublishBody.js'
 import type { QueueMemory } from '../channelMessages.js'
 
@@ -126,6 +130,11 @@ function heldPublishBytes(body: PublishBody): number {
   return body.frame.byteLength + HELD_PUBLISH_OVERHEAD_BYTES
 }
 
+/** What an answer of `result` holds in a replay, or while its page is away. */
+function heldAnswerBytes(result: string): number {
+  return utf8ByteLength(result) + MESSAGE_FRAME_OVERHEAD_MAX_BYTES + HELD_SEND_OVERHEAD_BYTES
+}
+
 /** Only counts: never reclaims, so whoever's mid-mutation finishes first. */
 function hold(holder: MemoryHolder, held: number | PublishBody): void {
   if (holder.released) return
@@ -137,6 +146,13 @@ function hold(holder: MemoryHolder, held: number | PublishBody): void {
     holder.heldBytes += heldPublishBytes(held)
     memory.total += HELD_PUBLISH_OVERHEAD_BYTES + (held.refs++ === 0 ? held.frame.byteLength : 0)
   }
+}
+
+/** Holds `bytes` for `holder` where `admit` admits them, and says whether it did. */
+function tryHold(holder: MemoryHolder, bytes: number): boolean {
+  if (!admit(holder, bytes)) return false
+  hold(holder, bytes)
+  return true
 }
 
 function letGo(holder: MemoryHolder, held: number | PublishBody): void {
@@ -184,8 +200,7 @@ function holdsEnough(): boolean {
 function queueMemory(): QueueMemory {
   const holder: MemoryHolder = { heldBytes: 0 }
   return {
-    admit: (bytes) => admit(holder, bytes),
-    hold: (bytes) => hold(holder, bytes),
+    tryHold: (bytes) => tryHold(holder, bytes),
     letGo: (bytes) => letGo(holder, bytes),
     release: () => releaseHolder(holder),
   }

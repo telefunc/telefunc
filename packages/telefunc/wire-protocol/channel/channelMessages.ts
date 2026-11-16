@@ -27,8 +27,8 @@ type Message<T> = { type: 'text'; data: T } | { type: 'binary'; data: Uint8Array
 
 /** Where a loop's queue or a stream's reader counts what it holds: on a server, the ledger; a page counts nothing. */
 interface QueueMemory {
-  admit(bytes: number): boolean
-  hold(bytes: number): void
+  /** Counts `bytes` where the server may hold them; false where it may not. */
+  tryHold(bytes: number): boolean
   letGo(bytes: number): void
   /** Its loop or that loop's channel ended: what the queue still has is no longer counted. */
   release(): void
@@ -120,11 +120,10 @@ async function* iterateMessages<M extends Message<unknown>>(
   const receive = (message: M, bytes = 0) => {
     if (registrations.signal.aborted) return
     const size = budget ? bytes + QUEUED_MESSAGE_OVERHEAD_BYTES : 0
-    if (memory && !memory.admit(size)) {
+    if (memory && !memory.tryHold(size)) {
       finish(new ChannelOverflowError('messages() ended: config.channel.maxMemory is held, and its loop is behind'))
       return
     }
-    memory?.hold(size)
     held += size
     return new Promise<void>((consumed) => {
       queue.push({ message, consumed, size })
