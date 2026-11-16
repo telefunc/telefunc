@@ -138,7 +138,7 @@ class RoomParticipantStub implements BroadcastEndOwner {
 
     const unlistenLeave = participant.onLeave((cause) => {
       this.left = true
-      this.room.replica.pageEndChanged(this)
+      this.room.replica.pageEndChanged(this, participant.id)
       this.notify({ __r: 'left', ...leaveCauseToWire(cause) })
       closeAfterReconnectWindow(this.end)
     })
@@ -173,6 +173,14 @@ class RoomParticipantStub implements BroadcastEndOwner {
 
   selfSuppressed(): string[] {
     return this.left || this.participant.selfDelivery ? [] : [this.participant.id]
+  }
+
+  holds(member: string): boolean {
+    return !this.left && member === this.participant.id
+  }
+
+  suppresses(member: string): boolean {
+    return this.holds(member) && !this.participant.selfDelivery
   }
 
   /** Its participant's inbox forwards here. */

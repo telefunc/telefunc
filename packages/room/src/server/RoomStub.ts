@@ -224,6 +224,10 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     for (const [id, selfDelivery] of this.members) if (!selfDelivery) yield id
   }
 
+  suppresses(member: string): boolean {
+    return this.members.get(member) === false
+  }
+
   atPage(suppressed: ReadonlySet<string>): void {
     this.suppressed = suppressed
   }

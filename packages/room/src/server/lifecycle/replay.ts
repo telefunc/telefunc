@@ -234,6 +234,8 @@ interface LaneHolder {
   readonly binaryWants: BinaryWants
   /** The participants it holds, who are the people at its page. */
   heldMembers(): Iterable<string>
+  /** Whether `member` is one of `heldMembers()`. */
+  holds(member: string): boolean
   /** The text the holder needs ingested; its relay filters further. */
   textDemand(): MemberWants
   wantsTextFrom(member: string): boolean
@@ -274,10 +276,18 @@ class LocalHolder implements LaneHolder {
     for (const [id, participant] of this.participants) if (!participant._heldByPage) yield id
   }
 
+  holds(member: string): boolean {
+    return this.participants.get(member)?._heldByPage === false
+  }
+
   /** Every participant that joined through it with `selfDelivery: false`, a page holding it or not: its listeners never
    *  get that participant's messages. */
   *selfSuppressed(): Generator<string> {
     for (const [id, participant] of this.participants) if (!participant.selfDelivery) yield id
+  }
+
+  suppresses(member: string): boolean {
+    return this.participants.get(member)?.selfDelivery === false
   }
 
   atPage(suppressed: ReadonlySet<string>): void {
