@@ -6,8 +6,14 @@ import { IndexedPeer, type PeerSender } from '../../wire-protocol/channel/server
 import { hold, letGo, releaseHolder, type MemoryHolder } from '../../wire-protocol/channel/server/channelMemory.js'
 import { countWaitingPublishes, droppingPublishes } from '../../wire-protocol/flowControl/server/waitingPublishes.js'
 import { pairPublishes } from '../../wire-protocol/channel/client/pairPublishes.js'
-import { decode, type DecodedFrame } from '../../wire-protocol/wire/frame.js'
+import { decode, encode, type DecodedFrame } from '../../wire-protocol/wire/frame.js'
 import { TAG } from '../../wire-protocol/wire/tags.js'
+import { getChannelMux } from '../../wire-protocol/channel/server/ChannelMux.js'
+import { handleSseChannelRequest } from '../../wire-protocol/channel/server/sse.js'
+import { SseEvents } from '../../wire-protocol/channel/client/SseEvents.js'
+import type { WireQueue } from '../../wire-protocol/flowControl/server/waitingPublishes.js'
+import { encodeSseRequest } from '../../wire-protocol/wire/envelope.js'
+import { CREDIT_WINDOW_INITIAL_BYTES, WIRE_VERSION } from '../../wire-protocol/constants.js'
 import { getChannelConfig } from './serverConfig.js'
 
 afterEach(() => vi.useRealTimers())
@@ -432,6 +438,138 @@ describe('a large lossy send near the memory budget', () => {
       free()
       channel._end()
       channel._release()
+    }
+  })
+
+  /** The page of `channel` over SSE, reading nothing of its event stream unless asked. `waiting()` counts the channel's
+   *  publishes in the wire's queue. */
+  async function overSse(channel: ServerChannel<unknown, string>) {
+    getChannelMux().registerChannel(channel)
+    const connId = crypto.randomUUID()
+    const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
+    const post = (frames: Uint8Array<ArrayBuffer>[], extra = {}) =>
+      handleSseChannelRequest(
+        new Request(url, { method: 'POST', body: encodeSseRequest({ connId, ...extra }, frames) }),
+      )
+    const open = [{ id: channel.id, ix: 0, lastSeq: 0, initial: true as const }]
+    const response = await post([encode.reconcile({ open })], { streamResponse: true })
+    await channel.opened
+    const reader = (response.body as ReadableStream<Uint8Array>).getReader()
+    const { events } = getChannelMux().getWireByConnId<{ events: WireQueue }>(connId)!
+    return {
+      /** The page reads and confirms the channel's first send. */
+      async readFirst() {
+        const sse = new SseEvents()
+        let first = false
+        const read = (frame: Uint8Array) => {
+          const { tag } = decode(frame)
+          first ||= tag === TAG.TEXT || tag === TAG.BINARY
+        }
+        while (!first) sse.push((await reader.read()).value!, read)
+        await post([encode.window(0, 1 << 30, 1)])
+      },
+      /** The page asks for more and reads no further: the next event starts, and what follows waits for it. */
+      askOnce() {
+        void reader.read()
+      },
+      waiting: () => events.waitingPublishes(0),
+      async leave() {
+        await post([], { close: true })
+        await reader.cancel()
+      },
+    }
+  }
+
+  /** Past what its wire takes to confirm a send, after the one the page confirmed. */
+  function untilBehind(channel: ServerChannel<unknown, string>) {
+    const after = (channel as any).peer.sender.behindAfter(channel._replayBuffer!.leastConfirmMs)
+    return new Promise((resolve) => setTimeout(resolve, after + 50))
+  }
+
+  const sendLossy = (channel: ServerChannel<unknown, string>, binary: boolean, value: string) =>
+    binary ? channel.sendBinary(new TextEncoder().encode(value), { lossy: true }) : channel.send(value, { lossy: true })
+
+  /** A channel whose page over SSE read and confirmed its first send, then left `a` and `b` of 800 kB unread: `a`'s event
+   *  started, and `b` waits for it. */
+  async function leftTwoUnread(binary: boolean) {
+    const channel = new ServerChannel<unknown, string>()
+    const page = await overSse(channel)
+    await sendLossy(channel, binary, 'warm')
+    await page.readFirst()
+    page.askOnce()
+    await sendLossy(channel, binary, 'a'.repeat(800_000))
+    await sendLossy(channel, binary, 'b'.repeat(800_000))
+    return { channel, page }
+  }
+
+  for (const binary of [false, true]) {
+    test(`on SSE, the first ${binary ? 'binary' : 'text'} send after the page fell behind takes the place of the one waiting for the wire, where both would not fit`, async () => {
+      const { channel, page } = await leftTwoUnread(binary)
+      expect(page.waiting()).toBe(1)
+      await untilBehind(channel)
+      const free = leaveRoom(100_000)
+      try {
+        await expect(sendLossy(channel, binary, 'c'.repeat(800_000))).resolves.toBeUndefined()
+        expect(page.waiting()).toBe(0)
+        // `a`, kept to replay: its frame and 200 bytes; `c`, waiting as the newest: its frame and 512 bytes.
+        const frame = 800_000 + (binary ? 0 : 2) + 7
+        expect(channel.heldBytes).toBe(frame + 200 + frame + 512)
+      } finally {
+        free()
+        await page.leave()
+      }
+    })
+  }
+
+  test('on SSE, a send too large even in place of the one waiting for the wire is refused, and that one stays', async () => {
+    const { channel, page } = await leftTwoUnread(true)
+    await untilBehind(channel)
+    const held = channel.heldBytes
+    const free = leaveRoom(100_000)
+    try {
+      await expect(sendLossy(channel, true, 'c'.repeat(1_500_000))).rejects.toThrow('Send refused')
+      expect(page.waiting()).toBe(1)
+      expect(channel.heldBytes).toBe(held)
+    } finally {
+      free()
+      await page.leave()
+    }
+  })
+
+  test('on SSE, a send after the page ran out of credit takes the place of the one waiting for the wire, where both would not fit', async () => {
+    const channel = new ServerChannel<unknown, string>()
+    const page = await overSse(channel)
+    // Each half the credit the page starts with, and a 7-byte header more: `b` runs it out.
+    const half = CREDIT_WINDOW_INITIAL_BYTES / 2
+    page.askOnce()
+    await sendLossy(channel, true, 'a'.repeat(half))
+    await sendLossy(channel, true, 'b'.repeat(half))
+    expect(page.waiting()).toBe(1)
+    const free = leaveRoom(100_000)
+    try {
+      await expect(sendLossy(channel, true, 'c'.repeat(half / 2))).resolves.toBeUndefined()
+      // Dropping `b` gave its credit back, so `c` goes in its place: `a` and `c` are kept to replay.
+      expect(page.waiting()).toBe(1)
+      expect(channel.heldBytes).toBe(half + 7 + 200 + half / 2 + 7 + 200)
+    } finally {
+      free()
+      await page.leave()
+    }
+  })
+
+  test('on SSE, a send after the page fell behind takes the place of the one waiting for the wire, and a plain send queued after that one stays', async () => {
+    const { channel, page } = await leftTwoUnread(true)
+    void channel.send('R')
+    await untilBehind(channel)
+    const free = leaveRoom(100_000)
+    try {
+      await expect(sendLossy(channel, true, 'c'.repeat(800_000))).resolves.toBeUndefined()
+      expect(page.waiting()).toBe(0)
+      // `a` and `c` as above, and `R`, kept to replay: its 3-byte JSON, its header and 512 bytes.
+      expect(channel.heldBytes).toBe(800_007 + 200 + 3 + 7 + 512 + 800_007 + 512)
+    } finally {
+      free()
+      await page.leave()
     }
   })
 })

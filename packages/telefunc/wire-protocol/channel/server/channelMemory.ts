@@ -7,6 +7,7 @@ export {
   fits,
   fitsPublish,
   hasCopyRoom,
+  heldPublishBytes,
   hold,
   holdsEnough,
   letGo,
@@ -111,6 +112,11 @@ function newestsThatEndingFrees(): [PublishBody, MemoryHolder[]][] {
   return [...byBody].sort((a, b) => a[1].length - b[1].length)
 }
 
+/** What a publish holds for one page. */
+function heldPublishBytes(body: PublishBody): number {
+  return body.frame.byteLength + HELD_PUBLISH_OVERHEAD_BYTES
+}
+
 /** Only counts: never reclaims, so whoever's mid-mutation finishes first. */
 function hold(holder: MemoryHolder, held: number | PublishBody): void {
   if (holder.released) return
@@ -119,7 +125,7 @@ function hold(holder: MemoryHolder, held: number | PublishBody): void {
     holder.heldBytes += held
     memory.total += held
   } else {
-    holder.heldBytes += held.frame.byteLength + HELD_PUBLISH_OVERHEAD_BYTES
+    holder.heldBytes += heldPublishBytes(held)
     memory.total += HELD_PUBLISH_OVERHEAD_BYTES + (held.refs++ === 0 ? held.frame.byteLength : 0)
   }
 }
@@ -130,7 +136,7 @@ function letGo(holder: MemoryHolder, held: number | PublishBody): void {
     holder.heldBytes -= held
     memory.total -= held
   } else {
-    holder.heldBytes -= held.frame.byteLength + HELD_PUBLISH_OVERHEAD_BYTES
+    holder.heldBytes -= heldPublishBytes(held)
     memory.total -= HELD_PUBLISH_OVERHEAD_BYTES + (--held.refs === 0 ? held.frame.byteLength : 0)
   }
   if (holder.heldBytes === 0) memory.holders.delete(holder)

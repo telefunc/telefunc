@@ -110,6 +110,11 @@ class IndexedPeer {
     return this.sender.queue.waitingPublishes(this.index)
   }
 
+  /** What those hold. */
+  unhandedHeld(): number {
+    return this.replay.heldByNewestPublishes(this.unhanded())
+  }
+
   /** Takes those back from the replay and the wire's queue. Returns how many went, and their bodies' bytes. */
   dropUnhanded(): { units: number; bytes: number } {
     const dropped = this.replay.dropNewestPublishes(this.unhanded())

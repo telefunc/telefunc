@@ -39,8 +39,8 @@ class LossyDelivery<U> {
 
   /** With no wire, `unit` goes as the replay's newest; behind, or out of credit, it waits as the newest. */
   send(unit: U): void {
-    if (!this.host.peer() || this.mustWait()) this.letWaitingGo()
-    if (this.mustWait()) {
+    if (!this.host.peer() || this.waits()) this.letWaitingGo()
+    if (this.waits()) {
       this.slot = unit
       this.host.hold(unit)
       return
@@ -60,7 +60,7 @@ class LossyDelivery<U> {
 
   /** Its page confirmed more, or granted more: the newest goes where it no longer has to wait. */
   mayGo(): void {
-    if (this.slot !== null && !this.mustWait()) this.flush()
+    if (this.slot !== null && !this.waits()) this.flush()
   }
 
   /** The sends that no wire has taken go, and the newest that waits, as a newer one takes their place. */
@@ -76,7 +76,9 @@ class LossyDelivery<U> {
     this.slot = null
   }
 
-  private mustWait(): boolean {
+  /** Whether a send made now waits, and takes the place of those no wire has taken: its page is behind, or out of
+   *  credit. */
+  waits(): boolean {
     return this.isBehind() || this.host.outOfCredit()
   }
 

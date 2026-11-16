@@ -324,16 +324,18 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const added = held - this.replaceableHeld()
     if (added > 0 && !admit(this, added)) return Promise.reject<void>(this.refuseSend(added))
     if (!this.peer) return this.offlineBuffer.pushLossy(tag, data, bytes)
-    this.lossySends ??= new LossyDelivery(this.lossyHost())
-    this.lossySends.send({ data, held })
+    this.lossySends!.send({ data, held })
   }
 
-  /** What its next lossy send takes the place of: the offline buffer's lossy last entry while no page is attached, the
-   *  newest waiting for the page while one is. */
+  /** What its next lossy send takes the place of, by what that holds: with no page attached, the offline buffer's lossy
+   *  last entry; attached to a page that is behind or out of credit, the newest that waits and its sends still in the
+   *  wire's queue. Nothing for a page that keeps up. */
   private replaceableHeld(): number {
     if (!this.peer) return this.offlineBuffer.replaceableHeld
-    const waiting = this.lossySends?.held
-    return waiting ? waiting.held : 0
+    // Made before the first attached lossy send is measured: the attach may have handed lossy sends that still wait.
+    const sends = (this.lossySends ??= new LossyDelivery(this.lossyHost()))
+    if (!sends.waits()) return 0
+    return (sends.held?.held ?? 0) + this.peer.unhandedHeld()
   }
 
   /** Its lossy sends wait only while its page is attached: the wire that goes hands the newest first. */

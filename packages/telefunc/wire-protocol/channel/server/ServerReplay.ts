@@ -1,7 +1,7 @@
 export { ServerReplay }
 
 import { assert } from '../../../utils/assert.js'
-import { HELD_SEND_OVERHEAD_BYTES, hold, letGo, type MemoryHolder } from './channelMemory.js'
+import { HELD_SEND_OVERHEAD_BYTES, heldPublishBytes, hold, letGo, type MemoryHolder } from './channelMemory.js'
 import type { PublishBody } from './PublishBody.js'
 import { SeqQueue } from '../SeqQueue.js'
 
@@ -85,6 +85,14 @@ class ServerReplay {
       out.push(head, body.frame)
     }
     return out
+  }
+
+  /** What its newest `count` publishes hold. */
+  heldByNewestPublishes(count: number): number {
+    let held = 0
+    for (let i = Math.max(0, this.publishes.length - count); i < this.publishes.length; i++)
+      held += heldPublishBytes(this.publishes.at(i).body)
+    return held
   }
 
   /** Its newest `droppable` publishes go, for a newer one to take their place: the page's `info.seq` shows what it
