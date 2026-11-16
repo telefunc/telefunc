@@ -83,6 +83,8 @@ function serializeTelefunctionResult(runContext: {
    *  stays open. */
   const registrations: (() => void)[] = []
   let goes = false
+  /** The response holds a channel an earlier response carried, which that response's page has. */
+  let carriesAnEarlierChannel = false
   const { valueShields } = runContext
   const shieldCtx = {
     telefunctionName: runContext.telefunctionName,
@@ -128,9 +130,8 @@ function serializeTelefunctionResult(runContext: {
       }
     },
     function onReplaced({ value, abort }) {
-      // Registered already, so its page may hold it: it ends with this response only once that goes.
-      const carriedBefore = ServerChannel.isServerChannel(value) && value._wasRegistered
-      if (carriedBefore) registrations.push(() => requestContext.responseAbort.onAbort(abort))
+      // Registered already, so an earlier response carried it: this one fails, and the channel stays with its page.
+      if (ServerChannel.isServerChannel(value) && value._wasRegistered) carriesAnEarlierChannel = true
       else requestContext.responseAbort.onAbort(abort)
     },
     responseTypes,
@@ -148,6 +149,17 @@ function serializeTelefunctionResult(runContext: {
         `Cannot serialize value returned by telefunction ${runContext.telefunctionName}() (${runContext.telefuncFilePath}).`,
         'Make sure that telefunctions always return a serializable value.',
         `Serialization error: ${lowercaseFirstLetter(err.message)}`,
+      ].join(' '),
+    )
+  }
+
+  if (carriesAnEarlierChannel) {
+    requestContext.responseAbort.abort()
+    assertUsage(
+      false,
+      [
+        `The value returned by telefunction ${runContext.telefunctionName}() (${runContext.telefuncFilePath}) holds a channel that an earlier telefunction call returned.`,
+        'A channel connects the server to one client: return a `new Channel()` from each call, and for many clients a `new BroadcastChannel({ key })` from each call, with the same `key`.',
       ].join(' '),
     )
   }
