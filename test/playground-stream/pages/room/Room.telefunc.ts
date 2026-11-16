@@ -816,7 +816,7 @@ async function onSystemPublish(roomId: string, data: unknown) {
 }
 
 async function onSystemSend(roomId: string, participantId: string, data: unknown) {
-  await Room.send(roomId, { id: participantId }, data)
+  return await Room.send(roomId, { id: participantId }, data)
 }
 
 async function onUpdateRoom(roomId: string, meta: Record<string, unknown>) {

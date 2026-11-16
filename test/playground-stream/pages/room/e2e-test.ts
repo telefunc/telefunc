@@ -79,6 +79,7 @@ type GuardResult = {
 type AdminResult = {
   published: Array<{ data: string; fromRoom: boolean }>
   system: Array<{ data: string; fromRoom: boolean }>
+  receipt: { seq: number; timestamp: number }
   kicked: boolean
   kickCause: { type: string; reason?: string } | null
   closed: boolean
@@ -663,6 +664,8 @@ function testRoom() {
     (result) => {
       expect(result.published).deep.equal([{ data: 'maintenance', fromRoom: true }])
       expect(result.system).deep.equal([{ data: 'welcome', fromRoom: true }])
+      expect(result.receipt.seq).greaterThan(0) // its place in the member's inbox
+      expect(result.receipt.timestamp).greaterThan(0)
       expect(result.kicked).toBe(true) // LocalParticipant.onLeave fired on removeParticipant()
       expect(result.kickCause).deep.equal({ type: 'removed', reason: 'be nice' })
       expect(result.closed).toBe(true) // Room.onClose fired on close()

@@ -19,6 +19,7 @@ export {
   lostReason,
   withinRoomHorizon,
 }
+export type { LaneCommit }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'

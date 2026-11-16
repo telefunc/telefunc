@@ -54,6 +54,7 @@ import {
   inboxOf,
   openConfig,
   encodeRoomRecord,
+  type LaneCommit,
 } from './lanes/lanes.js'
 import { ServerRoom, handleOf } from './room.js'
 import { RoomReplica } from './RoomReplica.js'
@@ -97,7 +98,8 @@ type RoomStatic = {
   close(id: string): Promise<void>
   removeParticipant(id: string, target: ParticipantRef & { reason?: unknown }): Promise<void>
   publish(id: string, data: unknown): Promise<RoomSendReceipt>
-  send(id: string, target: ParticipantRef, data: unknown): Promise<void>
+  send(id: string, target: { id: string }, data: unknown): Promise<RoomSendReceipt>
+  send(id: string, target: { identity: string }, data: unknown): Promise<RoomSendReceipt[]>
   getParticipants<P extends ParticipantMeta = ParticipantMeta>(
     id: string,
     target?: { identity: string },
@@ -365,19 +367,36 @@ async function publishToRoom(id: string, data: unknown): Promise<RoomSendReceipt
   return { seq: commit.seq, timestamp: commit.timestamp }
 }
 
-async function sendToParticipant(id: string, target: ParticipantRef, data: unknown): Promise<void> {
+/** One receipt for `{ id }`; for `{ identity }`, one per tab it reached, in the order they were delivered. */
+function sendToParticipant(id: string, target: { id: string }, data: unknown): Promise<RoomSendReceipt>
+function sendToParticipant(id: string, target: { identity: string }, data: unknown): Promise<RoomSendReceipt[]>
+async function sendToParticipant(
+  id: string,
+  target: ParticipantRef,
+  data: unknown,
+): Promise<RoomSendReceipt | RoomSendReceipt[]> {
   const message = ownMessage(data)
   const incarnation = await requireRoom(id)
   const members = await resolveParticipantRef(incarnation, target)
-  const exact = 'id' in target
-  await eachInFlight(members, (member) => sendDm(id, incarnation.inc, member.id, message, exact))
+  if ('id' in target) return deliveredOrThrow(id, await sendDm(id, incarnation.inc, target.id, message))
+  const receipts: RoomSendReceipt[] = []
+  await eachInFlight(members, async (member) => {
+    const commit = await sendDm(id, incarnation.inc, member.id, message)
+    // A tab that left since the user's tabs were read is skipped: the others still get the message.
+    if (commit.kind !== 'gone') receipts.push(deliveredOrThrow(id, commit))
+  })
+  return receipts
 }
 
-async function sendDm(id: string, inc: string, member: string, message: unknown, exact: boolean): Promise<void> {
+async function sendDm(id: string, inc: string, member: string, message: unknown): Promise<LaneCommit> {
   const envelope = { __r: 'dm', to: member, from: '', fromMeta: null, data: message } as const
   const requiredCellKeys = [memberCellKey(member)]
-  const receipt = await commitLane(inboxOf(id, inc, member), encodeRoomRecord(envelope), { requiredCellKeys })
-  if (receipt.kind === 'stale-incarnation') throw roomClosedError(id)
-  if (receipt.kind === 'gone' && exact) throw participantGoneError(member)
-  if (receipt.kind === 'accepted' && receipt.lost !== undefined) throw messageLostError()
+  return await commitLane(inboxOf(id, inc, member), encodeRoomRecord(envelope), { requiredCellKeys })
+}
+
+/** The delivered message's receipt; a member that left, a closed room or a lost handoff throws. */
+function deliveredOrThrow(id: string, commit: LaneCommit): RoomSendReceipt {
+  const accepted = acceptedOrThrow(id, commit)
+  if (accepted.lost !== undefined) throw messageLostError()
+  return { seq: accepted.seq, timestamp: accepted.timestamp }
 }

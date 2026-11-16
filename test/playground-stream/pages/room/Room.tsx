@@ -1567,7 +1567,7 @@ function Room() {
           lobby.onClose(() => (closed = true))
 
           await onSystemPublish(roomId, 'maintenance')
-          await onSystemSend(roomId, me.id, 'welcome')
+          const receipt = await onSystemSend(roomId, me.id, 'welcome')
           await pollUntil(() => ({
             result: { published, system },
             done: published.length >= 1 && system.length >= 1,
@@ -1579,6 +1579,7 @@ function Room() {
             const state = {
               published,
               system,
+              receipt,
               kicked,
               kickCause,
               closed,

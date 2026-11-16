@@ -54,6 +54,15 @@ function assertPageRoomTakesServerOptions(room: ClientRoom) {
   void room.getParticipants({ hidden: true })
 }
 
+// The server's private message resolves to one receipt per tab it reached: one for `{ id }`, a list for `{ identity }`.
+async function assertSendReceipts(statics: typeof Server.Room) {
+  const toMember = await statics.send('lobby', { id: 'p1' }, 'hi')
+  const toUser = await statics.send('lobby', { identity: 'user-1' }, 'hi')
+  type _Receipts = AssertAll<
+    [Exactly<typeof toMember, Server.RoomSendReceipt>, Exactly<typeof toUser, Server.RoomSendReceipt[]>]
+  >
+}
+
 function assertTrackInfo(room: ClientRoom, member: ServerRemote) {
   room.subscribe((_message, info) => void info.track, { track: 'cursor' })
   member.subscribe((_message, info) => void info.meta, { track: 'cursor' })
