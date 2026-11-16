@@ -8,6 +8,7 @@ export {
   onBenchBinaryServerPush,
   onBenchBroadcastRoom,
   onBenchBroadcastPublish,
+  onBenchBroadcastBinaryPublish,
   onBenchRoomTrack,
   onBenchRoomTrackPublish,
 }
@@ -175,6 +176,13 @@ async function onBenchBroadcastPublish(key: string, count: number, payloadSize: 
   const room = new BroadcastChannel<PushMsg>({ key })
   const payload = 'x'.repeat(payloadSize)
   await Promise.all(Array.from({ length: count }, (_, seq) => room.publish({ seq, payload, sentAt: Date.now() })))
+}
+
+/** Publishes `count` frames on `key`, pipelined. */
+async function onBenchBroadcastBinaryPublish(key: string, count: number, payloadSize: number) {
+  const room = new BroadcastChannel({ key })
+  const frame = new Uint8Array(payloadSize).fill(0xab)
+  await Promise.all(Array.from({ length: count }, () => room.publishBinary(frame)))
 }
 
 /** The members that publish on a bench room, joined before the page starts timing. */

@@ -6,6 +6,7 @@ import {
   onBenchBinaryEchoLatency,
   onBenchBinaryServerPush,
   onBenchBinaryThroughput,
+  onBenchBroadcastBinaryPublish,
   onBenchBroadcastPublish,
   onBenchBroadcastRoom,
   onBenchEchoLatency,
@@ -208,6 +209,15 @@ const SCENARIOS: Scenario[] = [
     label: 'Broadcast Push (text)',
     transport: 'ws',
     binary: false,
+    kind: 'push',
+    routing: 'pinned',
+    via: 'broadcast',
+  },
+  {
+    id: 'push-broadcast-bin-ws-pin',
+    label: 'Broadcast Push (binary)',
+    transport: 'ws',
+    binary: true,
     kind: 'push',
     routing: 'pinned',
     via: 'broadcast',
@@ -643,9 +653,13 @@ async function measureBroadcastPushCell(
   const opens = await Promise.all(
     slots(instances).map((slot) => openWith(onBenchBroadcastRoom, scenario, { instances, slot, bytes })(key)),
   )
-  for (const r of opens) r.room.subscribe(onReceive)
+  for (const r of opens) {
+    if (scenario.binary) r.room.subscribeBinary(onReceive)
+    else r.room.subscribe(onReceive)
+  }
   await Promise.all(opens.map((r) => r.room.opened))
-  void openWith(onBenchBroadcastPublish, scenario, { instances, bytes })(key, count, bytes)
+  const publish = scenario.binary ? onBenchBroadcastBinaryPublish : onBenchBroadcastPublish
+  void openWith(publish, scenario, { instances, bytes })(key, count, bytes)
   const wasAborted = await aborted
   const elapsed = performance.now() - warmedAt()
   await Promise.all(opens.map(close))
