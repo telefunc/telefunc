@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('cloudflare:workers', () => ({
@@ -20,13 +21,13 @@ import {
   resolveCloudflareLocationHint,
   resolveSessionRoutingTarget,
 } from './routing.js'
-import '../../../node/server/async_hooks.js'
 import { CloudflareBroadcastAuthorityState, CloudflareBroadcastTransport } from './broadcast.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { Broadcast, ServerBroadcast } from '../../channel/server/ServerBroadcast.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting } from '../../broadcast/broadcastAdapter.js'
 import { Telefunc } from '../../../serve/cloudflare.js'
 import type { BroadcastDeliverRequest } from './broadcast.js'
+import type { CloudflareScale } from './routing.js'
 
 type CloudflareRequest = Request & { cf?: { colo?: string; continent?: string } }
 
@@ -87,6 +88,15 @@ function createMockKV(writes?: string[]): KVNamespace {
       return { keys, list_complete: true, cursor: '' }
     },
   } as unknown as KVNamespace
+}
+
+/** A transport on a Worker with AsyncLocalStorage, so that `runInObject` names the Durable Object. */
+function createTransport(scale: CloudflareScale): CloudflareBroadcastTransport {
+  return new CloudflareBroadcastTransport({
+    baseInstanceName: 'telefunc',
+    scale,
+    runningObject: new AsyncLocalStorage(),
+  })
 }
 
 async function flushMicrotasks(turns = 6): Promise<void> {
@@ -265,7 +275,7 @@ describe('cloudflare broadcast routing', () => {
   })
 
   it('writes KV presence on subscribe and reads it during publish fanout', async () => {
-    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
+    const transport = createTransport(1)
     const kv = createMockKV()
     const previousTransport = getBroadcastAdapter()
 
@@ -320,7 +330,7 @@ describe('cloudflare broadcast routing', () => {
   })
 
   it('waits for KV presence setup before authority publish fanout', async () => {
-    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
+    const transport = createTransport(1)
     const kv = createMockKV()
     const previousTransport = getBroadcastAdapter()
     const publishTargets: string[] = []
@@ -366,7 +376,7 @@ describe('cloudflare broadcast routing', () => {
   })
 
   it('does not deliver locally before ordered publish setup completes', async () => {
-    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
+    const transport = createTransport(1)
     const kv = createMockKV()
     const received: string[] = []
     const previousTransport = getBroadcastAdapter()
@@ -429,7 +439,7 @@ describe('cloudflare broadcast routing', () => {
   })
 
   it('resolves publish ack with authority metadata after cold-path setup completes', async () => {
-    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
+    const transport = createTransport(1)
     const kv = createMockKV()
     const previousTransport = getBroadcastAdapter()
     let releaseKVPut: (() => void) | null = null
@@ -677,7 +687,7 @@ describe('cloudflare broadcast routing', () => {
   })
 
   it('deletes KV presence on unsubscribe', async () => {
-    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
+    const transport = createTransport(1)
     const kv = createMockKV()
     const previousTransport = getBroadcastAdapter()
 
@@ -700,8 +710,19 @@ describe('cloudflare broadcast routing', () => {
     _resetBroadcastAdapterForTesting(previousTransport)
   })
 
+  it('a subscriber with no page, on a Worker without AsyncLocalStorage, throws an error that names the flag', () => {
+    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
+    transport.attachIsolateInfo('weur')
+    expect(() =>
+      transport.runInObject('telefunc-shard-weur-0', () => transport.subscribe('room:test', () => {})),
+    ).toThrow(
+      // spellcheck-ignore  nodejs_als is Cloudflare's AsyncLocalStorage compatibility flag
+      'add "nodejs_als" to the compatibility_flags',
+    )
+  })
+
   it('records what a call subscribes after an `await` under the Durable Object that received that call', async () => {
-    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 5 })
+    const transport = createTransport(5)
     const previousTransport = getBroadcastAdapter()
     let deliveringIn: string | null = null
     transport.attachBinding(
@@ -758,7 +779,7 @@ describe('cloudflare broadcast routing', () => {
   })
 
   it('records what a listener subscribes while a publish is delivered under the Durable Object it runs in', async () => {
-    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 5 })
+    const transport = createTransport(5)
     const previousTransport = getBroadcastAdapter()
     _resetBroadcastAdapterForTesting(transport)
     type DeliveringObject = { telefuncBroadcastDeliver(request: BroadcastDeliverRequest): void }

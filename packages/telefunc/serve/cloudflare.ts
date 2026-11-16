@@ -4,7 +4,6 @@ export { Telefunc }
 export type { CloudflareOptions }
 
 import { DurableObject } from 'cloudflare:workers'
-import { installAsyncContext } from '../node/server/context/async.js'
 import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
 import { getServerConfig, setAdapterMaxFrameBytes, setAdapterMaxMemory } from '../node/server/serverConfig.js'
@@ -38,7 +37,6 @@ const asyncHooksModule = 'node:async_hooks'
 const asyncHooks: typeof import('node:async_hooks') | null = await import(/* @vite-ignore */ asyncHooksModule).catch(
   () => null,
 )
-if (asyncHooks) installAsyncContext(asyncHooks.AsyncLocalStorage)
 
 /** A Durable Object takes a WebSocket message of 32 MiB at most. */
 const DURABLE_OBJECT_MAX_RECEIVED_MESSAGE_BYTES = 32 * 1024 * 1024
@@ -88,7 +86,14 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const crosswsAdapter = crossws({ bindingName, instanceName: baseInstanceName, hooks })
   // Factory runs only on first install. Bundler quirks can evaluate the user's entry twice in the same isolate;
   // we want every evaluation to share one transport instance.
-  const broadcast = installBroadcastAdapter(() => new CloudflareBroadcastTransport({ baseInstanceName, scale }))
+  const broadcast = installBroadcastAdapter(
+    () =>
+      new CloudflareBroadcastTransport({
+        baseInstanceName,
+        scale,
+        runningObject: asyncHooks && new asyncHooks.AsyncLocalStorage<string>(),
+      }),
+  )
 
   function getBinding(env: Cloudflare.Env): DurableObjectNamespace | undefined {
     const baseBinding = (env as Record<string, DurableObjectNamespace | undefined>)[bindingName]

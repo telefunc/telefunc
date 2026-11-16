@@ -15,14 +15,12 @@ const PROVIDED_CONTEXT: unique symbol = Symbol.for('telefunc.providedContext')
 
 function getContext<Context extends object = Telefunc.Context>(): Context & TelefuncBuiltins {
   const raw = getRawContext()
-  if (!raw && isAsyncMode()) {
-    assertUsage(false, '[getContext()] Make sure to call provideTelefuncContext() before calling getContext()')
+  if (!raw) {
+    if (isAsyncMode()) {
+      assertUsage(false, '[getContext()] Make sure to call provideTelefuncContext() before calling getContext()')
+    }
+    assertUsage(false, '[getContext()] Cannot access context object, see https://telefunc.com/getContext#access')
   }
-  // An adapter's own scope, such as the Durable Object whose code runs on Cloudflare, holds none of the app's context.
-  assertUsage(
-    raw && (PROVIDED_CONTEXT in raw || REQUEST_CONTEXT in raw),
-    '[getContext()] Cannot access context object, see https://telefunc.com/getContext#access',
-  )
   const providedContext = (raw[PROVIDED_CONTEXT] ?? {}) as Context
   assert(isObject(providedContext))
 

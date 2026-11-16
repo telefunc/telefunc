@@ -3,7 +3,6 @@ export { CloudflareBroadcastTransport, CloudflareBroadcastAuthorityState }
 export type { BroadcastDeliverRequest, BroadcastPublishRequest, TelefuncBroadcastStub }
 
 import { PUBLISH_HOLD_BYTES } from '../../constants.js'
-import { getRawContext, isAsyncMode, restoreContext } from '../../../node/server/context/context.js'
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorScale, getDeterministicKeyBucketIndex } from './routing.js'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
@@ -16,11 +15,10 @@ import type {
   BroadcastAdapter,
   BroadcastUnsubscribe,
 } from '../../broadcast/broadcastAdapter.js'
+import type { AsyncLocalStorage } from 'node:async_hooks'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 
-/** The context key that names the Durable Object whose code runs. */
-const RUNNING_OBJECT = Symbol.for('telefunc.cloudflare.object')
 const PRESENCE_TTL_SECONDS = 90
 const PRESENCE_REFRESH_INTERVAL_MS = 30_000
 
@@ -273,7 +271,7 @@ class CloudflareBroadcastAuthorityState {
 //   - memberStates: per key, the presences of the DOs with subscribers here and the publishes waiting on them
 //   - requestOwners: each request a DO received, with its name
 //   - locationBucket: set once on first attachIsolateInfo call
-// The DO whose code runs is kept in telefunc's context (`runInObject`).
+// The DO whose code runs is kept in `runningObject` (`runInObject`).
 // ---------------------------------------------------------------------------
 
 class CloudflareBroadcastTransport implements BroadcastAdapter {
@@ -292,10 +290,21 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   /** The stub to each key's authority of this synchronous run, which is one Durable Object's: its publishes in one run
    *  stay in order. Later runs may be another's, so they get their own. */
   private readonly authorityStubsOfThisRun = new Map<string, TelefuncBroadcastStub>()
+  /** The Durable Object whose code runs (`runInObject`); null on a Worker without AsyncLocalStorage. */
+  private readonly runningObject: AsyncLocalStorage<string> | null
 
-  constructor({ baseInstanceName, scale }: { baseInstanceName: string; scale?: CloudflareScale }) {
+  constructor({
+    baseInstanceName,
+    scale,
+    runningObject = null,
+  }: {
+    baseInstanceName: string
+    scale?: CloudflareScale
+    runningObject?: AsyncLocalStorage<string> | null
+  }) {
     this.baseInstanceName = baseInstanceName
     this.scale = scale
+    this.runningObject = runningObject
   }
 
   attachBinding(binding: DurableObjectNamespace, bindingName: string): void {
@@ -314,8 +323,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   /** Runs `run` as the Durable Object `doName`'s code: what it subscribes with no page's wire is `doName`'s. Without
    *  AsyncLocalStorage no scope survives an await, so nothing is kept. */
   runInObject<T>(doName: string, run: () => T): T {
-    if (!isAsyncMode()) return run()
-    return restoreContext({ [RUNNING_OBJECT]: doName }, run)
+    return this.runningObject ? this.runningObject.run(doName, run) : run()
   }
 
   attachIsolateInfo(locationBucket: LocationBucket): void {
@@ -399,10 +407,26 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   /** The Durable Object that may write to a subscriber's page: its wire's; else the one whose code subscribes, where
    *  the page will be, as a call and its page's wire reach one object. */
   ownerOf(wireRequest: Request | undefined): string {
-    if (!wireRequest) return runningObject()
+    if (!wireRequest) return this.requireRunningObject()
     const owner = this.requestOwners.get(wireRequest)
     assert(owner, 'a wire opened by a request no Durable Object received')
     return owner
+  }
+
+  /** The Durable Object whose code runs (`runInObject`). */
+  private requireRunningObject(): string {
+    assertUsage(
+      this.runningObject,
+      'Broadcast on Cloudflare finds the Durable Object its server-side subscriber runs in through AsyncLocalStorage: ' +
+        // spellcheck-ignore  nodejs_als is Cloudflare's AsyncLocalStorage compatibility flag
+        'add "nodejs_als" to the compatibility_flags of your wrangler.jsonc',
+    )
+    const doName = this.runningObject.getStore()
+    assertUsage(
+      doName !== undefined,
+      'Broadcast on Cloudflare subscribes on the server only in code a Durable Object runs: a telefunction, or a channel or broadcast callback',
+    )
+    return doName
   }
 
   /** Adds `onMessage` to `subsByKey` under `key`, with its owner's presence; the returned function removes both. */
@@ -636,22 +660,6 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       locationHint ? { locationHint } : undefined,
     ) as TelefuncBroadcastStub
   }
-}
-
-/** The Durable Object whose code runs (`runInObject`). */
-function runningObject(): string {
-  assertUsage(
-    isAsyncMode(),
-    'Broadcast on Cloudflare finds the Durable Object its server-side subscriber runs in through AsyncLocalStorage: ' +
-      // spellcheck-ignore  nodejs_als is Cloudflare's AsyncLocalStorage compatibility flag
-      'add "nodejs_als" to the compatibility_flags of your wrangler.jsonc',
-  )
-  const doName = getRawContext()?.[RUNNING_OBJECT]
-  assertUsage(
-    typeof doName === 'string',
-    'Broadcast on Cloudflare subscribes on the server only in code a Durable Object runs: a telefunction, or a channel or broadcast callback',
-  )
-  return doName
 }
 
 /** Calls each of `subs` the Durable Object `doName` owns with `payload`. */
