@@ -315,7 +315,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private sendLossy(tag: typeof TAG.TEXT | typeof TAG.BINARY, data: EntryData, bytes: number): void | Promise<void> {
     const held = heldSendBytes(bytes)
     const added = held - this.replaceableHeld()
-    if (added > 0 && !this.admitSend(added)) return Promise.reject<void>(this.refuseSend(added))
+    if (added > 0 && !admit(this, added)) return Promise.reject<void>(this.refuseSend(added))
     if (!this.peer) return this.offlineBuffer.pushLossy(tag, data, bytes)
     this.lossyDelivery().send({ data, held })
   }
@@ -389,15 +389,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  on the wire, and later sends that fit go through. */
   private refusal(bytes: number): ChannelOverflowError | null {
     const held = heldSendBytes(bytes)
-    return this.admitSend(held) ? null : this.refuseSend(held)
-  }
-
-  /** Whether a send that would hold `held` is admitted. Making room for it may end a subscriber whose close callback
-   *  closes or aborts this channel: the send is then one on a closed channel. */
-  private admitSend(held: number): boolean {
-    const admitted = admit(this, held)
-    if (this._phase !== 'open') throw new ChannelClosedError()
-    return admitted
+    return admit(this, held) ? null : this.refuseSend(held)
   }
 
   /** A send that would hold `bytes` wasn't admitted. */
@@ -496,11 +488,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       (held) => admit(this, held),
       (held) => this.refuseSend(held),
     )
-    if (this._phase === 'ended') {
-      // Admitting them may have ended it after its shutdown rejected the ack requests kept so far.
-      this.offlineBuffer.rejectAcks(this.lifecycle.closeError ?? new ChannelClosedError())
-      return // the mux lets an ended channel go
-    }
+    if (this._phase === 'ended') return // the mux lets an ended channel go
     this.ttlTimer = unrefTimer(
       setTimeout(() => {
         this.ttlTimer = null
@@ -946,8 +934,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       result = ''
       status = ACK_STATUS.OVERFLOW
     }
-    // Making room may have ended it since the check above, which narrowed `_phase`: so this asks the lifecycle.
-    if (this.lifecycle.ended) return
     if (this.peer) {
       this.peer.sendAckRes(ackedSeq, result, status)
       if (ackedSeq === this._lastClientSeq) this.receiveCredit.answered()

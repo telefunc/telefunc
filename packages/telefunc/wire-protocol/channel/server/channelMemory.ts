@@ -51,14 +51,12 @@ const memory = getGlobalObject('channelMemory.ts', {
   holders: new Set<MemoryHolder>(),
   maxMemory: 0,
   maxPendingBytes: 0,
-  reclaiming: false,
   /** What wires hold as copies, on no holder: a replay holds the same bytes. */
   wireCopies: 0,
 })
 
 /** Whether `bytes` for `holder` may be held; its caller tells whoever asked when not. Near the budget, a holder past an
- *  equal share is refused, so one still under it has room. Making room ends subscribers, and their close callbacks run
- *  before it returns. */
+ *  equal share is refused, so one still under it has room. A subscriber cut to make room ends after this returns. */
 function admit(holder: MemoryHolder, bytes: number): boolean {
   const maxMemory = maxMemoryOf()
   const target = shedTarget(maxMemory)
@@ -89,15 +87,10 @@ function admitPublish(body: PublishBody, owner: string | undefined, replace: (ho
   const target = shedTarget(maxMemory)
   if (memory.total + bytes > target) for (const holder of [...memory.holders]) replace(holder)
   reclaim(bytes, target)
-  if (memory.total + bytes <= maxMemory || memory.reclaiming) return
-  memory.reclaiming = true
-  try {
-    for (const [newest, holders] of newestsThatEndingFrees()) {
-      if (memory.total + bytes <= maxMemory) return
-      if (holders.length === newest.refs) for (const holder of holders) holder.shed!(0, owner)
-    }
-  } finally {
-    memory.reclaiming = false
+  if (memory.total + bytes <= maxMemory) return
+  for (const [newest, holders] of newestsThatEndingFrees()) {
+    if (memory.total + bytes <= maxMemory) return
+    if (holders.length === newest.refs) for (const holder of holders) holder.shed!(0, owner)
   }
 }
 
@@ -209,18 +202,12 @@ function queueMemory(): QueueMemory {
 /** Everyone above the level comes down to it. A body shared goes only with its last holder, so the level drops until the
  *  total does. A holder that can't reach it, its bytes on the wire, leaves this pass; 1, not 0, as its newest stays. */
 function reclaim(need: number, target: number): void {
-  if (memory.reclaiming) return
-  memory.reclaiming = true
-  try {
-    const stuck = new Set<MemoryHolder>()
-    while (memory.total + need > target) {
-      const largest = largestSheddable(stuck)
-      const level = Math.max(1, largest - (memory.total + need - target))
-      if (level >= largest) return
-      shedTo(level, stuck)
-    }
-  } finally {
-    memory.reclaiming = false
+  const stuck = new Set<MemoryHolder>()
+  while (memory.total + need > target) {
+    const largest = largestSheddable(stuck)
+    const level = Math.max(1, largest - (memory.total + need - target))
+    if (level >= largest) return
+    shedTo(level, stuck)
   }
 }
 

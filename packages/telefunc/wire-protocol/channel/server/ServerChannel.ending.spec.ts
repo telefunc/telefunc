@@ -23,9 +23,9 @@ import { getBroadcastAdapter } from '../../broadcast/broadcastAdapter.js'
 import { pairPublishes } from '../client/pairPublishes.js'
 import { SseEvents } from '../client/SseEvents.js'
 import { ChannelStreamSource } from '../../values/ChannelStreamSource.js'
-import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
+import { ChannelOverflowError } from '../channelErrors.js'
 import { getChannelMux } from './ChannelMux.js'
-import { hold, letGo, queueMemory, releaseHolder, type MemoryHolder } from './channelMemory.js'
+import { admit, hold, letGo, queueMemory, releaseHolder, type MemoryHolder } from './channelMemory.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { ServerChannel } from './ServerChannel.js'
@@ -49,9 +49,14 @@ function sent(frames: Iterable<Uint8Array>): Sent[] {
     const decoded = pair(decode(frame) as DecodedFrame)
     if (decoded === null || !isSequencedFrame(decoded)) continue
     const { index, seq } = decoded
-    if (decoded.tag === TAG.PUBLISH || decoded.tag === TAG.TEXT)
+    if (
+      decoded.tag === TAG.PUBLISH ||
+      decoded.tag === TAG.TEXT ||
+      decoded.tag === TAG.TEXT_ACK_REQ ||
+      decoded.tag === TAG.ACK_RES
+    )
       out.push({ index, seq, label: `${index}:${(parse(decoded.text) as string).slice(0, 2)}` })
-    if (decoded.tag === TAG.PUBLISH_BINARY)
+    if (decoded.tag === TAG.PUBLISH_BINARY || decoded.tag === TAG.BINARY)
       out.push({ index, seq, label: `${index}:${new TextDecoder().decode(decoded.data.subarray(0, 2))}` })
     if (decoded.tag === TAG.CLOSE) out.push({ index, seq, label: `${index}:CLOSE` })
     if (decoded.tag === TAG.ABORT) out.push({ index, seq, label: `${index}:ABORT` })
@@ -438,14 +443,42 @@ for (const attach of ['before', 'after'] as const) {
   })
 }
 
-/** Each way an application's `onClose` of one channel ends another, and the last frame that other's page then reads. */
-const ENDED_BY_A_CLOSE_CALLBACK: Record<string, { end: (channel: ServerChannel) => void; last: string }> = {
-  closes: { end: (channel) => void channel.close(), last: 'CLOSE' },
-  aborts: { end: (channel) => channel.abort(), last: 'ABORT' },
+test('on SSE, a subscriber cut to make room ends after the call that cut it, which the room it let go of admits', async () => {
+  const subscriber = new ServerBroadcast<string>({ key: crypto.randomUUID() })
+  const page = await overSse([subscriber])
+  let closedWith: Error | undefined
+  subscriber.onClose((err) => {
+    closedWith = err
+  })
+  // The page reads nothing yet, so the publishes wait for its event stream.
+  await Promise.all(MESSAGES.map((data) => subscriber.publish(data)))
+  const release = leaveRoom(0)
+  try {
+    expect(admit({ heldBytes: 0 }, 1_000)).toBe(true)
+    expect(closedWith).toBeUndefined()
+    // Less than one of its publishes: those its page lacks went.
+    expect(subscriber.heldBytes).toBeLessThan(100_000)
+    await new Promise((resolve) => setTimeout(resolve))
+    expect(closedWith).toBeInstanceOf(ChannelOverflowError)
+  } finally {
+    release()
+    await page.leave()
+    await page.close()
+  }
+})
+
+/** Each way an application's `onClose` of one channel ends another, and the last frame that other's page then reads. A
+ *  graceful close comes behind what waits for the page; an abort drops what of that may go unsent. */
+const ENDED_BY_A_CLOSE_CALLBACK: Record<
+  string,
+  { end: (channel: ServerChannel) => void; last: string; drops: boolean }
+> = {
+  closes: { end: (channel) => void channel.close(), last: 'CLOSE', drops: false },
+  aborts: { end: (channel) => channel.abort(), last: 'ABORT', drops: true },
 }
 
-for (const [ends, { end, last }] of Object.entries(ENDED_BY_A_CLOSE_CALLBACK)) {
-  test(`on a WebSocket, a subscriber that another's onClose ${ends} while its publish is admitted reads nothing after its ${last}, and the subscriber after it gets the publish`, async () => {
+for (const [ends, { end, last, drops }] of Object.entries(ENDED_BY_A_CLOSE_CALLBACK)) {
+  test(`on a WebSocket, a subscriber that another's onClose ${ends} once its publish was admitted reads the ${last} behind it, and the subscriber after it gets the publish`, async () => {
     const [cutKey, key] = [crypto.randomUUID(), crypto.randomUUID()]
     const cut = new ServerBroadcast<string>({ key: cutKey })
     const channel = new ServerBroadcast<string>({ key })
@@ -455,10 +488,10 @@ for (const [ends, { end, last }] of Object.entries(ENDED_BY_A_CLOSE_CALLBACK)) {
     cut.onClose(() => end(channel))
     const release = leaveRoom(300_000)
     try {
-      // Admitting it for channel 1 cuts channel 0, whose onClose ends channel 1.
+      // Admitting it for channel 1 cuts channel 0, whose onClose ends channel 1 once the publish was delivered.
       await Broadcast.publish(key, 'p4' + 'x'.repeat(600_000))
       const pageReads = await page.readAll()
-      expect(pageReads.filter((read) => read.startsWith('1:'))).toEqual([`1:${last}`])
+      expect(pageReads.filter((read) => read.startsWith('1:'))).toEqual(drops ? [`1:${last}`] : ['1:p4', `1:${last}`])
       expect(pageReads.filter((read) => read.startsWith('2:'))).toEqual(['2:p4'])
     } finally {
       release()
@@ -467,32 +500,56 @@ for (const [ends, { end, last }] of Object.entries(ENDED_BY_A_CLOSE_CALLBACK)) {
   })
 }
 
-/** Each send that asks the ledger for room. */
-const SENDS: Record<string, (channel: ServerChannel) => unknown> = {
-  'send()': (channel) => channel.send('s1' + 'x'.repeat(1_000)),
-  'send() with ack': (channel) => channel.send('s1' + 'x'.repeat(1_000), { ack: true }),
-  'sendBinary()': (channel) => channel.sendBinary(new Uint8Array(1_000)),
-  'a lossy send()': (channel) => channel.send('s1' + 'x'.repeat(1_000), { lossy: true }),
+/** Each send that asks the ledger for room, whether an abort may drop it unsent, and how its promise settles once the
+ *  page left: an acknowledged one the page never answered rejects. */
+const SENDS: Record<
+  string,
+  { send: (channel: ServerChannel) => Promise<unknown>; droppable: boolean; settles: 'resolved' | 'rejected' }
+> = {
+  'send()': { send: (channel) => channel.send('s1' + 'x'.repeat(1_000)), droppable: false, settles: 'resolved' },
+  'send() with ack': {
+    send: (channel) => channel.send('s1' + 'x'.repeat(1_000), { ack: true }),
+    droppable: false,
+    settles: 'rejected',
+  },
+  'sendBinary()': {
+    send: (channel) => channel.sendBinary(new TextEncoder().encode('s1' + 'x'.repeat(1_000))),
+    droppable: false,
+    settles: 'resolved',
+  },
+  'a lossy send()': {
+    send: (channel) => channel.send('s1' + 'x'.repeat(1_000), { lossy: true }),
+    droppable: true,
+    settles: 'resolved',
+  },
 }
 
-for (const [ends, { end }] of Object.entries(ENDED_BY_A_CLOSE_CALLBACK)) {
-  for (const [name, send] of Object.entries(SENDS)) {
-    test(`on SSE, ${name} that cuts a subscriber whose onClose ${ends} its channel throws as on a closed channel, and holds nothing`, async () => {
+for (const [ends, { end, last, drops }] of Object.entries(ENDED_BY_A_CLOSE_CALLBACK)) {
+  for (const [name, { send, droppable, settles }] of Object.entries(SENDS)) {
+    test(`on SSE, ${name} that cuts a subscriber whose onClose ${ends} its channel goes, the ${last} behind it, and nothing stays pending or held`, async () => {
       const channel = new ServerChannel()
       const subscriber = new ServerBroadcast<string>({ key: crypto.randomUUID() })
       const page = await overSse([channel, subscriber])
       subscriber.onClose(() => end(channel))
       // The page reads nothing yet, so the publishes wait for its event stream.
       await Promise.all(MESSAGES.map((data) => subscriber.publish(data)))
-      // No room is left: the send's admission cuts the subscriber, whose onClose ends the channel.
+      // No room is left: the send's admission cuts the subscriber, whose onClose ends the channel after the send.
       const release = leaveRoom(0)
       try {
-        expect(() => send(channel)).toThrow(ChannelClosedError)
-        // Less than the send itself: the end, and nothing of the send.
-        expect(channel.heldBytes).toBeLessThan(1_000)
+        const settled = send(channel).then(
+          () => 'resolved',
+          () => 'rejected',
+        )
+        expect(channel.isClosed).toBe(false)
+        const frames = await page.readUntil(`0:${last}`)
+        expect(reads(frames).filter((read) => read.startsWith('0:'))).toEqual(
+          drops && droppable ? [`0:${last}`] : ['0:s1', `0:${last}`],
+        )
+        await page.leave()
+        expect(await settled).toBe(settles)
+        expect(channel.heldBytes).toBe(0)
       } finally {
         release()
-        await page.leave()
         await page.close()
       }
     })
@@ -523,7 +580,7 @@ test('on SSE, an acknowledged send made before a response carried its channel re
   }
 })
 
-test("on SSE, the answer to the page's acknowledged send that cuts a subscriber whose onClose aborts its channel holds nothing", async () => {
+test("on SSE, the answer to the page's acknowledged send that cuts a subscriber whose onClose aborts its channel goes, the ABORT behind it", async () => {
   const channel = new ServerChannel()
   const subscriber = new ServerBroadcast<string>({ key: crypto.randomUUID() })
   const page = await overSse([channel, subscriber])
@@ -535,13 +592,12 @@ test("on SSE, the answer to the page's acknowledged send that cuts a subscriber 
   const release = leaveRoom(50_000)
   try {
     fromPage(channel, encode.textAckReq(0, stringify('q1'), 1))
-    await new Promise((resolve) => setTimeout(resolve))
-    expect(channel.isClosed).toBe(true)
-    // Less than the answer itself: the ABORT, and nothing of the answer.
-    expect(channel.heldBytes).toBeLessThan(100_000)
+    const frames = await page.readUntil('0:ABORT')
+    expect(reads(frames).filter((read) => read.startsWith('0:'))).toEqual(['0:a1', '0:ABORT'])
+    await page.leave()
+    expect(channel.heldBytes).toBe(0)
   } finally {
     release()
-    await page.leave()
     await page.close()
   }
 })
