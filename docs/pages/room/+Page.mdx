@@ -633,8 +633,8 @@ Server-side.
 | `Room.list({ prefix? }?)` | List the open rooms. |
 | `Room.setMeta(id, meta)` / `Room.updateMeta(id, meta)` | Replace / update the room's `meta`. |
 | `Room.getParticipants(id, { identity? }?)` | List the participants, or one user's. |
-| `Room.publish(id, message)` | Send to everyone: `room.subscribe()` gets it with `info.from` `null`. |
-| `Room.send(id, target, message)` | Send to one participant (`{ id }`) or to every tab of a user (`{ identity }`). |
+| `Room.publish(id, message)` | Send to everyone: `room.subscribe()` gets it with `info.from` `null`. Resolves to `{ seq, timestamp }`. |
+| `Room.send(id, target, message)` | Send to one participant (`{ id }`) or to every tab of a user (`{ identity }`). Resolves to `{ seq, timestamp }`, or for `{ identity }` to a list of them, one per tab it reached. |
 | `Room.removeParticipant(id, target)` | Remove a participant (`{ id, reason? }`) or every tab of a user (`{ identity, reason? }`). |
 | `Room.close(id)` | Close a room. |
 
@@ -663,14 +663,14 @@ Properties: `id`, `meta`, `count`, `isEmpty`, `isClosed`.
 |---|---|
 | `publish(message, { track?, lossy?, retain? }?)` | Send to everyone. `lossy` needs `track`. |
 | `publishBinary(data, { track?, meta?, retain?, lossy? }?)` | Send binary to everyone. Without `track`, on the track `'main'`. |
-| `send(to, message, { ack? }?)` | Send to one participant; with `ack: true`, resolves to its `listen()` reply. |
+| `send(to, message, { ack? }?)` | Send to one participant. Resolves to `{ seq, timestamp }`, or with `ack: true` to its `listen()` reply. |
 | `listen(cb)` | Receive private messages: `cb(message, { from })`; return a value to reply. |
 | `setMeta(meta)` / `updateMeta(meta)` | Replace / update your `meta`. |
 | `onChange(cb)` | Your `meta`, `isConnected` or `demand` changed; once for the changes of one task. |
 | `leave()` / `onLeave(cb)` | Leave / you left, with `cause.type`: `'left'`, `'removed'`, `'closed'`, `'disconnected'`, or `'unknown'` (it left while nothing here listened to the room, too long ago to know why). |
 | `onDisconnect(cb)` / `onReconnect(cb)` | Your connection to the room dropped / is back. |
 
-Properties: `id`, `meta`, `identity`, `isConnected`, and `demand`: the tracks of yours someone receives now, each `{ track, watchers, watcherCount }`.
+Properties: `id`, `meta`, `identity`, `selfDelivery`, `isConnected`, and `demand`: the tracks of yours someone receives now, each `{ track, watchers, watcherCount }`.
 
 ### Other participants
 
@@ -680,7 +680,7 @@ Properties: `id`, `meta`, `identity`, `isConnected`, and `demand`: the tracks of
 | `onChange(cb)` / `onLeave(cb)` | This participant's `meta` or connection changed / this participant left. |
 | `onDisconnect(cb)` / `onReconnect(cb)` | This participant's connection dropped / is back. |
 
-Properties: `id`, `meta`, `identity`, `isConnected`.
+Properties: `id`, `meta`, `identity`, `joinedAt` (Unix epoch milliseconds), `isConnected`.
 
 ### `Room.guard()` hooks
 
