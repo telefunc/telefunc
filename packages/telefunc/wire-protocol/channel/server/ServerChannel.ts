@@ -148,7 +148,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected readonly lifecycle = new ChannelLifecycle({ owner: this, reportError: handleCallbackBug })
   private ttlTimer: ReturnType<typeof setTimeout> | null = null
   protected selfTime = new SelfTime()
-  /** Paces fire-and-forget TEXT, BINARY and PUBLISH sends to what the page grants; see `constants.ts`. */
+  /** Paces fire-and-forget TEXT and BINARY sends, lossy ones too, to what the page grants; see `constants.ts`. */
   protected sendCredit: SendCredit
   /** A send nobody awaits can't show its rejection, so the first refusal warns. */
   private refusalWarned = false
@@ -316,8 +316,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.sendCredit.decrement(this.peer.sendSequenced(encode.binary, data))
   }
 
-  /** A send of which only the newest matters, admitted for what it adds once it takes the place of the one waiting, so
-   *  that one stays where this one is refused. With no page attached it waits as the offline buffer's last entry, which
+  /** A send of which only the newest matters, admitted for what it adds once it takes the place of those waiting, so
+   *  those stay where this one is refused. With no page attached it waits as the offline buffer's last entry, which
    *  the next one replaces; attached, it goes, or waits as the newest while the page is behind or out of credit. */
   private sendLossy(tag: typeof TAG.TEXT | typeof TAG.BINARY, data: EntryData, bytes: number): void | Promise<void> {
     const held = heldSendBytes(bytes)

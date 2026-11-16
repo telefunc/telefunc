@@ -37,9 +37,11 @@ class LossyDelivery<U> {
     return this.slot
   }
 
-  /** With no wire, `unit` goes as the replay's newest; behind, or out of credit, it waits as the newest. */
+  /** With no wire, which only a subscriber's publishes meet, `unit` goes as the replay's newest; behind, or out of
+   *  credit, it waits as the newest. In both it takes the place of those no wire has taken; otherwise it goes. */
   send(unit: U): void {
     if (!this.host.peer() || this.waits()) this.letWaitingGo()
+    // Those that went gave their credit back, and may have been all its page left unconfirmed: this one may go at once.
     if (this.waits()) {
       this.slot = unit
       this.host.hold(unit)

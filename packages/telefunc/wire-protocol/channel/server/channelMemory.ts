@@ -24,14 +24,15 @@ import { HEADER } from '../../wire/header.js'
 import type { PublishBody } from './PublishBody.js'
 import type { QueueMemory } from '../channelMessages.js'
 
-/** What a held send takes beyond its payload, its callbacks and promise, rounded up: one buffered, awaiting its answer
- *  or credit, kept to replay, or waiting in the in-memory broadcast adapter. */
+/** What a held send takes beyond its payload, its callbacks and promise, rounded up: one buffered, waiting as a lossy
+ *  channel's newest, awaiting its answer or credit, kept to replay, or waiting in the in-memory broadcast adapter. A
+ *  lossy send kept to replay is a publish, and holds what one does. */
 const HELD_SEND_OVERHEAD_BYTES = 512
 /** What a held publish takes beyond its share of the body: its head and its entries. */
 const HELD_PUBLISH_OVERHEAD_BYTES = 200
 
 /** Holds bytes for a page. `shed` frees what no wire has, down to `toBytes`, and its own object ends it where its page
- *  would miss a message it may not, or at 0. A lossy page's holder only waits on its newest, so above 0 it frees
+ *  would miss a message it may not, or at 0. A lossy subscriber's holder only waits on its newest, so above 0 it frees
  *  nothing. One without `shed` refuses instead. `newestUnhanded` is its newest publish where no wire has it yet. */
 interface MemoryHolder {
   heldBytes: number
