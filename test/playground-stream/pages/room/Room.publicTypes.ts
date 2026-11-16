@@ -37,6 +37,11 @@ type _ServerSurface = AssertAll<
     Exactly<ReturnType<ServerRoom['snapshot']>, Server.RoomSnapshotView<RoomMeta, MemberMeta, ChatMsg>>,
     Exactly<ReturnType<ServerRoom['snapshot']>['participants'][number], ServerRemote>,
     Exactly<ReturnType<ServerRoom['messages']>, AsyncIterableIterator<Server.RoomMessage<ChatMsg, MemberMeta>>>,
+    Exactly<
+      Awaited<ReturnType<typeof Server.Room.getParticipants<MemberMeta>>>[number],
+      Server.ParticipantInfo<MemberMeta>
+    >,
+    Exactly<Parameters<typeof Server.Room.guard<RoomMeta, MemberMeta, ChatMsg>>[1], Server.RoomGuards<MemberMeta>>,
   ]
 >
 

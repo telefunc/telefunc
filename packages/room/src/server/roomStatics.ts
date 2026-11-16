@@ -1,5 +1,5 @@
 export { roomStatics }
-export type { RoomGuardHooks, RoomGuards, RoomStatic }
+export type { ParticipantInfo, RoomGuardHooks, RoomGuards, RoomStatic }
 
 import { assertUsage } from '../utils/assert.js'
 import { isObject } from 'telefunc/__internal'
@@ -66,7 +66,7 @@ import { repairRoomIndex } from './store/directory.js'
 import { ROOM_GUARD_USAGE } from './constants.js'
 
 /** A participant as `Room.getParticipants(id)` reads it from the store: its fields, with no room view to act through. */
-type StoredParticipant<P extends ParticipantMeta = ParticipantMeta> = Pick<
+type ParticipantInfo<P extends ParticipantMeta = ParticipantMeta> = Pick<
   RemoteParticipant<P>,
   'id' | 'identity' | 'meta' | 'joinedAt' | 'isConnected'
 >
@@ -103,7 +103,7 @@ type RoomStatic = {
   getParticipants<P extends ParticipantMeta = ParticipantMeta>(
     id: string,
     target?: { identity: string },
-  ): Promise<StoredParticipant<P>[]>
+  ): Promise<ParticipantInfo<P>[]>
 }
 
 const roomStatics: RoomStatic = {
@@ -339,7 +339,7 @@ async function removeParticipant(id: string, target: ParticipantRef & { reason?:
   await eachInFlight(members, (member) => evictMember(incarnation, member.id, cause))
 }
 
-async function getRoomParticipants(id: string, target?: { identity: string }): Promise<StoredParticipant[]> {
+async function getRoomParticipants(id: string, target?: { identity: string }): Promise<ParticipantInfo[]> {
   const incarnation = await requireRoom(id)
   let members: MemberSnapshot[]
   if (target === undefined) {
