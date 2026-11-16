@@ -3,6 +3,7 @@ export type { PgPool, PgClient }
 
 import { AsyncResource } from 'node:async_hooks'
 import { MAX_RESULT_ROWS, type FollowUp, type LiveDatabase, type Reservation, type Statement } from '../liveDatabase.js'
+import { processWide } from '../processWide.js'
 import { inOneTransaction, sendWithBeforeCommit } from './beforeCommit.js'
 import { takeHiddenFields, takeHiddenValues } from './hiddenColumns.js'
 import { HIDDEN_PREFIX } from './statement.js'
@@ -46,7 +47,8 @@ type PgPool = {
   Client?: new (
     options: unknown,
   ) => PgClient
-  options?: unknown
+  /** What it opens its clients with: `types`, the type parsers they parse values with. */
+  options?: { types?: object }
 }
 /** A `pg-cursor` (Prisma reads and writes through one), or another object `pg` submits. */
 type Submittable = {
@@ -69,13 +71,17 @@ const RESERVATION = Symbol('reservation')
 const AS_TEXT = { getTypeParser: () => (text: string) => text }
 /** The follow-up queries of ours a client still runs, one after the other; settles once they all ended. */
 const followingUp = new WeakMap<PgClient, Promise<void>>()
+/** What decides how clients parse values, numbered (`rowFormOf()`). */
+const parsings = processWide('pgParsings', () => ({ numbers: new WeakMap<object, number>(), count: 0 }))
 
 /** Captures every statement of a `pg.Pool` (each of its clients) or a `pg.Client`. */
 function capturePg(database: PgPool | PgClient, live: LiveDatabase): void {
-  if (!('totalCount' in database)) return captureClient(database, live)
-  database.on('connect', (client) => captureClient(client, live))
+  // A client of no pool doesn't tell its `types`: its reads share only with its own.
+  if (!('totalCount' in database)) return captureClient(database, live, rowFormOf(database))
+  const rowForm = rowFormOf(database.options?.types)
+  database.on('connect', (client) => captureClient(client, live, rowForm))
   checkOutForCaller(database)
-  shareReadsBeforeConnecting(database, live)
+  shareReadsBeforeConnecting(database, live, rowForm)
 }
 
 /** What `database` connects to, and how its sessions start. A pool tells through a client it would open, not
@@ -89,7 +95,7 @@ function pgConnectionTarget(database: PgPool | PgClient): string | undefined {
 
 /** A live read sent with `pool.query()` joins an identical one before waiting for a connection: N clients refetching
  *  one query wait for one connection, not N. */
-function shareReadsBeforeConnecting(pool: PgPool, live: LiveDatabase): void {
+function shareReadsBeforeConnecting(pool: PgPool, live: LiveDatabase, rowForm: string): void {
   const query = pool.query.bind(pool)
   pool.query = (...args: unknown[]) => {
     const [config, values, callback] = args
@@ -97,7 +103,7 @@ function shareReadsBeforeConnecting(pool: PgPool, live: LiveDatabase): void {
     const shared =
       !isSubmittable(config) &&
       isShareable(queryConfig) &&
-      live.reserveRead(queryConfig.text, Array.isArray(values) ? values : (queryConfig.values ?? []), ROW_FORM)
+      live.reserveRead(queryConfig.text, Array.isArray(values) ? values : (queryConfig.values ?? []), rowForm)
     if (!shared) return query(...args)
     const done = typeof values === 'function' ? (values as PgCallback) : (callback as PgCallback | undefined)
     const own = { ...queryConfig, ...(Array.isArray(values) ? { values } : {}) }
@@ -132,8 +138,14 @@ function answer(result: Promise<PgResult | PgResult[]>, callback: PgCallback | u
   return undefined
 }
 
-/** All `pg` reads share: each caller parses the text values itself (`parsedFor()`). */
-const ROW_FORM = 'pg'
+/** How the reads of clients parsing values with `parsing` return rows (`undefined`: `pg`'s own type parsers). A read
+ *  shares the text values of its result only with reads of clients that parse them alike (`parsedFor()`). */
+function rowFormOf(parsing: object | undefined): string {
+  if (!parsing) return 'pg'
+  let number = parsings.numbers.get(parsing)
+  if (number === undefined) parsings.numbers.set(parsing, (number = parsings.count++))
+  return `pg:${number}`
+}
 
 /** Whether a query asks for nothing but its rows, in a form `parsedFor()` reproduces: not binary values, say. */
 function isShareable(config: PgQueryConfig): boolean {
@@ -181,7 +193,7 @@ function releasedAfterFollowUps(client: CheckedOut): CheckedOut {
   return client
 }
 
-function captureClient(client: PgClient, live: LiveDatabase): void {
+function captureClient(client: PgClient, live: LiveDatabase, rowForm: string): void {
   if (CAPTURED in client) return
   Object.defineProperty(client, CAPTURED, { value: true, configurable: true })
   const query = client.query.bind(client)
@@ -228,7 +240,7 @@ function captureClient(client: PgClient, live: LiveDatabase): void {
       )
     const plan = () => {
       const statement = live.statementFor(client, queryConfig.text, queryConfig.values ?? [], {
-        sharing: isShareable(queryConfig) ? { rowForm: ROW_FORM, reservation } : undefined,
+        sharing: isShareable(queryConfig) ? { rowForm, reservation } : undefined,
       })
       planned(statement)
       return statement
