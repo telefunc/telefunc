@@ -11,6 +11,7 @@ import { configureBroadcastTransport, disposeBackend } from '../../backend/insta
 import type { BroadcastTransport } from '../../backend/broadcast/TransportBroadcastDriver.js'
 import { MemoryBackend } from '../../backend/memory/MemoryBackend.js'
 import { ChannelOverflowError } from '../channelErrors.js'
+import type { BroadcastPublishOptions } from '../channel.js'
 
 afterEach(() => disposeBackend())
 
@@ -179,6 +180,22 @@ describe('keyed in-process broadcast', () => {
     expect(a2.seq).toBe(a1.seq + 1)
     expect(b1.seq).toBeGreaterThan(0)
     expect(typeof a1.timestamp).toBe('number')
+  })
+
+  // Options read from a form or a configuration file: `'false'` would otherwise publish it lossy.
+  it("refuses a `lossy` that isn't a boolean, at the call", () => {
+    const key = 'room:lossy-option'
+    const broadcast = new ServerBroadcast({ key })
+    const options: BroadcastPublishOptions = JSON.parse('{ "lossy": "false" }')
+
+    expect(() => broadcast.publish(1, options)).toThrow("`publish()`'s `lossy` should be a boolean")
+    expect(() => Broadcast.publish(key, 1, options)).toThrow("`publish()`'s `lossy` should be a boolean")
+    expect(() => broadcast.publishBinary(new Uint8Array([1]), options)).toThrow(
+      "`publishBinary()`'s `lossy` should be a boolean",
+    )
+    expect(() => Broadcast.publishBinary(key, new Uint8Array([1]), options)).toThrow(
+      "`publishBinary()`'s `lossy` should be a boolean",
+    )
   })
 })
 

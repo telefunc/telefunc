@@ -8,6 +8,7 @@ import { decode, encode, type ChannelFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { ClientBroadcast } from './ClientBroadcast.js'
 import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
+import type { BroadcastPublishOptions } from '../channel.js'
 
 /** An SSE downstream that never sends a byte: the RECONCILED that would open sends never comes. */
 const stalledFetch = (async () => new Response(new ReadableStream({ start() {} }), { status: 200 })) as typeof fetch
@@ -77,6 +78,18 @@ describe('ClientBroadcast uplink', () => {
     })
 
     expect(waitingPublishes(page)).toEqual(sent)
+  })
+
+  // Options read from a form or a configuration file: `'false'` would otherwise publish it lossy.
+  it("refuses a `lossy` that isn't a boolean, at the call", () => {
+    const page = behindUplink()
+    const options: BroadcastPublishOptions = JSON.parse('{ "lossy": "false" }')
+
+    expect(() => page.publish(1, options)).toThrow("`publish()`'s `lossy` should be a boolean")
+    expect(() => page.publishBinary(new Uint8Array([1]), options)).toThrow(
+      "`publishBinary()`'s `lossy` should be a boolean",
+    )
+    expect(waitingPublishes(page)).toEqual([])
   })
 
   // The publish whose place it took holds the close till its answer comes, and both get that answer.
