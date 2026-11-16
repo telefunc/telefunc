@@ -83,7 +83,7 @@ function serializeTelefunctionResult(runContext: {
    *  stays open. */
   const registrations: (() => void)[] = []
   let goes = false
-  /** The response holds a channel an earlier response carried, which that response's page has. */
+  /** The response holds a channel an earlier response carried. */
   let carriesAnEarlierChannel = false
   const { valueShields } = runContext
   const shieldCtx = {
