@@ -4,11 +4,10 @@ export type { PageEnd }
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import type { RoomModel } from '../../shared/RoomModel.js'
 import type { LeaveCause } from '../../types.js'
-import type { WhoEntry } from '../protocol.js'
 import type { BinaryWants } from './binaryWants.js'
 import type { DemandReport } from './DemandReport.js'
 import { getOrCreate } from 'telefunc/__internal'
-import { toggleEntry } from '../../utils/sets.js'
+import { toggle, toggleEntry } from '../../utils/sets.js'
 import { assert } from '../../utils/assert.js'
 assertIsNotBrowser()
 
@@ -17,10 +16,14 @@ assertIsNotBrowser()
 interface PageEnd {
   /** The participants it holds. */
   heldMembers(): Iterable<string>
+  /** Whether `member` is one of `heldMembers()`. */
+  holds(member: string): boolean
   /** What it receives, where it receives anything. */
   readonly binaryWants?: BinaryWants
   /** The participants it holds that joined with `selfDelivery: false`. */
   selfSuppressed?(): Iterable<string>
+  /** Whether `member` is one of `selfSuppressed()`. */
+  suppresses?(member: string): boolean
   /** Its page's members whose own messages it doesn't get back: one set for every end of the page, kept current. */
   atPage?(suppressed: ReadonlySet<string>): void
   /** Its page's last participant of the room was removed, with `cause`. */
@@ -28,7 +31,7 @@ interface PageEnd {
 }
 
 /** A page's ends here, the participants they hold, those whose own messages none of them gets back, the token its
- *  who-entries name it by and what it was last reported with. */
+ *  who-entries name it by and what they were last reported with. */
 type Page = {
   /** What names it here (`ServerReplacerContext.page`); none for a server-side room's own page. */
   key: string | undefined
@@ -37,8 +40,14 @@ type Page = {
   ends: Set<PageEnd>
   suppressed: Set<string>
   held: Set<string>
-  told: WhoEntry[]
+  /** The participants its who-entries name. */
+  named: Set<string>
+  /** What its ends receive, which its who-entries name. */
+  scopes: Scope[]
 }
+
+/** Every track of every member, a track of every member, every track of a member, or a track of a member. */
+type Scope = { member?: string; track?: string }
 
 type PageIndexOptions = { model: Pick<RoomModel, 'memberHidden'> }
 
@@ -53,7 +62,8 @@ class PageIndex {
   private readonly pageOfKey = new Map<string, Page>()
   /** The pages holding each member, which its join and leave report again. */
   private readonly heldAt = new Map<string, Set<Page>>()
-  private readonly changedPages = new Set<Page>()
+  /** The pages changed since they were reported, with the members changed of each, or `'all'`. */
+  private readonly changedPages = new Map<Page, Set<string> | 'all'>()
   private readonly model: PageIndexOptions['model']
 
   constructor({ model }: PageIndexOptions) {
@@ -79,7 +89,7 @@ class PageIndex {
     page.ends.add(end)
     end.atPage?.(page.suppressed)
     for (const member of page.suppressed) suppressed.add(member)
-    this.changedPages.add(page)
+    this.reportAgain(page)
     this.readHolders(page, suppressed)
     return suppressed
   }
@@ -94,16 +104,16 @@ class PageIndex {
     return this.pageChanged(page)
   }
 
-  /** What the end holds or receives changed. Returns the members whose own messages its page's ends stopped or
-   *  started getting back. */
-  endChanged(end: PageEnd): Set<string> {
+  /** What the end holds or receives changed, of `member` alone when given. Returns the members whose own messages its
+   *  page's ends stopped or started getting back. */
+  endChanged(end: PageEnd, member?: string): Set<string> {
     const page = this.pageOf.get(end)
-    return page === undefined ? new Set() : this.pageChanged(page)
+    return page === undefined ? new Set() : this.pageChanged(page, member)
   }
 
   /** The member joined, or left. */
   memberChanged(member: string): void {
-    for (const page of this.heldAt.get(member) ?? []) this.changedPages.add(page)
+    for (const page of this.heldAt.get(member) ?? []) this.reportAgain(page, member)
   }
 
   /** The pages holding the member now. */
@@ -120,19 +130,28 @@ class PageIndex {
     }
   }
 
-  /** Reports each changed page's who-entries again, a page per step. */
+  /** Reports what changed of each changed page's who-entries, a page per step. */
   *report(report: Pick<DemandReport, 'setWho'>): Generator<void> {
-    for (const page of this.changedPages) {
+    for (const [page, members] of this.changedPages) {
       this.changedPages.delete(page)
-      this.reportPage(page, report)
+      this.reportPage(page, members, report)
       yield
     }
   }
 
-  private pageChanged(page: Page): Set<string> {
+  /** The next planning pass reports the page again, of `member` alone when given. */
+  private reportAgain(page: Page, member?: string): void {
+    const members = this.changedPages.get(page)
+    if (member === undefined) this.changedPages.set(page, 'all')
+    else if (members === undefined) this.changedPages.set(page, new Set([member]))
+    else if (members !== 'all') members.add(member)
+  }
+
+  private pageChanged(page: Page, member?: string): Set<string> {
     const suppressed = new Set<string>()
-    this.changedPages.add(page)
-    this.readHolders(page, suppressed)
+    this.reportAgain(page, member)
+    if (member === undefined) this.readHolders(page, suppressed)
+    else this.readHolder(page, member, suppressed)
     return suppressed
   }
 
@@ -160,28 +179,62 @@ class PageIndex {
     }
   }
 
-  private reportPage(page: Page, report: Pick<DemandReport, 'setWho'>): void {
-    for (const entry of page.told) report.setWho(entry, false)
-    // A hidden participant, and one whose join hasn't applied here yet, is never named.
-    const named = [...page.held].filter((member) => this.model.memberHidden(member) === false)
-    const who = named.length > 0 ? named.map((by) => ({ page: page.token, by })) : [{ page: page.token }]
-    page.told = []
+  /** `readHolders()` for `member` alone. */
+  private readHolder(page: Page, member: string, changed: Set<string>): void {
+    let held = false
+    let suppressed = false
     for (const end of page.ends) {
-      for (const scope of scopesOf(end.binaryWants)) {
-        for (const each of who) page.told.push({ ...each, ...scope })
-      }
+      held ||= end.holds(member)
+      suppressed ||= end.suppresses?.(member) === true
     }
-    for (const entry of page.told) report.setWho(entry, true)
+    toggleEntry(this.heldAt, member, page, held)
+    toggle(page.held, member, held)
+    if (page.suppressed.has(member) === suppressed) return
+    toggle(page.suppressed, member, suppressed)
+    changed.add(member)
+  }
+
+  /** Tells the page's who-entries that name `members` as they are now, or with `'all'`, every entry again. */
+  private reportPage(page: Page, members: Set<string> | 'all', report: Pick<DemandReport, 'setWho'>): void {
+    if (members === 'all') {
+      tellWho(page, report, false)
+      page.scopes = [...page.ends].flatMap((end) => [...scopesOf(end.binaryWants)])
+      page.named = new Set([...page.held].filter((member) => this.names(page, member)))
+      tellWho(page, report, true)
+      return
+    }
+    const wasNobody = page.named.size === 0
+    for (const member of members) {
+      const named = this.names(page, member)
+      if (named === page.named.has(member)) continue
+      toggle(page.named, member, named)
+      for (const scope of page.scopes) report.setWho({ page: page.token, by: member, ...scope }, named)
+    }
+    const nobody = page.named.size === 0
+    if (nobody === wasNobody) return
+    for (const scope of page.scopes) report.setWho({ page: page.token, ...scope }, nobody)
+  }
+
+  /** A hidden participant, and one whose join hasn't applied here yet, is never named. */
+  private names(page: Page, member: string): boolean {
+    return page.held.has(member) && this.model.memberHidden(member) === false
   }
 }
 
 function newPage(key: string | undefined): Page {
-  return { key, token: crypto.randomUUID(), ends: new Set(), suppressed: new Set(), held: new Set(), told: [] }
+  const token = crypto.randomUUID()
+  return { key, token, ends: new Set(), suppressed: new Set(), held: new Set(), named: new Set(), scopes: [] }
 }
 
-/** Each scope the wants cover: every track of every member, a track of every member, every track of a member, or a
- *  track of a member. */
-function* scopesOf(wants: BinaryWants | undefined): Generator<{ member?: string; track?: string }> {
+/** Tells, or untells, each entry the page's who-entries hold: each participant they name, or the page's token where
+ *  they name none, in each scope. */
+function tellWho(page: Page, report: Pick<DemandReport, 'setWho'>, on: boolean): void {
+  const who = page.named.size > 0 ? [...page.named].map((by) => ({ page: page.token, by })) : [{ page: page.token }]
+  for (const scope of page.scopes) for (const each of who) report.setWho({ ...each, ...scope }, on)
+}
+
+/** Each scope the wants cover. */
+function* scopesOf(wants: BinaryWants | undefined): Generator<Scope> {
   if (wants === undefined) return
   if (wants.everyMember.all) yield {}
   for (const track of wants.everyMember.tracks) yield { track }

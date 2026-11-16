@@ -123,7 +123,7 @@ class ServerLocalParticipant extends ParticipantBase {
     this.holder = new RoomParticipantStub({ room: this.room, participant: this, end, publishShield })
     // It is at the holder's page from now on, not at its server-side room's.
     this.room.replica.placeAtPage(this.holder, page)
-    this.room.replica.pageEndChanged(this.room.local)
+    this.room.replica.pageEndChanged(this.room.local, this.id)
     this._flushHeld(this.holder)
     return {
       channelId: end.id,

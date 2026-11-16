@@ -349,7 +349,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
     const admission = new Admission({ meta: ownMetadata(req.meta), identity: null, hidden: false })
     await this.admissions.admit(admission, () => {
       stub.addMember(req.reqId, admission.id, req.selfDelivery)
-      this.replica.pageEndChanged(stub)
+      this.replica.pageEndChanged(stub, admission.id)
       if (this.stubs.has(stub)) {
         this.stubOf.set(admission.id, stub)
         this.replica.own(admission.id, this)

@@ -221,7 +221,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
 
   own(member: string, handle: RoomHandle): void {
     this.reconsider(handle)
-    this.pageEndChanged(handle.local)
+    this.pageEndChanged(handle.local, member)
     this.owners.set(member, handle)
     // A member's id is fresh at each join, so its inbox starts before seq 1.
     this.inboxSeqs.set(member, 0)
@@ -297,9 +297,9 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.suppressionChanged(this.pages.remove(end))
   }
 
-  /** The participants the end holds changed. */
-  pageEndChanged(end: PageEnd): void {
-    this.suppressionChanged(this.pages.endChanged(end))
+  /** Whether the end holds `member`, or doesn't get its own messages back, may have changed. */
+  pageEndChanged(end: PageEnd, member: string): void {
+    this.suppressionChanged(this.pages.endChanged(end, member))
   }
 
   /** A page's ends stopped or started getting `members`' own messages back: the next planning pass recounts them. */
@@ -595,7 +595,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     if (owner !== undefined) {
       this.disown(id, owner)
       owner.memberLeft(id, cause)
-      this.pageEndChanged(owner.local)
+      this.pageEndChanged(owner.local, id)
       this.reconsider(owner)
     }
     // Every leave of a known member reaches the clients here, once, whatever applied it.
@@ -605,7 +605,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
       this.relayControl(leave, () => unorderedEventBody(leave))
     }
     for (const stub of this.stubs) {
-      if (stub.forgetMember(id)) this.pageEndChanged(stub)
+      if (stub.forgetMember(id)) this.pageEndChanged(stub, id)
       if (stub.forgetWantsOf(id)) this.lanePlan.holderChanged(stub, [id])
     }
     this.lanePlan.memberReleased(id)
