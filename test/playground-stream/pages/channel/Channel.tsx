@@ -1074,7 +1074,7 @@ function ChannelDemo() {
   }, [])
 
   const testLeftOpen = useCallback(async () => {
-    const { channel } = await openChannel(onChannelInit)
+    const { channel } = await openChannel(onChannelOpenAnswer)
     await channel.opened
     setChannelState((s) => ({ ...s, leftOpen: true }))
   }, [])
