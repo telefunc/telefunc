@@ -17,11 +17,15 @@ import { decodeU32 } from '../../wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
 
-// This spec pins the join's order, not its deadline: a loaded runner must not reach the deadline between steps.
+// This spec pins the upgrade's order, not its deadlines: a loaded runner must not reach one between steps.
 vi.mock('../../constants.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../constants.js')>()),
+  WS_PROBE_TIMEOUT_MS: 60_000,
+  UPGRADE_ATTEMPT_TIMEOUT_MS: 60_000,
   UPGRADE_HANDOFF_JOIN_TIMEOUT_MS: 60_000,
+  RECONCILE_TIMEOUT_MS: 60_000,
 }))
+vi.mock('../../wire/pingDeadline.js', () => ({ pingDeadline: () => 60_000 }))
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
 /** Long enough for the connect POST, the probe handshake and any chained microtasks to drain. */
@@ -339,5 +343,5 @@ describe('SSE→WS barrier on batch POSTs', () => {
     } finally {
       clearInterval(delivering)
     }
-  }, 10_000)
+  }, 60_000)
 })
