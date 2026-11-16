@@ -22,8 +22,9 @@ class ServerReplay {
   private pushedSeq = 0
   /** When its page last began moving to a wire: what it hadn't confirmed then is confirmed over that wire. */
   private movedAt = 0
-  /** Whether it ever held a lossy publish: until then every publish is owed, and nothing below walks. */
-  private usedLossy = false
+  /** How many lossy publishes of each stream it holds, from its first lossy publish on: until then every publish is
+   *  owed, and nothing below walks. */
+  private lossyHeld: Map<string, number> | null = null
 
   constructor(holder: MemoryHolder) {
     this.holder = holder
@@ -49,7 +50,11 @@ class ServerReplay {
     const alone = this.publishes.length === 0 && this.frames.length === 0
     this.publishes.push(seq, { head, body, at: performance.now(), alone })
     hold(this.holder, body)
-    if (body.lossy) this.usedLossy = true
+    const { stream } = body
+    if (body.lossy && stream !== null) {
+      this.lossyHeld ??= new Map()
+      this.lossyHeld.set(stream, (this.lossyHeld.get(stream) ?? 0) + 1)
+    }
   }
 
   /** The least time a publish waited for its page's confirmation, `Infinity` before the first. One sent with nothing
@@ -118,12 +123,16 @@ class ServerReplay {
   /** Replacement. Of its newest `droppable`, the lossy publishes of `stream` that no plain one of the stream followed go:
    *  its page's `info.seq` shows what it skipped. */
   dropLossyOf(stream: string, droppable: number): Dropped {
+    // Nothing of the stream older than its oldest lossy publish can go, so the walk ends there.
+    let lossyLeft = this.lossyHeld?.get(stream) ?? 0
+    if (lossyLeft === 0) return { seqs: [], bytes: 0 }
     const goes: number[] = []
     this.walkNewest(droppable, (index, { body }, owed) => {
       if (body.stream !== stream) return
       // A plain publish of the stream, or a lossy one before it: every older one of the stream is owed too.
       if (owed) return false
       goes.push(index)
+      return --lossyLeft > 0
     })
     return this.take(goes)
   }
@@ -193,7 +202,7 @@ class ServerReplay {
   /** Whether more than one publish its page is owed is among its newest `waiting`, and what it holds without the
    *  replaceable ones among them is over `toBytes`. */
   private owedOver(toBytes: number, waiting: number): boolean {
-    if (!this.usedLossy) return waiting > 1
+    if (this.lossyHeld === null) return waiting > 1
     let owedCount = 0
     let replaceableBytes = 0
     this.walkNewest(waiting, (_index, { body }, owed) => {
@@ -227,5 +236,10 @@ class ServerReplay {
 
   private letPublishGo({ body }: Publish): void {
     letGo(this.holder, body)
+    const { stream } = body
+    if (!body.lossy || stream === null || this.lossyHeld === null) return
+    const held = this.lossyHeld.get(stream) ?? 0
+    if (held > 1) this.lossyHeld.set(stream, held - 1)
+    else this.lossyHeld.delete(stream)
   }
 }
