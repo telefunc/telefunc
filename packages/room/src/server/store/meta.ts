@@ -243,8 +243,11 @@ async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: Ro
     return committed(roomId, result, (seq) => ({ __r: 'update', seq, changes }))
   })
   if (update === null) return
-  acceptedOrThrow(roomId, await commitLane(controlLane(roomId, inc), encodeRoomRecord(update)))
-  if ('replace' in write) await dropReplacedMetaGenerations(roomId, inc)
+  const [commit] = await Promise.all([
+    commitLane(controlLane(roomId, inc), encodeRoomRecord(update)),
+    'replace' in write && dropReplacedMetaGenerations(roomId, inc),
+  ])
+  acceptedOrThrow(roomId, commit)
 }
 
 /** The update a committed exchange made, at the `meta:seq` it left. */

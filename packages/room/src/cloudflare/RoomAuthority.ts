@@ -275,8 +275,10 @@ class RoomAuthority {
       const listedIn = claimListingBucket(sql, bucket)
       return listed ? null : listedIn
     })
-    if (newlyListedIn !== null) await this.callDirectory(newlyListedIn, (directory) => directory.add(roomId, incTag))
-    await this.scheduleMaintenanceIfNeeded()
+    await Promise.all([
+      newlyListedIn !== null && this.callDirectory(newlyListedIn, (directory) => directory.add(roomId, incTag)),
+      this.scheduleMaintenanceIfNeeded(),
+    ])
   }
 
   /** Its region directory forgets `incTag` even when the listing here is gone or newer, as after an alarm that couldn't

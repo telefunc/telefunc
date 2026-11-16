@@ -4,7 +4,7 @@ export type { RoomGuardHooks, RoomGuards, RoomStatic }
 import { assertUsage } from '../utils/assert.js'
 import { isObject } from 'telefunc/__internal'
 import { getRoomPlane } from '../backend/plane.js'
-import { DIRECTORY_PAGE_SIZE } from '../backend/contract.js'
+import { DIRECTORY_PAGE_SIZE, type RoomHead } from '../backend/contract.js'
 import type { RoomPlane } from '../backend/RoomPlane.js'
 import { RoomError, isRoomError, messageLostError, participantGoneError, roomClosedError } from '../shared/errors.js'
 import {
@@ -264,10 +264,14 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
   return rooms
 }
 
-/** A directory entry as `Room.list()` lists it, after repairing its listing; null once the room isn't open. */
+/** A directory entry as `Room.list()` lists it, while its listing is repaired; null once the room isn't open. */
 async function listedRoom(plane: RoomPlane, roomId: string, incTag: string): Promise<RoomInfo | null> {
   const head = await plane.driver.readHead(roomId)
-  await repairRoomIndex(plane, roomId, incTag, head)
+  const [, info] = await Promise.all([repairRoomIndex(plane, roomId, incTag, head), openRoomInfo(plane, roomId, head)])
+  return info
+}
+
+async function openRoomInfo(plane: RoomPlane, roomId: string, head: RoomHead | null): Promise<RoomInfo | null> {
   const config = openConfig(head)
   if (config === null) return null
   const [count, stored] = await Promise.all([countListedRoom(plane, roomId, config), readRoomMeta(roomId, config)])

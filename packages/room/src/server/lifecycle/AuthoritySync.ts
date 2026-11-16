@@ -88,8 +88,7 @@ class AuthoritySync {
 
   async reconcileAuthority(): Promise<void> {
     if (this.model.closed || !(await this.reconcileMeta())) return
-    await dropReplacedMetaGenerations(this.incarnation.id, this.incarnation.inc)
-    await this.refreshMembers()
+    await Promise.all([dropReplacedMetaGenerations(this.incarnation.id, this.incarnation.inc), this.refreshMembers()])
   }
 
   /** The heartbeat's check, after the meta and the lapsed leases: the roster read again only once the control lane
