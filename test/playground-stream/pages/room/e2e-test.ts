@@ -88,6 +88,8 @@ type AdminResult = {
 
 /** What a view received after its page's participant was removed, and how often it closed. */
 type RemovedView = { text: string[]; closes: number; closeCause: unknown; isClosed: boolean }
+/** The same, and how the page's participant left. */
+type RemovedMe = RemovedView & { myCause: unknown }
 
 /** What a view received of messages, of track `cam` and of the lossy track `cursor`. */
 type OwnTrack = { text: string[]; frames: number[]; lossy: number[] }
@@ -854,22 +856,25 @@ function testRoom() {
     expect(r.sameId).toBe(true)
     expect(r.sameCount).toBe(1) // ...with exactly its original member preserved
   })
-  testRoomScenario<{ alone: RemovedView & { myCause: unknown; pubCause: unknown }; two: RemovedView }>(
+  testRoomScenario<{
+    alone: RemovedMe & { pubCause: unknown }
+    joined: RemovedMe
+    together: RemovedMe
+    two: RemovedView
+  }>(
     'removed',
-    "room: a removed participant's page stops receiving the room it got from another call, and a page holding another participant keeps it",
+    "room: a removed participant's page stops receiving the room, whether the page joined the participant on the room or got it with the room or from another call, and a page holding another participant keeps it",
     (r) => {
       const removed = { type: 'removed', reason: 'be nice' }
       // Its participant leaves with the removal, the view closes with it and gets nothing after, and another participant
       // on the view leaves it as a closed view's do, not as removed.
-      expect(r.alone).deep.equal({
-        text: ['0'],
-        closes: 1,
-        closeCause: removed,
-        isClosed: true,
-        myCause: removed,
-        pubCause: { type: 'closed' },
+      const closedByRemoval = { text: ['0'], closes: 1, closeCause: removed, isClosed: true, myCause: removed }
+      expect(r).deep.equal({
+        alone: { ...closedByRemoval, pubCause: { type: 'closed' } },
+        joined: closedByRemoval,
+        together: closedByRemoval,
+        two: { text: ['still here'], closes: 0, closeCause: null, isClosed: false },
       })
-      expect(r.two).deep.equal({ text: ['still here'], closes: 0, closeCause: null, isClosed: false })
     },
   )
   test('room: a removal by identity closes the room on each tab holding that participant, and a tab that never joined keeps receiving', async () => {

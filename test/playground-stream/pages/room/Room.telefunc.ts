@@ -10,6 +10,7 @@ export {
   onOpenAuditedRoom,
   onGetAudit,
   onJoinAsServer,
+  onJoinRoomAsServer,
   onJoinRoomAsServerSelf,
   onJoinAsServerSelf,
   onJoinAsServerSelfPublishing,
@@ -229,6 +230,12 @@ async function onGetAudit(roomId: string) {
 
 async function onJoinAsServer(roomId: string, name: string) {
   return await Room.join(roomId, { meta: { name }, identity: `user:${name}` })
+}
+
+/** The room and `me`, joined in the same call. */
+async function onJoinRoomAsServer(roomId: string, name: string) {
+  const room = anyoneCanJoin(await Room.get(roomId))
+  return { room, me: await room.join({ meta: { name } }) }
 }
 
 /** Co-returned `{ room, me }` suppresses `me`'s echo while preserving other-member delivery. */

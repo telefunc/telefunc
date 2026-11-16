@@ -15,6 +15,7 @@ import {
   onOpenAuditedRoom,
   onGetAudit,
   onJoinAsServer,
+  onJoinRoomAsServer,
   onJoinRoomAsServerSelf,
   onJoinAsServerSelf,
   onJoinAsServerSelfPublishing,
@@ -2222,7 +2223,7 @@ function Room() {
         })
       })}
 
-      {scenario('removed', "Remove the page's participant", 'Alone, then one of two', async () => {
+      {scenario('removed', "Remove the page's participant", 'Alone three ways, then one of two', async () => {
         /** The view's messages and closes, and the room as it is. */
         const watch = (room: RoomView) => {
           const seen = { text: [] as unknown[], closes: 0, closeCause: null as unknown }
@@ -2233,13 +2234,30 @@ function Room() {
           })
           return () => ({ ...seen, isClosed: room.isClosed })
         }
+        /** The page's participant `me` removed between two messages: what the view got, once the server's own view got
+         *  both, and how `me` left. */
+        const removeMe = async (
+          roomId: string,
+          me: Pick<ServerJoined, 'id' | 'onLeave'>,
+          seen: ReturnType<typeof watch>,
+        ) => {
+          let myCause: unknown = null
+          me.onLeave((cause) => (myCause = cause))
+          await onRoomBurst(roomId, 1, 0)
+          await pollUntil(() => ({ done: seen().text.length === 1 }))
+          await onKick(roomId, me.id)
+          await pollUntil(() => ({ done: myCause !== null }))
+          await onRoomBurst(roomId, 1, 0)
+          await pollUntil(async () => ({
+            done: (await onGetWatched(roomId)).length === 2 && (seen().isClosed || seen().text.length === 2),
+          }))
+          return { ...seen(), myCause }
+        }
 
         const aloneId = await createRoomId('removed')
         await onWatchRoom(aloneId)
         const alone = await onGetRoom(aloneId)
         const me = await onJoinAsServer(aloneId, 'Me')
-        let myCause: unknown = null
-        me.onLeave((cause) => (myCause = cause))
         // A participant the page doesn't hold stays in the room, and leaves only the closed view.
         let pubCause: unknown = null
         let pubJoined = false
@@ -2253,14 +2271,29 @@ function Room() {
         const aloneSeen = watch(alone)
         // A same-channel ack orders the view's subscription before the server's publish.
         await (await alone.join()).leave()
-        await onRoomBurst(aloneId, 1, 0)
-        await pollUntil(() => ({ done: aloneSeen().text.length === 1 }))
-        await onKick(aloneId, me.id)
-        await pollUntil(() => ({ done: alone.isClosed }))
-        await onRoomBurst(aloneId, 1, 0)
-        await pollUntil(async () => ({
-          done: (await onGetWatched(aloneId)).length === 2 && (alone.isClosed || aloneSeen().text.length === 2),
-        }))
+
+        /** The page's participant from its own join on the view. */
+        const joinedOnView = async () => {
+          const roomId = await createRoomId('removed')
+          await onWatchRoom(roomId)
+          const room = await onGetRoom(roomId)
+          const seen = watch(room)
+          return removeMe(roomId, await room.join(), seen)
+        }
+        /** The view and the page's participant from one call. */
+        const returnedTogether = async () => {
+          const roomId = await createRoomId('removed')
+          await onWatchRoom(roomId)
+          const { room, me } = await onJoinRoomAsServer(roomId, 'Me')
+          const seen = watch(room)
+          await (await room.join()).leave()
+          return removeMe(roomId, me, seen)
+        }
+        const [aloneRemoved, joined, together] = await Promise.all([
+          removeMe(aloneId, me, aloneSeen),
+          joinedOnView(),
+          returnedTogether(),
+        ])
 
         const twoId = await createRoomId('removed')
         const two = await onGetRoom(twoId)
@@ -2271,7 +2304,7 @@ function Room() {
         await onKick(twoId, gone.id)
         await stays.publish('still here')
         await pollUntil(() => ({ done: twoSeen().text.includes('still here') }))
-        setResult(JSON.stringify({ alone: { ...aloneSeen(), myCause, pubCause }, two: twoSeen() }))
+        setResult(JSON.stringify({ alone: { ...aloneRemoved, pubCause }, joined, together, two: twoSeen() }))
       })}
 
       {scenario('removed-identity', null, 'Watch a room whose participant is removed by identity', async () => {
