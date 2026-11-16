@@ -1,22 +1,15 @@
-export { MemoryPubSub }
-export type { MemoryAttemptOwner, Subscribers }
+export { MemoryCommitQueue }
 
-import { Fifo } from '../../../utils/Fifo.js'
-import { isCloudflareWorkers } from '../../../utils/isCloudflareWorkers.js'
-import { DriverAttempt, type BackendPayload, type BackendReceiver } from '../driver.js'
-import type { OrderingInfo } from '../driverOrdering.js'
-import { nextTurn } from '../../flowControl/macrotaskYield.js'
-import { addSubscriber, deliverTo, removeSubscriber, type Subscribers } from './memorySubscribers.js'
-
-/** Told each time an attempt on `key` lets go. */
-type MemoryAttemptOwner = { released(key: string): void }
-
-type MemorySubscription = {
-  subscribers: Subscribers
-  key: string
-  receiver: BackendReceiver
-  owner?: MemoryAttemptOwner
-}
+import {
+  addSubscriber,
+  type BackendReceiver,
+  DriverAttempt,
+  Fifo,
+  isCloudflareWorkers,
+  nextTurn,
+  removeSubscriber,
+  type Subscribers,
+} from 'telefunc/__internal'
 
 /** A Worker's timers die with the request that set them, so what waits for a turn would wait for good. There deliveries
  *  go on, and the runtime's own limits are what end a listener that never stops answering. */
@@ -60,7 +53,7 @@ class MemoryDeliveries {
     ) {
       const delivery = this.queue.shift()!
       this.delivering = true
-      // What throws here is a bug, reported: it stops neither the queue behind it nor the publishes waiting on it.
+      // What throws here is a bug, reported: it stops neither the queue behind it nor the commits waiting on it.
       try {
         delivery()
       } catch (error) {
@@ -72,42 +65,32 @@ class MemoryDeliveries {
   }
 }
 
-type MemoryPubSubOptions = {
+type MemoryCommitQueueOptions = {
   /** How many commits go before those from the next microtask on wait for the next turn. */
-  operationsBetweenTurns: number
+  commitsBetweenTurns: number
 }
 
-/** An in-process driver's pub/sub: subscribers by key, delivered in order, a turn's worth at a time. */
-class MemoryPubSub {
+/** The in-memory driver's commits, delivered in order, a turn's worth at a time. */
+class MemoryCommitQueue {
   private readonly deliveries = new MemoryDeliveries()
-  private readonly operationsBetweenTurns: number
-  private operationsSinceTurn = 0
+  private readonly commitsBetweenTurns: number
+  private commitsSinceTurn = 0
   /** Deliveries a microtask is yet to queue. */
   private queuing = 0
 
-  constructor({ operationsBetweenTurns }: MemoryPubSubOptions) {
-    this.operationsBetweenTurns = TURNS_OUTLIVE_REQUESTS ? operationsBetweenTurns : Infinity
+  constructor({ commitsBetweenTurns }: MemoryCommitQueueOptions) {
+    this.commitsBetweenTurns = TURNS_OUTLIVE_REQUESTS ? commitsBetweenTurns : Infinity
   }
 
-  subscribe(subscription: MemorySubscription): DriverAttempt {
-    const { subscribers, key, receiver } = subscription
+  /** Adds `receiver` to `key`'s subscribers: ready once what was committed before it is delivered, as a network
+   *  subscriber hears its confirmation after the messages sent before it, and before what is committed after it. */
+  subscribe(subscribers: Subscribers, key: string, receiver: BackendReceiver): DriverAttempt {
     addSubscriber(subscribers, key, receiver)
-    const attempt = new MemoryAttempt({ pubSub: this, subscription })
-    // Ready once what was published before it is delivered, as a network subscriber hears its confirmation after the
-    // messages sent before it, and before what is published after it.
+    const attempt = new MemoryAttempt(() => removeSubscriber(subscribers, key, receiver))
     if (this.queuing > 0) queueMicrotask(() => this.deliveries.deliver(() => attempt.delivered()))
     else if (!this.deliveries.isIdle) this.deliveries.deliver(() => attempt.delivered())
     else attempt.delivered()
     return attempt
-  }
-
-  unsubscribe({ subscribers, key, receiver, owner }: MemorySubscription): void {
-    if (removeSubscriber(subscribers, key, receiver)) owner?.released(key)
-  }
-
-  /** Hands a message to each of `targets`: one that throws is reported, and the others still get it. */
-  deliverTo(targets: readonly BackendReceiver[], payload: BackendPayload, ordering: OrderingInfo): void {
-    deliverTo(targets, payload, ordering)
   }
 
   /** Queues `delivery` from a microtask, so a subscription made meanwhile is ready after it. Returns the turn the caller
@@ -118,46 +101,39 @@ class MemoryPubSub {
       this.queuing--
       this.deliveries.deliver(delivery)
     })
-    this.countOperation()
+    this.countCommit()
     return this.deliveries.isHolding ? new Promise<void>(nextTurn) : null
   }
 
   /** Awaited, a commit resolves without a turn, and a listener can answer after an `await` that nobody awaits:
    *  chains of microtasks that would starve the event loop, which only something left waiting ends. A synchronous loop is
    *  no such chain and can't be interrupted anyway, so it goes on. */
-  private countOperation(): void {
-    if (++this.operationsSinceTurn !== this.operationsBetweenTurns) return
-    queueMicrotask(this.holdOperations)
+  private countCommit(): void {
+    if (++this.commitsSinceTurn !== this.commitsBetweenTurns) return
+    queueMicrotask(this.holdCommits)
     // Now: a producer's next turn, which it schedules once its loop ends, finds the hold over.
     nextTurn(this.deliveries.drain)
   }
 
-  private readonly holdOperations = (): void => {
-    this.operationsSinceTurn = 0
+  private readonly holdCommits = (): void => {
+    this.commitsSinceTurn = 0
     this.deliveries.hold()
   }
 }
 
-type MemoryAttemptOptions = { pubSub: MemoryPubSub; subscription: MemorySubscription }
-
-/** An in-process subscription: its receiver is in its key's targets until it unsubscribes. */
+/** An in-process subscription: its receiver is in its key's subscribers until it unsubscribes. */
 class MemoryAttempt extends DriverAttempt {
-  private readonly pubSub: MemoryPubSub
-  private readonly subscription: MemorySubscription
-
-  constructor({ pubSub, subscription }: MemoryAttemptOptions) {
+  constructor(private readonly remove: () => void) {
     super()
-    this.pubSub = pubSub
-    this.subscription = subscription
   }
 
-  /** What was published before it is delivered. */
+  /** What was committed before it is delivered. */
   delivered(): void {
     this.transition('ready')
   }
 
   async unsubscribe(): Promise<void> {
     this.transition('closed')
-    this.pubSub.unsubscribe(this.subscription)
+    this.remove()
   }
 }

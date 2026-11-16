@@ -47,13 +47,14 @@ import {
   type BackendReceiver,
   DriverAttempt,
   type OrderingInfo,
-  MemoryPubSub,
   type Subscribers,
   createDeferred,
+  deliverTo,
   getOrCreate,
   unrefTimer,
 } from 'telefunc/__internal'
 import { SortedIds, compareCodePoints } from '../utils/SortedIds.js'
+import { MemoryCommitQueue } from './MemoryCommitQueue.js'
 
 type Expiring = { expiresAt: number | null }
 type StoredCell = { bytes: Uint8Array; version: string }
@@ -89,7 +90,7 @@ type DirectoryEntry = { incTag: string; checkAt: number }
 /** A directory entry's check, current while its entry is still due at `at`. */
 type DirectoryCheck = { at: number; roomId: string }
 
-/** About 10 ms of commits, as `MemoryBackend`'s count is of publishes. */
+/** About 10 ms of commits. */
 const COMMITS_BETWEEN_TURNS = 1024
 const NO_TARGETS = [] as const
 const SEMANTIC_LANE: LaneId = { kind: 'semantic' }
@@ -274,7 +275,7 @@ class MemoryRoomDriver implements RoomDriver {
   /** A min-heap by `at` of the checks each put scheduled; a check its entry no longer has is dropped when reached. */
   private readonly directoryChecks: DirectoryCheck[] = []
   private revSeq = 0
-  private readonly pubSub = new MemoryPubSub({ operationsBetweenTurns: COMMITS_BETWEEN_TURNS })
+  private readonly commits = new MemoryCommitQueue({ commitsBetweenTurns: COMMITS_BETWEEN_TURNS })
 
   async readHead(roomId: string): Promise<RoomHead | null> {
     const head = this.liveHead(this.rooms.get(roomId))
@@ -434,12 +435,12 @@ class MemoryRoomDriver implements RoomDriver {
     const everyTrack = binary ? (incarnation.everyTrackSubs.get(lane.member) ?? NO_TARGETS) : NO_TARGETS
     const everyMember = binary ? (incarnation.everyMemberSubs.get(lane.track) ?? NO_TARGETS) : NO_TARGETS
     const delivered = lane.kind === 'inbox' || lane.kind === 'control' ? createDeferred() : null
-    const nextTurn = this.pubSub.deliverSoon(() => {
+    const nextTurn = this.commits.deliverSoon(() => {
       // A subscriber may write into the bytes it is given, which a retained frame must not share.
       const shared = retain ? copyBytes(frame) : frame
-      this.pubSub.deliverTo(targets, shared, mark)
-      this.pubSub.deliverTo(everyTrack, shared, mark)
-      this.pubSub.deliverTo(everyMember, shared, mark)
+      deliverTo(targets, shared, mark)
+      deliverTo(everyTrack, shared, mark)
+      deliverTo(everyMember, shared, mark)
       delivered?.resolve()
     })
     if (nextTurn !== null) await nextTurn
@@ -487,7 +488,7 @@ class MemoryRoomDriver implements RoomDriver {
       key = encodeLaneKey(lane)
     }
     // Ready once what was committed before it is delivered: a lane it replaces delivers those first.
-    return this.pubSub.subscribe({ subscribers, key, receiver })
+    return this.commits.subscribe(subscribers, key, receiver)
   }
 
   async dropIncarnation(roomId: string, inc: string): Promise<void> {

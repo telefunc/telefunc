@@ -54,7 +54,13 @@ export { SharedSubscriptions } from '../../wire-protocol/backend/SharedSubscript
 export { assertDriverOrdering } from '../../wire-protocol/backend/driverOrdering.js'
 export { reportBroadcastDeliveryLost } from '../../wire-protocol/backend/broadcast/reportBroadcastDeliveryLost.js'
 export { MemoryBackend } from '../../wire-protocol/backend/memory/MemoryBackend.js'
-export { MemoryPubSub, type Subscribers } from '../../wire-protocol/backend/memory/MemoryPubSub.js'
+export {
+  addSubscriber,
+  removeSubscriber,
+  deliverTo,
+  type Subscribers,
+} from '../../wire-protocol/backend/memory/memorySubscribers.js'
+export { isCloudflareWorkers } from '../../utils/isCloudflareWorkers.js'
 export { ChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
 
 // A Cloudflare extension: Room's session and authority Durable Objects.
