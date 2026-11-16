@@ -399,6 +399,40 @@ test("on a WebSocket, a closing subscriber cut for another object's publish read
   }
 })
 
+for (const attach of ['before', 'after'] as const) {
+  test(`on a WebSocket, a subscriber cut for another object's publish while its page is away and its close waits reads the error alone, its page back ${attach} the close runs out`, async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    const adapter = getBroadcastAdapter()
+    adapter.ownerOf = (request) => request?.url ?? 'server'
+    const [key, otherKey] = [crypto.randomUUID(), crypto.randomUUID()]
+    const channel = new ServerBroadcast<string>({ key })
+    const other = new ServerBroadcast<string>({ key: otherKey })
+    const request = new Request('http://one.test/')
+    const page = overWebSocket([channel, other], [request, new Request('http://two.test/')])
+    for (const name of ['p1', 'p2', 'p3']) await Broadcast.publish(key, name + 'x'.repeat(600_000))
+    channel._onPeerDisconnect(page.peers[0]!, 60_000)
+    // Its page is away, so the CLOSE waits for it to attach again.
+    const closing = channel.close({ timeout: 1_000 })
+    const release = leaveRoom(300_000)
+    try {
+      await Broadcast.publish(otherKey, 'q1' + 'x'.repeat(600_000))
+      const back = overWebSocket([])
+      // The page has p1.
+      if (attach === 'before') back.attach(channel, 0, 1, request)
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(await closing).toBe(1)
+      vi.useRealTimers()
+      if (attach === 'after') back.attach(channel, 0, 1, request)
+      expect(await back.readAll()).toEqual(['0:ERROR'])
+    } finally {
+      vi.useRealTimers()
+      release()
+      other.abort()
+      delete adapter.ownerOf
+    }
+  })
+}
+
 /** Each way an application's `onClose` of one channel ends another, and the last frame that other's page then reads. */
 const ENDED_BY_A_CLOSE_CALLBACK: Record<string, { end: (channel: ServerChannel) => void; last: string }> = {
   closes: { end: (channel) => void channel.close(), last: 'CLOSE' },
