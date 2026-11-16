@@ -60,7 +60,7 @@ import { onGetLobby } from './Lobby.telefunc'
 const room = await onGetLobby()
 
 room.onJoin((member) => console.log(`${member.meta.name} joined`))
-room.subscribe((message, { from }) => console.log(`${from.meta.name}: ${message.text}`))
+room.subscribe((message, { from }) => console.log(from ? `${from.meta.name}: ${message.text}` : message.text))
 
 const me = await room.join({ meta: { name: 'Alice' } })
 await me.publish({ text: 'hello' })
@@ -132,7 +132,7 @@ const controller = new AbortController()
 room.onJoin((participant) => console.log(participant.id), { signal: controller.signal })
 for await (const message of room.messages({ signal: controller.signal })) {
   if (message.type === 'binary') showVideo(message.info.from.id, message.data, message.info.track)
-  else console.log(`${message.info.from.meta.name}: ${message.data.text}`)
+  else console.log(message.info.from ? `${message.info.from.meta.name}: ${message.data.text}` : message.data.text)
   break
 }
 controller.abort()
@@ -220,7 +220,7 @@ export async function onGetChat(roomId: string) {
 ```js
 // Environment: client
 
-me.listen((message, { from }) => showPrivateMessage(from.meta.name, message))
+me.listen((message, { from }) => showPrivateMessage(from?.meta.name, message))
 
 await me.send(member, 'meet me in room 2') // `member` from room.onJoin() or room.getParticipants()
 ```
@@ -413,7 +413,7 @@ import { onJoinMatch } from './Match.telefunc'
 
 const { room, me, host } = await onJoinMatch(matchId, 'Alice')
 room.subscribe((state, { from }) => {
-  if (from.identity === 'host') render(state)
+  if (from?.identity === 'host') render(state)
 })
 await me.send(host, { type: 'move', to: 'e4' })
 ```
