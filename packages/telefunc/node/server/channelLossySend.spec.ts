@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, expectTypeOf, test, vi } from 'vitest'
+import { afterEach, assert, describe, expect, expectTypeOf, onTestFinished, test, vi } from 'vitest'
 
 import { Channel, ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
 import { Broadcast, BroadcastChannel } from '../../wire-protocol/channel/server/ServerBroadcast.js'
@@ -452,9 +452,15 @@ describe('a large lossy send near the memory budget', () => {
         new Request(url, { method: 'POST', body: encodeSseRequest({ connId, ...extra }, frames) }),
       )
     const open = [{ id: channel.id, ix: 0, lastSeq: 0, initial: true as const }]
+    // The peer the mux attaches it with says how long its wire takes to confirm a send.
+    const attached = vi.spyOn(ServerChannel.prototype, '_attachPeer')
+    onTestFinished(() => attached.mockRestore())
     const response = await post([encode.reconcile({ open })], { streamResponse: true })
     await channel.opened
-    const reader = (response.body as ReadableStream<Uint8Array>).getReader()
+    const [peer] = attached.mock.calls[attached.mock.contexts.indexOf(channel)] ?? []
+    assert(peer)
+    assert(response.body instanceof ReadableStream)
+    const reader = response.body.getReader()
     const { events } = getChannelMux().getWireByConnId<{ events: WireQueue }>(connId)!
     return {
       /** The page reads and confirms the channel's first send. */
@@ -473,17 +479,16 @@ describe('a large lossy send near the memory budget', () => {
         void reader.read()
       },
       waiting: () => events.waitingPublishes(0),
+      /** Past what its wire takes to confirm a send, after the one the page confirmed: the page is then behind. */
+      untilBehind() {
+        const after = peer.sender.behindAfter(channel._replayBuffer!.leastConfirmMs)
+        return new Promise((resolve) => setTimeout(resolve, after + 50))
+      },
       async leave() {
         await post([], { close: true })
         await reader.cancel()
       },
     }
-  }
-
-  /** Past what its wire takes to confirm a send, after the one the page confirmed. */
-  function untilBehind(channel: ServerChannel<unknown, string>) {
-    const after = (channel as any).peer.sender.behindAfter(channel._replayBuffer!.leastConfirmMs)
-    return new Promise((resolve) => setTimeout(resolve, after + 50))
   }
 
   const sendLossy = (channel: ServerChannel<unknown, string>, binary: boolean, value: string) =>
@@ -506,7 +511,7 @@ describe('a large lossy send near the memory budget', () => {
     test(`on SSE, the first ${binary ? 'binary' : 'text'} send after the page fell behind takes the place of the one waiting for the wire, where both would not fit`, async () => {
       const { channel, page } = await leftTwoUnread(binary)
       expect(page.waiting()).toBe(1)
-      await untilBehind(channel)
+      await page.untilBehind()
       const free = leaveRoom(100_000)
       try {
         await expect(sendLossy(channel, binary, 'c'.repeat(800_000))).resolves.toBeUndefined()
@@ -523,7 +528,7 @@ describe('a large lossy send near the memory budget', () => {
 
   test('on SSE, a send too large even in place of the one waiting for the wire is refused, and that one stays', async () => {
     const { channel, page } = await leftTwoUnread(true)
-    await untilBehind(channel)
+    await page.untilBehind()
     const held = channel.heldBytes
     const free = leaveRoom(100_000)
     try {
@@ -560,7 +565,7 @@ describe('a large lossy send near the memory budget', () => {
   test('on SSE, a send after the page fell behind takes the place of the one waiting for the wire, and a plain send queued after that one stays', async () => {
     const { channel, page } = await leftTwoUnread(true)
     void channel.send('R')
-    await untilBehind(channel)
+    await page.untilBehind()
     const free = leaveRoom(100_000)
     try {
       await expect(sendLossy(channel, true, 'c'.repeat(800_000))).resolves.toBeUndefined()
