@@ -99,9 +99,13 @@ async function overSse(channels: ServerChannel[]) {
   const events = new SseEvents()
   const frames: Uint8Array[] = []
   return {
-    /** Reads the event stream until the page has read `last`, and returns the frames it carried. */
+    /** Reads the event stream until the page has read `last`, or the stream ends, and returns the frames it carried. */
     async readUntil(last: string): Promise<Uint8Array[]> {
-      while (!reads(frames).includes(last)) events.push((await reader.read()).value!, (frame) => frames.push(frame))
+      while (!reads(frames).includes(last)) {
+        const read = await reader.read()
+        if (read.done) break
+        events.push(read.value, (frame) => frames.push(frame))
+      }
       return frames
     },
     /** Reads the event stream to its end, and returns the frames it carried. */
