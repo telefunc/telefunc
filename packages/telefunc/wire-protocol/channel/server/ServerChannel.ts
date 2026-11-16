@@ -357,7 +357,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** Drops its lossy sends that no wire has taken: they never left the server. While its page is attached, those are
    *  the ones still in the wire's queue, and the credit they counted comes back; while it is away, those the offline
-   *  buffer holds. An ending drops them; reliable sends stay, and reach the page ahead of its end. */
+   *  buffer holds. `abort()`, the page's own close and an end for lack of memory drop them, where a graceful `close()`
+   *  hands the newest first; reliable sends stay, and reach the page ahead of its end. */
   protected dropUnhanded(): void {
     if (!this.peer) return this.offlineBuffer.dropLossy()
     const { units, bytes } = this.peer.dropUnhanded()
@@ -367,7 +368,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** A newer lossy send takes the place of its lossy sends still in the wire's queue, back to its last frame: a plain send
    *  keeps the lossy sends before it. The credit they counted comes back. */
   private dropReplaceable(): void {
-    const { units, bytes } = this.peer!.dropReplaceable()
+    assert(this.peer)
+    const { units, bytes } = this.peer.dropReplaceable()
     this.sendCredit.refund(bytes, units)
   }
 
