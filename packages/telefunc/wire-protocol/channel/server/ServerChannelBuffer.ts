@@ -3,8 +3,7 @@ export type { BufferedSender, Entry, EntryCallback, EntryData }
 
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import { TAG } from '../../wire/tags.js'
-import { HEADER } from '../../wire/header.js'
-import { HELD_SEND_OVERHEAD_BYTES } from './channelMemory.js'
+import { heldSendBytes } from './channelMemory.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 
 /** Callback pair for buffered entries: resolve on flush, reject where the channel ends first. */
@@ -77,7 +76,7 @@ class ServerChannelBuffer<TAck = never> {
       this.owner._letGoOffline(last.held)
     }
     const copy = typeof data === 'string' ? data : new Uint8Array(data)
-    this.keep({ tag, data: copy, callback: null, held: bytes + HEADER + HELD_SEND_OVERHEAD_BYTES, lossy: true })
+    this.keep({ tag, data: copy, callback: null, held: heldSendBytes(bytes), lossy: true })
   }
 
   /** Lets go of its lossy sends, unsent, and of what they held. */
@@ -124,7 +123,7 @@ class ServerChannelBuffer<TAck = never> {
   }
 
   private pushSend(tag: number, data: EntryData, bytes: number, callback: EntryCallback): void {
-    this.keep({ tag, data, callback, held: bytes + HEADER + HELD_SEND_OVERHEAD_BYTES, lossy: false })
+    this.keep({ tag, data, callback, held: heldSendBytes(bytes), lossy: false })
   }
 
   private keep(entry: Entry): void {

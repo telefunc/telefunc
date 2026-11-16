@@ -28,6 +28,7 @@ import {
   HELD_SEND_OVERHEAD_BYTES,
   admit,
   fits,
+  heldSendBytes,
   hold,
   holdsEnough,
   letGo,
@@ -73,7 +74,6 @@ import {
   encode,
   isSequencedFrame,
 } from '../../wire/frame.js'
-import { HEADER } from '../../wire/header.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
 import { seqNear, seqThrough } from '../../wire/seq.js'
 import { ProtocolViolationError, assertProtocol } from '../../wire/protocolViolation.js'
@@ -320,7 +320,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  that one stays where this one is refused. With no page attached it waits as the offline buffer's last entry, which
    *  the next one replaces; attached, it goes, or waits as the newest while the page is behind or out of credit. */
   private sendLossy(tag: typeof TAG.TEXT | typeof TAG.BINARY, data: EntryData, bytes: number): void | Promise<void> {
-    const held = bytes + HEADER + HELD_SEND_OVERHEAD_BYTES
+    const held = heldSendBytes(bytes)
     const added = held - this.replaceableHeld()
     if (added > 0 && !admit(this, added)) return Promise.reject<void>(this.refuseSend(added))
     if (!this.peer) return this.offlineBuffer.pushLossy(tag, data, bytes)
@@ -376,14 +376,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** Why a text send can't go, where it isn't admitted. A UTF-16 unit takes at most 3 UTF-8 bytes, so text that fits
    *  even at that is admitted unmeasured; other text is decided at its real size. */
   private textRefusal(text: string): ChannelOverflowError | null {
-    if (fits(this, text.length * 3 + HEADER + HELD_SEND_OVERHEAD_BYTES)) return null
+    if (fits(this, heldSendBytes(text.length * 3))) return null
     return this.refusal(utf8ByteLength(text))
   }
 
   /** Why a send of `bytes` can't go, where it isn't admitted. It holds nothing and takes no seq, so the page sees no gap
    *  on the wire, and later sends that fit go through. */
   private refusal(bytes: number): ChannelOverflowError | null {
-    const held = bytes + HEADER + HELD_SEND_OVERHEAD_BYTES
+    const held = heldSendBytes(bytes)
     return admit(this, held) ? null : this.refuseSend(held)
   }
 

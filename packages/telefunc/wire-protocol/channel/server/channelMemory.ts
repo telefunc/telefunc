@@ -8,6 +8,7 @@ export {
   fitsPublish,
   hasCopyRoom,
   heldPublishBytes,
+  heldSendBytes,
   hold,
   holdsEnough,
   letGo,
@@ -19,6 +20,7 @@ export type { MemoryHolder }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { getChannelConfig } from '../../../node/server/serverConfig.js'
+import { HEADER } from '../../wire/header.js'
 import type { PublishBody } from './PublishBody.js'
 import type { QueueMemory } from '../channelMessages.js'
 
@@ -110,6 +112,11 @@ function newestsThatEndingFrees(): [PublishBody, MemoryHolder[]][] {
     else byBody.set(newest, [holder])
   }
   return [...byBody].sort((a, b) => a[1].length - b[1].length)
+}
+
+/** What a send of `bytes` holds: its frame, and what it takes beyond that. */
+function heldSendBytes(bytes: number): number {
+  return bytes + HEADER + HELD_SEND_OVERHEAD_BYTES
 }
 
 /** What a publish holds for one page. */
