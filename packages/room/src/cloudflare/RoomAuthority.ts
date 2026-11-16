@@ -202,9 +202,8 @@ class RoomAuthority {
     const delivery = this.fanout.send(inc, laneKeys, routes, payload, mark)
     const receipt: AcceptedCommitWire = { kind: 'accepted', seq: mark.seq, timestamp: mark.timestamp }
     if (lane.kind !== 'inbox' && lane.kind !== 'control') {
-      // No committer awaits a data or binary frame's handoff, so a lost one is reported here. A delivery that can be lost
-      // has a route, and each route is this room's.
-      void reportIfLost(delivery, routes[0]!.roomId, lane)
+      // No committer awaits a data or binary frame's handoff, so a lost one is reported here.
+      void reportIfLost(delivery, routes, lane)
       return receipt
     }
     const lost = await lostReason(delivery)
@@ -378,10 +377,11 @@ function selectCell(sql: SqlStorage, inc: string, key: string, now: number): Uin
   return read.cells.get(key)
 }
 
-async function reportIfLost(delivery: Promise<void>, roomId: string, lane: LaneId): Promise<void> {
+/** A commit nobody subscribes to has no route. A delivery that can be lost has one, and each route is this room's. */
+async function reportIfLost(delivery: Promise<void>, routes: RouteInstallation[], lane: LaneId): Promise<void> {
   try {
     await delivery
   } catch (error) {
-    reportLaneLost(roomId, lane, String(error))
+    reportLaneLost(routes[0]!.roomId, lane, String(error))
   }
 }
