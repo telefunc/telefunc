@@ -9,6 +9,7 @@ import { pairPublishes } from '../../wire-protocol/channel/client/pairPublishes.
 import { decode, encode, type DecodedFrame } from '../../wire-protocol/wire/frame.js'
 import { TAG } from '../../wire-protocol/wire/tags.js'
 import { getChannelMux } from '../../wire-protocol/channel/server/ChannelMux.js'
+import { WireSender } from '../../wire-protocol/channel/server/WireSender.js'
 import { handleSseChannelRequest } from '../../wire-protocol/channel/server/sse.js'
 import { SseEvents } from '../../wire-protocol/channel/client/SseEvents.js'
 import type { WireQueue } from '../../wire-protocol/flowControl/server/waitingPublishes.js'
@@ -455,6 +456,9 @@ describe('a large lossy send near the memory budget', () => {
     // The peer the mux attaches it with says how long its wire takes to confirm a send.
     const attached = vi.spyOn(ServerChannel.prototype, '_attachPeer')
     onTestFinished(() => attached.mockRestore())
+    // The page falls behind only at `untilBehind()`: a loaded runner may leave two sends further apart than its wire's wait.
+    const behindAfter = vi.spyOn(WireSender.prototype, 'behindAfter').mockReturnValue(Number.POSITIVE_INFINITY)
+    onTestFinished(() => behindAfter.mockRestore())
     const response = await post([encode.reconcile({ open })], { streamResponse: true })
     await channel.opened
     const [peer] = attached.mock.calls[attached.mock.contexts.indexOf(channel)] ?? []
@@ -481,6 +485,7 @@ describe('a large lossy send near the memory budget', () => {
       waiting: () => events.waitingPublishes(0),
       /** Past what its wire takes to confirm a send, after the one the page confirmed: the page is then behind. */
       untilBehind() {
+        behindAfter.mockRestore()
         const after = peer.sender.behindAfter(channel._replayBuffer!.leastConfirmMs)
         return new Promise((resolve) => setTimeout(resolve, after + 50))
       },
