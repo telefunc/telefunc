@@ -345,7 +345,7 @@ window.addEventListener('pointermove', (e) => channel.send({ x: e.clientX, y: e.
 
 > A channel's lossy sends in one direction replace each other whatever they hold, so send the values that change together as one message, such as one pointer's `x` and `y`.
 
-> A send without `lossy` is never skipped, and nothing passes it: the lossy sends that arrive stay on the side of it they were sent on, and the newest lossy send before it arrives. A graceful `close()` delivers the newest first, and `abort()` drops it.
+> A send without `lossy` is never skipped, and nothing passes it: the lossy sends that arrive stay on the side of it they were sent on. The newest lossy send made before it arrives too. A graceful `close()` delivers the newest first, and `abort()` drops it.
 
 > Awaiting a lossy call never waits for the receiver. A lossy `send()` resolves at once. `lossy` can't be combined with `ack: true`: a skipped message has no answer.
 

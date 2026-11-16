@@ -53,7 +53,7 @@ export default {
 }
 ```
 
-> `nodejs_als` gives Telefunc `AsyncLocalStorage`, which tells it the Durable Object your server code subscribes in; `nodejs_compat` includes it. Without either, `Broadcast.subscribe()` throws an error that names the flag, and so does `subscribe()` on a `BroadcastChannel` before its client has it, such as in the telefunction that returns it. Telefunctions, channels, and a `BroadcastChannel` the client subscribes to work without it.
+> `nodejs_als` (or `nodejs_compat`, which includes it) is needed only when your server code subscribes to a broadcast. Without it, `Broadcast.subscribe()` throws an error that names the flag. So does `subscribe()` on a `BroadcastChannel` the client hasn't received yet, such as in the telefunction that returns it. Telefunctions, channels, and a `BroadcastChannel` the client subscribes to work without it.
 
 {/* spellcheck-ignore:off */}
 
