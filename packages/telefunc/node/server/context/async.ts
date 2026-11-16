@@ -6,6 +6,7 @@ import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { isObject } from '../../../utils/isObject.js'
 import { installAsyncMode } from './context.js'
 import { PROVIDED_CONTEXT } from './getContext.js'
+import { getSyncContext, provideTelefuncContext_sync } from './sync.js'
 import type { Context } from './context.js'
 import type { Telefunc } from './TelefuncNamespace.js'
 
@@ -20,19 +21,30 @@ function installAsyncContext(AsyncLocalStorageClass: typeof AsyncLocalStorage): 
   installAsyncMode({
     provideTelefuncContext_async,
     restoreContext_async,
-    getContextStore: () => globalObject.asyncStore?.getStore() ?? null,
+    getContextStore: () => globalObject.asyncStore?.getStore() ?? getSyncContext(),
   })
 }
 
 function provideTelefuncContext_async(context: Telefunc.Context): void {
   assertUsage(isObject(context), '[provideTelefuncContext(context)] Argument `context` should be an object')
-  assert(globalObject.asyncStore)
-  assertUsage(
-    typeof globalObject.asyncStore.enterWith === 'function',
-    '[provideTelefuncContext()] This runtime does not support AsyncLocalStorage.enterWith(). Pass context directly to serve() instead.',
-  )
+  const { asyncStore } = globalObject
+  assert(asyncStore)
   globalObject.provided = true
-  globalObject.asyncStore.enterWith({ [PROVIDED_CONTEXT]: context })
+  if (enterWith(asyncStore, { [PROVIDED_CONTEXT]: context })) return
+  // Where it can't (workerd), the context joins the scope it is provided in, or outside any lasts until the next timer.
+  const scope = asyncStore.getStore()
+  if (scope) scope[PROVIDED_CONTEXT] = context
+  else provideTelefuncContext_sync(context)
+}
+
+/** False where the runtime has no `enterWith()`, or one that throws, as workerd's does. */
+function enterWith(asyncStore: AsyncLocalStorage<Context>, store: Context): boolean {
+  try {
+    asyncStore.enterWith(store)
+    return true
+  } catch {
+    return false
+  }
 }
 
 function restoreContext_async<T>(rawContext: Context, fn: () => T): T {

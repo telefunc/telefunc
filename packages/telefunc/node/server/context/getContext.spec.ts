@@ -4,7 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { expect, test } from 'vitest'
 import { installAsyncContext } from './async.js'
 import { restoreContext } from './context.js'
-import { PROVIDED_CONTEXT, getContext } from './getContext.js'
+import { PROVIDED_CONTEXT, getContext, provideTelefuncContext } from './getContext.js'
 
 installAsyncContext(AsyncLocalStorage)
 const RUNNING_OBJECT = Symbol.for('telefunc.cloudflare.object')
@@ -22,4 +22,15 @@ test("a telefunction's context, inside an adapter's scope, is read after an awai
       expect(getContext<{ user: string }>().user).toBe('ada')
     }),
   )
+})
+
+test('a provided context is read after an await, and one provided later leaves the code already running as it was', async () => {
+  provideTelefuncContext({ user: 'ada' })
+  const running = (async () => {
+    await new Promise((resolve) => setTimeout(resolve, 1))
+    return getContext<{ user: string }>().user
+  })()
+  provideTelefuncContext({ user: 'grace' })
+  expect(await running).toBe('ada')
+  expect(getContext<{ user: string }>().user).toBe('grace')
 })
