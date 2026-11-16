@@ -535,7 +535,7 @@ async function onBroadcastJoinWhileQueued() {
   const key = `room:join-queued:${crypto.randomUUID()}`
   const trigger = `room:join-trigger:${crypto.randomUUID()}`
   const offs = [Broadcast.subscribe(key, () => {})]
-  // Resolves once the subscription is established, so the readiness gate holds none of the publishes below.
+  // The key has an order before the listener's publishes.
   await Broadcast.publish(key, 't0')
   const received: Array<string | number> = []
   const queued: Array<ReturnType<typeof Broadcast.publish>> = []

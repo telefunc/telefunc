@@ -24,7 +24,7 @@ import { addSubscriber, deliverTo, removeSubscriber, type Subscribers } from './
  *  for a recursive delivery. A chain that deep is taken for a listener that answers its own messages without end. */
 const MAX_ANSWER_DEPTH = 10_000
 
-type QueuedPublish = { size: number; depth: number; deliver: () => void; reject: (err: Error) => void }
+type QueuedPublish = { size: number; depth: number; deliver: () => void }
 
 class MemoryBackend implements BroadcastDriver {
   /** The order of each key subscribed here; an unsubscribed key's next publish starts above `broadcastHighest`. */
@@ -40,8 +40,8 @@ class MemoryBackend implements BroadcastDriver {
   /** How many answers deep the publish being delivered is: 0 for one from outside a listener. */
   private depth = 0
 
-  /** A publish from a listener reaches the subscribers after the message it answers, within the publish that started
-   *  the chain. */
+  /** A publish reaches the subscribers its key has as it is made. One from a listener reaches them after the message it
+   *  answers, within the publish that started the chain. */
   publish(route: BroadcastRoute, payload: BroadcastPayload): PublishResult | Promise<PublishResult> {
     const targets = this.broadcastSubs[route.kind].get(route.key) ?? []
     if (this.delivering) return this.queue(targets, payload, route.key)
@@ -70,13 +70,13 @@ class MemoryBackend implements BroadcastDriver {
     for (let publish = this.queued.shift(); publish !== undefined; publish = this.queued.shift()) {
       this.queuedBytes -= publish.size
       this.depth = publish.depth
-      if (publish.depth <= MAX_ANSWER_DEPTH) publish.deliver()
-      else publish.reject(endlessAnswersError())
+      publish.deliver()
     }
     this.depth = 0
   }
 
   private queue(targets: readonly BackendReceiver[], payload: BackendPayload, key: string): Promise<PublishResult> {
+    if (this.depth === MAX_ANSWER_DEPTH) return Promise.reject(endlessAnswersError())
     const isText = typeof payload === 'string'
     const size = (isText ? utf8ByteLength(payload) : payload.byteLength) + HELD_SEND_OVERHEAD_BYTES
     // One message alone goes through whatever its size.
@@ -90,15 +90,14 @@ class MemoryBackend implements BroadcastDriver {
     this.queuedBytes += size
     // The caller may reuse or transfer its buffer once the publish returns.
     const held = isText ? payload : new Uint8Array(payload)
-    return new Promise((resolve, reject) => {
+    // Its place in the key's order is the publish's: a subscriber that comes while it waits skips it by its seq.
+    const mark = this.takeOrdering(key)
+    return new Promise((resolve) => {
       const deliver = () => {
-        try {
-          resolve(this.deliverNow(targets, held, key))
-        } catch (err) {
-          reject(err)
-        }
+        deliverTo(targets, held, mark)
+        resolve(mark)
       }
-      this.queued.push({ size, depth: this.depth + 1, deliver, reject })
+      this.queued.push({ size, depth: this.depth + 1, deliver })
     })
   }
 
