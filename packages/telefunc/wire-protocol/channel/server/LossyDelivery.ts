@@ -38,7 +38,8 @@ class LossyDelivery<U> {
   }
 
   /** With no wire, which only a subscriber's publishes meet, `unit` goes as the replay's newest; behind, or out of
-   *  credit, it waits as the newest. In both it takes the place of those it replaces; otherwise it goes. */
+   *  credit, it waits as the newest. In both it takes the place of the sends its host lets it replace; otherwise it
+   *  goes. */
   send(unit: U): void {
     if (!this.host.peer() || this.waits()) this.letWaitingGo()
     // Those that went gave their credit back, and may have been all its page left unconfirmed: this one may go at once.
@@ -78,7 +79,8 @@ class LossyDelivery<U> {
     this.slot = null
   }
 
-  /** Whether a send made now waits, and takes the place of those it replaces: its page is behind, or out of credit. */
+  /** Whether a send made now waits, and takes the place of the sends its host lets it replace: its page is behind, or out
+   *  of credit. */
   waits(): boolean {
     return this.isBehind() || this.host.outOfCredit()
   }
