@@ -256,6 +256,52 @@ describe('binary in-process broadcast', () => {
 // hides them. Catches a regression where a subclass forgets to override one.
 // ───────────────────────────────────────────────────────────────────────────
 
+// The Cloudflare adapter refuses a server-side subscription on a Worker without AsyncLocalStorage; the app may catch it.
+class AdapterRefusingFirstSubscription extends DefaultBroadcastAdapter {
+  private refuse = true
+  override subscribe(...args: Parameters<DefaultBroadcastAdapter['subscribe']>) {
+    this.refuseOnce()
+    return super.subscribe(...args)
+  }
+  override subscribeBinary(...args: Parameters<DefaultBroadcastAdapter['subscribeBinary']>) {
+    this.refuseOnce()
+    return super.subscribeBinary(...args)
+  }
+  private refuseOnce(): void {
+    if (!this.refuse) return
+    this.refuse = false
+    throw new Error('subscription refused')
+  }
+}
+
+describe('a subscription the adapter refused', () => {
+  it('subscribe(): its callback gets no later publish', () => {
+    _resetBroadcastAdapterForTesting(new AdapterRefusingFirstSubscription())
+    const broadcast = new ServerBroadcast<string>({ key: 'room:refused' })
+    broadcast._registerChannel()
+    const refused: string[] = []
+    const later: string[] = []
+    expect(() => broadcast.subscribe((msg) => refused.push(msg))).toThrow('subscription refused')
+    broadcast.subscribe((msg) => later.push(msg))
+    broadcast.publish('hello')
+    expect(later).toEqual(['hello'])
+    expect(refused).toEqual([])
+  })
+
+  it('subscribeBinary(): its callback gets no later publish', () => {
+    _resetBroadcastAdapterForTesting(new AdapterRefusingFirstSubscription())
+    const broadcast = new ServerBroadcast<string>({ key: 'room:refused-binary' })
+    broadcast._registerChannel()
+    const refused: Uint8Array[] = []
+    const later: Uint8Array[] = []
+    expect(() => broadcast.subscribeBinary((data) => refused.push(data))).toThrow('subscription refused')
+    broadcast.subscribeBinary((data) => later.push(data))
+    broadcast.publishBinary(new Uint8Array([1, 2, 3]))
+    expect(later).toEqual([new Uint8Array([1, 2, 3])])
+    expect(refused).toEqual([])
+  })
+})
+
 describe('Broadcast disallows channel methods', () => {
   it.each([
     ['listen', (b: ServerBroadcast) => b.listen()],

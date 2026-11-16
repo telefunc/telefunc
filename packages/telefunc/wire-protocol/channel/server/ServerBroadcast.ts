@@ -134,11 +134,11 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {
     if (options.signal?.aborted) return () => {}
+    this.subscribeBroadcast()
     const remove = this.broadcastListeners.add(callback, {
       ...options,
       onRemove: () => this.unsubscribeUnusedBroadcasts(),
     })
-    this.subscribeBroadcast()
     this.unsubscribeUnusedBroadcasts()
     return remove
   }
@@ -151,11 +151,11 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
     if (options.signal?.aborted) return () => {}
+    this.subscribeBinaryBroadcast()
     const remove = this.broadcastBinaryListeners.add(callback, {
       ...options,
       onRemove: () => this.unsubscribeUnusedBroadcasts(),
     })
-    this.subscribeBinaryBroadcast()
     this.unsubscribeUnusedBroadcasts()
     return remove
   }
