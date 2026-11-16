@@ -34,6 +34,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testRefusedPresence()
   testColdPublish()
   testPublishOrder()
+  testServerFirst()
 }
 
 function testCloudflareBindings() {
@@ -410,4 +411,33 @@ function testPublishOrder() {
       { timeout: 30_000 },
     )
   })
+}
+
+function testServerFirst() {
+  test("Broadcast: a channel the server subscribed to after an `await` delivers every publish to its page's object", async () => {
+    // Pages on two objects, so that a subscription recorded under any one object but the page's misses on one of them.
+    for (const shard of [1, 2]) {
+      await page.goto(`${getServerUrl()}/server-first?session=${sessionTokenOfShard(shard)}`)
+      await autoRetry(async () => {
+        expect(await page.locator('#hydrated').count()).toBe(1)
+      })
+      await page.click('#server-first')
+      await autoRetry(
+        async () => {
+          expect(JSON.parse((await page.textContent('#server-first-result')) ?? 'null')).deep.equal(['p1', 'p2', 'p3'])
+        },
+        { timeout: 15_000 },
+      )
+    }
+  })
+}
+
+/** A session token the server routes to shard `shard` of the five `new Telefunc({ scale: 5 })` has. */
+function sessionTokenOfShard(shard: number): string {
+  for (;;) {
+    const token = crypto.randomUUID()
+    let hash = 0
+    for (let i = 0; i < token.length; i++) hash = (hash * 31 + token.charCodeAt(i)) >>> 0
+    if (hash % 5 === shard) return token
+  }
 }
