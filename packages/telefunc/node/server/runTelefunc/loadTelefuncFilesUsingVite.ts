@@ -1,6 +1,5 @@
 export { loadTelefuncFilesUsingVite }
 export { loadServerProductionEntry }
-export { preloadServerProductionEntry }
 
 import { importServerProductionEntry } from '@brillout/vite-plugin-server-entry/runtime'
 import { assert, assertWarning } from '../../../utils/assert.js'
@@ -16,7 +15,7 @@ import { handleError } from './handleError.js'
 import { VIRTUAL_FILE_ENTRY_ID } from '../../vite/plugins/pluginVirtualFileEntry/VIRTUAL_FILE_ENTRY_ID.js'
 
 const globalObject = getGlobalObject<{
-  serverProductionEntry?: { loaded: Promise<unknown>; preloaded?: Promise<unknown> }
+  serverProductionEntry?: Promise<unknown>
 }>('loadTelefuncFilesUsingVite.ts', {})
 
 async function loadTelefuncFilesUsingVite(runContext: { telefuncFilePath: string }, failOnFailure: boolean) {
@@ -31,26 +30,13 @@ async function loadTelefuncFilesUsingVite(runContext: { telefuncFilePath: string
   return { telefuncFilesLoaded, viteProvider, telefuncFilesAll }
 }
 
-// The entry applies the build's config (e.g. `telefuncUrl`), which the request reads before it loads the telefunc files
+// The build's config (e.g. `telefuncUrl`) routes the request. A failed load is logged; telefunction calls fail on it
 async function loadServerProductionEntry(): Promise<void> {
-  await getServerProductionEntry()?.loaded
-}
-
-/** For an adapter, which needs the build's config before it reads it.
- *  A failed load is logged here once and doesn't reject; a telefunction call still answers 500. */
-async function preloadServerProductionEntry(): Promise<void> {
-  const entry = getServerProductionEntry()
-  if (!entry) return
-  entry.preloaded ??= entry.loaded.catch(handleError)
-  await entry.preloaded
-}
-
-function getServerProductionEntry() {
-  if (globalThis.__TELEFUNC__IS_NON_RUNNABLE_DEV || getViteDevServer()) return null
+  if (globalThis.__TELEFUNC__IS_NON_RUNNABLE_DEV || getViteDevServer()) return
   // Like loadTelefuncFiles(), the server's `config.telefuncFiles` take precedence over the build
-  if (config.telefuncFiles) return null
-  globalObject.serverProductionEntry ??= { loaded: loadVirtualFile(false) }
-  return globalObject.serverProductionEntry
+  if (config.telefuncFiles) return
+  globalObject.serverProductionEntry ??= loadVirtualFile(false).catch(handleError)
+  await globalObject.serverProductionEntry
 }
 
 async function loadVirtualFile(failOnFailure: boolean) {
