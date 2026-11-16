@@ -36,3 +36,21 @@ describe('what the queue dropped', () => {
     },
   )
 })
+
+describe('an entry taken out', () => {
+  test('leaves the entries after it with their own seqs', () => {
+    const queue = new SeqQueue<string>()
+    queue.push(1, 'a')
+    queue.push(2, 'b')
+    queue.push(3, 'c')
+    expect(queue.removeAt(1)).toBe('b')
+    queue.push(4, 'd')
+    const entries = Array.from({ length: queue.length }, (_, i) => [queue.seqAt(i), queue.at(i)])
+    expect(entries).toEqual([
+      [1, 'a'],
+      [3, 'c'],
+      [4, 'd'],
+    ])
+    expect(queue.indexAfter(3)).toBe(2)
+  })
+})
