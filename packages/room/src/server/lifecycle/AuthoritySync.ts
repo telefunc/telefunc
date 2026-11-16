@@ -96,6 +96,7 @@ class AuthoritySync {
   async checkCoverage(): Promise<void> {
     const before = this.covered
     const mark = await this.controlMark()
+    if (this.model.closed) return
     // The authority's seq never goes below what a view covered, unless a failover rewound it.
     if (mark < before) {
       this.onControlLaneRewound()

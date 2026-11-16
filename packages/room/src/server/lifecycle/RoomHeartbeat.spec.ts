@@ -4,6 +4,7 @@ import { ROOM_HEARTBEAT_INTERVAL_MS } from '../constants.js'
 import { encodeRoomRecord } from '../lanes/lanes.js'
 import type { RoomIncarnation } from '../protocol.js'
 import { RoomLease, holdViews, renewLease } from '../store/lease.js'
+import { AuthoritySync } from './AuthoritySync.js'
 import { newRoomHold } from './hold.js'
 import { RoomHeartbeat } from './RoomHeartbeat.js'
 
@@ -50,7 +51,7 @@ async function heldRoom() {
     heartbeat.update()
   }
   const lapse = async () => (await plane.driver.readHead(room.id))?.expiresAt ?? 0
-  return { hosting, authority, stop, lapse, renewedAt: () => renewedAt }
+  return { room, hosting, authority, stop, lapse, renewedAt: () => renewedAt }
 }
 
 /** Runs heartbeats until `ran` holds, as a tick still running skips the next. */
@@ -89,6 +90,35 @@ describe('RoomHeartbeat', () => {
     await tickUntil(() => expect(authority.checkCoverage).toHaveBeenCalledTimes(2))
     expect(error).toHaveBeenCalledOnce()
     expect(error).toHaveBeenCalledWith(expect.stringContaining('coverage read failed'))
+    stop()
+  })
+
+  it('leaves a view as it closed when the room closes during a coverage check', async () => {
+    const { room, stop } = await heldRoom()
+    const model = {
+      closed: false,
+      metaWaiting: false,
+      metaSeq: 0,
+      rosterKnown: true,
+      memberIds: () => [].values(),
+      recordMembership: () => [],
+      stopRecordingMembership: () => {},
+    }
+    const owner = { applyControl: vi.fn() }
+    const authority = new AuthoritySync({
+      owner,
+      incarnation: room,
+      roster: { reconcile: async () => true },
+      model,
+      lanePlan: { replan: async () => {}, observing: true, controlEstablished: true },
+    })
+    authority.controlDelivered(1)
+    // The close dropped the room's lanes, and its closed frame reaches the view while the check reads the control lane.
+    await getRoomPlane().driver.dropIncarnation(room.id, room.inc)
+    const check = authority.checkCoverage()
+    model.closed = true
+    await check
+    expect(owner.applyControl).not.toHaveBeenCalled()
     stop()
   })
 })
