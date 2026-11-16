@@ -1,41 +1,37 @@
-export { countWaitingPublishes, droppingPublishes, droppingFromPublish, overtakes }
+export { countWaitingPublishes, droppingPublishes, droppingFrom, overtakes }
 export type { WireQueue }
 
 import { SEQ_OFFSET, SEQ_SPAN, readU16, readU32 } from '../../wire/header.js'
-import { TAG, isClosingTag, isSequencedTag } from '../../wire/tags.js'
+import { TAG, isPublishBody, isSequencedTag } from '../../wire/tags.js'
 
-/** What a server wire holds back for its page, which a broadcast falling behind can let go of. */
+/** What a server wire holds back for its page, which a broadcast falling behind, or a channel its page left, can let go of. */
 interface WireQueue {
   /** How many of channel `ix`'s publishes wait here, counted by their heads: its newest ones. */
   waitingPublishes(ix: number): number
   /** Drops channel `ix`'s publishes at `seqs`, oldest first, that wait here. */
   dropWaitingPublishes(ix: number, seqs: readonly number[]): void
-  /** Drops what of channel `ix` waits here from its oldest publish on, receipts too. */
-  dropWaitingFromPublish(ix: number): void
-  /** The rate the page takes data at, in bytes per ms, 0 before one was measured. */
-  drainRate(): number
+  /** Drops what of channel `ix` waits here, receipts too: from its oldest publish on, or from the start. */
+  dropWaitingFrom(ix: number, from: 'publish' | 'start'): void
 }
 
 function isHeadOf(frame: Uint8Array, ix: number): boolean {
   return frame[0] === TAG.PUBLISH_TO && readU16(frame, 1) === ix
 }
 
-function isPublishBody(tag: number): boolean {
-  return tag === TAG.PUBLISH || tag === TAG.PUBLISH_BINARY
-}
-
 /** Whether data `frame` goes ahead of `ahead`, the frames its wire holds back: a channel orders only its own frames, so a
- *  slow page's publishes don't hold up its other channels. Publishes keep their line, being what falls behind. What ends a
- *  channel passes that channel's publishes too: a channel that ends reads no more of them. */
+ *  slow page's publishes don't hold up its other channels. Publishes keep their line, being what falls behind. An abort
+ *  and the answer to the page's close pass that channel's publishes too: the page reads no more of them. Any other frame
+ *  of the channel, a close request or an error too, waits behind all of it, so the page gets what was sent before. */
 function overtakes(frame: Uint8Array, ahead: Iterable<Uint8Array>): boolean {
   const tag = frame[0]!
   if (!isSequencedTag(tag) || tag === TAG.PUBLISH_TO || isPublishBody(tag)) return false
+  const passesPublishes = tag === TAG.ABORT || tag === TAG.CLOSE_ACK
   const ix = readU16(frame, 1)
   for (const other of ahead) {
     const otherTag = other[0]!
     // A body's index names no channel; its head does.
     if (!isSequencedTag(otherTag) || isPublishBody(otherTag) || readU16(other, 1) !== ix) continue
-    if (!isClosingTag(tag) || otherTag !== TAG.PUBLISH_TO) return false
+    if (!passesPublishes || otherTag !== TAG.PUBLISH_TO) return false
   }
   return true
 }
@@ -47,10 +43,10 @@ function countWaitingPublishes(waiting: Iterable<Uint8Array>, ix: number): numbe
   return count
 }
 
-/** Tells, in the queue's order, whether each frame goes: channel `ix`'s sequenced frames from its first head on, and the
- *  body after each head. */
-function droppingFromPublish(ix: number): (frame: Uint8Array) => boolean {
-  let dropping = false
+/** Tells, in the queue's order, whether each frame goes: channel `ix`'s sequenced frames, from its first head on or from
+ *  the start, and the body after each head. */
+function droppingFrom(ix: number, from: 'publish' | 'start'): (frame: Uint8Array) => boolean {
+  let dropping = from === 'start'
   let bodyNext = false
   return (frame) => {
     if (bodyNext) {

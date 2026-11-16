@@ -3,6 +3,8 @@ export {
   ERROR_REASON,
   encode,
   withTook,
+  tookOf,
+  TOOK_TAGS,
   MESSAGE_FRAME_OVERHEAD_MAX_BYTES,
   isOneFrame,
   messageFrames,
@@ -95,10 +97,11 @@ type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON]
 
 // ===== Decoded frame =====
 
-/** `bytes`: the whole frame, what flow control counts, so an empty message counts too. */
+/** `bytes`: the whole frame, what flow control counts, so an empty message counts too. `lossy`: it came behind a
+ *  `PUBLISH_TO`, as a send a newer one may have replaced. */
 type ChannelDataFrame = { index: number; seq: number; bytes: number } & (
-  | { tag: typeof TAG.TEXT; text: string }
-  | { tag: typeof TAG.BINARY; data: Uint8Array }
+  | { tag: typeof TAG.TEXT; text: string; lossy?: true }
+  | { tag: typeof TAG.BINARY; data: Uint8Array; lossy?: true }
   | { tag: typeof TAG.TEXT_ACK_REQ; text: string }
   | { tag: typeof TAG.BINARY_ACK_REQ; data: Uint8Array }
   | { tag: typeof TAG.ACK_RES; ackedSeq: number; status: AckResultStatus; text: string }
@@ -136,7 +139,7 @@ type PiecesAck = { bytes: number; heldMs: number; spanUs: number }
 type BdpPingAck = { probe: number; backlog: number; pathRtt: number }
 
 type WireCtrlFrame =
-  | { tag: typeof TAG.PING; ended: PingEntry[]; took: number }
+  | { tag: typeof TAG.PING; ended: PingEntry[] }
   | { tag: typeof TAG.PONG; ended: PongEntry[]; took: number }
   | { tag: typeof TAG.FIN }
   | { tag: typeof TAG.RECONCILE; payload: ReconcilePayload }
@@ -372,11 +375,19 @@ const encode = {
   },
 }
 
-/** Writes into `heartbeat`, which its caller just encoded, that its sender took `bytes` of what its WebSocket carried
- *  (mod 2^32): it bounds the link's rate. */
-function withTook(heartbeat: Uint8Array<ArrayBuffer>, bytes: number): Uint8Array<ArrayBuffer> {
-  writeHeader(heartbeat, heartbeat[0]!, 0, bytes)
-  return heartbeat
+/** Writes into `frame`, a PONG or a frame `tookOf` reads, that its sender took `bytes` of what its WebSocket carried
+ *  (mod 2^32): it bounds the link's rate, and frees the peer's copies of what was taken. */
+function withTook(frame: Uint8Array<ArrayBuffer>, bytes: number): Uint8Array<ArrayBuffer> {
+  writeU32(frame, SEQ_OFFSET, bytes)
+  return frame
+}
+
+/** The page's frames that say, where a sequenced frame has its seq, what the page took off its WebSocket. */
+const TOOK_TAGS: ReadonlySet<number> = new Set([TAG.PING, TAG.WINDOW, TAG.MSG_WINDOW, TAG.BDP_PING, TAG.BDP_PING_ACK])
+
+/** What the page took off its WebSocket, as `frame` says; null for a frame that doesn't say. */
+function tookOf(frame: Uint8Array): number | null {
+  return TOOK_TAGS.has(frame[0]!) ? readU32(frame, SEQ_OFFSET) : null
 }
 
 // ===== Decode =====
@@ -496,7 +507,7 @@ function decode(frame: Uint8Array): DecodedFrame {
         const ix = readU16(payload, offset)
         ended.push({ ix, lastSeq: readU32(payload, offset + 2) })
       }
-      return { tag: TAG.PING, ended, took: readU32(frame, SEQ_OFFSET) }
+      return { tag: TAG.PING, ended }
     }
     case TAG.PONG: {
       assertProtocol(payload.length % PONG_ENTRY_BYTES === 0, 'PONG payload')

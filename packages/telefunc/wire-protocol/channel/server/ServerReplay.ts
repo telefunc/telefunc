@@ -1,23 +1,29 @@
 export { ServerReplay }
+export type { Dropped }
 
 import { assert } from '../../../utils/assert.js'
-import { HELD_SEND_OVERHEAD_BYTES, hold, letGo, type MemoryHolder } from './channelMemory.js'
+import { HELD_SEND_OVERHEAD_BYTES, heldPublishBytes, hold, letGo, type MemoryHolder } from './channelMemory.js'
 import type { PublishBody } from './PublishBody.js'
+import { SeqQueue } from '../SeqQueue.js'
 
-type Publish = { seq: number; head: Uint8Array<ArrayBuffer>; body: PublishBody; at: number }
+/** `alone`: sent with nothing of its channel's unconfirmed, publish or frame, so nothing waits ahead of its confirmation. */
+type Publish = { head: Uint8Array<ArrayBuffer>; body: PublishBody; at: number; alone: boolean }
+/** The publishes that went, by seq, oldest first, and their bodies' bytes. */
+type Dropped = { seqs: number[]; bytes: number }
 
 /** What a channel sent and its page hasn't confirmed, for a reconnect to send again: its own frames, and its publishes,
  *  each a head and a reference to the body its subscribers share. Each queue is in seq order: acknowledged entries leave
- *  from its oldest end, publishes past a gap from its newest, and a skipped one from among the newest. */
+ *  from its oldest end, publishes past a gap from its newest, and skipped ones from among the newest. */
 class ServerReplay {
   private readonly frames = new SeqQueue<Uint8Array<ArrayBuffer>>()
   private readonly publishes = new SeqQueue<Publish>()
-  /** The seq of each stream's lossy publish that a newer one may replace: its newest, while no publish of its stream
-   *  came after it. Any other publish it holds its page must get. */
-  private readonly replaceableOfStream = new Map<string, number>()
   private readonly holder: MemoryHolder
   private issuedSeq = 0
   private pushedSeq = 0
+  /** When its page last began moving to a wire: what it hadn't confirmed then is confirmed over that wire. */
+  private movedAt = 0
+  /** Whether it ever held a lossy publish: until then every publish is owed, and nothing below walks. */
+  private usedLossy = false
 
   constructor(holder: MemoryHolder) {
     this.holder = holder
@@ -40,26 +46,33 @@ class ServerReplay {
 
   pushPublish(seq: number, head: Uint8Array<ArrayBuffer>, body: PublishBody): void {
     this.pushed(seq)
-    this.publishes.push(seq, { seq, head, body, at: performance.now() })
+    const alone = this.publishes.length === 0 && this.frames.length === 0
+    this.publishes.push(seq, { head, body, at: performance.now(), alone })
     hold(this.holder, body)
-    const { stream } = body
-    if (stream === null) return
-    if (body.lossy) this.replaceableOfStream.set(stream, seq)
-    else this.replaceableOfStream.delete(stream)
+    if (body.lossy) this.usedLossy = true
   }
 
-  /** The least time a publish waited for its page's confirmation, `Infinity` before the first. */
+  /** The least time a publish waited for its page's confirmation, `Infinity` before the first. One sent with nothing
+   *  unconfirmed ahead of it waited for the path alone, so its confirmation sets it, also where the path got slower; one
+   *  sent behind others, publishes or frames, only lowers it. */
   leastConfirmMs = Number.POSITIVE_INFINITY
 
   /** The page has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
   acknowledge(lastSeq: number): void {
-    while (this.frames.length > 0 && this.frames.seqAt(0) <= lastSeq) this.letFrameGo(this.frames.shift())
-    let newest: Publish | undefined
-    while (this.publishes.length > 0 && this.publishes.seqAt(0) <= lastSeq) {
-      newest = this.publishes.shift()
-      this.letPublishGo(newest)
-    }
-    if (newest !== undefined) this.leastConfirmMs = Math.min(this.leastConfirmMs, performance.now() - newest.at)
+    const frames = this.frames.indexAfter(lastSeq)
+    for (let i = 0; i < frames; i++) this.letFrameGo(this.frames.at(i))
+    this.frames.dropOldest(frames)
+    const publishes = this.publishes.indexAfter(lastSeq)
+    if (publishes === 0) return
+    // Only the oldest can be alone: the others were sent while it was unconfirmed.
+    const alone = this.publishes.at(0).alone
+    const newest = this.publishes.at(publishes - 1)
+    for (let i = 0; i < publishes; i++) this.letPublishGo(this.publishes.at(i))
+    this.publishes.dropOldest(publishes)
+    // Sent before the wire its confirmation came on: its page may have had it long before.
+    if (newest.at < this.movedAt) return
+    const confirmMs = performance.now() - newest.at
+    this.leastConfirmMs = alone ? confirmMs : Math.min(this.leastConfirmMs, confirmMs)
   }
 
   /** The frames after `afterSeq` in seq order, each publish's head and then its body. A channel's are all there, as
@@ -80,26 +93,61 @@ class ServerReplay {
     return out
   }
 
-  /** The publish of `stream` that a newer one may replace goes if it is among its newest `droppable` publishes, the ones
-   *  no wire has, for the newer one to take its place: the page's `info.seq` shows what it skipped. Returns its seq where
-   *  it went. */
-  dropReplaceableOf(stream: string, droppable: number): number | undefined {
-    const seq = this.replaceableOfStream.get(stream)
-    if (seq === undefined) return undefined
-    const publish = this.publishes.removeAmongNewest(seq, droppable)
-    if (!publish) return undefined
-    this.letPublishGo(publish)
-    return seq
+  /** What its newest `count` publishes hold. */
+  heldByNewestPublishes(count: number): number {
+    let held = 0
+    for (let i = Math.max(0, this.publishes.length - count); i < this.publishes.length; i++)
+      held += heldPublishBytes(this.publishes.at(i).body)
+    return held
   }
 
-  /** A page gets every publish no newer one may replace: where its holder holds more than `toBytes` and one of its newest
-   *  `droppable` publishes would have to go (any at 0; above 0, one its page must get but the newest such, once the
-   *  replaceable ones are counted out), the oldest of them goes with every frame after it, receipts too, so nothing
-   *  reaches the page past the gap. Returns how many publishes went. */
+  /** Its newest `droppable` publishes go, for a newer one to take their place: the page's `info.seq` shows what it
+   *  skipped. Receipts stay. The older ones are on the wire, which a reconnect may have to send again. */
+  dropUnhanded(droppable: number): Dropped {
+    const dropped: Dropped = { seqs: [], bytes: 0 }
+    for (let i = Math.min(this.publishes.length, droppable); i > 0; i--) {
+      dropped.seqs.push(this.publishes.seqAt(this.publishes.length - 1))
+      const publish = this.publishes.pop()
+      dropped.bytes += publish.body.frame.byteLength
+      this.letPublishGo(publish)
+    }
+    dropped.seqs.reverse()
+    return dropped
+  }
+
+  /** Replacement. Of its newest `droppable`, the lossy publishes of `stream` that no plain one of the stream followed go:
+   *  its page's `info.seq` shows what it skipped. */
+  dropLossyOf(stream: string, droppable: number): Dropped {
+    const goes: number[] = []
+    this.walkNewest(droppable, (index, { body }, owed) => {
+      if (body.stream !== stream) return
+      // A plain publish of the stream, or a lossy one before it: every older one of the stream is owed too.
+      if (owed) return false
+      goes.push(index)
+    })
+    return this.take(goes)
+  }
+
+  /** A close. Of its newest `droppable`, each stream keeps its newest lossy publish and those its page is owed; the
+   *  lossy ones a newer one of their stream made stale go. */
+  dropStaleLossy(droppable: number): Dropped {
+    const newestKept = new Set<string>()
+    const goes: number[] = []
+    this.walkNewest(droppable, (index, { body: { stream } }, owed) => {
+      if (owed || stream === null) return
+      if (newestKept.has(stream)) goes.push(index)
+      else newestKept.add(stream)
+    })
+    return this.take(goes)
+  }
+
+  /** Shedding. Where its holder holds more than `toBytes` and one of its newest `droppable` publishes would have to go
+   *  (any at 0; above 0, one its page is owed), the oldest of them goes with every frame after it, receipts too, so
+   *  nothing reaches the page past the gap. Returns how many publishes went. */
   dropFromGap(toBytes: number, droppable: number): number {
     const waiting = Math.min(this.publishes.length, droppable)
     if (waiting === 0 || this.holder.heldBytes <= toBytes) return 0
-    if (toBytes > 0 && !this.reliableOver(toBytes, waiting)) return 0
+    if (toBytes > 0 && !this.owedOver(toBytes, waiting)) return 0
     const gap = this.publishes.seqAt(this.publishes.length - waiting)
     while (this.frames.length > 0 && this.frames.seqAt(this.frames.length - 1) >= gap)
       this.letFrameGo(this.frames.pop())
@@ -107,9 +155,15 @@ class ServerReplay {
     return waiting
   }
 
-  /** When the oldest publish its page hasn't confirmed was sent, `undefined` with none. */
-  get oldestPublishAt(): number | undefined {
-    return this.publishes.length > 0 ? this.publishes.at(0).at : undefined
+  /** Its page began moving to a wire, or attached one: what it hasn't confirmed is confirmed over that wire. */
+  moving(): void {
+    this.movedAt = performance.now()
+  }
+
+  /** Since when the oldest publish its page hasn't confirmed waits for that: since it was sent, or since its page began
+   *  moving to the wire that confirms it. `undefined` with none. */
+  get unconfirmedSince(): number | undefined {
+    return this.publishes.length > 0 ? Math.max(this.publishes.at(0).at, this.movedAt) : undefined
   }
 
   /** The body of the newest publish it holds. */
@@ -117,26 +171,49 @@ class ServerReplay {
     return this.publishes.length > 0 ? this.publishes.at(this.publishes.length - 1).body : undefined
   }
 
-  /** Whether more than one publish its page must get is among its newest `waiting`, and what it holds without the
-   *  replaceable ones among them is over `toBytes`. */
-  private reliableOver(toBytes: number, waiting: number): boolean {
-    let reliable = 0
-    let replaceableBytes = 0
-    for (let i = this.publishes.length - waiting; i < this.publishes.length; i++) {
-      const publish = this.publishes.at(i)
-      if (this.isReplaceable(publish)) replaceableBytes += publish.body.frame.byteLength
-      else reliable++
-    }
-    return reliable > 1 && this.holder.heldBytes - replaceableBytes > toBytes
-  }
-
-  private isReplaceable({ seq, body }: Publish): boolean {
-    return body.stream !== null && this.replaceableOfStream.get(body.stream) === seq
-  }
-
   dispose(): void {
     while (this.frames.length > 0) this.letFrameGo(this.frames.pop())
     while (this.publishes.length > 0) this.letPublishGo(this.publishes.pop())
+  }
+
+  /** Walks its newest `count` publishes from the newest. `owed`: its page must get it, as a plain one, or as a lossy one
+   *  that a plain one of its stream followed. `visit` returns false to stop. */
+  private walkNewest(count: number, visit: (index: number, publish: Publish, owed: boolean) => boolean | void): void {
+    let followed: Set<string> | null = null
+    const oldest = Math.max(0, this.publishes.length - count)
+    for (let i = this.publishes.length - 1; i >= oldest; i--) {
+      const publish = this.publishes.at(i)
+      const { stream, lossy } = publish.body
+      const owed = !lossy || stream === null || followed?.has(stream) === true
+      if (!lossy && stream !== null) (followed ??= new Set()).add(stream)
+      if (visit(i, publish, owed) === false) return
+    }
+  }
+
+  /** Whether more than one publish its page is owed is among its newest `waiting`, and what it holds without the
+   *  replaceable ones among them is over `toBytes`. */
+  private owedOver(toBytes: number, waiting: number): boolean {
+    if (!this.usedLossy) return waiting > 1
+    let owedCount = 0
+    let replaceableBytes = 0
+    this.walkNewest(waiting, (_index, { body }, owed) => {
+      if (owed) owedCount++
+      else replaceableBytes += body.frame.byteLength
+    })
+    return owedCount > 1 && this.holder.heldBytes - replaceableBytes > toBytes
+  }
+
+  /** Takes out the publishes at `indices`, newest first. */
+  private take(indices: readonly number[]): Dropped {
+    const dropped: Dropped = { seqs: [], bytes: 0 }
+    for (const index of indices) {
+      dropped.seqs.push(this.publishes.seqAt(index))
+      const publish = this.publishes.removeAt(index)
+      dropped.bytes += publish.body.frame.byteLength
+      this.letPublishGo(publish)
+    }
+    dropped.seqs.reverse()
+    return dropped
   }
 
   private pushed(seq: number): void {
@@ -148,80 +225,7 @@ class ServerReplay {
     letGo(this.holder, frame.byteLength + HELD_SEND_OVERHEAD_BYTES)
   }
 
-  private letPublishGo(publish: Publish): void {
-    letGo(this.holder, publish.body)
-    if (this.isReplaceable(publish)) this.replaceableOfStream.delete(publish.body.stream!)
-  }
-}
-
-/** Entries in seq order that leave at the ends, as `channel/client/ReplayBuffer.ts`'s queues, or from among the newest: a
- *  slot left at the oldest end holds nothing, and the slots go once they are as many as the live ones, which keeps a
- *  shift amortised O(1). Indices count from the oldest live entry. */
-class SeqQueue<T> {
-  // Seqs in an array of their own, so a scan by seq reads only numbers.
-  private seqs: number[] = []
-  private items: (T | undefined)[] = []
-  private head = 0
-
-  get length(): number {
-    return this.items.length - this.head
-  }
-
-  seqAt(i: number): number {
-    return this.seqs[this.head + i]!
-  }
-
-  at(i: number): T {
-    return this.items[this.head + i]!
-  }
-
-  /** The index of the oldest entry after `seq`, `length` where none is. */
-  indexAfter(seq: number): number {
-    let i = 0
-    while (i < this.length && this.seqAt(i) <= seq) i++
-    return i
-  }
-
-  push(seq: number, item: T): void {
-    this.seqs.push(seq)
-    this.items.push(item)
-  }
-
-  shift(): T {
-    const item = this.items[this.head]!
-    this.items[this.head++] = undefined
-    if (this.head >= this.items.length) this.clear()
-    else if (this.head >= this.length) {
-      this.seqs = this.seqs.slice(this.head)
-      this.items = this.items.slice(this.head)
-      this.head = 0
-    }
-    return item
-  }
-
-  pop(): T {
-    this.seqs.pop()
-    const item = this.items.pop()!
-    if (this.head >= this.items.length) this.clear()
-    return item
-  }
-
-  /** Takes out the entry of `seq` where it is among the newest `newest`, and returns it. */
-  removeAmongNewest(seq: number, newest: number): T | undefined {
-    const oldest = Math.max(this.head, this.seqs.length - newest)
-    for (let i = this.seqs.length - 1; i >= oldest; i--) {
-      if (this.seqs[i] !== seq) continue
-      this.seqs.splice(i, 1)
-      const [item] = this.items.splice(i, 1)
-      if (this.head >= this.items.length) this.clear()
-      return item
-    }
-    return undefined
-  }
-
-  private clear(): void {
-    this.seqs.length = 0
-    this.items.length = 0
-    this.head = 0
+  private letPublishGo({ body }: Publish): void {
+    letGo(this.holder, body)
   }
 }

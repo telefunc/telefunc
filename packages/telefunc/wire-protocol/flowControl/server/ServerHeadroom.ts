@@ -21,7 +21,7 @@ import type { PiecesAck } from '../../wire/frame.js'
 import { isSequencedTag } from '../../wire/tags.js'
 import {
   countWaitingPublishes,
-  droppingFromPublish,
+  droppingFrom,
   droppingPublishes,
   overtakes,
   type WireQueue,
@@ -92,12 +92,8 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     this.sender.dropWaiting(droppingPublishes(ix, seqs))
   }
 
-  dropWaitingFromPublish(ix: number): void {
-    this.sender.dropWaiting(droppingFromPublish(ix))
-  }
-
-  drainRate(): number {
-    return this.drain.rate || this.pieceRate.carried
+  dropWaitingFrom(ix: number, from: 'publish' | 'start'): void {
+    this.sender.dropWaiting(droppingFrom(ix, from))
   }
 
   /** The rate sends go by, which a probe gives before any data does. */
@@ -108,7 +104,9 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   /** What the path takes at `at` past what it holds. */
   headroom(at: number): number {
     const rate = this.pathRate()
-    if (rate === 0) return Number.POSITIVE_INFINITY
+    // Unmeasured, the path takes the least any sender sends ahead and as much again as the page said it took, which
+    // doubles each round trip as TCP's slow start does, until acknowledgements of data that waited give the rate.
+    if (rate === 0) return WIRE_SEND_AHEAD_MIN_BYTES + this.confirmed() - this.unconfirmed()
     // On a slow link the least round trip still spans a whole frame's arrival, and what goes ahead is copied pieces.
     // The rate's rise waits for acknowledgements, which go a gap apart however short the round trip.
     const toAck = WIRE_SEND_AHEAD_ROUND_TRIPS * this.leastRtt + 2 * WIRE_PIECES_ACK_GAP_MS
@@ -137,23 +135,32 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   }
 
   /** `PieceSenderOwner`: past what copies may hold, stalled wires hold that till their ping deadline, so each wire keeps
-   *  the least any sender sends ahead, which is how it shows it reads. One that never did waits for that to arrive: room
-   *  freed by a stalled wire's close would otherwise go to the next stalled wire. */
+   *  the least any sender sends ahead of what its page said it took. One whose page never said waits for that to arrive:
+   *  room freed by a stalled wire's close would otherwise go to the next stalled wire. */
   copyRoom(): number {
     if (hasCopyRoom()) return Number.POSITIVE_INFINITY
-    const { transmittedBytes, acknowledgedBytes } = this.sender
-    const room = WIRE_SEND_AHEAD_MIN_BYTES - (transmittedBytes - acknowledgedBytes)
+    const room = WIRE_SEND_AHEAD_MIN_BYTES - this.unconfirmed()
     if (room >= WIRE_PIECES_ACK_BYTES) return room
     this.awaitsCopyRoom = true
     return 0
+  }
+
+  /** What the page said it took of what the sender handed. */
+  private confirmed(): number {
+    return Math.max(this.sender.acknowledgedBytes, this.sender.heartbeatBytes)
+  }
+
+  /** What the sender handed that the page hasn't said it took. */
+  private unconfirmed(): number {
+    return this.sender.transmittedBytes - this.confirmed()
   }
 
   /** Takes a heartbeat (see `PieceSender.heartbeat`), which an acknowledgement's lost tail waits for. */
   heartbeat(bytes: number, at: number): boolean {
     if (!this.sender.heartbeat(bytes, at)) return false
     this.releaseCopies(this.sender.heartbeatBytes)
-    // Small frames are never acknowledged: for their wire, this is what shows its page reads.
-    if (this.awaitsCopyRoom) this.sendWaiting()
+    // A page taking small frames says what it took mostly here, in the frames it sends anyway.
+    if (this.awaitsCopyRoom || this.pathRate() === 0) this.sendWaiting()
     return true
   }
 
@@ -221,6 +228,8 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     const { waitingBytes, acknowledgedBytes, awaitsProbe } = this.sender
     if (this.paceTimer !== null || waitingBytes === 0 || awaitsProbe) return
     if (this.awaitsCopyRoom && acknowledgedBytes === 0) return
+    // With no rate, nothing drains on a timer: what the page says it took frees headroom.
+    if (!this.awaitsCopyRoom && this.pathRate() === 0) return
     // Another wire freeing room can't wake this one: on a Durable Object its socket is out of that wire's reach.
     const ms = this.awaitsCopyRoom
       ? WIRE_PIECES_ACK_GAP_MS

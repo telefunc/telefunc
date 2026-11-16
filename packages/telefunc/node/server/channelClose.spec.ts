@@ -6,6 +6,7 @@ import { TAG } from '../../wire-protocol/wire/tags.js'
 import { ProtocolViolationError } from '../../wire-protocol/wire/protocolViolation.js'
 import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'
 import { ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
+import { createDeferred } from '../../utils/createDeferred.js'
 
 function createPeer(frames: Uint8Array[]) {
   return new IndexedPeer({
@@ -19,7 +20,7 @@ function createPeer(frames: Uint8Array[]) {
       deliveredBefore: () => 0,
       terminate() {},
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-      queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, dropWaitingFromPublish() {}, drainRate: () => 0 },
+      queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
     },
     index: 7,
     replay: new ServerReplay({ heldBytes: 0 }),
@@ -155,16 +156,13 @@ describe('self-initiated close', () => {
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
-    channel.listen(
-      () =>
-        new Promise<string>((resolve) => {
-          setTimeout(() => resolve('done'), 30)
-        }),
-    )
+    const work = createDeferred<string>()
+    channel.listen(() => work.promise)
 
     // Start inbound ack-req processing
     const inboundPending = page.ackReq('"work"')
-    const closePromise = channel.close({ timeout: 100 })
+    // Its deadline is past any run's: the close ends on the ack.
+    const closePromise = channel.close({ timeout: 60_000 })
 
     expect(channel.isClosed).toBe(true)
     page.closeAck()
@@ -174,6 +172,7 @@ describe('self-initiated close', () => {
     expect(channel._phase).not.toBe('ended')
 
     // Inbound work finishes → close resolves
+    work.resolve('done')
     await expect(inboundPending).resolves.toBeUndefined()
     await expect(closePromise).resolves.toBe(0)
     expect(channel._phase).toBe('ended')
@@ -338,15 +337,12 @@ describe('peer-initiated close', () => {
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
-    channel.listen(
-      () =>
-        new Promise<string>((resolve) => {
-          setTimeout(() => resolve('done'), 25)
-        }),
-    )
+    const work = createDeferred<string>()
+    channel.listen(() => work.promise)
 
     const pending = page.ackReq('"work"')
-    page.closeRequest(100)
+    // Its deadline is past any run's: the close ends on the ack.
+    page.closeRequest(60_000)
 
     expect(channel.isClosed).toBe(true)
 
@@ -354,6 +350,7 @@ describe('peer-initiated close', () => {
     await new Promise((resolve) => setTimeout(resolve, 10))
     expect(channel._phase).not.toBe('ended')
 
+    work.resolve('done')
     await expect(pending).resolves.toBeUndefined()
     expect(channel._phase).toBe('ended')
   })
@@ -453,5 +450,91 @@ describe('cross-close', () => {
 
     await expect(closePromise).resolves.toBe(1)
     expect(channel._phase).toBe('ended')
+  })
+})
+
+// ── Stopping an onOpen or onClose callback ──
+
+describe('stopping an onOpen or onClose callback', () => {
+  test('a stopped onOpen is not called on open', () => {
+    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
+    let didFireOpen = false
+
+    const stop = channel.onOpen(() => {
+      didFireOpen = true
+    })
+    stop()
+
+    channel._registerChannel()
+    channel._attachPeer(createPeer([]))
+    expect(didFireOpen).toBe(false)
+  })
+
+  test('a stopped onClose is not called, and close() does not wait for it', async () => {
+    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
+    const frames: Uint8Array[] = []
+    let didFireClose = false
+
+    channel._registerChannel()
+    channel._attachPeer(createPeer(frames))
+    const page = fromPage(channel, frames)
+    const stop = channel.onClose(() => {
+      didFireClose = true
+      return new Promise<void>(() => {})
+    })
+    stop()
+
+    const closePromise = channel.close({ timeout: 100 })
+    page.closeAck()
+
+    await expect(closePromise).resolves.toBe(0)
+    expect(didFireClose).toBe(false)
+  })
+
+  test('stopping after the event, or twice, does nothing', async () => {
+    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
+    const frames: Uint8Array[] = []
+    let opens = 0
+    let closes = 0
+    const onClose = () => {
+      closes++
+    }
+
+    const stopOpen = channel.onOpen(() => {
+      opens++
+    })
+    const stopFirstClose = channel.onClose(onClose)
+    const stopSecondClose = channel.onClose(onClose)
+    stopFirstClose()
+    stopFirstClose()
+
+    channel._registerChannel()
+    channel._attachPeer(createPeer(frames))
+    stopOpen()
+    stopOpen()
+    fromPage(channel, frames).closeRequest(100)
+    stopSecondClose()
+
+    expect(opens).toBe(1)
+    expect(closes).toBe(1)
+  })
+
+  test('aborting { signal } removes the callback', () => {
+    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
+    const frames: Uint8Array[] = []
+    const controller = new AbortController()
+    let didFire = false
+    const fire = () => {
+      didFire = true
+    }
+
+    channel.onOpen(fire, { signal: controller.signal })
+    channel.onClose(fire, { signal: controller.signal })
+    controller.abort()
+
+    channel._registerChannel()
+    channel._attachPeer(createPeer(frames))
+    fromPage(channel, frames).closeRequest(100)
+    expect(didFire).toBe(false)
   })
 })

@@ -22,8 +22,7 @@ function createHarness() {
       queueOf: () => ({
         waitingPublishes: () => 0,
         dropWaitingPublishes() {},
-        dropWaitingFromPublish() {},
-        drainRate: () => 0,
+        dropWaitingFrom() {},
       }),
       terminateWire: () => (terminated = true),
     }

@@ -1,12 +1,12 @@
 export { ServerChannelBuffer }
-export type { BufferedSender, EntryCallback, EntryData }
+export type { BufferedSender, Entry, EntryCallback, EntryData }
 
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import { TAG } from '../../wire/tags.js'
-import { HEADER } from '../../wire/header.js'
-import { HELD_SEND_OVERHEAD_BYTES } from './channelMemory.js'
+import { heldSendBytes } from './channelMemory.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import type { PublishBody } from './PublishBody.js'
+import { OWN_STREAM } from '../ownStream.js'
 
 /** Callback pair for buffered entries: resolve on flush, reject where the channel ends first. */
 type EntryCallback = {
@@ -14,17 +14,25 @@ type EntryCallback = {
   reject: (err: Error) => void
 }
 
-/** The channel `flush` hands each held entry to, with the entry's tag, data and callbacks (null once rejected). */
+/** The channel `flush` hands each held entry to. */
 interface BufferedSender {
   /** The buffer holds `bytes` more for its page. */
   _holdOffline(bytes: number): void
   /** The buffer let `bytes` go. */
   _letGoOffline(bytes: number): void
-  _sendBuffered(peer: IndexedPeer, tag: number, data: EntryData, callback: EntryCallback | null): void
+  _sendBuffered(peer: IndexedPeer, entry: Entry): void
 }
 
-type EntryData = string | Uint8Array | PublishBody
-type Entry = { tag: number; data: EntryData; callback: EntryCallback | null; held: number }
+type EntryData = string | Uint8Array
+/** `callback`: null once rejected, and for a lossy send or a publish, which nothing waits on. `lossyOf`: the stream of a
+ *  lossy entry, whose next lossy entry takes its place where it is the last; null for one that must arrive. */
+type Entry = {
+  tag: number
+  data: EntryData | PublishBody
+  callback: EntryCallback | null
+  held: number
+  lossyOf: string | null
+}
 
 /**
  * Holds what a channel sends while no peer is attached (text, binary, ack requests, a first attach's publishes), for
@@ -34,7 +42,7 @@ class ServerChannelBuffer<TAck = never> {
   private entries: Entry[] = []
   private readonly owner: BufferedSender
   /** What the held sends count as on the channel's ledger. */
-  sendBytes = 0
+  private sendBytes = 0
 
   constructor(owner: BufferedSender) {
     this.owner = owner
@@ -61,15 +69,42 @@ class ServerChannelBuffer<TAck = never> {
     this.pushSend(TAG.BINARY_ACK_REQ, new Uint8Array(data), data.byteLength, { resolve, reject })
   }
 
-  /** A publish to a page that never attached: until it does, its channel has no index for the head. */
+  /** What the next lossy send takes the place of: the last entry's, where that is a lossy send. */
+  get replaceableHeld(): number {
+    const last = this.entries.at(-1)
+    return last?.lossyOf === OWN_STREAM ? last.held : 0
+  }
+
+  /** A lossy send of `bytes`, which takes the place of the last entry where that is a lossy send too: between two sends
+   *  that must arrive, a page that was away gets only the newest. Holds a copy of binary data, as `pushBinary` does. */
+  pushLossy(tag: typeof TAG.TEXT | typeof TAG.BINARY, data: EntryData, bytes: number): void {
+    this.dropReplaced(OWN_STREAM)
+    const copy = typeof data === 'string' ? data : new Uint8Array(data)
+    this.keep({ tag, data: copy, callback: null, held: heldSendBytes(bytes), lossyOf: OWN_STREAM })
+  }
+
+  /** A publish to a page that never attached: until it does, its channel has no index for the head. A lossy one takes
+   *  the place of the last entry where that is a lossy one of its stream, as `pushLossy`. */
   pushPublish(body: PublishBody): void {
-    this.pushSend(TAG.PUBLISH, body, body.frame.byteLength, null)
+    const lossyOf = body.lossy ? body.stream : null
+    if (lossyOf !== null) this.dropReplaced(lossyOf)
+    this.keep({ tag: TAG.PUBLISH, data: body, callback: null, held: heldSendBytes(body.frame.byteLength), lossyOf })
+  }
+
+  /** Lets go of its lossy sends, unsent, and of what they held. */
+  dropLossy(): void {
+    let held = 0
+    for (const entry of this.entries) if (entry.lossyOf !== null) held += entry.held
+    if (held === 0) return
+    this.entries = this.entries.filter((entry) => entry.lossyOf === null)
+    this.sendBytes -= held
+    this.owner._letGoOffline(held)
   }
 
   /** Sends every entry to its channel in the order it came, then empties the buffer. */
   flush(peer: IndexedPeer): void {
     this.letGoSends()
-    for (const { tag, data, callback } of this.entries) this.owner._sendBuffered(peer, tag, data, callback)
+    for (const entry of this.entries) this.owner._sendBuffered(peer, entry)
     this.clear()
   }
 
@@ -89,18 +124,27 @@ class ServerChannelBuffer<TAck = never> {
   }
 
   /** Decides anew, oldest first, as for a send made now: those `admit` takes stay, and the rest go and reject. */
-  admitAgain(admit: (held: number) => boolean, refusal: () => Error): void {
+  admitAgain(admit: (held: number) => boolean, refusal: (held: number) => Error): void {
     const entries = this.entries
     this.entries = []
     this.sendBytes = 0
     for (const entry of entries) {
       if (admit(entry.held)) this.keep(entry)
-      else entry.callback?.reject(refusal())
+      else entry.callback?.reject(refusal(entry.held))
     }
   }
 
-  private pushSend(tag: number, data: EntryData, bytes: number, callback: EntryCallback | null): void {
-    this.keep({ tag, data, callback, held: bytes + HEADER + HELD_SEND_OVERHEAD_BYTES })
+  private pushSend(tag: number, data: EntryData, bytes: number, callback: EntryCallback): void {
+    this.keep({ tag, data, callback, held: heldSendBytes(bytes), lossyOf: null })
+  }
+
+  /** The last entry goes, unsent, where it is a lossy one of `stream`. */
+  private dropReplaced(stream: string): void {
+    const last = this.entries.at(-1)
+    if (last?.lossyOf !== stream) return
+    this.entries.pop()
+    this.sendBytes -= last.held
+    this.owner._letGoOffline(last.held)
   }
 
   private keep(entry: Entry): void {

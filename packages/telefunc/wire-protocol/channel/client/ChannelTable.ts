@@ -31,6 +31,9 @@ type ChannelRecord = {
   readonly replay: ReplayBuffer
   /** The newest seq the server sent on it. */
   lastSeq: number
+  /** Each stream's lossy frame that a newer one may take the place of while it waits to go, by its seq: made at the
+   *  channel's first lossy frame. */
+  replaceable: Map<string, number> | null
   /** An initial channel a RECONCILED left out, till its ATTACH_RESULT: what it queues waits, so its replay goes first. */
   awaited: boolean
 }
@@ -78,8 +81,9 @@ class ChannelTable {
     return new Set([...this.undeclared, ...this.closed])
   }
 
-  isUndeclared(record: ChannelRecord): boolean {
-    return this.undeclared.has(record)
+  isUndeclared(ix: number): boolean {
+    const record = this.records.get(ix)
+    return record !== undefined && this.undeclared.has(record)
   }
 
   /** A RECONCILE declared `record` to the server. */
@@ -115,7 +119,8 @@ class ChannelTable {
 
   /** The server has what the page sent on channel `ix` through `lastSeq`, which its replay lets go. */
   serverHasThrough(ix: number, lastSeq: number): void {
-    this.records.get(ix)?.replay.acknowledge(lastSeq)
+    const record = this.records.get(ix)
+    if (record !== undefined) this.acknowledged(record, lastSeq)
   }
 
   // ── Per-channel state transitions: every write of a `record.state`, or of its fields, goes through these. ──
@@ -128,6 +133,7 @@ class ChannelTable {
       replay,
       lastSeq: 0,
       awaited: false,
+      replaceable: null,
     }
     this.records.set(ix, record)
     this.byChannel.set(channel, record)
@@ -149,10 +155,18 @@ class ChannelTable {
   }
 
   /** A closed channel the server attached has what the page sent on it through `lastSeq`. */
-  serverHas({ replay }: ChannelRecord, state: ClosedState, lastSeq: number): void {
+  serverHas(record: ChannelRecord, state: ClosedState, lastSeq: number): void {
     state.initial = false
-    replay.acknowledge(lastSeq)
-    if (lastSeq >= replay.seq) state.delivered = true
+    this.acknowledged(record, lastSeq)
+    if (lastSeq >= record.replay.seq) state.delivered = true
+  }
+
+  /** The server has every frame of `record`'s channel through `lastSeq`: none of them waits, so none is replaced. */
+  private acknowledged(record: ChannelRecord, lastSeq: number): void {
+    record.replay.acknowledge(lastSeq)
+    const { replaceable } = record
+    if (replaceable === null) return
+    for (const [stream, seq] of replaceable) if (seq <= lastSeq) replaceable.delete(stream)
   }
 
   /** The server ended the closed channel. */

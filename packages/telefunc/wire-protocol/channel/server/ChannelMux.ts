@@ -21,7 +21,7 @@ import {
   WIRE_RECV_BACKLOG_BASE_FRAMES,
   type ChannelTransports,
 } from '../../constants.js'
-import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, withTook } from '../../wire/frame.js'
+import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, tookOf, withTook } from '../../wire/frame.js'
 import { TAG, isWireCtrlTag } from '../../wire/tags.js'
 import { pingDeadline } from '../../wire/pingDeadline.js'
 import { textEncoder } from '../../wire/envelope.js'
@@ -481,13 +481,14 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
     rawFrame: Uint8Array<ArrayBuffer>,
   ): null | ReconcileOutcome | Promise<ReconcileOutcome | null> {
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CTRL_FRAME_BYTES)
+    const took = tookOf(rawFrame)
+    const pieces = entry.sender.pieces
+    // The bytes the page took off this wire: more than it was sent is a broken peer, and the wire ends.
+    if (took !== null && pieces) {
+      const known = pieces.headroom.heartbeat(took, performance.now())
+      assertProtocol(known, 'the page says it took more bytes than this wire sent it')
+    }
     if (frame.tag === TAG.PING) {
-      const pieces = entry.sender.pieces
-      // A PING counts the bytes the page took off this wire: more than it was sent is a broken peer, and the wire ends.
-      if (pieces) {
-        const known = pieces.headroom.heartbeat(frame.took, performance.now())
-        assertProtocol(known, 'PING says the page took more bytes than this wire sent it')
-      }
       this.resetPingTimer(entry)
       this.acknowledgeArrivals(entry)
       this.pong(entry, this.answerPing(entry, frame.ended))
@@ -568,8 +569,11 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
   private handlePrepare(entry: WireEntry, payload: PreparePayload, rawByteLength: number): null {
     const { wire } = entry
     assertProtocol(!entry.transport.getSessionId(wire), 'PREPARE on a reconciled wire')
-    assertProtocol(this.sessions.peekSession(payload.sessionId), 'PREPARE for an unknown session')
+    const session = this.sessions.peekSession(payload.sessionId)
+    assertProtocol(session, 'PREPARE for an unknown session')
     this.stages.stage(wire, payload, rawByteLength)
+    // From the READY on, the page holds back what it would send on its old wire, its confirmations included.
+    for (const { channel } of session.values()) channel._onPageMoving()
     entry.sender.send(encode.ready({ upgradeId: payload.upgradeId }))
     return null
   }
@@ -824,7 +828,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
   ): ChannelHandle | null {
     const buffer = channel._replayBuffer
     if (buffer === null) return null
-    channel._onPageHas(open.lastSeq)
+    channel._onPageAttach(open.lastSeq)
     const peer = new IndexedPeer({ sender, index: open.ix, replay: buffer })
     if (replay) for (const frame of buffer.getAfter(open.lastSeq)) sender.send(frame)
     channel._attachPeer(peer, open)

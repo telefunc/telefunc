@@ -205,7 +205,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
         this.headroomChanged(sender)
       } else if (frame.tag === TAG.PONG) {
         sender.heartbeat(frame.took, at)
-        this.heartbeat?.resetPong()
+        this.heartbeatOf(ws)?.resetPong()
         this.owner.onTransportPong(frame.ended)
       } else {
         const paired = pair(frame)
@@ -216,7 +216,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     ws.onmessage = ({ data }: MessageEvent) => {
       const now = performance.now()
       const raw = new Uint8Array(data as ArrayBuffer)
-      this.heartbeat?.noteReceived(raw.byteLength, now)
+      this.heartbeatOf(ws)?.noteReceived(raw.byteLength, now)
       downlink.delivered(raw.byteLength, now)
       headroom.received()
       if (!receiveMessage(receiver, raw, now, take)) ws.close()
@@ -229,6 +229,11 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
       this.owner.onTransportClosed(this, { otherWireVersion: code === WS_CLOSE_WIRE_VERSION })
     }
     ws.onerror = () => {}
+  }
+
+  /** The heartbeat of `ws`'s wire; none once the page left that socket, which then says nothing of the wire in use. */
+  private heartbeatOf(ws: WebSocket): Heartbeat | null {
+    return this.ws === ws ? this.heartbeat : null
   }
 
   /** `ClientHeadroomOwner`: the live wire's sender sends what waited. */
@@ -254,8 +259,9 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
 
   sendFrame(frame: OutboundFrame): void {
     assert(this.ws && this.pieces)
-    if (frame.kind === 'acknowledgement') this.pieces.sender.carry(() => frame.frame)
-    else this.pieces.headroom.send(frame.frame)
+    const { receiver } = this.pieces
+    if (frame.kind === 'acknowledgement') this.pieces.sender.carry(() => receiver.report(frame.frame))
+    else this.pieces.headroom.send(receiver.report(frame.frame))
   }
 
   /** Its frames wait behind the wire's queues, and for headroom that acknowledgements free. */
@@ -319,7 +325,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   sendPing(frame: Uint8Array<ArrayBuffer>): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
     assert(this.pieces)
-    this.pieces.sender.send(withTook(frame, this.pieces.receiver.took), 0)
+    this.pieces.sender.send(this.pieces.receiver.report(frame), 0)
   }
 
   dispose(): void {

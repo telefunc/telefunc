@@ -144,8 +144,9 @@ function testSmallPending() {
     )
   })
 
-  // The page's own 20 publishes at once as it opens, each its ordinal at the same size: a link that keeps up takes them
-  // all, and the server gets the last. Then 16 publishes of 256 KiB in one go to a lossy broadcast: each
+  // The page's own 20 publishes at once before its first attach, each its ordinal at the same size: only the newest
+  // waits, so all 20 settle with one receipt and the server gets the last. Then the same 20 attached, on a link that
+  // keeps up: each goes with a receipt of its own. Then 16 publishes of 256 KiB in one go to a lossy broadcast: each
   // one the wire hasn't taken goes as a newer one comes. Then the page's publish (17) is outstanding as its connection
   // drops, with 17 more published behind its receipt while it is away: only the newest of them is held. Then the page's
   // own 20 again, while it reconnects.
@@ -154,22 +155,22 @@ function testSmallPending() {
     await page.click('#channel-test-broadcast-behind')
     await autoRetry(
       async () => {
-        const { seqsAhead, isClosed, receiptAhead, opening, reconnected } = (await getResult<any>('#channel-state'))
-          .broadcastBehind
+        const { seqsAhead, isClosed, receiptAhead, opening, attached, reconnected } = (
+          await getResult<any>('#channel-state')
+        ).broadcastBehind
         const [burst, away] = [seqsAhead.filter((a: number) => a <= 16), seqsAhead.filter((a: number) => a > 17)]
         expect(burst.at(-1)).toBe(16)
         expect(burst.length).lessThan(16)
         expect(receiptAhead).toBe(17)
         expect(away).deep.equal([34])
-        expect(opening.receipts).toBe(20)
-        expect(opening.last).toBe('19')
+        expect(opening).deep.equal({ receipts: 1, last: '19' })
+        expect(attached).deep.equal({ receipts: 20, last: '219' })
         expect(reconnected.receipts).lessThan(20)
         expect(reconnected.last).toBe('119')
         expect(isClosed).toBe(false)
       },
       { timeout: 30_000 },
     )
-    expectLog('skipped messages its client')
   })
 
   // Two lossy broadcasts of one key whose page is away, with bodies of 1200 KiB: one fits the 2 MiB budget, two don't.
@@ -185,20 +186,22 @@ function testSmallPending() {
       },
       { timeout: 30_000 },
     )
-    expectLog('skipped messages its client')
   })
 
   // The same two without `lossy`, the second on a broadcast of its own: where its page would miss a message, it closes
-  // instead, and the receipt behind the gap doesn't come either.
+  // instead, and the receipt behind the gap doesn't come either. Between them, three publishes and one past the
+  // server's memory in the same turn: the gap is the fourth, so the page gets all three first.
   test('channel: a client that falls behind a broadcast gets every message up to the gap, then closes with ChannelOverflowError', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-broadcast-behind-closes')
     await autoRetry(
       async () => {
-        const { seqsAhead, closeErr, across } = (await getResult<any>('#channel-state')).broadcastBehindCloses
+        const { seqsAhead, closeErr, pastMemory, across } = (await getResult<any>('#channel-state'))
+          .broadcastBehindCloses
         expect(closeErr).toBe('ChannelOverflowError')
         expect(seqsAhead.length).lessThan(16)
         expect(seqsAhead).deep.equal(seqsAhead.map((_: number, i: number) => i + 1))
+        expect(pastMemory).deep.equal({ seqsAhead: [1, 2, 3], closeErr: 'ChannelOverflowError' })
         expect(across).deep.equal({ publish: 'ChannelOverflowError', received: 0, closeErr: 'ChannelOverflowError' })
       },
       { timeout: 30_000 },

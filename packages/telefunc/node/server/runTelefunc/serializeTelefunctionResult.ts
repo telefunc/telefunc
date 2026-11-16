@@ -8,7 +8,6 @@ import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
 import { createStreamingReplacer } from '../../../wire-protocol/values/server/response/registry.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
 import { ServerBroadcastEnd } from '../../../wire-protocol/channel/server/ServerBroadcastEnd.js'
-import { getChannelMux } from '../../../wire-protocol/channel/server/ChannelMux.js'
 import { getSessionToken } from '../../../wire-protocol/wire/requestKind.js'
 import {
   buildShieldValidators,
@@ -29,6 +28,8 @@ import type {
   StreamingValueServer,
 } from '../../../wire-protocol/values/types.js'
 import { type RequestContext } from '../context/requestContext.js'
+import { carryChannel } from './carryChannel.js'
+import type { AbortError } from '../Abort.js'
 import type { Context } from '../context/context.js'
 import type { Readable } from 'node:stream'
 import { getAdapterMaxFrameBytes, getServerExtensionTypes } from '../serverConfig.js'
@@ -66,7 +67,6 @@ function serializeTelefunctionResult(runContext: {
   telefunctionAborted: boolean
   context: Context
   requestContext: RequestContext
-  abortSignal: AbortSignal
   streamTransport: StreamTransport
   useNodeStream: boolean
   serverConfig: {
@@ -82,39 +82,42 @@ function serializeTelefunctionResult(runContext: {
     : { ret: runContext.telefunctionReturn }
 
   const useChannelPump = runContext.streamTransport === STREAM_TRANSPORT.CHANNEL
-  const streamingValues: StreamingValueServer[] = []
+  const producers: StreamingValueServer[] = []
   let nextStreamingIndex = 0
+  /** What the response carries is registered once the response is sure to go; ending the response before that, as a
+   *  failed serialization or a page that left does, ends what only it would carry; a channel an earlier response carried
+   *  stays open. */
+  const registrations: (() => void)[] = []
+  let goes = false
   const { valueShields } = runContext
   const shieldCtx = {
     telefunctionName: runContext.telefunctionName,
     telefuncFilePath: runContext.telefuncFilePath,
     shieldErrors: runContext.serverConfig.log.shieldErrors,
   }
-  const mux = getChannelMux()
   function registerChannel(channel: ServerChannel<any, any>) {
-    mux.registerChannel(channel as ServerChannel<unknown, unknown>)
-    channel._setResponseAbort(requestContext.responseAbort.abort)
-    channel.onClose(requestContext.trackPending())
-    channel._validators = makeValidators(channel, valueShields, shieldCtx)
+    registrations.push(() => {
+      channel._validators = makeValidators(channel, valueShields, shieldCtx)
+      carryChannel(channel, requestContext)
+    })
   }
   function sendStream(createProducer: () => StreamingProducer) {
+    // Taken as it's serialized: a stream that can't be read fails the serialization, which ends what the response carries.
+    const producer = createProducer()
+    const stream = {
+      close() {},
+      abort(abortError: AbortError) {
+        if (!goes) producer.cancel(abortError)
+      },
+    }
     if (useChannelPump) {
-      const channelId = pumpProducerToChannel(createProducer, runContext, requestContext.trackPending())
-      return {
-        metadata: { channelId },
-        // Pump self-manages lifecycle: close in finally, abort via responseAbort.errorPromise race.
-        close() {},
-        abort() {},
-      }
+      const channel = new ServerChannel<never, never>()
+      registrations.push(() => pumpProducerToChannel(channel, producer, runContext, requestContext.trackPending()))
+      return { metadata: { channelId: channel.id }, ...stream }
     }
     const index = nextStreamingIndex++
-    streamingValues.push({ createProducer, index })
-    return {
-      metadata: { __index: index },
-      // Inline streaming lifecycle is managed by the HTTP body stream.
-      close() {},
-      abort() {},
-    }
+    producers.push({ producer, index })
+    return { metadata: { __index: index }, ...stream }
   }
   function createChannel<ClientToServer, ServerToClient>(opts?: { ack?: boolean }) {
     const channel = new ServerChannel<ClientToServer, ServerToClient>(opts)
@@ -148,8 +151,11 @@ function serializeTelefunctionResult(runContext: {
         maxFrameBytes: getAdapterMaxFrameBytes(),
       }
     },
-    function onReplaced({ abort }) {
-      requestContext.responseAbort.onAbort(abort)
+    function onReplaced({ value, abort }) {
+      // Registered already, so its page may hold it: it ends with this response only once that goes.
+      const carriedBefore = ServerChannel.isServerChannel(value) && value._wasRegistered
+      if (carriedBefore) registrations.push(() => requestContext.responseAbort.onAbort(abort))
+      else requestContext.responseAbort.onAbort(abort)
     },
     responseTypes,
   )
@@ -158,6 +164,7 @@ function serializeTelefunctionResult(runContext: {
   try {
     httpResponseBody = stringify(bodyValue, { forbidReactElements: true, replacer })
   } catch (err: unknown) {
+    requestContext.responseAbort.abort()
     assert(hasProp(err, 'message', 'string'))
     assertUsage(
       false,
@@ -169,10 +176,16 @@ function serializeTelefunctionResult(runContext: {
     )
   }
 
-  if (useChannelPump || streamingValues.length === 0) {
-    requestContext.markComplete()
+  // Its page left while the telefunction ran: nobody gets this response.
+  if (requestContext.abortSignal.aborted) {
+    requestContext.responseAbort.abort()
     return { type: 'text', body: httpResponseBody }
   }
+
+  goes = true
+  for (const register of registrations) register()
+
+  if (useChannelPump || producers.length === 0) return { type: 'text', body: httpResponseBody }
 
   const telefuncId: TelefuncId = {
     telefunctionName: runContext.telefunctionName,
@@ -185,13 +198,12 @@ function serializeTelefunctionResult(runContext: {
       : (frame: Uint8Array<ArrayBuffer>) => frame
 
   const onStreamComplete = requestContext.trackPending()
-  requestContext.markComplete()
 
   return {
     type: 'streaming',
     body: buildInlineResponseBody({
       metadataSerialized: httpResponseBody,
-      streamingValues,
+      producers,
       telefuncId,
       context: runContext.context,
       abortSignal: requestContext.abortSignal,

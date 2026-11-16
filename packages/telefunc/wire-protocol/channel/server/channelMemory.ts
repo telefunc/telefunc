@@ -4,7 +4,11 @@ export {
   admit,
   admitPublish,
   dropWireCopies,
+  fits,
+  fitsPublish,
   hasCopyRoom,
+  heldPublishBytes,
+  heldSendBytes,
   hold,
   holdsEnough,
   letGo,
@@ -16,11 +20,13 @@ export type { MemoryHolder }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { getChannelConfig } from '../../../node/server/serverConfig.js'
+import { HEADER } from '../../wire/header.js'
 import type { PublishBody } from './PublishBody.js'
 import type { QueueMemory } from '../channelMessages.js'
 
-/** What a held send takes beyond its payload, its callbacks and promise, rounded up: one buffered, awaiting its answer
- *  or credit, kept to replay, or waiting in the in-memory broadcast adapter. */
+/** What a held send takes beyond its payload, its callbacks and promise, rounded up: one buffered, waiting as a lossy
+ *  channel's newest, awaiting its answer or credit, kept to replay, or waiting in the in-memory broadcast adapter. A
+ *  lossy send kept to replay is a publish, and holds what one does. */
 const HELD_SEND_OVERHEAD_BYTES = 512
 /** What a held publish takes beyond its share of the body: its head and its entries. */
 const HELD_PUBLISH_OVERHEAD_BYTES = 200
@@ -33,7 +39,7 @@ interface MemoryHolder {
   /** Its owner ended, so nothing is held for it any more (see `releaseHolder`). */
   released?: boolean
   shed?(toBytes: number): void
-  /** A newer publish of lossy `stream` reaches its page: the one no wire has taken of that stream goes. */
+  /** A newer publish of lossy `stream` reaches its pages: what of that stream it replaces goes. */
   replaceWaiting?(stream: string): void
   readonly newestUnhanded?: PublishBody | undefined
 }
@@ -59,12 +65,24 @@ function admit(holder: MemoryHolder, bytes: number): boolean {
   return holder.heldBytes + bytes <= maxMemory / memory.holders.size && memory.total + bytes <= maxMemory
 }
 
-/** Makes room for a delivery, which nobody can refuse. Near the budget, each page whose waiting publish it replaces
- *  lets go of that first, so what's measured is what stays; past what's older, it ends as few as must end, where that
- *  frees the bytes. */
+/** Whether `bytes` for `holder` may be held with nothing let go to make room for them: `admit` then admits them as well. */
+function fits(holder: MemoryHolder, bytes: number): boolean {
+  const maxMemory = maxMemoryOf()
+  return (
+    holder.heldBytes + bytes <= Math.min(maxPendingBytesOf(), maxMemory) &&
+    memory.total + bytes <= shedTarget(maxMemory)
+  )
+}
+
+/** Makes room for a delivery, which nobody can refuse. Near the budget, each page whose waiting publishes of a lossy
+ *  one's stream it replaces lets go of them first (`replaceWaiting`), so what's measured is what stays. Past that, it
+ *  ends the pages whose newest no wire has, fewest sharers first, until the body fits or none is left: where ending them
+ *  can't make room, they end all the same, and so do its own pages (`fitsPublish`). */
 function admitPublish(body: PublishBody): void {
   const maxMemory = maxMemoryOf()
   const bytes = body.frame.byteLength
+  // Nothing let go makes room for one that can't fit at all: its own pages end (`fitsPublish`), and no other page does.
+  if (bytes + HELD_PUBLISH_OVERHEAD_BYTES > maxMemory) return
   const target = shedTarget(maxMemory)
   const { stream } = body
   if (body.lossy && stream !== null && memory.total + bytes > target) {
@@ -83,6 +101,12 @@ function admitPublish(body: PublishBody): void {
   }
 }
 
+/** Whether one more page may hold `body` within `maxMemory`, once `admitPublish` made what room it could. */
+function fitsPublish(body: PublishBody): boolean {
+  const bytes = HELD_PUBLISH_OVERHEAD_BYTES + (body.refs === 0 ? body.frame.byteLength : 0)
+  return memory.total + bytes <= maxMemoryOf()
+}
+
 /** Fewest sharers first. A body another page has on the wire counts more references than holders here, so it's left. */
 function newestsThatEndingFrees(): [PublishBody, MemoryHolder[]][] {
   const byBody = new Map<PublishBody, MemoryHolder[]>()
@@ -96,6 +120,16 @@ function newestsThatEndingFrees(): [PublishBody, MemoryHolder[]][] {
   return [...byBody].sort((a, b) => a[1].length - b[1].length)
 }
 
+/** What a send of `bytes` holds: its frame, and what it takes beyond that. */
+function heldSendBytes(bytes: number): number {
+  return bytes + HEADER + HELD_SEND_OVERHEAD_BYTES
+}
+
+/** What a publish holds for one page. */
+function heldPublishBytes(body: PublishBody): number {
+  return body.frame.byteLength + HELD_PUBLISH_OVERHEAD_BYTES
+}
+
 /** Only counts: never reclaims, so whoever's mid-mutation finishes first. */
 function hold(holder: MemoryHolder, held: number | PublishBody): void {
   if (holder.released) return
@@ -104,7 +138,7 @@ function hold(holder: MemoryHolder, held: number | PublishBody): void {
     holder.heldBytes += held
     memory.total += held
   } else {
-    holder.heldBytes += held.frame.byteLength + HELD_PUBLISH_OVERHEAD_BYTES
+    holder.heldBytes += heldPublishBytes(held)
     memory.total += HELD_PUBLISH_OVERHEAD_BYTES + (held.refs++ === 0 ? held.frame.byteLength : 0)
   }
 }
@@ -115,7 +149,7 @@ function letGo(holder: MemoryHolder, held: number | PublishBody): void {
     holder.heldBytes -= held
     memory.total -= held
   } else {
-    holder.heldBytes -= held.frame.byteLength + HELD_PUBLISH_OVERHEAD_BYTES
+    holder.heldBytes -= heldPublishBytes(held)
     memory.total -= HELD_PUBLISH_OVERHEAD_BYTES + (--held.refs === 0 ? held.frame.byteLength : 0)
   }
   if (holder.heldBytes === 0) memory.holders.delete(holder)

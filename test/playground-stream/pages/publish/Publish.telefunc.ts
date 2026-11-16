@@ -480,32 +480,24 @@ async function onBroadcastAnswerOrder() {
   return seen
 }
 
-/** Listeners that answer every message on their own key, one at once and one after an await, until stop(); it returns
- *  once each answered, or 10 s pass. */
+/** A listener that answers every message on its own key until stop() or a refused publish; returns once it answered, or
+ *  10 s pass. */
 async function onBroadcastSelfAnswer() {
   const key = `room:self-answer:${crypto.randomUUID()}`
   let answers = 0
   // A store like Redis delivers a message to local subscribers once it comes back through the store.
-  const syncAnswered = Promise.withResolvers<void>()
-  const asyncAnswered = Promise.withResolvers<void>()
-  const offSync = Broadcast.subscribe<number>(`${key}:sync`, (n) => {
+  const answered = Promise.withResolvers<void>()
+  const off = Broadcast.subscribe<number>(key, (n) => {
     answers++
-    syncAnswered.resolve()
-    void Broadcast.publish(`${key}:sync`, n + 1)
+    answered.resolve()
+    // Past the answer bound the publish is rejected, and the listener stops.
+    Promise.resolve(Broadcast.publish(key, n + 1)).catch(() => {})
   })
-  const offAsync = Broadcast.subscribe<number>(`${key}:async`, async (n) => {
-    await Promise.resolve()
-    answers++
-    asyncAnswered.resolve()
-    void Broadcast.publish(`${key}:async`, n + 1)
-  })
-  void Broadcast.publish(`${key}:sync`, 0)
-  void Broadcast.publish(`${key}:async`, 0)
-  await within10s(Promise.all([syncAnswered.promise, asyncAnswered.promise]))
+  void Broadcast.publish(key, 0)
+  await within10s(answered.promise)
   return {
     stop: async () => {
-      offSync()
-      offAsync()
+      off()
       return answers
     },
   }
@@ -746,7 +738,7 @@ async function onBroadcastBurstThenClose() {
 }
 
 /** The in-memory adapter: a loop of publishes, a listener publishing a batch, then one big message, producers awaiting
- *  each publish to one key, and a listener answering its own key. */
+ *  each publish to one key, and listeners answering each other. */
 async function onInMemoryPublishes() {
   const id = crypto.randomUUID()
   const seen: number[] = []
@@ -842,7 +834,7 @@ async function onInMemoryPublishes() {
   }
   stopLongLoop()
 
-  // A listener's answer waits for the next turn, as a loop publishes 6,000 of 64 KiB: past 320 MiB, what waits goes.
+  // Two listeners answer in turn, then a loop publishes 6,000 of 64 KiB: the answers went with the publish they answer.
   await new Promise((resolve) => setTimeout(resolve, 0))
   let behindDelivered = 0
   const stopBehind = Broadcast.subscribeBinary(`behind:${id}`, () => void behindDelivered++)
@@ -869,50 +861,7 @@ async function onInMemoryPublishes() {
     aloneBytes,
     producers,
     timerProducer,
-    timerFiredMidChain: await timerFiresMidChain(`chain:${id}`),
-    awaitedLoopEnded: await timerEndsAwaitedLoop(`awaited-loop:${id}`),
-    answeringListenerEnded: await timerEndsAnsweringListener(`answering:${id}`),
   }
-}
-
-/** A loop that only awaits publishes: true once the timer that stops it has fired. */
-async function timerEndsAwaitedLoop(key: string): Promise<boolean> {
-  let stop = false
-  setTimeout(() => (stop = true), 50)
-  while (!stop) await Broadcast.publish(key, 'again')
-  return true
-}
-
-/** A listener that answers itself after an `await`: true once the timer that stops it has fired. */
-function timerEndsAnsweringListener(key: string): Promise<boolean> {
-  let stop = false
-  setTimeout(() => (stop = true), 50)
-  return new Promise((resolve) => {
-    const unsubscribe = Broadcast.subscribe(key, async () => {
-      await null
-      if (stop) {
-        unsubscribe()
-        resolve(true)
-      } else void Broadcast.publish(key, 'again')
-    })
-    void Broadcast.publish(key, 'start')
-  })
-}
-
-/** A listener answers itself 20,000 times: whether a timer fired before it was done. */
-async function timerFiresMidChain(key: string): Promise<boolean> {
-  let answers = 0
-  let answersWhenTimerFired = -1
-  setTimeout(() => (answersWhenTimerFired = answers), 0)
-  const finished = new Promise<void>((resolve) => {
-    Broadcast.subscribe(key, () => {
-      if (++answers === 20_000) resolve()
-      else void Broadcast.publish(key, 'again')
-    })
-  })
-  void Broadcast.publish(key, 'start')
-  await finished
-  return answersWhenTimerFired >= 0 && answersWhenTimerFired < 20_000
 }
 
 async function readSlowly(room: BroadcastChannel<string>, kind: 'slow' | 'held') {

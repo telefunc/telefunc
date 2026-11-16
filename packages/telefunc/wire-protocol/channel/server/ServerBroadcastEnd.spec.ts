@@ -44,8 +44,7 @@ function awayEnd(): ServerBroadcastEnd {
       queue: {
         waitingPublishes: () => Number.POSITIVE_INFINITY,
         dropWaitingPublishes() {},
-        dropWaitingFromPublish() {},
-        drainRate: () => 0,
+        dropWaitingFrom() {},
       },
     },
     index: 7,

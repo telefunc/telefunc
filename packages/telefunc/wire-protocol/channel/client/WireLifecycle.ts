@@ -54,8 +54,6 @@ interface TransportOwner {
   onTransportBatched(transport: ClientChannelTransport): void
   /** An SSE wire's RECONCILE went out with the request that opens it, before the wire opens (see `beatFromReconcile`). */
   onTransportReconcileSent(transport: ClientChannelTransport): void
-  /** A batch POST has been out longer than its upload takes at the slowest rate a wire is held to. */
-  onWireLate(transport: ClientChannelTransport): void
   /** What a transport's wire carries as it opens: the RECONCILE, and the frames buffered behind it. */
   stageInitialReconcileBatch(): ReconcileBatch
 }
@@ -63,12 +61,7 @@ interface TransportOwner {
 type ConnectionState =
   | { tag: 'fresh' }
   | { tag: 'open' }
-  | {
-      tag: 'reconnecting'
-      attempt: number
-      startedAt: number
-      timer: ReturnType<typeof setTimeout>
-    }
+  | { tag: 'reconnecting'; timer: ReturnType<typeof setTimeout> }
   | { tag: 'closed' }
 
 /** The connection, which a disposed wire lifecycle's next `getOrCreate` replaces. */
@@ -91,6 +84,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   transport: ClientChannelTransport
 
   private state: ConnectionState = { tag: 'fresh' }
+  /** The wires lost since the last RECONCILED, and when the first was: a wire that opens and never reconciles counts. */
+  private reconnects: { attempt: number; startedAt: number } | null = null
   private ttl: ReturnType<typeof setTimeout> | null = null
   get closed(): boolean {
     return this.state.tag === 'closed'
@@ -135,10 +130,10 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 
   /** Owns the reconnect timer's lifecycle so callers can't forget to cancel a prior one. */
-  private enterReconnecting(attempt: number, startedAt: number, delay: number): void {
+  private enterReconnecting(delay: number): void {
     if (this.state.tag === 'reconnecting') clearTimeout(this.state.timer)
     const timer = setTimeout(() => this.transport.start(), delay)
-    this.state = { tag: 'reconnecting', attempt, startedAt, timer }
+    this.state = { tag: 'reconnecting', timer }
     this.upgrade.forget()
   }
 
@@ -336,8 +331,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.onTransportClosed(transport)
   }
 
-  /** Its PONG or a batch POST came late. Until a wire's first RECONCILED, the RECONCILE deadline bounds it: the wait
-   *  may outlast the pong deadline. */
+  /** Its PONG came late. Until a wire's first RECONCILED, the RECONCILE deadline bounds it: the wait may outlast the
+   *  pong deadline. */
   onWireLate(transport: ClientChannelTransport): void {
     if (this.exchange.boundsWire) return
     this.dropWire(transport)
@@ -367,6 +362,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   private handleReconciled(ctrl: ReconciledPayload): void {
     if (!this.upgrade.onReconciled(ctrl)) return
+    this.reconnects = null
     this.transport.applyReconciledSettings(ctrl)
     this.takeServerSettings(ctrl)
     const outcome = this.exchange.applyReconciled(ctrl, {
@@ -502,10 +498,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.ttl = null
     }
 
-    const { attempt: prevAttempt, startedAt: prevStartedAt } =
-      this.state.tag === 'reconnecting' ? this.state : { attempt: 0, startedAt: 0 }
-
-    if (rejected && prevAttempt === 0) {
+    const { attempt, startedAt } = this.reconnects ?? { attempt: 0, startedAt: performance.now() }
+    if (rejected && attempt === 0) {
       this.closeAll(err)
       this.dispose()
       return
@@ -518,16 +512,15 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.dispose()
       return
     }
-    const startedAt = prevStartedAt || performance.now()
     if (performance.now() - startedAt > this.reconnectTimeoutMs) {
       this.closeAll(err)
       this.dispose()
       return
     }
-    const delay = Math.min(CHANNEL_RECONNECT_INITIAL_DELAY_MS * 2 ** prevAttempt, CHANNEL_RECONNECT_MAX_DELAY_MS)
-    this.enterReconnecting(prevAttempt + 1, startedAt, delay)
+    this.reconnects = { attempt: attempt + 1, startedAt }
+    this.enterReconnecting(Math.min(CHANNEL_RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, CHANNEL_RECONNECT_MAX_DELAY_MS))
     // Told once the wire is reconnecting, so what an `onDisconnect` callback sends (a `close()`) waits for the next wire.
-    if (prevAttempt === 0) {
+    if (attempt === 0) {
       for (const { channel, state } of this.channels.values())
         if (state.tag === 'open') channel._onTransportDisconnect()
     }

@@ -9,8 +9,10 @@ import type {
   ChannelPublishAck,
   ChannelPublishInfo,
 } from '../channel.js'
+import { stringifyMessage } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
+import { assert } from '../../../utils/assert.js'
 import { encode, type ChannelDataFrame, type SequencedEncoder } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { BroadcastKind, BroadcastSubscriptions } from '../../wire/payloads.js'
@@ -26,17 +28,12 @@ import { ClientChannel, reportChannelError, type ClientChannelOptions } from './
 
 type ClientBroadcastOptions = ClientChannelOptions & { lossy?: boolean }
 
-/** A publish of a lossy stream that may still wait to go, under its seq. */
-type NewestPublish = { seq: number; receipt: Promise<ChannelPublishAck> }
-
 class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
   /** The subscriptions this page asks the server for. */
   private readonly subscribed: BroadcastSubscriptions = { text: false, binary: false }
   /** A newer publish replaces this page's own that no wire has taken yet: see `sendPublish`. */
   private readonly lossy: boolean
-  /** This page's newest publish of each lossy stream, while it isn't settled. */
-  private readonly newestPublishes = new Map<string, NewestPublish>()
 
   constructor(options: ClientBroadcastOptions) {
     super(options)
@@ -92,7 +89,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     lossy = this.lossy,
   ): Promise<ChannelPublishAck> {
     if (this.stopped) throw new ChannelClosedError()
-    return this.sendPublish(encode.publishAckReq, stringify(data), stream, lossy)
+    return this.sendPublish(encode.publishAckReq, stringifyMessage(data, 'publish'), stream, lossy)
   }
 
   override messages(options?: { signal?: AbortSignal }) {
@@ -126,26 +123,14 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     lossy: boolean,
   ): Promise<ChannelPublishAck> {
     if (stream === null) return this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data)
-    if (!lossy) {
-      this.newestPublishes.delete(stream)
-      return this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data)
-    }
-    const newest = this.newestPublishes.get(stream)
-    if (newest !== undefined && this.connection.replaceWaiting(this, newest.seq, encodeFrame, data)) {
-      return newest.receipt
-    }
-    let seq = 0
-    const receipt = this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data, (queued) => (seq = queued))
-    const publish = { seq, receipt }
-    this.newestPublishes.set(stream, publish)
-    void this.forgetOnceSettled(stream, publish)
-    return receipt
-  }
-
-  /** A settled publish has nothing left to replace; a newer one may have taken its stream by then. */
-  private async forgetOnceSettled(lossyStream: string, publish: NewestPublish): Promise<void> {
-    await Promise.allSettled([publish.receipt])
-    if (this.newestPublishes.get(lossyStream) === publish) this.newestPublishes.delete(lossyStream)
+    if (!lossy) return this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data, { stream })
+    const replaced = this.connection.replaceWaiting(this, stream, encodeFrame, data)
+    if (replaced === null) return this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data, { stream, lossy })
+    // Both get the receipt of the publish whose place it took, which still waits for its answer: the close waits for
+    // that answer through the first one.
+    const waiting = this.pendingAcks.get(replaced.seq)
+    assert(waiting)
+    return waiting.promise
   }
 
   subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
@@ -156,7 +141,6 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     super._end(err)
     this.subscribers.text.clear()
     this.subscribers.binary.clear()
-    this.newestPublishes.clear()
   }
 
   /** The first listener of a kind subscribes the wire, and the last one's removal unsubscribes it. */
@@ -176,7 +160,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   private sendReplyData(data: unknown): void {
-    this.sendCredit.countSent(this.connection.sendSequenced(this, 'data', encode.text, stringify(data)))
+    this.sendCredit.count(this.connection.sendSequenced(this, 'data', encode.text, stringify(data)))
   }
 
   protected override dispatchDataFrame(frame: ChannelDataFrame): void {

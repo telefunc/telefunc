@@ -24,6 +24,8 @@ export const CHANNEL_PUMP_TAG_DATA = 0x00
 export const CHANNEL_PUMP_TAG_ERROR = 0x01
 /** The producer's end, before its close: a stream whose channel closes without it was cut short. */
 export const CHANNEL_PUMP_TAG_END = 0x02
+/** A chunk's part that more of it follows: the reader joins the parts up to the chunk's last, its `TAG_DATA`. */
+export const CHANNEL_PUMP_TAG_PART = 0x03
 
 // ===== Streaming error frames =====
 
@@ -126,7 +128,7 @@ export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
 
 // ===== SSE -> WS upgrade =====
 
-/** Batch mode: the barrier's wait for an outbox drain, before it flushes it or, with a POST out, defers the upgrade. */
+/** Batch mode: the barrier's wait for the POST out; one still out then is an upload, and the upgrade waits for the drain. */
 export const UPGRADE_DRAIN_TIMEOUT_MS = 2_000
 
 /** Post-flip wait: FIN on the old wire from the flip or its last delivery if later, RECONCILED on the new one. */
@@ -241,6 +243,9 @@ export const WIRE_ANNOUNCED_WAIT_MARGIN = 2
 export const WIRE_PIECE_RATE_WINDOW_MS = 60_000
 /** A receiver sends at most one PIECES_ACK this often, covering every frame it took since the last. */
 export const WIRE_PIECES_ACK_GAP_MS = 50
+/** A page acknowledges what it took once this much waits for a frame to say it: the server keeps each wire's copies
+ *  `WIRE_SEND_AHEAD_MIN_BYTES` ahead of what the page said, and room for a piece past what arrives meanwhile. */
+export const WIRE_UNREPORTED_MAX_BYTES = 32 * 1024
 /** The same where its peer holds data back by what it acknowledges (see `flowControl/client/ClientHeadroom.ts`). */
 export const WIRE_SEND_ACK_GAP_MS = 10
 /** Where its peer holds data back, a receiver acks data this soon once `WIRE_SEND_ACK_MIN_BYTES` wait, not 16 KiB. */
@@ -262,7 +267,7 @@ export const PUBLISH_HOLD_BYTES = 2 * 1024 * 1024
  *  send holds one, so only sends nobody awaits reach it. */
 export const CHANNEL_HOLD_MAX_BYTES = 320 * 1024 * 1024
 /** A stream's chunk larger than this goes in parts, each a message under every channel's frame limit (32 MiB on
- *  Cloudflare) and under the smallest `maxMemory`. */
+ *  Cloudflare) and under the smallest `maxMemory`; its reader gets the chunk whole. */
 export const STREAM_CHUNK_PART_BYTES = 1024 * 1024
 
 // Client-side channel reconnect defaults
@@ -321,10 +326,6 @@ export const CREDIT_WINDOW_INITIAL_BYTES_BATCH = 8 * 1024 * 1024
 /** Hard cap on the adaptive credit window — bounds per-channel buffering worst case.
  *  Covers ~5 Gbit/s × 100 ms RTT or ~500 Mbit/s × 1 s RTT. */
 export const CREDIT_WINDOW_MAX_BYTES = 64 * 1024 * 1024
-
-/** A server channel's sends outrun its page once, each time the page takes some for this long, more is ahead of it than
- *  when that began, and more than the page takes in this long: a few round trips of Slow 3G's 400 ms. */
-export const SENDS_OUTRUN_MS = 1_000
 
 /** The most a batch POST is sized to carry (see `SSE_POST_TARGET_MS`). */
 export const SSE_POST_MAX_BYTES = CREDIT_WINDOW_MAX_BYTES / 2

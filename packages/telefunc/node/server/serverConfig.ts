@@ -37,6 +37,7 @@ import {
   CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
+  CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   CHANNEL_RECONNECT_TIMEOUT_MIN_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
   CREDIT_WINDOW_INITIAL_BYTES,
@@ -353,32 +354,6 @@ function getServerConfig(): ConfigResolved {
   }
 }
 
-/** The user's settings as plain data, for the production manifest. (`extensions` and `broadcast` are runtime objects; `root` and `telefuncFiles` are paths on the build machine.) */
-function getManifestConfig(): Record<string, unknown> {
-  const { extensions, broadcast, root, telefuncFiles, ...manifestConfig } = configState
-  return manifestConfig
-}
-
-/** The app's server code wins: the manifest fills only the settings it leaves unset, whichever of the two runs first. */
-function applyManifestConfig(manifestConfig: Record<string, unknown>): void {
-  globalObject.manifestConfig = manifestConfig
-  fillFromManifest()
-}
-
-function fillFromManifest(): void {
-  for (const [prop, val] of Object.entries(globalObject.manifestConfig)) {
-    applyUserConfig(prop, fillUnset(configState[prop as keyof ConfigUser], val))
-  }
-}
-
-function fillUnset(current: unknown, val: unknown): unknown {
-  if (current === undefined) return val
-  if (!isPlainObject(val) || !isPlainObject(current)) return current
-  const filled = { ...current }
-  for (const [key, valNested] of Object.entries(val)) filled[key] = fillUnset(current[key], valNested)
-  return filled
-}
-
 function resolveChannelConfig(channel: ChannelConfigUser): ChannelConfigResolved {
   const reconnectTimeout = channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS
   return {
@@ -412,6 +387,32 @@ function defaultMaxMemory(): number {
 function getChannelConfig(): ChannelConfigResolved {
   globalObject.channelConfigInUse = true
   return resolveChannelConfig(configState.channel)
+}
+
+/** The user's settings as plain data, for the production manifest. (`extensions` and `broadcast` are runtime objects; `root` and `telefuncFiles` are paths on the build machine.) */
+function getManifestConfig(): Record<string, unknown> {
+  const { extensions, broadcast, root, telefuncFiles, ...manifestConfig } = configState
+  return manifestConfig
+}
+
+/** The app's server code wins: the manifest fills only the settings it leaves unset, whichever of the two runs first. */
+function applyManifestConfig(manifestConfig: Record<string, unknown>): void {
+  globalObject.manifestConfig = manifestConfig
+  fillFromManifest()
+}
+
+function fillFromManifest(): void {
+  for (const [prop, val] of Object.entries(globalObject.manifestConfig)) {
+    applyUserConfig(prop, fillUnset(configState[prop as keyof ConfigUser], val))
+  }
+}
+
+function fillUnset(current: unknown, val: unknown): unknown {
+  if (current === undefined) return val
+  if (!isPlainObject(val) || !isPlainObject(current)) return current
+  const filled = { ...current }
+  for (const [key, valNested] of Object.entries(val)) filled[key] = fillUnset(current[key], valNested)
+  return filled
 }
 
 /** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
@@ -566,7 +567,7 @@ function applyChannelConfig(val: unknown): void {
         assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
         assertUsage(
           value >= CHANNEL_RECONNECT_TIMEOUT_MIN_MS,
-          `\`${configPath}\` should be at least ${CHANNEL_RECONNECT_TIMEOUT_MIN_MS}: in less, no client can reconnect`,
+          `\`${configPath}\` should be at least ${CHANNEL_RECONNECT_TIMEOUT_MIN_MS}: a client that lost its connection retries after ${CHANNEL_RECONNECT_INITIAL_DELAY_MS} ms, so in less its channels close before it is back`,
         )
         next[key] = value
         break

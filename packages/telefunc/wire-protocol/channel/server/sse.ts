@@ -25,10 +25,9 @@ import { getChannelMux } from './ChannelMux.js'
 import type { ChannelMux, ReconcileOutcome, ServerTransport } from './ChannelMux.js'
 import { encode } from '../../wire/frame.js'
 import { TAG, passesData } from '../../wire/tags.js'
-import { DrainRate } from '../../flowControl/DrainRate.js'
 import {
   countWaitingPublishes,
-  droppingFromPublish,
+  droppingFrom,
   droppingPublishes,
   overtakes,
   type WireQueue,
@@ -73,13 +72,11 @@ class EventStream implements WireQueue {
   private waitingBytes = 0
   /** The frame whose event is going to the stream, and how far it went. */
   private current: { frame: Uint8Array<ArrayBuffer>; offset: number } | null = null
-  /** The newest publish's head that left: a body at the front of `waiting` names no channel, only its head does. */
+  /** The newest event started in order where it is a publish's head, whose body comes next in order: a body at the
+   *  front of `waiting` names no channel, only its head does. */
   private headStarted: Uint8Array<ArrayBuffer> | null = null
   /** Whether the stream asks for more. */
   private takes: boolean
-  /** The rate the page takes what waits, and when it last took some; null while nothing waits. */
-  private readonly drain = new DrainRate()
-  private tookAt: number | null = null
 
   constructor({ useNodeStream, onCancel }: EventStreamOptions) {
     // A Web stream asks from inside `enqueue`: an ask waits, so that no push runs inside another.
@@ -110,11 +107,14 @@ class EventStream implements WireQueue {
       this.waitingBytes += eventBytes(frame)
       return
     }
-    if (atOnce || (this.takes && this.current === null && this.waiting.length === 0)) {
+    if (atOnce) {
       this.startEvent(frame)
       return
     }
-    this.tookAt ??= performance.now()
+    if (this.takes && this.current === null && this.waiting.length === 0) {
+      this.startInOrder(frame)
+      return
+    }
     this.waiting.push(frame)
     this.waitingBytes += eventBytes(frame)
   }
@@ -132,26 +132,25 @@ class EventStream implements WireQueue {
     this.dropWaiting(droppingPublishes(ix, seqs))
   }
 
-  dropWaitingFromPublish(ix: number): void {
-    this.dropWaiting(droppingFromPublish(ix))
+  dropWaitingFrom(ix: number, from: 'publish' | 'start'): void {
+    this.dropWaiting(droppingFrom(ix, from))
   }
 
+  /** `drops` is asked in the order the stream takes the frames: what passes goes first. */
   private dropWaiting(drops: (frame: Uint8Array) => boolean): void {
-    this.waiting.remove((frame) => {
+    const goes = (frame: Uint8Array<ArrayBuffer>) => {
       if (!drops(frame)) return false
       this.waitingBytes -= eventBytes(frame)
       return true
-    })
+    }
+    this.passing.remove(goes)
+    this.waiting.remove(goes)
   }
 
-  drainRate(): number {
-    return this.drain.rate
-  }
-
-  /** Past a wire only lost, what waits is dropped: the page's reconnect gets it from its channels' replay, and it could
-   *  wait here for as long as the socket stays open taking nothing. */
-  close({ permanent }: { permanent: boolean }): void {
-    while (permanent && (this.current !== null || this.waiting.length > 0)) {
+  /** What waits goes only to a page that still reads: past a wire only lost, the page's reconnect gets it from its
+   *  channels' replay, and it could wait here for as long as the socket stays open taking nothing. */
+  close({ flush }: { flush: boolean }): void {
+    while (flush && (this.current !== null || this.waiting.length > 0)) {
       if (this.current !== null) this.pushChunks()
       else this.startEvent(this.waiting.shift()!)
     }
@@ -165,47 +164,44 @@ class EventStream implements WireQueue {
   /** Hands the stream the data that waits, as far as it asks. */
   private handWaiting(): void {
     this.takes = true
-    let bytes = this.current === null ? 0 : this.pushChunks()
+    if (this.current !== null) this.pushChunks()
     while (this.takes && this.waiting.length > 0) {
       const frame = this.waiting.shift()!
       this.waitingBytes -= eventBytes(frame)
-      bytes += this.startEvent(frame)
+      this.startInOrder(frame)
     }
-    if (this.tookAt === null) return
-    const now = performance.now()
-    this.drain.spanned((bytes * 3) / 4, now - this.tookAt)
-    this.tookAt = this.current !== null || this.waiting.length > 0 ? now : null
   }
 
-  /** Starts `frame`'s event and returns the bytes that went. */
-  private startEvent(frame: Uint8Array<ArrayBuffer>): number {
-    if (frame[0] === TAG.PUBLISH_TO) this.headStarted = frame
+  /** Starts the event of `frame`, next in the order data keeps. A head names its channel only until its body's event
+   *  starts: nothing passes an event once it started. */
+  private startInOrder(frame: Uint8Array<ArrayBuffer>): void {
+    this.headStarted = frame[0] === TAG.PUBLISH_TO ? frame : null
+    this.startEvent(frame)
+  }
+
+  private startEvent(frame: Uint8Array<ArrayBuffer>): void {
     this.current = { frame, offset: 0 }
-    return this.pushChunks()
+    this.pushChunks()
   }
 
-  /** Pushes the current event's next chunks, at least one, as far as the stream asks, and returns their bytes. What passes
-   *  goes as the event ends. */
-  private pushChunks(): number {
+  /** Pushes the current event's next chunks, at least one, as far as the stream asks. What passes goes as the event
+   *  ends. */
+  private pushChunks(): void {
     const current = this.current!
     const { frame } = current
-    let bytes = 0
     do {
       const start = current.offset
       const end = Math.min(frame.byteLength, start + SSE_EVENT_SLICE_BYTES)
-      const chunk = encodeChunk(frame, start, end)
-      this.takes = this.stream.push(chunk)
+      this.takes = this.stream.push(encodeChunk(frame, start, end))
       current.offset = end
-      bytes += chunk.byteLength
     } while (this.takes && current.offset < frame.byteLength)
-    if (current.offset < frame.byteLength) return bytes
+    if (current.offset < frame.byteLength) return
     this.current = null
     while (this.passing.length > 0) {
       const passing = this.passing.shift()!
       this.waitingBytes -= eventBytes(passing)
       this.takes = this.stream.push(encodeChunk(passing, 0, passing.byteLength))
     }
-    return bytes
   }
 }
 
@@ -371,7 +367,7 @@ class SseServerTransport {
   private handleClosePost(connId: string): SseChannelHttpResponse {
     const wire = this.mux.getWireByConnId<SseWire>(connId)
     if (wire) {
-      this.closeWire(wire, { permanent: true })
+      this.closeWire(wire, { permanent: true, pageLeft: true })
       return okResponse()
     }
     const sessionId = this.closedWires.get(connId)?.sessionId
@@ -396,7 +392,8 @@ class SseServerTransport {
     } finally {
       wire.pendingDispatches.delete(drain)
     }
-    return okResponse()
+    // Frames after a close don't run: refused, as a POST for a wire closed before it is, so the page reconnects.
+    return wire.closed ? badRequest() : okResponse()
   }
 
   /** Stream-response POST lifecycle: consume the initial reconcile batch; once its RECONCILE is answered, drain the
@@ -523,14 +520,14 @@ class SseServerTransport {
     })
   }
 
-  private closeWire(wire: SseWire, { permanent }: { permanent: boolean }): void {
+  private closeWire(wire: SseWire, { permanent, pageLeft = false }: { permanent: boolean; pageLeft?: boolean }): void {
     if (wire.closed) return
     wire.closed = true
     this.rememberClosed(wire)
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed wire and bails.
     wire.resolveReady()
     this.mux.onWireClosed(wire, { permanent })
-    wire.events.close({ permanent })
+    wire.events.close({ flush: permanent && !pageLeft })
   }
 
   private terminateWire(wire: SseWire): void {

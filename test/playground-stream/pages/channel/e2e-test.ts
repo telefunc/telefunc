@@ -4,6 +4,7 @@ import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillou
 import type { Request, Response, WebSocket, WebSocketRoute } from 'playwright-chromium'
 import {
   navigate,
+  withPacedLink,
   getResult,
   getCleanupState,
   restartProxy,
@@ -11,7 +12,7 @@ import {
   startProxy,
   countConnections,
 } from '../../e2e-utils'
-import { newCDPSession, sendsOutrunWarning, sendRefusedWarning, withNetworkConditions } from '../../../utils'
+import { newCDPSession, sendRefusedWarning, withNetworkConditions } from '../../../utils'
 
 type ChannelState = {
   heldBytes: number | null
@@ -73,6 +74,7 @@ type ChannelState = {
   shieldServerAckValid: { ok: boolean; value?: string; error?: string } | null
   shieldServerAckInvalid: { ok: boolean; value?: string; error?: string } | null
   selfRemovingListener: { pageSeen: string[]; serverSeen: string[] } | null
+  sendOrder: { id: string; sent: boolean } | null
   unserializableAnswer: { channelId: string; pageSend: string; pageFollowUp: string; isClosed: boolean } | null
   oversize: {
     channelId: string
@@ -906,6 +908,53 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
+  // The test holds what goes to the server on the page's channels' wire, SSE's POSTs and the WebSocket's messages, while
+  // the page gets two channels: the RECONCILE naming the first can't be answered before the page sent on both.
+  test("channel: a page's sends on a channel it just got and on an older one reach the server in the order it made them", async () => {
+    const context = await page.context().browser()!.newContext()
+    const routed = await context.newPage()
+    try {
+      let holding = false
+      const held: (() => void)[] = []
+      const hold = (go: () => void) => (holding ? held.push(go) : go())
+      await routed.route(/\/_telefunc/, (route) => {
+        // The telefunction calls go through.
+        if (route.request().headers()['x-telefunc-request'] === 'sse') hold(() => void route.continue())
+        else void route.continue()
+      })
+      await routed.routeWebSocket(/\/_telefunc/, (ws) => {
+        const server = ws.connectToServer()
+        ws.onMessage((message) => hold(() => server.send(message)))
+        server.onMessage((message) => ws.send(message))
+      })
+      const sendOrder = async () =>
+        (JSON.parse((await routed.textContent('#channel-state'))!) as ChannelState).sendOrder
+      await routed.goto(`${getServerUrl()}/channel`)
+      // A new context loads every asset cold: under load it hydrates later than `navigate` waits.
+      await routed.locator('#hydrated').waitFor({ state: 'attached' })
+      await routed.click('#channel-test-send-order')
+      await autoRetry(async () => {
+        expect(await sendOrder()).not.toBe(null)
+      })
+      holding = true
+      await routed.evaluate(() => (window as any).sendOrderGo())
+      await autoRetry(async () => {
+        expect((await sendOrder())!.sent).toBe(true)
+      })
+      holding = false
+      for (const go of held.splice(0)) go()
+      const { id } = (await sendOrder())!
+      let received = ''
+      await autoRetry(async () => {
+        received = (await getCleanupState())[`sendOrder_${id}`] ?? ''
+        expect(received.split(' ').length).toBe(2)
+      })
+      expect(received).toBe('c1 a2')
+    } finally {
+      await context.close()
+    }
+  })
+
   test("channel: a listener that stops listening itself doesn't make the next one miss a message, on either end", async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-self-removing-listener')
@@ -1012,6 +1061,99 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
+  /** 60 lossy sends, each its ordinal, 1000 / 30 ms apart, with the plain ones `plain` puts after the ordinal it is
+   *  given, then a plain `'done'`. */
+  function lossyStream(plain: (i: number) => string[] = () => []): string[] {
+    return [...Array.from({ length: 60 }, (_, i) => [String(i), ...plain(i)]).flat(), 'done']
+  }
+
+  /** What `lossy` promises on a link that keeps up. A busy machine may still delay the confirmations past the 600 ms a
+   *  sender waits for one (`LOSSY_CONFIRM_SLACK_MS` and the wire's wait, `WireSender.behindAfter` and the transports'
+   *  `behindAfter` on the page), and then skips. So: every plain send arrives once and in order, the lossy ones that arrive
+   *  keep their order, the newest arrives, and so do 15: nothing is skipped before the stream's first 600 ms (18 sends
+   *  at 30 a second), less 3 for a confirmation of what went before the stream that may still be on its way. */
+  function expectLossyStream(read: string[], sent: string[]) {
+    const isLossy = (value: string) => /^\d+$/.test(value)
+    expect(read.filter((value) => !isLossy(value))).deep.equal(sent.filter((value) => !isLossy(value)))
+    const order = read.map((value) => sent.indexOf(value))
+    expect(order).not.include(-1)
+    expect(order).deep.equal([...new Set(order)].sort((a, b) => a - b))
+    const lossy = read.filter(isLossy)
+    expect(lossy.at(-1)).toBe(sent.filter(isLossy).at(-1))
+    expect(lossy.length).greaterThanOrEqual(15)
+  }
+
+  test('channel: lossy sends on a channel keep only the newest before the telefunction returns, and their order, the newest and the plain ones on a link that keeps up', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-lossy-sends')
+    let lossySends: string[] | null = null
+    await autoRetry(
+      async () => {
+        lossySends = (await getResult<{ lossySends: string[] | null }>('#channel-state')).lossySends
+        expect(lossySends?.at(-1)).toBe('done')
+      },
+      { timeout: 20_000 },
+    )
+    // Before the telefunction returns, nothing is sent, so which go doesn't depend on the link.
+    expect(lossySends!.slice(0, 3)).deep.equal(['L3', 'R1', 'L4'])
+    expectLossyStream(lossySends!.slice(3), lossyStream())
+  })
+
+  /** What the server read of the page's lossy-sends channel, once the page opened it. */
+  async function readLossyFromPage(): Promise<string[]> {
+    const { lossyFromPageChannelId } = await getResult<{ lossyFromPageChannelId: string | null }>('#channel-state')
+    expect(lossyFromPageChannelId).not.toBe(null)
+    return JSON.parse((await getCleanupState())[`lossyFromPage_${lossyFromPageChannelId}`] ?? '[]')
+  }
+
+  test('channel: lossy sends from the page keep their order around plain ones, and the newest arrives, on a link that keeps up', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-lossy-from-page')
+    let read: string[] = []
+    await autoRetry(
+      async () => {
+        read = await readLossyFromPage()
+        expect(read.at(-1)).toBe('done')
+      },
+      { timeout: 20_000 },
+    )
+    expectLossyStream(
+      read,
+      lossyStream((i) => (i % 20 === 19 ? [`R${i}`] : [])),
+    )
+  })
+
+  if (!isDev) {
+    test('channel: lossy sends from the page while it is offline arrive after the reconnect, the plain ones in order and the newest last', async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await page.click('#channel-test-lossy-from-page-open')
+      await autoRetry(async () => expect(await readLossyFromPage()).deep.equal([]))
+
+      if (inDocker) stopProxy()
+      else await page.context().setOffline(true)
+      await page.waitForTimeout(3000)
+      await page.click('#channel-test-lossy-from-page-send')
+      const reconnectSignalPromise = waitForTransportReconnectSignal()
+      if (inDocker) startProxy()
+      else await page.context().setOffline(false)
+      await reconnectSignalPromise
+
+      let read: string[] = []
+      await autoRetry(async () => {
+        read = await readLossyFromPage()
+        expect(read.at(-1)).toBe('L4')
+      })
+      // A page that noticed it was offline replaced L1 with L2 and L3 with L4; R1 kept L2 from passing it.
+      console.log(`[lossy-from-page] the server read ${JSON.stringify(read)}`)
+      const sent = ['L1', 'L2', 'R1', 'L3', 'L4']
+      expect(read.filter((value) => value.startsWith('R'))).deep.equal(['R1'])
+      // Each once, in the order sent.
+      const order = read.map((value) => sent.indexOf(value))
+      expect(order).not.include(-1)
+      expect(order).deep.equal([...new Set(order)].sort((a, b) => a - b))
+    })
+  }
+
   // 100 messages of 4 KiB in one go, each way, on a link that keeps up.
   test('channel: a lossy broadcast on a link that keeps up delivers every message of a burst, from the server and from the page', async () => {
     await navigate(`${getServerUrl()}/channel`)
@@ -1042,38 +1184,44 @@ function testChannel(isDev: boolean, inDocker = false) {
     await cdp.detach()
   })
 
-  // With two transports the page opens an SSE stream, then a WebSocket: wire-e2e-test.ts covers that lane.
-  if (channelTransports.length === 1) {
+  // With two transports the page opens an SSE stream, then a WebSocket: wire-e2e-test.ts covers that lane. Preview
+  // only, as `testSlowLink`: the page loads through a proxy in the test process.
+  if (!isDev && !inDocker && channelTransports.length === 1) {
     test('channel: a 1 MB message to the page, 8 s at 1 Mbit/s, arrives over the connection it left on', async () => {
-      await navigate(`${getServerUrl()}/channel`)
-      const connections = countConnections()
       // 1 Mbit/s each way.
-      await withNetworkConditions({ downloadThroughput: 125_000, uploadThroughput: 125_000 }, async () => {
-        await page.click('#channel-test-slow-link')
-        await autoRetry(
-          async () => {
-            expect((await getResult<ChannelState>('#channel-state')).slowLinkReceived).toBe(1_000_000)
-          },
-          { timeout: 40_000 },
-        )
-      })
-      expect(connections.stop()).toBe(1)
+      await withPacedLink(
+        { downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 },
+        async () => {
+          const connections = countConnections()
+          await page.click('#channel-test-slow-link')
+          await autoRetry(
+            async () => {
+              expect((await getResult<ChannelState>('#channel-state')).slowLinkReceived).toBe(1_000_000)
+            },
+            { timeout: 40_000 },
+          )
+          expect(connections.stop()).toBe(1)
+        },
+      )
     })
   }
 
   // Over SSE, a channel's registration and the message the page queued with it go in one request.
-  if (channelTransports.length === 1 && channelTransport === 'sse') {
+  if (!isDev && !inDocker && channelTransports.length === 1 && channelTransport === 'sse') {
     test("channel: at 1 Mbit/s, a channel the page opens beside another's 4 MiB burst gets the message its server sends as it opens", async () => {
-      await navigate(`${getServerUrl()}/channel`)
-      await withNetworkConditions({ downloadThroughput: 125_000, uploadThroughput: 125_000 }, async () => {
-        await page.click('#channel-test-hello-beside-burst')
-        await autoRetry(
-          async () => {
-            expect((await getResult<ChannelState>('#channel-state')).helloBesideBurst).toBe(true)
-          },
-          { timeout: 50_000 },
-        )
-      })
+      // 1 Mbit/s each way.
+      await withPacedLink(
+        { downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 },
+        async () => {
+          await page.click('#channel-test-hello-beside-burst')
+          await autoRetry(
+            async () => {
+              expect((await getResult<ChannelState>('#channel-state')).helloBesideBurst).toBe(true)
+            },
+            { timeout: 50_000 },
+          )
+        },
+      )
     })
   }
 
@@ -1116,10 +1264,9 @@ function testChannel(isDev: boolean, inDocker = false) {
       },
       { timeout: 60_000 },
     )
-    expect(() => expectLog(sendsOutrunWarning)).throw()
   })
 
-  test('channel: sends nobody awaits that keep outrunning a 1 MB/s page warn once, then are refused at maxMemory with the channel open', async () => {
+  test('channel: sends nobody awaits that keep outrunning a 1 MB/s page are refused at maxMemory with the channel open', async () => {
     await navigate(`${getServerUrl()}/channel`)
     // 1 MiB every 50 ms to a page that takes 1 MB/s.
     await withNetworkConditions({ downloadThroughput: 1_000_000, uploadThroughput: -1 }, async () => {
@@ -1132,7 +1279,6 @@ function testChannel(isDev: boolean, inDocker = false) {
         { timeout: 60_000 },
       )
     })
-    expectLog(sendsOutrunWarning)
     expectLog(sendRefusedWarning)
     const paced = (await getResult<ChannelState>('#channel-state')).paced!
     expect(paced.ended).toBe(false)
@@ -1163,7 +1309,6 @@ function testChannel(isDev: boolean, inDocker = false) {
       },
       { timeout: 30_000 },
     )
-    expect(() => expectLog(sendsOutrunWarning)).throw()
   })
 
   test('channel: 6,000 text messages of 16 KiB the server sends in one loop without awaiting all reach a page that reads', async () => {
@@ -1192,7 +1337,6 @@ function testChannel(isDev: boolean, inDocker = false) {
       },
       { timeout: 30_000 },
     )
-    expect(() => expectLog(sendsOutrunWarning)).throw()
   })
 
   test('channel: of 18,000 acknowledgement requests of 64 KiB the server sends in one loop, those past maxMemory are refused and the channel stays open', async () => {

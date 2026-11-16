@@ -2,6 +2,7 @@ export { ReplayBuffer }
 
 import { replayKindOf, type ReplayKind } from '../../wire/tags.js'
 import { assert } from '../../../utils/assert.js'
+import { SeqQueue } from '../SeqQueue.js'
 
 /** Sent sequenced frames till their peer acks them, in queues by tag; a data queue evicts its oldest past its budget. */
 class ReplayBuffer {
@@ -100,10 +101,7 @@ function mergeBySeq(a: Run, b: Run): Run {
 /** One kind's frames, oldest first, within a byte budget; `ReplayBuffer` keeps one per replay kind, made at its first
  *  frame. */
 class ReplayQueue {
-  // Seqs and frames in parallel arrays, so a scan by seq reads only numbers.
-  private seqs: number[] = []
-  private frames: Uint8Array<ArrayBuffer>[] = []
-  private head = 0
+  private readonly frames = new SeqQueue<Uint8Array<ArrayBuffer>>()
   private totalBytes = 0
   private readonly maxBytes: number
 
@@ -112,69 +110,38 @@ class ReplayQueue {
   }
 
   get length(): number {
-    return this.frames.length - this.head
+    return this.frames.length
   }
 
-  /** Stores an encoded frame; none larger than the budget. */
+  /** Stores an encoded frame and evicts the oldest while over the budget; none larger than the budget. */
   push(seq: number, frame: Uint8Array<ArrayBuffer>): void {
     const bytes = frame.byteLength
     if (bytes > this.maxBytes) return
-    this.seqs.push(seq)
-    this.frames.push(frame)
+    this.frames.push(seq, frame)
     this.totalBytes += bytes
-    this.trim()
+    let evicted = 0
+    while (this.totalBytes > this.maxBytes) this.totalBytes -= this.frames.at(evicted++).byteLength
+    this.frames.dropOldest(evicted)
   }
 
   acknowledge(lastSeq: number): void {
-    while (this.head < this.frames.length && this.seqs[this.head]! <= lastSeq) this.dropHead()
-    this.compact()
+    const acknowledged = this.frames.indexAfter(lastSeq)
+    for (let i = 0; i < acknowledged; i++) this.totalBytes -= this.frames.at(i).byteLength
+    this.frames.dropOldest(acknowledged)
   }
 
   /** The stored frames with afterSeq < seq <= throughSeq. */
   getAfter(afterSeq: number, throughSeq: number): Run {
-    const len = this.frames.length
-    let lo = this.head
-    while (lo < len && this.seqs[lo]! <= afterSeq) lo++
-    let hi = lo
-    while (hi < len && this.seqs[hi]! <= throughSeq) hi++
-    return { seqs: this.seqs.slice(lo, hi), frames: this.frames.slice(lo, hi) }
+    const run: Run = { seqs: [], frames: [] }
+    for (let i = this.frames.indexAfter(afterSeq); i < this.frames.length && this.frames.seqAt(i) <= throughSeq; i++) {
+      run.seqs.push(this.frames.seqAt(i))
+      run.frames.push(this.frames.at(i))
+    }
+    return run
   }
 
   dispose(): void {
-    this.seqs.length = 0
-    this.frames.length = 0
-    this.head = 0
+    this.frames.clear()
     this.totalBytes = 0
-  }
-
-  // ── Private ──
-
-  /** Evicts the oldest entries while over the byte budget. */
-  private trim(): void {
-    while (this.head < this.frames.length && this.totalBytes > this.maxBytes) this.dropHead()
-    this.compact()
-  }
-
-  /** Drops the oldest entry, leaving its slot for `compact`. */
-  private dropHead(): void {
-    this.totalBytes -= this.frames[this.head]!.byteLength
-    this.head++
-  }
-
-  /** Drops the dead slots ahead of `head` once they are as many as the live ones, which keeps each drop amortised
-   *  O(1). */
-  private compact(): void {
-    if (this.head >= this.frames.length) {
-      this.seqs.length = 0
-      this.frames.length = 0
-      this.head = 0
-      this.totalBytes = 0
-      return
-    }
-    if (this.head > 0 && this.head >= this.frames.length - this.head) {
-      this.seqs = this.seqs.slice(this.head)
-      this.frames = this.frames.slice(this.head)
-      this.head = 0
-    }
   }
 }

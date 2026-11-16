@@ -262,7 +262,8 @@ class FrameDemuxer {
    *  drops its buffered/future frames, resolves any pending waiter with null. */
   cancelIndex(index: number): void {
     if (this.cancelledIndices.has(index)) return
-    // Drop buffered frames for this index; a finished one is not counted as cancelled.
+    // Drop buffered frames for this index. A finished one isn't counted as cancelled too: counted twice, it would cancel
+    // the body under a stream still being read.
     this.pendingFrames.delete(index)
     if (this.doneIndices.has(index)) return
     this.cancelledIndices.add(index)
@@ -334,55 +335,52 @@ class FrameDemuxer {
     try {
       while (this.indexWaiters.size > 0) {
         const frame = await this.streamReader.readNextFrame()
-        if (frame === null) {
-          this.ended = true
-          for (const [, w] of this.indexWaiters) w.resolve(null)
-          this.indexWaiters.clear()
-          return
-        }
-
-        // Drop frames for cancelled indices
-        if (this.cancelledIndices.has(frame.index)) continue
-
-        const waiter = this.indexWaiters.get(frame.index)
-
-        // Empty payload = per-index "done" signal
-        if (frame.payload.length === 0) {
-          this.doneIndices.add(frame.index)
-          this.cancelUpstreamIfAllTerminal()
-          if (waiter) {
-            this.indexWaiters.delete(frame.index)
-            waiter.resolve(null)
-          }
-          continue
-        }
-
-        // Direct dispatch — no buffering, no delay
-        if (waiter) {
-          this.indexWaiters.delete(frame.index)
-          waiter.resolve(frame.payload)
-          continue
-        }
-
-        // No consumer waiting — buffer it
-        let pending = this.pendingFrames.get(frame.index)
-        if (!pending) this.pendingFrames.set(frame.index, (pending = new Fifo()))
-        pending.push(frame.payload)
-        const newBytes = (this.pendingBytes.get(frame.index) ?? 0) + frame.payload.byteLength
-        this.pendingBytes.set(frame.index, newBytes)
-
-        // Per-index backpressure: stop reading when this index's buffer exceeds 1 MB.
-        // The loop restarts when the consumer drains via readNextChunkForIndex().
-        if (this.canStopReading && newBytes >= FrameDemuxer.MAX_BUFFER_BYTES_PER_INDEX) {
-          this.warnIfStillStalledLater()
-          break
-        }
+        if (frame === null) return this.endAll()
+        if (this.dispatch(frame.index, frame.payload)) return this.warnIfStillStalledLater()
       }
     } catch (err) {
       this.failWaiters(err)
     } finally {
       this.reading = false
     }
+  }
+
+  /** The response ended: every waiting index ends too. */
+  private endAll(): void {
+    this.ended = true
+    for (const [, w] of this.indexWaiters) w.resolve(null)
+    this.indexWaiters.clear()
+  }
+
+  /** Hands a frame to its index's waiter or buffer; returns whether reading stops till that index's consumer drains. */
+  private dispatch(index: number, payload: Uint8Array<ArrayBuffer>): boolean {
+    // Drop frames for cancelled indices
+    if (this.cancelledIndices.has(index)) return false
+    const waiter = this.indexWaiters.get(index)
+    // Empty payload = per-index "done" signal
+    if (payload.length === 0) {
+      this.doneIndices.add(index)
+      this.cancelUpstreamIfAllTerminal()
+      if (waiter) {
+        this.indexWaiters.delete(index)
+        waiter.resolve(null)
+      }
+      return false
+    }
+    // Direct dispatch — no buffering, no delay
+    if (waiter) {
+      this.indexWaiters.delete(index)
+      waiter.resolve(payload)
+      return false
+    }
+    // No consumer waiting — buffer it
+    let pending = this.pendingFrames.get(index)
+    if (!pending) this.pendingFrames.set(index, (pending = new Fifo()))
+    pending.push(payload)
+    const newBytes = (this.pendingBytes.get(index) ?? 0) + payload.byteLength
+    this.pendingBytes.set(index, newBytes)
+    // Per-index backpressure: stop reading when this index's buffer exceeds 1 MB.
+    return this.canStopReading && newBytes >= FrameDemuxer.MAX_BUFFER_BYTES_PER_INDEX
   }
 
   private failWaiters(err: unknown): void {

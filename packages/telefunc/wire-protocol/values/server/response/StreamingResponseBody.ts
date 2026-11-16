@@ -1,7 +1,7 @@
 export { buildInlineResponseBody, encodeErrorPayload }
 
 import type { Readable } from 'node:stream'
-import type { StreamingProducer, StreamingValueServer } from '../../types.js'
+import type { StreamingValueServer } from '../../types.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { encodeU32, encodeIndexedFrame, textEncoder } from '../../../wire/envelope.js'
 import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../../constants.js'
@@ -22,8 +22,7 @@ import { Fifo } from '../../../../utils/Fifo.js'
 
 const EMPTY = new Uint8Array(0)
 
-type Entry = { producer: StreamingProducer; index: number }
-type Settled = { entry: Entry; result: IteratorResult<Uint8Array<ArrayBuffer>> } | { err: unknown }
+type Settled = { entry: StreamingValueServer; result: IteratorResult<Uint8Array<ArrayBuffer>> } | { err: unknown }
 
 /**
  * Stream the inline response body: framed metadata + multiplexed streaming values.
@@ -52,7 +51,7 @@ type Settled = { entry: Entry; result: IteratorResult<Uint8Array<ArrayBuffer>> }
  */
 function buildInlineResponseBody(runContext: {
   metadataSerialized: string
-  streamingValues: StreamingValueServer[]
+  producers: StreamingValueServer[]
   telefuncId: TelefuncId
   context: Context
   abortSignal: AbortSignal
@@ -63,7 +62,7 @@ function buildInlineResponseBody(runContext: {
 }): Readable | ReadableStream<Uint8Array<ArrayBuffer>> {
   const {
     metadataSerialized,
-    streamingValues,
+    producers,
     telefuncId,
     context,
     abortSignal,
@@ -72,11 +71,6 @@ function buildInlineResponseBody(runContext: {
     encodeFrame,
     useNodeStream,
   } = runContext
-
-  // Producers are constructed eagerly so the abort listener can cancel them
-  // even before the loop starts. Cancelling interrupts any suspended
-  // `reader.read()` inside a producer — `iter.return()` alone can't.
-  const producers = streamingValues.map((sv) => ({ producer: sv.createProducer(), index: sv.index }))
 
   let cancelled = false
   // What the merge loop takes next, in the order it settled. A `Promise.race()` per frame would leave a reaction on
@@ -93,8 +87,7 @@ function buildInlineResponseBody(runContext: {
     drainResolve = null
     r?.()
   }
-  // `producersStopped` is a private idempotency latch — calling `producer.cancel()`
-  // twice on the same producer is at best wasted work, at worst a double-free.
+  // Both the consumer leaving and a failed merge reach here: each producer is cancelled once.
   let producersStopped = false
   const cancelProducers = () => {
     if (producersStopped) return
@@ -109,21 +102,27 @@ function buildInlineResponseBody(runContext: {
     wakeMerge()
     cancelProducers()
   }
+  // Ends the merge after what settled before it, and stops the producers now: the page may not read the body again.
+  const onResponseAborted = (err: unknown) => {
+    settle({ err })
+    cancelProducers()
+  }
 
   const sink = useNodeStream
     ? createPushReadable(onConsumerGone, wakeDrain)
     : createPushReadableStream<Uint8Array<ArrayBuffer>>(onConsumerGone, wakeDrain)
 
+  // Once the producers stopped, what's left (a frame each that settled, the error) goes without waiting for the page.
   const emit = async (frame: Uint8Array<ArrayBuffer>): Promise<void> => {
     if (cancelled) return
-    if (!sink.push(frame)) await new Promise<void>((resolve) => (drainResolve = resolve))
+    if (!sink.push(frame) && !producersStopped) await new Promise<void>((resolve) => (drainResolve = resolve))
   }
 
   const settle = (item: Settled) => {
     settled.push(item)
     wakeMerge()
   }
-  const pullNext = async (entry: Entry) => {
+  const pullNext = async (entry: StreamingValueServer) => {
     try {
       settle({ entry, result: await entry.producer.chunks.next() })
     } catch (err) {
@@ -179,8 +178,7 @@ function buildInlineResponseBody(runContext: {
 
   async function runInlineResponse() {
     abortSignal.addEventListener('abort', onConsumerGone, { once: true })
-    // A response-wide abort takes its turn after what settled before it, and routes us into the catch below.
-    responseAbort.errorPromise.catch((err: unknown) => settle({ err }))
+    responseAbort.errorPromise.catch(onResponseAborted)
     try {
       // The telefunc context is restored around the whole merge loop, like the
       // channel pump (ChannelResponseBody.ts) does, so `getContext()` works

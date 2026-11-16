@@ -34,7 +34,7 @@ class GcRegistry {
 
   constructor(private readonly periodicScanMs = 5000) {
     this.finalReg = new FinalizationRegistry<Entry>((entry) => {
-      // Chromium may still run this once its page navigated away, when its timer calls reach the next page's timers.
+      // Chrome 158 runs it once an iframe navigated, if its parent kept the old realm: it cleared the new page's timer.
       if (typeof document === 'undefined' || document.defaultView !== null) this.fireCleanup(entry)
     })
   }

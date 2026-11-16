@@ -669,7 +669,7 @@ function Publish() {
           setResult(JSON.stringify({ answers: await stop() }))
         }}
       >
-        Listeners answer their own key
+        A listener answers its own key
       </button>
 
       <h2>Static Publish Receipts</h2>

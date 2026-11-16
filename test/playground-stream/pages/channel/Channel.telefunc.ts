@@ -27,6 +27,7 @@ export {
   onChannelShieldClient,
   onChannelShieldServerAck,
   onChannelSelfRemovingListener,
+  onChannelSendOrder,
   onChannelUnserializableAnswer,
   onChannelOversize,
   onChannelHeldBinary,
@@ -43,6 +44,8 @@ export {
   onChannelSlowUplink,
   onChannelPublishesBehind,
   onChannelLossyTicker,
+  onChannelLossySends,
+  onChannelLossyFromPage,
   onChannelAcksWaiting,
   onChannelsQueuedBeforeReturn,
   onChannelAcrossFlip,
@@ -245,9 +248,12 @@ async function onChannelAckListenerAbort() {
   return { channel: ch.client }
 }
 
+type HeldBytesState = { channel: { heldBytes: number } | undefined; lateAnswer: Promise<void> }
 /** The channel `onChannelHeldBytes` reads what it holds of, once a listener's late answer went. */
-let heldChannel: { heldBytes: number } | undefined
-let lateAnswer = Promise.resolve()
+const heldBytesState = ((globalThis as Record<symbol, unknown>)[Symbol.for('telefunc__heldBytesState')] ??= {
+  channel: undefined,
+  lateAnswer: Promise.resolve(),
+}) as HeldBytesState
 
 /** A listener's `Abort` ends the channel from inside the delivery of the message it got. */
 async function onChannelListenerAbortHolds() {
@@ -255,7 +261,7 @@ async function onChannelListenerAbortHolds() {
   ch.listen(() => {
     throw Abort('stop')
   })
-  heldChannel = ch as unknown as { heldBytes: number }
+  heldBytesState.channel = ch as unknown as { heldBytes: number }
   return { channel: ch.client }
 }
 
@@ -264,7 +270,7 @@ async function onChannelLateAnswerHolds() {
   const ch = new Channel<(msg: string) => string, never>()
   const closed = new Promise<void>((resolve) => ch.onClose(() => resolve()))
   let markAnswered!: () => void
-  lateAnswer = new Promise((resolve) => {
+  heldBytesState.lateAnswer = new Promise((resolve) => {
     markAnswered = resolve
   })
   ch.listen(async (msg) => {
@@ -273,13 +279,13 @@ async function onChannelLateAnswerHolds() {
     setTimeout(markAnswered)
     return msg
   })
-  heldChannel = ch as unknown as { heldBytes: number }
+  heldBytesState.channel = ch as unknown as { heldBytes: number }
   return { channel: ch.client }
 }
 
 async function onChannelHeldBytes() {
-  await lateAnswer
-  return heldChannel!.heldBytes
+  await heldBytesState.lateAnswer
+  return heldBytesState.channel!.heldBytes
 }
 
 async function onChannelAckListenerBug() {
@@ -656,6 +662,16 @@ async function onChannelSelfRemovingListener() {
   return { channel: ch.client, getServerSeen: async () => serverSeen }
 }
 
+/** The server adds what the page sends on it to `sendOrder_<id>`, in the order it gets it: a page opens several. */
+async function onChannelSendOrder(id: string) {
+  const ch = new Channel<(msg: string) => void, never>()
+  const key = `sendOrder_${id}`
+  ch.listen((msg) => {
+    cleanupState[key] = cleanupState[key] ? `${cleanupState[key]} ${msg}` : msg
+  })
+  return ch.client
+}
+
 /** Each end answers 'cyclic' with an object that can't be serialized. */
 async function onChannelUnserializableAnswer() {
   const ch = new Channel<(msg: string) => unknown, (msg: string) => unknown>()
@@ -770,7 +786,7 @@ async function onChannelBinaryBurst() {
       if (awaited) await ch.sendBinary(message).catch(refused)
       else void ch.sendBinary(message).catch(refused)
     }
-    while (!(await sendFitted(ch, 'end'))) await new Promise((resolve) => setTimeout(resolve, 100))
+    while (!ch.isClosed && !(await sendFitted(ch, 'end'))) await new Promise((resolve) => setTimeout(resolve, 100))
   })
   return { channel: ch.client, channelId: ch.id }
 }
@@ -809,7 +825,7 @@ async function onChannelPaced() {
 
 /**
  * At the page's message, sends that many text messages, each starting with its index, in one loop: of 16 KiB, without
- * awaiting them or awaiting each, or of 1 KiB with `{ ack: true }`, awaiting the acks together.
+ * awaiting them or awaiting each, or of 64 KiB with `{ ack: true }`, awaiting the acks together.
  * cleanupState keys:
  *   textBurst_<id>_error = why the first refused send was refused, if one was
  *   textBurst_<id>_acked = how many of the ack-requesting sends resolved
@@ -878,10 +894,11 @@ async function onChannelLinkShare() {
   return { download: download.client, ping: ping.client }
 }
 
-/** A broadcast that publishes `count` bodies of `bytes`, or closes, as a channel beside it asks, and answers its pings.
+/** A broadcast that publishes `count` bodies of `bytes`, closes or aborts, as a channel beside it asks, and answers its
+ *  pings.
  *  After `'away'`, the page's next publish drops its connections: one body follows on the cut wire, ahead of that
  *  publish's receipt, and 16 more while the page is away (it retries after 500 ms). `'last'` answers the ordinal of the
- *  newest `<ordinal>:…` text its server subscription got. */
+ *  newest `<ordinal>:…` text its server subscription got. `'past memory'` publishes three bodies, then one of 3 MiB. */
 async function onChannelPublishesBehind(
   bytes = 4 * 1024 * 1024,
   lossy?: boolean,
@@ -895,7 +912,10 @@ async function onChannelPublishesBehind(
   broadcast.subscribe((message) => {
     if (typeof message === 'string' && /^\d+:/.test(message)) lastOrdinal = message.slice(0, message.indexOf(':'))
   })
-  const control = new Channel<(msg: 'ping' | 'close' | 'away' | 'cut' | 'last' | number) => string, never>()
+  const control = new Channel<
+    (msg: 'ping' | 'close' | 'abort' | 'away' | 'cut' | 'last' | 'past memory' | number) => string,
+    never
+  >()
   control.listen(async (msg) => {
     if (msg === 'ping') return 'pong'
     if (msg === 'last') return lastOrdinal
@@ -904,6 +924,19 @@ async function onChannelPublishesBehind(
       return 'cut'
     }
     if (msg === 'close') return String(await broadcast.close({ timeout: 20_000 }))
+    if (msg === 'abort') {
+      // In the same turn, so the abort comes while all but the first still wait for the wire.
+      publish(3)
+      broadcast.abort()
+      return 'aborted'
+    }
+    if (msg === 'past memory') {
+      // In the same turn, so the three still wait for the wire where a server with a `maxMemory` under 3 MiB can't hold
+      // the fourth.
+      publish(3)
+      void broadcast.publishBinary(new Uint8Array(3 * 1024 * 1024))
+      return 'published'
+    }
     if (msg === 'away') {
       const stop = broadcast.subscribe(() => {
         stop()
@@ -938,15 +971,55 @@ async function onChannelLossyTicker(bytes: number, count: number, periodMs: numb
   return { broadcast, control: control.client }
 }
 
+/** A channel's lossy sends. Before it returns, three, a plain one and one more: the page gets the third, the plain one and
+ *  the last. Then, once the page asks, `count` more, 1000 / 30 ms apart, each its ordinal, then a plain `'done'`. */
+async function onChannelLossySends(count: number) {
+  const channel = new Channel<never, string>()
+  for (const value of ['L1', 'L2', 'L3']) void channel.send(value, { lossy: true })
+  void channel.send('R1')
+  void channel.send('L4', { lossy: true })
+  const sendAll = async () => {
+    for (let i = 0; i < count; i++) {
+      void channel.send(String(i), { lossy: true })
+      await new Promise((resolve) => setTimeout(resolve, 1000 / 30))
+    }
+    void channel.send('done')
+  }
+  const control = new Channel<(msg: 'start') => string, never>()
+  control.listen(() => {
+    void sendAll()
+    return 'started'
+  })
+  return { channel: channel.client, control: control.client }
+}
+
+/** A channel the page sends on, some sends lossy: what the server reads, in order, as JSON in `cleanupState`. */
+async function onChannelLossyFromPage() {
+  const channel = new Channel<string, never>()
+  const key = `lossyFromPage_${channel.id}`
+  const read: string[] = []
+  cleanupState[key] = '[]'
+  channel.listen((value) => {
+    read.push(value)
+    cleanupState[key] = JSON.stringify(read)
+  })
+  return { channel: channel.client, channelId: channel.id }
+}
+
 /** Eight channels with 1 MiB queued on each before the telefunction returns. An acknowledged send to one answers how its
  *  queued send went. */
 async function onChannelsQueuedBeforeReturn() {
   return Array.from({ length: 8 }, () => {
     const channel = new Channel<(msg: 'how') => string, never>()
-    const queued = channel.sendBinary(new Uint8Array(1024 * 1024)).then(
-      () => 'delivered',
-      (err: Error) => err.name,
-    )
+    const queuedOutcome = async () => {
+      try {
+        await channel.sendBinary(new Uint8Array(1024 * 1024))
+        return 'delivered'
+      } catch (err) {
+        return (err as Error).name
+      }
+    }
+    const queued = queuedOutcome()
     channel.listen(() => queued)
     return channel.client
   })
@@ -1105,8 +1178,12 @@ async function onChannelBudgets() {
   const refused = (err: Error) => {
     cleanupState[`budget_${bytes.id}`] ??= err.message
   }
+  const recordCredit = async () => {
+    await bytes.send('x'.repeat(4 * 1024))
+    cleanupState[`budget_${bytes.id}_credit`] = 'accepted'
+  }
   bytes.onOpen(() => {
-    void bytes.send('x'.repeat(4 * 1024)).then(() => (cleanupState[`budget_${bytes.id}_credit`] = 'accepted'))
+    void recordCredit()
     for (let i = 0; i < 6000; i++) void bytes.send('x'.repeat(1024)).catch(refused)
   })
   return { bytes: bytes.client }
@@ -1118,7 +1195,7 @@ async function onChannelBudgets() {
  */
 async function onChannelAwaitedFromOffline() {
   const ch = new Channel<never, string>()
-  void (async () => {
+  const sendAll = async () => {
     const sends: string[] = []
     for (const bytes of [1024, 5 * 1024 * 1024, 1024]) {
       try {
@@ -1129,7 +1206,8 @@ async function onChannelAwaitedFromOffline() {
       }
     }
     cleanupState[`awaitedFromOffline_${ch.id}`] = JSON.stringify(sends)
-  })()
+  }
+  void sendAll()
   return { channel: ch.client, channelId: ch.id }
 }
 
@@ -1175,11 +1253,13 @@ async function onChannelOfflineBudgets() {
   ch.listen((msg) => `answered ${msg}`)
   // Sent before the page attaches: they wait in the channel's buffer until it does.
   const sends = Array.from({ length: 3 }, () => ch.send('x'.repeat(800 * 1024), { ack: true }))
-  void Promise.allSettled(sends).then((results) => {
+  const recordOutcomes = async () => {
+    const results = await Promise.allSettled(sends)
     cleanupState[`offline_budget_${ch.id}`] = JSON.stringify(
       results.map((r) => (r.status === 'rejected' ? `${r.reason.name}: ${r.reason.message}` : 'answered')),
     )
-  })
+  }
+  void recordOutcomes()
   return { channel: ch.client }
 }
 

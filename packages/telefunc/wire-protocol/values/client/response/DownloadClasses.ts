@@ -33,24 +33,24 @@ function isBlobDownload(value: unknown): value is BlobDownload {
  *  and client `close()` recursively traverses `Object.values()`, so enumerability changes behavior. */
 class FileDownload extends LazyFile {
   readonly [FILE_DOWNLOAD_BRAND] = true
-  readonly #core: DownloadCore
+  private readonly core: DownloadCore
 
   constructor(metadata: FileDownloadMetadata, source: StreamSource) {
     super(metadata.size ?? 0, metadata.type, metadata.name, metadata.lastModified, source.stream)
-    this.#core = new DownloadCore(source, metadata.size, this.name, this.type, () => this.markConsumed())
+    this.core = new DownloadCore(source, metadata.size, this.name, this.type, () => this.markConsumed())
   }
 
   get loaded(): number {
-    return this.#core.state.loaded
+    return this.core.state.loaded
   }
   onProgress(cb: DownloadProgress): void {
-    this.#core.onProgress(cb)
+    this.core.onProgress(cb)
   }
   cancel(): void {
-    this.#core.cancel()
+    this.core.cancel()
   }
   override stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
-    return this.#core.stream()
+    return this.core.stream()
   }
   /** Saves to user's filesystem. `opts.mode` selects the path:
    *  - `'picker'` — opens [`showSaveFilePicker`](https://developer.mozilla.org/en-US/docs/Web/API/Window/showSaveFilePicker)
@@ -61,11 +61,11 @@ class FileDownload extends LazyFile {
    *
    *  Default: `'picker'` if `showSaveFilePicker` is available, else `'memory'`. */
   saveToDisk(opts?: { mode?: 'picker' | 'memory' | 'opfs' }): Promise<File> {
-    return this.#core.saveToDisk(opts)
+    return this.core.saveToDisk(opts)
   }
   /** Streams into OPFS (browser-private), returns a disk-backed `File` for `URL.createObjectURL` etc. */
   saveToOpfs(path?: string): Promise<File> {
-    return this.#core.saveToOpfs(path)
+    return this.core.saveToOpfs(path)
   }
   /** Buffers all bytes into memory, returns a real `File`. */
   async saveToMemory(): Promise<File> {
@@ -77,24 +77,24 @@ class FileDownload extends LazyFile {
 /** Blob-shaped streaming download. Same shape as FileDownload minus name/lastModified. */
 class BlobDownload extends LazyBlob {
   readonly [BLOB_DOWNLOAD_BRAND] = true
-  readonly #core: DownloadCore
+  private readonly core: DownloadCore
 
   constructor(metadata: BlobDownloadMetadata, source: StreamSource) {
     super(metadata.size ?? 0, metadata.type, source.stream)
-    this.#core = new DownloadCore(source, metadata.size, '', this.type, () => this.markConsumed())
+    this.core = new DownloadCore(source, metadata.size, '', this.type, () => this.markConsumed())
   }
 
   get loaded(): number {
-    return this.#core.state.loaded
+    return this.core.state.loaded
   }
   onProgress(cb: DownloadProgress): void {
-    this.#core.onProgress(cb)
+    this.core.onProgress(cb)
   }
   cancel(): void {
-    this.#core.cancel()
+    this.core.cancel()
   }
   override stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
-    return this.#core.stream()
+    return this.core.stream()
   }
   /** Saves to user's filesystem. `opts.mode` selects the path:
    *  - `'picker'` — opens [`showSaveFilePicker`](https://developer.mozilla.org/en-US/docs/Web/API/Window/showSaveFilePicker)
@@ -105,11 +105,11 @@ class BlobDownload extends LazyBlob {
    *
    *  Default: `'picker'` if `showSaveFilePicker` is available, else `'memory'`. */
   saveToDisk(opts?: { mode?: 'picker' | 'memory' | 'opfs' }): Promise<File> {
-    return this.#core.saveToDisk(opts)
+    return this.core.saveToDisk(opts)
   }
   /** Streams into OPFS (browser-private), returns a disk-backed `File` for `URL.createObjectURL` etc. */
   saveToOpfs(path?: string): Promise<File> {
-    return this.#core.saveToOpfs(path)
+    return this.core.saveToOpfs(path)
   }
   /** Buffers all bytes into memory, returns a real `Blob`. */
   async saveToMemory(): Promise<Blob> {

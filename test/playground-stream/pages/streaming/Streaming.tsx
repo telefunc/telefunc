@@ -813,8 +813,9 @@ function Streaming() {
           const chunks = 200_000
           const reader = (await onReturnManyTinyChunks(chunks)).getReader()
           returnedRef.current = reader
-          for (let i = 0; i < chunks; i++) await reader.read()
-          setResult(JSON.stringify({ chunks }))
+          let read = 0
+          while (read < chunks && (await reader.read()).value?.byteLength === 8) read++
+          setResult(JSON.stringify({ chunks: read }))
         }}
       >
         Read many tiny chunks of a stream that stays open

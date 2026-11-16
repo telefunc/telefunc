@@ -8,6 +8,8 @@ import { TAG } from '../../wire/tags.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { configureBroadcastTransport, disposeBackend } from '../../backend/install.js'
 import type { BroadcastTransport } from '../../backend/broadcast/TransportBroadcastDriver.js'
+import { MemoryBackend } from '../../backend/memory/MemoryBackend.js'
+import { ChannelOverflowError } from '../channelErrors.js'
 
 afterEach(() => disposeBackend())
 
@@ -179,6 +181,43 @@ describe('keyed in-process broadcast', () => {
   })
 })
 
+describe('in-memory publishes in answer', () => {
+  it('delivers a chain of 5,000 answers', async () => {
+    const backend = new MemoryBackend()
+    const route = { key: 'room:finite', kind: 'text' } as const
+    let received = 0
+    const attempt = backend.subscribe(route, {
+      deliver(payload) {
+        received++
+        const n = Number(payload)
+        if (n < 5000) void backend.publish(route, String(n + 1))
+      },
+    })
+    await backend.publish(route, '0')
+    await attempt.unsubscribe()
+    expect(received).toBe(5001)
+  })
+
+  it('rejects a listener that answers its own messages without end, and timers run again', async () => {
+    const backend = new MemoryBackend()
+    const route = { key: 'room:endless', kind: 'text' } as const
+    const errors: unknown[] = []
+    const attempt = backend.subscribe(route, {
+      deliver() {
+        const result = backend.publish(route, 'again')
+        if (result instanceof Promise) result.catch((err: unknown) => errors.push(err))
+      },
+    })
+    const timerRan = new Promise((resolve) => setTimeout(resolve, 0))
+    void backend.publish(route, 'start')
+    await timerRan
+    await attempt.unsubscribe()
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toBeInstanceOf(ChannelOverflowError)
+    expect((errors[0] as Error).message).toContain('a listener that answers its own messages')
+  }, 60_000)
+})
+
 // ───────────────────────────────────────────────────────────────────────────
 // Binary path — publishBinary/subscribeBinary roundtrip with high-bit bytes.
 // Catches accidental string-coercion or UTF-8 transcoding of binary frames.
@@ -244,8 +283,7 @@ describe('ServerBroadcastEnd', () => {
           queue: {
             waitingPublishes: () => 0,
             dropWaitingPublishes() {},
-            dropWaitingFromPublish() {},
-            drainRate: () => 0,
+            dropWaitingFrom() {},
           },
         },
         index: 7,
@@ -332,8 +370,7 @@ function behindEnd(waiting = 0) {
       queue: {
         waitingPublishes: () => waiting,
         dropWaitingPublishes() {},
-        dropWaitingFromPublish() {},
-        drainRate: () => 0,
+        dropWaitingFrom() {},
       },
     },
     index: 7,
@@ -392,8 +429,7 @@ describe('Broadcast shield validation', () => {
           queue: {
             waitingPublishes: () => 0,
             dropWaitingPublishes() {},
-            dropWaitingFromPublish() {},
-            drainRate: () => 0,
+            dropWaitingFrom() {},
           },
         },
         index: 7,
@@ -436,8 +472,7 @@ describe('Broadcast shield validation', () => {
           queue: {
             waitingPublishes: () => 0,
             dropWaitingPublishes() {},
-            dropWaitingFromPublish() {},
-            drainRate: () => 0,
+            dropWaitingFrom() {},
           },
         },
         index: 7,
@@ -469,8 +504,7 @@ describe('lossy broadcast under memory pressure', () => {
           queue: {
             waitingPublishes: () => 0,
             dropWaitingPublishes() {},
-            dropWaitingFromPublish() {},
-            drainRate: () => 0,
+            dropWaitingFrom() {},
           },
         },
         index: 7,

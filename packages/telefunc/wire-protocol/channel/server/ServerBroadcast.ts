@@ -13,6 +13,7 @@ import type {
   ChannelPublishInfo,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
+import { stringifyMessage } from '../channel.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { ServerBroadcastEnd, type BroadcastEndOwner } from './ServerBroadcastEnd.js'
@@ -22,9 +23,8 @@ import type { BroadcastPayload, BroadcastRoute } from '../../backend/driver.js'
 import type { OrderingInfo } from '../../backend/driverOrdering.js'
 import { followBroadcastPlane, getBroadcastPlane, unfollowBroadcastPlane } from '../../backend/install.js'
 import type { BackendSubscription } from '../../backend/SharedSubscriptions.js'
-import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
-import { assertUsage, assertWarning } from '../../../utils/assert.js'
+import { assertUsage } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { queueMemory } from './channelMemory.js'
 import { isPromise } from '../../../utils/isPromise.js'
@@ -58,7 +58,8 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
   private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
   private readonly routes: { [Kind in BroadcastKind]: RouteSubscription<Kind> }
   private readonly peerSubscriptions: Record<BroadcastKind, boolean> = { text: false, binary: false }
-  private missedWarned = false
+  /** The stream of each kind's publishes: a text message doesn't take a binary one's place. */
+  private readonly streams: Record<BroadcastKind, string>
 
   /** Past what its wire takes to confirm, a newer publish replaces those waiting, on the way to its page and on the page's
    *  way up. */
@@ -70,6 +71,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     assertUsage(typeof lossy === 'boolean', "`new BroadcastChannel()`'s `lossy` should be a boolean")
     this.key = key
     this.lossy = lossy
+    this.streams = { text: `text:${key}`, binary: `binary:${key}` }
     this._end = new ServerBroadcastEnd()
     this._end.setOwner(this)
     this.routes = {
@@ -132,7 +134,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
-    return this.publishTracked('text', stringify(data))
+    return this.publishTracked('text', stringifyMessage(data, 'publish'))
   }
 
   subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {
@@ -147,12 +149,12 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     return this.subscribeKind('binary', callback, options)
   }
 
-  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): void {
-    this._end.onClose(callback, options)
+  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void {
+    return this._end.onClose(callback, options)
   }
 
-  onOpen(callback: () => void, options?: { signal?: AbortSignal }): void {
-    this._end.onOpen(callback, options)
+  onOpen(callback: () => void, options?: { signal?: AbortSignal }): () => void {
+    return this._end.onOpen(callback, options)
   }
 
   onDisconnect(callback: () => void, options?: { signal?: AbortSignal }): void {
@@ -179,8 +181,9 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     for (const cb of this.subscribers.text.list()) {
       if (this.callListener(cb, data, info)) return
     }
-    if (!this.peerSubscriptions.text) return
-    this._end.deliver(bodyOf(serialized, rawInfo, this.lossy ? `text:${this.key}` : null))
+    // Asked before a body is made, which admits it against the budget: a page that began to close costs nothing.
+    if (!this.peerSubscriptions.text || this._end.isClosed) return this._end._endOverflowed()
+    this._end.deliver(bodyOf(serialized, rawInfo, this.lossy ? this.streams.text : null))
   }
 
   private deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
@@ -189,8 +192,8 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
       // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
       if (this.callListener(cb, new Uint8Array(data), info)) return
     }
-    if (!this.peerSubscriptions.binary) return
-    this._end.deliver(bodyOf(data, rawInfo, this.lossy ? `binary:${this.key}` : null))
+    if (!this.peerSubscriptions.binary || this._end.isClosed) return this._end._endOverflowed()
+    this._end.deliver(bodyOf(data, rawInfo, this.lossy ? this.streams.binary : null))
   }
 
   /** Calls `listener` with a publish; true where it threw `Abort`, which aborts the channel, so the rest get none. */
@@ -206,17 +209,6 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
       return this._end._handleCallbackError(err)
     }
     return false
-  }
-
-  /** @internal `BroadcastEndOwner`: its page is told by `info.seq`, and the server's log by this once. */
-  _onPublishesMissed(): void {
-    if (this.missedWarned) return
-    this.missedWarned = true
-    assertWarning(
-      false,
-      `A lossy \`BroadcastChannel\` on key "${this.key}" skipped messages its client hadn't taken yet: \`info.seq\` shows the gap on the client.`,
-      { onlyOnce: false },
-    )
   }
 
   // --- Internal broadcast helpers ---
@@ -272,6 +264,13 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     this.peerSubscriptions[kind] = on
     this.syncSubscription(kind)
   }
+
+  /** @internal `BroadcastEndOwner`: the kind `stream` is of, or either kind without one. */
+  _pageReads(stream?: string): boolean {
+    const { text, binary } = this.peerSubscriptions
+    if (stream === undefined) return text || binary
+    return stream === this.streams.text ? text : stream === this.streams.binary && binary
+  }
 }
 
 /** Public surface of a `BroadcastChannel` instance — same shape `Channel` uses to hide internal
@@ -290,12 +289,13 @@ type BroadcastChannel<T = unknown> = {
     data: ChannelData<T>
     ack: unknown
   }
+  /** Serializes `data` as JSON: bytes go through `publishBinary()`. */
   publish(data: ChannelData<T>): Promise<ChannelPublishAck>
   subscribe(callback: BroadcastListener<T>, options?: { signal?: AbortSignal }): () => void
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
   subscribeBinary(callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): () => void
-  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): void
-  onOpen(callback: () => void, options?: { signal?: AbortSignal }): void
+  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void
+  onOpen(callback: () => void, options?: { signal?: AbortSignal }): () => void
   onDisconnect(callback: () => void, options?: { signal?: AbortSignal }): void
   onReconnect(callback: () => void, options?: { signal?: AbortSignal }): void
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>
@@ -318,9 +318,10 @@ function publishOnPlane<Kind extends BroadcastKind>(
 type BroadcastChannelOptions = {
   key: string
   /**
-   * A client that keeps up gets every message. One that can't skips to the newest: a newer message replaces those
-   * waiting, and `info.seq` jumps over them. Without it, the client gets every message, or the channel closes with
-   * `ChannelOverflowError` past what the server holds for it.
+   * Where only the newest message matters: a client that keeps up gets every message, and one that falls behind skips
+   * to the newest, with `info.seq` jumping over what it skipped. This channel's client skips whoever publishes, while a
+   * client of the same key without it gets every message, or its channel closes with `ChannelOverflowError` past what
+   * the server holds for it.
    *
    * https://telefunc.com/channel#skip-to-the-newest
    *
@@ -353,9 +354,10 @@ function bodyOf(payload: string | Uint8Array, info: WirePublishInfo, lossyStream
 }
 
 const Broadcast = {
+  /** Serializes `data` as JSON: bytes go through `publishBinary()`. */
   publish<U = unknown>(key: string, data: ChannelData<U>): ChannelPublishAck | Promise<ChannelPublishAck> {
     assertBroadcastKey(key)
-    return publishOnPlane({ key, kind: 'text' }, stringify(data))
+    return publishOnPlane({ key, kind: 'text' }, stringifyMessage(data, 'publish'))
   },
   subscribe<U = unknown>(
     key: string,

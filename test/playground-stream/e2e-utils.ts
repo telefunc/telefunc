@@ -15,6 +15,7 @@ export {
   refuseNextSsePost,
   releaseHeldSsePosts,
   navigate,
+  withPacedLink,
   expectServerError,
   getResult,
   sleep,
@@ -43,6 +44,7 @@ import type { BackendFault } from './failing-backend'
 import { execSync } from 'node:child_process'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { startBlackHoleProxy, type BlackHoleProxy } from './black-hole-proxy'
 
 const playgroundDir = dirname(fileURLToPath(import.meta.url))
 
@@ -243,6 +245,18 @@ async function releaseHeldSsePosts(): Promise<number> {
   return released
 }
 
+/** The server logged `error`: on its stderr, or under Docker on compose's stdout, each line prefixed with the container's
+ *  name. */
+function expectServerError(error: string, inDocker: boolean) {
+  expectLog(error, {
+    filter: (log) =>
+      inDocker
+        ? log.logSource === 'stdout' &&
+          log.logText.split('\n').some((line) => line.includes(error) && /^playground-[a-z]-\d+ +\| /.test(line))
+        : log.logSource === 'stderr',
+  })
+}
+
 /**
  * Loads a page and waits for it to hydrate — resiliently, because the Docker suite runs the browser
  * against a Caddy container over the Docker bridge.
@@ -259,18 +273,6 @@ async function releaseHeldSsePosts(): Promise<number> {
  *
  * `target` defaults to the shared `page`; pass another page to load a second tab/context resiliently.
  */
-/** The server logged `error`: on its stderr, or under Docker on compose's stdout, each line prefixed with the container's
- *  name. */
-function expectServerError(error: string, inDocker: boolean) {
-  expectLog(error, {
-    filter: (log) =>
-      inDocker
-        ? log.logSource === 'stdout' &&
-          log.logText.split('\n').some((line) => line.includes(error) && /^playground-[a-z]-\d+ +\| /.test(line))
-        : log.logSource === 'stderr',
-  })
-}
-
 async function navigate(url: string, options?: Parameters<typeof page.goto>[1], target: typeof page = page) {
   for (let attempt = 1; attempt <= NAVIGATE_ATTEMPTS; attempt++) {
     const lastAttempt = attempt === NAVIGATE_ATTEMPTS
@@ -319,6 +321,20 @@ async function retryOnNetworkChange(attempt: (cut: () => boolean) => Promise<voi
     await sleep(NAVIGATE_RETRY_DELAY)
   }
   throw new Error(`The network changed under each of ${NAVIGATE_ATTEMPTS} attempts`)
+}
+
+/** Loads the channel page through a proxy that paces its connections as `link`, then runs `run`. */
+async function withPacedLink(link: Parameters<BlackHoleProxy['pace']>[0], run: () => Promise<void>) {
+  const proxy = await startBlackHoleProxy(getServerUrl())
+  try {
+    await navigate(`${proxy.url}/channel`)
+    proxy.pace(link)
+    await run()
+  } finally {
+    // The page leaves before the proxy closes, which would cut its connections.
+    await page.goto('about:blank')
+    await proxy.close()
+  }
 }
 
 // Transient errors Chromium-in-Docker surfaces when the bridge interface state shifts. Mirrors

@@ -13,6 +13,7 @@ import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire
 import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
 import { getChannelMux } from '../../../wire-protocol/channel/server/ChannelMux.js'
+import { carryChannel } from './carryChannel.js'
 import { ChannelStreamSource } from '../../../wire-protocol/values/ChannelStreamSource.js'
 import { wrapProxy } from '../../../utils/wrapProxy.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
@@ -80,12 +81,9 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   }
 
   // Body + base reviver context (file handling differs between binary and text; channels are the same).
-  const mux = getChannelMux()
   const createChannel = <ClientToServer, ServerToClient>(opts: { id: string; ack?: boolean }) => {
     const channel = new ServerChannel<ClientToServer, ServerToClient>(opts)
-    mux.registerChannel(channel)
-    channel._setResponseAbort(requestContext.responseAbort.abort)
-    channel.onClose(requestContext.trackPending())
+    carryChannel(channel, requestContext)
     return channel
   }
   const { text, registerFile, consumeFile } = await readBody(request, readable, requestKind)
@@ -133,8 +131,8 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
           // underlying channel/stream closes and the client releases the original.
           const wrapper = wrapProxy(value)
           // Forgotten once the call's channels have closed, so the scan doesn't wait for a collection to stop.
-          requestContext.onClose(mux.gcRegistry.register(wrapper, close))
-          requestContext.onTopLevelError(close)
+          requestContext.onClose(getChannelMux().gcRegistry.register(wrapper, close))
+          requestContext.onCallFailed(close)
           requestContext.responseAbort.onAbort(abort)
           return wrapper
         },
