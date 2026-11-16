@@ -11,7 +11,7 @@ installAsyncContext(AsyncLocalStorage)
 const RUNNING_OBJECT = Symbol.for('telefunc.cloudflare.object')
 
 // The telefunctions below are this app's only file.
-const telefunctions = vi.hoisted(() => ({}) as Record<string, () => Promise<unknown>>)
+const telefunctions = vi.hoisted((): Record<string, () => Promise<unknown>> => ({}))
 vi.mock('../runTelefunc/loadTelefuncFiles.js', () => ({
   loadTelefuncFiles: async () => ({
     telefuncFilesLoaded: { '/getContext.telefunc.ts': telefunctions },
