@@ -57,6 +57,28 @@ describe('ClientBroadcast uplink', () => {
     expect(waiting(page, 1)).toEqual([5, 6, 8])
   })
 
+  // Its key orders both kinds: a lossy publish published after a plain one of the other kind never goes ahead of it.
+  it.each([
+    [
+      [{ binary: 5, lossy: true }, { text: 'plain' }, { binary: 7, lossy: true }],
+      [[1, 5], '"plain"', [1, 7]],
+    ],
+    [
+      [{ text: 'old', lossy: true }, { binary: 6 }, { text: 'new', lossy: true }],
+      ['\n"old"', [0, 6], '\n"new"'],
+    ],
+  ])('sends %j in the order they were published', (published, sent) => {
+    const page = behindUplink()
+    published.forEach((publish, i) => {
+      const options = { lossy: publish.lossy === true }
+      if ('text' in publish) void page.publish(publish.text, options)
+      else void page.publishBinary(new Uint8Array([publish.binary]), options)
+      if (i === 0) behind()
+    })
+
+    expect(waitingPublishes(page)).toEqual(sent)
+  })
+
   // The publish whose place it took holds the close till its answer comes, and both get that answer.
   it('closes once the publish a newer one replaced is answered, and both get its receipt', async () => {
     const page = behindUplink()
@@ -137,12 +159,18 @@ function received(frame: Uint8Array<ArrayBuffer>): ChannelFrame {
   return decoded
 }
 
-/** The byte at `at` of each publish the gate holds, in the order they go. */
-function waiting(page: ClientBroadcast, at = 0): (number | undefined)[] {
+/** Each publish the gate holds, in the order they go: its text, or its bytes. */
+function waitingPublishes(page: ClientBroadcast): (string | number[])[] {
   return (page as any).connection.gate
     .settleQueue()
     .map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
-    .flatMap((decoded: ReturnType<typeof decode>) =>
-      decoded.tag === TAG.PUBLISH_BINARY_ACK_REQ ? [decoded.data[at]] : [],
-    )
+    .flatMap((decoded: ReturnType<typeof decode>) => {
+      if (decoded.tag === TAG.PUBLISH_ACK_REQ) return [decoded.text]
+      return decoded.tag === TAG.PUBLISH_BINARY_ACK_REQ ? [[...decoded.data]] : []
+    })
+}
+
+/** The byte at `at` of each binary publish the gate holds, in the order they go. */
+function waiting(page: ClientBroadcast, at = 0): (number | undefined)[] {
+  return waitingPublishes(page).flatMap((publish) => (typeof publish === 'string' ? [] : [publish[at]]))
 }

@@ -349,6 +349,13 @@ function replayed(end: ServerBroadcastEnd): string[] {
     .flatMap((decoded) => (decoded.tag === TAG.PUBLISH ? [decoded.text] : []))
 }
 
+/** The `info.seq` of the publishes, of both kinds, a reconnect of `end`'s page would get, in order. */
+function replayedSeqs(end: ServerBroadcastEnd): number[] {
+  return (end._replayBuffer?.getAfter(0) ?? [])
+    .map((frame) => decode(frame))
+    .flatMap((decoded) => (decoded.tag === TAG.PUBLISH || decoded.tag === TAG.PUBLISH_BINARY ? [decoded.info.seq] : []))
+}
+
 /** An attached page's end whose page is behind once a publish waits for its confirmation, with `waiting` of its newest
  *  publishes not yet taken by its wire; the publishes it sends. */
 function behindEnd(waiting = 0) {
@@ -357,8 +364,8 @@ function behindEnd(waiting = 0) {
   return behindPage(end, waiting)
 }
 
-/** `end`'s page, attached and reading both kinds, as `behindEnd`'s; the text publishes it gets and their `info.seq`,
- *  and the binary ones. */
+/** `end`'s page, attached and reading both kinds, as `behindEnd`'s; the text publishes it gets, the binary ones, and the
+ *  `info.seq` of both in the order they arrive. */
 function behindPage(end: ServerBroadcastEnd, waiting = 0) {
   end._registerChannel()
   const sent: string[] = []
@@ -369,8 +376,8 @@ function behindPage(end: ServerBroadcastEnd, waiting = 0) {
       send: (frame) => {
         const decoded = decode(frame as Uint8Array<ArrayBuffer>)
         if (decoded.tag === TAG.PUBLISH_BINARY) binary.push([...decoded.data])
-        if (decoded.tag !== TAG.PUBLISH) return
-        sent.push(decoded.text)
+        else if (decoded.tag === TAG.PUBLISH) sent.push(decoded.text)
+        else return
         seqs.push(decoded.info.seq)
       },
       carry() {},
@@ -645,6 +652,39 @@ describe('TransportBroadcastDriver — multi-node transport', () => {
 
     expect(sent.map((text) => parse(text))).toEqual(['first', 10, 'plain'])
     expect(seqs).toEqual([1, 11, 12])
+  })
+
+  // One order spans a key's two kinds: a plain publish of either goes after the lossy ones of both, oldest first.
+  describe.each(['behind', 'away'] as const)('to a page that is %s', (wire) => {
+    it.each([
+      [
+        ['binary lossy', 'text', 'binary lossy'],
+        [1, 2, 3, 4],
+      ],
+      [
+        ['text lossy', 'binary', 'text lossy'],
+        [1, 2, 3, 4],
+      ],
+      [
+        ['text lossy', 'binary lossy', 'text lossy', 'binary'],
+        [1, 3, 4, 5],
+      ],
+    ])('delivers %j after a first plain publish with info.seq %j', async (published, arrives) => {
+      configureBroadcastTransport(createMockTransport())
+      const key = `room:tx:across-kinds:${wire}:${published.join()}`
+      const broadcast = new ServerBroadcast({ key })
+      const { end, peer, seqs } = behindPage(broadcast._end)
+      await Broadcast.publish(key, 'first')
+      if (wire === 'away') end._onPeerDisconnect(peer, 60_000)
+      for (const publish of published) {
+        const options = { lossy: publish.endsWith(' lossy') }
+        if (publish.startsWith('text')) void Broadcast.publish(key, publish, options)
+        else void Broadcast.publishBinary(key, new Uint8Array([9]), options)
+      }
+      void broadcast.close()
+
+      expect(wire === 'behind' ? seqs : replayedSeqs(end)).toEqual(arrives)
+    })
   })
 
   // What a transport carries is the caller's JSON, a lossy one behind a line feed, and the caller's bytes behind one

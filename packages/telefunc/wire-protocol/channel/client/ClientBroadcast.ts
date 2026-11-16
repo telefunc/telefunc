@@ -27,6 +27,7 @@ import { classifyTelefuncError } from '../errorClassification.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { forListener } from '../listenerAnswer.js'
 import { ClientChannel, reportChannelError, type ClientChannelOptions } from './ClientChannel.js'
+import { EVERY_STREAM } from '../ownStream.js'
 
 class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
@@ -79,7 +80,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   publish(data: ChannelData<T>, options?: BroadcastPublishOptions): Promise<ChannelPublishAck> {
     const lossy = options?.lossy ?? false
     const payload = textPayload(stringifyMessage(data, 'publish'), lossy)
-    return reportingUnexpected(this.sendPublish(encode.publishAckReq, payload, 'text', lossy))
+    return reportingUnexpected(this.sendPublish(encode.publishAckReq, payload, lossy ? 'text' : EVERY_STREAM, lossy))
   }
 
   /** @internal A publish that leaves reporting its rejection to the caller. */
@@ -98,7 +99,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   publishBinary(data: Uint8Array, options?: BroadcastPublishOptions): Promise<ChannelPublishAck> {
     const lossy = options?.lossy ?? false
     return reportingUnexpected(
-      this.sendPublish(encode.publishBinaryAckReq, binaryPayload(data, lossy), 'binary', lossy),
+      this.sendPublish(encode.publishBinaryAckReq, binaryPayload(data, lossy), lossy ? 'binary' : EVERY_STREAM, lossy),
     )
   }
 
@@ -108,7 +109,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   /** Of a lossy `stream`, once its uplink is behind, a publish that still waits to go takes the newer one's data in its
-   *  place, and both get its receipt. A plain publish of the stream ends that place, so no later one goes ahead of it. */
+   *  place, and both get its receipt. A plain publish of the stream, or of `EVERY_STREAM`, ends that place, so no later
+   *  one goes ahead of it. */
   private sendPublish<D>(
     encodeFrame: SequencedEncoder<D>,
     data: D,

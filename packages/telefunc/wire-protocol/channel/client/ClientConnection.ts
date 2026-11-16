@@ -23,7 +23,7 @@ import type { ReconciledPayload } from '../../wire/payloads.js'
 import type { Heartbeat } from './Heartbeat.js'
 import type { ChannelRecord, ChannelTable } from './ChannelTable.js'
 import type { SendGate } from './SendGate.js'
-import { OWN_STREAM } from '../ownStream.js'
+import { EVERY_STREAM, OWN_STREAM } from '../ownStream.js'
 import type { ChannelAttach } from './ChannelAttach.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
@@ -56,7 +56,8 @@ interface MuxChannel {
 }
 
 interface MuxConnection {
-  /** A frame of `stream` that must arrive: it ends the place of that stream's lossy frame that still waits. */
+  /** A frame of `stream` that must arrive: it ends the place of that stream's lossy frame that still waits, or of every
+   *  stream's with `EVERY_STREAM`. */
   sendSequenced<T>(
     channel: MuxChannel,
     kind: 'data' | 'ack',
@@ -260,9 +261,11 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
   }
 
   /** The next seq of `record`'s channel, for a frame of `stream` that must arrive. The stream's lossy frame that still
-   *  waits keeps its data from here on: what was sent after a frame never arrives ahead of it in an older one's place. */
+   *  waits, or every stream's, keeps its data from here on: what was sent after a frame never arrives ahead of it in an
+   *  older one's place. */
   private sequence(record: ChannelRecord, stream: string): number {
-    record.replaceable?.delete(stream)
+    if (stream === EVERY_STREAM) record.replaceable?.clear()
+    else record.replaceable?.delete(stream)
     return record.replay.nextSeq()
   }
 

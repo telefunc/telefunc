@@ -5,6 +5,7 @@ import { assert } from '../../../utils/assert.js'
 import { HELD_SEND_OVERHEAD_BYTES, heldPublishBytes, hold, letGo, type MemoryHolder } from './channelMemory.js'
 import type { PublishBody } from './PublishBody.js'
 import { SeqQueue } from '../SeqQueue.js'
+import { EVERY_STREAM } from '../ownStream.js'
 
 /** `alone`: sent with nothing of its channel's unconfirmed, publish or frame, so nothing waits ahead of its confirmation. */
 type Publish = { head: Uint8Array<ArrayBuffer>; body: PublishBody; at: number; alone: boolean }
@@ -186,14 +187,15 @@ class ServerReplay {
   }
 
   /** Walks its newest `count` publishes from the newest. `owed`: its page must get it, as a plain one, or as a lossy one
-   *  that a plain one of its stream followed. `visit` returns false to stop. */
+   *  that a plain one of its stream, or of every stream, followed. `visit` returns false to stop. */
   private walkNewest(count: number, visit: (index: number, publish: Publish, owed: boolean) => boolean | void): void {
     let followed: Set<string> | null = null
     const oldest = Math.max(0, this.publishes.length - count)
     for (let i = this.publishes.length - 1; i >= oldest; i--) {
       const publish = this.publishes.at(i)
       const { stream, lossy } = publish.body
-      const owed = !lossy || stream === null || followed?.has(stream) === true
+      const owed =
+        !lossy || stream === null || (followed !== null && (followed.has(stream) || followed.has(EVERY_STREAM)))
       if (!lossy && stream !== null) (followed ??= new Set()).add(stream)
       if (visit(i, publish, owed) === false) return
     }

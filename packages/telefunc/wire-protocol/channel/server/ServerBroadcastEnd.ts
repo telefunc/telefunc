@@ -7,6 +7,7 @@ import type { IndexedPeer } from './IndexedPeer.js'
 import { fitsPublish, hold, letGo, maxPendingBytesOf, type MemoryHolder } from './channelMemory.js'
 import type { PublishBody } from './PublishBody.js'
 import { LossyDelivery } from './LossyDelivery.js'
+import { EVERY_STREAM } from '../ownStream.js'
 import { ChannelOverflowError, isChannelOverflowError } from '../channelErrors.js'
 import { isShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { ACK_STATUS, ERROR_REASON, type AckResultStatus } from '../../wire/frame.js'
@@ -74,8 +75,9 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     if (!fitsPublish(body)) return this.overflow(body.lossy ? NOT_EVEN_NEWEST : FELL_BEHIND)
     const { stream } = body
     if (body.lossy && stream !== null) return this.lossyDelivery().send(stream, body)
-    // A plain publish goes after the lossy one waiting before it in its stream.
-    if (stream !== null) this.lossyPublishes?.flush(stream)
+    // A plain publish goes after the lossy ones waiting before it in its stream, or in every stream, oldest first.
+    if (stream === EVERY_STREAM) this.lossyPublishes?.flush()
+    else if (stream !== null) this.lossyPublishes?.flush(stream)
     this.forward(body)
     const most = maxPendingBytesOf()
     if (this.heldBytes > most) this.shed(most)

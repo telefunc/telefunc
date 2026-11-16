@@ -34,6 +34,7 @@ import { markHandled } from '../../../utils/markHandled.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { publishBody, type PublishBody } from './PublishBody.js'
+import { EVERY_STREAM } from '../ownStream.js'
 import type { BroadcastKind } from '../../wire/payloads.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { isAbort } from '../../../node/server/Abort.js'
@@ -60,7 +61,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
   private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
   private readonly routes: { [Kind in BroadcastKind]: RouteSubscription<Kind> }
   private readonly peerSubscriptions: Record<BroadcastKind, boolean> = { text: false, binary: false }
-  /** The stream of each kind's publishes: a text message doesn't take a binary one's place. */
+  /** The stream of each kind's lossy publishes: a text message doesn't take a binary one's place. */
   private readonly streams: Record<BroadcastKind, string>
 
   constructor(opts: BroadcastChannelOptions) {
@@ -324,11 +325,12 @@ const globalObject = getGlobalObject('wire-protocol/channel/server/ServerBroadca
   publishBodies: new WeakMap<WirePublishInfo, PublishBody>(),
 })
 
-/** A broadcast's one stream is its `key`, of each kind: a text message doesn't take a binary one's place. */
+/** A lossy publish waits in its kind's `stream`, and a plain one goes after those of both: its key orders them all. */
 function bodyOf(payload: string | Uint8Array, info: WirePublishInfo, stream: string): PublishBody {
   let body = globalObject.publishBodies.get(info)
   if (!body) {
-    body = publishBody(payload, info, stream, isLossy(payload))
+    const lossy = isLossy(payload)
+    body = publishBody(payload, info, lossy ? stream : EVERY_STREAM, lossy)
     globalObject.publishBodies.set(info, body)
   }
   return body
