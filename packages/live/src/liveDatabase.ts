@@ -61,8 +61,9 @@ type Statement = {
   asks?: FollowUp
   /** Identical reads wait for this one's result: give it to them with `answered()`. */
   leads: boolean
-  /** Gives the result to the identical reads that joined this one; `copy` makes each its own. */
-  answered<R>(result: R, copy: (result: R) => R): void
+  /** Gives the result to the identical reads that joined this one; `copy` makes each its own, or `undefined` when it
+   *  can't (they then run their own). */
+  answered<R>(result: R, copy: (result: R) => R | undefined): void
   /** An identical read is running: don't send this one, give the caller a copy of that one's result. */
   joined?: Joined
   /** A read outside a transaction that sets no role: what is planned after it on its connection may be planned before

@@ -147,7 +147,10 @@ function captureExecutor(
     for (const followUp of sent.succeeded(takeHiddenValues(result.rows, hidden, options?.rowMode === 'array')))
       void runFollowUp(followUp)
     if (!sent.returnsRows) result.rows.length = 0
-    sent.answered(result, (r) => ({ ...r, rows: copyRows(r.rows) }))
+    sent.answered(result, (r) => {
+      const rows = copyRows(r.rows)
+      return rows && { ...r, rows }
+    })
     return result
   }
   executor.exec = (text, options) => {

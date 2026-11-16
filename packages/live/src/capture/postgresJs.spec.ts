@@ -1,5 +1,5 @@
-// Two postgres.js clients of one database: identical live reads share a result only when the clients make the same rows
-// of it.
+// Identical live reads of postgres.js clients share a result only when each caller gets the same rows from it as from its
+// own read.
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { PGLiteSocketServer } from '@electric-sql/pglite-socket'
@@ -44,6 +44,35 @@ it('gives identical live reads of two postgres.js clients each its own rows, and
   expect(await rowsOf([camel, camel])).toEqual([expected[1], expected[1]])
   expect(sent.filter((text) => text.includes('from t'))).toHaveLength(1)
   await Promise.all([plain.end(), camel.end()])
+  await server.stop()
+  await pglite.close()
+})
+
+it("gives identical live reads of one postgres.js client the values of its custom type's class", async () => {
+  class Amount {
+    constructor(readonly text: string) {}
+  }
+  const pglite = await emptyPGlite()
+  await pglite.exec('create table t (id int primary key, amount numeric); insert into t values (1, 12.5)')
+  const server = new PGLiteSocketServer({ db: pglite, port: 0, maxConnections: 1 })
+  await server.start()
+  const amount = { to: 1700, from: [1700], serialize: String, parse: (text: string) => new Amount(text) }
+  const sql = postgres(`postgres://postgres@${server.getServerConn()}/postgres`, {
+    max: 1,
+    onnotice: () => {},
+    types: { amount },
+  })
+  liveDatabaseOf(sql, {})
+  const watched = () =>
+    store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
+      readLive(() => sql`select amount from t where id = ${1}`, 'the spec'),
+    )
+  const amounts = (await Promise.all([watched(), watched()])).map(
+    (cell) => (cell.send() as { amount: unknown }[])[0]!.amount,
+  )
+  expect(amounts).toStrictEqual([new Amount('12.5'), new Amount('12.5')])
+  expect(amounts[0]).not.toBe(amounts[1])
+  await sql.end()
   await server.stop()
   await pglite.close()
 })

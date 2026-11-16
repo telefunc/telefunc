@@ -8,7 +8,7 @@ import type { ReadShape } from './match/readShape.js'
 import type { Router } from './match/router.js'
 
 /** A read that joined an identical one in flight: a copy of that read's result for the caller, or `undefined` when
- *  it failed (the caller then runs its own). */
+ *  it failed or its result can't be copied (the caller then runs its own). */
 type Joined = Promise<{ result: unknown } | undefined>
 
 /** A live read in the router and the `.live()` queries watching it: identical reads share one. */
@@ -103,7 +103,7 @@ class SharedReads {
     key: string,
     read: WatchedRead,
     connection?: object,
-  ): { answered<R>(result: R, copy: (result: R) => R): void; failed(): void } {
+  ): { answered<R>(result: R, copy: (result: R) => R | undefined): void; failed(): void } {
     const running: InFlight = { read, connection, joiners: [] }
     this.inFlight.set(key, running)
     const settle = () => {
@@ -113,7 +113,10 @@ class SharedReads {
       answered: (result, copy) => {
         settle()
         // Copied before the leader's caller gets it: an ORM may change the rows it was given.
-        for (const resolve of running.joiners) resolve({ result: copy(result) })
+        for (const resolve of running.joiners) {
+          const own = copy(result)
+          resolve(own === undefined ? undefined : { result: own })
+        }
       },
       failed: () => {
         settle()
@@ -150,16 +153,26 @@ function keyOfValues(values: readonly unknown[]): string | undefined {
   }
 }
 
-/** Copies a result's rows so that callers sharing it can't see each other's changes to them. */
-function copyRows(rows: unknown[]): unknown[] {
-  return rows.map(copyValue)
+/** Copies a result's rows so that callers sharing it can't see each other's changes to them: `undefined` when a value
+ *  is of a class it can't copy (a custom type parser's). */
+function copyRows(rows: unknown[]): unknown[] | undefined {
+  try {
+    return rows.map(copyValue)
+  } catch {
+    return undefined
+  }
 }
 
 function copyValue(value: unknown): unknown {
   if (typeof value !== 'object' || value === null) return value
-  if (value instanceof Date) return new Date(value.getTime())
-  if (Buffer.isBuffer(value)) return Buffer.from(value)
-  if (value instanceof Uint8Array) return value.slice()
-  if (Array.isArray(value)) return value.map(copyValue)
-  return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, copyValue(v)]))
+  const prototype = Object.getPrototypeOf(value)
+  if (prototype === Date.prototype) return new Date((value as Date).getTime())
+  if (prototype === Buffer.prototype) return Buffer.from(value as Buffer)
+  if (prototype === Uint8Array.prototype) return (value as Uint8Array).slice()
+  if (prototype === Array.prototype) return (value as unknown[]).map(copyValue)
+  if (prototype === Object.prototype || prototype === null) {
+    const copy = Object.fromEntries(Object.entries(value).map(([k, v]) => [k, copyValue(v)]))
+    return Object.setPrototypeOf(copy, prototype)
+  }
+  throw new Error('Not copyable')
 }

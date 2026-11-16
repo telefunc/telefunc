@@ -298,10 +298,13 @@ function takeHidden(query: Query, result: Result, statement: Statement): (string
   return values.map((row) => row.map((v) => (v === null || typeof v === 'string' ? v : String(v))))
 }
 
-/** A copy of a result for a read that joined this one: postgres.js's own array, with its `count`, `columns`, …. */
-function copyResult(result: Result): Result {
+/** A copy of a result for a read that joined this one: postgres.js's own array, with its `count`, `columns`, …;
+ *  `undefined` when its rows can't be copied. */
+function copyResult(result: Result): Result | undefined {
+  const rows = copyRows(result)
+  if (!rows) return undefined
   const copy = new (result.constructor as new () => Result)()
-  for (const row of copyRows(result)) copy.push(row)
+  for (const row of rows) copy.push(row)
   for (const key of Object.getOwnPropertyNames(result)) {
     if (key !== 'length' && !/^\d+$/.test(key))
       (copy as unknown as Record<string, unknown>)[key] = (result as unknown as Record<string, unknown>)[key]
