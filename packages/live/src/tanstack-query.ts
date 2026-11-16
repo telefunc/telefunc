@@ -25,6 +25,9 @@ const registries = processWide('tanstackRegistries', () => new WeakMap<QueryClie
  * ```
  *
  * It wraps the `queryFn` and imports only `@tanstack/query-core`, no framework adapter. Its end-to-end tests use React.
+ *
+ * It throws on a query with `staleTime: 'static'`, which TanStack Query never refetches. A query fetched without it
+ * and read later by an observer with it doesn't throw, and doesn't go live.
  */
 function live<T, TArgs extends unknown[]>(
   telefunction: (...args: TArgs) => Promise<Live<T>>,
@@ -35,6 +38,10 @@ function live<T, TArgs extends unknown[]>(
     'live() takes a telefunction and its arguments, e.g. live(onGetTodos, userId).',
   )
   return async (context) => {
+    assertUsage(
+      !isStatic(queryOf(context.client, context.queryKey)),
+      "live() can't keep a query with `staleTime: 'static'` up to date: TanStack Query never refetches it. Give the query a `staleTime` in milliseconds, e.g. `staleTime: Infinity`.",
+    )
     if (context.signal.aborted) throw abortError()
     // Lets an aborted fetch cancel the telefunction's request.
     const value = await withContext(telefunction, { signal: context.signal })(...args)
@@ -111,6 +118,14 @@ function refetchAfterHydration(client: QueryClient, queryKey: QueryKey): void {
     // `dataUpdatedAt` is newer.
     query.setState({ ...query.state, isInvalidated: true, dataUpdatedAt: query.state.dataUpdatedAt + 1 })
   })
+}
+
+/** Whether TanStack Query never refetches `query`: `staleTime: 'static'` on it (`fetchQuery()`, `prefetchQuery()`, the
+ *  client's defaults) or on one of its observers. Before 5.79, TanStack Query has no `'static'`. */
+function isStatic(query: Query | undefined): boolean {
+  if (!query) return false
+  const { staleTime } = query.options as { staleTime?: unknown }
+  return query.isStatic?.() || (typeof staleTime === 'function' ? staleTime(query) : staleTime) === 'static'
 }
 
 /** The query a fetch with `queryKey` is for: TanStack passes a query's own key to its `queryFn`, whatever hashes it

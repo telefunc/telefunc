@@ -85,6 +85,24 @@ describe('live()', () => {
     expect(values.map((value) => value.closed)).toEqual([1, 1])
   })
 
+  it("rejects a query with staleTime: 'static', set on its observer or on its client's defaults", async () => {
+    const { call, values } = telefunction()
+    client = new QueryClient()
+    const observer = new QueryObserver(client, {
+      queryKey: ['todos'],
+      queryFn: live(call),
+      staleTime: 'static',
+      retry: false,
+    })
+    const stop = observer.subscribe(() => {})
+    await vi.waitFor(() => expect(observer.getCurrentResult().error?.message).toContain('[Wrong Usage]'))
+    stop()
+    client.clear()
+    client = new QueryClient({ defaultOptions: { queries: { staleTime: 'static' } } })
+    await expect(client.fetchQuery({ queryKey: ['todos'], queryFn: live(call) })).rejects.toThrow('[Wrong Usage]')
+    expect(values).toHaveLength(0)
+  })
+
   it('keys a query by the hash its client makes with its queryKeyHashFn', async () => {
     const queryKeyHashFn = (key: unknown) => JSON.stringify(key, (_, v) => (typeof v === 'bigint' ? String(v) : v))
     client = new QueryClient({ defaultOptions: { queries: { queryKeyHashFn } } })

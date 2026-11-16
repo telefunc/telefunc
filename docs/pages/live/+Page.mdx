@@ -212,7 +212,7 @@ const { data: todos } = useQuery({
 
 > `live()` wraps the `queryFn` and imports only `@tanstack/query-core`, no framework adapter. Its end-to-end tests use React.
 
-> A query rendered on the server shows its rows in the HTML, then fetches once more in the browser to go live, whatever its `staleTime` in milliseconds. A query with `staleTime: 'static'` doesn't go live: TanStack Query doesn't refetch a static query.
+> A query rendered on the server shows its rows in the HTML, then fetches once more in the browser to go live, whatever its `staleTime` in milliseconds. `live()` throws on a query with `staleTime: 'static'`: TanStack Query never refetches it.
 
 ### Without a library
 
