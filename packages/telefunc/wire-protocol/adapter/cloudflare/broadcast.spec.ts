@@ -773,7 +773,7 @@ describe('cloudflare broadcast routing', () => {
         return Promise.resolve()
       },
     })
-    const env = { TelefuncDurableObject: binding, TelefuncKV: createMockKV() } as unknown as Cloudflare.Env
+    const env = { TelefuncDurableObject: binding, TelefuncKV: createMockKV() }
     const { TelefuncDurableObject } = new Telefunc({ scale: 5 })
     for (const name of ['telefunc-shard-weur-0', 'telefunc-shard-weur-1']) {
       const ctx = { id: { name }, storage: {} } as unknown as DurableObjectState
