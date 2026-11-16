@@ -769,6 +769,14 @@ function testRoom() {
       expect(r.held).deep.equal(['early'])
     },
   )
+  testRoomScenario<{ senders: (string | null)[]; alice: string; reply: unknown }>(
+    'dm-info',
+    'room: each listener of a private message gets its own info, for a plain and an acknowledged send',
+    (r) => {
+      expect(r.senders).deep.equal([r.alice, r.alice])
+      expect(r.reply).toBe('ok')
+    },
+  )
   testRoomScenario<{ mine: string[]; theirs: string[]; selfDelivery: boolean }>(
     'self',
     'room: selfDelivery:false suppresses your own frames locally, not for others',

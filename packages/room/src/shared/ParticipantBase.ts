@@ -91,7 +91,7 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   private leftCause: LeaveCause | null = null
   // Each list is made when its first listener is added.
   private leaveListeners: Listeners<(cause: LeaveCause) => unknown> | null = null
-  private messageListeners: Listeners<(data: unknown, info: { from: Sender | null }) => unknown> | null = null
+  private messageListeners: Listeners<(data: unknown, from: Sender | null) => unknown> | null = null
   private changeListeners: Listeners<() => unknown> | null = null
   /** What `onChange`'s listeners last heard of, while they listen. */
   private seen: Shown | null = null
@@ -246,7 +246,9 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
 
   listen(callback: (data: unknown, info: { from: Sender | null }) => unknown, options?: ListenerOptions): () => void {
     if (options?.signal?.aborted) return makeDisposer()
-    const unlisten = this.register((this.messageListeners ??= new Listeners()), callback, options)
+    // Each call gets an `info` of its own, so a listener writing to it changes no other listener's.
+    const taking = (data: unknown, from: Sender | null) => callback(data, { from })
+    const unlisten = this.register((this.messageListeners ??= new Listeners()), taking, options)
     this._flushHeld({ deliver: (msg) => this.fireInbox(msg), deliverAck: (msg) => this.fireInboxAck(msg) })
     return unlisten
   }
@@ -305,8 +307,8 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   }
 
   private fireInbox(msg: InboxMessage): void {
-    const info = { from: this.inboxSender(msg) }
-    for (const cb of this.messageListeners?.list() ?? []) this.invoke(cb, msg.data, info)
+    const from = this.inboxSender(msg)
+    for (const cb of this.messageListeners?.list() ?? []) this.invoke(cb, msg.data, from)
   }
 
   /** Channel's rule (`soleAnswer`) picks the reply; a throw is the failure reply (see `toRoomFailure`: a bug is
@@ -314,7 +316,7 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   private async fireInboxAck(msg: InboxMessage): Promise<RoomResult> {
     let answer: unknown
     try {
-      answer = await soleAnswer(this.messageListeners?.list() ?? [], msg.data, { from: this.inboxSender(msg) })
+      answer = await soleAnswer(this.messageListeners?.list() ?? [], msg.data, this.inboxSender(msg))
     } catch (err) {
       return toRoomFailure(err, (e) => this._reportError(e), this._bugMessage)
     }

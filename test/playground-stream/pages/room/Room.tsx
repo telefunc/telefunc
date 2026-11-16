@@ -2021,6 +2021,25 @@ function Room() {
         await pollUntil(() => ({ result: { held }, done: held.includes('early') }))
       })}
 
+      {scenario('dm-info', 'DM info per listener', 'Two listeners, the first clears its info', async () => {
+        const [, room] = await createRoom('dm-info')
+        const me = await room.join({ meta: { name: 'Me' } })
+        const alice = await room.join({ meta: { name: 'Alice' } })
+        const senders: (string | null)[] = []
+        me.listen((_data, info) => {
+          info.from = null
+        })
+        me.listen((data, info) => {
+          senders.push(info.from?.id ?? null)
+          return data === 'ack' ? 'ok' : undefined
+        })
+
+        await alice.send(me.id, 'plain')
+        const reply = await alice.send(me.id, 'ack', { ack: true })
+
+        await pollUntil(() => ({ result: { senders, alice: alice.id, reply }, done: senders.length === 2 }))
+      })}
+
       {scenario('self', 'selfDelivery: false', 'Own frames suppressed', async () => {
         const roomId = await createRoomId('self')
         await onWatchRoom(roomId)
