@@ -10,6 +10,7 @@ export type {
   ChannelAck,
   ChannelPublishAck,
   ChannelPublishInfo,
+  BroadcastPublishOptions,
   ChannelListenReturn,
   ChannelListener,
   ChannelBinaryListener,
@@ -38,6 +39,20 @@ type ChannelPublishInfo = {
   timestamp: number
 }
 type ChannelPublishAck = ChannelPublishInfo
+
+/** The options of a broadcast's `publish()` and `publishBinary()`. */
+type BroadcastPublishOptions = {
+  /**
+   * Where only the newest message matters: a client that keeps up gets every message, and one that falls behind skips
+   * to the newest, with `info.seq` jumping over what it skipped. A message without it reaches every client, after the
+   * lossy ones published on the key before it.
+   *
+   * https://telefunc.com/channel#lossy-broadcast
+   *
+   * @default false
+   */
+  lossy?: boolean
+}
 
 /** Invoke a fire-and-forget listener while routing both thrown and rejected failures. Returns what `handleError`
  *  returned for a synchronous throw only, which a caller can use to stop iterating; a rejection can't stop it. */

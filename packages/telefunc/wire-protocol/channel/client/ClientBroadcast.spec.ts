@@ -7,6 +7,7 @@ import { CHANNEL_TRANSPORT } from '../../constants.js'
 import { decode, encode, type ChannelFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { ClientBroadcast } from './ClientBroadcast.js'
+import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 
 /** An SSE downstream that never sends a byte: the RECONCILED that would open sends never comes. */
 const stalledFetch = (async () => new Response(new ReadableStream({ start() {} }), { status: 200 })) as typeof fetch
@@ -19,6 +20,7 @@ afterEach(() => {
   vi.clearAllTimers()
   vi.useRealTimers()
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 describe('ClientBroadcast uplink', () => {
@@ -42,6 +44,19 @@ describe('ClientBroadcast uplink', () => {
     expect(waiting(page)).toEqual([3, 2])
   })
 
+  // The server reads from its first byte whether a page that is behind may skip it.
+  it('marks a lossy publishBinary(), whose place a newer one takes, and sends one after a plain one it followed', () => {
+    const page = behindUplink()
+    void page.publishBinary(new Uint8Array([5]), { lossy: true })
+    behind()
+    void page.publishBinary(new Uint8Array([6]))
+    void page.publishBinary(new Uint8Array([7]), { lossy: true })
+    void page.publishBinary(new Uint8Array([8]), { lossy: true })
+
+    expect(waiting(page)).toEqual([1, 0, 1])
+    expect(waiting(page, 1)).toEqual([5, 6, 8])
+  })
+
   // The publish whose place it took holds the close till its answer comes, and both get that answer.
   it('closes once the publish a newer one replaced is answered, and both get its receipt', async () => {
     const page = behindUplink()
@@ -63,6 +78,34 @@ describe('ClientBroadcast uplink', () => {
     expect(await first).toEqual(receipt)
     expect(await newer).toEqual(receipt)
     expect(closed).toBe(true)
+  })
+})
+
+describe('ClientBroadcast delivery', () => {
+  it("hands its listeners what was published, and Room's local ones the payload, and confirms a lossy one soon", () => {
+    const confirmSoon = vi.spyOn(ReceiveCredit.prototype, 'confirmSoon')
+    const page = behindUplink()
+    const text: unknown[] = []
+    const bytes: number[][] = []
+    const payloads: number[][] = []
+    page.subscribe((data) => text.push(data))
+    page.subscribeBinary((data) => bytes.push([...data]))
+    page._subscribeLocal('binary', (data) => payloads.push([...data]))
+    const info = { seq: 1, timestamp: 1 }
+
+    page._dispatchFrame(received(encode.publish('\n"lossy"', info)))
+    page._dispatchFrame(received(encode.publish('"plain"', info)))
+    expect(confirmSoon).toHaveBeenCalledTimes(1)
+    page._dispatchFrame(received(encode.publishBinary(new Uint8Array([1, 9]), info)))
+    page._dispatchFrame(received(encode.publishBinary(new Uint8Array([0, 8]), info)))
+
+    expect(confirmSoon).toHaveBeenCalledTimes(2)
+    expect(text).toEqual(['lossy', 'plain'])
+    expect(bytes).toEqual([[9], [8]])
+    expect(payloads).toEqual([
+      [1, 9],
+      [0, 8],
+    ])
   })
 })
 
@@ -94,12 +137,12 @@ function received(frame: Uint8Array<ArrayBuffer>): ChannelFrame {
   return decoded
 }
 
-/** The first byte of each publish the gate holds, in the order they go. */
-function waiting(page: ClientBroadcast): (number | undefined)[] {
+/** The byte at `at` of each publish the gate holds, in the order they go. */
+function waiting(page: ClientBroadcast, at = 0): (number | undefined)[] {
   return (page as any).connection.gate
     .settleQueue()
     .map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
     .flatMap((decoded: ReturnType<typeof decode>) =>
-      decoded.tag === TAG.PUBLISH_BINARY_ACK_REQ ? [decoded.data[0]] : [],
+      decoded.tag === TAG.PUBLISH_BINARY_ACK_REQ ? [decoded.data[at]] : [],
     )
 }

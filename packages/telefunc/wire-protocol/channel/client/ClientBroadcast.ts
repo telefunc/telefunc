@@ -5,6 +5,7 @@ import type {
   BroadcastListener,
   BroadcastListenerByKind,
   BroadcastListeners,
+  BroadcastPublishOptions,
   ChannelData,
   ChannelPublishAck,
   ChannelPublishInfo,
@@ -20,6 +21,7 @@ import { PUBLISH_BINARY_HEADER, type WirePublishInfo } from '../../wire/publishI
 import { HEADER } from '../../wire/header.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { broadcastMessages } from '../channelMessages.js'
+import { binaryData, binaryPayload, isLossy, textPayload } from '../broadcastPayload.js'
 import { ChannelClosedError, isExpectedChannelFailure } from '../channelErrors.js'
 import { classifyTelefuncError } from '../errorClassification.js'
 import { isPromise } from '../../../utils/isPromise.js'
@@ -43,7 +45,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this._attach.declareSubscriptions(this.subscribed)
   }
 
-  /** @internal Register a local listener without changing what it asks the server for. */
+  /** @internal Register a local listener without changing what it asks the server for; it gets each payload as it
+   *  arrived. */
   _subscribeLocal<K extends BroadcastKind>(kind: K, callback: BroadcastListenerByKind<T>[K]): () => void {
     return this.subscribers[kind].add(callback)
   }
@@ -78,18 +81,15 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     else this.connection.sendBroadcastUnsubscribe(this, kind === 'binary')
   }
 
-  publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
-    return reportingUnexpected(this._publishUnreported(data))
+  publish(data: ChannelData<T>, options?: BroadcastPublishOptions): Promise<ChannelPublishAck> {
+    const lossy = options?.lossy ?? this.lossy
+    const payload = textPayload(stringifyMessage(data, 'publish'), lossy)
+    return reportingUnexpected(this.sendPublish(encode.publishAckReq, payload, 'text', lossy))
   }
 
   /** @internal A publish that leaves reporting its rejection to the caller. */
-  _publishUnreported(
-    data: ChannelData<T>,
-    stream: string | null = this.lossy ? 'text' : null,
-    lossy = this.lossy,
-  ): Promise<ChannelPublishAck> {
-    if (this.stopped) throw new ChannelClosedError()
-    return this.sendPublish(encode.publishAckReq, stringifyMessage(data, 'publish'), stream, lossy)
+  _publishUnreported(data: ChannelData<T>): Promise<ChannelPublishAck> {
+    return this.sendPublish(encode.publishAckReq, stringifyMessage(data, 'publish'), null, false)
   }
 
   override messages(options?: { signal?: AbortSignal }) {
@@ -100,17 +100,15 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return this.subscribeWired('text', callback, options)
   }
 
-  publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
-    return reportingUnexpected(this._publishBinaryUnreported(data))
+  publishBinary(data: Uint8Array, options?: BroadcastPublishOptions): Promise<ChannelPublishAck> {
+    const lossy = options?.lossy ?? this.lossy
+    return reportingUnexpected(
+      this.sendPublish(encode.publishBinaryAckReq, binaryPayload(data, lossy), 'binary', lossy),
+    )
   }
 
-  /** @internal A publish that leaves reporting its rejection to the caller. */
-  _publishBinaryUnreported(
-    data: Uint8Array,
-    stream: string | null = this.lossy ? 'binary' : null,
-    lossy = this.lossy,
-  ): Promise<ChannelPublishAck> {
-    if (this.stopped) throw new ChannelClosedError()
+  /** @internal A publish of `data` as it is, which leaves reporting its rejection to the caller. */
+  _publishBinaryUnreported(data: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck> {
     return this.sendPublish(encode.publishBinaryAckReq, data, stream, lossy)
   }
 
@@ -122,6 +120,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     stream: string | null,
     lossy: boolean,
   ): Promise<ChannelPublishAck> {
+    if (this.stopped) throw new ChannelClosedError()
     if (stream === null) return this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data)
     if (!lossy) return this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data, { stream })
     const replaced = this.connection.replaceWaiting(this, stream, encodeFrame, data)
@@ -134,7 +133,11 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
-    return this.subscribeWired('binary', callback, options)
+    const listener: BroadcastBinaryListener = (payload, info) => {
+      if (isLossy(payload)) this._confirmSoon()
+      return callback(binaryData(payload), info)
+    }
+    return this.subscribeWired('binary', listener, options)
   }
 
   override _end(err?: Error): void {
@@ -176,25 +179,29 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   /** A publish counts in bytes, consumed once the listeners ran, so the server sees how far behind the page is. */
-  private onPeerPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
+  private onPeerPublish(payload: string, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
-    const parsed = parse(data) as ChannelData<T>
-    this.deliverPublish(this.subscribers.text.list(), () => parsed, wireInfo, bytes)
+    const parsed = parse(payload) as ChannelData<T>
+    this.deliverPublish(this.subscribers.text.list(), () => parsed, wireInfo, bytes, this.lossy || isLossy(payload))
   }
 
-  private onPeerPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
+  /** A `subscribeBinary()` listener reads the payload's mark, as Room's local ones read their own frames. */
+  private onPeerPublishBinary(payload: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
     const list = this.subscribers.binary.list()
-    this.deliverPublish(list, (i) => forListener(data, list, i, HEADER + PUBLISH_BINARY_HEADER), wireInfo, bytes)
+    const valueFor = (i: number) => forListener(payload, list, i, HEADER + PUBLISH_BINARY_HEADER)
+    this.deliverPublish(list, valueFor, wireInfo, bytes, this.lossy)
   }
 
   /** Calls each listener with its value, `valueFor` its index; an `Abort` stops the rest and leaves the publish
-   *  unconsumed. A listener's promise isn't awaited. */
+   *  unconsumed. A listener's promise isn't awaited. A `lossy` one is confirmed soon, so the server tells whether the
+   *  page keeps up. */
   private deliverPublish<V>(
     listeners: readonly ((value: V, info: ChannelPublishInfo) => unknown)[],
     valueFor: (i: number) => V,
     wireInfo: WirePublishInfo,
     bytes: number,
+    lossy: boolean,
   ): void {
     const info = { key: this.key!, seq: wireInfo.seq, timestamp: wireInfo.timestamp }
     for (const [i, cb] of listeners.entries()) {
@@ -206,7 +213,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
       }
     }
     this.receiveCredit.onPublishConsumed(bytes)
-    if (this.lossy) this._confirmSoon()
+    if (lossy) this._confirmSoon()
   }
 }
 

@@ -1169,7 +1169,8 @@ function testChannel(isDev: boolean, inDocker = false) {
     )
   })
 
-  // The page publishes as its connection drops: the server gets the newest of the ten lossy ones, then the plain one.
+  // The page publishes as its connection drops: the server gets the newest of ten lossy ones, the plain one after them,
+  // and the newest of the ten after that.
   test('channel: a lossy publish from a page that is away waits as the newest, and a plain one arrives after it', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-lossy-before-plain')
@@ -1178,7 +1179,7 @@ function testChannel(isDev: boolean, inDocker = false) {
         const { lossyBeforePlain } = await getResult<{
           lossyBeforePlain: { received: unknown[]; seqsAhead: number[] } | null
         }>('#channel-state')
-        expect(lossyBeforePlain).deep.equal({ received: [10, 'plain'], seqsAhead: [0, 1] })
+        expect(lossyBeforePlain).deep.equal({ received: [10, 'plain', 20], seqsAhead: [0, 1, 2] })
       },
       { timeout: 30_000 },
     )

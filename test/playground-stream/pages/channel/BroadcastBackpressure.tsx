@@ -247,21 +247,23 @@ function LossyBeforePlain({ show }: { show: Show }) {
     const received: unknown[] = []
     const seqsAhead: number[] = []
     let firstSeq: number | undefined
-    const plainArrived = new Promise<void>((resolve) =>
+    const newestArrived = new Promise<void>((resolve) =>
       broadcast.subscribe((message, info) => {
         firstSeq ??= info.seq
         received.push(message)
         seqsAhead.push(info.seq - firstSeq)
-        if (message === 'plain') resolve()
+        if (message === 20) resolve()
       }),
     )
-    // While its connection is down, ten lossy publishes and a plain one: only the newest of the ten waits to go.
+    // While its connection is down, ten lossy publishes, a plain one and ten more: of each ten, only the newest waits to
+    // go, and the second ten can't take the place of the first.
     broadcast.onDisconnect(() => {
       for (let n = 1; n <= 10; n++) void broadcast.publish(n, { lossy: true })
       void broadcast.publish('plain')
+      for (let n = 11; n <= 20; n++) void broadcast.publish(n, { lossy: true })
     })
     await control.send('cut', { ack: true })
-    await plainArrived
+    await newestArrived
     show({ lossyBeforePlain: { received, seqsAhead } })
     control.close()
   }

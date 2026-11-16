@@ -25,6 +25,7 @@ import { CHANNEL_MUX, ChannelMux, getChannelMux } from './ChannelMux.js'
 import { hold, letGo, releaseHolder, type MemoryHolder } from './channelMemory.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
+import { binaryData } from '../broadcastPayload.js'
 import { ServerChannel } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
 
@@ -49,7 +50,7 @@ function sent(frames: Iterable<Uint8Array>): Sent[] {
     if (decoded.tag === TAG.PUBLISH || decoded.tag === TAG.TEXT)
       out.push({ index, seq, label: `${index}:${(parse(decoded.text) as string).slice(0, 2)}` })
     if (decoded.tag === TAG.PUBLISH_BINARY)
-      out.push({ index, seq, label: `${index}:${new TextDecoder().decode(decoded.data.subarray(0, 2))}` })
+      out.push({ index, seq, label: `${index}:${new TextDecoder().decode(binaryData(decoded.data).subarray(0, 2))}` })
     if (decoded.tag === TAG.CLOSE) out.push({ index, seq, label: `${index}:CLOSE` })
     if (decoded.tag === TAG.ABORT) out.push({ index, seq, label: `${index}:ABORT` })
     if (decoded.tag === TAG.ERROR) out.push({ index, seq, label: `${index}:ERROR` })

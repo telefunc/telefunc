@@ -357,15 +357,18 @@ function behindEnd(waiting = 0) {
   return behindPage(end, waiting)
 }
 
-/** `end`'s page, attached and reading both kinds, as `behindEnd`'s; the text publishes it gets and their `info.seq`. */
+/** `end`'s page, attached and reading both kinds, as `behindEnd`'s; the text publishes it gets and their `info.seq`,
+ *  and the binary ones. */
 function behindPage(end: ServerBroadcastEnd, waiting = 0) {
   end._registerChannel()
   const sent: string[] = []
   const seqs: number[] = []
+  const binary: number[][] = []
   const peer = new IndexedPeer({
     sender: {
       send: (frame) => {
         const decoded = decode(frame as Uint8Array<ArrayBuffer>)
+        if (decoded.tag === TAG.PUBLISH_BINARY) binary.push([...decoded.data])
         if (decoded.tag !== TAG.PUBLISH) return
         sent.push(decoded.text)
         seqs.push(decoded.info.seq)
@@ -387,7 +390,7 @@ function behindPage(end: ServerBroadcastEnd, waiting = 0) {
     replay: end._replayBuffer!,
   })
   end._attachPeer(peer, { broadcast: { text: true, binary: true } })
-  return { end, peer, sent, seqs }
+  return { end, peer, sent, seqs, binary }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -542,21 +545,33 @@ describe('lossy broadcast under memory pressure', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('TransportBroadcastDriver — multi-node transport', () => {
-  type TextListener = (payload: string, info: { seq: number; timestamp: number }) => void
+  type Info = { seq: number; timestamp: number }
+  type TextListener = (payload: string, info: Info) => void
+  type BinaryListener = (payload: Uint8Array, info: Info) => void
 
-  /** Synchronous-delivery bus for fast, deterministic tests. */
-  function createMockTransport(): BroadcastTransport & { _listeners: Map<string, Set<TextListener>> } {
+  /** Synchronous-delivery bus for fast, deterministic tests; `_carried` is every payload it was sent, as sent. */
+  function createMockTransport(): BroadcastTransport & {
+    _listeners: Map<string, Set<TextListener>>
+    _carried: (string | number[])[]
+  } {
     const listeners = new Map<string, Set<TextListener>>()
+    const binaryListeners = new Map<string, Set<BinaryListener>>()
     const seqs = new Map<string, number>()
+    const carried: (string | number[])[] = []
+    const nextInfo = (key: string): Info => {
+      const seq = (seqs.get(key) ?? 0) + 1
+      seqs.set(key, seq)
+      return { seq, timestamp: Date.now() }
+    }
     return {
       _listeners: listeners,
+      _carried: carried,
       send(key, payload) {
-        const seq = (seqs.get(key) ?? 0) + 1
-        seqs.set(key, seq)
-        const timestamp = Date.now()
+        carried.push(payload)
+        const info = nextInfo(key)
         const set = listeners.get(key)
-        if (set) for (const cb of set) cb(payload, { seq, timestamp })
-        return { seq, timestamp }
+        if (set) for (const cb of set) cb(payload, info)
+        return info
       },
       listen(key, onMessage) {
         let set = listeners.get(key)
@@ -567,11 +582,16 @@ describe('TransportBroadcastDriver — multi-node transport', () => {
         set.add(onMessage)
         return () => listeners.delete(key)
       },
-      sendBinary(_key, _payload) {
-        return { seq: 0, timestamp: Date.now() }
+      sendBinary(key, payload) {
+        carried.push([...payload])
+        const info = nextInfo(key)
+        for (const cb of binaryListeners.get(key) ?? []) cb(payload, info)
+        return info
       },
-      listenBinary() {
-        return () => {}
+      listenBinary(key, onMessage) {
+        const set = binaryListeners.get(key) ?? new Set()
+        binaryListeners.set(key, set.add(onMessage))
+        return () => binaryListeners.delete(key)
       },
     }
   }
@@ -625,6 +645,44 @@ describe('TransportBroadcastDriver — multi-node transport', () => {
 
     expect(sent.map((text) => parse(text))).toEqual(['first', 10, 'plain'])
     expect(seqs).toEqual([1, 11, 12])
+  })
+
+  // What a transport carries is the caller's JSON, a lossy one behind a line feed, and the caller's bytes behind one
+  // byte, 1 where lossy; every reader gets what the caller published.
+  it("hands every reader the caller's data, and the transport the payload that says whether it is lossy", async () => {
+    const transport = createMockTransport()
+    configureBroadcastTransport(transport)
+    const key = 'room:tx:payloads'
+    const broadcast = new ServerBroadcast({ key })
+    const { sent, binary } = behindPage(broadcast._end)
+    const fromObject: unknown[] = []
+    const fromStatic: unknown[] = []
+    const fromObjectBinary: number[][] = []
+    const fromStaticBinary: number[][] = []
+    broadcast.subscribe((data) => fromObject.push(data))
+    broadcast.subscribeBinary((data) => fromObjectBinary.push([...data]))
+    Broadcast.subscribe(key, (data) => fromStatic.push(data))
+    Broadcast.subscribeBinary(key, (data) => fromStaticBinary.push([...data]))
+
+    await broadcast.publish({ n: 1 })
+    await Broadcast.publish(key, { n: 2 }, { lossy: true })
+    await broadcast.publishBinary(new Uint8Array([3, 1]))
+    await Broadcast.publishBinary(key, new Uint8Array([4]), { lossy: true })
+    await broadcast.publishBinary(new Uint8Array([5]), { lossy: true })
+    await Broadcast.publish(key, 'plain')
+    void broadcast.close()
+
+    expect(transport._carried).toEqual(['{"n":1}', '\n{"n":2}', [0, 3, 1], [1, 4], [1, 5], '"plain"'])
+    expect(fromObject).toEqual([{ n: 1 }, { n: 2 }, 'plain'])
+    expect(fromStatic).toEqual(fromObject)
+    expect(fromObjectBinary).toEqual([[3, 1], [4], [5]])
+    expect(fromStaticBinary).toEqual(fromObjectBinary)
+    // Its page is behind from the first publish on: the newest lossy one of each kind waits, for a plain one or the close.
+    expect(sent).toEqual(['{"n":1}', '\n{"n":2}', '"plain"'])
+    expect(binary).toEqual([
+      [0, 3, 1],
+      [1, 5],
+    ])
   })
 
   it('cross-node: a publish from node1 reaches node2 subscribers via the shared transport', () => {

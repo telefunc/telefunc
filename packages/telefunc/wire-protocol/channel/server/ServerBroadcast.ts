@@ -7,6 +7,7 @@ import type {
   BroadcastListener,
   BroadcastListenerByKind,
   BroadcastListeners,
+  BroadcastPublishOptions,
   ChannelCloseCallback,
   ChannelCloseOptions,
   ChannelCloseResult,
@@ -16,6 +17,7 @@ import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generate
 import { stringifyMessage } from '../channel.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import { broadcastMessages } from '../channelMessages.js'
+import { binaryData, binaryPayload, isLossy, textPayload } from '../broadcastPayload.js'
 import { ServerBroadcastEnd, type BroadcastEndOwner } from './ServerBroadcastEnd.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
@@ -133,16 +135,16 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     assertUsage(false, '`listenBinary()` is not available on a `BroadcastChannel` — use `subscribeBinary()`.')
   }
 
-  publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
-    return this.publishTracked('text', stringifyMessage(data, 'publish'))
+  publish(data: ChannelData<T>, options?: BroadcastPublishOptions): Promise<ChannelPublishAck> {
+    return this.publishTracked('text', textPayload(stringifyMessage(data, 'publish'), options?.lossy))
   }
 
   subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {
     return this.subscribeKind('text', callback, options)
   }
 
-  publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
-    return this.publishTracked('binary', data)
+  publishBinary(data: Uint8Array, options?: BroadcastPublishOptions): Promise<ChannelPublishAck> {
+    return this.publishTracked('binary', binaryPayload(data, options?.lossy))
   }
 
   subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
@@ -175,25 +177,25 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     this._end.abort(abortValue, message)
   }
 
-  private deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
+  private deliverBroadcastMessage(payload: string, rawInfo: WirePublishInfo): void {
     const info = { key: this.key, seq: rawInfo.seq, timestamp: rawInfo.timestamp }
-    const data = parse(serialized) as ChannelData<T>
+    const data = parse(payload) as ChannelData<T>
     for (const cb of this.subscribers.text.list()) {
       if (this.callListener(cb, data, info)) return
     }
     // Asked before a body is made, which admits it against the budget: a page that began to close costs nothing.
     if (!this.peerSubscriptions.text || this._end.isClosed) return this._end._endOverflowed()
-    this._end.deliver(bodyOf(serialized, rawInfo, this.lossy ? this.streams.text : null))
+    this._end.deliver(bodyOf(payload, rawInfo, this.streams.text, this.lossy || isLossy(payload)))
   }
 
-  private deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
+  private deliverBroadcastBinaryMessage(payload: Uint8Array, rawInfo: WirePublishInfo): void {
     const info = { key: this.key, seq: rawInfo.seq, timestamp: rawInfo.timestamp }
     for (const cb of this.subscribers.binary.list()) {
       // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
-      if (this.callListener(cb, new Uint8Array(data), info)) return
+      if (this.callListener(cb, new Uint8Array(binaryData(payload)), info)) return
     }
     if (!this.peerSubscriptions.binary || this._end.isClosed) return this._end._endOverflowed()
-    this._end.deliver(bodyOf(data, rawInfo, this.lossy ? this.streams.binary : null))
+    this._end.deliver(bodyOf(payload, rawInfo, this.streams.binary, this.lossy || isLossy(payload)))
   }
 
   /** Calls `listener` with a publish; true where it threw `Abort`, which aborts the channel, so the rest get none. */
@@ -290,9 +292,9 @@ type BroadcastChannel<T = unknown> = {
     ack: unknown
   }
   /** Serializes `data` as JSON: bytes go through `publishBinary()`. */
-  publish(data: ChannelData<T>): Promise<ChannelPublishAck>
+  publish(data: ChannelData<T>, options?: BroadcastPublishOptions): Promise<ChannelPublishAck>
   subscribe(callback: BroadcastListener<T>, options?: { signal?: AbortSignal }): () => void
-  publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
+  publishBinary(data: Uint8Array, options?: BroadcastPublishOptions): Promise<ChannelPublishAck>
   subscribeBinary(callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): () => void
   onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void
   onOpen(callback: () => void, options?: { signal?: AbortSignal }): () => void
@@ -340,14 +342,13 @@ const globalObject = getGlobalObject('wire-protocol/channel/server/ServerBroadca
   lossyPublishBodies: new WeakMap<WirePublishInfo, PublishBody>(),
 })
 
-/** A lossy broadcast's one stream is its `key`, of each kind: a text message doesn't take a binary one's place. A
- *  reliable broadcast has none. A lossy subscriber and a reliable one of a key share neither the body nor its place in a
- *  replay. */
-function bodyOf(payload: string | Uint8Array, info: WirePublishInfo, lossyStream: string | null): PublishBody {
-  const bodies = lossyStream === null ? globalObject.publishBodies : globalObject.lossyPublishBodies
+/** A broadcast's one stream is its `key`, of each kind: a text message doesn't take a binary one's place. A lossy
+ *  subscriber and a reliable one of a key share neither the body nor its place in a replay. */
+function bodyOf(payload: string | Uint8Array, info: WirePublishInfo, stream: string, lossy: boolean): PublishBody {
+  const bodies = lossy ? globalObject.lossyPublishBodies : globalObject.publishBodies
   let body = bodies.get(info)
   if (!body) {
-    body = publishBody(payload, info, lossyStream, lossyStream !== null)
+    body = publishBody(payload, info, stream, lossy)
     bodies.set(info, body)
   }
   return body
@@ -355,9 +356,13 @@ function bodyOf(payload: string | Uint8Array, info: WirePublishInfo, lossyStream
 
 const Broadcast = {
   /** Serializes `data` as JSON: bytes go through `publishBinary()`. */
-  publish<U = unknown>(key: string, data: ChannelData<U>): ChannelPublishAck | Promise<ChannelPublishAck> {
+  publish<U = unknown>(
+    key: string,
+    data: ChannelData<U>,
+    options?: BroadcastPublishOptions,
+  ): ChannelPublishAck | Promise<ChannelPublishAck> {
     assertBroadcastKey(key)
-    return publishOnPlane({ key, kind: 'text' }, stringifyMessage(data, 'publish'))
+    return publishOnPlane({ key, kind: 'text' }, textPayload(stringifyMessage(data, 'publish'), options?.lossy))
   },
   subscribe<U = unknown>(
     key: string,
@@ -368,9 +373,13 @@ const Broadcast = {
     const unsubscribe = subscribeRoute({ key, kind: 'text' }, (payload) => parse(payload) as ChannelData<U>, callback)
     return unsubscribeOnAbort(unsubscribe, options?.signal)
   },
-  publishBinary(key: string, data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
+  publishBinary(
+    key: string,
+    data: Uint8Array,
+    options?: BroadcastPublishOptions,
+  ): ChannelPublishAck | Promise<ChannelPublishAck> {
     assertBroadcastKey(key)
-    return publishOnPlane({ key, kind: 'binary' }, data)
+    return publishOnPlane({ key, kind: 'binary' }, binaryPayload(data, options?.lossy))
   },
   subscribeBinary(
     key: string,
@@ -379,7 +388,11 @@ const Broadcast = {
   ): BroadcastUnsubscribe {
     if (options?.signal?.aborted) return () => {}
     // A copy of its own, as a `BroadcastChannel` listener gets.
-    const unsubscribe = subscribeRoute({ key, kind: 'binary' }, (payload) => new Uint8Array(payload), callback)
+    const unsubscribe = subscribeRoute(
+      { key, kind: 'binary' },
+      (payload) => new Uint8Array(binaryData(payload)),
+      callback,
+    )
     return unsubscribeOnAbort(unsubscribe, options?.signal)
   },
 }
