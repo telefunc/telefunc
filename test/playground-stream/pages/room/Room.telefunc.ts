@@ -120,7 +120,7 @@ export {
 
 import { Buffer } from 'node:buffer'
 import { Abort, Broadcast, config, onBug } from 'telefunc'
-import { Room, roomConfig, type LeaveCause, type LocalParticipant } from '@telefunc/room'
+import { Room, type LeaveCause, type LocalParticipant } from '@telefunc/room'
 import { getRoomPlane } from '@telefunc/room/backend'
 import { sendPrivate } from '@telefunc/room/__internal'
 import { anyoneCanJoin } from '../../anyone-can-join'
@@ -1166,7 +1166,7 @@ async function onSubscriberDropped(roomId: string) {
   room.subscribe(() => received++)
   const me = await room.join({ meta: { name: 'Publisher' } })
   let reported = 0
-  reportOf(roomId, (reason) => (reported += Number.parseInt(reason)))
+  const stopReporting = reportOf(roomId, (reason) => (reported += Number.parseInt(reason)))
   const published: Promise<unknown>[] = []
   for (let i = 0; i < 600; i++) {
     if (i === 100) {
@@ -1179,8 +1179,7 @@ async function onSubscriberDropped(roomId: string) {
   await Promise.all(published)
   // Long enough to reconnect and read each lane's start.
   await sleep(1_000)
-  roomConfig.onDeliveryLost = ({ roomId, reason }) =>
-    console.error(`Room delivery handoff of '${roomId}' lost: ${reason}`)
+  stopReporting()
   return { published: published.length, received, reported }
 }
 
@@ -1190,15 +1189,26 @@ async function onPublishOverRedisLimit(roomId: string) {
   return { refused: await me.publishBinary(new Uint8Array(28 * 1024 * 1024 + 1)).catch((error: Error) => error.name) }
 }
 
-/** What a drop reports of this room: `onDeliveryLost` hears every room on the server, and another test's room may commit
- *  its heartbeat's demand page while the connections are down, which is a true report of that room. */
+/** What a drop reports of this room, read from Room's log until the returned function gives the log back: Room logs
+ *  every room on the server, and another test's room may commit its heartbeat's demand page while the connections are
+ *  down, which is a true report of that room. */
 function reportOf(roomId: string, report: (reason: string) => void) {
-  roomConfig.onDeliveryLost = ({ roomId: lost, reason }) => {
-    if (lost === roomId) report(reason)
+  const logError = console.error
+  const lost = `Room delivery handoff of '${roomId}' lost: `
+  console.error = (...args: unknown[]) => {
+    const [line] = args
+    if (typeof line === 'string' && line.startsWith(lost)) report(line.slice(lost.length))
+    else logError(...args)
+  }
+  return () => {
+    console.error = logError
   }
 }
 
-const atRest = new Map<string, { reported: string[]; arrived: () => number; send: () => Promise<void> }>()
+const atRest = new Map<
+  string,
+  { reported: string[]; arrived: () => number; send: () => Promise<void>; stopReporting: () => void }
+>()
 
 /** A subscription of each kind this server makes, and a commit on each lane, before the page drops its connections to
  *  Redis. */
@@ -1208,7 +1218,7 @@ async function onBusyLanes(roomId: string) {
   const bob = await room.join({ meta: { name: 'Bob' } })
   const view = await Room.get(roomId)
   const reported: string[] = []
-  reportOf(roomId, (reason) => reported.push(reason))
+  const stopReporting = reportOf(roomId, (reason) => reported.push(reason))
   config.broadcast.onDeliveryLost = ({ reason }) => reported.push(reason)
   let arrived = 0
   const arrives = () => arrived++
@@ -1235,19 +1245,18 @@ async function onBusyLanes(roomId: string) {
   const carol = await room.join({ meta: { name: 'Carol' } })
   await carol.publishBinary(bytes, { track: 'shared' })
   await carol.leave()
-  atRest.set(roomId, { reported, arrived: () => arrived, send })
+  atRest.set(roomId, { reported, arrived: () => arrived, send, stopReporting })
 }
 
 /** Nothing was published while the connections were down, so nothing is reported, and the lanes deliver again. */
 async function onLanesAfterDrop(roomId: string) {
-  const { reported, arrived, send } = atRest.get(roomId)!
+  const { reported, arrived, send, stopReporting } = atRest.get(roomId)!
   // Long enough to reconnect and read each lane's start.
   await sleep(1_000)
   const before = arrived()
   await send()
   await sleep(200)
-  roomConfig.onDeliveryLost = ({ roomId, reason }) =>
-    console.error(`Room delivery handoff of '${roomId}' lost: ${reason}`)
+  stopReporting()
   config.broadcast.onDeliveryLost = ({ key, reason }) => console.error(`Broadcast delivery of '${key}' lost: ${reason}`)
   return { reported, arrivedAfter: arrived() - before }
 }
@@ -1258,7 +1267,7 @@ async function onLanesBeforeRewind(roomId: string) {
   const room = anyoneCanJoin(await Room.get(roomId))
   const alice = await room.join({ meta: { name: 'Alice' } })
   const reported: string[] = []
-  reportOf(roomId, (reason) => reported.push(reason))
+  const stopReporting = reportOf(roomId, (reason) => reported.push(reason))
   config.broadcast.onDeliveryLost = ({ reason }) => reported.push(reason)
   let arrived = 0
   const arrives = () => arrived++
@@ -1276,7 +1285,7 @@ async function onLanesBeforeRewind(roomId: string) {
     await alice.publishBinary(bytes, { track: 'shared' })
     await Broadcast.publish(key, 'text')
   }
-  atRest.set(roomId, { reported, arrived: () => arrived, send })
+  atRest.set(roomId, { reported, arrived: () => arrived, send, stopReporting })
 }
 
 /** This server delivers past what the page's snapshot holds. */
