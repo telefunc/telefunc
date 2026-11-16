@@ -770,6 +770,22 @@ test('on a WebSocket, abort() drops each lossy send its wire has not started, al
   expect(await page.readAll()).toEqual(['0:p0', '0:p1', '0:ABORT'])
 })
 
+test("on a WebSocket, a lossy send that waits when the page closes goes unsent while the close's callbacks run", async () => {
+  const channel = new ServerChannel()
+  const page = overWebSocket([channel])
+  let onCloseDone = () => {}
+  channel.onClose(() => new Promise<void>((resolve) => (onCloseDone = resolve)))
+  // The page granted 100 messages, so the lossy send after them waits for more.
+  for (let i = 0; i < 100; i++) void channel.send(`p${i}`)
+  void channel.send('l1', { lossy: true })
+  fromPage(channel, encode.close(0, 1_000, 1))
+  // More credit, while the close waits for its callback.
+  fromPage(channel, encode.msgWindow(0, 200))
+  expect(await page.readAll()).not.toContain('0:l1')
+  onCloseDone()
+  await channel.closed
+})
+
 /** Each way a subscriber that may miss no publish falls behind, by what it publishes and what its page then reads. */
 const OVERFLOWS: Record<string, { publishes: string[]; pageReads: string[] }> = {
   // p1 left: from p2, the oldest waiting, all go.
