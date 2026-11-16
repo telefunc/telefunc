@@ -1856,10 +1856,11 @@ function Room() {
         null,
         'Let go of a member, of one that left, and of one in a closed room',
         async () => {
-          // Closing 500 ms after their member left and nothing holds them.
+          // Closing 500 ms after their member left and nothing holds them. A short `emptyTimeout` too would close them
+          // before the first join on a slow backend.
           const dropped = `e2e-let-go-dropped:${crypto.randomUUID()}`
           const left = `e2e-let-go-left:${crypto.randomUUID()}`
-          const timeouts = { emptyTimeout: 500, departureTimeout: 500 }
+          const timeouts = { departureTimeout: 500 }
           await Promise.all([onCreateRoomWith(dropped, timeouts), onCreateRoomWith(left, timeouts)])
           const closed = await createRoomId('let-go-closed')
           const guarded = await createRoomId('let-go-guarded')
