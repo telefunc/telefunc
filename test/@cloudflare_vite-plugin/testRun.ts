@@ -352,7 +352,7 @@ function testUnsubscribeTwice() {
     await autoRetry(async () => {
       expect(await publisher.locator('#hydrated').count()).toBe(1)
     })
-    // Each try publishes again: the subscriber's presence may still be on its way to KV.
+    // Each try publishes again: another session's publish may reach the key's authority before the subscriber's presence.
     await autoRetry(
       async () => {
         await publisher.click('#publish')
