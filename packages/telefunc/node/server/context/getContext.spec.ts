@@ -1,15 +1,23 @@
 // getContext() once AsyncLocalStorage is installed, inside an adapter's scope (telefunc/cloudflare's running object).
 
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import { installAsyncContext } from './async.js'
 import { serve } from '../telefunc.js'
-import { decorateTelefunction } from '../runTelefunc/decorateTelefunction.js'
 import { getRawContext, restoreContext } from './context.js'
 import { PROVIDED_CONTEXT, getContext, provideTelefuncContext } from './getContext.js'
 
 installAsyncContext(AsyncLocalStorage)
 const RUNNING_OBJECT = Symbol.for('telefunc.cloudflare.object')
+
+// The telefunctions below are this app's only file.
+const telefunctions = vi.hoisted(() => ({}) as Record<string, () => Promise<unknown>>)
+vi.mock('../runTelefunc/loadTelefuncFiles.js', () => ({
+  loadTelefuncFiles: async () => ({
+    telefuncFilesLoaded: { '/getContext.telefunc.ts': telefunctions },
+    telefuncFilesAll: ['/getContext.telefunc.ts'],
+  }),
+}))
 
 test("getContext() throws in an adapter's scope that holds none of the app's context", () => {
   restoreContext({ [RUNNING_OBJECT]: 'telefunc-shard-weur-0' }, () => {
@@ -43,7 +51,7 @@ test("a telefunction served in an adapter's scope reads the adapter's key after 
     await new Promise((resolve) => setTimeout(resolve, 1))
     read = getRawContext()?.[RUNNING_OBJECT]
   }
-  decorateTelefunction(readRunningObject, 'readRunningObject', '/getContext.telefunc.ts', '/')
+  telefunctions.readRunningObject = readRunningObject
   const request = new Request('https://example.test/_telefunc', {
     method: 'POST',
     headers: { 'x-telefunc-request': 'txt' },
