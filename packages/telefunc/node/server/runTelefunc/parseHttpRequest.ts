@@ -14,6 +14,7 @@ import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
 import { carryChannel } from './carryChannel.js'
 import { ChannelStreamSource } from '../../../wire-protocol/values/ChannelStreamSource.js'
+import { queueMemory } from '../../../wire-protocol/channel/server/channelMemory.js'
 import { GcRegistry } from '../../../utils/GcRegistry.js'
 import { wrapProxy } from '../../../utils/wrapProxy.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
@@ -101,7 +102,8 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     registerFile,
     consumeFile,
     createChannel,
-    receiveStream: ({ channelId }) => ChannelStreamSource.create(createChannel({ id: channelId })),
+    receiveStream: ({ channelId }) =>
+      ChannelStreamSource.create(createChannel({ id: channelId }), { memory: queueMemory() }),
   }
 
   // Routing must be known before the target telefunc module can load. Parse JSON structure only;

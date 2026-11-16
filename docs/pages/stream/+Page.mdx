@@ -346,6 +346,8 @@ const stream = new ReadableStream({
 await onIngest(stream, 'data.txt')
 ```
 
+> Each chunk reaches your telefunction whole. The server holds a chunk while it arrives, up to the default per-channel limit of 320 MiB, within <Link href="/channel-config">`maxMemory`</Link>. Past that, reading the stream throws `ChannelOverflowError`: send smaller chunks.
+
 #### Both directions
 
 Accept a `ReadableStream` *and* return one, transforming the bytes as they pass through.

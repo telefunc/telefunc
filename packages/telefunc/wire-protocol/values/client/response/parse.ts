@@ -121,7 +121,7 @@ async function reviveResponse(
     receiveStream(metadata) {
       if ('channelId' in metadata) {
         const channel = new ClientChannel({ channelId: metadata.channelId, connection })
-        return ChannelStreamSource.create(channel, throwStreamError)
+        return ChannelStreamSource.create(channel, { throwError: throwStreamError })
       }
       assert(bodyStreamReader, 'Unexpected receiveStream call in non-streaming response')
       demuxer ??= new FrameDemuxer(bodyStreamReader, callContext.telefunctionName)

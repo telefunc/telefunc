@@ -25,7 +25,7 @@ interface BroadcastSource<T> {
 
 type Message<T> = { type: 'text'; data: T } | { type: 'binary'; data: Uint8Array }
 
-/** Where a loop's queue counts what it holds: on a server, the ledger. A page's queue is the page's own memory. */
+/** Where a loop's queue or a stream's reader counts what it holds: on a server, the ledger; a page counts nothing. */
 interface QueueMemory {
   admit(bytes: number): boolean
   hold(bytes: number): void
