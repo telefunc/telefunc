@@ -14,7 +14,8 @@ import type { BroadcastKind, AttachState } from '../../wire/payloads.js'
 import type { ChannelCloseOptions, ChannelCloseResult } from '../channel.js'
 
 const NOT_EVEN_NEWEST = 'the server could not hold even the newest message for its client'
-const FELL_BEHIND = 'its client fell behind what the server holds for it; `lossy: true` lets it skip to the newest'
+const FELL_BEHIND =
+  'its client fell behind what the server holds for it; a publish with `lossy: true` lets it skip to the newest'
 
 /** What a page's publishes, subscriptions and attaches go to. */
 type BroadcastEndOwner = {

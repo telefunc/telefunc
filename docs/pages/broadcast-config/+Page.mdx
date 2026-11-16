@@ -31,6 +31,8 @@ type BroadcastTransport = {
 
 > `send()` and `sendBinary()` return the `{ seq, timestamp }` they assigned, and `onMessage` gets the same pair, which <Link href="/channel#broadcast">`Broadcast.subscribe()`</Link> subscribers receive as `info`. A key's `seq` increases with each message, across all servers and for text and binary together; `timestamp` is like `Date.now()`.
 
+> `onMessage` gets each `payload` as `send()` or `sendBinary()` got it, byte for byte: it carries whether the publish is `lossy`.
+
 > `listen()` and `listenBinary()` return a function that stops listening. A message sent right after `listen()` returned must reach that listener.
 
 > When its connection drops, the transport reconnects on its own and keeps calling the `onMessage` it was given.
