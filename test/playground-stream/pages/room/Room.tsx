@@ -2823,12 +2823,15 @@ function Room() {
         )
         await pollUntil(() => ({ done: seen.at(-1) === 19 }))
         await new Promise((resolve) => setTimeout(resolve))
-        // The room's own channel: its handle holds it, as its state's owner.
-        const { end } = (
-          view as unknown as { _remotes: { state: { owner: { end: { newestPublishes: Map<string, unknown> } } } } }
-        )._remotes.state.owner
+        // The room's own channel: its handle holds it, as its state's owner. Its connection lists a stream's newest lossy
+        // frame until the server confirms it.
+        type End = {
+          connection: { channels: { of(end: End): { replaceable: Map<string, number> | null } | undefined } }
+        }
+        const { end } = (view as unknown as { _remotes: { state: { owner: { end: End } } } })._remotes.state.owner
         const receiptSeqs = new Set(receipts.map((receipt) => receipt.seq))
-        setResult(JSON.stringify({ receipts: receiptSeqs.size, seen, listed: end.newestPublishes.size }))
+        const listed = end.connection.channels.of(end)?.replaceable?.size ?? 0
+        setResult(JSON.stringify({ receipts: receiptSeqs.size, seen, listed }))
       })}
 
       {scenario('slow-link', 'Slow link', '640 KB each way', async () => {
