@@ -24,7 +24,7 @@ import {
   onBroadcastReconnect,
   onBroadcastWhileOffline,
   onBroadcastSeqAcrossSubscribers,
-  onBroadcastSeqWhileQueued,
+  onBroadcastJoinWhileQueued,
   onBroadcastManyKeys,
   onBroadcastThrowingListener,
   onJoinChat,
@@ -563,13 +563,13 @@ function Publish() {
         Seqs across subscribers
       </button>
       <button
-        id="test-broadcast-seq-while-queued"
+        id="test-broadcast-join-while-queued"
         onClick={async () => {
           setResult('')
-          setResult(JSON.stringify(await onBroadcastSeqWhileQueued()))
+          setResult(JSON.stringify({ received: await onBroadcastJoinWhileQueued() }))
         }}
       >
-        Seqs while publishes queue
+        Subscribe while publishes queue
       </button>
       {([false, true] as const).map((subscribed) => (
         <button

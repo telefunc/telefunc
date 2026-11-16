@@ -27,7 +27,7 @@ type BroadcastBinaryOnMessage = (data: Uint8Array, info: WirePublishInfo) => voi
 
 type BroadcastUnsubscribe = () => void
 
-type QueuedPublish = { size: number; depth: number; deliver: () => void; reject: (err: Error) => void }
+type QueuedPublish = { size: number; depth: number; deliver: () => void }
 
 /** `wireRequest`: the request that opened the wire a subscribing page's messages go out on, where one did. */
 type BroadcastAdapter = {
@@ -175,12 +175,11 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     key: string,
     data: T,
   ): BroadcastPublishResult | Promise<BroadcastPublishResult> {
-    const timestamp = Date.now()
     // A publish from a listener reaches subscribers after the message it answers.
-    if (this.delivering) return this.queueInMemory(subs, key, data, timestamp)
+    if (this.delivering) return this.queueInMemory(subs, key, data)
     this.delivering = true
     try {
-      return this.deliverInMemory(subs, key, data, timestamp)
+      return this.deliverInMemory(subs.get(key), data, this.takeInfo(key))
     } finally {
       this.deliverQueued()
       this.delivering = false
@@ -193,8 +192,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       const publish = this.queued.shift()!
       this.queuedBytes -= publish.size
       this.depth = publish.depth
-      if (publish.depth <= MAX_ANSWER_DEPTH) publish.deliver()
-      else publish.reject(endlessAnswersError())
+      publish.deliver()
     }
     this.depth = 0
   }
@@ -203,8 +201,8 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>,
     key: string,
     data: T,
-    timestamp: number,
   ): Promise<BroadcastPublishResult> {
+    if (this.depth === MAX_ANSWER_DEPTH) return Promise.reject(endlessAnswersError())
     const isText = typeof data === 'string'
     const size = (isText ? utf8ByteLength(data) : data.byteLength) + HELD_SEND_OVERHEAD_BYTES
     // One message alone goes through whatever its size.
@@ -218,37 +216,45 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     this.queuedBytes += size
     // The caller may reuse or transfer its buffer once the publish returns.
     const queuedData = isText ? data : (new Uint8Array(data as Uint8Array) as T)
+    // Who gets it and its place in the key's order are the publish's: a subscriber that comes while it waits gets what is
+    // published after it.
+    const publishedTo = [...(subs.get(key) ?? [])]
+    const info = this.takeInfo(key)
     return new Promise((resolve, reject) => {
       const deliver = () => {
+        // One that left while it waited gets none.
+        const targets = publishedTo.filter((onMessage) => subs.get(key)?.has(onMessage))
         try {
-          resolve(this.deliverInMemory(subs, key, queuedData, timestamp))
+          resolve(this.deliverInMemory(targets, queuedData, info))
         } catch (err) {
           reject(err)
         }
       }
-      this.queued.push({ size, depth: this.depth + 1, deliver, reject })
+      this.queued.push({ size, depth: this.depth + 1, deliver })
     })
   }
 
   private deliverInMemory<T>(
-    subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>,
-    key: string,
+    targets: Iterable<(data: T, info: WirePublishInfo) => void> | undefined,
     data: T,
-    timestamp: number,
+    info: WirePublishInfo,
   ): BroadcastPublishResult {
-    const seq = (this.keySeqs.get(key) ?? this.highestSeq) + 1
-    if (seq > this.highestSeq) this.highestSeq = seq
-    if (this.subscriptions.has(key) || this.binarySubscriptions.has(key)) this.keySeqs.set(key, seq)
-    const info = { seq, timestamp }
     let delivered = 0
-    const set = subs.get(key)
-    if (set) {
-      for (const onMessage of set) {
+    if (targets) {
+      for (const onMessage of targets) {
         delivered++
         onMessage(data, info)
       }
     }
-    return { seq, timestamp, meta: { delivered, transport: 'in-memory' } }
+    return { ...info, meta: { delivered, transport: 'in-memory' } }
+  }
+
+  /** The `seq` and `timestamp` of a publish to `key` made now. */
+  private takeInfo(key: string): WirePublishInfo {
+    const seq = (this.keySeqs.get(key) ?? this.highestSeq) + 1
+    if (seq > this.highestSeq) this.highestSeq = seq
+    if (this.subscriptions.has(key) || this.binarySubscriptions.has(key)) this.keySeqs.set(key, seq)
+    return { seq, timestamp: Date.now() }
   }
 
   // ── Shared ──

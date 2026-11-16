@@ -19,7 +19,7 @@ export {
   onBroadcastReconnect,
   onBroadcastWhileOffline,
   onBroadcastSeqAcrossSubscribers,
-  onBroadcastSeqWhileQueued,
+  onBroadcastJoinWhileQueued,
   onBroadcastManyKeys,
   onBroadcastThrowingListener,
   onJoinChat,
@@ -233,25 +233,32 @@ async function onBroadcastSeqAcrossSubscribers() {
   return seqs
 }
 
-/** A listener's in-memory publishes queue. It publishes a key nobody subscribes to, then another key, then a subscriber
- *  comes before the queue drains, and the key is published again. */
-async function onBroadcastSeqWhileQueued() {
-  const key = `room:seq-queued:${crypto.randomUUID()}`
-  const trigger = `room:seq-trigger:${crypto.randomUUID()}`
-  const received: Array<[string, number]> = []
-  const sends: ReturnType<typeof Broadcast.publish>[] = []
-  let off = () => {}
-  const offTrigger = Broadcast.subscribe(trigger, () => {
-    sends.push(Broadcast.publish(key, 'first'))
-    void Broadcast.publish(`room:seq-other:${crypto.randomUUID()}`, 0)
-    off = Broadcast.subscribe<string>(key, (message, info) => received.push([message, info.seq]))
-    sends.push(Broadcast.publish(key, 'second'))
-  })
+/** A text subscriber holds a key. A listener's in-memory publishes queue: it gives the key text, binary and text, a second
+ *  subscriber then subscribes to both kinds, and the key gets text once more. What it got. */
+async function onBroadcastJoinWhileQueued() {
+  const key = `room:join-queued:${crypto.randomUUID()}`
+  const trigger = `room:join-trigger:${crypto.randomUUID()}`
+  const offs = [Broadcast.subscribe(key, () => {})]
+  // The key has an order before the listener's publishes.
+  await Broadcast.publish(key, 't0')
+  const received: Array<string | number> = []
+  const queued: Array<ReturnType<typeof Broadcast.publish>> = []
+  offs.push(
+    Broadcast.subscribe(trigger, () => {
+      queued.push(
+        Broadcast.publish(key, 't1'),
+        Broadcast.publishBinary(key, new Uint8Array([2])),
+        Broadcast.publish(key, 't3'),
+      )
+      offs.push(Broadcast.subscribe<string>(key, (message) => received.push(message)))
+      offs.push(Broadcast.subscribeBinary(key, (data) => received.push(data[0]!)))
+    }),
+  )
   await Broadcast.publish(trigger, 'go')
-  const receipts = [(await sends[0]!).seq, (await sends[1]!).seq]
-  off()
-  offTrigger()
-  return { receipts, received }
+  await Promise.all(queued)
+  await Broadcast.publish(key, 't4')
+  for (const off of offs) off()
+  return received
 }
 
 /** Publishes once on each of `count` distinct keys, each without a subscriber, or each while one subscribes. */

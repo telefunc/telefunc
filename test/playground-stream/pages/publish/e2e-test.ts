@@ -384,22 +384,14 @@ function testPublish(isDev: boolean, inDocker = false) {
     })
   })
 
-  // In-memory only: the Docker lanes publish through Redis, which has no queue, and whose delivery can come after the publish resolves.
+  // The in-memory backend's: Redis delivers what reaches a key's subscription once it is there.
   if (!inDocker && !process.env.REDIS_URL) {
-    test('broadcast: a subscriber that comes while publishes queue gets the next seq right after the one before it', async () => {
+    test('broadcast: a subscriber that comes while publishes queue gets only what is published after it, text and binary alike', async () => {
       await navigate(`${getServerUrl()}/publish`)
-      await page.click('#test-broadcast-seq-while-queued')
+      await page.click('#test-broadcast-join-while-queued')
 
       await autoRetry(async () => {
-        const { receipts, received } = await getResult<{ receipts: number[]; received: Array<[string, number]> }>(
-          '#publish-result',
-        )
-        const [first] = receipts
-        expect(receipts).deep.equal([first, first! + 1])
-        expect(received).deep.equal([
-          ['first', first],
-          ['second', first! + 1],
-        ])
+        expect((await getResult<{ received: Array<string | number> }>('#publish-result')).received).deep.equal(['t4'])
       })
     })
   }
