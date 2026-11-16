@@ -510,16 +510,17 @@ async function onStaticPublishReceipts() {
   return { key, receipts: [text, binary].map((receipt) => ({ key: receipt.key, seq: receipt.seq })) }
 }
 
-/** A key's receipts: two publishes while it has a subscriber, two after it left and another key published, one with a new subscriber. */
+/** A key's receipts: two publishes while it has a subscriber, with another key publishing between them, two after it
+ *  left, one with a new subscriber. */
 async function onBroadcastSeqAcrossSubscribers() {
   const key = `room:seq:${crypto.randomUUID()}`
   const seqs: number[] = []
   const publish = async () => seqs.push((await Broadcast.publish(key, seqs.length)).seq)
   const off = Broadcast.subscribe(key, () => {})
   await publish()
+  await Broadcast.publish(`room:seq-other:${crypto.randomUUID()}`, 0)
   await publish()
   off()
-  await Broadcast.publish(`room:seq-other:${crypto.randomUUID()}`, 0)
   await publish()
   await publish()
   const offAgain = Broadcast.subscribe(key, () => {})

@@ -443,7 +443,7 @@ function testPublish(isDev: boolean, inDocker = false) {
     }
   })
 
-  test("broadcast: a key's seq goes on growing after its subscribers leave and another key publishes, and runs on by one while it has a subscriber", async () => {
+  test("broadcast: a key's seq goes on growing after its subscribers leave, and runs on by one while it has a subscriber, whatever another key publishes", async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-seq-across-subscribers')
 
