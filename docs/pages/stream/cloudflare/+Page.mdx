@@ -36,7 +36,7 @@ export default {
 // wrangler.jsonc
 {
   "compatibility_date": "2025-08-15", // or later
-  // nodejs_als (or nodejs_compat): server-side Broadcast subscribers need it.
+  // nodejs_als (or nodejs_compat): server code that subscribes to a broadcast needs it.
   // enable_request_signal: a Worker's request.signal aborts when its client disconnects.
   "compatibility_flags": ["nodejs_als", "enable_request_signal"],
   "durable_objects": {
@@ -53,7 +53,7 @@ export default {
 }
 ```
 
-> `nodejs_als` gives Telefunc `AsyncLocalStorage`, which tells it the Durable Object a server-side `Broadcast` subscriber belongs to; `nodejs_compat` includes it. A Worker without either still serves telefunctions, channels, and a `BroadcastChannel` returned to the client; a server-side subscriber then throws an error that names the flag.
+> `nodejs_als` gives Telefunc `AsyncLocalStorage`, which tells it the Durable Object your server code subscribes in; `nodejs_compat` includes it. Without either, `Broadcast.subscribe()` throws an error that names the flag, and so does `subscribe()` on a `BroadcastChannel` before its client has it, such as in the telefunction that returns it. Telefunctions, channels, and a `BroadcastChannel` the client subscribes to work without it.
 
 {/* spellcheck-ignore:off */}
 
