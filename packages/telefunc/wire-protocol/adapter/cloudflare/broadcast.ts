@@ -2,6 +2,7 @@
 export { CloudflareBroadcastTransport, CloudflareBroadcastAuthorityState }
 export type { BroadcastDeliverRequest, BroadcastPublishRequest, TelefuncBroadcastStub }
 
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { PUBLISH_HOLD_BYTES } from '../../constants.js'
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorScale, getDeterministicKeyBucketIndex } from './routing.js'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
@@ -269,8 +270,9 @@ class CloudflareBroadcastAuthorityState {
 //   - textSubs/binarySubs: local subscriber callbacks by key, each with the DO that owns it
 //   - memberStates: per key, the presences of the DOs with subscribers here and the publishes waiting on them
 //   - requestOwners: each request a DO received, with its name
+//   - callOwners: the DO each running call was received by
 //   - locationBucket: set once on first attachIsolateInfo call
-//   - representativeDOName: the isolate's first DO, the owner of the server's own subscribers
+//   - representativeDOName: the isolate's first DO, the owner of subscribers made in no call
 // ---------------------------------------------------------------------------
 
 class CloudflareBroadcastTransport implements BroadcastAdapter {
@@ -287,6 +289,8 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   private readonly binarySubs = new Map<string, Map<BroadcastBinaryOnMessage, string>>()
   /** Each request a Durable Object received, with its name: a wire it opens is that Durable Object's. */
   private readonly requestOwners = new WeakMap<Request, string>()
+  /** The Durable Object each running call was received by: one isolate runs several objects' calls in turns. */
+  private readonly callOwners = new AsyncLocalStorage<string>()
   /** The stub to each key's authority of this synchronous run, which is one Durable Object's: its publishes in one run
    *  stay in order. Later runs may be another's, so they get their own. */
   private readonly authorityStubsOfThisRun = new Map<string, TelefuncBroadcastStub>()
@@ -307,6 +311,11 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
   attachRequest(request: Request, doName: string): void {
     this.requestOwners.set(request, doName)
+  }
+
+  /** Runs `call`, which the Durable Object `doName` received: what it subscribes with no page's wire is `doName`'s. */
+  runCall<T>(doName: string, call: () => T): T {
+    return this.callOwners.run(doName, call)
   }
 
   attachIsolateInfo(doName: string, locationBucket: LocationBucket): void {
@@ -395,10 +404,11 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     return binary !== undefined && binary.size > 0
   }
 
-  /** The Durable Object that may write to a subscriber's page; the server's own subscribers go with the isolate's first. */
-  ownerOf(pageRequest: Request | undefined): string {
-    if (!pageRequest) return this.requireRepresentativeDOName()
-    const owner = this.requestOwners.get(pageRequest)
+  /** The Durable Object that may write to a subscriber's page: its wire's; else the one whose call subscribes, where
+   *  the page will be, as a call and its page's wire reach one object; else the isolate's first. */
+  ownerOf(wireRequest: Request | undefined): string {
+    if (!wireRequest) return this.callOwners.getStore() ?? this.requireRepresentativeDOName()
+    const owner = this.requestOwners.get(wireRequest)
     assert(owner, 'a wire opened by a request no Durable Object received')
     return owner
   }
@@ -408,10 +418,10 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     subsByKey: Map<string, Map<OnMessage, string>>,
     key: string,
     onMessage: OnMessage,
-    pageRequest: Request | undefined,
+    wireRequest: Request | undefined,
   ): BroadcastUnsubscribe {
     const locationBucket = this.requireLocationBucket()
-    const owner = this.ownerOf(pageRequest)
+    const owner = this.ownerOf(wireRequest)
     let subs = subsByKey.get(key)
     if (!subs) {
       subs = new Map()
@@ -434,12 +444,12 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
   // --- BroadcastAdapter interface ---
 
-  subscribe(key: string, onMessage: BroadcastOnMessage, pageRequest?: Request): BroadcastUnsubscribe {
-    return this.addSubscriber(this.textSubs, key, onMessage, pageRequest)
+  subscribe(key: string, onMessage: BroadcastOnMessage, wireRequest?: Request): BroadcastUnsubscribe {
+    return this.addSubscriber(this.textSubs, key, onMessage, wireRequest)
   }
 
-  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, pageRequest?: Request): BroadcastUnsubscribe {
-    return this.addSubscriber(this.binarySubs, key, onMessage, pageRequest)
+  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, wireRequest?: Request): BroadcastUnsubscribe {
+    return this.addSubscriber(this.binarySubs, key, onMessage, wireRequest)
   }
 
   publish(key: string, serialized: string): Promise<BroadcastPublishResult> {

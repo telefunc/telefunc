@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => {
     readonly attachKV = vi.fn()
     readonly attachIsolateInfo = vi.fn()
     readonly attachRequest = vi.fn()
+    readonly runCall = vi.fn(<T>(_doName: string, call: () => T): T => call())
     readonly publishToSubscribers = vi.fn()
     readonly deliverToLocal = vi.fn()
 

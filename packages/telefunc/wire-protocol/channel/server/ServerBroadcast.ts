@@ -292,7 +292,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   }
 
   private get owner(): string | undefined {
-    return this.adapter?.ownerOf?.(this.pageRequest)
+    return this.adapter?.ownerOf?.(this.wireRequest)
   }
 
   /** `MemoryHolder`: its page gets every publish, so where it would miss one no wire has, the channel ends: from that gap
@@ -352,19 +352,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     }
   }
 
-  /** Its server's subscriptions made before a response carried it named no page's object: they are made again with its
-   *  page's, each before the old one goes, so where that is the same object the adapter writes nothing. */
-  override _carriedBy(request: Request, abortResponse: (abortValue?: unknown) => void): void {
-    const { pageRequest, unsubBroadcast, unsubBinaryBroadcast } = this
-    super._carriedBy(request, abortResponse)
-    if (pageRequest) return
-    this.unsubBroadcast = this.unsubBinaryBroadcast = null
-    if (unsubBroadcast) this.subscribeBroadcast()
-    if (unsubBinaryBroadcast) this.subscribeBinaryBroadcast()
-    unsubBroadcast?.()
-    unsubBinaryBroadcast?.()
-  }
-
   override _attachPeer(peer: IndexedPeer, state?: AttachState): void {
     this.lastPeer = peer
     super._attachPeer(peer, state)
@@ -408,7 +395,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.unsubBroadcast = this.broadcastAdapter().subscribe(
       this.key,
       (serialized, rawInfo) => this.deliverBroadcastMessage(serialized, rawInfo),
-      this.pageRequest,
+      this.wireRequest,
     )
   }
 
@@ -417,7 +404,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.unsubBinaryBroadcast = this.broadcastAdapter().subscribeBinary(
       this.key,
       (data, rawInfo) => this.deliverBroadcastBinaryMessage(data, rawInfo),
-      this.pageRequest,
+      this.wireRequest,
     )
   }
 

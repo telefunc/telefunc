@@ -118,7 +118,9 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         return crosswsAdapter.handleDurableUpgrade(this, request)
       }
       const context = getContext ? await getContext(request, this.env as Cloudflare.Env) : undefined
-      const httpResponse = await serveTelefunc(context ? { request, context } : { request })
+      const httpResponse = await broadcast.runCall(this.instanceName, () =>
+        serveTelefunc(context ? { request, context } : { request }),
+      )
       const headers = new Headers(httpResponse.headers)
       // The page names it from then on, so it reaches this Durable Object from any region.
       if (target) headers.set(SESSION_HOME_HEADER, target.locationBucket)
@@ -126,7 +128,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
-      return crosswsAdapter.handleDurableMessage(this, ws, message)
+      return broadcast.runCall(this.instanceName, () => crosswsAdapter.handleDurableMessage(this, ws, message))
     }
 
     webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {

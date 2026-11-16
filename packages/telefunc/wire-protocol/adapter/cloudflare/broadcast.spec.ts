@@ -12,8 +12,6 @@ import { CloudflareBroadcastAuthorityState, CloudflareBroadcastTransport } from 
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { ServerBroadcast } from '../../channel/server/ServerBroadcast.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting } from '../../broadcast/broadcastAdapter.js'
-import { carryChannel } from '../../../node/server/runTelefunc/carryChannel.js'
-import { createRequestContext } from '../../../node/server/context/requestContext.js'
 
 type CloudflareRequest = Request & { cf?: { colo?: string; continent?: string } }
 
@@ -49,16 +47,19 @@ function createAuthorityState() {
   return new CloudflareBroadcastAuthorityState(state)
 }
 
-function createMockKV(): KVNamespace {
+/** `writes`, where given, gets each put and delete in order. */
+function createMockKV(writes?: string[]): KVNamespace {
   const store = new Map<string, { value: string; expirationTtl?: number }>()
   return {
     async get(key: string) {
       return store.get(key)?.value ?? null
     },
     async put(key: string, value: string, options?: { expirationTtl?: number }) {
+      writes?.push(`put ${key}`)
       store.set(key, { value, expirationTtl: options?.expirationTtl })
     },
     async delete(key: string) {
+      writes?.push(`delete ${key}`)
       store.delete(key)
     },
     async list({ prefix, cursor }: { prefix?: string; cursor?: string }) {
@@ -682,7 +683,7 @@ describe('cloudflare broadcast routing', () => {
     _resetBroadcastAdapterForTesting(previousTransport)
   })
 
-  it("delivers a channel the server subscribed to before returning it in its call's Durable Object", async () => {
+  it('records what a call subscribes after an `await` under the Durable Object that received that call', async () => {
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 5 })
     const previousTransport = getBroadcastAdapter()
     let deliveringIn: string | null = null
@@ -698,22 +699,44 @@ describe('cloudflare broadcast routing', () => {
       }),
       'TelefuncDurableObject',
     )
-    transport.attachKV(createMockKV())
+    const kvWrites: string[] = []
+    transport.attachKV(createMockKV(kvWrites))
     transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
     _resetBroadcastAdapterForTesting(transport)
-    const call = new Request('https://telefunc.test/_telefunc', { method: 'POST' })
-    transport.attachRequest(call, 'telefunc-shard-weur-1')
 
-    const channel = new ServerBroadcast<string>({ key: 'room:test:carried' })
-    const deliveredIn: Array<string | null> = []
-    channel.subscribe(() => deliveredIn.push(deliveringIn))
-    carryChannel(channel, createRequestContext(call))
+    const deliveredIn: string[] = []
+    async function subscribingTelefunction(doName: string, resumeAfter: Promise<void>) {
+      await resumeAfter
+      const channel = new ServerBroadcast<string>({ key: 'room:test:call' })
+      channel.subscribe(() => deliveredIn.push(`${doName}'s listener in ${deliveringIn}`))
+      return channel
+    }
+    let secondCallStarted = () => {}
+    const secondCallStart = new Promise<void>((resolve) => {
+      secondCallStarted = resolve
+    })
+    // The first call resumes only after the second one ran, so each subscribes while the other's call is under way.
+    const firstCall = transport.runCall('telefunc-shard-weur-1', () =>
+      subscribingTelefunction('telefunc-shard-weur-1', secondCallStart),
+    )
+    const secondCall = transport.runCall('telefunc-shard-weur-2', () => {
+      secondCallStarted()
+      return subscribingTelefunction('telefunc-shard-weur-2', flushCoordinatorTurn())
+    })
+    const channels = await Promise.all([firstCall, secondCall])
     await flushCoordinatorTurn()
-    await channel.publish('hello')
+    await channels[0].publish('hello')
     await flushCoordinatorTurn()
 
-    expect(deliveredIn).toEqual(['telefunc-shard-weur-1'])
-    channel.abort()
+    expect(deliveredIn.sort()).toEqual([
+      "telefunc-shard-weur-1's listener in telefunc-shard-weur-1",
+      "telefunc-shard-weur-2's listener in telefunc-shard-weur-2",
+    ])
+    expect(kvWrites.sort()).toEqual([
+      `put tfps:${encodeURIComponent('room:test:call')}:weur:telefunc-shard-weur-1`,
+      `put tfps:${encodeURIComponent('room:test:call')}:weur:telefunc-shard-weur-2`,
+    ])
+    for (const channel of channels) channel.abort()
     _resetBroadcastAdapterForTesting(previousTransport)
   })
 })
