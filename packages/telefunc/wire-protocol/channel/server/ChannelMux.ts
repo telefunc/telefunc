@@ -688,8 +688,10 @@ class ChannelMux implements UpgradeStagesOwner {
     for (const ix of new Set(released)) if (heldId(ix) !== undefined) held--
     for (const { id, ix } of open) {
       const heldAs = heldId(ix)
-      // An index names one channel until the page releases it.
+      // An index names one channel until the page releases it, and a page holds one end of a channel.
       assertProtocol(heldAs === undefined || heldAs === id, 'RECONCILE names a held index under another id')
+      const heldAt = this.sessions.indexOf(sessionId, id)
+      assertProtocol(heldAt === undefined || heldAt === ix, 'RECONCILE names a held channel under another index')
       if (heldAs === undefined) held++
     }
     assertProtocol(held <= MAX_CHANNELS_PER_CONNECTION, 'RECONCILE over the wire channel cap')
@@ -747,6 +749,8 @@ class ChannelMux implements UpgradeStagesOwner {
     const { entry } = awaited
     const sessionId = entry.transport.getSessionId(entry.wire)
     assert(sessionId, 'a channel awaited on a wire that never reconciled')
+    // A page holds one end of a channel: one that awaits it at a second index broke the protocol.
+    if (this.sessions.indexOf(sessionId, channel.id) !== undefined) return this.terminateWire(entry.wire)
     entry.state.attaching.add(channel)
     const handle = this.attachChannel(channel, awaited.open, entry, false)
     entry.state.attaching.delete(channel)

@@ -38,7 +38,7 @@ function createHarness() {
   const received: number[] = []
   channel.listen((value) => received.push(value))
   mux.registerChannel(channel)
-  return { wire, received }
+  return { mux, wire, received }
 }
 
 async function setupUpgrade() {
@@ -106,4 +106,47 @@ test('a control frame is bounded by what the protocol can describe, a data frame
   expect(big.byteLength).toBeLessThan(WIRE_MAX_RAW_FRAME_BYTES)
   await data.deliver(big)
   expect(data.terminated()).toBe(false)
+})
+
+test("a RECONCILE that names a channel at a second index of the page's session ends its wire", async () => {
+  const h = createHarness()
+  const twice = h.wire()
+  await twice.deliver(
+    encode.reconcile({
+      open: [
+        { id: 'A', ix: 0, lastSeq: 0, initial: true },
+        { id: 'A', ix: 1, lastSeq: 0, initial: true },
+      ],
+    }),
+  )
+  expect(twice.terminated()).toBe(true)
+  expect(twice.sent.filter((frame) => frame.tag === TAG.RECONCILED)).toHaveLength(0)
+
+  const wire = h.wire()
+  await wire.deliver(encode.reconcile({ open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] }))
+  const opens = (ix: number) =>
+    encode.reconcile({ sessionId: wire.sessionId(), released: [], open: [{ id: 'A', ix, lastSeq: 0 }] })
+  // The page names the channel again where it holds it: that's no violation.
+  await wire.deliver(opens(0))
+  expect(wire.terminated()).toBe(false)
+  await wire.deliver(opens(1))
+  expect(wire.terminated()).toBe(true)
+  expect(wire.sent.filter((frame) => frame.tag === TAG.RECONCILED)).toHaveLength(2)
+})
+
+test('a page that awaits one channel at two indexes of its session has its wire ended as the channel registers', async () => {
+  const h = createHarness()
+  const wire = h.wire()
+  await wire.deliver(encode.reconcile({ open: [] }))
+  for (const ix of [0, 1])
+    await wire.deliver(
+      encode.reconcile({
+        sessionId: wire.sessionId(),
+        released: [],
+        open: [{ id: 'B', ix, lastSeq: 0, initial: true }],
+      }),
+    )
+  expect(wire.terminated()).toBe(false)
+  h.mux.registerChannel(new ServerChannel({ id: 'B' }))
+  expect(wire.terminated()).toBe(true)
 })

@@ -17,6 +17,11 @@ class SessionRegistry {
     return this.bySession.get(sessionId)?.get(ix)
   }
 
+  /** The index the session holds channel `channelId` at. */
+  indexOf(sessionId: string, channelId: string): number | undefined {
+    return this.byChannel.get(channelId)?.get(sessionId)
+  }
+
   /** The session's channels, left in place. */
   peekSession(sessionId: string): Map<number, ChannelHandle> | undefined {
     return this.bySession.get(sessionId)

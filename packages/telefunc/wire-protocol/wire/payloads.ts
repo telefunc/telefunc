@@ -106,9 +106,12 @@ function assertOpenList(open: unknown): asserts open is ReconcileOpenEntry[] {
   assertProtocol(Array.isArray(open), 'open list')
   assertProtocol(open.length <= MAX_CHANNELS_PER_CONNECTION, 'open list over entry cap')
   const indexes = new Set<number>()
+  const ids = new Set<string>()
   for (const rawEntry of open) {
     const entry = asObject(rawEntry)
-    assertProtocol(typeof entry.id === 'string', 'open entry id')
+    // A page holds one end of a channel, at one index.
+    assertProtocol(typeof entry.id === 'string' && !ids.has(entry.id), 'open entry id')
+    ids.add(entry.id)
     // `ix` is truncated to u16 by the header writer, so a wider one would alias onto another channel.
     assertProtocol(isUint(entry.ix, 0xffff) && !indexes.has(entry.ix), 'open entry ix')
     indexes.add(entry.ix)
