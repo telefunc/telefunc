@@ -36,6 +36,7 @@ class RoomHeartbeat {
   private timer: ReturnType<typeof setInterval> | null = null
   /** A slow backend must not pile up overlapping ticks. */
   private ticking = false
+  private checkingCoverage = false
 
   private readonly hosting: RoomHeartbeatOptions['hosting']
   private readonly incarnation: RoomIncarnation
@@ -88,12 +89,23 @@ class RoomHeartbeat {
         const { id, inc } = this.incarnation
         await Promise.all([dropReplacedMetaGenerations(id, inc), reapLapsedLeases(this.incarnation)])
         // Each reads what the reap left.
-        await Promise.all([this.authority.checkCoverage(), maintainHold(this.incarnation, head)])
+        if (!this.checkingCoverage) void this.checkCoverage().catch(reportRoomError)
+        await maintainHold(this.incarnation, head)
       }
       sweepLapsedRoomsSoon()
       for (const result of [renewal, reconciled]) if (result.status === 'rejected') throw result.reason
     } finally {
       this.ticking = false
+    }
+  }
+
+  /** One at a time, beside the ticks: the roster refresh it may wait for can outlast many. */
+  private async checkCoverage(): Promise<void> {
+    this.checkingCoverage = true
+    try {
+      await this.authority.checkCoverage()
+    } finally {
+      this.checkingCoverage = false
     }
   }
 }
