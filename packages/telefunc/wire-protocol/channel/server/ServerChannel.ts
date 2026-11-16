@@ -104,6 +104,8 @@ function heldAnswerBytes(result: string): number {
 const REFUSAL_BYTES = heldAnswerBytes('')
 const TOO_MANY_ANSWERS_TEXT =
   'Channel closed: more `{ ack: true }` sends and `publish()` calls wait for their answers than the server can hold even refusals for, see config.channel.maxMemory'
+const UNHELD_MESSAGE_TEXT =
+  "Channel closed: its client sent more than the most for one channel, or config.channel.maxMemory, while `listen()` callbacks or a stream's reader work on what it sent; on the client, await each send, or send smaller messages"
 
 /** A `sendAck` awaiting the peer's ACK_RES. */
 type PendingAck<T> = { resolve: (result: ChannelAck<T>) => void; reject: (err: Error) => void }
@@ -672,7 +674,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** Holds a frame of `bytes` for `deliver` and what it returns to wait for: consumed on every way out, as window
    *  refreshes are consumption-driven and a page's sends would stall. */
   private holdWhile(bytes: number, deliver: () => Promise<unknown> | undefined): void {
-    this.received(bytes)
+    if (!this.received(bytes)) return
     let pending: Promise<unknown> | undefined
     try {
       pending = deliver()
@@ -700,10 +702,17 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return pending.length > 0 ? Promise.all(pending) : undefined
   }
 
-  /** Data within the credit granted arrived: nobody can refuse it, so it's charged, and it lowers what's granted next. */
-  private received(bytes: number): void {
+  /** Charges a data frame that arrived, which lowers what's granted next; false where the channel ended instead. Credit
+   *  only paces a page, and one that doesn't await its sends passes it: where the server can't hold what it sent, its
+   *  channel ends. */
+  private received(bytes: number): boolean {
+    if (!admit(this, bytes)) {
+      this.endForLackOfMemory(UNHELD_MESSAGE_TEXT)
+      return false
+    }
     hold(this, bytes)
     this.receiveCredit.onReceived(bytes)
+    return true
   }
 
   private consumed(bytes: number): void {
@@ -922,6 +931,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.shutdown(err)
   }
 
+  /** Ends the channel for lack of memory, as a shed subscriber does. */
+  private endForLackOfMemory(text: string): void {
+    this.dropUnhanded()
+    this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(text))
+  }
+
   /** Send an ack response, buffering it if the peer is currently disconnected. It takes its request's place. One that
    *  isn't admitted becomes a refusal: the page's `send` rejects with `ChannelOverflowError` and the channel stays open.
    *  Its request held room for it, so it needs no more; only a request refused on arrival asks, and where even its
@@ -934,11 +949,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       letGo(this, room)
     }
     if (!admit(this, heldAnswerBytes(result))) {
-      if (room === undefined && !admit(this, REFUSAL_BYTES)) {
-        // It ends for lack of memory, as a shed subscriber does.
-        this.dropUnhanded()
-        return this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(TOO_MANY_ANSWERS_TEXT))
-      }
+      if (room === undefined && !admit(this, REFUSAL_BYTES)) return this.endForLackOfMemory(TOO_MANY_ANSWERS_TEXT)
       result = ''
       status = ACK_STATUS.OVERFLOW
     }

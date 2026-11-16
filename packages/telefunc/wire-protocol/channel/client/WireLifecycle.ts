@@ -604,7 +604,7 @@ const TRANSPORT_REGISTRY: Record<
 function channelErrorFor(reason: number): Error {
   if (reason === ERROR_REASON.OVERFLOW) {
     return new ChannelOverflowError(
-      `Channel closed: this client fell behind, and what it had yet to receive passed what the server holds for one channel (${CHANNEL_HOLD_MAX_BYTES / 2 ** 20} MiB by default) or config.channel.maxMemory. Read messages faster, send less or await each send and publish(), pass \`lossy: true\` to a BroadcastChannel that may skip to the newest, or raise config.channel.maxMemory`,
+      `Channel closed: the server couldn't hold more for this client. What it had yet to receive, or what it sent that the server was still working on, passed what the server holds for one channel (${CHANNEL_HOLD_MAX_BYTES / 2 ** 20} MiB by default) or config.channel.maxMemory. Read messages faster, send less or await each send and publish(), pass \`lossy: true\` to a BroadcastChannel that may skip to the newest, or raise config.channel.maxMemory`,
     )
   }
   return makeBugError()

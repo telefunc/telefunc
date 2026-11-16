@@ -4,7 +4,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { config, getChannelConfig } from '../../../node/server/serverConfig.js'
 import { Abort } from '../../../shared/Abort.js'
-import { CREDIT_WINDOW_INITIAL_BYTES, WIRE_VERSION } from '../../constants.js'
+import { CHANNEL_PUMP_TAG_DATA, CREDIT_WINDOW_INITIAL_BYTES, WIRE_VERSION } from '../../constants.js'
 import { encodeSseRequest } from '../../wire/envelope.js'
 import {
   ERROR_REASON,
@@ -22,9 +22,10 @@ import { ServerHeadroom } from '../../flowControl/server/ServerHeadroom.js'
 import { getBroadcastAdapter } from '../../broadcast/broadcastAdapter.js'
 import { pairPublishes } from '../client/pairPublishes.js'
 import { SseEvents } from '../client/SseEvents.js'
-import { ChannelClosedError } from '../channelErrors.js'
+import { ChannelStreamSource } from '../../values/ChannelStreamSource.js'
+import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
 import { getChannelMux } from './ChannelMux.js'
-import { hold, letGo, releaseHolder, type MemoryHolder } from './channelMemory.js'
+import { hold, letGo, queueMemory, releaseHolder, type MemoryHolder } from './channelMemory.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { ServerChannel } from './ServerChannel.js'
@@ -174,6 +175,8 @@ function overWebSocket(channels: ServerChannel[], requests: Request[] = []) {
     headroom,
     peers,
     attach,
+    /** Each frame the page got, whole. */
+    arrived,
     /** The page reads all that waits for it, saying it took each byte it got, and returns all it read. */
     async readAll(): Promise<string[]> {
       while (headroom.sender.unhandedBytes > 0) {
@@ -791,4 +794,59 @@ test('on a WebSocket, abort() comes behind the sends made before it', async () =
   for (const message of MESSAGES) void channel.send(message)
   channel.abort()
   expect(await page.readAll()).toEqual(['0:p1', '0:p2', '0:p3', '0:ABORT'])
+})
+
+/** The page's messages of 768 KiB with seqs 1 to 3, each starting with `firstByte(seq)`, of which a channel may hold
+ *  two: the third passes its 2 MiB. */
+function sendThreeFromPage(channel: ServerChannel, firstByte = (seq: number) => seq): void {
+  for (let seq = 1; seq <= 3; seq++) {
+    fromPage(channel, encode.binary(0, new Uint8Array(768 * 1024).fill(firstByte(seq), 0, 1), seq))
+  }
+}
+
+test("on a WebSocket, a page's message its channel can't hold while a listener works on the ones before closes the channel with ChannelOverflowError, and reaches no listener", async () => {
+  const held = ledgerTotal()
+  const channel = new ServerChannel()
+  const page = overWebSocket([channel])
+  let closedWith: unknown
+  channel.onClose((err) => {
+    closedWith = err
+  })
+  const got: (number | undefined)[] = []
+  let finish = () => {}
+  const working = new Promise<void>((resolve) => {
+    finish = resolve
+  })
+  channel.listenBinary((data) => {
+    got.push(data.at(0))
+    return working
+  })
+  sendThreeFromPage(channel)
+  expect(closedWith).toBeInstanceOf(ChannelOverflowError)
+  expect(ledgerTotal() - held).toBeLessThanOrEqual(getChannelConfig().maxPendingBytes)
+  expect(await page.readAll()).toEqual(['0:ERROR'])
+  expect(page.arrived.map((frame) => decode(frame))).toContainEqual(
+    expect.objectContaining({ tag: TAG.ERROR, reason: ERROR_REASON.OVERFLOW }),
+  )
+  expect(got).toEqual([1, 2])
+  // The listener is done, and the page confirms the ERROR.
+  finish()
+  await new Promise((resolve) => setTimeout(resolve))
+  fromPage(channel, encode.window(0, CREDIT_WINDOW_INITIAL_BYTES, 1))
+  expect(ledgerTotal()).toBe(held)
+})
+
+test("on a WebSocket, a stream argument's reader reads the chunks queued before a chunk its channel can't hold, then ChannelOverflowError", async () => {
+  const held = ledgerTotal()
+  const channel = new ServerChannel()
+  overWebSocket([channel])
+  const source = ChannelStreamSource.create(channel, { memory: queueMemory() })
+  sendThreeFromPage(channel, () => CHANNEL_PUMP_TAG_DATA)
+  const first = await source.readNextChunk()
+  const second = await source.readNextChunk()
+  const third = await source.readNextChunk().catch((err: unknown) => err)
+  expect([first?.byteLength, second?.byteLength]).toEqual([768 * 1024 - 1, 768 * 1024 - 1])
+  expect(third).toBeInstanceOf(ChannelOverflowError)
+  fromPage(channel, encode.window(0, CREDIT_WINDOW_INITIAL_BYTES, 1))
+  expect(ledgerTotal()).toBe(held)
 })

@@ -67,7 +67,8 @@ function broadcastMessages<T>(broadcast: BroadcastSource<T>, options?: { signal?
   )
 }
 
-/** Without a `budget`, what the loop holds is bounded by its source: a channel's listener promise holds its credit. */
+/** Without a `budget`, what the loop holds is bounded by its source: a channel holds each message until its listener's
+ *  promise settles, within the most it may hold. */
 async function* iterateMessages<M extends Message<unknown>>(
   source: { readonly closed: Promise<void> },
   subscribe: (
