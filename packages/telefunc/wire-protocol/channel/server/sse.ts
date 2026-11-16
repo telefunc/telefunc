@@ -73,7 +73,8 @@ class EventStream implements WireQueue {
   private waitingBytes = 0
   /** The frame whose event is going to the stream, and how far it went. */
   private current: { frame: Uint8Array<ArrayBuffer>; offset: number } | null = null
-  /** The newest publish's head that left: a body at the front of `waiting` names no channel, only its head does. */
+  /** The newest event started in order where it is a publish's head, whose body comes next in order: a body at the
+   *  front of `waiting` names no channel, only its head does. */
   private headStarted: Uint8Array<ArrayBuffer> | null = null
   /** Whether the stream asks for more. */
   private takes: boolean
@@ -110,8 +111,12 @@ class EventStream implements WireQueue {
       this.waitingBytes += eventBytes(frame)
       return
     }
-    if (atOnce || (this.takes && this.current === null && this.waiting.length === 0)) {
+    if (atOnce) {
       this.startEvent(frame)
+      return
+    }
+    if (this.takes && this.current === null && this.waiting.length === 0) {
+      this.startInOrder(frame)
       return
     }
     this.tookAt ??= performance.now()
@@ -169,7 +174,7 @@ class EventStream implements WireQueue {
     while (this.takes && this.waiting.length > 0) {
       const frame = this.waiting.shift()!
       this.waitingBytes -= eventBytes(frame)
-      bytes += this.startEvent(frame)
+      bytes += this.startInOrder(frame)
     }
     if (this.tookAt === null) return
     const now = performance.now()
@@ -177,9 +182,15 @@ class EventStream implements WireQueue {
     this.tookAt = this.current !== null || this.waiting.length > 0 ? now : null
   }
 
+  /** Starts the event of `frame`, next in the order data keeps. A head names its channel only until its body's event
+   *  starts: nothing passes an event once it started. */
+  private startInOrder(frame: Uint8Array<ArrayBuffer>): number {
+    this.headStarted = frame[0] === TAG.PUBLISH_TO ? frame : null
+    return this.startEvent(frame)
+  }
+
   /** Starts `frame`'s event and returns the bytes that went. */
   private startEvent(frame: Uint8Array<ArrayBuffer>): number {
-    if (frame[0] === TAG.PUBLISH_TO) this.headStarted = frame
     this.current = { frame, offset: 0 }
     return this.pushChunks()
   }
