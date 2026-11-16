@@ -3,6 +3,7 @@ import { expect, test, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { config, getChannelConfig } from '../../../node/server/serverConfig.js'
+import { Abort } from '../../../shared/Abort.js'
 import { CREDIT_WINDOW_INITIAL_BYTES, WIRE_VERSION } from '../../constants.js'
 import { encodeSseRequest } from '../../wire/envelope.js'
 import {
@@ -21,6 +22,7 @@ import { ServerHeadroom } from '../../flowControl/server/ServerHeadroom.js'
 import { getBroadcastAdapter } from '../../broadcast/broadcastAdapter.js'
 import { pairPublishes } from '../client/pairPublishes.js'
 import { SseEvents } from '../client/SseEvents.js'
+import { ChannelClosedError } from '../channelErrors.js'
 import { getChannelMux } from './ChannelMux.js'
 import { hold, letGo, releaseHolder, type MemoryHolder } from './channelMemory.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
@@ -461,6 +463,85 @@ for (const [ends, { end, last }] of Object.entries(ENDED_BY_A_CLOSE_CALLBACK)) {
     }
   })
 }
+
+/** Each send that asks the ledger for room. */
+const SENDS: Record<string, (channel: ServerChannel) => unknown> = {
+  'send()': (channel) => channel.send('s1' + 'x'.repeat(1_000)),
+  'send() with ack': (channel) => channel.send('s1' + 'x'.repeat(1_000), { ack: true }),
+  'sendBinary()': (channel) => channel.sendBinary(new Uint8Array(1_000)),
+  'a lossy send()': (channel) => channel.send('s1' + 'x'.repeat(1_000), { lossy: true }),
+}
+
+for (const [ends, { end }] of Object.entries(ENDED_BY_A_CLOSE_CALLBACK)) {
+  for (const [name, send] of Object.entries(SENDS)) {
+    test(`on SSE, ${name} that cuts a subscriber whose onClose ${ends} its channel throws as on a closed channel, and holds nothing`, async () => {
+      const channel = new ServerChannel()
+      const subscriber = new ServerBroadcast<string>({ key: crypto.randomUUID() })
+      const page = await overSse([channel, subscriber])
+      subscriber.onClose(() => end(channel))
+      // The page reads nothing yet, so the publishes wait for its event stream.
+      await Promise.all(MESSAGES.map((data) => subscriber.publish(data)))
+      // No room is left: the send's admission cuts the subscriber, whose onClose ends the channel.
+      const release = leaveRoom(0)
+      try {
+        expect(() => send(channel)).toThrow(ChannelClosedError)
+        // Less than the send itself: the end, and nothing of the send.
+        expect(channel.heldBytes).toBeLessThan(1_000)
+      } finally {
+        release()
+        await page.leave()
+        await page.close()
+      }
+    })
+  }
+}
+
+test('on SSE, an acknowledged send made before a response carried its channel rejects where carrying it cuts a subscriber whose onClose aborts the channel', async () => {
+  const subscriber = new ServerBroadcast<string>({ key: crypto.randomUUID() })
+  const page = await overSse([subscriber])
+  // The page reads nothing yet, so the publishes wait for its event stream.
+  await Promise.all(MESSAGES.map((data) => subscriber.publish(data)))
+  const channel = new ServerChannel()
+  let rejectedWith: unknown
+  channel.send('s1' + 'x'.repeat(1_000), { ack: true }).catch((err: unknown) => {
+    rejectedWith = err
+  })
+  subscriber.onClose(() => channel.abort())
+  const release = leaveRoom(0)
+  try {
+    // Admitted again with all this server's channels, the send cuts the subscriber, whose onClose aborts the channel.
+    getChannelMux().registerChannel(channel)
+    await new Promise((resolve) => setTimeout(resolve))
+    expect(rejectedWith).toBeInstanceOf(Abort)
+  } finally {
+    release()
+    await page.leave()
+    await page.close()
+  }
+})
+
+test("on SSE, the answer to the page's acknowledged send that cuts a subscriber whose onClose aborts its channel holds nothing", async () => {
+  const channel = new ServerChannel()
+  const subscriber = new ServerBroadcast<string>({ key: crypto.randomUUID() })
+  const page = await overSse([channel, subscriber])
+  subscriber.onClose(() => channel.abort())
+  channel.listen(() => 'a1' + 'x'.repeat(100_000))
+  // The page reads nothing yet, so the publishes wait for its event stream.
+  await Promise.all(MESSAGES.map((data) => subscriber.publish(data)))
+  // Room for the request, not for its answer: the answer's admission cuts the subscriber, whose onClose aborts the channel.
+  const release = leaveRoom(50_000)
+  try {
+    fromPage(channel, encode.textAckReq(0, stringify('q1'), 1))
+    await new Promise((resolve) => setTimeout(resolve))
+    expect(channel.isClosed).toBe(true)
+    // Less than the answer itself: the ABORT, and nothing of the answer.
+    expect(channel.heldBytes).toBeLessThan(100_000)
+  } finally {
+    release()
+    await page.leave()
+    await page.close()
+  }
+})
 
 /** Each small frame of channel 0 that follows a publish its page has read, which nothing of channel 0 is then ahead of:
  *  its CLOSE, and a 1 kB send after a lossy one, which goes as a publish. */

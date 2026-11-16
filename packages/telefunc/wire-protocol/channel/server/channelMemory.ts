@@ -53,7 +53,8 @@ const memory = getGlobalObject('channelMemory.ts', {
 })
 
 /** Whether `bytes` for `holder` may be held; its caller tells whoever asked when not. Near the budget, a holder past an
- *  equal share is refused, so one still under it has room. */
+ *  equal share is refused, so one still under it has room. Making room ends subscribers, and their close callbacks run
+ *  before it returns. */
 function admit(holder: MemoryHolder, bytes: number): boolean {
   const maxMemory = maxMemoryOf()
   const target = shedTarget(maxMemory)
