@@ -475,11 +475,11 @@ chat.subscribe((msg, info) => {
 chat.publish({ user: 'Alice', text: 'Hello!' })
 ```
 
-> The page receives what is published after it calls `subscribe()`, and nothing published before: return that along with the broadcast, as in `return { chat, history }`. A telefunction the page calls after `subscribe()` runs with the subscription in effect, so the page receives what that telefunction publishes.
+> The page receives what is published after it calls `subscribe()`, and nothing published before. Return the earlier messages along with the broadcast, as in `return { chat, history }`. A telefunction the page calls after `subscribe()` runs with the subscription in effect, so the page receives what that telefunction publishes.
 
 > `subscribe()` returns a function that unsubscribes, with a `ready` promise, on the page and on the server alike. `ready` resolves once the subscription is in effect on every server, so that a publish from any server reaches it, or once you unsubscribe. It rejects if the broadcast ends first. For example, `await unsubscribe.ready` before you fetch a snapshot from a plain HTTP route, so that nothing published after the snapshot is missed.
 
-> While Redis is unreachable, `ready` waits. If Redis refuses the subscription, or ioredis stops retrying it, the broadcast closes with that error. With ioredis's default options, it stops after 20 failed reconnection attempts: about 10 s where each connection is refused at once. A `Broadcast.subscribe()` that failed so makes the server's `publish()` calls to that key fail with the same error until you unsubscribe it, and a `Broadcast.subscribeBinary()` does the same to `publishBinary()`. Publishes to other keys go on.
+> While Redis is unreachable, `ready` waits. If Redis refuses the subscription, or ioredis stops retrying it, the broadcast closes with that error. With ioredis's default options, it stops after 20 failed reconnection attempts: about 10 s where each connection is refused at once. After a `Broadcast.subscribe()` fails this way, the server's `publish()` calls to that key fail with the same error until you call the function that unsubscribes. A failed `Broadcast.subscribeBinary()` does the same to `publishBinary()`. Publishes to other keys go on.
 
 ### Receive broadcast messages in a loop
 
