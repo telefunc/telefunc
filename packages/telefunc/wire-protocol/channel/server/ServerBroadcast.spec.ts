@@ -816,4 +816,14 @@ describe('Broadcast static bus (publish/subscribe)', () => {
 
     expect(received).toEqual([{ text: 'first' }])
   })
+
+  it('does not call a subscriber that an earlier one unsubscribed during the same delivery', async () => {
+    const received: string[] = []
+    Broadcast.subscribe<string>('room:static-unsub-in-delivery', () => unsubscribe())
+    const unsubscribe = Broadcast.subscribe<string>('room:static-unsub-in-delivery', (m) => received.push(m))
+
+    await Broadcast.publish('room:static-unsub-in-delivery', 'first')
+
+    expect(received).toEqual([])
+  })
 })

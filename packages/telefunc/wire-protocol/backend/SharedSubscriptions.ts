@@ -174,6 +174,8 @@ class SubscriptionSlot<Source> implements BackendReceiver {
     }
     // The listener is called here, not through a method of the consumer: one call less on every message.
     for (const consumer of this.targets()) {
+      // A consumer may leave on an earlier one's listener.
+      if (!consumer.attached) continue
       // Consumers are isolated from each other: one that throws is reported.
       try {
         consumer.listener(payload, ordering)
@@ -214,7 +216,7 @@ class SubscriptionSlot<Source> implements BackendReceiver {
     for (const { payload, ordering, targets } of early) {
       for (const consumer of targets) {
         // A consumer may leave, or stop the subscription, on one of them.
-        if (this.finished || !this.attached.has(consumer)) continue
+        if (this.finished || !consumer.attached) continue
         try {
           consumer.listener(payload, ordering)
         } catch (error) {
@@ -279,8 +281,9 @@ type ConsumerOptions = { slot: SubscriptionSlot<unknown>; listener: BackendListe
 /** One consumer's subscription on a slot. */
 class Consumer implements BackendSubscription {
   readonly listener: BackendListener
+  /** False from its `unsubscribe()` on: the slot calls its listener no more. */
+  attached = true
   private readonly slot: SubscriptionSlot<unknown>
-  private attached = true
   private readonly stateListeners = new Set<(state: AttemptState) => void>()
 
   constructor({ slot, listener }: ConsumerOptions) {
