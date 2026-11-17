@@ -135,9 +135,12 @@ class RedisTransport implements BroadcastTransport {
     if (failure) {
       this.failedSubscribes.set(channel, failure.err)
       // The publishes to its channel sent after it waited for it: they fail with it, and the rest go on in order.
-      const failing = this.waiters.filter((waiter) => waiter.channel === channel && waiter.upTo >= subscription.order)
-      for (const waiter of failing) this.waiters.splice(this.waiters.indexOf(waiter), 1)
-      for (const waiter of failing) waiter.reject(failure.err)
+      let kept = 0
+      for (const waiter of this.waiters) {
+        if (waiter.channel === channel && waiter.upTo >= subscription.order) waiter.reject(failure.err)
+        else this.waiters[kept++] = waiter
+      }
+      this.waiters.length = kept
     }
     this.releaseWaiters()
   }
