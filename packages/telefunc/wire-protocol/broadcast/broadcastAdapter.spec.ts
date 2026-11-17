@@ -301,11 +301,11 @@ class AdapterRefusingFirstSubscription extends DefaultBroadcastAdapter {
   }
 }
 
+// A broadcast no response carries: its server's subscribers are the only ones.
 describe('a subscription the adapter refused', () => {
   it('subscribe(): its callback gets no later publish', () => {
     _resetBroadcastAdapterForTesting(new AdapterRefusingFirstSubscription())
     const broadcast = new ServerBroadcast<string>({ key: 'room:refused' })
-    broadcast._registerChannel()
     const refused: string[] = []
     const later: string[] = []
     expect(() => broadcast.subscribe((msg) => refused.push(msg))).toThrow('subscription refused')
@@ -318,7 +318,6 @@ describe('a subscription the adapter refused', () => {
   it('subscribeBinary(): its callback gets no later publish', () => {
     _resetBroadcastAdapterForTesting(new AdapterRefusingFirstSubscription())
     const broadcast = new ServerBroadcast<string>({ key: 'room:refused-binary' })
-    broadcast._registerChannel()
     const refused: Uint8Array[] = []
     const later: Uint8Array[] = []
     expect(() => broadcast.subscribeBinary((data) => refused.push(data))).toThrow('subscription refused')
@@ -326,6 +325,16 @@ describe('a subscription the adapter refused', () => {
     broadcast.publishBinary(new Uint8Array([1, 2, 3]))
     expect(later).toEqual([new Uint8Array([1, 2, 3])])
     expect(refused).toEqual([])
+  })
+
+  it('at the return of the broadcast: the response carries it all the same, and a later subscriber gets publishes', () => {
+    _resetBroadcastAdapterForTesting(new AdapterRefusingFirstSubscription())
+    const broadcast = new ServerBroadcast<string>({ key: 'room:refused-at-return' })
+    expect(() => broadcast._registerChannel()).not.toThrow()
+    const later: string[] = []
+    broadcast.subscribe((msg) => later.push(msg))
+    broadcast.publish('hello')
+    expect(later).toEqual(['hello'])
   })
 })
 

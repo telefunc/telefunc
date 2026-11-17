@@ -395,8 +395,14 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     super._registerChannel(mux)
     if (!returned || this._phase !== 'open') return
     this.undeclared = true
-    this.subscribeBroadcast()
-    this.subscribeBinaryBroadcast()
+    try {
+      this.subscribeBroadcast()
+      this.subscribeBinaryBroadcast()
+    } catch {
+      // Without the hold, the response still goes: the page's want subscribes again, and gets the adapter's refusal.
+      this.undeclared = false
+      this.unsubscribeUnusedBroadcasts()
+    }
   }
 
   /** Its page said what it wants: what it holds of the kinds the page doesn't want goes, and so do their subscriptions. */
