@@ -84,7 +84,7 @@ async function onBroadcastShieldClient() {
 }
 
 /** Client subscribes to binary broadcast, server publishes frames. Tests client-side subscribeBinary.
- *  The client sends a `{ start: true }` text publish on the same wire as its BROADCAST_SUB (binary),
+ *  The client sends a `{ start: true }` text publish on the same wire as its binary WANT,
  *  so by the time this `start` callback runs, the peer is wire-subscribed for binary. */
 async function onBinaryBroadcast() {
   const room = new BroadcastChannel<{ start: true }>({ key: `room:broadcast-test:${crypto.randomUUID()}` })

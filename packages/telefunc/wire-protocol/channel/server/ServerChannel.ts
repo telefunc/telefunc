@@ -80,7 +80,7 @@ import type {
   ErrorReason,
   SequencedEncoder,
 } from '../../wire/frame.js'
-import type { AttachState } from '../../wire/payloads.js'
+import type { AttachState, Want } from '../../wire/payloads.js'
 
 /** Peer-authored JSON: a parse failure is the peer's, so it surfaces as a protocol violation. */
 function parsePeerText(text: string): unknown {
@@ -502,7 +502,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** @internal Attaches the page's wire. An ended channel only sends what it produced while no page was attached;
-   *  an open one applies the RECONCILE's broadcast subscriptions before `onOpen` fires. */
+   *  an open one applies the RECONCILE's broadcast want before `onOpen` fires. */
   _attachPeer(peer: IndexedPeer, state?: AttachState): void {
     if (this._phase === 'ended') {
       this.offlineBuffer.flush(peer)
@@ -519,10 +519,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.receiveCredit.attach(peer.sender.sendWait())
     this.offlineBuffer.flush(peer)
     this.sendPendingAckRes(peer)
-    if (state?.broadcast) {
-      this.onPeerSubscription({ binary: false, subscribed: state.broadcast.text })
-      this.onPeerSubscription({ binary: true, subscribed: state.broadcast.binary })
-    }
+    if (state?.want) this.onPeerWant(state.want)
     this.sendPendingEnd(peer)
     if (this._phase === 'closing') return
     this.lifecycle.fireOpen()
@@ -610,14 +607,18 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       case TAG.BDP_PING_ACK:
         this.receiveCredit.onPingAck(frame)
         return
-      case TAG.BROADCAST_SUB:
-      case TAG.BROADCAST_UNSUB:
-        this.onPeerSubscription({ binary: frame.binary, subscribed: frame.tag === TAG.BROADCAST_SUB })
+      case TAG.WANT:
+        this.onPeerWant(frame.want)
+        this._confirmWant()
     }
   }
 
-  /** `ServerBroadcast` overrides it; a plain channel ignores subscriptions. */
-  protected onPeerSubscription(_subscription: { binary: boolean; subscribed: boolean }): void {}
+  /** `ServerBroadcast` overrides it; a plain channel ignores wants. */
+  protected onPeerWant(_want: Want): void {}
+
+  /** @internal Tells the page which of its wants is in effect, as the answer to its attach or to a WANT frame does:
+   *  `ServerBroadcast` overrides it. */
+  _confirmWant(): void {}
 
   protected onPeerMessage(text: string, bytes: number): void {
     const t0 = performance.now()

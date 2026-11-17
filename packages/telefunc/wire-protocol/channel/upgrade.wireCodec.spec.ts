@@ -153,6 +153,7 @@ describe('decodeClientFrame — direction', () => {
     ['PUBLISH_BINARY', encode.publishBinary(new Uint8Array(14), { seq: 9, timestamp: 1700000000000 })],
     ['PUBLISH_TO', encode.publishTo(0, 1)],
     ['RECONCILED', encode.reconciled(reconciled())],
+    ['WANTED', encode.wanted(0, 1)],
   ]
   test.each(serverOnly)('a client-sent %s is refused', (_name, frame) => {
     expect(() => clientFrame(frame)).toThrow(ProtocolViolationError)
@@ -178,8 +179,7 @@ describe('decodeClientFrame — direction', () => {
     ['MSG_WINDOW', encode.msgWindow(0, 8)],
     ['BDP_PING', encode.bdpPing(0, 1)],
     ['BDP_PING_ACK', encode.bdpPingAck(0, 1, 0, 50)],
-    ['BROADCAST_SUB', encode.broadcastSub(0, false)],
-    ['BROADCAST_UNSUB', encode.broadcastUnsub(0, false)],
+    ['WANT', encode.want(0, { version: 1, text: true, binary: false })],
   ]
   test.each(clientLegal)('control: a client-sent %s passes', (_name, frame) => {
     expect(clientFrame(frame).tag).toBe(frame[0])

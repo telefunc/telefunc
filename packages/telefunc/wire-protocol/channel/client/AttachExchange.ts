@@ -348,7 +348,7 @@ class AttachExchange {
     },
   ): ReconcileOpenEntry[] {
     const open: ReconcileOpenEntry[] = []
-    const subscribing = new Set<number>()
+    const wanting = new Set<number>()
     for (const record of records) {
       const { ix } = record
       // The server has all a delivered one sent it, or ended it: leaving it out lets it go there too.
@@ -369,11 +369,11 @@ class AttachExchange {
       const state = record.channel._attach.state(uplink)
       if (state.probe !== undefined) this.inFlight.probes.set(ix, state.probe)
       Object.assign(payloadEntry, state)
-      if (state.broadcast) subscribing.add(ix)
+      if (state.want) wanting.add(ix)
       open.push(payloadEntry)
     }
-    // The declared subscriptions supersede the SUB/UNSUB frames queued before them.
-    if (subscribing.size > 0) this.gate.dropSubscriptionFrames(subscribing)
+    // The declared wants supersede the WANT frames queued before them.
+    if (wanting.size > 0) this.gate.dropWantFrames(wanting)
     return open
   }
 

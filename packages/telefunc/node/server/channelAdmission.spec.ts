@@ -32,7 +32,7 @@ function subscribedPage(key: string, lossy: boolean) {
   const broadcast = new ServerBroadcast<string>({ key, lossy })
   broadcast._registerChannel()
   broadcast._attachPeer(new IndexedPeer({ sender: stalledSender, index: 2, replay: broadcast._replayBuffer! }), {
-    broadcast: { text: true, binary: false },
+    want: { version: 1, text: true, binary: false },
   })
   return broadcast
 }
@@ -41,7 +41,7 @@ test("a reliable broadcast near the budget stays open when another channel's tex
   const broadcast = new ServerBroadcast<string>({ key: crypto.randomUUID() })
   broadcast._registerChannel()
   broadcast._attachPeer(new IndexedPeer({ sender: stalledSender, index: 2, replay: broadcast._replayBuffer! }), {
-    broadcast: { text: true, binary: false },
+    want: { version: 1, text: true, binary: false },
   })
   const channel = new ServerChannel<never, string>()
   channel._registerChannel()

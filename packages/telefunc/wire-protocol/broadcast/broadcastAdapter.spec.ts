@@ -449,7 +449,7 @@ describe('lossy broadcast under memory pressure', () => {
         index: 7,
         replay: broadcast._replayBuffer!,
       }),
-      { broadcast: { text: true, binary: false } },
+      { want: { version: 1, text: true, binary: false } },
     )
     await broadcast.publish('first')
     await new Promise((resolve) => setTimeout(resolve, 5))

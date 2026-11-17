@@ -104,6 +104,10 @@ class IndexedPeer {
     this.sender.send(encode.bdpPingAck(this.index, probe, backlog, pathRtt))
   }
 
+  sendWanted(version: number): void {
+    this.sender.send(encode.wanted(this.index, version))
+  }
+
   /** How many of its publishes no wire has taken: their heads still wait in its wire's queue, and they are the replay's
    *  newest. */
   unhanded(): number {

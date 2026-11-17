@@ -176,11 +176,10 @@ class SendGate {
     return frames
   }
 
-  /** Drops the `subscribing` channels' held SUB/UNSUB frames: the subscriptions a RECONCILE declares supersede them. */
-  dropSubscriptionFrames(subscribing: Set<number>): void {
+  /** Drops the `wanting` channels' held WANT frames: the wants a RECONCILE declares supersede them. */
+  dropWantFrames(wanting: Set<number>): void {
     this.sendBuffer = this.settleQueue().filter(
-      ({ channelIx, frame }) =>
-        !subscribing.has(channelIx) || (frame[0] !== TAG.BROADCAST_SUB && frame[0] !== TAG.BROADCAST_UNSUB),
+      ({ channelIx, frame }) => !wanting.has(channelIx) || frame[0] !== TAG.WANT,
     )
   }
 

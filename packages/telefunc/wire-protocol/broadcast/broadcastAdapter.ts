@@ -37,6 +37,8 @@ type BroadcastAdapter = {
   publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult>
   /** Where a process runs several objects that can't write to each other's pages, the one a subscriber's page is on. */
   ownerOf?(wireRequest: Request | undefined): string
+  /** As `BroadcastTransport`'s, for this process's subscribers of `key`. */
+  listening?(key: string, binary: boolean): Promise<void> | undefined
 }
 
 /**
@@ -60,6 +62,10 @@ type BroadcastTransport = {
     key: string,
     onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void,
   ): () => void
+  /** Settles once the listener of `key` (`binary`: its `listenBinary()` one) gets what any server publishes to it, and
+   *  rejects where it never will; undefined where it gets them already. Without it, a listener gets them from the
+   *  moment `listen()` returns. */
+  listening?(key: string, binary: boolean): Promise<void> | undefined
 }
 
 /** How deep in-memory publishes in answer to answers may go: 10,000, past the about 1,300 that Node.js's call stack holds
@@ -119,6 +125,10 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
         this.releaseSeq(key)
       }
     }
+  }
+
+  listening(key: string, binary: boolean): Promise<void> | undefined {
+    return this.transport?.listening?.(key, binary)
   }
 
   publish(key: string, serialized: string): BroadcastPublishResult | Promise<BroadcastPublishResult> {

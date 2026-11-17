@@ -403,7 +403,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       case TAG.BDP_PING_ACK:
         this.receiveCredit.onPingAck(frame)
         return
-      // BROADCAST_SUB/UNSUB are server-side only; ABORT/ERROR handled by connection.
+      // WANT is server-side only; ABORT/ERROR handled by connection.
     }
   }
 

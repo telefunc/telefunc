@@ -1,7 +1,8 @@
-export { parseJsonPayload, parsePreparePayload, parseReconcilePayload, parseBarrierPayload }
+export { parseJsonPayload, parsePreparePayload, parseReconcilePayload, parseBarrierPayload, isWant }
 export type {
   ReconcileOpenEntry,
   AttachState,
+  Want,
   ReconcilePayload,
   BarrierPayload,
   PreparePayload,
@@ -12,8 +13,13 @@ export type {
 import { MAX_CHANNELS_PER_CONNECTION, type ChannelTransports } from '../constants.js'
 import { ProtocolViolationError, assertProtocol } from './protocolViolation.js'
 import { textDecoder } from './envelope.js'
+import { hasProp } from '../../utils/hasProp.js'
 
 // ===== Reconcile payloads (JSON-encoded after the header) =====
+
+/** What a page wants to hear on a broadcast: `version` counts the changes the page made to it, so the server applies a
+ *  want only over an older one, whichever way each came. */
+type Want = { version: number; text: boolean; binary: boolean }
 
 type ReconcileOpenEntry = {
   id: string
@@ -21,14 +27,14 @@ type ReconcileOpenEntry = {
   lastSeq: number
   /** First reconcile: the server awaits it up to `connectTtl`, then an ATTACH_RESULT settles it; others fail fast. */
   initial?: true
-  /** A broadcast's subscriptions as of this (re)attach, applied before its `onOpen` fires. */
-  broadcast?: { text: boolean; binary: boolean }
+  /** A broadcast's want as of this (re)attach, applied before its `onOpen` fires. */
+  want?: Want
   /** A BDP probe the RECONCILED answers: on a wire other than the last, it queues behind none of the channel's data. */
   probe?: number
 }
 
 /** What a channel adds to its own RECONCILE entry. */
-type AttachState = Pick<ReconcileOpenEntry, 'broadcast' | 'probe'>
+type AttachState = Pick<ReconcileOpenEntry, 'want' | 'probe'>
 
 /** On a new wire it names every channel the page holds; on the wire of the session it names, with `released`, it names
  *  only the channels no RECONCILE named there yet, and `released` the ones the page let go since its last. */
@@ -118,10 +124,17 @@ function assertOpenList(open: unknown): asserts open is ReconcileOpenEntry[] {
     assertProtocol(isUint(entry.lastSeq, Number.MAX_SAFE_INTEGER), 'open entry lastSeq')
     assertProtocol(entry.initial === undefined || entry.initial === true, 'open entry initial')
     assertProtocol(entry.probe === undefined || isUint(entry.probe, 0xffffffff), 'open entry probe')
-    if (entry.broadcast === undefined) continue
-    const broadcast = asObject(entry.broadcast)
-    assertProtocol(typeof broadcast.text === 'boolean' && typeof broadcast.binary === 'boolean', 'open entry broadcast')
+    assertProtocol(entry.want === undefined || isWant(entry.want), 'open entry want')
   }
+}
+
+function isWant(value: unknown): value is Want {
+  return (
+    hasProp(value, 'version', 'number') &&
+    isUint(value.version, 0xffffffff) &&
+    hasProp(value, 'text', 'boolean') &&
+    hasProp(value, 'binary', 'boolean')
+  )
 }
 
 function assertReconcilePayload(value: unknown): asserts value is ReconcilePayload {

@@ -88,8 +88,8 @@ function subscribers() {
 async function overSse(channels: ServerChannel[]) {
   const mux = getChannelMux()
   for (const channel of channels) mux.registerChannel(channel)
-  const broadcast = { text: true, binary: false }
-  const open = channels.map((channel, ix) => ({ id: channel.id, ix, lastSeq: 0, initial: true as const, broadcast }))
+  const want = { version: 1, text: true, binary: false }
+  const open = channels.map((channel, ix) => ({ id: channel.id, ix, lastSeq: 0, initial: true as const, want }))
   const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
   const connId = crypto.randomUUID()
   const body = encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open })])
@@ -173,7 +173,7 @@ function overWebSocket(channels: ServerChannel[], requests: Request[] = []) {
     channel._onPageAttach(lastSeq, request)
     for (const frame of replay.getAfter(lastSeq)) sender.send(frame)
     const peer = new IndexedPeer({ sender, index, replay })
-    channel._attachPeer(peer, { broadcast: { text: true, binary: true } })
+    channel._attachPeer(peer, { want: { version: 1, text: true, binary: true } })
     return peer
   }
   const peers = channels.map((channel, index) => {

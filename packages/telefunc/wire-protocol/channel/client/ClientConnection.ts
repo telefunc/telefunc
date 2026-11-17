@@ -19,7 +19,7 @@ import {
 import type { Urgency } from '../../flowControl/credit.js'
 import { ACK_STATUS, encode } from '../../wire/frame.js'
 import type { AckResultStatus, BdpPingAck, ChannelFrame, SequencedEncoder } from '../../wire/frame.js'
-import type { ReconciledPayload } from '../../wire/payloads.js'
+import type { ReconciledPayload, Want } from '../../wire/payloads.js'
 import type { Heartbeat } from './Heartbeat.js'
 import type { ChannelTable } from './ChannelTable.js'
 import type { SendGate } from './SendGate.js'
@@ -77,8 +77,7 @@ interface MuxConnection {
   bufferedAmount(): number
   /** Bytes the wire delivered in the `ms` before its latest delivery: the frame being handled, on arrival. */
   deliveredBefore(ms: number): number
-  sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
-  sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void
+  sendWant(channel: MuxChannel, want: Want): void
   unregister(channel: MuxChannel): void
   reconnectWindow(): number
 }
@@ -313,15 +312,9 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     return this.transport.heartbeat?.deliveredBefore(ms) ?? 0
   }
 
-  sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void {
+  sendWant(channel: MuxChannel, want: Want): void {
     const record = this.channels.of(channel)
     if (record === undefined) return
-    this.gate.sendUnsequenced(record, encode.broadcastSub(record.ix, binary), 'control')
-  }
-
-  sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void {
-    const record = this.channels.of(channel)
-    if (record === undefined) return
-    this.gate.sendUnsequenced(record, encode.broadcastUnsub(record.ix, binary), 'control')
+    this.gate.sendUnsequenced(record, encode.want(record.ix, want), 'control')
   }
 }

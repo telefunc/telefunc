@@ -104,6 +104,13 @@ class RedisTransport implements BroadcastTransport {
     }
   }
 
+  /** Settles once Redis acknowledged the SUBSCRIBE of `key`'s listener, and rejects with its failure. */
+  listening(key: string, binary: boolean): Promise<void> | undefined {
+    const channel = this.channelKey(key, binary ? 'b' : 't')
+    if (this.failedSubscribes.has(channel)) return Promise.reject(this.failedSubscribes.get(channel))
+    return this.subscribing.get(channel)?.ack.then(() => {})
+  }
+
   private subscribe(channel: string): void {
     const ack = this.subscriber.subscribe(channel)
     this.subscribing.set(channel, { ack, order: ++this.subscribesSent })

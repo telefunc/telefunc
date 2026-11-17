@@ -1,6 +1,6 @@
 export { ChannelAttach }
 
-import type { AttachState } from '../../wire/payloads.js'
+import type { AttachState, Want } from '../../wire/payloads.js'
 import type { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import type { SendCredit } from '../../flowControl/SendCredit.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
@@ -17,8 +17,9 @@ class ChannelAttach {
   private readonly channel: { readonly isClosed: boolean }
   private readonly sendCredit: SendCredit
   readonly receiveCredit: ReceiveCredit
-  /** A broadcast's subscriptions, which its entry declares beside its probe. */
-  private subscriptions: { readonly text: boolean; readonly binary: boolean } | null = null
+  /** A broadcast's want, which its entry declares beside its probe; replaced, never changed, so an entry keeps the want
+   *  it was built with. */
+  private want: Readonly<Want> | null = null
 
   constructor({ channel, sendCredit, receiveCredit }: ChannelAttachOptions) {
     this.channel = channel
@@ -27,20 +28,26 @@ class ChannelAttach {
   }
 
   /** The channel's entry in the RECONCILE sent each time it attaches to `uplink`'s wire: a probe of a path it hasn't
-   *  measured, and a broadcast's subscriptions. A page of broadcasts alone measures its round trip so: a lossy one's
+   *  measured, and a broadcast's want. A page of broadcasts alone measures its round trip so: a lossy one's
    *  `behindAfter` needs it. */
   state(uplink: Uplink): AttachState {
     const probe = this.receiveCredit.probeAttach(uplink.roundTrips)
     return {
-      ...(this.subscriptions !== null && { broadcast: this.subscriptions }),
+      ...(this.want !== null && { want: this.want }),
       ...(probe !== undefined && { probe }),
     }
   }
 
-  /** A broadcast declares its subscriptions on every (re)attach: a SUB or UNSUB written to a dead wire isn't replayed.
-   *  `subscriptions` is read as each RECONCILE is built. */
-  declareSubscriptions(subscriptions: { readonly text: boolean; readonly binary: boolean }): void {
-    this.subscriptions = subscriptions
+  /** A broadcast declares its want on every (re)attach: a WANT written to a dead wire isn't replayed. */
+  get wants(): Readonly<Want> | null {
+    return this.want
+  }
+
+  /** Turns the want of `kind` on or off at the next version, and returns the new want. */
+  changeWant(kind: 'text' | 'binary', on: boolean): Readonly<Want> {
+    const { version, text, binary } = this.want ?? { version: 0, text: false, binary: false }
+    this.want = { version: version + 1, text, binary, [kind]: on }
+    return this.want
   }
 
   /** Caps both credit windows at what the server's `maxMemory` allows. */

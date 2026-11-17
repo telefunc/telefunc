@@ -25,8 +25,6 @@ type ClientBroadcastOptions = ClientChannelOptions & { lossy?: boolean }
 class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly broadcastListeners = new Listeners<BroadcastListener<T>>()
   private readonly broadcastBinaryListeners = new Listeners<BroadcastBinaryListener>()
-  /** The subscriptions this page asks the server for. */
-  private readonly subscribed = { text: false, binary: false }
   /** A newer publish replaces this page's own that no wire has taken yet: see `sendLossy`. */
   private readonly lossy: boolean
 
@@ -35,7 +33,6 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this.lossy = options.lossy === true
     // Nothing waits on a publish's credit, so the page grants the largest window from the start.
     this.receiveCredit.widenByteWindow()
-    this._attach.declareSubscriptions(this.subscribed)
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
@@ -94,10 +91,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   private setSubscribed(kind: 'text' | 'binary', on: boolean): void {
-    if (on === this.subscribed[kind] || this.stopped) return
-    this.subscribed[kind] = on
-    if (on) this.connection.sendBroadcastSubscribe(this, kind === 'binary')
-    else this.connection.sendBroadcastUnsubscribe(this, kind === 'binary')
+    if (on === (this._attach.wants?.[kind] ?? false) || this.stopped) return
+    this.connection.sendWant(this, this._attach.changeWant(kind, on))
   }
 
   protected override dispatchDataFrame(frame: ChannelDataFrame): void {

@@ -44,7 +44,7 @@ import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { PublishBody } from './PublishBody.js'
 import { LossyDelivery } from './LossyDelivery.js'
 import type { IndexedPeer } from './IndexedPeer.js'
-import type { AttachState } from '../../wire/payloads.js'
+import type { AttachState, Want } from '../../wire/payloads.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { isAbort } from '../../../node/server/Abort.js'
 assertIsNotBrowser()
@@ -69,8 +69,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private adapter: BroadcastAdapter | null = null
   private unsubBroadcast: BroadcastUnsubscribe | null = null
   private unsubBinaryBroadcast: BroadcastUnsubscribe | null = null
-  private peerSubscribedText = false
-  private peerSubscribedBinary = false
+  /** The page's want it applied last: which of the key's publishes go to the page. */
+  private pageWant: Readonly<Want> = { version: 0, text: false, binary: false }
 
   /** Past what its wire takes to confirm, a newer publish replaces those waiting, on the way to its page and on the page's
    *  way up. */
@@ -190,7 +190,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       if (!listener) continue
       if (this.callListener(listener, data, info)) return
     }
-    if (!this.takesPublish(this.peerSubscribedText)) return this.endOverflowed()
+    if (!this.takesPublish(this.pageWant.text)) return this.endOverflowed()
     const body = bodyOf(encode.publish, serialized, rawInfo, this.owner, (holder) => this.replaceIn(holder, false))
     this.forwardPublish(body)
   }
@@ -202,7 +202,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
       if (this.callListener(listener, new Uint8Array(data), info)) return
     }
-    if (!this.takesPublish(this.peerSubscribedBinary)) return this.endOverflowed()
+    if (!this.takesPublish(this.pageWant.binary)) return this.endOverflowed()
     const body = bodyOf(encode.publishBinary, data, rawInfo, this.owner, (holder) => this.replaceIn(holder, true))
     this.forwardPublish(body)
   }
@@ -282,7 +282,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private replaceIn(holder: MemoryHolder, binary: boolean): void {
     if (!ServerBroadcast.isServerBroadcast(holder) || !holder.lossyPublishes || holder.key !== this.key) return
     if (holder.owner !== this.owner) return
-    if (holder.takesPublish(binary ? holder.peerSubscribedBinary : holder.peerSubscribedText)) {
+    if (holder.takesPublish(binary ? holder.pageWant.binary : holder.pageWant.text)) {
       holder.lossyPublishes.letWaitingGo()
     }
   }
@@ -339,24 +339,50 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(`Broadcast closed: ${this.overflowed}`))
   }
 
-  protected override onPeerSubscription({ binary, subscribed }: { binary: boolean; subscribed: boolean }): void {
-    if (binary) this.peerSubscribedBinary = subscribed
-    else this.peerSubscribedText = subscribed
-    if (!subscribed) {
-      // A page that reads none of its publishes any more would only drop those still waiting for its wire.
-      if (!this.peerSubscribedText && !this.peerSubscribedBinary) this.dropUnhanded()
-      return this.unsubscribeUnusedBroadcasts()
+  /** Applies a want newer than the one it has: the wire and a call can each bring the page's. */
+  protected override onPeerWant(want: Want): void {
+    if (want.version > this.pageWant.version) this.applyPageWant(want)
+  }
+
+  private applyPageWant(want: Want): void {
+    this.pageWant = want
+    if (want.text) this.subscribeBroadcast()
+    if (want.binary) this.subscribeBinaryBroadcast()
+    // A page that reads none of its publishes any more would only drop those still waiting for its wire.
+    if (!want.text && !want.binary) this.dropUnhanded()
+    this.unsubscribeUnusedBroadcasts()
+  }
+
+  /** Tells the page its want is in effect: at once where its backend delivers what any server publishes to the key
+   *  already, else once it does. A page that never asked for one has nothing to confirm. */
+  override _confirmWant(): void {
+    const want = this.pageWant
+    if (want.version === 0) return
+    const adapter = this.broadcastAdapter()
+    const listening = [
+      want.text && adapter.listening?.(this.key, false),
+      want.binary && adapter.listening?.(this.key, true),
+    ]
+    if (listening.some((each) => each)) void this.confirmWhenListening(want.version, listening)
+    else this.peer?.sendWanted(want.version)
+  }
+
+  private async confirmWhenListening(version: number, listening: unknown[]): Promise<void> {
+    try {
+      await Promise.all(listening)
+    } catch {
+      // A backend that can't listen says so itself: Redis fails this server's publishes.
+      return
     }
-    if (binary) this.subscribeBinaryBroadcast()
-    else this.subscribeBroadcast()
+    this.peer?.sendWanted(version)
   }
 
   private unsubscribeUnusedBroadcasts(): void {
-    if (!this.peerSubscribedBinary && this.broadcastBinaryListeners.size === 0) {
+    if (!this.pageWant.binary && this.broadcastBinaryListeners.size === 0) {
       this.unsubBinaryBroadcast?.()
       this.unsubBinaryBroadcast = null
     }
-    if (!this.peerSubscribedText && this.broadcastListeners.size === 0) {
+    if (!this.pageWant.text && this.broadcastListeners.size === 0) {
       this.unsubBroadcast?.()
       this.unsubBroadcast = null
     }

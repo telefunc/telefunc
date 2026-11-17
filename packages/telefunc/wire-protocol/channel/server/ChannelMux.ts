@@ -253,6 +253,7 @@ class ChannelMux implements UpgradeStagesOwner {
         transports: this.options.transports,
       }),
     )
+    for (const { channel } of outcome.attached) channel._confirmWant()
     // Sends are sync, so the FIN can't pass anything on the new wire.
     if (outcome.retiredWire !== null) this.send(outcome.retiredWire, encode.fin())
   }
@@ -765,7 +766,9 @@ class ChannelMux implements UpgradeStagesOwner {
     // lastSeq counts them.
     const settle = async (): Promise<void> => {
       if (entry.state.awaited.get(awaited.open.ix) !== awaited) return
-      if (this.dispatchHeld(awaited)) entry.sender.send(encode.attachResult(awaited.open.ix, channel._lastClientSeq))
+      if (!this.dispatchHeld(awaited)) return
+      entry.sender.send(encode.attachResult(awaited.open.ix, channel._lastClientSeq))
+      channel._confirmWant()
     }
     void this.chainRecv(entry, settle).catch(handleTelefunctionBug)
   }

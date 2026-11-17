@@ -84,8 +84,10 @@ const TAG = {
   ERROR: 0x33 as const,
   /** Receiver → sender: bytes consumed plus window (mod 2^32), and the last seq it has, which the replay lets go. */
   WINDOW: 0x34 as const,
-  BROADCAST_SUB: 0x35 as const,
-  BROADCAST_UNSUB: 0x36 as const,
+  /** Page → server: a broadcast's want. Payload: u32 its version, u8 bit 0 text, bit 1 binary. */
+  WANT: 0x35 as const,
+  /** Server → page: the broadcast's want at this version is in effect. Payload: u32 the version. */
+  WANTED: 0x36 as const,
   /** BDP probe — receiver→sender. Sender echoes `BDP_PING_ACK` immediately so the
    *  receiver can measure bytes-in-flight during one RTT and grow `WINDOW` to BDP. Payload: u32, the probe's number. */
   BDP_PING: 0x37 as const,
