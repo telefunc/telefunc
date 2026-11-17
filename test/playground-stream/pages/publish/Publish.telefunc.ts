@@ -26,6 +26,7 @@ export {
   onJoinChat,
   onBroadcastToSubscribe,
   onPublishTo,
+  onBroadcastPublishingAfterReturn,
 }
 
 import { Broadcast, BroadcastChannel } from 'telefunc'
@@ -622,4 +623,12 @@ async function onBroadcastToSubscribe() {
 
 async function onPublishTo(key: string, text: string) {
   await Broadcast.publish(key, text)
+}
+
+/** A broadcast of a key of its own, which it publishes to right after it returns, before its page can have said what it
+ *  wants. */
+async function onBroadcastPublishingAfterReturn() {
+  const key = `room:after-return:${crypto.randomUUID()}`
+  setTimeout(() => void Broadcast.publish(key, 'after-return'), 0)
+  return new BroadcastChannel<string>({ key })
 }

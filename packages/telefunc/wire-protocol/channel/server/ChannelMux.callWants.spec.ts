@@ -28,7 +28,9 @@ function attachedBroadcast(session: string) {
     sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
     queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
   }
-  broadcast._attachPeer(new IndexedPeer({ sender, index: 0, replay: broadcast._replayBuffer! }))
+  const replay = broadcast._replayBuffer
+  if (!replay) throw new Error('A registered broadcast has its replay')
+  broadcast._attachPeer(new IndexedPeer({ sender, index: 0, replay }))
   return {
     key,
     broadcast,

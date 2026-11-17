@@ -44,6 +44,7 @@ import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { PublishBody } from './PublishBody.js'
 import { LossyDelivery } from './LossyDelivery.js'
 import type { IndexedPeer } from './IndexedPeer.js'
+import type { ChannelMux } from './ChannelMux.js'
 import type { AttachState, Want } from '../../wire/payloads.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { isAbort } from '../../../node/server/Abort.js'
@@ -102,9 +103,14 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** The page's channel on the wire it last attached on: a publish while the page is away joins the replay through it,
    *  as one a silently dead wire lost does. */
   private lastPeer: IndexedPeer | null = null
-  /** The publishes its page wanted before its first attach (a call of the page's brought the want): that attach sends
-   *  those its page still wants. */
+  /** The publishes for its page before its first attach: that attach sends those its page wants. */
   private beforeAttach: PublishBody[] = []
+  /** From its return until its page says what it wants (its first want, on a call or the wire, or its first attach), it
+   *  takes the key's publishes of both kinds for its page. */
+  private undeclared = false
+  /** The kinds a publish of didn't fit while its page's want was unknown: a page that wants one ends as one that missed
+   *  it. */
+  private readonly undeclaredGaps = { text: false, binary: false }
 
   static isServerBroadcast(value: unknown): value is ServerBroadcast {
     return value !== null && typeof value === 'object' && SERVER_BROADCAST_BRAND in value
@@ -229,7 +235,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** Whether a publish of the kind its page subscribed to (`subscribed`) is the page's. One made after its close began
    *  is not, and costs it nothing: this is asked before the body is made, which admits it against the budget. */
   private takesPublish(subscribed: boolean): boolean {
-    return subscribed && this._phase === 'open'
+    return (subscribed || this.undeclared) && this._phase === 'open'
   }
 
   /** A publish to a page that takes it (`takesPublish`). Where admitting this body or one before it cut the channel, it
@@ -237,28 +243,44 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
    *  page, the page ends as one that missed it. */
   private forwardPublish(body: PublishBody): void {
     if (this.overflowed !== null) return this.endOverflowed()
-    if (!fitsPublish(body)) return this.overflow(this.lossy ? NOT_EVEN_NEWEST : FELL_BEHIND, this.owner)
+    if (!fitsPublish(body)) return this.missed([body])
     if (this.lastPeer === null) return this.holdBeforeAttach(body)
     if (this.lossyPublishes) return this.lossyPublishes.send(body)
-    this.lastPeer!.sendPublish(body)
+    this.lastPeer.sendPublish(body)
     const most = maxPendingBytesOf()
     if (this.heldBytes > most) this.shed(most, this.owner)
   }
 
-  /** Holds a publish for the page's first attach: a lossy one only the newest; past `maxPendingBytes`, none, and the
-   *  page ends as one that missed them. */
+  /** Holds a publish for the page's first attach: a lossy one only the newest of its kind; past `maxPendingBytes`, none,
+   *  and the page misses them. */
   private holdBeforeAttach(body: PublishBody): void {
-    if (this.lossy) this.dropBeforeAttach()
+    if (this.lossy) this.keepBeforeAttach((held) => kindOf(held) !== kindOf(body))
     this.beforeAttach.push(body)
     hold(this, body)
     if (this.heldBytes <= maxPendingBytesOf()) return
+    const missed = this.beforeAttach
     this.dropBeforeAttach()
-    this.overflow(this.lossy ? NOT_EVEN_NEWEST : FELL_BEHIND, this.owner)
+    this.missed(missed)
   }
 
   private dropBeforeAttach(): void {
-    for (const body of this.beforeAttach) letGo(this, body)
+    this.keepBeforeAttach(() => false)
+  }
+
+  private keepBeforeAttach(keeps: (body: PublishBody) => boolean): void {
+    const held = this.beforeAttach
     this.beforeAttach = []
+    for (const body of held) {
+      if (keeps(body)) this.beforeAttach.push(body)
+      else letGo(this, body)
+    }
+  }
+
+  /** The page misses these publishes: it ends as one that missed them; while its want is unknown, once it wants their
+   *  kind. */
+  private missed(bodies: PublishBody[]): void {
+    if (!this.undeclared) return this.overflow(this.lossy ? NOT_EVEN_NEWEST : FELL_BEHIND, this.owner)
+    for (const body of bodies) this.undeclaredGaps[kindOf(body)] = true
   }
 
   /** A graceful close goes behind what waits for its page, so a lossy one first replaces that with the newest; an abort
@@ -364,6 +386,29 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** Applies a want newer than the one it has: the wire and a call can each bring the page's. */
   protected override onPeerWant(want: Want): void {
     if (want.version > this.pageWant.version) this.applyPageWant(want)
+    this.declare()
+  }
+
+  /** Taken by a response to its page: it takes the key's publishes for the page until the page says what it wants. */
+  override _registerChannel(mux?: ChannelMux): void {
+    const returned = !this._wasRegistered && this.pageWant.version === 0
+    super._registerChannel(mux)
+    if (!returned || this._phase !== 'open') return
+    this.undeclared = true
+    this.subscribeBroadcast()
+    this.subscribeBinaryBroadcast()
+  }
+
+  /** Its page said what it wants: what it holds of the kinds the page doesn't want goes, and so do their subscriptions. */
+  private declare(): void {
+    if (!this.undeclared) return
+    this.undeclared = false
+    this.keepBeforeAttach((body) => this.pageWant[kindOf(body)])
+    const gaps = this.undeclaredGaps
+    if ((gaps.text && this.pageWant.text) || (gaps.binary && this.pageWant.binary)) {
+      this.overflow(this.lossy ? NOT_EVEN_NEWEST : FELL_BEHIND, this.owner)
+    }
+    this.unsubscribeUnusedBroadcasts()
   }
 
   private applyPageWant(want: Want): void {
@@ -402,6 +447,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   }
 
   private unsubscribeUnusedBroadcasts(): void {
+    if (this.undeclared) return
     if (!this.pageWant.binary && this.broadcastBinaryListeners.size === 0) {
       this.unsubBinaryBroadcast?.()
       this.unsubBinaryBroadcast = null
@@ -416,10 +462,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   override _attachPeer(peer: IndexedPeer, state?: AttachState): void {
     this.lastPeer = peer
     if (state?.want) this.onPeerWant(state.want)
+    this.declare()
     const held = this.beforeAttach
     this.dropBeforeAttach()
-    for (const body of held)
-      if (this.pageWant[body.frame[0] === TAG.PUBLISH ? 'text' : 'binary']) peer.sendPublish(body)
+    for (const body of held) if (this.pageWant[kindOf(body)]) peer.sendPublish(body)
     super._attachPeer(peer, state)
     this.endOverflowed()
   }
@@ -557,6 +603,11 @@ const globalObject = getGlobalObject('wire-protocol/channel/server/ServerBroadca
   /** One delivery hands every subscriber on this server the same `info`, so they share the body the first one makes. */
   publishBodies: new WeakMap<WirePublishInfo, PublishBody>(),
 })
+
+/** Which of a page's wants a publish is for. */
+function kindOf(body: PublishBody): 'text' | 'binary' {
+  return body.frame[0] === TAG.PUBLISH ? 'text' : 'binary'
+}
 
 function bodyOf<T>(
   encodeBody: (data: T, info: WirePublishInfo) => Uint8Array<ArrayBuffer>,
