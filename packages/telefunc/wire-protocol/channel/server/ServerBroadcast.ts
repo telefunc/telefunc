@@ -445,13 +445,17 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   }
 
   /** What it held for its first attach goes first, of the kinds the attach's want keeps. */
-  override _attachPeer(peer: IndexedPeer, state?: AttachState): void {
+  protected override sendHeldForAttach(peer: IndexedPeer): void {
     if (this._phase !== 'ended') this.lastPeer = peer
-    if (state?.want) this.onPeerWant(state.want)
     const held = this.beforeAttach
     this.dropBeforeAttach()
     for (const body of held)
       if (this.pageWant[body.frame[0] === TAG.PUBLISH ? 'text' : 'binary']) peer.sendPublish(body)
+  }
+
+  override _attachPeer(peer: IndexedPeer, state?: AttachState): void {
+    // Attached again, what its want brings goes to its new wire at once; on a first attach, behind what was held.
+    if (this.lastPeer !== null && this._phase !== 'ended') this.lastPeer = peer
     super._attachPeer(peer, state)
     this.endOverflowed()
   }
@@ -756,4 +760,3 @@ function removedOnAbort({ unsubscribe, ready }: Listening, signal: AbortSignal |
   if (signal?.aborted) remove()
   return withReady(remove, readiness)
 }
-

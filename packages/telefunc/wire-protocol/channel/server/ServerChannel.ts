@@ -516,6 +516,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  an open one applies the RECONCILE's broadcast want before `onOpen` fires. */
   _attachPeer(peer: IndexedPeer, state?: AttachState): void {
     if (this._phase === 'ended') {
+      this.sendHeldForAttach(peer)
       this.offlineBuffer.flush(peer)
       this.sendPendingAckRes(peer)
       this.sendPendingEnd(peer)
@@ -528,9 +529,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.peer = peer
     this._replayBuffer?.moving()
     this.receiveCredit.attach(peer.sender.sendWait())
+    if (state?.want) this.onPeerWant(state.want)
+    this.sendHeldForAttach(peer)
     this.offlineBuffer.flush(peer)
     this.sendPendingAckRes(peer)
-    if (state?.want) this.onPeerWant(state.want)
     this.sendPendingEnd(peer)
     if (this._phase === 'closing') return
     this.lifecycle.fireOpen()
@@ -626,6 +628,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** `ServerBroadcast` overrides it; a plain channel ignores wants. */
   protected onPeerWant(_want: Want): void {}
+
+  /** What it held for its page's attach beyond its offline buffer goes ahead of that: `ServerBroadcast` overrides it. */
+  protected sendHeldForAttach(_peer: IndexedPeer): void {}
 
   /** @internal Tells the page which of its wants is in effect, as the answer to its attach or to a WANT frame does:
    *  `ServerBroadcast` overrides it. */
