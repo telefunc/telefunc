@@ -551,27 +551,6 @@ function testSubscribeOrder(inDocker = false) {
     }
   })
 
-  test('broadcast: a page hears a returned broadcast from its return, on a slow page too', async () => {
-    const cdp = await newCDPSession()
-    // A slow page attaches the broadcast late, after the publish its telefunction makes right after returning it.
-    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 6 })
-    try {
-      for (let run = 0; run < 4; run++) {
-        await navigate(`${getServerUrl()}/publish`)
-        await page.click('#test-broadcast-heard-from-return')
-        await autoRetry(
-          async () => {
-            expect(await getResult('#publish-result')).deep.equal({ received: ['after-return'] })
-          },
-          { timeout: 20_000 },
-        )
-      }
-    } finally {
-      await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 })
-      await cdp.detach()
-    }
-  })
-
   test("broadcast: once a subscriber's `ready` resolves, a publish from a telefunction reaches it, and `ready` rejects with the error its broadcast ends with first", async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-ready')

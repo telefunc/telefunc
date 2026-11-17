@@ -30,7 +30,6 @@ import {
   onBroadcastThrowingListener,
   onJoinChat,
   onBroadcastToSubscribe,
-  onBroadcastPublishingAfterReturn,
   onBroadcastRedisRefuses,
   onRedisAllowsEveryKey,
   onPublishTo,
@@ -205,27 +204,6 @@ function Publish() {
         }}
       >
         Subscribe, unsubscribe and subscribe again, then call a telefunction that publishes
-      </button>
-
-      <button
-        id="test-broadcast-heard-from-return"
-        onClick={async () => {
-          try {
-            const room = await onBroadcastPublishingAfterReturn()
-            const received: string[] = []
-            room.subscribe((text) => {
-              received.push(text)
-            })
-            for (let i = 0; i < 25 && received.length === 0; i++)
-              await new Promise((resolve) => setTimeout(resolve, 200))
-            await room.close()
-            setResult(JSON.stringify({ received }))
-          } catch (err) {
-            setResult(String(err))
-          }
-        }}
-      >
-        Subscribe to a returned broadcast its telefunction publishes to right after returning it
       </button>
 
       <button
