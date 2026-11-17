@@ -13,6 +13,13 @@ import type { Want } from '../../wire/payloads.js'
 
 /** A broadcast that the call of `session` returned, its page attached at index 0 and wanting nothing yet. */
 function attachedBroadcast(session: string) {
+  const page = returnedBroadcast(session)
+  page.attach()
+  return page
+}
+
+/** A broadcast that the call of `session` returned, its page not attached yet. */
+function returnedBroadcast(session: string) {
   const key = crypto.randomUUID()
   const broadcast = new ServerBroadcast<string>({ key })
   // As `carryChannel` stamps it.
@@ -28,12 +35,17 @@ function attachedBroadcast(session: string) {
     sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
     queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
   }
-  const replay = broadcast._replayBuffer
-  if (!replay) throw new Error('A registered broadcast has its replay')
-  broadcast._attachPeer(new IndexedPeer({ sender, index: 0, replay }))
+  const count = (tag: number) => frames.filter((frame) => frame[0] === tag).length
   return {
     key,
     broadcast,
+    /** The page attaches at index 0, its RECONCILE restating `want`. */
+    attach(want?: Want) {
+      const replay = broadcast._replayBuffer
+      if (!replay) throw new Error('A registered broadcast has its replay')
+      broadcast._attachPeer(new IndexedPeer({ sender, index: 0, replay }), { want })
+    },
+    publishes: () => ({ text: count(TAG.PUBLISH), binary: count(TAG.PUBLISH_BINARY) }),
     /** The page's WANT frame arrives. */
     wire: (want: Want) => broadcast._dispatchFrame({ tag: TAG.WANT, index: 0, want }),
     /** A call of `from` carries the want. */
@@ -99,3 +111,23 @@ for (const [order, { steps, hears }] of Object.entries(ORDERS)) {
     page.broadcast.abort()
   })
 }
+
+// A call can bring the page's subscription before the page's first attach: the page subscribed, then called at once.
+test("before the page's first attach, what it subscribed to by a call waits for the attach, and nothing else does", async () => {
+  const page = returnedBroadcast('session-a')
+  await page.call(on(1))
+  await Broadcast.publish(page.key, 'after-subscribe')
+  await Broadcast.publishBinary(page.key, new Uint8Array([1]))
+  page.attach(on(1))
+  expect(page.publishes()).toEqual({ text: 1, binary: 0 })
+  page.broadcast.abort()
+})
+
+test('before the first attach of a page that has not subscribed, nothing published is held for it', async () => {
+  const page = returnedBroadcast('session-a')
+  await Broadcast.publish(page.key, 'before-subscribe')
+  page.attach(on(1))
+  await Broadcast.publish(page.key, 'after-subscribe')
+  expect(page.publishes()).toEqual({ text: 1, binary: 0 })
+  page.broadcast.abort()
+})
