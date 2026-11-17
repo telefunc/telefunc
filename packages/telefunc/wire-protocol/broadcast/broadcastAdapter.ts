@@ -222,10 +222,8 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     const info = this.takeInfo(key)
     return new Promise((resolve, reject) => {
       const deliver = () => {
-        // One that left while it waited gets none.
-        const targets = publishedTo.filter((onMessage) => subs.get(key)?.has(onMessage))
         try {
-          resolve(this.deliverInMemory(targets, queuedData, info))
+          resolve(this.deliverInMemory(stillSubscribed(publishedTo, subs.get(key)), queuedData, info))
         } catch (err) {
           reject(err)
         }
@@ -282,6 +280,12 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     map.delete(key)
     unsub()
   }
+}
+
+/** Each of `targets` that `subs` still holds when its turn comes: one that left while the publish waited, or during its
+ *  delivery, gets none. */
+function* stillSubscribed<T>(targets: T[], subs: Set<T> | undefined): Generator<T> {
+  for (const target of targets) if (subs?.has(target)) yield target
 }
 
 function endlessAnswersError(): ChannelOverflowError {

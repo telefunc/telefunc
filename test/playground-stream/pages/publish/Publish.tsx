@@ -25,6 +25,7 @@ import {
   onBroadcastWhileOffline,
   onBroadcastSeqAcrossSubscribers,
   onBroadcastJoinWhileQueued,
+  onBroadcastLeaveWhileQueued,
   onBroadcastManyKeys,
   onBroadcastThrowingListener,
   onJoinChat,
@@ -570,6 +571,15 @@ function Publish() {
         }}
       >
         Subscribe while publishes queue
+      </button>
+      <button
+        id="test-broadcast-leave-while-queued"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onBroadcastLeaveWhileQueued()))
+        }}
+      >
+        Unsubscribe while publishes queue
       </button>
       {([false, true] as const).map((subscribed) => (
         <button

@@ -20,6 +20,7 @@ export {
   onBroadcastWhileOffline,
   onBroadcastSeqAcrossSubscribers,
   onBroadcastJoinWhileQueued,
+  onBroadcastLeaveWhileQueued,
   onBroadcastManyKeys,
   onBroadcastThrowingListener,
   onJoinChat,
@@ -259,6 +260,36 @@ async function onBroadcastJoinWhileQueued() {
   await Broadcast.publish(key, 't4')
   for (const off of offs) off()
   return received
+}
+
+/** Two subscribers of both kinds hold a key, and between them one that unsubscribes the second on a message. A listener's
+ *  in-memory publishes queue: it gives the key text, then binary. What each of the two got. */
+async function onBroadcastLeaveWhileQueued() {
+  const key = `room:leave-queued:${crypto.randomUUID()}`
+  const trigger = `room:leave-trigger:${crypto.randomUUID()}`
+  const subscribeBoth = (received: Array<string | number>) => [
+    Broadcast.subscribe<string>(key, (message) => received.push(message)),
+    Broadcast.subscribeBinary(key, (data) => received.push(...data)),
+  ]
+  const left: Array<string | number> = []
+  const stayed: Array<string | number> = []
+  const offs = subscribeBoth(stayed)
+  offs.push(
+    Broadcast.subscribe(key, () => {
+      for (const off of offLeaving) off()
+    }),
+  )
+  const offLeaving = subscribeBoth(left)
+  const queued: Array<ReturnType<typeof Broadcast.publish>> = []
+  offs.push(
+    Broadcast.subscribe(trigger, () => {
+      queued.push(Broadcast.publish(key, 't1'), Broadcast.publishBinary(key, new Uint8Array([2])))
+    }),
+  )
+  await Broadcast.publish(trigger, 'go')
+  await Promise.all(queued)
+  for (const off of offs) off()
+  return { left, stayed }
 }
 
 /** Publishes once on each of `count` distinct keys, each without a subscriber, or each while one subscribes. */
