@@ -13,6 +13,7 @@ import type {
   BroadcastOnMessage,
   BroadcastPublishResult,
   BroadcastAdapter,
+  Listening,
 } from '../../broadcast/broadcastAdapter.js'
 import type { AsyncLocalStorage } from 'node:async_hooks'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
@@ -460,12 +461,12 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   // --- BroadcastAdapter interface ---
 
   /** In effect at once. */
-  subscribe(key: string, onMessage: BroadcastOnMessage, wireRequest?: Request): () => void {
-    return this.addSubscriber(this.textSubs, key, onMessage, wireRequest)
+  subscribe(key: string, onMessage: BroadcastOnMessage, wireRequest?: Request): Listening {
+    return { unsubscribe: this.addSubscriber(this.textSubs, key, onMessage, wireRequest), ready: undefined }
   }
 
-  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, wireRequest?: Request): () => void {
-    return this.addSubscriber(this.binarySubs, key, onMessage, wireRequest)
+  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, wireRequest?: Request): Listening {
+    return { unsubscribe: this.addSubscriber(this.binarySubs, key, onMessage, wireRequest), ready: undefined }
   }
 
   publish(key: string, serialized: string): Promise<BroadcastPublishResult> {

@@ -6,16 +6,11 @@ import { ACK_STATUS, decode, encode, type ChannelFrame } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
 import { IndexedPeer } from '../channel/server/IndexedPeer.js'
 import { Channel } from '../channel/server/ServerChannel.js'
-import {
-  getBroadcastAdapter,
-  _resetBroadcastAdapterForTesting,
-  DefaultBroadcastAdapter,
-  listeningOf,
-} from './broadcastAdapter.js'
-import type { BroadcastTransport, BroadcastUnsubscribe } from './broadcastAdapter.js'
+import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcastAdapter.js'
+import type { BroadcastTransport, Listening } from './broadcastAdapter.js'
 
 /** The adapter's subscription as the function that stops it. */
-const stopOf = (subscription: BroadcastUnsubscribe) => listeningOf(subscription).unsubscribe
+const stopOf = (subscription: Listening) => subscription.unsubscribe
 import { ChannelOverflowError } from '../channel/channelErrors.js'
 import type { Unsubscribe } from '../channel/channel.js'
 
@@ -459,6 +454,8 @@ describe("subscribers that come and go while their backend hasn't confirmed the 
     'subscribe()': (key) => broadcastOf(key).subscribe(() => {}),
     'subscribeBinary()': (key) => broadcastOf(key).subscribeBinary(() => {}),
     // In effect at once: its `ready`, read, is one promise every such listener shares.
+    'Broadcast.subscribe()': (key) => Broadcast.subscribe(key, () => {}),
+    'Broadcast.subscribeBinary()': (key) => Broadcast.subscribeBinary(key, () => {}),
     "a channel's listen(), its `ready` read": (key) => {
       const remove = channelOf(key).listen(() => {})
       void remove.ready

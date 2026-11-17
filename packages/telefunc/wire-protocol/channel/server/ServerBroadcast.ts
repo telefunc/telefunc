@@ -15,13 +15,8 @@ import { Readiness, makePublishInfo, neverInEffect, stringifyMessage, withReady,
 import { broadcastMessages } from '../channelMessages.js'
 import { ServerChannel } from './ServerChannel.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
-import { getBroadcastAdapter, listeningOf } from '../../broadcast/broadcastAdapter.js'
-import type {
-  BroadcastPublishResult,
-  BroadcastAdapter,
-  BroadcastUnsubscribe,
-  Listening,
-} from '../../broadcast/broadcastAdapter.js'
+import { getBroadcastAdapter } from '../../broadcast/broadcastAdapter.js'
+import type { BroadcastPublishResult, BroadcastAdapter, Listening } from '../../broadcast/broadcastAdapter.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage } from '../../../utils/assert.js'
@@ -697,7 +692,7 @@ const Broadcast = {
       const data = parse(serialized) as ChannelData<U>
       callStaticListener(callback, data, makePublishInfo(key, info.seq, info.timestamp))
     })
-    return removedOnAbort(listeningOf(listening), options?.signal)
+    return removedOnAbort(listening, options?.signal)
   },
   publishBinary(key: string, data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     const adapter = getBroadcastAdapter()
@@ -711,7 +706,7 @@ const Broadcast = {
       // A copy of its own, as a `BroadcastChannel` listener gets.
       callStaticListener(callback, new Uint8Array(data), makePublishInfo(key, info.seq, info.timestamp))
     })
-    return removedOnAbort(listeningOf(listening), options?.signal)
+    return removedOnAbort(listening, options?.signal)
   },
 }
 
@@ -734,12 +729,15 @@ function reportStaticListenerError(err: unknown): void {
 }
 
 /** The subscription `subscribe` starts; where it throws and `orFailure`, one whose `ready` rejects with that. */
-function listeningOrFailure(orFailure: boolean, subscribe: () => BroadcastUnsubscribe): Listening {
+function listeningOrFailure(orFailure: boolean, subscribe: () => Listening): Listening {
   try {
-    return listeningOf(subscribe())
+    return subscribe()
   } catch (err) {
     if (!orFailure) throw err
-    return listeningOf({ unsubscribe: () => {}, ready: Promise.reject(err) })
+    const ready = Promise.reject(err)
+    // The broadcast it fails reports it (`whenListening`).
+    ready.catch(() => {})
+    return { unsubscribe: () => {}, ready }
   }
 }
 

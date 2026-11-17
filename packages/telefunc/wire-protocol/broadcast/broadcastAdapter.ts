@@ -1,10 +1,4 @@
-export {
-  getBroadcastAdapter,
-  installBroadcastAdapter,
-  _resetBroadcastAdapterForTesting,
-  DefaultBroadcastAdapter,
-  listeningOf,
-}
+export { getBroadcastAdapter, installBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter }
 export type {
   BroadcastAdapter,
   BroadcastTransport,
@@ -37,16 +31,17 @@ type BroadcastBinaryOnMessage = (data: Uint8Array, info: WirePublishInfo) => voi
  *  publishes to its key and rejects where it never will: its broadcast then closes with that error. */
 type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; ready: Promise<void> }
 
-/** A `BroadcastUnsubscribe` of either form; `ready` is undefined where the listener is in effect already. */
+/** A `BroadcastUnsubscribe` in one form: `ready` is undefined where the listener is in effect already, else the one
+ *  `ready` of its key's subscription, which every subscriber of the key shares. */
 type Listening = { unsubscribe: () => void; ready: Promise<void> | undefined }
 
 type QueuedPublish = { size: number; depth: number; deliver: () => void }
 
 /** `wireRequest`: the request that opened the wire a subscribing page's messages go out on, where one did. */
 type BroadcastAdapter = {
-  subscribe(key: string, onMessage: BroadcastOnMessage, wireRequest?: Request): BroadcastUnsubscribe
+  subscribe(key: string, onMessage: BroadcastOnMessage, wireRequest?: Request): Listening
   publish(key: string, serialized: string): BroadcastPublishResult | Promise<BroadcastPublishResult>
-  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, wireRequest?: Request): BroadcastUnsubscribe
+  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, wireRequest?: Request): Listening
   publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult>
   /** Where a process runs several objects that can't write to each other's pages, the one a subscriber's page is on. */
   ownerOf?(wireRequest: Request | undefined): string
@@ -118,7 +113,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     this.transport = transport ?? null
   }
 
-  subscribe(key: string, onMessage: BroadcastOnMessage): BroadcastUnsubscribe {
+  subscribe(key: string, onMessage: BroadcastOnMessage): Listening {
     let subs = this.subscriptions.get(key)
     if (!subs) {
       subs = new Set()
@@ -153,7 +148,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       }
       this.transportUnsubs.set(key, listening)
     }
-    return sharing(unsubscribe, listening)
+    return { unsubscribe, ready: listening?.ready }
   }
 
   publish(key: string, serialized: string): BroadcastPublishResult | Promise<BroadcastPublishResult> {
@@ -165,7 +160,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     return this.publishInMemory(this.subscriptions, key, serialized)
   }
 
-  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage): BroadcastUnsubscribe {
+  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage): Listening {
     let subs = this.binarySubscriptions.get(key)
     if (!subs) {
       subs = new Set()
@@ -199,7 +194,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       }
       this.transportBinaryUnsubs.set(key, listening)
     }
-    return sharing(unsubscribe, listening)
+    return { unsubscribe, ready: listening?.ready }
   }
 
   publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult> {
@@ -323,12 +318,6 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     map.delete(key)
     listening.unsubscribe()
   }
-}
-
-/** A subscriber of the transport's `listening`, which it shares with the key's other subscribers: in effect once that
- *  is, at once where it is already, and never where it failed. */
-function sharing(unsubscribe: () => void, listening: Listening | undefined): BroadcastUnsubscribe {
-  return listening?.ready ? { unsubscribe, ready: listening.ready } : unsubscribe
 }
 
 /** Each of `targets` that `subs` still holds when its turn comes: one that left while the publish waited, or during its

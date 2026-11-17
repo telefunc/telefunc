@@ -696,13 +696,15 @@ describe('cloudflare broadcast routing', () => {
     transport.attachIsolateInfo('weur')
     _resetBroadcastAdapterForTesting(transport)
 
-    const unsub = transport.runInObject('telefunc-shard-weur-0', () => transport.subscribe('room:test', () => {}))
+    const { unsubscribe } = transport.runInObject('telefunc-shard-weur-0', () =>
+      transport.subscribe('room:test', () => {}),
+    )
     await flushMicrotasks()
 
     const presenceKey = `tfps:${encodeURIComponent('room:test')}:weur:telefunc-shard-weur-0`
     expect(await kv.get(presenceKey)).toBe('telefunc-shard-weur-0')
 
-    unsub()
+    unsubscribe()
     await flushMicrotasks()
 
     expect(await kv.get(presenceKey)).toBeNull()
