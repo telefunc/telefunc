@@ -20,11 +20,7 @@ import { wrapProxy } from '../../../utils/wrapProxy.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import type { ServerReviverContext } from '../../../wire-protocol/values/types.js'
-import {
-  MAX_CHANNELS_PER_CONNECTION,
-  STREAM_TRANSPORT,
-  type StreamTransport,
-} from '../../../wire-protocol/constants.js'
+import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
 import { isCallWant, type CallWant } from '../../../wire-protocol/wire/payloads.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/channel/server/sse.js'
 import { buildShieldValidators, getArgumentShields, type ShieldLogConfig } from '../shield.js'
@@ -266,11 +262,11 @@ function envelopeFrom(parsed: unknown, runContext: RunContext): Envelope {
   }
 }
 
-/** The call's `wants`, none where it carries none, null where they're malformed. */
+/** The call's `wants`, of the page's broadcasts on all its connections: none where it carries none, null where malformed. */
 function wantsOf(raw: object): CallWant[] | null {
   if (!hasProp(raw, 'wants')) return []
   const { wants } = raw
-  return Array.isArray(wants) && wants.length <= MAX_CHANNELS_PER_CONNECTION && wants.every(isCallWant) ? wants : null
+  return Array.isArray(wants) && wants.every(isCallWant) ? wants : null
 }
 
 function logParseException(err: unknown, runContext: RunContext) {

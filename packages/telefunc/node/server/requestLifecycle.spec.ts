@@ -163,6 +163,24 @@ function call(
   })
 }
 
+// A page may hold 4,096 channels on each of its connections (`connectionKey`), and a call carries the wants of all.
+test('a call carrying the wants of more channels than one connection holds runs', async () => {
+  const wants = Array.from({ length: 4_097 }, () => ({
+    channel: crypto.randomUUID(),
+    version: 1,
+    text: true,
+    binary: false,
+  }))
+  const response = await serve({
+    request: new Request('https://example.test/_telefunc', {
+      method: 'POST',
+      headers: { 'x-telefunc-request': 'txt' },
+      body: JSON.stringify({ file: FILE, name: 'onSuccess', args: [], wants }),
+    }),
+  })
+  expect(response.statusCode).toBe(200)
+})
+
 describe('a request ends its lifecycle once, however the call ends', () => {
   for (const [name, args, statusCode] of [
     ['onSuccess', [], 200],
