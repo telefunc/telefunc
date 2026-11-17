@@ -7,7 +7,7 @@ import { decode, encode, type ChannelFrame } from '../../wire/frame.js'
 import { ClientBroadcast } from './ClientBroadcast.js'
 
 /** An SSE downstream that never sends a byte. */
-const stalledFetch = (async () => new Response(new ReadableStream({ start() {} }), { status: 200 })) as typeof fetch
+const stalledFetch: typeof fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
 
 beforeEach(() => {
   vi.stubGlobal('fetch', stalledFetch)

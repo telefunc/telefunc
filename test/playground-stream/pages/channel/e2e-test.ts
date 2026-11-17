@@ -1581,7 +1581,7 @@ async function expectHoldsNothingOnceLeft() {
 }
 
 function testChannelApi() {
-  test('channel: cancelled iterators settle acknowledgements and preserve captured listener replies', async () => {
+  test('channel: cancelled iterators settle acknowledgements, and a later listener answers them', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-iterator-ack')
     await autoRetry(async () => {
