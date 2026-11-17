@@ -121,8 +121,8 @@ export const db = liveDrizzle(drizzle(env.DB))
 // wrangler.jsonc
 {
   "compatibility_date": "2025-08-15", // or later
-  // nodejs_compat: @telefunc/live needs it.
-  "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
+  // nodejs_als (or nodejs_compat): @telefunc/live needs it.
+  "compatibility_flags": ["nodejs_als", "enable_request_signal"],
   "d1_databases": [{ "binding": "DB", "database_name": "app", "database_id": "<your database's id>" }],
   "durable_objects": {
     "bindings": [{ "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }]
@@ -135,7 +135,7 @@ export const db = liveDrizzle(drizzle(env.DB))
 
 > Several D1 databases with the same tables, a database per tenant for example, each need a name of their own: `liveDrizzle(drizzle(env.TENANT_A), { name: 'tenant-a' })`. Without one, a write to one refetches the other's matching reads.
 
-On Postgres through [Hyperdrive](https://developers.cloudflare.com/hyperdrive/), also import `@telefunc/live/postgres`, and create a pool in each telefunction call that uses it: a Worker can't use a connection of another request.
+On Postgres through [Hyperdrive](https://developers.cloudflare.com/hyperdrive/), also import `@telefunc/live/postgres` and add `nodejs_compat` to your `compatibility_flags`: [Postgres drivers need it](https://developers.cloudflare.com/hyperdrive/examples/connect-to-postgres/). Create a pool in each telefunction call that uses it: a Worker can't use a connection of another request.
 
 ```ts
 // database.ts
