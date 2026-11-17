@@ -1,6 +1,7 @@
 export { refuseChannels }
 
 import { Broadcast } from 'telefunc'
+import type { Redis } from 'ioredis'
 import { redis } from '../../redis'
 
 /** Leaves the keys that start with `!` out of this server's channel permissions, until `onRedisAllowsEveryKey()`, and
@@ -12,18 +13,24 @@ async function refuseChannels(): Promise<boolean> {
   await redis.call('ACL', 'SETUSER', 'default', 'resetchannels', '&tf:?:{[^!]*')
   const deadline = Date.now() + 5_000
   while (true) {
-    const key = `!refused:${crypto.randomUUID()}`
-    const probe = Broadcast.subscribe(key, () => {})
+    if (await refuses(redis, `!refused:${crypto.randomUUID()}`)) return true
+    if (Date.now() > deadline) return false
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+}
+
+/** Whether Redis refuses a subscription to `key`: its `ready` rejects, or Redis itself doesn't hold it. A `ready` that
+ *  resolved for a subscription Redis doesn't hold is the bug the cards look for, so they run on and show it. */
+async function refuses(redis: Redis, key: string): Promise<boolean> {
+  const probe = Broadcast.subscribe(key, () => {})
+  try {
     const refused = await probe.ready.then(
       () => false,
       () => true,
     )
-    // Whether Redis itself took it: a `ready` that resolved for a subscription Redis doesn't hold is the bug the cards
-    // look for, so they run on and show it.
     const reply = await redis.call('PUBSUB', 'NUMSUB', `tf:t:{${key}}`)
+    return refused || !Array.isArray(reply) || Number(reply[1]) === 0
+  } finally {
     probe()
-    if (refused || !Array.isArray(reply) || Number(reply[1]) === 0) return true
-    if (Date.now() > deadline) return false
-    await new Promise((resolve) => setTimeout(resolve, 100))
   }
 }

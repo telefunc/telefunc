@@ -69,15 +69,15 @@ async function onRedisSubscribeFailure() {
  *  another key. */
 async function onPublishBesideRefusedSubscribe() {
   if (!redis) throw new Error('The playground runs without Redis')
-  if (!(await refuseChannels())) {
-    await redis.call('ACL', 'SETUSER', 'default', 'allchannels')
-    return { refusesChannels: false }
-  }
-  const refused = Broadcast.subscribe(`!refused:${crypto.randomUUID()}`, () => {})
-  const key = `room:beside-refused:${crypto.randomUUID()}`
-  const received: string[] = []
-  const subscribed = Broadcast.subscribe<string>(key, (text) => received.push(text))
+  const unsubscribe: Array<() => void> = []
   try {
+    if (!(await refuseChannels())) return { refusesChannels: false }
+    const refused = Broadcast.subscribe(`!refused:${crypto.randomUUID()}`, () => {})
+    unsubscribe.push(refused)
+    const key = `room:beside-refused:${crypto.randomUUID()}`
+    const received: string[] = []
+    const subscribed = Broadcast.subscribe<string>(key, (text) => received.push(text))
+    unsubscribe.push(subscribed)
     const refusedReady = await refused.ready.then(
       () => 'resolved',
       () => 'rejected',
@@ -90,8 +90,7 @@ async function onPublishBesideRefusedSubscribe() {
     for (let i = 0; i < 25 && received.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 100))
     return { refusedReady, published, received }
   } finally {
-    refused()
-    subscribed()
+    for (const stop of unsubscribe) stop()
     await redis.call('ACL', 'SETUSER', 'default', 'allchannels')
   }
 }
