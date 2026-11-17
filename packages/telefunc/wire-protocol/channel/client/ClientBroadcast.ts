@@ -93,8 +93,13 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   protected override dispatchCtrl(frame: ChannelCtrlFrame): void {
-    if (frame.tag === TAG.WANTED) this._attach.confirmWant(frame.version)
+    if (frame.tag === TAG.WANTED) this.onWanted(frame.version)
     else super.dispatchCtrl(frame)
+  }
+
+  private onWanted(version: number): void {
+    this._attach.confirmWant(version)
+    if (this._attach.unconfirmedWant === null) this.connection.wantSettled(this)
   }
 
   override _end(err?: Error): void {

@@ -6,6 +6,7 @@ import { CHANNEL_TRANSPORT } from '../../constants.js'
 import { decode, encode, type ChannelFrame } from '../../wire/frame.js'
 import { ClientBroadcast } from './ClientBroadcast.js'
 import { ClientChannel } from './ClientChannel.js'
+import { ClientConnection } from './ClientConnection.js'
 
 /** An SSE downstream that never sends a byte. */
 const stalledFetch: typeof fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
@@ -62,6 +63,21 @@ describe('a listener added once its channel ended on the page', () => {
     await expect(page.listen(() => {}).ready).rejects.toBe(closedWith)
     await expect(page.listenBinary(() => {}).ready).rejects.toBe(closedWith)
   })
+})
+
+// A call carries each want the server hasn't confirmed yet, and none of a channel once it confirmed them or ended.
+it("a call carries the page's wants the server hasn't confirmed", () => {
+  const page = new ClientBroadcast(channelOptions())
+  const carried = () =>
+    (ClientConnection.unconfirmedWants('http://test.local/_telefunc') ?? []).filter((want) => want.channel === page.id)
+  page.subscribe(() => {})
+  expect(carried()).toEqual([{ channel: page.id, version: 1, text: true, binary: false }])
+  page._dispatchFrame(received(encode.wanted(0, 1)))
+  expect(carried()).toEqual([])
+  page.subscribeBinary(() => {})
+  expect(carried()).toEqual([{ channel: page.id, version: 2, text: true, binary: true }])
+  page.abort()
+  expect(carried()).toEqual([])
 })
 
 function channelOptions() {

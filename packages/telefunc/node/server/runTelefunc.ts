@@ -333,8 +333,7 @@ async function runTelefunc_(
       telefuncFilePath,
       telefunctionName,
       resolveRequest: parsed.resolveRequest,
-      // The page's wants take effect before the telefunction runs, whatever it causes and wherever.
-      wantsInEffect: getChannelMux().applyCallWants(getSessionToken(request), parsed.wants, request.signal),
+      wants: parsed.wants,
     })
   }
 
@@ -375,7 +374,8 @@ async function runTelefunc_(
     }
   }
 
-  await runContext.wantsInEffect
+  // The subscriptions the page made before this call are in effect before its telefunction runs.
+  if (runContext.wants) await getChannelMux().applyCallWants(getSessionToken(request), runContext.wants, request.signal)
 
   {
     assert(runContext.isValidRequest)

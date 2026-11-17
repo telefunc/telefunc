@@ -66,8 +66,8 @@ type ParseResult =
       telefuncFilePath: string
       telefunctionName: string
       telefunctionKey: string
-      /** The wants of the page's broadcasts the server hasn't confirmed to it. */
-      wants: CallWant[]
+      /** The wants of the page's broadcasts the server hasn't confirmed to it, where there are any. */
+      wants: CallWant[] | undefined
       resolveRequest: (telefunction: Telefunction) => ResolvedRequest
       isSseRequest: false
       isMalformedRequest: false
@@ -262,9 +262,9 @@ function envelopeFrom(parsed: unknown, runContext: RunContext): Envelope {
   }
 }
 
-/** The call's `wants`, of the page's broadcasts on all its connections: none where it carries none, null where malformed. */
-function wantsOf(raw: object): CallWant[] | null {
-  if (!hasProp(raw, 'wants')) return []
+/** The call's `wants`, of the page's broadcasts on all its connections: null where they're malformed. */
+function wantsOf(raw: object): CallWant[] | undefined | null {
+  if (!hasProp(raw, 'wants')) return undefined
   const { wants } = raw
   return Array.isArray(wants) && wants.every(isCallWant) ? wants : null
 }

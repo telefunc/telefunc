@@ -60,7 +60,7 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
   }
 
   const wants = ClientConnection.unconfirmedWants(callContext.telefuncUrl)
-  if (wants.length > 0) dataMain.wants = wants
+  if (wants) dataMain.wants = wants
 
   const connection = getConnectionOptions(callContext)
   const abortSignal = callContext.abortController.signal
