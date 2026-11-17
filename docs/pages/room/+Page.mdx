@@ -632,7 +632,7 @@ Server-side.
 | `Room.join(id, { meta?, selfDelivery?, identity?, hidden? }?)` | Join a room from the server, without getting the room first. |
 | `Room.list({ prefix? }?)` | List the open rooms. |
 | `Room.setMeta(id, meta)` / `Room.updateMeta(id, meta)` | Replace / update the room's `meta`. |
-| `Room.getParticipants(id, { identity? }?)` | List the participants, or one user's. |
+| `Room.getParticipants(id, { identity? }?)` | List the participants, or one user's: each `{ id, identity, meta, joinedAt, isConnected }`, with no methods. |
 | `Room.publish(id, message)` | Send to everyone: `room.subscribe()` gets it with `info.from` `null`. Resolves to `{ seq, timestamp }`. |
 | `Room.send(id, target, message)` | Send to one participant (`{ id }`) or to every tab of a user (`{ identity }`). Resolves to `{ seq, timestamp }`, or for `{ identity }` to a list of them, one per tab it reached. |
 | `Room.removeParticipant(id, target)` | Remove a participant (`{ id, reason? }`) or every tab of a user (`{ identity, reason? }`). |

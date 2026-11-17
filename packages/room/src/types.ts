@@ -80,7 +80,8 @@ type PublishGuard<P extends ParticipantMeta = ParticipantMeta> = (
 /** Runs before admission; throw to reject before membership is written. */
 type JoinGuard<P extends ParticipantMeta = ParticipantMeta> = (member: Sender<P>) => void | Promise<void>
 
-/** The receipt for a delivered private message, passed to `onAfterSend`. */
+/** A sent message's `seq` and `timestamp`: what `me.send()` without `ack`, `Room.publish()` and `Room.send()` resolve
+ *  to, and what `onAfterSend` gets. */
 type RoomSendReceipt = { seq: number; timestamp: number }
 
 /** Runs after a room-wide text or binary publish commits (`data` is a binary frame's bytes); throwing cannot undo
