@@ -4,7 +4,11 @@ import { autoRetry, expect, getServerUrl, page, run, test } from '@brillout/test
 import type { Page } from 'playwright-chromium'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
-  run(cmd)
+  run(cmd, {
+    // The SSE channel tries a streaming upload, which Chromium can't make over http: and reports as a
+    // `net::ERR_ALPN_NEGOTIATION_FAILED` browser error; the channel falls back to batch POSTs.
+    tolerateError: (log) => log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED'),
+  })
 
   test('a live query on D1 refetches on a write from another session Durable Object, which only Broadcast carries', async () => {
     await page.goto(getServerUrl() + '/')
