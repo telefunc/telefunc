@@ -78,16 +78,38 @@ For other backends (NATS, Kafka, …), implement `BroadcastTransport` and assign
 ```ts ts-only
 type BroadcastTransport = {
   send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
-  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
+  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): BroadcastUnsubscribe
   sendBinary(key: string, payload: Uint8Array): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
-  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void): () => void
-  listening?(key: string, binary: boolean): Promise<void> | undefined
+  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void): BroadcastUnsubscribe
+}
+type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; ready: Promise<void> }
+```
+
+`send()` / `sendBinary()` must return the assigned `{ seq, timestamp }` so subscribers across nodes see a single global order per key. `listen()` / `listenBinary()` are called at most once per key.
+
+Where your broker confirms a subscription only after `listen()` returns, return `{ unsubscribe, ready }`: `ready` resolves once the listener gets what any server publishes to the key, and rejects where it never will, which closes the broadcast with that error. A subscriber's `ready` waits for it, and so does a telefunction call that a page makes right after subscribing.
+
+```ts
+// server/broadcastTransport.ts
+// Environment: server
+
+import type { BroadcastTransport } from 'telefunc'
+import { broker } from './broker'
+
+const transport: BroadcastTransport = {
+  // ...send(), sendBinary(), and listenBinary() as listen()
+  listen(key, onMessage) {
+    // Your broker's subscribe() resolves once the broker confirmed the subscription
+    const subscribing = broker.subscribe(`text:${key}`, (message) => onMessage(message.payload, message.info))
+    return {
+      unsubscribe: () => void subscribing.then((subscription) => subscription.unsubscribe(), () => {}),
+      ready: subscribing.then(() => {}),
+    }
+  },
 }
 ```
 
-`send()` / `sendBinary()` must return the assigned `{ seq, timestamp }` so subscribers across nodes see a single global order per key. `listen()` / `listenBinary()` return an unsubscribe function and are called at most once per key.
-
-Where a listener misses publishes until your broker confirms it, as a Redis `SUBSCRIBE` does, implement `listening()`: return a promise that resolves once the listener of `key` (`binary`: the `listenBinary()` one) gets what any server publishes, or `undefined` where it already does, and that rejects where it never will: the broadcast then closes with that error. A subscriber's `ready` waits for it, and so does a telefunction call that a page makes right after subscribing.
+> A plain function that stops listening still works: the listener is then in effect from the moment `listen()` returns.
 
 A transport that sends `sendBinary()`'s `payload` after `sendBinary()` returns (after an `await`, or from a queue) must send a copy: the publisher may reuse its buffer once `publishBinary()` returns.
 
