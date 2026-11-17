@@ -4,8 +4,16 @@ import { ServerReplay } from '../channel/server/ServerReplay.js'
 import { ACK_STATUS, decode, encode, type ChannelFrame } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
 import { IndexedPeer } from '../channel/server/IndexedPeer.js'
-import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcastAdapter.js'
-import type { BroadcastTransport } from './broadcastAdapter.js'
+import {
+  getBroadcastAdapter,
+  _resetBroadcastAdapterForTesting,
+  DefaultBroadcastAdapter,
+  listeningOf,
+} from './broadcastAdapter.js'
+import type { BroadcastTransport, BroadcastUnsubscribe } from './broadcastAdapter.js'
+
+/** The adapter's subscription as the function that stops it. */
+const stopOf = (subscription: BroadcastUnsubscribe) => listeningOf(subscription).unsubscribe
 import { ChannelOverflowError } from '../channel/channelErrors.js'
 
 const previousBroadcastAdapter = getBroadcastAdapter()
@@ -195,11 +203,13 @@ describe('in-memory publishes in answer', () => {
   it('delivers a chain of 5,000 answers', async () => {
     const adapter = new DefaultBroadcastAdapter()
     let received = 0
-    const unsubscribe = adapter.subscribe('room:finite', (serialized) => {
-      received++
-      const n = Number(serialized)
-      if (n < 5000) void adapter.publish('room:finite', String(n + 1))
-    })
+    const unsubscribe = stopOf(
+      adapter.subscribe('room:finite', (serialized) => {
+        received++
+        const n = Number(serialized)
+        if (n < 5000) void adapter.publish('room:finite', String(n + 1))
+      }),
+    )
     await adapter.publish('room:finite', '0')
     unsubscribe()
     expect(received).toBe(5001)
@@ -208,12 +218,14 @@ describe('in-memory publishes in answer', () => {
   it('delivers the bytes an answer published, though its publisher reuses its buffer once publishBinary() returns', async () => {
     const adapter = new DefaultBroadcastAdapter()
     const received: number[][] = []
-    const unsubscribeBinary = adapter.subscribeBinary('room:reused', (data) => received.push(Array.from(data)))
-    const unsubscribe = adapter.subscribe('room:reused', () => {
-      const bytes = new Uint8Array([1, 2, 3])
-      void adapter.publishBinary('room:reused', bytes)
-      bytes.fill(0)
-    })
+    const unsubscribeBinary = stopOf(adapter.subscribeBinary('room:reused', (data) => received.push(Array.from(data))))
+    const unsubscribe = stopOf(
+      adapter.subscribe('room:reused', () => {
+        const bytes = new Uint8Array([1, 2, 3])
+        void adapter.publishBinary('room:reused', bytes)
+        bytes.fill(0)
+      }),
+    )
     await adapter.publish('room:reused', 'question')
     unsubscribe()
     unsubscribeBinary()
@@ -223,10 +235,12 @@ describe('in-memory publishes in answer', () => {
   it('rejects a listener that answers its own messages without end, and timers run again', async () => {
     const adapter = new DefaultBroadcastAdapter()
     const errors: unknown[] = []
-    const unsubscribe = adapter.subscribe('room:endless', () => {
-      const result = adapter.publish('room:endless', 'again')
-      if (result instanceof Promise) result.catch((err: unknown) => errors.push(err))
-    })
+    const unsubscribe = stopOf(
+      adapter.subscribe('room:endless', () => {
+        const result = adapter.publish('room:endless', 'again')
+        if (result instanceof Promise) result.catch((err: unknown) => errors.push(err))
+      }),
+    )
     const timerRan = new Promise((resolve) => setTimeout(resolve, 0))
     adapter.publish('room:endless', 'start')
     await timerRan
@@ -334,7 +348,7 @@ describe('a subscription the adapter refused', () => {
 describe("a server subscriber's `ready` while its backend hasn't confirmed the subscription", () => {
   const pending = new Promise<void>(() => {})
   const sent = () => ({ seq: 1, timestamp: 1 })
-  const listen = () => () => {}
+  const listen = () => ({ unsubscribe: () => {}, ready: pending })
   const unconfirmed = () =>
     _resetBroadcastAdapterForTesting(
       new DefaultBroadcastAdapter({
@@ -342,7 +356,6 @@ describe("a server subscriber's `ready` while its backend hasn't confirmed the s
         sendBinary: sent,
         listen,
         listenBinary: listen,
-        listening: () => pending,
       }),
     )
   const settled = async (ready: Promise<void>) => {
@@ -640,8 +653,8 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
     const transport = createMockTransport()
     const adapter = new DefaultBroadcastAdapter(transport)
 
-    const u1 = adapter.subscribe('room:rc', () => {})
-    const u2 = adapter.subscribe('room:rc', () => {})
+    const u1 = stopOf(adapter.subscribe('room:rc', () => {}))
+    const u2 = stopOf(adapter.subscribe('room:rc', () => {}))
     expect(transport._listeners.get('room:rc')?.size).toBe(1) // exactly one upstream sub for both
 
     u1()
@@ -655,7 +668,7 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
     const transport = createMockTransport()
     const adapter = new DefaultBroadcastAdapter(transport)
 
-    const u1 = adapter.subscribe('room:rc-cycle', () => {})
+    const u1 = stopOf(adapter.subscribe('room:rc-cycle', () => {}))
     u1()
     expect(transport._listeners.has('room:rc-cycle')).toBe(false)
 

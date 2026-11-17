@@ -13,7 +13,6 @@ import type {
   BroadcastOnMessage,
   BroadcastPublishResult,
   BroadcastAdapter,
-  BroadcastUnsubscribe,
 } from '../../broadcast/broadcastAdapter.js'
 import type { AsyncLocalStorage } from 'node:async_hooks'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
@@ -435,7 +434,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     key: string,
     onMessage: OnMessage,
     wireRequest: Request | undefined,
-  ): BroadcastUnsubscribe {
+  ): () => void {
     const locationBucket = this.requireLocationBucket()
     const owner = this.ownerOf(wireRequest)
     let subs = subsByKey.get(key)
@@ -460,11 +459,12 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
   // --- BroadcastAdapter interface ---
 
-  subscribe(key: string, onMessage: BroadcastOnMessage, wireRequest?: Request): BroadcastUnsubscribe {
+  /** In effect at once. */
+  subscribe(key: string, onMessage: BroadcastOnMessage, wireRequest?: Request): () => void {
     return this.addSubscriber(this.textSubs, key, onMessage, wireRequest)
   }
 
-  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, wireRequest?: Request): BroadcastUnsubscribe {
+  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, wireRequest?: Request): () => void {
     return this.addSubscriber(this.binarySubs, key, onMessage, wireRequest)
   }
 

@@ -23,7 +23,7 @@ async function onRedisSubscribeFailure() {
   const transport = new RedisTransport({ redis: publisher })
   await publisher.ping()
   const received: string[] = []
-  let stop = transport.listen(user, (value) => received.push(value))
+  let stop = transport.listen(user, (value) => received.push(value)).unsubscribe
   try {
     const pending = await Promise.allSettled([
       transport.send(user, 'text'),
@@ -40,7 +40,7 @@ async function onRedisSubscribeFailure() {
         stop = transport.listen(user, (value) => {
           received.push(value)
           resolve()
-        })
+        }).unsubscribe
       })
       try {
         await transport.send(user, 'recovered')

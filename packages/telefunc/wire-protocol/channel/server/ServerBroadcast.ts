@@ -15,12 +15,8 @@ import { makePublishInfo, stringifyMessage, withReady, type Unsubscribe } from '
 import { broadcastMessages } from '../channelMessages.js'
 import { ServerChannel } from './ServerChannel.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
-import { getBroadcastAdapter } from '../../broadcast/broadcastAdapter.js'
-import type {
-  BroadcastPublishResult,
-  BroadcastAdapter,
-  BroadcastUnsubscribe,
-} from '../../broadcast/broadcastAdapter.js'
+import { getBroadcastAdapter, listeningOf } from '../../broadcast/broadcastAdapter.js'
+import type { BroadcastPublishResult, BroadcastAdapter, Listening } from '../../broadcast/broadcastAdapter.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage } from '../../../utils/assert.js'
@@ -68,8 +64,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private readonly broadcastListeners = new Listeners<BroadcastListener<T>>()
   private readonly broadcastBinaryListeners = new Listeners<BroadcastBinaryListener>()
   private adapter: BroadcastAdapter | null = null
-  private unsubBroadcast: BroadcastUnsubscribe | null = null
-  private unsubBinaryBroadcast: BroadcastUnsubscribe | null = null
+  /** Its subscription to the key's publishes on its backend, while its page or a subscriber of it wants them. */
+  private textListening: Listening | null = null
+  private binaryListening: Listening | null = null
   /** The page's want it applied last: which of the key's publishes go to the page. */
   private pageWant: Readonly<Want> = { version: 0, text: false, binary: false }
 
@@ -174,8 +171,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       },
     })
     this.unsubscribeUnusedBroadcasts()
-    const listening = this.broadcastAdapter().listening?.(this.key, binary)
-    return withReady(remove, Promise.race([this.ended().promise, listening, removed.promise]))
+    const listening = binary ? this.binaryListening : this.textListening
+    return withReady(remove, Promise.race([this.ended().promise, listening?.ready, removed.promise]))
   }
 
   // --- Transport callbacks ---
@@ -395,8 +392,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   override _confirmWant(): Promise<unknown> | undefined {
     const { version, text, binary } = this.pageWant
     if (version === 0) return undefined
-    const adapter = this.broadcastAdapter()
-    const pending = [text && adapter.listening?.(this.key, false), binary && adapter.listening?.(this.key, true)]
+    const pending = [text && this.textListening?.ready, binary && this.binaryListening?.ready]
     if (!pending.some((each) => each)) {
       this.peer?.sendWanted(version)
       return undefined
@@ -418,12 +414,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   private unsubscribeUnusedBroadcasts(): void {
     if (!this.pageWant.binary && this.broadcastBinaryListeners.size === 0) {
-      this.unsubBinaryBroadcast?.()
-      this.unsubBinaryBroadcast = null
+      this.binaryListening?.unsubscribe()
+      this.binaryListening = null
     }
     if (!this.pageWant.text && this.broadcastListeners.size === 0) {
-      this.unsubBroadcast?.()
-      this.unsubBroadcast = null
+      this.textListening?.unsubscribe()
+      this.textListening = null
     }
   }
 
@@ -466,10 +462,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     if (options?.pageGone) this.dropBeforeAttach()
     this.lossyPublishes?.dispose()
     this.lastPeer = null
-    this.unsubBroadcast?.()
-    this.unsubBroadcast = null
-    this.unsubBinaryBroadcast?.()
-    this.unsubBinaryBroadcast = null
+    this.textListening?.unsubscribe()
+    this.textListening = null
+    this.binaryListening?.unsubscribe()
+    this.binaryListening = null
     super.shutdown(err, options)
     this.ending?.reject(this.endError())
     this.broadcastListeners.clear()
@@ -496,33 +492,37 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   }
 
   private subscribeBroadcast(): void {
-    if (this.unsubBroadcast) return
-    const unsubscribe = this.broadcastAdapter().subscribe(
-      this.key,
-      (serialized, rawInfo) => this.deliverBroadcastMessage(serialized, rawInfo),
-      this.wireRequest,
+    if (this.textListening) return
+    const listening = listeningOf(
+      this.broadcastAdapter().subscribe(
+        this.key,
+        (serialized, rawInfo) => this.deliverBroadcastMessage(serialized, rawInfo),
+        this.wireRequest,
+      ),
     )
-    this.unsubBroadcast = unsubscribe
-    void this.endUnlessListening(false, () => this.unsubBroadcast === unsubscribe)
+    this.textListening = listening
+    void this.endUnlessListening(listening, () => this.textListening === listening)
   }
 
   private subscribeBinaryBroadcast(): void {
-    if (this.unsubBinaryBroadcast) return
-    const unsubscribe = this.broadcastAdapter().subscribeBinary(
-      this.key,
-      (data, rawInfo) => this.deliverBroadcastBinaryMessage(data, rawInfo),
-      this.wireRequest,
+    if (this.binaryListening) return
+    const listening = listeningOf(
+      this.broadcastAdapter().subscribeBinary(
+        this.key,
+        (data, rawInfo) => this.deliverBroadcastBinaryMessage(data, rawInfo),
+        this.wireRequest,
+      ),
     )
-    this.unsubBinaryBroadcast = unsubscribe
-    void this.endUnlessListening(true, () => this.unsubBinaryBroadcast === unsubscribe)
+    this.binaryListening = listening
+    void this.endUnlessListening(listening, () => this.binaryListening === listening)
   }
 
   /** A subscription its backend failed stays failed (Redis doesn't try it again), so the broadcast ends: with the
    *  backend's error on the server, reported as a server error, and as a server error on its page. Every `ready` waiting
    *  for the subscription rejects with that end. One removed meanwhile ends nothing. */
-  private async endUnlessListening(binary: boolean, current: () => boolean): Promise<void> {
+  private async endUnlessListening(listening: Listening, current: () => boolean): Promise<void> {
     try {
-      await this.broadcastAdapter().listening?.(this.key, binary)
+      await listening.ready
     } catch (err) {
       if (!current()) return
       handleCallbackBug(err)
@@ -664,11 +664,11 @@ const Broadcast = {
   subscribe<U = unknown>(key: string, callback: BroadcastListener<U>, options?: { signal?: AbortSignal }): Unsubscribe {
     const adapter = getBroadcastAdapter()
     if (options?.signal?.aborted) return withReady(() => {})
-    const unsubscribe = adapter.subscribe(key, (serialized, info) => {
+    const listening = adapter.subscribe(key, (serialized, info) => {
       const data = parse(serialized) as ChannelData<U>
       callStaticListener(callback, data, makePublishInfo(key, info.seq, info.timestamp))
     })
-    return removedOnAbort(unsubscribe, options?.signal, adapter.listening?.(key, false))
+    return removedOnAbort(listeningOf(listening), options?.signal)
   },
   publishBinary(key: string, data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     const adapter = getBroadcastAdapter()
@@ -678,11 +678,11 @@ const Broadcast = {
   subscribeBinary(key: string, callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe {
     const adapter = getBroadcastAdapter()
     if (options?.signal?.aborted) return withReady(() => {})
-    const unsubscribe = adapter.subscribeBinary(key, (data, info) => {
+    const listening = adapter.subscribeBinary(key, (data, info) => {
       // A copy of its own, as a `BroadcastChannel` listener gets.
       callStaticListener(callback, new Uint8Array(data), makePublishInfo(key, info.seq, info.timestamp))
     })
-    return removedOnAbort(unsubscribe, options?.signal, adapter.listening?.(key, true))
+    return removedOnAbort(listeningOf(listening), options?.signal)
   },
 }
 
@@ -705,12 +705,8 @@ function reportStaticListenerError(err: unknown): void {
 }
 
 /** Unsubscribes once `signal` aborts, at once if it aborted while subscribing, or when the returned function runs; its
- *  `ready` resolves once the subscription is in effect (`listening`) or removed. */
-function removedOnAbort(
-  unsubscribe: () => void,
-  signal: AbortSignal | undefined,
-  listening: Promise<void> | undefined,
-): Unsubscribe {
+ *  `ready` resolves once the subscription is in effect or removed. */
+function removedOnAbort({ unsubscribe, ready }: Listening, signal: AbortSignal | undefined): Unsubscribe {
   const removed = createDeferred()
   let current: (() => void) | undefined = unsubscribe
   const remove = () => {
@@ -722,5 +718,5 @@ function removedOnAbort(
   }
   signal?.addEventListener('abort', remove, { once: true })
   if (signal?.aborted) remove()
-  return withReady(remove, Promise.race([listening, removed.promise]))
+  return withReady(remove, Promise.race([ready, removed.promise]))
 }

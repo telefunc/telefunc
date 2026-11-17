@@ -1,8 +1,15 @@
-export { getBroadcastAdapter, installBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter }
+export {
+  getBroadcastAdapter,
+  installBroadcastAdapter,
+  _resetBroadcastAdapterForTesting,
+  DefaultBroadcastAdapter,
+  listeningOf,
+}
 export type {
   BroadcastAdapter,
   BroadcastTransport,
   BroadcastUnsubscribe,
+  Listening,
   BroadcastPublishResult,
   BroadcastOnMessage,
   BroadcastBinaryOnMessage,
@@ -25,7 +32,13 @@ type BroadcastOnMessage = (serialized: string, info: WirePublishInfo) => void
 
 type BroadcastBinaryOnMessage = (data: Uint8Array, info: WirePublishInfo) => void
 
-type BroadcastUnsubscribe = () => void
+/** What starting to listen returns: a function that stops listening, where the listener is in effect from the moment it
+ *  is returned; else that function as `unsubscribe`, with `ready`, which resolves once the listener gets what any server
+ *  publishes to its key and rejects where it never will: its broadcast then closes with that error. */
+type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; ready: Promise<void> }
+
+/** A `BroadcastUnsubscribe` of either form; `ready` is undefined where the listener is in effect already. */
+type Listening = { unsubscribe: () => void; ready: Promise<void> | undefined }
 
 type QueuedPublish = { size: number; depth: number; deliver: () => void }
 
@@ -37,8 +50,6 @@ type BroadcastAdapter = {
   publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult>
   /** Where a process runs several objects that can't write to each other's pages, the one a subscriber's page is on. */
   ownerOf?(wireRequest: Request | undefined): string
-  /** As `BroadcastTransport`'s, for this process's subscribers of `key`. */
-  listening?(key: string, binary: boolean): Promise<void> | undefined
 }
 
 /**
@@ -50,22 +61,30 @@ type BroadcastAdapter = {
 type BroadcastTransport = {
   /** Send a text message. Must return the assigned seq and timestamp. */
   send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
-  /** Listen for text messages on a key. Called at most once per key. Return an unsubscribe function. */
-  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
+  /** Listen for text messages on a key. Called at most once per key. Return an unsubscribe function, or, where the
+   *  listener misses publishes until your broker confirms it, `{ unsubscribe, ready }`. */
+  listen(
+    key: string,
+    onMessage: (payload: string, info: { seq: number; timestamp: number }) => void,
+  ): BroadcastUnsubscribe
   /** Send a binary message. Must return the assigned seq and timestamp. */
   sendBinary(
     key: string,
     payload: Uint8Array,
   ): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
-  /** Listen for binary messages on a key. Called at most once per key. Return an unsubscribe function. */
+  /** As `listen()`, for binary messages. */
   listenBinary(
     key: string,
     onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void,
-  ): () => void
-  /** Settles once the listener of `key` (`binary`: its `listenBinary()` one) gets what any server publishes to it, and
-   *  rejects where it never will, which closes its broadcast with that error; undefined where it gets them already.
-   *  Without it, a listener gets them from the moment `listen()` returns. */
-  listening?(key: string, binary: boolean): Promise<void> | undefined
+  ): BroadcastUnsubscribe
+}
+
+/** The one form of either `BroadcastUnsubscribe`. A failure nobody reads raises no unhandled rejection: the broadcast it
+ *  closes reports it. */
+function listeningOf(returned: BroadcastUnsubscribe): Listening {
+  if (typeof returned === 'function') return { unsubscribe: returned, ready: undefined }
+  returned.ready.catch(() => {})
+  return { unsubscribe: returned.unsubscribe, ready: returned.ready }
 }
 
 /** How deep in-memory publishes in answer to answers may go: 10,000, past the about 1,300 that Node.js's call stack holds
@@ -80,8 +99,9 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   private readonly transport: BroadcastTransport | null
   private readonly subscriptions = new Map<string, Set<BroadcastOnMessage>>()
   private readonly binarySubscriptions = new Map<string, Set<BroadcastBinaryOnMessage>>()
-  private readonly transportUnsubs = new Map<string, () => void>()
-  private readonly transportBinaryUnsubs = new Map<string, () => void>()
+  /** The transport's one listener of each key, which its subscribers share. */
+  private readonly transportUnsubs = new Map<string, Listening>()
+  private readonly transportBinaryUnsubs = new Map<string, Listening>()
   /** Per-key seq counter for in-memory mode, while the key has a subscriber. */
   private readonly keySeqs = new Map<string, number>()
   /** The highest seq issued on any key: a key without a counter goes on above it. */
@@ -106,16 +126,17 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     }
     subs.add(onMessage)
 
-    if (this.transport && !this.transportUnsubs.has(key)) {
-      this.transportUnsubs.set(
-        key,
+    let listening = this.transportUnsubs.get(key)
+    if (this.transport && !listening) {
+      listening = listeningOf(
         this.transport.listen(key, (payload, info) => {
           this.deliver(this.subscriptions, key, payload, info)
         }),
       )
+      this.transportUnsubs.set(key, listening)
     }
 
-    return () => {
+    const unsubscribe = () => {
       const s = this.subscriptions.get(key)
       if (!s) return
       s.delete(onMessage)
@@ -125,10 +146,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
         this.releaseSeq(key)
       }
     }
-  }
-
-  listening(key: string, binary: boolean): Promise<void> | undefined {
-    return this.transport?.listening?.(key, binary)
+    return sharing(unsubscribe, listening)
   }
 
   publish(key: string, serialized: string): BroadcastPublishResult | Promise<BroadcastPublishResult> {
@@ -148,16 +166,17 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     }
     subs.add(onMessage)
 
-    if (this.transport && !this.transportBinaryUnsubs.has(key)) {
-      this.transportBinaryUnsubs.set(
-        key,
+    let listening = this.transportBinaryUnsubs.get(key)
+    if (this.transport && !listening) {
+      listening = listeningOf(
         this.transport.listenBinary(key, (payload, info) => {
           this.deliver(this.binarySubscriptions, key, payload, info)
         }),
       )
+      this.transportBinaryUnsubs.set(key, listening)
     }
 
-    return () => {
+    const unsubscribe = () => {
       const s = this.binarySubscriptions.get(key)
       if (!s) return
       s.delete(onMessage)
@@ -167,6 +186,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
         this.releaseSeq(key)
       }
     }
+    return sharing(unsubscribe, listening)
   }
 
   publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult> {
@@ -284,12 +304,18 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     }
   }
 
-  private releaseUnsub(map: Map<string, () => void>, key: string): void {
-    const unsub = map.get(key)
-    if (!unsub) return
+  private releaseUnsub(map: Map<string, Listening>, key: string): void {
+    const listening = map.get(key)
+    if (!listening) return
     map.delete(key)
-    unsub()
+    listening.unsubscribe()
   }
+}
+
+/** A subscriber of the transport's `listening`, which it shares with the key's other subscribers: in effect once that
+ *  is, at once where it is already, and never where it failed. */
+function sharing(unsubscribe: () => void, listening: Listening | undefined): BroadcastUnsubscribe {
+  return listening?.ready ? { unsubscribe, ready: listening.ready } : unsubscribe
 }
 
 /** Each of `targets` that `subs` still holds when its turn comes: one that left while the publish waited, or during its

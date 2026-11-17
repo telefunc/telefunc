@@ -82,39 +82,41 @@ class RedisTransport implements BroadcastTransport {
     return this.publish(this.channelKey(key, 'b'), this.seqKey(key), payload)
   }
 
-  listen(key: string, onMessage: TextOnMessage): () => void {
+  /** In effect once Redis acknowledged its SUBSCRIBE. */
+  listen(key: string, onMessage: TextOnMessage): { unsubscribe: () => void; ready: Promise<void> } {
     const channel = this.channelKey(key, 't')
     assert(!this.textCallbacks.has(channel), `Duplicate text listener for key "${key}"`)
     this.textCallbacks.set(channel, onMessage)
-    this.subscribe(channel)
-    return () => {
+    const ready = this.subscribe(channel)
+    const unsubscribe = () => {
       this.textCallbacks.delete(channel)
       this.unsubscribe(channel)
     }
+    return { unsubscribe, ready }
   }
 
-  listenBinary(key: string, onMessage: BinaryOnMessage): () => void {
+  /** In effect once Redis acknowledged its SUBSCRIBE. */
+  listenBinary(key: string, onMessage: BinaryOnMessage): { unsubscribe: () => void; ready: Promise<void> } {
     const channel = this.channelKey(key, 'b')
     assert(!this.binaryCallbacks.has(channel), `Duplicate binary listener for key "${key}"`)
     this.binaryCallbacks.set(channel, onMessage)
-    this.subscribe(channel)
-    return () => {
+    const ready = this.subscribe(channel)
+    const unsubscribe = () => {
       this.binaryCallbacks.delete(channel)
       this.unsubscribe(channel)
     }
+    return { unsubscribe, ready }
   }
 
-  /** Settles once Redis acknowledged the SUBSCRIBE of `key`'s listener, and rejects with its failure. */
-  listening(key: string, binary: boolean): Promise<void> | undefined {
-    const channel = this.channelKey(key, binary ? 'b' : 't')
-    if (this.failedSubscribes.has(channel)) return Promise.reject(this.failedSubscribes.get(channel))
-    return this.subscribing.get(channel)?.ack.then(() => {})
-  }
-
-  private subscribe(channel: string): void {
+  /** Sends the SUBSCRIBE, and returns its acknowledgement, which rejects with its failure; a failure nobody reads raises
+   *  no unhandled rejection. */
+  private subscribe(channel: string): Promise<void> {
     const ack = this.subscriber.subscribe(channel)
     this.subscribing.set(channel, { ack, order: ++this.subscribesSent })
     void this.settleSubscribe(channel, ack)
+    const ready = ack.then(() => {})
+    ready.catch(() => {})
+    return ready
   }
 
   private async settleSubscribe(channel: string, ack: Promise<unknown>): Promise<void> {
