@@ -11,7 +11,7 @@ import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import type { BroadcastPublishOptions } from '../channel.js'
 
 /** An SSE downstream that never sends a byte: the RECONCILED that would open sends never comes. */
-const stalledFetch = (async () => new Response(new ReadableStream({ start() {} }), { status: 200 })) as typeof fetch
+const stalledFetch: typeof fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance', 'Date'] })
