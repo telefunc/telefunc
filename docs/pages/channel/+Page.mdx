@@ -117,7 +117,7 @@ channel.send('Hello!')
 
 > `listen()`, `listenBinary()`, `onOpen()` and `onClose()` accept `{ signal }` as their second argument. Aborting the signal removes that registration.
 
-> Message listeners are called in registration order. A listener aborted by an earlier listener still gets that message.
+> Message listeners are called in registration order. A listener that an earlier listener removed doesn't get that message.
 
 ### Receive messages in a loop
 
