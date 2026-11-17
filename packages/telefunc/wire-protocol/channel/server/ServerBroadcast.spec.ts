@@ -716,8 +716,8 @@ describe('TransportBroadcastDriver — multi-node transport', () => {
     })
   })
 
-  // What a transport carries is the caller's JSON, a lossy one behind a line feed, and the caller's bytes behind one
-  // byte, 1 where lossy; every reader gets what the caller published.
+  // What a transport carries is the caller's JSON, a lossy one behind a line feed, and the caller's bytes, a lossy one
+  // behind 0xfe; every reader gets what the caller published.
   it("hands every reader the caller's data, and the transport the payload that says whether it is lossy", async () => {
     const transport = createMockTransport()
     configureBroadcastTransport(transport)
@@ -741,7 +741,7 @@ describe('TransportBroadcastDriver — multi-node transport', () => {
     await Broadcast.publish(key, 'plain')
     void broadcast.close()
 
-    expect(transport._carried).toEqual(['{"n":1}', '\n{"n":2}', [0, 3, 1], [1, 4], [1, 5], '"plain"'])
+    expect(transport._carried).toEqual(['{"n":1}', '\n{"n":2}', [3, 1], [0xfe, 4], [0xfe, 5], '"plain"'])
     expect(fromObject).toEqual([{ n: 1 }, { n: 2 }, 'plain'])
     expect(fromStatic).toEqual(fromObject)
     expect(fromObjectBinary).toEqual([[3, 1], [4], [5]])
@@ -749,8 +749,8 @@ describe('TransportBroadcastDriver — multi-node transport', () => {
     // Its page is behind from the first publish on: the newest lossy one of each kind waits, for a plain one or the close.
     expect(sent).toEqual(['{"n":1}', '\n{"n":2}', '"plain"'])
     expect(binary).toEqual([
-      [0, 3, 1],
-      [1, 5],
+      [3, 1],
+      [0xfe, 5],
     ])
   })
 
