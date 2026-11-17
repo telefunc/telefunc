@@ -8,6 +8,11 @@ import { getChannelMux } from './ChannelMux.js'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { decode } from '../../wire/frame.js'
+import {
+  DefaultBroadcastAdapter,
+  _resetBroadcastAdapterForTesting,
+  getBroadcastAdapter,
+} from '../../broadcast/broadcastAdapter.js'
 import { TAG } from '../../wire/tags.js'
 import type { Want } from '../../wire/payloads.js'
 
@@ -142,4 +147,34 @@ test("a close that runs out before the page's first attach keeps what the page s
   page.attach(on(1))
   expect(page.tags()).toEqual([TAG.PUBLISH_TO, TAG.PUBLISH, TAG.CLOSE])
   page.broadcast._release()
+})
+
+test('an ended broadcast takes no newer want its late attach brings, and listens to its backend no more', async () => {
+  let listening = 0
+  const listen = () => {
+    listening++
+    return () => {
+      listening--
+    }
+  }
+  const sent = () => ({ seq: 1, timestamp: 1 })
+  const previous = getBroadcastAdapter()
+  _resetBroadcastAdapterForTesting(
+    new DefaultBroadcastAdapter({ send: sent, sendBinary: sent, listen, listenBinary: listen }),
+  )
+  try {
+    const page = returnedBroadcast('session-a')
+    await page.call(on(1))
+    expect(listening).toBe(1)
+    page.broadcast.abort()
+    const counts = [listening]
+    // Meanwhile the page subscribed to its binary publishes too.
+    page.attach({ version: 2, text: true, binary: true })
+    counts.push(listening)
+    page.broadcast._release()
+    counts.push(listening)
+    expect(counts).toEqual([0, 0, 0])
+  } finally {
+    _resetBroadcastAdapterForTesting(previous)
+  }
 })

@@ -361,9 +361,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(`Broadcast closed: ${this.overflowed}`))
   }
 
-  /** Applies a want newer than the one it has: the wire and a call can each bring the page's. */
+  /** Applies a want newer than the one it has: the wire and a call can each bring the page's. An ended one takes none: it
+   *  would listen to its backend with nothing left to stop it. */
   protected override onPeerWant(want: Want): void {
-    if (want.version > this.pageWant.version) this.applyPageWant(want)
+    if (this._phase !== 'ended' && want.version > this.pageWant.version) this.applyPageWant(want)
   }
 
   private applyPageWant(want: Want): void {
@@ -414,7 +415,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   /** What it held for its first attach goes first, of the kinds the attach's want keeps. */
   override _attachPeer(peer: IndexedPeer, state?: AttachState): void {
-    this.lastPeer = peer
+    if (this._phase !== 'ended') this.lastPeer = peer
     if (state?.want) this.onPeerWant(state.want)
     const held = this.beforeAttach
     this.dropBeforeAttach()
