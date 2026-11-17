@@ -626,6 +626,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return undefined
   }
 
+  /** @internal What has yet to happen before the channel a response returns gets what its page is to hear: the response
+   *  waits for it. `ServerBroadcast` overrides it. */
+  _listening(): Promise<unknown> | undefined {
+    return undefined
+  }
+
   /** @internal Applies a want a call of the page's carries, as one the wire brings, and returns what has yet to happen
    *  before it is in effect. */
   _applyCallWant(want: Want): Promise<unknown> | undefined {

@@ -23,6 +23,7 @@ import { uint8ArrayToBase64url } from '../../../wire-protocol/wire/base64url.js'
 import type { StreamingProducer, StreamingValueServer } from '../../../wire-protocol/values/types.js'
 import { type RequestContext } from '../context/requestContext.js'
 import { carryChannel } from './carryChannel.js'
+import { getChannelMux } from '../../../wire-protocol/channel/server/ChannelMux.js'
 import type { AbortError } from '../Abort.js'
 import type { Context } from '../context/context.js'
 import type { Readable } from 'node:stream'
@@ -46,12 +47,14 @@ type TelefuncId = {
   telefuncFilePath: string
 }
 
+/** `inEffect`: what the response waits for before it goes, so the page hears what it returned from then on. */
 type SerializeResult =
-  | { type: 'text'; body: string }
+  | { type: 'text'; body: string; inEffect?: Promise<void> }
   | {
       type: 'streaming'
       body: Readable | ReadableStream<Uint8Array<ArrayBuffer>>
       streamTransport: StreamTransport
+      inEffect?: Promise<void>
     }
 
 function serializeTelefunctionResult(runContext: {
@@ -82,6 +85,8 @@ function serializeTelefunctionResult(runContext: {
    *  failed serialization or a page that left does, ends what only it would carry; a channel an earlier response carried
    *  stays open. */
   const registrations: (() => void)[] = []
+  /** What the channels it carries wait for before their page can rely on hearing them (`ServerChannel._listening`). */
+  const listening: Promise<unknown>[] = []
   let goes = false
   /** The response holds a channel an earlier response carried. */
   let carriesAnEarlierChannel = false
@@ -94,7 +99,8 @@ function serializeTelefunctionResult(runContext: {
   function registerChannel(channel: ServerChannel<any, any>) {
     registrations.push(() => {
       channel._validators = makeValidators(channel, valueShields, shieldCtx)
-      carryChannel(channel, requestContext)
+      const pending = carryChannel(channel, requestContext)
+      if (pending) listening.push(pending)
     })
   }
   function sendStream(createProducer: () => StreamingProducer) {
@@ -172,8 +178,9 @@ function serializeTelefunctionResult(runContext: {
 
   goes = true
   for (const register of registrations) register()
+  const inEffect = getChannelMux().inEffect(listening)
 
-  if (useChannelPump || producers.length === 0) return { type: 'text', body: httpResponseBody }
+  if (useChannelPump || producers.length === 0) return { type: 'text', body: httpResponseBody, inEffect }
 
   const telefuncId: TelefuncId = {
     telefunctionName: runContext.telefunctionName,
@@ -201,5 +208,6 @@ function serializeTelefunctionResult(runContext: {
       useNodeStream: runContext.useNodeStream,
     }),
     streamTransport: runContext.streamTransport,
+    inEffect,
   }
 }

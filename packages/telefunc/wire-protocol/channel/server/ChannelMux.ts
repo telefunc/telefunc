@@ -193,6 +193,12 @@ class ChannelMux implements UpgradeStagesOwner {
       const listening = channel._applyCallWant(want)
       if (listening) pending.push(listening)
     }
+    return this.inEffect(pending)
+  }
+
+  /** Settles once every one of `pending` has, or after `connectTtl`, whichever comes first; undefined where there is
+   *  nothing to wait for. */
+  inEffect(pending: Promise<unknown>[]): Promise<void> | undefined {
     return pending.length === 0 ? undefined : settledWithin(Promise.all(pending), this.options.connectTtl)
   }
 

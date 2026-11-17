@@ -33,6 +33,7 @@ import {
   onBroadcastPublishingAfterReturn,
   onBroadcastRedisRefuses,
   onRedisAllowsEveryKey,
+  onPublishFromAnotherServer,
   onPublishTo,
 } from './Publish.telefunc'
 
@@ -177,6 +178,30 @@ function Publish() {
         }}
       >
         Subscribe to a broadcast whose key Redis refuses to subscribe to
+      </button>
+
+      <button
+        id="test-broadcast-another-server-after-return"
+        onClick={async () => {
+          try {
+            const { room, key } = await onBroadcastToSubscribe()
+            const received: string[] = []
+            // Sent before the page says what it wants: the call waits for nothing, and the server hears it at once.
+            const published = onPublishFromAnotherServer(key, 'from-another-server')
+            room.subscribe((text) => {
+              received.push(text)
+            })
+            await published
+            for (let i = 0; i < 25 && received.length === 0; i++)
+              await new Promise((resolve) => setTimeout(resolve, 200))
+            await room.close()
+            setResult(JSON.stringify({ received }))
+          } catch (err) {
+            setResult(String(err))
+          }
+        }}
+      >
+        Subscribe to a returned broadcast another server publishes to right away
       </button>
 
       <button

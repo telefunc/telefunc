@@ -406,6 +406,8 @@ async function runTelefunc_(
   {
     objectAssign(runContext, { useNodeStream: readable !== undefined })
     const result = serializeTelefunctionResult(runContext)
+    // The broadcasts it returns take what their key gets from here on, another server's publish too.
+    if (result.inEffect) await result.inEffect
 
     if (result.type === 'streaming') {
       const contentType =
