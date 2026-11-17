@@ -178,3 +178,32 @@ test('an ended broadcast takes no newer want its late attach brings, and listens
     _resetBroadcastAdapterForTesting(previous)
   }
 })
+
+// A transport that refuses a page's subscription at once fails it as a backend that gives it up later does: the
+// broadcast ends with that error, which the page reads, and the call that carried the subscription goes on.
+const KINDS: ('text' | 'binary')[] = ['text', 'binary']
+const ARRIVALS: ('call' | 'wire')[] = ['call', 'wire']
+for (const kind of KINDS) {
+  for (const arrival of ARRIVALS) {
+    test(`a ${kind} subscription the transport refuses at once, arriving by ${arrival}, ends the broadcast with the transport's error`, async () => {
+      const refuse = () => {
+        throw new Error('broker connection closed')
+      }
+      const sent = () => ({ seq: 1, timestamp: 1 })
+      const previous = getBroadcastAdapter()
+      _resetBroadcastAdapterForTesting(
+        new DefaultBroadcastAdapter({ send: sent, sendBinary: sent, listen: refuse, listenBinary: refuse }),
+      )
+      try {
+        const page = attachedBroadcast('session-a')
+        const want = { version: 1, text: kind === 'text', binary: kind === 'binary' }
+        if (arrival === 'call') await page.call(want)
+        else page.wire(want)
+        await expect(page.broadcast.closed).rejects.toThrow('broker connection closed')
+        expect(page.tags()).toContain(TAG.ERROR)
+      } finally {
+        _resetBroadcastAdapterForTesting(previous)
+      }
+    })
+  }
+}

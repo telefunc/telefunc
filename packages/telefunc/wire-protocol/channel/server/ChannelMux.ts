@@ -952,7 +952,8 @@ function getGlobals(): { mux: ChannelMux } {
 async function settledWithin(pending: Promise<unknown>, ms: number): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise((resolve) => (timer = setTimeout(resolve, ms)))
-  // A backend that can't listen says so itself: Redis fails the publishes made on this server.
+  // A subscription its backend fails, at once or later, ends its broadcast with that error (`endUnlessListening`), which
+  // the page reads; the call goes on.
   await Promise.race([pending.catch(() => {}), timeout])
   clearTimeout(timer)
 }

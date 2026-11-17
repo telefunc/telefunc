@@ -16,7 +16,12 @@ import { broadcastMessages } from '../channelMessages.js'
 import { ServerChannel } from './ServerChannel.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import { getBroadcastAdapter, listeningOf } from '../../broadcast/broadcastAdapter.js'
-import type { BroadcastPublishResult, BroadcastAdapter, Listening } from '../../broadcast/broadcastAdapter.js'
+import type {
+  BroadcastPublishResult,
+  BroadcastAdapter,
+  BroadcastUnsubscribe,
+  Listening,
+} from '../../broadcast/broadcastAdapter.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage } from '../../../utils/assert.js'
@@ -380,8 +385,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   private applyPageWant(want: Want): void {
     this.pageWant = want
-    if (want.text) this.subscribeBroadcast()
-    if (want.binary) this.subscribeBinaryBroadcast()
+    if (want.text) this.subscribeBroadcast(true)
+    if (want.binary) this.subscribeBinaryBroadcast(true)
     // A page that reads none of its publishes any more would only drop those still waiting for its wire.
     if (!want.text && !want.binary) this.dropUnhanded()
     this.unsubscribeUnusedBroadcasts()
@@ -491,9 +496,11 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     return this.adapter
   }
 
-  private subscribeBroadcast(): void {
+  /** `forPage`: a subscription its backend refuses at once fails as one it gives up later does (`endUnlessListening`),
+   *  where a server subscriber's `subscribe()` throws the refusal instead. */
+  private subscribeBroadcast(forPage = false): void {
     if (this.textListening) return
-    const listening = listeningOf(
+    const listening = listeningOrFailure(forPage, () =>
       this.broadcastAdapter().subscribe(
         this.key,
         (serialized, rawInfo) => this.deliverBroadcastMessage(serialized, rawInfo),
@@ -504,9 +511,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     void this.endUnlessListening(listening, () => this.textListening === listening)
   }
 
-  private subscribeBinaryBroadcast(): void {
+  private subscribeBinaryBroadcast(forPage = false): void {
     if (this.binaryListening) return
-    const listening = listeningOf(
+    const listening = listeningOrFailure(forPage, () =>
       this.broadcastAdapter().subscribeBinary(
         this.key,
         (data, rawInfo) => this.deliverBroadcastBinaryMessage(data, rawInfo),
@@ -702,6 +709,16 @@ function callStaticListener<D>(
 
 function reportStaticListenerError(err: unknown): void {
   if (!isAbort(err)) handleCallbackBug(err)
+}
+
+/** The subscription `subscribe` starts; where it throws and `orFailure`, one whose `ready` rejects with that. */
+function listeningOrFailure(orFailure: boolean, subscribe: () => BroadcastUnsubscribe): Listening {
+  try {
+    return listeningOf(subscribe())
+  } catch (err) {
+    if (!orFailure) throw err
+    return listeningOf({ unsubscribe: () => {}, ready: Promise.reject(err) })
+  }
 }
 
 /** Unsubscribes once `signal` aborts, at once if it aborted while subscribing, or when the returned function runs; its
