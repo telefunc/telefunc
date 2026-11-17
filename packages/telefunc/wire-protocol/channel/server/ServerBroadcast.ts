@@ -165,10 +165,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   ): Unsubscribe {
     if (options.signal?.aborted) return withReady(() => {})
     if (this._phase === 'ended') return neverInEffect(this.endError())
-    if (binary) this.subscribeBinaryBroadcast()
-    else this.subscribeBroadcast()
     const waiting = binary ? this.binaryWaiting : this.textWaiting
     const readiness = new Readiness()
+    // Before the backend starts: it may deliver a message before its subscribe returns.
     const remove = listeners.add(callback, {
       ...options,
       onRemove: () => {
@@ -177,6 +176,14 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
         this.unsubscribeUnusedBroadcasts()
       },
     })
+    try {
+      if (binary) this.subscribeBinaryBroadcast()
+      else this.subscribeBroadcast()
+    } catch (err) {
+      remove()
+      throw err
+    }
+    // A listener that removed itself on such a message leaves the backend unused.
     this.unsubscribeUnusedBroadcasts()
     if ((binary ? this.binaryListening : this.textListening)?.ready) waiting.add(readiness)
     else readiness.settle(true)

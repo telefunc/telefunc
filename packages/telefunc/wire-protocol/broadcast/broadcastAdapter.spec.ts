@@ -536,6 +536,38 @@ describe("a transport's listen() that throws", () => {
     })
   })
 
+  it('BroadcastChannel.subscribe(): keeps no listener of the call that threw; the retry hears its own messages only', async () => {
+    const transport = failingFirst()
+    const room = new ServerBroadcast<string>({ key: 'room:throws' })
+    const heard: string[] = []
+    expect(() => room.subscribe((text) => heard.push(`failed ${text}`))).toThrow('broker connection closed')
+    const stop = room.subscribe((text) => heard.push(`retry ${text}`))
+    await stop.ready
+    transport.text('"hello"', { seq: 1, timestamp: 1 })
+    room.abort()
+    expect({ heard, active: transport.active, attempts: transport.attempts }).toEqual({
+      heard: ['retry hello'],
+      active: 0,
+      attempts: 2,
+    })
+  })
+
+  it('BroadcastChannel.subscribeBinary(): keeps no listener of the call that threw; the retry hears its own messages only', async () => {
+    const transport = failingFirst()
+    const room = new ServerBroadcast({ key: 'room:throws' })
+    const heard: string[] = []
+    expect(() => room.subscribeBinary((data) => heard.push(`failed ${data}`))).toThrow('broker connection closed')
+    const stop = room.subscribeBinary((data) => heard.push(`retry ${data}`))
+    await stop.ready
+    transport.binary(new Uint8Array([1, 2, 3]), { seq: 1, timestamp: 1 })
+    room.abort()
+    expect({ heard, active: transport.active, attempts: transport.attempts }).toEqual({
+      heard: ['retry 1,2,3'],
+      active: 0,
+      attempts: 2,
+    })
+  })
+
   it('Broadcast.subscribeBinary(): keeps no callback of the call that threw; the retry hears its own messages only', async () => {
     const transport = failingFirst()
     const heard: string[] = []
@@ -558,68 +590,85 @@ describe("a transport's listen() that throws", () => {
 // key has a listener.
 describe('a message the transport delivers inside listen()', () => {
   type Info = { seq: number; timestamp: number }
-  let seq = 0
-  const info = (): Info => ({ seq: ++seq, timestamp: 1 })
-
-  it('Broadcast.subscribe(): the subscriber hears it, then the next publish', async () => {
-    let delivery: ((payload: string, info: Info) => void) | undefined
+  const KEY = 'room:inside-listen'
+  /** A transport whose `listen()` and `listenBinary()` deliver `1` to their key before they return. */
+  const deliveringInsideListen = () => {
+    let seq = 0
+    let text: ((payload: string, info: Info) => void) | undefined
+    let binary: ((payload: Uint8Array, info: Info) => void) | undefined
     const send = (_key: string, payload: string) => {
-      const sent = info()
-      delivery?.(payload, sent)
+      const sent = { seq: ++seq, timestamp: 1 }
+      text?.(payload, sent)
       return sent
     }
-    const sendBinary = () => info()
+    const sendBinary = (_key: string, payload: Uint8Array) => {
+      const sent = { seq: ++seq, timestamp: 1 }
+      binary?.(payload, sent)
+      return sent
+    }
     _resetBroadcastAdapterForTesting(
       new DefaultBroadcastAdapter({
         send,
         sendBinary,
         listen: (key, onMessage) => {
-          delivery = onMessage
+          text = onMessage
           send(key, '1')
           return () => {
-            delivery = undefined
+            text = undefined
           }
         },
-        listenBinary: () => () => {},
-      }),
-    )
-    const heard: number[] = []
-    const stop = Broadcast.subscribe<number>('room:inside-listen', (n) => heard.push(n))
-    await stop.ready
-    await Broadcast.publish('room:inside-listen', 2)
-    stop()
-    expect({ heard, listening: delivery !== undefined }).toEqual({ heard: [1, 2], listening: false })
-  })
-
-  it('Broadcast.subscribeBinary(): the subscriber hears it, then the next publish', async () => {
-    let delivery: ((payload: Uint8Array, info: Info) => void) | undefined
-    const sendBinary = (_key: string, payload: Uint8Array) => {
-      const sent = info()
-      delivery?.(payload, sent)
-      return sent
-    }
-    const send = () => info()
-    _resetBroadcastAdapterForTesting(
-      new DefaultBroadcastAdapter({
-        send,
-        sendBinary,
-        listen: () => () => {},
         listenBinary: (key, onMessage) => {
-          delivery = onMessage
+          binary = onMessage
           sendBinary(key, Uint8Array.of(1))
           return () => {
-            delivery = undefined
+            binary = undefined
           }
         },
       }),
     )
-    const heard: number[] = []
-    const stop = Broadcast.subscribeBinary('room:inside-listen', (data) => heard.push(...data))
-    await stop.ready
-    await Broadcast.publishBinary('room:inside-listen', Uint8Array.of(2))
-    stop()
-    expect({ heard, listening: delivery !== undefined }).toEqual({ heard: [1, 2], listening: false })
-  })
+    return { listening: () => text !== undefined || binary !== undefined }
+  }
+  const room = () => new ServerBroadcast<number>({ key: KEY })
+  const SURFACES: Record<string, (heard: number[]) => { stop: Unsubscribe; publish: () => unknown; end?: () => void }> =
+    {
+      'Broadcast.subscribe()': (heard) => ({
+        stop: Broadcast.subscribe<number>(KEY, (n) => heard.push(n)),
+        publish: () => Broadcast.publish(KEY, 2),
+      }),
+      'Broadcast.subscribeBinary()': (heard) => ({
+        stop: Broadcast.subscribeBinary(KEY, (data) => heard.push(...data)),
+        publish: () => Broadcast.publishBinary(KEY, Uint8Array.of(2)),
+      }),
+      'BroadcastChannel.subscribe()': (heard) => {
+        const broadcast = room()
+        return {
+          stop: broadcast.subscribe((n) => heard.push(n)),
+          publish: () => Broadcast.publish(KEY, 2),
+          end: () => broadcast.abort(),
+        }
+      },
+      'BroadcastChannel.subscribeBinary()': (heard) => {
+        const broadcast = room()
+        return {
+          stop: broadcast.subscribeBinary((data) => heard.push(...data)),
+          publish: () => Broadcast.publishBinary(KEY, Uint8Array.of(2)),
+          end: () => broadcast.abort(),
+        }
+      },
+    }
+
+  for (const [surface, subscribe] of Object.entries(SURFACES)) {
+    it(`${surface}: the subscriber hears it, then the next publish`, async () => {
+      const transport = deliveringInsideListen()
+      const heard: number[] = []
+      const { stop, publish, end } = subscribe(heard)
+      await stop.ready
+      await publish()
+      stop()
+      end?.()
+      expect({ heard, listening: transport.listening() }).toEqual({ heard: [1, 2], listening: false })
+    })
+  }
 })
 
 describe('Broadcast disallows channel methods', () => {
