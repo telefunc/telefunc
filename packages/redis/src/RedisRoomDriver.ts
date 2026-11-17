@@ -223,6 +223,7 @@ class RedisRoomDriver implements RoomDriver {
       closingLease: undefined,
       requiredCellKeys: [],
       fenceTokens: fence.tokens,
+      kit: this.kit,
     }
     const run = () => this.connection.run(REDIS_COMMANDS.operation, { ...input, commit })
     let outcome
@@ -347,6 +348,7 @@ class RedisRoomDriver implements RoomDriver {
         closingLease: opts?.closingLease,
         requiredCellKeys: opts?.requiredCellKeys ?? [],
         fenceTokens: fence?.tokens ?? NO_FENCE_TOKENS,
+        kit: this.kit,
       })
     } catch (error) {
       fence?.cancel()

@@ -190,17 +190,17 @@ async function onBroadcastAnsweringLoop() {
   return { timerFired: true, deliveredAtLastReceipt, delivered }
 }
 
-/** An instance subscribes and publishes `count` messages of `bytes` bytes in the same turn, the last past the 2 MiB a new
- *  subscription holds: Redis's SUBSCRIBE round trip keeps the new subscription short of ready, so the Redis driver holds
- *  the publishes until it is. It returns once its listener saw the others, or 10 s pass. */
+/** An instance subscribes and publishes `count` messages of `bytes` bytes in the same turn: Redis's SUBSCRIBE round trip
+ *  keeps the new subscription short of ready, so the Redis driver holds the publishes until it is. It returns once its
+ *  listener saw them all, or 10 s pass. */
 async function onBroadcastWhileEstablishing(count: number, bytes: number) {
   const room = new BroadcastChannel<string>({ key: `room:held-test:${crypto.randomUUID()}` })
   const seen: string[] = []
   // publish() resolves once the message is accepted: a store like Redis delivers it to local subscribers after that.
-  const sawOthers = Promise.withResolvers<void>()
+  const sawAll = Promise.withResolvers<void>()
   room.subscribe((data) => {
     seen.push(data[0]!)
-    if (seen.length === count - 1) sawOthers.resolve()
+    if (seen.length === count) sawAll.resolve()
   })
   const outcomes = await Promise.all(
     Array.from({ length: count }, (_, i) =>
@@ -210,7 +210,7 @@ async function onBroadcastWhileEstablishing(count: number, bytes: number) {
       ),
     ),
   )
-  await within10s(sawOthers.promise)
+  await within10s(sawAll.promise)
   await room.close()
   return { outcomes, seen }
 }

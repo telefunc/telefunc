@@ -17,12 +17,14 @@ export {
   encodeRoomRecord,
   handoffLost,
   lostReason,
+  publishedBytes,
   withinRoomHorizon,
 }
 export type { LaneCommit }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
+import { utf8ByteLength } from 'telefunc/__internal'
 import { raceTimeout } from '../../utils/raceTimeout.js'
 import { getRoomPlane } from '../../backend/plane.js'
 import type {
@@ -34,6 +36,7 @@ import type {
   StaleIncarnation,
 } from '../../backend/contract.js'
 import { hasRoomTag } from '../../shared/protocol.js'
+import { decodeBinaryFrame } from '../../shared/binary.js'
 import type { RoomConfigRecord, RoomDemandPage, RoomIncarnation } from '../protocol.js'
 import { RoomError, participantGoneError, roomClosedError } from '../../shared/errors.js'
 import { assert } from '../../utils/assert.js'
@@ -75,6 +78,19 @@ function decodeLaneEnvelope(serialized: string): { __r: string } {
 
 function decodeRoomRecord<T>(bytes: Uint8Array): T {
   return parse(decodeRoomText(bytes)) as T
+}
+
+/** The bytes of a commit's payload that its publisher published, serialized as `publish()` serializes a message: a
+ *  message's data, or the whole payload of any other commit. */
+function publishedBytes(lane: LaneId, payload: Uint8Array): number {
+  if (lane.kind === 'binary') {
+    const frame = decodeBinaryFrame(payload)
+    assert(frame !== null)
+    return frame.payload.byteLength
+  }
+  if (lane.kind !== 'semantic') return payload.byteLength
+  const record = decodeRoomRecord<{ __r: string; data?: unknown }>(payload)
+  return record.__r === 'data' ? utf8ByteLength(stringify(record.data)) : payload.byteLength
 }
 
 function configFromHead(head: RoomHead): RoomConfigRecord {

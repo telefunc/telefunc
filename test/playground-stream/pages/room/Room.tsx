@@ -1445,21 +1445,12 @@ function Room() {
         setResult(JSON.stringify({ first, outcomes: await Promise.all(sends), got }))
       })}
 
-      {scenario('hold-overflow', null, 'Publishes held past 2 MiB', async () => {
-        const roomId = await createRoomId('hold-overflow')
-        const serverOutcomes = await onPublishWhileEstablishing(roomId, 3, 900_000)
+      {scenario('hold', null, 'Publishes held past 2 MiB together', async () => {
+        const roomId = await createRoomId('hold')
+        const serverOutcomes = await onPublishWhileEstablishing(roomId, 3, 1_500_000)
         await pollUntil(async () => {
           const seen = await onGetWatched(roomId)
-          return { result: { serverOutcomes, seen }, done: seen.length >= 2 }
-        })
-      })}
-
-      {scenario('hold-alone', null, 'One publish held, itself past 2 MiB', async () => {
-        const roomId = await createRoomId('hold-alone')
-        const serverOutcomes = await onPublishWhileEstablishing(roomId, 2, 2_300_000)
-        await pollUntil(async () => {
-          const seen = await onGetWatched(roomId)
-          return { result: { serverOutcomes, seen }, done: seen.length >= 1 }
+          return { result: { serverOutcomes, seen }, done: seen.length >= 3 }
         })
       })}
 

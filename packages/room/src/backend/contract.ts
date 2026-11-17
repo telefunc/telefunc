@@ -38,6 +38,7 @@ export type {
 import type { reportLaneLost } from '../server/config.js'
 import type { BackendReceiver, DriverAttempt, OrderingInfo, PlaneKey, SubscriptionDriver } from 'telefunc/__internal'
 import type { recordOperation } from './operation.js'
+import type { publishedBytes } from '../server/lanes/lanes.js'
 
 /** The cells a prefix read's page holds. */
 const CELL_PAGE_SIZE = 1024
@@ -48,8 +49,8 @@ const DIRECTORY_PAGE_SIZE = 100
  *  `servePlane(planeKey<RoomPlaneKey>('telefunc.room.plane'), (kit) => …)`. */
 type RoomPlaneKey = PlaneKey<'telefunc.room.plane', RoomPlaneKit, RoomDriver>
 
-/** Room's lane keys, page sizes and operation recorder, which `backendPlane()` hands a backend's Room driver: a backend
- *  package imports Room for types only, as a Broadcast-only app doesn't install it. */
+/** Room's lane keys, page sizes, operation recorder and frame reader, which `backendPlane()` hands a backend's Room
+ *  driver: a backend package imports Room for types only, as a Broadcast-only app doesn't install it. */
 type RoomPlaneKit = {
   encodeLaneKey(lane: LaneId | EveryTrackLane | EveryMemberLane): string
   decodeLaneKey(key: string): LaneId
@@ -60,6 +61,7 @@ type RoomPlaneKit = {
   recordOperation: typeof recordOperation
   OPERATION_COMMIT_LANE: LaneId
   reportLaneLost: typeof reportLaneLost
+  publishedBytes: typeof publishedBytes
 }
 
 /** Each lane is its own ordering domain: one semantic, one control, one demand, one per member for inbox, and one per

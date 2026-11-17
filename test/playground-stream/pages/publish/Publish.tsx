@@ -395,25 +395,16 @@ function Publish() {
         Listeners that answer
       </button>
 
-      <h2>Held Past 2 MiB</h2>
+      <h2>Held While Subscribing</h2>
 
       <button
-        id="test-broadcast-hold-overflow"
+        id="test-broadcast-hold"
         onClick={async () => {
           setResult('')
-          setResult(JSON.stringify(await onBroadcastWhileEstablishing(3, 900_000)))
+          setResult(JSON.stringify(await onBroadcastWhileEstablishing(3, 1_500_000)))
         }}
       >
-        Publishes held past 2 MiB
-      </button>
-      <button
-        id="test-broadcast-hold-alone"
-        onClick={async () => {
-          setResult('')
-          setResult(JSON.stringify(await onBroadcastWhileEstablishing(2, 2_300_000)))
-        }}
-      >
-        One publish held, itself past 2 MiB
+        Publishes held past 2 MiB together
       </button>
 
       <h2>Broadcast Shield Validation</h2>

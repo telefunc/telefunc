@@ -400,7 +400,7 @@ Broadcast.subscribe('room:lobby', (msg, info) => {
 When `publish()` rejects depends on where Broadcast runs:
 
 - In memory (the default), with `ChannelOverflowError`, when a `subscribe()` callback, before its first `await`, publishes a message that would take those waiting past 320 MiB, or one that answers a chain of answers 10,000 deep, which is taken for a callback that answers its own messages without end. With none waiting, a message goes through whatever its size. A publish from anywhere else never gets this error.
-- With <Link href="/redis">`@telefunc/redis`</Link>, when Redis can't run the publish, for example while the connection is down. It also rejects with `ChannelOverflowError` when a publish to a key this server has only just subscribed to would take the publishes waiting on that subscription past 2 MiB. With none waiting, a message goes through whatever its size.
+- With <Link href="/redis">`@telefunc/redis`</Link>, when Redis can't run the publish, for example while the connection is down. It also rejects with `ChannelOverflowError` when a publish to a key this server has only just subscribed to would take the publishes waiting on that subscription past the default per-channel limit of 320 MiB, or `maxMemory`. With none waiting, a message goes through whatever its size.
 - With a <Link href="/broadcast-config">`BroadcastTransport`</Link>, when its `send()` or `sendBinary()` throws or rejects, with that error.
 - On Cloudflare, when a server <Link href="/stream/cloudflare#delivery-guarantees">couldn't take it</Link>.
 

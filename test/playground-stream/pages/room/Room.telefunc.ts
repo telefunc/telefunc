@@ -1191,9 +1191,21 @@ async function onSubscriberDropped(roomId: string) {
 }
 
 /** One byte more than the largest message Telefunc's Redis backend takes. */
+/** The largest message Telefunc's Redis backend takes from a member, binary and text, and a binary one past it by a
+ *  byte: the ceiling counts the member's data, not what Room sends beside it. */
 async function onPublishOverRedisLimit(roomId: string) {
-  const me = await anyoneCanJoin(await Room.get(roomId)).join({ meta: { name: 'Publisher' } })
-  return { refused: await me.publishBinary(new Uint8Array(28 * 1024 * 1024 + 1)).catch((error: Error) => error.name) }
+  const largest = 28 * 1024 * 1024
+  const room = await Room.get(roomId)
+  const me = await anyoneCanJoin(room).join({ meta: { name: 'Publisher' } })
+  const received: number[] = []
+  room.subscribeBinary((data) => received.push(data.byteLength))
+  room.subscribe((data) => received.push(String(data).length))
+  await me.publishBinary(new Uint8Array(largest))
+  // Serialized with its two quotes, the text is `largest` bytes.
+  await me.publish('a'.repeat(largest - 2))
+  const refused = await me.publishBinary(new Uint8Array(largest + 1)).catch((error: Error) => error.name)
+  for (let tries = 1; received.length < 2 && tries <= 40; tries++) await sleep(50)
+  return { refused, received }
 }
 
 /** What a drop reports of this room, read from Room's log until the returned function gives the log back: Room logs
@@ -1406,9 +1418,8 @@ async function onStopChurn(roomId: string) {
   return await churning.get(roomId)!()
 }
 
-/** A view subscribes and a member publishes `count` messages of `bytes` bytes in the same turn, the last past the 2 MiB a
- *  new subscription holds: Redis's SUBSCRIBE round trip keeps the view's new subscription short of ready, so the commits
- *  wait until it is. */
+/** A view subscribes and a member publishes `count` messages of `bytes` bytes in the same turn: Redis's SUBSCRIBE round
+ *  trip keeps the view's new subscription short of ready, so the commits wait until it is. */
 async function onPublishWhileEstablishing(roomId: string, count: number, bytes: number) {
   const me = await Room.join(roomId, { meta: { name: 'Me' } })
   const room = await Room.get(roomId)

@@ -55,9 +55,12 @@ const REDIS_DELIVERY_FENCE_BYTE = 0xff
 const REDIS_DELIVERY_FENCE_TOKEN_LENGTH = 36
 /** What a start read's, a leave's or an incarnation drop's page holds, as a SCAN count. */
 const LANE_PAGE_SIZE = 1024
-/** Telefunc's ceiling on a message, whatever Redis's limits are set to. Over it, a Redis at its defaults closes the
- *  subscriber: its allocator rounds the buffer up to the default pubsub limit, 32 MiB. */
+/** Telefunc's ceiling on what an app publishes in one message, whatever Redis's limits are set to. Over it, a Redis at
+ *  its defaults closes the subscriber: its allocator rounds the buffer up to the default pubsub limit, 32 MiB. */
 const PUBLISH_MAX_BYTES = 28 * 1024 * 1024
+/** The most a Room message carries beside its data (its sender's meta, a track and its meta): with Telefunc's own
+ *  framing, under the 8122 bytes past `PUBLISH_MAX_BYTES` that a Redis 7.4 at its defaults delivered at the least. */
+const ROOM_FRAMING_MAX_BYTES = 6 * 1024
 
 // Authority time in ms from Redis TIME's [sec, µs] pair, never from the caller.
 const NOW_LUA = `
@@ -691,6 +694,7 @@ type CommitInput = RoomInc & {
   closingLease: string | undefined
   requiredCellKeys: readonly string[]
   fenceTokens: FenceTokens
+  kit: RoomPlaneKit
 }
 
 /** The commit script's JSON reply: a missing required cell by its index among them. */
@@ -750,7 +754,8 @@ const REDIS_COMMANDS = {
     lua: PUBLISH_LUA,
     numberOfKeys: 2,
     invoke: (prefix, { route, payload }: { route: BroadcastRoute; payload: BroadcastPayload }) => {
-      assertPublishable(publishedData(payload))
+      const data = publishedData(payload)
+      assertPublishable(typeof data === 'string' ? Buffer.byteLength(data) : data.byteLength)
       return {
         keys: [broadcastSequenceKey(prefix, route.key), broadcastChannel(prefix, route)],
         // ioredis sends a string as UTF-8.
@@ -1177,19 +1182,30 @@ function binaryLaneOf(kit: RoomPlaneKit, laneKey: string): Extract<LaneId, { kin
   return lane
 }
 
-/** Refuses a message over Telefunc's ceiling before it reaches Redis. */
-function assertPublishable(payload: string | Uint8Array): void {
-  const bytes = typeof payload === 'string' ? Buffer.byteLength(payload) : payload.byteLength
+/** Refuses a message over Telefunc's ceiling before it reaches Redis, by the `bytes` its app published. */
+function assertPublishable(bytes: number): void {
   if (bytes <= PUBLISH_MAX_BYTES) return
   throw new ChannelOverflowError(
     `Telefunc's Redis backend takes a message of ${PUBLISH_MAX_BYTES} bytes at most, and this one has ${bytes}`,
   )
 }
 
+/** A Room commit's ceiling counts what its publisher published, as a broadcast's does, and bounds what Room puts beside
+ *  it, which a sender's meta can make as large as it is. */
+function assertCommittable({ lane, payload, kit }: CommitInput): void {
+  if (payload.byteLength <= PUBLISH_MAX_BYTES) return
+  const published = kit.publishedBytes(lane, payload)
+  assertPublishable(published)
+  if (payload.byteLength - published <= ROOM_FRAMING_MAX_BYTES) return
+  throw new ChannelOverflowError(
+    `Telefunc's Redis backend takes a Room message whose track name and metadata take ${ROOM_FRAMING_MAX_BYTES} bytes at most beside its data, and this one's take ${payload.byteLength - published}`,
+  )
+}
+
 /** COMMIT's KEYS and ARGV, which OPERATION's commit takes too. */
 function commitInvocation(prefix: string, input: CommitInput): { keys: string[]; argv: (string | Buffer)[] } {
   const { roomId, inc, lane, laneKey, channels, fenceTokens } = input
-  assertPublishable(input.payload)
+  assertCommittable(input)
   const retained = retainedKey(prefix, roomId, inc, laneKey)
   const indexed = lane.kind === 'binary' && input.retain
   const order =
