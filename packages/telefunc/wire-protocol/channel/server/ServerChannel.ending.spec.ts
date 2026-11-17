@@ -471,6 +471,34 @@ test('on SSE, a subscriber cut to make room ends after the call that cut it, whi
   }
 })
 
+/** Each way the app ends a channel. */
+const APP_ENDS: Record<string, (channel: ServerChannel) => void> = {
+  closes: (channel) => void channel.close(),
+  aborts: (channel) => channel.abort(),
+}
+
+for (const [ends, end] of Object.entries(APP_ENDS)) {
+  test(`on a WebSocket, a subscriber cut to make room that the app ${ends} before it ended reads the error, as its onClose does`, async () => {
+    const key = crypto.randomUUID()
+    const subscriber = new ServerBroadcast<string>({ key })
+    const page = overWebSocket([subscriber])
+    for (const name of ['p1', 'p2', 'p3']) await Broadcast.publish(key, name + 'x'.repeat(600_000))
+    let closedWith: Error | undefined
+    subscriber.onClose((err) => {
+      closedWith = err
+    })
+    const release = leaveRoom(0)
+    try {
+      admit({ heldBytes: 0 }, 1_000)
+      end(subscriber)
+      expect(await page.readAll()).toEqual(['0:p1', '0:ERROR'])
+      expect(closedWith).toBeInstanceOf(ChannelOverflowError)
+    } finally {
+      release()
+    }
+  })
+}
+
 /** Each way an application's `onClose` of one channel ends another, and the last frame that other's page then reads. A
  *  graceful close comes behind what waits for the page; an abort drops what of that may go unsent. */
 const ENDED_BY_A_CLOSE_CALLBACK: Record<

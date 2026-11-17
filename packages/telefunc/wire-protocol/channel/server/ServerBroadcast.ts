@@ -241,8 +241,14 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** A graceful close goes behind what waits for its page, so a lossy one first replaces that with the newest; an abort
    *  drops it. */
   override close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
+    this.endOverflowed()
     if (this._phase === 'open') this.sendNewestOnly()
     return super.close(opts)
+  }
+
+  override abort(abortValue?: unknown, message?: string): void {
+    this.endOverflowed()
+    super.abort(abortValue, message)
   }
 
   /** Leaves a lossy page only the newest publish to wait for: what waits for its wire goes, and the newest is sent again. */
@@ -317,9 +323,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     super.sendAckRes(ackedSeq, result, status)
   }
 
-  /** It ends after the call that cut it, so no close callback runs inside that call. Only its own object can write to its
-   *  page, so cut for a publish of another `owner` it ends at the next delivery of its key, its heartbeat, its attach,
-   *  its answer or its close running out. */
+  /** It ends after the call that cut it, so no close callback runs inside that call: at its next event (a delivery of its
+   *  key, its heartbeat, its attach, its answer, its close running out, the app's `close()` or `abort()`), a microtask
+   *  later at the latest. Only its own object can write to its page, so one cut for another `owner`'s publish waits for
+   *  that event. */
   private overflow(why: string, owner: string | undefined): void {
     this.overflowed ??= why
     if (owner === this.owner) queueMicrotask(() => this.endOverflowed())
