@@ -54,19 +54,18 @@ describe('ClientBroadcast uplink', () => {
     void page.publishBinary(new Uint8Array([7]), { lossy: true })
     void page.publishBinary(new Uint8Array([8]), { lossy: true })
 
-    expect(waiting(page)).toEqual([1, 0, 1])
-    expect(waiting(page, 1)).toEqual([5, 6, 8])
+    expect(waitingPublishes(page)).toEqual([[0xfe, 5], [6], [0xfe, 8]])
   })
 
   // Its key orders both kinds: a lossy publish published after a plain one of the other kind never goes ahead of it.
   it.each([
     [
       [{ binary: 5, lossy: true }, { text: 'plain' }, { binary: 7, lossy: true }],
-      [[1, 5], '"plain"', [1, 7]],
+      [[0xfe, 5], '"plain"', [0xfe, 7]],
     ],
     [
       [{ text: 'old', lossy: true }, { binary: 6 }, { text: 'new', lossy: true }],
-      ['\n"old"', [0, 6], '\n"new"'],
+      ['\n"old"', [6], '\n"new"'],
     ],
   ])('sends %j in the order they were published', (published, sent) => {
     const page = behindUplink()
@@ -131,16 +130,13 @@ describe('ClientBroadcast delivery', () => {
     page._dispatchFrame(received(encode.publish('\n"lossy"', info)))
     page._dispatchFrame(received(encode.publish('"plain"', info)))
     expect(confirmSoon).toHaveBeenCalledTimes(1)
-    page._dispatchFrame(received(encode.publishBinary(new Uint8Array([1, 9]), info)))
-    page._dispatchFrame(received(encode.publishBinary(new Uint8Array([0, 8]), info)))
+    page._dispatchFrame(received(encode.publishBinary(new Uint8Array([0xfe, 9]), info)))
+    page._dispatchFrame(received(encode.publishBinary(new Uint8Array([8]), info)))
 
     expect(confirmSoon).toHaveBeenCalledTimes(2)
     expect(text).toEqual(['lossy', 'plain'])
     expect(bytes).toEqual([[9], [8]])
-    expect(payloads).toEqual([
-      [1, 9],
-      [0, 8],
-    ])
+    expect(payloads).toEqual([[0xfe, 9], [8]])
   })
 
   it('does not call a listener that an earlier one unsubscribed during the same publish', () => {
@@ -200,7 +196,7 @@ function waitingPublishes(page: ClientBroadcast): (string | number[])[] {
     })
 }
 
-/** The byte at `at` of each binary publish the gate holds, in the order they go. */
-function waiting(page: ClientBroadcast, at = 0): (number | undefined)[] {
-  return waitingPublishes(page).flatMap((publish) => (typeof publish === 'string' ? [] : [publish[at]]))
+/** The first byte of each binary publish the gate holds, in the order they go. */
+function waiting(page: ClientBroadcast): (number | undefined)[] {
+  return waitingPublishes(page).flatMap((publish) => (typeof publish === 'string' ? [] : [publish[0]]))
 }
