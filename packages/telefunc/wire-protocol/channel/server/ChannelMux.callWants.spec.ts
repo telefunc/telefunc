@@ -2,7 +2,7 @@
 // newest whichever comes first, and a call changes only the wants of the broadcasts its own session's calls returned.
 // The real ChannelMux, ServerBroadcast and in-memory Broadcast run; the page's wire is a sender that records frames.
 
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 
 import { getChannelMux } from './ChannelMux.js'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
@@ -302,3 +302,70 @@ test(
     expect(page.wanted()).toEqual([])
   }),
 )
+
+test(
+  'a call waits `connectTtl` at most for a subscription its backend neither confirms nor refuses: that broadcast then ends with the error, the call goes on, and a sibling in effect stays',
+  confirmingLater(async (listening) => {
+    vi.useFakeTimers()
+    try {
+      const silent = attachedBroadcast('session-a')
+      const healthy = attachedBroadcast('session-a')
+      const wants = [silent, healthy].map((page) => ({ channel: page.broadcast.id, ...on(1) }))
+      let done = false
+      void getChannelMux()
+        .applyCallWants(callOf('session-a'), wants)
+        ?.finally(() => (done = true))
+      listening(healthy.key).resolve()
+      await vi.advanceTimersByTimeAsync(getChannelMux().connectTtl - 1)
+      expect(done).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(done).toBe(true)
+      await expect(silent.broadcast.closed).rejects.toThrow('did not take effect within')
+      expect(silent.tags()).toContain(TAG.ERROR)
+      expect({ closed: healthy.broadcast.isClosed, wanted: healthy.wanted() }).toEqual({
+        closed: false,
+        wanted: [{ tag: TAG.WANTED, index: 0, version: 1 }],
+      })
+      healthy.broadcast.abort()
+    } finally {
+      vi.useRealTimers()
+    }
+  }),
+)
+
+// Each way a call's wait ends leaves no timer of its own behind, so none ends the broadcast later.
+const WAIT_ENDS: Record<
+  string,
+  (end: { ready: Deferred<void>; request: AbortController; page: ReturnType<typeof attachedBroadcast> }) => void
+> = {
+  'the subscription takes effect': ({ ready }) => ready.resolve(),
+  'its backend refuses it': ({ ready }) => ready.reject(new Error('NOPERM')),
+  "the call's request goes": ({ request }) => request.abort(),
+  'the broadcast is closed': ({ page }) => page.broadcast.abort(),
+}
+for (const [end, endWait] of Object.entries(WAIT_ENDS)) {
+  test(
+    `a call's wait for a subscription ends with no timer left once ${end}`,
+    confirmingLater(async (listening) => {
+      vi.useFakeTimers()
+      try {
+        const page = attachedBroadcast('session-a')
+        const before = vi.getTimerCount()
+        const request = new AbortController()
+        const call = page.call(on(1), 'session-a', request.signal)
+        endWait({ ready: listening(page.key), request, page })
+        await call
+        await vi.advanceTimersByTimeAsync(0)
+        const left = vi.getTimerCount() - before
+        await vi.advanceTimersByTimeAsync(getChannelMux().connectTtl)
+        expect({ left, closed: page.broadcast.isClosed }).toEqual({
+          left: 0,
+          closed: end !== 'the subscription takes effect',
+        })
+        page.broadcast.abort()
+      } finally {
+        vi.useRealTimers()
+      }
+    }),
+  )
+}

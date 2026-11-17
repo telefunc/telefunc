@@ -34,6 +34,7 @@ import { isPromise } from '../../../utils/isPromise.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
+import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { ACK_STATUS, ERROR_REASON, encode, type AckResultStatus } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { ChannelDataFrame, ErrorReason } from '../../wire/frame.js'
@@ -51,6 +52,8 @@ const NOT_EVEN_NEWEST = 'the server could not hold even the newest message for i
 const FELL_BEHIND = 'its client fell behind what the server holds for it; `lossy: true` lets it skip to the newest'
 const NOT_IN_EFFECT =
   'Broadcast closed: its client subscribed, then made a telefunction call that ended before the subscription took effect'
+const NOT_IN_EFFECT_IN_TIME =
+  'Broadcast closed: its subscription did not take effect within `connectTtl` of a telefunction call its client made after subscribing'
 
 class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder {
   readonly [SERVER_BROADCAST_BRAND] = true
@@ -436,21 +439,26 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   }
 
   /** The call waits until the want it carries is in effect, or the broadcast ended. Where the call's request goes first
-   *  (its page left, or aborted the call), the broadcast ends now: its telefunction runs without the subscription. */
-  override _applyCallWant(want: Want, callAborted: AbortSignal): Promise<void> | undefined {
+   *  (its page left, or aborted the call), or the call waited `waitAtMost` (`connectTtl`), the broadcast ends now with an
+   *  error its page reads: its telefunction runs without the subscription. */
+  override _applyCallWant(want: Want, callAborted: AbortSignal, waitAtMost: number): Promise<void> | undefined {
     this.onPeerWant(want)
     this._confirmWant()
-    return this.pageWantInEffect() ? undefined : this.inEffectUnlessAborted(callAborted)
+    return this.pageWantInEffect() ? undefined : this.inEffectOrEnded(callAborted, waitAtMost)
   }
 
-  private async inEffectUnlessAborted(callAborted: AbortSignal): Promise<void> {
+  /** Every way the wait ends comes past its `await`, which drops its timer and abort listener. */
+  private async inEffectOrEnded(callAborted: AbortSignal, waitAtMost: number): Promise<void> {
     const inEffect = createDeferred()
     this.callWaits.add(inEffect.resolve)
-    const end = () => this.endWithError(ERROR_REASON.BUG, new ChannelClosedError(NOT_IN_EFFECT))
-    if (callAborted.aborted) end()
-    else callAborted.addEventListener('abort', end, { once: true })
+    const end = (message: string) => this.endWithError(ERROR_REASON.BUG, new ChannelClosedError(message))
+    const endAborted = () => end(NOT_IN_EFFECT)
+    if (callAborted.aborted) endAborted()
+    else callAborted.addEventListener('abort', endAborted, { once: true })
+    const timer = unrefTimer(setTimeout(() => end(NOT_IN_EFFECT_IN_TIME), waitAtMost))
     await inEffect.promise
-    callAborted.removeEventListener('abort', end)
+    clearTimeout(timer)
+    callAborted.removeEventListener('abort', endAborted)
   }
 
   private unsubscribeUnusedBroadcasts(): void {

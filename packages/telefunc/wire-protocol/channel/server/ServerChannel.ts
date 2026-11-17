@@ -638,7 +638,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal Applies a want a call of the page's carries, as one the wire brings, and returns what the call waits for
    *  before its telefunction runs: `ServerBroadcast` overrides it; a plain channel has no want. */
-  _applyCallWant(_want: Want, _callAborted: AbortSignal): Promise<void> | undefined {
+  _applyCallWant(_want: Want, _callAborted: AbortSignal, _waitAtMost: number): Promise<void> | undefined {
     return undefined
   }
 

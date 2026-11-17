@@ -184,7 +184,8 @@ class ChannelMux implements UpgradeStagesOwner {
   }
 
   /** Applies the wants `call` carries to the channels its session's earlier calls returned, and settles once each is in
-   *  effect or its channel ended (`_applyCallWant`). A want of a channel another session holds, or none, changes nothing.
+   *  effect or its channel ended (`_applyCallWant`, which ends one still on its way after `connectTtl`). A want of a
+   *  channel another session holds, or none, changes nothing.
    *  Undefined where nothing has to happen first. */
   applyCallWants(call: Request, wants: CallWant[]): Promise<unknown> | undefined {
     const session = getSessionToken(call)
@@ -192,7 +193,7 @@ class ChannelMux implements UpgradeStagesOwner {
     for (const want of wants) {
       const channel = this.channels.get(want.channel)
       if (session === undefined || !channel?._callRequest || getSessionToken(channel._callRequest) !== session) continue
-      const inEffect = channel._applyCallWant(want, call.signal)
+      const inEffect = channel._applyCallWant(want, call.signal, this.options.connectTtl)
       if (inEffect) pending.push(inEffect)
     }
     return pending.length === 0 ? undefined : Promise.all(pending)
