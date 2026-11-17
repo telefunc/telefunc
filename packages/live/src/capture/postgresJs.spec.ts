@@ -77,6 +77,43 @@ it("gives identical live reads of one postgres.js client the values of its custo
   await pglite.close()
 })
 
+it('gives identical live reads of one postgres.js client the bytes of its custom type, with what its class adds', async () => {
+  /** Bytes with what the parser learned about them, set on each instance. */
+  class Document extends Uint8Array {
+    declare mimeType: string
+  }
+  const pglite = await emptyPGlite()
+  await pglite.exec('create table t (id int primary key, body numeric); insert into t values (1, 12.5)')
+  const server = new PGLiteSocketServer({ db: pglite, port: 0, maxConnections: 1 })
+  await server.start()
+  const document = {
+    to: 1700,
+    from: [1700],
+    serialize: String,
+    parse: (text: string) => Object.assign(new Document(new TextEncoder().encode(text)), { mimeType: 'text/plain' }),
+  }
+  const sql = postgres(`postgres://postgres@${server.getServerConn()}/postgres`, {
+    max: 1,
+    onnotice: () => {},
+    types: { document },
+  })
+  liveDatabaseOf(sql, {})
+  const watched = () =>
+    store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
+      readLive(() => sql`select body from t where id = ${1}`, 'the spec'),
+    )
+  const bodies = (await Promise.all([watched(), watched()])).map(
+    (cell) => (cell.send() as { body: Document }[])[0]!.body,
+  )
+  expect(bodies.map((body) => [body.constructor, body.mimeType, [...body]])).toEqual([
+    [Document, 'text/plain', [49, 50, 46, 53]],
+    [Document, 'text/plain', [49, 50, 46, 53]],
+  ])
+  await sql.end()
+  await server.stop()
+  await pglite.close()
+})
+
 it('gives identical live reads of one postgres.js client by bytes each its own buffer', async () => {
   const pglite = await emptyPGlite()
   await pglite.exec("create table t (id bytea primary key, bytes bytea); insert into t values ('\\x01', '\\x0a0b')")

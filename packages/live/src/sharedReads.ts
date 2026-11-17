@@ -167,8 +167,10 @@ function copyValue(value: unknown): unknown {
   if (typeof value !== 'object' || value === null) return value
   const prototype = Object.getPrototypeOf(value)
   if (prototype === Date.prototype) return new Date((value as Date).getTime())
-  // A copy of the value's own class (`Buffer` included): `Buffer.prototype.slice()` makes no copy.
-  if (value instanceof Uint8Array) return Uint8Array.prototype.slice.call(value)
+  // A `Uint8Array`, or Node's `Buffer` (whose own `slice()` makes no copy); a subclass of the app's may hold more than
+  // its bytes, so it isn't copied.
+  if (prototype === Uint8Array.prototype || prototype === globalThis.Buffer?.prototype)
+    return Uint8Array.prototype.slice.call(value as Uint8Array)
   if (prototype === Array.prototype) return (value as unknown[]).map(copyValue)
   if (prototype === Object.prototype || prototype === null) {
     const copy = Object.fromEntries(Object.entries(value).map(([k, v]) => [k, copyValue(v)]))
