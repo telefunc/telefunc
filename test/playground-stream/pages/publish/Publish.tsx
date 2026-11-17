@@ -567,7 +567,7 @@ function Publish() {
         id="test-broadcast-join-while-queued"
         onClick={async () => {
           setResult('')
-          setResult(JSON.stringify({ received: await onBroadcastJoinWhileQueued() }))
+          setResult(JSON.stringify(await onBroadcastJoinWhileQueued()))
         }}
       >
         Subscribe while publishes queue

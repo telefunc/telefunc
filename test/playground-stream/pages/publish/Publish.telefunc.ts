@@ -234,14 +234,19 @@ async function onBroadcastSeqAcrossSubscribers() {
   return seqs
 }
 
-/** A text subscriber holds a key. A listener's in-memory publishes queue: it gives the key text, binary and text, a second
- *  subscriber then subscribes to both kinds, and the key gets text once more. What it got. */
+/** A subscriber of both kinds holds a key. A listener's in-memory publishes queue: it gives the key text, binary and text,
+ *  a second subscriber then subscribes to both kinds, and the key gets text once more. What the second got, the seqs of
+ *  the first publish and of the queued ones, and what the first got with each seq. */
 async function onBroadcastJoinWhileQueued() {
   const key = `room:join-queued:${crypto.randomUUID()}`
   const trigger = `room:join-trigger:${crypto.randomUUID()}`
-  const offs = [Broadcast.subscribe(key, () => {})]
+  const held: string[] = []
+  const offs = [
+    Broadcast.subscribe<string>(key, (message, { seq }) => held.push(`${message}:${seq}`)),
+    Broadcast.subscribeBinary(key, (data, { seq }) => held.push(`${data.join()}:${seq}`)),
+  ]
   // The key has an order before the listener's publishes.
-  await Broadcast.publish(key, 't0')
+  const { seq: t0 } = await Broadcast.publish(key, 't0')
   const received: Array<string | number> = []
   const queued: Array<ReturnType<typeof Broadcast.publish>> = []
   offs.push(
@@ -252,14 +257,14 @@ async function onBroadcastJoinWhileQueued() {
         Broadcast.publish(key, 't3'),
       )
       offs.push(Broadcast.subscribe<string>(key, (message) => received.push(message)))
-      offs.push(Broadcast.subscribeBinary(key, (data) => received.push(data[0]!)))
+      offs.push(Broadcast.subscribeBinary(key, (data) => received.push(...data)))
     }),
   )
   await Broadcast.publish(trigger, 'go')
-  await Promise.all(queued)
+  const receipts = (await Promise.all(queued)).map(({ seq }) => seq)
   await Broadcast.publish(key, 't4')
   for (const off of offs) off()
-  return received
+  return { received, t0, receipts, held }
 }
 
 /** Two subscribers of both kinds hold a key, and between them one that unsubscribes the second on a message. A listener's

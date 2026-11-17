@@ -386,12 +386,20 @@ function testPublish(isDev: boolean, inDocker = false) {
 
   // The in-memory backend's queue: Redis delivers to the subscribers a key has once a message comes back from it.
   if (!inDocker && !process.env.REDIS_URL) {
-    test('broadcast: a subscriber that comes while publishes queue gets only what is published after it, text and binary alike', async () => {
+    test('broadcast: a subscriber that comes while publishes queue gets only what is published after it, and the queued publishes take the next seqs, the same in their receipts and their delivery, text and binary alike', async () => {
       await navigate(`${getServerUrl()}/publish`)
       await page.click('#test-broadcast-join-while-queued')
 
       await autoRetry(async () => {
-        expect((await getResult<{ received: Array<string | number> }>('#publish-result')).received).deep.equal(['t4'])
+        const { received, t0, receipts, held } = await getResult<{
+          received: unknown[]
+          t0: number
+          receipts: number[]
+          held: string[]
+        }>('#publish-result')
+        expect(received).deep.equal(['t4'])
+        expect(receipts).deep.equal([t0 + 1, t0 + 2, t0 + 3])
+        expect(held).deep.equal([`t0:${t0}`, `t1:${t0 + 1}`, `2:${t0 + 2}`, `t3:${t0 + 3}`, `t4:${t0 + 4}`])
       })
     })
 
