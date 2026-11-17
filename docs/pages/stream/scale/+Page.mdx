@@ -81,10 +81,13 @@ type BroadcastTransport = {
   listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
   sendBinary(key: string, payload: Uint8Array): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
   listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void): () => void
+  listening?(key: string, binary: boolean): Promise<void> | undefined
 }
 ```
 
 `send()` / `sendBinary()` must return the assigned `{ seq, timestamp }` so subscribers across nodes see a single global order per key. `listen()` / `listenBinary()` return an unsubscribe function and are called at most once per key.
+
+Where a listener misses publishes until your broker confirms it, as a Redis `SUBSCRIBE` does, implement `listening()`: return a promise that resolves once the listener of `key` (`binary`: the `listenBinary()` one) gets what any server publishes, or `undefined` where it already does. A subscriber's `ready` waits for it, and so does a telefunction call that a page makes right after subscribing.
 
 A transport that sends `sendBinary()`'s `payload` after `sendBinary()` returns (after an `await`, or from a queue) must send a copy: the publisher may reuse its buffer once `publishBinary()` returns.
 

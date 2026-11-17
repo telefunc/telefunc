@@ -475,6 +475,10 @@ chat.subscribe((msg, info) => {
 chat.publish({ user: 'Alice', text: 'Hello!' })
 ```
 
+> The page hears a broadcast from the moment your telefunction returns it, and every telefunction the page calls after `subscribe()` runs with the subscription in effect, so a publish that telefunction makes reaches the page. A publish made before your telefunction returns the broadcast isn't heard: return what came before along with it, as in `return { chat, history }`.
+
+> `subscribe()` returns a function that unsubscribes, with a `ready` promise that resolves once the subscription gets what any server publishes to the key, and rejects if the broadcast ends first. Await it only where you need that moment itself, such as before the page asks another user to publish: `await unsubscribe.ready`.
+
 ### Receive broadcast messages in a loop
 
 ```ts
@@ -563,9 +567,9 @@ price.subscribe((value, info) => showPrice(value, info.seq))
 | `closed` | Promise that resolves on clean close; rejects on failure. |
 | `messages({ signal }?)` | Receive text and binary messages with publish info in an async loop. |
 | `publish(data)` | Publish to every subscriber of the key. Returns a receipt. |
-| `subscribe(cb, { signal }?)` | Receive `(data, info)`. Returns an unsubscribe function. |
+| `subscribe(cb, { signal }?)` | Receive `(data, info)`. Returns an unsubscribe function, with a `ready` promise. |
 | `publishBinary(data)` | Publish raw binary to every subscriber. Returns a receipt. |
-| `subscribeBinary(cb, { signal }?)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function. |
+| `subscribeBinary(cb, { signal }?)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function, with a `ready` promise. |
 | `onOpen(cb)` | Called when the channel opens. Returns a function that removes the callback. |
 | `onClose(cb)` | Called when the channel closes. Returns a function that removes the callback. |
 | `close()` | Close gracefully. |

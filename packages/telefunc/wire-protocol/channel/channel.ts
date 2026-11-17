@@ -109,7 +109,8 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
    *
    *  https://telefunc.com/channel#skip-to-the-newest */
   sendBinary(data: Uint8Array, opts: { lossy: true; ack?: false }): Promise<void>
-  /** Receive messages. Return a value to ack the sender. Returns an unlisten function. */
+  /** Receive messages. Return a value to ack the sender. Returns an unlisten function, whose `ready` is resolved: the
+   *  listener is in effect once `listen()` returns. */
   listen(callback: ChannelListener<TIn>, options?: { signal?: AbortSignal }): Unsubscribe
   listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe
   /** Called when the channel closes. Returns a function that removes the callback. */

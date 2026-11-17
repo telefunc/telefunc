@@ -570,8 +570,15 @@ type BroadcastChannel<T = unknown> = {
   }
   /** Serializes `data` as JSON: bytes go through `publishBinary()`. */
   publish(data: ChannelData<T>): Promise<ChannelPublishAck>
+  /** Receive `(data, info)` for each publish to the key. Returns an unsubscribe function, whose `ready` resolves once
+   *  the subscription gets what any server publishes to the key, and rejects where it never will, as when the page's
+   *  broadcast ends first. A page hears the broadcast from the moment its telefunction returned it, and every
+   *  telefunction the page calls after `subscribe()` runs with the subscription in effect.
+   *
+   *  https://telefunc.com/channel#chat-example */
   subscribe(callback: BroadcastListener<T>, options?: { signal?: AbortSignal }): Unsubscribe
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
+  /** As `subscribe()`, for binary publishes. */
   subscribeBinary(callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe
   onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void
   onOpen(callback: () => void, options?: { signal?: AbortSignal }): () => void
@@ -649,6 +656,8 @@ const Broadcast = {
     const serialized = stringifyMessage(data, 'publish')
     return receiptOf(key, adapter.publish(key, serialized))
   },
+  /** Receive `(data, info)` for each publish to `key`. Returns an unsubscribe function, whose `ready` resolves once the
+   *  subscription gets what any server publishes to `key`. */
   subscribe<U = unknown>(key: string, callback: BroadcastListener<U>, options?: { signal?: AbortSignal }): Unsubscribe {
     const adapter = getBroadcastAdapter()
     if (options?.signal?.aborted) return withReady(() => {})
@@ -662,6 +671,7 @@ const Broadcast = {
     const adapter = getBroadcastAdapter()
     return receiptOf(key, adapter.publishBinary(key, data))
   },
+  /** As `subscribe()`, for binary publishes. */
   subscribeBinary(key: string, callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe {
     const adapter = getBroadcastAdapter()
     if (options?.signal?.aborted) return withReady(() => {})
