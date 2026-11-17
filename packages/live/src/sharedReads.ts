@@ -140,7 +140,7 @@ function keyOfValues(values: readonly unknown[]): string | undefined {
       const original = this[key]
       if (original instanceof Date) return `\0date:${original.getTime()}`
       if (typeof original === 'bigint') return `\0bigint:${original}`
-      if (original instanceof Uint8Array) return `\0bytes:${Buffer.from(original).toString('base64')}`
+      if (original instanceof Uint8Array) return `\0bytes:${original.join()}`
       // JSON writes `NaN` and the infinities as `null`, and `-0` as `0`.
       if (typeof original === 'number' && (!Number.isFinite(original) || Object.is(original, -0)))
         return `\0number:${Object.is(original, -0) ? '-0' : original}`
@@ -167,8 +167,8 @@ function copyValue(value: unknown): unknown {
   if (typeof value !== 'object' || value === null) return value
   const prototype = Object.getPrototypeOf(value)
   if (prototype === Date.prototype) return new Date((value as Date).getTime())
-  if (prototype === Buffer.prototype) return Buffer.from(value as Buffer)
-  if (prototype === Uint8Array.prototype) return (value as Uint8Array).slice()
+  // A copy of the value's own class (`Buffer` included): `Buffer.prototype.slice()` makes no copy.
+  if (value instanceof Uint8Array) return Uint8Array.prototype.slice.call(value)
   if (prototype === Array.prototype) return (value as unknown[]).map(copyValue)
   if (prototype === Object.prototype || prototype === null) {
     const copy = Object.fromEntries(Object.entries(value).map(([k, v]) => [k, copyValue(v)]))

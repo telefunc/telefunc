@@ -76,3 +76,31 @@ it("gives identical live reads of one postgres.js client the values of its custo
   await server.stop()
   await pglite.close()
 })
+
+it('gives identical live reads of one postgres.js client by bytes each its own buffer', async () => {
+  const pglite = await emptyPGlite()
+  await pglite.exec("create table t (id bytea primary key, bytes bytea); insert into t values ('\\x01', '\\x0a0b')")
+  const server = new PGLiteSocketServer({ db: pglite, port: 0, maxConnections: 1 })
+  await server.start()
+  const sent: string[] = []
+  const sql = postgres(`postgres://postgres@${server.getServerConn()}/postgres`, {
+    max: 1,
+    onnotice: () => {},
+    debug: (_: unknown, text: string) => void sent.push(text),
+  })
+  liveDatabaseOf(sql, {})
+  const watched = (id: Uint8Array) =>
+    store.run({ [REQUEST_CONTEXT]: { onClose() {} } }, () =>
+      readLive(() => sql`select bytes from t where id = ${id}`, 'the spec'),
+    )
+  const buffers = (await Promise.all([watched(Buffer.from([1])), watched(new Uint8Array([1]))])).map(
+    (cell) => (cell.send() as { bytes: Buffer }[])[0]!.bytes,
+  )
+  expect(sent.filter((text) => text.includes('from t'))).toHaveLength(1)
+  expect(buffers.map((buffer) => Buffer.isBuffer(buffer))).toEqual([true, true])
+  buffers[0]![0] = 0
+  expect([...buffers[1]!]).toEqual([10, 11])
+  await sql.end()
+  await server.stop()
+  await pglite.close()
+})
