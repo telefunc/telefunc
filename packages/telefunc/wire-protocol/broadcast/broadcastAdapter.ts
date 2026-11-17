@@ -119,17 +119,6 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   }
 
   subscribe(key: string, onMessage: BroadcastOnMessage): BroadcastUnsubscribe {
-    // The transport first: where its listen() throws, this subscriber is left with nothing registered.
-    let listening = this.transportUnsubs.get(key)
-    if (this.transport && !listening) {
-      listening = listeningOf(
-        this.transport.listen(key, (payload, info) => {
-          this.deliver(this.subscriptions, key, payload, info)
-        }),
-      )
-      this.transportUnsubs.set(key, listening)
-    }
-
     let subs = this.subscriptions.get(key)
     if (!subs) {
       subs = new Set()
@@ -147,6 +136,23 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
         this.releaseSeq(key)
       }
     }
+
+    // Registered before the transport listens, so a message it delivers inside listen() reaches this subscriber; where
+    // listen() throws, the subscriber is removed again, leaving nothing registered.
+    let listening = this.transportUnsubs.get(key)
+    if (this.transport && !listening) {
+      try {
+        listening = listeningOf(
+          this.transport.listen(key, (payload, info) => {
+            this.deliver(this.subscriptions, key, payload, info)
+          }),
+        )
+      } catch (err) {
+        unsubscribe()
+        throw err
+      }
+      this.transportUnsubs.set(key, listening)
+    }
     return sharing(unsubscribe, listening)
   }
 
@@ -160,17 +166,6 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   }
 
   subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage): BroadcastUnsubscribe {
-    // As in `subscribe()`.
-    let listening = this.transportBinaryUnsubs.get(key)
-    if (this.transport && !listening) {
-      listening = listeningOf(
-        this.transport.listenBinary(key, (payload, info) => {
-          this.deliver(this.binarySubscriptions, key, payload, info)
-        }),
-      )
-      this.transportBinaryUnsubs.set(key, listening)
-    }
-
     let subs = this.binarySubscriptions.get(key)
     if (!subs) {
       subs = new Set()
@@ -187,6 +182,22 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
         this.releaseUnsub(this.transportBinaryUnsubs, key)
         this.releaseSeq(key)
       }
+    }
+
+    // As in `subscribe()`.
+    let listening = this.transportBinaryUnsubs.get(key)
+    if (this.transport && !listening) {
+      try {
+        listening = listeningOf(
+          this.transport.listenBinary(key, (payload, info) => {
+            this.deliver(this.binarySubscriptions, key, payload, info)
+          }),
+        )
+      } catch (err) {
+        unsubscribe()
+        throw err
+      }
+      this.transportBinaryUnsubs.set(key, listening)
     }
     return sharing(unsubscribe, listening)
   }

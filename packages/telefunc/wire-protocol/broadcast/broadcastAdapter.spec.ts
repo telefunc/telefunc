@@ -493,6 +493,74 @@ describe("a transport's listen() that throws", () => {
   })
 })
 
+// A broker may deliver a message before its subscribe returns: an in-process one whose producer publishes as soon as the
+// key has a listener.
+describe('a message the transport delivers inside listen()', () => {
+  type Info = { seq: number; timestamp: number }
+  let seq = 0
+  const info = (): Info => ({ seq: ++seq, timestamp: 1 })
+
+  it('Broadcast.subscribe(): the subscriber hears it, then the next publish', async () => {
+    let delivery: ((payload: string, info: Info) => void) | undefined
+    const send = (_key: string, payload: string) => {
+      const sent = info()
+      delivery?.(payload, sent)
+      return sent
+    }
+    const sendBinary = () => info()
+    _resetBroadcastAdapterForTesting(
+      new DefaultBroadcastAdapter({
+        send,
+        sendBinary,
+        listen: (key, onMessage) => {
+          delivery = onMessage
+          send(key, '1')
+          return () => {
+            delivery = undefined
+          }
+        },
+        listenBinary: () => () => {},
+      }),
+    )
+    const heard: number[] = []
+    const stop = Broadcast.subscribe<number>('room:inside-listen', (n) => heard.push(n))
+    await stop.ready
+    await Broadcast.publish('room:inside-listen', 2)
+    stop()
+    expect({ heard, listening: delivery !== undefined }).toEqual({ heard: [1, 2], listening: false })
+  })
+
+  it('Broadcast.subscribeBinary(): the subscriber hears it, then the next publish', async () => {
+    let delivery: ((payload: Uint8Array, info: Info) => void) | undefined
+    const sendBinary = (_key: string, payload: Uint8Array) => {
+      const sent = info()
+      delivery?.(payload, sent)
+      return sent
+    }
+    const send = () => info()
+    _resetBroadcastAdapterForTesting(
+      new DefaultBroadcastAdapter({
+        send,
+        sendBinary,
+        listen: () => () => {},
+        listenBinary: (key, onMessage) => {
+          delivery = onMessage
+          sendBinary(key, Uint8Array.of(1))
+          return () => {
+            delivery = undefined
+          }
+        },
+      }),
+    )
+    const heard: number[] = []
+    const stop = Broadcast.subscribeBinary('room:inside-listen', (data) => heard.push(...data))
+    await stop.ready
+    await Broadcast.publishBinary('room:inside-listen', Uint8Array.of(2))
+    stop()
+    expect({ heard, listening: delivery !== undefined }).toEqual({ heard: [1, 2], listening: false })
+  })
+})
+
 describe('Broadcast disallows channel methods', () => {
   it.each([
     ['listen', (b: ServerBroadcast) => b.listen()],
