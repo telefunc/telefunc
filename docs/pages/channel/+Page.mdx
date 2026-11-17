@@ -475,9 +475,11 @@ chat.subscribe((msg, info) => {
 chat.publish({ user: 'Alice', text: 'Hello!' })
 ```
 
-> The page gets what is published from its `subscribe()` on, and every telefunction the page calls after `subscribe()` runs with the subscription in effect, so a publish that telefunction makes reaches the page. A publish made before the page subscribes isn't delivered to it: return what came before along with the broadcast, as in `return { chat, history }`.
+> The page receives what is published after it calls `subscribe()`, and nothing published before: return that along with the broadcast, as in `return { chat, history }`. A telefunction the page calls after `subscribe()` runs with the subscription in effect, so the page receives what that telefunction publishes.
 
-> `subscribe()` returns a function that unsubscribes, with a `ready` promise, on the page and on the server alike: it resolves once the subscription gets what any server publishes to the key, or once you unsubscribe, and it rejects if the broadcast ends first. While Redis is unreachable, `ready` waits; where Redis gives the subscription up (once ioredis stops retrying it, after 20 reconnections or about 10 s by default), the broadcast closes with that error, and a `Broadcast.subscribe()` that Redis gave up makes the server's publishes to its key fail with it until you unsubscribe it. Await it only where you need that moment itself, such as before the page asks another user to publish: `await unsubscribe.ready`.
+> `subscribe()` returns a function that unsubscribes, with a `ready` promise, on the page and on the server alike. `ready` resolves once the subscription is in effect on every server, so that a publish from any server reaches it, or once you unsubscribe. It rejects if the broadcast ends first. For example, `await unsubscribe.ready` before you fetch a snapshot from a plain HTTP route, so that nothing published after the snapshot is missed.
+
+> While Redis is unreachable, `ready` waits. If Redis refuses the subscription, or ioredis stops retrying it, the broadcast closes with that error. With ioredis's default options, it stops after 20 failed reconnection attempts: about 10 s where each connection is refused at once. A `Broadcast.subscribe()` that failed so makes the server's `publish()` calls to that key fail with the same error until you unsubscribe it, and a `Broadcast.subscribeBinary()` does the same to `publishBinary()`. Publishes to other keys go on.
 
 ### Receive broadcast messages in a loop
 
