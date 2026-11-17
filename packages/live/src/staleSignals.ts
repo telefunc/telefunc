@@ -1,6 +1,6 @@
 export { staleSignals }
 
-import { performance } from 'node:perf_hooks'
+import type { Performance } from 'node:perf_hooks'
 
 /** How often the pace is adjusted, in ms. */
 const TICK = 20
@@ -8,6 +8,10 @@ const TICK = 20
 const BUSY = 0.7
 /** Signals per second at the start and at the least: a few per tick even when the server is busy. */
 const SLOWEST = 100
+/** Node's, on its global `performance`: a Worker's has none. */
+const eventLoopUtilization: Performance['eventLoopUtilization'] =
+  (performance as Partial<Performance>).eventLoopUtilization?.bind(performance) ??
+  (() => ({ idle: 0, active: 0, utilization: 0 }))
 
 /**
  * Stale signals, sent as fast as this server can serve the refetches they cause. Each signal makes a client run a
@@ -16,7 +20,7 @@ const SLOWEST = 100
  * loop has time to spare, and wait their turn when it doesn't: the server keeps answering, and under load results
  * update as often as it can afford, a client's result never staying stale for good.
  *
- * Bun and Deno report no event loop use, so there signals always go out at once.
+ * Bun, Deno and Workers report no event loop use, so there signals always go out at once.
  */
 class StaleSignals {
   private readonly waiting: (() => void)[] = []
@@ -25,14 +29,14 @@ class StaleSignals {
   /** Signals that may go out now. */
   private allowance = 1
   private last = performance.now()
-  private usage = performance.eventLoopUtilization()
+  private usage = eventLoopUtilization()
   private ticking: ReturnType<typeof setInterval> | undefined
   private measuresLoad = false
 
   send(signal: () => void): void {
     if (!this.measuresLoad) {
-      // Node measures the event loop's time once its loop runs; Bun and Deno never do: there's no pace to keep.
-      const { idle, active } = performance.eventLoopUtilization()
+      // Node measures the event loop's time once its loop runs; Bun, Deno and Workers never do: there's no pace to keep.
+      const { idle, active } = eventLoopUtilization()
       this.measuresLoad = idle + active > 0
       if (!this.measuresLoad) return signal()
     }
@@ -42,13 +46,13 @@ class StaleSignals {
       signal()
     } else this.waiting.push(signal)
     if (this.ticking) return
-    this.usage = performance.eventLoopUtilization()
+    this.usage = eventLoopUtilization()
     this.ticking = setInterval(() => this.tick(), TICK).unref()
   }
 
   private tick(): void {
-    const usage = performance.eventLoopUtilization()
-    const busy = performance.eventLoopUtilization(usage, this.usage).utilization
+    const usage = eventLoopUtilization()
+    const busy = eventLoopUtilization(usage, this.usage).utilization
     this.usage = usage
     if (busy > BUSY) this.rate = Math.max(SLOWEST, this.rate / 2)
     else if (this.waiting.length > 0) this.rate *= 1.5
