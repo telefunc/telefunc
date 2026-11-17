@@ -100,8 +100,6 @@ test('a call of a session that names a broadcast no session holds changes nothin
 
 // Subscribe (1), unsubscribe (2), each reaching the server on the wire and with a call, in every order.
 const ORDERS: Record<string, { steps: ((page: ReturnType<typeof attachedBroadcast>) => unknown)[]; hears: boolean }> = {
-  'the wire, then the call, of a subscribe': { steps: [(p) => p.wire(on(1)), (p) => p.call(on(1))], hears: true },
-  'the call, then the wire, of a subscribe': { steps: [(p) => p.call(on(1)), (p) => p.wire(on(1))], hears: true },
   'an unsubscribe by call ahead of the subscribe by wire': {
     steps: [(p) => p.call(off(2)), (p) => p.wire(on(1))],
     hears: false,

@@ -97,12 +97,18 @@ function Publish() {
         onClick={async () => {
           try {
             const { room, key } = await onBroadcastToSubscribe()
+            await room.opened
+            if (sseOnly) await holdNextSsePost()
             const received: string[] = []
             const stop = room.subscribe((text) => {
               received.push(text)
             })
+            // The server takes the subscription only once the POST that carries it reaches it.
+            const readyWhileHeld = sseOnly ? await settledWithin(stop.ready, 1_000) : null
+            const held = sseOnly ? await releaseHeldSsePosts() : null
             await stop.ready
-            await onPublishTo(key, 'after-ready')
+            // Not by a telefunction: a call would carry the subscription and wait for it.
+            await fetch(`/api/server-action?key=publish_${key}`, { method: 'POST' })
             const aborted = (await onBroadcastToSubscribe()).room
             const stopAborted = aborted.subscribe(() => {})
             aborted.abort()
@@ -110,10 +116,10 @@ function Publish() {
               () => 'resolved',
               (err: Error) => err.name,
             )
-            // The publish reaches the page over its wire, after the call that made it answered.
+            // The publish reaches the page over its wire, after the server action that made it answered.
             await new Promise((resolve) => setTimeout(resolve, 1_000))
             await room.close()
-            setResult(JSON.stringify({ received, abortedReady }))
+            setResult(JSON.stringify({ readyWhileHeld, held, received, abortedReady }))
           } catch (err) {
             setResult(String(err))
           }
@@ -127,6 +133,9 @@ function Publish() {
         onClick={async () => {
           try {
             const { room, key } = await onBroadcastToSubscribe()
+            await room.opened
+            // The call's copy of the subscription reaches the server first: the wire's is held.
+            if (sseOnly) await holdNextSsePost()
             const received: string[] = []
             room.subscribe((text) => {
               received.push(text)
@@ -134,8 +143,9 @@ function Publish() {
             await onPublishTo(key, 'after-subscribe')
             for (let i = 0; i < 25 && received.length === 0; i++)
               await new Promise((resolve) => setTimeout(resolve, 200))
+            const held = sseOnly ? await releaseHeldSsePosts() : null
             await room.close()
-            setResult(JSON.stringify({ received }))
+            setResult(JSON.stringify({ received, held }))
           } catch (err) {
             setResult(String(err))
           }
@@ -154,13 +164,7 @@ function Publish() {
             const stop = room.subscribe((text) => {
               received.push(text)
             })
-            const ready = await Promise.race([
-              stop.ready.then(
-                () => 'resolved',
-                () => 'rejected',
-              ),
-              new Promise((resolve) => setTimeout(() => resolve('pending'), 5_000)),
-            ])
+            const ready = await settledWithin(stop.ready, 5_000)
             const closed = await Promise.race([
               room.closed.then(
                 () => 'clean',
@@ -801,4 +805,30 @@ function Publish() {
       ))}
     </div>
   )
+}
+
+/** Whether the page's wire is SSE only, whose next batch POST the server can hold. */
+const sseOnly = JSON.stringify(JSON.parse(import.meta.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '["sse"]')) === '["sse"]'
+
+/** The server hands the page's next SSE batch POST to Telefunc only at `releaseHeldSsePosts()`. */
+async function holdNextSsePost() {
+  await fetch('/api/wire/next-sse-post?action=hold', { method: 'POST' })
+}
+
+/** How many SSE POSTs the server held. */
+async function releaseHeldSsePosts(): Promise<number> {
+  const response = await fetch('/api/wire/release', { method: 'POST' })
+  return ((await response.json()) as { released: number }).released
+}
+
+async function settledWithin(promise: Promise<unknown>, ms: number): Promise<'resolved' | 'rejected' | 'pending'> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const pending = new Promise<'pending'>((resolve) => (timer = setTimeout(() => resolve('pending'), ms)))
+  const settled = promise.then(
+    () => 'resolved' as const,
+    () => 'rejected' as const,
+  )
+  const outcome = await Promise.race([settled, pending])
+  clearTimeout(timer)
+  return outcome
 }

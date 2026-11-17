@@ -618,9 +618,10 @@ async function readSlowly(room: BroadcastChannel<string>, kind: 'slow' | 'held')
   }
 }
 
-/** A broadcast of a key of its own, which `onPublishTo()` publishes to from outside it. */
+/** A broadcast of a key of its own, which `onPublishTo()` and server action `publish_<key>` publish to from outside it. */
 async function onBroadcastToSubscribe() {
   const key = `room:subscribe:${crypto.randomUUID()}`
+  onServerAction(`publish_${key}`, () => void Broadcast.publish(key, 'from a server action'))
   return { room: new BroadcastChannel<string>({ key }), key }
 }
 

@@ -501,6 +501,9 @@ function testPublish(isDev: boolean, inDocker = false) {
 
 /** When a page's subscription takes effect. */
 function testSubscribeOrder(inDocker = false) {
+  // On SSE alone, the page holds the POST that carries its subscription (Publish.tsx `holdNextSsePost()`).
+  const sseOnly = JSON.stringify(JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '["sse"]')) === '["sse"]'
+
   test('broadcast: a page that subscribes, unsubscribes and subscribes again in one task hears the publish of the call it makes next, in the second listener only, once', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-subscribe-again')
@@ -531,7 +534,7 @@ function testSubscribeOrder(inDocker = false) {
     })
   }
 
-  test('broadcast: a subscription is in effect for the telefunction call the page makes right after it, on a slow page too', async () => {
+  test("broadcast: a subscription is in effect for the telefunction call the page makes right after it, on a slow page too, and on SSE while the server holds the page's POST that carries it", async () => {
     const cdp = await newCDPSession()
     // A slow page's wire declares the subscription late, which a call made right after it doesn't wait for.
     await cdp.send('Emulation.setCPUThrottlingRate', { rate: 6 })
@@ -541,7 +544,10 @@ function testSubscribeOrder(inDocker = false) {
         await page.click('#test-broadcast-subscribe-then-call')
         await autoRetry(
           async () => {
-            expect(await getResult('#publish-result')).deep.equal({ received: ['after-subscribe'] })
+            expect(await getResult('#publish-result')).deep.equal({
+              received: ['after-subscribe'],
+              held: sseOnly ? 1 : null,
+            })
           },
           { timeout: 20_000 },
         )
@@ -552,12 +558,17 @@ function testSubscribeOrder(inDocker = false) {
     }
   })
 
-  test("broadcast: once a subscriber's `ready` resolves, a publish from a telefunction reaches it, and `ready` rejects with the error its broadcast ends with first", async () => {
+  test("broadcast: a subscriber's `ready` resolves once the server took its subscription, on SSE not while the server holds the page's POST that carries it; then a publish from outside a telefunction call reaches it; and `ready` rejects with the error its broadcast ends with first", async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-ready')
     await autoRetry(
       async () => {
-        expect(await getResult('#publish-result')).deep.equal({ received: ['after-ready'], abortedReady: 'Abort' })
+        expect(await getResult('#publish-result')).deep.equal({
+          readyWhileHeld: sseOnly ? 'pending' : null,
+          held: sseOnly ? 1 : null,
+          received: ['from a server action'],
+          abortedReady: 'Abort',
+        })
       },
       { timeout: 20_000 },
     )
