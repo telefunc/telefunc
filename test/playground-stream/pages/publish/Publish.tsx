@@ -822,15 +822,16 @@ async function holdNextSsePost() {
 /** How many SSE POSTs the server held. */
 async function releaseHeldSsePosts(): Promise<number> {
   const response = await fetch('/api/wire/release', { method: 'POST' })
-  return ((await response.json()) as { released: number }).released
+  const body: { released: number } = await response.json()
+  return body.released
 }
 
 async function settledWithin(promise: Promise<unknown>, ms: number): Promise<'resolved' | 'rejected' | 'pending'> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const pending = new Promise<'pending'>((resolve) => (timer = setTimeout(() => resolve('pending'), ms)))
   const settled = promise.then(
-    () => 'resolved' as const,
-    () => 'rejected' as const,
+    (): 'resolved' => 'resolved',
+    (): 'rejected' => 'rejected',
   )
   const outcome = await Promise.race([settled, pending])
   clearTimeout(timer)
