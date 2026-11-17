@@ -1817,29 +1817,16 @@ function testRoomSmallMemory() {
       expect(r).deep.equal({ closeCause: { type: 'disconnected' }, myCause: { type: 'disconnected' } })
     },
   )
-  test("room: lossy frames that wait for the page's uplink while it reconnects are replaced by the newest of their track, which its viewers get, their publishes share its receipt, and none stays listed once settled", async () => {
-    await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-lossy-uplink')
-    try {
-      await autoRetry(async () => {
-        expect((await getResult<{ ready: boolean }>('#room-result')).ready).toBe(true)
-      })
-      await page.context().setOffline(true)
-      await sleep(3000)
-      await page.click('#test-room-lossy-uplink-publish')
-      await sleep(500)
-      await page.context().setOffline(false)
-      await autoRetry(async () => {
-        const r = await getResult<{ receipts: number; seen: number[]; listed: number }>('#room-result')
-        expect(r.listed).toBe(0)
-        expect(r.receipts).lessThan(20)
-        expect(r.seen.at(-1)).toBe(19)
-        expect(r.seen).deep.equal([...r.seen].sort((a, b) => a - b))
-      })
-    } finally {
-      await page.goto('about:blank')
-    }
-  })
+  testRoomScenario<{ receipts: number; seen: number[]; listed: number }>(
+    'lossy-uplink',
+    "room: lossy frames that wait for the page's uplink while it reconnects are replaced by the newest of their track, which its viewers get, their publishes share its receipt, and none stays listed once settled",
+    (r) => {
+      expect(r.listed).toBe(0)
+      expect(r.receipts).lessThan(20)
+      expect(r.seen.at(-1)).toBe(19)
+      expect(r.seen).deep.equal([...r.seen].sort((a, b) => a - b))
+    },
+  )
   testRoomScenario<{ refused: string | null; next: string; closed: boolean; myCause: unknown; leaves: unknown[] }>(
     'meta-past-memory',
     'room: a setMeta() larger than maxMemory rejects with ChannelOverflowError, its page stays in the room and the others see no leave',

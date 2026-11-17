@@ -115,6 +115,7 @@ import {
   onSeedAndChurn,
   onStopChurn,
   onPublishWhileEstablishing,
+  onCutWire,
   onPublishOnServer,
   onServerPublisherReads,
   onJoinHiddenHeld,
@@ -163,8 +164,6 @@ let publishUpgradedSelf: (() => void) | null = null
 let checkUpgradedWatch: (() => void) | null = null
 /** The publish the `member-resub` card makes when its second button is clicked. */
 let publishToResubscribed: (() => void) | null = null
-/** The publishes the `lossy-uplink` card makes when its second button is clicked. */
-let publishWhileAway: (() => void) | null = null
 /** The check the `members-let-go` card runs when its second button is clicked. */
 let checkLetGo: (() => void) | null = null
 /** The chat the `ack-dm-close` card closes when its second button is clicked. */
@@ -2893,11 +2892,9 @@ function Room() {
         const seen: number[] = []
         view.subscribeBinary((_data, info) => seen.push(info.meta!.n as number), { track: 'cursor' })
         const me = await view.join({ meta: { name: 'Me' } })
-        const { promise: away, resolve } = Promise.withResolvers<void>()
-        publishWhileAway = resolve
-        setResult(JSON.stringify({ ready: true }))
-        // The test takes the page offline before it clicks: the frames wait while the page reconnects.
-        await away
+        // A link that keeps up takes every frame: they wait while the page reconnects.
+        await onCutWire()
+        await new Promise((resolve) => setTimeout(resolve, 150))
         const receipts = await Promise.all(
           Array.from({ length: 20 }, (_, n) =>
             me.publishBinary(new Uint8Array(256 * 1024), { track: 'cursor', meta: { n }, lossy: true }),
@@ -2915,9 +2912,6 @@ function Room() {
         const listed = end.connection.channels.of(end)?.replaceable?.size ?? 0
         setResult(JSON.stringify({ receipts: receiptSeqs.size, seen, listed }))
       })}
-      <button id="test-room-lossy-uplink-publish" onClick={() => publishWhileAway?.()}>
-        Publish while away
-      </button>
 
       {scenario('slow-link', 'Slow link', '640 KB each way', async () => {
         const [roomId, view] = await createRoom('slow-link')
