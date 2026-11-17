@@ -46,6 +46,7 @@ function returnedBroadcast(session: string) {
       broadcast._attachPeer(new IndexedPeer({ sender, index: 0, replay }), { want })
     },
     publishes: () => ({ text: count(TAG.PUBLISH), binary: count(TAG.PUBLISH_BINARY) }),
+    tags: () => frames.map((frame) => frame[0]),
     /** The page's WANT frame arrives. */
     wire: (want: Want) => broadcast._dispatchFrame({ tag: TAG.WANT, index: 0, want }),
     /** A call of `from` carries the want. */
@@ -130,4 +131,15 @@ test('before the first attach of a page that has not subscribed, nothing publish
   await Broadcast.publish(page.key, 'after-subscribe')
   expect(page.publishes()).toEqual({ text: 1, binary: 0 })
   page.broadcast.abort()
+})
+
+// As a plain channel sends what it held across a close that ran out before its page attached.
+test("a close that runs out before the page's first attach keeps what the page subscribed to by a call, ahead of the CLOSE", async () => {
+  const page = returnedBroadcast('session-a')
+  await page.call(on(1))
+  await Broadcast.publish(page.key, 'after-subscribe')
+  await page.broadcast.close({ timeout: 1 })
+  page.attach(on(1))
+  expect(page.tags()).toEqual([TAG.PUBLISH_TO, TAG.PUBLISH, TAG.CLOSE])
+  page.broadcast._release()
 })

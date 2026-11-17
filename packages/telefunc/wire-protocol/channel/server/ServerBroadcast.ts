@@ -39,7 +39,7 @@ import { Listeners } from '../../../utils/Listeners.js'
 import { ChannelOverflowError } from '../channelErrors.js'
 import { ACK_STATUS, ERROR_REASON, encode, type AckResultStatus } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
-import type { ChannelDataFrame } from '../../wire/frame.js'
+import type { ChannelDataFrame, ErrorReason } from '../../wire/frame.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { PublishBody } from './PublishBody.js'
 import { LossyDelivery } from './LossyDelivery.js'
@@ -103,7 +103,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
    *  as one a silently dead wire lost does. */
   private lastPeer: IndexedPeer | null = null
   /** The publishes its page wanted before its first attach (a call of the page's brought the want): that attach sends
-   *  those its page still wants. */
+   *  those its page still wants, ahead of the close where the broadcast closed meanwhile, as a plain channel does. */
   private beforeAttach: PublishBody[] = []
 
   static isServerBroadcast(value: unknown): value is ServerBroadcast {
@@ -436,8 +436,19 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     super._end(err)
   }
 
-  protected override shutdown(err?: Error, options?: { pageGone?: boolean }): void {
+  /** What it held for its first attach goes with the rest it buffered: an error ends it without them. */
+  protected override endWithError(reason: ErrorReason, err: Error): void {
+    if (this._phase !== 'ended') this.dropBeforeAttach()
+    super.endWithError(reason, err)
+  }
+
+  override _release(): void {
     this.dropBeforeAttach()
+    super._release()
+  }
+
+  protected override shutdown(err?: Error, options?: { pageGone?: boolean }): void {
+    if (options?.pageGone) this.dropBeforeAttach()
     this.lossyPublishes?.dispose()
     this.lastPeer = null
     this.unsubBroadcast?.()
