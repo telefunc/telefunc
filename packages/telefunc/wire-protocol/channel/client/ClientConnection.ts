@@ -191,7 +191,8 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
       const want = channel.isClosed ? null : channel._attach.unconfirmedWant
       if (want !== null) wants.push({ channel: channel.id, ...want })
     }
-    return wants
+    // A broadcast closing before its want was confirmed stays here until it sends nothing more.
+    return wants.length === 0 ? undefined : wants
   }
 
   /** The next `getOrCreate` opens a fresh connection; one that already replaced this one stays cached. */

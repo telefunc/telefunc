@@ -81,6 +81,16 @@ it("a call carries the page's wants the server hasn't confirmed", () => {
   expect(carried()).toEqual([])
 })
 
+// A broadcast the page is closing has no want left to bring: a call meanwhile carries none, as one with nothing pending.
+it('a call made while the page closes its broadcast before the server confirmed its want carries no `wants`', () => {
+  const telefuncUrl = `http://test.local/${crypto.randomUUID()}/_telefunc`
+  const page = new ClientBroadcast(channelOptions(telefuncUrl))
+  page.subscribe(() => {})
+  page.close({ timeout: 50 }).catch(() => {})
+  expect(ClientConnection.unconfirmedWants(telefuncUrl)).toBe(undefined)
+  page.abort()
+})
+
 // A `ready` nobody reads makes no promise: subscribers that come and go while the server hasn't confirmed leave nothing.
 it("1,000 page subscribers added and removed while the server hasn't confirmed make no promise", () => {
   const page = new ClientBroadcast(channelOptions())
@@ -100,12 +110,12 @@ it("1,000 page subscribers added and removed while the server hasn't confirmed m
   page.abort()
 })
 
-function channelOptions() {
+function channelOptions(telefuncUrl = 'http://test.local/_telefunc') {
   return {
     channelId: crypto.randomUUID(),
     connection: {
       transports: [CHANNEL_TRANSPORT.SSE],
-      telefuncUrl: 'http://test.local/_telefunc',
+      telefuncUrl,
       connectionKey: crypto.randomUUID(),
     },
   }
