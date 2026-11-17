@@ -67,7 +67,7 @@ import { PublishBody } from './PublishBody.js'
 import { OWN_STREAM } from '../ownStream.js'
 import { getChannelConfig } from '../../../node/server/serverConfig.js'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
-import { Listeners } from '../../../utils/Listeners.js'
+import { Listeners, type Registration } from '../../../utils/Listeners.js'
 import {
   ACK_STATUS,
   ERROR_REASON,
@@ -687,9 +687,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private callListeners<T>(listeners: Listeners<(value: T) => unknown>, value: T): Promise<unknown> | undefined {
     const pending: Promise<unknown>[] = []
     const list = listeners.list()
-    for (const [i, cb] of list.entries()) {
+    for (const [i, { listener }] of list.entries()) {
+      if (!listener) continue
       try {
-        const result = cb(forListener(value, list, i))
+        const result = listener(forListener(value, list, i))
         if (isPromise(result)) {
           pending.push(result.catch((err: unknown) => this.lifecycle.handleCallbackError(err)))
         }
@@ -988,7 +989,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** Answers request `seq` with the answer of the one listener that returned one, or with its failure. */
-  protected async answerRequest<T>(seq: number, listeners: readonly ((data: T) => unknown)[], data: T): Promise<void> {
+  protected async answerRequest<T>(
+    seq: number,
+    listeners: readonly Registration<(data: T) => unknown>[],
+    data: T,
+  ): Promise<void> {
     let answer: string | null
     try {
       answer = await listenerAnswer(listeners, data)

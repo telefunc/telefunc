@@ -175,8 +175,9 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
   private deliverBroadcastMessage(payload: string, rawInfo: WirePublishInfo): void {
     const info = { key: this.key, seq: rawInfo.seq, timestamp: rawInfo.timestamp }
     const data = parse(payload) as ChannelData<T>
-    for (const cb of this.subscribers.text.list()) {
-      if (this.callListener(cb, data, info)) return
+    for (const { listener } of this.subscribers.text.list()) {
+      if (!listener) continue
+      if (this.callListener(listener, data, info)) return
     }
     // Asked before a body is made, which admits it against the budget: a page that began to close costs nothing.
     if (!this.peerSubscriptions.text || this._end.isClosed) return this._end._endOverflowed()
@@ -185,9 +186,10 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
 
   private deliverBroadcastBinaryMessage(payload: Uint8Array, rawInfo: WirePublishInfo): void {
     const info = { key: this.key, seq: rawInfo.seq, timestamp: rawInfo.timestamp }
-    for (const cb of this.subscribers.binary.list()) {
+    for (const { listener } of this.subscribers.binary.list()) {
+      if (!listener) continue
       // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
-      if (this.callListener(cb, new Uint8Array(binaryData(payload)), info)) return
+      if (this.callListener(listener, new Uint8Array(binaryData(payload)), info)) return
     }
     if (!this.peerSubscriptions.binary || this._end.isClosed) return this._end._endOverflowed()
     this._end.deliver(bodyOf(payload, rawInfo, this.streams.binary))

@@ -43,3 +43,18 @@ describe("a participant's demand", () => {
     expect(await told(['Screen', 'mic', ''])).toEqual(['Screen', 'main', 'mic'])
   })
 })
+
+describe("a participant's leave listeners", () => {
+  it('hear that it left, all but one that an earlier one removed', async () => {
+    const { room, endWire } = pageRoom()
+    const me = await room.join()
+    const heard: string[] = []
+    me.onLeave(() => removeSecond())
+    const removeSecond = me.onLeave(() => heard.push('second'))
+    me.onLeave(() => heard.push('third'))
+
+    endWire()
+
+    expect(heard).toEqual(['third'])
+  })
+})

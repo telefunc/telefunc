@@ -2,6 +2,7 @@ export { listenerAnswer, forListener, soleAnswer, TWO_ANSWERS }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { HEADER } from '../wire/header.js'
+import type { Registration } from '../../utils/Listeners.js'
 
 /** What `listeners[i]` gets of `value`: bytes of its own, which it may keep or transfer without touching another
  *  listener's. The last takes `value` itself where its buffer holds only it and the `ahead` bytes its frame has before
@@ -19,13 +20,14 @@ const TWO_ANSWERS = Symbol('TWO_ANSWERS')
  *  returned something: `undefined` answers nothing, so listeners that only observe can stand beside the one that
  *  answers. `TWO_ANSWERS` once two answered. What a listener throws propagates. */
 async function soleAnswer<T, A extends unknown[]>(
-  listeners: readonly ((data: T, ...args: A) => unknown)[],
+  listeners: readonly Registration<(data: T, ...args: A) => unknown>[],
   data: T,
   ...args: A
 ): Promise<unknown> {
   let answer: unknown
-  for (const [i, cb] of listeners.entries()) {
-    const value = await cb(forListener(data, listeners, i), ...args)
+  for (const [i, { listener }] of listeners.entries()) {
+    if (!listener) continue
+    const value = await listener(forListener(data, listeners, i), ...args)
     if (value === undefined) continue
     if (answer !== undefined) return TWO_ANSWERS
     answer = value
@@ -34,7 +36,10 @@ async function soleAnswer<T, A extends unknown[]>(
 }
 
 /** `soleAnswer`, serialized: null once two listeners answered. What `stringify` throws propagates. */
-async function listenerAnswer<T>(listeners: readonly ((data: T) => unknown)[], data: T): Promise<string | null> {
+async function listenerAnswer<T>(
+  listeners: readonly Registration<(data: T) => unknown>[],
+  data: T,
+): Promise<string | null> {
   const answer = await soleAnswer(listeners, data)
   return answer === TWO_ANSWERS ? null : stringify(answer)
 }

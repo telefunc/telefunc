@@ -224,14 +224,16 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     const owner = this.owner
     assert(owner)
     // What the publish carries is its owner's to hold, so its request holds only the room for its answer.
-    return this.answerHeld(seq, 0, () => this.answerRequest(seq, [(t: string) => owner._onPagePublish(t)], text))
+    return this.answerHeld(seq, 0, () =>
+      this.answerRequest(seq, [{ listener: (t: string) => owner._onPagePublish(t) }], text),
+    )
   }
 
   override _onPeerPublishBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
     const owner = this.owner
     assert(owner)
     return this.answerHeld(seq, 0, () =>
-      this.answerRequest(seq, [(d: Uint8Array) => owner._onPagePublishBinary(d)], data),
+      this.answerRequest(seq, [{ listener: (d: Uint8Array) => owner._onPagePublishBinary(d) }], data),
     )
   }
 

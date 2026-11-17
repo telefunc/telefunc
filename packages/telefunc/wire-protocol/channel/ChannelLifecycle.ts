@@ -158,8 +158,9 @@ class ChannelLifecycle {
 
   /** Calls each of `listeners`, until one throws `Abort`. */
   private invokeAll(listeners: Listeners<() => void>): void {
-    for (const cb of listeners.list()) {
-      if (this.invokeCallback(cb)) return
+    for (const { listener } of listeners.list()) {
+      if (!listener) continue
+      if (this.invokeCallback(listener)) return
     }
   }
 
@@ -262,8 +263,9 @@ class ChannelLifecycle {
     if (this.didFireClose) return
     this.didFireClose = true
     this.isConnected = false
-    for (const callback of this.closeListeners.list()) {
-      const pending = this.invokeCloseCallback(callback, err)
+    for (const { listener } of this.closeListeners.list()) {
+      if (!listener) continue
+      const pending = this.invokeCloseCallback(listener, err)
       if (pending !== undefined) void this.trackCloseListener(pending)
     }
     this.closeListeners.clear()

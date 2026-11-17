@@ -19,7 +19,7 @@ import { TAG } from '../../wire/tags.js'
 import type { BroadcastKind, BroadcastSubscriptions } from '../../wire/payloads.js'
 import { PUBLISH_BINARY_HEADER, type WirePublishInfo } from '../../wire/publishInfo.js'
 import { HEADER } from '../../wire/header.js'
-import { Listeners } from '../../../utils/Listeners.js'
+import { Listeners, type Registration } from '../../../utils/Listeners.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { binaryData, binaryPayload, isLossy, textPayload } from '../broadcastPayload.js'
 import { ChannelClosedError, isExpectedChannelFailure } from '../channelErrors.js'
@@ -194,16 +194,17 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
    *  unconsumed. A listener's promise isn't awaited. A `lossy` one is confirmed soon, so the server tells whether the
    *  page keeps up. */
   private deliverPublish<V>(
-    listeners: readonly ((value: V, info: ChannelPublishInfo) => unknown)[],
+    listeners: readonly Registration<(value: V, info: ChannelPublishInfo) => unknown>[],
     valueFor: (i: number) => V,
     wireInfo: WirePublishInfo,
     bytes: number,
     lossy: boolean,
   ): void {
     const info = { key: this.key!, seq: wireInfo.seq, timestamp: wireInfo.timestamp }
-    for (const [i, cb] of listeners.entries()) {
+    for (const [i, { listener }] of listeners.entries()) {
+      if (!listener) continue
       try {
-        const result = cb(valueFor(i), info)
+        const result = listener(valueFor(i), info)
         if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
       } catch (err) {
         if (this.lifecycle.handleCallbackError(err)) return

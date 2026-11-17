@@ -307,8 +307,7 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   }
 
   private fireInbox(msg: InboxMessage): void {
-    const from = this.inboxSender(msg)
-    for (const cb of this.messageListeners?.list() ?? []) this.invoke(cb, msg.data, from)
+    this.fireAll(this.messageListeners, msg.data, this.inboxSender(msg))
   }
 
   /** Channel's rule (`soleAnswer`) picks the reply; a throw is the failure reply (see `toRoomFailure`: a bug is
@@ -413,7 +412,7 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
     const seen = this.seen
     this.seen = now
     if (seen?.meta === now.meta && seen.connected === now.connected && seen.demand === now.demand) return
-    for (const cb of this.changeListeners?.list() ?? []) this.invoke(cb)
+    this.fireAll(this.changeListeners)
   }
 
   private shown(): Shown {
@@ -431,13 +430,13 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   /** @internal */
   _onDisconnected(): void {
     this._changed()
-    for (const cb of this.disconnectListeners?.list() ?? []) this.invoke(cb)
+    this.fireAll(this.disconnectListeners)
   }
 
   /** @internal */
   _onReconnected(): void {
     this._changed()
-    for (const cb of this.reconnectListeners?.list() ?? []) this.invoke(cb)
+    this.fireAll(this.reconnectListeners)
   }
 
   onLeave(callback: (cause: LeaveCause) => void, options?: ListenerOptions): () => void {
@@ -456,9 +455,8 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
     this.pendingInbox = null
     this.pendingInboxBytes = 0
     if (held) for (const entry of held) entry.ackResolve?.(DM_FAILURE.left)
-    const leaveListeners = this.leaveListeners?.list() ?? []
+    this.fireAll(this.leaveListeners, ownedCause)
     for (const unlisten of this.listenerCleanups ?? []) unlisten()
-    for (const cb of leaveListeners) this.invoke(cb, ownedCause)
   }
 
   private assertActive(): void {
@@ -471,8 +469,13 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
     return makeDisposer(() => void remove(), (this.listenerCleanups ??= new Set()), options?.signal)
   }
 
-  private invoke<Args extends unknown[]>(cb: (...args: Args) => unknown, ...args: Args): void {
-    invokeChannelListener(cb, args, (err) => this._reportError(err))
+  private fireAll<Args extends unknown[]>(
+    listeners: Listeners<(...args: Args) => unknown> | null,
+    ...args: Args
+  ): void {
+    for (const { listener } of listeners?.list() ?? []) {
+      if (listener) invokeChannelListener(listener, args, (err) => this._reportError(err))
+    }
   }
 }
 

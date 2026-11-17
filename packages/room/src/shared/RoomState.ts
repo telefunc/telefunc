@@ -360,14 +360,14 @@ class RoomState {
     }
     const entry = this.model.entry(frame.from)
     const from: ResolvedSender = entry ? { entry } : { sender: senderSnapshot(frame.from, {}, null) }
-    for (const listener of this.roomTrackListeners.list()) {
-      if (hearsFrame(listener, frame))
+    for (const { listener } of this.roomTrackListeners.list()) {
+      if (listener && hearsFrame(listener, frame))
         invokeChannelListener(listener.cb, [listenerData(frame), frameInfo, from], this.reportError)
     }
     const tracks = entry && this.memberListeners.get(entry)?.tracks
     if (!tracks) return
-    for (const listener of tracks.listeners.list()) {
-      if (hearsFrame(listener, frame))
+    for (const { listener } of tracks.listeners.list()) {
+      if (listener && hearsFrame(listener, frame))
         invokeChannelListener(listener.cb, [listenerData(frame), frameInfo, from], this.reportError)
     }
   }
@@ -467,7 +467,7 @@ class RoomState {
   }
 
   private fireAll<Args extends unknown[]>(listeners: Listeners<(...args: Args) => unknown>, ...args: Args): void {
-    for (const cb of listeners.list()) invokeChannelListener(cb, args, this.reportError)
+    for (const { listener } of listeners.list()) if (listener) invokeChannelListener(listener, args, this.reportError)
   }
 }
 

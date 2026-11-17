@@ -329,9 +329,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private callListeners<T>(listeners: Listeners<(value: T) => unknown>, value: T, bytes: number): void {
     const pending: Promise<unknown>[] = []
     const list = listeners.list()
-    for (const [i, cb] of list.entries()) {
+    for (const [i, { listener }] of list.entries()) {
+      if (!listener) continue
       try {
-        const result = cb(forListener(value, list, i))
+        const result = listener(forListener(value, list, i))
         if (isPromise(result)) {
           pending.push(result.catch((err: unknown) => this.lifecycle.handleCallbackError(err)))
         }

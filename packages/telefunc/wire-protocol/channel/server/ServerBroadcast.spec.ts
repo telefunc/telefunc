@@ -148,6 +148,18 @@ describe('keyed in-process broadcast', () => {
     expect(seen).toEqual([1])
   })
 
+  it('does not call a subscriber that an earlier one unsubscribed during the same delivery', () => {
+    const broadcast = new ServerBroadcast<string>({ key: 'room:unsub-in-delivery' })
+    broadcast._end._registerChannel()
+
+    const seen: string[] = []
+    broadcast.subscribe(() => unsubscribe())
+    const unsubscribe = broadcast.subscribe((m) => seen.push(m))
+    broadcast.publish('first')
+
+    expect(seen).toEqual([])
+  })
+
   it('buffers keyed publishes that arrive before a sibling has registered yet', () => {
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:late-register' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:late-register' })

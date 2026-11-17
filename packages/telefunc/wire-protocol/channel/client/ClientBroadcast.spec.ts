@@ -142,6 +142,23 @@ describe('ClientBroadcast delivery', () => {
       [0, 8],
     ])
   })
+
+  it('does not call a listener that an earlier one unsubscribed during the same publish', () => {
+    const page = behindUplink()
+    const text: unknown[] = []
+    const bytes: number[][] = []
+    page.subscribe(() => unsubscribeText())
+    const unsubscribeText = page.subscribe((data) => text.push(data))
+    page.subscribeBinary(() => unsubscribeBinary())
+    const unsubscribeBinary = page.subscribeBinary((data) => bytes.push([...data]))
+    const info = { seq: 1, timestamp: 1 }
+
+    page._dispatchFrame(received(encode.publish('"plain"', info)))
+    page._dispatchFrame(received(encode.publishBinary(new Uint8Array([0, 8]), info)))
+
+    expect(text).toEqual([])
+    expect(bytes).toEqual([])
+  })
 })
 
 /** A page's broadcast whose wire opened and measured its round trip, and which a RECONCILED opened: what it publishes
