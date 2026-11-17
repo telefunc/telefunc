@@ -63,8 +63,8 @@ type BroadcastTransport = {
     onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void,
   ): () => void
   /** Settles once the listener of `key` (`binary`: its `listenBinary()` one) gets what any server publishes to it, and
-   *  rejects where it never will; undefined where it gets them already. Without it, a listener gets them from the
-   *  moment `listen()` returns. */
+   *  rejects where it never will, which closes its broadcast with that error; undefined where it gets them already.
+   *  Without it, a listener gets them from the moment `listen()` returns. */
   listening?(key: string, binary: boolean): Promise<void> | undefined
 }
 
