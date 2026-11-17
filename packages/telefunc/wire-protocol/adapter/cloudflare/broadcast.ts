@@ -167,6 +167,8 @@ class MemberBucketState {
   setupsInFlight = 0
   /** Each Durable Object with subscribers on the key here, with how many: each has a presence of its own. */
   readonly owners = new Map<string, number>()
+  /** The presences being written, by owner: its subscribers are in effect once it is. */
+  readonly writing = new Map<string, Promise<void>>()
   refreshTimer: ReturnType<typeof setInterval> | null = null
   /** A stub can only be used by the Durable Object that got it, and this state is the isolate's, so it holds none. */
   private readonly authority: () => TelefuncBroadcastStub
@@ -429,13 +431,13 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     return doName
   }
 
-  /** Adds `onMessage` to `subsByKey` under `key`, with its owner's presence; the returned function removes both. */
+  /** Adds `onMessage` to `subsByKey` under `key`, with its owner's presence, which it is in effect once KV wrote. */
   private addSubscriber<OnMessage>(
     subsByKey: Map<string, Map<OnMessage, string>>,
     key: string,
     onMessage: OnMessage,
     wireRequest: Request | undefined,
-  ): () => void {
+  ): Listening {
     const locationBucket = this.requireLocationBucket()
     const owner = this.ownerOf(wireRequest)
     let subs = subsByKey.get(key)
@@ -448,7 +450,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       subs.set(onMessage, owner)
       this.ensurePresence(key, locationBucket, owner)
     }
-    return () => {
+    const unsubscribe = () => {
       const current = subsByKey.get(key)
       const entryOwner = current?.get(onMessage)
       if (!current || entryOwner === undefined) return
@@ -456,17 +458,17 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       if (current.size === 0) subsByKey.delete(key)
       this.releasePresence(key, entryOwner)
     }
+    return { unsubscribe, ready: this.memberStates.get(key)?.writing.get(owner) }
   }
 
   // --- BroadcastAdapter interface ---
 
-  /** In effect at once. */
   subscribe(key: string, onMessage: BroadcastOnMessage, wireRequest?: Request): Listening {
-    return { unsubscribe: this.addSubscriber(this.textSubs, key, onMessage, wireRequest), ready: undefined }
+    return this.addSubscriber(this.textSubs, key, onMessage, wireRequest)
   }
 
   subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, wireRequest?: Request): Listening {
-    return { unsubscribe: this.addSubscriber(this.binarySubs, key, onMessage, wireRequest), ready: undefined }
+    return this.addSubscriber(this.binarySubs, key, onMessage, wireRequest)
   }
 
   publish(key: string, serialized: string): Promise<BroadcastPublishResult> {
@@ -620,10 +622,13 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
   private async initializePresence(key: string, memberState: MemberBucketState, owner: string): Promise<void> {
     memberState.setupsInFlight++
+    const written = this.putPresence(key, owner)
+    memberState.writing.set(owner, written)
     try {
-      await this.putPresence(key, owner)
+      await written
     } finally {
       memberState.setupsInFlight--
+      if (memberState.writing.get(owner) === written) memberState.writing.delete(owner)
     }
     // Its release may have deleted the presence before the put above wrote it.
     if (!memberState.owners.has(owner)) void this.deletePresence(key, owner)

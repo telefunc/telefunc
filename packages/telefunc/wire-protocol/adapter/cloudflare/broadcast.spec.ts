@@ -687,6 +687,35 @@ describe('cloudflare broadcast routing', () => {
     expect(coordinatorPublishes).toContain('telefunc:broadcast:apac:0:{"text":"second"}')
   })
 
+  // Its publishes reach this Durable Object only where another one's publish finds its presence in KV.
+  it("a subscriber's `ready` resolves once KV wrote its Durable Object's presence", async () => {
+    const transport = createTransport(1)
+    const previousTransport = getBroadcastAdapter()
+    let wrote = () => {}
+    const kv = createMockKV()
+    const put = kv.put.bind(kv)
+    kv.put = async (...args: Parameters<KVNamespace['put']>) => {
+      await new Promise<void>((resolve) => (wrote = resolve))
+      return put(...args)
+    }
+    transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
+    transport.attachKV(kv)
+    transport.attachIsolateInfo('weur')
+    _resetBroadcastAdapterForTesting(transport)
+
+    const remove = transport.runInObject('telefunc-shard-weur-0', () => Broadcast.subscribe('room:test', () => {}))
+    let ready = false
+    void remove.ready.then(() => (ready = true))
+    await flushCoordinatorTurn()
+    expect(ready).toBe(false)
+    wrote()
+    await flushCoordinatorTurn()
+    expect(ready).toBe(true)
+
+    remove()
+    _resetBroadcastAdapterForTesting(previousTransport)
+  })
+
   it('deletes KV presence on unsubscribe', async () => {
     const transport = createTransport(1)
     const kv = createMockKV()
