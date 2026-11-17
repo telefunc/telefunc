@@ -149,11 +149,26 @@ type ClientChannel<ClientToServer = unknown, ServerToClient = unknown, TDefault 
 class Readiness {
   private outcome: true | Error | undefined = undefined
   private waiting: Deferred<void> | undefined = undefined
-  /** In effect once `until` resolves, never where it rejects: followed only once `ready` is read. */
-  private readonly until: Promise<void> | undefined
+  /** Settles as `until` does: followed only once `ready` is read. */
+  private readonly until: Readiness | undefined
 
-  constructor(until?: Promise<void>) {
+  constructor(until?: Readiness) {
     this.until = until
+  }
+
+  /** One that settles as `promise` does, followed now: a backend's `ready`, observed once for every subscriber. */
+  static following(promise: Promise<void>): Readiness {
+    const readiness = new Readiness()
+    promise.then(
+      () => readiness.settle(true),
+      (err: unknown) => readiness.settle(err instanceof Error ? err : new Error(String(err))),
+    )
+    return readiness
+  }
+
+  /** The error it settled with, where it did. */
+  get failure(): Error | undefined {
+    return this.outcome === true ? undefined : this.outcome
   }
 
   settle(outcome: true | Error): void {
@@ -175,9 +190,9 @@ class Readiness {
     return this.waiting.promise
   }
 
-  private async follow(until: Promise<void>): Promise<void> {
+  private async follow(until: Readiness): Promise<void> {
     try {
-      await until
+      await until.promise
     } catch (err) {
       return this.settle(err instanceof Error ? err : new Error(String(err)))
     }

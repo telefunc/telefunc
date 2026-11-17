@@ -8,6 +8,7 @@ import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { OrderedStubs } from './OrderedStubs.js'
+import { Readiness } from '../../channel/channel.js'
 import type {
   BroadcastBinaryOnMessage,
   BroadcastOnMessage,
@@ -168,7 +169,7 @@ class MemberBucketState {
   /** Each Durable Object with subscribers on the key here, with how many: each has a presence of its own. */
   readonly owners = new Map<string, number>()
   /** The presences being written, by owner: its subscribers are in effect once it is. */
-  readonly writing = new Map<string, Promise<void>>()
+  readonly writing = new Map<string, Readiness>()
   refreshTimer: ReturnType<typeof setInterval> | null = null
   /** A stub can only be used by the Durable Object that got it, and this state is the isolate's, so it holds none. */
   private readonly authority: () => TelefuncBroadcastStub
@@ -623,12 +624,13 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   private async initializePresence(key: string, memberState: MemberBucketState, owner: string): Promise<void> {
     memberState.setupsInFlight++
     const written = this.putPresence(key, owner)
-    memberState.writing.set(owner, written)
+    const writing = Readiness.following(written)
+    memberState.writing.set(owner, writing)
     try {
       await written
     } finally {
       memberState.setupsInFlight--
-      if (memberState.writing.get(owner) === written) memberState.writing.delete(owner)
+      if (memberState.writing.get(owner) === writing) memberState.writing.delete(owner)
     }
     // Its release may have deleted the presence before the put above wrote it.
     if (!memberState.owners.has(owner)) void this.deletePresence(key, owner)

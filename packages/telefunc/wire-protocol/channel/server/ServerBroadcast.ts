@@ -571,10 +571,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
    *  the page's want are in effect. A subscription its backend failed stays failed (Redis doesn't try it again), so the
    *  broadcast ends: with the backend's error on the server, reported as a server error, and as a server error on its
    *  page; every `ready` waiting rejects with that end. One removed meanwhile changes nothing. */
-  private async whenListening(listening: Listening, ready: Promise<void>, waiting: Set<Readiness>): Promise<void> {
+  private async whenListening(listening: Listening, ready: Readiness, waiting: Set<Readiness>): Promise<void> {
     const current = () => this.textListening === listening || this.binaryListening === listening
     try {
-      await ready
+      await ready.promise
     } catch (err) {
       if (!current()) return
       handleCallbackBug(err)
@@ -767,15 +767,15 @@ function listeningOrFailure(orFailure: boolean, subscribe: () => Listening): Lis
     return subscribe()
   } catch (err) {
     if (!orFailure) throw err
-    const ready = Promise.reject(err)
     // The broadcast it fails reports it (`whenListening`).
-    ready.catch(() => {})
+    const ready = new Readiness()
+    ready.settle(err instanceof Error ? err : new Error(String(err)))
     return { unsubscribe: () => {}, ready }
   }
 }
 
 /** Unsubscribes once `signal` aborts, at once if it aborted while subscribing, or when the returned function runs; its
- *  `ready` resolves once the subscription is in effect or removed. */
+ *  `ready` resolves once the subscription is in effect or removed, and rejects where its backend failed it first. */
 function removedOnAbort({ unsubscribe, ready }: Listening, signal: AbortSignal | undefined): Unsubscribe {
   const readiness = ready && new Readiness(ready)
   let current: (() => void) | undefined = unsubscribe
@@ -784,7 +784,7 @@ function removedOnAbort({ unsubscribe, ready }: Listening, signal: AbortSignal |
     current = undefined
     signal?.removeEventListener('abort', remove)
     // Ahead of the transport's remover, which may fail the wait it abandons.
-    readiness?.settle(true)
+    readiness?.settle(ready?.failure ?? true)
     pending?.()
   }
   signal?.addEventListener('abort', remove, { once: true })

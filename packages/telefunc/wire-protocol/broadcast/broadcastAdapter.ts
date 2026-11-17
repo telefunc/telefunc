@@ -15,6 +15,7 @@ import { Fifo } from '../../utils/Fifo.js'
 import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import { CHANNEL_HOLD_MAX_BYTES } from '../constants.js'
 import { ChannelOverflowError } from '../channel/channelErrors.js'
+import { Readiness } from '../channel/channel.js'
 import { HELD_SEND_OVERHEAD_BYTES } from '../channel/server/channelMemory.js'
 import type { WirePublishInfo } from '../wire/publishInfo.js'
 
@@ -33,8 +34,8 @@ type BroadcastBinaryOnMessage = (data: Uint8Array, info: WirePublishInfo) => voi
 type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; ready: Promise<void> }
 
 /** A `BroadcastUnsubscribe` in one form: `ready` is undefined where the listener is in effect already, else the one
- *  `ready` of its key's subscription, which every subscriber of the key shares. */
-type Listening = { unsubscribe: () => void; ready: Promise<void> | undefined }
+ *  outcome of its key's subscription, which every subscriber of the key shares. */
+type Listening = { unsubscribe: () => void; ready: Readiness | undefined }
 
 type QueuedPublish = { size: number; depth: number; deliver: () => void }
 
@@ -75,12 +76,11 @@ type BroadcastTransport = {
   ): BroadcastUnsubscribe
 }
 
-/** The one form of either `BroadcastUnsubscribe`. A failure nobody reads raises no unhandled rejection: a broadcast it
- *  closes reports it, and a `Broadcast.subscribe()` has only its `ready` for it. */
+/** The one form of either `BroadcastUnsubscribe`: the transport's `ready` is observed here once, for every subscriber of
+ *  the key, so its first outcome is known to each, read or not. */
 function listeningOf(returned: BroadcastUnsubscribe): Listening {
   if (typeof returned === 'function') return { unsubscribe: returned, ready: undefined }
-  returned.ready.catch(() => {})
-  return { unsubscribe: returned.unsubscribe, ready: returned.ready }
+  return { unsubscribe: returned.unsubscribe, ready: Readiness.following(returned.ready) }
 }
 
 /** How deep in-memory publishes in answer to answers may go: 10,000, past the about 1,300 that Node.js's call stack holds

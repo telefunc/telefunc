@@ -418,6 +418,37 @@ describe("a server subscriber's `ready` while its backend hasn't confirmed the s
   }
 })
 
+// A backend that refused a key's subscription keeps that outcome: removing a subscriber afterwards doesn't turn its
+// `ready` into a success, whether the app read `ready` before the removal or not.
+describe("a static subscriber's `ready` once its backend refused the key's subscription", () => {
+  const sent = () => ({ seq: 1, timestamp: 1 })
+  const refusing = () => {
+    const ready = Promise.reject(new Error('NOPERM'))
+    const listen = () => ({ unsubscribe: () => {}, ready })
+    _resetBroadcastAdapterForTesting(
+      new DefaultBroadcastAdapter({ send: sent, sendBinary: sent, listen, listenBinary: listen }),
+    )
+  }
+  const SUBSCRIBE: Record<string, () => Unsubscribe> = {
+    'Broadcast.subscribe()': () => Broadcast.subscribe('room:refused', () => {}),
+    'Broadcast.subscribeBinary()': () => Broadcast.subscribeBinary('room:refused', () => {}),
+  }
+  for (const [name, subscribe] of Object.entries(SUBSCRIBE)) {
+    for (const removed of ['after', 'before']) {
+      it(`${name}: rejects with the refusal when removed ${removed} its first read`, async () => {
+        refusing()
+        const remove = subscribe()
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        let ready: Promise<void> | undefined
+        if (removed === 'after') ready = remove.ready
+        remove()
+        ready ??= remove.ready
+        await expect(ready).rejects.toThrow('NOPERM')
+      })
+    }
+  }
+})
+
 // A `ready` nobody reads makes no promise, so subscribers that come and go while the backend waits leave nothing behind.
 describe("subscribers that come and go while their backend hasn't confirmed the key's subscription", () => {
   const pending = new Promise<void>(() => {})
