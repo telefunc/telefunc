@@ -1,4 +1,4 @@
-export { makePublishInfo, stringifyMessage, LOSSY_WITH_ACK_TEXT }
+export { makePublishInfo, stringifyMessage, withReady, LOSSY_WITH_ACK_TEXT }
 export type {
   ChannelBase,
   ChannelShield,
@@ -16,6 +16,7 @@ export type {
   ChannelBinaryListener,
   BroadcastListener,
   BroadcastBinaryListener,
+  Unsubscribe,
 }
 
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shieldKey.js'
@@ -65,6 +66,10 @@ type ChannelBinaryListener = (data: Uint8Array) => unknown | Promise<unknown>
 type BroadcastListener<T> = (data: ChannelData<T>, info: ChannelPublishInfo) => ChannelListenReturn<T>
 /** Callback for `Broadcast.subscribeBinary()` — receives raw binary data and publish info. */
 type BroadcastBinaryListener = (data: Uint8Array, info: ChannelPublishInfo) => unknown | Promise<unknown>
+/** Removes the listener. `ready` resolves once the listener is in effect, at once where nothing has to reach the other
+ *  side first, or once the listener is removed; it rejects where it never will be in effect, as when its channel ends
+ *  first. */
+type Unsubscribe = (() => void) & { readonly ready: Promise<void> }
 type ChannelCloseOptions = {
   timeout?: number
 }
@@ -105,8 +110,8 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
    *  https://telefunc.com/channel#skip-to-the-newest */
   sendBinary(data: Uint8Array, opts: { lossy: true; ack?: false }): Promise<void>
   /** Receive messages. Return a value to ack the sender. Returns an unlisten function. */
-  listen(callback: ChannelListener<TIn>, options?: { signal?: AbortSignal }): () => void
-  listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): () => void
+  listen(callback: ChannelListener<TIn>, options?: { signal?: AbortSignal }): Unsubscribe
+  listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe
   /** Called when the channel closes. Returns a function that removes the callback. */
   onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void
   /** Called when the channel opens. Returns a function that removes the callback. */
@@ -134,3 +139,9 @@ type ClientChannel<ClientToServer = unknown, ServerToClient = unknown, TDefault 
   TDefault
 > &
   ChannelShield<ClientToServer, ServerToClient>
+
+/** `remove` with `ready`: a failure nobody reads raises no unhandled rejection. */
+function withReady(remove: () => void, ready: Promise<void> = Promise.resolve()): Unsubscribe {
+  ready.catch(() => {})
+  return Object.assign(remove, { ready })
+}

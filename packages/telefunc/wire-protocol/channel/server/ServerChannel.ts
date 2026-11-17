@@ -15,8 +15,9 @@ import type {
   ChannelData,
   ChannelListener,
   ChannelBinaryListener,
+  Unsubscribe,
 } from '../channel.js'
-import { LOSSY_WITH_ACK_TEXT, stringifyMessage } from '../channel.js'
+import { LOSSY_WITH_ACK_TEXT, stringifyMessage, withReady } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 
 import type { IndexedPeer } from './IndexedPeer.js'
@@ -425,12 +426,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     )
   }
 
-  listen(callback: ChannelListener<ClientToServer>, options?: { signal?: AbortSignal }): () => void {
-    return this.listeners.add(callback, options)
+  /** In effect at once: the page sends whether the server listens or not. */
+  listen(callback: ChannelListener<ClientToServer>, options?: { signal?: AbortSignal }): Unsubscribe {
+    return withReady(this.listeners.add(callback, options))
   }
 
-  listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): () => void {
-    return this.binaryListeners.add(callback, options)
+  listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe {
+    return withReady(this.binaryListeners.add(callback, options))
   }
 
   onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void {

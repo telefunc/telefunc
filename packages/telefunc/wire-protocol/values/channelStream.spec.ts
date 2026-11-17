@@ -13,6 +13,7 @@ import { queueMemory } from '../channel/server/channelMemory.js'
 import { ChannelOverflowError } from '../channel/channelErrors.js'
 import { config } from '../../node/server/serverConfig.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
+import { withReady } from '../channel/channel.js'
 import type { ClientReviverContext, ServerReplacerContext, StreamingProducer } from './types.js'
 
 config.channel = { maxMemory: '2m' }
@@ -28,7 +29,7 @@ function memoryChannel() {
   return {
     listenBinary(callback: (frame: Uint8Array) => Promise<void>) {
       listener = callback
-      return () => {}
+      return withReady(() => {})
     },
     onClose(callback: () => void) {
       onClose = callback

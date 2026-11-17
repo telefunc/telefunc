@@ -29,6 +29,8 @@ import {
   onBroadcastManyKeys,
   onBroadcastThrowingListener,
   onJoinChat,
+  onBroadcastToSubscribe,
+  onPublishTo,
 } from './Publish.telefunc'
 
 type ShieldState = {
@@ -86,6 +88,36 @@ function Publish() {
         }}
       >
         Broadcast iteration and signals
+      </button>
+
+      <button
+        id="test-broadcast-ready"
+        onClick={async () => {
+          try {
+            const { room, key } = await onBroadcastToSubscribe()
+            const received: string[] = []
+            const stop = room.subscribe((text) => {
+              received.push(text)
+            })
+            await stop.ready
+            await onPublishTo(key, 'after-ready')
+            const aborted = (await onBroadcastToSubscribe()).room
+            const stopAborted = aborted.subscribe(() => {})
+            aborted.abort()
+            const abortedReady = await stopAborted.ready.then(
+              () => 'resolved',
+              (err: Error) => err.name,
+            )
+            // The publish reaches the page over its wire, after the call that made it answered.
+            await new Promise((resolve) => setTimeout(resolve, 1_000))
+            await room.close()
+            setResult(JSON.stringify({ received, abortedReady }))
+          } catch (err) {
+            setResult(String(err))
+          }
+        }}
+      >
+        A subscriber's ready
       </button>
 
       <button

@@ -7,9 +7,9 @@ import type {
   ChannelPublishAck,
   ChannelPublishInfo,
 } from '../channel.js'
-import { makePublishInfo, stringifyMessage } from '../channel.js'
+import { makePublishInfo, stringifyMessage, withReady, type Unsubscribe } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
-import { encode, type ChannelDataFrame, type SequencedEncoder } from '../../wire/frame.js'
+import { encode, type ChannelCtrlFrame, type ChannelDataFrame, type SequencedEncoder } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { PUBLISH_BINARY_HEADER, type WirePublishInfo } from '../../wire/publishInfo.js'
 import { HEADER } from '../../wire/header.js'
@@ -17,6 +17,7 @@ import { Listeners, type Registration } from '../../../utils/Listeners.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { ChannelClosedError } from '../channelErrors.js'
 import { isPromise } from '../../../utils/isPromise.js'
+import { createDeferred } from '../../../utils/createDeferred.js'
 import { forListener } from '../listenerAnswer.js'
 import { ClientChannel, type ClientChannelOptions } from './ClientChannel.js'
 
@@ -46,16 +47,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return broadcastMessages<ChannelData<T>>(this, options)
   }
 
-  subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {
-    if (options.signal?.aborted) return () => {}
-    const remove = this.broadcastListeners.add(callback, {
-      ...options,
-      onRemove: () => {
-        if (this.broadcastListeners.size === 0) this.setSubscribed('text', false)
-      },
-    })
-    if (this.broadcastListeners.size === 1) this.setSubscribed('text', true)
-    return remove
+  subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): Unsubscribe {
+    return this.addSubscriber(this.broadcastListeners, 'text', callback, options)
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
@@ -72,20 +65,40 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return this.lossy ? this.sendLossy(encodeFrame, data, start) : start()
   }
 
-  subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
-    if (options.signal?.aborted) return () => {}
-    const remove = this.broadcastBinaryListeners.add(callback, {
+  subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): Unsubscribe {
+    return this.addSubscriber(this.broadcastBinaryListeners, 'binary', callback, options)
+  }
+
+  /** Its `ready` settles once the server confirmed the want this subscriber needs, or the subscriber is removed. */
+  private addSubscriber<L>(
+    listeners: Listeners<L>,
+    kind: 'text' | 'binary',
+    callback: L,
+    options: { signal?: AbortSignal },
+  ): Unsubscribe {
+    if (options.signal?.aborted) return withReady(() => {})
+    const removed = createDeferred()
+    const remove = listeners.add(callback, {
       ...options,
       onRemove: () => {
-        if (this.broadcastBinaryListeners.size === 0) this.setSubscribed('binary', false)
+        removed.resolve()
+        if (listeners.size === 0) this.setSubscribed(kind, false)
       },
     })
-    if (this.broadcastBinaryListeners.size === 1) this.setSubscribed('binary', true)
-    return remove
+    if (listeners.size === 1) this.setSubscribed(kind, true)
+    const confirmed = this._attach.wantConfirmed(this._attach.wants?.version ?? 0)
+    return withReady(remove, Promise.race([confirmed, removed.promise]))
+  }
+
+  protected override dispatchCtrl(frame: ChannelCtrlFrame): void {
+    if (frame.tag === TAG.WANTED) this._attach.confirmWant(frame.version)
+    else super.dispatchCtrl(frame)
   }
 
   override _end(err?: Error): void {
     super._end(err)
+    // Ahead of clearing the subscribers, which settles their `ready` as removed.
+    this._attach.failWants(err ?? new ChannelClosedError())
     this.broadcastListeners.clear()
     this.broadcastBinaryListeners.clear()
   }

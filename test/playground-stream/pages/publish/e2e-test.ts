@@ -1,4 +1,4 @@
-export { testPublish }
+export { testPublish, testSubscribeOrder }
 
 import type { ConsoleMessage, WebSocket } from 'playwright-chromium'
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
@@ -42,6 +42,8 @@ type ServerBroadcastResult = {
 function testPublish(isDev: boolean, inDocker = false) {
   const transports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '["sse"]')
   const transport = transports.at(-1)
+
+  testSubscribeOrder()
 
   test('broadcast: a messages() loop that falls 2 MiB behind a busy broadcast ends with ChannelOverflowError, on the page and on the server, and the page is sent nothing published after', async () => {
     let wsBytes = 0
@@ -493,4 +495,18 @@ function testPublish(isDev: boolean, inDocker = false) {
         })
     }
   }
+}
+
+/** When a page's subscription takes effect. */
+function testSubscribeOrder() {
+  test("broadcast: once a subscriber's `ready` resolves, a publish from a telefunction reaches it, and `ready` rejects with the error its broadcast ends with first", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-ready')
+    await autoRetry(
+      async () => {
+        expect(await getResult('#publish-result')).deep.equal({ received: ['after-ready'], abortedReady: 'Abort' })
+      },
+      { timeout: 20_000 },
+    )
+  })
 }

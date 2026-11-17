@@ -10,8 +10,9 @@ import type {
   ChannelData,
   ChannelListener,
   ChannelBinaryListener,
+  Unsubscribe,
 } from '../channel.js'
-import { LOSSY_WITH_ACK_TEXT, stringifyMessage } from '../channel.js'
+import { LOSSY_WITH_ACK_TEXT, stringifyMessage, withReady } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -227,12 +228,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.sendCredit.decrement(this.connection.sendSequenced(this, 'data', encode.binary, data))
   }
 
-  listen(callback: ChannelListener<ServerToClient>, options?: { signal?: AbortSignal }): () => void {
-    return this.listeners.add(callback, options)
+  /** In effect at once: the server sends whether the page listens or not. */
+  listen(callback: ChannelListener<ServerToClient>, options?: { signal?: AbortSignal }): Unsubscribe {
+    return withReady(this.listeners.add(callback, options))
   }
 
-  listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): () => void {
-    return this.binaryListeners.add(callback, options)
+  listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe {
+    return withReady(this.binaryListeners.add(callback, options))
   }
 
   onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void {

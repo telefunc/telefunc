@@ -11,7 +11,7 @@ import type {
   ChannelCloseResult,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
-import { makePublishInfo, stringifyMessage } from '../channel.js'
+import { makePublishInfo, stringifyMessage, withReady, type Unsubscribe } from '../channel.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { ServerChannel } from './ServerChannel.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
@@ -132,15 +132,16 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     return broadcastMessages<ChannelData<T>>(this, options, queueMemory())
   }
 
-  subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {
-    if (options.signal?.aborted) return () => {}
+  /** In effect once its backend delivers what any server publishes to the key. */
+  subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): Unsubscribe {
+    if (options.signal?.aborted) return withReady(() => {})
     this.subscribeBroadcast()
     const remove = this.broadcastListeners.add(callback, {
       ...options,
       onRemove: () => this.unsubscribeUnusedBroadcasts(),
     })
     this.unsubscribeUnusedBroadcasts()
-    return remove
+    return withReady(remove, this.broadcastAdapter().listening?.(this.key, false))
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
@@ -149,15 +150,15 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     return ret
   }
 
-  subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
-    if (options.signal?.aborted) return () => {}
+  subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): Unsubscribe {
+    if (options.signal?.aborted) return withReady(() => {})
     this.subscribeBinaryBroadcast()
     const remove = this.broadcastBinaryListeners.add(callback, {
       ...options,
       onRemove: () => this.unsubscribeUnusedBroadcasts(),
     })
     this.unsubscribeUnusedBroadcasts()
-    return remove
+    return withReady(remove, this.broadcastAdapter().listening?.(this.key, true))
   }
 
   // --- Transport callbacks ---
@@ -493,9 +494,9 @@ type BroadcastChannel<T = unknown> = {
   }
   /** Serializes `data` as JSON: bytes go through `publishBinary()`. */
   publish(data: ChannelData<T>): Promise<ChannelPublishAck>
-  subscribe(callback: BroadcastListener<T>, options?: { signal?: AbortSignal }): () => void
+  subscribe(callback: BroadcastListener<T>, options?: { signal?: AbortSignal }): Unsubscribe
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
-  subscribeBinary(callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): () => void
+  subscribeBinary(callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe
   onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void
   onOpen(callback: () => void, options?: { signal?: AbortSignal }): () => void
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>
@@ -567,35 +568,27 @@ const Broadcast = {
     const serialized = stringifyMessage(data, 'publish')
     return receiptOf(key, adapter.publish(key, serialized))
   },
-  subscribe<U = unknown>(
-    key: string,
-    callback: BroadcastListener<U>,
-    options?: { signal?: AbortSignal },
-  ): BroadcastUnsubscribe {
+  subscribe<U = unknown>(key: string, callback: BroadcastListener<U>, options?: { signal?: AbortSignal }): Unsubscribe {
     const adapter = getBroadcastAdapter()
-    if (options?.signal?.aborted) return () => {}
+    if (options?.signal?.aborted) return withReady(() => {})
     const unsubscribe = adapter.subscribe(key, (serialized, info) => {
       const data = parse(serialized) as ChannelData<U>
       callStaticListener(callback, data, makePublishInfo(key, info.seq, info.timestamp))
     })
-    return unsubscribeOnAbort(unsubscribe, options?.signal)
+    return withReady(unsubscribeOnAbort(unsubscribe, options?.signal), adapter.listening?.(key, false))
   },
   publishBinary(key: string, data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     const adapter = getBroadcastAdapter()
     return receiptOf(key, adapter.publishBinary(key, data))
   },
-  subscribeBinary(
-    key: string,
-    callback: BroadcastBinaryListener,
-    options?: { signal?: AbortSignal },
-  ): BroadcastUnsubscribe {
+  subscribeBinary(key: string, callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe {
     const adapter = getBroadcastAdapter()
-    if (options?.signal?.aborted) return () => {}
+    if (options?.signal?.aborted) return withReady(() => {})
     const unsubscribe = adapter.subscribeBinary(key, (data, info) => {
       // A copy of its own, as a `BroadcastChannel` listener gets.
       callStaticListener(callback, new Uint8Array(data), makePublishInfo(key, info.seq, info.timestamp))
     })
-    return unsubscribeOnAbort(unsubscribe, options?.signal)
+    return withReady(unsubscribeOnAbort(unsubscribe, options?.signal), adapter.listening?.(key, true))
   },
 }
 

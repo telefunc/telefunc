@@ -24,6 +24,8 @@ export {
   onBroadcastManyKeys,
   onBroadcastThrowingListener,
   onJoinChat,
+  onBroadcastToSubscribe,
+  onPublishTo,
 }
 
 import { Broadcast, BroadcastChannel } from 'telefunc'
@@ -610,4 +612,14 @@ async function readSlowly(room: BroadcastChannel<string>, kind: 'slow' | 'held')
   } catch (err) {
     return { received, error: (err as Error).name }
   }
+}
+
+/** A broadcast of a key of its own, which `onPublishTo()` publishes to from outside it. */
+async function onBroadcastToSubscribe() {
+  const key = `room:subscribe:${crypto.randomUUID()}`
+  return { room: new BroadcastChannel<string>({ key }), key }
+}
+
+async function onPublishTo(key: string, text: string) {
+  await Broadcast.publish(key, text)
 }
