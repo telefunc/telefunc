@@ -716,6 +716,54 @@ describe('cloudflare broadcast routing', () => {
     _resetBroadcastAdapterForTesting(previousTransport)
   })
 
+  // A presence KV refuses to write is a subscription that failed, as a refused one is on any other backend.
+  describe('where KV refuses the presence write', () => {
+    const refusing = () => {
+      const transport = createTransport(1)
+      const kv = createMockKV()
+      const put = kv.put.bind(kv)
+      const state = { refuse: true }
+      kv.put = async (...args: Parameters<KVNamespace['put']>) => {
+        if (state.refuse) throw new Error('KV PUT failed: 429 Too Many Requests')
+        return put(...args)
+      }
+      transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
+      transport.attachKV(kv)
+      transport.attachIsolateInfo('weur')
+      _resetBroadcastAdapterForTesting(transport)
+      const inObject = <T>(run: () => T) => transport.runInObject('telefunc-shard-weur-0', run)
+      return { state, inObject }
+    }
+
+    it("a subscriber's `ready` rejects with KV's error, and so does a later one of the same Durable Object, until it has none", async () => {
+      const previousTransport = getBroadcastAdapter()
+      const { state, inObject } = refusing()
+      const first = inObject(() => Broadcast.subscribe('room:test', () => {}))
+      await expect(first.ready).rejects.toThrow('429')
+      const second = inObject(() => Broadcast.subscribe('room:test', () => {}))
+      await expect(second.ready).rejects.toThrow('429')
+      first()
+      second()
+      state.refuse = false
+      const third = inObject(() => Broadcast.subscribe('room:test', () => {}))
+      await expect(third.ready).resolves.toBe(undefined)
+      third()
+      _resetBroadcastAdapterForTesting(previousTransport)
+    })
+
+    it("a broadcast that subscribes closes with KV's error", async () => {
+      const previousTransport = getBroadcastAdapter()
+      const { inObject } = refusing()
+      const room = inObject(() => {
+        const broadcast = new ServerBroadcast<string>({ key: 'room:test:refused' })
+        broadcast.subscribe(() => {})
+        return broadcast
+      })
+      await expect(room.closed).rejects.toThrow('429')
+      _resetBroadcastAdapterForTesting(previousTransport)
+    })
+  })
+
   it('deletes KV presence on unsubscribe', async () => {
     const transport = createTransport(1)
     const kv = createMockKV()

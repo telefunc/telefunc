@@ -66,12 +66,14 @@ type BufferedPublish = {
   pending: PendingBucketPublish
 }
 
-/** KV takes one write a second per key, so a write it refuses is expected. */
-async function warnRefusedWrite(write: Promise<void>, warning: string): Promise<void> {
+/** KV takes one write a second per key, so a write it refuses is expected. Whether KV took it. */
+async function warnRefusedWrite(write: Promise<void>, warning: string): Promise<boolean> {
   try {
     await write
+    return true
   } catch (err) {
     assertWarning(false, `${warning} (${String(err)})`, { onlyOnce: false })
+    return false
   }
 }
 
@@ -168,8 +170,9 @@ class MemberBucketState {
   setupsInFlight = 0
   /** Each Durable Object with subscribers on the key here, with how many: each has a presence of its own. */
   readonly owners = new Map<string, number>()
-  /** The presences being written, by owner: its subscribers are in effect once it is. */
-  readonly writing = new Map<string, Readiness>()
+  /** Each owner's presence KV hasn't written, by owner: being written, its subscribers are in effect once it is; refused,
+   *  they never are, nor any it gets until it has none left. */
+  readonly unwritten = new Map<string, Readiness>()
   refreshTimer: ReturnType<typeof setInterval> | null = null
   /** A stub can only be used by the Durable Object that got it, and this state is the isolate's, so it holds none. */
   private readonly authority: () => TelefuncBroadcastStub
@@ -358,8 +361,16 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   }
 
   private async putPresence(key: string, owner: string): Promise<void> {
-    await warnRefusedWrite(
-      this.requireKV().put(this.getPresenceKey(key, owner), owner, { expirationTtl: PRESENCE_TTL_SECONDS }),
+    await this.warnRefusedPresence(key, this.writePresence(key, owner))
+  }
+
+  private writePresence(key: string, owner: string): Promise<void> {
+    return this.requireKV().put(this.getPresenceKey(key, owner), owner, { expirationTtl: PRESENCE_TTL_SECONDS })
+  }
+
+  private warnRefusedPresence(key: string, write: Promise<void>): Promise<boolean> {
+    return warnRefusedWrite(
+      write,
       `KV refused to record that this Durable Object has subscribers to the Broadcast key ${JSON.stringify(key)}, so they may miss publishes made on other Durable Objects until Telefunc's next try, within ${PRESENCE_REFRESH_INTERVAL_MS / 1000} s`,
     )
   }
@@ -432,7 +443,8 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     return doName
   }
 
-  /** Adds `onMessage` to `subsByKey` under `key`, with its owner's presence, which it is in effect once KV wrote. */
+  /** Adds `onMessage` to `subsByKey` under `key`, with its owner's presence, which it is in effect once KV wrote, and
+   *  never where KV refused it. */
   private addSubscriber<OnMessage>(
     subsByKey: Map<string, Map<OnMessage, string>>,
     key: string,
@@ -459,7 +471,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       if (current.size === 0) subsByKey.delete(key)
       this.releasePresence(key, entryOwner)
     }
-    return { unsubscribe, ready: this.memberStates.get(key)?.writing.get(owner) }
+    return { unsubscribe, ready: this.memberStates.get(key)?.unwritten.get(owner) }
   }
 
   // --- BroadcastAdapter interface ---
@@ -604,6 +616,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     if (count > 0) memberState.owners.set(owner, count)
     else {
       memberState.owners.delete(owner)
+      memberState.unwritten.delete(owner)
       void this.deletePresence(key, owner)
     }
     this.teardownPresenceIfEmpty(key)
@@ -623,15 +636,13 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
   private async initializePresence(key: string, memberState: MemberBucketState, owner: string): Promise<void> {
     memberState.setupsInFlight++
-    const written = this.putPresence(key, owner)
-    const writing = Readiness.following(written)
-    memberState.writing.set(owner, writing)
-    try {
-      await written
-    } finally {
-      memberState.setupsInFlight--
-      if (memberState.writing.get(owner) === writing) memberState.writing.delete(owner)
-    }
+    const written = this.writePresence(key, owner)
+    const unwritten = Readiness.following(written)
+    memberState.unwritten.set(owner, unwritten)
+    const wrote = await this.warnRefusedPresence(key, written)
+    memberState.setupsInFlight--
+    // A refused write stays its owner's outcome; the refresh below still tries again.
+    if (wrote && memberState.unwritten.get(owner) === unwritten) memberState.unwritten.delete(owner)
     // Its release may have deleted the presence before the put above wrote it.
     if (!memberState.owners.has(owner)) void this.deletePresence(key, owner)
     if (memberState.setupsInFlight > 0) return
