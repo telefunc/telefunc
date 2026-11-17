@@ -3,7 +3,7 @@ export type { ClientRoomHandleOptions }
 
 import { assert, assertUsage } from '../utils/assert.js'
 import type { ChannelPublishAck, ChannelPublishInfo, ClientBroadcast } from 'telefunc/__internal'
-import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame } from '../shared/binary.js'
+import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { normalizeJoinOptions } from '../shared/arguments.js'
 import {
   hasRoomTag,
@@ -56,6 +56,8 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
   private readonly mirror: RoomMirror
   private readonly localParticipants = new Map<string, ClientParticipant>()
   private readonly joins = new PendingJoins()
+  /** The wants turned off in this task, by `wantKey`. */
+  private readonly offsDue = new Map<string, WantChange>()
 
   constructor({ end, snapshot }: ClientRoomHandleOptions) {
     this.end = end
@@ -180,10 +182,29 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
     local._onLeft(cause)
   }
 
+  /** A want turned on is declared at once, so it reaches the server before anything sent after it. One turned off is
+   *  declared as the task ends, unless it is turned on again before, as a React effect that runs again does: then
+   *  nothing is declared, and the server replays no retained message. */
+  onWantChanged(change: WantChange): void {
+    if (change.kind === 'listeners') return this.declare(change)
+    const want = wantKey(change)
+    if (change.kind === 'text' ? change.on : change.change.on) {
+      if (!this.offsDue.delete(want)) this.declare(change)
+      return
+    }
+    if (this.offsDue.size === 0) queueMicrotask(() => this.declareOffsDue())
+    this.offsDue.set(want, change)
+  }
+
+  private declareOffsDue(): void {
+    for (const change of this.offsDue.values()) this.declare(change)
+    this.offsDue.clear()
+  }
+
   /** Room-wide text wants ride the Broadcast subscription, which attaches again before the channel's `onOpen`.
    *  Declarations are replayed channel messages, so the server keeps them across reconnects: each carries only what
    *  changed: a member's text want, or the binary want. */
-  onWantChanged(change: WantChange): void {
+  private declare(change: WantChange): void {
     if (this.mirror.model.closed) {
       this.end._setSubscribed('text', false) // a closed room takes no declaration
       return
@@ -195,15 +216,8 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
         if (change.member === null) return this.end._setSubscribed('text', change.on)
         // Declared under the room-wide stream too, so the server keeps these members' lane when that stream stops.
         return this.notify({ __r: 'sub-text', members: { [change.member]: change.on } })
-      case 'track': {
-        const { member, track, on } = change.change
-        return this.notify({
-          __r: 'sub-binary',
-          member: member === EVERY_MEMBER ? null : member,
-          track: track === EVERY_TRACK ? null : track,
-          on,
-        })
-      }
+      case 'track':
+        return this.notify({ __r: 'sub-binary', ...trackWantOnWire(change.change) })
     }
   }
 
@@ -326,6 +340,18 @@ class PendingJoins {
     if (join.id !== null) this.byMember.delete(join.id)
     return join.held
   }
+}
+
+/** The one want a change turns on or off: the room's text, a member's text, or a track. */
+function wantKey(change: Exclude<WantChange, { kind: 'listeners' }>): string {
+  if (change.kind === 'text') return JSON.stringify(['text', change.member])
+  const { member, track } = trackWantOnWire(change.change)
+  return JSON.stringify(['track', member, track])
+}
+
+/** The wire names every member and every track `null`. */
+function trackWantOnWire({ member, track, on }: BinaryWantChange) {
+  return { member: member === EVERY_MEMBER ? null : member, track: track === EVERY_TRACK ? null : track, on }
 }
 
 /** The member an event concerns while that member's join may still be settling. */

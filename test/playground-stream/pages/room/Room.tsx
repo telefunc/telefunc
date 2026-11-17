@@ -2012,6 +2012,42 @@ function Room() {
         releaseRoom()
       })}
 
+      {scenario('member-resub', null, 'Follow one member again in one task', async () => {
+        const [roomId, room] = await createRoom('memberresub')
+        // A GC pass would close `room`, and X leaving with it deletes the message it retained.
+        const releaseRoom = keepReachable(room)
+        const x = await room.join({ meta: { name: 'X' } })
+        await x.publish('pinned', { retain: true })
+
+        const observer = await onGetRoom(roomId)
+        const remoteX = await getParticipantWhenJoined(observer, x.id)
+        const first: string[] = []
+        const second: string[] = []
+        const off = remoteX.subscribe((data) => first.push(data as string))
+        await pollUntil(() => ({ done: first.length >= 1 }))
+        // What a React effect over `[remoteX]` does when it runs again.
+        off()
+        remoteX.subscribe((data) => second.push(data as string))
+        await x.publish('live')
+        await pollUntil(() => ({ result: { first, second }, done: second.includes('live') }))
+        releaseRoom()
+      })}
+
+      {scenario('member-sub-order', null, 'Follow one member and publish in one task', async () => {
+        const [roomId, room] = await createRoom('membersuborder')
+        const releaseRoom = keepReachable(room)
+        const x = await room.join({ meta: { name: 'X' } })
+
+        const observer = await onGetRoom(roomId)
+        const remoteX = await getParticipantWhenJoined(observer, x.id)
+        const received: string[] = []
+        remoteX.subscribe((data) => received.push(data as string))
+        await x.publish('live')
+        await x.publish('end')
+        await pollUntil(() => ({ result: { received }, done: received.includes('end') }))
+        releaseRoom()
+      })}
+
       {scenario('dm-hold', 'DM pre-listen hold', 'Send before listen', async () => {
         const [roomId, observer] = await createRoom('dmhold')
         const bob = await onJoinAsServer(roomId, 'Bob')
