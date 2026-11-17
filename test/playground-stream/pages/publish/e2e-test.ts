@@ -332,10 +332,10 @@ function testPublish(isDev: boolean, inDocker = false) {
     await autoRetry(async () => {
       const result = await getResult<{ page: unknown[]; server: unknown[] }>('#publish-result')
       expect(result).deep.equal({
-        page: [[1, 2, 3]],
+        page: [[0xfe, 2, 3]],
         server: [
-          [1, 2, 3],
-          [1, 2, 3],
+          [0xfe, 2, 3],
+          [0xfe, 2, 3],
         ],
       })
     })

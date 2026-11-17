@@ -548,7 +548,8 @@ function Publish() {
           room.subscribeBinary((data) => void structuredClone(data.buffer, { transfer: [data.buffer] }))
           room.subscribeBinary((data) => void received.push(data.byteLength === 0 ? 'detached' : [...data]))
           try {
-            await room.publishBinary(new Uint8Array([1, 2, 3]))
+            // A plain publish whose first byte is the lossy one's mark arrives as published.
+            await room.publishBinary(new Uint8Array([0xfe, 2, 3]))
             for (let poll = 0; poll < 50; poll++) {
               const server = await getReceived()
               setResult(JSON.stringify({ page: received, server }))
